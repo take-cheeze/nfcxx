@@ -1,0 +1,306 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir_containers'
+require_relative 'numeric_flow'
+require_relative 'core_defs'
+
+# Specialize the selected core bytecode, never infer a result from its name.
+module CoreRubyResults
+  EMPTY_SEEN = Set.new.freeze
+  EMPTY_ARGUMENTS = [].freeze
+  INSTALLERS = %i[alias_method define_method define_singleton_method undef_method remove_method].freeze
+
+  def self.installed_names(ireps)
+    names = Set.new
+    ireps.each_value do |body|
+      next unless CoreDefs.core_source?(body.file)
+
+      BytecodeIR.for(body).each_source do |insn, index|
+        next unless BytecodeIR::Ops::SEND_PREFIX_OPS.include?(insn.op) && INSTALLERS.include?(insn.sym)
+        return nil unless insn.plain_fixed_argc? && insn.argc.positive?
+
+        argc = %i[alias_method define_method define_singleton_method].include?(insn.sym) ? 1 : insn.argc
+        (1..argc).each do |arg|
+          name = body.walk_dominating_writers(index - 1, (insn.reg + arg), follow_moves: true) do |writer|
+            writer.sym if writer.op == :LOADSYM
+          end
+          return nil unless name
+
+          names << name
+        end
+      end
+    end
+    names
+  end
+
+  def self.opaque_definitions(registry, ineligible, ireps, alias_sites, aliases)
+    omitted = registry.values.flatten.select { |definition| definition.core && (!definition.irep || ineligible.include?(definition.irep)) }
+    out = omitted.flat_map do |definition|
+      key = [definition.owner, definition.name]
+      [key] + Array(aliases[key]).map { |name| [definition.owner, name] }
+    end.to_set
+    alias_sites.each do |site|
+      body = ireps.fetch(site[:irep])
+      next unless CoreDefs.core_source?(body.file)
+
+      mapped = Array(aliases[[site[:owner], site[:old]]]).include?(site[:new])
+      conditional = skippable_alias?(body, site[:new])
+      out << [site[:owner], site[:new]] unless mapped && !conditional
+    end
+    out
+  end
+
+  # Can some run reach an exit of +body+ without passing an ALIAS of +name+? A jump over it, a back-edge or a
+  # catch handler's path all count, so the answer comes from the flow graph, not from a textual branch range.
+  def self.skippable_alias?(body, name)
+    program = BytecodeIR.for(body)
+    program.instructions.any? do |alias_insn|
+      next false unless alias_insn.op == :ALIAS && alias_insn.source.sym == name
+
+      reached = program.reachable_from(0, include_handlers: true, avoiding: alias_insn.index)
+      program.exits.any? { |frame_exit| reached.include?(frame_exit.index) }
+    end
+  end
+
+  # The body reads only its input masks and audited core facts. Growing caller
+  # facts remain dependencies of the caller flow, not of this specialization.
+  class Oracle
+    def initialize(codegen, receiver, arguments, block_given, block_register, seen, target, call_name)
+      @cg = codegen
+      @receiver = receiver
+      @arguments = arguments
+      @block_given = block_given
+      @block_register = block_register
+      @seen = seen
+      @target = target
+      @call_name = call_name
+    end
+
+    def self_mask = @receiver
+    # EXC supplies only truthiness here. It has no exportable result class.
+    def entry_mask(_irep, reg)
+      return @block_given ? NumericFlow::EXC : NumericFlow::NIL if reg == @block_register
+
+      @arguments.fetch(reg - 1, NumericFlow::OTHER)
+    end
+    def const_mask(_insn) = NumericFlow::OTHER
+    def ivar_entry_mask(_irep, _name) = NumericFlow::OTHER
+    def ivar_fact_mask(_irep, _name) = NumericFlow::OTHER
+    def upvar_mask(_irep, _insn) = NumericFlow::OTHER
+    def pool_mask(_irep, _insn) = NumericFlow::OTHER
+    def op_native?(_sym) = false
+    def nil_raises?(_sym) = false
+    def ivar_slots(_irep) = []
+    def false_class_bit = @cg.numeric_false_class_bit
+
+    def send_mask(_irep, _index, insn, state)
+      @cg.core_ruby_static_send_mask(insn, state)
+    end
+
+    def block_send_mask(irep, index, insn, state)
+      @cg.core_ruby_class_result(irep, index, insn, state, seen: @seen, name_results: false) || NumericFlow::OTHER
+    end
+
+    def super_mask(_irep, _index, insn, _state)
+      return NumericFlow::OTHER if @block_given || ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
+      return NumericFlow::OTHER unless @call_name == @target.name
+      return NumericFlow::OTHER unless insn.plain_fixed_argc? && insn.argc.zero?
+
+      target = @cg.core_ruby_super_result_target(@target, @receiver)
+      target && @cg.core_ruby_body_result(target, @receiver, false, seen: @seen) || NumericFlow::OTHER
+    end
+  end
+end
+
+class CodeGen
+  def core_ruby_class_result(irep, index, insn, state, seen: nil, name_results: true)
+    scratch = ENV['BC2CPP_CORE_RUBY_QUERY_SCRATCH'] != '0'
+    seen ||= scratch ? CoreRubyResults::EMPTY_SEEN : Set.new
+    return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'
+    return nil unless %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].include?(insn.op)
+    return nil unless insn.sym && (%i[SEND0 SSEND0].include?(insn.op) || insn.plain_fixed_argc?)
+    argc = %i[SEND0 SSEND0].include?(insn.op) ? 0 : insn.argc
+    return nil if argc.positive? && ENV['BC2CPP_CORE_RUBY_POSITIONAL_RESULTS'] == '0'
+
+    arguments = if scratch
+                  argc.zero? ? CoreRubyResults::EMPTY_ARGUMENTS : Array.new(argc) { |arg| state[insn.reg.to_i + arg + 1] || NumericFlow::OTHER }
+                else
+                  (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
+                end
+
+    receiver = state[insn.reg.to_i]
+    receiver &= ~NumericFlow::NIL if receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL) && nil_unanswerable?(insn.sym)
+    core_bits = scratch ? RETURN_CORE_MASK : RETURN_CORE_CLASS.keys.reduce(0, :|)
+    classes = if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~core_bits).zero?
+                RETURN_CORE_CLASS.select { |bit, _klass| receiver.anybits?(bit) }
+              else scratch ? nil : {}
+              end
+    return name_results ? core_ruby_name_result(irep, index, insn, arguments) : nil if !classes || classes.empty?
+    if (classes.size > 1 && ENV['BC2CPP_CORE_RUBY_RECEIVER_UNIONS'] == '0') ||
+       classes.values.any? { |klass| !BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain) }
+      return name_results ? core_ruby_name_result(irep, index, insn, arguments) : nil
+    end
+    return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
+    return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
+
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
+    return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
+
+    # Every member must resolve and return a modelled class; a missing member
+    # must not turn an exhaustive receiver set into a partial proof.
+    classes.reduce(0) do |joined, (bit, klass)|
+      chain = BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
+      target = chain && core_ruby_result_target(chain, insn.sym)
+      result = target && core_ruby_body_result(target, bit, block_given, arguments: arguments, seen: seen, call_name: insn.sym)
+      return nil unless result
+
+      joined | result
+    end
+  end
+
+  # Every answering definition must be modelled; receiver class knowledge is
+  # unnecessary when every body's result is independent of self.
+  def core_ruby_name_result(irep, index, insn, arguments = [])
+    return nil if ENV['BC2CPP_CORE_RUBY_NAME_RESULTS'] == '0'
+    return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
+    block_given = BytecodeIR::Ops::BLOCK_SEND_FAMILY.include?(insn.op)
+    return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
+
+    @core_ruby_name_results ||= {}
+    key = [insn.sym, block_given, arguments]
+    return @core_ruby_name_results[key] if @core_ruby_name_results.key?(key)
+
+    @core_ruby_name_results[key] = compute_core_ruby_name_result(insn.sym, block_given, arguments)
+  end
+
+  def compute_core_ruby_name_result(name, block_given, arguments = [])
+    return nil unless @closed_world.native_paths_spelling(name).empty?
+    paths = @closed_world.outside_ruby_paths_defining(name).select { |path| CoreDefs.core_source?(path) }
+    return nil unless @closed_world.native_return_sources_visible?(name, paths)
+    installed = symbol_installed_names
+    core_installed = self.class.core_result_installed_names
+    return nil unless installed && core_installed && !installed.include?(name) && !core_installed.include?(name)
+    return nil if numeric_aliased_names.include?(name)
+    opaque = self.class.core_result_opaque_defs
+    return nil unless opaque && opaque.none? { |_owner, method| method == name }
+    return nil unless (@registry[name] || []).all? { |definition| definition.core }
+
+    definitions = block_core_index.select { |(_owner, method), _defs| method == name }.values.flatten
+    definitions += (@registry[name] || [])
+    definitions = definitions.uniq
+    return nil if definitions.empty?
+
+    definitions.reduce(0) do |mask, definition|
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, block_given, arguments: arguments, call_name: name)
+      return nil unless result
+
+      mask | result
+    end
+  end
+
+  def core_ruby_body_result(target, receiver, block_given, arguments: [], seen: Set.new, call_name: target.name)
+    return nil unless target.irep
+
+    key = [target.irep, receiver, block_given, arguments]
+    # Recursive specializations contribute no class fact until their result is known.
+    return nil if seen.include?(key)
+
+    body = @ireps.fetch(target.irep)
+    fields = body.enter&.enter_fields
+    return nil unless fields && fields.size == 8 && fields[0] == arguments.size && fields.values_at(1, 2, 3, 4, 5, 7).all?(&:zero?)
+    return nil unless core_ruby_result_exits_safe?(body)
+
+    block_register = fields[6] == 1 ? arguments.size + 1 : nil
+    oracle = CoreRubyResults::Oracle.new(self, receiver, arguments, block_given, block_register, seen | Set[key], target, call_name)
+    states = BytecodeIR::NumericClasses.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
+    return nil unless states
+
+    mask = BytecodeIR::NumericClasses.exit_mask(body, states) do |exit, state|
+      case exit.op
+      when :RETURN then state[exit.reg]
+      when :RETSELF then receiver
+      when :RETNIL then NumericFlow::NIL
+      when :RETURN_BLK, :BREAK then 0
+      else NumericFlow::OTHER
+      end
+    end
+    mask if mask.positive? && (mask & ~NumericFlow::CONTAINERS).zero?
+  end
+
+  # Use the alias-aware core index and the same lookup exclusions as core arms,
+  # without probing emitted C++ while return facts are still being built.
+  def core_ruby_result_target(chain, name)
+    installed = symbol_installed_names
+    return nil unless installed && !installed.include?(name)
+    core_installed = self.class.core_result_installed_names
+    return nil unless core_installed && !core_installed.include?(name)
+    registry = @registry[name] || []
+    return nil if registry.any? { |definition| chain.include?(definition.owner) && !definition.core }
+
+    chain.each do |owner|
+      return nil if self.class.core_result_opaque_defs&.include?([owner, name])
+      return nil unless block_core_owner_plain?(owner, name)
+
+      definitions = Array(block_core_index[[owner, name]]) + registry.select { |definition| definition.owner == owner && definition.core && definition.irep }
+      return definitions.one? ? definitions.first : nil unless definitions.empty?
+    end
+    nil
+  end
+
+  def core_ruby_super_result_target(target, receiver)
+    klass = RETURN_CORE_CLASS[receiver]
+    chain = klass && BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
+    position = chain&.index(target.owner)
+    return nil unless position
+    # The fixed core chain cannot skip a newly included module's super method.
+    return nil unless chain.each_with_index.all? do |owner, index|
+      Array(@included_modules[owner]).all? { |mod| chain.drop(index + 1).include?(mod) }
+    end
+
+    core_ruby_result_target(chain.drop(position + 1), target.name)
+  end
+
+  # SYMBOL_BLOCK_ARG: `x.reject(&:dead?)` compiles to `LOADSYM R(a+1) :dead?` then SENDB. The block is a Symbol
+  # that vm.c's OP_SENDB converts with to_proc; calling that proc only sends the method to the element, so it has
+  # no `break` that could replace the callee's result (an exception unwinds past the call and yields none), the
+  # same fact a literal block without BREAK states. BC2CPP_CORE_RUBY_SYMBOL_BLOCKS=0 withdraws it.
+  def core_ruby_literal_block_safe?(irep, index, insn)
+    irep.walk_dominating_writers(index - 1, (insn.reg + insn.argc + 1), follow_moves: true) do |writer|
+      next true if writer.op == :LOADSYM && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
+
+      body = writer.op == :BLOCK && @ireps[irep.reps[writer.block_index]]
+      body && core_ruby_result_exits_safe?(body, caller: true)
+    end || false
+  end
+
+  # A nested break can replace a block-taking send's value. Callee nonlocal
+  # returns also need a context-sensitive child flow, which is not modelled here.
+  def core_ruby_result_exits_safe?(irep, caller: false)
+    forbidden = caller ? %i[BREAK] : %i[BREAK RETURN_BLK]
+    return false if BytecodeIR.for(irep).op?(*forbidden)
+
+    irep.reps.all? { |label| core_ruby_result_exits_safe?(@ireps.fetch(label), caller: caller) }
+  end
+
+  def core_ruby_static_send_mask(insn, state)
+    return NumericFlow::OTHER unless %i[SEND SEND0 SSEND SSEND0].include?(insn.op)
+    installed = self.class.core_result_installed_names
+    opaque = self.class.core_result_opaque_defs
+    return NumericFlow::OTHER unless installed && !installed.include?(insn.sym) && opaque && opaque.none? { |_owner, name| name == insn.sym }
+
+    if insn.sym == 'dup' && insn.op == :SEND0 && native_dup_result_safe?
+      return state[insn.reg.to_i]
+    end
+    core = native_core_class_result(insn, state)
+    return core if core
+
+    definitions = @registry[insn.sym] || []
+    hidden = self.class.core_hidden_defs || []
+    if NativeClassResults::FACTS.key?(insn.sym) && definitions.all? { |definition| definition.owner == '<native>' } &&
+       hidden.none? { |definition| definition.name == insn.sym } && !numeric_aliased_names.include?(insn.sym)
+      kinds = native_result_name_kinds(insn.sym)
+      return kinds.values.reduce(0) { |mask, kind| mask | native_result_bits(kind, true) } if kinds
+    end
+    NumericFlow::OTHER
+  end
+end

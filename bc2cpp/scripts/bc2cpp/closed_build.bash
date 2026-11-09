@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Build build_config.rb's `closed` mruby library with bc2cpp: the closed world
+# (RPG2000/2003 only) compiled natively by the host compiler, with mruby's
+# C++-exception mode on (docs/ci.md, "bc2cpp gate").
+#
+# bc2cpp's generated C++ lowers block `break`, non-local `return` and `raise`
+# with real C++ throw/catch, so it needs MRB_USE_CXX_EXCEPTION. This build
+# checks the closed world's generation and the compilation of the generated
+# code.
+#
+# Usage:
+#   scripts/bc2cpp/closed_build.bash [BUILD_DIR, default ./build-closed-bc2cpp]
+#
+# Needs on PATH: ruby, rake, a native C/C++ compiler, bison, gperf and
+# python3 (scripts/mruby/standalone_prep.bash). No cross toolchain. Writes
+# BUILD_DIR/closed/lib/libmruby.a and the bootstrap BUILD_DIR/host mrbc.
+set -euo pipefail
+
+# WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
+tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="${BC2CPP_WORLD_ROOT:-$tree}"
+build_dir="${1:-$root/build-closed-bc2cpp}"
+# Tools, Unicode tables and mruby patches.
+# shellcheck source=scripts/mruby/standalone_prep.bash
+. "$root/scripts/mruby/standalone_prep.bash"
+# The compiled gems need C++ exceptions; build_config.rb's `closed` stanza
+# enables them, and this escape hatch would turn them off in the host half.
+unset MRUBY_FORCE_NO_CXX_EXCEPTION
+# The `closed` stanza compiles at -O0 (enable_debug), where glibc warns on every
+# file that _FORTIFY_SOURCE needs optimization. Nix's cc-wrapper appends its
+# -D_FORTIFY_SOURCE after the command's own flags, so the build drops the
+# hardening flag instead of passing -U.
+no_fortify=()
+for flag in ${NIX_HARDENING_ENABLE:-}; do
+  case "$flag" in fortify | fortify3) ;; *) no_fortify+=("$flag") ;; esac
+done
+# The rake build, with the arguments given (a task name, or none for the whole build).
+rake_closed() {
+  (
+    if [ -n "${NIX_HARDENING_ENABLE+set}" ]; then
+      export NIX_HARDENING_ENABLE="${no_fortify[*]}"
+    fi
+    cd "$root/3rd/mruby" && MRUBY_CONFIG="$root/build_config.rb" \
+      MRUBY_BUILD_DIR="$build_dir" \
+      PROJECT_BUILD_DIR="$build_dir" \
+      MRUBY_TARGET=closed \
+      RPGMAKER_BC2CPP=1 \
+      rake "$@"
+  )
+}
+
+# Phase 1 builds the presym list the native return-kind table's analysis needs (analysis_headers.rb). That list only
+# needs every source to preprocess, so the compiled gems' outputs are empty stubs here (BC2CPP_STUB_GENERATION in
+# tools/bc2cpp/compiled_gems.rb) rather than a full bc2cpp run whose code phase 2 throws away.
+# No lists yet, and none are needed: nothing here compiles core C or generates a registration.
+BC2CPP_STATIC_DISPATCH_LISTS=none BC2CPP_STUB_GENERATION=1 rake_closed "$build_dir/closed/presym"
+ruby "$tree/scripts/bc2cpp/analysis_headers.rb" "$build_dir/closed"
+ruby "$tree/scripts/bc2cpp/native_fn_kinds.rb" "$build_dir/closed" > "$build_dir/closed/analysis/fn-kinds.tsv"
+echo "wrote $build_dir/closed/analysis/fn-kinds.tsv"
+
+# STATIC_DISPATCH_LISTS: the names the closed build leaves out of its method tables are computed from this tree
+# (docs/bc2cpp-unregistered-methods.md), once the host mrbc exists. A file for the same sources is reused.
+BC2CPP_STATIC_DISPATCH_LISTS="$("$tree/scripts/bc2cpp/static_dispatch_lists.bash" "$build_dir")"
+export BC2CPP_STATIC_DISPATCH_LISTS
+
+# Phase 2 regenerates the code with the table. rake does not track the variable, so
+# the generated sources are removed and rake writes them again; their objects follow.
+find "$build_dir/closed" -name '*_gen.cpp' -delete
+export BC2CPP_NATIVE_FN_KINDS="$build_dir/closed/analysis/fn-kinds.tsv"
+# PRESYM_SYMBOL: the presym names phase 1 generated, so the symbol table leaves them to MRB_SYM.
+export BC2CPP_PRESYM_HEADER="$build_dir/closed/include/mruby/presym/id.h"
+rake_closed
+
+echo "built $build_dir/closed/lib/libmruby.a"

@@ -1,0 +1,395 @@
+# frozen_string_literal: true
+
+# Run mrbc and build the whole Irep tree from its RITE binary.
+
+# MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
+# `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
+require_relative 'insn_operands'
+require_relative 'insn_decoder'
+require_relative 'irep_scans'
+require_relative 'irep_cache'
+require_relative 'bytecode_ir_containers'
+
+MRBC = ENV['MRBC'] || 'mrbc'
+
+# The Struct-style surface of a record class: the members named by its MEMBERS constant, construction from one Hash of
+# them, [] / []=, members, to_h, and ==, eql?, hash and inspect over the members. A record keeps ivars beyond its members
+# (cached or deferred state), which mruby does not allow on a Struct instance, so the record classes are plain classes.
+module MemberRecord
+  def initialize(fields = {})
+    unknown = fields.keys - self.class::MEMBERS
+    raise ArgumentError, "bc2cpp: unknown #{self.class} member #{unknown.first.inspect}" unless unknown.empty?
+
+    self.class::MEMBERS.each { |key| public_send(:"#{key}=", fields[key]) }
+  end
+
+  def [](key)
+    raise NameError, "bc2cpp: no #{self.class} member #{key.inspect}" unless self.class::MEMBERS.include?(key)
+
+    public_send(key)
+  end
+
+  def []=(key, value)
+    raise NameError, "bc2cpp: no #{self.class} member #{key.inspect}" unless self.class::MEMBERS.include?(key)
+
+    public_send(:"#{key}=", value)
+  end
+
+  def members = self.class::MEMBERS
+
+  def to_h = members.to_h { |key| [key, self[key]] }
+
+  def ==(other)
+    other.instance_of?(self.class) && members.all? { |key| self[key] == other[key] }
+  end
+
+  def eql?(other)
+    other.instance_of?(self.class) && members.all? { |key| self[key].eql?(other[key]) }
+  end
+
+  # Equal records (eql?) have equal members, so a hash over the leading ones is consistent with eql?. Hashing every member
+  # walked an Irep's instructions, pool and child ireps on each Hash or Set lookup, which dominated bc2cpp run as an
+  # mruby executable (docs/bc2cpp-self-compile.md).
+  def hash = [self.class, *members.first(3).map { |key| self[key] }].hash
+
+  def inspect
+    "#<#{self.class} #{members.map { |key| "#{key}=#{self[key].inspect}" }.join(', ')}>"
+  end
+end
+
+class Irep
+  include MemberRecord
+  include IrepScans
+
+  MEMBERS = %i[label nlocals nregs pool syms reps lv instructions file catch_handlers].freeze
+
+  # Spelled out, not attr_accessor(*MEMBERS): bc2cpp's registry refuses an attr_* call whose names are not literal, and
+  # bc2cpp compiles its own sources (docs/bc2cpp-self-compile.md).
+  attr_accessor :label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file, :catch_handlers
+
+  # A digest of the irep's own code (its locals, registers, pool, symbols and instructions), not its label or its
+  # children. mrbc compiles one method to the same code in every compile unit, so (digest, send address) names one
+  # bytecode send in the closed-list proof and in the generated code alike; labels are per compile.
+  def content_digest
+    @content_digest ||= begin
+      require 'digest'
+      code = [nlocals, nregs, pool, syms, instructions.map { |i| [i.op, i.args, i.raw] }]
+      Digest::SHA256.hexdigest(code.inspect)[0, 16]
+    end
+  end
+
+  # label => Irep of the whole tree this irep belongs to (set by load_ireps);
+  # an ivar, not a member, so Struct#==/hash/inspect never walk the cycle.
+  attr_accessor :tree
+
+  # Instruction whose address is +addr+, as an index into #instructions.
+  def index_of_addr(addr)
+    BytecodeIR.for(self).address_to_index[addr]
+  end
+
+  # Yields `(insn, index)` for each instruction whose op is one of +ops+, in program order.
+  def each_with_op(*ops, &block)
+    BytecodeIR.for(self).each_with_op_in(ops, &block)
+  end
+
+  # The ENTER instruction (nil for a bodyless zero-argument method).
+  def enter
+    return @enter if defined?(@enter)
+
+    @enter = BytecodeIR.for(self).instructions_with_op(:ENTER).first
+  end
+
+  def enter_index
+    return @enter_index if defined?(@enter_index)
+
+    @enter_index = nil
+    each_with_op(:ENTER) do |_insn, index|
+      @enter_index = index
+      break
+    end
+    @enter_index
+  end
+
+  # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next
+  # instruction; this is the index of the nearest real opcode at or before
+  # +from+, or -1.
+  EXT_OPS = BytecodeIR::Ops::EXT
+
+  def previous_real_index(from)
+    index = from
+    index -= 1 while index >= 0 && EXT_OPS.include?(BytecodeIR.for(self).source_at(index)&.op)
+    index
+  end
+
+  # Nearest instruction at or before index +from+ whose first register operand
+  # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
+  def last_writer(from, reg)
+    index = last_writer_index(from, reg)
+    index && BytecodeIR.for(self).source_at(index)
+  end
+
+  def last_writer_index(from, reg)
+    BytecodeIR.for(self).last_writer_index(from, reg)
+  end
+
+  # The first non-MOVE instruction writing +reg+ at or before index +from+,
+  # following MOVE copies to their source register (BytecodeIR::Program#copy_root).
+  # Nil when the register is never written or a MOVE has no source.
+  def source_writer(from, reg)
+    BytecodeIR.for(self).copy_root(from, reg)&.writer
+  end
+
+  # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).
+  def instructions_at(range)
+    instructions.select { |insn| range.cover?(insn.addr) }
+  end
+end
+# One decoded instruction. `args` is the disassembly's operand text, kept only
+# for diagnostics and comments; every pass reads the typed operands through
+# InsnOperands (see OperandSchema).
+# One decoded instruction (Symbol +op+). A plain class rather than a Struct: under mruby a Struct instance cannot hold
+# instance variables, and the typed operands and deferred disassembly live in ivars. The members keep the Struct's
+# names and its [] / []= / to_h / members / == surface.
+class Insn
+  include InsnOperands
+  include MemberRecord
+
+  MEMBERS = %i[lineno addr op args raw frozen_literal].freeze
+
+  attr_accessor :lineno, :addr, :frozen_literal
+
+  # Hand-built test insns pass String ops; normalize to Symbol so every
+  # consumer sees one type. Decoded insns already carry Symbols.
+  def op=(name)
+    @op = name.is_a?(String) ? name.intern : name
+  end
+
+  attr_reader :op
+
+  # A decoded instruction (Symbol +op+). Built through the constructor: under mruby, allocate leaves a Struct without its
+  # members, so the fields are set by initialize.
+  # Sets the fields directly: MemberRecord's keyword initialize costs a Hash and six reflective setter calls (with an
+  # interned name each) per instruction, which dominated decoding under mruby (about 3x slower, ~30% more memory per Insn).
+  def self.decoded(lineno, addr, op, frozen_literal)
+    insn = allocate
+    insn.send(:init_decoded, lineno, addr, op, frozen_literal)
+    insn
+  end
+
+  # The same state MemberRecord#initialize(lineno:, addr:, op:, frozen_literal:) leaves: args and raw are nil until
+  # defer_disassembly / materialize_disassembly fill them.
+  def init_decoded(lineno, addr, op, frozen_literal)
+    @lineno = lineno
+    @addr = addr
+    @op = op.is_a?(String) ? op.intern : op
+    @frozen_literal = frozen_literal
+    @args = nil
+    @raw = nil
+  end
+  private :init_decoded
+
+  def defer_disassembly(decoder, name, values, next_pc)
+    @disassembly_decoder = decoder
+    @disassembly_name = name
+    @disassembly_values = values
+    @disassembly_next_pc = next_pc
+  end
+
+  def args
+    materialize_disassembly
+    @args
+  end
+
+  def raw
+    materialize_disassembly
+    @raw
+  end
+
+  def args=(text)
+    materialize_disassembly
+    @args = text
+  end
+
+  def raw=(text)
+    materialize_disassembly
+    @raw = text
+  end
+
+  def freeze
+    materialize_disassembly
+    super
+  end
+
+  private
+
+  def materialize_disassembly
+    return unless @disassembly_decoder
+
+    @args, @raw = @disassembly_decoder.disassembly(self, @disassembly_name, @disassembly_values, @disassembly_next_pc)
+    @disassembly_decoder = @disassembly_name = @disassembly_values = @disassembly_next_pc = nil
+  end
+
+  public
+
+  # An Insn for code the compiler synthesizes (no disassembly line behind it).
+  def self.synthetic(op, args)
+    new(lineno: 0, addr: 0, op: op, args: args, raw: "#{op} #{args}")
+  end
+end
+# One entry of an irep's catch handler table (mruby/irep.h
+# `struct mrb_irep_catch_handler`) from the RITE binary. `type` is :rescue or
+# :ensure; the addresses are Insn#addr byte offsets.
+CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
+# `kind`: nil for ordinary defs and most synthetic (irep: nil) entries. Set to
+# :ivar_accessor only where the native body is known to be a plain
+# attr_reader/writer (see build_registry), which lets IVAR_ACCESSOR_DEVIRT
+# inline mrb_iv_get/mrb_iv_set. Other synthetic defs (Struct members, which are
+# not ivars; module_function copies; NATIVE_SRCS names) must stay untagged:
+# tagging them would be a silent wrong-value bug, not a missed optimization.
+# `core`: the body comes from mruby's own Ruby (CoreDefs, set by the driver).
+# `installer`: :define_method for a `define_method(:x) { }` body (DefineMethodSites), else nil.
+# `site`: for an accessor a loop installs (LoopInstallers), the [irep label, index] of each attr_* send
+# of that loop, else nil.
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, :installer, :site,
+                       keyword_init: true)
+
+# ---------------------------------------------------------------------------
+# mrbc compiles several files on one command line as one program (with class
+# reopening across files), which is what makes a whole-gem closed world
+# possible. The RITE binary (`-g`) carries everything bc2cpp needs: the irep
+# tree, iseq bytes, pool, symbols, local-variable names, file and catch table.
+# ---------------------------------------------------------------------------
+RiteImage = Struct.new(:bytes)
+
+def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
+  mrb_path = File.join(out_dir, "#{symbol}.mrb")
+  system(mrbc, '-g', '-o', mrb_path, *Array(src_paths), exception: true)
+  RiteImage.new(File.binread(mrb_path))
+end
+
+# [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
+def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC)
+  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc), cache: IrepCache.directory_for_sources(src_paths))
+end
+
+CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
+
+# Labels are the numbers `mrbc -B -S` gave each irep (`<sym>_irep_<n>`), and
+# generated C++ names embed them, so the counter must stay bug-for-bug: root 0;
+# an irep with k children reserves k more numbers per child before descending
+# (src/cdump.c cdump_irep_struct), starting from 1.
+def assign_irep_labels(rites, pos, label, counter, labels, children)
+  labels[pos] = label.to_s
+  first = counter[0]
+  rlen = rites[pos].rlen
+  nxt = pos + 1
+  rlen.times do |i|
+    counter[0] += rlen
+    children[pos] << nxt
+    nxt = assign_irep_labels(rites, nxt, first + i, counter, labels, children)
+  end
+  nxt
+end
+
+# A pool entry in the shape passes consume: a String for a string literal,
+# else `{ type:, raw: }` with `raw` the C initializer text `mrbc -S` printed.
+def irep_pool_entry(entry)
+  case entry.kind
+  when :str then pool_string(entry.value)
+  when :int32 then { type: :int32, raw: ".i32=#{entry.value}" }
+  when :int64
+    # mrbc -S narrows an int64 that fits into int32.
+    if entry.value.between?(-0x8000_0000, 0x7fff_ffff)
+      { type: :int32, raw: ".i32=#{entry.value}" }
+    else
+      { type: :int64, raw: ".i64=#{entry.value}" }
+    end
+  when :float then { type: :float, raw: ".f=#{c_double(entry.value)}" }
+  when :bigint
+    bytes = [entry.value.bytesize - 1].pack('C') + entry.value
+    # `base` is signed (negative = negative literal) and `digits` are ASCII in
+    # that base, exactly what vm.c's OP_LOADL hands to mrb_bint_new_str.
+    { type: :bigint, raw: "\"#{bytes.unpack('C*').map { |b| format('\\x%02x', b) }.join}\"",
+      base: entry.value.unpack1('c'), digits: entry.value.byteslice(1..) }
+  else raise "bc2cpp: unknown pool entry kind #{entry.kind}"
+  end
+end
+
+# ASCII text stays UTF-8; anything else is raw bytes, as the string
+# consumers (c_string_literal) already expect.
+def pool_string(bytes)
+  bytes = bytes.dup
+  bytes.force_encoding(bytes.ascii_only? ? Encoding::UTF_8 : Encoding::BINARY)
+end
+
+def c_double(value)
+  return value.nan? ? 'nan' : (value.positive? ? 'inf' : '-inf') unless value.finite?
+
+  format('%.17g', value)
+end
+
+def symbol_name(bytes)
+  bytes && bytes.dup.force_encoding(Encoding::UTF_8)
+end
+
+# The whole Irep tree of a RITE image: [ireps (label => Irep), root_label].
+def load_ireps(image, cache: ENV['BC2CPP_IREP_CACHE_DIR'])
+  return decode_ireps(image) if cache.nil? || cache.empty?
+
+  IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+end
+
+def decode_ireps(image)
+  rites = RiteBinary.parse(image.bytes)
+  labels = Array.new(rites.length)
+  children = Array.new(rites.length) { [] }
+  assign_irep_labels(rites, 0, 0, [1], labels, children)
+
+  # Children before their parent (the order `mrbc -S` printed them in): passes
+  # iterate the label => Irep hash, so its order shows in generated output.
+  post_order = []
+  emit = lambda do |pos|
+    children[pos].each { |child| emit.call(child) }
+    post_order << pos
+  end
+  emit.call(0)
+
+  ireps = {}
+  post_order.each do |pos|
+    rite = rites[pos]
+    insns, file = InsnDecoder.decode(rite)
+    ireps[labels[pos]] = Irep.new(
+      label: labels[pos], nlocals: rite.nlocals, nregs: rite.nregs,
+      pool: rite.pool.map { |entry| irep_pool_entry(entry) },
+      syms: rite.syms.map { |name| symbol_name(name) },
+      reps: children[pos].map { |child| labels[child] },
+      lv: (rite.lv || []).map { |name| symbol_name(name) },
+      instructions: insns, file: file,
+      catch_handlers: rite.catch_handlers.map do |h|
+        type = CATCH_TYPES.fetch(h.type) { raise "bc2cpp: unknown catch handler type #{h.type}" }
+        CatchHandler.new(type: type, begin_addr: h.begin_addr, end_addr: h.end_addr, target: h.target)
+      end
+    )
+  end
+  ireps.each_value { |irep| irep.tree = ireps }
+  [ireps, labels.first]
+end
+
+# DFS pre-order of the tree (root, then each rep in order, recursively before
+# the next sibling); the order the RITE binary lists the ireps in.
+def dfs_order(ireps, root_label)
+  order = []
+  visit = lambda do |label|
+    order << label
+    ireps.fetch(label).reps.each { |child| visit.call(child) }
+  end
+  visit.call(root_label)
+  order
+end
+
+# Unescapes a C string literal body read from native sources (mrb_define_*
+# names); not used on mrbc output.
+def unescape_c_string(s)
+  s.gsub(/\\x([0-9a-fA-F]{2})/) { [Regexp.last_match(1)].pack('H2') }
+   .gsub('\\\\', '\\').gsub('\\"', '"').gsub('\\n', "\n").gsub('\\t', "\t")
+end

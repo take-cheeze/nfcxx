@@ -1,0 +1,1254 @@
+# frozen_string_literal: true
+
+require_relative 'branch_hints'
+
+# CodeGen: per-method compile state and file-level emission.
+
+class CodeGen
+  # Does compile_method(label) come out without `#error`? A MONO target with the
+  # right arity can still have an unsupported opcode in its body; SKIP_UNSUPPORTED
+  # then drops its `_impl` and a direct call to it fails to link. Compiling for
+  # real (memoized) is the only way to answer without duplicating compile_insn's
+  # opcode list. A label already being probed reports "not known clean" (safe
+  # direction), so mutually recursive MONO methods just keep mrb_funcall.
+  def compiles_clean?(label)
+    # CORE_BLOCK_GUARD: only the registered entry carries the guard, so no direct `_impl`
+    # call may reach a guarded body.
+    # RESUMABLE_ENTRY: `_impl` is the entry that hands over to the driver, not the body.
+    return false if resumable_method?(label)
+    return @clean_cache[label] if @clean_cache.key?(label)
+    return false if @probing.include?(label)
+
+    probe_clean(label) do
+      # Specialization caches emitted clone text, so its probes must keep final-code optimization.
+      @clean_probe = ENV['BC2CPP_PROBE_REGISTER_FLOW'] != '0' && !entry_specialize_enabled?
+      compile_method(label)
+    end
+  end
+
+  PROBE_DEPTH_LIMIT = Integer(ENV.fetch('BC2CPP_PROBE_DEPTH', '32'))
+
+  # One cleanliness probe of `label` (compiles_clean?, block_core_clean?). An answer a guard gave from an
+  # in-progress probe is conditional on that probe's stack, not on this label alone, so it is not memoized in
+  # @clean_cache. PROBE_CYCLE_CACHE: it is kept for the rest of the outermost probe instead, whose stack every
+  # nested probe shares; without it a ring of methods whose `super` probes each other (optcarrot's
+  # Oscillator#reset and its subclasses) recompiled each member for every site that reached the ring.
+  def probe_clean(label)
+    # PROBE_DEPTH: a probe compiles `label`, whose sends probe their targets in turn, so the nesting follows the program's
+    # call chains. A program with a long chain (bc2cpp's own) nests deep enough to overflow the interpreter's stack, and
+    # an mruby runner's call levels are fewer still. Past PROBE_DEPTH_LIMIT the answer is "not clean" (the safe direction,
+    # as for a label already being probed): the call stays an mrb_funcall. Like a cycle's answer it depends on the stack,
+    # so it is not memoized per label (@guard_cycles).
+    if @probing.size >= PROBE_DEPTH_LIMIT
+      @guard_cycles += 1
+      return false
+    end
+    @cycle_clean_cache = {} if @probing.empty?
+    return @cycle_clean_cache[label] if @cycle_clean_cache&.key?(label) && ENV['BC2CPP_PROBE_CYCLE_CACHE'] != '0'
+
+    @probing << label
+    begin
+      cycles = @guard_cycles
+      result = with_fresh_method_state { yield }
+      clean = !result[:code].include?('#error')
+      if cycles == @guard_cycles
+        @clean_cache[label] = clean
+      else
+        (@cycle_clean_cache ||= {})[label] = clean
+      end
+      clean
+    ensure
+      @probing.delete(label)
+    end
+  end
+
+  # Every ivar one compile_method call sets and clears for itself, with its
+  # top-level value. A probe runs mid-way through another method's compile.
+  METHOD_COMPILE_STATE = {
+    :@clean_probe => false,
+    :@ir_inline_remaining => 512,
+    :@ir_inline_stack => nil,
+    :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
+    :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
+    # NESTED_BLOCK_FORWARD: the BLOCK_FALLBACK body's nesting depth,
+    # which @blk_param_level is derived from. Scoped like @blk_param_level (the
+    # two are saved and restored together), so it resets per method too.
+    :@block_fallback_depth => 0,
+    :@block_ret_slot => nil, :@block_brk_slot => nil,
+    :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
+    # LOOP_FLOW_POSITION: the enclosing inlined loop's SENDB. Saved and restored around each inlined
+    # body, so a nested compile of a callee must start without the caller's loop parent.
+    :@inline_loop_parent => nil,
+    :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
+    :@compiling_core => false, :@resumable => nil,
+    :@exact_core_site => nil, :@nonnil_receiver => nil,
+    # CHECKED_POOL_EXACT: the one register its arm is being compiled under a class test for.
+    :@checked_pool_override => nil,
+    # INDEX_CLOSED: set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
+    :@index_closed_build => nil
+  }.freeze
+
+  METHOD_COMPILE_IVARS = METHOD_COMPILE_STATE.keys.freeze
+
+  # Runs a nested compile against top-level state, then restores the caller's
+  # state, so neither compile sees or clobbers the other's.
+  def with_fresh_method_state
+    saved = METHOD_COMPILE_IVARS.map { |ivar| instance_variable_get(ivar) }
+    METHOD_COMPILE_STATE.each { |ivar, initial| instance_variable_set(ivar, initial) }
+    yield
+  ensure
+    if saved
+      METHOD_COMPILE_IVARS.each_with_index { |ivar, index| instance_variable_set(ivar, saved[index]) }
+    end
+  end
+
+  def embed_type(owner, ivar)
+    (@ivar_layout[embed_storage_owner(owner)] || {})[ivar]
+  end
+
+  def embedding_classes
+    owners = @ivar_layout.keys.to_set
+    @superclass_of.each do |klass, superclass|
+      next unless superclass.is_a?(String) && !klass.end_with?('.singleton')
+
+      seen = Set.new
+      while superclass.is_a?(String) && !seen.include?(superclass)
+        break if @ivar_layout.key?(superclass) && owners.add?(klass)
+
+        seen << superclass
+        superclass = @superclass_of[superclass]
+      end
+    end
+    owners.to_a.sort
+  end
+
+  # INSTANCE_TT_SETUP: every class in embedding_classes stores ivars in an RData
+  # payload, so its instances must be MRB_TT_DATA (GETIV/SETIV and mrb_data_init
+  # assume it). This generates the MRB_SET_INSTANCE_TT setup for exactly those
+  # classes instead of hand-kept register.cxx calls that drifted. A class whose
+  # constant is not defined yet is skipped: each compiled gem calls this at its
+  # gem_init, and a later gem's call picks it up. Idempotent.
+  # OWNER_METHOD_REGISTRATION: generates the method registration for every
+  # compiled entry of `owners` from the same :aspec data the entry wrapper's
+  # mrb_get_args uses, so the two cannot drift (hand registration missed many
+  # entries, leaving interpreted fallbacks reading nil from embedded ivars).
+  # Idempotent with an identical hand registration: mrb_define_method overwrites.
+  # :protected is skipped (mruby has no mrb_define_protected_method, and
+  # mrb_define_method would make it public). A `.singleton` owner registers via
+  # mrb_define_class_method; a private one via
+  # bc2cpp_define_private_class_method (below).
+  # STATIC_DISPATCH_UNREGISTRATION: entries in `unregistered` are
+  # skipped: static_dispatch_registrations.rb proved no runtime lookup reaches
+  # them, so the wrapper is dead, and with no dynamic lookup there is no
+  # interpreted fallback to read iv_tbl.
+  # BC2CPP_UNREGISTERED_EXTRA ("Owner#name,..."): more entries to leave unregistered, for a check fixture that has
+  # no place in the committed lists (scripts/bc2cpp/unregistered_verify_check.rb).
+  def emit_owner_registrations(compiled, owners, core_owners: owners, unregistered: unregistered_keys)
+    by_owner = compiled.group_by { |m| m[:owner] }
+    copies = module_function_copies(compiled)
+    copies.each { |m| (by_owner[m[:owner]] ||= []) << m }
+    targets = (owners + copies.map { |m| m[:owner] }).uniq.select { |o| by_owner.key?(o) }
+    accessors = left_out_accessors(compiled, unregistered)
+    natives = left_out_natives(compiled, unregistered)
+    core_rom = left_out_core_rom
+    core_ram = left_out_core_ram
+
+    # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
+    # mrb_define_method_raw (src/class.c) only forces a singleton-class method
+    # public while its visibility is still the MT_VDEFAULT sentinel, so setting
+    # MRB_METHOD_PRIVATE_FL first keeps it private -- public MRB_API only, no
+    # submodule patch.
+    needs_private_class_method = targets.any? do |o|
+      o.end_with?('.singleton') && by_owner[o].any? { |m| m[:visibility] == :private }
+    end
+
+    # Always emitted, even empty, so every gem_init can call it unconditionally.
+    out = +"// OWNER_METHOD_REGISTRATION -- see bc2cpp.rb's own emit_owner_registrations comment.\n"
+    if needs_private_class_method
+      out << <<~CPP
+        static void bc2cpp_define_private_class_method(mrb_state* M, struct RClass* c, const char* name, mrb_func_t func, mrb_aspec aspec) {
+          int ai = mrb_gc_arena_save(M);
+          struct RClass* sc = mrb_singleton_class_ptr(M, mrb_obj_value(c));
+          mrb_method_t m;
+          MRB_METHOD_FROM_FUNC(m, func);
+          m.flags |= aspec;
+          MRB_METHOD_SET_VISIBILITY(m, MRB_METHOD_PRIVATE_FL);
+          mrb_define_method_raw(M, sc, mrb_intern_cstr(M, name), m);
+          mrb_gc_arena_restore(M, ai);
+        }
+      CPP
+    end
+    # LEFT_OUT: what stands in for an entry the build leaves out of the tables. A verify build registers the stub
+    # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
+    # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
+    # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
+    if [accessors, natives, core_rom, core_ram].any?(&:any?) ||
+       compiled.any? do |m|
+         names = [m[:name], *Array(self.class.core_aliases&.dig([m[:owner], m[:name]]))]
+         names.any? { |name| unregistered.include?("#{m[:owner]}##{name}") }
+       end
+      out << <<~CPP
+        #ifdef BC2CPP_UNREGISTERED_VERIFY
+        #include <stdio.h>
+        #include <stdlib.h>
+        // UNREGISTERED_VERIFY: what a by-name lookup of an unregistered (statically dispatched only) entry finds.
+        static mrb_value bc2cpp_unregistered_stub(mrb_state* M, mrb_value self) {
+          fprintf(stderr, "bc2cpp: UNREGISTERED_VERIFY: unregistered method looked up by name: %s#%s\\n",
+                  mrb_obj_classname(M, self), mrb_sym_name(M, M->c->ci->mid));
+          fflush(stderr);
+          abort();
+        }
+        #endif
+        // LEFT_OUT_NATIVES: the class at `path` under Object, or NULL when some segment is not defined.
+        [[maybe_unused]] static struct RClass* bc2cpp_native_owner(mrb_state* M, const char* const* path, int n) {
+          mrb_value v = mrb_obj_value(M->object_class);
+          for (int i = 0; i < n; i++) {
+            mrb_sym id = mrb_intern_cstr(M, path[i]);
+            if (!mrb_const_defined_at(M, v, id)) return NULL;
+            v = mrb_const_get(M, v, id);
+          }
+          return mrb_class_ptr(v);
+        }
+        [[maybe_unused]] static void bc2cpp_left_out(mrb_state* M, struct RClass* c, const char* name, mrb_bool singleton) {
+        #if defined(BC2CPP_UNREGISTERED_VERIFY)
+          if (singleton) mrb_define_class_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+          else mrb_define_method(M, c, name, bc2cpp_unregistered_stub, MRB_ARGS_ANY());
+        #else
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          mrb_sym id = mrb_intern_cstr(M, name);
+          // Only a definition on the owner itself: an inherited one belongs to another entry.
+          struct RClass* definer = owner;
+          mrb_method_t m = bc2cpp_find_method(M, &definer, id);
+          if (!MRB_METHOD_UNDEF_P(m) && definer == owner) mrb_remove_method(M, owner, id);
+        #if defined(BC2CPP_RESPOND_TO_PHANTOM)
+          bc2cpp_phantom_add(M, owner, id);
+        #endif
+        #endif
+        }
+      CPP
+    end
+    # REGISTRATION_SPLIT: the `core_owners` half resolves only classes that exist before any program class body
+    # runs, so a program can install it first and the program half once its classes are defined (the optcarrot
+    # probe's install_prelude! / install!). bc2cpp_register_owner_methods runs both, in the same order as one list.
+    core_targets, program_targets = targets.partition { |owner| core_owners.include?(owner) }
+    { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
+      out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
+      emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
+      if part == 'core' && core_rom.any?
+        # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
+        out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
+        emit_left_out_native_lines(out, core_rom)
+        out << "#endif\n"
+      end
+      emit_left_out_native_lines(out, core_ram) if part == 'core'
+      if part == 'program'
+        emit_left_out_accessor_lines(out, accessors)
+        emit_left_out_native_lines(out, natives)
+      end
+      out << "}\n"
+    end
+    out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
+    out << "  bc2cpp_proc_call_capture(M);\n"
+    out << "  bc2cpp_register_core_owner_methods(M);\n"
+    out << "  bc2cpp_register_program_owner_methods(M);\n"
+    out << "  bc2cpp_proc_specs_install(M);\n"
+    out << "}\n\n"
+    out
+  end
+
+  def named_registration_entries(compiled, owners)
+    copies = module_function_copies(compiled)
+    targets = (owners + copies.map { |m| m[:owner] }).to_set
+    excluded = unregistered_keys
+    (compiled + copies).flat_map do |m|
+      next [] unless targets.include?(m[:owner]) && %i[public private].include?(m[:visibility])
+
+      names = [m[:name]]
+      names += self.class.core_aliases&.dig([m[:owner], m[:name]]) || [] if @owner_of[m[:label]]&.core
+      names.map do |name|
+        { owner: m[:owner], name: name, implementation: m[:name],
+          excluded: excluded.include?("#{m[:owner]}##{m[:name]}") || excluded.include?("#{m[:owner]}##{name}") }
+      end
+    end.uniq { |row| [row[:owner], row[:name]] }
+  end
+
+  def emit_owner_registration_lines(out, targets, by_owner, unregistered)
+    targets.each do |owner|
+      singleton = owner.end_with?('.singleton')
+      var = "bc2cpp_owner_reg_#{sanitize(owner)}"
+      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      by_owner[owner].each do |m|
+        fn = if singleton
+               m[:visibility] == :private ? 'bc2cpp_define_private_class_method' : 'mrb_define_class_method'
+             elsif m[:visibility] == :private
+               'mrb_define_private_method'
+             elsif m[:visibility] == :public
+               'mrb_define_method'
+             end
+        unless fn
+          out << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
+          next
+        end
+        if unregistered.include?("#{owner}##{m[:name]}")
+          out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
+          out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
+          next
+        end
+        names = [m[:name]]
+        # CORE_ALIASES: the same entry under the names the bytecode aliased it to.
+        names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
+        omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
+        omitted.each { |name| out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
+        defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
+        defines.each { |define| out << "  #{define}\n" }
+      end
+    end
+  end
+
+  # The removal of each listed accessor (left_out_accessors), in the program half: its owner is a program class.
+  def emit_left_out_accessor_lines(out, accessors)
+    accessors.group_by(&:first).each do |owner, entries|
+      var = "bc2cpp_owner_acc_#{sanitize(owner)}"
+      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      entries.each do |_, name|
+        out << "  // #{owner}##{name} (attr accessor) left unregistered: statically dispatched only (docs/adr/0203).\n"
+        out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
+      end
+    end
+  end
+
+  # The removal of each listed native (left_out_natives), in the program half. A native's class may be missing from a
+  # build that does not link its source.
+  def emit_left_out_native_lines(out, natives)
+    natives.group_by(&:first).each do |owner, entries|
+      path = lexical_scope_path(owner).map { |seg| c_string_literal(seg) }
+      out << "  {\n    static const char* const path[] = {#{path.join(', ')}};\n"
+      out << "    if (struct RClass* c = bc2cpp_native_owner(M, path, #{path.size})) {\n"
+      entries.each do |_, name|
+        out << "      // #{owner}##{name} (native) left unregistered: statically dispatched only (docs/adr/0203).\n"
+        out << "      bc2cpp_left_out(M, c, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
+      end
+      out << "    }\n  }\n"
+    end
+  end
+
+  # The Owner#name keys this build leaves out of its method tables: what emit_owner_registrations skips, and what
+  # Closed builds also omit core_left_out definitions from class/load code. C++ implementations remain available
+  # to direct calls; omitting a registration does not itself omit the generated function.
+  def unregistered_keys(lists: nil)
+    lists ||= static_dispatch_lists
+    keys = lists.for_build(ENV['BC2CPP_BUILD_NAME'])
+    keys |= lists.core_left_out | lists.core_excluded if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+    keys | ENV.fetch('BC2CPP_UNREGISTERED_EXTRA', '').split(',').to_set
+  end
+
+  # The proof's output for this run (static_dispatch_lists.rb). A real gem build has to be given it: running without
+  # would register every name, or none, and ship a method table the proof was never run for. A fixture or a probe
+  # (any other OUT_SYMBOL) has no engine names to leave out.
+  def static_dispatch_lists
+    real = BC2CPP_COMPILED_GEMS.values.any? { |gem| gem[:out_symbol] == ENV['OUT_SYMBOL'] }
+    StaticDispatchLists.current(required: real)
+  end
+
+  # CORE_NATIVE_CANDIDATES: [owner, name] of each core ROM entry the closed build leaves out of its tables
+  # (StaticDispatchLists#core_excluded). The core gem registers them; only a verify build has anything to register.
+  def left_out_core_rom
+    return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
+                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    static_dispatch_lists.core_excluded.map { |key| key.split('#', 2) }.sort
+  end
+
+  # CORE_RAM_CANDIDATES: [owner, name] of each core run-time registration the closed build removes
+  # (StaticDispatchLists#core_left_out), from the core gem's core half like a left-out native. A class the build does not
+  # define is skipped (bc2cpp_native_owner).
+  def left_out_core_ram
+    return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
+                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    static_dispatch_lists.core_left_out.map { |key| key.split('#', 2) }.sort
+  end
+
+  # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no
+  # compiled entry. The registration proof lists one when nothing looks its name up (ACCESSOR_CANDIDATES), so it is
+  # removed like a left-out compiled entry.
+  def left_out_accessors(compiled, unregistered)
+    return [] unless @only_owners
+
+    entries = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    @registry.flat_map do |name, defs|
+      defs.filter_map do |d|
+        key = "#{d.owner}##{name}"
+        [d.owner, name] if d.kind == :ivar_accessor && !d.core && @only_owners.include?(d.owner) &&
+                           unregistered.include?(key) && !entries.include?(key)
+      end
+    end.uniq.sort
+  end
+
+  # LEFT_OUT_NATIVES: [owner, name] of each listed native registration (NATIVE_CANDIDATES,
+  # static_dispatch_registrations.rb) whose owner this gem removes natives of (bc2cpp_native_strip_gem, by
+  # OUT_SYMBOL) and which is none of its compiled entries. As there, a name Ruby defines on the owner is skipped.
+  def left_out_natives(compiled, unregistered)
+    map = native_owner_map
+    symbol = ENV['OUT_SYMBOL']
+    return [] unless map && symbol
+
+    gem = BC2CPP_COMPILED_GEMS.find { |_name, g| g[:out_symbol] == symbol }&.first
+    entries = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    map.registrations.filter_map do |owner, name, _fn|
+      next unless owner.is_a?(String) && name && gem && bc2cpp_native_strip_gem(owner) == gem
+
+      key = "#{owner}##{name}"
+      next unless unregistered.include?(key) && !entries.include?(key)
+      next if Array(@registry[name]).any? { |d| d.owner == owner }
+
+      [owner, name]
+    end.uniq.sort
+  end
+
+  # DIRECT_CONSTRUCT_ACCESSORS (dispatch_targets.rb): `<Owner>_compiled_class()` for each listed owner whose
+  # #initialize this gem compiles, with C++ linkage, so the other gems' direct-construct sites link to it. The class
+  # is captured when this gem registers its methods and dropped by bc2cpp_gem_final. The capture and reset functions
+  # are always emitted, empty when the gem owns none.
+  def emit_direct_construct_accessors(compiled)
+    own = compiled.select { |m| m[:name] == 'initialize' }.map { |m| m[:owner] }.to_set
+    owners = DIRECT_CONSTRUCT_ACCESSOR_TARGETS.select { |owner| own.include?(owner) }
+    out = +"// DIRECT_CONSTRUCT_ACCESSORS -- see emit_direct_construct_accessors.\n"
+    owners.each do |owner|
+      out << "static RClass* bc2cpp_direct_construct_#{sanitize(owner)} = nullptr;\n"
+      out << "RClass* #{direct_construct_class_fn(owner)}(void) { return bc2cpp_direct_construct_#{sanitize(owner)}; }\n"
+    end
+    out << "static void bc2cpp_capture_direct_construct_classes([[maybe_unused]] mrb_state* M) {\n"
+    owners.each do |owner|
+      out << "  bc2cpp_direct_construct_#{sanitize(owner)} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+    end
+    out << "}\n"
+    out << "static void bc2cpp_reset_direct_construct_classes() {\n"
+    owners.each { |owner| out << "  bc2cpp_direct_construct_#{sanitize(owner)} = nullptr;\n" }
+    out << "}\n\n"
+  end
+
+  # MODULE_FUNCTION_COPY: `module_function :x` gives the module's singleton class a copy of #x, which `Mod.x`
+  # reaches by name. The copy runs the same body with the module as self, so the compiled entry registers there too
+  # when the body never observes self (module_function_copy_self_safe?). Otherwise the copy stays bytecode.
+  def module_function_copies(compiled)
+    by_label = compiled.group_by { |m| m[:label] }
+    @registry.values.flatten.filter_map do |d|
+      next unless d.kind == :module_function && d.copy_irep
+
+      m = by_label[d.copy_irep]&.find { |c| c[:owner] == d.copy_owner }
+      next unless m && module_function_copy_self_safe?(@ireps[d.copy_irep], d.copy_owner)
+
+      m.merge(owner: d.owner, visibility: :public)
+    end
+  end
+
+  # GEM_HOOKS: what every compiled gem's register.cxx runs. Init installs the compiled methods over the bytecode
+  # the gem's mrblib loaded. Final drops the ids, constants and class pointers cached for this VM, so a later VM
+  # at a reused address never sees them. Init clears the constant and class slots too (VM_CACHE_LIFETIME): their
+  # hit path has no mrb_state compare, and the game's deferred gem init never runs gem_final.
+  # CLASS_BODY_EMIT_GEM: `class_units` (compile_top_class_units) are the top-level class bodies the compiled gem runs
+  # itself, after the owner-class slots are reset and before the registrations below.
+  # CORE_CLASS_UNITS (mruby mrblib.rake, MRB_CORE_CLASS_UNITS): the function mrb_init_mrblib calls in place of the core
+  # mrblib load. It runs each core unit in file order; extern "C" because mrblib.c declares it in C.
+  def emit_core_class_units(class_units)
+    calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
+    "extern \"C\" void bc2cpp_core_class_units(mrb_state* M) {\n#{calls}}\n"
+  end
+
+  def emit_gem_hooks(class_units: [], top_level: false)
+    unit_calls = class_units.map { |unit| "  bc2cpp_top_unit_#{unit[:name]}(M);\n" }.join
+    hooks = <<~CPP
+      [[maybe_unused]] static void bc2cpp_gem_init(mrb_state* M) {
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
+        bc2cpp_set_instance_tts(M);
+        bc2cpp_register_owner_methods(M);
+        bc2cpp_capture_direct_construct_classes(M);
+      }
+      [[maybe_unused]] static void bc2cpp_gem_final() {
+        bc2cpp_reset_symbol_cache();
+        bc2cpp_reset_const_site_cache();
+        bc2cpp_reset_owner_classes();
+        bc2cpp_reset_direct_construct_classes();
+      }
+    CPP
+    hooks.sub("  bc2cpp_reset_owner_classes();\n  bc2cpp_set_instance_tts", "  bc2cpp_reset_owner_classes();\n#{unit_calls}#{top_level ? "  bc2cpp_top_level_statements(M);\n" : ''}  bc2cpp_set_instance_tts")
+  end
+
+
+  # INSTANCE_TT_SUBCLASSES: a class copies its superclass's instance type when it is created, so a subclass made
+  # before the switch (`Class.new(C)` in a class body: a gem's mrblib loads before its compiled gem's init runs this)
+  # keeps MRB_TT_OBJECT, and mrb_data_init would put the embedded payload in a plain object the GC neither marks nor
+  # frees. Such subclasses are switched too, found by the heap walk Class#subclasses (mruby-class-ext) uses, when a
+  # switched class has any subclass (MRB_FL_CLASS_IS_INHERITED).
+  INSTANCE_TT_SUBCLASS_WALK = <<~CPP
+    struct Bc2cppInstanceTtRoots { struct RClass** classes; int count; };
+    static int bc2cpp_instance_tt_subclass(mrb_state*, struct RBasic* obj, void* data) {
+      if (obj->tt != MRB_TT_CLASS) return MRB_EACH_OBJ_OK;
+      struct RClass* c = (struct RClass*)obj;
+      if (MRB_INSTANCE_TT(c) != MRB_TT_OBJECT) return MRB_EACH_OBJ_OK;
+      const Bc2cppInstanceTtRoots* roots = (const Bc2cppInstanceTtRoots*)data;
+      for (struct RClass* s = c->super; s; s = s->super) {
+        for (int i = 0; i < roots->count; ++i) {
+          if (s == roots->classes[i]) { MRB_SET_INSTANCE_TT(c, MRB_TT_DATA); return MRB_EACH_OBJ_OK; }
+        }
+      }
+      return MRB_EACH_OBJ_OK;
+    }
+  CPP
+
+  def emit_instance_tt_setup(compiled = [])
+    out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
+    out << INSTANCE_TT_SUBCLASS_WALK
+    out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
+    out << "  static const char* const paths[][6] = {\n"
+    embedding_classes.each do |klass|
+      next if klass.end_with?('.singleton')
+
+      segments = klass.split('::')
+      raise "INSTANCE_TT_SETUP: #{klass} nests deeper than 5 levels" if segments.size > 5
+
+      out << "    { #{(segments.map { |seg| "\"#{seg}\"" } + ['nullptr']).join(', ')} },\n"
+    end
+    out << "    { nullptr },\n  };\n"
+    out << <<~CPP
+      struct RClass* found_classes[sizeof(paths) / sizeof(paths[0])];
+      Bc2cppInstanceTtRoots roots = { found_classes, 0 };
+      bool switched = false, inherited = false;
+      for (const auto& path : paths) {
+        if (!path[0]) break;
+        mrb_value scope = mrb_obj_value(M->object_class);
+        bool found = true;
+        for (int i = 0; path[i]; ++i) {
+          mrb_sym name = mrb_intern_cstr(M, path[i]);
+          if (!mrb_const_defined_at(M, scope, name)) { found = false; break; }
+          scope = mrb_const_get(M, scope, name);
+        }
+        if (!found || mrb_type(scope) != MRB_TT_CLASS) continue;
+        struct RClass* c = mrb_class_ptr(scope);
+        switched = switched || MRB_INSTANCE_TT(c) != MRB_TT_DATA;
+        inherited = inherited || (c->flags & MRB_FL_CLASS_IS_INHERITED);
+        MRB_SET_INSTANCE_TT(c, MRB_TT_DATA);
+        found_classes[roots.count++] = c;
+      }
+      // INSTANCE_TT_SUBCLASSES (codegen_emit.rb): a later call with nothing new to switch has nothing new to find.
+      if (switched && inherited) mrb_objspace_each_objects(M, bc2cpp_instance_tt_subclass, &roots);
+    CPP
+    # RESUMABLE_ENTRY: define the frame class and the driver where no fiber is running.
+    out << "  bc2cpp_resumable_init(M);\n" if compiled.any? { |m| m[:resumable] }
+    out << "}\n"
+    out
+  end
+
+  # EMBED_FAMILY: a folded subclass names its family root's struct and data type (embed_storage_owner).
+  def struct_name(owner)
+    storage = embed_storage_owner(owner)
+    cached_codegen_name(@struct_names ||= {}, storage) { sanitize("#{storage}_ivars") }
+  end
+
+  def type_var(owner)
+    storage = embed_storage_owner(owner)
+    cached_codegen_name(@type_var_names ||= {}, storage) { sanitize("#{storage}_ivars_type") }
+  end
+
+  # ATTR_STRUCT_DEVIRT: the compiled getter/setter for one [owner, ivar,
+  # :reader | :writer] from @synthesize_accessor_for (see
+  # drop_unsafe_embeddings: once registered, every access path is
+  # struct-aware). Built with the same box/check/unbox code as GETIV/SETIV.
+  # Returns a `compiled`-shaped Hash so it needs no special-casing downstream.
+  def emit_ivar_accessor_pair(owner, ivar, which)
+    type = embed_type(owner, ivar)
+    return nil unless type
+
+    sname = struct_name(owner)
+    ops = TYPE_OPS.fetch(type)
+    base = "#{sanitize(owner)}_#{sanitize(ivar)}"
+
+    case which
+    when :reader
+      impl = "#{base}_impl"
+      entry = base
+      value = embedded_reader_value(owner, ivar, 'self')
+      code = <<~CPP
+        // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment).
+        mrb_value #{impl}(mrb_state* M, mrb_value self) {
+          return #{value};
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          return #{impl}(M, self);
+        }
+
+      CPP
+      { label: "synth:#{owner}##{ivar}", owner: owner, name: ivar, entry: entry, impl: impl,
+        arity: 0, arg_c_types: [], aspec: 'MRB_ARGS_NONE()', code: code, visibility: :public }
+    when :writer
+      impl = "#{base}_eq_impl"
+      # The reader's entry wrapper is already `#{base}`, so a writer that
+      # reused it emitted the SAME function twice -- a hard C++ redefinition
+      # for every embedded ivar with both attr_reader and attr_writer. The
+      # `_eq` suffix is the convention the writer entries already use (base_eq/base_eq_impl).
+      entry = "#{base}_eq"
+      # NILABLE_EMBED_SUPPORT: a tagged field stores through its setter helper;
+      # the check below still runs first, so a refused value leaves the field
+      # unchanged and the assigned value (not the field) is returned.
+      store =
+        if NULLABLE_TYPES.include?(type)
+          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
+        elsif type == :value
+          "  bc2cpp_keep_old(M, ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)});\n" \
+            "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
+            "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
+        else
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(arg);\n"
+        end
+      guard = if type == :value
+                ''
+              else
+                "if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
+                  "\"@#{ivar}: expected #{ops[:err]}\");"
+              end
+      code = <<~CPP
+        // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment). Same
+        // guarded check-then-store as SETIV's own embedded-ivar codegen
+        // (compile_insn's own SETIV case) -- the whole-program analysis
+        // proved every *compiled* write site is this type, but an
+        // external caller (this accessor's own whole reason to exist) is
+        // exactly the case that analysis can't see, so this checks rather
+        // than blindly trusting it. Returns the assigned value, never the
+        // struct field read back -- real attr_writer's own behavior
+        // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
+        // MethodDef's own kind: :ivar_accessor comment for the citation).
+        mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
+          mrb_check_frozen(M, mrb_obj_ptr(self));
+          #{guard}
+        #{store.chomp}
+          #{guard}
+          return arg;
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          mrb_value arg;
+          mrb_get_args(M, "o", &arg);
+          return #{impl}(M, self, arg);
+        }
+
+      CPP
+
+      { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
+        arity: 1, arg_c_types: ['mrb_value'], aspec: 'MRB_ARGS_REQ(1)', code: code, visibility: :public }
+    end
+  end
+
+  # Every synthesized accessor, built after compile_all. A nil from
+  # emit_ivar_accessor_pair should be impossible (the same pass fills both
+  # tables) but is checked. `only_owners` mirrors compile_all's filter: no
+  # accessor for a class this run does not emit.
+  def emit_synthesized_accessors(only_owners: nil)
+    pairs = @synthesize_accessor_for.to_a
+    pairs = pairs.select { |owner, _, _| only_owners.include?(owner) } if only_owners
+    pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
+  end
+
+  RDATA_IVAR_HASH_EMPTY = 0xFFFF
+
+  # enum mrb_data_ivar_kind (the pinned fork commit (mruby-rdata-ivar-slots, docs/patch-fork-tracking.md)) per TYPE_OPS key.
+  RDATA_IVAR_KIND = {
+    value: 'MRB_DATA_IVAR_VALUE', fixnum: 'MRB_DATA_IVAR_INT', symbol: 'MRB_DATA_IVAR_SYMBOL',
+    bool: 'MRB_DATA_IVAR_BOOL', fixnum_nil: 'MRB_DATA_IVAR_INT_OR_NIL'
+  }.freeze
+
+  # RDATA_IVAR_HASH: open-addressing index (FNV-1a 32 of the "@name", linear
+  # probing, half full) over a descriptor, so rdata_ivar_find in
+  # the pinned fork commit (mruby-rdata-ivar-slots, docs/patch-fork-tracking.md) stops scanning every slot per access.
+  def rdata_ivar_hash(names)
+    raise "too many RData ivar slots (#{names.size})" if names.size >= RDATA_IVAR_HASH_EMPTY
+
+    size = 2
+    size <<= 1 while size < names.size * 2
+    table = Array.new(size, RDATA_IVAR_HASH_EMPTY)
+    names.each_with_index do |name, index|
+      hash = 2_166_136_261
+      name.each_byte { |byte| hash = ((hash ^ byte) * 16_777_619) & 0xffff_ffff }
+      pos = hash & (size - 1)
+      pos = (pos + 1) & (size - 1) until table[pos] == RDATA_IVAR_HASH_EMPTY
+      table[pos] = index
+    end
+    table
+  end
+
+  # One slot + mrb_data_type marker per statically named ivar. The marker lets
+  # mruby's normal ivar APIs and GC find slots; dynamic names remain in RData's
+  # ordinary iv_tbl.
+  def emit_structs
+    out = String.new
+    out << emit_nullable_structs
+    @ivar_layout.each do |owner, ivars|
+      # As compile_all's only_owners filter: no struct for a class this run does not
+      # emit (it would be dead code and an unused-static warning).
+      next if @only_owners && !@only_owners.include?(owner)
+
+      out << "struct #{struct_name(owner)} {\n"
+      ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{ivar_field_name(name)};\n" }
+      out << "};\n"
+      # NON_POD_MEMBER_SUPPORT: placement-destroy before mrb_free. The struct is
+      # allocated with mrb_calloc and released by mrb_free, which is a bare
+      # `mrb_basic_alloc_func(p, 0)` -- a plain free() that runs NO member
+      # destructor. Every C_TYPE entry today is POD (mrb_int / mrb_sym / mrb_bool
+      # and the tagged Bc2cppFixnumOrNil), so nothing leaks and the explicit
+      # destructor call below compiles to the same code; it is emitted anyway so
+      # that adding a non-POD field type later cannot leak silently. `delete p`
+      # would be wrong: the memory comes from mruby's arena/page allocator, not
+      # operator new.
+      #
+      # NON_POD_MEMBER_SUPPORT (the null guard): mruby tests `d->type &&
+      # d->type->dfree` but never `d->data` (3rd/mruby/src/gc.c), so this runs
+      # with p == NULL for any object whose #initialize raised before its
+      # mrb_data_init -- a bare mrb_free(NULL) was harmless, but
+      # `static_cast<T*>(nullptr)->~T()` is UB as soon as the destructor is
+      # non-trivial, which is the whole point of calling it here. Verified
+      # against real libmruby_core.a: 1000 bare MRB_TT_DATA shells produced
+      # 1000 dfree calls with p == NULL, every one of them at mrb_close (gc_sweep
+      # skips them because the sweep's liveness test never sees them; free_heap
+      # frees every non-MRB_TT_FREE slot unconditionally). Same `if (!p) return;`
+      # the hand-written DataType<T>::free_obj already uses(mruby-rgss/src/lib.cxx).
+      out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) {\n"
+      out << "  if (!p) return;\n"
+      out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
+      out << "  mrb_free(mrb, p);\n"
+      out << "}\n"
+      out << "static const mrb_data_ivar #{sanitize(owner)}_bc2cpp_ivar_slot_table[] = {\n"
+      # Typed fields are listed with their kind: the runtime boxes a raw C value on
+      # read and type-checks a store, so instance_variable_get/set,
+      # instance_variables, inspect, Marshal and dup see them. The GC
+      # marks VALUE slots only.
+      slots = ivars.keys
+      slots.each do |name|
+        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), " \
+               "#{RDATA_IVAR_KIND.fetch(ivars.fetch(name))} },\n"
+      end
+      out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
+      out << "};\n"
+      hash_fields = 'nullptr, 0'
+      unless slots.empty?
+        table = rdata_ivar_hash(slots.map { |name| "@#{name}" })
+        out << "static const uint16_t #{sanitize(owner)}_ivar_hash[] = { #{table.join(', ')} };\n"
+        hash_fields = "#{sanitize(owner)}_ivar_hash, #{table.size - 1}"
+      end
+      out << "static const mrb_data_type #{type_var(owner)} = " \
+             "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
+             "#{sanitize(owner)}_bc2cpp_ivar_slot_table, #{slots.size}, sizeof(#{struct_name(owner)}), " \
+             "#{hash_fields} };\n\n"
+    end
+    out
+  end
+
+  # NILABLE_EMBED_SUPPORT: the tagged Integer-or-nil payload and its three
+  # helpers, emitted ahead of every owner struct and only when a field uses
+  # them. `present` is first and mrb_calloc zeroes the whole struct, so a fresh
+  # instance reads nil before its first SETIV -- the same observable state as
+  # an absent ivar. Both arms are immediates, so nothing here is a GC root and
+  # no mrb_gc_mark/write barrier is involved.
+  #
+  # `mrb_fixnum_p`, not `mrb_integer_p`: a heap-backed Bignum is an MRB_TT_INTEGER
+  # on a non-word-boxed target, and storing one in an mrb_int would truncate it
+  # silently. The check refuses it and the caller's TypeError does the rest.
+  def emit_nullable_structs
+    return '' unless @ivar_layout.any? { |_, ivars| ivars.any? { |_, t| NULLABLE_TYPES.include?(t) } }
+
+    <<~CPP
+      // NILABLE_EMBED_SUPPORT: a tagged Integer-or-nil ivar field. Immediate-only
+      // by construction, so it needs no GC rooting; see IvarLayout::FIXNUM_NIL.
+      struct Bc2cppFixnumOrNil { mrb_bool present; mrb_int value; };
+      // The runtime reads this slot as struct mrb_data_int_or_nil.
+      static_assert(sizeof(Bc2cppFixnumOrNil) == sizeof(mrb_data_int_or_nil) &&
+                    offsetof(Bc2cppFixnumOrNil, present) == offsetof(mrb_data_int_or_nil, present) &&
+                    offsetof(Bc2cppFixnumOrNil, value) == offsetof(mrb_data_int_or_nil, value),
+                    "Bc2cppFixnumOrNil must match struct mrb_data_int_or_nil");
+      static inline mrb_bool bc2cpp_fixnum_or_nil_p(mrb_value v) {
+        return mrb_nil_p(v) || mrb_fixnum_p(v);
+      }
+      static inline mrb_value bc2cpp_fixnum_or_nil_box(const Bc2cppFixnumOrNil& f) {
+        return f.present ? mrb_fixnum_value(f.value) : mrb_nil_value();
+      }
+      // Store only after bc2cpp_fixnum_or_nil_p, so a rejected value leaves the
+      // field exactly as it was (the caller's check raises before this runs).
+      static inline void bc2cpp_fixnum_or_nil_set(Bc2cppFixnumOrNil* f, mrb_value v) {
+        if (mrb_nil_p(v)) { f->present = FALSE; f->value = 0; }
+        else { f->present = TRUE; f->value = mrb_fixnum(v); }
+      }
+
+    CPP
+  end
+
+  # ARY_ENTRY_INLINE: a same-TU copy of mrb_ary_entry (src/array.c):
+  #
+  #   struct RArray *a = mrb_ary_ptr(ary);
+  #   mrb_int len = ARY_LEN(a);
+  #   if (n < 0) n += len;
+  #   if (n < 0 || len <= n) return mrb_nil_value();
+  #   return ARY_PTR(a)[n];
+  #
+  # UNSIGNED_INDEX: the copy reads the embed flag once and tests 0 <= n < len as one unsigned compare. A negative n
+  # then counts from the end in unsigned arithmetic, which lands at or past len exactly when n < -len, so the result
+  # is mrb_ary_entry's for every n (docs/bc2cpp-unsigned-index.md).
+  #
+  # Every emitted "mrb_ary_ref(M, ...)" becomes "bc2cpp_ary_entry(M, ...)"; the
+  # real macro is `#define mrb_ary_ref(mrb, ary, n) mrb_ary_entry(ary, n)`
+  # (mruby/array.h), so behavior is identical. It exists because mrb_ary_entry
+  # lives in libmruby.a and the build has no LTO, so the
+  # call could never be inlined. An unboxed element representation is not an
+  # option: the GC marks elements through a real RArray (src/gc.c).
+  # Emitted only when some compiled code calls it (checked on the output).
+  def emit_ary_entry_helper(compiled)
+    # OUTLINED_INDEX_OPS' GETIDX/GETIDX0 helpers call it too.
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_ary_entry(') } ||
+                     emit_index_helpers(compiled).include?('bc2cpp_ary_entry(')
+
+    <<~CPP
+      BC2CPP_HOT_INLINE static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        const mrb_value* p;
+        mrb_uint len;
+        if (ARY_EMBED_P(a)) {
+          p = ARY_EMBED_PTR(a);
+          len = (mrb_uint)ARY_EMBED_LEN(a);
+        } else {
+          p = a->as.heap.ptr;
+          len = (mrb_uint)a->as.heap.len;
+        }
+        if (#{BranchHints.likely('(mrb_uint)n < len')}) return p[n];
+        mrb_uint from_end = (mrb_uint)n + len;
+        return from_end < len ? p[from_end] : mrb_nil_value();
+      }
+
+    CPP
+  end
+
+  # ARY_WRITE_INLINE: same-TU fast paths in front of mrb_ary_push, mrb_ary_set and mrb_ary_splice (src/array.c), for
+  # the ARRAY_PUSH, SETIDX and ARRAY_SLICE_WRITE arms; libmruby.a has no LTO, so those calls are never inlined. Each
+  # takes only the case where the library body reduces to a store and a write barrier: ary_modify's frozen check
+  # passes and there is no shared buffer to detach, and the store needs no growth, nil fill or element move. Every
+  # other case, frozen, negative (UNSIGNED_INDEX) or out of range included, calls the library function, which raises or grows as before.
+  ARY_WRITE_HELPERS = {
+    'bc2cpp_ary_push' => <<~CPP,
+      BC2CPP_HOT_INLINE static inline void bc2cpp_ary_push(mrb_state* M, mrb_value ary, mrb_value elem) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        if (mrb_likely(!ARY_EMBED_P(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a) && a->as.heap.len < a->as.heap.aux.capa)) {
+          a->as.heap.ptr[a->as.heap.len++] = elem;
+          mrb_field_write_barrier_value(M, (struct RBasic*)a, elem);
+          return;
+        }
+        mrb_ary_push(M, ary, elem);
+      }
+    CPP
+    'bc2cpp_ary_set' => <<~CPP,
+      BC2CPP_HOT_INLINE static inline void bc2cpp_ary_set(mrb_state* M, mrb_value ary, mrb_int n, mrb_value val) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        if (mrb_likely((mrb_uint)n < (mrb_uint)ARY_LEN(a) && !ARY_SHARED_P(a) && !mrb_frozen_p(a))) {
+          bc2cpp_keep_old(M, ARY_PTR(a)[n]);
+          ARY_PTR(a)[n] = val;
+          mrb_field_write_barrier_value(M, (struct RBasic*)a, val);
+          return;
+        }
+        mrb_ary_set(M, ary, n, val);
+      }
+    CPP
+    # Only an in-range replacement by an Array of the same length (not the receiver itself): mrb_ary_splice's
+    # element-for-element value_move, then its write barrier.
+    'bc2cpp_ary_splice' => <<~CPP
+      static inline void bc2cpp_ary_splice(mrb_state* M, mrb_value ary, mrb_int head, mrb_int len, mrb_value rpl) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        mrb_int alen = ARY_LEN(a);
+        if (mrb_likely(head >= 0 && len >= 0 && head < alen && len <= alen - head && !ARY_SHARED_P(a) && !mrb_frozen_p(a) &&
+            mrb_array_p(rpl) && RARRAY_LEN(rpl) == len && RARRAY_PTR(rpl) != ARY_PTR(a))) {
+          mrb_value* dst = ARY_PTR(a) + head;
+          const mrb_value* src = RARRAY_PTR(rpl);
+          bc2cpp_keep_old_range(M, ary, head, len);
+          for (mrb_int i = 0; i < len; i++) dst[i] = src[i];
+          mrb_write_barrier(M, (struct RBasic*)a);
+          return;
+        }
+        mrb_ary_splice(M, ary, head, len, rpl);
+      }
+    CPP
+  }.freeze
+
+  # Emitted only for the helpers some compiled code (or an index helper) calls.
+  def emit_ary_write_helpers(compiled)
+    index = emit_index_helpers(compiled)
+    ARY_WRITE_HELPERS.filter_map do |name, text|
+      "#{BranchHints.text(text)}\n" if compiled.any? { |m| m[:code].include?("#{name}(") } || index.include?("#{name}(")
+    end.join
+  end
+
+  # NUMERIC_OPERAND_PROOF helpers: the core Integer/Float compare and
+  # divide bodies for operands proven Integer or Float, so the sites need no
+  # dynamic send. Emitted only when the output uses them.
+  def emit_numeric_proof_helpers(compiled)
+    out = +''
+    if compiled.any? { |m| m[:code].include?('bc2cpp_num_cmp(') }
+      # Integer#</<=/>/>= and Float#... are all num_lt & co. over cmpnum
+      # (src/numeric.c); mrb_cmp is cmpnum for Integer/Float/bigint receivers.
+      out << <<~CPP
+        static inline mrb_int bc2cpp_num_cmp(mrb_state *M, mrb_value a, mrb_value b) {
+          mrb_state *mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+          mrb_int c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+          return c;
+        }
+
+      CPP
+    end
+    if compiled.any? { |m| m[:code].include?('bc2cpp_num_div(') }
+      # flo_div / int_div (src/numeric.c) for Integer-or-Float operands.
+      # mrb_bint_div/mrb_as_bint are internal.h-only (see bc2cpp.rb's extern "C" block).
+      out << <<~CPP
+        #ifdef MRB_USE_BIGINT
+        extern "C" mrb_value mrb_bint_div(mrb_state*, mrb_value, mrb_value);
+        extern "C" mrb_value mrb_as_bint(mrb_state*, mrb_value);
+        #endif
+        static inline mrb_value bc2cpp_num_div(mrb_state *M, mrb_value x, mrb_value y) {
+        #ifndef MRB_NO_FLOAT
+          if (mrb_float_p(x)) return mrb_float_value(M, mrb_div_float(mrb_float(x), mrb_as_float(M, y)));
+          if (mrb_float_p(y)) return mrb_float_value(M, mrb_div_float(mrb_as_float(M, x), mrb_float(y)));
+        #endif
+        #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(x)) return mrb_bint_div(M, x, y);
+          if (mrb_bigint_p(y)) return mrb_bint_div(M, mrb_as_bint(M, x), y);
+        #endif
+          return mrb_div_int_value(M, mrb_integer(x), mrb_integer(y));
+        }
+
+      CPP
+    end
+    out
+  end
+
+  # NATIVE_CORE_DIRECT mirrors of core natives whose bodies are
+  # static, emitted only for the ones the output calls. NativeCoreDirect::ENTRIES
+  # pins each to the audited core body.
+  def emit_native_core_helpers(compiled)
+    NativeCoreDirect::HELPERS.filter_map do |name, text|
+      "#{text}\n" if compiled.any? { |m| m[:code].include?("#{name}(") }
+    end.join
+  end
+
+  # bc2cpp_bool_p (TYPE_OPS :bool check), emitted only when the output uses it.
+  # There is no single macro for both boolean tags, so it ORs
+  # mrb_true_p/mrb_false_p (mruby/value.h).
+  def emit_bool_check_helper(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_bool_p(') }
+
+    <<~CPP
+      static inline mrb_bool bc2cpp_bool_p(mrb_value v) { return mrb_true_p(v) || mrb_false_p(v); }
+
+    CPP
+  end
+
+  # GETCONST's lexical lookup helpers (see compile_insn's GETCONST). Emitted once, only when used.
+  def emit_const_lookup_helper
+    return '' unless const_lookup_helper_used?
+
+    <<~CPP
+      // The order of mrb_vm_const_get (3rd/mruby/src/variable.c): the own table of each lexical scope, innermost
+      // first and Object last, then the ancestors of the innermost scope (const_get with skip). A miss is answered
+      // without raising until the end, where mrb_const_get runs const_missing on the innermost scope as the VM does.
+      static inline bool bc2cpp_const_own(mrb_state* M, mrb_value scope, mrb_sym name, mrb_value* out) {
+        if (!(mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) || !mrb_iv_defined(M, scope, name)) {
+          return false;
+        }
+        *out = mrb_iv_get(M, scope, name);
+        return true;
+      }
+      static mrb_value bc2cpp_const_inherited(mrb_state* M, mrb_value scope, mrb_sym name) {
+        if (mrb_class_p(scope) || mrb_module_p(scope) || mrb_sclass_p(scope)) {
+          struct RClass* base = mrb_class_ptr(scope);
+          struct RClass* c = base->super;
+          for (bool retried = false;; retried = true, c = M->object_class) {
+            for (; c; c = c->super) {
+              if (MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED)) continue;
+              mrb_value v;
+              if (bc2cpp_const_own(M, mrb_obj_value(c->tt == MRB_TT_ICLASS ? c->c : c), name, &v)) return v;
+            }
+            if (retried || base->tt != MRB_TT_MODULE) break;
+          }
+        }
+        return mrb_const_get(M, scope, name);
+      }
+
+    CPP
+  end
+
+  # Declarations for the NATIVE_CONSTRUCT_TARGETS entry points actually used,
+  # via include/rgss_construct.hxx (namespace `rgss`). Do not re-spell the
+  # signatures here: the header is the single source of truth, and parameter
+  # types must match exactly (`RClass*` klass, native arg_type parameters). The
+  # three *-compiled mrbgem.rake files add repo include/ to cxx.include_paths.
+  def emit_native_construct_decls
+    return '' unless @native_construct_used.any?
+
+    out = String.new
+    out << "// mruby-rgss/src/lib.cxx's own devirtualized-construction entry\n"
+    out << "// points (see that file's own DataType<T> comment) -- called\n"
+    out << "// directly in place of Class#new's own allocate+initialize\n"
+    out << "// dispatch when a `.new` call site's receiver is provably one of\n"
+    out << "// these native DataType<T>-backed classes (compile_send's own\n"
+    out << "// \"MONO :new -> direct native construct\" path). Declared in\n"
+    out << "// include/rgss_construct.hxx, defined in namespace `rgss` at\n"
+    out << "// file scope in lib.cxx -- plain C++ linkage both sides, no\n"
+    out << "// `extern \"C\"` anywhere.\n"
+    out << "#include \"rgss_construct.hxx\"\n"
+    out << "\n"
+    out
+  end
+
+  # Class-identity accessor name for a DIRECT_CONSTRUCT_TARGETS owner
+  # ("Game::Transition" -> "Game__Transition_compiled_class"), derived with
+  # `sanitize`; the owning gem's emit_direct_construct_accessors defines it.
+  def direct_construct_class_fn(owner)
+    "#{sanitize(owner)}_compiled_class"
+  end
+
+  # The class expression of a DIRECT_CONSTRUCT_TARGETS owner at a direct-construct site. A full build
+  # reads the gem's hand-wired accessor when one exists (DIRECT_CONSTRUCT_ACCESSOR_TARGETS); the others
+  # use the owner-class cache.
+  def direct_construct_class_expr(owner)
+    return owner_class_ptr_expr(owner) unless DIRECT_CONSTRUCT_ACCESSOR_TARGETS.include?(owner)
+
+    @direct_construct_used << owner
+    "#{direct_construct_class_fn(owner)}()"
+  end
+
+  # STRINGIO_DIRECT_READ (codegen_send.rb): the file-scope prototypes of mrb_stringio_read_direct and mrb_io_read_direct,
+  # which mruby-stringio and mruby-io define with C linkage. Only a unit that emits the read form declares it.
+  def emit_stringio_read_decl
+    return '' unless @stringio_direct_read_used
+
+    "extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n" \
+      "extern \"C\" mrb_bool mrb_io_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n\n"
+  end
+
+  # Declarations for direct compiled construction actually used:
+  # 1. bc2cpp_direct_alloc: mirrors mrb_instance_alloc's checks and allocation.
+  # 2. Accessors only for listed targets, defined by the owning gem's generated code (DIRECT_CONSTRUCT_ACCESSORS).
+  #    Other local classes use the owner-class cache instead.
+  def emit_direct_construct_decls
+    return '' unless @direct_alloc_used || @direct_construct_used.any?
+
+    out = String.new
+    out << "// A generic replacement for Class#new's own `self.allocate` step,\n"
+    out << "// correct for ANY class C regardless of its own MRB_INSTANCE_TT --\n"
+    out << "// including one with an embedded MRB_TT_DATA ivar struct, since\n"
+    out << "// MRB_INSTANCE_TT(c) reads the class's OWN stored instance type\n"
+    out << "// (set once, at gem-init time, by MRB_SET_INSTANCE_TT), never\n"
+    out << "// guesses it from the class's shape. This is exactly what\n"
+    out << "// mrb_instance_alloc (3rd/mruby/src/class.c, Class#allocate's own\n"
+    out << "// real implementation) does internally -- confirmed by reading that\n"
+    out << "// function directly -- just reimplemented here since it is `static`\n"
+    out << "// (no external linkage, so this generated file -- a different\n"
+    out << "// translation unit -- cannot call it directly) using only the two\n"
+    out << "// PUBLIC mruby APIs for allocating with MRB_INSTANCE_TT(c) and\n"
+    out << "// mrb_obj_alloc (mruby.h), preserving mrb_instance_alloc's tag and\n"
+    out << "// allocator checks. Called directly in\n"
+    out << "// place of Class#new's own real allocate+initialize dispatch chain\n"
+    out << "// when a `.new` call site's receiver is a compiled class with a\n"
+    out << "// proven standard constructor chain (compile_send's direct\n"
+    out << "// compiled-construction path).\n"
+    out << "// -- #initialize's own already-compiled _impl function is called\n"
+    out << "// right after, for its side effects only (its own return value is\n"
+    out << "// discarded, never assigned to the result register: real Ruby\n"
+    out << "// Class#new always returns the newly allocated object, never\n"
+    out << "// whatever #initialize itself returns).\n"
+    out << "static inline mrb_value bc2cpp_direct_alloc(mrb_state* M, RClass* c) {\n"
+    out << "  enum mrb_vtype ttype = MRB_INSTANCE_TT(c);\n"
+    out << "  if (c->tt == MRB_TT_SCLASS) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
+           "\"can't create instance of singleton class\");\n"
+    out << "  if (c == M->nil_class || c == M->false_class) {\n"
+    out << "    mrb_assert(ttype == 0);\n"
+    out << "  } else if (ttype == 0) {\n"
+    out << "    ttype = MRB_TT_OBJECT;\n"
+    out << "  }\n"
+    type_error = 'mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError"))'
+    out << "  if (MRB_UNDEF_ALLOCATOR_P(c)) mrb_raisef(M, #{type_error}, \"allocator undefined for %v\", mrb_obj_value(c));\n"
+    out << "  if (ttype <= MRB_TT_CPTR) mrb_raisef(M, #{type_error}, \"can't create instance of %v\", mrb_obj_value(c));\n"
+    out << "  return mrb_obj_value(mrb_obj_alloc(M, ttype, c));\n"
+    out << "}\n\n"
+    out << "// Class-identity accessors for explicitly listed target classes\n"
+    out << "// their owning gem's generated code defines (mirroring\n"
+    out << "// NATIVE_CONSTRUCT_TARGETS' own class_fn precedent) -- a real,\n"
+    out << "// durable RClass* captured once at that gem's own gem-init time, NOT\n"
+    out << "// a second mrb_const_get/mrb_class_get_under lookup (see\n"
+    out << "// compile_send's own comment on why: that would just observe\n"
+    out << "// whatever the constant currently names, exactly what a\n"
+    out << "// reassignment would already have changed, so it could never\n"
+    out << "// actually detect one happened).\n"
+    @direct_construct_used.sort.each do |owner|
+      out << "RClass* #{direct_construct_class_fn(owner)}(void);\n"
+    end
+    out << "\n"
+    out
+  end
+
+  # `only_owners` limits which classes are emitted, but the registry and
+  # ivar_layout must come from the WHOLE closed world: analyzed alone,
+  # mruby-lcf has one :rpg2003? definition, while the game has four.
+  # `other_owners`: classes compiled in another TU of the same link; their
+  # `_impl`s are declared via emit_decls_header and resolved at link time.
+  # A ".singleton" pseudo-owner needs no special handling here: it is selected
+  # exactly when an `owners:` list names it, and SDEF defs now carry an irep so
+  # they are in @owner_of (see build_registry). compile_send's
+  # `@only_owners.include?` guard works the same way.
+  def compile_all(only_owners: nil, other_owners: nil, live_labels: nil)
+    @only_owners = only_owners
+    @other_owners = other_owners
+    # SYM_DEVIRT: sym_call_target probes callees with compiles_clean?, whose
+    # compile_method reads @only_owners/@other_owners, so both are set before any
+    # compile_method runs. compile_method never assigns them.
+    leaves = @owner_of.keys
+    if only_owners
+      leaves.select! { |l| only_owners.include?(@owner_of.fetch(l).owner) && emit_unit_allows?(l) }
+      # A module_function copy has its own singleton lookup entry but shares its
+      # source body's irep. Emit that body from the module's gem when the copy's
+      # singleton owner is selected; the source module method itself stays bytecode.
+      copied = @registry.values.flatten.filter_map do |d|
+        d.copy_irep if d.kind == :module_function && d.copy_irep && only_owners.include?(d.owner)
+      end
+      leaves |= copied
+    end
+    leaves.select! { |label| live_labels.include?(label) } if live_labels
+    leaves.map { |label| compile_method(label) }
+  end
+
+  # EMIT_UNIT: Array and StringIO have definitions in both mruby's own
+  # Ruby and an engine gem (mruby-rgss's Array#include?, mruby-lcf's
+  # StringIO#ungetbyte), and each compiled gem is one translation unit that must
+  # emit a symbol exactly once. The unit is read from the source file and the
+  # owner list: the core gem is the run whose owners are all core owners
+  # (BC2CPP_CORE_OWNERS) and emits the core-source definitions; a run with any
+  # other owner is an engine gem (or the aggregate of all gems) and emits the
+  # rest. A run whose owners cover the core set and more emits both, which is
+  # what a single-process analysis of every gem wants. Every run agrees on
+  # which bodies compile (same registry), only on which TU emits them.
+  def emit_unit_allows?(label)
+    return true unless @only_owners
+
+    covers_core = BC2CPP_CORE_OWNERS.all? { |owner| @only_owners.include?(owner) }
+    core_only = @only_owners.all? { |owner| BC2CPP_CORE_OWNERS.include?(owner) }
+    if CoreDefs.core_source?(@ireps.fetch(label).file)
+      covers_core
+    else
+      !core_only
+    end
+  end
+
+  # RESPOND_TO_PHANTOM (closed build): the closed proof lets `respond_to?(:name)` take a Symbol that names a method
+  # the build leaves out of the tables (SYMBOL_USES, static_dispatch_symbol_uses.rb), so respond_to? must still answer
+  # true for it. bc2cpp_left_out (LEFT_OUT) records each left-out entry's class in one table shared by every compiled
+  # gem; mrb_respond_to (renamed below, for the generated code) and the Kernel#respond_to? it installs consult it when
+  # the method table says no. mruby's respond_to? ignores visibility and the closed world has no UNDEF, so "the
+  # receiver is a kind of an owner of the entry" is the whole answer.
+  def self.respond_to_phantom_runtime
+    <<~'CPP'
+        #define BC2CPP_RESPOND_TO_PHANTOM 1
+        // Keyed by the symbol's number, which hashes by value under every boxing and every mruby pin.
+        [[maybe_unused]] static mrb_value bc2cpp_phantom_table(mrb_state* M) {
+          return mrb_iv_get(M, mrb_obj_value(M->kernel_module), mrb_intern_lit(M, "__bc2cpp_left_out__"));
+        }
+        [[maybe_unused]] static mrb_bool bc2cpp_phantom_responds(mrb_state* M, mrb_value obj, mrb_sym id) {
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) return FALSE;
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
+          if (!mrb_array_p(owners)) return FALSE;
+          for (mrb_int i = 0; i < RARRAY_LEN(owners); i++) {
+            if (mrb_obj_is_kind_of(M, obj, mrb_class_ptr(RARRAY_PTR(owners)[i]))) return TRUE;
+          }
+          return FALSE;
+        }
+        [[maybe_unused]] static inline mrb_bool bc2cpp_mrb_respond_to(mrb_state* M, mrb_value obj, mrb_sym id) {
+          return mrb_respond_to(M, obj, id) || bc2cpp_phantom_responds(M, obj, id);
+        }
+        // The first gem's install keeps mruby's own Kernel#respond_to? (kernel.c obj_respond_to) and answers with it,
+        // then with the table; a later gem only adds to the table.
+        static mrb_func_t bc2cpp_original_respond_to = nullptr;
+        [[maybe_unused]] static mrb_value bc2cpp_kernel_respond_to(mrb_state* M, mrb_value self) {
+          mrb_value answer = bc2cpp_original_respond_to(M, self);
+          if (mrb_test(answer)) return answer;
+          mrb_sym id;
+          mrb_bool priv = FALSE;
+          mrb_get_args(M, "n|b", &id, &priv);
+          return mrb_bool_value(bc2cpp_phantom_responds(M, self, id));
+        }
+        [[maybe_unused]] static void bc2cpp_phantom_add(mrb_state* M, struct RClass* owner, mrb_sym id) {
+          mrb_value kernel = mrb_obj_value(M->kernel_module);
+          mrb_value table = bc2cpp_phantom_table(M);
+          if (!mrb_hash_p(table)) {
+            struct RClass* k = M->kernel_module;
+            mrb_method_t m = bc2cpp_find_method(M, &k, mrb_intern_lit(M, "respond_to?"));
+            if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) {
+              mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: RESPOND_TO_PHANTOM: Kernel#respond_to? is not mruby's native");
+            }
+            bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
+            table = mrb_hash_new(M);
+            mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
+            mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
+          }
+          mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
+          if (!mrb_array_p(owners)) {
+            owners = mrb_ary_new(M);
+            mrb_hash_set(M, table, mrb_int_value(M, (mrb_int)id), owners);
+          }
+          mrb_ary_push(M, owners, mrb_obj_value(owner));
+        }
+        #define mrb_respond_to bc2cpp_mrb_respond_to
+    CPP
+  end
+
+  # SKIPPED_ENTRY_MACROS: one `#define BC2CPP_SKIPPED_<entry> 1` per entry SKIP_UNSUPPORTED dropped from this output.
+  def emit_skipped_entry_macros(entries)
+    return '' if entries.empty?
+
+    "// SKIPPED_ENTRY_MACROS: entries refused by this run (left on the interpreter).\n" +
+      entries.sort.map { |e| "#define BC2CPP_SKIPPED_#{e} 1\n" }.join + "\n"
+  end
+
+  # Forward declarations first: a direct call can target a method defined later
+  # in the file.
+  def emit_forward_decls(compiled)
+    out = String.new
+    compiled.each do |m|
+      out << "#{decl_line(m)};\n"
+      # The entry wrapper stays static: only this gem's registration calls it. An entry the build leaves out of the
+      # tables (StaticDispatchLists#for_build) is reached only by direct `_impl` calls, so it can go unused.
+      out << "[[maybe_unused]] static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
+    end
+    out << "\n"
+    out
+  end
+
+  # The same declarations as a `#pragma once` header, for other gems' generated
+  # code (OTHER_DECLS_HEADER in mrbgem.rake) so the linker resolves cross-gem
+  # direct calls. `_impl`/entry are not `static` for this reason.
+  def emit_decls_header(compiled)
+    out = String.new
+    out << "#pragma once\n"
+    out << "#include <mruby.h>\n\n"
+    compiled.each { |m| out << "#{decl_line(m)};\n" }
+    out << "\n"
+    out
+  end
+
+  # `m[:arg_c_types]`: each mandatory position's C++ type (mrb_value, or
+  # mrb_int for NATIVE_ARGS). `self` is never retyped. Absent (an
+  # `#error` stub) means all mrb_value.
+  def decl_line(m)
+    arg_c_types = m[:arg_c_types] || Array.new(m[:arity], 'mrb_value')
+    impl_params = (['mrb_state*', 'mrb_value'] + arg_c_types).join(', ')
+    "mrb_value #{m[:impl]}(#{impl_params})"
+  end
+end

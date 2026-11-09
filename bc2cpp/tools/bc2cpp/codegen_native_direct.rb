@@ -1,0 +1,217 @@
+# frozen_string_literal: true
+
+require_relative 'native_direct'
+
+# NATIVE_DIRECT: exact-class arms that call the RGSS natives'
+# frame-independent entry points (include/rgss_construct.hxx), placed in the
+# else of a call site's guard chain. Every other receiver keeps the chain's
+# fallback: ordinary dispatch, or, in a closed world where the arms name every
+# native class that answers the name, the proven-dead nomethod raise.
+#
+# Prepended to CodeGen, so it wraps guarded_fallback_line (codegen_send.rb)
+# without editing it.
+module NativeDirectFallback
+  # The :int tag test of an arm wrapper is dropped when the Fixnum proof covers
+  # the argument (the same test codegen_send.rb and codegen_native_exact_direct.rb already
+  # drop). BC2CPP_NATIVE_INT_GUARDS=0 is the control.
+  def native_int_guard_needed?(int_site, argv, position)
+    return true unless ENV['BC2CPP_NATIVE_INT_GUARDS'] != '0'
+    return true unless int_site
+
+    !native_int_arg_proven?(*int_site, argv, position)
+  end
+
+  def guarded_fallback_line(d, recv, name, argv, listed, site)
+    plan = native_direct_plan(name, argv.size, closed_world_site: !site.nil?)
+    return super unless plan
+
+    tail = plan[:lift] ? @closed_world.with_native_arms(name) { super } : super
+    native_direct_wrap(d, recv, name, argv, plan[:arms], tail)
+  end
+
+  # The last-resort dispatch of a site with no guard chain at all.
+  def native_direct_dynamic_line(d, recv, name, argv)
+    line = dynamic_dispatch_line(d, recv, name, argv)
+    plan = native_direct_plan(name, argv.size, closed_world_site: false)
+    plan ? native_direct_wrap(d, recv, name, argv, plan[:arms], line) : line
+  end
+
+  # The zero-argument RGSS arms (compile_send) are emitted ahead of the chain;
+  # record their owners so this wrapper does not repeat them.
+  def with_native_arms_emitted(name, owners)
+    previous = @native_arms_emitted
+    @native_arms_emitted = { name => owners }
+    yield
+  ensure
+    @native_arms_emitted = previous
+  end
+
+  # owner => [function, kinds] for every class whose native `name` of this
+  # arity has an entry point, the older zero-argument tables included.
+  def native_direct_specs(name, arity)
+    specs = {}
+    if arity.zero?
+      (CodeGen::NATIVE_WRAPPER_ZERO_ARG_DIRECT[name] || {}).each { |owner, function| specs[owner] = [function, []] }
+      if name == 'dispose'
+        CodeGen::NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name).each do |owner|
+          specs[owner] = [owner == 'RGSS::Tilemap' ? 'tilemap_dispose_direct' : 'dispose_direct', []]
+        end
+      end
+    end
+    (NativeDirect::ENTRIES[name] || {}).each do |owner, entry|
+      specs[owner] ||= [entry.function, entry.kinds] if entry.kinds.size == arity
+    end
+    specs
+  end
+
+  # Same conditions as native_wrapper_owner_safe?: one native registration, no
+  # Ruby definition on the class, no mixin that could precede it.
+  def native_direct_owner_safe?(name, owner)
+    return false unless @native_name_sources && CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.key?(owner)
+    return false unless rgss_native_registers?(name)
+
+    defs = @registry[name]
+    return false unless defs
+
+    defs.any? { |definition| definition.owner == '<native>' && definition.irep.nil? } &&
+      defs.none? { |definition| definition.owner == owner } &&
+      Array(@prepended_modules[owner]).empty? && !@unknown_mixins.include?(owner)
+  end
+
+  def native_direct_plan(name, arity, closed_world_site:)
+    return nil unless @native_name_sources
+
+    specs = native_direct_specs(name, arity)
+    return nil if specs.empty?
+
+    present = (@native_arms_emitted && @native_arms_emitted[name]) || []
+    arms = specs.reject { |owner, _| present.include?(owner) }
+                .select { |owner, _| native_direct_owner_safe?(name, owner) }
+    lift = closed_world_site && native_direct_lift?(name, specs, present + arms.keys)
+    return nil if arms.empty? && !lift
+
+    { arms: arms, lift: lift }
+  end
+
+  # The arms cover every native class registering `name` (or a Ruby definition
+  # replaced it), so the chain's else is reached only by receivers no native
+  # class answers for.
+  def native_direct_lift?(name, specs, covered)
+    return false unless @closed_world
+
+    paths = @native_name_sources.fetch(name, []).select { |path| path.include?('/mruby-rgss/src/') }
+    registered = NativeDirect.registered_owners(name, paths)
+    return false if registered.nil? || registered.empty?
+
+    ruby_owned = @registry.fetch(name, []).reject { |definition| definition.owner == '<native>' }.map(&:owner)
+    # A module_function also answers on the module object (`Graphics.update`), which no class-level arm names: the
+    # chain's else still reaches that receiver, so its fallback cannot be the proven-dead raise.
+    registered.none? { |owner| owner.end_with?('.singleton') } &&
+      registered.all? { |owner| specs.key?(owner) && (covered.include?(owner) || ruby_owned.include?(owner)) } &&
+      @closed_world.native_only_in?(name, '/mruby-rgss/src/') &&
+      @closed_world.native_subclass_free?(registered.to_a)
+  end
+
+  # POLY_DIAG: the arms cover every native class answering `name`, so the native
+  # definition no longer reaches a dispatch.
+  def native_direct_lifted?(name, arity)
+    plan = native_direct_plan(name, arity, closed_world_site: !@closed_world.nil?)
+    !plan.nil? && plan[:lift]
+  end
+
+  # An exact native receiver cannot enter a Ruby owner's class arm ahead of this same native fallback.
+  def flow_native_direct_line(d, recv, name, argv)
+    return nil if ENV['BC2CPP_NATIVE_EXACT_BEFORE_POLY'] == '0'
+
+    site = exact_core_site_for(recv, name)
+    return nil unless site && !site[:checked] && CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.key?(site[:klass])
+
+    plan = native_direct_plan(name, argv.size, closed_world_site: true)
+    spec = plan && plan[:arms][site[:klass]]
+    return nil unless spec
+
+    @native_construct_used << site[:klass]
+    native_direct_exact_line(d, recv, name, argv, [site[:klass], spec], dynamic_dispatch_line(d, recv, name, argv), site[:int_site])
+  end
+
+  def native_direct_wrap(d, recv, name, argv, arms, tail)
+    return tail if arms.empty?
+
+    @native_construct_used.merge(arms.keys)
+    generic = dynamic_dispatch_line(d, recv, name, argv)
+    site = exact_core_site_for(recv, name)
+    exact = site && arms.slice(site[:klass])
+    return native_direct_exact_line(d, recv, name, argv, exact.first, generic, site[:int_site]) if exact && !exact.empty?
+
+    # The class-tested branches below run only when no exact-core site matched (or matched a
+    # class with no entry point), so there is no int_site to ask: they keep every tag test.
+    branches = arms.group_by { |_, spec| spec }.map do |(function, kinds), owners|
+      check = owners.map { |owner, _| "bc2cpp_native_class == rgss::#{CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)}()" }
+                    .join(' || ')
+      if native_param_unbox_on?
+        guards, call = native_param_unbox_call(name, d, recv, argv, function, kinds)
+        body = if guards.empty?
+                 "    #{call.chomp}\n"
+               else
+                 "    if (#{guards.join(' && ')}) {\n      #{call.chomp}\n    } else {\n      #{generic.chomp}\n    }\n"
+               end
+        next "if (#{check}) {\n#{body}  } else "
+      end
+      guards = kinds.each_index.select { |i| kinds[i] == :int }.map { |i| "mrb_integer_p(#{argv[i]})" }
+      args = kinds.each_index.map do |i|
+        case kinds[i]
+        when :int then "mrb_integer(#{argv[i]})"
+        when :float then "mrb_as_float(M, #{argv[i]})"
+        when :bool then "mrb_test(#{argv[i]})"
+        else argv[i]
+        end
+      end
+      call = "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});"
+      body = if guards.empty?
+               "    #{call}\n"
+             else
+               "    if (#{guards.join(' && ')}) {\n      #{call}\n    } else {\n      #{generic.chomp}\n    }\n"
+             end
+      "if (#{check}) {\n#{body}  } else "
+    end
+    "// NATIVE_DIRECT :#{name} -- exact RGSS class identity selects the shared native entry point\n" \
+      "  {\n" \
+      "  struct RClass* bc2cpp_native_class = #{obj_class_expr(recv)};\n" \
+      "  #{branches.join}{\n" \
+      "    #{tail.chomp}\n" \
+      "  }\n" \
+      "  }\n"
+  end
+
+  # EXACT_CORE_RECEIVER: the receiver is a fresh `Klass.new`, so the class test is a
+  # fact. Behind native_param_unbox_name? each :int/:float argument is converted as mrb_get_args does;
+  # without it an integer argument that is not a Fixnum still takes the ordinary send, unless the Fixnum
+  # proof covers it, which drops the test and with it the by-name else.
+  def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic, int_site = nil)
+    native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
+    note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"
+    if native_param_unbox_on?
+      proven = kinds.each_index.select { |i| kinds[i] == :int && !native_int_guard_needed?(int_site, argv, i) }
+      guards, call = native_param_unbox_call(name, d, recv, argv, function, kinds, proven: proven)
+      return "#{note}  #{call.chomp}\n" if guards.empty?
+
+      return "#{note}  if (#{guards.join(' && ')}) {\n    #{call.chomp}\n  } else {\n    #{generic.chomp}\n  }\n"
+    end
+    args = kinds.each_index.map do |i|
+      case kinds[i]
+      when :int then "mrb_integer(#{argv[i]})"
+      when :float then "mrb_as_float(M, #{argv[i]})"
+      when :bool then "mrb_test(#{argv[i]})"
+      else argv[i]
+      end
+    end
+    call = "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});"
+    guards = kinds.each_index.select { |i| kinds[i] == :int && native_int_guard_needed?(int_site, argv, i) }
+                             .map { |i| "mrb_integer_p(#{argv[i]})" }
+    return "#{note}  #{call}\n" if guards.empty?
+
+    "#{note}  if (#{guards.join(' && ')}) {\n    #{call}\n  } else {\n    #{generic.chomp}\n  }\n"
+  end
+end
+
+CodeGen.prepend(NativeDirectFallback)

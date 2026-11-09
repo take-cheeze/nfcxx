@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# bc2cpp, before it moves here (docs/notes/bc2cpp-migration.md): a shallow checkout of rpg-maker-clone at the pin below,
-# with only the submodules bc2cpp and its worlds read, in build/bc2cpp/rpg-maker-clone. Sourced by the world scripts
+# The world bc2cpp (bc2cpp/, docs/notes/bc2cpp-migration.md) compiles: a shallow checkout of rpg-maker-clone at the pin
+# below, with only the submodules the worlds read, in build/bc2cpp/rpg-maker-clone. Sourced by the world scripts
 # (tests/bc2cpp/run_*.sh); sets $bc2cpp_root. Re-running reuses the checkout and only moves it when the pin changes.
+# The pin needs rpg-maker-clone's tools/bc2cpp_tree.rb, which lets its build take bc2cpp from BC2CPP_TREE_ROOT.
 #   BC2CPP_RPG_DIR=dir   use an existing rpg-maker-clone checkout instead (its own commit and submodules are kept)
-# Bumping the pin is a one-line change here; the fork commit of 3rd/mruby comes with it.
-rpg_pin=df3ee7c520085e431c9951bb5be6cfa1e6401c85 # take-cheeze/rpg-maker-clone master, 2026-11-09
+# Bumping the pin is a one-line change here; the mruby fork commit (3rd/mruby) comes with it.
+rpg_pin=17fc04f434070df63e915636a75fc2ea37d07cca # take-cheeze/rpg-maker-clone#3203 (bc2cpp's tree and world roots)
 rpg_url=https://github.com/take-cheeze/rpg-maker-clone
-# The submodules bc2cpp reads: the mruby fork, the gems of the probe's closed world and optcarrot itself.
+# The submodules the worlds read: the mruby fork, the gems of the probe's closed world and optcarrot itself.
 bc2cpp_submodules=(3rd/mruby 3rd/mruby-onig-regexp 3rd/mruby-stringio 3rd/mruby-marshal 3rd/optcarrot)
 
 bc2cpp_fetch() {

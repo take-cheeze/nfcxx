@@ -1,0 +1,388 @@
+#!/usr/bin/env ruby
+# encoding: UTF-8
+# frozen_string_literal: true
+
+# The method-lookup shapes behind bc2cpp_owner_call and the bc2cpp_find_method seam (docs/bc2cpp-vm-free-runtime-plan.md,
+# Phase 1): singleton methods, include order, method_missing, undefined and private errors, send, respond_to?.
+# Compiled output must equal the interpreter's, line for line, and the generated code must keep one lookup call.
+# Owner-call sites themselves are in owner_call_icache_check.rb. Also pinned: public_send of a private method raises, and
+# `super` from a module's method reaches the superclass through the receiver's include-class. A `call` on a compiled
+# block runs its entry only while Proc#call is the builtin (PROC_CALL_DIRECT): rows for overrides, lambdas, next/break/
+# return, a block argument and the Method/Symbol/curry procs. A strict lambda (a class-body free lambda or Kernel#lambda over
+# a thunk block) takes the same entry with its arity check: rows for the ArgumentError text, no autosplat, return/next/break.
+#
+# Usage: MRBC=path/to/mrbc [BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/owner_lookup_shapes_check.rb
+
+require_relative 'fixture_runtime'
+
+suite = Bc2cppStepCheck.new('bc2cpp owner lookup shapes check')
+
+SRC = <<~'RUBY'
+  module Loud; def tag; "loud"; end; end
+  module Mid;  def tag; "mid"; end; end
+  class Base
+    def tag; "base"; end
+    def size; 7; end
+    def self.size; 3; end
+  end
+  class Kid < Base
+    include Mid
+    include Loud
+    def other; "kid"; end
+  end
+  module Wrap; def tag; "w" + super; end; end
+  class Wrapped < Base
+    include Wrap
+    def go; tag; end
+  end
+  class Ghost
+    def method_missing(name, *args); name == :size ? [:mm, args] : super; end
+    def respond_to_missing?(name, priv = false); name == :size; end
+  end
+  class Secret
+    def size; 1; end
+    private :size
+    def hidden; :h; end
+    private :hidden
+    def hid_arg(x); [:ha, x]; end
+    private :hid_arg
+    def hid_opt(a, b = 2); [a, b]; end
+    private :hid_opt
+    def hid_self; self.hidden; end
+    def hid_implicit; hidden; end
+  end
+  class Pub; def shown(x); x + 1; end; end
+  class Vault
+    def prot; :p; end
+    protected :prot
+    def peek(o); o.prot; end
+    def peek_blk(o); [o].map { |x| x.prot }; end
+    def peek_splat(o, *a); o.prot(*a); end
+    def peek_pub(o); o.public_send(:prot); end
+    def peek_sub(o); o.sprot; end
+  end
+  class SubVault < Vault
+    def sprot; :sp; end
+    protected :sprot
+    def speek(o); o.prot; end
+  end
+  module Guard
+    def gprot; :g; end
+    protected :gprot
+    def gpeek(o); o.gprot; end
+  end
+  class Guarded; include Guard; end
+  class Opened
+    def op1; :o; end
+    private :op1
+  end
+  class VisParent; def vis2; :par; end; end
+  class VisChild < VisParent; private :vis2; end
+  class OverParent; def vis3; :par3; end; end
+  class OverKid < OverParent
+    def vis3; :kid3; end
+    private :vis3
+  end
+  class OwnProc < Proc; def call(*a); [:own, a]; end; end
+  class SubProc < Proc; end
+  class PrivProc < Proc; private :call; end
+  # Free lambdas: class-body constants that read nothing from their frame (a direct entry with the strict arity check).
+  class LamBox
+    ADD = ->(a, b) { a + b }
+    ONE = ->(a) { a }
+    ZERO = -> { :z }
+    RET = ->(x) { return :early if x > 1; :late }
+    NXT = ->(x) { next :n if x > 1; :m }
+    BRK = ->(x) { break :b }
+  end
+  module Late; def size; :late; end; end
+  module Pre; def size; :pre; end; end
+  class Probe
+    def sz(o); o.size; end
+    def pk(o); o.pack('C*'); end
+    def tg(o); o.tag; end
+    def via_send(o); o.send(:hidden); end
+    def via_splat_size(o, *a); o.size(*a); end
+    def via_plain(o); o.hidden; end
+    def via_arg(o); o.hid_arg(1); end
+    def via_opt(o); o.hid_opt(1); end
+    def via_new; Secret.new.hidden; end
+    def via_pub(o); o.shown(1); end
+    def via_send_arg(o); o.send(:hid_arg, 2); end
+    def via_public_send_arg(o); o.public_send(:hid_arg, 2); end
+    def out_prot(o); o.prot; end
+    def out_gprot(o); o.gprot; end
+    def op(o); o.op1; end
+    def vis2(o); o.vis2; end
+    def vis3(o); o.vis3; end
+    def via_public_send(o); o.public_send(:hidden); end
+    def rt(o, name); o.respond_to?(name); end
+    def mk(&b); b; end
+    def cl(b, *a); b.call(*a); end
+    def cl_aref(b, *a); b[*a]; end
+    def cl_blk(b, x, &bl); b.call(x, &bl); end
+    def mk_plain; mk { |a, b| [:plain, a, b] }; end
+    def mk_next; mk { |x| next :big if x > 1; :small }; end
+    def mk_break; mk { |x| break :brk }; end
+    def mk_ret; mk { |x| return :ret }; end
+    def mk_lam; lambda { |a, b| [:lam, a, b] }; end
+    def mk_blk; mk { |x, &bb| [x, bb ? bb.call : nil] }; end
+    def mk_sum; n = 0; mk { |x| n += x }; end
+    def mk_lam0; lambda { :l0 }; end
+    def mk_lam1; lambda { |x| [:l1, x] }; end
+    def mk_lam_ret; lambda { |x| return :r if x > 1; :s }; end
+    def mk_lam_next; lambda { |x| next :n if x > 1; :s }; end
+    def mk_lam_brk; lambda { |x| break :b }; end
+    def y_each(l); [[1, 2]].each(&l); end
+    def y_each1(l); [3].each(&l); end
+  end
+RUBY
+
+OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Pub Vault SubVault Guard Guarded Opened VisParent VisChild OverParent OverKid Probe Wrap Wrapped Array String
+            Hash Symbol Range Kernel Object BasicObject Module Class Comparable Integer NilClass Proc Method].freeze
+code = suite.generate(SRC, OWNERS)
+lookups = code.scan(/\bmrb_method_search_vm\(/).size
+suite.check("one method-table lookup call in the generated unit (the seam), found #{lookups}", lookups == 1)
+suite.check('the seam is used', code.include?('bc2cpp_find_method('))
+# A public def is still a direct call; a private one is not (the visibility check lives in the dispatch).
+pub_site = code[/^mrb_value Probe_via_pub_impl\(mrb_state\* M.*?^}/m]
+suite.check('a public single-owner call stays a direct _impl call', pub_site&.include?('Pub_shown_impl(M,'))
+suite.check('a private single-owner call is not a direct _impl call',
+            !code.match?(/Secret_(hidden|hid_arg|hid_opt)_impl\(M, r\d+/))
+
+DRIVER = <<~'RUBY'
+  pr = Probe.new
+  show = lambda do |label, &blk|
+    begin
+      puts "#{label}: #{blk.call.inspect}"
+    rescue Exception => e
+      puts "#{label}: #{e.class}: #{e.message}"
+    end
+  end
+  # The block-call rows redefine Proc#call, so they run through yield, not a Proc.
+  def row(label)
+    puts "#{label}: #{yield.inspect}"
+  rescue Exception => e
+    puts "#{label}: #{e.class}: #{e.message}"
+  end
+  row('proc call') { [pr.cl(pr.mk_plain, 1, 2), pr.cl(pr.mk_plain, [3, 4]), pr.cl(pr.mk_plain), pr.cl(pr.mk_plain, 1, 2, 3)] }
+  row('proc aref') { [pr.cl_aref(pr.mk_plain, 1), pr.cl_aref(pr.mk_plain, [5, 6])] }
+  row('proc next') { [pr.cl(pr.mk_next, 5), pr.cl(pr.mk_next, 0)] }
+  row('proc break') { pr.cl(pr.mk_break, 1) }
+  row('proc return') { pr.cl(pr.mk_ret, 1) }
+  row('proc closure') { s = pr.mk_sum; [pr.cl(s, 1), pr.cl(s, 2), pr.cl(s, 3)] }
+  row('lambda ok') { pr.cl(pr.mk_lam, 1, 2) }
+  row('lambda arity') { pr.cl(pr.mk_lam, 1) }
+  row('lambda arity aref') { pr.cl_aref(pr.mk_lam, 1, 2, 3) }
+  row('proc block arg') { [pr.cl_blk(pr.mk_blk, 1), pr.cl_blk(pr.mk_blk, 2) { :given }] }
+  row('method to_proc') { [pr.cl(5.method(:+).to_proc, 3), pr.cl(5.method(:between?).to_proc, 1, 9)] }
+  row('symbol to_proc') { [pr.cl(:upcase.to_proc, 'a'), pr.cl(:upcase.to_proc)] }
+  row('curry') { c = pr.mk_lam.curry; [pr.cl(c, 1).class, pr.cl(pr.cl(c, 1), 2)] }
+  row('free lambda ok') { [pr.cl(LamBox::ADD, 1, 2), pr.cl(LamBox::ONE, 5), pr.cl(LamBox::ZERO), pr.cl_aref(LamBox::ADD, 3, 4)] }
+  row('free lambda too few') { pr.cl(LamBox::ADD, 1) }
+  row('free lambda too many') { pr.cl(LamBox::ONE, 1, 2) }
+  row('free lambda none') { pr.cl(LamBox::ONE) }
+  row('free lambda zero arity') { pr.cl(LamBox::ZERO, 1) }
+  row('free lambda aref arity') { pr.cl_aref(LamBox::ADD, 1, 2, 3) }
+  row('free lambda no autosplat') { pr.cl(LamBox::ADD, [1, 2]) }
+  row('free lambda one array') { pr.cl(LamBox::ONE, [1, 2]) }
+  row('free lambda return') { [pr.cl(LamBox::RET, 5), pr.cl(LamBox::RET, 0)] }
+  row('free lambda next') { [pr.cl(LamBox::NXT, 5), pr.cl(LamBox::NXT, 0)] }
+  row('free lambda break') { pr.cl(LamBox::BRK, 1) }
+  row('free lambda block arg') { pr.cl_blk(LamBox::ONE, 1) { :given } }
+  row('free lambda flags') { [LamBox::ADD.lambda?, LamBox::ADD.class, LamBox::ADD.frozen?] }
+  row('free lambda yield') { [pr.y_each1(LamBox::ONE), pr.y_each(LamBox::ONE)] }
+  row('free lambda yield array') { pr.y_each(LamBox::ADD) }
+  row('free lambda curry') { c = LamBox::ADD.curry; [pr.cl(c, 1).class, pr.cl(pr.cl(c, 1), 2)] }
+  row('free lambda to_proc') { [pr.cl(LamBox::ONE.to_proc, 9), LamBox::ONE.to_proc.equal?(LamBox::ONE)] }
+  row('lambda zero') { pr.cl(pr.mk_lam0) }
+  row('lambda zero extra') { pr.cl(pr.mk_lam0, 1) }
+  row('lambda one') { [pr.cl(pr.mk_lam1, 1), pr.cl(pr.mk_lam1, [1, 2])] }
+  row('lambda one none') { pr.cl(pr.mk_lam1) }
+  row('lambda two autosplat') { pr.cl(pr.mk_lam, [1, 2]) }
+  row('lambda yield one') { [pr.y_each1(pr.mk_lam1), pr.y_each(pr.mk_lam1)] }
+  row('lambda yield array') { pr.y_each(pr.mk_lam) }
+  row('lambda return') { [pr.cl(pr.mk_lam_ret, 5), pr.cl(pr.mk_lam_ret, 0)] }
+  row('lambda next') { [pr.cl(pr.mk_lam_next, 5), pr.cl(pr.mk_lam_next, 0)] }
+  row('lambda break') { pr.cl(pr.mk_lam_brk, 1) }
+  row('lambda flags') { [pr.mk_lam.lambda?, pr.mk_plain.lambda?, pr.mk_lam1.lambda?] }
+  row('interpreted block') { [pr.cl(proc { |a, b| [a, b] }, 1, 2), pr.cl(proc { |a| a }, [7])] }
+  100.times { pr.cl(pr.mk_plain, 1, 2) }
+  one = pr.mk_plain
+  def one.call(*a); [:single, a]; end
+  row('singleton call') { [pr.cl(one, 1), pr.cl_aref(one, 1), pr.cl(pr.mk_plain, 1, 2)] }
+  mod = Module.new { def call(*a); [:ext, a]; end }
+  ext = pr.mk_plain.extend(mod)
+  row('extended call') { [pr.cl(ext, 1), pr.cl(pr.mk_plain, 1, 2)] }
+  class Proc; alias_method :call_was, :call; def call(*a); [:ovr, a]; end; end
+  row('Proc#call overridden') { [pr.cl(pr.mk_plain, 1), pr.cl_aref(pr.mk_plain, 1), pr.cl(pr.mk_lam, 1)] }
+  class Proc; alias_method :call, :call_was; end
+  row('Proc#call restored') { [pr.cl(pr.mk_plain, 1, 2), pr.cl(pr.mk_lam, 1, 2)] }
+  class Proc; alias_method :aref_was, :[]; def [](*a); [:aref, a]; end; end
+  row('Proc#[] overridden') { [pr.cl_aref(pr.mk_plain, 1), pr.cl(pr.mk_plain, 1, 2)] }
+  class Proc; alias_method :[], :aref_was; end
+  row('subclass override') { [pr.cl(OwnProc.new { |a| a }, 1), pr.cl(OwnProc.new { |a| a }, 2)] }
+  row('subclass private call') { [pr.cl(PrivProc.new { |a| a }, 1)] }
+  row('subclass private aref') { pr.cl_aref(PrivProc.new { |a| a }, 1) }
+  row('subclass plain') { pr.cl(SubProc.new { |a| a }, 1) }
+  show.call('array size') { pr.sz([1, 2, 3]) }
+  show.call('pack owner call') { pr.pk([65, 66]) }
+  50.times { pr.pk([67]) }
+  show.call('pack after warm-up') { pr.pk([68]) }
+  show.call('string size') { pr.sz('ab') }
+  show.call('hash size') { pr.sz({ a: 1 }) }
+  show.call('instance size') { pr.sz(Base.new) }
+  show.call('class-method size (singleton)') { pr.sz(Base) }
+  show.call('inherited class-method size') { pr.sz(Kid) }
+  show.call('method_missing size') { pr.sz(Ghost.new) }
+  show.call('method_missing other') { pr.tg(Ghost.new) }
+  show.call('undefined size') { pr.sz(Object.new) }
+  show.call('undefined on nil') { pr.sz(nil) }
+  show.call('private size') { pr.sz(Secret.new) }
+  show.call('include order') { pr.tg(Kid.new) }
+  show.call('base tag') { pr.tg(Base.new) }
+  show.call('send private') { pr.via_send(Secret.new) }
+  show.call('splat private size') { pr.via_splat_size(Secret.new) }
+  show.call('splat public') { pr.via_splat_size([1, 2]) }
+  show.call('public_send private') { pr.via_public_send(Secret.new) }
+  show.call('private plain call') { pr.via_plain(Secret.new) }
+  show.call('private call with args') { pr.via_arg(Secret.new) }
+  show.call('private call with an optional argument') { pr.via_opt(Secret.new) }
+  show.call('private call on a fresh instance') { pr.via_new }
+  show.call('public call stays direct and works') { pr.via_pub(Pub.new) }
+  show.call('private via literal self receiver') { Secret.new.hid_self }
+  show.call('private via implicit self') { Secret.new.hid_implicit }
+  show.call('send private with args') { pr.via_send_arg(Secret.new) }
+  show.call('public_send private with args') { pr.via_public_send_arg(Secret.new) }
+  show.call('protected from the same class') { Vault.new.peek(Vault.new) }
+  show.call('protected from outside') { pr.out_prot(Vault.new) }
+  show.call('protected from a block in the same class') { Vault.new.peek_blk(Vault.new) }
+  show.call('protected by splat from the same class') { Vault.new.peek_splat(Vault.new) }
+  show.call('protected by public_send from the same class') { Vault.new.peek_pub(Vault.new) }
+  show.call('protected from a subclass instance') { [SubVault.new.speek(Vault.new), SubVault.new.peek(SubVault.new)] }
+  show.call('subclass protected from the superclass') { Vault.new.peek_sub(SubVault.new) }
+  show.call('module protected from an including instance') { Guarded.new.gpeek(Guarded.new) }
+  show.call('module protected from outside') { pr.out_gprot(Guarded.new) }
+  show.call('private then reopened public (before)') { pr.op(Opened.new) }
+  class Opened; public :op1; end
+  show.call('private then reopened public (after)') { pr.op(Opened.new) }
+  show.call('subclass makes inherited method private') { [pr.vis2(VisParent.new), (pr.vis2(VisChild.new) rescue $!.class)] }
+  show.call('subclass overrides with private') { [pr.vis3(OverParent.new), (pr.vis3(OverKid.new) rescue $!.class)] }
+  show.call('module super via dispatch') { pr.tg(Wrapped.new) }
+  show.call('module super via self call') { Wrapped.new.go }
+  show.call('send undefined') { pr.via_send(Object.new) }
+  show.call('respond_to? public') { pr.rt(Base.new, :size) }
+  show.call('respond_to? private') { pr.rt(Secret.new, :size) }
+  show.call('respond_to? missing') { pr.rt(Ghost.new, :size) }
+  show.call('respond_to? absent') { pr.rt(Object.new, :size) }
+  100.times { pr.sz([1]); pr.sz('x'); pr.sz(Base.new) }
+  show.call('after warm-up array') { pr.sz([1, 2]) }
+  show.call('after warm-up undefined') { pr.sz(Object.new) }
+  class Base; def size; 8; end; end
+  show.call('redefined size') { pr.sz(Base.new) }
+  class Base; undef_method :size; end
+  show.call('undef size') { pr.sz(Base.new) }
+  # Table writes after the sites are warm (the seam must not keep a stale answer). Only `size`, `pack` and
+  # respond_to? reach the table: a method every owner of which is compiled is a direct call, and runtime
+  # redefinition of those is outside the closed world (the engine lint forbids it).
+  class Base; def size; 9; end; end
+  200.times { pr.sz(Base.new); pr.sz(Kid.new); pr.sz(Ghost.new); pr.pk([1]) }
+  Base.send(:define_method, :size) { 10 }
+  show.call('define_method over a warm site') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  Base.send(:remove_method, :size)
+  show.call('remove_method falls to undefined') { pr.sz(Kid.new) }
+  class Kid; include Late; end
+  show.call('include after warm-up') { pr.sz(Kid.new) }
+  class Base; alias_method :size, :class; end
+  show.call('alias_method on the superclass') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  class Base; undef_method :size; end
+  show.call('undef_method hides the included module') { [pr.sz(Base.new), pr.sz(Kid.new)] }
+  class Kid; prepend Pre; end
+  show.call('prepend after warm-up') { pr.sz(Kid.new) }
+  module Late; def size; :late2; end; end
+  show.call('module body redefined') { pr.sz(Kid.new) }
+  class Base; def size; 11; end; end
+  class Base; private :size; end
+  show.call('private after warm-up') { pr.sz(Base.new) }
+  class Base; public :size; end
+  show.call('public again') { pr.sz(Base.new) }
+  show.call('respond_to? private-then-public') { pr.rt(Base.new, :size) }
+  class Ghost; undef_method :method_missing; end
+  show.call('method_missing undefined') { pr.sz(Ghost.new) }
+  class Ghost; def method_missing(name, *args); [:mm2, name]; end; end
+  show.call('method_missing redefined') { pr.sz(Ghost.new) }
+  class Ghost; def size; :real; end; end
+  show.call('real method beats method_missing') { pr.sz(Ghost.new) }
+  show.call('respond_to? after define') { pr.rt(Ghost.new, :size) }
+  class Ghost; remove_method :size; end
+  show.call('respond_to? after remove') { pr.rt(Ghost.new, :size) }
+  class Secret; public :size; end
+  show.call('private made public') { pr.sz(Secret.new) }
+  g = Ghost.new
+  g.extend(Late)
+  show.call('extend on an instance') { pr.sz(g) }
+  class << Base; def size; 33; end; end
+  show.call('class-method redefined') { [pr.sz(Base), pr.sz(Kid)] }
+  class << Base; remove_method :size; end
+  show.call('class-method removed') { pr.sz(Kid) }
+  class Array
+    alias_method :pack_was, :pack
+    def pack(f); 'mine'; end
+  end
+  show.call('core method redefined') { pr.pk([65]) }
+  class Array
+    remove_method :pack
+    alias_method :pack, :pack_was
+  end
+  show.call('core method restored') { pr.pk([65]) }
+  puts 'end'
+RUBY
+
+suite.behaviour(DRIVER) do |interpreted, compiled|
+  suite.check('NoMethodError text is the interpreter\'s',
+              compiled.to_a.any? { |l| l.start_with?('undefined size: NoMethodError: undefined method') })
+  suite.check('include order', compiled.to_a.include?('include order: "loud"'))
+  suite.check('public_send of a private method raises',
+              compiled.to_a.any? { |l| l.start_with?('public_send private: NoMethodError: private method') })
+  suite.check('private plain call raises like the interpreter',
+              compiled.to_a.any? { |l| l.start_with?('private plain call: NoMethodError: private method \'hidden\' called for') })
+  # vm.c OP_SEND: a protected method runs when the caller's self is a kind_of the class or module it is found on.
+  {
+    'protected from the same class' => ':p', 'protected from a block in the same class' => '[:p]',
+    'protected by splat from the same class' => ':p', 'protected from a subclass instance' => '[:p, :p]',
+    'module protected from an including instance' => ':g',
+    'protected from outside' => "NoMethodError: protected method 'prot' called for Vault",
+    'protected by public_send from the same class' => "NoMethodError: protected method 'prot' called for Vault",
+    'subclass protected from the superclass' => "NoMethodError: protected method 'sprot' called for SubVault",
+    'module protected from outside' => "NoMethodError: protected method 'gprot' called for Guarded"
+  }.each { |label, want| suite.check("protected row: #{label}", compiled.to_a.include?("#{label}: #{want}")) }
+  suite.check('send reaches a private method', compiled.to_a.include?('send private with args: [:ha, 2]'))
+  suite.check('module super reaches the superclass',
+              compiled.to_a.include?('module super via self call: "wbase"'))
+  suite.check('the interpreter produced the rows', interpreted.to_a.size > 20)
+  [
+    'proc call: [[:plain, 1, 2], [:plain, 3, 4], [:plain, nil, nil], [:plain, 1, 2]]', 'proc next: [:big, :small]',
+    'singleton call: [[:single, [1]], [:plain, 1, nil], [:plain, 1, 2]]', 'extended call: [[:ext, [1]], [:plain, 1, 2]]',
+    'Proc#call restored: [[:plain, 1, 2], [:lam, 1, 2]]', 'subclass plain: 1'
+  ].each { |row| suite.check("block call row: #{row}", compiled.to_a.include?(row)) }
+  suite.check('overridden Proc#call wins',
+              compiled.to_a.include?('Proc#call overridden: [[:ovr, [1]], [:plain, 1, nil], [:ovr, [1]]]'))
+  suite.check('a lambda keeps its arity error', compiled.to_a.any? { |l| l.start_with?('lambda arity: ArgumentError: wrong number of arguments') })
+  suite.check('a subclass call wins', compiled.to_a.include?('subclass override: [[:own, [1]], [:own, [2]]]'))
+  suite.check('a Proc subclass with a private call raises, as a splat send of it does',
+              compiled.to_a.include?("subclass private call: NoMethodError: private method 'call' called for PrivProc"))
+  [
+    'free lambda ok: [3, 5, :z, 7]', 'free lambda too few: ArgumentError: wrong number of arguments (given 1, expected 2)',
+    'free lambda zero arity: ArgumentError: wrong number of arguments (given 1, expected 0)',
+    'free lambda no autosplat: ArgumentError: wrong number of arguments (given 1, expected 2)',
+    'free lambda one array: [1, 2]', 'free lambda return: [:early, :late]', 'free lambda next: [:n, :m]',
+    'free lambda break: :b', 'free lambda flags: [true, Proc, false]', 'lambda two autosplat: ArgumentError: wrong number of arguments (given 1, expected 2)'
+  ].each { |row| suite.check("strict lambda row: #{row}", compiled.to_a.include?(row)) }
+  [
+    'define_method over a warm site: [10, 10]', 'include after warm-up: :late', 'prepend after warm-up: :pre',
+    'module body redefined: :pre', 'private after warm-up: NoMethodError: private method \'size\' called for Base',
+    'method_missing redefined: [:mm2, :size]', 'real method beats method_missing: :real',
+    'extend on an instance: :late2', 'core method redefined: "mine"'
+  ].each { |row| suite.check("mutation row after warm-up: #{row}", compiled.to_a.include?(row)) }
+end
+suite.finish

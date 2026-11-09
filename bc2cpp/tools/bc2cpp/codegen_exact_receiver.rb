@@ -1,0 +1,160 @@
+# frozen_string_literal: true
+
+# EXACT_CORE_RECEIVER: an unguarded proof that a receiver is exactly an Array, Hash,
+# Range or String (or a fresh `Klass.new`), so the arms can drop their
+# class test. Nothing checks the class at run time, so only a literal or `*rest` write on every reaching path
+# counts, and only while
+# ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint or an annotation is a guarded fact and never
+# enters here. A compiled core body gets the literal proof only, as a checked proof.
+class CodeGen
+  EXACT_LITERAL_CLASS = {
+    :ARRAY => 'Array', :ARRAY2 => 'Array', :HASH => 'Hash', :STRING => 'String',
+    :RANGE_INC => 'Range', :RANGE_EXC => 'Range', :LOADNIL => 'NilClass'
+  }.freeze
+
+  # 'Array' | 'Hash' | 'Range' | 'String' (| 'NilClass', for arguments) when the value in `reg`
+  # at `idx` is exactly that class.
+  def exact_core_value_class(irep, idx, reg)
+    return nil unless @closed_world&.exact_instances_singleton_free? && irep && idx&.positive? && reg
+
+    exact_literal_class(irep, idx, reg) || exact_flow_core_class(irep, idx, reg) || frozen_table_exact_class(irep, idx, reg)
+  end
+
+  # The literal proof alone: BytecodeIR::Types#exact_at (a literal or the method's own `*rest` slot on every
+  # reaching path), narrowed to the classes above.
+  def exact_literal_class(irep, idx, reg, self_class: nil)
+    klass = exact_literal(irep, idx, reg, self_class: self_class)&.klass&.to_s
+    klass if EXACT_LITERAL_CLASS.value?(klass)
+  end
+
+  # BytecodeIR::Types#exact_at for +irep+, one Types per irep.
+  def exact_literal(irep, idx, reg, self_class: nil)
+    @exact_literal_types ||= {}.compare_by_identity
+    types = (@exact_literal_types[irep] ||= BytecodeIR::Types.new(irep))
+    types.exact_at(idx, reg, self_class: self_class&.to_sym)
+  end
+
+  CORE_BODY_EXACT_TESTS = {
+    'Array' => 'mrb_array_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->array_class',
+    'Hash' => 'mrb_hash_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->hash_class',
+    'String' => 'mrb_string_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->string_class',
+    'Range' => 'mrb_range_p(%<r>s) && mrb_obj_ptr(%<r>s)->c == M->range_class'
+  }.freeze
+
+  # CORE_BODY_EXACT: a compiled core body has no engine world, so its walk proof rests on
+  # the program's. It is a checked proof: the site keeps a class test and a guard violation.
+  def core_body_exact_class(irep, idx, reg, owner_def: nil)
+    return nil unless core_body_exact_enabled? && irep && idx&.positive? && reg
+
+    klass = exact_literal_class(irep, idx, reg, self_class: core_self_exact_class(irep, owner_def))
+    klass if CORE_BODY_EXACT_TESTS.key?(klass)
+  end
+
+  # CORE_SELF_EXACT: inside a compiled body of Array, Hash, String or Range, `self` is exactly
+  # that class once the program has no subclass of it (core_class_subclass_free?) and no singleton maker
+  # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof.
+  # Only the method's own irep counts: a block can be run with a rebound self (instance_exec, define_method).
+  def core_self_exact_class(irep, owner_def)
+    return nil if @rsm_variant
+    return nil unless ENV['BC2CPP_CORE_SELF_EXACT'] != '0' && owner_def && irep && !@self_class_unknown
+    return nil unless owner_def.core && CORE_BODY_EXACT_TESTS.key?(owner_def.owner) && irep.equal?(@ireps[owner_def.irep])
+    return nil unless core_class_subclass_free?(owner_def.owner)
+
+    owner_def.owner
+  end
+
+  def core_body_exact_enabled?
+    # RESUMABLE_DUAL: the Fiber variant of a core body dispatches its receiver's methods like the interpreter, so a
+    # subclass that overrides one of them (EnumStepSub#length) is run, not refused.
+    return false if @rsm_variant
+
+    ENV['BC2CPP_CORE_BODY_EXACT'] != '0' && @closed_world.nil? && NomethodReviewed.guard_violation_enabled? &&
+      @core_program_world&.exact_instances_singleton_free?
+  end
+
+  INDEX_EXACT_NOTE = "// INDEX_EXACT -- receiver is exactly this class (unguarded proof, ADR 0296)\n  "
+
+  # 'Array' | 'Hash' when GETIDX/GETIDX0/SETIDX's receiver register is exactly that class, so its
+  # fast path needs no class test.
+  def index_exact_class(irep, idx, reg)
+    return nil if @rsm_variant # RESUMABLE_DUAL: the variant's `self[i]` dispatches, so a subclass's [] runs
+
+    klass = irep && idx && reg && exact_core_value_class(irep, idx, reg)
+    %w[Array Hash].include?(klass) ? klass : nil
+  end
+
+  # The site's proof for the arm wrappers: the receiver's exact class, and a lambda that answers
+  # the exact class of an argument register (nil when it is not a plain register or unproven).
+  # `new_class` is the fresh `Klass.new` proof of compile_send (exact_new_receiver_class).
+  # `owner_def` is carried so an arm wrapper can ask native_int_arg_proven? about an :int
+  # argument; without it the wrapper cannot reach the Fixnum proof at all.
+  def exact_core_site(irep, idx, receiver_reg, argv, reg_offset, new_class = nil, recv: nil, name: nil, owner_def: nil, dest: nil)
+    if @closed_world&.exact_instances_singleton_free?
+      klass = exact_core_value_class(irep, idx, receiver_reg) || new_class
+      return nil unless klass
+
+      return { klass: klass, recv: recv, name: name,
+               int_site: [irep, idx, owner_def, reg_offset],
+               arg_class: lambda do |position|
+                 reg = argv[position].to_s[/\Ar(\d+)\z/, 1]&.to_i
+                 reg && exact_core_value_class(irep, idx, reg.to_i - reg_offset)
+               end }
+    end
+
+    checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def, reg_offset)
+  end
+
+  # CORE_BODY_EXACT: the receiver proof of a compiled core body. Only the receiver is
+  # proven and with_exact_core_site tests it; arguments admit only independent literal proofs.
+  def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def = nil, reg_offset = 0)
+    return nil unless recv.to_s.match?(/\A(?:r\d+|self)\z/) && name && dest
+
+    klass = core_body_exact_class(irep, idx, receiver_reg, owner_def: owner_def)
+    return nil unless klass
+
+    { klass: klass, recv: recv, name: name, int_site: nil, arg_class: ->(_position) {},
+      literal_int_arg: lambda do |position|
+        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]&.to_i
+        literal = reg && exact_literal(irep, idx, reg.to_i - reg_offset)
+        literal && literal.klass == :Integer && literal.value &&
+          literal.value.between?(IntegerConstantRanges::FIXNUM_MIN, IntegerConstantRanges::FIXNUM_MAX)
+      end,
+      checked: true, dest: dest, argv: argv, used: false }
+  end
+
+  # The site's proof, only for the send it was made for: a nested compile that reaches the arm
+  # wrappers while the ivar is set (compiles_clean? on a callee) is another send.
+  def exact_core_site_for(recv, name)
+    site = @exact_core_site
+    return nil unless site && site[:recv] == recv && site[:name] == name
+
+    site[:used] = true
+    site
+  end
+
+  def with_exact_core_site(site)
+    previous = @exact_core_site
+    @exact_core_site = site
+    checked = site && site[:checked]
+    site[:used] = false if checked
+    code = yield
+    checked && !previous.equal?(site) ? checked_exact_code(site, code) : code
+  ensure
+    @exact_core_site = previous
+  end
+
+  # What an arm that dropped its class test on this proof says about itself: a new arm kind must say it too, or
+  # its code is left unchecked; CORE_BODY_EXACT_ARM below is the scan for that text.
+  CORE_BODY_EXACT_ARM = /unguarded proof|-- proven \w+ receiver/
+
+  # The code is only valid for the proven class, so it sits behind the class test and the else is a
+  # loud error.
+  def checked_exact_code(site, code)
+    return code unless site[:used] && code.is_a?(String) && code.match?(CORE_BODY_EXACT_ARM)
+
+    test = format(CORE_BODY_EXACT_TESTS.fetch(site[:klass]), r: site[:recv])
+    violation = guard_violation_line(site[:dest], site[:recv], site[:name], site[:argv], 'CORE_BODY_EXACT')
+    "// CORE_BODY_EXACT_CHECKED :#{site[:name]} -> #{site[:klass]} (ADR 0359)\n" \
+      "  if (#{test}) {\n#{code.chomp}\n  } else {\n    #{violation.chomp}\n  }\n"
+  end
+end

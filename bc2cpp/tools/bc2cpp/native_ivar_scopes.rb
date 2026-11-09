@@ -1,0 +1,68 @@
+# frozen_string_literal: true
+
+require_relative 'world_root'
+require 'digest'
+require_relative 'native_names'
+
+# Audited native writes preserve their registered receiver family.
+# Only unrelated Ruby families may pool the same names.
+module NativeIvarScopes
+  FILES = {
+    'mruby-rgss/src/lib.cxx' => %w[eda898bc7ee051089bbba85bdb74f7cd4f892966c8df49a687ea7f7c9d570eb0
+                                   1c00ea527391818a1ef2ac74b1de433abc0f97a92423fa9cf9a35906bb6e6a1f
+                                   27b968ac91121591b1062306fc7789f8c8a748f1e2203b6544cf21319753f0ab],
+    'include/rgss_construct.hxx' => '24a6783a902be749f6c1f7502a2bd2cad073629cecb9ca1b9d586d63f6a8ef83',
+    'include/rgss_native_direct.hxx' => 'f12c29d9699d2bd2966711c48d9d1e4568239171d26dc2f7b2438456c140b1b2'
+  }.freeze
+  SCOPES = {
+    'contents' => ['RGSS::Window'],
+    'bitmap' => %w[RGSS::Sprite RGSS::Plane],
+    'cursor_rect' => ['RGSS::Window'],
+    'viewport' => %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window],
+    # window_init, window_refresh and window_width_set_direct/window_height_set_direct read and write these on a
+    # Window self only; other classes' @width / @height keep their typed slots.
+    'width' => ['RGSS::Window'],
+    'height' => ['RGSS::Window']
+  }.freeze
+  NAMES = SCOPES.keys.freeze
+  # What the audited natives (FILES, pinned by digest) put in a scoped slot. `setters` are the registered
+  # setters that store their one argument unvalidated (`window_set_contents`: mrb_get_args "o" then
+  # window_contents_set_direct); `classes` are the values the natives build themselves (window_init's 1x1 Bitmap).
+  # Every `mrb_iv_set` of the slot in FILES must be one of these.
+  STORES = {
+    'contents' => { setters: ['contents='].freeze, classes: ['RGSS::Bitmap'].freeze }.freeze
+  }.freeze
+
+  module_function
+
+  def canonical_path(path)
+    File.exist?(path) ? File.realpath(path) : File.expand_path(path)
+  end
+
+  def analyze(native_paths, ruby_paths, root: BC2CPP_WORLD_ROOT)
+    return [{}, 'disabled'] if ENV['BC2CPP_NATIVE_IVAR_SCOPES'] == '0'
+
+    paths = (Array(native_paths) + Array(ruby_paths)).map { |p| canonical_path(p) }.uniq
+    audited = {}
+    FILES.each do |relative, digest|
+      path = canonical_path(File.join(root, relative))
+      return [{}, "missing audit input: #{relative}"] unless paths.include?(path)
+
+      text = SourceText.read(path, 'native ivar scopes', binary: true)
+      return [{}, "audit changed: #{relative}"] unless text && Digest::SHA256.hexdigest(text) == digest
+
+      audited[path] = text
+    end
+    # Reject address taking and token pasting as well as ordinary writer calls.
+    references = /\bwindow_(?!title(?:\b|_))\w*|\b(?:spr_init|sprite_new_direct|plane_init|tilemap_init|spr_set_bmp|sprite_bitmap_set_direct|plane_set_bmp\w*)\b|\b(?:spr_|sprite_|plane_|tilemap_)\s*\#\#/
+    outside = paths - audited.keys
+    outside.each do |path|
+      text = SourceText.read(path, 'native ivar scopes', binary: true)
+      return [{}, "missing outside input: #{path}"] unless text
+      return [{}, "outside audited receiver reference: #{path}"] if text.match?(references)
+    end
+    globally_spelled = outside_ivar_names(outside)
+    scopes = NAMES.reject { |name| globally_spelled.include?(name) || (name == 'bitmap' && ENV['BC2CPP_NATIVE_BITMAP_IVAR_SCOPE'] == '0') }.to_h { |name| [name, SCOPES.fetch(name)] }
+    [scopes, scopes.empty? ? 'names spelled outside the audit' : nil]
+  end
+end
