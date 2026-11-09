@@ -38,7 +38,7 @@ module NativeRomOwners
   CLASS_GET = /\Amrb_class_get(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")\s*\)\z/
   FIELD = /\Amrb->(\w+)\z/
   IDENT = /\A(\w+)\z/
-  SINGLETON = /\Amrb_singleton_class_ptr\s*\(\s*mrb\s*,\s*mrb_obj_value\s*\(\s*((?:mrb->)?\w+)\s*\)\s*\)\z/
+  SINGLETON = /\Amrb_singleton_class_ptr\s*\(\s*\w+\s*,\s*mrb_obj_value\s*\(\s*((?:mrb->)?\w+)\s*\)\s*\)\z/
 
   module_function
 
