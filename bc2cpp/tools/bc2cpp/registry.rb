@@ -457,7 +457,15 @@ def build_registry(ireps, root_label)
           else
             # `private :a, :b, ...` -- retroactively marks already-defined
             # methods, without changing the mode for whatever comes after.
-            collect_loadsym_names.call.each do |mname|
+            # `public def x` / `private def x` pass the Symbol the (T)DEF just before
+            # the send wrote into the argument register, not a LOADSYM.
+            prev = n == 1 && !packed && idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
+            names = if prev && %i[TDEF DEF].include?(prev.op) && prev.reg == insn.reg + 1
+                      [prev.sym]
+                    else
+                      collect_loadsym_names.call
+                    end
+            names.each do |mname|
               def_ = registry[mname]&.find { |d| d.owner == namespace }
               def_.visibility = name.to_sym if def_
             end
