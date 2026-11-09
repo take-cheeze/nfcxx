@@ -13,6 +13,9 @@ require_relative 'native_owner_map'
 #   VAR = mrb-><core field>                              -> the field's class (NativeOwnerMap::CORE_FIELD_OWNERS)
 #   VAR = mrb_define_class_under_id(mrb, OUTER, MRB_SYM(Name), ...) -> OUTER's owner::Name (Name under Object)
 #   VAR = OTHER                                          -> OTHER's owner, up to MAX_COPY_HOPS copies
+#   mrb_singleton_class_ptr(mrb, mrb_obj_value(X))       -> X's owner + '.singleton' (NativeOwnerMap's spelling of a
+#                                                           define_class_method owner); for mrb->top_self, Object, as
+#                                                           NativeOwnerMap::INSTANCE_FIELD_OWNERS records main's methods
 #
 # Anything else (an outer class it cannot resolve, a computed name, an install outside its function) is UNKNOWN.
 # Unknown is recorded rather than guessed: the caller treats those entries as unattributed, as NativeOwnerMap does today.
@@ -25,13 +28,17 @@ module NativeRomOwners
 
   INSTALL = /MRB_MT_INIT_ROM\s*\(\s*mrb\s*,\s*(.+?)\s*,\s*(\w+)\s*\)/
   TABLE = /static\s+const\s+mrb_mt_entry\s+(\w+)\s*\[\]\s*=\s*\{(.*?)\}\s*;/m
-  ENTRY = /MRB_MT_ENTRY\s*\(\s*(\w+)\s*,\s*MRB_\w*SYM\w*\s*\(\s*(\w+)\s*\)/
+  ENTRY = /MRB_MT_ENTRY\s*\(\s*(\w+)\s*,\s*MRB_(\w*SYM\w*)\s*\(\s*(\w+)\s*\)/
+  # MRB_SYM_Q/_B/_E name `x?`, `x!` and `x=`. An operator (MRB_OPSYM) keeps its presym name (`plus`), which no Ruby name
+  # matches, as before.
+  SUFFIXES = { 'SYM_Q' => '?', 'SYM_B' => '!', 'SYM_E' => '=' }.freeze
   DEFINE = /\Amrb_define_(?:class|module)(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")/
   UNDER = /\Amrb_(?:define_(?:class|module)|(?:class|module)_get)_under(?:_id)?\s*\(\s*mrb\s*,\s*((?:mrb->)?\w+)\s*,\s*
              (?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")/x
   CLASS_GET = /\Amrb_class_get(?:_id)?\s*\(\s*mrb\s*,\s*(?:MRB_SYM\s*\(\s*(\w+)\s*\)|"(\w+)")\s*\)\z/
   FIELD = /\Amrb->(\w+)\z/
   IDENT = /\A(\w+)\z/
+  SINGLETON = /\Amrb_singleton_class_ptr\s*\(\s*mrb\s*,\s*mrb_obj_value\s*\(\s*((?:mrb->)?\w+)\s*\)\s*\)\z/
 
   module_function
 
@@ -43,7 +50,7 @@ module NativeRomOwners
   def analyze(text)
     tables = {}
     text.scan(TABLE) do |name, body|
-      tables[name] = { owner: nil, entries: body.scan(ENTRY) }
+      tables[name] = { owner: nil, entries: body.scan(ENTRY).map { |fn, macro, sym| [fn, "#{sym}#{SUFFIXES[macro]}"] } }
     end
     installs = []
     text.scan(INSTALL) do
@@ -62,6 +69,12 @@ module NativeRomOwners
 
     if (m = CLASS_GET.match(arg))
       m[1] || m[2]
+    elsif (m = SINGLETON.match(arg))
+      instance = m[1].start_with?('mrb->') && NativeOwnerMap::INSTANCE_FIELD_OWNERS[m[1].delete_prefix('mrb->')]
+      return instance if instance
+
+      owner = owner_of(text, pos, m[1], depth)
+      owner == UNKNOWN ? UNKNOWN : "#{owner}.singleton"
     elsif (m = FIELD.match(arg))
       NativeOwnerMap::CORE_FIELD_OWNERS.fetch(m[1], UNKNOWN)
     elsif (m = IDENT.match(arg))

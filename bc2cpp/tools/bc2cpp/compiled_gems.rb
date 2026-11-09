@@ -130,6 +130,10 @@ def scan_c_definition_owners(c_files)
     src.scan(/MRB_MT_INIT_ROM\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
       owners << resolve.(ref) if resolve.(ref)
     end
+    # A ROM table on a class object's singleton holds class methods, as define_class_method below.
+    src.scan(/MRB_MT_INIT_ROM\(\s*mrb\s*,\s*mrb_singleton_class_ptr\(\s*mrb\s*,\s*mrb_obj_value\(\s*([\w>-]+)\s*\)\s*\)\s*,/) do |(ref)|
+      owners << "#{resolve.(ref)}.singleton" if resolve.(ref)
+    end
     src.scan(/mrb_define_(?:method|method_id|method_raw|module_function|module_function_id)\s*\(\s*mrb\s*,\s*([\w>-]+)\s*,/) do |(ref)|
       owners << resolve.(ref) if resolve.(ref)
     end

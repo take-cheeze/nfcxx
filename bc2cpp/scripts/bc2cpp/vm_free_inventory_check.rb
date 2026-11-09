@@ -17,7 +17,7 @@ DEPENDENCIES = {
   # The by-name helpers over `mrb_funcall_argv` / `mrb_funcall_send`: shared helper copies (four units) and the two
   # `_rsm` variant sites that dispatch by name on purpose.
   'bc2cpp_by_name' => { pattern: /\bbc2cpp_(?:funcall_argv|ssend|funcall_kw)\b/, count: 60 },
-  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2377 },
+  'bc2cpp_owner_call' => { pattern: /\bbc2cpp_owner_call\w*/, count: 2391 },
   'mrb_proc_new_cfunc_with_env' => { pattern: /\bmrb_proc_new_cfunc_with_env\w*/, count: 5 },
   # Phase 2: every block site goes through these two, so the dependency stays counted where it now lives.
   'bc2cpp_heap_proc' => { pattern: /\bbc2cpp_heap_proc\w*/, count: 96 },
