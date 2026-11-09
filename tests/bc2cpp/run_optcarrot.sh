@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# bc2cpp world: optcarrot compiled by bc2cpp, the first step of docs/notes/bc2cpp-migration.md. bc2cpp still lives in
-# rpg-maker-clone, so tests/bc2cpp/fetch.sh checks it out at a pin and this runs its own runner,
-# tools/optcarrot_probe/compiled_run.rb: optcarrot (rpg-maker-clone's 3rd/optcarrot) on CRuby, on the mruby
-# interpreter, and as a sealed mruby build whose Ruby bc2cpp compiled to C++, with the host C/C++ compiler.
+# bc2cpp world: optcarrot compiled by this repository's bc2cpp (bc2cpp/, docs/notes/bc2cpp-migration.md). The world is
+# the rpg-maker-clone checkout tests/bc2cpp/fetch.sh pins (its mruby fork and 3rd/optcarrot); the runner is the probe's,
+# bc2cpp/tools/optcarrot_probe/compiled_run.rb: optcarrot on CRuby, on the mruby interpreter, and as a sealed mruby
+# build whose Ruby bc2cpp compiled to C++, with the host C/C++ compiler.
 # The check is the video checksum of the 180-frame run on examples/Lan_Master.nes: 59662, the same on every runtime
 # (the runner also fails when the runtimes disagree). Prints the frames per second of each run and the speedup of
 # the compiled build over the mruby interpreter (hot-path fps, which leaves out start-up and warm-up).
@@ -24,17 +24,20 @@ command -v rake >/dev/null || { echo "SKIP bc2cpp optcarrot: rake not installed"
 bc2cpp_fetch; status=$?
 [ "$status" = 2 ] && exit 0 # a fetch failure is a network fault, not a result (fetch.sh printed why)
 [ "$status" = 0 ] || exit 1
-echo "bc2cpp: rpg-maker-clone $(git -C "$bc2cpp_root" rev-parse --short HEAD), mruby fork $(git -C "$bc2cpp_root/3rd/mruby" rev-parse --short HEAD)"
+echo "bc2cpp: this tree, world rpg-maker-clone $(git -C "$bc2cpp_root" rev-parse --short HEAD), mruby fork $(git -C "$bc2cpp_root/3rd/mruby" rev-parse --short HEAD)"
+# The two roots (bc2cpp/tools/bc2cpp/world_root.rb): bc2cpp is this tree, the program is the pinned world.
+tree=$root/bc2cpp
+export BC2CPP_TREE_ROOT=$tree BC2CPP_WORLD_ROOT=$bc2cpp_root
 
 log=$root/build/bc2cpp/optcarrot.log
 jobs=$(nproc 2>/dev/null || echo 4)
 # The probe's host mrbc (3rd/mruby/bin/mrbc), from the probe's own build config (tools/optcarrot_probe/README.md); rake
 # rebuilds only what changed.
-(cd "$bc2cpp_root/3rd/mruby" && env -u LD MRUBY_CONFIG="$bc2cpp_root/tools/optcarrot_probe/mruby_build_config.rb" \
+(cd "$bc2cpp_root/3rd/mruby" && env -u LD MRUBY_CONFIG="$tree/tools/optcarrot_probe/mruby_build_config.rb" \
   rake -j"$jobs") > "$root/build/bc2cpp/mrbc.log" 2>&1 ||
   { tail -20 "$root/build/bc2cpp/mrbc.log"; echo "FAIL bc2cpp optcarrot: building the probe mrbc failed"; exit 1; }
 # LD is the linker *driver* in the probe's rake build (it links C++); a Nix shell exports LD=ld, which cannot.
-(cd "$bc2cpp_root" && env -u LD ruby tools/optcarrot_probe/compiled_run.rb "$frames") 2>&1 | tee "$log"
+(cd "$bc2cpp_root" && env -u LD ruby "$tree/tools/optcarrot_probe/compiled_run.rb" "$frames") 2>&1 | tee "$log"
 [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL bc2cpp optcarrot: the runner failed"; exit 1; }
 
 compiled=$(grep -E '^mruby \+ bc2cpp \(sealed\): [0-9.]+ s' "$log" | head -1)

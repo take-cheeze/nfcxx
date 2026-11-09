@@ -1,17 +1,19 @@
 name: bc2cpp
 
-# bc2cpp (rpg-maker-clone's mruby-to-C++ compiler, docs/notes/bc2cpp-migration.md) compiling the worlds under
-# tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world; optcarrot first). bc2cpp itself is still a pinned
-# rpg-maker-clone checkout (tests/bc2cpp/fetch.sh), so this runs when that pin or a world changes, and on demand.
+# bc2cpp (bc2cpp/, the mruby-to-C++ compiler moved from rpg-maker-clone, docs/notes/bc2cpp-migration.md) compiling the
+# worlds under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world; optcarrot first) against a pinned
+# rpg-maker-clone checkout (tests/bc2cpp/fetch.sh). Runs when bc2cpp, a world or the pin changes, and on demand.
 # It needs only the host compiler and Ruby 4.0, not the EDG toolchain.
 on:
   push:
     branches: [main]
     paths:
+      - "bc2cpp/**"
       - "tests/bc2cpp/**"
       - ".github/workflows/bc2cpp.yml"
   pull_request:
     paths:
+      - "bc2cpp/**"
       - "tests/bc2cpp/**"
       - ".github/workflows/bc2cpp.yml"
   workflow_dispatch:
