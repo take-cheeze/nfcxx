@@ -129,7 +129,12 @@ class CodeGen
           else if (mrb_bigint_p(b)) r = #{bint}(M, mrb_as_bint(M, a), b);
           else
       #endif
-          r = mrb_int_value(M, mrb_integer(a) #{op} mrb_integer(b));
+          {
+            // int_and/int_or/int_xor refuse a non-Integer operand (mrb_int_noconv).
+            mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
+            if (!mrb_integer_p(b)) mrb_raisef(M, E_TYPE_ERROR, "can't convert %Y into Integer", b);
+            r = mrb_int_value(M, mrb_integer(a) #{op} mrb_integer(b));
+          }
           #{NUMERIC_SLOW_DONE}
         }
         if (mrb_nil_p(a) || mrb_false_p(a)) return #{falsy};

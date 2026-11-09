@@ -16,7 +16,7 @@ class CodeGen
   end
 
   def sort_array_cmp_source_matches?(source)
-    Digest::SHA256.hexdigest(source) == '0e73f68c2aa22a497b9106d043931f5e4bbebef1b6c56f3acd8395bdf04cb30f'
+    Digest::SHA256.hexdigest(source) == '2b40b18506870ad9abe76c0464ae654336fd51b3c19ff4091ee913726da8b953'
   end
 
   def emit_sort_array_cmp_helper(compiled)

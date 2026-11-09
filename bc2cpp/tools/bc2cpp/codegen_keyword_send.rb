@@ -752,7 +752,7 @@ class CodeGen
     # CORE_PROC_CALL: see dynamic_dispatch_line.
     if @compiling_core && name == 'call'
       return "// SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)\n" \
-             "r#{d} = bc2cpp_proc_call_argv(M, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));\n"
+             "r#{d} = bc2cpp_proc_call_argv(M, self, #{recv}, ary_size(r#{argv_reg}), ary_items(r#{argv_reg}));\n"
     end
     if (owner_call = splat_owner_call_line(d, recv, name, "ary_size(r#{argv_reg})", "ary_items(r#{argv_reg})"))
       return "// SPLAT n=* :#{name} runtime-sized (not a literal), owner call over the Array's items\n#{owner_call}\n"

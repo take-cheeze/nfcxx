@@ -103,14 +103,16 @@ static inline void envadjust(mrb_state* mrb,
                              mrb_value* oldbase,
                              mrb_value* newbase) {
   mrb_callinfo* ci = mrb->c->cibase;
-  ptrdiff_t off = (char*)newbase - (char*)oldbase;
 
-  if (off == 0)
+  if (newbase == oldbase)
     return;
   while (ci <= mrb->c->ci) {
     struct REnv* e = mrb_vm_ci_env(ci);
 
-    mrb_value* new_stack = (mrb_value*)((char*)ci->stack + off);
+    // vm.c: rebased from newbase, never by stepping a pointer into the freed
+    // oldbase buffer.
+    mrb_value* new_stack =
+        (mrb_value*)((char*)newbase + ((char*)ci->stack - (char*)oldbase));
 
     if (e) {
       e->stack = new_stack;
@@ -124,7 +126,8 @@ static void stack_extend_alloc(mrb_state* mrb, mrb_int room) {
   mrb_value* oldbase = mrb->c->stbase;
   size_t oldsize = mrb->c->stend - mrb->c->stbase;
   size_t size = oldsize;
-  size_t off = mrb->c->ci->stack ? mrb->c->stend - mrb->c->ci->stack : 0;
+  // vm.c: the frame offset from the base, which can lie past stend.
+  size_t off = mrb->c->ci->stack ? mrb->c->ci->stack - oldbase : 0;
 
   if (off > size)
     size = off;
@@ -137,12 +140,17 @@ static void stack_extend_alloc(mrb_state* mrb, mrb_int room) {
     size = newsize;
   }
 
+  // vm.c: no GC step inside the realloc, which frees the old stack before
+  // stbase is updated.
+  mrb_bool gc_disabled = mrb->gc.disabled;
+  mrb->gc.disabled = TRUE;
   mrb_value* newstack =
       (mrb_value*)mrb_realloc(mrb, mrb->c->stbase, sizeof(mrb_value) * size);
   stack_clear(&(newstack[oldsize]), size - oldsize);
   envadjust(mrb, oldbase, newstack);
   mrb->c->stbase = newstack;
   mrb->c->stend = mrb->c->stbase + size;
+  mrb->gc.disabled = gc_disabled;
 
   if (size > MRB_STACK_MAX) {
     mrb_exc_raise(mrb, mrb_obj_value(mrb->stack_err));
@@ -242,10 +250,14 @@ static inline mrb_callinfo* cipush(mrb_state* mrb,
     if (size >= MRB_CALL_LEVEL_MAX) {
       mrb_exc_raise(mrb, mrb_obj_value(mrb->stack_err));
     }
+    // As in stack_extend_alloc: no GC step while cibase is stale.
+    mrb_bool gc_disabled = mrb->gc.disabled;
+    mrb->gc.disabled = TRUE;
     c->cibase = (mrb_callinfo*)mrb_realloc(mrb, c->cibase,
                                            sizeof(mrb_callinfo) * size * 2);
     c->ci = ci = c->cibase + size;
     c->ciend = c->cibase + size * 2;
+    mrb->gc.disabled = gc_disabled;
   }
   ci->mid = mid;
   ci_proc_set(ci, proc);

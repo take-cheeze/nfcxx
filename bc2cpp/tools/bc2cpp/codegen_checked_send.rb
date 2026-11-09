@@ -2,7 +2,8 @@
 
 # CHECKED_SEND: the by-name call of a real SEND / SSEND instruction is an mrb_funcall,
 # which skips two checks the VM makes for that instruction: an explicit-receiver OP_SEND raises
-# NoMethodError for a private or protected method, and both opcodes raise ArgumentError for an
+# NoMethodError for a private method, or a protected one unless the caller's self is a kind_of its class or module
+# (SymbolCache passes `self` to those calls), and both opcodes raise ArgumentError for an
 # attr_reader called with arguments. This marks the call so SymbolCache gives it a slot that
 # bc2cpp_send checks (symbol_cache.rb, CHECKED_SEND); the direct, guarded and exact-class arms
 # are not by name and keep their own checks.
@@ -28,7 +29,7 @@ module CheckedSend
     # OUTSIDE_OWNER_CALL: the checked owner call takes the same level as an argument; so does the splat form over
     # the Array's items, or `o.private_m(*a)` and `proc_subclass.call(*a)` would skip the visibility check.
     if insn.positional_splat? && level == :explicit
-      code = code.gsub(/(\bbc2cpp_funcall_argv\(M, #{Regexp.escape(recv)}, mrb_intern_\w+\(M, "#{Regexp.escape(insn.sym)}"\), ary_size\([^()]*\), ary_items\([^()]*\))\)/) { "#{$1}, true)" }
+      code = code.gsub(/(\bbc2cpp_funcall_argv\(M, #{Regexp.escape(recv)}, mrb_intern_\w+\(M, "#{Regexp.escape(insn.sym)}"\), ary_size\([^()]*\), ary_items\([^()]*\))\)/) { "#{$1}, true, self)" }
     end
     %w[bc2cpp_owner_call_named bc2cpp_owner_call_argv_named].each do |callee|
       next unless code.include?("#{callee}(M, ")
