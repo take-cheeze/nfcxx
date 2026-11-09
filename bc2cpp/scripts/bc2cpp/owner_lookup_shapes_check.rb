@@ -56,7 +56,22 @@ SRC = <<~'RUBY'
     def prot; :p; end
     protected :prot
     def peek(o); o.prot; end
+    def peek_blk(o); [o].map { |x| x.prot }; end
+    def peek_splat(o, *a); o.prot(*a); end
+    def peek_pub(o); o.public_send(:prot); end
+    def peek_sub(o); o.sprot; end
   end
+  class SubVault < Vault
+    def sprot; :sp; end
+    protected :sprot
+    def speek(o); o.prot; end
+  end
+  module Guard
+    def gprot; :g; end
+    protected :gprot
+    def gpeek(o); o.gprot; end
+  end
+  class Guarded; include Guard; end
   class Opened
     def op1; :o; end
     private :op1
@@ -96,6 +111,7 @@ SRC = <<~'RUBY'
     def via_send_arg(o); o.send(:hid_arg, 2); end
     def via_public_send_arg(o); o.public_send(:hid_arg, 2); end
     def out_prot(o); o.prot; end
+    def out_gprot(o); o.gprot; end
     def op(o); o.op1; end
     def vis2(o); o.vis2; end
     def vis3(o); o.vis3; end
@@ -122,7 +138,7 @@ SRC = <<~'RUBY'
   end
 RUBY
 
-OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Pub Vault Opened VisParent VisChild OverParent OverKid Probe Wrap Wrapped Array String
+OWNERS = %w[Late Pre Loud Mid Base Kid Ghost Secret Pub Vault SubVault Guard Guarded Opened VisParent VisChild OverParent OverKid Probe Wrap Wrapped Array String
             Hash Symbol Range Kernel Object BasicObject Module Class Comparable Integer NilClass Proc Method].freeze
 code = suite.generate(SRC, OWNERS)
 lookups = code.scan(/\bmrb_method_search_vm\(/).size
@@ -240,6 +256,13 @@ DRIVER = <<~'RUBY'
   show.call('public_send private with args') { pr.via_public_send_arg(Secret.new) }
   show.call('protected from the same class') { Vault.new.peek(Vault.new) }
   show.call('protected from outside') { pr.out_prot(Vault.new) }
+  show.call('protected from a block in the same class') { Vault.new.peek_blk(Vault.new) }
+  show.call('protected by splat from the same class') { Vault.new.peek_splat(Vault.new) }
+  show.call('protected by public_send from the same class') { Vault.new.peek_pub(Vault.new) }
+  show.call('protected from a subclass instance') { [SubVault.new.speek(Vault.new), SubVault.new.peek(SubVault.new)] }
+  show.call('subclass protected from the superclass') { Vault.new.peek_sub(SubVault.new) }
+  show.call('module protected from an including instance') { Guarded.new.gpeek(Guarded.new) }
+  show.call('module protected from outside') { pr.out_gprot(Guarded.new) }
   show.call('private then reopened public (before)') { pr.op(Opened.new) }
   class Opened; public :op1; end
   show.call('private then reopened public (after)') { pr.op(Opened.new) }
@@ -323,6 +346,16 @@ suite.behaviour(DRIVER) do |interpreted, compiled|
               compiled.to_a.any? { |l| l.start_with?('public_send private: NoMethodError: private method') })
   suite.check('private plain call raises like the interpreter',
               compiled.to_a.any? { |l| l.start_with?('private plain call: NoMethodError: private method \'hidden\' called for') })
+  # vm.c OP_SEND: a protected method runs when the caller's self is a kind_of the class or module it is found on.
+  {
+    'protected from the same class' => ':p', 'protected from a block in the same class' => '[:p]',
+    'protected by splat from the same class' => ':p', 'protected from a subclass instance' => '[:p, :p]',
+    'module protected from an including instance' => ':g',
+    'protected from outside' => "NoMethodError: protected method 'prot' called for Vault",
+    'protected by public_send from the same class' => "NoMethodError: protected method 'prot' called for Vault",
+    'subclass protected from the superclass' => "NoMethodError: protected method 'sprot' called for SubVault",
+    'module protected from outside' => "NoMethodError: protected method 'gprot' called for Guarded"
+  }.each { |label, want| suite.check("protected row: #{label}", compiled.to_a.include?("#{label}: #{want}")) }
   suite.check('send reaches a private method', compiled.to_a.include?('send private with args: [:ha, 2]'))
   suite.check('module super reaches the superclass',
               compiled.to_a.include?('module super via self call: "wbase"'))

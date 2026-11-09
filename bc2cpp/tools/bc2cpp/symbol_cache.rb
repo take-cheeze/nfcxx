@@ -117,16 +117,31 @@ module SymbolCache
   # `bc2cpp_guard_violation_named(M, RECV, "name", "site", ...)` becomes
   # `bc2cpp_guard_violation(M, RECV, i, "site", ...)`; NIL_RECEIVER's
   # `bc2cpp_nil_receiver_named(M, RECV, "name", ...)` becomes `bc2cpp_nil_receiver(M, RECV, i, ...)`.
+  # CALLER_SELF: an explicit-receiver (level 2) call also passes the generated code's `self` after its arguments, for
+  # vm.c's protected check (the caller's self must be a kind_of the method's class or module).
   def rewrite_funcalls(code, table, encoding: code.encoding)
     # The grammar is ASCII; byte offsets avoid rescanning UTF-8 prefixes at each match.
     code = code.b
     out = +''.b
     pos = 0
+    selves = []
+    copy = lambda do |from, to|
+      while (at = selves.first) && at < to
+        out << code[from...at] << ', self'.b
+        from = at
+        selves.shift
+      end
+      out << code[from...to]
+    end
     while (start = code.index(FUNCALL_START, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       name = recv_end && (FUNCALLS.include?(kind) ? FUNCALL_NAME : NAMED_NAME).match(code, recv_end)
+      if name && caller_self_call?(kind, code, name.end(0)) && (close = call_close(code, recv_end))
+        selves << close
+        selves.sort!
+      end
       if name
         # The receiver may itself contain a funcall; rewrite it first so its
         # names take their slots before this call's own.
@@ -150,15 +165,36 @@ module SymbolCache
                       when 'bc2cpp_native_owner_named' then "bc2cpp_native_owner(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
-        out << code[pos...start] << replacement.b
+        copy.call(pos, start)
+        out << replacement.b
         pos = recv_end + name[0].length
       else
-        out << code[pos...head_end]
+        copy.call(pos, head_end)
         pos = head_end
       end
     end
-    out << code[pos..]
+    copy.call(pos, code.length)
     out.force_encoding(encoding)
+  end
+
+  OWNER_CALL_EXPLICIT = /\G,\s*2\s*,/
+  private_constant :OWNER_CALL_EXPLICIT
+
+  def caller_self_call?(kind, code, after_name)
+    case kind
+    when 'bc2cpp_funcall_explicit', 'bc2cpp_native_singleton_named' then true
+    when 'bc2cpp_owner_call_named', 'bc2cpp_owner_call_argv_named' then OWNER_CALL_EXPLICIT.match?(code, after_name)
+    else false
+    end
+  end
+
+  # Index of the `)` closing the call whose receiver ends at `recv_end`.
+  def call_close(code, recv_end)
+    i = recv_end
+    while i && code[i] == ','
+      i = expression_end(code, i + 1)
+    end
+    i if i && code[i] == ')'
   end
 
   # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` (and
@@ -272,8 +308,9 @@ module SymbolCache
         va_list ap;
         va_start(ap, argc);
         for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      #{checked ? "  // CALLER_SELF: an explicit-receiver slot's call passes the caller's self after its arguments.\n  mrb_value caller_self = bc2cpp_sym_check[i] == 2 ? va_arg(ap, mrb_value) : mrb_nil_value();" : ''}
         va_end(ap);
-      #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2);" : ''}
+      #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2, caller_self);" : ''}
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}
@@ -284,8 +321,8 @@ module SymbolCache
   end
 
   # CHECKED_SEND: what OP_SEND / OP_SSEND check before calling and mrb_funcall does not.
-  # Level 2 is an explicit-receiver OP_SEND: a private or protected method raises NoMethodError
-  # (vm.c vis_error, protected by the same kind_of test). Level 1 and 2 both raise ArgumentError for
+  # Level 2 is an explicit-receiver OP_SEND: a private method raises NoMethodError (vm.c vis_error), and so does a
+  # protected one unless the caller's self is a kind_of the class or module it was found on. Level 1 and 2 both raise ArgumentError for
   # a cfunc proc flagged MRB_PROC_NOARG (an attr_reader) called with arguments. An undefined
   # method is left to mrb_funcall, which reaches method_missing.
   CHECKED_SEND = <<~CPP
@@ -297,7 +334,8 @@ module SymbolCache
       if (st != M) { ps = mrb_intern_lit(M, "public_send"); st = M; }
       return mid == ps;
     }
-    [[gnu::noinline]] static void bc2cpp_check_send(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv, bool explicit_receiver) {
+    [[gnu::noinline]] static void bc2cpp_check_send(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv, bool explicit_receiver,
+                                                     mrb_value caller_self) {
       struct RClass* c = mrb_class(M, recv);
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) return;
@@ -311,7 +349,7 @@ module SymbolCache
       }
       if (explicit_receiver) {
         if (m.flags & MRB_METHOD_PRIVATE_FL) bc2cpp_visibility_error(M, recv, mid, argc, argv, true);
-        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) bc2cpp_visibility_error(M, recv, mid, argc, argv, false);
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && !mrb_obj_is_kind_of(M, caller_self, c)) bc2cpp_visibility_error(M, recv, mid, argc, argv, false);
       }
       if (argc > 0 && MRB_METHOD_PROC_P(m)) {
         const struct RProc* p = MRB_METHOD_PROC(m);
@@ -375,6 +413,7 @@ module SymbolCache
       va_list ap;
       va_start(ap, argc);
       for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      mrb_value caller_self = va_arg(ap, mrb_value);  // CALLER_SELF, as bc2cpp_send's level 2
       va_end(ap);
       mrb_sym mid = bc2cpp_sym(M, i);
       bool cached = s.epoch == bc2cpp_nsc_epoch && s.state == M && (mrb_type(recv) == MRB_TT_CLASS || mrb_type(recv) == MRB_TT_MODULE) &&
@@ -382,7 +421,7 @@ module SymbolCache
       if (cached || bc2cpp_nsc_fill(M, s, recv, mid, argc)) {
         return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
       }
-      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2);
+      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2, caller_self);
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
     // CORE_SELF_NATIVE: a self call whose method the compiler proved to be the C function registered on `owner`
@@ -403,7 +442,7 @@ module SymbolCache
         cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
       }
       if (cached) return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
-      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2);
+      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, false, mrb_nil_value());
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
@@ -425,7 +464,7 @@ module SymbolCache
   # that same entry: mruby clears an entry whenever a definition, removal, undef, include, prepend or the freeing
   # of either class could change it (class.c mc_clear_by_id, mrb_method_cache_clear, mrb_mc_clear_by_class), so
   # a present, equal entry is exactly what the full lookup would return, and the checks depend only on it and the
-  # count. Protected methods are not kept (their check reads the receiver). The slot is per VM like the owner set.
+  # count. Protected methods are not kept (their check reads the caller's self). The slot is per VM like the owner set.
   # Builds with MRB_NO_METHOD_CACHE, -DBC2CPP_NO_OWNER_ICACHE or BC2CPP_OWNER_ICACHE=0 at generation take the full
   # path every time.
   OWNER_CALL = <<~CPP
@@ -602,7 +641,9 @@ module SymbolCache
     }
     // The argv form: a splat site passes the Array's own items, as mrb_funcall_with_block would (both reach vm.c's
     // funcall_with_block_m, whose funcall_args_capture copies them and packs a long list as OP_SEND does).
-    static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+    // CALLER_SELF: a level 2 call passes the caller's self (the generated code's `self`) for the protected check.
+    static mrb_value bc2cpp_owner_call_argv(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, const mrb_value* argv,
+                                            mrb_value caller_self = mrb_nil_value()) {
       mrb_sym mid = bc2cpp_sym(M, i);
       // As bc2cpp_funcall_argv: Proc#call and its aliases on a compiled block are a yield, not an OP_CALL in a C frame.
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
@@ -640,11 +681,12 @@ module SymbolCache
         if (s.seen && s.seen_count < 32) s.seen[s.seen_count++] = owner;
       }
       if (level >= 2) {
-        // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one from outside.
+        // vm.c OP_SEND: an explicit receiver may not call a private method, nor a protected one unless the caller's
+        // self is a kind_of the class or module the method was found on.
         if (m.flags & MRB_METHOD_PRIVATE_FL) {
           mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", mid, recv);
         }
-        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && !mrb_obj_is_kind_of(M, caller_self, c)) {
           mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", mid, recv);
         }
       }
@@ -676,8 +718,10 @@ module SymbolCache
       va_list ap;
       va_start(ap, argc);
       for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      for (mrb_int k = 16; k < argc; k++) (void)va_arg(ap, mrb_value);
+      mrb_value caller_self = level >= 2 ? va_arg(ap, mrb_value) : mrb_nil_value();
       va_end(ap);
-      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, argc, argv);
+      return bc2cpp_owner_call_argv(M, recv, i, level, s, blk, argc, argv, caller_self);
     }
   CPP
   private_constant :OWNER_CALL

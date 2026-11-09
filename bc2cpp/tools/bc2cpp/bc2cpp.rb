@@ -2264,10 +2264,10 @@ BC2CPP_MAIN = lambda do
       return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_FUNC_P(m) && MRB_METHOD_FUNC(m) == builtin &&
              !(m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL));
     }
-    // `explicit_recv`: CHECKED_SEND for a splat send, which OP_SEND refuses a private method (and a protected one from outside)
-    // that the by-name funcall would run.
+    // `explicit_recv`: CHECKED_SEND for a splat send, which OP_SEND refuses a private method (and a protected one unless
+    // `caller_self` is a kind_of its class or module) that the by-name funcall would run.
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv,
-                                                bool explicit_recv = false) {
+                                                bool explicit_recv = false, mrb_value caller_self = mrb_nil_value()) {
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       if (explicit_recv) {
         struct RClass* c = mrb_class(M, recv);
@@ -2275,7 +2275,7 @@ BC2CPP_MAIN = lambda do
         if (!MRB_METHOD_UNDEF_P(m) && (m.flags & MRB_METHOD_PRIVATE_FL)) {
           mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", mid, recv);
         }
-        if (!MRB_METHOD_UNDEF_P(m) && (m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+        if (!MRB_METHOD_UNDEF_P(m) && (m.flags & MRB_METHOD_PROTECTED_FL) && !mrb_obj_is_kind_of(M, caller_self, c)) {
           mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", mid, recv);
         }
       }
@@ -2336,7 +2336,7 @@ BC2CPP_MAIN = lambda do
     // up once and the found method run with no second lookup (visibility as OP_SEND checks it; a missing method goes
     // through method_missing / the NoMethodError of mrb_funcall_with_method).
     extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
-    [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value recv, mrb_int argc, const mrb_value* argv) {
+    [[maybe_unused]] static mrb_value bc2cpp_proc_call_argv(mrb_state* M, mrb_value caller_self, mrb_value recv, mrb_int argc, const mrb_value* argv) {
       if (mrb_proc_p(recv) && mrb_class(M, recv) == M->proc_class) return bc2cpp_yield_argv(M, recv, argc, argv);
       // Interned by name: a presym id is only valid in the library the header came from (fixture builds mix them).
       mrb_sym call_id = mrb_intern_lit(M, "call");
@@ -2346,7 +2346,7 @@ BC2CPP_MAIN = lambda do
         if (m.flags & MRB_METHOD_PRIVATE_FL) {
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "private", call_id, recv);
         }
-        if ((m.flags & MRB_METHOD_PROTECTED_FL) && mrb_obj_is_kind_of(M, recv, c)) {
+        if ((m.flags & MRB_METHOD_PROTECTED_FL) && !mrb_obj_is_kind_of(M, caller_self, c)) {
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
         }
       }
