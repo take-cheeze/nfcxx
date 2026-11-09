@@ -45,3 +45,86 @@ jobs:
 
       - name: bc2cpp world ${{ matrix.world }}
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
+
+  # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
+  # bc2cpp-checks job. They run inside the pinned world (tests/bc2cpp/fetch.sh), whose bc2cpp paths reach this checkout
+  # through its 3rd/nfcxx, with the world's own Nix dev shell, so the commands and their toolchain are unchanged.
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      RUBY_YJIT_ENABLE: "1"
+      BC2CPP_WORLD_FULL: "1"
+    steps:
+      - run: git config --global submodule.fetchJobs 4
+      - uses: actions/checkout@v7
+
+      - name: World checkout
+        run: tests/bc2cpp/world.sh
+
+      - uses: nixbuild/nix-quick-install-action@v35
+      - name: Restore and cache Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-bc2cpp-${{ runner.os }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}
+          restore-prefixes-first-match: nix-bc2cpp-${{ runner.os }}-
+
+      - name: Set up development environment
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: ./scripts/nix/develop-export-env.bash .#bc2cpp
+
+      - name: Verify host Ruby JIT
+        run: ruby -e 'abort "YJIT is unavailable or disabled" unless RubyVM::YJIT.enabled?; puts RUBY_DESCRIPTION'
+
+      # Keyed on content digests, so a stale restore is recomputed rather than trusted.
+      - name: Cache bc2cpp scan cache
+        uses: actions/cache@v6
+        with:
+          path: build/bc2cpp/rpg-maker-clone/build/bc2cpp-cache
+          key: bc2cpp-scan-cache-${{ hashFiles('bc2cpp/tools/bc2cpp/*.rb') }}
+          restore-keys: bc2cpp-scan-cache-
+
+      - name: Key for the fixture libmruby caches
+        id: lib-key
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          echo "mruby=$(git rev-parse HEAD:3rd/mruby)" >> "$GITHUB_OUTPUT"
+          echo "stringio=$(git rev-parse HEAD:3rd/mruby-stringio)" >> "$GITHUB_OUTPUT"
+      - name: Cache the full-core libmruby build
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bc2cpp-full
+          key: bc2cpp-full-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}-${{ steps.lib-key.outputs.mruby }}-${{ steps.lib-key.outputs.stringio }}-${{ hashFiles('bc2cpp/scripts/bc2cpp/fixture_runtime.rb', 'build/bc2cpp/rpg-maker-clone/scripts/mruby/**', 'bc2cpp/scripts/bc2cpp/*.bash', 'build/bc2cpp/rpg-maker-clone/patches/mruby*.patch') }}
+      # The same libmruby without mruby-fiber, for native_fiber_check (the C++ Fiber as the only Fiber).
+      - name: Cache the no-fiber libmruby build
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bc2cpp-nofiber
+          key: bc2cpp-nofiber-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}-${{ steps.lib-key.outputs.mruby }}-${{ hashFiles('bc2cpp/scripts/bc2cpp/fixture_runtime.rb', 'build/bc2cpp/rpg-maker-clone/scripts/mruby/**', 'build/bc2cpp/rpg-maker-clone/mruby-fiber-placeholder/**', 'bc2cpp/scripts/bc2cpp/*.bash', 'build/bc2cpp/rpg-maker-clone/patches/mruby*.patch') }}
+
+      - name: Prepare shared check libraries
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          env -u LD BC2CPP_FULL_BUILD_DIR="$RUNNER_TEMP/bc2cpp-full" ruby -r ./scripts/bc2cpp/fixture_runtime -e 'abort "full-core mruby unavailable" unless Bc2cppFixtureRuntime.full_or_build'
+          env -u LD BC2CPP_NOFIBER_BUILD_DIR="$RUNNER_TEMP/bc2cpp-nofiber" ruby -r ./scripts/bc2cpp/fixture_runtime -e 'abort "no-fiber mruby unavailable" unless Bc2cppFixtureRuntime.nofiber_or_build'
+          echo "MRBC=$RUNNER_TEMP/bc2cpp-full/host/bin/mrbc" >> "$GITHUB_ENV"
+          echo "BC2CPP_MRUBY_FULL=$RUNNER_TEMP/bc2cpp-full/host" >> "$GITHUB_ENV"
+          echo "BC2CPP_MRUBY_NOFIBER=$RUNNER_TEMP/bc2cpp-nofiber/host" >> "$GITHUB_ENV"
+          echo "BC2CPP_BUILD_INCLUDE=$RUNNER_TEMP/bc2cpp-full/host/include" >> "$GITHUB_ENV"
+
+      # The world's registry: every check in the policy is scheduled somewhere (checks.list included).
+      - name: Check bc2cpp registrations
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: ruby scripts/ci/check_registry.rb
+
+      - name: Run bc2cpp checks
+        timeout-minutes: 30
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          unset LD
+          ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
+          source "$RUNNER_TEMP/bc2cpp-checks.sh"
