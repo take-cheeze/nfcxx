@@ -45,7 +45,7 @@ if [ "${PIPESTATUS[0]}" != 0 ]; then
   if [ -n "$sealed" ] && command -v gdb >/dev/null; then
     echo "== gdb: $sealed"
     (cd "$bc2cpp_root" && gdb -q -batch -ex run -ex 'info signals SIGILL' -ex bt -ex 'x/6i $pc-12' \
-      --args "$sealed" 3rd/optcarrot/examples/Lan_Master.nes) 2>&1 | grep -v -E '^\[(New|Thread) ' | tail -60
+      --args "$sealed" 3rd/optcarrot/examples/Lan_Master.nes "$frames") 2>&1 | grep -v -E '^\[(New|Thread) ' | tail -60
   fi
   echo "FAIL bc2cpp optcarrot: the runner failed"; exit 1
 fi
