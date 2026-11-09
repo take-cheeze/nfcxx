@@ -2284,10 +2284,50 @@ BC2CPP_MAIN = lambda do
       return !MRB_METHOD_UNDEF_P(m) && MRB_METHOD_FUNC_P(m) && MRB_METHOD_FUNC(m) == builtin &&
              !(m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL));
     }
+    #ifdef BC2CPP_SEND_COUNT
+    // SEND_COUNT (diagnostic, off by default): by-name sends tallied per (translation unit, call kind, method name) over a
+    // run and appended to $BC2CPP_SEND_COUNT_FILE (stderr when unset) at exit, to rank what still dispatches by name.
+    // One table for the link (C linkage), like the proc-call slots. Kinds: `send` (a dynamic call site) and `argv` (every
+    // other by-name helper caller: self sends, include hooks, splat sends, ...).
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <unordered_map>
+    extern "C" inline void bc2cpp_send_counts_dump();
+    // The dump is registered here, once for the link and after the table is built, so it runs before the table is destroyed.
+    extern "C" inline std::unordered_map<std::string, unsigned long long>& bc2cpp_send_counts() {
+      static std::unordered_map<std::string, unsigned long long> counts;
+      static const bool registered = (atexit(bc2cpp_send_counts_dump), true);
+      (void)registered;
+      return counts;
+    }
+    extern "C" inline bool& bc2cpp_send_counting_inner() {
+      static bool inner;
+      return inner;
+    }
+    extern "C" inline void bc2cpp_send_counts_dump() {
+      FILE* out = stderr;
+      if (const char* path = getenv("BC2CPP_SEND_COUNT_FILE")) {
+        if (FILE* f = fopen(path, "a")) out = f;
+      }
+      for (const auto& kv : bc2cpp_send_counts()) fprintf(out, "%llu\t%s\n", kv.second, kv.first.c_str());
+      if (out != stderr) fclose(out);
+    }
+    static void bc2cpp_send_hit(mrb_state* M, const char* unit, const char* kind, mrb_sym mid) {
+      mrb_int len = 0;
+      const char* name = mrb_sym_name_len(M, mid, &len);
+      bc2cpp_send_counts()[std::string(unit) + "\t" + kind + "\t" + std::string(name ? name : "?", name ? (size_t)len : 1)]++;
+    }
+    #define BC2CPP_SEND_HIT(M, kind, mid) bc2cpp_send_hit((M), __FILE__, (kind), (mid))
+    #else
+    #define BC2CPP_SEND_HIT(M, kind, mid) ((void)0)
+    #endif
     // `explicit_recv`: CHECKED_SEND for a splat send, which OP_SEND refuses a private method (and a protected one unless
     // `caller_self` is a kind_of its class or module) that the by-name funcall would run.
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv,
                                                 bool explicit_recv = false, mrb_value caller_self = mrb_nil_value()) {
+      #ifdef BC2CPP_SEND_COUNT
+      if (!bc2cpp_send_counting_inner()) BC2CPP_SEND_HIT(M, "argv", mid);
+      #endif
       if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       if (explicit_recv) {
         struct RClass* c = mrb_class(M, recv);
