@@ -316,7 +316,7 @@ class CodeGen
         #endif
           {
             mrb_int x = mrb_integer(a), y = mrb_integer(b);
-            if (x == 0) return a;
+            // int_mod: 0 % 0 raises like any zero divisor.
             if (y == 0) return mrb_funcall(M, a, "%", 1, b);
             if (x == MRB_INT_MIN && y == -1) return mrb_fixnum_value(0);
             mrb_int mod = x % y;
@@ -672,7 +672,12 @@ class CodeGen
           else if (mrb_bigint_p(b)) r = mrb_bint_xor(M, mrb_as_bint(M, a), b);
           else
       #endif
-          r = mrb_int_value(M, mrb_integer(a) ^ mrb_integer(b));
+          {
+            // int_and/int_or/int_xor refuse a non-Integer operand (mrb_int_noconv).
+            mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
+            if (!mrb_integer_p(b)) mrb_raisef(M, E_TYPE_ERROR, "can't convert %Y into Integer", b);
+            r = mrb_int_value(M, mrb_integer(a) ^ mrb_integer(b));
+          }
           #{NUMERIC_SLOW_DONE}
         }
         if (mrb_nil_p(a) || mrb_false_p(a)) return mrb_bool_value(mrb_test(b));

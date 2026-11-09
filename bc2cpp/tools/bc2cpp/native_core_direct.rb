@@ -264,6 +264,10 @@ module NativeCoreDirect
                   if (mrb_nil_p(blk)) return mrb_nil_value();
                   return mrb_yield(mrb, blk, obj);
                 }
+                if (j > ARY_LEN(ary)) {
+                  mrb_raise(mrb, E_RUNTIME_ERROR, "array modified during delete");
+                }
+                ary_modify(mrb, ary);
                 ARY_SET_LEN(ary, j);
                 return ret;
               C
@@ -950,7 +954,7 @@ module NativeCoreDirect
       }
     #ifdef MRB_USE_BIGINT
       else if (mrb_bigint_p(v1)) {
-        if (mrb_integer_p(v2) || mrb_bigint_p(v2)) {
+        if (mrb_integer_p(v2) || mrb_bigint_p(v2) || mrb_float_p(v2)) {
           return mrb_bint_cmp(mrb, v1, v2);
         }
         x = mrb_as_float(mrb, v1);
@@ -960,12 +964,20 @@ module NativeCoreDirect
         x = mrb_as_float(mrb, v1);
       }
 
+    #ifdef MRB_USE_BIGINT
+      if (mrb_bigint_p(v2)) {
+        /* The switch below would convert `v2` with `mrb_as_float()` and lose the
+           low bits of a big integer. `mrb_bint_cmp()` keeps it exact. Negate the
+           result rather than the operands; -2 means incomparable, which has no
+           opposite. */
+        mrb_int c = mrb_bint_cmp(mrb, v2, mrb_float_value(mrb, x));
+        return c == -2 ? -2 : -c;
+      }
+    #endif
+
       switch (mrb_type(v2)) {
     #ifdef MRB_USE_RATIONAL
       case MRB_TT_RATIONAL:
-    #endif
-    #ifdef MRB_USE_BIGINT
-      case MRB_TT_BIGINT:
     #endif
       case MRB_TT_INTEGER:
         if (mrb_integer_p(v2)) {
@@ -1179,6 +1191,11 @@ module NativeCoreDirect
           j++;
         }
         if (i == j) return mrb_nil_value();
+        // the last == can have shrunk the array below what was kept
+        if (j > ARY_LEN(ary)) {
+          mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "array modified during delete");
+        }
+        mrb_ary_modify(M, ary);
         ARY_SET_LEN(ary, j);
         return ret;
       }
