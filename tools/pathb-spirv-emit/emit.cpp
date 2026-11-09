@@ -1865,6 +1865,9 @@ Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap) {
       throw Refused("kernel " + e + ": its functions ask for different sub-group sizes (" + l + ")");
     }
     int64_t sgsz = asked.empty() ? (int64_t)SUBGROUP_SIZE : asked[0];
+    // ContractionOff (OpenCL only): the IR's fmul, fadd and fsub each round, and the driver must not fuse a multiply with the
+    // add or subtract that uses it into one fused multiply-add (it did so in some inlined shapes, one ulp off the IR)
+    if (kernel_cl) spv.entry_flag(wr.fid, 31);
     if (sg) {
       spv.cap(58);
       spv.entry_mode(wr.fid, 35, (uint32_t)sgsz);

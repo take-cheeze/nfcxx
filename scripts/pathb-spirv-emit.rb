@@ -724,6 +724,11 @@ class Spv
     @modes << [16, fid, mode, lit]
   end
 
+  # an OpExecutionMode without a literal (ContractionOff)
+  def entry_flag(fid, mode)
+    @modes << [16, fid, mode]
+  end
+
   def ext(name)
     @exts << name unless @exts.include?(name)
   end
@@ -2716,6 +2721,9 @@ def emit_module(src, kernel_cl = false, no_div_trap = false)
     asked = reached.map { |n| kernel_sg[n] }.compact.uniq
     raise Refused, "kernel #{e}: its functions ask for different sub-group sizes (#{asked.join(", ")})" if asked.length > 1
     sgsz = asked.first || SUBGROUP_SIZE
+    # ContractionOff (OpenCL only): the IR's fmul, fadd and fsub each round, and the driver must not fuse a multiply with the
+    # add or subtract that uses it into one fused multiply-add (it did so in some inlined shapes, one ulp off the IR)
+    spv.entry_flag(wr.fid, 31) if kernel_cl
     if sg
       spv.cap(58)                        # SubgroupDispatch: the SubgroupSize execution mode needs it
       spv.entry_mode(wr.fid, 35, sgsz)

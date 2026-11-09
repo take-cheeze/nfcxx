@@ -55,6 +55,7 @@ class Spv {
   void cap(uint32_t c);
   void ext(const std::string &name);
   void entry_mode(uint32_t fid, uint32_t mode, uint32_t lit) { modes_.push_back({16, fid, mode, lit}); }
+  void entry_flag(uint32_t fid, uint32_t mode) { modes_.push_back({16, fid, mode}); }   // an execution mode without a literal
   uint32_t glsl_id();
   uint32_t ext_num(int g);   // the opcode of GLSL instruction g in the module's extended set
   void decl(Inst i) { types_.push_back(std::move(i)); }
