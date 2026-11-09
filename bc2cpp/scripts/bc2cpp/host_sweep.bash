@@ -12,6 +12,8 @@
 #   GAME_DIR  default data/Nepheshel206beta/Nepheshel206Rbeta (scripts/download/nepheshel.bash); copied, since
 #             saving writes into it.
 #   JOBS      maps run at once (default nproc).
+#   SEND_COUNT_DIR  count by-name sends and method searches per call site: runs trace_host_counted (send_counter.bash
+#             builds it) and leaves one NAME.tsv per process in this directory (send_counter_report.rb reads them).
 set -uo pipefail
 
 # WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
@@ -26,6 +28,13 @@ mkdir -p "$logs"
 game=$logs/game
 cp -r "$src" "$game"
 host=$build/trace-host/trace_host
+send_dir=${SEND_COUNT_DIR:-}
+if [ -n "$send_dir" ]; then
+  mkdir -p "$send_dir"
+  send_dir=$(cd "$send_dir" && pwd)
+  BC2CPP_GAME_DIR="$src" "$tree/scripts/bc2cpp/send_counter.bash" "$build" || exit 1
+  host=$build/trace-host/trace_host_counted
+fi
 # What a run must never print: a left-out entry reached (verify build), a violated proof or hint, a stubbed
 # body run, or a method lookup that failed.
 bad_re='UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
@@ -39,7 +48,8 @@ run() { # name, then env assignments
   for a in "$@"; do case $a in BC2CPP_HOST_FRAMES=*) frames=${a#*=} ;; esac; done
   local survey=()
   if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/$name.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/$name.vm.tsv"); fi
-  if [ -x "$host" ] && [ -n "${built:-}" ]; then
+  [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/$name.tsv")
+  if [ -x "$host" ] && [ -n "${built:-}" ] || [ -n "$send_dir" ]; then
     env "${survey[@]}" "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
   else
     env "${survey[@]}" "$@" "$tree/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
@@ -81,6 +91,7 @@ map() {
   local id=$1 log=$logs/map-$1.log
   local survey=()
   if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/map-$id.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/map-$id.vm.tsv"); fi
+  [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/map-$id.tsv")
   env "${survey[@]}" BC2CPP_HOST_FRAMES=150 BC2CPP_HOST_PREVIEW_MAP="$id" BC2CPP_HOST_KEYS="$MAP_TAPS" \
     BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" 150 > "$log" 2>&1
   local rc=$?
@@ -89,7 +100,7 @@ map() {
   fi
 }
 export -f map
-export host game logs bad_re LOOKUP_SURVEY
+export host game logs bad_re LOOKUP_SURVEY send_dir
 MAP_TAPS=$(taps 20 150 12)
 export MAP_TAPS
 total=$(ls "$game"/Map*.lmu | wc -l)
