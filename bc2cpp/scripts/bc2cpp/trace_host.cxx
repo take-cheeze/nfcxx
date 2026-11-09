@@ -9,8 +9,10 @@
 //
 // Usage: trace_host GAME_DIR [FRAMES]
 // BC2CPP_HOST_MT_COUNT=1 prints the method-table size and exits before the game
-// starts.
+// starts; BC2CPP_HOST_MT_HEAP=1 dumps the heap method-table entries the same
+// way.
 
+#include <link.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -145,6 +147,79 @@ int dump_class_entries(mrb_state* M, struct RBasic* obj, void* data) {
     mrb_mt_foreach(M, d->klass, dump_entry, d);
   }
   return MRB_EACH_OBJ_OK;
+}
+
+// BC2CPP_HOST_MT_HEAP=1: the heap (mutable) method-table entries once the gems
+// are initialised, one "TRACE_HOST_MT_HEAP <class> <method> <kind> <offset>"
+// line each (offset: the C function's, from the load base), then a summary.
+// scripts/bc2cpp/rom_method_tables_check.rb reads both.
+uintptr_t load_base = 0;
+int load_base_cb(struct dl_phdr_info* info, size_t, void*) {
+  load_base = info->dlpi_addr;
+  return 1;
+}
+int collect_classes(mrb_state*, struct RBasic* obj, void* data) {
+  if (obj->tt == MRB_TT_CLASS || obj->tt == MRB_TT_MODULE ||
+      obj->tt == MRB_TT_SCLASS ||
+      (obj->tt == MRB_TT_ICLASS && (obj->flags & MRB_FL_CLASS_IS_ORIGIN)))
+    static_cast<std::vector<struct RClass*>*>(data)->push_back(
+        reinterpret_cast<struct RClass*>(obj));
+  return MRB_EACH_OBJ_OK;
+}
+// A heap entry is a duplicate when a ROM layer below it holds the same name and
+// function (what a registration's table replaces).
+bool rom_duplicate(const mrb_mt_tbl* below, const mrb_mt_entry& e) {
+  for (; below; below = below->next) {
+    if (!(below->alloc & MRB_MT_READONLY_BIT))
+      continue;
+    for (int i = 0; i < below->size; ++i)
+      if (below->ptr[i].key == e.key && below->ptr[i].val.func == e.val.func)
+        return true;
+  }
+  return false;
+}
+void dump_heap_tables(mrb_state* M) {
+  dl_iterate_phdr(load_base_cb, nullptr);
+  std::vector<struct RClass*> classes;
+  mrb_objspace_each_objects(M, collect_classes, &classes);
+  M->gc.disabled = TRUE;
+  long entries = 0, layers = 0, bytes = 0, rom = 0, duplicates = 0;
+  const int flag_bits = MRB_MT_READONLY_BIT | MRB_MT_FROZEN_BIT;
+  for (struct RClass* c : classes) {
+    const char* name = c->tt == MRB_TT_ICLASS ? nullptr : mrb_class_name(M, c);
+    for (const mrb_mt_tbl* t = c->mt; t; t = t->next) {
+      if (t->alloc & MRB_MT_READONLY_BIT) {
+        ++rom;
+        continue;
+      }
+      ++layers;
+      bytes +=
+          sizeof(mrb_mt_tbl) + (t->alloc & ~flag_bits) * sizeof(mrb_mt_entry);
+      for (int i = 0; i < t->size; ++i) {
+        const mrb_mt_entry& e = t->ptr[i];
+        ++entries;
+        const bool func = e.flags & MRB_MT_FUNC;
+        if (func && e.val.func && rom_duplicate(t->next, e))
+          ++duplicates;
+        const char* kind = MRB_MT_REMOVED_P(e)            ? "removed"
+                           : func                         ? "func"
+                           : !e.val.proc                  ? "undef"
+                           : MRB_PROC_CFUNC_P(e.val.proc) ? "cfuncproc"
+                                                          : "proc";
+        uintptr_t fn = func && e.val.func ? (uintptr_t)e.val.func
+                       : !func && e.val.proc && MRB_PROC_CFUNC_P(e.val.proc)
+                           ? (uintptr_t)MRB_PROC_CFUNC(e.val.proc)
+                           : 0;
+        fprintf(stdout, "TRACE_HOST_MT_HEAP %s %s %s %lx\n",
+                name ? name : "(anonymous)", mrb_sym_name(M, e.key), kind,
+                fn ? (unsigned long)(fn - load_base) : 0UL);
+      }
+    }
+  }
+  fprintf(stdout,
+          "TRACE_HOST heap_method_tables entries=%ld layers=%ld bytes=%ld "
+          "rom_layers=%ld rom_duplicates=%ld\n",
+          entries, layers, bytes, rom, duplicates);
 }
 
 void set_const(mrb_state* M, const char* name, mrb_value v) {
@@ -354,6 +429,12 @@ int main(int argc, char** argv) {
       mrb_objspace_each_objects(M, dump_class_entries, &dump);
     }
     fprintf(stdout, "TRACE_HOST method_table_entries=%ld\n", total);
+    return 0;
+  }
+
+  if (const char* const heap = getenv("BC2CPP_HOST_MT_HEAP");
+      heap && strcmp(heap, "1") == 0) {
+    dump_heap_tables(M);
     return 0;
   }
 

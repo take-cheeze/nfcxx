@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'branch_hints'
+require_relative 'presym_spelling'
 
 # CodeGen: per-method compile state and file-level emission.
 
@@ -166,7 +167,7 @@ class CodeGen
     out = +"// OWNER_METHOD_REGISTRATION -- see bc2cpp.rb's own emit_owner_registrations comment.\n"
     if needs_private_class_method
       out << <<~CPP
-        static void bc2cpp_define_private_class_method(mrb_state* M, struct RClass* c, const char* name, mrb_func_t func, mrb_aspec aspec) {
+        [[maybe_unused]] static void bc2cpp_define_private_class_method(mrb_state* M, struct RClass* c, const char* name, mrb_func_t func, mrb_aspec aspec) {
           int ai = mrb_gc_arena_save(M);
           struct RClass* sc = mrb_singleton_class_ptr(M, mrb_obj_value(c));
           mrb_method_t m;
@@ -231,9 +232,13 @@ class CodeGen
     # runs, so a program can install it first and the program half once its classes are defined (the optcarrot
     # probe's install_prelude! / install!). bc2cpp_register_owner_methods runs both, in the same order as one list.
     core_targets, program_targets = targets.partition { |owner| core_owners.include?(owner) }
+    rom = rom_method_tables? ? +'' : nil
+    head = out
+    bodies = +''
     { 'core' => core_targets, 'program' => program_targets }.each do |part, part_targets|
+      out = bodies
       out << "static void bc2cpp_register_#{part}_owner_methods([[maybe_unused]] mrb_state* M) {\n"
-      emit_owner_registration_lines(out, part_targets, by_owner, unregistered)
+      emit_owner_registration_lines(out, part_targets, by_owner, unregistered, rom: rom && [rom, part])
       if part == 'core' && core_rom.any?
         # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
         out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
@@ -247,6 +252,8 @@ class CodeGen
       end
       out << "}\n"
     end
+    out = head
+    out << rom.to_s << bodies
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
     out << "  bc2cpp_proc_call_capture(M);\n"
     out << "  bc2cpp_register_core_owner_methods(M);\n"
@@ -272,11 +279,14 @@ class CodeGen
     end.uniq { |row| [row[:owner], row[:name]] }
   end
 
-  def emit_owner_registration_lines(out, targets, by_owner, unregistered)
+  def emit_owner_registration_lines(out, targets, by_owner, unregistered, rom: nil)
     targets.each do |owner|
       singleton = owner.end_with?('.singleton')
       var = "bc2cpp_owner_reg_#{sanitize(owner)}"
       out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      # In call order: a String is a line as it stands, a Hash a definition (a table row in ROM_METHOD_TABLES).
+      ops = []
+      left_out = Set.new
       by_owner[owner].each do |m|
         fn = if singleton
                m[:visibility] == :private ? 'bc2cpp_define_private_class_method' : 'mrb_define_class_method'
@@ -286,24 +296,95 @@ class CodeGen
                'mrb_define_method'
              end
         unless fn
-          out << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
+          ops << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
           next
         end
         if unregistered.include?("#{owner}##{m[:name]}")
-          out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
-          out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
+          ops << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
+          ops << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
+          left_out << m[:name]
           next
         end
         names = [m[:name]]
         # CORE_ALIASES: the same entry under the names the bytecode aliased it to.
         names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
         omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
-        omitted.each { |name| out << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
-        defines = names.map { |name| "#{fn}(M, #{var}, #{c_string_literal(name)}, #{m[:entry]}, #{m[:aspec]});" }
-        defines.each { |define| out << "  #{define}\n" }
+        omitted.each { |name| ops << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
+        left_out.merge(omitted)
+        names.each do |name|
+          ops << { name: name, key: rom && presym_key(name), fn: fn, entry: m[:entry], aspec: m[:aspec],
+                   private: m[:visibility] == :private }
+        end
       end
+      rows = ops.grep(Hash)
+      # A name both left out and defined keeps the calls' order, which one table installed after them would not.
+      table = rom && rows.none? { |row| left_out.include?(row[:name]) }
+      ops.each do |op|
+        next out << op if op.is_a?(String)
+        next if table && op[:key]
+
+        out << "  #{op[:fn]}(M, #{var}, #{c_string_literal(op[:name])}, #{op[:entry]}, #{op[:aspec]});\n"
+      end
+      rows = rows.select { |row| row[:key] }
+      out << rom_method_table(rom, owner, var, singleton, rows) if table && !rows.empty?
     end
   end
+
+  # ROM_METHOD_TABLES (BC2CPP_ROM_METHOD_TABLES=1, set for the rake gem build, whose presym scan reads the generated
+  # sources): one const mrb_mt_entry table per owner and half. A later row of a name wins, as the later
+  # mrb_define_method did; the forced-private names are mrb_define_method_raw's.
+  def rom_method_tables?
+    ENV['BC2CPP_ROM_METHOD_TABLES'] == '1'
+  end
+
+  ROM_FORCED_PRIVATE = %w[initialize initialize_copy respond_to_missing?].freeze
+
+  def rom_method_table((tables, part), owner, var, singleton, rows)
+    rows = rows.reverse.uniq { |row| row[:name] }.reverse
+    table = "bc2cpp_mt_#{part}_#{sanitize(owner)}"
+    tables << "static const mrb_mt_entry #{table}[] = {\n"
+    rows.each do |row|
+      flags = row[:aspec].to_s
+      flags = "(#{flags}) | MRB_MT_PRIVATE" if row[:private] || ROM_FORCED_PRIVATE.include?(row[:name])
+      tables << "  MRB_MT_ENTRY(#{row[:entry]}, #{row[:key]}, #{flags})\n"
+    end
+    tables << "};\n"
+    "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
+  end
+
+  def presym_key(name)
+    PresymSpelling.key(name)
+  end
+
+  # ROM_INSTALL: chains one table into the class (its origin, as mrb_define_method_raw writes there) and drops the
+  # heap top's entries of the same names (a class unit's or a native's definition), which mrb_define_method replaced.
+  ROM_INSTALL_HELPER = <<~CPP
+    [[maybe_unused]] static void bc2cpp_mt_install(mrb_state* M, struct RClass* c, const mrb_mt_entry* entries, int n, bool singleton) {
+      if (singleton) c = mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c)));
+      MRB_CLASS_ORIGIN(c);
+      mrb_mt_init_rom(M, c, entries, n);
+      const int flag_bits = MRB_MT_READONLY_BIT | MRB_MT_FROZEN_BIT;
+      for (mrb_mt_tbl* t = c->mt; t && t->ptr != entries; t = t->next) {
+        if (t->alloc & MRB_MT_READONLY_BIT) continue;
+        for (int i = 0; i < t->size;) {
+          bool shadowed = false;
+          for (int k = 0; k < n && !shadowed; k++) shadowed = entries[k].key == t->ptr[i].key;
+          if (shadowed) t->ptr[i] = t->ptr[--t->size];
+          else i++;
+        }
+        int flags = t->alloc & flag_bits;
+        if (t->size == 0) {
+          mrb_free(M, t->ptr);
+          t->ptr = NULL;
+          t->alloc = flags;
+        } else if (t->size < (t->alloc & ~flag_bits)) {
+          t->ptr = (mrb_mt_entry*)mrb_realloc(M, t->ptr, sizeof(mrb_mt_entry) * (size_t)t->size);
+          t->alloc = flags | t->size;
+        }
+      }
+      mrb_method_cache_clear(M);
+    }
+  CPP
 
   # The removal of each listed accessor (left_out_accessors), in the program half: its owner is a program class.
   def emit_left_out_accessor_lines(out, accessors)
@@ -1196,7 +1277,14 @@ class CodeGen
             bc2cpp_original_respond_to = MRB_METHOD_CFUNC(m);
             table = mrb_hash_new(M);
             mrb_iv_set(M, kernel, mrb_intern_lit(M, "__bc2cpp_left_out__"), table);
+        #ifdef BC2CPP_ROM_METHOD_TABLES
+            static const mrb_mt_entry respond_to_rom[] = {
+              MRB_MT_ENTRY(bc2cpp_kernel_respond_to, MRB_SYM_Q(respond_to), MRB_ARGS_ARG(1, 1))
+            };
+            bc2cpp_mt_install(M, M->kernel_module, respond_to_rom, 1, false);
+        #else
             mrb_define_method(M, M->kernel_module, "respond_to?", bc2cpp_kernel_respond_to, MRB_ARGS_ARG(1, 1));
+        #endif
           }
           mrb_value owners = mrb_hash_fetch(M, table, mrb_int_value(M, (mrb_int)id), mrb_nil_value());
           if (!mrb_array_p(owners)) {

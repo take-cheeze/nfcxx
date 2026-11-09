@@ -1790,9 +1790,18 @@ class CodeGen
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
       MRB_SET_INSTANCE_TT(frame, MRB_TT_DATA);
+    #ifdef BC2CPP_ROM_METHOD_TABLES
+      static const mrb_mt_entry frame_rom[] = {
+        MRB_MT_ENTRY(bc2cpp_resume_frame_value, MRB_SYM(value), MRB_ARGS_NONE())
+        MRB_MT_ENTRY(bc2cpp_resume_frame_block_call, MRB_SYM_Q(block_call), MRB_ARGS_NONE())
+        MRB_MT_ENTRY(bc2cpp_resume_frame_block, MRB_SYM(block), MRB_ARGS_NONE())
+      };
+      bc2cpp_mt_install(M, frame, frame_rom, 3, false);
+    #else
       mrb_define_method(M, frame, "value", bc2cpp_resume_frame_value, MRB_ARGS_NONE());
       mrb_define_method(M, frame, "block_call?", bc2cpp_resume_frame_block_call, MRB_ARGS_NONE());
       mrb_define_method(M, frame, "block", bc2cpp_resume_frame_block, MRB_ARGS_NONE());
+    #endif
     }
     // A step of a method called from C yielded: hand it to the real Fiber.yield, which raises
     // the FiberError the interpreted method would have raised.
