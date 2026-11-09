@@ -82,10 +82,11 @@ RUBY
 
 # The probe: compiled, it is the helpers themselves; interpreted, the Ruby they stand for.
 body = <<~CPP
-  static mrb_value probe_nil_call(mrb_state* M, mrb_value) {
+  static mrb_value probe_nil_call(mrb_state* M, mrb_value self) {
     mrb_value* argv; mrb_int argc;
     mrb_get_args(M, "*", &argv, &argc);
-    return bc2cpp_proc_call_argv(M, mrb_nil_value(), argc, argv);
+    // The helper now takes the caller's self (for vm.c's protected rule); the probe's receiver is that caller.
+    return bc2cpp_proc_call_argv(M, self, mrb_nil_value(), argc, argv);
   }
   static mrb_value probe_report(mrb_state* M, mrb_value) {
     mrb_value msg;
