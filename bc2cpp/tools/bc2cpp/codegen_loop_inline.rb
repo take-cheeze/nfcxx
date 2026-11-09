@@ -1,0 +1,1199 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir_containers'
+
+# CodeGen: emitters of inlined block loops.
+
+class CodeGen
+  # INLINE_NESTED_BLOCK_SUPPORT: the result of the BLOCK_FALLBACK recognize ->
+  # emit -> suppress pipeline on ONE inlined body (inline_nested_block_pass).
+  # `pre` is file-scope code for the cfuncs; `suppressed`/`glue` drive the
+  # emitter's loop like compile_method's suppressed/glue_at. InlineNested.none
+  # (nothing claimed) leaves the emitted code unchanged.
+  InlineNested = Struct.new(:pre, :suppressed, :glue) do
+    def self.none = new(String.new, [], {})
+
+    # JUMP_TARGET_GLUE_FIX's rule: a suppressed address that still carries glue
+    # keeps its label; one without code loses it.
+    def targets(all) = all - (suppressed - glue.keys)
+
+    def skip?(addr) = suppressed.include?(addr) && !glue.key?(addr)
+  end
+
+  # inline_nested_block_pass (below), INLINE_NESTED_BLOCK_SUPPORT:
+  # recognize/emit/suppress the BLOCK/SENDB regions NESTED in one inlined loop
+  # body, so an already-proven outer region is no longer abandoned just because
+  # its body contains another block call (compile_insn has no BLOCK case, so the
+  # body got `#error` and the whole loop fell back to BLOCK_FALLBACK). The same
+  # pipeline NESTED_BLOCK_FALLBACK_SUPPORT runs inside emit_proc_fallback_fn.
+  # E.g. Game::ChipsetLayout.quads_from_quarters:
+  #     out = []
+  #     2.times do |j|
+  #       2.times do |i|
+  #         qc, qr = quarters[j][i]
+  #         out << [i * HTS, j * HTS, qc * TS + i * HTS, qr * TS + j * HTS, HTS, HTS]
+  #       end
+  #     end
+  # where the inner block has `GETUPVAR R5 1 1` (the method's `quarters`) and
+  # `GETUPVAR R6 1 0` (the outer block's `j`).
+  # Both levels are directly addressable without pointer forwarding: an inlined
+  # body is emitted into the method's own `_impl`, where the method's registers
+  # are `r0 .. r<nregs-1>` and the inlined block's are `r<offset> ..` with
+  # offset == irep.nregs. So level 0 is `&r<x + offset>` and level 1 is
+  # `&r<x>`. Sound only because the inlined-loop emitters are called from
+  # compile_method and nowhere else (so `irep` is a method body); re-verify
+  # before calling one from a nested context. `available_upvars` = [0, x] for
+  # every method register expresses this: the recognizer admits levels 0 and 1
+  # and refuses >= 2.
+  # RETURN_BLK is refused: it would throw bc2cpp_method_return, and
+  # needs_return_catch (which arms the catch) is computed before these emitters
+  # run, so nothing would catch it (std::terminate).
+  # `blk_available: false`: forwarding the method's block through a nested
+  # yield depends on BLKPUSH level counts over real VM frames, which inlining
+  # collapses.
+  # All-or-nothing: an unclaimable nested region leaves `#error`, and the loop
+  # falls back as before.
+  #
+  # inline_nested_region_has_break?: does the nested region's body contain a
+  # BREAK at any depth? Refused: a BLOCK_FALLBACK `break` throws
+  # bc2cpp_block_break through the VM frames mrb_funcall_with_block pushed, and
+  # that unwind is already broken (mruby's mrb_vm_run callinfo assertion fires
+  # for `rows.each { |row| acc << row.each { |v| break v * 100 if v > 1 } }`),
+  # so nothing newly admitted may depend on it. MRB_CATCH (mruby/throw.h) does
+  # not swallow the foreign type; the VM state is what breaks.
+  # `available_upvars` must match the real emit pass (see
+  # block_fallback_region_has_return_blk?).
+  def inline_nested_region_has_break?(region, available_upvars)
+    block_irep = region[:block_irep]
+    return true if BytecodeIR.for(block_irep).op?(:BREAK)
+
+    recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || available_upvars)
+      .any? { |nregion| inline_nested_region_has_break?(nregion, available_upvars) }
+  end
+
+  def inline_nested_block_pass(block_irep, irep, d, offset, outer_addr)
+    host_upvars = (0...irep.nregs).map { |x| [0, x] }
+    regions = recognize_block_fallback_regions(block_irep, available_upvars: host_upvars)
+    return InlineNested.none if regions.empty?
+
+    fn_prefix = "#{cpp_name(d.owner, d.name)}_inline_#{outer_addr}"
+    nested = InlineNested.none
+    regions.each do |nregion|
+      next if block_fallback_region_has_return_blk?(nregion)
+      next if inline_nested_region_has_break?(nregion, host_upvars)
+
+      fn_result = emit_proc_fallback_fn(nregion, d, fn_prefix)
+      next unless fn_result
+
+      nfn_name, nfn_code = fn_result
+      nested.pre << nfn_code
+      nested.suppressed << nregion[:block_addr] << nregion[:sendb_addr]
+      nested.glue[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, inline_offset: offset, owner_def: d)
+    end
+    nested
+  end
+
+  # Two nested-claim passes over the same body, merged into the one
+  # InlineNested the body compiler reads. `pre` is the file-scope code backing
+  # cfunc bodies, so it concatenates; the suppressed set and the glue map are
+  # disjoint by address (an ordinary block region and a section/frame region
+  # cannot both claim the same BLOCK), so a merge never overwrites a claim.
+  def merge_inline_nested(a, b)
+    return b if a.pre.empty? && a.suppressed.empty?
+    return a if b.pre.empty? && b.suppressed.empty?
+
+    InlineNested.new(a.pre + b.pre, a.suppressed + b.suppressed, a.glue.merge(b.glue))
+  end
+
+  # PROFILER_SECTION_SUPPORT, nested case: a `Profiler.section`/`Profiler.frame`
+  # block that sits INSIDE another inlined region's body (the real shapes are
+  # RPG2k#main_loop, whose whole loop body is one `Profiler.frame` wrapping two
+  # `Profiler.section` blocks, and Scene::Map#draw_map_animation, likewise).
+  #
+  # The same claim machinery as inline_nested_block_pass, but the claimed region
+  # is inlined in place rather than compiled as a standalone cfunc: the outer
+  # region is already being emitted into this function, so the nested section
+  # becomes two profiler primitive calls around its own inlined body. Registers
+  # are shifted by the OUTER region's offset plus the outer block's own frame, so
+  # the nested body keeps addressing the right locals.
+  def inline_nested_profiler_pass(block_irep, irep, d, offset, outer_addr, outer_block_irep)
+    regions = recognize_profiler_section_regions(block_irep)
+    return InlineNested.none if regions.empty?
+
+    nested = InlineNested.none
+    regions.each do |nregion|
+      nested_upvars = block_upvar_needs(nregion[:block_irep])
+      next if nested_upvars.nil?
+      next if inline_nested_region_has_break?({ block_irep: nregion[:block_irep], upvars: nested_upvars },
+                                               nested_upvars)
+
+      inlined = emit_profiler_section_inline(nregion, block_irep, d, reg_offset: offset,
+                                                               dest_offset: offset, pre: nested.pre)
+      next unless inlined
+
+      nested.suppressed << nregion[:block_addr] << nregion[:sendb_addr]
+      nested.glue[nregion[:block_addr]] = inlined
+    end
+    nested
+  end
+
+  # INLINE_NESTED_BLOCK_SUPPORT: the compiled body of one inlined block, or nil
+  # if any instruction is unclean (a loop is never emitted partially; the caller
+  # then leaves BLOCK/SENDB as `#error`). Nested block calls are claimed first
+  # (inline_nested_block_pass) and consumed by compile_block_body_insn through
+  # `@inline_nested`, which is saved and restored, not cleared: compile_method is
+  # re-entrant (compiles_clean? -> monomorphic_target -> compile_send ->
+  # compile_insn can re-enter it from the body loop), and clearing would disarm
+  # an enclosing body's map. The nested cfunc code reaches @inline_nested_pre
+  # only on success; a failed region would leave it unreferenced.
+  # `break_label` wires BREAK to the destination register; `result_var` and
+  # `broke_flag` select compile_collect_body_insn; `elem_reg` is the block
+  # register bound to the loop element (ELEMENT_CLASS_SUPPORT); `hash_capture`
+  # scopes inline_hash_capture_hints over the instructions only, not the nested
+  # pass.
+  def compile_inline_block_body(region, irep, d, iter_label, break_label: nil, result_var: nil, broke_flag: nil,
+                                elem_reg: nil, hash_capture: false, forwarded_blk: false)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    break_dest = break_label ? region[:dest_reg] : nil
+    label_prefix = "LBLK#{region[:block_addr]}#{region[:label_tag]}_"
+    arm_prune_block_analysis(block_irep, d, offset)
+    compile_insn = lambda do |insn, i|
+      if result_var
+        compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                  result_var: result_var, break_dest: break_dest, break_label: break_label,
+                                  broke_flag: broke_flag, idx: i)
+      else
+        compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                break_dest: break_dest, break_label: break_label, idx: i)
+      end
+    end
+
+    saved_nested = @inline_nested
+    saved_blk_param_name = @blk_param_name
+    saved_blk_param_level = @blk_param_level
+    # LOOP_FLOW_POSITION: the method's SENDB of this body, where a GETUPVAR-read receiver is judged.
+    saved_loop_parent = @inline_loop_parent
+    @inline_loop_parent = { block_irep: block_irep, irep: irep, idx: irep.index_of_addr(region[:sendb_addr]) }
+    @blk_param_name = 'bc2cpp_blk' if forwarded_blk
+    @blk_param_level = 1 if forwarded_blk
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, "#{region[:block_addr]}#{region[:label_tag]}")
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
+    body = String.new
+    compile_all = lambda do
+      BytecodeIR.for(block_irep).each_source do |insn, i|
+        next if insn.op == :ENTER
+
+        body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        code = if elem_reg
+                 with_element_hint(block_irep, insn, i, elem_reg, region[:elem_class]) { compile_insn.call(insn, i) }
+               else
+                 compile_insn.call(insn, i)
+               end
+        body << '  ' << code
+      end
+    end
+    if hash_capture
+      with_block_hash_capture_hints(inline_hash_capture_hints(irep, region), &compile_all)
+    else
+      compile_all.call
+    end
+    nested_pre = @inline_nested.pre
+    @inline_nested = saved_nested
+    @inline_loop_parent = saved_loop_parent
+    @blk_param_name = saved_blk_param_name
+    @blk_param_level = saved_blk_param_level
+    return nil if body.include?('#error')
+
+    @inline_nested_pre << nested_pre
+    body
+  end
+
+  # The declarations opening every iteration: block registers reset to nil, as
+  # a fresh block activation would be, and R0 (the block's self, never
+  # renumbered) aliased to `self`, which GETIV/SETIV codegen names directly.
+  def inline_block_frame(block_irep, offset)
+    out = String.new
+    (1...block_irep.nregs).each { |i| out << "      mrb_value r#{i + offset} = mrb_nil_value();\n" }
+    out << "      mrb_value r#{offset} = self;\n"
+  end
+
+  # Not E_TYPE_ERROR: that macro hardcodes `mrb`; generated code names it `M`.
+  def inline_raise(exc_class, message)
+    "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"bc2cpp: #{message}\");"
+  end
+
+  # The tail of a generated function whose every path RETURNs: a
+  # compiler that let control fall off the end raises instead of returning nil.
+  def fell_off_end(where)
+    "  #{inline_raise('RuntimeError', "#{where} fell off the end of its body")}\n"
+  end
+
+  # `inline_raise` with the VM's own message (LOADL_BIGINT raises what OP_LOADL does).
+  def inline_raise_exact(exc_class, message)
+    "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"#{message}\");"
+  end
+
+  # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
+  # and mrb_funcall cannot pass a block.
+  # INLINE_NIL_RECEIVER: the gate also takes an ivar class hint, and an ivar no path assigned yet is
+  # nil, so nil runs the send's own NoMethodError (bc2cpp_nil_receiver) when nil answers `name` nowhere.
+  def inline_receiver_guard(predicate, recv_expr, expected, name: nil)
+    "    if (!#{predicate}(#{recv_expr})) { #{inline_nil_arm(recv_expr, name)}" \
+      "#{inline_raise('TypeError', "expected #{expected}")} }\n"
+  end
+
+  def inline_nil_arm(recv_expr, name)
+    return '' unless name && nil_unanswerable?(name)
+
+    "if (mrb_nil_p(#{recv_expr})) bc2cpp_nil_receiver_named(M, #{recv_expr}, \"#{name}\"); " \
+      "#{NomethodReviewed.nil_receiver_marker(name)} "
+  end
+
+  # SSENDB (a self-receiver call) iterates `self`, not a register.
+  def inline_recv_expr(region) = region[:ssendb] ? 'self' : "r#{region[:dest_reg]}"
+
+  # BLOCK_SUPPORT: the inlined loop for one `.times` region, or nil if the body
+  # is not clean. `offset` (the method's nregs) keeps block registers apart.
+  def emit_times_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_times_iter_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, forwarded_blk: region[:needs_blk])
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_integer_p', "r#{dest_reg}", 'Integer receiver for inlined #times')
+    out << "    mrb_int bc2cpp_times_n_#{addr} = mrb_integer(r#{dest_reg});\n"
+    out << "    for (mrb_int bc2cpp_times_i_#{addr} = 0; " \
+           "bc2cpp_times_i_#{addr} < bc2cpp_times_n_#{addr}; " \
+           "++bc2cpp_times_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    # A parameterless block has no R1 argument: R1 is one of its locals and must
+    # start nil like every other block register.
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{addr});\n" if region[:bind_counter]
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "  }\n"
+    # Integer#times returns the receiver, which r<dest_reg> still holds.
+    out
+  end
+
+  # EACH_BLOCK_SUPPORT: the inlined loop for one `ary.each` region (nil if not
+  # clean). Differences from times:
+  #   - LIVE length: `i < ary_size(recv)` every iteration, as array.c does;
+  #     Array#each visits elements pushed during iteration. Elements via
+  #     mrb_ary_ref.
+  #   - An mrb_array_p guard (inline_receiver_guard). Unproven sites stay
+  #     interpreted.
+  #   - BREAK wired (break_dest/break_label). A completed loop leaves the
+  #     receiver in the destination, which is what Array#each returns.
+  def emit_each_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    param_reg = 1 + offset # the block's first mandatory arg (its only one without EACH_SPREAD), R1 in its own numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_each_iter_#{addr}"
+    break_label = "Lbc2cpp_each_end_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: the block's single parameter R1 is bound to the
+    # element below, so R1 is the loop element.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label,
+                                                                  elem_reg: region[:spread] ? nil : '1',
+                                                                  hash_capture: true)
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each', name: 'each')
+    out << "    for (mrb_int bc2cpp_each_i_#{addr} = 0; " \
+           "bc2cpp_each_i_#{addr} < ary_size(#{recv_expr}); " \
+           "++bc2cpp_each_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    entry = "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{addr})"
+    if region[:spread]
+      out << each_spread_binding(entry, addr, param_reg, region[:spread])
+    else
+      out << "      r#{param_reg} = #{entry};\n"
+    end
+    bound = region[:spread] ? (0...region[:spread]).map { |k| param_reg + k } : [param_reg]
+    out << ElementReadRoots.loop_keep(body, bound)
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # EACH_SPREAD: OP_ENTER's rule for a block of `n` > 1 parameters given one argument: an Array (by
+  # type, no #to_ary) is spread, missing parameters stay nil (inline_block_frame), extras are dropped;
+  # any other value is the first parameter. Nothing is allocated, so the receiver keeps the row alive.
+  def each_spread_binding(entry, addr, first_reg, n)
+    row = "bc2cpp_row_#{addr}"
+    out = String.new
+    out << "      mrb_value #{row} = #{entry};\n"
+    out << "      if (mrb_array_p(#{row})) {\n"
+    n.times do |k|
+      out << "        if (ary_size(#{row}) > #{k}) { r#{first_reg + k} = ary_items(#{row})[#{k}]; }\n"
+    end
+    out << "      } else {\n"
+    out << "        r#{first_reg} = #{row};\n"
+    out << "      }\n"
+    out
+  end
+
+  # EACH_INDEX_SUPPORT: emit_each_inline's live-length loop, but the parameter is
+  # the counter (`mrb_fixnum_value(i)`): Array#each_index yields idx, not
+  # self[idx]. No element hint (the value is an Integer). Returns the receiver.
+  def emit_each_index_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_eachidx_iter_#{addr}"
+    break_label = "Lbc2cpp_eachidx_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each_index', name: 'each_index')
+    out << "    for (mrb_int bc2cpp_eachidx_i_#{addr} = 0; " \
+           "bc2cpp_eachidx_i_#{addr} < ary_size(#{recv_expr}); " \
+           "++bc2cpp_eachidx_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  def emit_hash_each_value_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    value_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_heval_iter_#{addr}"
+    break_label = "Lbc2cpp_heval_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '1')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_hash_p(#{recv_expr}) || mrb_obj_ptr(#{recv_expr})->c != M->hash_class) {\n"
+    out << "      #{inline_nil_arm(recv_expr, 'each_value')}" \
+           "#{inline_raise('TypeError', 'expected exact Hash receiver for inlined #each_value')}\n"
+    out << "    }\n"
+    out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
+           "bc2cpp_heval_i_#{addr} < ary_size(bc2cpp_heval_values_#{addr}); " \
+           "++bc2cpp_heval_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # HASH_EACH_SUPPORT: the inlined loop for `hash.each` (nil if not clean).
+  # Differences from emit_each_inline (mrblib/hash.rb):
+  #   - SNAPSHOT: Hash#each takes keys/values/size once. mrb_hash_keys and
+  #     mrb_hash_values (public MRB_API) return fresh Arrays, so mutation during
+  #     iteration cannot affect the loop.
+  #   - Key and value are assigned directly to the block's R1/R2 (as the
+  #     reduce/inject fold does).
+  # An mrb_hash_p guard; BREAK wired; returns the receiver.
+  def emit_hash_each_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    key_reg = 1 + offset
+    val_reg = 2 + offset # the block's own two mandatory args, R1/R2 in its own numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_heach_iter_#{addr}"
+    break_label = "Lbc2cpp_heach_end_#{addr}"
+    # HASH_ELEMENT_SUPPORT: R2 is bound to the value below, so R2 is the loop value
+    # (values only; see HashElementLayout).
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '2')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each', name: 'each')
+    out << "    mrb_value bc2cpp_heach_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+    out << "    mrb_value bc2cpp_heach_vals_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+    out << "    mrb_int bc2cpp_heach_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_heach_i_#{addr} = 0; " \
+           "bc2cpp_heach_i_#{addr} < bc2cpp_heach_len_#{addr}; " \
+           "++bc2cpp_heach_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{addr}, bc2cpp_heach_i_#{addr});\n"
+    out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{addr}, bc2cpp_heach_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # EACH_KEY_SUPPORT: emit_hash_each_inline's snapshot loop over keys only
+  # (Hash#each_key never calls values); one value bound. Same guard; returns the
+  # receiver.
+  def emit_each_key_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    key_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_ekey_iter_#{addr}"
+    break_label = "Lbc2cpp_ekey_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each_key', name: 'each_key')
+    out << "    mrb_value bc2cpp_ekey_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+    out << "    mrb_int bc2cpp_ekey_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; " \
+           "bc2cpp_ekey_i_#{addr} < bc2cpp_ekey_len_#{addr}; " \
+           "++bc2cpp_ekey_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{addr}, bc2cpp_ekey_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # INTERP_UNLOCK: the inlined loop for Range#each (nil if not clean), following
+  # mrblib/range.rb's integer fast path:
+  #   - the element is the counter, boxed through FIXABLE (a bound past the Fixnum range);
+  #   - beg/end/excl are read once (Ranges are frozen by range_initialize);
+  #   - `excl ? i < e : i <= e` instead of mrblib's `lim = end + 1`;
+  #   - RANGE_EACH_INT_MAX: an inclusive end at MRB_INT_MAX takes the send: there `lim` is a bigint, which cmpnum
+  #     compares with a non-Fixnum Integer as doubles, so with a 64-bit mrb_int the interpreter stops short of it;
+  #   - RANGE_EACH_GUARD: the loop is the then-arm of mrb_range_p AND mrb_integer_p beg/end; any other Range
+  #     (String, Float or bigint edges, endless) falls through to the ordinary send (range_each_guarded_glue).
+  #     The real excl flag (mrb_range_excl_p) is used, never `begin == end`.
+  # Returns the receiver; BREAK, RETURN_BLK, upvars and jumps as in
+  # compile_block_body_insn.
+  def emit_range_each_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv = "r#{region[:dest_reg]}"
+    param_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_range_iter_#{addr}"
+    break_label = "Lbc2cpp_range_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!(mrb_range_p(#{recv}) && mrb_integer_p(mrb_range_beg(M, #{recv})) && " \
+           "mrb_integer_p(mrb_range_end(M, #{recv})))) goto #{range_each_send_label(region)};\n"
+    out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(mrb_range_beg(M, #{recv}));\n"
+    out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(mrb_range_end(M, #{recv}));\n"
+    out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
+    out << "    if (!bc2cpp_range_x_#{addr} && bc2cpp_range_z_#{addr} == MRB_INT_MAX) goto #{range_each_send_label(region)};\n"
+    # The step is at the iteration label, not in the header, so an end at MRB_INT_MAX cannot
+    # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value.
+    out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
+           "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr};) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{param_reg} = FIXABLE(bc2cpp_range_i_#{addr}) ? mrb_fixnum_value(bc2cpp_range_i_#{addr}) : " \
+           "mrb_int_value(M, bc2cpp_range_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "      if (bc2cpp_range_i_#{addr} >= bc2cpp_range_z_#{addr}) break;\n"
+    out << "      ++bc2cpp_range_i_#{addr};\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "    goto #{range_each_end_label(region)};\n"
+    out << "  }\n"
+    out
+  end
+
+  # RANGE_EACH_GUARD: the label of the ordinary send a non-Integer Range takes, and the one past it.
+  def range_each_send_label(region) = "Lbc2cpp_range_send_#{region[:sendb_addr]}"
+  def range_each_end_label(region) = "Lbc2cpp_range_after_#{region[:sendb_addr]}"
+
+  # RANGE_MAP_INLINE: the inlined loop for a recognize_range_map_regions region (nil if not clean):
+  # emit_range_each_inline's counter loop carrying emit_collect_inline's map accumulator, `next` value and `break`
+  # flag. The element is pushed before the bound check, so the last one is collected too. The Integer test is
+  # emit_range_each_inline's tripwire: the recognizer proved two literal bounds.
+  def emit_range_map_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv = "r#{dest_reg}"
+    param_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_rmap_iter_#{addr}"
+    break_label = "Lbc2cpp_rmap_end_#{addr}"
+    result_var = "bc2cpp_rmap_v_#{addr}"
+    broke = "bc2cpp_rmap_broke_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: broke, elem_reg: '1')
+    return nil unless body
+
+    counter = "bc2cpp_rmap_i_#{addr}"
+    last = "bc2cpp_rmap_z_#{addr}"
+    excl = "bc2cpp_rmap_x_#{addr}"
+    acc = "bc2cpp_rmap_acc_#{addr}"
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_range_p', recv, 'Range receiver for inlined #map')
+    out << "    mrb_value bc2cpp_rmap_b_#{addr} = mrb_range_beg(M, #{recv});\n"
+    out << "    mrb_value bc2cpp_rmap_e_#{addr} = mrb_range_end(M, #{recv});\n"
+    out << "    if (!mrb_integer_p(bc2cpp_rmap_b_#{addr}) || !mrb_integer_p(bc2cpp_rmap_e_#{addr})) { " \
+           "#{inline_raise('TypeError', 'expected Integer Range bounds for inlined #map')} }\n"
+    out << "    mrb_int #{last} = mrb_integer(bc2cpp_rmap_e_#{addr});\n"
+    out << "    mrb_bool #{excl} = mrb_range_excl_p(M, #{recv});\n"
+    out << "    mrb_value #{acc} = mrb_ary_new(M);\n"
+    out << "    mrb_bool #{broke} = FALSE;\n"
+    out << "    for (mrb_int #{counter} = mrb_integer(bc2cpp_rmap_b_#{addr}); " \
+           "#{excl} ? #{counter} < #{last} : #{counter} <= #{last};) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = FIXABLE(#{counter}) ? mrb_fixnum_value(#{counter}) : mrb_int_value(M, #{counter});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "      mrb_ary_push(M, #{acc}, #{result_var});\n"
+    out << "      if (#{counter} >= #{last}) break;\n"
+    out << "      ++#{counter};\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "    if (!#{broke}) r#{dest_reg} = #{acc};\n"
+    out << "  }\n"
+    out
+  end
+
+  # MAP_BLOCK_SUPPORT: the inlined loop for a collection-block region (nil if not
+  # clean). Differences from emit_each_inline:
+  #   - result: map pushes each yielded value into a fresh accumulator (the
+  #     destination gets it, not the receiver); select/reject push the element
+  #     on a truthy/falsy result; find takes the first truthy element and exits
+  #     (nil otherwise); each_with_index binds a second parameter to the index.
+  #   - the yielded value (RETURN/RETNIL/RETFALSE/RETTRUE, i.e. `next`) is
+  #     stored into the per-iteration result by compile_collect_body_insn; a
+  #     bare `next` collects nil, as in Ruby.
+  #   - `break v` sets the destination and jumps past the loop.
+  #   - live RARRAY_LEN and mrb_array_p guard as in each.
+  def emit_collect_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = inline_recv_expr(region)
+    meth = region[:method_name]
+    param_reg = 1 + offset
+    param2_reg = 2 + offset # each_with_index's own index arg, R2 in block numbering.
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_collect_iter_#{addr}"
+    break_label = "Lbc2cpp_collect_end_#{addr}"
+    result_var = "bc2cpp_collect_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: R1 is the element for every admitted method;
+    # each_with_index's R2 (the index) is not hinted.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_collect_broke_#{addr}", elem_reg: '1')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject filter_map].include?(meth)
+    out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
+    # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
+    out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index' || body.include?("bc2cpp_collect_broke_#{addr}")
+    out << "    for (mrb_int bc2cpp_collect_i_#{addr} = 0; " \
+           "bc2cpp_collect_i_#{addr} < ary_size(#{recv_expr}); " \
+           "++bc2cpp_collect_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{addr});\n"
+    out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
+    out << ElementReadRoots.loop_keep(body, [param_reg])
+    out << body
+    out << "      #{iter_label}:;\n"
+    case meth
+    when 'map'
+      out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
+    when 'select'
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, r#{param_reg});\n"
+    when 'reject'
+      out << "      if (!mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, r#{param_reg});\n"
+    when 'find'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_collect_found_#{addr} = r#{param_reg}; goto #{break_label}; }\n"
+    when 'filter_map'
+      # filter_map pushes the block's RESULT when truthy (Enumerable#filter_map
+      # reassigns `x = blk.call(*x)` before `ary.push x if x`).
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
+    end
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    # A BREAK jumps here with the destination already holding the break value, so
+    # the final accumulator assignment must not run on that path. A dedicated
+    # flag set only by BREAK is used: comparing the loop index fails when
+    # elements are popped during iteration. each_with_index needs neither the flag
+    # nor the assignment.
+    if meth != 'each_with_index'
+      out << "    if (!bc2cpp_collect_broke_#{addr}) {\n"
+      case meth
+      when 'map', 'select', 'reject', 'filter_map'
+        out << "    r#{dest_reg} = bc2cpp_collect_acc_#{addr};\n"
+      when 'find'
+        out << "    r#{dest_reg} = bc2cpp_collect_found_#{addr};\n"
+      end
+      out << "    }\n"
+    end
+    out << "  }\n"
+    out
+  end
+
+  # ACCUM_BLOCK_SUPPORT: the inlined loop for an accumulator/predicate region
+  # (nil if not clean), cloned from emit_collect_inline:
+  #   - any?/all?/none?: boolean destination with early exit (defaults and
+  #     exits as in recognize_accum_regions); `break v` overrides via the
+  #     broke flag; empty arrays get the defaults.
+  #   - count: a fixnum tally, no early exit; `break v` overrides.
+  #   - index: nil default, the first truthy result exits with its index (array.c mrb_ary_index_m).
+  #   - reduce/inject(init): the accumulator is seeded ONCE from R(dest+1)
+  #     before the loop, bound to param 1 with the element in param 2, and
+  #     replaced by the yielded value. Reading init before the loop makes a
+  #     later level-0 SETUPVAR to that register irrelevant.
+  def emit_accum_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = inline_recv_expr(region)
+    meth = region[:method_name]
+    is_fold = !region[:init_reg].nil?
+    param_reg = 1 + offset
+    param2_reg = 2 + offset
+    addr = region[:block_addr]
+    acc_var = "bc2cpp_accum_acc_#{addr}"
+    iter_label = "Lbc2cpp_accum_iter_#{addr}"
+    break_label = "Lbc2cpp_accum_end_#{addr}"
+    result_var = "bc2cpp_accum_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: predicates take the element in R1; a fold takes the
+    # accumulator in R1 and the element in R2. Read from the same `is_fold` flag
+    # as the binding below.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_accum_broke_#{addr}",
+                                                                  elem_reg: is_fold ? '2' : '1')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    out << "    mrb_bool bc2cpp_accum_broke_#{addr} = FALSE;\n"
+    case meth
+    when 'any?'
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_false_value();\n"
+    when 'all?', 'none?'
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_true_value();\n"
+    when 'count'
+      out << "    mrb_int bc2cpp_accum_n_#{addr} = 0;\n"
+    when 'index'
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_nil_value();\n"
+    when 'reduce', 'inject'
+      out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
+    end
+    out << "    for (mrb_int bc2cpp_accum_i_#{addr} = 0; " \
+           "bc2cpp_accum_i_#{addr} < ary_size(#{recv_expr}); " \
+           "++bc2cpp_accum_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    if is_fold
+      out << "      r#{param_reg} = #{acc_var};\n"
+      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
+    else
+      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
+    end
+    out << ElementReadRoots.loop_keep(body, [is_fold ? param2_reg : param_reg])
+    out << body
+    out << "      #{iter_label}:;\n"
+    case meth
+    when 'any?'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_true_value(); goto #{break_label}; }\n"
+    when 'all?'
+      out << "      if (!mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_false_value(); goto #{break_label}; }\n"
+    when 'none?'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_false_value(); goto #{break_label}; }\n"
+    when 'count'
+      out << "      if (mrb_test(#{result_var})) ++bc2cpp_accum_n_#{addr};\n"
+    when 'index'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_fixnum_value(bc2cpp_accum_i_#{addr}); " \
+             "goto #{break_label}; }\n"
+    when 'reduce', 'inject'
+      out << "      #{acc_var} = #{result_var};\n"
+    end
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "    if (!bc2cpp_accum_broke_#{addr}) {\n"
+    case meth
+    when 'any?', 'all?', 'none?', 'index'
+      out << "    r#{dest_reg} = bc2cpp_accum_res_#{addr};\n"
+    when 'count'
+      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_accum_n_#{addr});\n"
+    when 'reduce', 'inject'
+      out << "    r#{dest_reg} = #{acc_var};\n"
+    end
+    out << "    }\n"
+    out << "  }\n"
+    out
+  end
+
+  # PROFILER_SECTION_SUPPORT: the inlined `RGSS::Profiler.section("name") { ... }`
+  # / `RGSS::Profiler.frame { ... }` region (nil if not clean).
+  #
+  # mruby-rgss/src/profiler.cxx's prof_section is exactly this: yield the block,
+  # return its value, and time the span. The timing itself is NOT reimplemented
+  # here -- profiler_section_begin/profiler_section_end (and the frame pair) are
+  # public primitives from include/profiler.hxx that already own the enabled
+  # test, the clock, the aggregation and the trace write, and are no-ops when
+  # profiling is off (section_end returns immediately on a zero stamp). So the
+  # native `if (!g_enabled) return mrb_yield_argv(...)` fast path collapses into
+  # calling the two primitives.
+  #
+  # The body becomes its OWN static function, called DIRECTLY. That is what
+  # makes this a removal rather than a relocation: compared with
+  # BLOCK_FALLBACK there is no mrb_proc_new_cfunc_with_env, no RProc, no
+  # mrb_funcall_with_block, no by-name dispatch, and no separate
+  # `try`/catch around the call. It is also the only shape that compiles: a
+  # method body's own `goto` for its ENTER/optional-argument dispatch (e.g.
+  # `goto L19` in Scene::Map#initialize) jumps forward across whatever the
+  # straight-line body declares, and C++ forbids a jump that crosses an
+  # initialization. A braced in-place body would sit between that goto and its
+  # label and fail to compile; a separate function has its own frame and its
+  # own label namespace, exactly like the block-fallback cfuncs it replaces.
+  #
+  # The NAME is emitted as a C string literal, not an mrb_value: the primitive
+  # takes `const char*` and copies it into its aggregation map during the call
+  # (so a static literal is exactly what the header asks for), which also drops
+  # the name-register GETIDX and mrb_string_value_cstr the block-fallback path
+  # paid on every call.
+  def emit_profiler_section_inline(region, irep, d, reg_offset: nil, dest_offset: nil, pre: nil)
+    block_irep = region[:block_irep]
+    dest = (dest_offset || 0) + region[:dest_reg].to_i
+    addr = region[:block_addr]
+    meth = region[:method_name]
+    # A nested section's address is relative to its own (block) irep, so it can equal the enclosing section's: the
+    # irep label keeps the two functions apart.
+    fn_name = "#{cpp_name(d.owner, d.name)}_profiler_#{meth}_#{addr}#{reg_offset ? "_in_#{irep.label}" : ''}"
+    # File-scope code for the body function. The top-level pass has no buffer of
+    # its own, so it lands in @inline_nested_pre (already wired ahead of this
+    # function); the nested pass passes its own buffer, because that body's file
+    # code is collected by the enclosing compile_inline_block_body.
+    pre ||= @inline_nested_pre
+    # Captures alias the caller's slots; the block frame must not overwrite them.
+    upvars = block_upvar_needs(block_irep)
+    return nil unless upvars && upvars.all? { |level, _index| level.zero? }
+
+    offset = (upvars.map(&:last).max || -1) + 1
+    body = compile_profiler_section_body(region, irep, d, offset, "#{fn_name}_tail", "#{fn_name}_v",
+                                         "LBLK#{addr}_", pre)
+    return nil unless body
+
+    pre << "// PROFILER_SECTION_INLINE :#{region[:section_name] || meth} -- " \
+            "the profiling body compiled inline and called directly\n"
+    params = upvars.each_with_index.map { |(_level, _index), i| "mrb_value* bc2cpp_prof_up_#{i}" }
+    pre << "static mrb_value #{fn_name}(mrb_state* M, mrb_value self" \
+           "#{params.map { |p| ", #{p}" }.join}) {\n"
+    upvars.each_with_index do |(_level, index), i|
+      pre << "  mrb_value& r#{index} = *bc2cpp_prof_up_#{i};\n"
+    end
+    pre << "  mrb_value r#{offset} = self;\n"
+    (1...block_irep.nregs).each { |i| pre << "  mrb_value r#{i + offset} = mrb_nil_value();\n" }
+    # The block's tail value, which the call site returns: the `next`/tail stores
+    # it here, and the call assigns it to the SENDB destination. Declared with
+    # the frame so the body's own jumps never cross an initialization.
+    pre << "  mrb_value #{fn_name}_v = mrb_nil_value();\n"
+    pre << body
+    # The call site assigns this function's return to the SENDB destination, and
+    # mrb_yield_argv returned the block's own value, so the tail label must
+    # return it (not a bare nil, which would silently drop every section's value
+    # -- exactly the shape `map = Profiler.section(...) { load_map }` depends on).
+    pre << "  #{fn_name}_tail:;\n"
+    pre << "  return #{fn_name}_v;\n"
+    pre << "}\n\n"
+
+    out = String.new
+    call_args = upvars.map { |_level, index| ", &r#{index + (reg_offset || 0)}" }.join
+    if meth == 'section'
+      out << "  {\n"
+      out << "    uint64_t bc2cpp_prof_start_#{addr} = profiler_section_begin();\n"
+      out << "    r#{dest} = #{fn_name}(M, self#{call_args});\n"
+      out << "    profiler_section_end(#{c_string_literal(region[:section_name])}, bc2cpp_prof_start_#{addr});\n"
+      out << "  }\n"
+    else
+      out << "  profiler_frame_begin();\n"
+      out << "  r#{dest} = #{fn_name}(M, self#{call_args});\n"
+      out << "  profiler_frame_end();\n"
+    end
+    out
+  end
+
+  # PROFILER_SECTION_SUPPORT: one inlined section/frame body.
+  #
+  # Same shape as compile_block_body_insn, with the ordinary return forms
+  # (`next`, with or without a value, and the implicit tail) storing into
+  # result_var and jumping to the tail label instead of an iteration end.
+  # Nonlocal returns retain the fallback: this function has its own C++ frame.
+  def compile_profiler_section_body(region, irep, d, offset, tail_label, result_var, body_label_prefix, pre)
+    block_irep = region[:block_irep]
+    # The body's own jump targets, in the containing region's label namespace.
+    # A top-level section owns `LBLK<its own block_addr>_`; a nested one reuses
+    # the OUTER body's namespace, because its irep is the outer block's and its
+    # labels are already claimed there.
+    body_prefix = body_label_prefix
+    arm_prune_block_analysis(block_irep, d, offset)
+
+    saved_nested = @inline_nested
+    saved_blk_param_name = @blk_param_name
+    saved_blk_param_level = @blk_param_level
+    @blk_param_name = nil
+    @blk_param_level = 0
+    # Nested regions inside this body, of both kinds: an ordinary block
+    # (inline_nested_block_pass) and another section/frame
+    # (inline_nested_profiler_pass). Both are claimed here so the body can be
+    # emitted at all -- an unclaimed BLOCK would leave `#error` and abandon the
+    # whole region.
+    nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    nested = merge_inline_nested(nested, inline_nested_profiler_pass(block_irep, irep, d, offset,
+                                                                       region[:block_addr], block_irep))
+    @inline_nested = nested
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
+    body = String.new
+    BytecodeIR.for(block_irep).each_source do |insn, i|
+      next if insn.op == :ENTER
+
+      # `L<addr>:;` -- the colon makes it a label and the trailing semicolon the
+      # null statement mrbc's disassembly implies, the same spelling every other
+      # emitter in this compiler uses.
+      body << "  #{body_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      code = case insn.op
+             when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
+               r = insn.op == :RETURN ? (insn.no_operands? ? '0' : insn.reg) : nil
+               store = case insn.op
+                       when :RETURN then "r#{r.to_i + offset}"
+                       when :RETNIL then 'mrb_nil_value()'
+                       when :RETFALSE then 'mrb_false_value()'
+                       when :RETTRUE then 'mrb_true_value()'
+                       end
+               "  #{result_var} = #{store};\n  goto #{tail_label};\n"
+             else
+               compile_block_body_insn(insn, block_irep, d, offset, tail_label, body_prefix, idx: i)
+             end
+      body << '  ' << code
+    end
+    nested_pre = @inline_nested.pre
+    @inline_nested = saved_nested
+    @blk_param_name = saved_blk_param_name
+    @blk_param_level = saved_blk_param_level
+    return nil if body.include?('#error') || nested_pre.include?('#error')
+
+    # This body's own nested functions are emitted at file scope ahead of the
+    # function they belong to, into the same buffer the caller uses for this
+    # region's file-scope code.
+    pre << nested_pre
+    body
+  end
+
+  # MAP_BLOCK_SUPPORT: compile_block_body_insn, except the ordinary return forms
+  # (`next`, with or without a value) store their value into `result_var` before
+  # jumping to iter-end, since collection methods use it. RETURN_BLK is still a
+  # plain C++ return.
+  def compile_collect_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                                result_var:, break_dest:, break_label:, broke_flag:, idx: nil)
+    case insn.op
+    when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
+      r = insn.op == :RETURN ? (insn.no_operands? ? '0' : insn.reg) : nil
+      store = case insn.op
+              when :RETURN then "r#{r.to_i + offset}"
+              when :RETNIL then 'mrb_nil_value()'
+              when :RETFALSE then 'mrb_false_value()'
+              when :RETTRUE then 'mrb_true_value()'
+              end
+      "  #{result_var} = #{store};\n  goto #{iter_end_label};\n"
+    when :BREAK
+      # Same value semantics as compile_block_body_insn's BREAK, plus the broke
+      # flag so the post-loop accumulator assignment is skipped.
+      r = insn.no_operands? ? '0' : insn.reg
+      "  r#{break_dest} = r#{r.to_i + offset};\n  #{broke_flag} = TRUE;\n  goto #{break_label};\n"
+    else
+      compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                              break_dest: break_dest, break_label: break_label, idx: idx)
+    end
+  end
+
+  # EACH_BLOCK_SUPPORT: the inlined loop for a `&:sym` site. Each iteration does
+  # `mrb_funcall(M, elem, "<sym>", 0)`, which is what Symbol#to_proc does, and
+  # accumulates per method:
+  #   each: discard (destination keeps the receiver);
+  #   map: push each result into a fresh Array;
+  #   select/reject: push the ELEMENT when the result is truthy/falsy;
+  #   find: first element with a truthy result (else nil), early exit;
+  #   any?/all?/none?: boolean with early exit (all?/none? default true);
+  #   count: tally of truthy results.
+  # Live length and mrb_array_p guard as in emit_each_inline.
+  def emit_sym_inline(region, irep, _d)
+    dest_reg = region[:dest_reg]
+    recv_expr = inline_recv_expr(region)
+    meth = region[:method_name]
+    sym = region[:sym_name]
+    return nil unless SYM_BLOCK_METHODS.include?(meth)
+
+    iter_label = "Lbc2cpp_sym_iter_#{region[:sym_addr]}"
+    end_label = "Lbc2cpp_sym_end_#{region[:sym_addr]}"
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}", name: meth)
+    case meth
+    when 'map', 'select', 'reject'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
+    when 'find'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_nil_value();\n"
+    when 'any?', 'none?'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value();\n"
+    when 'all?'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_true_value();\n"
+    when 'count'
+      out << "    mrb_int bc2cpp_sym_acc_#{region[:sym_addr]} = 0;\n"
+    end
+    # SYM_SITE: this loop is the block site of the bytecode send at sendb_addr, for the Symbol proof
+    # (static_dispatch_registrations.rb, covered_block_sites).
+    out << "    // SYM_SITE #{irep.content_digest} #{region[:sendb_addr]}\n"
+    out << "    for (mrb_int bc2cpp_sym_i_#{region[:sym_addr]} = 0; " \
+           "bc2cpp_sym_i_#{region[:sym_addr]} < ary_size(#{recv_expr}); " \
+           "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
+    out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
+           "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+    # The element is used after the by-name call on it, so it is rooted for the whole call (ELEMENT_READ_ROOTS).
+    out << "      bc2cpp_keep(M, bc2cpp_sym_e_#{region[:sym_addr]});\n"
+    if meth == 'each'
+      out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
+    else
+      out << "      #{sym_call_value(sym, "bc2cpp_sym_e_#{region[:sym_addr]}", "bc2cpp_sym_r_#{region[:sym_addr]}")}\n"
+      case meth
+      when 'map'
+        out << "      mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_r_#{region[:sym_addr]});\n"
+      when 'select'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) " \
+               "mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_e_#{region[:sym_addr]});\n"
+      when 'reject'
+        out << "      if (!mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) " \
+               "mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_e_#{region[:sym_addr]});\n"
+      when 'find'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = bc2cpp_sym_e_#{region[:sym_addr]}; " \
+               "goto #{end_label}; }\n"
+      when 'any?'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_true_value(); goto #{end_label}; }\n"
+      when 'all?'
+        out << "      if (!mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value(); goto #{end_label}; }\n"
+      when 'none?'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value(); goto #{end_label}; }\n"
+      when 'count'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) ++bc2cpp_sym_acc_#{region[:sym_addr]};\n"
+      end
+    end
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{end_label}:;\n"
+    case meth
+    when 'each'
+      # `each` returns the receiver, already in the destination register.
+    when 'count'
+      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_sym_acc_#{region[:sym_addr]});\n"
+    else
+      out << "    r#{dest_reg} = bc2cpp_sym_acc_#{region[:sym_addr]};\n"
+    end
+    out << "  }\n"
+    out
+  end
+
+  # SYM_DEVIRT: the per-element call for a `&:sym` site, devirtualized where
+  # sym_call_target allows. sym_call_value declares `mrb_value <result_var> =
+  # ...`; sym_call_line emits the discarded call for `each`. The element is the
+  # loop's `bc2cpp_sym_e_N` local.
+  # A POLY chain is an if/else-if/else statement (C has no if-expression), hence
+  # two helpers.
+  # Sound: the mrb_funcall fallback is exactly Symbol#to_proc (no closure to
+  # lose); MONO needs no guard (one def); each POLY branch guards exact class.
+  def sym_call_value(sym, elem_expr, result_var)
+    kind, target = sym_call_target(sym) || [nil, nil]
+    fallback = sym_call_fallback(sym, elem_expr)
+    return "mrb_value #{result_var} = #{fallback};" unless kind
+
+    if kind == :mono
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
+             "      mrb_value #{result_var} = #{impl}(M, #{elem_expr});"
+    end
+
+    out = String.new
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    target.each_with_index do |branch, i|
+      d = branch[:definition]
+      impl = cpp_name(d.owner, d.name) + '_impl'
+      check = exact_class_guard(owner_class_ptr_expr(branch[:guard_owner]), elem_expr)
+      out << (i.zero? ? '      ' : '      else ')
+      out << "if (#{check}) { #{result_var} = #{impl}(M, #{elem_expr}); }\n"
+    end
+    out << "      else { #{result_var} = #{fallback}; }\n"
+    out
+  end
+
+  # The per-element call for an element no arm takes: Symbol#to_proc's own send (no visibility check), or, when the
+  # closed world names every class answering `sym` (NAME_OWNER_SET), the owner call over them at check level 0.
+  def sym_call_fallback(sym, elem_expr)
+    owners = !@call_block_expr && name_owner_set(sym)
+    return "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0)" unless owners
+
+    list = owners.map { |owner| "\"#{owner}\"" }.join(', ')
+    "bc2cpp_owner_call_named(M, #{elem_expr}, \"#{sym}\", 0, BC2CPP_OWNERS(#{list}), mrb_nil_value(), 0) " \
+      "/* CLOSED_WORLD owner-call: #{sym} */"
+  end
+
+  def sym_call_line(sym, elem_expr)
+    kind, target = sym_call_target(sym) || [nil, nil]
+    fallback = "#{sym_call_fallback(sym, elem_expr)};"
+    return fallback unless kind
+
+    if kind == :mono
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
+             "      #{impl}(M, #{elem_expr});"
+    end
+
+    out = String.new
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"
+    target.each_with_index do |branch, i|
+      d = branch[:definition]
+      impl = cpp_name(d.owner, d.name) + '_impl'
+      check = exact_class_guard(owner_class_ptr_expr(branch[:guard_owner]), elem_expr)
+      out << (i.zero? ? '      ' : '      else ')
+      out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
+    end
+    out << "      else { #{fallback} }\n"
+    out
+  end
+
+  # SORT_BLOCK_SUPPORT: the inlined replacement for a sort_by region (nil if
+  # not clean).
+  # - `sort_by` with a key block: a Schwartzian transform:
+  #     1. keys[i] = block(elem[i]) (compile_collect_body_insn: `next` collects
+  #        nil, `break` overrides via the broke flag);
+  #     2. pairs[i] = [keys[i], i, elem[i]]; the index keeps the sort stable
+  #        (mruby's sort is not, CRuby's sort_by is);
+  #     3. sort pairs by (key, index) with mrb_cmp (public; -2 when
+  #        incomparable, like the native sort);
+  #     4. dest[i] = pairs[i][2].
+  #   All temporaries are fresh arrays;
+  #   the receiver is only read.
+  def emit_sort_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = inline_recv_expr(region)
+    meth = region[:method_name]
+    param_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_sort_iter_#{addr}"
+    break_label = "Lbc2cpp_sort_end_#{addr}"
+    result_var = "bc2cpp_sort_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: a sort_by key block takes the element as R1.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_sort_broke_#{addr}", elem_reg: '1')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}", name: meth)
+    out << "    mrb_bool bc2cpp_sort_broke_#{addr} = FALSE;\n"
+    out << "    mrb_int bc2cpp_sort_n_#{addr} = ary_size(#{recv_expr});\n"
+    out << "    mrb_value bc2cpp_sort_keys_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_n_#{addr});\n"
+    out << "    for (mrb_int bc2cpp_sort_i_#{addr} = 0; bc2cpp_sort_i_#{addr} < ary_size(#{recv_expr}); ++bc2cpp_sort_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << ElementReadRoots.loop_keep(body, [param_reg])
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"
+    out << "    }\n"
+    # The key loop re-checks live RARRAY_LEN (the same live-length rule as the
+    # other emitters), so keys are 1:1 with visited elements. The sort phase loops
+    # over the key array's length and fetches elements with mrb_ary_ref (nil if
+    # the receiver shrank). Only a body that mutates the receiver can make them
+    # differ, and the native sort raises "array modified during sort" there anyway.
+    out << "    #{break_label}:;\n"
+    out << "    if (!bc2cpp_sort_broke_#{addr}) {\n"
+    out << "    mrb_int bc2cpp_sort_m_#{addr} = ary_size(bc2cpp_sort_keys_#{addr});\n"
+    out << "    mrb_value bc2cpp_sort_pairs_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
+    out << "    for (mrb_int bc2cpp_sort_j_#{addr} = 0; bc2cpp_sort_j_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_j_#{addr}) {\n"
+    out << "      mrb_value bc2cpp_sort_e_#{addr} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_k_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_trip_#{addr} = mrb_ary_new_capa(M, 3);\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_k_#{addr});\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, mrb_fixnum_value(bc2cpp_sort_j_#{addr}));\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_e_#{addr});\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_trip_#{addr});\n"
+    out << "    }\n"
+    # Insertion sort on (key, index): O(n^2) but these arrays are small, and the
+    # index tiebreak makes it stable at any size. mrb_cmp returns 1/0/-1, or -2 when
+    # incomparable (the native sort_cmp contract; incomparable keys raise). The
+    # decorated index is always our own fixnum, so mrb_integer cannot fail.
+    out << "    for (mrb_int bc2cpp_sort_a_#{addr} = 1; bc2cpp_sort_a_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_a_#{addr}) {\n"
+    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
+    out << "      mrb_int bc2cpp_sort_b_#{addr} = bc2cpp_sort_a_#{addr} - 1;\n"
+    out << "      while (bc2cpp_sort_b_#{addr} >= 0) {\n"
+    out << "        mrb_value bc2cpp_sort_pa_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
+    out << "        mrb_value bc2cpp_sort_ka_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ia_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_kb_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ib_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
+    comparison = sort_array_cmp_direct? ? 'bc2cpp_sort_key_cmp' : 'mrb_cmp'
+    out << "        mrb_int bc2cpp_sort_c_#{addr} = #{comparison}(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
+    out << "        if (bc2cpp_sort_c_#{addr} == -2) { #{inline_raise('ArgumentError', 'sort_by comparison failed')} }\n"
+    out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
+    out << "        if (bc2cpp_sort_c_#{addr} >= 0) break;\n"
+    # The pairs array is this loop's own temporary and every value it holds is moved, never dropped: no
+    # GC_KEEP_OVERWRITTEN root needed.
+    out << "        bc2cpp_raw_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_pa_#{addr});\n"
+    out << "        --bc2cpp_sort_b_#{addr};\n"
+    out << "      }\n"
+    out << "      bc2cpp_raw_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_tmp_#{addr});\n"
+    out << "    }\n"
+    out << "    r#{dest_reg} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
+    out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
+    out << "      mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
+    out << "    }\n"
+    out << "    }\n"
+    out << "  }\n"
+    out
+  end
+end

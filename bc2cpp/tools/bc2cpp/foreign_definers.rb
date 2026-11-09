@@ -1,0 +1,180 @@
+# frozen_string_literal: true
+
+require 'prism'
+require 'set'
+require_relative 'file_identity'
+require_relative 'ruby_parse_cache'
+require_relative 'outside_ruby_owners'
+
+# FOREIGN_DEFINERS: which method names outside Ruby (the build's
+# mrblib sources) defines, aliases, undefines or re-scopes on which class. The
+# closed world only knows such names globally (`foreign_method_names`), which
+# refuses `inspect` for Integer because Rational#inspect exists. NativeCoreDirect
+# needs the class, so this walks the syntax tree with a lexical class stack.
+#
+# Deliberately over-approximate: a nested `Foo::Array` counts as `Array`, and a
+# dynamic definition (a non-literal name, `class_eval`, `prepend`) marks the whole
+# class as wild so every name on it is treated as defined.
+module ForeignDefiners
+  # Shared with OutsideRubyOwners so the two walks classify the same definers and reopeners.
+  DEFINERS = OutsideRubyOwners::DEFINERS
+  REOPENERS = OutsideRubyOwners::REOPENERS
+
+  Result = Struct.new(:names, :wild)
+
+  # FOREIGN_DEFINERS_PER_LIST: file list => [its stat key, Result]. One entry per list of files, so callers
+  # that alternate between lists (the closed world's outside Ruby, the same list without core sources, the frozen
+  # tables' foreign list) no longer evict each other and rewalk every syntax tree on each switch.
+  @cache = {}
+
+  module_function
+
+  # Memoized on file identity: a check that rewrites a fixture never sees stale text. The stat key
+  # ([path, mtime, size] of every file) is compared with eql?, as the Hash key it replaces was.
+  def scan(paths)
+    files, key = FileIdentity.files_and_key(paths)
+    hit = @cache[files]
+    return hit[1] if hit && hit[0].eql?(key)
+
+    result = scan_files(files)
+    @cache[files.freeze] = [key, result]
+    result
+  end
+
+  def scan_files(files)
+    collector = Collector.new
+    files.each do |path|
+      parsed = RubyParseCache.parse_file(path)
+      raise "foreign Ruby source #{path} does not parse: #{parsed.errors.first&.message}" unless parsed.errors.empty?
+
+      collector.visit(parsed.value)
+    end
+    Result.new(collector.names, collector.wild)
+  end
+
+  # True when some foreign definition could sit on `owner` under `name`.
+  def defines?(paths, owner, name)
+    result = scan(paths)
+    result.wild.include?(owner) || result.names.fetch(owner, Set.new).include?(name)
+  end
+
+  # Does one of +paths+ define +name+ on +owner+ by a name the scan reads? Unlike defines?, a wild owner does not count:
+  # a caller uses this as proof that a definition exists, where defines? is proof that one may.
+  def defines_named?(paths, owner, name)
+    scan(paths).names.fetch(owner, Set.new).include?(name)
+  end
+
+  # defines? for any of +owners+, from one scan: a caller asking about several owners checks the stat key once.
+  # No owners asks nothing, so it scans nothing (a foreign file that does not parse raises only when asked).
+  def defines_any?(paths, owners, name)
+    return false if owners.empty?
+
+    result = scan(paths)
+    owners.any? { |owner| result.wild.include?(owner) || result.names.fetch(owner, Set.new).include?(name) }
+  end
+
+  class Collector < Prism::Visitor
+    attr_reader :names, :wild
+
+    def initialize
+      super
+      @stack = []
+      @names = Hash.new { |hash, key| hash[key] = Set.new }
+      @wild = Set.new
+    end
+
+    def visit_class_node(node)
+      scoped(constant_name(node.constant_path)) { super }
+    end
+
+    def visit_module_node(node)
+      scoped(constant_name(node.constant_path)) { super }
+    end
+
+    def visit_singleton_class_node(node)
+      scoped(:singleton) { super }
+    end
+
+    def visit_def_node(node)
+      record(node.name.to_s) if node.receiver.nil?
+      super
+    end
+
+    def visit_alias_method_node(node)
+      record(node.new_name.unescaped) if node.new_name.respond_to?(:unescaped)
+      super
+    end
+
+    def visit_undef_node(node)
+      node.names.each { |name| record(name.unescaped) if name.respond_to?(:unescaped) }
+      super
+    end
+
+    def visit_call_node(node)
+      name = node.name.to_s
+      receiver = node.receiver
+      if receiver.nil?
+        definition_call(name, node)
+      elsif REOPENERS.include?(name) || DEFINERS.include?(name)
+        owner = receiver_owner(receiver)
+        @wild << owner if owner
+      end
+      if node.receiver.nil? && %w[prepend refine].include?(name)
+        @wild << @stack.last if @stack.last.is_a?(String)
+      end
+      super
+    end
+
+    private
+
+    def scoped(name)
+      @stack.push(name)
+      yield
+    ensure
+      @stack.pop
+    end
+
+    def constant_name(path)
+      path.slice.split('::').last
+    end
+
+    def receiver_owner(receiver)
+      return unless receiver.is_a?(Prism::ConstantReadNode) || receiver.is_a?(Prism::ConstantPathNode)
+
+      constant_name(receiver)
+    end
+
+    def current_owner
+      owner = @stack.last
+      owner.is_a?(String) ? owner : nil
+    end
+
+    def record(name)
+      # A top-level `def` defines a private method on Object.
+      owner = current_owner || (@stack.empty? ? 'Object' : nil)
+      @names[owner] << name if owner
+    end
+
+    def definition_call(name, node)
+      owner = current_owner
+      return unless owner
+      return unless DEFINERS.include?(name) || REOPENERS.include?(name)
+
+      arguments = node.arguments&.arguments || []
+      # `private def x` names its method through the DefNode visited below.
+      arguments = arguments.reject { |argument| argument.is_a?(Prism::DefNode) }
+      symbols = arguments.map do |argument|
+        argument.unescaped if argument.is_a?(Prism::SymbolNode) || argument.is_a?(Prism::StringNode)
+      end
+      visibility = %w[public private protected].include?(name)
+      if REOPENERS.include?(name) || symbols.any?(&:nil?) || (symbols.empty? && !visibility && node.arguments.nil?)
+        @wild << owner
+        return
+      end
+      symbols.each do |symbol|
+        @names[owner] << symbol
+        @names[owner] << "#{symbol}=" if name.start_with?('attr')
+      end
+    end
+  end
+end

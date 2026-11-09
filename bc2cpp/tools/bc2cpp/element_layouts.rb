@@ -1,0 +1,779 @@
+# frozen_string_literal: true
+
+require_relative 'fixpoint'
+require_relative 'bytecode_ir_containers'
+require_relative 'lexical_scopes'
+
+# Step 6g-bis: element classes of Array and Hash ivars.
+
+# ---------------------------------------------------------------------------
+# Step 6g-bis: ELEMENT_CLASS_SUPPORT: "every element of this Array ivar is
+# exactly class X", so calls on an inlined loop's element register can be
+# devirtualized (`party.each { |a| a.dead? }`).
+#
+# Not a proof: the sweep sees only this program's bytecode, and an Array is
+# mutable through aliases and through library methods (`party.actors.push(x)`).
+# Mutations it can attribute (SETIDX `@x[i] = v` on a receiver tracing to
+# `GETIV @x` in the owner) are checked; every other mutation is a named residual.
+# That is harmless because every consumer re-checks `mrb_class_ptr(...) ==
+# mrb_obj_class(M, elem)` and falls back to mrb_funcall. The table is never used to
+# embed, pick a C type or skip a check.
+# A fixed point (ten passes, sticky UNKNOWN join), as in ClassLayout.
+# Core method names are not modelled here: an element-preserving or element-returning
+# library call is UNKNOWN, and the generic producer join decides everything else.
+# ---------------------------------------------------------------------------
+
+# PRIMITIVE_ELEMENT_SUPPORT: element tags element_value_class returns for
+# literal primitives. `.known` strips them explicitly: consumers
+# (with_element_hint et al.) only guard with mrb_obj_class and were never meant
+# to receive them. Diagnostic only, distinct from ELEM_HINT and ELEM_CANDIDATE
+# (ANY/OPAQUE; see ArrayElementLayout.analyze).
+PRIMITIVE_ELEMENT_CLASSES = %w[Integer Hash String Symbol].freeze
+
+# ELEMENT_CLASS_SUPPORT: element class of the Array in `reg` at `idx`, joined
+# over every producer of the register. nil
+# is always safe: the caller poisons the ivar. The strict hint tier forces
+# ELEMENT hints, so `@a = c ? [A.new] : [B.new]` must not read one arm.
+def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  # An `Array<Klass>` argument annotation counts only for the untouched incoming argument register; consumers
+  # still guard each element.
+  at_entry = lambda do |reg|
+    pos = reg.to_i
+    ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
+  end
+  program = BytecodeIR.for(irep)
+  join_element_producers(irep, idx, dest_reg, entry: at_entry) do |producer|
+    literal = program.container_literal(producer.index)
+    if literal
+      next nil unless literal.kind == :array && program.quiet_span?(producer.index, idx)
+
+      literal_element_class(irep, literal, ctx, depth)
+    else
+      case producer.op
+      when :GETIV
+        ivar = producer.insn.ivar
+        ivar && ivar_element_hint(ctx[:owner], ivar, ctx)
+      when BytecodeIR::Ops::SEND
+        send_element_class(irep, producer.index, producer.reg, producer.insn, ctx, depth)
+      end
+    end
+  end
+end
+
+# HASH_ELEMENT_SUPPORT: VALUE class of the Hash in `reg` at `idx`. Narrower
+# than array_element_source_scan: only a literal and a chained ivar read; nil on
+# anything else.
+def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  program = BytecodeIR.for(irep)
+  join_element_producers(irep, idx, dest_reg) do |producer|
+    literal = program.container_literal(producer.index)
+    if literal
+      next nil unless literal.kind == :hash && program.quiet_span?(producer.index, idx)
+
+      literal_element_class(irep, literal, ctx, depth)
+    elsif producer.op == :GETIV
+      ivar = producer.insn.ivar
+      ivar && ivar_hash_element_hint(ctx[:owner], ivar, ctx)
+    end
+  end
+end
+
+# ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above. No core method name is
+# special here: a library call that could return an element is UNKNOWN.
+def send_element_class(irep, i, reg, insn, ctx, depth)
+  # Same charset as compile_send's own name extraction (see its comment).
+  name = insn.sym
+  return nil unless name
+
+  block_carrying = BytecodeIR::Ops::BLOCK_SEND.include?(insn.op)
+  # SEND0/SSEND0 print no "n=": zero arguments.
+  argc = insn.argc || 0
+  self_recv = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+
+  # A `-> Array<Klass>` annotation is trusted only when its irep is the only
+  # definition of the name (else the call may reach another method).
+  annotated = ctx[:annotated_element]&.call(name)
+  return annotated if annotated
+
+  # CHAINED_ACCESSOR_SUPPORT, element dimension (`@state.party.actors`): the
+  # receiver resolves to class R, R defines the name as an :ivar_accessor, and
+  # R's entry in this table names an element class. Same check as
+  # trace_new_target's chained-accessor branch.
+  return nil if argc.positive? || block_carrying
+  return self_accessor_element(name, ctx) if self_recv
+
+  recv_class = traced_owner(irep, i, reg, ctx)
+  return nil unless recv_class
+
+  accessor = ctx[:registry][name]&.find { |md| md.owner == recv_class && md.kind == :ivar_accessor }
+  return nil unless accessor
+
+  ivar_element_hint(recv_class, name, ctx)
+end
+
+# SELF_ACCESSOR_RECEIVER: `allies` on implicit self reads `@allies` when the call can only reach
+# `ctx[:owner]`'s own attr_reader, so the ivar's element hint applies as it would to a GETIV.
+# CodeGen answers that with CodeGen#self_accessor_owner? (`ctx[:self_accessor]`, which also covers
+# a subclassed owner by hierarchy analysis); without it, self's class must be exact
+# (self_receiver_class) and register the reader itself.
+def self_accessor_element(name, ctx)
+  owner = ctx[:owner]
+  reached = if ctx[:self_accessor]
+              ctx[:self_accessor].call(name)
+            else
+              self_receiver_class(ctx) &&
+                ctx[:registry][name]&.any? { |md| md.owner == owner && md.kind == :ivar_accessor }
+            end
+  reached ? ivar_element_hint(owner, name, ctx) : nil
+end
+
+# ELEMENT_CLASS_SUPPORT: read the in-progress table without returning UNKNOWN.
+# `key?` because `[]` on the `Hash.new { {} }` table would insert an entry and
+# perturb the diagnostic ordering.
+def ivar_element_hint(owner, ivar, ctx)
+  table = ctx[:elements]
+  return nil unless owner && ivar && table&.key?(owner)
+
+  hint = table[owner][ivar]
+  return nil if hint.nil? || hint == ArrayElementLayout::UNKNOWN
+
+  hint
+end
+
+# HASH_ELEMENT_SUPPORT: ivar_element_hint for `ctx[:hash_elements]`.
+def ivar_hash_element_hint(owner, ivar, ctx)
+  table = ctx[:hash_elements]
+  return nil unless owner && ivar && table&.key?(owner)
+
+  hint = table[owner][ivar]
+  return nil if hint.nil? || hint == HashElementLayout::UNKNOWN
+
+  hint
+end
+
+# ELEMENT_CLASS_SUPPORT: the block irep of the SENDB at `i`, re-checking the
+# `BLOCK R(a+1) I[k]` adjacency.
+def adjacent_block_irep(irep, i, recv_reg, ctx)
+  k = BytecodeIR.for(irep).adjacent_block_index(i, recv_reg)
+  label = k && irep.reps[k.to_i]
+  label && ctx[:ireps][label]
+end
+
+# ELEMENT_CLASS_SUPPORT: class of a `map` block's yielded value. Every RETURN
+# must agree; RETNIL (a bare `next`), RETFALSE/RETTRUE or a break make the
+# answer unknown, as does a block with no RETURN.
+def block_return_class(block_irep, ctx, depth)
+  # A block's `self` is the method's self, so owner and ivar hints carry over.
+  # Its parameters are not method arguments: `mand: 0` disables the
+  # argument-annotation terminal.
+  irep_return_class(block_irep, ctx.merge(arg_classes: nil, mand: 0), depth)
+end
+
+# ELEMENT_CLASS_SUPPORT: trace a register to a class the REGISTRY knows.
+# trace_new_target returns bare names ("Actors" for `Actors.new` in
+# Game::Party) while the registry says "Game::Actors", so an unresolved bare
+# name is a dead hint. Resolve it like Ruby: lexical nesting innermost first,
+# accepting only registry classes; otherwise nil.
+# Kept local to this analysis: changing trace_new_target's result would change
+# TYPED devirtualization everywhere.
+def traced_owner(irep, idx, reg, ctx)
+  cls = trace_new_target(irep, idx, reg, ctx[:ivar_classes], ctx[:mand], ctx[:arg_classes],
+                         owner: ctx[:owner], class_layout: ctx[:class_layout], registry: ctx[:registry],
+                         known_owners: ctx[:known_owners], container_constants: ctx[:container_constants],
+                         element_annotations: ctx[:element_annotations])
+  resolve_owner_name(cls, ctx)
+end
+
+def resolve_owner_name(name, ctx)
+  resolve_owner_name_in(name, ctx[:owner], ctx[:known_owners])
+end
+
+def resolve_owner_name_in(name, owner, known)
+  return nil unless name
+
+  # Core containers are valid annotation targets without registry methods.
+  return name if known.include?(name) || %w[Array Hash].include?(name)
+  # Already qualified and unknown: no lexical search can help.
+  return nil if name.include?('::')
+
+  LexicalScopes.prefixes(owner).each do |prefix|
+    candidate = LexicalScopes.qualify(prefix, name)
+    return candidate if known.include?(candidate)
+  end
+  nil
+end
+
+# ELEMENT_CLASS_SUPPORT: mandatory arity from ENTER, 0 if none.
+def mand_of(ireps, label)
+  enter = ireps.fetch(label).enter
+  enter ? enter.enter_fields.first : 0
+end
+
+# ELEMENT_CLASS_SUPPORT: every irep reachable through `reps`; `seen` guards
+# against cycles.
+def nested_block_labels(ireps, label, seen = Set.new)
+  out = []
+  stack = [label]
+  until stack.empty?
+    cur = stack.pop
+    irep = ireps[cur]
+    next unless irep
+
+    (irep.reps || []).each do |child|
+      next if child.nil? || seen.include?(child) || !ireps.key?(child)
+
+      seen << child
+      out << child
+      stack << child
+    end
+  end
+  out
+end
+
+# ELEMENT_CLASS_SUPPORT: the one class every RETURN of this irep hands back,
+# or nil. Shared by block_return_class and mono_fresh_return_class.
+def irep_return_class(irep, ctx, depth)
+  return nil if depth > 8
+
+  found = nil
+  BytecodeIR.for(irep).each_with_op(:RETURN, :RETNIL, :RETFALSE, :RETTRUE, :BREAK, :RETURN_BLK) do |insn, i|
+    # nil/false/true is not an object class, and a non-local return leaves by a path not read here.
+    return nil unless insn.op == :RETURN
+
+    cls = element_value_class(irep, i, insn.no_operands? ? '0' : insn.reg, ctx, depth)
+    return nil unless cls
+    return nil if found && found != cls
+
+    found = cls
+  end
+  found
+end
+
+# ELEMENT_CLASS_SUPPORT: return class of a call whose RECEIVER traces to one
+# exact class, looked up class-exactly. Needed for names like `:[]`, which are
+# POLY program-wide (Game::Party builds `@actors` from `@roster[i]`, and
+# Game::Actors#[] returns a Game::Actor or nil).
+# The class-exact definition counts when it has a `-> Klass` annotation or
+# provably returns a fresh `Klass.new` on every path (X.new never allocates a
+# subclass). Guarded downstream like every other fact here.
+def receiver_scoped_return_class(irep, i, recv_reg, name, ctx, depth)
+  return nil if depth > 8
+
+  recv_class = traced_owner(irep, i, recv_reg, ctx)
+  return nil unless recv_class
+
+  class_scoped_return_class(recv_class, name, ctx, depth)
+end
+
+# ELEMENT_CLASS_SUPPORT: what `name` returns on an exact receiver class.
+def class_scoped_return_class(recv_class, name, ctx, depth)
+  return nil if depth > 8
+
+  defs = ctx[:registry][name] || []
+  direct_defs = defs.select { |m| m.owner == recv_class }
+  return nil if direct_defs.size > 1
+  return nil if direct_defs.any? && !direct_defs.first.irep
+
+  md = direct_defs.first if direct_defs.first&.irep
+  unless md
+    # Inherited lookup is useful when another class makes this name globally
+    # polymorphic. Require a closed-world proof and a fully known, mixin-free
+    # ancestry; otherwise Ruby's lookup order may differ from this walk.
+    world = ctx[:closed_world]
+    return nil unless world&.inherited_lookup_safe?(name, recv_class)
+
+    seen = Set.new
+    owner = recv_class
+    loop do
+      return nil unless seen.add?(owner)
+      return nil if [ctx[:included_modules], ctx[:prepended_modules], ctx[:unknown_mixins]].any? do |mixins|
+        next false unless mixins
+
+        entries = mixins.respond_to?(:key?) ? mixins[owner] : (mixins.include?(owner) ? [owner] : [])
+        !entries.to_a.empty?
+      end
+
+      owner = (ctx[:superclass_of] || {})[owner]
+      break unless owner.is_a?(String)
+
+      inherited_defs = defs.select { |m| m.owner == owner }
+      unless inherited_defs.empty?
+        return nil unless inherited_defs.size == 1 && inherited_defs.first.irep
+
+        md = inherited_defs.first
+        break
+      end
+    end
+  end
+  return nil unless md
+
+  ann = ctx[:element_annotations][md.irep]&.ret_class
+  return ann if ann
+
+  callee = ctx[:ireps][md.irep]
+  return nil unless callee
+
+  sub = ctx.merge(owner: md.owner, ivar_classes: (ctx[:class_layout][md.owner] || {}),
+                  mand: mandatory_arity(callee), arg_classes: ctx[:class_annotations][md.irep]&.args)
+  irep_return_class(callee, sub, depth + 1)
+end
+
+# ELEMENT_CLASS_SUPPORT: the exact class of `self` in a method of `owner`,
+# for implicit-self calls (`@members << member(db, m)`, where :member is POLY).
+# Only answered when no class declares `owner` as its superclass (`subclassed`,
+# from resolve_superclass_ref): a subclass instance could dispatch to an
+# override. `.singleton` owners are refused: their self is the class object.
+def self_receiver_class(ctx)
+  owner = ctx[:owner]
+  return nil if owner.nil? || owner.end_with?('.singleton')
+  return nil unless ctx[:known_owners].include?(owner)
+  closed_world = ctx[:closed_world]
+  if closed_world
+    return nil unless closed_world.exact_class?(owner)
+  else
+    return nil if ctx[:subclassed].include?(owner)
+  end
+
+  owner
+end
+
+def mono_fresh_return_class(name, ctx, depth)
+  defs = ctx[:registry][name]
+  return nil unless defs && defs.size == 1 && defs.first.irep
+
+  d = defs.first
+  irep = ctx[:ireps][d.irep]
+  return nil unless irep
+
+  sub = ctx.merge(owner: d.owner, ivar_classes: (ctx[:class_layout][d.owner] || {}),
+                  mand: mandatory_arity(irep), arg_classes: ctx[:class_annotations][d.irep]&.args)
+  irep_return_class(irep, sub, depth + 1)
+end
+
+# ELEMENT_CLASS_SUPPORT: class of the SCALAR value in `reg` at `idx`, from:
+#   1. trace_new_target (fresh `X.new`, known ivar, argument annotation,
+#      chained accessor);
+#   2. a `-> Klass` return annotation (ElementAnnotations);
+#   3. an index read with a known element class (`@actors[i]`, GETIDX/AREF), which
+#      lets a self-referential reorder (`@a = order.map { |i| @a[i] }`) agree
+#      instead of poisoning.
+# 2 and 3 are joined over every producer of the register (element_producer_class).
+def element_value_class(irep, idx, reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  direct = traced_owner(irep, idx, reg, ctx)
+  return direct if direct
+
+  join_element_producers(irep, idx, reg) do |producer|
+    element_producer_class(irep, producer, ctx, depth)
+  end
+end
+
+# The queries over an element table (owner => { ivar => class }, UNKNOWN for an ivar
+# with no proven class), shared by ArrayElementLayout and HashElementLayout.
+module ElementTableQueries
+  UNKNOWN = :unknown
+
+  # analyze's result minus UNKNOWN and empty owners. Kept separate so poisoned
+  # entries can be reported (`== array-element candidates ==`).
+  def known(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      # PRIMITIVE_ELEMENT_SUPPORT: primitive tags are dropped too; CodeGen consumers
+      # only guard with mrb_obj_class against registry classes.
+      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = known unless known.empty?
+    end
+  end
+
+  # PRIMITIVE_ELEMENT_SUPPORT: diagnostic-only counterpart of `.known`, so
+  # provably-primitive ivars are not listed with the OPAQUE ones.
+  def primitives(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = prim unless prim.empty?
+    end
+  end
+
+  def unknowns(table)
+    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+
+  # ANY_OPAQUE_SUPPORT: `.unknowns` split by `poison_reason`; a filter over
+  # `.unknowns` so the two cannot disagree.
+  def unknowns_by_reason(table, poison_reason, reason)
+    unknowns(table).select do |name|
+      owner, ivar = name.split('#@', 2)
+      poison_reason.dig(owner, ivar) == reason
+    end
+  end
+end
+
+class ArrayElementLayout
+  UNKNOWN = ElementTableQueries::UNKNOWN
+  extend ElementTableQueries
+
+  # "This site provably introduces no elements"; kept apart from unreadable (see
+  # array_element_source_scan's ARRAY arm).
+  VACUOUS = :vacuous
+
+  # owner -> {ivar => element class}, only for ivars ClassLayout proved always
+  # hold an Array (every consumer has already proved its receiver is an Array).
+  # ANY_OPAQUE_SUPPORT: when given a Hash, `poison_reason` records, at the moment
+  # an ivar first becomes UNKNOWN:
+  #   :any    -- two traced sites disagree: provably heterogeneous; no
+  #              annotation can help.
+  #   :opaque -- some site could not be traced: a candidate for an annotation.
+  # nil (the default) changes nothing.
+  # ELEMENT_SIGNATURE_CHECK: when given a Hash, `site_classes` collects owner -> ivar -> Set of every class a
+  # traced site wrote, so an RBS `@x: Array[C]` seed can be checked against them (AnnotationContradictions.
+  # ivar_element_conflicts). nil (the default) changes nothing.
+  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {},
+                    poison_reason: nil, closed_world: nil, included_modules: {}, prepended_modules: {},
+                    unknown_mixins: {}, site_classes: nil)
+    methods_of = Hash.new { |h, k| h[k] = [] }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    # Registry classes, used by resolve_owner_name for bare GETCONST tokens.
+    known_owners = Set.new(registry.values.flatten.map(&:owner))
+    # Classes some other class declares as its superclass (see
+    # self_receiver_class). :none and unrecognized expressions are dropped.
+    subclassed = Set.new(superclass_of.values.select { |v| v.is_a?(String) })
+
+    # name -> element/return class, only for MONO names: an annotation sits on one
+    # irep, so it can only speak for a call no other method could receive.
+    mono_ann = lambda do |field|
+      lambda do |name|
+        defs = registry[name]
+        next nil unless defs && defs.size == 1 && defs.first.irep
+
+        element_annotations[defs.first.irep]&.public_send(field)
+      end
+    end
+    annotated_element = mono_ann.call(:element)
+    annotated_ret_class = mono_ann.call(:ret_class)
+
+    elements = Hash.new { |h, k| h[k] = {} }
+
+    Fixpoint.iterate('ArrayElementLayout.analyze', Fixpoint::SWEEP_LIMIT) do
+      changed = false
+      methods_of.each do |owner, labels|
+        array_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Array' }.keys
+        next if array_ivars.empty?
+
+        labels.each do |label|
+          # ELEMENT_CLASS_SUPPORT: sweep the method AND every nested block body.
+          # Populating code often lives in blocks, which have no MethodDef
+          # (`row.members.each { |_, m| @members << member(db, m) }`); stopping at the
+          # method would miss those writers. Blocks share self, but their parameters are
+          # not method arguments, so mand/arg_classes are zeroed (as in
+          # block_return_class).
+          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args,
+                    element_annotations[label]&.arg_elements]]
+          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil, nil] }
+
+          sweep.each do |(cur_label, mand, arg_classes, arg_elements)|
+            irep = ireps.fetch(cur_label)
+            ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
+                    class_annotations: class_annotations, element_annotations: element_annotations,
+                    known_owners: known_owners, subclassed: subclassed,
+                    closed_world: closed_world, superclass_of: superclass_of,
+                    included_modules: included_modules, prepended_modules: prepended_modules,
+                    unknown_mixins: unknown_mixins,
+                    ivar_classes: (class_layout[owner] || {}), mand: mand,
+                    arg_classes: arg_classes, arg_elements: arg_elements, elements: elements,
+                    annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
+
+            # Library writers (`@x.push(v)`) are not modelled: see the header's residual note.
+            BytecodeIR.for(irep).each_with_op(:SETIV, :SETIDX) do |insn, idx|
+              found = nil
+              targets = nil
+              if insn.op == :SETIV
+                ivar = insn.ivar
+                next unless array_ivars.include?(ivar)
+
+                targets = [ivar]
+
+                src_reg = insn.regs.first
+                found = array_element_source_scan(irep, idx, src_reg, ctx)
+                # NIL_TOLERANT_JOIN (element dimension): `@x = nil` says nothing about the
+                # elements; see ClassLayout.analyze.
+                next if found.nil? && nil_literal_write?(irep, idx, src_reg)
+              elsif insn.op == :SETIDX
+                # ELEMENT_CLASS_SUPPORT: `@a[0] = x` is OP_SETIDX, not SEND :[]=.
+                # "SETIDX R4 (R5) (R6)" is `R[a][R[a+1]] = R[a+2]`: receiver R4, element R6.
+                recv, _i_reg, val = insn.regs
+                next unless recv && val
+
+                targets = mutated_ivar_targets(irep, idx, recv) & array_ivars
+                next if targets.empty?
+
+                found = element_value_class(irep, idx, val, ctx, 1)
+              else
+                next
+              end
+
+              # An element-free site (`@x = []`) must not reach the join.
+              next if found == VACUOUS
+
+              found ||= UNKNOWN
+              # A mutation through a register that may hold several ivars counts for each.
+              targets.each do |ivar|
+                (((site_classes[owner] ||= {})[ivar] ||= Set.new) << found) if site_classes && found != UNKNOWN
+                before = elements[owner][ivar]
+                # Sticky join as in ClassLayout: disagreement or an unreadable site poisons
+                # permanently. Never a majority vote.
+                merged = if before.nil?
+                           found
+                         elsif before == UNKNOWN || found == UNKNOWN || before != found
+                           UNKNOWN
+                         else
+                           before
+                         end
+                if merged != before
+                  elements[owner][ivar] = merged
+                  if merged == UNKNOWN && poison_reason
+                    # First poisoning: `found == UNKNOWN` means some site was never traced
+                    # (:opaque); otherwise two traced sites conflict (:any).
+                    (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                  end
+                  changed = true
+                end
+              end
+            end
+          end
+        end
+      end
+      changed
+    end
+
+    elements
+  end
+end
+
+# ELEMENT_CLASS_SUPPORT: the ivars a mutation's receiver may name: the GETIV of
+# every producer of the register (through handler edges), so `(@x ||= [])[0] = v`,
+# whose receiver is `@x` or the fresh `[]` just stored into it, still counts as a
+# write to @x. Extra targets only add checks. Empty means "not attributed" (the
+# aliasing residual in this section's header), not "no mutation".
+def mutated_ivar_targets(irep, idx, reg)
+  return [] unless reg
+
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true) || []
+  sources.filter_map { |p| p.insn.ivar if p.op == :GETIV }.uniq
+end
+
+# HASH_ELEMENT_SUPPORT: "every VALUE of this Hash ivar is class X"
+# (HASH_ELEM_HINT). Narrower than ArrayElementLayout: values only, and only SETIDX
+# (`h[k] = v`) writes are attributed. Mirrors ArrayElementLayout's
+# analyze/known/unknowns, kept as its own class rather than parameterized.
+class HashElementLayout
+  UNKNOWN = ElementTableQueries::UNKNOWN
+  extend ElementTableQueries
+
+  VACUOUS = :vacuous
+
+  # owner -> {ivar => value class}, only for ivars ClassLayout proved are Hashes.
+  # `array_elements` (ArrayElementLayout's finished raw table, so this must run
+  # after it) lets `@h[k] = @roster[i]` resolve; empty means such chains poison.
+  # ANY_OPAQUE_SUPPORT: `poison_reason` as in ArrayElementLayout.analyze; ELEMENT_SIGNATURE_CHECK: `site_classes`
+  # likewise.
+  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, array_elements = {},
+                    superclass_of = {}, poison_reason: nil, closed_world: nil, included_modules: {},
+                    prepended_modules: {}, unknown_mixins: {}, site_classes: nil)
+    methods_of = Hash.new { |h, k| h[k] = [] }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    known_owners = Set.new(registry.values.flatten.map(&:owner))
+    subclassed = Set.new(superclass_of.values.select { |v| v.is_a?(String) })
+
+    mono_ann = lambda do |field|
+      lambda do |name|
+        defs = registry[name]
+        next nil unless defs && defs.size == 1 && defs.first.irep
+
+        element_annotations[defs.first.irep]&.public_send(field)
+      end
+    end
+    annotated_element = mono_ann.call(:element)
+    annotated_ret_class = mono_ann.call(:ret_class)
+
+    hash_elements = Hash.new { |h, k| h[k] = {} }
+
+    Fixpoint.iterate('HashElementLayout.analyze', Fixpoint::SWEEP_LIMIT) do
+      changed = false
+      methods_of.each do |owner, labels|
+        hash_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Hash' }.keys
+        next if hash_ivars.empty?
+
+        labels.each do |label|
+          # Transitive block-body sweep, as in ArrayElementLayout.analyze.
+          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args]]
+          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil] }
+
+          sweep.each do |(cur_label, mand, arg_classes)|
+            irep = ireps.fetch(cur_label)
+            ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
+                    class_annotations: class_annotations, element_annotations: element_annotations,
+                    known_owners: known_owners, subclassed: subclassed,
+                    closed_world: closed_world, superclass_of: superclass_of,
+                    included_modules: included_modules, prepended_modules: prepended_modules,
+                    unknown_mixins: unknown_mixins,
+                    ivar_classes: (class_layout[owner] || {}), mand: mand,
+                    arg_classes: arg_classes, elements: array_elements, hash_elements: hash_elements,
+                    annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
+
+            # Library writers (`@h.store(k, v)`) are not modelled: see the header's residual note.
+            BytecodeIR.for(irep).each_with_op(:SETIV, :SETIDX) do |insn, idx|
+              found = nil
+              targets = nil
+              if insn.op == :SETIV
+                ivar = insn.ivar
+                next unless hash_ivars.include?(ivar)
+
+                targets = [ivar]
+
+                src_reg = insn.regs.first
+                found = hash_element_source_scan(irep, idx, src_reg, ctx)
+                # NIL_TOLERANT_JOIN (hash-value dimension); see ArrayElementLayout.analyze.
+                next if found.nil? && nil_literal_write?(irep, idx, src_reg)
+              elsif insn.op == :SETIDX
+                # `h[k] = v` is OP_SETIDX: "SETIDX R4 (R5) (R6)", receiver R4, value R6 (the
+                # key is not read).
+                recv, _i_reg, val = insn.regs
+                next unless recv && val
+
+                targets = mutated_ivar_targets(irep, idx, recv) & hash_ivars
+                next if targets.empty?
+
+                found = element_value_class(irep, idx, val, ctx, 1)
+              else
+                next
+              end
+
+              # A value-free site (`@h = {}`) is VACUOUS (see hash_element_source_scan).
+              next if found == VACUOUS
+
+              found ||= UNKNOWN
+              # A mutation through a register that may hold several ivars counts for each.
+              targets.each do |ivar|
+                (((site_classes[owner] ||= {})[ivar] ||= Set.new) << found) if site_classes && found != UNKNOWN
+                before = hash_elements[owner][ivar]
+                # Sticky join, as in ArrayElementLayout.analyze.
+                merged = if before.nil?
+                           found
+                         elsif before == UNKNOWN || found == UNKNOWN || before != found
+                           UNKNOWN
+                         else
+                           before
+                         end
+                if merged != before
+                  hash_elements[owner][ivar] = merged
+                  if merged == UNKNOWN && poison_reason
+                    # See ArrayElementLayout.analyze's `poison_reason`.
+                    (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                  end
+                  changed = true
+                end
+              end
+            end
+          end
+        end
+      end
+      changed
+    end
+
+    hash_elements
+  end
+end
+
+# ---------------------------------------------------------------------------
+# The element scans read the IR: each joins over every producer of
+# the register (BytecodeIR.producers, through handler edges). All producers must
+# classify and agree, and a VACUOUS one (an empty literal) agrees with any class.
+# A refused dataflow answers nil. A container literal counts only when nothing
+# can mutate it before the read (Program#quiet_span?), or `a = []; a << x; @v = a`
+# would read as vacuous.
+# ---------------------------------------------------------------------------
+
+# The one class +classify+ gives every producer of +reg+ at +idx+, VACUOUS when each is vacuous, else nil. +entry+
+# classifies the value the frame was entered with.
+def join_element_producers(irep, idx, reg, entry: nil)
+  sources = BytecodeIR.producers(irep, idx, reg, through_handlers: true)
+  return nil unless sources
+  found = nil
+  vacuous = false
+  sources.each do |producer|
+    cls = producer.entry? ? entry&.call(producer.reg) : yield(producer)
+    return nil if cls.nil?
+
+    if cls == ArrayElementLayout::VACUOUS
+      vacuous = true
+      next
+    end
+    return nil if found && found != cls
+
+    found = cls
+  end
+  found || (vacuous ? ArrayElementLayout::VACUOUS : nil)
+end
+
+# The one class every element (or Hash value) of a container literal has, VACUOUS for an empty one, else nil.
+def literal_element_class(irep, literal, ctx, depth)
+  return ArrayElementLayout::VACUOUS if literal.empty?
+
+  classes = literal.value_regs.map { |r| element_value_class(irep, literal.index, r, ctx, depth + 1) }
+  classes.any?(&:nil?) || classes.uniq.size != 1 ? nil : classes.first
+end
+
+# One producer's class for element_value_class.
+# ELEMENT_PICK_SENDS: core sends that, without arguments, return one element of an Array receiver (first, last) or
+# the one their block picks (find, detect, min_by, max_by). A hint only: a Ruby redefinition is a named residual the
+# guarded consumers re-check, like every other ELEMENT_CLASS_SUPPORT fact. BC2CPP_ELEMENT_PICKS=0 turns it off.
+ELEMENT_PICK_SENDS = %w[first last find detect min_by max_by].freeze
+
+def element_producer_class(irep, producer, ctx, depth)
+  insn = producer.insn
+  i = producer.index
+  # PRIMITIVE_ELEMENT_SUPPORT: diagnostic only (`.known` strips these); nil is not an element shape here.
+  literal = BytecodeIR.literal_class(irep, i)
+  return PRIMITIVE_ELEMENT_CLASSES.include?(literal) ? literal : nil if literal
+
+  # `a[i]` is an index opcode, not SEND :[]. GETIDX reads R[a][R[a+1]], GETIDX0 R[b][0], AREF R[b][c].
+  if BytecodeIR::Ops::INDEX_READ.include?(insn.op) || insn.op == :AREF
+    recv = insn.op == :GETIDX ? producer.reg : insn.regs[1]
+    return nil unless recv
+
+    hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
+    return hit if hit && hit != ArrayElementLayout::VACUOUS
+    # AREF on a non-Array is destructuring (index 0 yields the receiver), not a `:[]` dispatch.
+    return nil if insn.op == :AREF
+
+    return receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
+  end
+  return nil unless BytecodeIR::Ops::SEND.include?(insn.op)
+
+  name = insn.sym
+  return nil unless name
+
+  annotated = ctx[:annotated_ret_class]&.call(name)
+  return annotated if annotated
+
+  self_recv = BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+  # ELEMENT_PICK_SENDS: `a.first`, `a.find { }` return one element of the Array (or nil, which consumers guard).
+  if !self_recv && ELEMENT_PICK_SENDS.include?(name) && (insn.argc || 0).zero? && ENV['BC2CPP_ELEMENT_PICKS'] != '0'
+    hit = array_element_source_scan(irep, i, producer.reg, ctx, depth + 1)
+    return hit if hit && hit != ArrayElementLayout::VACUOUS
+  end
+  scoped = if self_recv
+             sc = self_receiver_class(ctx)
+             sc && class_scoped_return_class(sc, name, ctx, depth)
+           else
+             receiver_scoped_return_class(irep, i, producer.reg, name, ctx, depth)
+           end
+  scoped || mono_fresh_return_class(name, ctx, depth)
+end
+
+# The ivars a mutation's receiver may name: the GETIV of every producer (through handler edges, so a write inside a
+# protected range is still attributed). Empty means "not attributed", not "no mutation".

@@ -1,0 +1,633 @@
+# frozen_string_literal: true
+
+require 'set'
+require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_ops'
+
+# CodeGen: CONSTRUCTOR_POOLS.
+#
+# ENTRY_ARG_CALLSITE_PROOF and the argument pools refuse `initialize` (rule 5): no SEND names it, so its
+# call sites cannot be enumerated by name. They can by class: the initialize D a class K runs is a fact of
+# the closed hierarchy (numeric_init_definition up the superclass chain), and D is entered from two places:
+#
+#   * `Klass.new(args)`. Every definition reaching the receiver register is a GETCONST/GETMCNST and no
+#     SETCONST binds a value to that name, so the site builds a class named like it
+#     (ClosedWorld#classes_named). A `new` in a method of X whose receiver is X's own class object (the
+#     implicit-self `new` of `def self.m`, `self.class.new`) builds X or a descendant ("rooted").
+#   * `super(a, b)` in the initialize of a subclass (a bare `super` withdraws the target).
+#
+# D becomes a candidate, in the shape ENTRY_ARG_CALLSITE_PROOF's candidates have so the numeric, Fixnum and
+# class pools read it unchanged, only when nothing else can enter it:
+#
+#   * a `new` whose receiver is not provably a constant, rooted or a parameter of class constants (CLASS_OBJECT_ARGS)
+#     could build any class. It withdraws every D
+#     it can get past ENTER for (mand <= argc <= mand + opt, any count with a rest parameter), all of them when
+#     the count is unknown (splat, keyword);
+#   * no `:new`/`:initialize` Symbol, keyword or computed name (an `alias_method :x, :initialize` in a class
+#     body withdraws that class's initialize only), no Ruby `new`, no module or singleton `initialize`, no
+#     explicit `initialize` call, no Class mixin, no wild class;
+#   * D's class and every class running D has a plain declared-class chain to Object (an Exception subclass is
+#     built by `raise`), is not opaque, and no native or foreign Ruby source spells its root and last segment.
+#
+# Positions 1..mand are candidates. An optional position mand+k is one only under CONSTRUCTOR_OPTIONALS (see
+# constructor_optional_positions): every default is a literal load, so no default code reads a later argument's
+# ENTER slot, and only the sites that pass position mand+k contribute to it. A post-mandatory parameter leaves D out.
+#
+# BC2CPP_CONSTRUCTOR_POOLS=0 turns it off.
+class CodeGen
+  # Ops that name a method without calling it, so the name can reach a body with arguments nobody sees.
+  CONSTRUCTOR_NAMING_OPS = %i[LOADSYM ALIAS KARG KEY_P].freeze
+
+  # Ops a CONSTRUCTOR_OPTIONALS default may consist of: each writes its leading register and reads none.
+  CONSTRUCTOR_LITERAL_DEFAULT_OPS = (BytecodeIR::Ops::LOADI_OPS | Set[:LOADNIL, :LOADTRUE, :LOADFALSE, :LOADSYM, :LOADL,
+                                                                    :STRING]).freeze
+
+  # [irep label, argument position] => [sites, position], as entry_arg_candidates.
+  def constructor_pool_candidates
+    return @constructor_pool_candidates if defined?(@constructor_pool_candidates)
+
+    @constructor_pool_status = {}
+    @constructor_pool_candidates = {}
+    refusal = constructor_pools_refusal
+    if refusal
+      @constructor_pool_refusal = refusal
+    else
+      build_constructor_pool_candidates
+    end
+    @constructor_pool_candidates
+  end
+
+  # RBS_CHECKED_PARAMS: every site that can enter the initialize body +label+, as
+  # [[irep, index, receiver register, positional argc, owner], ...] (argument k is register receiver + k), or
+  # [nil, why] when something the closed world cannot enumerate may enter it. :no_sites is the empty list: no
+  # `new` or `super` reaches the body. Only positions 1..mandatory are entry-site facts (see the header).
+  def constructor_entry_sites(label)
+    constructor_pool_candidates
+    return [nil, @constructor_pool_refusal] if @constructor_pool_refusal
+
+    status = @constructor_pool_status[label]
+    return [[], nil] if status == :no_sites
+    return [nil, status || 'not an initialize of a declared class'] unless status == :ok
+    # A zero-argument `new` is no site here (constructor_new_site), so an initialize without mandatory positions
+    # has entries the list would miss.
+    return [nil, 'only optional positions are pooled'] if mandatory_arity(@ireps[label]).zero?
+
+    [@constructor_pool_candidates.fetch([label, 1]).first, nil]
+  end
+
+  # BC2CPP_CTOR_OPTIONALS=0 pools mandatory positions only (the rule before CONSTRUCTOR_OPTIONALS).
+  def constructor_optionals_enabled?
+    ENV.fetch('BC2CPP_CTOR_OPTIONALS', '1') != '0'
+  end
+
+  # CONSTRUCTOR_OPTIONALS: the optional positions mand+1..mand+opt of +irep+, or [] unless each default is one literal
+  # load into its own register. vm.c OP_ENTER jumps past the defaults of the passed positions (the JMP table after it),
+  # so an omitted position's register holds its default from then on and a passed one's holds the argument; a default
+  # that read a register could see a later position's slot before ENTER's caller value or its own default is there.
+  def constructor_optional_positions(irep)
+    return [] unless constructor_optionals_enabled?
+
+    mand = mandatory_arity(irep)
+    opt, _table, targets = optional_arg_table(irep)
+    return [] unless opt.positive? && targets
+
+    program = BytecodeIR.for(irep)
+    starts = targets.map { |addr| program.address_to_index[addr] }
+    return [] unless starts.all? && starts.each_cons(2).all? { |a, b| a < b }
+
+    literal = (0...opt).all? do |i|
+      (starts[i]...starts[i + 1]).all? do |j|
+        insn = program.source_at(j)
+        CONSTRUCTOR_LITERAL_DEFAULT_OPS.include?(insn.op) && insn.reg.to_i == mand + 1 + i
+      end
+    end
+    literal ? (mand + 1..mand + opt).to_a : []
+  end
+
+  # Does a site pass its arguments with literal keywords (CONSTRUCTOR_KEYWORDS)? For an initialize without keyword
+  # parameters vm.c OP_ENTER appends those keywords as one more positional Hash, which an optional position takes.
+  def constructor_keyword_site?(site)
+    irep, idx, = site
+    !constructor_keyword_argc(BytecodeIR.for(irep).source_at(idx)).nil?
+  end
+
+  # The class whose instance `self` is in the body +label+ (blocks included), or nil.
+  def ivar_reader_owner(label)
+    numeric_irep_owner[label]&.owner
+  end
+
+  # The same for a read in an instance method of +owner+ (an attr_reader's slot).
+  def ivar_write_sites_of(owner, name)
+    sites, why = ivar_store_sites_of(owner, name)
+    return [nil, why] if why
+    return [nil, "@#{name} may be read before a constructor of #{owner} assigns it"] unless numeric_ivar_assured?(owner, name)
+
+    [sites, nil]
+  end
+
+  # ivar_write_sites_of without INIT_ASSIGNED: every SETIV that can write `@name` of an +owner+ instance, for a
+  # consumer to which an unassigned (nil) read is harmless (SEALED_HASH_IVAR: `nil[k]` raises NoMethodError).
+  def ivar_store_sites_of(owner, name)
+    setup_numeric_ivar_groups unless @numeric_ivar_groups
+    return [nil, "ivar proofs are off (#{@numeric_ivar_disabled})"] if @numeric_ivar_disabled
+    return [nil, 'read outside a method of a declared class'] unless owner && @closed_world.class_declared?(owner)
+
+    group = @numeric_ivar_groups[[numeric_family(owner), name]]
+    return [nil, "@#{name} has a writer outside its SETIV sites (NUMERIC_IVAR_PROOF)"] if group.nil? || group.structural
+
+    # A store in a method of W writes an instance of W or a descendant, a read in a method of +owner+ reads one of
+    # +owner+ or a descendant: in a tree of classes both can be one object only when one class is the other's
+    # ancestor. A store in a module's method may write any includer's instance and is always kept.
+    [group.sites.select { |site_irep, _idx, _reg| ivar_classes_overlap?(ivar_reader_owner(site_irep.label), owner) }, nil]
+  end
+
+  def ivar_classes_overlap?(writer, reader)
+    return true unless writer && @closed_world.class_declared?(writer)
+
+    constructor_chain(writer).include?(reader) || constructor_chain(reader).include?(writer)
+  end
+
+  # Why the whole analysis is off, or nil.
+  def constructor_pools_refusal
+    return 'BC2CPP_CONSTRUCTOR_POOLS=0' if ENV.fetch('BC2CPP_CONSTRUCTOR_POOLS', '1') == '0'
+
+    world = @closed_world
+    return 'no outside-source scan' unless @foreign_method_names && @outside_tokens
+    return 'no closed world' unless world
+    return "closed world refusal: #{world.global_refusal}" if world.global_refusal
+    unless world.exact_instances_singleton_free?
+      makers = world.singleton_makers.first(5).map { |label, op| "#{label} #{op}" }
+      return "an object gets a singleton class (#{makers.join(', ')}#{', ...' if world.singleton_makers.size > 5})"
+    end
+    return 'non-standard new/allocate lookup' unless world.standard_constructor_lookup?
+    return 'Class has a mixin' unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty? &&
+                                      !@unknown_mixins.include?('Class')
+    return 'Ruby-defined new' unless (@registry['new'] || []).all? { |d| d.owner == '<native>' }
+    unless constructor_initializers_in_classes?
+      owners = (@registry['initialize'] || []).reject { |d| d.owner == '<native>' || world.class_declared?(d.owner) }.map(&:owner).uniq.sort
+      return "initialize defined outside a class: #{owners.join(', ')}"
+    end
+    return 'new/initialize installed out of sight' if %w[new initialize].any? { |name| world.unknown_def?(name) }
+
+    constructor_naming_refusal
+  end
+
+  # BC2CPP_CTOR_KEYWORDS=0 turns the keyword-call rule off (a keyword call, or a keyword parameter, refuses the initialize).
+  def constructor_keywords_enabled?
+    ENV.fetch('BC2CPP_CTOR_KEYWORDS', '1') != '0'
+  end
+
+  # CONSTRUCTOR_KEYWORDS: the positional count of a call that passes literal keywords (`new(a, b, k: v)`, n=2|nk=1), or
+  # nil for a splat, a packed kdict (`**opts`, nk=*) or a call without keywords. The keywords occupy the registers after
+  # the positionals; vm.c OP_ENTER hands them to a callee with keyword parameters as its kdict and appends them to the
+  # positionals of one without (an extra trailing Hash), so argument k <= n is the k-th positional either way.
+  def constructor_keyword_argc(insn)
+    return nil unless constructor_keywords_enabled?
+
+    n = insn.argc
+    nk = insn.keyword_argc
+    return nil unless n && nk && nk.positive?
+
+    n
+  end
+
+  # Does a keyword call with +positionals+ positional arguments leave all of D's mandatory positions (1..mand) as plain
+  # positionals? A call with fewer raises in ENTER or, without keyword parameters, would see the keyword Hash there.
+  def constructor_keyword_site_ok?(d, positionals)
+    positionals >= mandatory_arity(@ireps[d.irep])
+  end
+
+  # Every Ruby initialize belongs to a declared class: a module's or singleton's one could sit between a
+  # class and its superclass's initialize, or run with an argument list the sites do not show.
+  def constructor_initializers_in_classes?
+    (@registry['initialize'] || []).all? { |d| d.owner == '<native>' || @closed_world.class_declared?(d.owner) }
+  end
+
+  # A name in an op that does not call it can reach the body with arguments nobody sees. The one shape
+  # kept per class is `alias_method :other, :initialize` (or `alias other initialize`) in a class body,
+  # which makes that class's initialize callable as `other`: that initialize is withdrawn
+  # (@constructor_aliased). Anything else naming new/initialize turns the analysis off.
+  def constructor_naming_refusal
+    @constructor_aliased = Set.new
+    string_spelled = false
+    @ireps.each do |label, irep|
+      program = BytecodeIR.for(irep)
+      program.each_source do |insn, idx|
+        return 'explicit initialize call' if insn.sym == 'initialize' && BytecodeIR::Ops::SEND.include?(insn.op)
+
+        string_spelled ||= insn.op == :STRING && %w[new initialize].include?(irep.pool[insn.pool_index.to_i])
+        next unless CONSTRUCTOR_NAMING_OPS.include?(insn.op)
+
+        names = [insn.sym, (insn.first_of(:name)&.value if insn.op == :ALIAS)].compact
+        next unless names.any? { |name| %w[new initialize].include?(name) }
+
+        klass = constructor_alias_class(label, insn, program, idx)
+        return "#{insn.op} :#{names.join('/')} names new/initialize" unless klass
+
+        @constructor_aliased << klass
+      end
+    end
+    return 'new/initialize spelled as a String where a computed name can reach it' if string_spelled && DynamicNames.analyze(@ireps).last
+
+    nil
+  end
+
+  # The class whose body aliases its initialize under another name, or nil for any other use.
+  def constructor_alias_class(label, insn, program, idx)
+    klass = constructor_body_classes[label]
+    return nil unless klass
+
+    other = ->(name) { name && !%w[initialize new].include?(name) }
+    return (insn.first_of(:name)&.value == 'initialize' && other.call(insn.sym) ? klass : nil) if insn.op == :ALIAS
+    return nil unless insn.op == :LOADSYM && insn.sym == 'initialize'
+
+    # The neighbours keep the raw index window (idx +/- 1, nil past either end), so they stay source_at reads.
+    call = program.source_at(idx + 1)
+    prior = idx.positive? ? program.source_at(idx - 1) : nil
+    alias_call = call&.op == :SSEND && call.sym == 'alias_method' && call.plain_fixed_argc? && call.argc == 2 &&
+                 call.reg.to_i + 2 == insn.reg.to_i && prior&.op == :LOADSYM && prior.reg.to_i == call.reg.to_i + 1 &&
+                 other.call(prior.sym)
+    alias_call ? klass : nil
+  end
+
+  # Class body irep label => the class path it opens (CLASS or MODULE with an implicit or `::` outer).
+  def constructor_body_classes
+    @constructor_body_classes ||= begin
+      map = {}
+      children = @ireps.values.flat_map { |irep| Array(irep.reps) }.to_set
+      walk = lambda do |label, namespace|
+        irep = @ireps.fetch(label)
+        bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE)
+        irep.each_with_op(:CLASS, :MODULE) do |insn, idx|
+          full = BytecodeIR.class_body_path(irep, idx, namespace)
+          next unless full && bodies.key?(idx)
+
+          child = bodies[idx]
+          map[child] = full
+          walk.call(child, full)
+        end
+      end
+      @ireps.each_key { |label| walk.call(label, nil) unless children.include?(label) }
+      map
+    end
+  end
+
+  def build_constructor_pool_candidates
+    found = constructor_site_scan
+    @constructor_pool_stats = found[:stats]
+
+    (@registry['initialize'] || []).each do |d|
+      next unless d.irep
+
+      status, here = constructor_pool_status(d, found)
+      @constructor_pool_status[d.irep] = status
+      next unless status == :ok
+
+      irep = @ireps[d.irep]
+      (1..mandatory_arity(irep)).each { |k| @constructor_pool_candidates[[d.irep, k]] = [here, k] }
+      constructor_optional_candidates(d, irep, here)
+    end
+  end
+
+  # CONSTRUCTOR_OPTIONALS: optional position k pools the sites that pass it (positional argc >= k); a site that omits
+  # it runs the default instead. Nothing is added when no site passes k, or when a keyword site can put its Hash there.
+  def constructor_optional_candidates(d, irep, here)
+    positions = constructor_optional_positions(irep)
+    return if positions.empty?
+
+    fields = irep.enter.enter_fields.map(&:to_i)
+    return if fields[4..5].all?(&:zero?) && here.any? { |site| constructor_keyword_site?(site) }
+
+    positions.each do |k|
+      passing = here.select { |(_ir, _i, _recv, argc, _own)| argc >= k }
+      @constructor_pool_candidates[[d.irep, k]] = [passing, k] unless passing.empty?
+    end
+  end
+
+  # Every `new` and `super` in the closed world, sorted by what they can reach (see the header). ENTRY_SEEDS reads it
+  # too, so it is a method of its own; it has no effect on the pools themselves.
+  def constructor_site_scan
+    found = { sites: Hash.new { |h, k| h[k] = [] }, broken: {}, open_argc: [], rooted: [], stats: Hash.new(0) }
+
+    @ireps.each_value do |irep|
+      owner = entry_arg_body_owner[irep.label]
+      BytecodeIR.for(irep).each_source do |insn, idx|
+        if insn.op == :SUPER
+          constructor_super_site(irep, idx, insn, owner, found)
+        elsif BytecodeIR::Ops::SEND.include?(insn.op) && insn.sym == 'new'
+          constructor_new_site(irep, idx, insn, owner, found)
+        end
+      end
+    end
+
+    @constructor_aliased.each do |klass|
+      target = constructor_init_target(klass)
+      found[:broken][target.irep] ||= "initialize aliased in #{klass}" if target
+    end
+    found
+  end
+
+  # [:ok, sites], or [why D is not a candidate, nil]. +exempt+ names classes whose outside spelling the caller has
+  # accounted for (ENTRY_SEEDS); the pools never pass it.
+  def constructor_pool_status(d, found, exempt: nil)
+    broken = found[:broken]
+    return [broken[:all], nil] if broken[:all]
+
+    irep = @ireps[d.irep]
+    fields = irep.enter ? irep.enter.enter_fields : []
+    mand = fields[0].to_i
+    opt = fields[1].to_i
+    # Positions 1..mand hold the first positional arguments of every call that gets as far as the body, whatever
+    # follows them (optional, rest, block); a post-mandatory or keyword parameter is left out to stay clear of ENTER's hash handling.
+    # CONSTRUCTOR_KEYWORDS: keyword parameters (fields 4 and 5) leave positions 1..mand alone (vm.c OP_ENTER keeps the
+    # caller's keywords in a separate kdict register when the callee accepts any), so only a post-mandatory parameter
+    # is still refused. With the switch off the old rule refuses all three.
+    return [:arity, nil] unless (mand.positive? || constructor_optional_positions(irep).any?) && fields[3].to_i.zero? &&
+                                (constructor_keywords_enabled? || fields[4..5].all? { |f| f.to_i.zero? })
+    return [broken[d.irep], nil] if broken[d.irep]
+
+    reach = constructor_reach(d)
+    return [:hierarchy, nil] unless reach
+    return [:outside_name, nil] if reach.any? { |klass| !exempt&.include?(klass) && @closed_world.outside_spells_class?(klass) }
+
+    # A call with fewer than mand or more than mand + opt positionals raises in ENTER (no rest parameter).
+    enters = ->(argc) { argc.between?(mand, fields[2].to_i.positive? ? Float::INFINITY : mand + opt) }
+    clash = found[:open_argc].find { |argc, _| enters.call(argc) }
+    return ["unresolved new with #{clash[0]} arguments (#{clash[1]})", nil] if clash
+
+    # A `new` in a method of X builds X or a descendant, so it reaches D when X is, or is above, a class that runs D.
+    rooted = found[:rooted].select { |root, _argc, _site| reach.any? { |klass| constructor_chain(klass).include?(root) } }
+    return ['new with a splat or keyword', nil] if rooted.any? { |_root, argc, _site| argc.nil? }
+
+    here = (found[:sites][d.irep] + rooted.map(&:last)).select { |(_ir, _i, _recv, argc, _own)| enters.call(argc) }
+    # :no_sites means no Ruby `new`/`super` enters D at all (ENTRY_SEEDS relies on it). A zero-argument `new` is never
+    # a site, so without mandatory positions an empty list proves no such thing.
+    return [(mand.zero? ? 'no site passes an argument' : :no_sites), nil] if here.empty?
+
+    [:ok, here]
+  end
+
+  # The classes that run D (D's class and the descendants resolving to it), or nil when the set is not
+  # fully visible.
+  def constructor_reach(d)
+    world = @closed_world
+    return nil unless constructor_plain_chain?(d.owner)
+
+    hierarchy = world.class_hierarchy(d.owner)
+    return nil unless hierarchy && hierarchy[:wild].empty?
+
+    ([d.owner] + hierarchy[:descendants].to_a).select { |klass| constructor_init_target(klass)&.irep == d.irep }
+  end
+
+  # Superclass chain of declared classes ending at an implicit Object.
+  def constructor_plain_chain?(klass)
+    seen = Set.new
+    while seen.add?(klass)
+      return false unless @closed_world.class_declared?(klass)
+
+      parent = @superclass_of[klass]
+      return true if parent == :none
+      return false unless parent.is_a?(String)
+
+      klass = parent
+    end
+    false
+  end
+
+  # The initialize an instance of +klass+ runs, nil when it is Object's or unknowable.
+  def constructor_init_target(klass)
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      definition = numeric_init_definition(klass)
+      return nil if definition == :unknown
+      return definition if definition
+
+      klass = @superclass_of[klass]
+    end
+    nil
+  end
+
+  # Every initialize definition the classes in +classes+ run.
+  def constructor_targets(classes)
+    classes.filter_map { |klass| constructor_init_target(klass) }.uniq
+  end
+
+  # +klass+ and its superclasses, with the implicit Object, Kernel and BasicObject at the end.
+  def constructor_chain(klass)
+    @constructor_chain ||= {}
+    @constructor_chain[klass] ||= begin
+      chain = []
+      while klass.is_a?(String) && !chain.include?(klass)
+        chain << klass
+        klass = @superclass_of[klass]
+      end
+      chain + %w[Object Kernel BasicObject]
+    end
+  end
+
+  def constructor_new_site(irep, idx, insn, owner, found)
+    stats = found[:stats]
+    stats[:new] += 1
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    # No initialize this analysis pools takes zero arguments: a count of 0 raises in ENTER.
+    return stats[:no_args] += 1 if argc&.zero?
+
+    site = [irep, idx, insn.reg.to_i, argc, owner]
+    if argc.nil? && (packed = constructor_packed_argc(irep, idx, insn))
+      stats[:packed] += 1
+      argc = packed
+      site = [irep, idx - 1, insn.reg.to_i, argc, owner]
+    end
+    kw_argc = constructor_keyword_argc(insn) if argc.nil?
+    classes = constructor_named_classes(irep, idx, insn) unless BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+    if classes.nil? && !BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op) && (via_param = class_object_receiver_classes(irep, idx, insn))
+      # CLASS_OBJECT_ARGS: the receiver is a parameter every caller passes class constants for.
+      classes = via_param
+      stats[:param_named] += 1
+    end
+    if classes
+      targets = constructor_targets(classes)
+      stats[targets.empty? ? :named_no_ruby_init : :named] += 1
+      targets.each do |d|
+        if kw_argc && constructor_keyword_site_ok?(d, kw_argc)
+          # CONSTRUCTOR_KEYWORDS: a keyword call is a site of its positionals.
+          stats[:keyword_named] += 1
+          found[:sites][d.irep] << [irep, idx, insn.reg.to_i, kw_argc, owner]
+          next
+        end
+        if kw_argc
+          stats[:keyword_refused_short] += 1
+          found[:broken][d.irep] ||= "keyword new with fewer positionals than mandatory parameters at #{irep.label}:#{idx}"
+          next
+        end
+        found[:sites][d.irep] << site
+        found[:broken][d.irep] ||= "new with a splat or keyword at #{irep.label}:#{idx}" if argc.nil?
+      end
+    elsif (root = constructor_new_root(irep, idx, insn, numeric_irep_owner[irep.label]))
+      stats[:rooted] += 1
+      found[:rooted] << [root, argc, site]
+    elsif argc.nil?
+      stats[:unresolved_unknown_argc] += 1
+      found[:broken][:all] = "new with a splat or keyword on an unknown receiver at #{irep.label}:#{idx}"
+    else
+      stats[:unresolved] += 1
+      found[:open_argc] << [argc, "new at #{File.basename(irep.file.to_s)} #{irep.label}:#{idx}"]
+    end
+  end
+
+  # The class X whose method the `new` is in when its receiver is X's own class object: the implicit-self
+  # PACKED_NEW: mrbc passes more than 14 positionals as one Array (`ARRAY R(a+1) n`, then `SEND Ra :new n=*`) and the
+  # callee's OP_ENTER unpacks it, so the call passes n positionals. ARRAY writes only R(a+1), so argument k is R(a+k)
+  # at the ARRAY, which is where the site reads it: the positional count, or nil unless the ARRAY is the send's only
+  # predecessor. BC2CPP_CTOR_PACKED=0 leaves such a `new` a splat.
+  def constructor_packed_argc(irep, idx, insn)
+    return nil if ENV['BC2CPP_CTOR_PACKED'] == '0' || idx.zero?
+    return nil unless insn.positional_splat? && !insn.keyword_arguments?
+
+    program = BytecodeIR.for(irep)
+    array = program.source_at(idx - 1)
+    return nil unless array.op == :ARRAY && array.typed.size == 2 && array.reg.to_i == insn.reg.to_i + 1
+
+    preds = program.instruction_predecessors(include_handlers: true)
+    return nil unless preds && preds[idx] == [idx - 1]
+
+    count = array.typed[1].value.to_i
+    count.positive? ? count : nil
+  end
+
+  # The `new` send a constructor site reads its arguments for: the site's own instruction, or the send after a
+  # PACKED_NEW ARRAY (constructor_packed_argc).
+  def constructor_site_send_index(irep, idx)
+    BytecodeIR.for(irep).source_at(idx).op == :ARRAY ? idx + 1 : idx
+  end
+
+  # `new` of `def self.m` in X, or `self.class.new` in an instance method of X.
+  def constructor_new_root(irep, idx, insn, owner)
+    return nil unless owner && !@closed_world.module_declared?(owner.owner.delete_suffix('.singleton'))
+
+    if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+      owner.owner.end_with?('.singleton') ? owner.owner.delete_suffix('.singleton') : nil
+    else
+      constructor_self_class_root(irep, idx, insn, owner)
+    end
+  end
+
+  # `self.class.new`: the receiver's one reaching definition is a SEND0 `class` on the method's own `self`.
+  def constructor_self_class_root(irep, idx, insn, owner)
+    return nil if owner.owner.end_with?('.singleton') || !(@registry['class'] || []).all? { |d| d.owner == '<native>' }
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
+    return nil unless defs&.size == 1 && !defs.first.entry?
+
+    send = BytecodeIR.for(irep).source_at(defs.first.index)
+    return nil unless irep.label == owner.irep && send.sym == 'class'
+    return owner.owner if send.op == :SSEND0
+    return nil unless send.op == :SEND0
+
+    selves = BytecodeIR.reaching_definitions(irep, defs.first.index, send.reg, through_handlers: true, shared: true)
+    selves&.size == 1 && selves.first.entry? && selves.first.reg == 0 ? owner.owner : nil
+  end
+
+  # The declared classes the constant receiver of the `new` at +idx+ can name, or nil when some
+  # definition reaching it is not a constant that only names classes.
+  def constructor_named_classes(irep, idx, insn)
+    defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg, through_handlers: true, shared: true)
+    return nil if defs.nil? || defs.empty?
+
+    names = defs.map do |definition|
+      next nil if definition.entry?
+
+      writer = BytecodeIR.for(irep).source_at(definition.index)
+      case writer.op
+      when :GETCONST then writer.const_name
+      when :GETMCNST then writer.mcnst_name
+      end
+    end
+    return nil unless names.all? && names.all? { |name| @closed_world.class_valued_constant?(name) }
+
+    candidates = names.uniq.flat_map { |name| @closed_world.classes_named(name) }
+    # CONSTRUCTOR_EXACT_CONSTANT: a receiver the compiler already proves to be one stable class constant
+    # (constant_object_owner, what CLOSED_WORLD_CONSTANT_OBJECT calls by) builds that class alone, not every class
+    # sharing its last segment (`Game::Map.new` is no entry of RPG2k::Scene::Map#initialize).
+    owner = entry_arg_body_owner[irep.label]&.owner
+    exact = owner && constant_object_owner(irep, idx, insn.reg, owner)
+    candidates.include?(exact) ? [exact] : candidates
+  end
+
+  # `super` in an initialize reaches the superclass's initialize with the arguments it passes.
+  def constructor_super_site(irep, idx, insn, owner, found)
+    return unless owner && owner.name == 'initialize'
+
+    parent = @superclass_of[owner.owner]
+    return unless parent.is_a?(String)
+
+    target = constructor_init_target(parent)
+    return unless target&.irep
+
+    # A bare `super` forwards the method's own arguments through ARGARY, an op the flow does not model, so only
+    # the explicit form can ever prove anything; the other withdraws the target.
+    kw_argc = constructor_keyword_argc(insn)
+    if insn.plain_fixed_argc?
+      found[:stats][:super_explicit] += 1
+      found[:sites][target.irep] << [irep, idx, insn.reg.to_i, insn.argc, owner]
+    elsif kw_argc && constructor_keyword_site_ok?(target, kw_argc)
+      found[:stats][:super_keyword] += 1
+      found[:sites][target.irep] << [irep, idx, insn.reg.to_i, kw_argc, owner]
+    else
+      found[:stats][:super_unmodelled] += 1
+      found[:broken][target.irep] = "super with unmodelled arguments at #{irep.label}:#{idx}"
+    end
+  end
+
+  # Lines for the diagnostic: the refusal, or one per constructor and why it is not pooled.
+  def constructor_pool_report
+    constructor_pool_candidates
+    return ["  off: #{@constructor_pool_refusal}"] if @constructor_pool_refusal
+
+    lines = ["  SITES #{@constructor_pool_stats.sort.map { |k, v| "#{k}=#{v}" }.join(' ')}"]
+    (@registry['initialize'] || []).each do |d|
+      status = @constructor_pool_status[d.irep]
+      next unless status
+      if status == :ok
+        lines << "  CTOR #{d.owner}#initialize pooled"
+        @constructor_pool_candidates.each_key { |(label, k)| lines << "  CTORARG #{d.owner}#initialize arg#{k} #{constructor_arg_state(label, k)}" if label == d.irep }
+      else
+        lines << "  CTOR #{d.owner}#initialize refused: #{status}#{constructor_arity_note(d, status)}"
+      end
+    end
+    lines.sort
+  end
+
+  # " (req=2 opt=0 rest=0 post=0 key=1 kdict=0)" for an arity refusal, so the report says which shape it was.
+  def constructor_arity_note(d, status)
+    return '' unless status == :arity
+
+    f = (@ireps[d.irep].enter ? @ireps[d.irep].enter.enter_fields : []).map(&:to_i)
+    " (req=#{f[0]} opt=#{f[1]} rest=#{f[2]} post=#{f[3]} key=#{f[4]} kdict=#{f[5]})"
+  end
+
+  # What the fixpoint made of one candidate argument: its pools, or the producers that dropped it.
+  def constructor_arg_state(label, k)
+    cls = @class_arg_pools && @class_arg_pools[[label, k]]
+    num = @entry_arg_numeric && @entry_arg_numeric[[label, k]]
+    fix = @entry_arg_fixnum&.include?([label, k])
+    state = []
+    state << "class=#{class_mask_name(cls)}" if cls
+    state << "numeric=#{numeric_mask_name(num)}" if num
+    state << 'fixnum' if fix
+    return state.join(' ') unless state.empty?
+
+    sites, = @constructor_pool_candidates.fetch([label, k])
+    culprits = sites.filter_map do |irep, idx, recv, _argc, _owner|
+      mask = return_class_raw_mask(irep, idx, recv + k)
+      next if mask && !mask.anybits?(CLASS_POOL_UNSHIPPABLE)
+
+      writer = irep.walk_writers(idx - 1, recv + k, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], follow_moves: true,
+                                                          exhausted: ->(last) { last == 0 ? 'self' : 'incoming_arg' }) do |ins|
+        %i[SEND SEND0 SSEND SSEND0 SENDB].include?(ins.op) ? "send:#{ins.sym}" : ins.op.to_s.downcase
+      end
+      writer.is_a?(String) ? writer : 'unknown'
+    end
+    "dropped<#{culprits.tally.map { |c, n| "#{c}x#{n}" }.join(',')}>"
+  end
+end

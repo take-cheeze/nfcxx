@@ -1,0 +1,176 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# LEXICAL_CONST: LexicalConsts.analyze names the definition each GETCONST / GETMCNST reads.
+# Each fixture is compiled by the host mrbc and its reads are checked against the lexical rule: a
+# bare name resolves to the first scope of its lexical chain that defines it, only when no other
+# definition reachable from that scope (chain, ancestors, Object) could be read instead; anything
+# else has no key. Needs MRBC (a host mrbc); without it the check prints SKIP and exits 0.
+
+require_relative 'check_support'
+require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/lexical_consts'
+require_relative '../../tools/bc2cpp/codegen_insn'
+require_relative '../../tools/bc2cpp/codegen_numeric_consts'
+
+suite = FixtureCheck.new('lexical_const_check')
+suite.require_mrbc!
+
+check = suite.method(:check)
+
+# [op, name, key] of every GETCONST/GETMCNST read, and [name, key] of every SETCONST site.
+analyze = lambda do |source, static: true|
+  suite.compile(source) do |ireps, _root|
+    info = LexicalConsts.analyze(ireps, static: static)
+    reads = []
+    sites = []
+    ireps.each_value do |irep|
+      irep.instructions.each do |insn|
+        case insn.op
+        when :GETCONST, :GETMCNST then reads << [insn.op, insn.const_name, info.read_keys[insn]]
+        when :SETCONST then sites << [insn.const_name, info.site_keys[insn]]
+        end
+      end
+    end
+    { reads: reads, sites: sites, read_keys: info.read_keys.size }
+  end
+end
+
+# The reads of one constant name, so a fixture's own headers (a superclass, a module name) are not counted.
+named = ->(result, name) { result[:reads].select { |_op, read_name, _key| read_name == name } }
+
+puts '== resolution'
+turn = analyze.call(<<~RUBY)
+  module Game
+    class Character
+      TURN_LEFT = { 8 => 4 }.freeze
+      def turn_left; TURN_LEFT[1]; end
+    end
+    class MoveRoute
+      TURN_LEFT = 17
+      def mr; TURN_LEFT; end
+    end
+    def self.outer; Character::TURN_LEFT; end
+  end
+  def top_read; Game::Character::TURN_LEFT; end
+RUBY
+check.call('TURN_LEFT read in Game::Character is Game::Character::TURN_LEFT',
+           turn[:reads].include?(['GETCONST', 'TURN_LEFT', 'Game::Character::TURN_LEFT']))
+check.call('TURN_LEFT read in Game::MoveRoute is Game::MoveRoute::TURN_LEFT',
+           turn[:reads].include?(['GETCONST', 'TURN_LEFT', 'Game::MoveRoute::TURN_LEFT']))
+check.call('Character::TURN_LEFT (GETMCNST from Game) is Game::Character::TURN_LEFT',
+           turn[:reads].count([:GETMCNST, 'TURN_LEFT', 'Game::Character::TURN_LEFT']) == 2)
+check.call('the definitions are keyed by their own scope', turn[:sites].sort == [['TURN_LEFT', 'Game::Character::TURN_LEFT'],
+                                                                                 ['TURN_LEFT', 'Game::MoveRoute::TURN_LEFT']])
+
+only_top = analyze.call("TURN_LEFT = 0\ndef top_read; TURN_LEFT; end\n")
+check.call('a name defined only at the top level is read as that definition', only_top[:reads] == [[:GETCONST, 'TURN_LEFT', 'TURN_LEFT']])
+
+sibling = analyze.call("class Pre; Y = 0; end\nclass P2; Y = 1; def f; Y; end; end\n")
+check.call('a sibling definition in another scope does not reach a read (P2::Y)',
+           sibling[:reads] == [[:GETCONST, 'Y', 'P2::Y']])
+
+reopen = analyze.call("class A0; V = 1; end\nclass A0; def f; V; end; end\n")
+check.call('a plain reopened class reads its own constant', reopen[:reads] == [[:GETCONST, 'V', 'A0::V']])
+
+block = analyze.call("class Blk; T = 1; def f; [1].each { |_| T }; end; end\n")
+check.call('a block in a method keeps the lexical scope of its body', block[:reads] == [[:GETCONST, 'T', 'Blk::T']])
+
+puts '== refused'
+shadow = analyze.call("module G; X = 1; class F; X = 2; def f; X; end; end; end\n")
+check.call('an inner definition does not hide an outer one that is also reachable: refused',
+           shadow[:reads] == [[:GETCONST, 'X', nil]])
+
+prefn = analyze.call("X = 0\nclass F; X = 1; def f; X; end; end\n")
+check.call('Object::X can be read before F::X is assigned: refused', prefn[:reads] == [[:GETCONST, 'X', nil]])
+
+superclass = analyze.call("class B0; W = 1; end\nclass S0 < B0; W = 2; def f; W; end; end\n")
+check.call('a name also defined by an explicit superclass: refused', named.call(superclass, 'W') == [[:GETCONST, 'W', nil]])
+
+unrelated = analyze.call("module Q; Z = 1; end\nclass S2; def f; Z; end; end\n")
+check.call('a read outside the scope of the only definition: refused', unrelated[:reads] == [[:GETCONST, 'Z', nil]])
+
+mixin = analyze.call("module M0; U = 1; end\nclass C0; include M0; U = 2; def f; U; end; end\n")
+check.call('a name also defined by an included module: refused', named.call(mixin, 'U') == [[:GETCONST, 'U', nil]])
+
+compact = analyze.call("module G; end\nclass G::Compact; def f; Q1; end; end\nQ1 = 1\n")
+check.call('a read in a compact class body (scope not modelled): refused', named.call(compact, 'Q1') == [[:GETCONST, 'Q1', nil]])
+
+singleton = analyze.call("class << Object\n  Z9 = 1\nend\nclass Rd; def f; Z9; end; end\n")
+check.call('a definition in a singleton body is unknown: its site and its reads are refused',
+           singleton[:sites] == [['Z9', nil]] && named.call(singleton, 'Z9') == [[:GETCONST, 'Z9', nil]])
+
+private = analyze.call("class Pc; V = 1; private_constant :V; end\nclass Pq; def f; Pc::V; end; end\n")
+check.call('a scoped read of a private constant is refused (it raises from outside its class)',
+           named.call(private, 'V') == [[:GETMCNST, 'V', nil]])
+
+evaled = analyze.call("class K; def f; X; end; end\nK.class_eval('X = 1')\n")
+check.call('a string class_eval makes the whole world unresolved', evaled[:read_keys].zero?)
+
+blocked = analyze.call("class K; V = 1; def f; V; end; end\nK.class_eval { 1 }\nK.instance_eval { 2 }\n")
+check.call('a block-form class_eval / instance_eval keeps the model (its block runs in the lexical cref)',
+           named.call(blocked, 'V') == [[:GETCONST, 'V', 'K::V']])
+
+splatted = analyze.call("class K; def f; X; end; end\nargs = ['X = 1']\nK.class_eval(*args)\n")
+check.call('a splatted class_eval argument may be a string: the whole world is unresolved', splatted[:read_keys].zero?)
+
+unstatic = analyze.call("class A1; V = 1; def f; V; end; end\n", static: false)
+check.call('non-static constants (const_set and friends) make the whole world unresolved', unstatic[:read_keys].zero?)
+
+# The trace marker (codegen_insn.rb const_trace_marker) names the owner the same analysis resolved, or `-` when the
+# closed world does not prove it (no closed world, or a non-static one). Untraced, no marker at all.
+puts '== trace marker'
+closed_world = Class.new do
+  def initialize(static) = @static = static
+  def constants_static? = @static
+end
+markers = lambda do |source, static: true, closed: true, traced: true|
+  suite.compile(source) do |ireps, _root|
+    gen = CodeGen.allocate
+    gen.instance_variable_set(:@ireps, ireps)
+    gen.instance_variable_set(:@closed_world, closed ? closed_world.new(static) : nil)
+    previous = ENV['BC2CPP_TRACE_TYPES']
+    traced ? ENV['BC2CPP_TRACE_TYPES'] = '1' : ENV.delete('BC2CPP_TRACE_TYPES')
+    begin
+      ireps.values.flat_map do |irep|
+        irep.instructions.filter_map do |insn|
+          marker = gen.send(:const_trace_marker, insn) if CodeGen::CONST_READ_OPS.include?(insn.op)
+          marker unless marker.nil? || marker.empty?
+        end
+      end
+    ensure
+      previous ? ENV['BC2CPP_TRACE_TYPES'] = previous : ENV.delete('BC2CPP_TRACE_TYPES')
+    end
+  end
+end
+marker_source = <<~RUBY
+  module Game
+    class Character
+      TURN_LEFT = { 8 => 4 }.freeze
+      def turn_left; TURN_LEFT[1]; end
+    end
+    class MoveRoute
+      TURN_LEFT = 17
+      def mr; TURN_LEFT; end
+    end
+    def self.outer; Character::TURN_LEFT; end
+  end
+RUBY
+resolved = markers.call(marker_source)
+# Four reads: TURN_LEFT in each class, Character (GETCONST) and Character::TURN_LEFT (GETMCNST) in Game.outer.
+starts = ->(list, prefix) { list.count { |m| m.start_with?(prefix) } }
+check.call('a read the analysis resolves names its owner: Game::Character and Game::MoveRoute TURN_LEFT',
+           starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::Character::TURN_LEFT TURN_LEFT r') == 2 &&
+             starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::MoveRoute::TURN_LEFT TURN_LEFT r') == 1 &&
+             starts.call(resolved, '  /*BC2CPP_CONST_HIT Game::Character Character r') == 1)
+check.call('every constant read (GETCONST and GETMCNST) has exactly one marker',
+           resolved.size == 4 && resolved.all? { |m| m.end_with?("*/\n") })
+unproven = markers.call(marker_source, static: false)
+check.call('a non-static closed world proves no owner: every read is `-`, still traced',
+           unproven.size == 4 && unproven.all? { |m| m.include?('/*BC2CPP_CONST_HIT - ') })
+no_world = markers.call(marker_source, closed: false)
+check.call('a compile with no closed world (a core body) proves no owner', no_world.all? { |m| m.include?('CONST_HIT - ') })
+untraced = markers.call(marker_source, traced: false)
+check.call('without BC2CPP_TRACE_TYPES=1 no marker is emitted', untraced.empty?)
+
+suite.finish!

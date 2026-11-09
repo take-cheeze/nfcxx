@@ -1,0 +1,326 @@
+# frozen_string_literal: true
+
+require_relative 'numeric_flow'
+require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_regions'
+
+# CodeGen: NUMERIC_RETURN_PROOF.
+#
+# What class set can a call to `name` return? FIXNUM_RETURN_PROOF answers "a
+# small Integer" for a name with ONE bytecode definition; this joins every
+# definition of the name, so a getter defined in several classes (or an
+# attr_reader) still yields a class set, and it reasons in NumericFlow's
+# lattice, so Float, nil, and exact Array/Hash/String results count.
+#
+# A name is tracked only when a call can reach nothing but the definitions the
+# registry lists (ClosedWorld#name_fully_visible?: no native or foreign source
+# defines it, no runtime installer or method_missing hook exists) and no alias
+# gives its body another name. Every definition then must be a bytecode body
+# whose return sites the flow models, or a plain attr_reader of an ivar with a
+# tracked group. SENDB/SSENDB never use the result: a `break` in the caller's
+# block becomes the call's value.
+#
+# Least fixpoint with the other numeric facts (compute_numeric_facts): each name
+# starts empty and only grows, so a recursive getter proves itself the way the
+# base case does.
+#
+# The result of a send NO tracked name covers comes from numeric_send_mask below:
+# core bodies whose result class follows from the receiver's proven class.
+class CodeGen
+  NUMERIC_RETURN_NAME = /\A[A-Za-z_]\w*[?!]?\z/
+
+  def setup_numeric_returns
+    @numeric_return = {}
+    @numeric_return_send_ireps = Hash.new { |h, k| h[k] = Set.new }
+    numeric_return_candidates.each { |name| @numeric_return[name] = 0 }
+    @ireps.each_value do |irep|
+      BytecodeIR.for(irep).each_with_op(:SEND, :SEND0, :SSEND, :SSEND0) do |insn, _index|
+        next unless @numeric_return.key?(insn.sym)
+
+        @numeric_return_send_ireps[insn.sym] << irep.label
+      end
+    end
+  end
+
+  # Names a call can reach only through the definitions the registry lists (see the header), each a
+  # bytecode body or a plain attr_reader. Shared with the exact-class table (RETURN_CLASS_TABLE).
+  def numeric_return_candidates(alias_mode: :irep)
+    return [] unless @foreign_method_names && @closed_world && @closed_world.global_refusal.nil?
+
+    aliased = alias_mode == :operands ? aliased_operand_name_set : numeric_aliased_names
+    @registry.filter_map do |name, _definitions|
+      defs = return_table_definitions(name)
+      next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
+      next if defs.empty?
+      string_native = name == 'to_s' && native_result_name_kinds(name)
+      # The linked-source audit is stricter than the broad foreign-name census.
+      collection_native = NativeClassResults::ARRAY_TRANSFORMS.include?(name) && native_result_name_kinds(name)
+      next if @foreign_method_names.include?(name) && !string_native && !collection_native
+      next if aliased.include?(name) && !(string_native && native_struct_string_alias_safe?)
+      next unless @closed_world.name_fully_visible?(name) || native_result_name_kinds(name)
+      next unless defs.all? { |d| numeric_return_def_usable?(d) }
+
+      name
+    end
+  end
+
+  # A registry placeholder is not a runtime definition when the
+  # build's complete closed-world scan proves that no native defines the name.
+  def return_table_definitions(name)
+    definitions = @registry[name] || []
+    return definitions if ENV['BC2CPP_ABSENT_NATIVE_RETURNS'] == '0'
+    return definitions unless @native_name_sources && @foreign_method_names && @closed_world&.name_fully_visible?(name)
+
+    definitions.reject { |definition| definition.owner == '<native>' && definition.irep.nil? }
+  end
+
+  def numeric_return_def_usable?(d)
+    return d.irep.nil? && !native_result_name_kinds(d.name).nil? if d.owner == '<native>'
+    return false if d.owner.start_with?('<') || (d.owner.end_with?('.singleton') && d.irep.nil?)
+    return d.kind == :ivar_accessor && !d.name.end_with?('=') if d.irep.nil?
+
+    !@ireps[d.irep].nil?
+  end
+
+  # Sends that give a body another name, with how many leading arguments name methods.
+  ALIAS_NAME_ARGUMENTS = { 'alias_method' => 2, 'alias' => 2, 'define_method' => 1, 'define_singleton_method' => 1 }.freeze
+
+  # Names an `alias`/`alias_method`/`define_method` gives a body another name:
+  # the registry lists the body under its original name only.
+  #
+  # Asked per name by the numeric dataflow, so it is computed once: @ireps is fixed at construction and no pass
+  # edits an irep's instructions. Frozen, so a caller that tried to extend it would fail instead of leaking.
+  def numeric_aliased_names
+    @numeric_aliased_names ||= begin
+      names = Set.new
+      @ireps.each_value do |irep|
+        program = BytecodeIR.for(irep)
+        aliasing = program.each_source.any? do |i, _index|
+          i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym)
+        end
+        next unless aliasing
+
+        program.each_with_op(:ALIAS, :LOADSYM) { |i, _index| names << i.sym if i.sym }
+      end
+      names.freeze
+    end
+  end
+
+  # The names the aliasing operations of the program spell (an irep with a computed operand keeps every Symbol it
+  # loads). numeric_aliased_names takes every Symbol of an irep that aliases anything; a name whose every definition
+  # is an attr_reader of a checked pool is withdrawn only when an operation spells it, so
+  # `attr_reader :contents` next to `alias_method :a, :initialize` keeps its return fact. The fact carries
+  # NumericFlow::CHECKED and so only ever reaches a class-tested arm; admit_checked_alias_names adds the name once
+  # its pool has grown that provenance.
+  def aliased_operand_name_set
+    @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
+      next unless BytecodeIR.for(irep).each_source.any? { |i, _index| i.op == :ALIAS || BytecodeIR::Ops::SEND_FAMILY.include?(i.op) && ALIAS_NAME_ARGUMENTS.key?(i.sym) }
+
+      names.merge(aliased_operand_names(irep) || BytecodeIR.for(irep).instructions_with_op(:ALIAS, :LOADSYM).filter_map { |i| i.sym if i.sym })
+    end
+  end
+
+  # Every definition of +name+ is an attr_reader whose ivar pool carries the CHECKED provenance.
+  def checked_accessor_name?(name)
+    defs = return_table_definitions(name)
+    !defs.empty? && defs.all? do |d|
+      d.irep.nil? && d.kind == :ivar_accessor && !d.name.end_with?('=') && !d.owner.start_with?('<') && !d.owner.end_with?('.singleton') &&
+        @class_ivar_pools&.dig([numeric_family(d.owner), d.name])&.anybits?(NumericFlow::CHECKED)
+    end
+  end
+
+  # The names an irep's aliasing operations spell, or nil when one of them takes a name that is not a Symbol literal.
+  def aliased_operand_names(irep)
+    names = Set.new
+    program = BytecodeIR.for(irep)
+    program.each_source do |insn, idx|
+      if insn.op == :ALIAS
+        names << insn.sym
+        old = insn.first_of(:name)&.value
+        names << old if old
+      elsif BytecodeIR::Ops::SEND_FAMILY.include?(insn.op) && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
+        return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= count
+
+        # Every name that can reach each argument, not only the textually last arm of a join.
+        literal = (1..count).all? do |k|
+          sources = BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + k))&.map { |i| program.source_at(i) }
+          next false unless sources&.all? { |w| w.op == :LOADSYM && w.sym }
+
+          sources.each { |w| names << w.sym }
+        end
+        return nil unless literal
+      end
+    end
+    names
+  end
+
+  # Class set of the value one definition returns, or OTHER.
+  def numeric_return_def_mask(d)
+    return native_result_def_mask(d, classes: false) if d.owner == '<native>'
+    return numeric_accessor_return_mask(d) if d.irep.nil?
+
+    irep = @ireps[d.irep]
+    states = numeric_states_for(irep)
+    return NumericFlow::OTHER unless states
+
+    joined = numeric_block_return_mask(irep)
+    return NumericFlow::OTHER if joined.nil?
+
+    BytecodeIR::NumericClasses.returned_mask(irep, states, joined)
+  end
+
+  # What a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
+  # any depth), or nil when a block the flow does not model has one. A `break` is the result of
+  # the call that took the block, which SENDB never reads, so it adds nothing. A lambda's own
+  # RETURN_BLK is counted too: a superset of the classes, never a subset.
+  def numeric_block_return_mask(irep, seen = Set.new)
+    joined = 0
+    (irep.reps || []).each do |label|
+      next unless seen.add?(label)
+
+      child = @ireps[label]
+      next unless child
+
+      if BytecodeIR::NumericClasses.block_returns?(child)
+        states = numeric_states_for(child)
+        return nil unless states
+
+        joined |= BytecodeIR::NumericClasses.block_return_mask(child, states)
+      end
+      nested = numeric_block_return_mask(child, seen)
+      return nil if nested.nil?
+
+      joined |= nested
+    end
+    joined
+  end
+
+  def numeric_accessor_return_mask(d)
+    return NumericFlow::INT if embed_type(d.owner, d.name) == :fixnum
+
+    group = @numeric_ivar_groups && @numeric_ivar_groups[[numeric_family(d.owner), d.name]]
+    return NumericFlow::OTHER unless group && !group.failed
+
+    group.mask | (numeric_ivar_assured?(d.owner, d.name) ? 0 : NumericFlow::NIL)
+  end
+
+  # One growth pass: a name's mask is the join of what each definition returns;
+  # the name is untracked for good when a definition may return an unmodelled
+  # class.
+  def grow_numeric_returns
+    changed = false
+    @numeric_return.keys.each do |name|
+      current = @numeric_return[name]
+      joined = 0
+      return_table_definitions(name).each { |d| joined |= numeric_return_def_mask(d) }
+      if (joined & NumericFlow::OTHER) != 0
+        @numeric_return.delete(name)
+      elsif (joined | current) == current
+        next
+      else
+        @numeric_return[name] = current | joined
+      end
+      @numeric_return_send_ireps[name].each { |label| numeric_invalidate(label) }
+      changed = true
+    end
+    changed
+  end
+
+  # Class each receiver bit stands for, when its core body is what a send runs.
+  NUMERIC_SEND_OWNERS = NumericFlow.class_bits('Array', 'Hash', 'String', 'Integer', 'Float')
+  # Zero-argument sends on a numeric receiver whose result class is fixed.
+  NUMERIC_TO_INT_SENDS = %w[to_i to_int floor ceil round truncate].freeze
+  # Integer bit operators: an Integer for INT op INT. `<<` and `>>` are
+  # absent: no range proof bounds a shift, and a negative `>>` count shifts left.
+  NUMERIC_BITOP_SENDS = %w[& | ^].freeze
+
+  # Class set a SEND-family result holds, given the flow state at the call. It
+  # is a union over the receiver's possible classes, so it is monotone: a class
+  # this file has no rule for contributes OTHER. Tracked names come from
+  # NUMERIC_RETURN_PROOF, the rest are core bodies whose result class is fixed by
+  # the receiver's proven class and gated by builtin_class_send_safe? (no Ruby
+  # override, no prepend).
+  def numeric_send_mask(irep, index, insn, state)
+    name = insn.sym
+    return NumericFlow::OTHER unless name
+
+    lcf = lcf_new_mask(irep, index, insn) if name == 'new'
+    return lcf if lcf
+
+    # A literal frozen in place: the kind of its slots.
+    table = name == 'freeze' && insn.op == :SEND0 && frozen_table_freeze_site(irep, index)
+    return (state[insn.reg.to_i] || 0).zero? ? 0 : table if table
+
+    tracked = @numeric_return && @numeric_return[name]
+    return tracked if tracked
+    return NumericFlow::INT if @fixnum_return_names.include?(name)
+    return NumericFlow::ARR if @array_return_names.include?(name)
+    return NumericFlow::OTHER if BytecodeIR::Ops::SELF_SEND_FAMILY.include?(insn.op)
+
+    native = native_result_numeric_mask(irep, index, insn)
+    return native if native
+
+    recv = state[insn.reg.to_i]
+    return NumericFlow::OTHER unless recv
+
+    # SEND0 carries no operand count; a keyword or splat form has no plain count.
+    argc = BytecodeIR::Ops::ZERO_SUFFIX_OPS.include?(insn.op) ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    mask = 0
+    tables = @frozen_tables ? @frozen_tables.tables(recv) : 0
+    if tables.nonzero?
+      mask |= frozen_table_send_mask(tables, name, argc)
+      recv &= ~tables
+    end
+    NUMERIC_SEND_OWNERS.each_key do |bit|
+      mask |= numeric_send_on_class(bit, name, argc, insn, state) if (recv & bit).nonzero?
+    end
+    mask |= NumericFlow::OTHER if (recv & ~NUMERIC_SEND_OWNERS.keys.sum).nonzero?
+    mask
+  end
+
+  def numeric_send_on_class(bit, name, argc, insn, state)
+    other = NumericFlow::OTHER
+    owners = bit.anybits?(NumericFlow::NUM) ? NUMERIC_OP_OWNERS : [NUMERIC_SEND_OWNERS.fetch(bit)]
+    return other unless builtin_class_send_safe?(name, owners)
+
+    if bit.anybits?(NumericFlow::CONTAINERS)
+      # `count` stays name-keyed: Enumerable#count's INT result is not inferred from its body, because the
+      # numeric path does not reach the core-Ruby body analysis and the block-written accumulator is opaque.
+      counted = name == 'count' ? bit != NumericFlow::STR : %w[size length].include?(name)
+      return argc == 0 && counted ? NumericFlow::INT : other
+    end
+    numeric_send_on_number(bit, name, argc, insn, state)
+  end
+
+  # +bit+ is INT or FLT.
+  def numeric_send_on_number(bit, name, argc, insn, state)
+    if argc == 0
+      return NumericFlow::INT if NUMERIC_TO_INT_SENDS.include?(name)
+      return NumericFlow::FLT if name == 'to_f'
+      return bit if %w[abs -@].include?(name)
+    elsif argc == 1 && NUMERIC_BITOP_SENDS.include?(name) && bitop_results_on?
+      return numeric_bitop_mask(bit, state[insn.reg.to_i + 1])
+    elsif argc == 1 && %w[% fdiv].include?(name)
+      arg = state[insn.reg.to_i + 1]
+      return NumericFlow::OTHER unless arg
+
+      return name == 'fdiv' ? NumericFlow::FLT : NumericFlow.arith(bit, arg, numeric_nil_raises?(name))
+    end
+    NumericFlow::OTHER
+  end
+
+  # BITOP_RESULTS: INT means Integer, so `Integer & | ^ Integer` is an
+  # Integer, the class claim `arith` makes for `+`. Only INT op INT is claimed. Float has no
+  # such operator and any other operand class stays OTHER. An unreached operand yields no value.
+  def numeric_bitop_mask(bit, arg)
+    return NumericFlow::OTHER unless arg
+    return 0 if arg.zero?
+
+    bit == NumericFlow::INT && arg == NumericFlow::INT ? NumericFlow::INT : NumericFlow::OTHER
+  end
+
+  # Kill switch for BITOP_RESULTS: BC2CPP_BITOP_RESULTS=0 restores the OTHER answer.
+  def bitop_results_on?
+    ENV['BC2CPP_BITOP_RESULTS'] != '0'
+  end
+end

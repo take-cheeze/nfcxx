@@ -1,0 +1,139 @@
+# frozen_string_literal: true
+
+require 'set'
+require_relative 'core_defs'
+
+# CORE_METHODS: every method of mruby's own Ruby (compiled_gems.rb
+# BC2CPP_CORE_MRBLIB_GEMS) that compiles clean is compiled, except the ones that
+# stay bytecode by decision: a definition a later one replaces, one a
+# conditional can skip, one that names the Fiber class or builds a lambda (CoreDefs),
+# A method that touches a block
+# compiles with no Fiber guard. An excluded definition is
+# dropped from the registry (bc2cpp.rb), so it is neither compiled nor a dispatch
+# target, and the interpreter's method answers it exactly as before.
+module CoreMethods
+  # The operator names bc2cpp gives inline fast paths (fixnum arithmetic and comparison,
+  # `case`/`when` literals, INTEGER_UNARY) on the premise that the registry holds only
+  # the native definition of the name (CodeGen#native_only_mono?, eqq_literal_devirt_safe?).
+  # A core Ruby definition of one (Comparable#<, Numeric#-@, String#%) sits behind the
+  # builtin receivers' own natives and can never win, but showing it to the registry
+  # would switch those fast paths off, so it is compiled without being a registry
+  # definition (bc2cpp.rb CORE_VISIBILITY).
+  OPERATOR_NAMES = %w[+ - * / % ** & | ^ ~ << >> < <= > >= == != === <=> =~ !~ ! [] []= -@ +@ zero?].freeze
+
+  # The exclusion_reason of mruby-enumerator's methods; CoreEnumeratorFree decides whether the build may leave them out.
+  ENUMERATOR_REASON = 'mruby-enumerator'
+
+  module_function
+
+  # Admits an Enumerator method by its body alone, not by name: the body must come from
+  # mruby-enumerator's enumerator.rb and touch no block and no Fiber. In that file only
+  # inspect, size, rewind, feed, next, peek and peek_values pass (next_values names Fiber,
+  # the rest take a block). These wrappers create no compiled closure. Their delegated
+  # callbacks may suspend, so every entry still requires the root context.
+  def enumerator_wrapper?(definition, ireps)
+    return false if ENV['BC2CPP_ENUMERATOR_WRAPPERS'] == '0'
+    return false unless definition && definition.owner == 'Enumerator'
+
+    body = definition.irep && ireps[definition.irep]
+    body && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb') &&
+      !CoreDefs.touches_block?(body, ireps) && !CoreDefs.references_fiber?(body, ireps)
+  end
+
+  # The mruby-enumerator #initialize methods that take a block to keep it (Enumerator, Enumerator::Generator and
+  # Enumerator::Yielder). They store the block or hand it to Generator.new and never call it, and they name no Fiber
+  # and build no lambda, as any core block method is compiled with no Fiber guard.
+  ENUMERATOR_INITIALIZERS = %w[Enumerator Enumerator::Generator Enumerator::Yielder].freeze
+
+  def enumerator_initializer?(definition, ireps)
+    return false unless definition && definition.name == 'initialize' && ENUMERATOR_INITIALIZERS.include?(definition.owner)
+
+    body = definition.irep && ireps[definition.irep]
+    body && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb') &&
+      !CoreDefs.references_fiber?(body, ireps) && !CoreDefs.builds_lambda?(body, ireps)
+  end
+
+  def key(method_def)
+    "#{method_def.owner}##{method_def.name}"
+  end
+
+  # Irep labels of the core-source definitions in `registry` that must not be
+  # compiled: refused, conditional, Fiber-naming, lambda-building or unaudited mruby-enumerator bodies
+  # (shadowed ones are dropped from the registry by the driver before this runs).
+  def excluded_labels(registry, ireps)
+    conditional = CoreDefs.conditional_def_labels(ireps)
+    out = Set.new
+    registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
+
+        out << d.irep if exclusion_reason(d, ireps, conditional)
+      end
+    end
+    out
+  end
+
+  # Why a core-source definition stays bytecode by decision (nil when eligible). One place for
+  # excluded_labels and the interpreted report, so the two cannot disagree.
+  def exclusion_reason(definition, ireps, conditional)
+    irep = ireps.fetch(definition.irep)
+    return 'conditional def' if conditional.include?(definition.irep)
+    return "#{ENUMERATOR_REASON} (Fiber machinery)" if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps) &&
+                                                         !enumerator_initializer?(definition, ireps) && !enumerator_fiber_step?(definition, ireps)
+    return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
+
+    'names Fiber' if CoreDefs.references_fiber?(irep, ireps) && !enumerator_fiber_step?(definition, ireps)
+  end
+
+  # ENUMERATOR_FIBER (on; BC2CPP_ENUMERATOR_FIBER=0 keeps mruby-enumerator's bytecode on mruby-fiber): its methods are compiled,
+  # so `next_values` builds a C++ Fiber over a step (docs/bc2cpp-cxx-fiber.md); methods that build a lambda stay bytecode.
+  ENUMERATOR_FIBER_STEPS = %w[Enumerator#next_values Enumerator#each Enumerator#__enumerator_block_call].freeze
+
+  def enumerator_fiber?
+    ENV['BC2CPP_ENUMERATOR_FIBER'] != '0'
+  end
+
+  def enumerator_fiber_step?(definition, ireps = nil)
+    return false unless enumerator_fiber?
+    return true if ENUMERATOR_FIBER_STEPS.include?(key(definition))
+
+    body = ireps && definition.irep && ireps[definition.irep]
+    !body.nil? && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb')
+  end
+
+  # Language features a body uses, for grouping the interpreted report by what an unsupported
+  # shape needs (a method may carry several).
+  def shape_tags(irep, ireps)
+    ops = all_ops(irep, ireps)
+    tags = []
+    tags << 'block' if CoreDefs.touches_block?(irep, ireps)
+    tags << 'rescue' if %i[RESCUE EXCEPT ONERR POPERR].any? { |op| ops.include?(op) }
+    tags << 'super' if ops.include?('SUPER')
+    tags << 'lambda' if ops.include?('LAMBDA')
+    fields = irep.enter&.enter_fields&.map(&:to_i)
+    tags << 'optargs' if fields && fields[1..5].any?(&:positive?)
+    tags
+  end
+
+  def all_ops(irep, ireps)
+    irep.reps.compact.reduce(BytecodeIR.for(irep).instructions.to_set(&:op)) { |acc, child| acc | all_ops(ireps.fetch(child), ireps) }
+  end
+
+  # One line per core-source bytecode definition the build keeps interpreted.
+  # `unsupported` maps "Owner#name" to the compiler's own #error reason for definitions the
+  # exclusion rules let through but codegen cannot express.
+  def interpreted_report(defs, ireps, unsupported = {})
+    conditional = CoreDefs.conditional_def_labels(ireps)
+    defs.filter_map do |d|
+      next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
+
+      key = "#{d.owner}##{d.name}"
+      reason = exclusion_reason(d, ireps, conditional) ||
+               (unsupported[key] && "unsupported shape: #{unsupported[key]}")
+      next unless reason
+
+      "#{key} | #{reason} | #{shape_tags(ireps.fetch(d.irep), ireps).join(',')}"
+    end.sort
+  end
+
+end

@@ -1,0 +1,633 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# JOIN_DOMINANCE: a backward register walk takes the textually
+# nearest writer, which a join can skip. `x = h[k] || []` reads the literal
+# while the register may hold h[k]. Every walk whose answer feeds an
+# unguarded consumer must therefore prove that the write it found is the only
+# value the register can hold at the read.
+#
+# 1. Host only (no mrbc): BytecodeIR::Program#write_dominates?, its
+#    ivar_assigned_before_exposure? sibling, IrepScans#walk_dominating_writers
+#    and IvarLayout.trace_type on hand-built instruction lists.
+# 2. With MRBC: the generated code for fixtures. The joins the walks used to
+#    miss no longer give an inlined loop, an exact-class direct call or a typed
+#    slot; the straight-line shapes keep all three.
+# 3. With MRBC, BC2CPP_MRUBY_FULL and g++: the fixtures run against real mruby,
+#    interpreted and compiled, and must answer alike.
+#
+# Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_FULL=dir] ruby scripts/bc2cpp/join_dominance_check.rb
+
+# The fixture program defines none of the engine's classes, which sig/bc2cpp/declarations.rbs declares, so the
+# shipped signatures would all be unusable (TC1003). Checked against no signature world, as block_iterator_direct_check does.
+ENV['BC2CPP_SIG_DIRS'] = ''
+
+require 'set'
+require 'tmpdir'
+
+# Exercise guarded join hints separately from exhaustive user receiver unions.
+ENV['BC2CPP_USER_RECEIVER_UNIONS'] = '0'
+require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/bytecode_ir'
+require_relative '../../tools/bc2cpp/ivar_layout'
+require_relative '../../tools/bc2cpp/irep_scans'
+require_relative '../../tools/bc2cpp/nil_narrowing'
+require_relative '../../tools/bc2cpp/block_self'
+
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
+end
+
+def insn(addr, op, args)
+  Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
+end
+
+def irep_of(list, handlers = [])
+  Irep.new(label: "t#{list.hash}", instructions: list, catch_handlers: handlers)
+end
+
+puts '-- write_dominates? (host)'
+# x = h[k] || <lit>; use x  -- GETIDX writes R3, JMPIF skips the literal.
+or_literal = irep_of([
+  insn(0, :MOVE, "R3\tR1"), insn(3, :GETIDX, "R3\t(R4)"), insn(5, :JMPIF, "R3\t12"),
+  insn(9, :ARRAY, "R3\t0"), insn(12, :SETIV, "@x\tR3")
+])
+check.call('the literal of `x = h[k] || []` does not dominate the read after the join',
+           !BytecodeIR.write_dominates?(or_literal, 3, 4, 3))
+check.call('the GETIDX before the branch does dominate the branch', BytecodeIR.write_dominates?(or_literal, 1, 2, 3))
+check.call('a write directly before its read dominates it', BytecodeIR.write_dominates?(or_literal, 3, 4, 3) == false &&
+                                                             BytecodeIR.write_dominates?(or_literal, 0, 1, 3))
+
+# A multi-write op between the write and the read can overwrite the register on its fallback or callee frame
+# (vm.c L_SEND_SYM writes nil above R(a); a SEND's frame starts at R(a)): the write then does not supply the
+# value. The origin walk's rule (origin_effect) refuses these; write_dominates? must refuse them too.
+clobber = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :ADD, "R0\t(R1)"), insn(2, :MOVE, "R3\tR2"),
+                   insn(3, :RETURN, 'R3')])
+check.call('ADD R0 falls back to a send that writes R2: the LOADI before it does not dominate the read of R2',
+           !BytecodeIR.write_dominates?(clobber, 0, 2, 2))
+check.call('ADD R5 writes only R5..R7 on its fallback: the LOADI of R2 still dominates (negative)',
+           BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :ADD, "R5\t(R6)"),
+                                                 insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 0, 2, 2))
+check.call('GETIDX0 R0 writes R1 on its fallback: a LOADI of R1 does not dominate its read',
+           !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R1\t(5)"), insn(1, :GETIDX0, "R0\tR9[0]"),
+                                                 insn(2, :MOVE, "R3\tR1"), insn(3, :RETURN, 'R3')]), 0, 2, 1))
+check.call('a SEND on R1 starts its callee frame at R1: it clobbers R3 (the LOADI does not dominate)',
+           !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R3\t(5)"), insn(1, :SEND0, "R1\t:f"),
+                                                 insn(2, :MOVE, "R4\tR3"), insn(3, :RETURN, 'R4')]), 0, 2, 3))
+check.call('a SEND on R4 leaves R3 alone (negative)',
+           BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R3\t(5)"), insn(1, :SEND0, "R4\t:f"),
+                                                 insn(2, :MOVE, "R5\tR3"), insn(3, :RETURN, 'R5')]), 0, 2, 3))
+check.call('a side write does not supply the register: GETIDX0 R0 writes R1 only on its fallback',
+           !BytecodeIR.write_dominates?(irep_of([insn(0, :GETIDX0, "R0\tR9[0]"), insn(1, :MOVE, "R3\tR1"),
+                                                 insn(2, :RETURN, 'R3')]), 0, 1, 1))
+check.call('an intervening write to the register is the value at the read: the first LOADI does not dominate',
+           !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :LOADI_6, "R2\t(6)"),
+                                                 insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 0, 2, 2) &&
+           BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(1, :LOADI_6, "R2\t(6)"),
+                                                 insn(2, :MOVE, "R3\tR2"), insn(3, :RETURN, 'R3')]), 1, 2, 2))
+
+straight = irep_of([
+  insn(0, :LOADI_5, "R2\t(5)"), insn(2, :JMPNOT, "R1\t9"), insn(6, :LOADI_1, "R3\t(1)"),
+  insn(8, :NOP, ''), insn(9, :MOVE, "R4\tR2"), insn(12, :RETURN, 'R4')
+])
+check.call('a jump over an unrelated write leaves the earlier write dominating',
+           BytecodeIR.write_dominates?(straight, 0, 4, 2))
+
+# The entry value survives a branch that never writes the register, but not a
+# branch that does.
+entry_plain = irep_of([insn(0, :JMPNOT, "R1\t7"), insn(4, :LOADI_1, "R3\t(1)"), insn(6, :NOP, ''),
+                       insn(7, :MOVE, "R4\tR2"), insn(10, :RETURN, 'R4')])
+check.call('the entry value of an untouched register reaches a read behind a branch',
+           BytecodeIR.write_dominates?(entry_plain, BytecodeIR::ENTRY, 3, 2))
+loop_back = irep_of([insn(0, :MOVE, "R4\tR2"), insn(3, :LOADI_1, "R2\t(1)"), insn(5, :JMPNOT, "R1\t0"),
+                     insn(9, :RETURN, 'R4')])
+check.call('a back edge from after the read refuses the entry value',
+           !BytecodeIR.write_dominates?(loop_back, BytecodeIR::ENTRY, 0, 2))
+
+nested = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')])
+check.call('a register a nested block writes is never dominated',
+           !BytecodeIR.for(nested).write_dominates?(0, 1, 2, opaque_regs: Set[2]))
+check.call('an op outside the audited write list between write and read refuses',
+           !BytecodeIR.write_dominates?(irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :APOST, "R4\t1\t0"),
+                                                 insn(6, :RETURN, 'R2')]), 0, 2, 2))
+handler = irep_of([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SEND0, "R3\t:f"), insn(4, :LOADI_2, "R2\t(2)"),
+                   insn(6, :MOVE, "R5\tR2"), insn(9, :RETURN, 'R5')],
+                  [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 6, target: 6)])
+check.call('an exception edge from before the write into the read refuses',
+           !BytecodeIR.write_dominates?(handler, 2, 3, 2))
+
+# Canonical opaque-register keys: write_dominates? shares the reaching_definitions
+# snapshot helper. Distinct empty Sets share one frozen snapshot while nil stays
+# distinct; frozen Integer Sets (including dev-time StrictKeySet) reuse their
+# snapshot by identity; mutable inputs take the uncached path; the
+# BC2CPP_IR_QUERY_KEYS control initializes consistently on a dominance-first
+# Program and restores per-query copying when off.
+opaque_body = [insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :RETURN, 'R3')]
+opaque_prog = -> { BytecodeIR::Program.new(irep_of(opaque_body)) }
+check.call('an explicitly empty opaque Set still dominates',
+           opaque_prog.call.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze))
+check.call('distinct empty opaque Sets share one snapshot while nil stays distinct',
+           opaque_prog.call.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze) &&
+           opaque_prog.call.write_dominates?(0, 1, 2) &&
+           BytecodeIR::Program::EMPTY_OPAQUE_KEY.frozen?)
+mutable_opaque = Set[9]
+prog_mut = opaque_prog.call
+check.call('a mutable opaque Set takes the uncached path (no query cache entry)',
+           prog_mut.write_dominates?(0, 1, 2, opaque_regs: mutable_opaque) &&
+           prog_mut.instance_variable_get(:@write_dominates_cache).nil?)
+mutable_opaque << 2
+check.call('a mutable opaque Set change is observed (no retained snapshot)',
+           !prog_mut.write_dominates?(0, 1, 2, opaque_regs: mutable_opaque))
+flag = ENV['BC2CPP_IR_QUERY_KEYS']
+begin
+  ENV['BC2CPP_IR_QUERY_KEYS'] = '1'
+  first_prog = opaque_prog.call
+  strict_set = StrictKeySet.new([2]).freeze
+  check.call('a dominance-first query initializes the key control and memoizes a StrictKeySet snapshot',
+             !first_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set) &&
+             first_prog.instance_variable_get(:@compact_dataflow_keys) == true &&
+             first_prog.instance_variable_get(:@opaque_reg_keys).key?(strict_set))
+  first_prog.write_dominates?(0, 1, 2, opaque_regs: StrictKeySet.new([2]).freeze)
+  check.call('equal distinct StrictKeySets each keep their own snapshot',
+             first_prog.instance_variable_get(:@opaque_reg_keys).size == 2)
+  first_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set)
+  check.call('a repeated identical StrictKeySet reuses its snapshot without growing the memo',
+             first_prog.instance_variable_get(:@opaque_reg_keys).size == 2)
+  ENV['BC2CPP_IR_QUERY_KEYS'] = '0'
+  off_prog = opaque_prog.call
+  check.call('control-off dominance answers stay correct and copy per query',
+             !off_prog.write_dominates?(0, 1, 2, opaque_regs: strict_set) &&
+             off_prog.write_dominates?(0, 1, 2, opaque_regs: Set[].freeze) &&
+             off_prog.instance_variable_get(:@opaque_reg_keys).nil?)
+ensure
+  flag ? ENV['BC2CPP_IR_QUERY_KEYS'] = flag : ENV.delete('BC2CPP_IR_QUERY_KEYS')
+end
+bound_prog = opaque_prog.call
+BytecodeIR::DATAFLOW_CACHE_SIZE.times { |i| bound_prog.write_dominates?(0, 1, 2, opaque_regs: Set[i + 10].freeze) }
+check.call('opaque snapshot memo stays bounded for dominance queries',
+           bound_prog.instance_variable_get(:@opaque_reg_keys).size == BytecodeIR::DATAFLOW_CACHE_SIZE)
+
+puts '-- walk_dominating_writers (host)'
+moves = irep_of([insn(0, :LOADI_5, "R2\t(5)"), insn(2, :MOVE, "R3\tR2"), insn(5, :MOVE, "R4\tR3"), insn(8, :RETURN, 'R4')])
+found = moves.walk_dominating_writers(2, 4, use: 3, follow_moves: true) { |i| i.op }
+check.call('MOVE is followed as a hop of its own', found == :LOADI_5)
+found = or_literal.walk_dominating_writers(3, 3, use: 4) { |i| i.op }
+check.call('the walk ends with nil at the literal behind a join', found.nil?)
+
+puts '-- ivar_assigned_before_exposure? (host)'
+assigned = ->(list, ivar = 'a', handlers = []) { BytecodeIR.for(irep_of(list, handlers)).ivar_assigned_before_exposure?(ivar) }
+check.call('assigned first, then returned', assigned.call([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@a\tR2"),
+                                                            insn(5, :RETURN, 'R2')]))
+check.call('assigned on one branch only', !assigned.call([insn(0, :JMPNOT, "R1\t8"), insn(4, :LOADI_1, "R2\t(1)"),
+                                                          insn(6, :SETIV, "@a\tR2"), insn(8, :RETURN, 'R2')]))
+check.call('read before the assignment', !assigned.call([insn(0, :GETIV, "R2\t@a"), insn(3, :LOADI_1, "R3\t(1)"),
+                                                         insn(5, :SETIV, "@a\tR3"), insn(8, :RETURN, 'R3')]))
+check.call('an implicit-self call before the assignment', !assigned.call([insn(0, :SSEND0, "R2\t:foo"),
+                                                                          insn(3, :LOADI_1, "R3\t(1)"), insn(5, :SETIV, "@a\tR3"),
+                                                                          insn(8, :RETURN, 'R3')]))
+check.call('a call on another object before the assignment is harmless',
+           assigned.call([insn(0, :SEND0, "R2\t:foo"), insn(3, :LOADI_1, "R3\t(1)"), insn(5, :SETIV, "@a\tR3"),
+                          insn(8, :RETURN, 'R3')]))
+check.call('self copied out before the assignment', !assigned.call([insn(0, :MOVE, "R2\tR0"), insn(3, :LOADI_1, "R3\t(1)"),
+                                                                    insn(5, :SETIV, "@a\tR3"), insn(8, :RETURN, 'R3')]))
+check.call('a method that never assigns it', !assigned.call([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :RETURN, 'R2')]))
+check.call('another ivar is not this one', !assigned.call([insn(0, :LOADI_1, "R2\t(1)"), insn(2, :SETIV, "@b\tR2"),
+                                                          insn(5, :RETURN, 'R2')]))
+check.call('a rescue path back into the body counts as a path',
+           !assigned.call([insn(0, :SEND0, "R2\t:f"), insn(2, :LOADI_1, "R3\t(1)"), insn(4, :SETIV, "@a\tR3"),
+                           insn(7, :RETURN, 'R3')],
+                          'a', [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 4, target: 7)]))
+
+puts '-- IvarLayout.trace_type joins (host)'
+type_of = lambda do |list, idx, reg|
+  IvarLayout.trace_type(irep_of(list), idx, reg, {}, nil, 1)
+end
+or_zero = [insn(0, :MOVE, "R3\tR1"), insn(3, :GETIDX, "R3\t(R4)"), insn(5, :JMPIF, "R3\t12"),
+           insn(9, :LOADI_0, "R3\t(0)"), insn(12, :SETIV, "@x\tR3")]
+check.call('`@x = h[k] || 0` is not proven Fixnum (h[k] may be anything)', type_of.call(or_zero, 4, 3) == IvarLayout::UNKNOWN)
+both = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R3\t(1)"), insn(6, :JMP, "12"), insn(9, :LOADI_2, "R3\t(2)"),
+        insn(12, :SETIV, "@x\tR3")]
+check.call('both arms Fixnum is Fixnum', type_of.call(both, 4, 3) == :fixnum)
+one_nil = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R3\t(1)"), insn(6, :JMP, "11"), insn(9, :LOADNIL, "R3\t(nil)"),
+           insn(11, :SETIV, "@x\tR3")]
+check.call('a Fixnum arm and a nil arm is Integer-or-nil', type_of.call(one_nil, 4, 3) == IvarLayout::FIXNUM_NIL)
+counter = [insn(0, :LOADI_0, "R3\t(0)"), insn(2, :JMPNOT, "R1\t12"), insn(6, :ADDI, "R3\t1"), insn(9, :JMP, '2'),
+           insn(12, :SETIV, "@y\tR3")]
+check.call('a loop-carried counter is not Fixnum: `+= 1` can leave the Fixnum range (ADR 0279)',
+           type_of.call(counter, 4, 3) == IvarLayout::UNKNOWN)
+switch = [insn(0, :LOADI_0, "R3\t(0)"), insn(2, :JMPNOT, "R1\t12"), insn(6, :LOADI_7, "R3\t(7)"), insn(8, :JMP, '2'),
+          insn(12, :SETIV, "@y\tR3")]
+check.call('a loop-carried literal keeps the join: the cycle takes the type the other definition gives it',
+           type_of.call(switch, 4, 3) == :fixnum)
+opaque = [insn(0, :LOADI_0, "R3\t(0)"), insn(2, :JMPNOT, "R1\t10"), insn(6, :SEND0, "R3\t:next"), insn(8, :JMP, '2'),
+          insn(10, :SETIV, "@y\tR3")]
+check.call('a loop that also writes an opaque call result is not Fixnum', type_of.call(opaque, 4, 3) == IvarLayout::UNKNOWN)
+check.call('a write straight before the SETIV is unchanged',
+           type_of.call([insn(0, :LOADI_7, "R3\t(7)"), insn(2, :SETIV, "@x\tR3")], 1, 3) == :fixnum)
+
+puts '-- NIL_NARROWING (host, ADR 0456)'
+# `nil.placed?` raises NoMethodError: the callable says nil cannot answer it. `nil?` nil does answer.
+nil_free = ->(name) { name == 'placed?' }
+non_nil = ->(list, idx, reg, handlers = []) { NilNarrowing.non_nil?(irep_of(list, handlers), idx, reg, nil_free) }
+# v = f; if v then use(v) end
+if_v = [insn(0, :SEND0, "R2\t:f"), insn(3, :JMPNOT, "R2\t12"), insn(7, :MOVE, "R3\tR2"), insn(10, :RETURN, 'R3'),
+        insn(12, :RETNIL, '')]
+check.call('`if v`: v is non-nil on the taken arm', non_nil.call(if_v, 2, 2))
+check.call('`if v`: a MOVE copies the fact', non_nil.call(if_v, 3, 3))
+check.call('`if v`: not on the else arm (negative)', !non_nil.call(if_v, 4, 2))
+check.call('`if v`: not before the test (negative)', !non_nil.call(if_v, 1, 2))
+# v = f; return unless v; use(v)
+unless_v = [insn(0, :SEND0, "R2\t:f"), insn(3, :JMPIF, "R2\t9"), insn(7, :RETNIL, ''), insn(9, :MOVE, "R3\tR2"),
+            insn(12, :RETURN, 'R3')]
+check.call('`return unless v`: v is non-nil after the guard', non_nil.call(unless_v, 3, 2))
+# v = f; v.placed?; use(v)
+called = [insn(0, :SEND0, "R2\t:f"), insn(3, :MOVE, "R3\tR2"), insn(6, :SEND0, "R3\t:placed?"),
+          insn(9, :MOVE, "R4\tR2"), insn(12, :RETURN, 'R4')]
+check.call('a call nil cannot answer proves its receiver non-nil after it returns', non_nil.call(called, 3, 2))
+check.call('the receiver register itself holds the result, not the receiver (negative)', !non_nil.call(called, 3, 3))
+check.call('a call nil may answer proves nothing (negative)',
+           !NilNarrowing.non_nil?(irep_of(called), 3, 2, ->(_name) { false }))
+check.call('a rescue edge out of the call reaches the use without the proof (negative)',
+           !non_nil.call(called, 3, 2, [CatchHandler.new(type: :rescue, begin_addr: 6, end_addr: 9, target: 9)]))
+rewritten = [insn(0, :SEND0, "R2\t:f"), insn(3, :JMPNOT, "R2\t15"), insn(7, :SEND0, "R2\t:g"),
+             insn(10, :MOVE, "R3\tR2"), insn(13, :RETURN, 'R3'), insn(15, :RETNIL, '')]
+check.call('a write between the test and the use drops the fact (negative)', !non_nil.call(rewritten, 3, 2))
+joined = [insn(0, :SEND0, "R2\t:f"), insn(3, :JMPNOT, "R1\t11"), insn(7, :JMPNOT, "R2\t16"),
+          insn(11, :MOVE, "R3\tR2"), insn(14, :RETURN, 'R3'), insn(16, :RETNIL, '')]
+check.call('a join with an untested path drops the fact (negative)', !non_nil.call(joined, 3, 2))
+clobbered = [insn(0, :SEND0, "R4\t:f"), insn(3, :JMPNOT, "R4\t12"), insn(7, :SEND0, "R3\t:g"),
+             insn(10, :RETURN, 'R4'), insn(12, :RETNIL, '')]
+check.call('a callee frame below the register clobbers it (negative)', !non_nil.call(clobbered, 3, 4))
+# v = f; c = (v.placed? && v.map_id == x) ? g(v) : nil; h(v)  -- mrbc's code for Scene::Map#draw_vehicles: the
+# receiver of each call and each argument are separate MOVE copies of the local R4, the `&&` jumps straight to the
+# ternary's test, and the test's JMPNOT then splits into the call and the LOADNIL.
+ternary = [insn(0, :SEND0, "R6\t:f"), insn(3, :MOVE, "R4\tR6"), insn(6, :MOVE, "R6\tR4"),
+           insn(9, :SEND0, "R6\t:placed?"), insn(12, :JMPNOT, "R6\t30"), insn(16, :MOVE, "R6\tR4"),
+           insn(19, :SEND0, "R6\t:map_id"), insn(22, :GETIV, "R7\t@x"), insn(25, :SEND0, "R7\t:map_id"),
+           insn(28, :EQ, "R6\t(R7)"), insn(30, :JMPNOT, "R6\t44"), insn(34, :MOVE, "R7\tR4"),
+           insn(37, :SSEND, "R6\t:g\tn=1"), insn(41, :JMP, '46'), insn(44, :LOADNIL, "R6\t(nil)"),
+           insn(46, :MOVE, "R5\tR6"), insn(49, :MOVE, "R8\tR4"), insn(52, :SSEND, "R7\t:h\tn=1"),
+           insn(56, :RETURN, 'R7')]
+check.call('`(v.m? && x) ? g(v) : nil`: the argument copy of v is non-nil at g', non_nil.call(ternary, 12, 7))
+check.call('`(v.m? && x) ? g(v) : nil`: v stays non-nil past the `&&` and ternary joins', non_nil.call(ternary, 15, 4))
+check.call('`(v.m? && x) ? g(v) : nil`: a later argument copy of v is non-nil at h', non_nil.call(ternary, 17, 8))
+check.call('`(v.m? && x) ? g(v) : nil`: not before the call (negative)', !non_nil.call(ternary, 3, 4))
+check.call('`(v.m? && x) ? g(v) : nil`: nothing when nil may answer m? (negative)',
+           !NilNarrowing.non_nil?(irep_of(ternary), 12, 7, ->(_name) { false }))
+# b = blk; c = b; return unless c; use(blk)  -- available copies: a test of c narrows every copy of it.
+chain = [insn(0, :MOVE, "R2\tR1"), insn(3, :MOVE, "R3\tR2"), insn(6, :JMPIF, "R3\t12"), insn(10, :RETNIL, ''),
+         insn(12, :RETURN, 'R1')]
+check.call('a test narrows the register its copy was copied from, two copies back', non_nil.call(chain, 4, 1))
+check.call('a test narrows a sibling copy', non_nil.call(chain, 4, 2))
+broken = [insn(0, :MOVE, "R2\tR1"), insn(3, :LOADNIL, "R1\t(nil)"), insn(5, :MOVE, "R3\tR2"),
+          insn(8, :JMPIF, "R3\t14"), insn(12, :RETNIL, ''), insn(14, :RETURN, 'R1')]
+check.call('a write of the original ends the copy (negative)', !non_nil.call(broken, 5, 1) && non_nil.call(broken, 5, 2))
+joined_copy = [insn(0, :JMPNOT, "R4\t10"), insn(4, :MOVE, "R2\tR1"), insn(7, :JMP, '13'), insn(10, :MOVE, "R2\tR1"),
+               insn(13, :JMPIF, "R2\t19"), insn(17, :RETNIL, ''), insn(19, :RETURN, 'R1')]
+check.call('a copy made on both arms of a join still narrows the original', non_nil.call(joined_copy, 6, 1))
+one_arm = [insn(0, :JMPNOT, "R4\t10"), insn(4, :MOVE, "R2\tR1"), insn(7, :JMP, '13'), insn(10, :MOVE, "R2\tR3"),
+           insn(13, :JMPIF, "R2\t19"), insn(17, :RETNIL, ''), insn(19, :RETURN, 'R1')]
+check.call('a copy made on one arm only does not narrow the original (negative)', !non_nil.call(one_arm, 6, 1))
+
+puts '-- IS_A_GUARD (host, ADR 0456)'
+# The closed world's answers come from a real ClosedWorld over a declared class K (and a subclass, or a Ruby
+# definition, where a case needs one) and CodeGen#is_a_guard_class / #raise_never_returns? on it. Only the native
+# registration scan (class_test_native_owners?: is_a? and raise are registered on Kernel alone, kernel.c) is
+# stubbed, since it reads a build's native sources.
+require_relative '../../tools/bc2cpp/codegen'
+%w[codegen_receiver_facts codegen_class_narrowing codegen_eqq codegen_return_analysis codegen_block_core_direct
+   rbs_param_check].each { |file| require_relative "../../tools/bc2cpp/#{file}" }
+guard_def = Struct.new(:owner, :name, :irep, :kind)
+guard_for = lambda do |registry: {}, classes: { 'K' => [{ super: :none, outer_nil: true }] }|
+  world = ClosedWorld.new(ireps: {}, registry: registry, class_decls: classes, walked: Set.new, native_paths: [],
+                          ruby_paths: [])
+  gen = CodeGen.allocate
+  gen.instance_variable_set(:@closed_world, world)
+  gen.instance_variable_set(:@registry, registry)
+  gen.instance_variable_set(:@ireps, {})
+  gen.define_singleton_method(:class_test_native_owners?) { |_name| true }
+  RbsParamCheck::IsAGuard.new(gen)
+end
+guard = guard_for.call
+# cmd = f; raise TypeError, "..." unless cmd.is_a?(K); execute(cmd)  -- mrbc's code for the Interpreter's run loop.
+guarded_list = lambda do |klass_load = insn(9, :GETCONST, "R4\tK"), arg = 'R2'|
+  [insn(0, :SEND0, "R3\t:f"), insn(3, :MOVE, "R2\tR3"), insn(6, :MOVE, "R3\tR2"), klass_load,
+   insn(12, :SEND, "R3\t:is_a?\tn=1"), insn(16, :JMPIF, "R3\t29"), insn(20, :GETCONST, "R4\tTypeError"),
+   insn(23, :STRING, "R5\tL[0]"), insn(26, :SSEND, "R3\t:raise\tn=2"), insn(29, :MOVE, "R4\t#{arg}"),
+   insn(32, :SSEND, "R3\t:execute\tn=1"), insn(36, :RETURN, 'R3')]
+end
+instance_k = lambda do |list, idx, reg, with = guard|
+  NilNarrowing.instance_of?(irep_of(list), idx, reg, 'K', nil_free, {}, class_guard: with)
+end
+check.call('`raise ... unless x.is_a?(K)`: the argument copy of x is an instance of K at the call',
+           instance_k.call(guarded_list.call, 10, 4))
+check.call('`raise ... unless x.is_a?(K)`: the local is an instance of K, and non-nil, after the guard',
+           instance_k.call(guarded_list.call, 9, 2) &&
+             NilNarrowing.non_nil?(irep_of(guarded_list.call), 9, 2, nil_free, {}, class_guard: guard))
+check.call('`raise ... unless x.is_a?(K)`: nothing before the test (negative)', !instance_k.call(guarded_list.call, 4, 2))
+check.call('a guard on another register proves nothing about the argument (negative)',
+           !instance_k.call(guarded_list.call(insn(9, :GETCONST, "R4\tK"), 'R1'), 10, 4))
+check.call('a program that defines is_a? in Ruby refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, 4,
+                            guard_for.call(registry: { 'is_a?' => [guard_def.new('K', 'is_a?', 'k_is_a', :method)] })))
+check.call('a K that is a call result, not a constant, refuses (negative)',
+           !instance_k.call(guarded_list.call(insn(9, :SEND0, "R4\t:k")), 10, 4))
+check.call('a K something inherits from refuses (negative)',
+           !instance_k.call(guarded_list.call, 10, 4,
+                            guard_for.call(classes: { 'K' => [{ super: :none, outer_nil: true }],
+                                                      'S' => [{ super: 'K', outer_nil: true }] })))
+check.call('a raise that may return (a Ruby `raise`) leaves the fall-through unproven (negative)',
+           !instance_k.call(guarded_list.call, 10, 4,
+                            guard_for.call(registry: { 'raise' => [guard_def.new('K', 'raise', 'k_raise', :method)] })))
+# if x.is_a?(K) then h(x) end
+if_is_a = [insn(0, :MOVE, "R3\tR1"), insn(3, :GETCONST, "R4\tK"), insn(6, :SEND, "R3\t:is_a?\tn=1"),
+           insn(10, :JMPNOT, "R3\t20"), insn(14, :MOVE, "R4\tR1"), insn(17, :SSEND, "R3\t:h\tn=1"),
+           insn(20, :RETURN, 'R3')]
+check.call('`if x.is_a?(K)`: the taken arm proves the argument', instance_k.call(if_is_a, 5, 4))
+check.call('`if x.is_a?(K)`: not after the join (negative)', !instance_k.call(if_is_a, 6, 1))
+# A jump into the test from elsewhere: the branch no longer reads only the is_a? result.
+joined_is_a = [insn(0, :JMPNOT, "R2\t13"), insn(4, :MOVE, "R3\tR1"), insn(7, :GETCONST, "R4\tK"),
+               insn(10, :SEND, "R3\t:is_a?\tn=1"), insn(13, :JMPNOT, "R3\t23"), insn(17, :MOVE, "R4\tR1"),
+               insn(20, :SSEND, "R3\t:h\tn=1"), insn(23, :RETURN, 'R3')]
+check.call('a test another edge also reaches proves nothing (negative)', !instance_k.call(joined_is_a, 6, 4))
+
+puts '-- BLOCK_SELF plain yielders (host, ADR 0456)'
+yielder = lambda do |list, nested = nil|
+  outer = Irep.new(label: 'bs_out', instructions: list, reps: nested ? ['bs_in'] : [], nregs: 8, catch_handlers: [])
+  ireps = { 'bs_out' => outer }
+  ireps['bs_in'] = Irep.new(label: 'bs_in', instructions: nested, reps: [], nregs: 8, catch_handlers: []) if nested
+  BlockSelf.plain_yielder_why(outer, ireps)
+end
+# mruby-enum-ext's `def each_with_object(obj, &block); return to_enum(...) unless block; self.each {|*val|
+# block.call(val.__svalue, obj) }; obj; end`, as mrbc compiles it: the block slot R2 is copied to the local R3 and
+# tested, the nested block reads it back through GETUPVAR and only calls it.
+ewo_inner = [insn(0, :ENTER, "0:0:1:0:0:0:0:0 (0x1000)"), insn(4, :GETUPVAR, "R3\t3\t0"), insn(8, :MOVE, "R4\tR1"),
+             insn(11, :SEND0, "R4\t:__svalue"), insn(14, :GETUPVAR, "R5\t1\t0"), insn(18, :SEND, "R3\t:call\tn=2"),
+             insn(22, :RETURN, 'R3')]
+ewo = [insn(0, :ENTER, "1:0:0:0:0:0:1:0 (0x40001)"), insn(4, :MOVE, "R3\tR2"), insn(7, :MOVE, "R4\tR3"),
+       insn(10, :JMPIF, "R4\t26"), insn(14, :LOADSYM, "R5\t:each_with_object"), insn(17, :MOVE, "R6\tR1"),
+       insn(20, :SSEND, "R4\t:to_enum\tn=2"), insn(24, :RETURN, 'R4'), insn(26, :BLOCK, "R5\tI[0]"),
+       insn(29, :SSENDB, "R4\t:each\tn=0"), insn(33, :RETURN, 'R1')]
+check.call('each_with_object only calls its block (a copy tested, then called from a nested block)',
+           yielder.call(ewo, ewo_inner).nil?)
+# def f(x); yield x; end  -- BLKPUSH, then BLKCALL.
+yield_x = [insn(0, :ENTER, "1:0:0:0:0:0:0:0 (0x40000)"), insn(4, :MOVE, "R4\tR1"), insn(7, :BLKPUSH, "R3\t1:0:0:0 (0)"),
+           insn(11, :BLKCALL, "R3\t1"), insn(14, :RETURN, 'R3')]
+check.call('`yield x` is a plain call of the block', yielder.call(yield_x).nil?)
+# def f(&b); b; end
+returns_it = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :RETURN, 'R1')]
+check.call('returning the block lets it escape (negative)', !yielder.call(returns_it).nil?)
+# def f(&b); instance_exec(&b); end
+rebinds = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :MOVE, "R2\tR1"), insn(7, :MOVE, "R4\tR2"),
+           insn(10, :SSENDB, "R3\t:instance_exec\tn=0"), insn(14, :RETURN, 'R3')]
+check.call('passing the block on (`instance_exec(&b)`) lets it escape (negative)', !yielder.call(rebinds).nil?)
+# def f(&b); @b = b; end
+stores = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :SETIV, "@b\tR1"), insn(7, :RETURN, 'R1')]
+check.call('storing the block lets it escape (negative)', !yielder.call(stores).nil?)
+# def f(&b); g(b.call, b); end  -- the receiver of `call` is fine, the same Proc as an argument is not.
+as_arg = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :MOVE, "R3\tR1"), insn(7, :SEND0, "R3\t:call"),
+          insn(10, :MOVE, "R4\tR1"), insn(13, :SSEND, "R2\t:g\tn=2"), insn(17, :RETURN, 'R2')]
+check.call('the block as an argument lets it escape (negative)', !yielder.call(as_arg).nil?)
+# def f(&b); [1].each { @b = b }; end  -- a nested block stores the captured slot.
+nested_store = [insn(0, :ENTER, "0:0:0:0:0:0:0:0 (0x0)"), insn(4, :GETUPVAR, "R2\t2\t0"), insn(8, :SETIV, "@b\tR2"),
+                insn(11, :RETURN, 'R2')]
+outer_store = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :MOVE, "R2\tR1"), insn(7, :LOADI_1, "R3\t(1)"),
+               insn(9, :ARRAY, "R3\t1"), insn(12, :BLOCK, "R4\tI[0]"), insn(15, :SENDB, "R3\t:each\tn=0"),
+               insn(19, :RETURN, 'R3')]
+check.call('a nested block storing the captured block lets it escape (negative)',
+           !yielder.call(outer_store, nested_store).nil?)
+# def f(&b); super; end  -- a zsuper passes the frame's block on.
+zsuper = [insn(0, :ENTER, "0:0:0:0:0:0:1:0 (0x1)"), insn(4, :MOVE, "R2\tR1"), insn(7, :ARGARY, "R4\t0:0:0:0 (0)"),
+          insn(11, :SUPER, "R3\tn=*"), insn(14, :RETURN, 'R3')]
+check.call('`super` forwards the block (negative)', !yielder.call(zsuper).nil?)
+
+if ENV['MRBC']
+  require_relative 'fixture_runtime'
+  runtime = Bc2cppFixtureRuntime
+  body_of = lambda do |code, fn|
+    code[/^mrb_value #{fn}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
+  end
+
+  # Inline loops over `loop_var` (bc2cpp_each_i / bc2cpp_heach_i) that are not behind their GUARDED_BLOCK_INLINE
+  # exact-class test. A comment alone is not a guard: the nearest comment above a loop must be GUARDED_BLOCK_INLINE
+  # and the `if` line directly under it must be the exact-class test (`M->c == M->root_c` plus an
+  # mrb_array_p / mrb_hash_p test on the receiver). The loop's own `if (!mrb_array_p ...)` assert is not the guard.
+  loop_starts = lambda do |chunk, loop_var|
+    starts = []
+    chunk.scan(/^\s*for \(mrb_int #{loop_var}_\d+ = 0/) { starts << Regexp.last_match.begin(0) }
+    starts
+  end
+  guard_if = /\A\s*if \(M->c == M->root_c && mrb_(?:array|hash)_p\(\w+\)/
+  unguarded_loops = lambda do |chunk, loop_var|
+    loop_starts.call(chunk, loop_var).reject do |pos|
+      lines = chunk[0...pos].lines
+      comment = lines.rindex { |l| l.match?(%r{\A\s*// }) }
+      comment && lines[comment].include?('GUARDED_BLOCK_INLINE') && lines[comment + 1].to_s.match?(guard_if)
+    end
+  end
+
+  puts '-- generated code (closed world)'
+  Dir.mktmpdir do |dir|
+    code, = runtime.generate(<<~RUBY, dir)
+      class JdFoo
+        def bar; 1; end
+      end
+      class JdBaz
+        def bar; 2; end
+      end
+      class JdProbe
+        def orarr(h, k)
+          x = h[k] || []
+          s = 0
+          x.each { |e| s += e }
+          s
+        end
+
+        def orhash(h, k)
+          x = h[k] || {}
+          x.each { |kk, vv| kk }
+          x
+        end
+
+        def straight
+          x = []
+          s = 0
+          x.each { |e| s += e }
+          s
+        end
+
+        def orfoo(h, k)
+          x = h[k] || JdFoo.new
+          x.bar
+        end
+
+        def reassigned(c)
+          x = JdBaz.new
+          x = JdFoo.new if c
+          x.bar
+        end
+
+        def fresh
+          x = JdFoo.new
+          x.bar
+        end
+      end
+    RUBY
+    # The receiver may not be an Array, so its inline walk is only the GUARDED_BLOCK_INLINE arm behind the exact-class
+    # test, and the send stays as the other arm. (An unguarded walk would be the wrong answer here.)
+    orarr = body_of.call(code, 'JdProbe_orarr')
+    check.call('`(h[k] || []).each` is inlined only behind an exact-Array test (the receiver may not be an Array)',
+               loop_starts.call(orarr, 'bc2cpp_each_i').any? && unguarded_loops.call(orarr, 'bc2cpp_each_i').empty? &&
+                 orarr.include?('BLOCK_FALLBACK :each'))
+    orhash = body_of.call(code, 'JdProbe_orhash')
+    check.call('`(h[k] || {}).each` walks a Hash only behind an exact-Hash test',
+               loop_starts.call(orhash, 'bc2cpp_heach_i').any? && unguarded_loops.call(orhash, 'bc2cpp_heach_i').empty? &&
+                 orhash.include?('GUARDED_BLOCK_INLINE :each -- exact Hash receiver'))
+    check.call('an array built on the straight path is still inlined',
+               body_of.call(code, 'JdProbe_straight').include?('inlined #each'))
+    check.call('`x = h[k] || Foo.new; x.bar` is not an unguarded exact-class call',
+               !body_of.call(code, 'JdProbe_orfoo').include?('CLOSED_WORLD_EXACT_CLASS'))
+    check.call('a class picked on one branch is not an unguarded exact-class call',
+               !body_of.call(code, 'JdProbe_reassigned').include?('CLOSED_WORLD_EXACT_CLASS'))
+    check.call('a fresh `Foo.new` receiver keeps the unguarded exact-class call',
+               body_of.call(code, 'JdProbe_fresh').include?('CLOSED_WORLD_EXACT_CLASS'))
+    check.call('the guarded typed call is kept for the join, with its class check',
+               body_of.call(code, 'JdProbe_reassigned').match?(/TYPED :bar -> JdFoo#bar.*\n\s+if \((?:mrb_likely\()?bc2cpp_class_is\(M, r\d+, bc2cpp_owner_class_\d+\(M\)\)\)/))
+  end
+
+  puts '-- embedded ivar types (closed world)'
+  Dir.mktmpdir do |dir|
+    code, = runtime.generate(<<~RUBY, dir)
+      class JdHolder
+        def initialize(h)
+          @jd_a = 1
+          @jd_b = h[:b] || 0
+          @jd_c = h[:c] ? 1 : nil
+        end
+
+        def set_late; @jd_late = 5; end
+        def late; @jd_late; end
+      end
+    RUBY
+    fields = code[/struct JdHolder_ivars \{\n(.*?)\n\};/m, 1].to_s
+    check.call('a straight-line Fixnum ivar stays typed', fields.include?('mrb_int ivar_jd_a;'))
+    check.call('`@jd_b = h[:b] || 0` is not typed (h[:b] may be any class)', fields.include?('mrb_value ivar_jd_b;'))
+    check.call('a Fixnum-or-nil join is the nilable type', fields.include?('Bc2cppFixnumOrNil ivar_jd_c;'))
+    check.call('an ivar assigned outside #initialize is not typed (an unset read is nil, not 0)',
+               fields.include?('mrb_value ivar_jd_late;'))
+  end
+
+  full = runtime.full
+  if full.nil? || !runtime.compiler?
+    puts '  SKIP run: set BC2CPP_MRUBY_FULL (libmruby.a with the full-core gems, from the patched 3rd/mruby) and have g++'
+  else
+    puts '-- fixtures on real mruby, interpreted and compiled'
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class JdFoo
+          def bar; 1; end
+        end
+        class JdBaz
+          def bar; 2; end
+        end
+        class JdProbe
+          def orarr(h, k)
+            x = h[k] || []
+            s = 0
+            x.each { |e| s += e }
+            s
+          end
+
+          def reassigned(c)
+            x = JdBaz.new
+            x = JdFoo.new if c
+            x.bar
+          end
+
+          def orfoo(h, k)
+            x = h[k] || JdFoo.new
+            x.bar
+          end
+        end
+        class JdHolder
+          def initialize(h)
+            @b = h[:b] || 0
+          end
+
+          def b; @b; end
+          def add_one; @b = @b + 1; end
+        end
+        class JdLate
+          def set_late; @late = 5; end
+          def late; @late; end
+          def initialize; @a = 1; end
+        end
+      RUBY
+      _code, err = runtime.generate(source, dir, only_owners: %w[JdProbe JdHolder JdLate JdFoo JdBaz])
+      body = <<~CPP
+        static int scenario(mrb_state* M) {
+          mrb_value probe = mrb_obj_new(M, mrb_class_get(M, "JdProbe"), 0, nullptr);
+          mrb_value h = mrb_hash_new(M);
+          mrb_value list = mrb_ary_new(M);
+          mrb_ary_push(M, list, mrb_fixnum_value(1));
+          mrb_ary_push(M, list, mrb_fixnum_value(2));
+          mrb_hash_set(M, h, mrb_symbol_value(mrb_intern_lit(M, "list")), list);
+          mrb_value args[2] = { h, mrb_symbol_value(mrb_intern_lit(M, "list")) };
+          call(M, "orarr with an array", probe, "orarr", 2, args);
+          args[1] = mrb_symbol_value(mrb_intern_lit(M, "none"));
+          call(M, "orarr with a missing key", probe, "orarr", 2, args);
+          // A Hash where an Array was assumed: `each` still works there.
+          mrb_value hh = mrb_hash_new(M);
+          mrb_hash_set(M, hh, mrb_fixnum_value(1), mrb_fixnum_value(2));
+          mrb_hash_set(M, h, mrb_symbol_value(mrb_intern_lit(M, "hash")), hh);
+          args[1] = mrb_symbol_value(mrb_intern_lit(M, "hash"));
+          call(M, "orarr with a Hash value", probe, "orarr", 2, args);
+          mrb_value no = mrb_false_value();
+          mrb_value yes = mrb_true_value();
+          call(M, "reassigned false", probe, "reassigned", 1, &no);
+          call(M, "reassigned true", probe, "reassigned", 1, &yes);
+          mrb_hash_set(M, h, mrb_symbol_value(mrb_intern_lit(M, "baz")), mrb_obj_new(M, mrb_class_get(M, "JdBaz"), 0, nullptr));
+          args[1] = mrb_symbol_value(mrb_intern_lit(M, "baz"));
+          call(M, "orfoo with a JdBaz value", probe, "orfoo", 2, args);
+          args[1] = mrb_symbol_value(mrb_intern_lit(M, "none"));
+          call(M, "orfoo with a missing key", probe, "orfoo", 2, args);
+
+          // A value of another class in a `|| 0` ivar.
+          mrb_value opts = mrb_hash_new(M);
+          mrb_hash_set(M, opts, mrb_symbol_value(mrb_intern_lit(M, "b")), mrb_float_value(M, 2.5));
+          mrb_value holder = mrb_obj_new(M, mrb_class_get(M, "JdHolder"), 1, &opts);
+          call(M, "holder b (a Float)", holder, "b");
+          mrb_value empty = mrb_hash_new(M);
+          mrb_value plain = mrb_obj_new(M, mrb_class_get(M, "JdHolder"), 1, &empty);
+          call(M, "holder b (defaulted)", plain, "b");
+          call(M, "holder add_one", plain, "add_one");
+          // An unset ivar reads nil.
+          mrb_value late = mrb_obj_new(M, mrb_class_get(M, "JdLate"), 0, nullptr);
+          call(M, "late before set", late, "late");
+          call(M, "set_late", late, "set_late");
+          call(M, "late after set", late, "late");
+          return 0;
+        }
+      CPP
+      built, output = runtime.run(dir, err, %w[JdProbe JdHolder JdLate JdFoo JdBaz], body, build: full, full: true)
+      check.call('the fixture compiles and runs against real mruby', built)
+      puts output unless built
+      if built
+        sections = runtime.sections(output)
+        values = ->(name) { sections.fetch(name, []).reject { |l| l.start_with?('  ') } }
+        check.call('every join answers what the interpreter answers',
+                   !values.call('interpreted').empty? && values.call('interpreted') == values.call('compiled'))
+        puts output if ENV["BC2CPP_CHECK_VERBOSE"] || values.call("interpreted") != values.call("compiled")
+      end
+    end
+  end
+end
+
+if failures.empty?
+  puts 'bc2cpp join dominance check: PASS'
+else
+  warn "bc2cpp join dominance check: #{failures.size} failure(s)"
+  exit 1
+end

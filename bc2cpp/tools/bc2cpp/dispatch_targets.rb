@@ -1,0 +1,1122 @@
+# frozen_string_literal: true
+
+require_relative 'world_root'
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_receivers'
+require_relative 'bytecode_ir_containers'
+require_relative 'native_constructor_sigs'
+require_relative 'compiled_gems'
+require_relative 'ruby_parse_cache'
+require_relative 'scan_cache'
+require_relative 'lexical_scopes'
+
+# Construct, native-argument and super devirtualization targets.
+
+# Sources for the construct-target lists below. Each read happens at load time and raises when its
+# source is missing or yields nothing, so a moved or emptied file fails the load instead of silently
+# shrinking a list (the compiler would then devirtualize fewer sites, with no error).
+module DispatchTargetSources
+  ROOT = BC2CPP_WORLD_ROOT
+
+  module_function
+
+  def read(rel)
+    path = File.join(ROOT, rel)
+    raise "bc2cpp: #{rel} is missing (dispatch_targets.rb derives a list from it)" unless File.file?(path)
+
+    text = File.read(path, encoding: 'UTF-8')
+    raise "bc2cpp: #{rel} is empty (dispatch_targets.rb derives a list from it)" if text.strip.empty?
+
+    text
+  end
+
+  # Full names of the classes whose body defines an instance `initialize` directly (not inside
+  # `class << self` or a method body) in the mrblib files matching `glob`.
+  def class_initializers(glob)
+    files = Dir[File.join(ROOT, glob)].sort
+    raise "bc2cpp: no Ruby sources match #{glob}" if files.empty?
+
+    found = {}
+    files.each { |file| file_initializers(file).each { |name| found[name] = true } }
+    found
+  end
+
+  # One file's class_initializers names, in first-seen order. They depend on that file's bytes alone, so the scan
+  # cache keeps them per file (with the Prism version) and a warm run does not parse the file for this list.
+  def file_initializers(file)
+    ScanCache.fetch("dispatch_targets.class_initializers.prism#{Prism::VERSION}", [file], cache_absent: false) do
+      result = RubyParseCache.parse_file(file)
+      raise "bc2cpp: #{file}: #{result.errors.first.message}" unless result.errors.empty?
+
+      collect_initializers(result.value, nil, {}).keys
+    end
+  end
+
+  def collect_initializers(node, scope, found)
+    case node
+    when Prism::ClassNode, Prism::ModuleNode
+      full = [scope, node.constant_path.slice].compact.join('::')
+      if node.is_a?(Prism::ClassNode) && node.body.is_a?(Prism::StatementsNode)
+        node.body.body.each do |stmt|
+          found[full] = true if stmt.is_a?(Prism::DefNode) && stmt.name == :initialize
+        end
+      end
+      collect_initializers(node.body, full, found) if node.body
+    when Prism::SingletonClassNode, Prism::DefNode
+      nil
+    else
+      node.compact_child_nodes.each { |child| collect_initializers(child, scope, found) }
+    end
+    found
+  end
+
+  # DIRECT_CONSTRUCT_TARGETS: the non-singleton owners mruby-rpg2k-compiled emits (compiled_gems.rb) that
+  # define #initialize in mruby-rpg2k's own mrblib.
+  def direct_construct_targets
+    owners = BC2CPP_COMPILED_GEMS.fetch('mruby-rpg2k-compiled').fetch(:owners)
+    initializers = class_initializers('mruby-rpg2k/mrblib/**/*.rb')
+    targets = owners.reject { |owner| owner.include?('.') }.select { |owner| initializers.key?(owner) }
+    raise 'bc2cpp: DIRECT_CONSTRUCT_TARGETS derived empty' if targets.empty?
+
+    targets.freeze
+  end
+
+  # DIRECT_CONSTRUCT_ACCESSORS: the owners whose class a direct-construct site reads from a `<Owner>_compiled_class`
+  # accessor, captured once when the owning gem registers its methods (CodeGen#emit_direct_construct_accessors), so a
+  # constant reassigned later is caught by the site's guard. Every other DIRECT_CONSTRUCT_TARGETS owner uses the
+  # owner-class cache. Each must be a target.
+  DIRECT_CONSTRUCT_ACCESSOR_OWNERS = %w[
+    Game::Battle Game::ChipSet Game::Interpreter Game::Map Game::MessageConfig Game::MoveRoute Game::NumberInput
+    Game::Screen Game::Switches Game::Timer Game::Transition RPG2k::Scene::ChipsetEditor RPG2k::Scene::DebugMenu
+    RPG2k::Scene::ItemMenu RPG2k::Scene::Map RPG2k::Scene::MapViewer RPG2k::Scene::Menu
+  ].freeze
+
+  def direct_construct_accessor_targets(targets)
+    stray = DIRECT_CONSTRUCT_ACCESSOR_OWNERS.reject { |owner| targets.include?(owner) }
+    raise "bc2cpp: DIRECT_CONSTRUCT_ACCESSOR_OWNERS names no DIRECT_CONSTRUCT_TARGETS owner: #{stray.join(', ')}" if stray.any?
+
+    DIRECT_CONSTRUCT_ACCESSOR_OWNERS
+  end
+end
+
+# The typed-_impl calling convention models plain mandatory arguments only.
+# ENTER's aspec is m1:opt:rest:m2:key:kwrest:block; anything past m1
+# (`def foo(n = 0)`, `*args`, keywords, `&block`) does not fit, and reading
+# only m1 once produced a direct call with an extra argument. Shared with
+# report_annotation_candidates so it counts what drop_unsafe_embeddings would
+# accept (see pure_mandatory_arity?).
+
+# Native RGSS classes (mruby-rgss/src/lib.cxx DataType<T>) whose `SEND :new`
+# can be devirtualized ("MONO :new -> direct native construct" in compile_send)
+# when trace_new_target proves the receiver class: a hand-written lib.cxx entry
+# point (`fn`) builds T from the argument registers, behind a runtime
+# class-identity check against `class_fn` (see compile_send).
+#
+# `arity` must match the call site exactly (no default filling); an Array
+# lists several accepted counts. Other counts fall back to dynamic dispatch.
+# `arg_type` (:int/:float, uniform per class, matching the lib.cxx structs) is
+# how each argument is unboxed before calling `fn`, which takes native
+# mrb_int/mrb_float; mrb_as_int/mrb_as_float raise the same TypeError they
+# raised inside `fn`.
+# Tone, Color, Rect and Bitmap rows are derived from their `bc2cpp:direct` overloads in
+# sig/bc2cpp/declarations.rbs#rgss_constructors (NativeConstructorSigs.construct_targets). Each class's
+# fn, class_fn, arity and arg_type come from that section and its audited source (the rule is stated there).
+# Rect's direct arity is 4, not the source's 0..4: the 0-argument form is a literal-argument direct overload, and
+# the direct arm does not fill defaults. Those counts go through OVERLOADED_CONSTRUCT.
+NATIVE_CONSTRUCT_TYPE_GUARDS = {
+  # Bitmap#initialize also accepts a String (file load), which the section's Ruby initialize dispatches on
+  # `kind_of? String` (not a native format, so the section cannot say it). `type_guard: :int` checks mrb_integer_p
+  # on every argument and falls back to mrb_funcall otherwise.
+  'Bitmap' => :int,
+}.freeze
+
+# Rows the section does not carry, listed by hand:
+#  - Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that rgss::sprite_new_direct
+#    (include/rgss_construct.hxx) reproduces. The entry takes an object, which the section has no type for. "|o"
+#    never coerces or raises, so there is no TypeError behavior to preserve.
+#  - Table: table_init is `mrb_get_args(M, "i|ii", ...)`, but table_new_direct takes the argument count too, which
+#    the section cannot express. :table_dimensions names that count (codegen_send.rb emits it).
+NATIVE_CONSTRUCT_EXPLICIT = {
+  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', class_owner: 'RGSS::Sprite',
+                arity: [0, 1],
+                arg_type: :object },
+  'Table' => { fn: 'rgss::table_new_direct', class_fn: 'rgss::native_table_class', class_owner: 'RGSS::Table',
+               arity: [1, 2, 3], arg_type: :table_dimensions },
+}.freeze
+
+NATIVE_CONSTRUCT_TARGETS = begin
+  derived = NativeConstructorSigs.construct_targets.to_h do |key, row|
+    guard = NATIVE_CONSTRUCT_TYPE_GUARDS[key]
+    [key, guard ? row.merge(type_guard: guard) : row]
+  end
+  missing_guard = NATIVE_CONSTRUCT_TYPE_GUARDS.keys - derived.keys
+  raise "bc2cpp: type_guard for #{missing_guard.join(', ')}, which rgss_constructors does not derive" unless missing_guard.empty?
+
+  duplicated = derived.keys & NATIVE_CONSTRUCT_EXPLICIT.keys
+  raise "bc2cpp: #{duplicated.join(', ')} is both derived and listed by hand" unless duplicated.empty?
+
+  derived.merge(NATIVE_CONSTRUCT_EXPLICIT).freeze
+end
+
+# bc2cpp-COMPILED classes whose `Owner.new` may become bc2cpp_direct_alloc +
+# the compiled `#initialize` _impl (emit_direct_construct_decls), the compiled
+# counterpart of NATIVE_CONSTRUCT_TARGETS. The arity comes from the real
+# #initialize and is re-checked at the call site; only the class-identity
+# accessor is implied (`class_fn`-style, guarding a reassigned constant).
+#
+# Derived (DispatchTargetSources.direct_construct_targets), not hand-listed. An
+# entry needs no accessor: a full build reads a generated `*_compiled_class`
+# only for DIRECT_CONSTRUCT_ACCESSOR_TARGETS, and the rest use the owner-class cache.
+#
+# Soundness bar for an entry, re-checked live by compile_send:
+#   - no `self.new`/`self.allocate` anywhere for the class (checked against
+#     @registry every run);
+#   - #initialize compiles clean with pure mandatory arity
+#     (pure_mandatory_arity?), or, for the keyword path, mandatory + optional
+#     + keyword parameters (mandatory_optional_and_keyword_arity?,
+#     compile_keyword_direct_construct);
+#   - the call site's argument count matches.
+# A site whose enclosing method does not compile is dropped with it
+# (SKIP_UNSUPPORTED is per method), so an entry can be listed with no active
+# site. #initialize is always private (src/class.c), which does not matter: a
+# direct call bypasses the visibility lookup, as Class#new does.
+# Receivers written relative to the enclosing module (`Scene::Map` inside
+# `module RPG2k`) are resolved by lexically_resolve_construct_target, which
+# prefers a member of this table and otherwise falls back to the set of classes
+# the closed world DEFINES (LEXICAL_CONSTRUCT_RESOLUTION), refusing
+# cross-level ambiguity either way.
+#
+# No #initialize arity filters the list. compile_send's positional arm refuses
+# keyword-declaring initializers (pure_mandatory_arity?), and
+# compile_keyword_direct_construct reaches them from its own call shape (Game::MoveRoute).
+# POSITIONAL_OPTIONAL_CONSTRUCT pads omitted `= default` positionals and passes
+# bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
+#
+# LISTING_GRANTS_NOTHING: an entry here only lets lexically_resolve_construct_target
+# CONSIDER the class. compile_send still re-checks all four gates on every run --
+# no custom self.new/self.allocate, an #initialize that compiles clean, a call
+# count inside [mand, mand+opt], and the owner emitted -- so a class listed here
+# that fails any of them simply keeps its dynamic dispatch. That is why the
+# derived entries can be broad: they are every class this gem emits that has an
+# #initialize, and the measurement decides which of them actually fire.
+DIRECT_CONSTRUCT_TARGETS = DispatchTargetSources.direct_construct_targets
+
+# The DIRECT_CONSTRUCT_TARGETS owners whose `<Owner>_compiled_class()` accessor the owning gem's generated code
+# defines (DispatchTargetSources::DIRECT_CONSTRUCT_ACCESSOR_OWNERS). A full build reads that accessor for these;
+# every other listed target uses the owner-class cache (owner_class_ptr_expr). One naming no listed owner raises at
+# load time.
+DIRECT_CONSTRUCT_ACCESSOR_TARGETS = DispatchTargetSources.direct_construct_accessor_targets(DIRECT_CONSTRUCT_TARGETS)
+
+# CPP_RESERVED_WORDS: a Ruby parameter name can be a C++ keyword
+# (RPG2k::Scene::Map#page_field(name, default)). Not a full keyword table,
+# just plausible names; every arg_names entry goes through sanitize_c_ident.
+CPP_RESERVED_WORDS = Set[
+  'default', 'class', 'new', 'delete', 'template', 'namespace', 'operator',
+  'this', 'true', 'false', 'nullptr', 'try', 'catch', 'throw', 'const',
+  'static', 'struct', 'union', 'enum', 'typedef', 'sizeof', 'goto',
+  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
+  'return', 'void', 'int', 'float', 'double', 'char', 'bool', 'long',
+  'short', 'auto', 'extern', 'volatile', 'explicit', 'typename', 'using',
+  'public', 'private', 'protected', 'virtual', 'friend', 'export', 'mutable',
+  # The rest of C++17's keywords and alternative tokens (a Ruby local `register` or `and` is a legal name).
+  'register', 'inline', 'signed', 'unsigned', 'wchar_t', 'asm', 'alignas', 'alignof', 'and', 'and_eq', 'bitand', 'bitor',
+  'compl', 'not', 'not_eq', 'or', 'or_eq', 'xor', 'xor_eq', 'const_cast', 'dynamic_cast', 'reinterpret_cast',
+  'static_cast', 'decltype', 'constexpr', 'noexcept', 'thread_local', 'static_assert', 'typeid', 'char16_t', 'char32_t',
+  'concept', 'requires', 'co_await', 'co_return', 'co_yield',
+].freeze
+
+def sanitize_c_ident(name)
+  CPP_RESERVED_WORDS.include?(name) ? "#{name}_" : name
+end
+
+# Call-site devirtualization: is THIS receiver provably an instance of one
+# exact class? Unlike monomorphic_target this can resolve a POLY name.
+# Walks back from `idx` for the last writer of `reg` (following MOVEs) to a
+# `Klass.new(...)` SEND, then through the GETMCNST/GETCONST chain on the same
+# register (each segment overwrites it in place) to a `::`-joined name spelled
+# like MethodDef#owner. `Klass.new` always allocates exactly Klass, so no
+# inheritance model is needed. Anything unrecognized returns nil (dynamic
+# dispatch).
+# Optional extra terminals: `ivar_classes` (ClassLayout, this owner) and
+# `arg_classes` (ClassAnnotations). `resolving_new:` starts inside the SEND
+# :new case, to resolve that call's own receiver (NATIVE_CONSTRUCT_TARGETS).
+# CHAINED_ACCESSOR_SUPPORT: with `class_layout` (all owners) and `registry`, a
+# mid-chain SEND (`@state.screen.foo`) resolves when its receiver traces to
+# class R (recursing on a strictly smaller index), R defines the name as an
+# :ivar_accessor getter, and R's class_layout entry names that ivar's class.
+# Every consumer still guards these hints with mrb_obj_class.
+# LEXICAL_NEW_TARGET_RESOLUTION: map the constant path a `.new` site WRITES
+# (`Scene::MapViewer` inside `module RPG2k`, or a bare `Switches`) to the
+# registry name, using Module.nesting:
+#
+#     module RPG2k; module Scene; class DebugMenu
+#       def f; Scene::MapViewer.new; end
+#     end; end; end
+#
+#   Module.nesting there is [RPG2k::Scene::DebugMenu, RPG2k::Scene, RPG2k]:
+#   the owner's name prefixes, innermost first; the first prefix that holds
+#   the first segment wins. `Scene::Battle` inside `module RPG2k3` resolves to
+#   RPG2k3::Scene::Battle, never RPG2k's.
+# Owner prefixes equal Module.nesting only for nested (not compact `class
+# A::B`) definitions; the closed world has no compact ones. Lexical scope only;
+# the cref's ancestors are not searched.
+# Soundness: only returns a name the closed world DEFINES; the first matching
+# lexical prefix wins, then a proven top-level binding is considered. No owner
+# or no match returns nil and leaves the written path in place.
+#
+# LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
+# DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
+# resolved to nothing -- not because the name is ambiguous, but because the
+# RESOLVER's table was the allowlist rather than the set of classes that exist.
+# `Window` has two bindings program-wide (RGSS::Window and RPG2k::Window), so
+# UniqueClassNames refuses it outright, yet inside `module RPG2k` only
+# RPG2k::Window is reachable: mruby-rpg2k/mrblib/main.rb's own comment records
+# that "Every use is inside `class RPG2k`, so the bare name still resolves here".
+#
+# The table is therefore split in two. RESOLUTION still decides only WHICH class
+# the name denotes -- a fact about the program. ADMISSION (whether
+# that class may be devirtualized) stays with compile_send's four live gates:
+# no custom `self.new`/`self.allocate`, an #initialize that compiles clean with
+# pure mandatory arity, a matching argument count, and the owner being emitted.
+# Listing a class in DIRECT_CONSTRUCT_TARGETS therefore still grants nothing; it
+# only stops the resolver from looking. Widening the resolution cannot make an
+# unsound call, because a class that fails any gate simply stays dynamic.
+def lexically_resolve_construct_target(written, owner)
+  return nil if written.nil? || written.empty?
+  return nil if owner.nil?
+
+  prefixes = LexicalScopes.prefixes(owner)
+  return nil if prefixes.empty?
+
+  prefixes.each do |prefix|
+    candidate = LexicalScopes.qualify(prefix, written)
+    return candidate if construct_resolution_known?(candidate)
+  end
+
+  return written if construct_resolution_known?(written)
+
+  nil
+end
+
+# Does the closed world define `name` as a class or module? A bare name
+# (no `::`) is a valid top-level binding only when the closed-world table lists
+# that exact name.
+def construct_resolution_known?(name)
+  return true if DIRECT_CONSTRUCT_TARGETS.include?(name)
+
+  (ConstructClassNames.table || {}).include?(name)
+end
+
+# REST_ENTRY_ARRAY: the register ENTER's rest parameter arrives in holds exactly an Array. OP_ENTER
+# builds it, and so does every caller of a compiled `_impl` (the entry wrapper and the block entries
+# with mrb_ary_new_from_values, direct_call_args with mrb_ary_new). Read only at method entry: any
+# later write is seen by the walk before it gets here.
+def rest_entry_class(irep, reg)
+  enter = irep.enter
+  return nil unless enter
+
+  mand, opt, rest = enter.enter_fields
+  reg.to_i == mand.to_i + opt.to_i + 1 && rest.to_i.positive? ? 'Array' : nil
+end
+
+# Class of the value `reg` holds at `idx`. The backward walk (trace_new_target_walk)
+# answers first; when it finds nothing, the fact is asked of EVERY definition
+# reaching the read (BytecodeIR.reaching_definitions) and accepted only when
+# each one traces to the same class. Never applied with `dominated:`: RETURN
+# proofs run their own reaching-definition walk (return_value_sources).
+# The trace options are spelled out rather than splatted (`*rest, **opts`): a splat costs an Array and two Hashes
+# per call, and these three functions recurse once per receiver question.
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+                     class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
+                     known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
+                     dominated: nil, canonical: true, guarded: false)
+  if dominated && !dominated.is_a?(JoinDominance)
+    return trace_new_target_walk(irep, idx, reg, ivar_classes, mand, arg_classes,
+                                 resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                 registry: registry, container_constants: container_constants,
+                                 element_annotations: element_annotations, known_owners: known_owners,
+                                 capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                 method_return_class: method_return_class, dominated: dominated,
+                                 canonical: canonical, guarded: guarded)
+  end
+
+  # A guarded consumer re-checks the class at run time, so a join costs it a compare. The mode is an argument of
+  # this trace only: a trace nested in it (a callback, a return proof) asks for its own mode.
+  klass = trace_new_target_walk(irep, idx, reg, ivar_classes, mand, arg_classes,
+                                resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                registry: registry, container_constants: container_constants,
+                                element_annotations: element_annotations, known_owners: known_owners,
+                                capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                method_return_class: method_return_class,
+                                dominated: guarded ? nil : JoinDominance.for(irep), canonical: canonical,
+                                guarded: guarded)
+  return klass if klass
+
+  trace_new_target_reaching(irep, idx, reg, ivar_classes, mand, arg_classes,
+                            resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                            registry: registry, container_constants: container_constants,
+                            element_annotations: element_annotations, known_owners: known_owners,
+                            capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                            method_return_class: method_return_class, canonical: canonical, guarded: guarded)
+end
+
+# JOIN_DOMINANCE: every hop of the walk must dominate the read it
+# feeds; a hop that does not ends the walk and trace_new_target_reaching then
+# accepts only a unanimous answer over the reaching definitions.
+class JoinDominance
+  # Stateless past its irep, so one per irep serves every trace (weakly held: a collected one is rebuilt).
+  @per_irep = ObjectSpace::WeakMap.new
+
+  def self.for(irep)
+    @per_irep[irep] ||= new(irep)
+  end
+
+  def initialize(irep)
+    @irep = irep
+  end
+
+  def call(w_idx, use_idx, reg)
+    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg)
+  end
+end
+
+# Queries being answered, so a value that flows into its own definition (a
+# loop-carried `x = x.foo`) fails instead of recursing. Keyed by irep label, then
+# by reaching_key's packed (idx, reg, resolving_new).
+module TraceReaching
+  IN_PROGRESS = Hash.new { |table, label| table[label] = Set.new }
+  # mruby register numbers are 16-bit (irep->nregs), so the packing is injective.
+  REG_LIMIT = 0x1_0000
+
+  def self.key(idx, reg, resolving_new)
+    raise ArgumentError, "bc2cpp: register #{reg.inspect} out of range" unless reg.is_a?(Integer) && reg.between?(0, REG_LIMIT - 1)
+
+    (((idx * REG_LIMIT) + reg) * 2) + (resolving_new ? 1 : 0)
+  end
+end
+
+def trace_new_target_reaching(irep, idx, reg, ivar_classes, mand, arg_classes, resolving_new:, owner:, class_layout:,
+                              registry:, container_constants:, element_annotations:, known_owners:, capture_hints:,
+                              ret_class_proof:, method_return_class:, canonical:, guarded:)
+  return nil unless idx&.positive? && reg
+
+  in_progress = TraceReaching::IN_PROGRESS[irep.label]
+  key = TraceReaching.key(idx, reg, resolving_new)
+  return nil unless in_progress.add?(key)
+
+  begin
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
+    return nil if defs.nil? || defs.empty?
+
+    # Unanimity: the first definition's class when every one traces to it. Every definition is still traced, as
+    # the walks feed the shared memo tables.
+    first = nil
+    unanimous = true
+    defs.each_with_index do |definition, k|
+      klass = if definition.entry?
+                # Register N is argument N for N <= mand; only an annotation names its class.
+                pos = definition.reg.to_i
+                (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)) || rest_entry_class(irep, pos)
+              else
+                # The definition's own walk continues past it into the join (a `.new` send walks its receiver), so
+                # an unguarded hop must dominate the read it feeds. A guarded consumer accepts the join-blind answer.
+                trace_new_target_walk(irep, definition.index + 1, definition.reg, ivar_classes, mand, arg_classes,
+                                      resolving_new: resolving_new, owner: owner, class_layout: class_layout,
+                                      registry: registry, container_constants: container_constants,
+                                      element_annotations: element_annotations, known_owners: known_owners,
+                                      capture_hints: capture_hints, ret_class_proof: ret_class_proof,
+                                      method_return_class: method_return_class,
+                                      dominated: guarded ? nil : JoinDominance.for(irep), canonical: canonical,
+                                      guarded: guarded)
+              end
+      if k.zero?
+        first = klass
+      elsif klass != first
+        unanimous = false
+      end
+    end
+    first if unanimous
+  ensure
+    in_progress.delete(key)
+  end
+end
+
+# RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see IvarLayout.trace_type's RESCUE arm): `b`, the
+# SECOND token, is a write; `a` is a read, so RESCUE is a barrier only when it writes the followed register.
+TRACE_RESCUE_WRITE = ->(insn, cur) { BytecodeIR::Receivers::RESCUE.include?(insn.op) && insn.regs[1] == cur }
+# The constant path collected so far, root first; shared until the first segment is prepended.
+TRACE_EMPTY_PATH = [].freeze
+
+# `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
+# accept every hop, so no hop can skip past a join.
+# The walk closes over nothing (hoisted barrier, IrepScans::REACH_ENTRY, a shared empty path): it runs once per
+# receiver question, recursively (docs/bc2cpp-trace-walk-allocations.md).
+def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+                      class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
+                      dominated: nil, canonical: true, guarded: false)
+  path = TRACE_EMPTY_PATH
+  use = idx
+  # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
+  # receiver: `@position = POS_BOTTOM` is an Integer constant, not a class.
+  # `resolving_new` becomes true right after a SEND :new (with an empty `path`),
+  # or starts true for the `resolving_new:` caller.
+  # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
+  # LEAD_READ_ONLY only reads its register (see BytecodeIR::Receivers::SKIP_OPS).
+  skip_ops = BytecodeIR::Receivers::SKIP_OPS
+  found = BytecodeIR.for(irep).walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: TRACE_RESCUE_WRITE,
+                                                          exhausted: IrepScans::REACH_ENTRY) do |insn, i, cur|
+    if dominated && !BytecodeIR::Ops::LEAD_READ_ONLY.include?(insn.op)
+      return nil unless dominated.call(i, use, cur)
+
+      use = i
+    end
+
+    case insn.op
+    when BytecodeIR::Receivers::COPY
+      next IrepScans.follow(insn.regs[1])
+    when BytecodeIR::Ops::INDEX_READ
+      # RBS_RECORD_TYPES: a literal-key read of a checked record key, for guarded consumers only.
+      if BytecodeIR::Receivers::INDEX_READ_IN_PLACE.include?(insn.op) && !resolving_new && path.empty? && guarded &&
+         defined?(RbsRecordTypes) &&
+         (record_hint = RbsRecordTypes.read_hint(irep, i))
+        return record_hint
+      end
+      return nil unless element_annotations && class_layout && registry
+
+      # GETIDX overwrites its receiver register; GETIDX0 has a separate source.
+      recv_reg = if BytecodeIR::Receivers::INDEX_READ_IN_PLACE.include?(insn.op)
+                   cur
+                 else
+                   insn.regs[1]
+                 end
+      return nil unless recv_reg
+
+      recv_class = trace_new_target(irep, i, recv_reg, ivar_classes, mand, arg_classes, owner: owner,
+                                     class_layout: class_layout, registry: registry,
+                                     container_constants: container_constants,
+                                     element_annotations: element_annotations,
+                                     known_owners: known_owners, capture_hints: capture_hints,
+                                     ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                     dominated: dominated, canonical: canonical, guarded: guarded)
+      # An annotated Hash<Klass> parameter is a safe source for indexed values.
+      # Only plain MOVE aliases back to the untouched argument register count;
+      # GETIDX keeps its Hash and subclass dispatch guards at codegen.
+      captured_reg = nil
+      alias_probe = proc do |prior|
+        captured_reg = prior.reg.to_i if prior.op == :GETUPVAR && prior.upvar_ref&.last&.zero?
+        nil
+      end
+      # An unguarded alias must dominate this GETIDX: a join the alias skips would name the argument on one path
+      # only. A guarded consumer keeps the join-blind alias, as its recv_class does.
+      arg_reg = if guarded
+                  irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: IrepScans::LAST_REG, &alias_probe)
+                else
+                  irep.walk_dominating_writers(i - 1, recv_reg, use: i, follow_moves: true,
+                                               exhausted: IrepScans::LAST_REG, &alias_probe)
+                end
+      # The trace can stop at a block's GETUPVAR before reaching the captured
+      # container; the callsite hint is limited to annotated Hash arguments.
+      recv_class ||= capture_hints&.dig(irep.label, captured_reg, :container_class) if captured_reg
+      recv_class = resolve_owner_name_in(recv_class, owner, known_owners) if recv_class && known_owners
+      arg_pos = arg_reg&.to_i
+      if recv_class == 'Hash' && arg_pos && arg_pos.between?(1, mand) &&
+         element_annotations[irep.label]&.arg_containers&.[](arg_pos - 1) == 'Hash'
+        annotated_value = element_annotations[irep.label]&.arg_elements&.[](arg_pos - 1)
+        return annotated_value if annotated_value
+      end
+      if recv_class == 'Hash' && captured_reg
+        captured_value = capture_hints&.dig(irep.label, captured_reg, :element_class)
+        return captured_value if captured_value
+      end
+      md = registry['[]']&.find { |candidate| candidate.owner == recv_class && candidate.irep }
+      return md && element_annotations[md.irep]&.ret_class
+    when BytecodeIR::Receivers::PLAIN_SEND
+      return nil if resolving_new || !path.empty?
+
+      # Same charset as compile_send's name extraction.
+      name = insn.sym
+      if name == 'new'
+        resolving_new = true
+      elsif name == 'dup' && registry && (registry['dup'] || []).all? { |md| md.owner == '<native>' }
+        # DUP_PRESERVES_CLASS: a blockless, argless `.dup` returns an object of exactly
+        # its receiver's class: mrb_obj_dup (src/class.c) does
+        # `mrb_obj_alloc(mrb, mrb_type(obj), mrb_obj_class(mrb, obj))`, bound as
+        # Kernel#dup with MRB_ARGS_NONE (src/kernel.c). The `registry['dup']` check
+        # above rejects any program-level `def dup`. So the receiver's class (traced by
+        # recursion on a strictly smaller index; SEND overwrites its receiver register)
+        # is the result's class.
+        # SEND0 prints no `n=`; a `.dup(x)` with arguments is an ArgumentError and
+        # proves nothing.
+        return nil if insn.argc_operand && insn.argc != 0
+
+        return trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
+                                 class_layout: class_layout, registry: registry,
+                                 container_constants: container_constants,
+                                 element_annotations: element_annotations,
+                                 known_owners: known_owners, capture_hints: capture_hints,
+                                 ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                 dominated: dominated, canonical: canonical, guarded: guarded)
+      else
+        # A whole-program return proof is receiver-independent only when every
+        # registered implementation of the name agrees on its returned class.
+        # Successful dispatch then has that class regardless of receiver type.
+        if method_return_class && (returned_class = method_return_class.call(name))
+          return returned_class
+        end
+
+        # CHAINED_ACCESSOR_SUPPORT (see the header): a non-`new` SEND may be a chained
+        # :ivar_accessor read. A no-op unless the caller passes class_layout and
+        # registry; `resolving_new` callers already returned above.
+        return nil unless class_layout && registry
+
+        # attr_reader takes zero arguments (src/class.c), so require n=0 to rule out a
+        # same-named POLY method of another arity (as the MONO/TYPED arity guards do).
+        # SEND0 prints no "n=" (vm.c OP_SEND0 has c=0).
+        # The receiver is whatever wrote `reg` before `i` (SEND overwrites its
+        # receiver register in place); recursing on a strictly smaller index
+        # terminates.
+        recv_class = trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
+                                       class_layout: class_layout, registry: registry,
+                                       container_constants: container_constants,
+                                       element_annotations: element_annotations,
+                                       known_owners: known_owners, capture_hints: capture_hints,
+                                       ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                       dominated: dominated, canonical: canonical, guarded: guarded)
+        return singleton_declared_return(registry, element_annotations, name) unless recv_class
+        recv_class = resolve_owner_name_in(recv_class, owner, known_owners) if known_owners
+
+        if element_annotations
+          annotated = registry[name]&.find do |md|
+            md.owner == recv_class && md.irep && element_annotations[md.irep]&.ret_class
+          end
+          return element_annotations[annotated.irep].ret_class if annotated
+        end
+
+        return nil if insn.argc_operand && insn.argc != 0
+
+        # An attr_writer is registered as "name=", so `registry[name]` only matches
+        # getters.
+        accessor = registry[name]&.find { |md| md.owner == recv_class && md.kind == :ivar_accessor }
+        return nil unless accessor
+
+        # R's own hint for this ivar (getter name == ivar name). class_layout can be
+        # ClassLayout.analyze's in-progress table, so never return UNKNOWN from it.
+        # `key?`, not `[]`: the table is `Hash.new { |h, k| h[k] = {} }`, and `[]`
+        # would insert entries and reorder the `== known-ivar-class hints ==`
+        # diagnostic.
+        recv_ivars = class_layout[recv_class] if class_layout.key?(recv_class)
+        hint = recv_ivars && recv_ivars[name]
+        return nil unless hint && hint != ClassLayout::UNKNOWN
+
+        return hint
+      end
+    when BytecodeIR::Receivers::SELF_SEND
+      # RETCLASS_SELF_CALL_SUPPORT: an implicit-receiver call has no receiver
+      # register (and a bare `new(...)` here is an instance method, not Class#new),
+      # so the only evidence is `ret_class_proof` (compute_class_return_names); nil
+      # for callers that do not opt in. Never contributes to a `.new` path.
+      return nil if resolving_new || !path.empty?
+      return nil unless ret_class_proof
+
+      name = insn.sym
+      return nil unless name
+
+      # Explicit `return`: this is inside the downto block, so a bare expression
+      # would only end this iteration and the walk would continue past the answer.
+      # `owner`: CodeGen#self_call_reaches_def? (never method_missing).
+      return ret_class_proof.call(name, owner)
+    when BytecodeIR::Receivers::BLOCK_NEW_SEND
+      # BLOCK_CARRYING_NEW: `Klass.new(...) { ... }` compiles to SENDB. A block
+      # passed to #initialize does not change which class `.new` allocates, so set
+      # `resolving_new` like the blockless case and share the GETCONST walk.
+      # SSENDB (`self.new { }`) is excluded: self's class is not a fixed name, and
+      # no such site exists.
+      return nil if resolving_new || !path.empty?
+
+      name = insn.sym
+      return nil unless name == 'new'
+
+      resolving_new = true
+    # Same register: SEND overwrites its receiver register with the result.
+    when BytecodeIR::Receivers::IVAR_READ
+      return nil if resolving_new || !path.empty?
+
+      ivar = insn.ivar
+      klass = ivar_classes && ivar_classes[ivar]
+      return klass && known_owners ? resolve_owner_name_in(klass, owner, known_owners) : klass
+    when BytecodeIR::Receivers::UPVAR_READ
+      return nil if resolving_new || !path.empty?
+
+      return nil unless insn.upvar_ref&.last&.zero?
+
+      capture_class = capture_hints&.dig(irep.label, insn.reg.to_i, :container_class)
+      capture_class
+    when BytecodeIR::Ops::ARRAY_ALLOC
+      # EACH_BLOCK_SUPPORT: an ARRAY literal is always an Array (vm.c OP_ARRAY). Only
+      # valid at the end of a trace: during a `.new` chain or constant path the
+      # register belongs to another expression.
+      return nil if resolving_new || !path.empty?
+
+      return 'Array'
+    when BytecodeIR::Receivers::HASH_LITERAL
+      # HASH_EACH_SUPPORT: a HASH literal is always a Hash (vm.c OP_HASH); same
+      # end-of-trace gating.
+      return nil if resolving_new || !path.empty?
+
+      return 'Hash'
+    when BytecodeIR::Ops::RANGE_BUILD
+      # INTERP_UNLOCK: RANGE_INC/RANGE_EXC always create a Range (vm.c,
+      # mrb_range_new); same end-of-trace gating.
+      return nil if resolving_new || !path.empty?
+
+      return 'Range'
+    when BytecodeIR::Receivers::CONST_PATH_SEGMENT
+      # CONST_CONTAINER_SUPPORT: collecting a segment is harmless either way; what
+      # happens with `path` is decided at GETCONST.
+      # Not `$`-anchored: a trailing "; R6:name" comment would end up in the segment.
+      path = [] if path.frozen?
+      path.unshift(insn.mcnst_name)
+    when BytecodeIR::Receivers::CONST_READ
+      # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
+      # the local-name comment.
+      const_name = insn.const_name
+      written = path.empty? ? const_name : ([const_name] + path).join('::')
+
+      # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
+      # RELATIVE constant -- inside `module LCF`, `EventCommand.new` is
+      # `GETCONST EventCommand`, not `GETMCNST LCF` + `GETMCNST EventCommand`.
+      # This arm used to fall straight through to the written path for that
+      # shape, so a relative `Klass.new` named no class at all.
+      #
+      # Every OTHER opcode here refuses under `resolving_new` (`return nil if
+      # resolving_new`), because during a `.new` chain the register belongs to
+      # the class expression, not to the object: `Klass.new` must not read
+      # `@x = SOME_INT_CONST` as an Integer receiver, and `Klass.new` must not
+      # read `[1,2].map` as an Array receiver. A constant is different in kind --
+      # it is a class NAME, not a value -- so resolving it is the point of the
+      # walk. The safety test is therefore that the name must BE a class the
+      # closed world defines, checked against its class-name table or the
+      # registry's owner set. A
+      # non-class constant like POS_BOTTOM is not in that set, so it still
+      # resolves to nothing and the old behaviour is unchanged for it.
+      #
+      # Ruby and generated constant lookup both search lexical scopes from the
+      # innermost outward. When same-named classes exist at multiple levels,
+      # the first defined binding is the one this site reads; runtime class
+      # identity guards still reject a rebound or merged receiver trace.
+      if resolving_new && owner
+        # GETMCNST extends an explicit constant path (`A::B.new`). Once a
+        # path is present it is already rooted at GETCONST's value; prefixing
+        # the caller's lexical owner would invent `Caller::A::B`.
+        if !path.empty? && (known_owners&.include?(written) || construct_resolution_known?(written))
+          return written
+        end
+
+        hit = nil
+        LexicalScopes.prefixes(owner).each do |prefix|
+          candidate = LexicalScopes.qualify(prefix, written)
+          hit ||= candidate if known_owners&.include?(candidate) || construct_resolution_known?(candidate)
+        end
+        return hit if hit
+        # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
+        # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
+        # only names already proven unique and reachable at this lexical site.
+        if path.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
+           (known_owners&.include?(unique) || construct_resolution_known?(unique))
+          return canonical ? unique : const_name
+        end
+        # Native RGSS constructors have gem-init-captured class accessors even
+        # when native source scanning cannot give their short names a unique
+        # canonical path. Object's RGSS include makes these bare names
+        # reachable; compile_send still requires the runtime receiver class to
+        # match that constructor's captured class before calling it directly.
+        if path.empty? && NATIVE_CONSTRUCT_TARGETS.key?(const_name) && object_includes_rgss?
+          return const_name
+        end
+        # String is a core mruby class whose RClass* is fixed in mrb_state.
+        # Generic construction still checks that identity and the standard
+        # Class#new/allocate chain before bypassing constant dispatch.
+        return const_name if path.empty? && %w[String NameError].include?(const_name)
+      end
+
+      # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
+      # of an ordinary call (`Game::Vehicle::TYPES.each`), and the useful fact is
+      # "this constant's value is a proven Array/Hash" from build_registry's
+      # `container_constants`, keyed by `[const_name] + path` (root first).
+      unless resolving_new
+        return nil unless container_constants
+
+        unless path.empty?
+          full = ([const_name] + path).join('::')
+          return container_constants[full]
+        end
+
+        # A bare reference (`STAT_NAMES.each`): lexical lookup innermost first against
+        # `container_constants`; absent everywhere means nil.
+        if owner
+          LexicalScopes.prefixes(owner).each do |prefix|
+            candidate = LexicalScopes.qualify(prefix, const_name)
+            return container_constants[candidate] if container_constants.key?(candidate)
+          end
+        end
+        return container_constants[const_name]
+      end
+
+      # Resolve the written path (bare `Switches` or qualified `Scene::MapViewer`)
+      # with lexically_resolve_construct_target (see its comment): innermost first,
+      # DIRECT_CONSTRUCT_TARGETS members only, ambiguity refused. A general lookup
+      # is not sound here: Ruby may fall through to a same-named top-level constant,
+      # which this function cannot rule out. A miss falls back to the written path;
+      # an already-qualified `Game::Transition` resolves through that fallback.
+      # Consumers also guard with `mrb_class_ptr(recv) == ...` at runtime, but this
+      # does not rely on it.
+      written = path.empty? ? const_name : ([const_name] + path).join('::')
+      resolved = lexically_resolve_construct_target(written, owner)
+      return resolved if resolved
+      # UNIQUE_CLASS_NAME: construct-target callers (canonical: false) key their
+      # tables by the written name.
+      if canonical && path.empty? && (unique = UniqueClassNames.resolve(const_name, owner))
+        return unique
+      end
+
+      path = [] if path.frozen?
+      path.unshift(const_name)
+      return path.join('::')
+    when BytecodeIR::Receivers::COND_JUMP
+      # CONTAINER_PHI_MERGE: `x || []` / `x && {}` writes a container literal
+      # into `reg` on ONE side of the branch, so the register has two incoming
+      # definitions and the walk would otherwise keep going past the literal
+      # to an older, unrelated write (or off the top of the body to the
+      # argument). This opcode is in the read-only skip set, which is correct
+      # for soundness of the skip but loses the literal (no `x || []` receiver
+      # was reachable then).
+      #
+      # The merge is admitted ONLY when the other (branch-taken) side is
+      # provably the same container class, or provably nil:
+      #   * LOADNIL, so the two arms are `nil` and the literal;
+      #   * another literal of the same class, so both arms agree.
+      # Anything else -- a GETIV with no class fact, an opaque SEND result, a
+      # GETIDX whose element class is unresolved -- is REFUSED, not merged.
+      # That is the whole safety argument, and it matters more here than in the
+      # TYPED send path: this fact feeds the block recognizers' `traced ==
+      # 'Array'` GATE, which has no runtime fallback (a wrong fact emits a loop
+      # over a register that is not an Array), so a wrong merge would not
+      # degrade to mrb_funcall as a wrong TYPED fact does.
+      merged = container_phi_merge(irep, i, cur)
+      return merged if merged
+
+      # Unproven: fall through to the LEAD_READ_ONLY behaviour, which is to
+      # keep walking backwards past this read.
+    else
+      return nil
+    end
+    IrepScans::KEEP
+  end
+  return found unless found.is_a?(IrepScans::EntryReached)
+
+  # Never written: an incoming argument (register N is argument N for N <=
+  # mand). Only a class annotation can name its class; pooling call sites is
+  # unsound for POLY names.
+  entry_reg = found.reg
+  return nil if dominated && !dominated.call(-1, use, entry_reg)
+
+  pos = entry_reg.to_i
+  (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)) || rest_entry_class(irep, pos)
+end
+
+def object_includes_rgss?
+  Array(UniqueClassNames.object_mixins).any? { |mixin| mixin.delete_prefix('Object::') == 'RGSS' }
+end
+
+# CONTAINER_PHI_MERGE: the class a register provably holds across a
+# `JMPNOT`/`JMPIF` that has a container literal on its fall-through arm, or nil
+# when the other arm is not provably the same class (or nil).
+#
+# `at` is the branch instruction's index; `reg` the branch's operand. The
+# literal is the instruction immediately after it. The value the jump KEEPS is
+# whatever wrote `reg` earlier, so that older writer is the side that has to
+# agree, and proving it is the deliberately conservative half of this rule.
+#
+# Soundness matters more here than in the TYPED send path. A TYPED fact is
+# checked at runtime (`mrb_obj_class(M, recv) == owner_class_ptr`) and a wrong
+# one costs a failed compare; the block recognizers instead GATE on
+# `traced == 'Array'` and then emit `RARRAY_LEN`/`RARRAY_PTR` with no runtime
+# check at all. So this returns a class only when the register cannot hold
+# anything but that container class or nil at the merge point:
+#   * LOADNIL -- the other arm is nil, which no inlined receiver ever is;
+#   * a literal of the SAME class -- both arms agree.
+# An older GETIV with no class fact, an opaque SEND result, or a GETIDX whose
+# element class is unresolved is refused, not merged.
+# CLOSED_WORLD_VALUE_CONSTANT: infer the instance class of a single-assignment
+# constant initialized directly by a statically resolved `Klass.new`. The
+# resulting receiver fact remains guarded at dispatch; a custom constructor
+# returning another class therefore takes the ordinary fallback.
+def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world,
+                                       native_name_sources:, included_modules:, prepended_modules:, unknown_mixins:,
+                                       class_decls: {})
+
+  known_owners = Set.new(registry.values.flatten.map(&:owner))
+  # Every site's own value class, nil when any gate refuses it. A bare name's sites are judged together: the name
+  # binds one of them at run time, so each site must construct the same class (ClosedWorld#static_constant_writes?
+  # keeps the write set closed). A name with one site is judged as before.
+  values = assignment_sites.map do |site|
+    next nil unless site[:reg] && !container_constants.key?(site[:name])
+
+    irep = ireps[site[:irep]]
+    next nil unless irep && assigned_from_new_send?(irep, site[:idx], site[:reg])
+
+    klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
+                             registry: registry, container_constants: container_constants,
+                             known_owners: known_owners)
+    next nil unless klass.is_a?(String)
+
+    if known_owners.include?(klass)
+      klass
+    else
+      native_constructed_class(klass, registry, closed_world, native_name_sources: native_name_sources,
+                               included_modules: included_modules, prepended_modules: prepended_modules,
+                               unknown_mixins: unknown_mixins)
+    end
+  end
+  # CONSTANT_SITE_SCOPE: the sites are grouped by qualified name, so a site's class is judged by its own binding. The
+  # other sites of the same bare name only matter when a bare read from this site can reach them; they must sit in
+  # scopes that cannot reach it (constant_scopes_unrelated?). The write count is still the bare name's, so the write
+  # set stays closed.
+  by_bare = assignment_sites.zip(values).group_by { |site, _| site[:name].to_s.split('::').last }
+  inferred = {}
+  assignment_sites.zip(values).group_by { |site, _| site[:name] }.each do |full, group|
+    classes = group.map { |_, value| value }
+    next unless classes.none?(&:nil?) && classes.uniq.size == 1
+
+    bare = full.split('::').last
+    siblings = by_bare.fetch(bare)
+    next unless closed_world.static_constant_writes?(bare, siblings.size)
+
+    owner = group.first.first[:owner]
+    next unless siblings.all? do |site, _|
+      site[:name] == full ||
+        constant_scopes_unrelated?(owner, site[:owner], class_decls: class_decls, included_modules: included_modules,
+                                                        prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+    end
+
+    group.each { |site, value| inferred[site[:name]] = value }
+  end
+  inferred
+end
+
+# CONSTANT_SCOPE_UNRELATED: true only when a bare-name read in scope +a+ can never resolve to a constant defined in
+# +b+, and the reverse. Ruby's lookup visits the lexical chain, then the ancestors of the innermost scope (superclasses,
+# included and prepended modules, Object and what Object mixes in). A pair is related when one scope encloses the
+# other, or one is among the other's ancestors. Any scope whose ancestry cannot be modelled (a superclass that is
+# unresolved or reopened with different superclasses, a mixin the registry could not resolve) is related, never
+# guessed. The `<`-scopes and singleton scopes are not in class_decls, so they stay unmodelled.
+def constant_scopes_unrelated?(a, b, class_decls:, included_modules:, prepended_modules:, unknown_mixins:)
+  return false unless a.is_a?(String) && b.is_a?(String)
+  return false if a == b || a.start_with?("#{b}::") || b.start_with?("#{a}::")
+
+  reach_a = constant_lookup_scopes(a, class_decls, included_modules, prepended_modules, unknown_mixins)
+  reach_b = constant_lookup_scopes(b, class_decls, included_modules, prepended_modules, unknown_mixins)
+  return false unless reach_a && reach_b
+
+  !reach_a.include?(b) && !reach_b.include?(a)
+end
+
+# The scopes a bare-name lookup from +klass+ visits after its lexical chain, or nil when the ancestry is unmodelled.
+# A name with no class_decls entry is a module (or Object itself, or a core class), which ends the chain.
+def constant_lookup_scopes(klass, class_decls, included_modules, prepended_modules, unknown_mixins)
+  scopes = Set.new
+  work = [klass]
+  until work.empty?
+    scope = work.shift
+    next if scopes.include?(scope)
+    return nil if unknown_mixins.include?(scope)
+
+    scopes << scope
+    work.concat(Array(included_modules[scope]), Array(prepended_modules[scope]))
+    supers = class_decls.fetch(scope, []).map { |decl| decl[:super] }.uniq
+    next if supers.empty?
+    return nil unless supers.size == 1
+
+    case supers.first
+    when String then work << supers.first
+    when :none then work << 'Object'
+    else return nil
+    end
+  end
+  scopes
+end
+
+# NATIVE_CONSTRUCTED_CONSTANT: the full name of the native class `klass` (a bare `Color` or `RGSS::Color`) when a
+# `Klass.new` on it provably allocates exactly that class. Only NATIVE_CONSTRUCT_TARGETS rows qualify, since those
+# name the class a gem defines. The proof has two parts:
+#   * the name can only denote that native class: no other binding of the simple name exists in the program or
+#     the natives (ClosedWorld#native_class_unshadowed?). So a bare `Color` reached through Object's include of RGSS,
+#     or any other lookup that succeeds, finds RGSS::Color, and one that finds nothing raises before any assignment;
+#   * Class#new is the constructor the class object reaches (class_new_is_stock?).
+# Class#new allocates its receiver, so the result is that class whatever #initialize does.
+def native_constructed_class(klass, registry, closed_world, native_name_sources:, included_modules:, prepended_modules:,
+                             unknown_mixins:)
+  full = NATIVE_CONSTRUCT_TARGETS.each_value.map { |row| row[:class_owner] }.find do |owner|
+    owner == klass || klass == owner.split('::').last
+  end
+  return nil unless full
+  return nil unless closed_world.native_class_unshadowed?(full)
+  return nil unless class_new_is_stock?(registry, closed_world, native_name_sources, included_modules,
+                                        prepended_modules, unknown_mixins)
+
+  full
+end
+
+# Class#new is what a class object's `new` and `allocate` reach. It is stock when no Ruby definition of either name
+# sits on a class object's singleton chain or on Class, no mixin reaches those, no unknown installer defines them, and
+# no non-core native source names them (mruby's own definitions are taken as the stock Class#new). Any singleton of
+# any class is refused, not only the ones on the chain: the closed world keeps no superclass facts for native classes.
+def class_new_is_stock?(registry, closed_world, native_name_sources, included_modules, prepended_modules, unknown_mixins)
+  return false unless closed_world.standard_constructor_lookup?
+  return false if unknown_mixins.any? { |mixin| mixin == 'Class' || mixin.end_with?('.singleton') }
+  mixed = [included_modules, prepended_modules].flat_map(&:to_a)
+  return false if mixed.any? { |owner, mods| (owner == 'Class' || owner.end_with?('.singleton')) && Array(mods).any? }
+
+  %w[new allocate].all? do |name|
+    ruby_on_class_objects = registry.fetch(name, []).any? do |definition|
+      definition.owner != '<native>' && (definition.owner == 'Class' || definition.owner.end_with?('.singleton'))
+    end
+    native_definers = native_name_sources.fetch(name, []).reject { |path| path.match?(ClosedWorld::NATIVE_CORE) }
+    !ruby_on_class_objects && native_definers.empty?
+  end
+end
+
+# A SETCONST value may be copied after the constructor send. Follow only plain
+# MOVE aliases; every other write ends the proof, while trace_new_target repeats
+# the walk and proves the class expression itself.
+def assigned_from_new_send?(irep, idx, reg)
+  irep.walk_writers(idx - 1, reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, follow_moves: true) do |insn|
+    BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new'
+  end || false
+end
+
+def container_phi_merge(irep, at, reg)
+  lit = BytecodeIR.for(irep).source_at(at + 1)
+  return nil unless lit && %i[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
+
+  # The literal arm and the taken edge meet at the jump's target only in this shape. The definitions reaching that
+  # join cover both arms and every other predecessor of it; the definitions before the branch do not.
+  return nil unless BytecodeIR.for(irep).decoded[at]&.goto == at + 2
+
+  lit_class = lit.op == :HASH ? 'Hash' : 'Array'
+  defs = BytecodeIR.reaching_definitions(irep, at + 2, reg, shared: true)
+  return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+  agree = defs.all? do |d|
+    case BytecodeIR.for(irep).source_at(d.index).op
+    when :LOADNIL then true
+    when :ARRAY, :ARRAY2 then lit_class == 'Array'
+    when :HASH then lit_class == 'Hash'
+    else false
+    end
+  end
+  lit_class if agree
+end
+
+# RBS_SINGLETON_RETURN: `Klass.m(...)` has a constant receiver, which the walk does not trace to a
+# class. When `m` has exactly one definition in the whole program (natives included) and that definition is a
+# `def self.m` with a declared `-> C`, every call that does not raise NoMethodError runs that body, whatever the
+# receiver, so the result is C or nil (the ret_class contract). `key?`: the registry may insert on a miss.
+def singleton_declared_return(registry, element_annotations, name)
+  return nil unless element_annotations && registry&.key?(name)
+
+  defs = registry[name]
+  return nil unless defs.size == 1 && defs.first.irep && defs.first.owner.end_with?('.singleton')
+
+  element_annotations[defs.first.irep]&.ret_class
+end
+
+# NIL_TOLERANT_JOIN predicate: true only when `reg` at `idx` was just loaded by
+# LOADNIL (following MOVEs). A false negative only falls back to the ordinary
+# join; a false positive would drop real evidence.
+def nil_literal_write?(irep, idx, reg)
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == :LOADNIL } == true
+end
+
+# CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` holds a fresh Array/Hash/Range
+# literal on every path, optionally frozen (`ARRAY R1 2` / `SEND0 R1 :freeze` /
+# `SETCONST NAME R1`). Every reaching definition must give the same class, so
+# `X = c ? [] : {}` has none. `.freeze` is accepted only directly on
+# such a literal, never as a general passthrough: RGSS::Transition#freeze is an
+# unrelated override with a different return value.
+def literal_container_class(irep, idx, reg)
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
+  return nil if defs.nil? || defs.empty?
+
+  classes = defs.map { |definition| literal_container_definition_class(irep, definition, Set.new) }
+  classes.first if classes.first && classes.uniq.size == 1
+end
+
+# The container class one reaching definition of a literal_container_class read gives, or nil. A `.freeze` writes
+# its own register from the value it was called on, so the class is that value's, read at the freeze itself.
+def literal_container_definition_class(irep, definition, path)
+  return nil if definition.entry?
+
+  insn = BytecodeIR.for(irep).source_at(definition.index)
+  return nil unless insn.reg == definition.reg
+
+  case insn.op
+  when :SEND0
+    return nil unless insn.sym == 'freeze'
+
+    # A loop-carried `x = x.freeze` names its own definition again: no class.
+    key = [definition.index, definition.reg]
+    return nil unless path.add?(key)
+
+    frozen = BytecodeIR.reaching_definitions(irep, definition.index, definition.reg, shared: true)
+    classes = frozen&.map { |inner| literal_container_definition_class(irep, inner, path) }
+    path.delete(key)
+    classes.first if classes&.first && classes.uniq.size == 1
+  when :ARRAY, :ARRAY2 then 'Array'
+  when :HASH then 'Hash'
+  when :RANGE_INC, :RANGE_EXC then 'Range'
+  end
+end
+
+# LITERAL_EQQ_SUPPORT: find a literal Fixnum/Symbol written to a `:===`
+# receiver register, the `case x; when 5; when :bar` desugaring:
+#   LOADI_5  R4  (5)
+#   MOVE     R5  R3   ; R3 holds the case value
+#   SEND     R4  :===  n=1
+#   ...
+#   LOADSYM  R4  :bar
+#   MOVE     R5  R3
+#   SEND     R4  :===  n=1
+# Separate from trace_new_target: a different question with no shared
+# terminals. Follows MOVEs defensively. Returns {type: :fixnum, value: "5"} /
+# {type: :symbol, name: "bar"}, or nil (compile_send keeps POLY dispatch).
+def trace_eqq_literal_receiver(irep, idx, reg)
+  # Every definition reaching the receiver must load the same literal: a join with a call on one arm leaves
+  # no literal. An argument or block-entry definition is not a literal either.
+  defs = BytecodeIR.reaching_definitions(irep, idx, reg, shared: true)
+  return nil if defs.nil? || defs.empty?
+
+  literals = defs.map { |definition| eqq_literal_of(irep, definition) }
+  first = literals.first
+  first if first && literals.all? { |literal| literal == first }
+end
+
+# The literal one definition of an EQQ receiver loads, or nil.
+def eqq_literal_of(irep, definition)
+  return nil if definition.entry?
+
+  insn = BytecodeIR.for(irep).source_at(definition.index)
+  return nil unless insn.reg == definition.reg
+
+  case insn.op
+  when :LOADSYM
+    # Same extraction as LOADSYM's codegen (stops before a local-name comment).
+    name = insn.sym_token
+    name ? { type: :symbol, name: name } : nil
+  when BytecodeIR::Ops::LOADI_OPS
+    # Same two literal shapes as LOADI's codegen.
+    lit = insn.paren_value || BytecodeIR::OperandModel.imm_operand(insn)
+    lit ? { type: :fixnum, value: lit.to_s } : nil
+  end
+end
