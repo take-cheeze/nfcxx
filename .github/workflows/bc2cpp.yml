@@ -1,0 +1,45 @@
+name: bc2cpp
+
+# bc2cpp (rpg-maker-clone's mruby-to-C++ compiler, docs/notes/bc2cpp-migration.md) compiling the worlds under
+# tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world; optcarrot first). bc2cpp itself is still a pinned
+# rpg-maker-clone checkout (tests/bc2cpp/fetch.sh), so this runs when that pin or a world changes, and on demand.
+# It needs only the host compiler and Ruby 4.0, not the EDG toolchain.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tests/bc2cpp/**"
+      - ".github/workflows/bc2cpp.yml"
+  pull_request:
+    paths:
+      - "tests/bc2cpp/**"
+      - ".github/workflows/bc2cpp.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  world:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        world: [optcarrot]
+    steps:
+      # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
+      - uses: actions/checkout@v7
+
+      # Ruby 4.0 ships the Prism 1.x and RBS 4.x that bc2cpp is written against; the runner image's Ruby is older.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+
+      # bison and gperf for the fork's mruby build, autoconf and automake for Onigmo (mruby-onig-regexp).
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+
+      - name: bc2cpp world ${{ matrix.world }}
+        run: tests/bc2cpp/run_${{ matrix.world }}.sh

@@ -1,6 +1,7 @@
 # Moving bc2cpp here from rpg-maker-clone (plan)
 
-Status: proposal, 2026-11-09. Nothing has moved yet. This note is the plan to review before Phase 1 starts.
+Status: proposal, 2026-11-09. No bc2cpp code has moved yet. The first step, optcarrot compiled by a pinned bc2cpp under
+this repository's CI, is done (`tests/bc2cpp/run_optcarrot.sh`). The rest is the plan to review before Phase 1 starts.
 
 bc2cpp is rpg-maker-clone's mruby-bytecode-to-C++ compiler (`tools/bc2cpp`). It compiles a closed world, the engine
 and the core and gem Ruby of one build, to C++ that runs without the mruby VM. It moves here the way optcarrot's
@@ -58,6 +59,54 @@ Both repositories are MIT and owned by the same person. CI here already installs
    - A `home: nfcxx|rpg` key goes on every policy entry first, so the split is a reviewed diff.
 
 Each item is an ordinary rpg-maker-clone PR that keeps its CI green.
+
+## First step: optcarrot compiled here, with bc2cpp pinned (done)
+
+Before any code moves, bc2cpp compiles a world under this repository's CI. That shows what CI here needs (Ruby 4.0
+and the host compiler, no EDG toolchain) and puts the optcarrot probe, which rpg-maker-clone runs in no CI job, under a
+check.
+- `tests/bc2cpp/fetch.sh` makes a shallow checkout of rpg-maker-clone at a pinned commit, with only the five
+  submodules bc2cpp and the worlds read (the mruby fork, mruby-onig-regexp, mruby-stringio, mruby-marshal, optcarrot),
+  in `build/bc2cpp/`. Bumping bc2cpp is a one-line change of that pin.
+- `tests/bc2cpp/run_optcarrot.sh` builds the probe's host `mrbc` and runs rpg-maker-clone's own runner
+  (`tools/optcarrot_probe/compiled_run.rb 180`): optcarrot on CRuby, on CRuby with YJIT, on the mruby interpreter, and as
+  a sealed mruby build whose Ruby bc2cpp compiled to C++.
+- The check is checksum 59662 on every runtime. The script prints each runtime's frames per second and the compiled
+  build's hot-path speedup over the interpreter. `OPTCARROT_MIN_SPEEDUP=X` also fails below X; it is off by default.
+- `.github/workflows/bc2cpp.yml` runs one job per world, when `tests/bc2cpp/` changes or on demand.
+
+At the first pin (rpg-maker-clone `df3ee7c52`, 32-core desktop, host gcc 15), 180 frames took:
+
+| Runtime | Seconds |
+| --- | ---: |
+| CRuby | 2.89 |
+| CRuby + YJIT | 0.89 |
+| mruby interpreter | 7.77 |
+| bc2cpp | 1.61 |
+
+The hot-path speedup over the interpreter is 4.4×, down from about 28× before rpg-maker-clone #3174 (see Phase 0).
+The gate stays off until that regression is fixed. The whole script runs in about 2 minutes there.
+
+## Adding a world
+
+A world is a program bc2cpp compiles as a closed world, plus a check that its compiled build behaves like the
+interpreter. Each world is one `tests/bc2cpp/run_<name>.sh` that sources `fetch.sh`, plus one entry in the workflow's
+`world` matrix.
+
+The next world is nfcxx's own mruby scripts ([mruby-scripting.md](mruby-scripting.md)): `scripts/pathb-qbe-emit.rb`,
+`scripts/cil-link.rb`, `scripts/qbe2cil.rb`, `scripts/pathb-cil-emit.rb` and the rest that `scripts/mrb` runs on the
+`build/mruby-tool` interpreter.
+- Their rules already fit a closed world: no `Regexp`, byte strings, no `eval`.
+- `tests/mruby/run.sh` already has the oracle inputs, so the check is the compiled script's output, stderr and exit
+  status against the interpreted run, byte for byte.
+
+Two things are missing on the bc2cpp side, both rpg-maker-clone changes until Phase 3:
+- **A build kind for these scripts**, next to `optcarrot-probe` and `bc2cpp-self` in `compiled_gems.rb`'s
+  `BC2CPP_CLOSED_WORLD_BUILDS`, with the gem list of `scripts/mruby-tool-config.rb`. That interpreter pins upstream mruby
+  4.0.0, and bc2cpp needs its fork (coupling item 1), so the compiled scripts build on the fork.
+- **A generic runner.** `compiled_run.rb` is optcarrot-specific. A world needs one that takes a list of sources and an
+  entry and produces a sealed executable. The `bc2cpp-self` executable, whose C `main` calls one entry
+  (`host-libs/mruby-bc2cpp-runner`), is the shape to follow.
 
 ## Phases
 
