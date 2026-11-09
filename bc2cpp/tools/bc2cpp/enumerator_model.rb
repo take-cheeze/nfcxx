@@ -40,12 +40,12 @@ module EnumeratorModel
     alias_match = kernel.match(/^  alias (\w+) (\w+)$/) or raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: no Kernel alias"
     raise "bc2cpp: #{MRUBY_ENUMERATOR_RB}: the alias is not to_enum" unless alias_match[2] == 'to_enum'
 
-    # Class#new is a cfunc (`class_new_instance`): the names it sends are its two mrb_funcall_send calls, and it makes no
-    # other call.
+    # Class#new is a cfunc (`class_new_instance`): the names it sends are its two mrb_funcall_send calls (class_send
+    # where the fork skips the second lookup), and it makes no other call.
     new_body = source_text(MRUBY_CLASS_C)[/^class_new_instance\(.*?^}$/m] or raise "bc2cpp: #{MRUBY_CLASS_C}: no Class#new function"
-    presyms = new_body.scan(/\bmrb_funcall_send\(mrb, \w+, MRB_SYM\((\w+)\)/).flatten
+    presyms = new_body.scan(/\b(?:mrb_funcall_send|class_send)\(mrb, \w+, MRB_SYM\((\w+)\)/).flatten
     raise "bc2cpp: #{MRUBY_CLASS_C}: Class#new does not send allocate, then initialize" unless
-      presyms == %w[allocate initialize] && new_body.scan(/\bmrb_funcall\w*\(/).size == 2
+      presyms == %w[allocate initialize] && new_body.scan(/\b(?:mrb_funcall\w*|class_send)\(/).size == 2
     body_sends = to_enum_def.scan(/\b[A-Z]\w*\.(\w+)/).flatten.uniq
     [['Kernel', alias_match[1], alias_match[2]].freeze,
      ['to_enum', alias_match[1], *body_sends, *presyms].freeze]
