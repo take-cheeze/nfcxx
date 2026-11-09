@@ -5,7 +5,7 @@
 # The pin needs rpg-maker-clone's tools/bc2cpp_tree.rb, which lets its build take bc2cpp from BC2CPP_TREE_ROOT.
 #   BC2CPP_RPG_DIR=dir   use an existing rpg-maker-clone checkout instead (its own commit and submodules are kept)
 # Bumping the pin is a one-line change here; the mruby fork commit (3rd/mruby) comes with it.
-rpg_pin=17fc04f434070df63e915636a75fc2ea37d07cca # take-cheeze/rpg-maker-clone#3203 (bc2cpp's tree and world roots)
+rpg_pin=7c4c2d9e041f4f429ac7e970fc4c0f42dfee4e03 # take-cheeze/rpg-maker-clone master with #3199-#3202, the root split applied (rpg-maker-clone#3204)
 rpg_url=https://github.com/take-cheeze/rpg-maker-clone
 # The submodules the worlds read: the mruby fork, the gems of the probe's closed world and optcarrot itself.
 bc2cpp_submodules=(3rd/mruby 3rd/mruby-onig-regexp 3rd/mruby-stringio 3rd/mruby-marshal 3rd/optcarrot)
