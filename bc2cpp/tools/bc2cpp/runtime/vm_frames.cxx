@@ -667,8 +667,8 @@ mrb_value mrb_funcall_send_with_method(mrb_state* mrb,
                                        mrb_value kdict,
                                        mrb_value blk) {
   const mrb_value* kdict_p = mrb_hash_p(kdict) ? &kdict : NULL;
-  return funcall_with_block_m(mrb, self, mid, argc, argv, kdict_p, TRUE, blk,
-                              m, owner);
+  return funcall_with_block_m(mrb, self, mid, argc, argv, kdict_p, TRUE, blk, m,
+                              owner);
 }
 
 // The hot case (a found cfunc, positional arguments, a running context):
