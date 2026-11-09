@@ -463,8 +463,10 @@ class CodeGen
     [
       "  // RESUMABLE_BLOCK_CALL #{state}",
       # The block this suspension calls (a `yield`'s, or a proc held in a variable): the fiber's adapter reads it back.
-      "  mrb_iv_set(M, bc2cpp_frame_value, BC2CPP_LIT_SYM(M, \"__block__\"), r#{dest});",
+      # Read during this suspension only; the block stays rooted by its register, which the spill keeps in the frame.
+      "  F->block = r#{dest};",
       *resumable_suspend_lines(state, dest, packed, call: true),
+      '  F->block = mrb_nil_value();',
       ''
     ].join("\n")
   end
@@ -986,7 +988,7 @@ class CodeGen
       # mruby keeps the block in register argc+1, which `yield` (BLKPUSH) reads, so that register's slot gets it too.
       # With keywords the keyword-hash register sits between the arguments and the block.
       block_reg_slot = ctx.register_slots[arg_names.size + 1 + (kw ? 1 : 0)]
-      fill += ['mrb_iv_set(M, frame, BC2CPP_LIT_SYM(M, "__block__"), bc2cpp_blk);', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
+      fill += ['F->block = bc2cpp_blk;', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
       fill << "F->regs[#{block_reg_slot}] = bc2cpp_blk;" if block_reg_slot
     end
     cell = ctx.kw_base
@@ -1724,6 +1726,7 @@ class CodeGen
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       int block_call; // BLOCK_CALL of the last suspension: 0 none yet (block_call? is nil), 1 false, 2 true
       mrb_value regs_ary; // the hidden ivar's Array, which is never replaced: read here instead of by name
+      mrb_value block; // BLOCK_CALL: the block a suspension asks the fiber to call; rooted by the register holding it
       long long slots[1];
     };
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
@@ -1763,6 +1766,7 @@ class CodeGen
         f->nregs = nregs;
         f->regs = ary_items(regs);
         f->regs_ary = regs;
+        f->block = mrb_nil_value();
         *frame = mrb_obj_value(mrb_data_object_alloc(M, bc2cpp_resume_frame_class(M), f, &bc2cpp_resume_frame_type));
         mrb_iv_set(M, *frame, bc2cpp_resume_regs_sym(M), regs);
         return f;
@@ -1797,7 +1801,8 @@ class CodeGen
       return !f || f->block_call == 0 ? mrb_nil_value() : mrb_bool_value(f->block_call == 2);
     }
     static mrb_value bc2cpp_resume_frame_block(mrb_state* M, mrb_value self) {
-      return mrb_iv_get(M, self, BC2CPP_LIT_SYM(M, "__block__"));
+      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
+      return f ? f->block : mrb_nil_value();
     }
     // The values of a yield, as the Array the driver splats into the block's arguments.
     static mrb_value bc2cpp_block_args_from(mrb_state* M, std::initializer_list<mrb_value> values) {
