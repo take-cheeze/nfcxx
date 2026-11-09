@@ -215,7 +215,9 @@ def expand_call(s, fns, st)
       bt = p[3][1]
       bsize = p[3][2]
       balign = p[3][3]
-      name = "\"#{unq(p[2])}.i#{k}\""
+      # the parameter's position makes the name unique: parameters are named by the front end and two of them can share a name
+      # (unnamed temporaries are "tmp"), and two slots of one name would share their storage
+      name = "\"#{unq(p[2])}.byval#{i}.i#{k}\""
       arg = args[i]
       arg = arg[2] if head(arg) == "byval"   # the call passes (byval TYPE TMP): TMP is the argument's address
       map[p[1]] = "%#{st[:next]}"
@@ -236,6 +238,7 @@ def expand_call(s, fns, st)
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
   st[:inlined] += 1
+  st[:attr_from] << cname if st[:attrs].key?(cname)
   [hoisted, out]
 end
 
@@ -285,12 +288,19 @@ def inline_pass(forms, max_depth, report)
   counter = { k: 0 }
   reasons = {}   # callee name -> refusal reason (nil: inlinable); see expand_call
   infos = {}     # callee name -> callee_info; dropped with the reason when the callee changes
+  # A function's [[sycl::reqd_sub_group_size(N)]] is a top-level sycl-kernel-attr form that the emitter reads for the functions a
+  # kernel reaches. A callee that carries one is inlined into its caller, so the caller gets the same attr (else the kernel
+  # that reaches the caller alone takes the default sub-group size).
+  attrs = {}     # function name -> its sycl-kernel-attr form (with a reqd-sub-group-size)
+  forms.each { |f| attrs[unq(f[1])] = f if head(f) == "sycl-kernel-attr" && f.drop(2).any? { |a| head(a) == "reqd-sub-group-size" } }
+  extra = []     # attr forms for callers, appended after the functions
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       name = unq(f[1])
-      st = { next: max_id(f) + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons, ic: infos }
+      st = { next: max_id(f) + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons, ic: infos,
+             attrs: attrs, attr_from: [] }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -299,10 +309,16 @@ def inline_pass(forms, max_depth, report)
       fns[name] = forms[i]
       reasons.delete(name)
       infos.delete(name)
+      unless st[:attr_from].empty? || attrs.key?(name)
+        src = attrs[st[:attr_from].first]
+        attrs[name] = ["sycl-kernel-attr", f[1]] + src.drop(2)
+        extra << attrs[name]
+      end
     end
     inlined += round
     break if round == 0
   end
+  forms.concat(extra)
   if report
     $stderr.write("pathb-ir-opt: inlined #{inlined} calls\n")
     refused.keys.each { |r| $stderr.write("pathb-ir-opt: refused #{refused[r]} call(s): #{r}\n") }
@@ -751,6 +767,9 @@ def fold_unit_index(list, unit)
       list[i] = ["let", s[1], s[2], ["offset", s[3][1], "0"]]
       next
     end
+    # set is a store to a variable, not a new value: a register that s sets no longer holds the checked 0 after s, and inside s
+    # the fact is dropped too, since a loop in s runs its body again with the set value
+    all_forms(s).each { |sf| unit.delete(sf[1]) if head(sf) == "set" && sf.length == 3 && sf[1].is_a?(String) }
     s.each { |x| fold_unit_index(x, unit) if x.is_a?(Array) }
   end
   list
@@ -844,6 +863,8 @@ def cprop_function(children)
         a = resolve.call(s[3][2])[2].to_i
         b = resolve.call(s[3][3])[2].to_i
         v = head(s[3]) == "wadd" ? a + b : (head(s[3]) == "wsub" ? a - b : a * b)
+        # wadd/wsub/wmul wrap in the type's width (int is 32 bits, two's complement)
+        v = ((v + 0x80000000) & 0xFFFFFFFF) - 0x80000000
         set_const.call(s[1], ["const", "int", v.to_s])
       elsif h == "if" || h == "loop" || h == "switch" || h == "block" || SROA_CONTAINERS.include?(h)
         # an if arm or a block runs once from here, so it keeps what is known; a loop or a switch can enter its body from
