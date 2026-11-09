@@ -463,7 +463,7 @@ class CodeGen
     [
       "  // RESUMABLE_BLOCK_CALL #{state}",
       # The block this suspension calls (a `yield`'s, or a proc held in a variable): the fiber's adapter reads it back.
-      "  mrb_iv_set(M, bc2cpp_frame_value, mrb_intern_lit(M, \"__block__\"), r#{dest});",
+      "  mrb_iv_set(M, bc2cpp_frame_value, BC2CPP_LIT_SYM(M, \"__block__\"), r#{dest});",
       *resumable_suspend_lines(state, dest, packed, call: true),
       ''
     ].join("\n")
@@ -621,7 +621,7 @@ class CodeGen
     [
       "  // RESUMABLE_UNWIND #{insn.op}",
       "  {",
-      "    mrb_value bc2cpp_target = mrb_iv_get(M, bc2cpp_frame_value, mrb_intern_lit(M, \"#{key}\"));",
+      "    mrb_value bc2cpp_target = mrb_iv_get(M, bc2cpp_frame_value, BC2CPP_LIT_SYM(M, \"#{key}\"));",
       '    if (!mrb_data_p(bc2cpp_target)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "break from proc-closure");',
       "    F->unwind_key = mrb_obj_ptr(bc2cpp_target);",
       "    F->unwind_mode = #{mode};",
@@ -820,7 +820,7 @@ class CodeGen
     end
     if ctx.upvars
       (@block_step_cell_levels || []).each_with_index do |level, i|
-        out << "  [[maybe_unused]] mrb_value bc2cpp_up_cells_#{level} = RARRAY_PTR(mrb_iv_get(M, bc2cpp_frame_value, mrb_intern_lit(M, \"__cells__\")))[#{i}];\n"
+        out << "  [[maybe_unused]] mrb_value bc2cpp_up_cells_#{level} = RARRAY_PTR(mrb_iv_get(M, bc2cpp_frame_value, BC2CPP_LIT_SYM(M, \"__cells__\")))[#{i}];\n"
       end
     end
     out << resumable_cells_setup(boxed, registers, cells_slot) if cells_slot
@@ -986,7 +986,7 @@ class CodeGen
       # mruby keeps the block in register argc+1, which `yield` (BLKPUSH) reads, so that register's slot gets it too.
       # With keywords the keyword-hash register sits between the arguments and the block.
       block_reg_slot = ctx.register_slots[arg_names.size + 1 + (kw ? 1 : 0)]
-      fill += ['mrb_iv_set(M, frame, mrb_intern_lit(M, "__block__"), bc2cpp_blk);', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
+      fill += ['mrb_iv_set(M, frame, BC2CPP_LIT_SYM(M, "__block__"), bc2cpp_blk);', "F->regs[#{ctx.block_slot}] = bc2cpp_blk;"]
       fill << "F->regs[#{block_reg_slot}] = bc2cpp_blk;" if block_reg_slot
     end
     cell = ctx.kw_base
@@ -1061,7 +1061,12 @@ class CodeGen
   def emit_resumable_helpers(compiled)
     return '' unless compiled.any? { |m| m[:resumable] } || @fiber_body_used
 
-    "#{RESUMABLE_HELPERS_CPP}\n#{fiber_runtime_cpp}\n"
+    "#{lit_sym_cpp}\n#{RESUMABLE_HELPERS_CPP}\n#{fiber_runtime_cpp}\n"
+  end
+
+  # BC2CPP_LIT_SYM (runtime/bc2cpp_lit_sym.hxx), which the helpers and the Fiber runtime both use.
+  def lit_sym_cpp
+    File.read(File.join(FIBER_RUNTIME_DIR, 'bc2cpp_lit_sym.hxx')).gsub(/^#pragma once\n/, '')
   end
 
   FIBER_RUNTIME_DIR = File.expand_path('runtime', __dir__)
@@ -1288,7 +1293,7 @@ class CodeGen
     return nil unless region[:needs_ret] || region[:needs_brk]
 
     ret = if !@resumable then 'mrb_nil_value()'
-          elsif @resumable.upvars then 'mrb_iv_get(M, bc2cpp_frame_value, mrb_intern_lit(M, "__ret__"))'
+          elsif @resumable.upvars then 'mrb_iv_get(M, bc2cpp_frame_value, BC2CPP_LIT_SYM(M, "__ret__"))'
           else 'bc2cpp_frame_value'
           end
     brk = @resumable ? 'bc2cpp_frame_value' : 'mrb_nil_value()'
@@ -1470,8 +1475,8 @@ class CodeGen
       out << "  if (bc2cpp_made) {\n"
       out << "    mrb_value bc2cpp_mf = ((Bc2cppMethodFrame*)bc2cpp_made)->frame;\n"
       out << "    mrb_int bc2cpp_len = MRB_ENV_LEN(bc2cpp_env);\n"
-      out << "    mrb_iv_set(M, bc2cpp_mf, mrb_intern_lit(M, \"__brk__\"), bc2cpp_env->stack[bc2cpp_len - 4]);\n"
-      out << "    mrb_iv_set(M, bc2cpp_mf, mrb_intern_lit(M, \"__ret__\"), bc2cpp_env->stack[bc2cpp_len - 5]);\n"
+      out << "    mrb_iv_set(M, bc2cpp_mf, BC2CPP_LIT_SYM(M, \"__brk__\"), bc2cpp_env->stack[bc2cpp_len - 4]);\n"
+      out << "    mrb_iv_set(M, bc2cpp_mf, BC2CPP_LIT_SYM(M, \"__ret__\"), bc2cpp_env->stack[bc2cpp_len - 5]);\n"
       out << "  }\n"
     end
     unless upvars.empty?
@@ -1485,7 +1490,7 @@ class CodeGen
       # keeps it too, as the env may go before the frame does.
       if cells.positive?
         slot = 1 + upvars.size + (needs_blk ? 1 : 0)
-        out << "    mrb_iv_set(M, ((Bc2cppMethodFrame*)bc2cpp_made)->frame, mrb_intern_lit(M, \"__cells__\"), " \
+        out << "    mrb_iv_set(M, ((Bc2cppMethodFrame*)bc2cpp_made)->frame, BC2CPP_LIT_SYM(M, \"__cells__\"), " \
                "mrb_ary_new_from_values(M, #{cells}, &bc2cpp_env->stack[#{slot}]));\n"
       end
       out << "  }\n"
@@ -1717,16 +1722,19 @@ class CodeGen
       mrb_int has_handlers; // HANDLERS: the step has a handler table and has not declined the exception in flight
       void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
+      int block_call; // BLOCK_CALL of the last suspension: 0 none yet (block_call? is nil), 1 false, 2 true
       long long slots[1];
     };
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
     static const mrb_data_type bc2cpp_resume_frame_type = { "Bc2cppResumable::Frame", bc2cpp_resume_frame_free };
-    static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return mrb_intern_lit(M, "__bc2cpp_regs__"); }
+    static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return BC2CPP_LIT_SYM(M, "__bc2cpp_regs__"); }
     static struct RClass* bc2cpp_resume_frame_class(mrb_state* M) {
-      return mrb_class_get_under(M, mrb_module_get(M, "Bc2cppResumable"), "Frame");
+      struct RClass* mod = mrb_module_get_id(M, BC2CPP_LIT_SYM(M, "Bc2cppResumable"));
+      return mrb_class_get_under_id(M, mod, BC2CPP_LIT_SYM(M, "Frame"));
     }
+    // Only bc2cpp_resume_frame makes an object of this data type, so the type is the frame test (no class lookup).
     static bool bc2cpp_resume_frame_p(mrb_state* M, mrb_value v) {
-      return mrb_data_p(v) && mrb_obj_ptr(v)->c == bc2cpp_resume_frame_class(M);
+      return mrb_data_p(v) && DATA_TYPE(v) == &bc2cpp_resume_frame_type;
     }
     static mrb_value bc2cpp_resume_regs(mrb_state* M, mrb_value frame) {
       return mrb_iv_get(M, frame, bc2cpp_resume_regs_sym(M));
@@ -1738,7 +1746,7 @@ class CodeGen
     static Bc2cppResumeFrame* bc2cpp_resume_frame(mrb_state* M, mrb_value* frame, mrb_int nregs, mrb_int nslots) {
       if (mrb_nil_p(*frame)) {
         mrb_value regs = mrb_ary_new_capa(M, nregs + 2);
-        for (mrb_int i = 0; i < nregs + 2; ++i) mrb_ary_push(M, regs, mrb_nil_value());
+        mrb_ary_resize(M, regs, nregs + 2); // nil-filled
         size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
         Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_calloc(M, 1, size);
         f->nregs = nregs;
@@ -1770,13 +1778,14 @@ class CodeGen
     }
     // Whether a frame's last suspension was a block call (BLOCK_CALL) rather than a Fiber.yield: set by each suspension.
     static void bc2cpp_resume_frame_set_call(mrb_state* M, mrb_value frame, bool call) {
-      mrb_iv_set(M, frame, mrb_intern_lit(M, "__call__"), mrb_bool_value(call));
+      ((Bc2cppResumeFrame*)DATA_PTR(frame))->block_call = call ? 2 : 1;
     }
     static mrb_value bc2cpp_resume_frame_block_call(mrb_state* M, mrb_value self) {
-      return mrb_iv_get(M, self, mrb_intern_lit(M, "__call__"));
+      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
+      return !f || f->block_call == 0 ? mrb_nil_value() : mrb_bool_value(f->block_call == 2);
     }
     static mrb_value bc2cpp_resume_frame_block(mrb_state* M, mrb_value self) {
-      return mrb_iv_get(M, self, mrb_intern_lit(M, "__block__"));
+      return mrb_iv_get(M, self, BC2CPP_LIT_SYM(M, "__block__"));
     }
     // The values of a yield, as the Array the driver splats into the block's arguments.
     static mrb_value bc2cpp_block_args_from(mrb_state* M, std::initializer_list<mrb_value> values) {
@@ -1785,7 +1794,7 @@ class CodeGen
     static void bc2cpp_fiber_define(mrb_state* M); // the fiber runtime, after this
     static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value); // Fiber.yield from C, in the fiber runtime
     static void bc2cpp_resumable_init(mrb_state* M) {
-      if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "Bc2cppResumable"))) return;
+      if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), BC2CPP_LIT_SYM(M, "Bc2cppResumable"))) return;
       bc2cpp_fiber_define(M); // Fiber, FiberError and Fiber.yield exist before any suspendable method runs
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
       struct RClass* frame = mrb_define_class_under(M, mod, "Frame", M->object_class);
