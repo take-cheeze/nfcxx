@@ -4,8 +4,9 @@ Status, 2026-11-09: in progress.
 - Done: optcarrot under this repository's CI (`tests/bc2cpp/run_optcarrot.sh`).
 - Done: Phase 1's root split, rpg-maker-clone#3203.
 - Done: Phase 2's import. bc2cpp is in `bc2cpp/` with its history, and the optcarrot world now uses it.
-- Next: rpg-maker-clone takes bc2cpp from a `3rd/nfcxx` submodule (Phase 3), and this repository's CI runs the
-  checks (Phase 2's job list).
+- Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
+  `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
+- Next: rpg-maker-clone takes bc2cpp from its `3rd/nfcxx` submodule (rpg-maker-clone#3204, Phase 3).
 
 bc2cpp is rpg-maker-clone's mruby-bytecode-to-C++ compiler (`tools/bc2cpp`). It compiles a closed world, the engine
 and the core and gem Ruby of one build, to C++ that runs without the mruby VM. It moves here the way optcarrot's
@@ -142,8 +143,7 @@ and every policy entry has `home:`.
 Done for the code. `bc2cpp/` holds `tools/bc2cpp`, `scripts/bc2cpp`, `tools/optcarrot_probe`, `scripts/optcarrot` and the
 `host-libs/mruby-bc2cpp-*` gems, merged with the 4053 rpg-maker-clone commits that touch them. Its two roots
 (`bc2cpp/tools/bc2cpp/world_root.rb`) are this tree and the world. `tests/bc2cpp/run_optcarrot.sh` sets both: this tree,
-and the pinned rpg-maker-clone checkout. It passes with that checkout's own copy of bc2cpp removed. The CI jobs for the
-checks are still to come.
+and the pinned rpg-maker-clone checkout. It passes with that checkout's own copy of bc2cpp removed.
 
 Original plan:
 
