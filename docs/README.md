@@ -13,6 +13,7 @@ covers say so.
 | [asan.md](notes/asan.md) | `nfcxx -fsanitize=address`: AddressSanitizer on the qbe (default) and gcc backends; backend selection, limits. `tests/asan/run.sh`. |
 | [asan-plan.md](notes/asan-plan.md) | Plan for AddressSanitizer on Path B and wasm (the qbe milestones are done): emitter checks, libasan reuse, milestones. |
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
+| [bc2cpp-migration.md](notes/bc2cpp-migration.md) | Plan (not started) for moving rpg-maker-clone's bc2cpp compiler and its checks here: what moves, the coupling to cut first, phases, risks and the open decisions. No script covers it yet. |
 | [cxx-driver.md](notes/cxx-driver.md) | `nfcxx` as `CXX` for CMake and mruby: the driver options accepted (`find_package(Torch)`'s `--no-as-needed` spans, CMake 4's linker dependency file), and the rpg-maker-clone desktop build's remaining blockers. |
 | [sqlite.md](notes/sqlite.md) | SQLite 3.54.1 built with nfcc (`scripts/setup-sqlite.sh`) and `lib/sqlcache`, a TTL key-value cache on it. `tests/sqlite/run.sh`. |
 | [astro.md](notes/astro.md) | ASTro (ko1/astro: ASTroGen, partial evaluation into C, a Code Store that compiles with `$(CC)`) built with nfcc: calc, luastro, baruby_precise and koruby_precise (with Prism, and astrogre's regex engine) on both backends, two patches for Ruby 3.3 and cproc, and the cproc and nfcc changes it needed (GNU statement expressions, weak definitions in C, `--param`). `tests/realworld/run_astro.sh`. |
