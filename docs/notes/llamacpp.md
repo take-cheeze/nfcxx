@@ -121,3 +121,41 @@ includes `immintrin.h`, which needs AVX10.2 builtins EDG does not know (below). 
 The qbe backend fails the same way on `origin/main` in this checkout (`tests/cases/eh_exception_ptr.cpp`,
 `eh_libstdcxx_throw.cpp`, `eval_order_calls.cpp`, `qbe_gnu_forms.cpp`, and five `tests/c` float128/float16/long double
 cases: cproc rejects the qbe-prep output). These are not caused by the driver changes above; the gcc backend passes.
+
+## Per-op performance against llama.cpp's nvcc build (RTX 5050, sm_120, 2026-11-07)
+
+Both binaries are `test-backend-ops` from the same llama.cpp tree (`~/dev/llama.cpp`, d59d455fd): nvcc (the CMake
+build, CUDA 13.4, sm_120) and nfcxx (`tests/llamacpp/cuda/build.sh` with `LLAMA=~/dev/llama.cpp NFCXX_SM=120`). The per-case
+times are the `us/run` of `test-backend-ops perf -o OP -p <case>`, one process per case.
+
+| op | cases | nfcxx ok | nfcxx / nvcc, geometric mean | median | worst |
+| --- | --- | --- | --- | --- | --- |
+| SOFT_MAX | 29 | 29 | 3.76x | 2.51x | 31.4x |
+| MUL_MAT | 184 | 169 | 12.6x | 12.0x | 72.2x |
+
+MUL_MAT by type (geometric mean): f32 1.6x, bf16 1.7x, f16 7.5x, q4_1 30x, q5_1 27x, q6_K 19x, iq4_xs 18x. The best cases are
+the f32 and bf16 ones, the worst the quantized mat-vec.
+
+Not run on nfcxx (process abort): the k-quant cases (q2_K to q6_K), and some f32, bf16, mxfp4 and nvfp4 cases. The k-quant
+aborts are the `unspecified launch failure` of the MMVQ table mismatch: the device pass takes `__CUDA_ARCH__` as 750
+(`tools/cuda-rewrite/cuda_rewrite.cpp`, DEVICE_PASS_MACROS), so ggml's device side selects the Turing MMVQ table while the
+host selects the generic one. Setting it from `NFCXX_SM` fixes the k-quant case, but then ggml's sm_120 code paths compile
+(inline PTX `asm`, `cvta.shared`, FP4) and 25 objects fail. Those paths are the open work.
+
+These numbers are not an emitter comparison alone: nfcxx builds with `__CUDA_ARCH__` = 750 and nvcc with sm_120, so the
+code paths differ (see above). FLASH_ATTN_EXT aborts on nfcxx after 4 cases (the same class of launch failure). RMS_NORM
+has no cases on either binary.
+
+### Update: sm_120a build (2026-11-07)
+
+The nfcxx build now targets `NFCXX_SM=120a` and compiles all 208 objects (the flash-attention MMA instances use
+cp.async and cvta.shared; the FP4 MMQ instances need the block-scale MMA of sm_120a). The k-quant MUL_MAT results were
+wrong before a struct-field fix in the emitter (commit a78c8e11), and they are correct now.
+
+Correctness against the CPU backend (`test-backend-ops test -b CUDA0`): SOFT_MAX 212/212, MUL_MAT 1187/1187.
+
+Per-case time, nfcxx / nvcc (geometric mean): SOFT_MAX 3.8x (29 cases), MUL_MAT 11.6x (184 cases, all run). Worst MUL_MAT
+case 72x. Quantized mat-vec remains the largest gap: q4_1 29x, q5_1 26x, q3_K 20x, q2_K 20x, iq4_xs 18x.
+
+Not run: the other test suites (tests/cuda, tests/pathb-ir), and the non-MUL_MAT ops. The struct-field change makes SRA
+more conservative, so generated PTX changes for other kernels.

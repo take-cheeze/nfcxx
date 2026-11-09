@@ -16,10 +16,18 @@ if [ ! -f "$llama/ggml/src/ggml.c" ] || [ ! -f "$cuda/include/cuda_runtime.h" ];
 fi
 mkdir -p "$out/obj" "$out/gen" "$out/tmp"
 export NFCXX_BACKEND=gcc TMPDIR=$out/tmp
-sed 's/@GGML_VERSION@/0.0.0/; s/@GGML_BUILD_COMMIT@/test/' "$llama/ggml/src/ggml-version.h.in" > "$out/gen/ggml-version.h"
+# Older trees generate ggml-version.h from a template; newer ones pass GGML_VERSION and GGML_COMMIT to ggml-base (CMake).
+ver_defs=""
+if [ -f "$llama/ggml/src/ggml-version.h.in" ]; then
+  sed 's/@GGML_VERSION@/0.0.0/; s/@GGML_BUILD_COMMIT@/test/' "$llama/ggml/src/ggml-version.h.in" > "$out/gen/ggml-version.h"
+else
+  v=$(sed -n 's/^set(GGML_VERSION_\(MAJOR\|MINOR\|PATCH\) \([0-9][0-9]*\)).*/\2/p' "$llama/ggml/CMakeLists.txt" | paste -sd. -)
+  ver=${v:-0.0.0}
+  ver_defs="-DGGML_VERSION=\"$ver\" -DGGML_COMMIT=\"$(git -C "$llama" rev-parse --short HEAD 2>/dev/null || echo test)\""
+fi
 fa=(); for k in q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16; do for v in q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16; do
   on=0; [ "$k-$v" = f16-f16 ] && on=1; fa+=("-DGGML_CUDA_FA_$(echo "${k}_${v}" | tr a-z A-Z)=$on"); done; done
-inc="-I$llama/ggml/include -I$llama/ggml/src -I$llama/ggml/src/ggml-cpu -I$out/gen -D_GNU_SOURCE"
+inc="-I$llama/ggml/include -I$llama/ggml/src -I$llama/ggml/src/ggml-cpu -I$out/gen -D_GNU_SOURCE $ver_defs"
 export root out inc
 export cuflags="-std=c++17 -DGGML_USE_CUDA ${fa[*]} -I$root/lib/cuda/host -I$cuda/include -I$cuda/include/cccl -I$llama/ggml/src/ggml-cuda"
 export cpuflags="-DGGML_CPU_GENERIC"
@@ -30,7 +38,7 @@ export cpuxxflags="-DGGML_CPU_GENERIC -U__SSE__ -U__SSE2__ -U__SSE3__ -U__SSSE3_
   for f in "$llama"/ggml/src/*.c; do printf '%s\t\n' "$f"; done
   for f in "$llama"/ggml/src/*.cpp; do printf '%s\tcxx\n' "$f"; done
   for f in "$llama"/ggml/src/ggml-cpu/*.c; do printf '%s\tcpuflags\n' "$f"; done
-  for f in "$llama"/ggml/src/ggml-cpu/*.cpp "$llama"/ggml/src/ggml-cpu/tiled/*.cpp; do printf '%s\tcpuxxflags\n' "$f"; done
+  for f in "$llama"/ggml/src/ggml-cpu/*.cpp "$llama"/ggml/src/ggml-cpu/tiled/*.cpp; do [ -e "$f" ] && printf '%s\tcpuxxflags\n' "$f"; done
   find "$llama/ggml/src/ggml-cuda" -name '*.cu' | sort | while read -r f; do printf '%s\tcuflags\n' "$f"; done
   printf '%s\tcxx\n' "$llama/tests/test-backend-ops.cpp"
 } > "$out/sources"

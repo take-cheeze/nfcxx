@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # A newer push to the same branch or PR supersedes the run in progress.
 concurrency:
@@ -12,7 +13,7 @@ concurrency:
 
 jobs:
   # Builds the EDG front end and QBE/cproc once and saves them to the Actions cache (.github/actions/toolchain); the
-  # test jobs below, and the hexagon, pathb and realworld workflows, restore them instead of rebuilding.
+  # test jobs below, the Path B jobs and the hexagon and realworld workflows, restore them instead of rebuilding.
   # build/ holds absolute paths, so every job uses the same checkout path.
   build:
     runs-on: ubuntu-24.04
@@ -30,6 +31,15 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           packages: python3 python3-dev ruby rake clang
+
+      # The upstream harness scripts and their offline self-test (tests/upstream): under a minute.
+      - name: Syntax of the upstream scripts and Python
+        run: |
+          for f in tests/upstream/*.sh; do bash -n "$f"; done
+          python3 -m py_compile tests/upstream/*.py
+
+      - name: Native upstream harness self-test
+        run: python3 tests/upstream/nightly-self-test.py
 
       - name: sccache stats
         if: always()
@@ -168,8 +178,7 @@ jobs:
             run: |
               tests/asan/run.sh
               ASAN_BACKEND=qbe tests/asan/run.sh
-          # Moved here from pathb.yml so that build-and-test gates it. The Path B harness comes from the cache that pathb.yml
-          # saves (same key), and is built here on a miss.
+          # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
           - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
             pathb: true
             run: tests/pathb-egraph/run.sh
@@ -277,7 +286,7 @@ jobs:
           path: build/test-bin
           key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
-      # The Path B harness (scripts/setup-pathb.sh), keyed as pathb.yml keys it: its inputs are be/ and the script, and the EDG revision.
+      # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
       - name: Path B harness cache key
         if: matrix.pathb
         id: pathb-key
@@ -516,34 +525,187 @@ jobs:
         if: steps.rust-changes.outputs.changed == 'true'
         run: tests/realworld/run_mrustc.sh clap regex serde-json batch
 
-  # The upstream harness scripts and their offline self-test (tests/upstream): syntax of every script and the native
-  # merge and collection logic, in under a minute. Not a required check; the nightly workflow runs the real suites.
-  upstream-harness:
-    name: upstream harness self-test
+  # Path B (docs/notes/pathb-stage1.md to pathb-stage3.md). Building the harness compiles the whole EDG front end a second
+  # time, so these jobs run only when a change can affect them (the list below), and on demand (workflow_dispatch). A build
+  # job makes the harness and the mruby tool, and the suites run in parallel from their caches. ruby and rake only
+  # bootstrap the mruby build.
+  #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
+  #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
+  #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
+  #   (tests/pathb-egraph/run.sh, the e-graph pass, is a matrix entry of the test job above)
+  #   tests/wasm/run.sh        the wasm emitter (scripts/pathb-wasm-emit.rb): IR -> wasm, run under node, against EXPECT
+  #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
+  #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
+  #   tests/safeptr/run.sh     -fsafe-pointers (lib/safeptr, docs/notes/safe-pointers.md), and the Path B probes under it
+  pathb-changes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      # fetch-depth 0: the change check diffs against the base commit, which a shallow clone does not have.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The paths that can affect Path B: the front end (be/, the EDG and QBE submodules and their setup scripts), the
+      # Path B and mruby scripts, the suites that run through them, and this workflow. A push to main compares with the
+      # commit before it; a manual run (no base) always runs the jobs.
+      - name: Did the change touch Path B
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(be/|3rd/edg$|3rd/qbe$|scripts/pathb-|scripts/(setup-pathb\.sh|setup-edg\.sh|setup-qbe\.sh|host-sys\.sh|mrb|setup-mruby\.sh|mruby-tool-config\.rb|sycl-build\.sh|spirv-emit|qbe-prep|ehshim|safeptr-rt|cpp-feature-)|tests/(pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|lib/(sycl|ehshim|safeptr)/|tools/(pathb-spirv-emit|qbe-prep)/|^nfcxx$|tests/realworld/tinyxml2_main\.cpp$|\.github/workflows/ci\.yml$)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pathb-build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh); the runner has 4 cores and 16 GB, and
+      # the harness links with -flto, so do not oversubscribe it.
+      PATHB_JOBS: "4"
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
-      - name: Syntax of the upstream scripts and Python
-        run: |
-          for f in tests/upstream/*.sh; do bash -n "$f"; done
-          python3 -m py_compile tests/upstream/*.py
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
 
-      - name: Native harness self-test
-        run: python3 tests/upstream/nightly-self-test.py
+      # The harness (build/pathb) depends on be/, on the script that assembles it and on the EDG revision. An
+      # exact hit skips the build; on a miss sccache still serves the unchanged EDG compiles.
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+
+      - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: scripts/setup-mruby.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # One suite per job, all restoring the pathb-build job's caches. The slowest suite sets the total time.
+  pathb-test:
+    # Skipped with pathb-build when the change does not touch Path B.
+    needs: pathb-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Path B stages 1-2, wasm and the mruby-ninja file tasks
+            run: |
+              tests/pathb/run.sh
+              tests/pathb-ir/run.sh
+              tests/pathb-borrow/run.sh
+              tests/wasm/run.sh
+              NFCXX_WASM_OPT=1 tests/wasm/run.sh
+              tests/mruby-ninja/run.sh
+          - name: Path B stage 3 (IR to QBE translation validation) and hosted Path B (NFCXX_PATH=b)
+            run: |
+              tests/pathb-qbe/run.sh
+              tests/pathb-qbe/hosted.sh
+          - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
+            run: |
+              FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/ehshim/run.sh
+          - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
+            run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
+          - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
+            run: |
+              sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
+              npm install --prefix "$RUNNER_TEMP/pw" playwright
+              "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+    name: ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
+
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        uses: actions/cache/restore@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Restore the mruby tool
+        uses: actions/cache/restore@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          fail-on-cache-miss: true
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
-  # the build, every test group, the Linux arm64 tests, the macOS suites and the mrustc suite passed. if: always() stops a
-  # skipped dependency from skipping this job.
+  # the build, every test group, the Linux arm64 tests, the macOS suites, the mrustc suite and, when the change touches
+  # Path B, the Path B jobs passed. if: always() stops a skipped dependency from skipping this job.
   build-and-test:
     if: always()
-    needs: [build, test, arm-test, macos-suites, mrustc]
+    needs: [build, test, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every build and test job to pass
         run: |
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.arm-test.result }}" != "success" ] || [ "${{ needs.macos-suites.result }}" != "success" ] || [ "${{ needs.mrustc.result }}" != "success" ]; then
-            echo "build=${{ needs.build.result }} test=${{ needs.test.result }} arm-test=${{ needs.arm-test.result }} macos-suites=${{ needs.macos-suites.result }} mrustc=${{ needs.mrustc.result }}"
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.arm-test.result }}" != "success" ] || [ "${{ needs.macos-suites.result }}" != "success" ] || [ "${{ needs.mrustc.result }}" != "success" ] || [ "${{ needs.pathb-changes.result }}" != "success" ]; then
+            echo "build=${{ needs.build.result }} test=${{ needs.test.result }} arm-test=${{ needs.arm-test.result }} macos-suites=${{ needs.macos-suites.result }} mrustc=${{ needs.mrustc.result }} pathb-changes=${{ needs.pathb-changes.result }}"
+            exit 1
+          fi
+          # The Path B jobs are skipped (not failed) when the change does not touch Path B.
+          if [ "${{ needs.pathb-changes.outputs.changed }}" = "true" ] && { [ "${{ needs.pathb-build.result }}" != "success" ] || [ "${{ needs.pathb-test.result }}" != "success" ]; }; then
+            echo "pathb-build=${{ needs.pathb-build.result }} pathb-test=${{ needs.pathb-test.result }}"
             exit 1
           fi

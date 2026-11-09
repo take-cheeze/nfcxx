@@ -427,9 +427,11 @@ def promote_address_slots(children)
         elsif v.is_a?(String) && addr[v]
           target = addr[v]
         end
-        if target && counts["$\"#{n}\""] == 1 + count_in_forms(list.drop(i + 1), "$\"#{n}\"")
-          loads = all_forms(list.drop(i + 1)).select { |sf| head(sf) == "load" && sf.length == 3 && sf[2] == "$\"#{n}\"" }
-          lets = all_forms(list.drop(i + 1)).select { |sf| head(sf) == "let" && sf.length == 4 && head(sf[3]) == "load" && sf[3][2] == "$\"#{n}\"" }
+        # one walk of the statements after the store gives both their forms and the count of the slot's atom in them
+        rest_forms, rest_count = target ? suffix_forms_and_count(list, i + 1, "$\"#{n}\"") : [nil, 0]
+        if target && counts["$\"#{n}\""] == 1 + rest_count
+          loads = rest_forms.select { |sf| head(sf) == "load" && sf.length == 3 && sf[2] == "$\"#{n}\"" }
+          lets = rest_forms.select { |sf| head(sf) == "let" && sf.length == 4 && head(sf[3]) == "load" && sf[3][2] == "$\"#{n}\"" }
           if lets.length == loads.length && lets.length > 0
             lets.each { |sf| sf[3] = ["offset", "$\"#{target[0]}\"", target[1].to_s] }
             list.delete_at(i)
@@ -464,6 +466,24 @@ end
 
 def count_in_forms(list, atom)
   atoms_flat(list).count { |a| a == atom }
+end
+
+# [all_forms(list[from..]), count_in_forms(list[from..], atom)] in one walk (the same forms, in the same order).
+def suffix_forms_and_count(list, from, atom)
+  forms = []
+  count = 0
+  walk = lambda do |x|
+    if x.is_a?(Array)
+      forms << x
+      x.each { |y| walk.call(y) }
+    elsif x == atom
+      count += 1
+    end
+  end
+  rest = list[from..]
+  forms << rest   # all_forms of the array includes the array itself
+  rest.each { |y| walk.call(y) }
+  [forms, count]
 end
 
 def sroa_function(children, counter)
@@ -557,7 +577,8 @@ def sroa_function(children, counter)
       db = base_of.call(s[2])
       sb = base_of.call(s[3])
       next unless db || sb
-      copies << [db, sb, s[1].to_i]
+      # the copy's ALIGN (its last item) is the object's alignment: a filler field may not be wider than it
+      copies << [db, sb, s[1].to_i, s.length >= 5 ? s[4].to_i : 1]
     end
   end
   copies.each do |db, sb, bytes|
@@ -585,7 +606,7 @@ def sroa_function(children, counter)
   # a copy out of the group must write every byte of the object: the bytes no access reads get filler fields. The group's
   # copy in (from memory) gives them their values, so they are defined; a group that is only written is refused above when
   # its fields overlap.
-  copies.each do |db, sb, bytes|
+  copies.each do |db, sb, bytes, align|
     next if db || !sb
     g = groups.find(sb[0])
     fs = group_fields[g]
@@ -609,7 +630,7 @@ def sroa_function(children, counter)
         nxt = occupied.find { |k| k > cursor } || limit
         nxt = limit if nxt > limit
         while cursor < nxt
-          chunk = [8, 4, 2, 1].find { |c| cursor % c == 0 && cursor + c <= nxt }
+          chunk = [8, 4, 2, 1].find { |c| c <= align && cursor % c == 0 && cursor + c <= nxt }
           fs[cursor] = { 8 => "unsigned_long", 4 => "unsigned_int", 2 => "unsigned_short", 1 => "unsigned_char" }[chunk]
           cursor += chunk
         end
@@ -804,10 +825,17 @@ def cprop_function(children)
   all.each { |sf| setted[sf[1]] = true if head(sf) == "set" && sf.length == 3 }
   set_const = lambda { |name, val| consts[name] = val unless setted[name] }
   # the slots a statement may store (anywhere inside it)
+  # Memoized per form: the walk only replaces the right side of a let (a load by a constant), which holds no store, so a
+  # form's stores do not change while the walk runs. Nested containers are then read once, not once per enclosing container.
+  stored_memo = {}.compare_by_identity
   stored_in = lambda do |x|
-    res = []
-    all_forms(x).each { |sf| res << unq(sf[2]) if head(sf) == "store" && sf.length >= 3 && sf[2].is_a?(String) && sf[2].start_with?("$\"") }
-    res
+    next [] unless x.is_a?(Array)
+    stored_memo[x] ||= begin
+      res = []
+      res << unq(x[2]) if head(x) == "store" && x.length >= 3 && x[2].is_a?(String) && x[2].start_with?("$\"")
+      x.each { |y| res.concat(stored_in.call(y)) if y.is_a?(Array) }
+      res.uniq
+    end
   end
   resolve = lambda { |x| x.is_a?(String) && consts[x] ? consts[x] : x }
   walk = nil

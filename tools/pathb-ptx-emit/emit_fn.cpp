@@ -1009,6 +1009,13 @@ void Fn::call_site(const Node &x, const std::string &dest, const Ty *ty) {
     emit("membar.sys;");
     return;
   }
+  if (cname == "__nfcxx_pdl_wait" || cname == "__nfcxx_pdl_launch") {
+    // programmatic dependent launch (sm_90+): wait for the prerequisite grid, or let the dependent grid start
+    if (n != 3) throw Refused(cname + " takes no arguments");
+    if (!dest.empty()) throw Refused(cname + " has no value");
+    emit(cname == "__nfcxx_pdl_wait" ? "griddepcontrol.wait;" : "griddepcontrol.launch_dependents;");
+    return;
+  }
   if (cname == "__nfcxx_nanosleep") {
     // nanosleep.u32: suspend the thread for about the given number of nanoseconds (a hint)
     if (n != 4) throw Refused("__nfcxx_nanosleep takes (ns)");
@@ -1507,6 +1514,20 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
       if (mentions(c)) return true;
     return false;
   };
+  // A field is keyed by its offset and its ptx type, and a narrow integer's ptx type is u32 or s32 whatever its width:
+  // an access of another width at the same offset (a byte of a halfword) or an overlapping one would share the key, so
+  // any access that overlaps a field it is not exactly equal to keeps the struct in memory.
+  auto add_field_entry = [&](long long off, const Ty &t) {
+    const long long sz = type_size(t);
+    for (const auto &[key, ety] : out.fields) {
+      const long long eo = key.first, es = type_size(ety);
+      if (eo < off + sz && off < eo + es && !(eo == off && es == sz)) {
+        sra_fail(out, __LINE__);
+        return;
+      }
+    }
+    out.fields[{off, ptx_type(t)}] = t;
+  };
   auto add_field = [&](long long off, const Node &type_node) {
     Ty t = parse_type(&type_node);
     bool ok = t.kind == "ptr" || (t.kind == "int" && !t.is_bool && (t.size == 1 || t.size == 2 || t.size == 4 || t.size == 8)) ||
@@ -1515,7 +1536,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
       sra_fail(out, __LINE__);
       return;
     }
-    out.fields[{off, ptx_type(t)}] = t;
+    add_field_entry(off, t);
   };
   std::function<void(const Node &)> call_uses;
   call_uses = [&](const Node &c) {
@@ -1555,7 +1576,7 @@ void Fn::scan_aliases(const std::vector<const Node *> &body, const std::set<std:
         sra_fail(out, __LINE__);
         return;
       }
-      for (const auto &[key, ty] : sub.fields) out.fields[{key.first + o, key.second}] = ty;
+      for (const auto &[key, ty] : sub.fields) add_field_entry(key.first + o, ty);
       for (const auto &[a, w] : sub.word_offs) out.word_offs.insert({a + o, w});
     }
   };

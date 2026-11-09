@@ -28,4 +28,8 @@ if grep -q '(sycl-kernel-attr "entry" (reqd-sub-group-size 32))' "$out/subgroup_
 # names in the caller, not one name twice.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline byval_names.ir > "$out/byval_names.ir" || fail=1
 if [ "$(grep -o '(slot "tmp\.byval[0-9]\.i[0-9]*"' "$out/byval_names.ir" | sort | uniq -d | wc -l)" = 0 ] && [ "$(grep -o '(slot "tmp\.byval[0-9]\.i[0-9]*"' "$out/byval_names.ir" | wc -l)" = 2 ]; then echo "byval slot names: ok"; else echo "byval slot names: FAIL"; fail=1; fi
+# A 12-byte struct of alignment 4 (a uint3) copied out with a gap of 8 bytes at its start: the filler field must not be 8 bytes
+# wide (a 64-bit access to an object 4 mod 8 is misaligned on the GPU; the old pass gave one unsigned_long field).
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa align4_copy.ir > "$out/align4.ir" || fail=1
+if grep -q "unsigned_long" "$out/align4.ir"; then echo "align-4 filler: FAIL (an 8-byte field)"; fail=1; else echo "align-4 filler: ok"; fi
 exit $fail
