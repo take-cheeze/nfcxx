@@ -13,6 +13,7 @@ covers say so.
 | [asan.md](notes/asan.md) | `nfcxx -fsanitize=address`: AddressSanitizer on the qbe (default) and gcc backends; backend selection, limits. `tests/asan/run.sh`. |
 | [asan-plan.md](notes/asan-plan.md) | Plan for AddressSanitizer on Path B and wasm (the qbe milestones are done): emitter checks, libasan reuse, milestones. |
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
+| [bc2cpp-epoch-method-table.md](notes/bc2cpp-epoch-method-table.md) | Measurement of bc2cpp's owner-call lookups (why they miss, what a miss costs) on the host sweep and optcarrot, and why an epoch-validated method table is not worth building. |
 | [bc2cpp-migration.md](notes/bc2cpp-migration.md) | Moving rpg-maker-clone's bc2cpp compiler and its checks here: the first step (optcarrot compiled by a pinned bc2cpp, checksum and speedup over the interpreter), how a world such as the mruby scripts is added, and the plan (what moves, the coupling to cut first, phases, risks, open decisions). `tests/bc2cpp/run_optcarrot.sh`. |
 | [cxx-driver.md](notes/cxx-driver.md) | `nfcxx` as `CXX` for CMake and mruby: the driver options accepted (`find_package(Torch)`'s `--no-as-needed` spans, CMake 4's linker dependency file), and the rpg-maker-clone desktop build's remaining blockers. |
 | [sqlite.md](notes/sqlite.md) | SQLite 3.54.1 built with nfcc (`scripts/setup-sqlite.sh`) and `lib/sqlcache`, a TTL key-value cache on it. `tests/sqlite/run.sh`. |
