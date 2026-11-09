@@ -1723,21 +1723,32 @@ class CodeGen
       void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
       int block_call; // BLOCK_CALL of the last suspension: 0 none yet (block_call? is nil), 1 false, 2 true
+      mrb_value regs_ary; // the hidden ivar's Array, which is never replaced: read here instead of by name
       long long slots[1];
     };
     static void bc2cpp_resume_frame_free(mrb_state* M, void* p) { mrb_free(M, p); }
     static const mrb_data_type bc2cpp_resume_frame_type = { "Bc2cppResumable::Frame", bc2cpp_resume_frame_free };
     static mrb_sym bc2cpp_resume_regs_sym(mrb_state* M) { return BC2CPP_LIT_SYM(M, "__bc2cpp_regs__"); }
+    // STATE_EPOCH (bc2cpp_lit_sym.hxx): the class is looked up by name once per state. Nothing in a closed world names
+    // Bc2cppResumable, so its Frame stays the class bc2cpp_resumable_init defined.
     static struct RClass* bc2cpp_resume_frame_class(mrb_state* M) {
+      static struct RClass* cached = nullptr;
+      static unsigned cached_gen = 0;
+      const unsigned gen = bc2cpp_state_gen(M);
+      if (gen && cached_gen == gen) return cached;
       struct RClass* mod = mrb_module_get_id(M, BC2CPP_LIT_SYM(M, "Bc2cppResumable"));
-      return mrb_class_get_under_id(M, mod, BC2CPP_LIT_SYM(M, "Frame"));
+      struct RClass* c = mrb_class_get_under_id(M, mod, BC2CPP_LIT_SYM(M, "Frame"));
+      cached = c;
+      cached_gen = gen;
+      return c;
     }
     // Only bc2cpp_resume_frame makes an object of this data type, so the type is the frame test (no class lookup).
     static bool bc2cpp_resume_frame_p(mrb_state* M, mrb_value v) {
       return mrb_data_p(v) && DATA_TYPE(v) == &bc2cpp_resume_frame_type;
     }
     static mrb_value bc2cpp_resume_regs(mrb_state* M, mrb_value frame) {
-      return mrb_iv_get(M, frame, bc2cpp_resume_regs_sym(M));
+      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_data_check_get_ptr(M, frame, &bc2cpp_resume_frame_type);
+      return f ? f->regs_ary : mrb_iv_get(M, frame, bc2cpp_resume_regs_sym(M));
     }
     [[noreturn]] static void bc2cpp_resume_bad_state(mrb_state* M) {
       mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: resumable frame resumed in an unknown state");
@@ -1751,6 +1762,7 @@ class CodeGen
         Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_calloc(M, 1, size);
         f->nregs = nregs;
         f->regs = ary_items(regs);
+        f->regs_ary = regs;
         *frame = mrb_obj_value(mrb_data_object_alloc(M, bc2cpp_resume_frame_class(M), f, &bc2cpp_resume_frame_type));
         mrb_iv_set(M, *frame, bc2cpp_resume_regs_sym(M), regs);
         return f;
@@ -1793,7 +1805,12 @@ class CodeGen
     }
     static void bc2cpp_fiber_define(mrb_state* M); // the fiber runtime, after this
     static mrb_value bc2cpp_fiber_yield_c(mrb_state* M, mrb_value value); // Fiber.yield from C, in the fiber runtime
+    // Every resumable entry calls this; STATE_EPOCH makes the repeat a compare.
     static void bc2cpp_resumable_init(mrb_state* M) {
+      static unsigned done_gen = 0;
+      const unsigned gen = bc2cpp_state_gen(M);
+      if (gen && done_gen == gen) return;
+      done_gen = gen;
       if (mrb_const_defined_at(M, mrb_obj_value(M->object_class), BC2CPP_LIT_SYM(M, "Bc2cppResumable"))) return;
       bc2cpp_fiber_define(M); // Fiber, FiberError and Fiber.yield exist before any suspendable method runs
       struct RClass* mod = mrb_define_module(M, "Bc2cppResumable");
