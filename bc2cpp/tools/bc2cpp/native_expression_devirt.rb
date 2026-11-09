@@ -49,6 +49,17 @@ module NativeExpressionDevirt
   # size so an in-process caller that rewrites a file never sees stale text.
   SOURCE_CACHE = {}
 
+  # CRuby reports MatchData offsets in characters; mruby-onig-regexp reports bytes. The scanners index the
+  # source by character, so convert when the engine counts bytes.
+  MATCH_OFFSETS_ARE_BYTES = "\u00e9".match(/\u00e9/).end(0) != 1
+
+  def match_end_index(source, match)
+    index = match.end(0)
+    return index if !MATCH_OFFSETS_ARE_BYTES || source.ascii_only?
+
+    source.byteslice(0, index).size
+  end
+
   def read_source(path)
     stat = File.stat(path)
     key = [path, stat.mtime, stat.size]
@@ -156,7 +167,7 @@ module NativeExpressionDevirt
       function, state_arg, self_arg = Regexp.last_match.captures
       next unless needed.include?(function)
 
-      opening = Regexp.last_match.end(0) - 1
+      opening = match_end_index(source, Regexp.last_match) - 1
       body, = brace_body(source, opening)
       next unless body
 
@@ -305,7 +316,7 @@ module NativeExpressionDevirt
       arities = arities_by_function.fetch(function, [])
       next if arities.empty?
 
-      opening = Regexp.last_match.end(0) - 1
+      opening = match_end_index(source, Regexp.last_match) - 1
       body, = brace_body(source, opening)
       arities.each do |arity|
         expression = if arity.zero? && mruby_root && path.start_with?(File.join(mruby_root, '3rd/mruby') + '/') &&
@@ -663,13 +674,13 @@ module NativeExpressionDevirt
     table_pattern = /(?:static\s+)?const\s+mrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{/
     source.scan(table_pattern) do
       table = Regexp.last_match(1)
-      opening = Regexp.last_match.end(0) - 1
+      opening = match_end_index(source, Regexp.last_match) - 1
       _body, closing = brace_body(source, opening)
       tables << [opening, closing, table] if closing
     end
     table_index = 0
     source.scan(/MRB_MT_ENTRY\s*\(/) do
-      opening = Regexp.last_match.end(0) - 1
+      opening = match_end_index(source, Regexp.last_match) - 1
       position = opening
       arguments, = split_call_arguments(source, opening)
       next unless arguments && arguments.length == 3
@@ -905,7 +916,7 @@ module NativeExpressionDevirt
     return calls unless source.include?(macro)
 
     source.scan(macro_call_pattern(macro)) do
-      opening = Regexp.last_match.end(0) - 1
+      opening = match_end_index(source, Regexp.last_match) - 1
       arguments, = split_call_arguments(source, opening)
       calls << arguments if arguments
     end
