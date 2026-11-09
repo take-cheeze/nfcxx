@@ -2,17 +2,27 @@
 # llama.cpp's ggml with the Vulkan backend through the nfcxx driver, linked into test-backend-ops (llama.cpp's
 # per-op check of each backend against the CPU). The host side is nfcxx's: vulkan-shaders-gen, ggml-vulkan*.cpp,
 # the generated shader sources (SPIR-V byte arrays), the core and the CPU backend. The shaders themselves are GLSL and
-# go through glslc, as in llama.cpp's own build. Objects are kept in OUT and a file is compiled again only when its
+# go through glslc, as in llama.cpp's own build, or through glslang (NFCXX_VK_GLSL=glslang: glslc-glslang.sh, the same
+# command line with glslangValidator, see there). Objects are kept in OUT and a file is compiled again only when its
 # object is missing, so a second run only links.
 # Usage: tests/llamacpp/vulkan/build.sh [OUT_DIR]     (default: build/llvk); the program is OUT/test-backend-ops.
 # Env: LLAMA (clone, default build/targets/llama.cpp), JOBS (default 4). Skips (exit 0) without the clone, the Vulkan
-# headers or glslc.
+# headers or the shader compiler (glslc, or glslangValidator and spirv-opt with NFCXX_VK_GLSL=glslang).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 llama=${LLAMA:-$root/build/targets/llama.cpp}
 out=${1:-$root/build/llvk}
-if [ ! -f "$llama/ggml/src/ggml.c" ] || [ ! -f /usr/include/vulkan/vulkan.hpp ] || ! command -v glslc > /dev/null; then
-  echo "SKIP: llama.cpp clone ($llama), vulkan.hpp or glslc missing"; exit 0
+# The shader compiler: glslc (default), or glslang through glslc-glslang.sh (NFCXX_VK_GLSL=glslang).
+case ${NFCXX_VK_GLSL:-glslc} in
+  glslc) glslc_cmd=glslc ;;
+  glslang) glslc_cmd=$root/tests/llamacpp/vulkan/glslc-glslang.sh ;;
+  *) echo "FAIL NFCXX_VK_GLSL must be glslc or glslang"; exit 1 ;;
+esac
+have_glsl=0
+if [ "$glslc_cmd" = glslc ]; then command -v glslc > /dev/null && have_glsl=1
+else command -v glslangValidator > /dev/null && command -v spirv-opt > /dev/null && [ -x "$glslc_cmd" ] && have_glsl=1; fi
+if [ ! -f "$llama/ggml/src/ggml.c" ] || [ ! -f /usr/include/vulkan/vulkan.hpp ] || [ $have_glsl = 0 ]; then
+  echo "SKIP: llama.cpp clone ($llama), vulkan.hpp or the shader compiler (${NFCXX_VK_GLSL:-glslc}) missing"; exit 0
 fi
 vk=$llama/ggml/src/ggml-vulkan
 mkdir -p "$out/obj" "$out/gen/vk" "$out/spv" "$out/tmp"
@@ -25,10 +35,10 @@ vkdefs=""
 for t in coopmat:COOPMAT coopmat2:COOPMAT2 coopmat2_decode_vector:COOPMAT2_DECODE_VECTOR integer_dot:INTEGER_DOT \
          bfloat16:BFLOAT16 float_e2m1:FLOAT_E2M1 float_e4m3:FLOAT_E4M3; do
   # The message, not the exit status, decides (as in CMake): glslc fails for other reasons too.
-  msg=$(glslc -o /dev/null -fshader-stage=compute --target-env=vulkan1.3 "$vk/vulkan-shaders/feature-tests/${t%%:*}.comp" 2>&1)
+  msg=$("$glslc_cmd" -o /dev/null -fshader-stage=compute --target-env=vulkan1.3 "$vk/vulkan-shaders/feature-tests/${t%%:*}.comp" 2>&1)
   case $msg in *"extension not supported"*) ;; *) vkdefs+=" -DGGML_VULKAN_${t#*:}_GLSLC_SUPPORT" ;; esac
 done
-echo "glslc extensions:$vkdefs"
+echo "shader compiler ${glslc_cmd##*/} extensions:$vkdefs"
 
 gen=$out/vulkan-shaders-gen
 if [ ! -x "$gen" ]; then
@@ -39,11 +49,11 @@ fi
 hpp=$out/gen/ggml-vulkan-shaders.hpp
 [ -f "$hpp" ] || "$gen" --output-dir "$out/spv" --target-hpp "$hpp" > "$out/shaders.log" 2>&1 ||
   { echo "FAIL shader header"; exit 1; }
-export gen hpp out
+export gen hpp out glslc_cmd
 gen_one() {
   local f=$1 b; b=$(basename "$f")
   [ -f "$out/gen/vk/$b.cpp" ] && return 0
-  "$gen" --glslc glslc --source "$f" --output-dir "$out/spv" --target-hpp "$hpp" --target-cpp "$out/gen/vk/$b.cpp" \
+  "$gen" --glslc "$glslc_cmd" --source "$f" --output-dir "$out/spv" --target-hpp "$hpp" --target-cpp "$out/gen/vk/$b.cpp" \
     > "$out/gen/vk/$b.log" 2>&1 || { rm -f "$out/gen/vk/$b.cpp"; echo "FAIL shader $b"; return 1; }
 }
 export -f gen_one
