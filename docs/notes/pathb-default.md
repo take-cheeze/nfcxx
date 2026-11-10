@@ -17,6 +17,14 @@ Path B is chosen when all of these hold:
 
 Anything else gets qbe, as before. `-fsanitize=undefined` and `-fsafe-pointers` still select Path B, as they did.
 
+## CUDA (.cu inputs)
+
+A `.cu` input takes Path B by default too. Its host copy is rewritten (the `<<<...>>>` launches become calls, the copy
+gets the forced `nfcxx_cuda.h` include and is read with the launch syntax, `--cuda`), and its device image is a
+file-scope asm block (`pathb-ptx-emit --embed`), which Path B writes into the object as it is. `tests/cuda/libs/run.sh`
+passes on the default driver and with `NFCXX_BACKEND=qbe`. `nfcc` (the C compiler for CMake) is C-only and keeps its own
+backend choice.
+
 ## Fallback
 
 A default-selected Path B build that fails on any `.cpp` file is rebuilt with qbe. The driver prints one line naming the
