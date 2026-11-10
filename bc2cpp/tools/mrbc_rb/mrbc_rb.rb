@@ -41,6 +41,9 @@ module MrbcRb
   BINARY_OPS = { :+ => :ADD, :- => :SUB, :* => :MUL, :/ => :DIV, :== => :EQ, :< => :LT, :<= => :LE, :> => :GT,
                  :>= => :GE }.freeze
 
+  # Predicates the fork folds at compile time (no test is emitted for them).
+  LITERAL_PREDICATES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::StringNode].freeze
+
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
                    Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode].freeze
@@ -168,6 +171,8 @@ module MrbcRb
     def if_statement(node, last:)
       predicate = node.predicate
       raise Unsupported, 'if predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+      # The fork folds a literal predicate away (`if 1` compiles to its body only); not reproduced yet.
+      raise Unsupported, 'literal if predicate' if LITERAL_PREDICATES.include?(predicate.class)
 
       else_node = node.subsequent
       raise Unsupported, 'elsif' if else_node.is_a?(Prism::IfNode)
@@ -267,6 +272,7 @@ module MrbcRb
     def unless_statement(node, last:)
       predicate = node.predicate
       raise Unsupported, 'unless predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+      raise Unsupported, 'literal unless predicate' if LITERAL_PREDICATES.include?(predicate.class)
 
       body = node.statements&.body || []
       else_node = node.else_clause
