@@ -1,10 +1,10 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# Run by skipped_direct_call_check.rb, which supplies the registered fixture entry point.
 require_relative '../../tools/bc2cpp/bc2cpp'
 require_relative 'check_support'
 
-suite = FixtureCheck.new('poly_candidate_probe_check')
+suite = FixtureCheck.new('poly_candidate_probe_cases')
 suite.require_mrbc!
 
 source = <<~RUBY

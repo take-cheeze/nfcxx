@@ -114,7 +114,6 @@ ruby scripts/bc2cpp/compiled_gems_config_check.rb
 ruby scripts/bc2cpp/self_build_kind_check.rb
 ruby scripts/bc2cpp/escape_receiver_flow_check.rb
 ruby scripts/bc2cpp/skipped_direct_call_check.rb
-ruby scripts/bc2cpp/poly_candidate_probe_check.rb
 ruby scripts/bc2cpp/array_literal_block_check.rb
 ruby scripts/bc2cpp/send_arg_facts_check.rb
 ruby scripts/bc2cpp/constant_typing_check.rb
