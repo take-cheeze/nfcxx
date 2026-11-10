@@ -81,10 +81,11 @@ class CodeGen
       # SCLASS/ICLASS and returns e.g. Module, and const_chain_value_expr strips the
       # suffix. Such a candidate would be dead code, so it is excluded.
       next false if t.owner.end_with?('.singleton')
-      next false unless compiles_clean?(t.irep)
-
       t_irep = @ireps.fetch(t.irep)
+      # Reject an impossible call shape before compiling the callee as a cleanliness
+      # probe. That probe may recursively compile its entire call graph.
       next false unless poly_arity_fits?(t_irep, n, optional)
+      next false unless compiles_clean?(t.irep)
       next false unless native_arg_types(t, mandatory_arity(t_irep)).all?(&:nil?)
 
       if @only_owners && !@only_owners.include?(t.owner)
