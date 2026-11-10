@@ -266,20 +266,39 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   paths = Array(src_paths)
   # BC2CPP_MRBC_RB=1: one source file the Ruby emitter (bc2cpp/tools/mrbc_rb) covers is compiled without mrbc; any other
   # input, or a construct the emitter does not cover yet, goes to mrbc as before.
-  if paths.size == 1 && ENV['BC2CPP_MRBC_RB'] == '1' && (image = mrbc_rb_image(paths.first))
-    File.binwrite(mrb_path, image)
-    return RiteImage.new(image)
+  reason = 'disabled'
+  if ENV['BC2CPP_MRBC_RB'] == '1'
+    if paths.size == 1
+      image, reason = mrbc_rb_image(paths.first)
+      if image
+        mrbc_rb_log(paths.size, 'emitter', '-', symbol)
+        File.binwrite(mrb_path, image)
+        return RiteImage.new(image)
+      end
+    else
+      reason = 'multi-file'
+    end
   end
+  mrbc_rb_log(paths.size, 'mrbc', reason, symbol)
   system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
   RiteImage.new(File.binread(mrb_path))
 end
 
-# The RITE binary of +path+ from the Ruby emitter, or nil when it does not cover the file.
+# BC2CPP_MRBC_RB_LOG=<file>: one line per run_mrbc call: "<inputs>\t<emitter|mrbc>\t<reason>\t<symbol>", where reason is
+# disabled, multi-file or Unsupported(<message>) for an mrbc run, and "-" for the emitter.
+def mrbc_rb_log(count, served_by, reason, symbol)
+  log = ENV['BC2CPP_MRBC_RB_LOG']
+  return if log.nil? || log.empty?
+
+  File.open(log, 'a') { |f| f.write("#{count}\t#{served_by}\t#{reason.to_s.tr("\n\t", '  ')}\t#{symbol}\n") }
+end
+
+# [the RITE binary of +path+ from the Ruby emitter, nil] or [nil, "Unsupported(message)"] when it does not cover the file.
 def mrbc_rb_image(path)
   require_relative '../mrbc_rb/mrbc_rb'
-  MrbcRb.compile(File.binread(path), path)
-rescue MrbcRb::Unsupported
-  nil
+  [MrbcRb.compile(File.binread(path), path), nil]
+rescue MrbcRb::Unsupported => e
+  [nil, "Unsupported(#{e.message})"]
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
