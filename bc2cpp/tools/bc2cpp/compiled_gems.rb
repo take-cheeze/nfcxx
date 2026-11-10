@@ -351,7 +351,15 @@ end
 # bc2cpp compiles these builds only; every other build, and any
 # build with a gem below, is the plain mruby build.
 # `closed` is the closed world built natively for CI (build_config.rb).
-BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe wio bc2cpp-self].freeze
+BC2CPP_CLOSED_WORLD_BUILDS = %w[closed optcarrot-probe script-world wio bc2cpp-self].freeze
+# The probe builds: one standalone program run from a fixed C main, compiled with the core's Ruby. Each names its program
+# gem (the Ruby bc2cpp compiles, with the C main in its src/) and its compiled gem (the generated C++).
+# optcarrot-probe is optcarrot (tools/optcarrot_probe); script-world is one of nfcxx's own mruby scripts
+# (tools/script_world).
+BC2CPP_PROBE_BUILDS = {
+  'optcarrot-probe' => %w[optcarrot-benchmark optcarrot-compiled],
+  'script-world' => %w[script-benchmark script-compiled]
+}.freeze
 # bc2cpp-self: bc2cpp compiled by bc2cpp, an mruby executable whose program is bc2cpp's own sources (baked as bytecode by
 # host-libs/mruby-bc2cpp-sources) rather than a game. Its world is the gems below, which must all be present, and it holds
 # no gem that loads or compiles Ruby at runtime: mruby-compiler, and every mruby-bin-* (the C main replaces bin/mruby).
@@ -629,7 +637,7 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
     errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
   end
   required = case build_name
-             when 'optcarrot-probe' then %w[optcarrot-benchmark optcarrot-compiled]
+             when *BC2CPP_PROBE_BUILDS.keys then BC2CPP_PROBE_BUILDS.fetch(build_name)
              when BC2CPP_SELF_BUILD then BC2CPP_SELF_GEMS
              else BC2CPP_CLOSED_WORLD_GEMS
              end
@@ -642,17 +650,17 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
       errors << "#{name} cannot be linked into the bc2cpp-self executable"
     end
   end
-  if build_name == 'optcarrot-probe'
-    errors << 'optcarrot-probe cannot include mruby-compiler' if gems.key?('mruby-compiler')
-    benchmark = gems['optcarrot-benchmark']
+  if BC2CPP_PROBE_BUILDS.key?(build_name)
+    errors << "#{build_name} cannot include mruby-compiler" if gems.key?('mruby-compiler')
+    benchmark = gems[BC2CPP_PROBE_BUILDS.fetch(build_name).first]
     if benchmark
       ruby = Dir["#{benchmark}/mrblib/**/*.rb"].map { |p| File.expand_path(p) }
       inputs = compiled_srcs.map { |p| File.expand_path(p) }
       if ruby.empty? || !(ruby - inputs).empty?
-        errors << 'optcarrot benchmark Ruby must be complete compiled input'
+        errors << "#{build_name} program Ruby must be complete compiled input"
       end
       host = Dir["#{benchmark}/src/**/#{BC2CPP_NATIVE_GLOB}"]
-      errors << 'optcarrot benchmark lacks a fixed native host' if host.empty?
+      errors << "#{build_name} program lacks a fixed native host" if host.empty?
       host.each do |path|
         if File.read(path).match?(/\bmrb_(?:load|parse)_\w*\s*\(/)
           errors << "#{path} loads Ruby at runtime; the benchmark must initialize fixed gem bytecode"
@@ -690,7 +698,7 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
   ruby = Dir["#{repo_root}/3rd/mruby/mrblib/**/*.rb"]
   # The probe's program is its bundle alone (OptcarrotSealedBuild.bc2cpp_world): the core gems' mrblib, which a game
   # build compiles into its program (closed_world_mrblib_srcs), stays outside Ruby there.
-  probe = build_name == 'optcarrot-probe'
+  probe = BC2CPP_PROBE_BUILDS.key?(build_name)
   gems.each do |name, dir|
     next if BC2CPP_COMPILED_GEMS.key?(name)
 
@@ -698,7 +706,7 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
     native.reject! { |path| path.end_with?("/#{RgssTtsConfig::RGSS_TTS_CXX}") } unless RgssTtsConfig.backend_possible?(build_name)
     ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name) ||
                                                (!probe && BC2CPP_PROGRAM_CORE_MRBLIB_GEMS.include?(name)) ||
-                                               (probe && name == 'optcarrot-benchmark')
+                                               (probe && name == BC2CPP_PROBE_BUILDS.fetch(build_name).first)
   end
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
