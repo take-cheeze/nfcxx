@@ -84,6 +84,45 @@ module CoreNativeCandidates
     }
   }.freeze
 
+  # HOOK_CALLER: the one function that runs an mruby default-hook (inherited, method_added, ...). It runs a hook only
+  # when the method search finds one that is not the no-op default, or, for a name the build left out of its table
+  # (HOOK_GONE_<name>, set from MRB_MT_EXCLUDE_<class>_SYM__<name>), when it finds an undefined one, which it skips. So
+  # the name it is called with looks up nothing the table entry of the default could answer: a hook the program defines
+  # is its own entry, and `super` / a Symbol / an alias of it count as spellings elsewhere. `path` is the one file that
+  # defines it, `definition` its text without blanks.
+  HOOK_CALLER = {
+    path: %r{/3rd/mruby/src/class\.c\z},
+    definition: <<~'C'.gsub(/\s+/, '')
+      static void
+      hook_call(mrb_state *mrb, mrb_value obj, mrb_sym mid, mrb_bool gone, mrb_value arg)
+      {
+        struct RClass *c = mrb_class(mrb, obj);
+        mrb_method_t m = mrb_method_search_vm(mrb, &c, mid);
+
+        if (MRB_METHOD_UNDEF_P(m)) {
+          if (gone) return;
+        }
+        else if (MRB_METHOD_FUNC_P(m)) {
+          if (MRB_METHOD_FUNC(m) == mrb_do_nothing) return;
+        }
+        else {
+          const struct RProc *p = MRB_METHOD_PROC(m);
+          if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == mrb_do_nothing) return;
+        }
+        mrb_funcall_argv(mrb, obj, mid, 1, &arg);
+      }
+    C
+  }.freeze
+  # The default hook entries hook_call may find absent: the keys of the ROM entries it answers for.
+  HOOK_DEFAULTS = %w[Class#inherited Module#method_added Module#method_removed Module#method_undefined Module#const_added
+                     Module#extended Module#prepended BasicObject#singleton_method_added BasicObject#singleton_method_removed
+                     BasicObject#singleton_method_undefined].freeze
+  # A call's name argument and the gone flag of the same name, side by side: `MRB_SYM(name), HOOK_GONE_name`.
+  HOOK_NAME_ARG = /\bMRB_SYM\s*\(\s*(\w+)\s*\)\s*,\s*HOOK_GONE_\1\b/
+  HOOK_GONE_DEFINE = lambda do |cls, name|
+    /^#ifdef MRB_MT_EXCLUDE_#{cls}_SYM__#{name}\n#\s*define HOOK_GONE_#{name} TRUE\n#else\n#\s*define HOOK_GONE_#{name} FALSE\n#endif$/
+  end
+
   # An operator's table name is the operator, not the identifier: MRB_OPSYM(div) is `/`, and cdump's table row
   # OPERATOR_SYMBOL("/", "div") formats it. Neither looks up a method called `div`.
   OPERATOR_NAMES_TEXT = [
@@ -177,12 +216,54 @@ module CoreNativeCandidates
     end
   end
 
+  # [name, class] of each default hook whose spellings in `path` are only HOOK_CALLER calls: the one definition of
+  # hook_call is HOOK_CALLER's, every other mention of it is a call, each name is a table entry of the file that
+  # HOOK_GONE_<name> is defined for (the class of that entry's table), and no macro redefines either.
+  def verified_hook_names(native_paths)
+    out = {}
+    native_paths.each do |path|
+      next unless path.match?(HOOK_CALLER[:path])
+
+      text = StaticDispatchRegistrations.strip_c_comments(File.read(path, encoding: 'BINARY'))
+      next if text.match?(/^[ \t]*#[ \t]*(?:define|undef)[ \t]+hook_call\b/)
+      defs = label_definitions(path, text, 'hook_call').select { |_, body| body }
+      next unless text.scan(/\bstatic\s+void\s+hook_call\s*\(/).size == 1 && defs.size == 1 &&
+                  defs[0][1] == HOOK_CALLER[:definition].sub(/\Astaticvoid/, 'void')
+
+      calls = text.scan(HOOK_NAME_ARG).flatten
+      table = entries([path]).select { |e| e[:installed] && e[:fn] == 'mrb_do_nothing' }.to_h { |e| [e[:name], e[:mt_class]] }
+      names = calls.uniq
+      names.each do |name|
+        cls = table[name] or next
+        out[name] = cls if text.match?(HOOK_GONE_DEFINE.call(cls, name))
+      end
+    end
+    out
+  end
+
+  # The `MRB_SYM(name)` of each HOOK_CALLER call blanked, for each name `verified` names, and the hook_call helper's
+  # own parameters (not a spelling). A mention of the name anywhere else stays.
+  def strip_hook_calls(text, verified)
+    return text if verified.empty?
+
+    t = StaticDispatchRegistrations.strip_c_comments(text)
+    t.gsub(HOOK_NAME_ARG) do |m|
+      verified.key?(Regexp.last_match(1)) ? m.sub(/MRB_SYM\s*\(\s*\w+\s*\)/) { |a| ' ' * a.size } : m
+    end
+  end
+
   # Every table entry of `paths`: { mt_class:, kind:, cname:, name:, fn:, installed: } with `installed` the class the
   # table's MRB_MT_INIT_ROM installs it into (NativeRomOwners), or nil when that is not MRB_MT_CLASS's own class.
   # An operator name is never a candidate: the VM sends those from opcodes the scan does not name. `operator_names`
   # names the two index operators (MRB_OPSYM(aref/aset)) for the INDEX_CLOSED proof, whose planner verdict covers
   # every class that can answer them; every other operator stays unnamed.
   OPERATOR_NAMES = { 'aref' => '[]', 'aset' => '[]=' }.freeze
+
+  # A table installed into the class its MRB_MT_CLASS names: `X` for X, and `X_singleton` for X's singleton (NativeRomOwners
+  # spells that owner `X.singleton`). A singleton table under a plain `X` token shares that token with X's own tables.
+  def own_table?(owner, mt_class)
+    owner == mt_class || (owner.is_a?(String) && owner.end_with?('.singleton') && "#{owner.delete_suffix('.singleton')}_singleton" == mt_class)
+  end
   def entries(paths, operator_names: false)
     paths.flat_map do |path|
       text = File.binread(path).force_encoding(Encoding::UTF_8).scrub
@@ -204,7 +285,7 @@ module CoreNativeCandidates
         line.scan(ENTRY) do |fn, kind, cname|
           name = kind == 'OPSYM' ? (operator_names ? OPERATOR_NAMES[cname] : nil) : cname + SUFFIX.fetch(kind)
           out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
-                   installed: owners[table] == mt_class ? mt_class : nil }
+                   installed: own_table?(owners[table], mt_class) ? mt_class : nil }
         end
       end
       out
@@ -230,11 +311,13 @@ module CoreNativeCandidates
     end
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     helpers = diagnostic_literals ? verified_label_helpers(native_paths, ireps, core, generated) : Set.new
+    hook_names = diagnostic_literals ? verified_hook_names(native_paths) : {}
     native_paths.each do |path|
       note.call("native #{path}")
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
       text = strip_label_calls(strip_operator_names(text), helpers)
+      text = strip_hook_calls(text, hook_names) if diagnostic_literals
       text = strip_enumerator_symbols(text, enumerator_free)
       text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)

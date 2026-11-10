@@ -15,9 +15,9 @@
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
-#   --prune-unreachable=SUBSTR   drop the functions that no function whose name contains SUBSTR reaches (prune_pass). With
-#                --inline or --sroa this is the default for a SYCL device module (__nfcxx_sycl_entry_ kernels); --no-prune
-#                keeps every function.
+#   --prune-unreachable=SUBSTR   drop the functions and the global or data objects that no function whose name contains SUBSTR
+#                reaches, by name (prune_pass). With --inline or --sroa this is the default for a SYCL device module
+#                (__nfcxx_sycl_entry_ kernels); --no-prune keeps every function.
 #
 # Exit status: 0 written; 1 malformed IR (on stderr).
 
@@ -1659,35 +1659,39 @@ def strip_eh_pass(forms, report)
 end
 
 # ---- unreachable functions (--prune-unreachable=SUBSTR) -------------------------------------------------------------------
-# Drops the functions that no root reaches: the roots are the functions whose name contains SUBSTR (the SYCL device build's
-# entry kernels, __nfcxx_sycl_entry_) and every function a non-function form names (an initializer of a global or data form
-# may hold a function's address). A function reaches each function whose &"name" it holds, called or not. The emitters only
-# take the functions their kernels reach, so the dropped ones would only cost the later passes time.
-def function_refs(x, fns, out)
+# Drops the functions and the global or data objects that no root reaches. The roots are the functions whose name contains
+# SUBSTR (the SYCL device build's entry kernels, __nfcxx_sycl_entry_). A reached function or object reaches each function or
+# object whose name it holds (a &"f", $"x" or @"g" atom), called or not. The IR names every global and function, so a form that
+# no reached code names cannot be used by the device; the emitters take only what their kernels reach.
+SYCL_ENTRY = "__nfcxx_sycl_entry_"
+
+# The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
+def quoted_names(x, out)
   if x.is_a?(Array)
-    x.each { |y| function_refs(y, fns, out) }
-  elsif x.is_a?(String) && x.start_with?("&\"") && fns.key?(n = unq(x))
-    out << n
+    x.each { |y| quoted_names(y, out) }
+  elsif x.is_a?(String) && x.match?(/\A[$&@]?"/)
+    out << unq(x.sub(/\A@/, ""))
   end
   out
 end
 
-SYCL_ENTRY = "__nfcxx_sycl_entry_"
-
+# The functions and objects (global, data) that the functions whose names contain substr reach. An object is reached only
+# when a reached function or object names it: the other top-level forms of a module (static tables of host code, for one)
+# are not roots, so the functions that only they name are dropped too. A name shared by two forms keeps both (a conservative
+# match on the name, never a miss).
 def prune_pass(forms, substr, report)
-  fns = {}
-  forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
-  queue = fns.keys.select { |n| n.include?(substr) }
-  forms.each { |f| function_refs(f, fns, queue) unless head(f) == "function" }
+  nodes = {}
+  forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
+  queue = nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
   seen = {}
   until queue.empty?
     n = queue.pop
     next if seen[n]
     seen[n] = true
-    function_refs(fns[n].drop(2), fns, []).each { |c| queue << c unless seen[c] }
+    quoted_names(nodes[n].drop(2), []).each { |c| queue << c if nodes.key?(c) && !seen[c] }
   end
-  out = forms.select { |f| head(f) != "function" || seen[unq(f[1])] }
-  $stderr.write("pathb-ir-opt: kept #{seen.size} of #{fns.size} functions (reachable from #{substr})\n") if report
+  out = forms.select { |f| !%w[function global data].include?(head(f)) || seen[unq(f[1])] }
+  $stderr.write("pathb-ir-opt: kept #{seen.size} of #{nodes.size} functions and objects (reachable from #{substr})\n") if report
   out
 end
 
