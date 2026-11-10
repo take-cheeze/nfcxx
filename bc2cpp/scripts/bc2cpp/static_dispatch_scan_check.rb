@@ -438,7 +438,11 @@ if ENV['MRBC']
         def r(m)
           local_name_only = m
           __send__(local_name_only, reflective_send_name, :reflective_symbol)
+          @quiet_ivar_name = QuietConstName
+          QuietConstName.new
         end
+        def quiet_defined_name; end
+        def calls_it(o) = o.quiet_defined_name2
       end
     RUBY
     tokens = Set.new
@@ -464,6 +468,9 @@ if ENV['MRBC']
     check('core: a reflective file loses the receiver rule, not its symbols',
           text.keys == [reflective] && names&.include?('reflective_send_name') &&
           names.include?('reflective_symbol') && !tokens.include?('reflective_send_name'))
+    check('core: a reflective file names no variable, constant or defined name no op looks up',
+          names && %w[@quiet_ivar_name QuietConstName quiet_defined_name].none? { |n| names.include?(n) } &&
+          names.include?('quiet_defined_name2'))
     check('core: a reflective file names no comment word or local variable',
           names && !names.include?('comment_word_only') && !names.include?('local_name_only'))
 
