@@ -1660,7 +1660,7 @@ BC2CPP_MAIN = lambda do
       const int capa = M->gc.arena_capa;
     #endif
       if (p->gc_color == MRB_GC_RED) return;
-      if (mrb_likely(M->gc.arena_idx < capa)) { M->gc.arena[M->gc.arena_idx++] = p; return; }
+      if (M->gc.arena_idx < capa) { M->gc.arena[M->gc.arena_idx++] = p; return; }
       mrb_gc_protect(M, v);
     }
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.
