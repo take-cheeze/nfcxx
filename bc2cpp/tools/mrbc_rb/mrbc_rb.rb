@@ -34,7 +34,8 @@ module MrbcRb
     ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
-    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57
+    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57,
+    GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -149,7 +150,45 @@ module MrbcRb
       self
     end
 
-    attr_reader :locals, :nlocals, :children
+    # A literal block's body (lambda_body in codegen.c): as a method body, a scope of self, the required parameters, the
+    # hidden block slot and the body's own locals, entered with ENTER; the variables of the enclosing scopes are upvalues
+    # (GETUPVAR and SETUPVAR). +parent+ is the Compiler of the enclosing scope.
+    def compile_block(node, parent)
+      @parent = parent
+      params = node.parameters
+      case params
+      when nil then params = nil
+      when Prism::BlockParametersNode
+        raise Unsupported, 'block-local variables' unless params.locals.empty?
+
+        params = params.parameters
+      else raise Unsupported, 'numbered or it block parameters'
+      end
+      requireds = params ? params.requireds : []
+      other = params && (params.optionals.any? || params.rest || params.posts.any? || params.keywords.any? ||
+                         params.keyword_rest || params.block)
+      raise Unsupported, 'block parameters other than required ones' if other || !requireds.all? { |r| r.is_a?(Prism::RequiredParameterNode) }
+      raise Unsupported, 'block body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
+
+      param_names = requireds.map(&:name)
+      set_locals(param_names + [nil] + (node.locals - param_names))
+      @nregs = @nlocals + 1
+      @line = node.opening_loc.start_line
+      emit(:ENTER, requireds.size << 18)
+      stmts = node.body ? node.body.body : []
+      value_reg = if stmts.empty?
+                    t = temp
+                    @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
+                    emit(:LOADNIL, t)
+                    t
+                  else
+                    generate(stmts, val: true)
+                  end
+      return_value(value_reg)
+      self
+    end
+
+    attr_reader :locals, :nlocals, :children, :parent
 
     # The name of each register from R1: a method's block slot has none (its LVAR entry is the null mark).
     def lv_names
@@ -169,6 +208,75 @@ module MrbcRb
     end
 
     private
+
+    # The register in the scope +depth+ levels up of the local +name+, and the level for GETUPVAR/SETUPVAR (depth - 1).
+    def upvar_operands(name, depth)
+      scope = self
+      depth.times { scope = scope.parent or raise Unsupported, 'upvalue without an enclosing scope' }
+      [scope.send(:local_register, name), depth - 1]
+    end
+
+    # gen_getupvar: a GETUPVAR right after the SETUPVAR of the same variable into the same register is skipped.
+    def getupvar(dst, node)
+      idx, lv = upvar_operands(node.name, node.depth)
+      name, operands, = @last
+      return if name == :SETUPVAR && operands == [dst, idx, lv] && !@labels.include?(@code.size)
+
+      emit(:GETUPVAR, dst, idx, lv)
+    end
+
+    # `a = value` with +a+ in an enclosing scope: the value goes to the first temporary and SETUPVAR stores it, using the
+    # source of a MOVE just before it (gen_setupvar). The statement's value register is the temporary, even when the
+    # rewound MOVE left it unloaded (verified: `foo { |x| a = x }` returns R3).
+    def write_upvar(node, last:)
+      t = temp
+      value_into(node.value, t)
+      idx, lv = upvar_operands(node.name, node.depth)
+      name, operands, start = @last
+      src = t
+      if name == :MOVE && operands[0] == t && !@labels.include?(@code.size)
+        truncate(start)
+        src = operands[1]
+      end
+      emit(:SETUPVAR, src, idx, lv)
+      last ? t : nil
+    end
+
+    # A call with a literal block (codegen_call with a block argument): the receiver (when there is one), the arguments, then
+    # the block in the register after them (BLOCK, whose body is a child irep) and SENDB or SSENDB. The fork then skips the
+    # operator opcodes, so only plain method names are covered. Line numbers of a call that spans lines depend on the node
+    # each instruction belongs to, so only a call whose parts all start and end on the line of its block are covered.
+    def call_with_block(node, need:)
+      blk = node.block
+      raise Unsupported, 'block argument' unless blk.is_a?(Prism::BlockNode)
+      raise Unsupported, 'call with a block and a non-plain method name' unless node.name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/)
+      raise Unsupported, 'safe navigation with a block' if node.safe_navigation?
+
+      recv = node.receiver && unparen(node.receiver)
+      recv = nil if recv.is_a?(Prism::SelfNode)
+      args = (node.arguments&.arguments || []).map { |a| unparen(a) }
+      raise Unsupported, 'call with a block and keywords or a non-simple argument' if args.any? { |a| !simple?(a) }
+      raise Unsupported, 'call with a block and a non-simple receiver' if recv && !(simple?(recv) || call_node?(recv))
+
+      line = blk.opening_loc.start_line
+      parts = [*(recv ? [recv.location] : []), *args.map(&:location)]
+      unless @line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line }
+        raise Unsupported, 'call with a block spanning lines'
+      end
+
+      a = temp
+      value_into(recv, a) if recv
+      args.each_with_index { |arg, i| value_into(arg, a + 1 + i) }
+      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(blk, self)
+      index = @children.size - 1
+      raise Unsupported, 'more than 255 child ireps' if index > 0xff
+
+      n = args.size
+      emit(:BLOCK, a + n + 1, index)
+      emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), n)
+      @nregs = [@nregs, a + n + 2].max
+      a
+    end
 
     def set_locals(locals)
       @locals = locals.dup
@@ -467,6 +575,8 @@ module MrbcRb
     end
 
     def write_local(node, last:)
+      return write_upvar(node, last: last) if node.depth.positive?
+
       local = local_register(node.name)
       value = unparen(node.value)
       if last
@@ -480,7 +590,8 @@ module MrbcRb
         temp
         case value
         when Prism::LocalVariableReadNode
-          emit(:MOVE, local, local_register(value.name))
+          # An upvalue read is loaded straight into the local (gen_move's GETUPVAR peephole).
+          value.depth.zero? ? emit(:MOVE, local, local_register(value.name)) : value_into(value, local)
         when Prism::CallNode
           # A call or operator result stays in its temporary, and the move into the local is kept (gen_move's peephole
           # only removes a move after a load).
@@ -534,6 +645,8 @@ module MrbcRb
     end
 
     def call(node, need: true)
+      return call_with_block(node, need: need) if node.block
+
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
       recv = node.receiver && unparen(node.receiver)
@@ -620,7 +733,7 @@ module MrbcRb
     # The register the value of +node+ is in: a local is read in place, anything else is loaded into a temporary.
     def value_in_register(node)
       node = unparen(node)
-      return local_register(node.name) if node.is_a?(Prism::LocalVariableReadNode)
+      return local_register(node.name) if node.is_a?(Prism::LocalVariableReadNode) && node.depth.zero?
 
       t = temp
       value_into(node, t)
@@ -635,7 +748,8 @@ module MrbcRb
       when Prism::FalseNode then emit(:LOADFALSE, dst)
       when Prism::SelfNode then emit(:LOADSELF, dst)
       when Prism::IntegerNode then load_int(node.value, dst)
-      when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
+      when Prism::LocalVariableReadNode
+        node.depth.zero? ? emit(:MOVE, dst, local_register(node.name)) : getupvar(dst, node)
       when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
