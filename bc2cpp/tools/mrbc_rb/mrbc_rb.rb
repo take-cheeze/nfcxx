@@ -5,7 +5,9 @@
 # Covered: a top-level program whose statements are nil, true, false, self, Integer literals, local reads, local writes
 # of those, and method calls on simple operands (a self call or a call with an explicit receiver, with positional
 # arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI),
-# and if/else with a simple or call predicate and bodies of the forms above. Anything else raises Unsupported, so a
+# and if/else with a simple or call predicate and bodies of the forms above, unless, and `class X` or `module X` with a
+# plain constant and a body of the forms above (no superclass; the body is a child irep run by EXEC). Anything else
+# raises Unsupported, so a
 # caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
@@ -31,7 +33,8 @@ module MrbcRb
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
     ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
-    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
+    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
+    CLASS: 103, MODULE: 104, EXEC: 105
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -68,28 +71,67 @@ module MrbcRb
       @nregs = 0
       @pool = []
       @syms = []
+      @children = [] # child ireps of class and module bodies, in the order EXEC refers to them
       @labels = [] # pcs that a jump lands on: the peepholes do not work across them (no_peephole in codegen.c)
       @last = nil # [name, operands, start] of the last instruction, for the RETURN peephole
     end
 
     def compile(program)
-      @locals = program.locals.dup
-      @nlocals = @locals.size + 1
-      @nregs = @nlocals
       stmts = program.statements.body
       raise Unsupported, 'empty program' if stmts.empty?
 
-      value_reg = nil
-      stmts.each_with_index do |node, i|
-        @line = node.location.start_line
-        value_reg = statement(node, last: i == stmts.size - 1)
-      end
+      set_locals(program.locals)
+      value_reg = generate(stmts, val: true)
       return_value(value_reg)
       emit(:STOP)
       write_rite
     end
 
+    # A child irep for a class or module body (scope_body in codegen.c): its own locals, registers, code and tables. It
+    # is generated as a top-level program is, but without STOP. With +val+ its last statement's value is returned;
+    # without it the body returns nil (gen_return with source register 0).
+    def compile_body(locals, stmts, val)
+      set_locals(locals)
+      value_reg = generate(stmts, val: val)
+      if val
+        return_value(value_reg)
+      else
+        emit(:RETURN, 0)
+      end
+      self
+    end
+
+    attr_reader :locals, :nlocals, :children
+
+    # This irep and its children, depth first: the order of the irep records, the debug records and the LVAR records.
+    def scopes
+      [self] + @children.flat_map(&:scopes)
+    end
+
+    # The IREP record of this irep: its own block (the record size counts only that), then the records of its children.
+    def irep_tree
+      body = [@nlocals, @nregs, @children.size].pack('nnn') + [0, @code.size].pack('nN') + @code.pack('C*') +
+             pool_block + syms_block
+      [body.bytesize + 4].pack('N') + body + @children.map(&:irep_tree).join
+    end
+
     private
+
+    def set_locals(locals)
+      @locals = locals.dup
+      @nlocals = @locals.size + 1
+      @nregs = @nlocals
+    end
+
+    # Generates the statements of a body. The last one is generated as a value when +val+ is set; its register is returned.
+    def generate(stmts, val:)
+      value_reg = nil
+      stmts.each_with_index do |node, i|
+        @line = node.location.start_line
+        value_reg = statement(node, last: val && i == stmts.size - 1)
+      end
+      value_reg
+    end
 
     # Generates one statement. The last statement returns the register that holds its value.
     def statement(node, last:)
@@ -111,6 +153,10 @@ module MrbcRb
         if_statement(node, last: last)
       when Prism::UnlessNode
         unless_statement(node, last: last)
+      when Prism::ClassNode
+        class_statement(node, last: last)
+      when Prism::ModuleNode
+        module_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
@@ -154,6 +200,60 @@ module MrbcRb
       emit(:LOADNIL, t) if !else_node && last
       patch_jump(to_end, @code.size) if to_end
       last ? t : nil
+    end
+
+    # codegen_class: the outer namespace (nil for a plain constant) goes into the first temporary, the superclass (nil when
+    # there is none) into the next, and CLASS takes the first temporary as its result. The body follows (class_body).
+    def class_statement(node, last:)
+      raise Unsupported, 'class with a superclass' if node.superclass
+
+      name = plain_constant(node.constant_path)
+      t = temp
+      emit(:LOADNIL, t)
+      emit(:LOADNIL, t + 1)
+      emit(:CLASS, t, sym_index(name))
+      class_body(node, t, last)
+      t
+    end
+
+    # codegen_module: the outer namespace goes into the temporary, which MODULE takes as its result.
+    def module_statement(node, last:)
+      name = plain_constant(node.constant_path)
+      t = temp
+      emit(:LOADNIL, t)
+      emit(:MODULE, t, sym_index(name))
+      class_body(node, t, last)
+      t
+    end
+
+    def plain_constant(path)
+      raise Unsupported, 'class or module path other than a plain constant' unless path.is_a?(Prism::ConstantReadNode)
+
+      path.name
+    end
+
+    # gen_class_body: an empty body loads nil into the result register, which the RETURN peephole folds when the class is
+    # the last statement. A body with statements is a child irep that EXEC runs on the class in the result register.
+    def class_body(node, t, val)
+      body = node.body
+      raise Unsupported, 'class or module body' unless body.nil? || body.is_a?(Prism::StatementsNode)
+
+      stmts = body ? body.body : []
+      if stmts.empty?
+        emit(:LOADNIL, t)
+      else
+        emit(:EXEC, t, child_body(node.locals, stmts, val))
+      end
+    end
+
+    # scope_body: the index of the child irep, which is the next entry of the parent's reps (a body with no statements
+    # creates none).
+    def child_body(locals, stmts, val)
+      @children << Compiler.new(@filename).compile_body(locals, stmts, val)
+      index = @children.size - 1
+      raise Unsupported, 'more than 255 child ireps' if index > 0xff
+
+      index
     end
 
     def set_jump_line(position, line)
@@ -529,25 +629,20 @@ module MrbcRb
     # ---- RITE, as src/dump.c writes it: header, IREP, DBG, LVAR, END ----
 
     def write_rite
-      # The LVAR section exists only when the program has locals, as the fork omits it otherwise.
-      lvar = @locals.empty? ? ''.b : lvar_section
+      # The LVAR section exists only when some irep has locals, as the fork omits it otherwise (lv_defined_p in dump.c).
+      lvar = scopes.any? { |s| !s.locals.empty? } ? lvar_section : ''.b
       sections = irep_section + debug_section + lvar + sized("END\0", ''.b)
       ['RITE0400', 20 + sections.bytesize].pack('a8N') + 'MATZ0000'.b + sections
     end
 
-    # IREP's body starts with its version, "0400"; the record follows it.
+    # IREP's body starts with its version, "0400"; the records follow it.
     def irep_section
-      sized('IREP', '0400'.b + irep_record)
+      sized('IREP', '0400'.b + irep_tree)
     end
 
     # A section is its ident (4 bytes), its size (counting the 8-byte header), and its body.
     def sized(ident, body)
       [ident.b, body.bytesize + 8].pack('a4N') + body.b
-    end
-
-    def irep_record
-      body = [@nlocals, @nregs, 0].pack('nnn') + [0, @code.size].pack('nN') + @code.pack('C*') + pool_block + syms_block
-      [body.bytesize + 4].pack('N') + body
     end
 
     # write_syms_block: the count, then per symbol its length, its name and a NUL (dump.c).
@@ -572,11 +667,20 @@ module MrbcRb
 
     def debug_section
       name = @filename.b
-      packed = packed_lines
+      sized('DBG' + "\0", [1].pack('n') + [name.bytesize].pack('n') + name + debug_records.join)
+    end
+
+    # One debug record per irep, this one first and then its children's (write_debug_record in dump.c). Each covers one file,
+    # from pc 0 of its own code.
+    def debug_records
+      [debug_record(packed_lines)] + @children.flat_map(&:debug_records)
+    end
+    public :debug_records # called on each child, from the parent's debug section
+
+    def debug_record(packed)
       file = [0].pack('N') + [0].pack('n') + [packed.bytesize].pack('N') + [2].pack('C') + packed
       record = [1].pack('n') + file
-      record = [record.bytesize + 4].pack('N') + record
-      sized('DBG' + "\0", [1].pack('n') + [name.bytesize].pack('n') + name + record)
+      [record.bytesize + 4].pack('N') + record
     end
 
     # src/debug.c's packed map: (pc delta, line delta) pairs, written only where the line changes.
@@ -608,10 +712,12 @@ module MrbcRb
       bytes
     end
 
+    # The names of all ireps' locals, in order of first appearance over the tree, then one reference per local of each irep
+    # (create_lv_sym_table and write_lv_record in dump.c).
     def lvar_section
-      names = @locals.map(&:to_s).uniq
+      names = scopes.flat_map { |s| s.locals.map(&:to_s) }.uniq
       syms = [names.size].pack('N') + names.map { |n| [n.bytesize].pack('n') + n.b }.join
-      refs = (1...@nlocals).map { |reg| names.index(@locals[reg - 1].to_s) }
+      refs = scopes.flat_map { |s| (1...s.nlocals).map { |reg| names.index(s.locals[reg - 1].to_s) } }
       sized('LVAR', syms + refs.pack('n*'))
     end
   end
