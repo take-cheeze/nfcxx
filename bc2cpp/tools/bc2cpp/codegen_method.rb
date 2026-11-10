@@ -1051,12 +1051,20 @@ class CodeGen
     @backedge = nil
     return '' unless stack_tuple_declarations(irep).empty?
 
-    roots = String.new
-    roots << "    bc2cpp_root(M, self);\n"
-    roots << "    bc2cpp_root(M, bc2cpp_cells_ary);\n" unless boxed.empty?
-    (1...irep.nregs).each { |reg| roots << "    bc2cpp_root(M, #{RegName[reg]});\n" }
-    @backedge = { irep: irep, text: "mrb_gc_arena_restore(M, bc2cpp_fai);\n#{roots}" }
-    "  [[maybe_unused]] int bc2cpp_fai = mrb_gc_arena_save(M);\n"
+    # One rooted array holds the frame's registers (index = register number), and the boxed cells at nregs. It is
+    # rooted before the arena index is saved, so a restore keeps it; each back-edge stores the registers into it
+    # (mrb_ary_set takes the write barrier), which costs no arena entry per register.
+    slots = irep.nregs + 1
+    text = String.new
+    text << "  mrb_value bc2cpp_frame_roots = mrb_ary_new_capa(M, #{slots});\n"
+    text << "  bc2cpp_root(M, bc2cpp_frame_roots);\n"
+    text << "  for (int bc2cpp_fi = 0; bc2cpp_fi < #{slots}; ++bc2cpp_fi) mrb_ary_push(M, bc2cpp_frame_roots, mrb_nil_value());\n"
+    text << "  [[maybe_unused]] int bc2cpp_fai = mrb_gc_arena_save(M);\n"
+    stores = String.new
+    (0...irep.nregs).each { |reg| stores << "mrb_ary_set(M, bc2cpp_frame_roots, #{reg}, #{RegName[reg]});\n" }
+    stores << "mrb_ary_set(M, bc2cpp_frame_roots, #{irep.nregs}, bc2cpp_cells_ary);\n" unless boxed.empty?
+    @backedge = { irep: irep, text: "mrb_gc_arena_restore(M, bc2cpp_fai);\n#{stores}" }
+    text
   end
 
   # The restore a backward jump from +irep+ emits before it goes to +target+, or "" when none applies.
