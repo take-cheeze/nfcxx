@@ -30,12 +30,12 @@ module MrbcRb
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADSYM: 16, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
-    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
+    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40, JMPNIL: 41, JMPUW: 42,
     ARRAY: 82, ARRAY2: 83, STRING: 92, STRCAT: 93, HASH: 94, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35,
     SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
-    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
-    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57, KEYEND: 59, KARG: 60,
+    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
+    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEYEND: 59, KARG: 60,
     GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98
   }.freeze
 
@@ -46,10 +46,12 @@ module MrbcRb
   # Statements that may span several lines because their line rules are verified (if/unless arms, class and module bodies,
   # def); any other multi-line statement raises Unsupported: the fork stamps its code with a line that is not the start
   # line (a %w array over two lines is stamped with its last line), and that rule is not reproduced yet.
-  MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode].freeze
+  MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode].freeze
 
-  # Predicates the fork folds at compile time (no test is emitted for them).
-  LITERAL_PREDICATES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::StringNode].freeze
+  # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
+  TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
+  FALSE_ALWAYS = [Prism::NilNode, Prism::FalseNode].freeze
 
   # `(expr)` with one statement is the statement itself: the fork's codegen does not see the parentheses.
   def self.unparen(node)
@@ -107,6 +109,7 @@ module MrbcRb
       @children = [] # child ireps of class and module bodies, in the order EXEC refers to them
       @labels = [] # pcs that a jump lands on: the peepholes do not work across them (no_peephole in codegen.c)
       @last = nil # [name, operands, start] of the last instruction, for the RETURN peephole
+      @loops = [] # the enclosing while/until loops of this scope, innermost last
     end
 
     def compile(program)
@@ -359,15 +362,24 @@ module MrbcRb
 
     # A def in a body: TDEF stores the method's symbol in the result register and refers to a child irep.
     def def_statement(node, last:)
-      raise Unsupported, 'singleton or receiver def' if node.receiver
+      recv = node.receiver && unparen(node.receiver)
+      raise Unsupported, 'receiver def on a non-simple receiver' if recv && !simple?(recv)
       raise Unsupported, 'def with a name that is not plain' unless node.name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/)
 
+      # codegen_sdef: the name's symbol comes first, then the method's irep, then the receiver, loaded into the result
+      # register, which SDEF takes. A plain def is TDEF on the same register.
+      sym = sym_index(node.name)
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_method(node)
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
       t = temp
-      emit(:TDEF, t, sym_index(node.name), index)
+      if recv
+        value_into(recv, t)
+        emit(:SDEF, t, sym, index)
+      else
+        emit(:TDEF, t, sym, index)
+      end
       last ? t : nil
     end
 
@@ -381,7 +393,7 @@ module MrbcRb
 
       t = temp
       args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
-      return_value(t)
+      return_value(t, @loops.empty? ? :RETURN : :RETURN_BLK) # a return inside a loop is the in-block form
       last ? t : nil
     end
 
@@ -440,6 +452,14 @@ module MrbcRb
         if_statement(node, last: last)
       when Prism::UnlessNode
         unless_statement(node, last: last)
+      when Prism::WhileNode, Prism::UntilNode
+        loop_statement(node, last: last)
+      when Prism::BreakNode
+        break_statement(node, last: last)
+      when Prism::NextNode
+        next_statement(node, last: last)
+      when Prism::SingletonClassNode
+        sclass_statement(node, last: last)
       when Prism::ClassNode
         class_statement(node, last: last)
       when Prism::ModuleNode
@@ -449,46 +469,216 @@ module MrbcRb
       end
     end
 
-    # The fork's NODE_IF: the predicate goes into the first temporary, JMPNOT skips the then-branch to the else-branch
-    # (or to the end), and the then-branch ends with a JMP to the end when there is an else-branch or a value is needed.
-    # A missing else-branch loads nil when the value is needed. Returns the value's register when +last+.
-    def if_statement(node, last:)
-      predicate = unparen(node.predicate)
-      raise Unsupported, 'if predicate' unless simple?(predicate) || call_node?(predicate)
-      # The fork folds a literal predicate away (`if 1` compiles to its body only); not reproduced yet.
-      raise Unsupported, 'literal if predicate' if LITERAL_PREDICATES.include?(predicate.class)
+    def elsif_node?(node) = node.is_a?(Prism::IfNode) && node.if_keyword_loc&.slice == 'elsif'
 
-      else_node = node.subsequent
-      raise Unsupported, 'elsif' if else_node.is_a?(Prism::IfNode)
+    def true_always?(node) = TRUE_ALWAYS.include?(node.class)
+    def false_always?(node) = FALSE_ALWAYS.include?(node.class)
+
+    # A condition (an if/unless/while/until predicate) is generated as a value on one line: the fork stamps each node with
+    # its own line, and a statement's @line is the line of its first node.
+    def check_condition(pred, elsif_node)
+      return if pred.location.start_line == pred.location.end_line && (elsif_node || pred.location.start_line == @line)
+
+      raise Unsupported, 'condition on another line than its statement'
+    end
+
+    # `x.nil?` in a condition is tested with JMPNIL on the receiver (codegen_if's nil_p).
+    def nil_check?(pred)
+      return false unless pred.is_a?(Prism::CallNode) && pred.name == :nil? && pred.receiver && pred.block.nil? &&
+                          pred.arguments.nil? && !pred.safe_navigation?
+
+      recv = unparen(pred.receiver)
+      raise Unsupported, 'nil? receiver' unless operand?(recv) && !BUILT_VALUES.include?(recv.class)
+
+      true
+    end
+
+    # The fork's NODE_IF (if, elsif, ternary, modifier if): the predicate goes into the first temporary, JMPNOT skips the
+    # then-branch to the else-branch (or to the end), and the then-branch ends with a JMP to the end when there is an
+    # else-branch or a value is needed. A missing else-branch loads nil when the value is needed. An `elsif` is an if node
+    # that is the whole else-branch. Returns the value's register when +last+.
+    def if_statement(node, last:)
+      sub = node.subsequent
+      else_list = case sub
+                  when nil then nil
+                  when Prism::IfNode then [sub]
+                  else
+                    raise Unsupported, 'empty else-branch' if sub.statements.nil? || sub.statements.body.empty?
+
+                    sub.statements.body
+                  end
+      then_list = node.statements&.body || []
+      empty_line = nil
+      if then_list.empty?
+        # An empty then-branch takes the line of the `else`, `elsif` or `end` keyword (verified).
+        keyword = case sub
+                  when nil then node.end_keyword_loc
+                  when Prism::IfNode then sub.if_keyword_loc
+                  else sub.else_keyword_loc
+                  end
+        empty_line = keyword.start_line
+      end
+      gen_if(unparen(node.predicate), then_list, else_list, val: last, then_present: true, empty_line: empty_line,
+                                                            elsif_node: elsif_node?(node))
+    end
+
+    # `unless` is an if whose then-branch is the else-clause and whose else-branch is the body (the fork's parser swaps
+    # them), so the body runs when the predicate is false. Without an else-clause the then-branch is absent.
+    def unless_statement(node, last:)
+      body = node.statements&.body || []
+      else_node = node.else_clause
+      raise Unsupported, 'empty unless-body' if body.empty?
+
+      if else_node
+        raise Unsupported, 'empty unless or else-branch' if else_node.statements.nil? || else_node.statements.body.empty?
+
+        gen_if(unparen(node.predicate), else_node.statements.body, body, val: last, then_present: true)
+      else
+        gen_if(unparen(node.predicate), [], body, val: last, then_present: false)
+      end
+    end
+
+    # codegen_if. +then_list+ and +else_list+ are statement lists (+else_list+ is nil without an else-branch).
+    # +then_present+ is whether the fork's then-branch exists (it does for an empty `if` body but not for a bare `unless`).
+    def gen_if(pred, then_list, else_list, val:, then_present:, empty_line: nil, elsif_node: false)
+      return gen_arm(then_list, val, then_present ? empty_line : nil) if true_always?(pred)
+      return gen_arm(else_list || [], val, nil) if false_always?(pred)
+
+      check_condition(pred, elsif_node)
+      @line = pred.location.start_line # the predicate's nodes are visited at their own line
+      t = temp
+      nil_p = nil_check?(pred)
+      nil_p ? operand_into(unparen(pred.receiver), t) : value_into(pred, t)
+      if val || then_present
+        if nil_p
+          to_then = cond_jump(:JMPNIL, t, val: val)
+          to_else = emit_jump(:JMP)
+          dispatch(to_then)
+        else
+          to_else = cond_jump(:JMPNOT, t, val: val)
+        end
+        @line = empty_line if then_list.empty? && empty_line
+        branch(then_list, t, need: val)
+        if else_list || val
+          to_end = emit_jump(:JMP)
+          dispatch(to_else)
+          branch(else_list || [], t, need: val)
+          dispatch(to_end)
+        else
+          dispatch(to_else)
+        end
+      elsif else_list
+        to_end = cond_jump(nil_p ? :JMPNIL : :JMPIF, t, val: val)
+        branch(else_list, t, need: false)
+        dispatch(to_end)
+      end
+      val ? t : nil
+    end
+
+    # A branch that is the whole statement because the fork folded the condition away.
+    def gen_arm(list, val, empty_line)
+      t = temp
+      @line = empty_line if list.empty? && empty_line
+      branch(list, t, need: val)
+      val ? t : nil
+    end
+
+    # Marks the jump at +position+ (nil when it was folded away) as landing at the current pc: dispatch in codegen.c. The
+    # offset's bytes take the line of the last node generated.
+    def dispatch(position)
+      return unless position
+
+      patch_jump(position, @code.size)
+      set_jump_line(position, @line)
+    end
+
+    # codegen_sclass: the object goes into the first temporary, SCLASS opens its singleton class there and the body follows
+    # as a class body does (class_body).
+    def sclass_statement(node, last:)
+      obj = unparen(node.expression)
+      raise Unsupported, 'singleton class of a non-simple object' unless simple?(obj)
 
       t = temp
-      value_into(predicate, t)
-      to_else = emit_jump(:JMPNOT, t)
-      # A jump operand's bytes take the line of the branch's last statement (verified with mrbc -g's line table). An empty
-      # then-branch takes the line of the `else` or `end` keyword.
-      then_stmts = node.statements&.body || []
-      if then_stmts.empty?
-        keyword = else_node ? else_node.else_keyword_loc : node.end_keyword_loc
-        @line = keyword.start_line
-        set_jump_line(to_else, keyword.start_line)
-        branch(node.statements, t, need: last)
-      else
-        set_jump_line(to_else, branch(node.statements, t, need: last))
-      end
-      if else_node
-        raise Unsupported, 'empty else-branch' if else_node.statements.nil? || else_node.statements.body.empty?
+      value_into(obj, t)
+      emit(:SCLASS, t)
+      class_body(node, t, last)
+      t
+    end
 
-        to_end = emit_jump(:JMP)
-      elsif last
-        to_end = emit_jump(:JMP)
+    Loop = Struct.new(:reg, :pc0, :breaks)
+
+    # codegen_while and codegen_until: the loop's value register is the first temporary (a loop's value is nil, or the value
+    # of a `break`). The condition is generated at pc0 and tested with JMPNOT (JMPIF for until) to the exit; a NOP (the
+    # redo target) starts the body, which ends with a JMP back to pc0. A constant condition that is always true (always
+    # false for until) skips the test and the exit jump; one that is never true skips the loop entirely. `break` is a JMPUW
+    # to the end of the loop, `next` a JMPUW back to pc0.
+    def loop_statement(node, last:)
+      raise Unsupported, 'begin/end while or until' if node.begin_modifier?
+
+      until_loop = node.is_a?(Prism::UntilNode)
+      pred = unparen(node.predicate)
+      forever = until_loop ? false_always?(pred) : true_always?(pred)
+      never = until_loop ? true_always?(pred) : false_always?(pred)
+      t = temp
+      if never
+        emit(:LOADNIL, t) if last
+        return last ? t : nil
       end
-      patch_jump(to_else, @code.size)
-      if else_node
-        set_jump_line(to_end, branch(else_node.statements, t, need: last))
+
+      check_condition(pred, false) unless forever
+      lp = Loop.new(last ? t : nil, @code.size, [])
+      @labels << lp.pc0
+      @loops << lp
+      begin
+        unless forever
+          value_into(pred, t)
+          to_exit = cond_jump(until_loop ? :JMPIF : :JMPNOT, t, val: false)
+        end
+        @labels << @code.size
+        emit(:NOP)
+        branch(node.statements, nil, need: false)
+        back = emit_jump(:JMP)
+        patch_jump(back, lp.pc0)
+        dispatch(to_exit)
+        emit(:LOADNIL, t) if last
+        lp.breaks.each { |j| dispatch(j) }
+      ensure
+        @loops.pop
       end
-      emit(:LOADNIL, t) if !else_node && last
-      patch_jump(to_end, @code.size) if to_end
       last ? t : nil
+    end
+
+    # loop_break: a value goes into the loop's register (when the loop's value is used) and JMPUW leaves the loop; without a
+    # value the register is set to nil. Only a break directly in a while or until of this scope is covered.
+    def break_statement(node, last:)
+      lp = @loops.last or raise Unsupported, 'break outside a while or until loop'
+      args = node.arguments&.arguments
+      raise Unsupported, 'break with several values' if args && args.size != 1
+
+      value = args && unparen(args[0])
+      if value
+        if lp.reg
+          raise Unsupported, 'break value outside the loop statement level' unless @sp == lp.reg
+          raise Unsupported, 'break value' unless simple?(value) || call_node?(value)
+
+          value_into(value, lp.reg)
+        else
+          statement(value, last: false)
+        end
+      elsif lp.reg
+        emit(:LOADNIL, lp.reg)
+      end
+      lp.breaks << emit_jump(:JMPUW)
+      last ? temp : nil
+    end
+
+    def next_statement(node, last:)
+      lp = @loops.last or raise Unsupported, 'next outside a while or until loop'
+      raise Unsupported, 'next with a value' if node.arguments
+
+      jump = emit_jump(:JMPUW)
+      patch_jump(jump, lp.pc0)
+      last ? temp : nil
     end
 
     # codegen_class: the outer namespace (nil for a plain constant) goes into the first temporary, the superclass (nil when
@@ -552,57 +742,18 @@ module MrbcRb
       @lines[position + 1] = line
     end
 
-    # `unless` is an if whose body runs when the predicate is false. With an else-branch, the else-branch is the body that
-    # runs when the predicate holds, so it is generated first, exactly as the then-branch of an if/else. Without one, the
-    # value form loads nil for the predicate-true case, and the statement form skips the body with JMPIF.
-    def unless_statement(node, last:)
-      predicate = unparen(node.predicate)
-      raise Unsupported, 'unless predicate' unless simple?(predicate) || call_node?(predicate)
-      raise Unsupported, 'literal unless predicate' if LITERAL_PREDICATES.include?(predicate.class)
-
-      body = node.statements&.body || []
-      else_node = node.else_clause
-      t = temp
-      value_into(predicate, t)
-      if else_node
-        raise Unsupported, 'empty unless or else-branch' if body.empty? || else_node.statements.nil? || else_node.statements.body.empty?
-
-        to_else = emit_jump(:JMPNOT, t)
-        set_jump_line(to_else, branch(else_node.statements, t, need: last))
-        to_end = emit_jump(:JMP)
-        patch_jump(to_else, @code.size)
-        set_jump_line(to_end, branch(node.statements, t, need: last))
-        patch_jump(to_end, @code.size)
-      elsif last
-        raise Unsupported, 'empty unless-body' if body.empty?
-
-        to_body = emit_jump(:JMPNOT, t)
-        set_jump_line(to_body, node.location.start_line)
-        emit(:LOADNIL, t)
-        to_end = emit_jump(:JMP)
-        patch_jump(to_body, @code.size)
-        set_jump_line(to_end, branch(node.statements, t, need: true))
-        patch_jump(to_end, @code.size)
-      else
-        raise Unsupported, 'empty unless-body' if body.empty?
-
-        to_end = emit_jump(:JMPIF, t)
-        set_jump_line(to_end, branch(node.statements, t, need: false))
-        patch_jump(to_end, @code.size)
-      end
-      last ? t : nil
-    end
-
-    # One branch of an if: its statements in order, the last one's value in +t+ when it is needed. Returns the line of the
-    # last statement, which the jump into the branch takes.
-    def branch(statements, t, need:)
-      stmts = statements ? statements.body : []
+    # One branch of an if or a loop body: its statements in order, the last one's value in +t+ when it is needed. An empty
+    # branch loads nil (when needed) at the current line.
+    def branch(stmts, t, need:)
+      stmts = stmts.body if stmts.respond_to?(:body)
+      stmts ||= []
       if stmts.empty?
         emit(:LOADNIL, t) if need
-        return nil
+        return
       end
       stmts.each_with_index do |stmt, i|
-        @line = stmt.location.start_line
+        # An `elsif` is an if node the fork's parser stamps with the line of the closing `end` (verified).
+        @line = elsif_node?(stmt) ? stmt.end_keyword_loc.start_line : stmt.location.start_line
         if need && i == stmts.size - 1
           r = statement(stmt, last: true)
           emit(:MOVE, t, r) unless r == t
@@ -610,7 +761,6 @@ module MrbcRb
           statement(stmt, last: false)
         end
       end
-      stmts.last.location.start_line
     end
 
     # A jump whose target is patched later: the operand is the 16-bit absolute pc. Returns the operand's position.
@@ -636,24 +786,94 @@ module MrbcRb
       @labels << target
     end
 
+    # no_peephole in codegen.c: nothing to combine with at the start of the code, after a rewind, or at a jump target.
+    def no_peephole?
+      @code.empty? || @last.nil? || @labels.include?(@code.size)
+    end
+
+    # gen_move (the part verified here): a load into the temporary +src+ right before is rewritten to load into +dst+, and a
+    # MOVE into it becomes a MOVE from its source; otherwise a MOVE.
+    FOLDABLE_LOADS = %i[LOADNIL LOADSELF LOADTRUE LOADFALSE LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
+                        LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 LOADL LOADSYM GETGV GETIV GETCONST STRING FSTRING GETUPVAR].freeze
+    def gen_move(dst, src)
+      return if dst == src
+
+      unless no_peephole?
+        name, operands, start = @last
+        if FOLDABLE_LOADS.include?(name) && operands[0] == src && src >= @nlocals
+          truncate(start)
+          @last = nil
+          emit(name, dst, *operands[1..])
+          return
+        elsif name == :MOVE && operands[0] == src && operands[1] != dst && src >= @nlocals
+          truncate(start)
+          @last = nil
+          emit(:MOVE, dst, operands[1])
+          return
+        end
+      end
+      emit(:MOVE, dst, src)
+    end
+
+    # genjmp2: a conditional jump on +reg+. When the value is not needed (+val+ false) and the jump is not a jump target, the
+    # fork folds it with the instruction before it: a MOVE into a temporary is dropped and its source tested (only for a
+    # temporary above the locals), and a constant load makes the jump unconditional or removes it. Returns the jump's
+    # operand position, or nil when the jump was removed.
+    def cond_jump(name, reg, val:)
+      unless val || no_peephole?
+        last, operands, start = @last
+        case last
+        when :MOVE
+          if operands[0] == reg && operands[0] > @nlocals
+            truncate(start)
+            @last = nil
+            reg = operands[1]
+          end
+        when :LOADNIL, :LOADFALSE
+          if operands[0] == reg || operands[0] > @nlocals
+            truncate(start)
+            @last = nil
+            return name == :JMPNOT || (name == :JMPNIL && last == :LOADNIL) ? emit_jump(:JMP) : nil
+          end
+        when :LOADTRUE, :LOADI8, :LOADINEG, :LOADI__1, :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5,
+             :LOADI_6, :LOADI_7
+          if operands[0] == reg || operands[0] > @nlocals
+            truncate(start)
+            @last = nil
+            return name == :JMPIF ? emit_jump(:JMP) : nil
+          end
+        end
+      end
+      emit_jump(name, reg)
+    end
+
     # `a || b` and `a && b`: the left value goes to the first temporary, a jump past the right side tests it (JMPIF for ||,
-    # JMPNOT for &&), and the right side replaces it. As a statement the right side is evaluated only for its effects.
+    # JMPNOT for &&), and the right side replaces it. As a statement the right side is evaluated only for its effects. A
+    # literal left side is folded away (codegen_and and codegen_or): `true && b` is b, `nil && b` is nil.
     def logic(node, need:)
       left = unparen(node.left)
       right = unparen(node.right)
-      raise Unsupported, 'logic operand' unless (simple?(left) || call_node?(left)) &&
-                                                (simple?(right) || call_node?(right))
+      is_or = node.is_a?(Prism::OrNode)
+      if true_always?(left) || false_always?(left)
+        pick = true_always?(left) == is_or ? left : right
+        if need
+          t = temp
+          value_into(pick, t)
+          return t
+        end
+        statement(pick, last: false)
+        return nil
+      end
 
       t = temp
       value_into(left, t)
-      to_end = emit_jump(node.is_a?(Prism::OrNode) ? :JMPIF : :JMPNOT, t)
-      set_jump_line(to_end, right.location.start_line)
+      to_end = cond_jump(is_or ? :JMPIF : :JMPNOT, t, val: need)
       if need
         value_into(right, t)
       else
         statement(right, last: false)
       end
-      patch_jump(to_end, @code.size)
+      dispatch(to_end)
       need ? t : nil
     end
 
@@ -822,6 +1042,7 @@ module MrbcRb
     def operand?(node)
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || BUILT_VALUES.include?(node.class) ||
+        node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
         (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| simple?(e) })
     end
 
@@ -844,22 +1065,22 @@ module MrbcRb
     end
 
     # The fork's gen_return: a MOVE or a constant load right before RETURN is folded into the return.
-    def return_value(reg)
+    def return_value(reg, op = :RETURN)
       name, operands, start = @last
       # No fold when the return or the instruction it would rewrite is a jump target (the fork's no_peephole and the
       # label checks on the last instruction, codegen.c).
       if @labels.include?(@code.size)
-        emit(:RETURN, reg)
+        emit(op, reg)
       elsif %i[RETURN RETSELF RETNIL RETTRUE RETFALSE].include?(name)
         nil # gen_return emits nothing after a return
       elsif name == :MOVE && operands[0] == reg && operands[0] >= @nlocals # a MOVE into a local is kept (verified with mrbc -v)
         truncate(start)
-        emit(:RETURN, operands[1])
-      elsif %i[LOADSELF LOADNIL LOADTRUE LOADFALSE].include?(name) && operands[0] == reg
+        emit(op, operands[1])
+      elsif op == :RETURN && %i[LOADSELF LOADNIL LOADTRUE LOADFALSE].include?(name) && operands[0] == reg
         truncate(start)
         emit({ LOADSELF: :RETSELF, LOADNIL: :RETNIL, LOADTRUE: :RETTRUE, LOADFALSE: :RETFALSE }.fetch(name))
       else
-        emit(:RETURN, reg)
+        emit(op, reg)
       end
     end
 
@@ -900,7 +1121,19 @@ module MrbcRb
       when Prism::InstanceVariableReadNode then emit(:GETIV, dst, sym_index(node.name))
       when Prism::OrNode, Prism::AndNode
         r = logic(node, need: true)
-        emit(:MOVE, dst, r) unless r == dst
+        gen_move(dst, r)
+      when Prism::IfNode, Prism::UnlessNode
+        # An if as a value (a ternary, a nested predicate, an argument): built at the destination when it is a temporary,
+        # else at the first temporary and moved.
+        saved = @sp
+        base = dst >= @nlocals ? dst : temp
+        begin
+          @sp = base
+          r = node.is_a?(Prism::IfNode) ? if_statement(node, last: true) : unless_statement(node, last: true)
+        ensure
+          @sp = saved
+        end
+        gen_move(dst, r)
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::InterpolatedStringNode then built_into(dst) { |base| dstr_at(node, base) }
       when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
@@ -937,7 +1170,16 @@ module MrbcRb
     def built_into(dst)
       base = dst >= @nlocals ? dst : temp
       yield base
-      emit(:MOVE, dst, base) unless dst == base
+      return if dst == base
+
+      # gen_move folds an empty hash literal (HASH with no pairs) into the destination, as it folds a constant load.
+      name, operands, start = @last
+      if name == :HASH && operands == [base, 0] && !@labels.include?(@code.size)
+        truncate(start)
+        emit(:HASH, dst, 0)
+      else
+        emit(:MOVE, dst, base)
+      end
     end
 
     # The fork's string interpolation: the first literal part is a STRING, and each interpolated value is loaded into the
@@ -1001,6 +1243,8 @@ module MrbcRb
       @nregs = [@nregs, a + elems.size].max
       if dst == a
         emit(:ARRAY, a, elems.size)
+      elsif elems.empty?
+        emit(:ARRAY, dst, 0) # gen_move rewinds an empty ARRAY into the destination
       else
         emit(:ARRAY2, dst, a, elems.size)
       end
