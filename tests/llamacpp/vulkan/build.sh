@@ -27,6 +27,8 @@ fi
 vk=$llama/ggml/src/ggml-vulkan
 mkdir -p "$out/obj" "$out/gen/vk" "$out/spv" "$out/tmp"
 export NFCXX_BACKEND=gcc TMPDIR=$out/tmp
+# NFCXX_PATH=b (Path B for the C++): the C files go through gcc too (qbe-cc has no _Atomic, which ggml-cpu.c uses).
+[ "${NFCXX_PATH:-}" != b ] || export NFCXX_PATHB_C=gcc
 sed 's/@GGML_VERSION@/0.0.0/; s/@GGML_BUILD_COMMIT@/test/' "$llama/ggml/src/ggml-version.h.in" > "$out/gen/ggml-version.h"
 
 # The glslc extension probes of ggml-vulkan/CMakeLists.txt (test_shader_extension_support): a definition for each
@@ -90,7 +92,11 @@ compile_one() {
   esac
   local start=$SECONDS
   # shellcheck disable=SC2086
-  if timeout 2400 "$root/nfcxx" -c $inc $flags "$f" -o "$o" > "${o%.o}.log" 2>&1; then
+  # NFCXX_PATH=b: the generated shader files are byte tables and no code. Path B's route takes minutes per megabyte of
+  # such data (scripts/pathb-ssa-build), so they are compiled by the host g++ (NFCXX_DATA_CXX), and the code is Path B's.
+  local driver=$root/nfcxx
+  if [ "${NFCXX_PATH:-}" = b ] && [ "$kind" = vk ] && [[ $f == */gen/vk/*.cpp ]]; then driver=${NFCXX_DATA_CXX:-g++}; fi
+  if timeout 2400 "$driver" -c $inc $flags "$f" -o "$o" > "${o%.o}.log" 2>&1; then
     echo "ok   $((SECONDS - start))s ${f#"$LLAMA_ROOT"/}"
   else
     rm -f "$o"; echo "FAIL ${f#"$LLAMA_ROOT"/}: $(grep -m1 -E ' error|refused:|cannot open' "${o%.o}.log" | cut -c1-160)"
@@ -104,6 +110,9 @@ tr '\t' '\n' < "$out/sources" | xargs -d '\n' -n 2 -P "${JOBS:-4}" bash -c 'comp
 [ $fail = 0 ] || { echo "compile failures: see $out/obj/*.log"; exit 1; }
 
 objs=(); while IFS=$'\t' read -r f _; do objs+=("$(objname "$f")"); done < "$out/sources"
+# NFCXX_PATH=b: the object-only link is not Path B's link, so the runtime archive (scripts/pathb-ldrt: _mm_pause and the
+# long double helpers) goes on the line here.
+[ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt")")
 if "$root/nfcxx" "${objs[@]}" -lvulkan -lm -lpthread -lstdc++ -o "$out/test-backend-ops" > "$out/link.log" 2>&1; then
   echo "linked $out/test-backend-ops (${#objs[@]} objects)"
 else

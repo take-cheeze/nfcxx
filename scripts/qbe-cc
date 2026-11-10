@@ -55,6 +55,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     *.c) src=$a ;;
   esac
 done
+# Without -std the preprocessor is the host cc, whose default is C23 on gcc 15 (gnu23): its headers then use C23's
+# nullptr, which cproc does not know. The C this path compiles is gnu17 (as gcc-cc sets), so that is the default here.
+case " ${cppflags[*]+${cppflags[*]}} " in *" -std="*) ;; *) cppflags+=(-std=gnu17) ;; esac
 # the kernel's headers define far more static inline functions than a file uses: drop the unreferenced ones (cproc -p)
 [ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p -g -V)   # -g: the GNU keyword asm (the kernel is gnu11); -V: volatile accesses kept
 # -G: GNU C's cleanup attribute, which runs at the end of the object's scope (the kernel's guard()); nfcxx's EDG-made C
