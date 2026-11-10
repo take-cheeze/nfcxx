@@ -138,3 +138,5 @@ else
   warn "bc2cpp skipped direct call check: #{failures.size} failure(s)"
   exit 1
 end
+
+require_relative 'poly_candidate_probe_cases'
