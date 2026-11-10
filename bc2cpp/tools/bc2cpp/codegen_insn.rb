@@ -547,7 +547,7 @@ class CodeGen
       # `.to_i`: the disassembly zero-pads ("018") while labels use the integer
       # ("L18:").
       target = ensure_remapped_jump_target(irep, insn.jmp_addr)
-      "  goto L#{target};\n"
+      "#{backedge_restore_text(irep, insn, target)}  goto L#{target};\n"
     when :JMPUW
       # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when no ensure handler
       # can intercept it (see jmpuw_plain_jump_at?). `.to_i` as for JMP.
@@ -560,19 +560,19 @@ class CodeGen
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (!mrb_test(#{RegName[reg]})) goto L#{target};\n"
+        backedge_conditional(irep, insn, target, "!mrb_test(#{RegName[reg]})")
     when :JMPIF
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (mrb_test(#{RegName[reg]})) goto L#{target};\n"
+        backedge_conditional(irep, insn, target, "mrb_test(#{RegName[reg]})")
     when :JMPNIL
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
       reg = insn.reg
       target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       decided_branch_code(insn, decided_branch_outcome(insn, irep, owner_def, idx, reg_offset), "L#{target}") ||
-        "  if (mrb_nil_p(#{RegName[reg]})) goto L#{target};\n"
+        backedge_conditional(irep, insn, target, "mrb_nil_p(#{RegName[reg]})")
     when :GETCONST
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
       # (mrb_vm_const_get), which compiled code does not have. A single lookup from
