@@ -1266,7 +1266,9 @@ class ClosedWorld
   end
 
   def self.native_local_symbols(text)
+    # A MRB_SYM(name) spelling (a ROM entry's key) names a method, not the local of the same name.
     blanked = text.gsub(/"((?:[^"\\\n]|\\.)*)"/) { |lit| '"' + ' ' * (lit.size - 2) + '"' }
+                  .gsub(/MRB_(?:OP)?SYM\w*\(\s*\w+\s*\)/, ' ')
     dispatched = Hash.new(0)
     text.to_enum(:scan, NATIVE_DISPATCH_CALL).map { Regexp.last_match }.each do |md|
       arg = bc2cpp_c_call_args(md[1])[2].to_s.strip
