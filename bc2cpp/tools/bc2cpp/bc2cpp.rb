@@ -1649,8 +1649,19 @@ BC2CPP_MAIN = lambda do
   # register would keep it.
   puts <<~'CPP'
     // The runtime's one arena root: every other root (the keeps below, a numeric slow path's result) goes through it.
+    // ARENA_FAST_PUSH: the library's own steps (a permanent object needs no root; a push into the arena with room) inline,
+    // as the roots are the most frequent call of the compiled code; a full arena takes the library call, which grows it or raises.
     static inline void bc2cpp_root(mrb_state* M, mrb_value v) {
-      if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+      if (mrb_immediate_p(v)) return;
+      struct RBasic* p = mrb_basic_ptr(v);
+    #ifdef MRB_GC_FIXED_ARENA
+      const int capa = MRB_GC_ARENA_SIZE;
+    #else
+      const int capa = M->gc.arena_capa;
+    #endif
+      if (p->gc_color == MRB_GC_RED) return;
+      if (M->gc.arena_idx < capa) { M->gc.arena[M->gc.arena_idx++] = p; return; }
+      mrb_gc_protect(M, v);
     }
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.
     static inline mrb_value bc2cpp_arena_keep(mrb_state* M, int ai, mrb_value v) {
