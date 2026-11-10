@@ -1651,7 +1651,12 @@ BC2CPP_MAIN = lambda do
   puts <<~'CPP'
     // The runtime's one arena root: every other root (the keeps below, a numeric slow path's result) goes through it.
     static inline void bc2cpp_root(mrb_state* M, mrb_value v) {
-      if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+      if (mrb_immediate_p(v)) return;
+      // A consecutive keep needs no second slot. Read the current arena, so a
+      // restore (including one in a nested call) cannot leave a stale hit.
+      int ai = M->gc.arena_idx;
+      if (ai > 0 && M->gc.arena[ai - 1] == mrb_basic_ptr(v)) return;
+      mrb_gc_protect(M, v);
     }
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.
     static inline mrb_value bc2cpp_arena_keep(mrb_state* M, int ai, mrb_value v) {
