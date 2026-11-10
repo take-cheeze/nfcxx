@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# nfcxx-cpp: preprocess a C or C++ source with the EDG front end (cpfe -E), the host's system headers and GNU version, as
+# nfcxx's compile does. A stand-in for `clang -E -P`:
+#   nfcxx-cpp [-x c|c++] [-std=...] [-P] [-I DIR] [-D MACRO] ... FILE
+# -P drops the `# LINE "file"` markers (clang -P). -std is ignored for C (EDG's GNU C mode); for C++ it selects --c++NN.
+# Needs scripts/setup-edg.sh (build/edg/bin/cpfe, build/edg-base). Exit status 2 when EDG is not built.
+# (`nfcxx -E` itself hands the preprocessing to the host g++, as nfcc does; this is the EDG preprocessor.)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/scripts/host-sys.sh"
+cpfe=${CPFE:-$root/build/edg/bin/cpfe}
+[ -x "$cpfe" ] || { echo "nfcxx-cpp: EDG not built ($cpfe); run scripts/setup-edg.sh" >&2; exit 2; }
+export EDG_BASE=${EDG_BASE:-$root/build/edg-base}
+lang=""; std=""; strip=0; args=(); files=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -x) lang=$2; shift ;;
+    -x*) lang=${1#-x} ;;
+    -std=*) std=${1#-std=} ;;
+    -P) strip=1 ;;
+    -E) ;;
+    -I|-D|-U|-include) args+=("$1" "$2"); shift ;;
+    -*) args+=("$1") ;;
+    *) files+=("$1") ;;
+  esac
+  shift
+done
+if [ -z "$lang" ]; then
+  case ${files[0]:-} in *.c) lang=c ;; *) lang=c++ ;; esac
+fi
+sys=(); while IFS= read -r d; do sys+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
+gnu=$(host_gnu_version); gopt=(); [ -z "$gnu" ] || gopt=(--gnu_version="$gnu")
+lopt=(); dial=--gcc
+if [ "$lang" = c ]; then lopt=(--c99); else
+  dial=--g++
+  n=${std#*++}; case $n in 98|03|11|14|17|20|23) lopt=("--c++$n") ;; esac
+fi
+if [ $strip = 1 ]; then
+  "$cpfe" "$dial" ${gopt[@]+"${gopt[@]}"} ${lopt[@]+"${lopt[@]}"} -E "${sys[@]}" ${args[@]+"${args[@]}"} "${files[@]}" | { grep -v '^# [0-9]' || true; }
+else
+  exec "$cpfe" "$dial" ${gopt[@]+"${gopt[@]}"} ${lopt[@]+"${lopt[@]}"} -E "${sys[@]}" ${args[@]+"${args[@]}"} "${files[@]}"
+fi
