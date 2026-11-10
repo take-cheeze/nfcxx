@@ -787,6 +787,19 @@ end
         safe_check(item[2], dst, n)
         safe_check(item[3], src, n)
         @lines << "  blit #{src}, #{dst}, #{n}"
+      # `(zero-fill N DST)`: clear N bytes at DST (be/nfcxx_ir.c emits it for a zero-initialised object of more than 128
+      # stores, as the QBE emitter does: one call of memset).
+      when "zero-fill"
+        raise QbeUnsupported, "zero-fill of a register count" unless item[1].is_a?(Integer) || item[1].to_s.match?(/\A\d+\z/)
+        if item[2].is_a?(String) && item[2].start_with?("%")
+          t = @types[item[2]]
+          raise QbeUnsupported, "zero-fill of an address with no declared type #{item[2]}" if t.nil?
+          raise QbeUnsupported, "zero-fill of the by-value aggregate #{item[2]}" unless head(unqual(t)) == "ptr"
+        end
+        n = Qbe.int_lit(item[1])
+        dst = op(item[2])
+        safe_check(item[2], dst, n)
+        @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -1435,14 +1448,15 @@ end
       a = op(rv[2])
       count_cls = Qbe.cls(switch_operand_type(rv[3]))
       n = op(rv[3])
+      # The count is checked at its own width (a long count such as 0x100000005 must trap, not wrap to 5 when narrowed).
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
+      check_call(bad, 3)
       if count_cls == "l" && c == "w"
         narrowed = fresh
         @lines << "  #{narrowed} =w copy #{n}"
         n = narrowed
       end
-      bad = fresh
-      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
-      check_call(bad, 3)
       if %w[cshl wshl].include?(head(rv))
         shifted = fresh
         @lines << "  #{shifted} =#{c} shl #{a}, #{n}"

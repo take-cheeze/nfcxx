@@ -806,7 +806,9 @@ fi
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/qbe-cc ;;   # for the .c inputs
+       export NFCXX_CC=$root/scripts/qbe-cc   # for the .c inputs
+       # NFCXX_PATHB_C=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
+       [ "${NFCXX_PATHB_C:-}" != gcc ] || export NFCXX_CC=$root/scripts/gcc-cc ;;
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
@@ -900,6 +902,17 @@ fi
 
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
+if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  # -c: one object per C++ file, named as the gcc and qbe backends name it (-o FILE for one file, else basename.o)
+  for f in ${files[@]+"${files[@]}"}; do
+    case $f in
+      -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
+      *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$dst" || exit $? ;;
+    esac
+  done
+  exit 0
+fi
 if [ $backend = pathb ]; then
   ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
   pobjs=(); plink=(); n=0

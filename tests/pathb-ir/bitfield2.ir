@@ -989,7 +989,7 @@
 (function "_ZZ4mainENKUlvE_clEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "_ZZ4mainEUlvE_"))))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (const (struct "_ZZ4mainEUlvE_")))) 8 8)
   (store (ptr (const (struct "_ZZ4mainEUlvE_"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZZ4mainEUlvE_"))) (load (ptr (const (struct "_ZZ4mainEUlvE_"))) $"tmp"))
