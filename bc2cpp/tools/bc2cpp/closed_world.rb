@@ -1197,6 +1197,10 @@ class ClosedWorld
     # Struct members named by C strings (mruby-marshal checks for Struct).
     dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
     text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
+    # An engine gem's class-object table answers a constant receiver, as mrb_define_module_function / class_method did.
+    if NativeOwnerMap.engine_source?(path)
+      NativeOwnerMap.rom_bindings(text).each { |_expr, singleton, name, _fn| singleton_names << name if singleton }
+    end
     names.merge(text.scan(C_STRING).flatten) if dynamic
     # Only mruby's own defaults: BasicObject#method_missing, Kernel#respond_to_missing?.
     refusals << :outside_method_missing if names.include?('method_missing') && !path.end_with?('/3rd/mruby/src/class.c')
