@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shard_output'
 require_relative 'shared_generation'
+require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
 require_relative 'file_identity'
@@ -2867,6 +2868,7 @@ BC2CPP_MAIN = lambda do
   warn "== declared return guards (DECLARED_RETURN_GUARD): #{guard_sites.size} bc2cpp_declared_return_violation =="
   guard_sites.uniq.sort.each { |k| warn "  DECLARED_RETURN_GUARD_SITE #{k}" }
   warn ''
+  CoreCFacts.report(gen)
   miss_sites = ProvenMiss.sites(compiled)
   warn "== closed world proven-class miss sites: #{miss_sites.size} =="
   miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
