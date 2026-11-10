@@ -51,7 +51,21 @@ SNIPPETS = [
   "x = 1\ny = 2\nx - y",
   "x = 1\ny = 2\nx < y",
   "x = 1\ny = 2\nx == y",
-  "x = 1\nx >= 3"
+  "x = 1\nx >= 3",
+  # if (milestone 3)
+  "x = 1\nif x\n  p 1\nend\n2",
+  "x = 1\nif x\n  2\nend\np 3",
+  "x = 1\nif x\n  2\nelse\n  3\nend\np 4",
+  "x = 1\nif x > 2\n  p 1\nelse\n  p 2\nend",
+  "x = 1\nif x\n  2\n  3\nelse\n  4\nend",
+  "if self\n  1\nend",
+  "x = 1\nif x\n  2\nelse\n  3\nend",
+  "x = 1\nif x\n  p 1\nend",
+  "x = 1\nif x\nend",
+  "x = 1\nif x\nelse\n  3\nend\nx",
+  "x = 1\nif x\n  2\n  3\nelse\n  4\nend",
+  "x = 1\nif x\n  p 2\nelse\n  3\n  p 4\nend\nx",
+  "x = 1\nif x\n  p 2\n  p 3\nelse\n  p 4\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)

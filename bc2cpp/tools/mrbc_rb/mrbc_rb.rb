@@ -4,8 +4,9 @@
 #
 # Covered: a top-level program whose statements are nil, true, false, self, Integer literals, local reads, local writes
 # of those, and method calls on simple operands (a self call or a call with an explicit receiver, with positional
-# arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI).
-# Anything else raises Unsupported, so a caller can fall back to the real mrbc.
+# arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI),
+# and if/else with a simple or call predicate and bodies of the forms above. Anything else raises Unsupported, so a
+# caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
 # follow mrbgems/mruby-compiler/core/codegen.c:
@@ -27,7 +28,7 @@ module MrbcRb
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
-    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72,
+    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPNOT: 40,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
@@ -63,6 +64,7 @@ module MrbcRb
       @nregs = 0
       @pool = []
       @syms = []
+      @labels = [] # pcs that a jump lands on: the peepholes do not work across them (no_peephole in codegen.c)
       @last = nil # [name, operands, start] of the last instruction, for the RETURN peephole
     end
 
@@ -94,9 +96,99 @@ module MrbcRb
         last ? value_in_register(node) : nil
       when Prism::CallNode
         call(node)
+      when Prism::IfNode
+        if_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
+    end
+
+    # The fork's NODE_IF: the predicate goes into the first temporary, JMPNOT skips the then-branch to the else-branch
+    # (or to the end), and the then-branch ends with a JMP to the end when there is an else-branch or a value is needed.
+    # A missing else-branch loads nil when the value is needed. Returns the value's register when +last+.
+    def if_statement(node, last:)
+      predicate = node.predicate
+      raise Unsupported, 'if predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+
+      else_node = node.subsequent
+      raise Unsupported, 'elsif' if else_node.is_a?(Prism::IfNode)
+
+      t = temp
+      value_into(predicate, t)
+      to_else = emit_jump(:JMPNOT, t)
+      # A jump operand's bytes take the line of the branch's last statement (verified with mrbc -g's line table). An empty
+      # then-branch takes the line of the `else` or `end` keyword.
+      then_stmts = node.statements&.body || []
+      if then_stmts.empty?
+        keyword = else_node ? else_node.else_keyword_loc : node.end_keyword_loc
+        @line = keyword.start_line
+        set_jump_line(to_else, keyword.start_line)
+        branch(node.statements, t, need: last)
+      else
+        set_jump_line(to_else, branch(node.statements, t, need: last))
+      end
+      if else_node
+        raise Unsupported, 'empty else-branch' if else_node.statements.nil? || else_node.statements.body.empty?
+
+        to_end = emit_jump(:JMP)
+      elsif last
+        to_end = emit_jump(:JMP)
+      end
+      patch_jump(to_else, @code.size)
+      if else_node
+        set_jump_line(to_end, branch(else_node.statements, t, need: last))
+      end
+      emit(:LOADNIL, t) if !else_node && last
+      patch_jump(to_end, @code.size) if to_end
+      last ? t : nil
+    end
+
+    def set_jump_line(position, line)
+      @lines[position] = line
+      @lines[position + 1] = line
+    end
+
+    # One branch of an if: its statements in order, the last one's value in +t+ when it is needed. Returns the line of the
+    # last statement, which the jump into the branch takes.
+    def branch(statements, t, need:)
+      stmts = statements ? statements.body : []
+      if stmts.empty?
+        emit(:LOADNIL, t) if need
+        return nil
+      end
+      stmts.each_with_index do |stmt, i|
+        @line = stmt.location.start_line
+        if need && i == stmts.size - 1
+          r = statement(stmt, last: true)
+          emit(:MOVE, t, r) unless r == t
+        else
+          statement(stmt, last: false)
+        end
+      end
+      stmts.last.location.start_line
+    end
+
+    # A jump whose target is patched later: the operand is the 16-bit absolute pc. Returns the operand's position.
+    def emit_jump(name, reg = nil)
+      start = @code.size
+      @last = [name, [reg].compact, start]
+      @code << OP.fetch(name)
+      byte(reg) if reg
+      position = @code.size
+      short(0)
+      (@code.size - start).times { @lines << @line }
+      position
+    end
+
+    # The operand is a signed 16-bit offset from the end of the jump (the pc after its last byte), as mrbc stores it;
+    # `mrbc -v` prints the absolute target instead.
+    def patch_jump(position, target)
+      offset = target - (position + 2)
+      raise Unsupported, 'jump beyond 16 bits' unless offset.between?(-0x8000, 0x7fff)
+
+      @code[position] = (offset >> 8) & 0xff
+      @code[position + 1] = offset & 0xff
+      @labels << target
     end
 
     def write_local(node, last:)
@@ -176,7 +268,9 @@ module MrbcRb
     # The fork's gen_return: a MOVE or a constant load right before RETURN is folded into the return.
     def return_value(reg)
       name, operands, start = @last
-      if name == :MOVE && operands[0] == reg
+      if @labels.include?(@code.size)
+        emit(:RETURN, reg)
+      elsif name == :MOVE && operands[0] == reg
         truncate(start)
         emit(:RETURN, operands[1])
       elsif %i[LOADSELF LOADNIL LOADTRUE LOADFALSE].include?(name) && operands[0] == reg
@@ -353,6 +447,7 @@ module MrbcRb
 
     # mrb_packed_int_encode: 7 bits per byte, least significant first, with bit 7 set while more bytes follow.
     def pack_int(num)
+      num &= 0xffff_ffff # a line that goes back is a wrapped 32-bit delta, as src/debug.c stores it
       bytes = ''.b
       loop do
         b = num & 0x7f
