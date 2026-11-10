@@ -5,6 +5,7 @@
 # Covered: a top-level program whose statements are nil, true, false, self, Integer literals, local reads, local writes
 # of those, and method calls on simple operands (a self call or a call with an explicit receiver, with positional
 # arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI),
+# whose receiver and arguments may themselves be calls (nested to any depth, on the register stack described at #call),
 # and if/else with a simple or call predicate and bodies of the forms above. Anything else raises Unsupported, so a
 # caller can fall back to the real mrbc.
 #
@@ -42,6 +43,9 @@ module MrbcRb
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
                    Prism::LocalVariableReadNode, Prism::StringNode].freeze
 
+  # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
+  UNVERIFIED_OPERATORS = %i[! != [] []= -@ +@ ~ =~ !~ <=> ** % & | ^ << >> === ].freeze
+
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
 
@@ -63,6 +67,7 @@ module MrbcRb
       @lines = []
       @line = 0
       @nregs = 0
+      @sp = 0 # the register stack pointer: the first free register; see #call
       @pool = []
       @syms = []
       @labels = [] # pcs that a jump lands on: the peepholes do not work across them (no_peephole in codegen.c)
@@ -73,6 +78,7 @@ module MrbcRb
       @locals = program.locals.dup
       @nlocals = @locals.size + 1
       @nregs = @nlocals
+      @sp = @nlocals
       stmts = program.statements.body
       raise Unsupported, 'empty program' if stmts.empty?
 
@@ -260,35 +266,46 @@ module MrbcRb
       end
     end
 
-    # A method call, as the fork's codegen emits it: the result register is the first temporary, the receiver is copied
-    # into it, and the arguments follow it. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the copy.
+    # A method call, as the fork's codegen emits it. The registers above the locals are a stack (the fork's cursp, here
+    # @sp = the first free register): a call's result register is the stack pointer at its start, its receiver is
+    # generated into that register, and each argument is generated into the next one with the pointer advanced to it, so a
+    # nested call (or an operator on a call) takes the argument's register as its own result register and its result lands
+    # in place with no move. The pointer is restored when the call is done; the result stays in the base register, which
+    # the caller then owns. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the receiver's register.
     # Returns the result register.
     def call(node)
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
       recv = node.receiver unless node.receiver.is_a?(Prism::SelfNode)
       args = node.arguments&.arguments || []
-      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !SIMPLE_VALUES.include?(a.class) }
-      raise Unsupported, 'call with a non-simple receiver' if recv && !SIMPLE_VALUES.include?(recv.class)
+      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !operand?(a) }
+      raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
+      raise Unsupported, 'safe navigation' if node.safe_navigation?
+      raise Unsupported, "operator method #{name}" if recv && UNVERIFIED_OPERATORS.include?(name)
 
-      a = temp
+      # The parser folds an operator on two integer literals (1 + 2), which is not reproduced here.
+      raise Unsupported, 'operator on two literals' if recv.is_a?(Prism::IntegerNode) && BINARY_OPS.key?(name) &&
+                                                       args.size == 1 && args[0].is_a?(Prism::IntegerNode)
+
+      a = @sp
+      @nregs = [@nregs, a + 1].max
       if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
          (1..0xff).cover?(args[0].value)
-        value_into(recv, a)
+        operand_into(recv, a)
         emit(name == :+ ? :ADDI : :SUBI, a, args[0].value)
         @nregs = [@nregs, a + 3].max
         return a
       end
       if recv && BINARY_OPS.key?(name) && args.size == 1
-        value_into(recv, a)
-        value_into(args[0], a + 1)
+        operand_into(recv, a)
+        operand_into(args[0], a + 1)
         emit(BINARY_OPS.fetch(name), a)
         @nregs = [@nregs, a + 3].max
         return a
       end
 
-      value_into(recv, a) if recv
-      args.each_with_index { |arg, i| value_into(arg, a + 1 + i) }
+      operand_into(recv, a) if recv
+      args.each_with_index { |arg, i| operand_into(arg, a + 1 + i) }
       sym = sym_index(name)
       n = args.size
       if recv
@@ -298,6 +315,24 @@ module MrbcRb
       end
       @nregs = [@nregs, a + n + 2].max
       a
+    ensure
+      @sp = a if a
+    end
+
+    # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
+    def operand?(node)
+      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) ||
+        (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| SIMPLE_VALUES.include?(e.class) })
+    end
+
+    # Generates an operand into register +dst+ with the stack pointer at +dst+ (everything above it is free), as the fork
+    # pushes an operand and generates it into the new top of the stack.
+    def operand_into(node, dst)
+      saved = @sp
+      @sp = dst
+      value_into(node, dst)
+    ensure
+      @sp = saved
     end
 
     # Symbols are numbered in order of first use, as the fork's new_sym does.
@@ -331,7 +366,12 @@ module MrbcRb
 
     # The register the value of +node+ is in: a local is read in place, anything else is loaded into a temporary.
     def value_in_register(node)
-      return local_register(node.name) if node.is_a?(Prism::LocalVariableReadNode)
+      if node.is_a?(Prism::LocalVariableReadNode)
+        # The register is read in place: the fork's MOVE into a temporary, folded into the RETURN, leaves no instruction
+        # behind, so a MOVE of an earlier statement must not be folded.
+        @last = nil
+        return local_register(node.name)
+      end
 
       t = temp
       value_into(node, t)
@@ -407,10 +447,11 @@ module MrbcRb
       index + 1
     end
 
-    # The first temporary, as the fork's codegen starts its stack after the locals. Using one raises the register count.
+    # The first free register (@sp), which starts after the locals as the fork's codegen starts its stack. Using one raises
+    # the register count.
     def temp
-      @nregs = [@nregs, @nlocals + 1].max
-      @nlocals
+      @nregs = [@nregs, @sp + 1].max
+      @sp
     end
 
     # Emits one instruction and records its source line for each of its bytes. Operands follow the formats in ops.h:
