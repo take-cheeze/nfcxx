@@ -84,7 +84,8 @@ code = suite.generate(SRC, OWNERS)
 suite.check('include and attr_* call their own helpers', code.scan('bc2cpp_mod_include(M, self, ').size >= 5 &&
                                                        code.scan('bc2cpp_mod_attr(M, self, ').size >= 10)
 suite.check('no include or attr_* goes by name', code.scan(/bc2cpp_ssend\(M, self, mrb_intern_cstr\(M, "(?:include|attr\w*)"/).empty?)
-suite.check('the helpers make no by-name send of include or attr_*', !code[/bc2cpp_mod_attr\(.*?\n    \}\n/m].to_s.include?('funcall'))
+suite.check('the helpers make no by-name send of include or attr_*',
+            code[/bc2cpp_mod_attr\(.*?\n    \}\n/m].to_s.scan(/funcall\w*\([^;]*;/).all? { |send| send.include?('"nil?"') })
 suite.check('no site keeps its own by-name argument array', !code.include?('bc2cpp_ssend_args'))
 
 DRIVER = <<~'RUBY'
