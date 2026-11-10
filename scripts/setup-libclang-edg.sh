@@ -42,9 +42,9 @@ link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-libclang
 
 # 1. Back end: nfcxx_decl.c joins the CORE list. cp_gen_be.c stays (the front end uses its helpers, such as
 #    expr_has_comma_operation), but its back_end() is renamed in the tree copy, so the C++ generator never runs.
-sed 's/ cp_gen_be\.c / cp_gen_be.c nfcxx_decl.c /' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
-grep -q ' cp_gen_be.c nfcxx_decl.c ' "$tree/src/CMakeLists.txt" || { echo "setup-libclang-edg: CORE list patch failed" >&2; exit 1; }
-cp "$root/be/nfcxx_decl.c" "$root/be/nfcxx_edg_entry.c" "$tree/src/"
+sed 's/ cp_gen_be\.c / cp_gen_be.c nfcxx_decl.c nfcxx_ast.c /' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
+grep -q ' cp_gen_be.c nfcxx_decl.c nfcxx_ast.c ' "$tree/src/CMakeLists.txt" || { echo "setup-libclang-edg: CORE list patch failed" >&2; exit 1; }
+cp "$root/be/nfcxx_decl.c" "$root/be/nfcxx_ast.c" "$root/be/nfcxx_edg_entry.c" "$tree/src/"
 rm -f "$tree/src/cp_gen_be.c"  # a symlink into the submodule: write a copy, never through the link
 sed 's/^void back_end(void)/void nfcxx_cp_gen_back_end_unused(void)/' "$src/src/cp_gen_be.c" > "$tree/src/cp_gen_be.c"
 grep -q 'nfcxx_cp_gen_back_end_unused(void)' "$tree/src/cp_gen_be.c" || { echo "setup-libclang-edg: cp_gen_be.c rename failed" >&2; exit 1; }

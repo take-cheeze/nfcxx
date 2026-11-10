@@ -14,9 +14,14 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_ast_returns'
+require_relative '../../tools/bc2cpp/native_ast_source'
 
-unless system('clang --version', out: File::NULL, err: File::NULL)
-  puts 'SKIP native_ast_returns_check: clang is not installed'
+# Every producer available here is checked against the same expectations (clang, and nfcxx once
+# scripts/setup-libclang-edg.sh has built its front end); BC2CPP_AST_PRODUCER=clang|nfcxx limits it to one.
+producers = ENV['BC2CPP_AST_PRODUCER'] ? [ENV['BC2CPP_AST_PRODUCER']] : NativeAstSource::PRODUCERS
+producers = producers.select { |name| NativeAstSource.available?(name) }
+if producers.empty?
+  puts 'SKIP native_ast_returns_check: neither clang nor the nfcxx front end is available'
   exit 0
 end
 
@@ -94,25 +99,27 @@ failures = []
 Dir.mktmpdir('native_ast_returns_check') do |dir|
   source = File.join(dir, 'fixture.cxx')
   File.write(source, FIXTURE)
-  ast, err, status = Open3.capture3('clang', '-fsyntax-only', '-Xclang', '-ast-dump=json', '-x', 'c++', source)
-  abort "clang failed: #{err}" unless status.success?
+  producers.each do |name|
+    ast, err, status = NativeAstSource.dump(source, [], lang: :cxx, name: name)
+    abort "#{name} failed: #{err}" unless status.success?
 
-  kinds = NativeAstReturns.analyze(JSON.parse(ast), source)
-  EXPECTED.each do |fn, want|
-    got = kinds[fn]
-    failures << "#{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
-  end
-  failures << "functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
+    kinds = NativeAstReturns.analyze(JSON.parse(ast), source)
+    EXPECTED.each do |fn, want|
+      got = kinds[fn]
+      failures << "#{name}: #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    end
+    failures << "#{name}: functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
 
-  optional = NativeAstReturns.analyze(JSON.parse(ast), source, optional: true)
-  EXPECTED.merge(OPTIONAL).each do |fn, want|
-    got = optional[fn]
-    failures << "optional #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    optional = NativeAstReturns.analyze(JSON.parse(ast), source, optional: true)
+    EXPECTED.merge(OPTIONAL).each do |fn, want|
+      got = optional[fn]
+      failures << "#{name}: optional #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    end
   end
 end
 
 if failures.empty?
-  puts "native AST returns check: #{EXPECTED.size} functions classified"
+  puts "native AST returns check: #{EXPECTED.size} functions classified (#{producers.join(', ')})"
 else
   failures.each { |failure| warn "  #{failure}" }
   abort "native AST returns check: #{failures.size} failure(s)"
