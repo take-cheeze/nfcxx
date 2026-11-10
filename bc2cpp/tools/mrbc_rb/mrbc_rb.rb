@@ -654,6 +654,8 @@ module MrbcRb
     # else-branch or a value is needed. A missing else-branch loads nil when the value is needed. An `elsif` is an if node
     # that is the whole else-branch. Returns the value's register when +last+.
     def if_statement(node, last:)
+      raise Unsupported, 'multi-line ternary with an interpolated string' if multiline_ternary_dstr?(node)
+
       sub = node.subsequent
       else_list = case sub
                   when nil then nil
@@ -676,6 +678,21 @@ module MrbcRb
       else_line = else_list && else_list.empty? ? node.end_keyword_loc.start_line : nil
       gen_if(node.predicate, then_list, else_list, val: last, then_present: true, empty_line: empty_line,
                                                             elsif_node: elsif_node?(node), else_line: else_line)
+    end
+
+    # A ternary that spans lines (`c ? "a#{x}" \` then `: "b"`) and has an interpolated string: the fork stamps the jump over
+    # the else-branch with another line (verified against mrbc -v), which is not reproduced, so it is not covered.
+    def multiline_ternary_dstr?(node)
+      return false unless node.if_keyword_loc.nil? && node.location.start_line != node.location.end_line
+
+      stack = [node]
+      until stack.empty?
+        n = stack.pop
+        return true if n.is_a?(Prism::InterpolatedStringNode)
+
+        stack.concat(n.compact_child_nodes)
+      end
+      false
     end
 
     # `unless` is an if whose then-branch is the else-clause and whose else-branch is the body (the fork's parser swaps
@@ -1117,7 +1134,7 @@ module MrbcRb
     def case_statement(node, last:)
       subject = node.predicate && unparen(node.predicate)
       raise Unsupported, 'case subject' if subject && !case_operand?(subject)
-      raise Unsupported, 'multi-line case' if node.location.start_line != node.location.end_line && !case_multiline_ok?(node)
+      check_multiline(subject) if subject # heredocs, leading dots and multi-line logic have their own line rules
 
       node.conditions.each do |w|
         raise Unsupported, 'case/in pattern matching' unless w.is_a?(Prism::WhenNode)
@@ -1126,6 +1143,8 @@ module MrbcRb
           c = unparen(c)
           c = unparen(c.expression) if c.is_a?(Prism::SplatNode) && c.expression
           raise Unsupported, 'when value' unless case_operand?(c) && !c.is_a?(Prism::SplatNode)
+
+          check_multiline(c)
         end
       end
       saved = @sp
@@ -1187,11 +1206,6 @@ module MrbcRb
       head
     ensure
       @sp = saved if saved
-    end
-
-    # Case statements whose lines are verified; any other multi-line case is Unsupported.
-    def case_multiline_ok?(_node)
-      true
     end
 
     # A case as a value: built at the destination when it is a temporary, else at the first temporary and moved.
