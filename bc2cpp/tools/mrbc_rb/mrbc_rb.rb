@@ -589,8 +589,6 @@ module MrbcRb
         case n
         when Prism::OrNode, Prism::AndNode, Prism::ParenthesesNode
           nil
-        when Prism::StringNode, Prism::InterpolatedStringNode
-          raise Unsupported, 'heredoc' if n.opening_loc&.slice&.start_with?('<<')
         when Prism::CallNode
           leading_dot(n)
         end
@@ -782,6 +780,7 @@ module MrbcRb
     # codegen_if. +then_list+ and +else_list+ are statement lists (+else_list+ is nil without an else-branch).
     # +then_present+ is whether the fork's then-branch exists (it does for an empty `if` body but not for a bare `unless`).
     def gen_if(pred, then_list, else_list, val:, then_present:, empty_line: nil, elsif_node: false, else_line: nil, line: nil)
+      @line = line if line # the if node is entered first; the predicate's nodes are then visited at their own lines
       # The fork folds a literal condition only when it is the condition node itself: `(nil)` is not folded.
       return gen_arm(then_list, val, then_present ? empty_line : nil) if true_always?(pred)
       return gen_arm(else_list || [], val, else_line) if false_always?(pred)
@@ -789,7 +788,6 @@ module MrbcRb
       pred = unparen(pred)
       check_condition(pred, elsif_node)
       leading_dot(pred) if pred.is_a?(Prism::CallNode)
-      @line = line if line # the if node is entered first; the predicate's nodes are then visited at their own lines
       t = temp
       nil_p = nil_check?(pred)
       if nil_p
@@ -1440,6 +1438,19 @@ module MrbcRb
       end
     end
 
+    # The read of `recv[idx]` with the receiver and index loaded into +t+ and +t+ + 1 (gen_binop): `local[0]` fuses its two loads
+    # into GETIDX0, and a pc that is a jump target gives a plain SEND of `[]`.
+    def index_read(t, recv, idx)
+      if no_peephole?
+        emit(:SEND, t, sym_index(:[]), 1)
+      elsif idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
+        truncate(@code.size - 5)
+        emit(:GETIDX0, t, local_register(recv.name))
+      else
+        emit(:GETIDX, t)
+      end
+    end
+
     # gen_assignment(lhs, NULL, t, val): store R[t] into the variable.
     def write_target_from(kind, node, t, val)
       case kind
@@ -1565,7 +1576,7 @@ module MrbcRb
       operand_into(recv, t)
       if index
         operand_into(idx, t + 1)
-        emit(:GETIDX, t)
+        index_read(t, recv, idx)
       else
         emit(:SEND0, t, sym_index(node.read_name))
       end
@@ -2112,9 +2123,6 @@ module MrbcRb
     def operand_into(node, dst)
       # The fork stamps each node with its own line, so after a heredoc body's expression an operand on an earlier line goes
       # back to that line; only strings (which set their own line) are covered after one.
-      if @line_moved && node.location.start_line != @line && !node.is_a?(Prism::InterpolatedStringNode)
-        raise Unsupported, 'operand after a heredoc interpolation'
-      end
 
       saved = @sp
       @sp = dst
@@ -2182,7 +2190,11 @@ module MrbcRb
       when Prism::TrueNode then emit(:LOADTRUE, dst)
       when Prism::FalseNode then emit(:LOADFALSE, dst)
       when Prism::SelfNode then emit(:LOADSELF, dst)
-      when Prism::IntegerNode then load_int(node.value, dst)
+      when Prism::IntegerNode
+        # The big integer entry of -2147483648 keeps the literal's digits and base: only the decimal spelling is verified.
+        raise Unsupported, 'INT32_MIN literal in another spelling' if node.value == INT32_MIN && node.location.slice != '-2147483648'
+
+        load_int(node.value, dst)
       when Prism::LocalVariableReadNode
         node.depth.zero? ? emit(:MOVE, dst, local_register(node.name)) : getupvar(dst, node)
       when Prism::StringNode
