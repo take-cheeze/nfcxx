@@ -43,7 +43,7 @@ cases=build/bc2cpp/sycl_rewrite.cases
   done
   echo "--bogus tests/gpu/sycl/vecadd.cpp"        # the usage line, status 1
   echo "-"                                         # stdin as the source: a usage error (no file), status 1
-  echo "!tests/gpu/sycl/no_such_file.cpp"          # an uncaught exception: the report without its backtrace
+  echo "tests/gpu/sycl/no_such_file.cpp"          # a missing file: main reports it and returns status 1
 } > "$cases"
 
 log=build/bc2cpp/sycl_rewrite.log
