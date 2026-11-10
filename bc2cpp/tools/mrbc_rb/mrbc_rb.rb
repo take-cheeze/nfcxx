@@ -48,11 +48,15 @@ module MrbcRb
   # multi-line statement of the kinds in MULTILINE_STATEMENTS follows the entered-node rule (Compiler#enter); any other
   # multi-line statement raises Unsupported.
   MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
-                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode].freeze
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode].freeze
 
   # Multi-line statements whose line rules are derived below (see Compiler#enter): the fork stamps each instruction with the
   # line of the classic parser node it entered last, and a node's line is the line of the last token the parser had read
-  # when it built the node, which is the node's end line.
+  # when it built the node, which is the node's end line. Milestone 11 (multi-line statements) verified these with `mrbc -v`
+  # and with a fuzzer that inserts newlines, continuations and comments into statements and compares with the oracle: the
+  # exceptions are a node built after later tokens (the key of `label: value`, #label_key_line), a node that waits for the
+  # token after it, which a backslash-newline or a leading dot puts on a later line (#continuation_line, #leading_dot), and
+  # the nodes whose line is a keyword's (#if_node_line, the loops, #def_line, blocks and lambdas).
   MULTILINE_STATEMENTS = [Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
                           Prism::InstanceVariableWriteNode, Prism::CallNode, Prism::StringNode, Prism::InterpolatedStringNode,
                           Prism::HashNode, Prism::ArrayNode, Prism::OrNode, Prism::AndNode, Prism::ReturnNode,
@@ -670,6 +674,8 @@ module MrbcRb
         multiple_write(node, last: last)
       when Prism::IfNode
         if_statement(node, last: last)
+      when Prism::CaseNode
+        case_statement(node, last: last)
       when Prism::UnlessNode
         unless_statement(node, last: last)
       when Prism::WhileNode, Prism::UntilNode
@@ -757,6 +763,72 @@ module MrbcRb
         node.end_keyword_loc.start_line
       else
         kw.start_line
+      end
+    end
+
+    # codegen_case: the subject (when there is one) goes into the first temporary, its head register; every `when` value is
+    # generated into the register after it and compared with `===` against a copy of the head (a second register), a JMPIF to the
+    # body for all but the last value of a `when` and a JMPNOT to the next `when` for the last. Each body ends with a JMP to
+    # the end, the `else` too (it is a `when` without values), and without an else-clause a missing branch loads nil. A value
+    # is moved into the head. Without a subject the values are tested directly (the jumps then keep their loads, genjmp2 with
+    # val). Splatted values (`__case_eqq`) are not covered.
+    def case_statement(node, last:)
+      subject = node.predicate && unparen(node.predicate)
+      head = subject ? @sp : nil
+      saved_sp = @sp
+      begin
+        if subject
+          operand_into(subject, head)
+          @sp = head + 1
+          @nregs = [@nregs, @sp].max
+        end
+        a0 = @sp
+        case_end = []
+        next_when = nil
+        # An empty body is a node on the line of the keyword that follows it (the next `when`, the `else` or the `end`).
+        keywords = node.conditions.map(&:keyword_loc) + [node.else_clause&.else_keyword_loc, node.end_keyword_loc].compact
+        whens = node.conditions.each_with_index.map { |w, i| [w.conditions, w.statements, keywords[i + 1]] }
+        whens << [[], node.else_clause.statements, node.end_keyword_loc] if node.else_clause
+        whens.each do |conds, stmts, following|
+          dispatch(next_when) if next_when
+          next_when = nil
+          success = []
+          conds.each_with_index do |c, i|
+            c = unparen(c)
+            raise Unsupported, 'case with a splatted value' if c.is_a?(Prism::SplatNode)
+            raise Unsupported, 'case value' unless operand?(c)
+
+            @sp = a0
+            operand_into(c, a0)
+            if head
+              gen_move(a0 + 1, head, false)
+              @nregs = [@nregs, a0 + 3].max
+              emit(:SEND, a0, sym_index(:===), 1)
+            end
+            @sp = a0
+            if i < conds.size - 1
+              success << cond_jump(:JMPIF, a0, val: head.nil?)
+            else
+              next_when = cond_jump(:JMPNOT, a0, val: head.nil?)
+            end
+          end
+          success.each { |j| dispatch(j) }
+          @sp = a0
+          @line = following.start_line if stmts.nil? || stmts.body.empty?
+          branch(stmts, a0, need: last)
+          case_end << emit_jump(:JMP)
+        end
+        if next_when
+          dispatch(next_when)
+          emit(:LOADNIL, a0) if last
+        end
+        case_end.each { |j| dispatch(j) }
+        if last
+          gen_move(head, a0, false) if head
+          head || a0
+        end
+      ensure
+        @sp = saved_sp
       end
     end
 
@@ -2217,6 +2289,17 @@ module MrbcRb
         begin
           @sp = base
           r = node.is_a?(Prism::IfNode) ? if_statement(node, last: true) : unless_statement(node, last: true)
+        ensure
+          @sp = saved
+        end
+        gen_move(dst, r, false)
+      when Prism::CaseNode
+        # A case as a value is built at the destination when it is a temporary, else at the first temporary and moved.
+        saved = @sp
+        base = dst >= @nlocals ? dst : temp
+        begin
+          @sp = base
+          r = case_statement(node, last: true)
         ensure
           @sp = saved
         end

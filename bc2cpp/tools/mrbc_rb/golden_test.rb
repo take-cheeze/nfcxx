@@ -908,7 +908,30 @@ SNIPPETS = [
   "x = 5\ny = x -\n  1",
   "x = 5\ny = x +\n  1",
   "x = 5\ny = x +\n  x",
-  "x = [1,\n  2].size"
+  "x = [1,\n  2].size",
+  # case/when, also multi-line
+  "x = 1\ncase x\nwhen 1 then p 1\nwhen 2, 3 then p 2\nelse p 4\nend",
+  "x = 1\ncase x\nwhen 1 then p 1\nend",
+  "x = 1\ncase x\nwhen 1\n  p 1\nwhen 2\n  p 2\nend\np 3",
+  "x = 1\ny = case x\n    when 1 then 2\n    else 3\n    end",
+  "x = 1\ny = case x\n    when 1 then 2\n    end",
+  "x = 1\ncase\nwhen x then p 1\nwhen nil then p 2\nend",
+  "x = 1\ncase\nwhen x then p 1\nelse p 2\nend",
+  "x = 1\ncase x\nwhen Integer then p 1\nwhen String, Symbol then p 2\nelse p 3\nend",
+  "x = 1\ncase x\nwhen 1\nelse p 3\nend",
+  "x = 1\ncase x\nwhen 1 then\nend",
+  "x = 1\ncase x\nwhen 1, 2, 3, 4 then p 1\nend",
+  "def f(x)\n  case x\n  when 1 then :a\n  when 2 then :b\n  else :c\n  end\nend",
+  "def f(x)\n  case x\n  when 1 then return :a\n  end\n  x\nend",
+  "x = 1\ncase x\nwhen 1\n  p 1\n  p 2\nwhen 2\n  p 3\nend",
+  "x = 1\ny = 2\ncase x\nwhen y then p y\nend",
+  "case foo\nwhen 1 then 2\nend",
+  "x = 1\ncase x\nwhen 1 then 2\nelse\nend",
+  "x = 1\nwhile x\n  case x\n  when 1 then break\n  end\nend",
+  "x = 1\ncase x\nwhen 1 then foo { |a| a }\nwhen 2 then foo(1,\n                2)\nend",
+  "x = 1\ncase x\nwhen \"a\" then 1\nwhen \"b\#{x}\" then 2\nend",
+  "x = 1\ncase x\nwhen 1\n  case x\n  when 2 then p 1\n  end\nend",
+  "x = 1\ncase x\nwhen 1 then x\nelse x\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
