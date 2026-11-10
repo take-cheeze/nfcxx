@@ -37,7 +37,8 @@ module MrbcRb
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
-    GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97
+    GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
+    RANGE_INC: 100, RANGE_EXC: 101, SYMBOL: 91, GETCV: 27, SETCV: 28
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -48,7 +49,7 @@ module MrbcRb
   # multi-line statement of the kinds in MULTILINE_STATEMENTS follows the entered-node rule (Compiler#enter); any other
   # multi-line statement raises Unsupported.
   MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
-                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode].freeze
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode].freeze
 
   # Multi-line statements whose line rules are derived below (see Compiler#enter): the fork stamps each instruction with the
   # line of the classic parser node it entered last, and a node's line is the line of the last token the parser had read
@@ -62,7 +63,9 @@ module MrbcRb
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
              Prism::SymbolNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::ArrayNode, Prism::CallNode,
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
-             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode].freeze
+             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::ClassVariableReadNode,
+             Prism::ClassVariableWriteNode, Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode,
+             Prism::FloatNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
@@ -79,7 +82,8 @@ module MrbcRb
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
                    Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode,
-                   Prism::SymbolNode].freeze
+                   Prism::SymbolNode, Prism::ClassVariableReadNode, Prism::NumberedReferenceReadNode,
+                   Prism::BackReferenceReadNode, Prism::FloatNode].freeze
 
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
@@ -508,13 +512,21 @@ module MrbcRb
         # A constant read is generated even when unused: the lookup can autoload or raise (verified: `C` then `1` has GETCONST).
         last ? value_in_register(node) : value_into(node, temp) && nil
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
-           Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode
+           Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode, Prism::ClassVariableReadNode
         last ? value_in_register(node) : nil
+      when Prism::FloatNode
+        # An unused float still enters the literal pool (new_lit_float runs before gen_load_op2 looks at val).
+        float_index(node) unless last
+        last ? value_in_register(node) : nil
+      when Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode
+        # An unused `$1` or `$&` still enters the symbol table (verified: the symbol count differs, unlike `$~` or `$stdout`).
+        sym_index(node.is_a?(Prism::BackReferenceReadNode) ? node.name : :"$#{node.number}") unless last
+        last ? value_in_register(node) : nil
+      when Prism::ClassVariableWriteNode
+        cvar_write(node, last: last)
       when Prism::ArrayNode
-        # Only as a value: an unused array evaluates its elements with no value (NOVAL), which is not reproduced.
-        raise Unsupported, 'unused array' unless last
-
-        value_in_register(node)
+        # An unused array generates nothing, not even its elements (codegen_array returns early without a value; verified).
+        last ? value_in_register(node) : nil
       when Prism::LambdaNode
         # An unused lambda generates nothing at all, not even its body (codegen_lambda returns early without a value).
         last ? value_in_register(node) : nil
@@ -554,11 +566,12 @@ module MrbcRb
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
       when Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
-           Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode
+           Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode, Prism::ClassVariableOperatorWriteNode
         operator_write(node, last: last)
       when Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode, Prism::GlobalVariableOrWriteNode,
            Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
-           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode
+           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::ClassVariableAndWriteNode,
+           Prism::ClassVariableOrWriteNode
         logic_write(node, last: last)
       when Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
            Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
@@ -581,6 +594,10 @@ module MrbcRb
         class_statement(node, last: last)
       when Prism::ModuleNode
         module_statement(node, last: last)
+      when Prism::CaseNode
+        case_statement(node, last: last)
+      when Prism::RangeNode
+        range_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
@@ -617,6 +634,8 @@ module MrbcRb
     # else-branch or a value is needed. A missing else-branch loads nil when the value is needed. An `elsif` is an if node
     # that is the whole else-branch. Returns the value's register when +last+.
     def if_statement(node, last:)
+      raise Unsupported, 'multi-line ternary with an interpolated string' if multiline_ternary_dstr?(node)
+
       sub = node.subsequent
       else_list = case sub
                   when nil then nil
@@ -639,6 +658,21 @@ module MrbcRb
       else_line = else_list && else_list.empty? ? node.end_keyword_loc.start_line : nil
       gen_if(node.predicate, then_list, else_list, val: last, then_present: true, empty_line: empty_line,
                                                             elsif_node: elsif_node?(node), else_line: else_line)
+    end
+
+    # A ternary that spans lines (`c ? "a#{x}" \` then `: "b"`) and has an interpolated string: the fork stamps the jump over
+    # the else-branch with another line (verified against mrbc -v), which is not reproduced, so it is not covered.
+    def multiline_ternary_dstr?(node)
+      return false unless node.if_keyword_loc.nil? && node.location.start_line != node.location.end_line
+
+      stack = [node]
+      until stack.empty?
+        n = stack.pop
+        return true if n.is_a?(Prism::InterpolatedStringNode)
+
+        stack.concat(n.compact_child_nodes)
+      end
+      false
     end
 
     # `unless` is an if whose then-branch is the else-clause and whose else-branch is the body (the fork's parser swaps
@@ -928,6 +962,266 @@ module MrbcRb
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
       index
+    end
+
+    # ---- case/when and range literals (milestone 11) ----
+
+    # A `*value` element of an array literal whose value is an operand.
+    def array_splat?(node)
+      node.is_a?(Prism::SplatNode) && node.expression && operand?(node.expression)
+    end
+
+    # An array literal with splats (codegen_array, unlike gen_values it inlines nothing): the regular elements are loaded in
+    # consecutive registers from the first temporary a; at the first splat they are flushed into an array (ARRAY, or LOADNIL
+    # and ARRAY 0 when the splat comes first) and later ones are ARYPUSHed; the splatted value is loaded in the register after
+    # the array and ARYCAT appends it. A splat of `[]` is skipped. The array is built in a, then moved to +dst+ (gen_move).
+    def array_splat_into(node, dst)
+      elems = node.elements
+      raise Unsupported, 'array element' unless elems.all? { |e| operand?(e) || array_splat?(e) }
+      raise Unsupported, 'array with many elements' if elems.size > 50
+
+      a = temp
+      sp = a
+      regular = 0
+      first = true
+      elems.each do |e|
+        if e.is_a?(Prism::SplatNode)
+          v = unparen(e.expression)
+          next if v.is_a?(Prism::ArrayNode) && v.elements.empty?
+
+          if regular.positive?
+            sp -= regular
+            if first
+              emit(:ARRAY, sp, regular)
+              first = false
+            else
+              sp -= 1
+              emit(:ARYPUSH, sp, regular)
+            end
+            sp += 1
+            regular = 0
+          elsif first
+            emit(:LOADNIL, sp)
+            emit(:ARRAY, sp, 0)
+            sp += 1
+            first = false
+          end
+          operand_into(v, sp)
+          @nregs = [@nregs, sp + 1].max
+          emit(:ARYCAT, sp - 1)
+        else
+          operand_into(unparen(e), sp)
+          sp += 1
+          regular += 1
+        end
+      end
+      if first
+        emit(:ARRAY, a, regular)
+      elsif regular.positive?
+        emit(:ARYPUSH, a, regular)
+      end
+      gen_move(dst, a, false)
+    end
+
+    # Assignments whose value is used (`x = (y ||= 1)`, `foo(a = 1)`, `a = b = 2`).
+    VALUE_WRITES = [Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode,
+                    Prism::ConstantWriteNode, Prism::ClassVariableWriteNode, Prism::ConstantPathWriteNode,
+                    Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+                    Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode,
+                    Prism::ClassVariableOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
+                    Prism::GlobalVariableOrWriteNode, Prism::ConstantOrWriteNode, Prism::ClassVariableOrWriteNode,
+                    Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode, Prism::GlobalVariableAndWriteNode,
+                    Prism::ConstantAndWriteNode, Prism::ClassVariableAndWriteNode, Prism::IndexOperatorWriteNode,
+                    Prism::IndexOrWriteNode, Prism::IndexAndWriteNode, Prism::CallOperatorWriteNode, Prism::CallOrWriteNode,
+                    Prism::CallAndWriteNode].freeze
+
+    # A write as a value: the statement's own code with its value used, built at the destination when that is a temporary,
+    # else at the first temporary and moved (as for an `if`).
+    def write_value_into(node, dst)
+      raise Unsupported, 'multi-line assignment as a value' if node.location.start_line != node.location.end_line
+
+      saved = @sp
+      base = dst >= @nlocals ? dst : temp
+      begin
+        @sp = base
+        r = statement(node, last: true)
+      ensure
+        @sp = saved
+      end
+      gen_move(dst, r, false)
+    end
+
+    # The pool entry of a float literal (new_lit_float): the value is read as the fork's mrb_read_float does, and an entry
+    # is reused only when its bits are the same (so 0.0 and -0.0 are two entries).
+    def float_index(node)
+      pool_index([:float, [read_float(node.location.slice)].pack('E')])
+    end
+
+    # src/readfloat.c: the integer part, up to 18 fraction places (the rest are skipped) and the exponent are read with
+    # integer arithmetic and combined in double arithmetic, which is not always the correctly rounded value.
+    def read_float(text)
+      m = /\A(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?\z/.match(text.delete('_'))
+      raise Unsupported, 'float literal form' unless m
+      raise Unsupported, 'float literal with a long integer part' if m[2].size > 18
+
+      res = m[2].to_i.to_f
+      if m[3]
+        frac = m[3][0, 18]
+        res += frac.to_i.to_f / pow10(frac.size)
+      end
+      res *= pow10(m[4].to_i) if m[4]
+      res *= m[1].empty? ? 1 : -1
+      raise Unsupported, 'float literal out of range' unless res.finite?
+
+      res
+    end
+
+    # mrb_pow10: the table entries are correctly rounded literals; beyond the table the result is infinity or 0.
+    def pow10(exp)
+      return Float("1e#{exp}") if exp.between?(-323, 308)
+
+      raise Unsupported, 'float exponent out of range'
+    end
+
+    # `@@cv = value`: as an instance variable write, with SETCV.
+    def cvar_write(node, last:)
+      t = temp
+      value_into(node.value, t)
+      gen_setxv(:SETCV, t, node.name, last)
+      last ? t : nil
+    end
+
+    # Nodes the fork enters but ENTERED lacks: a single-line one stamps its own line (case_statement sets it).
+    CASE_UNENTERED = [Prism::ConstantPathNode, Prism::RangeNode, Prism::RegularExpressionNode,
+                      Prism::InterpolatedRegularExpressionNode].freeze
+
+    # A subject or a `when` value the case code covers: a node the fork enters (so its line is set by value_into), a
+    # constant path or a range of such.
+    def case_operand?(node)
+      node = unparen(node)
+      return false unless operand?(node)
+
+      ENTERED.include?(node.class) || CASE_UNENTERED.include?(node.class)
+    end
+
+    # codegen_case: the subject (when there is one) goes into the first temporary `head`; each `when` value is generated at
+    # head+1 and compared with `value === subject` (the subject is copied to head+2 for the SEND: gen_move, then two pushes
+    # and a pop leave the SEND at head+1, so the registers head+3 are counted). A `when *list` calls __case_eqq. Without a
+    # subject the value itself is tested. The last value of a `when` takes JMPNOT to the next clause, the others JMPIF to the
+    # body; the body ends with a JMP to the end of the case (also the last one, and the `else` body). With a value and no
+    # `else` the fall-through loads nil; then the result is in head+1 and a MOVE brings it to head (gen_move: that is what a
+    # `return` or an assignment then folds).
+    def case_statement(node, last:)
+      subject = node.predicate && unparen(node.predicate)
+      raise Unsupported, 'case subject' if subject && !case_operand?(subject)
+      check_multiline(subject) if subject # heredocs, leading dots and multi-line logic have their own line rules
+
+      node.conditions.each do |w|
+        raise Unsupported, 'case/in pattern matching' unless w.is_a?(Prism::WhenNode)
+
+        w.conditions.each do |c|
+          c = unparen(c)
+          c = unparen(c.expression) if c.is_a?(Prism::SplatNode) && c.expression
+          raise Unsupported, 'when value' unless case_operand?(c) && !c.is_a?(Prism::SplatNode)
+
+          check_multiline(c)
+        end
+      end
+      saved = @sp
+      head = temp
+      if subject
+        if CASE_UNENTERED.include?(subject.class)
+          raise Unsupported, 'multi-line case subject' if subject.location.start_line != subject.location.end_line
+
+          @line = subject.location.start_line
+        end
+        value_into(subject, head)
+      end
+      base = subject ? head + 1 : head
+      @sp = base
+      # An empty body is a node on the line of the keyword that follows it (the next `when`, the `else` or the `end`).
+      keywords = node.conditions.map(&:keyword_loc) + [node.else_clause&.else_keyword_loc, node.end_keyword_loc].compact
+      clauses = node.conditions.each_with_index.map { |w, i| [w.conditions, w.statements, keywords[i + 1].start_line] }
+      clauses << [[], node.else_clause.statements, node.end_keyword_loc.start_line] if node.else_clause
+      end_jumps = []
+      next_jump = nil
+      clauses.each do |conds, body, empty_line|
+        dispatch(next_jump)
+        next_jump = nil
+        success = []
+        conds.each_with_index do |c, i|
+          c = unparen(c)
+          splat = c.is_a?(Prism::SplatNode)
+          v = splat ? unparen(c.expression) : c
+          if CASE_UNENTERED.include?(v.class)
+            raise Unsupported, 'multi-line when value' if v.location.start_line != v.location.end_line
+
+            @line = v.location.start_line
+          end
+          operand_into(v, base)
+          if subject
+            gen_move(base + 1, head, false)
+            @nregs = [@nregs, head + 4].max
+            emit(:SEND, base, sym_index(splat ? :__case_eqq : :===), 1)
+          end
+          if i < conds.size - 1
+            success << cond_jump(:JMPIF, base, val: !subject)
+          else
+            next_jump = cond_jump(:JMPNOT, base, val: !subject)
+          end
+        end
+        success.each { |j| dispatch(j) }
+        @line = empty_line if body.nil? || body.body.empty?
+        branch(body, base, need: last)
+        end_jumps << emit_jump(:JMP)
+      end
+      if next_jump
+        dispatch(next_jump)
+        emit(:LOADNIL, base) if last
+      end
+      end_jumps.each { |j| dispatch(j) }
+      return nil unless last
+
+      gen_move(head, base, false) if subject
+      head
+    ensure
+      @sp = saved if saved
+    end
+
+    # A case as a value: built at the destination when it is a temporary, else at the first temporary and moved.
+    def case_value_into(node, dst)
+      saved = @sp
+      base = dst >= @nlocals ? dst : temp
+      begin
+        @sp = base
+        r = case_statement(node, last: true)
+      ensure
+        @sp = saved
+      end
+      gen_move(dst, r, false)
+    end
+
+    # codegen_dot2 and codegen_dot3: both ends are values in consecutive registers (an omitted end is nil) and RANGE_INC or
+    # RANGE_EXC builds the range in the first.
+    def range_at(node, base)
+      raise Unsupported, 'multi-line range' if node.location.start_line != node.location.end_line
+
+      @line = node.location.start_line # the node is entered before its ends (an omitted end is a nil on its line)
+      [node.left, node.right].each_with_index do |e, i|
+        e ? operand_into(unparen(e), base + i) : emit(:LOADNIL, base + i)
+      end
+      @nregs = [@nregs, base + 2].max
+      emit(node.exclude_end? ? :RANGE_EXC : :RANGE_INC, base)
+    end
+
+    # A range statement: its value as the last statement; otherwise only the ends are evaluated, for their effects.
+    def range_statement(node, last:)
+      if last
+        value_in_register(node)
+      else
+        [node.left, node.right].each { |e| statement(e, last: false) if e }
+        nil
+      end
     end
 
     def set_jump_line(position, line)
@@ -1284,6 +1578,8 @@ module MrbcRb
         :gvar
       when Prism::ConstantOperatorWriteNode, Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode
         :const
+      when Prism::ClassVariableOperatorWriteNode, Prism::ClassVariableOrWriteNode, Prism::ClassVariableAndWriteNode
+        :cvar
       end
     end
 
@@ -1295,6 +1591,7 @@ module MrbcRb
       when :ivar then emit(:GETIV, t, sym_index(node.name))
       when :gvar then emit(:GETGV, t, sym_index(node.name))
       when :const then emit(:GETCONST, t, sym_index(node.name))
+      when :cvar then emit(:GETCV, t, sym_index(node.name))
       end
     end
 
@@ -1314,6 +1611,7 @@ module MrbcRb
       when :ivar then gen_setxv(:SETIV, t, node.name, val)
       when :gvar then gen_setxv(:SETGV, t, node.name, val)
       when :const then gen_setxv(:SETCONST, t, node.name, val)
+      when :cvar then gen_setxv(:SETCV, t, node.name, val)
       end
     end
 
@@ -1375,6 +1673,7 @@ module MrbcRb
     def logic_write(node, last:)
       kind = write_target(node)
       raise Unsupported, 'constant ||=' if kind == :const && node.is_a?(Prism::ConstantOrWriteNode)
+      raise Unsupported, 'class variable ||=' if node.is_a?(Prism::ClassVariableOrWriteNode) # wrapped in a catch handler
 
       value = unparen(node.value)
       raise Unsupported, 'logic assignment value' unless assign_value?(value)
@@ -1481,6 +1780,7 @@ module MrbcRb
         end
       when Prism::InstanceVariableTargetNode then gen_setxv(:SETIV, src, target.name, false)
       when Prism::GlobalVariableTargetNode then gen_setxv(:SETGV, src, target.name, false)
+      when Prism::ClassVariableTargetNode then gen_setxv(:SETCV, src, target.name, false)
       when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
       when Prism::MultiTargetNode
         raise Unsupported, 'nested multiple assignment with a splat' unless target.rest.nil? && target.rights.empty?
@@ -1529,8 +1829,7 @@ module MrbcRb
       value = unparen(node.value)
       fixed = value.is_a?(Prism::ArrayNode) && value.elements.none? { |e| e.is_a?(Prism::SplatNode) }
       if value.is_a?(Prism::ArrayNode)
-        raise Unsupported, 'multiple assignment right side with a splat' unless fixed
-        raise Unsupported, 'multiple assignment right side element' unless value.elements.all? { |e| operand?(e) }
+        raise Unsupported, 'multiple assignment right side element' unless value.elements.all? { |e| operand?(e) || array_splat?(e) }
       else
         raise Unsupported, 'multiple assignment right side' unless operand?(value) || value.is_a?(Prism::OrNode) ||
                                                                       value.is_a?(Prism::AndNode)
@@ -1942,7 +2241,8 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| operand?(e) })
+        node.is_a?(Prism::CaseNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| operand?(e) || array_splat?(e) })
     end
 
     # Generates an operand into register +dst+ with the stack pointer at +dst+ (everything above it is free), as the fork
@@ -2034,6 +2334,10 @@ module MrbcRb
         emit(:MOVE, dst, result) unless result == dst
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
       when Prism::InstanceVariableReadNode then emit(:GETIV, dst, sym_index(node.name))
+      when Prism::ClassVariableReadNode then emit(:GETCV, dst, sym_index(node.name))
+      when Prism::FloatNode then emit(:LOADL, dst, float_index(node))
+      when Prism::NumberedReferenceReadNode then emit(:GETGV, dst, sym_index(:"$#{node.number}"))
+      when Prism::BackReferenceReadNode then emit(:GETGV, dst, sym_index(node.name))
       when Prism::OrNode, Prism::AndNode
         r = logic(node, need: true)
         gen_move(dst, r, false)
@@ -2059,6 +2363,9 @@ module MrbcRb
       when Prism::ConstantPathNode
         result = colon_path(node)
         emit(:MOVE, dst, result) unless result == dst
+      when Prism::CaseNode then case_value_into(node, dst)
+      when *VALUE_WRITES then write_value_into(node, dst)
+      when Prism::RangeNode then built_into(dst) { |base| range_at(node, base) }
       when Prism::LambdaNode
         # LAMBDA takes the child irep like BLOCK does; gen_move folds it straight into a local's register.
         @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(node, self)
@@ -2374,9 +2681,12 @@ module MrbcRb
     # its destination; otherwise ARRAY2 takes the destination and the register of the first element (codegen.c, NODE_ARRAY).
     def array_into(node, dst)
       elems = node.elements
+      return array_splat_into(node, dst) if elems.any?(Prism::SplatNode)
+
       raise Unsupported, 'array element' unless elems.all? { |e| operand?(e) }
-      # %i builds its symbols with SYMBOL and a pool string (not covered); a long list is built in chunks (gen_values).
-      raise Unsupported, '%i array' if node.opening_loc&.slice&.match?(/\A%[iI]/)
+      # %i builds its symbols with SYMBOL and a pool string; a long list is built in chunks (gen_values).
+      pct_symbols = node.opening_loc&.slice&.match?(/\A%[iI]/)
+      raise Unsupported, '%I element' if pct_symbols && !elems.all?(Prism::SymbolNode)
       raise Unsupported, 'array with many elements' if elems.size > 50
 
       a = temp
@@ -2385,7 +2695,9 @@ module MrbcRb
       literal_words = node.opening_loc&.slice&.start_with?('%')
       saved_hold = @hold_line
       @hold_line = true if literal_words
-      elems.each_with_index { |e, i| operand_into(unparen(e), a + i) }
+      elems.each_with_index do |e, i|
+        pct_symbols ? emit(:SYMBOL, a + i, pool_index([:str, e.unescaped.b])) : operand_into(unparen(e), a + i)
+      end
       @hold_line = saved_hold
       @nregs = [@nregs, a + elems.size].max
       if elems.empty?
@@ -2647,6 +2959,8 @@ module MrbcRb
         case entry
         in [:bigint, digits, base]
           [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
+        in [:float, bits]
+          [5].pack('C') + bits # IREP_TT_FLOAT, then the double little endian
         in [:str, bytes]
           # A string: tag 0, its length, its bytes and a NUL (dump.c's default case).
           [0].pack('C') + [bytes.bytesize].pack('n') + bytes + "\0".b
