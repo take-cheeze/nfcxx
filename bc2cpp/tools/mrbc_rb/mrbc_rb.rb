@@ -10,8 +10,9 @@
 # keyword, splat and block-pass arguments, constant paths (read, write, class and module names), regexp literals, lambda
 # literals and `&.`. Milestone 11 adds every operator method (folded for integer literals, SEND otherwise), unary minus,
 # plus and not, Float, big Integer, Rational and Imaginary literals, operator and setter names in def, alias, undef,
-# defined? (not for constants), the special variables, __FILE__ and __LINE__. Anything else raises Unsupported, so a
-# caller can fall back to the real mrbc.
+# defined? (not for constants), the special variables, __FILE__ and __LINE__, and exceptions: begin/rescue/else/ensure,
+# `rescue Foo, *list => e`, retry, rescue modifiers, def-level and block-level rescue bodies and the irep's catch handler
+# table (see the exceptions section below). Anything else raises Unsupported, so a caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
 # follow mrbgems/mruby-compiler/core/codegen.c:
@@ -40,7 +41,8 @@ module MrbcRb
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
     ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
-    RANGE_INC: 100, RANGE_EXC: 101, SYMBOL: 91, GETCV: 27, SETCV: 28
+    RANGE_INC: 100, RANGE_EXC: 101, SYMBOL: 91, GETCV: 27, SETCV: 28,
+    EXCEPT: 43, RESCUE: 44, RAISEIF: 45
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -51,7 +53,7 @@ module MrbcRb
   # multi-line statement of the kinds in MULTILINE_STATEMENTS follows the entered-node rule (Compiler#enter); any other
   # multi-line statement raises Unsupported.
   MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
-                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode].freeze
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::BeginNode].freeze
 
   # Multi-line statements whose line rules are derived below (see Compiler#enter): the fork stamps each instruction with the
   # line of the classic parser node it entered last, and a node's line is the line of the last token the parser had read
@@ -138,6 +140,8 @@ module MrbcRb
       @insns = [] # every emitted instruction as [name, operands, start], for the peepholes that look two back (gen_move)
       @rewound = false # the pc was rewound to the last instruction (the fork's pc == lastpc): no peephole until the next emit
       @leading_dot = {}.compare_by_identity # receiver node => line of the next token, for `recv\n  .name` (see #line_of)
+      @catches = [] # the catch handler table [type, begin, end, target] (RITE_CATCH), in the order the fork allocates them
+      @regions = [] # the begin/rescue regions being generated (the fork's LOOP_BEGIN and LOOP_RESCUE loopinfos)
     end
 
     def compile(program)
@@ -182,11 +186,13 @@ module MrbcRb
       else
         parameters(params, node.locals, node.location.start_line)
       end
-      raise Unsupported, 'method body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
-
-      stmts = node.body ? node.body.body : []
+      stmts = body_statements(node.body)
+      if node.body.is_a?(Prism::BeginNode) && node.body.statements.nil?
+        check_empty_gap(node.rparen_loc || params&.location || node.name_loc, first_keyword(node.body))
+      end
       value_reg = if stmts.empty?
                     t = temp
+                    check_empty_gap(node.rparen_loc || params&.location || node.name_loc, node.body ? node.body.location : node.end_keyword_loc)
                     @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -211,12 +217,14 @@ module MrbcRb
       when Prism::ItParametersNode then params = nil # `it` is a plain method call to the fork's parser
       else raise Unsupported, 'block parameters'
       end
-      parameters(params, node.locals, node.opening_loc.start_line, numbered: numbered)
-      raise Unsupported, 'block body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
-
-      stmts = node.body ? node.body.body : []
+      parameters(params, node.locals, node.is_a?(Prism::LambdaNode) ? node.closing_loc.start_line : node.opening_loc.start_line, numbered: numbered)
+      stmts = body_statements(node.body)
+      if node.body.is_a?(Prism::BeginNode) && node.body.statements.nil?
+        check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, first_keyword(node.body))
+      end
       value_reg = if stmts.empty?
                     t = temp
+                    check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, node.body ? node.body.location : node.closing_loc)
                     @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -290,8 +298,8 @@ module MrbcRb
 
     # The IREP record of this irep: its own block (the record size counts only that), then the records of its children.
     def irep_tree
-      body = [@nlocals, @nregs, @children.size].pack('nnn') + [0, @code.size].pack('nN') + @code.pack('C*') +
-             pool_block + syms_block
+      body = [@nlocals, @nregs, @children.size].pack('nnn') + [@catches.size, @code.size].pack('nN') + @code.pack('C*') +
+             catch_table_block + pool_block + syms_block
       [body.bytesize + 4].pack('N') + body + @children.map(&:irep_tree).join
     end
 
@@ -412,7 +420,7 @@ module MrbcRb
 
       t = temp
       args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
-      return_value(t, @loops.empty? ? :RETURN : :RETURN_BLK) # a return inside a loop is the in-block form
+      return_value(t, @loops.empty? && @regions.empty? ? :RETURN : :RETURN_BLK) # a return inside a loop or a rescue region is the in-block form
       last ? t : nil
     end
 
@@ -515,7 +523,15 @@ module MrbcRb
         call(it_call(node), need: last) # `it` is a method call to the fork's parser
       when Prism::ConstantReadNode
         # A constant read is generated even when unused: the lookup can autoload or raise (verified: `C` then `1` has GETCONST).
-        last ? value_in_register(node) : value_into(node, temp) && nil
+        # An unused one pushes nothing (codegen_const), so its register does not count toward nregs.
+        if last
+          value_in_register(node)
+        else
+          nregs = @nregs
+          value_into(node, @sp)
+          @nregs = nregs
+          nil
+        end
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
            Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode, Prism::ClassVariableReadNode
         last ? value_in_register(node) : nil
@@ -586,6 +602,12 @@ module MrbcRb
         def_statement(node, last: last)
       when Prism::ReturnNode
         return_statement(node, last: last)
+      when Prism::BeginNode
+        begin_statement(node, last: last)
+      when Prism::RescueModifierNode
+        rescue_modifier_statement(node, last: last)
+      when Prism::RetryNode
+        retry_statement(node, last: last)
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
       when Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
@@ -909,6 +931,8 @@ module MrbcRb
     end
 
     def next_statement(node, last:)
+      return next_in_region(node, last: last) if @regions.last && @regions.last.loops == @loops.size
+
       lp = @loops.last or raise Unsupported, 'next outside a while or until loop'
       raise Unsupported, 'next with a value' if node.arguments
 
@@ -1860,6 +1884,7 @@ module MrbcRb
         raise Unsupported, 'multiple assignment right side' unless operand?(value) || value.is_a?(Prism::OrNode) ||
                                                                       value.is_a?(Prism::AndNode)
       end
+      nregs_before = @nregs
       t = temp
       if !last && fixed && !value.elements.empty?
         elems = value.elements.map { |e| unparen(e) }
@@ -1867,6 +1892,7 @@ module MrbcRb
         if rest.nil? && rights.empty? && !lefts.empty? && lefts.size == elems.size &&
            elems.all? { |e| simple_literals.include?(e.class) } &&
            lefts.all? { |l| l.is_a?(Prism::LocalVariableTargetNode) && l.depth.zero? }
+          @nregs = nregs_before # nothing is pushed for loads straight into the locals
           lefts.each_with_index { |l, i| value_into(elems[i], local_register(l.name)) }
           return nil
         end
@@ -2382,6 +2408,17 @@ module MrbcRb
         begin
           @sp = base
           r = node.is_a?(Prism::IfNode) ? if_statement(node, last: true) : unless_statement(node, last: true)
+        ensure
+          @sp = saved
+        end
+        gen_move(dst, r, false)
+      when Prism::BeginNode, Prism::RescueModifierNode
+        # A begin block as a value: built at the destination when it is a temporary, else at the first temporary and moved.
+        saved = @sp
+        base = dst >= @nlocals ? dst : temp
+        begin
+          @sp = base
+          r = statement(node, last: true)
         ensure
           @sp = saved
         end
@@ -3351,6 +3388,222 @@ module MrbcRb
       end
       emit(:SSEND, a, sym_index(name), argc)
       reach(a + argc + 2)
+    end
+
+    # ---- exceptions (milestone 11): begin/rescue/else/ensure and retry ----
+
+    # A begin/rescue region on the fork's loop stack (LOOP_BEGIN, then LOOP_RESCUE once its body is done): +pc0+ is the retry
+    # target and +loops+ the number of while/until loops enclosing it (a `next` right inside one is not covered).
+    Region = Struct.new(:type, :pc0, :loops)
+
+    # write_iseq_block (dump.c): the catch handlers follow the iseq, each a type byte and the begin, end and target pcs as
+    # 32-bit big-endian numbers (struct mrb_irep_catch_handler).
+    def catch_table_block
+      @catches.map { |type, from, to, target| [type, from, to, target].pack('CNNN') }.join
+    end
+
+    def new_catch
+      @catches << nil
+      @catches.size - 1
+    end
+
+    def push_sp(n = 1)
+      @sp += n
+      @nregs = [@nregs, @sp].max
+    end
+
+    # NODE_BEGIN, NODE_RESCUE and NODE_ENSURE (codegen_begin, codegen_rescue, codegen_ensure). The value of the whole is in the
+    # register the statement started at. A begin block with neither rescue nor a non-empty ensure is its statements.
+    def begin_statement(node, last:)
+      rescue_c = node.rescue_clause
+      else_c = node.else_clause
+      ensure_c = node.ensure_clause
+      raise Unsupported, 'else without rescue' if else_c && !rescue_c
+
+      stmts = node.statements&.body || []
+      ensure_stmts = ensure_c&.statements&.body || []
+      if !rescue_c && ensure_stmts.empty?
+        raise Unsupported, 'empty begin block' if stmts.empty?
+
+        return generate(stmts, val: last)
+      end
+      r = @sp
+      @nregs = [@nregs, r + 1].max
+      first_kw = rescue_c ? rescue_c.keyword_loc : (else_c ? else_c.else_keyword_loc : (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc))
+      if stmts.empty?
+        @line = first_kw.start_line # an empty body is a node on the line of the keyword after it
+        check_empty_gap(node.begin_keyword_loc, first_kw) if node.begin_keyword_loc
+      end
+      clauses = []
+      clause = rescue_c
+      while clause
+        # An empty clause body is a node on the line of the keyword after it.
+        after = clause.subsequent ? clause.subsequent.keyword_loc : (else_c ? else_c.else_keyword_loc : (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc))
+        body = clause.statements&.body || []
+        check_empty_gap(clause.then_keyword_loc || clause.reference&.location || clause.exceptions.last&.location || clause.keyword_loc, after) if body.empty?
+        clauses << RescueClause.new(clause.exceptions, clause.reference, body, after.start_line)
+        clause = clause.subsequent
+      end
+      else_stmts = else_c ? (else_c.statements&.body || []) : nil
+      else_end = ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc
+      else_line = else_end.start_line
+      check_empty_gap(else_c.else_keyword_loc, else_end) if else_stmts&.empty?
+      if ensure_stmts.empty?
+        rescue_region(r, stmts, clauses, else_stmts, else_line, last)
+      else
+        ensure_region(r, last, ensure_stmts) do
+          clauses.empty? ? branch(stmts, r, need: last) : rescue_region(r, stmts, clauses, else_stmts, else_line, last)
+        end
+      end
+      @sp = r
+      last ? r : nil
+    end
+
+    # The first keyword after the body of a begin node (rescue, else or ensure, or the end).
+    def first_keyword(node)
+      (node.rescue_clause ? node.rescue_clause.keyword_loc : nil) || node.else_clause&.else_keyword_loc ||
+        node.ensure_clause&.ensure_keyword_loc || node.end_keyword_loc
+    end
+
+    # An empty body is a node the parser stamps with the line of the next keyword, unless a `;` came first: then it is the line
+    # of the first `;` (verified: `foo do\n  ;\nend` is line 2). A `;` in a gap that spans lines is not covered (it may
+    # also just end the keyword's own line).
+    def check_empty_gap(from_loc, to_loc)
+      return if from_loc.end_line == to_loc.start_line
+
+      gap = from_loc.copy(start_offset: from_loc.end_offset, length: to_loc.start_offset - from_loc.end_offset).slice
+      raise Unsupported, 'empty body with a semicolon' if gap.include?(';')
+    end
+
+    # `expr rescue other` is a rescue of StandardError with no variable (the same NODE_RESCUE).
+    def rescue_modifier_statement(node, last:)
+      r = @sp
+      @nregs = [@nregs, r + 1].max
+      clauses = [RescueClause.new([], nil, [node.rescue_expression], node.location.end_line)]
+      rescue_region(r, [node.expression], clauses, nil, nil, last)
+      @sp = r
+      last ? r : nil
+    end
+
+    RescueClause = Struct.new(:exceptions, :reference, :body, :empty_line)
+
+    # codegen_ensure: the body (value in r when +val+), then EXCEPT into the register after it, the ensure clause, RAISEIF.
+    # The handler covers the body and its target is the end of the body.
+    def ensure_region(r, val, ensure_stmts)
+      entry = new_catch
+      from = @code.size
+      yield
+      to = @code.size
+      @sp = val ? r + 1 : r
+      push_sp
+      idx = @sp
+      emit(:EXCEPT, idx)
+      push_sp
+      branch(ensure_stmts, nil, need: false)
+      @sp = idx
+      emit(:RAISEIF, idx)
+      @sp = idx - 1
+      @catches[entry] = [1, from, to, to]
+    end
+
+    # codegen_rescue: the body goes to r; a JMP skips the handlers when nothing was raised. The handler starts with EXCEPT into
+    # r, then each clause tests its classes with RESCUE and JMPIF (StandardError when there are none), assigns the
+    # exception to its variable and runs its body; no clause matching re-raises with RAISEIF.
+    def rescue_region(r, stmts, clauses, else_stmts, else_line, val)
+      region = Region.new(:begin, @code.size, @loops.size)
+      @labels << region.pc0
+      @regions << region
+      entry = new_catch
+      from = @code.size
+      @sp = r
+      branch(stmts, r, need: true)
+      region.type = :rescue
+      to = @code.size
+      noexc = emit_jump(:JMP)
+      @catches[entry] = [0, from, to, @code.size]
+      exend = []
+      pos1 = nil
+      @sp = r
+      emit(:EXCEPT, r)
+      @sp = r + 1
+      clauses.each do |clause|
+        dispatch(pos1)
+        pos2 = []
+        if clause.exceptions.empty?
+          emit(:GETCONST, r + 1, sym_index(:StandardError))
+          emit(:RESCUE, r, r + 1)
+          pos2 << emit_jump(:JMPIF, r + 1)
+        end
+        clause.exceptions.each do |ex|
+          ex = unparen(ex)
+          if ex.is_a?(Prism::SplatNode)
+            # `*list`: the list, then the exception copied after it, and list.__case_eqq(exception) tests it.
+            splat = ex.expression && unparen(ex.expression)
+            raise Unsupported, 'rescue with a splat of a non-operand' unless splat && operand?(splat)
+
+            operand_into(splat, r + 1)
+            gen_move(r + 2, r, false)
+            @nregs = [@nregs, r + 4].max
+            emit(:SEND, r + 1, sym_index(:__case_eqq), 1)
+          else
+            raise Unsupported, 'rescue with a non-operand class' unless operand?(ex)
+
+            @line = ex.location.end_line if ex.is_a?(Prism::ConstantPathNode) # a path node is entered like the rest
+            operand_into(ex, r + 1)
+            emit(:RESCUE, r, r + 1)
+          end
+          pos2 << emit_jump(:JMPIF, r + 1)
+        end
+        pos1 = emit_jump(:JMP)
+        pos2.each { |j| dispatch(j) }
+        @sp = r
+        assign_target(clause.reference, r, @sp) if clause.reference
+        @line = clause.empty_line if clause.body.empty?
+        branch(clause.body, r, need: val)
+        exend << emit_jump(:JMP)
+        @sp = r + 1
+      end
+      dispatch(pos1)
+      emit(:RAISEIF, r)
+      @sp = r
+      dispatch(noexc)
+      if else_stmts
+        @line = else_line if else_stmts.empty?
+        branch(else_stmts, r, need: val)
+      end
+      exend.each { |j| dispatch(j) }
+      @regions.pop
+    end
+
+    # codegen_next: when the innermost loopinfo is a begin/rescue region rather than a while loop, the fork treats `next` as a
+    # block's: the value (nil when there is none) is returned with RETURN (verified: a `next` in a rescue clause inside a while
+    # is RETNIL, leaving the method).
+    def next_in_region(node, last:)
+      args = node.arguments&.arguments
+      raise Unsupported, 'next with several values' if args && (args.size != 1 || !(simple?(args[0]) || call_node?(args[0])))
+
+      t = temp
+      args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
+      return_value(t, :RETURN)
+      last ? t : nil
+    end
+
+    # The statements of a def or block body: a body with rescue, else or ensure is one begin statement.
+    def body_statements(body)
+      case body
+      when nil then []
+      when Prism::StatementsNode then body.body
+      when Prism::BeginNode then [body]
+      else raise Unsupported, "body #{body.class.name.split('::').last}"
+      end
+    end
+
+    # codegen_retry: JMPUW to the start of the innermost region whose body is done (LOOP_RESCUE).
+    def retry_statement(_node, last:)
+      region = @regions.reverse.find { |g| g.type == :rescue } or raise Unsupported, 'retry outside a rescue clause'
+      jump = emit_jump(:JMPUW)
+      patch_jump(jump, region.pc0)
+      last ? temp : nil
     end
 
     # ---- RITE, as src/dump.c writes it: header, IREP, DBG, LVAR, END ----
