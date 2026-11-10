@@ -65,7 +65,20 @@ SNIPPETS = [
   "x = 1\nif x\nelse\n  3\nend\nx",
   "x = 1\nif x\n  2\n  3\nelse\n  4\nend",
   "x = 1\nif x\n  p 2\nelse\n  3\n  p 4\nend\nx",
-  "x = 1\nif x\n  p 2\n  p 3\nelse\n  p 4\nend"
+  "x = 1\nif x\n  p 2\n  p 3\nelse\n  p 4\nend",
+  # string and array literals, unless (milestone 4)
+  'x = "ab"',
+  "x = \"ab\"\nx",
+  "x = \"ab\"\ny = \"ab\"\np x, y",
+  'x = [1, 2]',
+  'x = []',
+  "x = 1\nx = [x, 2]",
+  "x = [1]\nx.size",
+  "x = 1\np x, \"s\"",
+  "x = 1\nunless x\n  2\nelse\n  3\nend",
+  "x = 1\nunless x\n  2\nend",
+  "x = 1\nunless x\n  2\nend\np 3",
+  "unless self\n  1\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)

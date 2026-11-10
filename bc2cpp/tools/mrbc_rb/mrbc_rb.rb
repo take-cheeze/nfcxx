@@ -28,7 +28,8 @@ module MrbcRb
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
-    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPNOT: 40,
+    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
+    ARRAY: 82, ARRAY2: 83, STRING: 92,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
@@ -39,7 +40,7 @@ module MrbcRb
 
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
-                   Prism::LocalVariableReadNode].freeze
+                   Prism::LocalVariableReadNode, Prism::StringNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -98,6 +99,8 @@ module MrbcRb
         call(node)
       when Prism::IfNode
         if_statement(node, last: last)
+      when Prism::UnlessNode
+        unless_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
@@ -146,6 +149,46 @@ module MrbcRb
     def set_jump_line(position, line)
       @lines[position] = line
       @lines[position + 1] = line
+    end
+
+    # `unless` is an if whose body runs when the predicate is false. With an else-branch, the else-branch is the body that
+    # runs when the predicate holds, so it is generated first, exactly as the then-branch of an if/else. Without one, the
+    # value form loads nil for the predicate-true case, and the statement form skips the body with JMPIF.
+    def unless_statement(node, last:)
+      predicate = node.predicate
+      raise Unsupported, 'unless predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+
+      body = node.statements&.body || []
+      else_node = node.else_clause
+      t = temp
+      value_into(predicate, t)
+      if else_node
+        raise Unsupported, 'empty unless or else-branch' if body.empty? || else_node.statements.nil? || else_node.statements.body.empty?
+
+        to_else = emit_jump(:JMPNOT, t)
+        set_jump_line(to_else, branch(else_node.statements, t, need: last))
+        to_end = emit_jump(:JMP)
+        patch_jump(to_else, @code.size)
+        set_jump_line(to_end, branch(node.statements, t, need: last))
+        patch_jump(to_end, @code.size)
+      elsif last
+        raise Unsupported, 'empty unless-body' if body.empty?
+
+        to_body = emit_jump(:JMPNOT, t)
+        set_jump_line(to_body, node.location.start_line)
+        emit(:LOADNIL, t)
+        to_end = emit_jump(:JMP)
+        patch_jump(to_body, @code.size)
+        set_jump_line(to_end, branch(node.statements, t, need: true))
+        patch_jump(to_end, @code.size)
+      else
+        raise Unsupported, 'empty unless-body' if body.empty?
+
+        to_end = emit_jump(:JMPIF, t)
+        set_jump_line(to_end, branch(node.statements, t, need: false))
+        patch_jump(to_end, @code.size)
+      end
+      last ? t : nil
     end
 
     # One branch of an if: its statements in order, the last one's value in +t+ when it is needed. Returns the line of the
@@ -303,6 +346,8 @@ module MrbcRb
       when Prism::SelfNode then emit(:LOADSELF, dst)
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
+      when Prism::StringNode then emit(:STRING, dst, pool_index([:str, node.unescaped.b]))
+      when Prism::ArrayNode then array_into(node, dst)
       when Prism::CallNode
         result = call(node)
         emit(:MOVE, dst, result) unless result == dst
@@ -328,6 +373,22 @@ module MrbcRb
       elsif i <= 0xff then emit(:LOADI8, dst, i)
       elsif i <= 0x7fff then emit(:LOADI16, dst, i)
       else emit(:LOADI32, dst, i)
+      end
+    end
+
+    # An array literal of leaf values: the elements are loaded from the first temporary on. ARRAY takes that register as
+    # its destination; otherwise ARRAY2 takes the destination and the register of the first element (codegen.c, NODE_ARRAY).
+    def array_into(node, dst)
+      elems = node.elements
+      raise Unsupported, 'array element' unless elems.all? { |e| SIMPLE_VALUES.include?(e.class) }
+
+      a = temp
+      elems.each_with_index { |e, i| value_into(e, a + i) }
+      @nregs = [@nregs, a + elems.size].max
+      if dst == a
+        emit(:ARRAY, a, elems.size)
+      else
+        emit(:ARRAY2, dst, a, elems.size)
       end
     end
 
@@ -415,8 +476,13 @@ module MrbcRb
     # and its digits, with no terminating NUL (dump.c writes len + 2 bytes).
     def pool_block
       entries = @pool.map do |entry|
-        _kind, digits, base = entry
-        [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
+        case entry
+        in [:bigint, digits, base]
+          [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
+        in [:str, bytes]
+          # A string: tag 0, its length, its bytes and a NUL (dump.c's default case).
+          [0].pack('C') + [bytes.bytesize].pack('n') + bytes + "\0".b
+        end
       end
       [@pool.size].pack('n') + entries.join
     end
