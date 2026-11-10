@@ -31,7 +31,7 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, FSTRING: 119,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, SETIDX: 37, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57
@@ -122,6 +122,8 @@ module MrbcRb
       @nregs = @nlocals + 1
       @line = node.location.start_line
       emit(:ENTER, requireds.size << 18)
+      raise Unsupported, 'method body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
+
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
                     t = temp
@@ -262,12 +264,14 @@ module MrbcRb
     # codegen_class: the outer namespace (nil for a plain constant) goes into the first temporary, the superclass (nil when
     # there is none) into the next, and CLASS takes the first temporary as its result. The body follows (class_body).
     def class_statement(node, last:)
-      raise Unsupported, 'class with a superclass' if node.superclass
+      superclass = node.superclass
+      raise Unsupported, 'superclass that is not a simple value' if superclass && !SIMPLE_VALUES.include?(superclass.class)
 
       name = plain_constant(node.constant_path)
       t = temp
       emit(:LOADNIL, t)
-      emit(:LOADNIL, t + 1)
+      # The superclass, when there is one, goes into the register after the namespace (codegen_class).
+      superclass ? value_into(superclass, t + 1) : emit(:LOADNIL, t + 1)
       emit(:CLASS, t, sym_index(name))
       class_body(node, t, last)
       t
@@ -489,6 +493,23 @@ module MrbcRb
       end
     end
 
+    # `recv[index] = value` (SETIDX, verified): where the value is needed the result register r holds it, the receiver,
+    # index and value follow it, and SETIDX runs on the receiver; otherwise the receiver is in the first temporary.
+    def index_assign(recv, index, value, need:)
+      [recv, index, value].each do |v|
+        raise Unsupported, 'index assignment with a non-simple operand' unless SIMPLE_VALUES.include?(v.class)
+      end
+      r = temp
+      base = need ? r + 1 : r
+      value_into(recv, base)
+      value_into(index, base + 1)
+      value_into(value, base + 2)
+      emit(:MOVE, r, base + 2) if need
+      emit(:SETIDX, base)
+      @nregs = [@nregs, base + 4].max
+      need ? r : nil
+    end
+
     def call(node, need: true)
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
@@ -515,6 +536,9 @@ module MrbcRb
       end
       # `recv[index]` is GETIDX and `recv[]` a plain SEND0 (both verified); other index forms are not covered yet.
       raise Unsupported, 'index call with several arguments' if name == :[] && args.size > 1
+      if name == :[]= && recv && args.size == 2
+        return index_assign(recv, args[0], args[1], need: need)
+      end
       raise Unsupported, 'index assignment' if name == :[]=
 
       if recv && BINARY_OPS.key?(name) && args.size == 1

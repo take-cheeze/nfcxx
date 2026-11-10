@@ -156,7 +156,14 @@ SNIPPETS = [
   "x = 1\nx[2]",
   "x = 1\nx[]",
   "module Foo\n  def bar\n    1\n  end\nend",
-  "# frozen_string_literal: true\ndef foo\n  'a'\nend"
+  "# frozen_string_literal: true\ndef foo\n  'a'\nend",
+  # index assignment and superclasses (milestone 7)
+  "x = 1\nx[2] = 3",
+  "x = 1\nx[2] = 3\nx",
+  "x = 1\nx[2] = 3\n3",
+  "class Foo < Bar; end",
+  "class Foo < Bar\n  1\nend",
+  "class Foo < Bar; end\nclass Baz; end"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
