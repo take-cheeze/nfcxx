@@ -424,4 +424,67 @@ Dir.mktmpdir('enumerator-symbols') do |dir|
   suite.check('the proof is not made when no native has a to_enum Symbol', !asked)
 end
 
+Dir.mktmpdir('hook-calls') do |dir|
+  klass = File.join(dir, '3rd', 'mruby', 'src', 'class.c')
+  FileUtils.mkdir_p(File.dirname(klass))
+  helper = <<~'C'
+    static void
+    hook_call(mrb_state *mrb, mrb_value obj, mrb_sym mid, mrb_bool gone, mrb_value arg)
+    {
+      struct RClass *c = mrb_class(mrb, obj);
+      mrb_method_t m = mrb_method_search_vm(mrb, &c, mid);
+
+      if (MRB_METHOD_UNDEF_P(m)) {
+        if (gone) return;
+      }
+      else if (MRB_METHOD_FUNC_P(m)) {
+        if (MRB_METHOD_FUNC(m) == mrb_do_nothing) return;
+      }
+      else {
+        const struct RProc *p = MRB_METHOD_PROC(m);
+        if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == mrb_do_nothing) return;
+      }
+      mrb_funcall_argv(mrb, obj, mid, 1, &arg);
+    }
+  C
+  gone = "#ifdef MRB_MT_EXCLUDE_Widget_SYM__inherited\n# define HOOK_GONE_inherited TRUE\n#else\n# define HOOK_GONE_inherited FALSE\n#endif\n"
+  call = 'void f(mrb_state *mrb, mrb_value o, mrb_value k) { hook_call(mrb, o, MRB_SYM(inherited), HOOK_GONE_inherited, k); }'
+  table = <<~'C'
+    #define MRB_MT_CLASS Widget
+    static const mrb_mt_entry widget_rom_entries[] = {
+      MRB_MT_ENTRY(mrb_do_nothing, MRB_SYM(inherited), MRB_ARGS_REQ(1) | MRB_MT_PRIVATE)
+    };
+    #undef MRB_MT_CLASS
+    void
+    mrb_init_widget(mrb_state *mrb)
+    {
+      struct RClass *w = mrb_define_class_id(mrb, MRB_SYM(Widget), mrb->object_class);
+      MRB_MT_INIT_ROM(mrb, w, widget_rom_entries);
+    }
+  C
+  source = ->(h: helper, g: gone, c: call, extra: '') { "#{g}#{h}#{table}#{c}\n#{extra}" }
+  scan = lambda do |text, enabled: true|
+    File.write(klass, text)
+    CoreNativeCandidates.reachable({}, [klass], [], diagnostic_literals: enabled)[0]
+  end
+  suite.check('without the closed-world guarantee a hook call is a lookup', scan.call(source.call, enabled: false).include?('inherited'))
+  suite.check('a hook_call name is no lookup of the default entry', !scan.call(source.call).include?('inherited'))
+  suite.check('another lookup of the name still counts',
+              scan.call(source.call(extra: 'void g(mrb_state *mrb, mrb_value o) { mrb_funcall_id(mrb, o, MRB_SYM(inherited), 0); }')).include?('inherited'))
+  unsafe = {
+    'changed helper body' => source.call(h: helper.sub('if (gone) return;', 'if (!gone) return;')),
+    'second definition' => source.call(h: "#{helper}#{helper}"),
+    'missing gone macro' => source.call(g: ''),
+    'gone macro of another class' => source.call(g: gone.gsub('Widget', 'Gadget')),
+    'gone macro true when kept' => source.call(g: gone.sub('FALSE', 'TRUE')),
+    'shadowing hook_call macro' => source.call(extra: '#define hook_call(mrb, o, id, g, a) mrb_funcall_id(mrb, o, id, 0)'),
+    'a call with another gone flag' => source.call(c: call.sub('HOOK_GONE_inherited', 'TRUE'))
+  }
+  unsafe.each { |why, text| suite.check("#{why} disables the hook-call exemption", scan.call(text).include?('inherited')) }
+  other = File.join(dir, 'other.c')
+  File.write(other, source.call)
+  suite.check('a hook_call defined outside class.c is not verified',
+              CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('inherited'))
+end
+
 suite.finish!
