@@ -56,14 +56,15 @@ module MrbcRb
   # when it built the node, which is the node's end line.
   MULTILINE_STATEMENTS = [Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
                           Prism::InstanceVariableWriteNode, Prism::CallNode, Prism::StringNode, Prism::InterpolatedStringNode,
-                          Prism::HashNode, Prism::ArrayNode].freeze
+                          Prism::HashNode, Prism::ArrayNode, Prism::LambdaNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
              Prism::SymbolNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::ArrayNode, Prism::CallNode,
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
-             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode].freeze
+             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::RegularExpressionNode,
+             Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
@@ -85,7 +86,7 @@ module MrbcRb
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
   BUILT_VALUES = [Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
-                  Prism::InterpolatedRegularExpressionNode].freeze
+                  Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode].freeze
 
   # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
   UNVERIFIED_OPERATORS = %i[-@ +@ ~ =~ !~ <=> ** & | ^ >> ===].freeze # `[]`, `[]=`, `!`, `!=`, `%` and `<<` are verified
@@ -245,7 +246,7 @@ module MrbcRb
       param_names = requireds.map(&:name)
       set_locals(param_names + [nil] + (node.locals - param_names))
       @nregs = @nlocals + 1
-      @line = node.opening_loc.start_line
+      @line = node.is_a?(Prism::LambdaNode) ? node.location.end_line : node.opening_loc.start_line # a lambda node is stamped at its end
       emit(:ENTER, requireds.size << 18)
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
@@ -363,9 +364,8 @@ module MrbcRb
 
       line = blk.opening_loc.start_line
       parts = [*(recv ? [recv.location] : []), *args.map(&:location)]
-      unless @line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line }
-        raise Unsupported, 'call with a block spanning lines'
-      end
+      multi = !(@line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line })
+      block_call_lines(node, recv, args, line) if multi
 
       a = @sp
       @nregs = [@nregs, a + 1].max
@@ -377,6 +377,7 @@ module MrbcRb
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
+      @line = line if multi # BLOCK and the send are stamped with the line of the block node
       emit(:BLOCK, sp, index)
       emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), argc)
       patch_jump(skip, @code.size) if skip
@@ -500,18 +501,6 @@ module MrbcRb
       end
     end
 
-    # Whether a call with a block that spans lines is inside +node+.
-    def block_call_inside?(node)
-      stack = node.compact_child_nodes
-      until stack.empty?
-        n = stack.pop
-        return true if n.is_a?(Prism::CallNode) && n.block.is_a?(Prism::BlockNode) && n.block.location.start_line != n.block.location.end_line
-
-        stack.concat(n.compact_child_nodes)
-      end
-      false
-    end
-
     # Rejects the shapes whose line rules are not verified: heredocs, and operators `||` `&&` over several lines.
     def check_multiline(node)
       stack = [node]
@@ -521,9 +510,9 @@ module MrbcRb
         when Prism::OrNode, Prism::AndNode, Prism::ParenthesesNode
           raise Unsupported, 'multi-line logic or parentheses' if n.location.start_line != n.location.end_line
         when Prism::KeywordHashNode
-          # A call with a multi-line block as a keyword value: the line of its BLOCK and send (the call's own) differs from
-          # the line the hash was entered at (the wrong guess `foo(k: lambda do ... end)` was seen).
-          raise Unsupported, 'multi-line block call as a keyword value' if block_call_inside?(n)
+          # A keyword whose value spans lines: the parser builds the key (the symbol) only after the value, so its line is the
+          # value's end (seen as a wrong line for `foo(k: [\n 1\n])`); not derived here.
+          raise Unsupported, 'multi-line keyword value' if n.elements.any? { |e| e.location.start_line != e.location.end_line }
         when Prism::StringNode, Prism::InterpolatedStringNode
           raise Unsupported, 'heredoc' if n.opening_loc&.slice&.start_with?('<<')
         when Prism::CallNode
@@ -1481,7 +1470,7 @@ module MrbcRb
       operand_into(recv, t)
       if index
         operand_into(idx, t + 1)
-        emit(:GETIDX, t)
+        index_read(recv, idx, t)
       else
         emit(:SEND0, t, sym_index(node.read_name))
       end
@@ -2529,6 +2518,31 @@ module MrbcRb
     end
 
     # ---- Block control flow (milestone 11) ----
+
+    # The read of `recv[idx]` in an index operator assignment, as gen_binop does it: GETIDX0 fuses `MOVE t, local; LOADI_0 t+1`
+    # (a local receiver and the index 0), a plain SEND replaces GETIDX when the code is at a jump target.
+    def index_read(recv, idx, t)
+      if no_peephole?
+        emit(:SEND, t, sym_index(:[]), 1)
+      elsif idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
+        truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
+        emit(:GETIDX0, t, local_register(recv.name))
+      else
+        emit(:GETIDX, t)
+      end
+    end
+
+    # A call with a block whose receiver or arguments are not all on the line of the block's opening: the parts are generated
+    # with the line rules of an ordinary call (each node entered at its own line, a leading-dot receiver at the dot's line),
+    # and BLOCK and the send carry the line of the block node, its opening. Parts after the opening line are not covered.
+    def block_call_lines(node, recv, args, line)
+      parts = [*(recv ? [recv] : []), *args]
+      raise Unsupported, 'call with a block spanning lines' unless parts.all? { |part| part.location.end_line <= line }
+      raise Unsupported, 'safe navigation in a call with a block spanning lines' if node.safe_navigation? # DIFF seen
+
+      leading_dot(node)
+      parts.each { |part| check_multiline(part) }
+    end
 
     # The LOOP_BLOCK entry that lambda_body pushes for a block or lambda body (a marker: it has no registers or jumps).
     BLOCK_LOOP = :block
