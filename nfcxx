@@ -523,7 +523,6 @@ while [ $# -gt 0 ]; do
     -x) xlang=$2; shift ;;      # -x c++ (CMake's compiler probes pipe a source to -E -x c++ -)
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
-    -fno-rtti|-frtti) ;;                            # accepted, not acted on: RTTI stays available (a program that builds without it builds with it)
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
     -fsanitize=*) sanitize=${sanitize:+$sanitize,}${1#-fsanitize=} ;;
     -fno-sanitize=all) sanitize="" ;;
