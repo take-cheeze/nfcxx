@@ -6,6 +6,7 @@ Status, 2026-11-09: in progress.
 - Done: Phase 2's import. bc2cpp is in `bc2cpp/` with its history, and the optcarrot world now uses it.
 - Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
   `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
+- Done: a second world, `scripts/pathb-qbe-emit.rb` (`tests/bc2cpp/run_pathb_qbe_emit.sh`, the `script-world` build kind).
 - Next: rpg-maker-clone takes bc2cpp from its `3rd/nfcxx` submodule (rpg-maker-clone#3204, Phase 3).
 
 bc2cpp is rpg-maker-clone's mruby-bytecode-to-C++ compiler (`tools/bc2cpp`). It compiles a closed world, the engine
@@ -98,20 +99,19 @@ A world is a program bc2cpp compiles as a closed world, plus a check that its co
 interpreter. Each world is one `tests/bc2cpp/run_<name>.sh` that sources `fetch.sh`, plus one entry in the workflow's
 `world` matrix.
 
-The next world is nfcxx's own mruby scripts ([mruby-scripting.md](mruby-scripting.md)): `scripts/pathb-qbe-emit.rb`,
-`scripts/cil-link.rb`, `scripts/qbe2cil.rb`, `scripts/pathb-cil-emit.rb` and the rest that `scripts/mrb` runs on the
-`build/mruby-tool` interpreter.
-- Their rules already fit a closed world: no `Regexp`, byte strings, no `eval`.
-- `tests/mruby/run.sh` already has the oracle inputs, so the check is the compiled script's output, stderr and exit
-  status against the interpreted run, byte for byte.
-
-Two things are missing on the bc2cpp side, both rpg-maker-clone changes until Phase 3:
-- **A build kind for these scripts**, next to `optcarrot-probe` and `bc2cpp-self` in `compiled_gems.rb`'s
-  `BC2CPP_CLOSED_WORLD_BUILDS`, with the gem list of `scripts/mruby-tool-config.rb`. That interpreter pins upstream mruby
-  4.0.0, and bc2cpp needs its fork (coupling item 1), so the compiled scripts build on the fork.
-- **A generic runner.** `compiled_run.rb` is optcarrot-specific. A world needs one that takes a list of sources and an
-  entry and produces a sealed executable. The `bc2cpp-self` executable, whose C `main` calls one entry
-  (`host-libs/mruby-bc2cpp-runner`), is the shape to follow.
+The second world is one of nfcxx's own mruby scripts ([mruby-scripting.md](mruby-scripting.md)):
+`scripts/pathb-qbe-emit.rb`, the largest (3.5K lines) and the one with the heaviest real input (the 3.4 MB IR of
+`tests/pathb-ir`). Its rules fit a closed world: no `Regexp`, byte strings, no `eval`.
+- **Build kind.** `script-world` is a probe build like `optcarrot-probe` (`BC2CPP_PROBE_BUILDS` in `compiled_gems.rb`): the
+  script is the mrblib of a gem, its closing statements (`rc = main(ARGV); exit(rc)`) become `ScriptWorld.run`, and a
+  fixed C `main` passes `ARGV` and returns its status. It builds on the pinned world's mruby fork with the same sealed
+  gem set, without `Regexp`.
+- **Runner.** `bc2cpp/tools/script_world/compiled_run.rb` takes the script, its tail, a file of cases and benchmark
+  arguments. It checks that every case gives the same stdout, stderr and exit status compiled as interpreted (an
+  uncaught exception compares without its backtrace: compiled code has no line table), then times the interpreter, the
+  compiled build and CRuby.
+- **Another script** needs its own `tests/bc2cpp/run_<name>.sh` (the tail, the entry, the cases), nothing else, as long as
+  the script's inputs are files given on the command line.
 
 ## Phases
 
