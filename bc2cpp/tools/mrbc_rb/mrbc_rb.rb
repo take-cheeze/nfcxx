@@ -68,7 +68,7 @@ module MrbcRb
   # the nodes whose line is a keyword's (#if_node_line, the loops, #def_line, blocks and lambdas).
   MULTILINE_STATEMENTS = [Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
                           Prism::InstanceVariableWriteNode, Prism::CallNode, Prism::StringNode, Prism::InterpolatedStringNode,
-                          Prism::HashNode, Prism::ArrayNode, Prism::OrNode, Prism::AndNode, Prism::ReturnNode,
+                          Prism::HashNode, Prism::ArrayNode, Prism::OrNode, Prism::AndNode, Prism::ReturnNode, Prism::BreakNode, Prism::NextNode,
                           Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
                           Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode,
                           Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode, Prism::GlobalVariableOrWriteNode,
@@ -368,7 +368,7 @@ module MrbcRb
 
       recv = node.receiver && unparen(node.receiver)
       recv = nil if recv.is_a?(Prism::SelfNode)
-      raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil?
+      raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil? && !self_receiver?(node)
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
       raise Unsupported, 'call with a block and a non-operand argument' unless args.all? { |x| operand?(x) || x.is_a?(Prism::KeywordHashNode) || x.is_a?(Prism::SplatNode) }
       raise Unsupported, 'call with a block and a non-simple receiver' if recv && !operand?(recv)
@@ -453,8 +453,6 @@ module MrbcRb
     # codegen_return: the value (nil for a plain `return`) goes into the first temporary and gen_return folds a MOVE or a
     # constant load into it. Only inside a method body; a statement's value register is that temporary.
     def return_statement(node, last:)
-      raise Unsupported, 'return outside a method body' unless @in_method || @parent
-
       enter(node)
 
       args = node.arguments&.arguments
@@ -592,7 +590,7 @@ module MrbcRb
         @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')' || recv.block.is_a?(Prism::BlockNode)
       when Prism::ParenthesesNode
         # Ends in its closing parenthesis: built without the next token. Several lines inside would move the inner nodes.
-        raise Unsupported, 'leading-dot receiver' if recv.location.start_line != recv.location.end_line
+        nil
       else raise Unsupported, 'leading-dot receiver'
       end
     end
@@ -711,6 +709,8 @@ module MrbcRb
         return_statement(node, last: last)
       when Prism::BeginNode
         begin_statement(node, last: last)
+      when Prism::ParenthesesNode
+        parentheses_statement(node, last: last)
       when Prism::RescueModifierNode
         rescue_modifier_statement(node, last: last)
       when Prism::RetryNode
@@ -1046,9 +1046,11 @@ module MrbcRb
       enter(node)
 
       args = node.arguments&.arguments
-      raise Unsupported, 'break with several values' if args && args.size != 1
+      # milestone 13: with the loop's value unused, several values are a NOVAL array (nothing) and `break *a` the plain value.
+      raise Unsupported, 'break with several values' if args && args.size != 1 && lp.reg
+      raise Unsupported, 'break with a splat' if args && args.size == 1 && args[0].is_a?(Prism::SplatNode) && (lp.reg || args[0].expression.nil?)
 
-      value = args && unparen(args[0])
+      value = args && args.size == 1 && unparen(args[0].is_a?(Prism::SplatNode) ? args[0].expression : args[0])
       if value
         if lp.reg
           raise Unsupported, 'break value outside the loop statement level' unless @sp == lp.reg
@@ -1073,9 +1075,13 @@ module MrbcRb
 
       enter(node)
       args = node.arguments&.arguments
-      raise Unsupported, 'next with several values or a splat' if args && (args.size != 1 || args[0].is_a?(Prism::SplatNode))
+      # milestone 13: several values are an array literal, which generates nothing unused; `next *a` is the plain value.
+      if args && args.size == 1
+        v = args[0].is_a?(Prism::SplatNode) ? args[0].expression : args[0]
+        raise Unsupported, 'next with an anonymous splat' unless v
 
-      statement(unparen(args[0]), last: false) if args # codegen(value, NOVAL) before the JMPUW
+        statement(unparen(v), last: false) # codegen(value, NOVAL) before the JMPUW
+      end
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp.pc0)
       last ? temp : nil
@@ -1086,7 +1092,7 @@ module MrbcRb
     # there is none) into the next, and CLASS takes the first temporary as its result. The body follows (class_body).
     def class_statement(node, last:)
       superclass = node.superclass
-      raise Unsupported, 'superclass that is not a simple value' if superclass && !(simple?(superclass) || unparen(superclass).is_a?(Prism::ConstantPathNode))
+      raise Unsupported, 'superclass that is not a simple value' if superclass && !(simple?(superclass) || operand?(superclass))
 
       t = temp
       name = namespace_into(node.constant_path, t)
@@ -1229,6 +1235,8 @@ module MrbcRb
     end
 
     # Nodes the fork enters but ENTERED lacks: a single-line one stamps its own line (case_statement sets it).
+    # milestone 13: subjects the fork does not enter either (their own parts do): an if, a begin block, parentheses.
+    CASE_BLOCKISH = [Prism::IfNode, Prism::UnlessNode, Prism::BeginNode, Prism::ParenthesesNode].freeze
     CASE_UNENTERED = [Prism::ConstantPathNode, Prism::RangeNode, Prism::RegularExpressionNode,
                       Prism::InterpolatedRegularExpressionNode].freeze
 
@@ -1238,7 +1246,7 @@ module MrbcRb
       node = unparen(node)
       return false unless operand?(node)
 
-      ENTERED.include?(node.class) || CASE_UNENTERED.include?(node.class)
+      ENTERED.include?(node.class) || CASE_UNENTERED.include?(node.class) || CASE_BLOCKISH.include?(node.class)
     end
 
     # codegen_case: the subject (when there is one) goes into the first temporary `head`; each `when` value is generated at
@@ -1983,11 +1991,20 @@ module MrbcRb
       when Prism::ClassVariableTargetNode then gen_setxv(:SETCV, src, target.name, false)
       when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
       when Prism::MultiTargetNode
-        raise Unsupported, 'nested multiple assignment with a splat' unless target.rest.nil? && target.rights.empty?
-
         target.lefts.each_with_index do |l, i|
           emit(:AREF, cursp, src, i)
           assign_target(l, cursp, cursp + 1)
+        end
+        # milestone 13: a splat or trailing targets in a nested target: APOST on a copy at the stack pointer (codegen_masgn).
+        rest = target.rest
+        rest = nil if rest.is_a?(Prism::ImplicitRestNode)
+        if rest || !target.rights.empty?
+          post = target.rights.size
+          gen_move(cursp, src, false)
+          @nregs = [@nregs, cursp + post + 1].max
+          emit(:APOST, cursp, target.lefts.size, post)
+          assign_target(rest.expression, cursp, cursp) if rest&.expression
+          target.rights.each_with_index { |r, i| assign_target(r, cursp + 1 + i, cursp) }
         end
       when Prism::CallTargetNode, Prism::IndexTargetNode
         index = target.is_a?(Prism::IndexTargetNode)
@@ -2024,8 +2041,6 @@ module MrbcRb
       rest = node.rest
       rights = node.rights
       rest = nil if rest.is_a?(Prism::ImplicitRestNode) # a trailing comma adds nothing
-      raise Unsupported, 'multiple assignment with a bare splat' if rest && rest.expression.nil?
-      raise Unsupported, 'multiple assignment with parentheses' if node.lparen_loc
 
       value = unparen(node.value)
       fixed = value.is_a?(Prism::ArrayNode) && value.elements.none? { |e| e.is_a?(Prism::SplatNode) }
@@ -2074,14 +2089,14 @@ module MrbcRb
           n += 1
         end
         if rest
-          raise Unsupported, 'splat target that is not a variable' unless plain.include?(rest.expression.class)
+          raise Unsupported, 'splat target that is not a variable' unless rest.expression.nil? || plain.include?(rest.expression.class)
 
           post = rights.size
           rn = len < post + n ? 0 : len - post - n
           cursp = t + len
           saved = @nregs
           cursp == t + n ? emit(:ARRAY, cursp, rn) : emit(:ARRAY2, cursp, t + n, rn)
-          assign_target(rest.expression, cursp, cursp)
+          assign_target(rest.expression, cursp, cursp) if rest.expression # a bare `*` is the fork's NODE_NIL: nothing assigned
           @nregs = saved
           n += rn
         end
@@ -2121,7 +2136,7 @@ module MrbcRb
         gen_move(sp, t, last)
         @nregs = [@nregs, sp + post + 1].max
         emit(:APOST, sp, lefts.size, post)
-        assign_target(rest.expression, sp, sp) if rest
+        assign_target(rest.expression, sp, sp) if rest&.expression
         rights.each_with_index { |r, i| assign_target(r, sp + 1 + i, sp) }
       end
       last ? t : nil
@@ -2212,6 +2227,9 @@ module MrbcRb
 
     # Whether a call's arguments are more than positional operands: keyword arguments, splats or a block argument.
     def complex_arguments?(node)
+      # `a[*x] = v`: the fork generates the splat node as its plain value, so the call has simple arguments (verified).
+      return false if index_splat_assign?(node)
+
       (node.arguments&.arguments || []).any? { |a| a.is_a?(Prism::KeywordHashNode) || a.is_a?(Prism::SplatNode) || a.is_a?(Prism::ForwardingArgumentsNode) } ||
         node.block.is_a?(Prism::BlockArgumentNode) || ((node.arguments&.arguments || []).size > 14 && (node.name.to_s.match?(PLAIN_NAME) || (node.name == :[] && node.receiver)))
     end
@@ -2238,7 +2256,7 @@ module MrbcRb
 
       recv = node.receiver && unparen(node.receiver)
       recv = nil if recv.is_a?(Prism::SelfNode) && node.name != :[] # `self[*a]` loads self like any receiver (opt_op is set)
-      raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil?
+      raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil? && !self_receiver?(node)
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
 
       enter(node) # instructions before the first operand (the splat's array) carry the call's line
@@ -2445,11 +2463,13 @@ module MrbcRb
         end
       end
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
+      args = args.map { |a| a.is_a?(Prism::SplatNode) && a.expression ? unparen(a.expression) : a } if index_splat_assign?(node)
       setter = recv && (name == :[]= || name.to_s.match?(/\A[A-Za-z_]\w*=\z/)) # an assigned value may also be a begin block or a rescue modifier
       raise Unsupported, 'call with a block or keywords' if args.any? { |a| !(operand?(a) || (setter && assign_value?(a))) }
       raise Unsupported, 'call with many arguments' if args.size > 14 # gen_values packs more than 14 into an array
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
-      raise Unsupported, 'safe navigation' if node.safe_navigation? && !recv
+      raise Unsupported, 'safe navigation' if node.safe_navigation? && !recv && !self_receiver?(node) # `self&.m` has no self load (verified)
+      return safe_index_assign(node, recv, args, need: need) if node.safe_navigation? && name == :[]= && args.size == 2 && assign_value?(args[1]) && operand?(args[0])
       raise Unsupported, 'safe navigation with an index assignment call' if node.safe_navigation? && name == :[]=
       raise Unsupported, "operator method #{name}" if recv && UNVERIFIED_OPERATORS.include?(name)
       raise Unsupported, 'unary operator with arguments' if UNARY_OPS.include?(name) && !args.empty?
@@ -2523,12 +2543,37 @@ module MrbcRb
       @sp = a if a
     end
 
+    # `recv&.[]=(i, v)`: SETIDX behind the nil test of the receiver (verified with mrbc -v): the receiver at the result register a
+    # (safe_jump's copy when the value is used), the index and the value after it, and SETIDX on a leaves its result there.
+    def safe_index_assign(node, recv, args, need:)
+      a = @sp
+      @nregs = [@nregs, a + 1].max
+      enter(node)
+      operand_into(recv, a)
+      skip = safe_jump(a, need)
+      operand_into(args[0], a + 1)
+      operand_into(args[1], a + 2)
+      emit(:SETIDX, a)
+      dispatch(skip)
+      @nregs = [@nregs, a + 4].max
+      a
+    ensure
+      @sp = a if a
+    end
+
+    def index_splat_assign?(node)
+      node.name == :[]= && node.receiver && node.call_operator_loc.nil? && node.block.nil? &&
+        node.arguments&.arguments&.any?(Prism::SplatNode) && node.arguments.arguments.none?(Prism::KeywordHashNode)
+    end
+
+    def self_receiver?(node) = node.receiver && unparen(node.receiver).is_a?(Prism::SelfNode)
+
     # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
     def operand?(node)
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
 
@@ -2661,7 +2706,7 @@ module MrbcRb
           @sp = saved
         end
         gen_move(dst, r, false)
-      when Prism::BeginNode, Prism::RescueModifierNode
+      when Prism::BeginNode, Prism::RescueModifierNode, Prism::ParenthesesNode
         # A begin block as a value: built at the destination when it is a temporary, else at the first temporary and moved.
         saved = @sp
         base = dst >= @nlocals ? dst : temp
@@ -2685,6 +2730,9 @@ module MrbcRb
         result = colon_path(node)
         emit(:MOVE, dst, result) unless result == dst
       when Prism::CaseNode then case_value_into(node, dst)
+      when Prism::DefNode
+        result = def_statement(node, last: true)
+        emit(:MOVE, dst, result) unless result == dst
       when *VALUE_WRITES then write_value_into(node, dst)
       when Prism::RangeNode then built_into(dst) { |base| range_at(node, base) }
       when Prism::LambdaNode
@@ -4073,6 +4121,19 @@ module MrbcRb
 
     # NODE_BEGIN, NODE_RESCUE and NODE_ENSURE (codegen_begin, codegen_rescue, codegen_ensure). The value of the whole is in the
     # register the statement started at. A begin block with neither rescue nor a non-empty ensure is its statements.
+    # milestone 13: `(a; b)` and `()`: statements like a begin block's, `()` a nil.
+    def parentheses_statement(node, last:)
+      stmts = node.body&.body || []
+      if stmts.empty?
+        return nil unless last
+
+        t = temp
+        emit(:LOADNIL, t)
+        return t
+      end
+      generate(stmts, val: last)
+    end
+
     def begin_statement(node, last:)
       rescue_c = node.rescue_clause
       else_c = node.else_clause
@@ -4283,6 +4344,11 @@ module MrbcRb
     # The value of a `break` or `next` (gen_retval): a plain `break`/`next` loads nil; one value goes into the first temporary.
     def jump_value(node, t)
       args = node.arguments&.arguments
+      # `next *a` is the plain value to the fork (codegen_next generates the splat node itself, with no ARYSPLAT; verified).
+      if node.is_a?(Prism::NextNode) && args&.size == 1 && args[0].is_a?(Prism::SplatNode) && args[0].expression && operand?(args[0].expression)
+        return operand_into(unparen(args[0].expression), t)
+      end
+
       raise Unsupported, 'break or next with a value of an unverified form' if args&.size == 1 && !args[0].is_a?(Prism::SplatNode) && !operand?(args[0])
 
       args ? return_values_into(args, t) : emit(:LOADNIL, t)
@@ -4299,6 +4365,9 @@ module MrbcRb
 
         operand_into(unparen(v), t)
         emit(:ARYSPLAT, t)
+      elsif args.any?(Prism::SplatNode)
+        # milestone 13: several values with a splat are the fork's array literal of them (array_splat_into).
+        array_splat_into(Struct.new(:elements, :opening_loc).new(args, nil), t)
       else
         raise Unsupported, 'return values of an unverified form' unless args.all? { |a| operand?(a) && !a.is_a?(Prism::SplatNode) }
 
@@ -4320,8 +4389,6 @@ module MrbcRb
     # codegen_next in a block (not LOOP_NORMAL): the value goes into the first temporary and the block returns it; a plain
     # `next` is RETNIL.
     def block_next(node, last:)
-      raise Unsupported, 'next with a splat' if node.arguments&.arguments&.any?(Prism::SplatNode) # not gen_retval: unverified
-
       t = temp
       jump_value(node, t)
       return_value(t)
