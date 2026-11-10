@@ -406,9 +406,14 @@ module MrbcRb
     # so those headers are Unsupported.
     def def_line(node)
       lines = [node.def_keyword_loc, node.receiver&.location, node.operator_loc, node.name_loc].compact.map(&:start_line)
-      raise Unsupported, 'def header spanning lines' if lines.uniq.size != 1 || continuation_count(node.name_loc).positive?
+      raise Unsupported, 'def header spanning lines' if continuation_count(node.name_loc).positive?
+      return lines.first if lines.uniq.size == 1
 
-      lines.first
+      # A header broken before the name: the def node is stamped by the last token read when it is reduced, the name (and the
+      # token after it, on its line).
+      raise Unsupported, 'def header spanning lines' if node.equal_loc || node.receiver # a receiver's header is not verified
+
+      node.name_loc.start_line
     end
 
     def set_locals(locals)
@@ -984,11 +989,11 @@ module MrbcRb
     def post_test_loop(node, last:, until_loop:, forever:, t:)
       pred = unparen(node.predicate)
       body = node.statements.body.first
-      unless body.is_a?(Prism::BeginNode) && body.rescue_clause.nil? && body.else_clause.nil? && body.ensure_clause.nil?
-        raise Unsupported, 'begin/end loop body'
-      end
+      raise Unsupported, 'begin/end loop body' unless body.is_a?(Prism::BeginNode)
 
-      stmts = body.statements&.body || []
+      # With rescue, else or ensure the begin node itself is the body, a statement with its handler region.
+      plain = body.rescue_clause.nil? && body.else_clause.nil? && body.ensure_clause.nil?
+      stmts = plain ? (body.statements&.body || []) : [body]
       raise Unsupported, 'empty begin/end loop body' if stmts.empty?
 
       # A condition that never loops runs the body once (the body's value is not covered); one that always does has no test.
@@ -1829,14 +1834,16 @@ module MrbcRb
     # is wrapped in an exception handler and is not covered.
     def logic_write(node, last:)
       kind = write_target(node)
-      raise Unsupported, 'constant ||=' if kind == :const && node.is_a?(Prism::ConstantOrWriteNode)
-      raise Unsupported, 'class variable ||=' if node.is_a?(Prism::ClassVariableOrWriteNode) # wrapped in a catch handler
 
       value = unparen(node.value)
       raise Unsupported, 'logic assignment value' unless assign_value?(value)
 
       t = temp
-      read_target(kind, node, t)
+      if node.is_a?(Prism::ConstantOrWriteNode) || node.is_a?(Prism::ClassVariableOrWriteNode)
+        guarded_read(kind, node, t)
+      else
+        read_target(kind, node, t)
+      end
       reg = t
       unless last || no_peephole?
         name, ops, start = @insns.last
@@ -1850,6 +1857,21 @@ module MrbcRb
       write_target_from(kind, node, t, last)
       dispatch(to_end)
       last ? t : nil
+    end
+
+    # The read of `Const ||= v` and `@@cv ||= v` (codegen_op_asgn): a LOOP_BEGIN label, the read inside a catch handler whose
+    # target is EXCEPT then LOADFALSE (an unset constant or class variable counts as false).
+    def guarded_read(kind, node, t)
+      @labels << @code.size
+      entry = new_catch
+      from = @code.size
+      read_target(kind, node, t)
+      to = @code.size
+      noexc = emit_jump(:JMP)
+      @catches[entry] = [0, from, to, @code.size]
+      emit(:EXCEPT, t)
+      emit(:LOADFALSE, t)
+      dispatch(noexc)
     end
 
     # `recv[i] op= v`, `recv.name op= v` (and ||=, &&=): the call is read as an ordinary call, then assigned with the
@@ -2460,7 +2482,7 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        node.is_a?(Prism::CaseNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        node.is_a?(Prism::CaseNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
 
@@ -3672,6 +3694,7 @@ module MrbcRb
       when Prism::ClassVariableReadNode
         defined_cvar(r, expr.name)
         defined_bool_to_str(r, 'class variable')
+      when Prism::ConstantReadNode, Prism::ConstantPathNode then defined_const(expr, r)
       when Prism::YieldNode
         reach(r + 2)
         emit(:SSEND0, r, sym_index(:block_given?))
@@ -3689,6 +3712,25 @@ module MrbcRb
         defined_bool_to_str(r, 'method')
       else raise Unsupported, "defined? of #{expr.class.name.split('::').last}"
       end
+    end
+
+    # codegen_defined_const: the constant read, run inside a catch handler (rescue with no filtering); "constant" or nil.
+    def defined_const(expr, r)
+      entry = new_catch
+      from = @code.size
+      saved = @sp
+      @sp = r
+      value_into(expr, r)
+      @sp = saved
+      to = @code.size
+      success = emit_jump(:JMP)
+      @catches[entry] = [0, from, to, @code.size]
+      emit(:EXCEPT, r)
+      emit(:LOADNIL, r)
+      done = emit_jump(:JMP)
+      dispatch(success)
+      defined_str(r, 'constant')
+      dispatch(done)
     end
 
     # codegen_defined_respond_to: `recv.respond_to?(:name, true)` (SSEND without a receiver) is run, never the method.
@@ -3811,7 +3853,15 @@ module MrbcRb
       stmts = node.statements&.body || []
       ensure_stmts = ensure_c&.statements&.body || []
       if !rescue_c && ensure_stmts.empty?
-        raise Unsupported, 'empty begin block' if stmts.empty?
+        if stmts.empty?
+          # An empty `begin; end` is a nil: loaded only where its value is used.
+          @line = (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc)&.end_line || @line
+          return nil unless last
+
+          t = temp
+          emit(:LOADNIL, t)
+          return t
+        end
 
         return generate(stmts, val: last)
       end
