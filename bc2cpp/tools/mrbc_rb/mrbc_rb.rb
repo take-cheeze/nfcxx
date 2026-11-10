@@ -36,7 +36,7 @@ module MrbcRb
     SETIDX: 37, GETIDX0: 36, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
-    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEYEND: 59, KARG: 60,
+    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
     GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97
   }.freeze
 
@@ -156,54 +156,23 @@ module MrbcRb
       self
     end
 
-    # A method body (scope_body for def, lambda_body in codegen.c): self, the parameters in the order required, optional,
-    # rest, post-required, then the keyword dictionary slot "**" when there are keywords, the hidden block slot (no name),
-    # the named block parameter, the keywords, and the body's own locals in the parser's order. ENTER takes
-    # the aspec in its 24 bits: req << 18 | opt << 13 | rest << 12 | post << 7 | keywords << 2 | block (ops.h, MRB_ARGS_*).
-    # Optional parameters add a jump table of one OP_JMP per parameter plus one for "all supplied" right after ENTER, then
-    # the default expressions, each assigned like a local write whose value is unused. Required keywords are KARG, then
-    # KEYEND, then the keyword hash is rebuilt into the "**" slot (LOADSYM, MOVE pairs and HASH); a named block parameter is
-    # copied out of the block slot last. Optional keywords, **rest, anonymous & and destructuring are Unsupported.
+    # A method body (scope_body for def, lambda_body in codegen.c): the parameters are laid out and entered by #parameters (every
+    # kind is covered: optional, rest, post-required, keywords, `**rest`, `&block`, `...`, anonymous `*` `**` `&` and
+    # destructuring), then the body follows.
     def compile_method(node)
       params = node.parameters
-      requireds = params ? params.requireds : []
-      optionals = params ? params.optionals : []
-      posts = params ? params.posts : []
-      keywords = params ? params.keywords : []
-      rest = params&.rest
-      block = params&.block
-      if params && (params.keyword_rest || (rest && !rest.is_a?(Prism::RestParameterNode)))
-        raise Unsupported, 'keyword rest or forwarding parameter'
-      end
-      raise Unsupported, 'destructuring parameter' unless (requireds + posts).all? { |r| r.is_a?(Prism::RequiredParameterNode) }
-      raise Unsupported, 'optional keyword parameter' unless keywords.all? { |k| k.is_a?(Prism::RequiredKeywordParameterNode) }
-      raise Unsupported, 'anonymous block parameter' if block && block.name.nil?
-      raise Unsupported, 'too many parameters' if [requireds, optionals, posts, keywords].any? { |l| l.size > 0x1f }
-
-      # Registers, in mrbc's order.
-      pre = requireds.map(&:name) + optionals.map(&:name)
-      pre << (rest.name || :*) if rest
-      pre += posts.map(&:name)
-      pre << :** unless keywords.empty?
-      kw_names = keywords.map(&:name)
-      block_names = [block&.name].compact
+      @in_method = true
       if params.nil? && node.equal_loc && node.lparen_loc.nil?
         # `def f = expr` has no hidden block slot (verified with mrbc -v: nlocals is 1, unlike `def f() = expr`).
         raise Unsupported, 'endless def without parameters but with locals' unless node.locals.empty?
 
         set_locals([])
+        @nregs = @nlocals + 1
+        @line = node.location.start_line
+        emit(:ENTER, 0)
       else
-        set_locals(pre + [nil] + block_names + kw_names + (node.locals - pre - block_names - kw_names))
+        parameters(params, node.locals, node.location.start_line)
       end
-      @nregs = @nlocals + 1
-      @line = node.location.start_line
-      aspec = (requireds.size << 18) | (optionals.size << 13) | ((rest ? 1 : 0) << 12) | (posts.size << 7) |
-              (keywords.size << 2) | (block ? 1 : 0)
-      emit(:ENTER, aspec)
-      @in_method = true
-      method_optionals(optionals) unless optionals.empty?
-      method_keywords(keywords, pre.size) unless keywords.empty?
-      emit(:MOVE, local_register(block.name), pre.size + 1) if block
       raise Unsupported, 'method body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
 
       stmts = node.body ? node.body.body : []
@@ -219,31 +188,23 @@ module MrbcRb
       self
     end
 
-    # A literal block's body (lambda_body in codegen.c): as a method body, a scope of self, the required parameters, the
-    # hidden block slot and the body's own locals, entered with ENTER; the variables of the enclosing scopes are upvalues
-    # (GETUPVAR and SETUPVAR). +parent+ is the Compiler of the enclosing scope.
+    # A literal block's body (lambda_body in codegen.c): laid out and entered as a method body is (#parameters, which also takes
+    # numbered parameters and the block-local variables); the variables of the enclosing scopes are upvalues (GETUPVAR and
+    # SETUPVAR). +parent+ is the Compiler of the enclosing scope.
     def compile_block(node, parent)
       @parent = parent
       params = node.parameters
+      numbered = 0
       case params
-      when nil then params = nil
-      when Prism::BlockParametersNode
-        raise Unsupported, 'block-local variables' unless params.locals.empty?
-
-        params = params.parameters
-      else raise Unsupported, 'numbered or it block parameters'
+      when nil then nil
+      when Prism::BlockParametersNode then params = params.parameters
+      when Prism::NumberedParametersNode then numbered = params.maximum; params = nil
+      when Prism::ItParametersNode then params = nil # `it` is a plain method call to the fork's parser
+      else raise Unsupported, 'block parameters'
       end
-      requireds = params ? params.requireds : []
-      other = params && (params.optionals.any? || params.rest || params.posts.any? || params.keywords.any? ||
-                         params.keyword_rest || params.block)
-      raise Unsupported, 'block parameters other than required ones' if other || !requireds.all? { |r| r.is_a?(Prism::RequiredParameterNode) }
+      parameters(params, node.locals, node.opening_loc.start_line, numbered: numbered)
       raise Unsupported, 'block body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
 
-      param_names = requireds.map(&:name)
-      set_locals(param_names + [nil] + (node.locals - param_names))
-      @nregs = @nlocals + 1
-      @line = node.opening_loc.start_line
-      emit(:ENTER, requireds.size << 18)
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
                     t = temp
@@ -274,11 +235,28 @@ module MrbcRb
       set_jump_line(jumps.last, @line)
     end
 
-    # Required keywords: KARG into each keyword's register, KEYEND, then the hash of the keywords is rebuilt into the "**"
-    # slot (register +dict+ is the one after the positional parameters) starting at the first temporary.
-    def method_keywords(keywords, npre)
-      dict = npre # the "**" slot is the last of the leading names, R[npre]
-      keywords.each { |k| emit(:KARG, local_register(k.name), sym_index(k.name)) }
+    # Keywords (lambda_body, in source order): a required one is KARG into its register; an optional one is KEY_P, a JMPIF over
+    # its default (the default is assigned like an optional parameter's, then a JMP past the KARG), then the KARG. Without
+    # a `**rest` that takes the leftovers, KEYEND follows, then the hash of the keywords is rebuilt into the "**" slot
+    # (register +dict+, the one after the positional parameters) starting at the first temporary.
+    def method_keywords(keywords, dict, kwrest)
+      keywords.each do |k|
+        reg = local_register(k.name)
+        if k.is_a?(Prism::OptionalKeywordParameterNode)
+          emit(:KEY_P, reg, sym_index(k.name))
+          to_key = emit_jump(:JMPIF, reg)
+          @line = k.value.location.start_line
+          write_local(k, last: false)
+          to_end = emit_jump(:JMP)
+          dispatch(to_key)
+          emit(:KARG, reg, sym_index(k.name))
+          dispatch(to_end)
+        else
+          emit(:KARG, reg, sym_index(k.name))
+        end
+      end
+      return if kwrest
+
       emit(:KEYEND)
       base = temp
       keywords.each_with_index do |k, i|
@@ -524,6 +502,8 @@ module MrbcRb
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
+      when Prism::ItLocalVariableReadNode
+        call(it_call(node), need: last) # `it` is a method call to the fork's parser
       when Prism::ConstantReadNode
         # A constant read is generated even when unused: the lookup can autoload or raise (verified: `C` then `1` has GETCONST).
         last ? value_in_register(node) : value_into(node, temp) && nil
@@ -1694,7 +1674,7 @@ module MrbcRb
 
     # Whether a call's arguments are more than positional operands: keyword arguments, splats or a block argument.
     def complex_arguments?(node)
-      (node.arguments&.arguments || []).any? { |a| a.is_a?(Prism::KeywordHashNode) || a.is_a?(Prism::SplatNode) } ||
+      (node.arguments&.arguments || []).any? { |a| a.is_a?(Prism::KeywordHashNode) || a.is_a?(Prism::SplatNode) || a.is_a?(Prism::ForwardingArgumentsNode) } ||
         node.block.is_a?(Prism::BlockArgumentNode)
     end
 
@@ -1725,7 +1705,8 @@ module MrbcRb
       @nregs = [@nregs, a + 1].max
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
-      argc, blk = gen_args(node.block, a, node.arguments&.arguments || [])
+      args, block = forwarding_arguments(node)
+      argc, blk = gen_args(block, a, args)
       emit_send(a, recv, node.name, argc, blk)
       patch_jump(skip, @code.size) if skip
       a
@@ -1761,8 +1742,7 @@ module MrbcRb
       regular.each do |arg|
         arg = unparen(arg)
         if arg.is_a?(Prism::SplatNode)
-          v = arg.expression && unparen(arg.expression)
-          raise Unsupported, 'anonymous splat' unless v
+          v = arg.expression ? unparen(arg.expression) : anonymous_local(:*, arg)
 
           if v.is_a?(Prism::ArrayNode) && v.elements.none?(Prism::SplatNode)
             # Literal arrays are inlined (empty ones vanish).
@@ -1814,9 +1794,7 @@ module MrbcRb
       @sp = sp
       @nregs = [@nregs, sp + 1].max
       if blk
-        raise Unsupported, 'anonymous block argument' unless blk.expression
-
-        operand_into(unparen(blk.expression), sp)
+        operand_into(blk.expression ? unparen(blk.expression) : anonymous_local(:&, blk), sp)
       end
       [n | (nk << 4), !blk.nil?]
     end
@@ -1830,8 +1808,8 @@ module MrbcRb
       kw.elements.each do |e|
         case e
         when Prism::AssocSplatNode
-          v = e.value && unparen(e.value)
-          raise Unsupported, 'anonymous keyword splat' unless v && operand?(v)
+          v = e.value ? unparen(e.value) : anonymous_local(:**, e)
+          raise Unsupported, 'keyword splat of a non-operand' unless operand?(v)
 
           if first
             emit(:HASH, sp, 0)
@@ -1962,7 +1940,7 @@ module MrbcRb
     # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
     def operand?(node)
       node = unparen(node)
-      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
+      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
         (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| operand?(e) })
     end
@@ -2051,6 +2029,9 @@ module MrbcRb
         end
       when Prism::SymbolNode then emit(:LOADSYM, dst, sym_index(node.unescaped.to_sym))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
+      when Prism::ItLocalVariableReadNode
+        result = call(it_call(node))
+        emit(:MOVE, dst, result) unless result == dst
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
       when Prism::InstanceVariableReadNode then emit(:GETIV, dst, sym_index(node.name))
       when Prism::OrNode, Prism::AndNode
@@ -2470,6 +2451,169 @@ module MrbcRb
       return unless reg.is_a?(Integer)
 
       @nregs = [@nregs, reg + 1].max
+    end
+
+    # ---- parameters (milestone 11): def, block and lambda ----
+
+    # lambda_body's argument processing for a def, a block or a lambda. The registers are self, then the required parameters
+    # (a destructuring one is an unnamed slot), the optional ones, the rest (`*` when anonymous), the post-required ones, the
+    # keyword dictionary slot (the `**rest`'s name, `**` when anonymous or when there are only keywords), the hidden block
+    # slot (no name), the block parameter (`&` when anonymous), the keywords (the required ones first, then the optional ones),
+    # the variables of destructuring parameters (marg_names), and the body's own locals in the parser's order. `...` is `*`,
+    # `**` and `&`; a numbered parameter block takes +numbered+ required parameters. ENTER takes the aspec in its 24 bits:
+    # req << 18 | opt << 13 | rest << 12 | post << 7 | keywords << 2 | kwrest << 1 | block (ops.h, MRB_ARGS_*), then the
+    # optional parameters' jump table, the keywords, the copy of the block slot into the block parameter's register and the
+    # destructuring (AREF) of the required and then the post-required parameters.
+    def parameters(params, node_locals, line, numbered: 0)
+      requireds = numbered.zero? && params ? params.requireds : []
+      optionals = params ? params.optionals : []
+      posts = params ? params.posts : []
+      keywords = params ? params.keywords : []
+      rest = params&.rest
+      rest = nil if rest.is_a?(Prism::ImplicitRestNode) # `|a,|` adds nothing
+      keyword_rest = params&.keyword_rest
+      block = params&.block
+      forwarding = keyword_rest.is_a?(Prism::ForwardingParameterNode)
+      raise Unsupported, 'rest parameter' unless rest.nil? || rest.is_a?(Prism::RestParameterNode)
+      raise Unsupported, 'keyword rest parameter' unless keyword_rest.nil? || forwarding ||
+                                                          keyword_rest.is_a?(Prism::KeywordRestParameterNode)
+      raise Unsupported, 'destructuring parameter' unless (requireds + posts).all? { |r| plain_or_marg?(r) }
+      raise Unsupported, 'parameter kind' unless optionals.all?(Prism::OptionalParameterNode) &&
+                                                  keywords.all? { |k| k.is_a?(Prism::RequiredKeywordParameterNode) || k.is_a?(Prism::OptionalKeywordParameterNode) }
+      raise Unsupported, 'too many parameters' if [requireds, optionals, posts, keywords].any? { |l| l.size > 0x1f } || numbered > 0x1f
+
+      rest_name = forwarding ? :* : (rest && (rest.name || :*))
+      kwrest_name = forwarding ? :** : (keyword_rest && (keyword_rest.name || :**))
+      block_name = forwarding ? :& : (block && (block.name || :&))
+      required_names = numbered.positive? ? (1..numbered).map { |i| :"_#{i}" } : requireds.map { |r| r.is_a?(Prism::MultiTargetNode) ? nil : r.name }
+      pre = required_names + optionals.map(&:name)
+      pre << rest_name if rest_name
+      pre += posts.map { |r| r.is_a?(Prism::MultiTargetNode) ? nil : r.name }
+      pre << (kwrest_name || :**) if kwrest_name || !keywords.empty?
+      kw_names = (keywords.grep(Prism::RequiredKeywordParameterNode) + keywords.grep(Prism::OptionalKeywordParameterNode)).map(&:name)
+      # The fork's parser declares the keywords only after the whole list: a default that names one reads a method call.
+      keywords.grep(Prism::OptionalKeywordParameterNode).each do |k|
+        raise Unsupported, 'keyword default that reads a keyword parameter' if reads_local?(k.value, kw_names)
+      end
+      margs = (requireds + posts).grep(Prism::MultiTargetNode)
+      marg_vars = margs.flat_map { |m| marg_names(m) }
+      named = pre + [block_name] + kw_names + marg_vars
+      set_locals(pre + [nil] + [block_name].compact + kw_names + marg_vars + (node_locals - named))
+      @nregs = @nlocals + 1
+      @line = line
+      aspec = ((numbered.positive? ? numbered : requireds.size) << 18) | (optionals.size << 13) | ((rest_name ? 1 : 0) << 12) |
+              (posts.size << 7) | (keywords.size << 2) | ((kwrest_name ? 1 : 0) << 1) | (block_name ? 1 : 0)
+      emit(:ENTER, aspec)
+      method_optionals(optionals) unless optionals.empty?
+      method_keywords(keywords, pre.size, kwrest_name) unless keywords.empty?
+      emit(:MOVE, local_register(block_name), pre.size + 1) if block_name
+      requireds.each_with_index { |r, i| destructure_parameter(r, i + 1) if r.is_a?(Prism::MultiTargetNode) }
+      first_post = requireds.size + optionals.size + (rest_name ? 1 : 0) + 1
+      posts.each_with_index { |r, i| destructure_parameter(r, first_post + i) if r.is_a?(Prism::MultiTargetNode) }
+    end
+
+    # Whether +node+ holds a read or write of a local variable named in +names+.
+    def reads_local?(node, names)
+      return true if node.class.name.start_with?('Prism::LocalVariable') && node.respond_to?(:name) && names.include?(node.name)
+
+      node.compact_child_nodes.any? { |c| reads_local?(c, names) }
+    end
+
+    # A required parameter, or a destructuring one whose targets are names or nested destructuring (with no rest or
+    # post-required targets, which the fork does not generate code for at the top level and generates as APOST below it).
+    def plain_or_marg?(node, top: true)
+      case node
+      when Prism::RequiredParameterNode then true
+      when Prism::MultiTargetNode
+        node.rest.is_a?(Prism::SplatNode) || node.rest.nil? ? marg_targets_ok?(node, top) : false
+      else false
+      end
+    end
+
+    def marg_targets_ok?(node, top)
+      return false unless top || (node.rest.nil? && node.rights.empty?)
+      return false unless node.rest.nil? || node.rest.expression.nil? || node.rest.expression.is_a?(Prism::RequiredParameterNode)
+
+      (node.lefts + node.rights).all? { |t| plain_or_marg?(t, top: false) }
+    end
+
+    # The names the parser gives a destructuring parameter's variables (level by level: the level's targets in order, an
+    # unnamed placeholder for a nested destructuring, then each nested one's own names; an anonymous `*` is named `*`).
+    def marg_names(marg)
+      level = marg.lefts.dup
+      level << marg.rest if marg.rest
+      level += marg.rights
+      names = level.map do |t|
+        case t
+        when Prism::MultiTargetNode then nil
+        when Prism::SplatNode then t.expression ? t.expression.name : :*
+        else t.name
+        end
+      end
+      names + level.grep(Prism::MultiTargetNode).flat_map { |m| marg_names(m) }
+    end
+
+    # The destructuring of a required parameter held in register +src+ (lambda_body): each leading target is read with AREF
+    # into the first temporary and assigned (gen_assignment, which folds the AREF into the variable's register); a nested
+    # destructuring is read the same way and destructured from that temporary. A rest or post-required target gets no code.
+    def destructure_parameter(marg, src)
+      marg.lefts.each_with_index do |t, i|
+        sp = @sp
+        @nregs = [@nregs, sp + 1].max
+        emit(:AREF, sp, src, i)
+        if t.is_a?(Prism::MultiTargetNode)
+          saved = @sp
+          @sp = sp + 1
+          begin
+            destructure_parameter(t, sp)
+          ensure
+            @sp = saved
+          end
+        else
+          gen_move(local_register(t.name), sp, false)
+        end
+      end
+    end
+
+    # `foo(*)`, `foo(**)` and `foo(&)` read the enclosing method's anonymous parameters, which the parser names `*`, `**` and
+    # `&`: a read of that local, an upvalue from inside a block. The node is built here with the position of the argument.
+    def anonymous_local(name, at)
+      anonymous_line!(at)
+      depth = 0
+      scope = self
+      until scope.locals.include?(name)
+        scope = scope.parent or raise Unsupported, "no anonymous #{name} parameter"
+        depth += 1
+      end
+      Prism::LocalVariableReadNode.new(at.send(:source), -1, at.location, 0, name, depth)
+    end
+
+    # The parser builds the read of an anonymous parameter at the token after the `*`, `**`, `&` or `...`: its line is that
+    # token's, so an anonymous argument that ends its line is not covered.
+    def anonymous_line!(at)
+      rest = at.send(:source).source.byteslice(at.location.end_offset..) || ''
+      raise Unsupported, 'anonymous argument at the end of a line' if rest.match?(/\A[ \t]*(\n|#|\z)/)
+    end
+
+    # `foo(a, ...)` passes `*`, `**` and `&` of the enclosing method on, as `foo(a, *, **, &)` does. Returns the arguments with
+    # those in place of the `...`, and the block argument.
+    def forwarding_arguments(node)
+      args = node.arguments&.arguments || []
+      fwd = args.last
+      return [args, node.block] unless fwd.is_a?(Prism::ForwardingArgumentsNode)
+      raise Unsupported, 'forwarding after keywords' if args.any?(Prism::KeywordHashNode)
+
+      anonymous_line!(fwd)
+      src = fwd.send(:source)
+      loc = fwd.location
+      splat = Prism::SplatNode.new(src, -1, loc, 0, loc, nil)
+      keywords = Prism::KeywordHashNode.new(src, -1, loc, 0, [Prism::AssocSplatNode.new(src, -1, loc, 0, nil, loc)])
+      [args[0...-1] + [splat, keywords], Prism::BlockArgumentNode.new(src, -1, loc, 0, nil, loc)]
+    end
+
+    # `it` in a block is a call of the method `it` (no implicit parameter in the fork's parser).
+    def it_call(node)
+      Prism::CallNode.new(node.send(:source), -1, node.location, 0, nil, nil, :it, node.location, nil, nil, nil, nil, nil)
     end
 
     # ---- RITE, as src/dump.c writes it: header, IREP, DBG, LVAR, END ----
