@@ -7,6 +7,7 @@
 # (the runner also fails when the runtimes disagree). Prints the frames per second of each run and the speedup of
 # the compiled build over the mruby interpreter (hot-path fps, which leaves out start-up and warm-up).
 #   OPTCARROT_FRAMES=N        frames to run (default 180; the checksum is checked only for 180)
+#   OPTCARROT_MIN_VS_YJIT=X   also fail when the compiled build's hot-path fps is under X times CRuby + YJIT's (off by default)
 #   OPTCARROT_MIN_SPEEDUP=X   also fail when the compiled build's hot-path fps is under X times the interpreter's
 #   BC2CPP_RPG_DIR=dir        an existing rpg-maker-clone checkout instead of the pinned one (tests/bc2cpp/fetch.sh)
 # Needs Ruby 4.0 (bc2cpp reads Prism 1.x and RBS 4.x; Ruby 4.0 ships both), rake, a C/C++ compiler, bison, and make
@@ -60,7 +61,27 @@ hot_interp=$(sed -nE 's/^mruby interpreter: hot-path ([0-9.]+) frames\/s$/\1/p' 
 if [ -n "$hot_compiled" ] && [ -n "$hot_interp" ]; then
   speedup=$(awk -v c="$hot_compiled" -v i="$hot_interp" 'BEGIN { printf "%.1f", c / i }')
   echo "bc2cpp optcarrot: compiled ${hot_compiled} fps, interpreter ${hot_interp} fps (hot path): ${speedup}x"
-  [ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "Compiled over interpreted mruby (hot path): **${speedup}x**" >> "$GITHUB_STEP_SUMMARY"
+  # CRuby's own interpreter and YJIT (the probe runs YJIT when this Ruby has it), for the same 180 frames.
+  hot_cruby=$(sed -nE 's/^CRuby \(interpreter\): hot-path ([0-9.]+) frames\/s$/\1/p' "$log" | head -1)
+  hot_yjit=$(sed -nE 's/^CRuby \+ YJIT: hot-path ([0-9.]+) frames\/s$/\1/p' "$log" | head -1)
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "optcarrot, 180 frames, hot-path frames per second (checksum $want on every runtime)"
+      echo
+      echo "| runtime | fps | compiled build over it |"
+      echo "| --- | ---: | ---: |"
+      for row in "mruby + bc2cpp (sealed)|$hot_compiled" "mruby interpreter|$hot_interp" "CRuby interpreter|$hot_cruby" "CRuby + YJIT|$hot_yjit"; do
+        [ -n "${row#*|}" ] && awk -v n="${row%|*}" -v f="${row#*|}" -v c="$hot_compiled" 'BEGIN { printf "| %s | %.1f | %.1fx |\n", n, f, c / f }'
+      done
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+  if [ -n "$hot_yjit" ]; then
+    echo "bc2cpp optcarrot: CRuby + YJIT ${hot_yjit} fps (hot path): compiled is $(awk -v c="$hot_compiled" -v y="$hot_yjit" 'BEGIN { printf "%.2f", c / y }')x of it"
+    if [ -n "${OPTCARROT_MIN_VS_YJIT:-}" ] &&
+       awk -v c="$hot_compiled" -v y="$hot_yjit" -v m="$OPTCARROT_MIN_VS_YJIT" 'BEGIN { exit !(c / y < m) }'; then
+      echo "FAIL bc2cpp optcarrot: compiled build is under OPTCARROT_MIN_VS_YJIT=${OPTCARROT_MIN_VS_YJIT} of CRuby + YJIT"; exit 1
+    fi
+  fi
   if [ -n "${OPTCARROT_MIN_SPEEDUP:-}" ] &&
      awk -v s="$speedup" -v m="$OPTCARROT_MIN_SPEEDUP" 'BEGIN { exit !(s < m) }'; then
     echo "FAIL bc2cpp optcarrot: speedup ${speedup}x is under OPTCARROT_MIN_SPEEDUP=${OPTCARROT_MIN_SPEEDUP}"; exit 1
