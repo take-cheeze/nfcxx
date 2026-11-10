@@ -30,7 +30,7 @@ module MrbcRb
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADSYM: 16, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
-    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
+    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40, ADDILV: 73, SUBILV: 74, AREF: 87, ASET: 88, APOST: 89, ARYCAT: 84, ARYPUSH: 85, ARYSPLAT: 86,
     ARRAY: 82, ARRAY2: 83, STRING: 92, STRCAT: 93, HASH: 94, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35,
     SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
@@ -107,6 +107,8 @@ module MrbcRb
       @children = [] # child ireps of class and module bodies, in the order EXEC refers to them
       @labels = [] # pcs that a jump lands on: the peepholes do not work across them (no_peephole in codegen.c)
       @last = nil # [name, operands, start] of the last instruction, for the RETURN peephole
+      @insns = [] # every emitted instruction as [name, operands, start], for the peepholes that look two back (gen_move)
+      @rewound = false # the pc was rewound to the last instruction (the fork's pc == lastpc): no peephole until the next emit
     end
 
     def compile(program)
@@ -436,6 +438,18 @@ module MrbcRb
         return_statement(node, last: last)
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
+      when Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+           Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode
+        operator_write(node, last: last)
+      when Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode, Prism::GlobalVariableOrWriteNode,
+           Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
+           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode
+        logic_write(node, last: last)
+      when Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
+           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
+        call_write(node, last: last)
+      when Prism::MultiWriteNode
+        multiple_write(node, last: last)
       when Prism::IfNode
         if_statement(node, last: last)
       when Prism::UnlessNode
@@ -617,6 +631,8 @@ module MrbcRb
     def emit_jump(name, reg = nil)
       start = @code.size
       @last = [name, [reg].compact, start]
+      @insns << @last
+      @rewound = false
       @code << OP.fetch(name)
       byte(reg) if reg
       position = @code.size
@@ -662,14 +678,14 @@ module MrbcRb
     def ivar_write(node, last:)
       t = temp
       value_into(node.value, t)
-      emit(:SETIV, t, sym_index(node.name))
+      gen_setxv(:SETIV, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
 
     def global_write(node, last:)
       t = temp
       value_into(node.value, t)
-      emit(:SETGV, t, sym_index(node.name))
+      gen_setxv(:SETGV, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
 
@@ -677,7 +693,7 @@ module MrbcRb
     def const_write(node, last:)
       t = temp
       value_into(node.value, t)
-      emit(:SETCONST, t, sym_index(node.name))
+      gen_setxv(:SETCONST, t, node.name, last) # drops a MOVE just before when the value is unused
       last ? t : nil
     end
 
@@ -698,16 +714,482 @@ module MrbcRb
         case value
         when Prism::LocalVariableReadNode
           # An upvalue read is loaded straight into the local (gen_move's GETUPVAR peephole).
-          value.depth.zero? ? emit(:MOVE, local, local_register(value.name)) : value_into(value, local)
+          value.depth.zero? ? gen_move(local, local_register(value.name), false) : value_into(value, local)
         when Prism::CallNode
           # A call or operator result stays in its temporary, and the move into the local is kept (gen_move's peephole
           # only removes a move after a load).
-          emit(:MOVE, local, call(value))
+          gen_move(local, call(value), false)
         else
           value_into(value, local)
         end
         nil
       end
+    end
+
+    # ---- operator, or and and assignment (milestone 10) ----
+
+    # no_peephole in codegen.c: the pc is a jump target, the start of the code, or the last instruction's own pc.
+    def no_peephole?
+      @code.empty? || @rewound || @labels.include?(@code.size)
+    end
+
+    # get_int_operand: the integer an integer load puts in its register, or nil.
+    def int_operand(insn)
+      name, ops, = insn
+      case name
+      when :LOADI__1 then -1
+      when :LOADINEG then -ops[1]
+      when :LOADI8 then ops[1]
+      when :LOADI16 then ops[1] >= 0x8000 ? ops[1] - 0x10000 : ops[1]
+      when :LOADI32 then ops[1] >= 0x8000_0000 ? ops[1] - 0x1_0000_0000 : ops[1]
+      else
+        name.to_s =~ /\ALOADI_(\d)\z/ ? Regexp.last_match(1).to_i : nil
+      end
+    end
+
+    # The fork's gen_move: R[dst] = R[src], folding the instruction that produced the value into the destination. With
+    # +nopeep+ (the value is used afterwards) the move is always emitted.
+    def gen_move(dst, src, nopeep)
+      return if dst == src
+
+      unless nopeep || no_peephole?
+        name, ops, start = @insns.last
+        case name
+        when :MOVE
+          a, b = ops
+          if a == src
+            return if b == dst # a swapping MOVE
+
+            unless a < @nlocals
+              truncate(start)
+              @rewound = false # lastpc is the instruction before: the peepholes go on
+              gen_move(dst, b, false)
+              return
+            end
+          elsif dst == a # an overwritten MOVE
+            truncate(start)
+            @rewound = false
+            gen_move(dst, src, false)
+            return
+          end
+        when :LOADNIL, :LOADSELF, :LOADTRUE, :LOADFALSE, :LOADI__1, :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4,
+             :LOADI_5, :LOADI_6, :LOADI_7
+          if ops[0] == src && ops[0] >= @nlocals
+            truncate(start)
+            emit(name, dst)
+            return
+          end
+        when :LOADI8, :LOADINEG, :LOADL, :LOADSYM, :GETGV, :GETIV, :GETCONST, :STRING, :FSTRING, :LOADI16, :LOADI32, :HASH
+          if ops[0] == src && ops[0] >= @nlocals && (name != :HASH || ops[1].zero?)
+            truncate(start)
+            emit(name, dst, ops[1])
+            return
+          end
+        when :ARRAY
+          if ops[0] == src && ops[0] >= @nlocals && ops[0] >= dst
+            truncate(start)
+            ops[1].zero? ? emit(:ARRAY, dst, 0) : emit(:ARRAY2, dst, ops[0], ops[1])
+            return
+          end
+        when :ARRAY2, :GETUPVAR, :AREF
+          if ops[0] == src && ops[0] >= @nlocals && (name != :ARRAY2 || ops[0] >= dst)
+            truncate(start)
+            emit(name, dst, ops[1], ops[2])
+            return
+          end
+        when :ADDI, :SUBI
+          if ops[0] == src && ops[0] >= @nlocals && !@labels.include?(start) && @insns.size >= 2
+            data0 = @insns[-2]
+            if data0[0] == :MOVE && data0[1][0] == ops[0] && data0[1][1] == dst
+              folded = nil
+              unless @labels.include?(data0[2])
+                raise Unsupported, 'move peephole at the start of the code' if @insns.size < 3
+
+                n = int_operand(@insns[-3])
+                if n && @insns[-3][1][0] == dst
+                  n = name == :ADDI ? n + ops[1] : n - ops[1]
+                  folded = n if n.between?(INT32_MIN, INT32_MAX)
+                end
+              end
+              if folded
+                first = @insns[-3][2]
+                truncate(first)
+                load_int(folded, dst)
+              else
+                truncate(data0[2])
+                emit(name == :ADDI ? :ADDILV : :SUBILV, dst, ops[0], ops[1])
+              end
+              return
+            end
+          end
+        end
+      end
+      emit(:MOVE, dst, src)
+    end
+
+    # gen_setxv: SETGV, SETIV and SETCONST of R[dst]; when the value is not used, the source of a MOVE just before is stored.
+    def gen_setxv(op, dst, sym, val)
+      sym_index(sym)
+      if !val && !no_peephole?
+        name, ops, start = @insns.last
+        if name == :MOVE && ops[0] == dst
+          dst = ops[1]
+          truncate(start)
+        end
+      end
+      emit(op, dst, sym_index(sym))
+    end
+
+    # The variable of an operator, or and and write: [kind, name]. Upvalues and the other variable kinds are not covered.
+    def write_target(node)
+      case node
+      when Prism::LocalVariableOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::LocalVariableAndWriteNode
+        node.depth.positive? ? :upvar : :local
+      when Prism::InstanceVariableOperatorWriteNode, Prism::InstanceVariableOrWriteNode, Prism::InstanceVariableAndWriteNode
+        :ivar
+      when Prism::GlobalVariableOperatorWriteNode, Prism::GlobalVariableOrWriteNode, Prism::GlobalVariableAndWriteNode
+        :gvar
+      when Prism::ConstantOperatorWriteNode, Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode
+        :const
+      end
+    end
+
+    # codegen(lhs, VAL): the variable's value into register +t+.
+    def read_target(kind, node, t)
+      case kind
+      when :local then emit(:MOVE, t, local_register(node.name))
+      when :upvar then getupvar(t, node)
+      when :ivar then emit(:GETIV, t, sym_index(node.name))
+      when :gvar then emit(:GETGV, t, sym_index(node.name))
+      when :const then emit(:GETCONST, t, sym_index(node.name))
+      end
+    end
+
+    # gen_assignment(lhs, NULL, t, val): store R[t] into the variable.
+    def write_target_from(kind, node, t, val)
+      case kind
+      when :local then gen_move(local_register(node.name), t, val)
+      when :upvar
+        # gen_setupvar: a MOVE just before is dropped whether or not the value is used.
+        idx, lv = upvar_operands(node.name, node.depth)
+        name, ops, start = @insns.last
+        if !no_peephole? && name == :MOVE && ops[0] == t
+          truncate(start)
+          t = ops[1]
+        end
+        emit(:SETUPVAR, t, idx, lv)
+      when :ivar then gen_setxv(:SETIV, t, node.name, val)
+      when :gvar then gen_setxv(:SETGV, t, node.name, val)
+      when :const then gen_setxv(:SETCONST, t, node.name, val)
+      end
+    end
+
+    # The values an assignment's right side may be: operands, and `||` and `&&` of operands (value_into builds them).
+    def assign_value?(value)
+      operand?(value) || value.is_a?(Prism::OrNode) || value.is_a?(Prism::AndNode)
+    end
+
+    # `x += v` is `x = x + v` (codegen_op_asgn): the variable goes to the first temporary, the value to the next, the operator
+    # runs on the first one (ADDI and SUBI take a literal from -255 to 255 off gen_addsub's last instruction), and the result is
+    # assigned back; the assignment keeps its MOVE where the value is used and folds into the load or the ADDILV otherwise.
+    def operator_write(node, last:)
+      kind = write_target(node)
+      value = unparen(node.value)
+      raise Unsupported, 'operator assignment value' unless assign_value?(value)
+
+      t = temp
+      read_target(kind, node, t)
+      operand_into(value, t + 1)
+      @nregs = [@nregs, t + 3].max
+      op = node.binary_operator
+      case op
+      when :+, :-
+        add_sub(op, t)
+      when :*, :/, :<, :<=, :>, :>=
+        emit({ :* => :MUL, :/ => :DIV, :< => :LT, :<= => :LE, :> => :GT, :>= => :GE }.fetch(op), t)
+      else
+        emit(:SEND, t, sym_index(op), 1)
+      end
+      write_target_from(kind, node, t, last)
+      last ? t : nil
+    end
+
+    # gen_addsub: a literal operand from -255 to 255 makes ADDI or SUBI (the load is dropped; 0 drops the operation).
+    def add_sub(op, t)
+      name, ops, start = @insns.last
+      n = no_peephole? ? nil : int_operand(@insns.last)
+      if n.nil?
+        emit(op == :+ ? :ADD : :SUB, t)
+        return
+      end
+      raise Unsupported, 'folded operator assignment' if @insns.size >= 2 && !@labels.include?(start) && int_operand(@insns[-2])
+
+      if n > 0xff || n < -0xff
+        emit(op == :+ ? :ADD : :SUB, t)
+        return
+      end
+      truncate(start)
+      return if n.zero?
+
+      add = (op == :+) == n.positive?
+      emit(add ? :ADDI : :SUBI, t, n.abs)
+    end
+
+    # `x ||= v` and `x &&= v` (codegen_op_asgn): the variable goes to the first temporary and JMPIF (or JMPNOT) skips the
+    # assignment; the value replaces it and is assigned. Where the value is unused a MOVE just before the jump is dropped
+    # (genjmp2, only above the first temporary), and the assignment folds into the load. A constant or class variable `||=`
+    # is wrapped in an exception handler and is not covered.
+    def logic_write(node, last:)
+      kind = write_target(node)
+      raise Unsupported, 'constant ||=' if kind == :const && node.is_a?(Prism::ConstantOrWriteNode)
+
+      value = unparen(node.value)
+      raise Unsupported, 'logic assignment value' unless assign_value?(value)
+
+      t = temp
+      read_target(kind, node, t)
+      reg = t
+      unless last || no_peephole?
+        name, ops, start = @insns.last
+        if name == :MOVE && ops[0] == t && t > @nlocals
+          truncate(start)
+          reg = ops[1]
+        end
+      end
+      to_end = emit_jump(jump_name(node), reg)
+      value_into(value, t)
+      write_target_from(kind, node, t, last)
+      patch_jump(to_end, @code.size)
+      last ? t : nil
+    end
+
+    # `recv[i] op= v`, `recv.name op= v` (and ||=, &&=): the call is read as an ordinary call, then assigned with the
+    # fork's codegen_call_assign, which evaluates the receiver and the index again. The value is in the first temporary t;
+    # the receiver (and index) go after a result slot at t+1 and the value is copied after them, SETIDX or SEND of the
+    # writer then runs on the receiver. Where the value is used it is copied back into t first.
+    def call_write(node, last:)
+      index = node.is_a?(Prism::IndexOperatorWriteNode) || node.is_a?(Prism::IndexOrWriteNode) ||
+              node.is_a?(Prism::IndexAndWriteNode)
+      recv = node.receiver && unparen(node.receiver)
+      raise Unsupported, 'assignment receiver' unless recv && (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
+      raise Unsupported, 'safe navigation assignment' if !index && node.safe_navigation?
+
+      idx = nil
+      if index
+        args = node.arguments&.arguments || []
+        raise Unsupported, 'index assignment with a block' if node.block
+        raise Unsupported, 'index assignment arguments' unless args.size == 1 && (simple?(args[0]) || call_node?(args[0]))
+
+        idx = unparen(args[0])
+      end
+      value = unparen(node.value)
+      raise Unsupported, 'assignment value' unless assign_value?(value)
+
+      t = temp
+      operand_into(recv, t)
+      if index
+        operand_into(idx, t + 1)
+        emit(:GETIDX, t)
+      else
+        emit(:SEND0, t, sym_index(node.read_name))
+      end
+      @nregs = [@nregs, t + 2].max
+      to_end = nil
+      case node
+      when Prism::IndexOrWriteNode, Prism::CallOrWriteNode, Prism::IndexAndWriteNode, Prism::CallAndWriteNode
+        to_end = emit_jump(jump_name(node), t)
+        value_into(value, t)
+      else
+        operand_into(value, t + 1)
+        @nregs = [@nregs, t + 3].max
+        op = node.binary_operator
+        case op
+        when :+, :-
+          add_sub(op, t)
+        when :*, :/, :<, :<=, :>, :>=
+          emit({ :* => :MUL, :/ => :DIV, :< => :LT, :<= => :LE, :> => :GT, :>= => :GE }.fetch(op), t)
+        else
+          emit(:SEND, t, sym_index(op), 1)
+        end
+      end
+      base = t + 1
+      operand_into(recv, base)
+      if index
+        operand_into(idx, base + 1)
+        gen_move(base + 2, t, false)
+        gen_move(t, base + 2, true) if last
+        emit(:SETIDX, base)
+        @nregs = [@nregs, base + 4].max
+      else
+        gen_move(base + 1, t, false)
+        gen_move(t, base + 1, true) if last
+        emit(:SEND, base, sym_index(node.write_name), 1)
+        @nregs = [@nregs, base + 3].max
+      end
+      patch_jump(to_end, @code.size) if to_end
+      last ? t : nil
+    end
+
+    # gen_assignment(target, NULL, src, NOVAL): store R[src] into one target of a multiple assignment; +cursp+ is the
+    # register stack pointer at that moment (a nested target's AREFs and a call target's receiver start there).
+    def assign_target(target, src, cursp)
+      case target
+      when Prism::LocalVariableTargetNode
+        if target.depth.positive?
+          idx, lv = upvar_operands(target.name, target.depth)
+          name, ops, start = @insns.last
+          if !no_peephole? && name == :MOVE && ops[0] == src
+            truncate(start)
+            src = ops[1]
+          end
+          emit(:SETUPVAR, src, idx, lv)
+        else
+          gen_move(local_register(target.name), src, false)
+        end
+      when Prism::InstanceVariableTargetNode then gen_setxv(:SETIV, src, target.name, false)
+      when Prism::GlobalVariableTargetNode then gen_setxv(:SETGV, src, target.name, false)
+      when Prism::ConstantTargetNode then gen_setxv(:SETCONST, src, target.name, false)
+      when Prism::MultiTargetNode
+        raise Unsupported, 'nested multiple assignment with a splat' unless target.rest.nil? && target.rights.empty?
+
+        target.lefts.each_with_index do |l, i|
+          emit(:AREF, cursp, src, i)
+          assign_target(l, cursp, cursp + 1)
+        end
+      when Prism::CallTargetNode, Prism::IndexTargetNode
+        index = target.is_a?(Prism::IndexTargetNode)
+        recv = unparen(target.receiver)
+        raise Unsupported, 'assignment target receiver' unless (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
+        raise Unsupported, 'safe navigation assignment' if !index && target.safe_navigation?
+
+        callsp = src == cursp ? cursp + 1 : cursp # room for the result when the value is at the stack pointer
+        operand_into(recv, callsp)
+        if index
+          args = target.arguments&.arguments || []
+          raise Unsupported, 'index assignment target' unless args.size == 1 && !target.block && (simple?(args[0]) || call_node?(args[0]))
+
+          operand_into(unparen(args[0]), callsp + 1)
+          gen_move(callsp + 2, src, false)
+          emit(:SETIDX, callsp)
+          @nregs = [@nregs, callsp + 4].max
+        else
+          gen_move(callsp + 1, src, false)
+          emit(:SEND, callsp, sym_index(target.name), 1)
+          @nregs = [@nregs, callsp + 3].max
+        end
+      else raise Unsupported, "multiple assignment target #{target.class.name.split('::').last}"
+      end
+    end
+
+    # `a, b = x, y` (codegen_masgn). With a fixed right side whose value is unused, the values go to consecutive registers
+    # from the first temporary and each target takes its own (a literal-only right side for local targets is loaded straight
+    # into them). Otherwise the right side is a value (an array, for several) in the first temporary, and AREF reads each
+    # leading target out of it (APOST for the splat and the trailing targets); the statement's value is that value.
+    def multiple_write(node, last:)
+      lefts = node.lefts
+      rest = node.rest
+      rights = node.rights
+      rest = nil if rest.is_a?(Prism::ImplicitRestNode) # a trailing comma adds nothing
+      raise Unsupported, 'multiple assignment with a bare splat' if rest && rest.expression.nil?
+      raise Unsupported, 'multiple assignment with parentheses' if node.lparen_loc
+
+      value = unparen(node.value)
+      fixed = value.is_a?(Prism::ArrayNode) && value.elements.none? { |e| e.is_a?(Prism::SplatNode) }
+      if value.is_a?(Prism::ArrayNode)
+        raise Unsupported, 'multiple assignment right side with a splat' unless fixed
+        raise Unsupported, 'multiple assignment right side element' unless value.elements.all? { |e| operand?(e) }
+      else
+        raise Unsupported, 'multiple assignment right side' unless operand?(value) || value.is_a?(Prism::OrNode) ||
+                                                                      value.is_a?(Prism::AndNode)
+      end
+      t = temp
+      if !last && fixed && !value.elements.empty?
+        elems = value.elements.map { |e| unparen(e) }
+        simple_literals = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode]
+        if rest.nil? && rights.empty? && !lefts.empty? && lefts.size == elems.size &&
+           elems.all? { |e| simple_literals.include?(e.class) } &&
+           lefts.all? { |l| l.is_a?(Prism::LocalVariableTargetNode) && l.depth.zero? }
+          lefts.each_with_index { |l, i| value_into(elems[i], local_register(l.name)) }
+          return nil
+        end
+        len = elems.size
+        elems.each_with_index { |e, i| operand_into(e, t + i) }
+        @nregs = [@nregs, t + len].max
+        n = 0
+        # The fork's register stack does not grow for a LOADNIL or the rest's ARRAY (no push), so the register count must not
+        # either; only variable targets are covered there (a call target counts its own registers).
+        plain = [Prism::LocalVariableTargetNode, Prism::InstanceVariableTargetNode, Prism::GlobalVariableTargetNode,
+                 Prism::ConstantTargetNode]
+        n = 0
+        lefts.each do |l|
+          if n < len
+            assign_target(l, t + n, t + len)
+          else
+            raise Unsupported, 'missing value for a non-variable target' unless plain.include?(l.class)
+
+            saved = @nregs
+            emit(:LOADNIL, t + n)
+            assign_target(l, t + n, t + len)
+            @nregs = saved
+          end
+          n += 1
+        end
+        if rest
+          raise Unsupported, 'splat target that is not a variable' unless plain.include?(rest.expression.class)
+
+          post = rights.size
+          rn = len < post + n ? 0 : len - post - n
+          cursp = t + len
+          saved = @nregs
+          cursp == t + n ? emit(:ARRAY, cursp, rn) : emit(:ARRAY2, cursp, t + n, rn)
+          assign_target(rest.expression, cursp, cursp)
+          @nregs = saved
+          n += rn
+        end
+        rights.each do |r|
+          if n < len
+            assign_target(r, t + n, t + len)
+          else
+            raise Unsupported, 'missing value for a non-variable target' unless plain.include?(r.class)
+
+            saved = @nregs
+            emit(:LOADNIL, t + len)
+            assign_target(r, t + len, t + len)
+            @nregs = saved
+          end
+          n += 1
+        end
+        return nil
+      end
+
+      if fixed
+        raise Unsupported, 'empty array on a multiple assignment' if value.elements.empty?
+
+        value.elements.each_with_index { |e, i| operand_into(unparen(e), t + 1 + i - 1) }
+        @nregs = [@nregs, t + value.elements.size].max
+        emit(:ARRAY, t, value.elements.size)
+      else
+        operand_into(value, t)
+      end
+      sp = t + 1
+      @nregs = [@nregs, sp].max
+      lefts.each_with_index do |l, i|
+        emit(:AREF, sp, t, i)
+        assign_target(l, sp, sp + 1)
+      end
+      post = rights.size
+      if rest || post.positive?
+        gen_move(sp, t, last)
+        @nregs = [@nregs, sp + post + 1].max
+        emit(:APOST, sp, lefts.size, post)
+        assign_target(rest.expression, sp, sp) if rest
+        rights.each_with_index { |r, i| assign_target(r, sp + 1 + i, sp) }
+      end
+      last ? t : nil
+    end
+
+    def jump_name(node)
+      node.class.name.end_with?('OrWriteNode') ? :JMPIF : :JMPNOT
     end
 
     # A method call, as the fork's codegen emits it. The registers above the locals are a stack (the fork's cursp, here
@@ -866,6 +1348,8 @@ module MrbcRb
     def truncate(start)
       @code.slice!(start..)
       @lines.slice!(start..)
+      @insns.pop while @insns.last && @insns.last[2] >= start
+      @rewound = true # rewind_pc: the pc is the last instruction's, so no peephole until something is emitted
     end
 
     # The register the value of +node+ is in: a local is read in place, anything else is loaded into a temporary.
@@ -1033,6 +1517,8 @@ module MrbcRb
     def emit(name, *operands)
       start = @code.size
       @last = [name, operands, start]
+      @insns << @last
+      @rewound = false
       @code << OP.fetch(name)
       case name
       when :ENTER then byte((operands[0] >> 16) & 0xff); short(operands[0] & 0xffff)
