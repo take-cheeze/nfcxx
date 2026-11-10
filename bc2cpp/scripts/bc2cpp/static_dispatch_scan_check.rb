@@ -27,6 +27,9 @@
 #   GENERATED_REGISTRATION: no compiled gem's src/register.cxx registers a method by hand (the generated
 #     bc2cpp_register_owner_methods is the only registration, so the lists' left-out entries stay out), and the
 #     closed list may take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
+#   SUPER_REACH (closed only): a `super` in a class's method reaches that name on the class's ancestors only; a module,
+#     a singleton or an owner outside the recorded chains stays reached, and an unknown native superclass keeps the name
+#     dynamic.
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
@@ -376,6 +379,20 @@ check('ancestry: a native exception superclass', exc != :all && exc.superset?(Se
 check('ancestry: any other native superclass is unknown', S.engine_ancestry({ 'Game::N' => 'RGSS::Native' }, []) == :all)
 check('ancestry: an engine Struct', S.engine_ancestry({}, ['Game::Row']).include?('Struct'))
 
+# --- SUPER_REACH ---
+chains = { 'Game::A' => 'Game::B', 'Game::B' => 'Object', 'Game::N' => 'RGSS::Native', 'Game::E' => 'StandardError' }
+check('super: a class reaches its ancestors, not itself', S.super_ancestors('Game::A', chains) == Set['Game::B', 'Object'])
+check('super: a native exception chain ends it', S.super_ancestors('Game::E', chains) == Set['StandardError'])
+check('super: an unknown native superclass is unbounded', S.super_ancestors('Game::N', chains).nil?)
+check('super: a module or singleton owner is unbounded', S.super_ancestors('Game::M', chains).nil? && S.super_ancestors('Game::A.singleton', chains).nil?)
+check('super: a superclass cycle is unbounded', S.super_ancestors('Game::X', { 'Game::X' => 'Game::Y', 'Game::Y' => 'Game::X' }).nil?)
+reach = { 'start' => Set['Game::B'] }
+classes = chains.keys.to_set
+check('super: only an ancestor, a module or a singleton is reached',
+      S.super_reached?(reach, classes, 'Game::B', 'start') && S.super_reached?(reach, classes, 'Game::M', 'start') &&
+      S.super_reached?(reach, classes, 'Game::A.singleton', 'start') && !S.super_reached?(reach, classes, 'Game::A', 'start') &&
+      !S.super_reached?(reach, classes, 'Game::B', 'other'))
+
 # --- CORE_BYTECODE_TOKENS ---
 if ENV['MRBC']
   require 'tmpdir'
@@ -421,7 +438,11 @@ if ENV['MRBC']
         def r(m)
           local_name_only = m
           __send__(local_name_only, reflective_send_name, :reflective_symbol)
+          @quiet_ivar_name = QuietConstName
+          QuietConstName.new
         end
+        def quiet_defined_name; end
+        def calls_it(o) = o.quiet_defined_name2
       end
     RUBY
     tokens = Set.new
@@ -447,6 +468,9 @@ if ENV['MRBC']
     check('core: a reflective file loses the receiver rule, not its symbols',
           text.keys == [reflective] && names&.include?('reflective_send_name') &&
           names.include?('reflective_symbol') && !tokens.include?('reflective_send_name'))
+    check('core: a reflective file names no variable, constant or defined name no op looks up',
+          names && %w[@quiet_ivar_name QuietConstName quiet_defined_name].none? { |n| names.include?(n) } &&
+          names.include?('quiet_defined_name2'))
     check('core: a reflective file names no comment word or local variable',
           names && !names.include?('comment_word_only') && !names.include?('local_name_only'))
 
