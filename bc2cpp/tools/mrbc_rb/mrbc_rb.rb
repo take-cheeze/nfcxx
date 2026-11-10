@@ -582,8 +582,6 @@ module MrbcRb
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
         @leading_dot[recv] = op.start_line
       when Prism::CallNode
-        raise Unsupported, 'leading-dot receiver' if recv.safe_navigation?
-
         # A call with a block ends in its `}` or `end`: it is built without the next token, like one ending in `)`.
         @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')' || recv.block.is_a?(Prism::BlockNode)
       when Prism::ParenthesesNode
@@ -1863,7 +1861,7 @@ module MrbcRb
               node.is_a?(Prism::IndexAndWriteNode)
       recv = node.receiver && unparen(node.receiver)
       raise Unsupported, 'assignment receiver' unless recv && (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
-      raise Unsupported, 'safe navigation assignment' if !index && node.safe_navigation?
+      raise Unsupported, 'safe navigation assignment' if index && node.safe_navigation?
 
       leading_dot(node) unless index
       idx = nil
@@ -1883,7 +1881,9 @@ module MrbcRb
         operand_into(idx, t + 1)
         index_read(t, recv, idx)
       else
+        skip = safe_jump(t, true) if node.safe_navigation?
         emit(:SEND0, t, sym_index(node.read_name))
+        dispatch(skip)
       end
       @nregs = [@nregs, t + 2].max
       to_end = nil
@@ -1906,6 +1906,7 @@ module MrbcRb
       end
       base = t + 1
       operand_into(recv, base)
+      skip = safe_jump(base, last) if !index && node.safe_navigation?
       if index
         operand_into(idx, base + 1)
         gen_move(base + 2, t, false)
@@ -1916,6 +1917,7 @@ module MrbcRb
         gen_move(base + 1, t, false)
         gen_move(t, base + 1, true) if last
         emit(:SEND, base, sym_index(node.write_name), 1)
+        dispatch(skip)
         @nregs = [@nregs, base + 3].max
       end
       dispatch(to_end)
@@ -2117,15 +2119,19 @@ module MrbcRb
       r = temp
       if need
         operand_into(recv, r + 1)
+        skip = safe_jump(r + 1, true) if node.safe_navigation?
         operand_into(arg, r + 2)
         emit(:MOVE, r, r + 2)
         emit(:SEND, r + 1, sym_index(node.name), 1)
+        dispatch(skip)
         @nregs = [@nregs, r + 4].max
         r
       else
         operand_into(recv, r)
+        skip = safe_jump(r, false) if node.safe_navigation?
         operand_into(arg, r + 1)
         emit(:SEND, r, sym_index(node.name), 1)
+        dispatch(skip)
         @nregs = [@nregs, r + 3].max
         nil
       end
@@ -2375,13 +2381,14 @@ module MrbcRb
       raise Unsupported, 'call with a block or keywords' if args.any? { |a| !operand?(a) }
       raise Unsupported, 'call with many arguments' if args.size > 14 # gen_values packs more than 14 into an array
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
-      raise Unsupported, 'safe navigation' if node.safe_navigation? && !(recv && name.to_s.match?(PLAIN_NAME))
+      raise Unsupported, 'safe navigation' if node.safe_navigation? && !recv
+      raise Unsupported, 'safe navigation with an index assignment call' if node.safe_navigation? && name == :[]=
       raise Unsupported, "operator method #{name}" if recv && UNVERIFIED_OPERATORS.include?(name)
       raise Unsupported, 'unary operator with arguments' if UNARY_OPS.include?(name) && !args.empty?
 
       if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
         raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
-        raise Unsupported, 'attribute assignment receiver' unless simple?(recv)
+        raise Unsupported, 'attribute assignment receiver' unless simple?(recv) || (node.safe_navigation? && call_node?(recv))
 
         return attribute_assign(node, recv, args[0], need: need)
       end
@@ -2400,13 +2407,15 @@ module MrbcRb
 
       if recv && BINARY_OPS.key?(name) && args.size == 1
         operand_into(recv, a)
+        skip = safe_jump(a, need) if node.safe_navigation?
         operand_into(args[0], a + 1)
         if name == :[] && no_peephole? # gen_binop gives up (a plain SEND) when the argument ends at a jump target
           emit(:SEND, a, sym_index(:[]), 1)
+          dispatch(skip)
           @nregs = [@nregs, a + 3].max
           return a
         end
-        if name == :[] && args[0].is_a?(Prism::IntegerNode) && args[0].value.zero? && recv.is_a?(Prism::LocalVariableReadNode) &&
+        if name == :[] && !skip && args[0].is_a?(Prism::IntegerNode) && args[0].value.zero? && recv.is_a?(Prism::LocalVariableReadNode) &&
            recv.depth.zero?
           # gen_binop's GETIDX0 fusion: MOVE a, local; LOADI_0 a+1 become GETIDX0 a, local (verified with mrbc -v).
           truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
@@ -2414,9 +2423,13 @@ module MrbcRb
           @nregs = [@nregs, a + 3].max
           return a
         end
-        return a if binary_folded(name, a)
+        if binary_folded(name, a)
+          dispatch(skip)
+          return a
+        end
 
         emit(BINARY_OPS.fetch(name), a)
+        dispatch(skip)
         @nregs = [@nregs, a + 3].max
         return a
       end
@@ -3512,6 +3525,13 @@ module MrbcRb
         return a
       end
       operand_into(recv, a)
+      if node.safe_navigation? # `a&.-@`: the send is skipped for nil and never folded (verified)
+        skip = safe_jump(a, need)
+        emit(:SEND0, a, sym_index(name))
+        dispatch(skip)
+        @nregs = [@nregs, a + 2].max
+        return a
+      end
       return a if unary_folded(name, a)
 
       sym = sym_index(name)
