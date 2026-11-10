@@ -1,3 +1,5 @@
+// GCC-SKIP: g++ 15 itself rejects "+r,m" on an inlined long at -O1 and up ("impossible constraint in asm"); the gcc backend now
+// inlines keep_mut, so it fails the same way. Path B accepts the program (EXPECT below); the gcc comparison is skipped.
 // Path B: extended-asm idioms that QBE can express (docs/notes/pathb-hosted.md, "Inline asm"):
 //   mfence/lfence/sfence and `lock; addl $0,(%rsp)` are a full fence, a call of the helper __pathb_fence, which the
 //   assembler step writes with the real mfence; pause / rep nop / nop are compiler barriers or nothing;
