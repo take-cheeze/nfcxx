@@ -3,7 +3,7 @@
 
 # Compares the two AST producers (tools/bc2cpp/native_ast_source.rb: clang and nfcxx) on real sources: the return kind
 # NativeAstReturns gives each function (single-kind and optional modes), and the frame-free verdict and
-# candidate rows (defined, external, frame_free) of NativeCoreCandidates. Prints every function whose result differs, and a summary. Exits 1 on any difference or when
+# candidate rows (defined, external, frame_free) of NativeCoreCandidates, and the ROM tables of NativeRomExtract (each entry's function, symbol and defined flag). Prints every function whose result differs, and a summary. Exits 1 on any difference or when
 # a producer fails on a file the other parses.
 #
 #   BC2CPP_WORLD_ROOT=/path/to/rpg-maker-clone ruby scripts/bc2cpp/native_ast_producers_diff.rb [--flags="-DX -Iy"] SRC.c...
@@ -20,6 +20,7 @@ require_relative 'base_rbs_all'
 require_relative '../../tools/bc2cpp/native_ast_returns'
 require_relative '../../tools/bc2cpp/native_ast_source'
 require_relative '../../tools/bc2cpp/native_core_candidates'
+require_relative '../../tools/bc2cpp/native_rom_extract'
 
 extra = nil
 closed = nil
@@ -60,16 +61,20 @@ paths.each do |path|
 
   results = asts.transform_values do |ast|
     { kinds: NativeAstReturns.analyze(ast, path), optional: NativeAstReturns.analyze(ast, path, optional: true),
-      free: NativeCoreCandidates.frame_free(ast), candidates: NativeCoreCandidates.candidates(path, ast).to_h { |c| [c['function'], c] } }
+      free: NativeCoreCandidates.frame_free(ast),
+      # The `*_rom_entries` tables (file-scope initializers: InitListExpr of InitListExpr, function and symbol per entry).
+      rom: NativeRomExtract.extract(ast).to_h { |table| [table['table'], table['entries']] },
+      candidates: NativeCoreCandidates.candidates(path, ast).to_h { |c| [c['function'], c] } }
   end
   clang, nfcxx = results.values_at('clang', 'nfcxx')
   totals[:proven] += clang[:kinds].values.count { |kind| !kind.nil? }
   bad = 0
-  %i[kinds optional free candidates].each do |facet|
+  %i[kinds optional free candidates rom].each do |facet|
     # The frame-free verdict is read for the source's own functions (a header's unused static inline function has no
     # body in the nfcxx IL, and no consumer asks about it).
     names = clang[facet].keys | nfcxx[facet].keys
     names &= clang[:kinds].keys if facet == :free || facet == :candidates
+    totals[:rom_entries] += clang[:rom].values.sum(&:size) if facet == :rom
     names.sort.each do |fn|
       totals[facet] += 1
       next if clang[facet][fn] == nfcxx[facet][fn] && clang[facet].key?(fn) == nfcxx[facet].key?(fn)
@@ -82,5 +87,5 @@ paths.each do |path|
   puts format('%-28s %4d functions, %3d differences (clang %.1fs, nfcxx %.1fs)', File.basename(path), clang[:kinds].size, bad,
               seconds['clang'], seconds['nfcxx'])
 end
-puts "#{paths.size} files, #{totals[:kinds]} function kinds (#{totals[:proven]} with a kind), #{totals[:candidates]} candidate rows, #{differences} differences"
+puts "#{paths.size} files, #{totals[:kinds]} function kinds (#{totals[:proven]} with a kind), #{totals[:candidates]} candidate rows, #{totals[:rom]} ROM tables (#{totals[:rom_entries]} entries), #{differences} differences"
 exit(differences.zero? ? 0 : 1)

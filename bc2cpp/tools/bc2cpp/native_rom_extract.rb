@@ -2,9 +2,12 @@
 
 require 'json'
 
-# Native method registrations from the clang AST (the JSON of `clang -fsyntax-only -Xclang -ast-dump=json`).
+# Native method registrations from the AST of a translation unit: clang's JSON (`clang -fsyntax-only -Xclang
+# -ast-dump=json`) or the nfcxx front end's (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md; it carries the file-scope
+# initializers, a ck_aggregate array of structs as InitListExpr of InitListExpr, and enumerators by name).
 #
 #   clang -fsyntax-only -Xclang -ast-dump=json <flags> SOURCE | ruby native_rom_extract.rb
+#   BC2CPP_AST_PRODUCER=clang|nfcxx ruby native_rom_extract.rb SOURCE [FLAGS...]    # the producer is run here
 #
 # mruby 3 registers most core methods in a static ROM table, `static const mrb_mt_entry NAME_rom_entries[] = {
 # MRB_MT_ENTRY(fn, SYM, ARGS), ... }`, installed by MRB_MT_INIT_ROM. Each entry names one C function. The function is
@@ -102,5 +105,14 @@ end
 
 if $PROGRAM_NAME == __FILE__
   require 'set'
-  puts JSON.pretty_generate(NativeRomExtract.extract(JSON.parse($stdin.read)))
+  if ARGV.empty?
+    puts JSON.pretty_generate(NativeRomExtract.extract(JSON.parse($stdin.read)))
+  else
+    require_relative 'native_ast_source'
+    source, *flags = ARGV
+    out, err, status = NativeAstSource.dump(source, flags, lang: source.end_with?('.c') ? :c : :cxx)
+    abort "native_rom_extract: #{NativeAstSource.producer} failed on #{source}: #{err.lines.first}" unless status.success?
+
+    puts JSON.pretty_generate(NativeRomExtract.extract(JSON.parse(out)))
+  end
 end
