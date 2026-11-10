@@ -32,7 +32,7 @@ module MrbcRb
     LOADI16: 14, LOADI32: 15, LOADSYM: 16, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
     ARRAY: 82, ARRAY2: 83, STRING: 92, STRCAT: 93, HASH: 94, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35,
-    SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
+    SETIDX: 37, GETIDX0: 36, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57, KEYEND: 59, KARG: 60,
@@ -93,6 +93,12 @@ module MrbcRb
     def unparen(node) = MrbcRb.unparen(node)
     def simple?(node) = SIMPLE_VALUES.include?(unparen(node).class)
     def call_node?(node) = unparen(node).is_a?(Prism::CallNode)
+
+    # `x.nil?` as a condition is a JMPNIL on the receiver in the fork (codegen_if's nil_p): not reproduced.
+    def nil_predicate?(node)
+      node = unparen(node)
+      node.is_a?(Prism::CallNode) && node.name == :nil? && node.arguments.nil? && !node.receiver.nil?
+    end
 
     def initialize(filename, frozen_strings: false)
       @filename = filename
@@ -390,6 +396,7 @@ module MrbcRb
       value_reg = nil
       stmts.each_with_index do |node, i|
         @line = node.location.start_line
+        @line_moved = false
         value_reg = statement(node, last: val && i == stmts.size - 1)
       end
       value_reg
@@ -412,16 +419,24 @@ module MrbcRb
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
+      when Prism::ConstantReadNode
+        # A constant read is generated even when unused: the lookup can autoload or raise (verified: `C` then `1` has GETCONST).
+        last ? value_in_register(node) : value_into(node, temp) && nil
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
-           Prism::ConstantReadNode, Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode
+           Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode
         last ? value_in_register(node) : nil
       when Prism::SymbolNode
         # An unused symbol still enters the symbol table (sym_idx runs before gen_load_op2 checks val).
         sym_index(node.unescaped.to_sym)
         last ? value_in_register(node) : nil
       when *BUILT_VALUES
-        # Unused strings and hashes generate nothing (codegen_hash returns early, gen_string skips its parts).
-        last ? value_in_register(node) : nil
+        # Unused hashes generate nothing (codegen_hash returns early); an unused string evaluates its expressions only.
+        if last
+          value_in_register(node)
+        else
+          string_unused(node) if node.is_a?(Prism::InterpolatedStringNode)
+          nil
+        end
       when Prism::CallNode
         call(node, need: last)
       when Prism::ConstantWriteNode
@@ -457,6 +472,7 @@ module MrbcRb
       raise Unsupported, 'if predicate' unless simple?(predicate) || call_node?(predicate)
       # The fork folds a literal predicate away (`if 1` compiles to its body only); not reproduced yet.
       raise Unsupported, 'literal if predicate' if LITERAL_PREDICATES.include?(predicate.class)
+      raise Unsupported, 'nil? predicate (JMPNIL)' if nil_predicate?(predicate)
 
       else_node = node.subsequent
       raise Unsupported, 'elsif' if else_node.is_a?(Prism::IfNode)
@@ -559,6 +575,7 @@ module MrbcRb
       predicate = unparen(node.predicate)
       raise Unsupported, 'unless predicate' unless simple?(predicate) || call_node?(predicate)
       raise Unsupported, 'literal unless predicate' if LITERAL_PREDICATES.include?(predicate.class)
+      raise Unsupported, 'nil? predicate (JMPNIL)' if nil_predicate?(predicate)
 
       body = node.statements&.body || []
       else_node = node.else_clause
@@ -603,6 +620,7 @@ module MrbcRb
       end
       stmts.each_with_index do |stmt, i|
         @line = stmt.location.start_line
+        @line_moved = false
         if need && i == stmts.size - 1
           r = statement(stmt, last: true)
           emit(:MOVE, t, r) unless r == t
@@ -761,7 +779,15 @@ module MrbcRb
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
       recv = node.receiver && unparen(node.receiver)
-      recv = nil if recv.is_a?(Prism::SelfNode)
+      if recv.is_a?(Prism::SelfNode)
+        # A named method on self is a send with no receiver (SSEND); an operator or index on self loads self like any receiver
+        # (verified: `self[x]` is LOADSELF, MOVE, GETIDX).
+        n_args = (node.arguments&.arguments || []).size
+        if name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/) then recv = nil
+        elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args == 2))
+          raise Unsupported, "operator method #{name} on self"
+        end
+      end
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
       raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !operand?(a) }
       raise Unsupported, 'call with a non-simple receiver' if recv && (!operand?(recv) || BUILT_VALUES.include?(recv.class))
@@ -776,7 +802,7 @@ module MrbcRb
       end
 
       # The parser folds an operator on two integer literals (1 + 2), which is not reproduced here.
-      raise Unsupported, 'operator on two literals' if recv.is_a?(Prism::IntegerNode) && BINARY_OPS.key?(name) &&
+      raise Unsupported, 'operator on two literals' if recv.is_a?(Prism::IntegerNode) && (BINARY_OPS.key?(name) || %i[<< >> % ** & | ^].include?(name)) &&
                                                        args.size == 1 && args[0].is_a?(Prism::IntegerNode)
 
       a = @sp
@@ -798,6 +824,14 @@ module MrbcRb
       if recv && BINARY_OPS.key?(name) && args.size == 1
         operand_into(recv, a)
         operand_into(args[0], a + 1)
+        if name == :[] && args[0].is_a?(Prism::IntegerNode) && args[0].value.zero? && recv.is_a?(Prism::LocalVariableReadNode) &&
+           recv.depth.zero?
+          # gen_binop's GETIDX0 fusion: MOVE a, local; LOADI_0 a+1 become GETIDX0 a, local (verified with mrbc -v).
+          truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
+          emit(:GETIDX0, a, local_register(recv.name))
+          @nregs = [@nregs, a + 3].max
+          return a
+        end
         emit(BINARY_OPS.fetch(name), a)
         @nregs = [@nregs, a + 3].max
         return a
@@ -828,6 +862,12 @@ module MrbcRb
     # Generates an operand into register +dst+ with the stack pointer at +dst+ (everything above it is free), as the fork
     # pushes an operand and generates it into the new top of the stack.
     def operand_into(node, dst)
+      # The fork stamps each node with its own line, so after a heredoc body's expression an operand on an earlier line goes
+      # back to that line; only strings (which set their own line) are covered after one.
+      if @line_moved && node.location.start_line != @line && !node.is_a?(Prism::InterpolatedStringNode)
+        raise Unsupported, 'operand after a heredoc interpolation'
+      end
+
       saved = @sp
       @sp = dst
       value_into(node, dst)
@@ -893,7 +933,11 @@ module MrbcRb
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode
         node.depth.zero? ? emit(:MOVE, dst, local_register(node.name)) : getupvar(dst, node)
-      when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
+      when Prism::StringNode
+        # A heredoc of several lines is a literal per line, concatenated (dstr_into).
+        if node.opening&.start_with?('<<') then dstr_into(node, dst)
+        else emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
+        end
       when Prism::SymbolNode then emit(:LOADSYM, dst, sym_index(node.unescaped.to_sym))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
@@ -902,7 +946,7 @@ module MrbcRb
         r = logic(node, need: true)
         emit(:MOVE, dst, r) unless r == dst
       when Prism::ArrayNode then array_into(node, dst)
-      when Prism::InterpolatedStringNode then built_into(dst) { |base| dstr_at(node, base) }
+      when Prism::InterpolatedStringNode then dstr_into(node, dst)
       when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
       when Prism::CallNode
         result = call(node)
@@ -940,35 +984,165 @@ module MrbcRb
       emit(:MOVE, dst, base) unless dst == base
     end
 
-    # The fork's string interpolation: the first literal part is a STRING, and each interpolated value is loaded into the
-    # next register and STRCATed, followed by the literal part after it (empty when another interpolation or the end
-    # follows: the fork always appends it).
-    def dstr_at(node, base)
-      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+    # The fork's string literal (NODE_STR, gen_string): a list of parts, each a literal or an expression. A quoted literal
+    # with interpolation is a literal, then an expression and a literal for each interpolation (the literals may be empty,
+    # the fork always has them); a literal without one is a single part; adjacent literals ("a" "b#{x}" 'c') are not merged,
+    # each contributes its own parts. `#@ivar`, `#$g` and `#@@cv` are not interpolations in the fork: they stay literal text
+    # (the part Prism calls an embedded variable). A heredoc is a list of literals per source line (see heredoc_parts).
+    # Returns [[:lit, bytes] | [:expr, node], ...].
+    def string_parts(node, top: true)
+      heredoc = node.respond_to?(:opening) && node.opening&.start_with?('<<')
+      raise Unsupported, 'heredoc in a concatenation' if !top && heredoc
+      return heredoc_parts(node) if heredoc
 
-      segments = [''.b]
-      values = []
-      node.parts.each do |part|
+      case node
+      when Prism::StringNode
+        [[:lit, node.unescaped.b]]
+      when Prism::InterpolatedStringNode
+        return node.parts.flat_map { |part| string_parts(part, top: false) } if node.opening_loc.nil? # adjacent literals
+
+        parts = [[:lit, ''.b]]
+        node.parts.each do |part|
+          case part
+          when Prism::StringNode then parts.last[1] << part.unescaped.b
+          when Prism::EmbeddedVariableNode then parts.last[1] << part.location.slice.b
+          when Prism::EmbeddedStatementsNode
+            body = part.statements&.body || []
+            raise Unsupported, 'interpolation with several statements' if body.size > 1
+
+            parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
+          else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
+          end
+        end
+        parts
+      else raise Unsupported, "string part #{node.class.name.split('::').last}"
+      end
+    end
+
+    # A heredoc body, as the fork's parser splits it (heredoc_string_interp): one literal per source line, the text of a line
+    # before an interpolation as a literal of its own (empty when the line starts with it), and the rest of the line, newline
+    # included, after it. Prism joins the lines between two interpolations, so they are split again at the newlines of the
+    # text. Escapes stay inside their line's literal (verified: \t, \\, \#, \" and \' in a heredoc, a backslash before another
+    # character in a raw `<<'A'` one); a continuation, a doubled backslash in a raw heredoc and other escapes are not covered.
+    def heredoc_parts(node)
+      pieces = node.is_a?(Prism::StringNode) ? [node] : node.parts
+      raw = node.opening.include?("'")
+      # The fork reads a raw heredoc like a single-quoted string: `\\` is one backslash (unlike Ruby).
+      bad = ->(text) { raw ? text.match?(/\\[\\\n]/) : text.gsub(/\\[t\\#"']/, '').include?('\\') }
+      if pieces.any? { |x| x.respond_to?(:content_loc) && bad.call(x.content_loc.slice) }
+        raise Unsupported, 'heredoc with an escape other than a tab, backslash, quote or hash'
+      end
+
+      parts = []
+      run = ''.b
+      flush = lambda do |before_expr|
+        lits = run.scan(/[^\n]*\n|[^\n]+/n)
+        lits << ''.b if before_expr && (lits.empty? || lits.last.end_with?("\n"))
+        lits.each { |l| parts << [:lit, l] }
+        run = ''.b
+      end
+      pieces.each do |part|
         case part
-        when Prism::StringNode
-          segments.last << part.unescaped.b
+        when Prism::StringNode then run << part.unescaped.b
+        when Prism::EmbeddedVariableNode then run << part.location.slice.b
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
-          raise Unsupported, 'interpolation operand' unless body.size == 1 && SIMPLE_VALUES.include?(body[0].class)
+          raise Unsupported, 'interpolation with several statements' if body.size > 1
 
-          values << body[0]
-          segments << ''.b
+          flush.call(true)
+          parts << [:expr, body[0] && unparen(body[0])]
         else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
         end
       end
-      raise Unsupported, 'string without interpolation' if values.empty?
+      flush.call(false)
+      parts << [:lit, ''.b] if parts.empty?
+      parts
+    end
 
-      emit(:STRING, base, pool_index([:str, segments[0]]))
-      values.each_with_index do |v, i|
-        value_into(v, base + 1)
-        emit(:STRCAT, base)
-        emit(:STRING, base + 1, pool_index([:str, segments[i + 1]]))
-        emit(:STRCAT, base)
+    # Whether a heredoc starts inside +node+ (its body lines are not part of the node's own lines).
+    def heredoc_inside?(node)
+      return true if node.respond_to?(:opening) && node.opening&.start_with?('<<')
+
+      node.compact_child_nodes.any? { |c| heredoc_inside?(c) }
+    end
+
+    # An interpolated expression the register stack covers: the operands of calls, the logic operators and the conditionals
+    # (an empty interpolation is nil).
+    def interpolation_operand?(node)
+      node.nil? || operand?(node) || [Prism::OrNode, Prism::AndNode, Prism::IfNode, Prism::UnlessNode].include?(node.class)
+    end
+
+    # The value of an interpolated expression in register +dst+, which is the top of the stack.
+    def interpolation_into(node, dst)
+      raise Unsupported, 'interpolation operand' unless interpolation_operand?(node)
+      raise Unsupported, 'multi-line interpolation' if node && (node.location.start_line != node.location.end_line || heredoc_inside?(node))
+
+      # Every node the fork generates stamps the line it was parsed on, so the code of an expression in a heredoc body is on
+      # that body's line, and so is the rest of the string and of the statement after it.
+      if node
+        @line_moved = true if @line != node.location.start_line
+        @line = node.location.start_line
+      end
+      saved = @sp
+      @sp = dst
+      if node.nil?
+        emit(:LOADNIL, dst)
+      elsif node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode)
+        r = statement(node, last: true)
+        emit(:MOVE, dst, r) unless r == dst
+      else
+        value_into(node, dst)
+      end
+    ensure
+      @sp = saved
+    end
+
+    # An interpolated or concatenated string whose value is unused: only the expressions are evaluated, in order, for their
+    # effects (gen_string with val 0).
+    def string_unused(node)
+      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+
+      string_parts(node).each do |kind, v|
+        next unless kind == :expr && v
+
+        raise Unsupported, 'interpolation operand' unless interpolation_operand?(v)
+        raise Unsupported, 'multi-line interpolation' if v.location.start_line != v.location.end_line || heredoc_inside?(v)
+
+        @line_moved = true if @line != v.location.start_line
+        @line = v.location.start_line
+        statement(v, last: false)
+      end
+    end
+
+    # gen_string with a value: the first part is loaded into the base register, each further part into the next one and
+    # STRCATed onto the base. Under `# frozen_string_literal: true` a string of literals only is one FSTRING of the
+    # concatenated bytes (gen_frozen_string).
+    def dstr_into(node, dst)
+      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+
+      parts = string_parts(node)
+      # The node's own line, as every node the fork generates (a heredoc: the `<<` line).
+      @line_moved = true if @line != node.location.start_line
+      @line = node.location.start_line
+      if @frozen_strings && parts.all? { |kind, _| kind == :lit }
+        return emit(:FSTRING, dst, pool_index([:str, parts.map(&:last).join.b]))
+      end
+
+      # A single literal is a plain string load, folded into a local like any other (gen_move).
+      return emit(:STRING, dst, pool_index([:str, parts[0][1]])) if parts.size == 1
+
+      built_into(dst) { |base| dstr_at(parts, base) }
+    end
+
+    def dstr_at(parts, base)
+      parts.each_with_index do |(kind, v), i|
+        reg = i.zero? ? base : base + 1
+        if kind == :lit
+          emit(:STRING, reg, pool_index([:str, v]))
+        else
+          interpolation_into(v, reg)
+        end
+        emit(:STRCAT, base) unless i.zero?
       end
     end
 
