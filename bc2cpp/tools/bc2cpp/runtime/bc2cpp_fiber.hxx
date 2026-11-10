@@ -85,16 +85,40 @@ struct Bc2cppFiberFrame {
   // Whether the step has rescue/ensure handlers that run when something unwinds
   // through it; an UNWIND then travels as an exception.
   bool (*has_handlers)(Bc2cppFiberFrame* frame);
+  // The size bc2cpp_frame_alloc made it with: bc2cpp_frame_free files it under that size class (FRAME_FREELIST).
+  size_t size;
 };
+
+// FRAME_FREELIST: a block step's frame is made and freed on every block call, so a freed frame of up to 128 bytes waits on
+// the list of its 16-byte size class (at most 64 each, linked through `parent`) for the next one. The compiled code runs in
+// one mrb_state (CONST_SITE_CACHE binds it), whose allocator made every frame on the lists.
+constexpr size_t BC2CPP_FRAME_CLASSES = 8;
+constexpr int BC2CPP_FRAME_FREE_MAX = 64;
+struct Bc2cppFrameFreeList {
+  Bc2cppFiberFrame* head;
+  int count;
+};
+inline Bc2cppFrameFreeList bc2cpp_frame_free_lists[BC2CPP_FRAME_CLASSES + 1] = {};
 
 // A frame of type T (whose first member `f` is the Bc2cppFiberFrame), zeroed.
 template <class T>
 static T* bc2cpp_frame_alloc(mrb_state* M,
                              Bc2cppStepFn step,
                              Bc2cppMarkFn mark) {
-  T* frame = (T*)mrb_calloc(M, 1, sizeof(T));
+  constexpr size_t cls = (sizeof(T) + 15) / 16;
+  T* frame;
+  if (cls <= BC2CPP_FRAME_CLASSES && bc2cpp_frame_free_lists[cls].head) {
+    Bc2cppFrameFreeList& list = bc2cpp_frame_free_lists[cls];
+    frame = (T*)list.head;
+    list.head = list.head->parent;
+    --list.count;
+    memset((void*)frame, 0, sizeof(T));
+  } else {
+    frame = (T*)mrb_calloc(M, 1, sizeof(T));
+  }
   frame->f.step = step;
   frame->f.mark = mark;
+  frame->f.size = sizeof(T);
   return frame;
 }
 
@@ -221,6 +245,14 @@ struct Bc2cppTailYieldScope {
 static void bc2cpp_frame_free(mrb_state* M, Bc2cppFiberFrame* frame) {
   if (frame->release)
     frame->release(M, frame);
+  const size_t cls = (frame->size + 15) / 16;
+  if (cls <= BC2CPP_FRAME_CLASSES && bc2cpp_frame_free_lists[cls].count < BC2CPP_FRAME_FREE_MAX) {
+    Bc2cppFrameFreeList& list = bc2cpp_frame_free_lists[cls];
+    frame->parent = list.head;
+    list.head = frame;
+    ++list.count;
+    return;
+  }
   mrb_free(M, frame);
 }
 
