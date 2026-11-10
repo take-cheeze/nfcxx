@@ -89,7 +89,33 @@ SNIPPETS = [
   "class Foo; end\nclass Bar; end",
   "module Foo; end\nmodule Bar; end",
   "class Foo; end\nmodule Foo; end",
-  "module Foo; end\nx = 1\nx"
+  "module Foo; end\nx = 1\nx",
+  # class and module bodies with statements (step 2: child ireps, EXEC)
+  'class Foo; 1; end',
+  'class Foo; self; end',
+  'class Foo; nil; end',
+  'class Foo; x = 1; end',
+  "class Foo; x = 1; x; end",
+  "class Foo\n  1\nend",
+  "class Foo\n  x = 1\n  2\nend",
+  "class Foo; x = 1\n  x + 2\nend",
+  'class Foo; p 1; end',
+  'class Foo; 1; 2; end',
+  "class Foo; 1; end\nx = 1",
+  "class Foo; 1; end\np 2",
+  "class Foo; x = 1; end\nx = 2",
+  "class Foo; 1; end\nclass Bar; 2; end",
+  "class Foo; end\nclass Bar; 1; end",
+  'module Foo; 1; end',
+  "module Foo; x = 1; x; end",
+  "x = 1\nclass Foo; x; end",
+  "class Foo; class Bar; 1; end; end",
+  "class Foo; x = 1; end\nclass Bar; x = 2; end",
+  "class Foo; y = 1; x = y; end",
+  "class Foo; x = [1]; end",
+  "x = 1\nclass Foo; x = 2; end\nx",
+  "class Foo\n  x = 1\n  if x\n    2\n  end\nend",
+  "class Foo\n  x = 1\n  if x\n    2\n  else\n    3\n  end\n  x\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
