@@ -2739,7 +2739,7 @@ module MrbcRb
           nil # `-self` is a NODE_NEGATE: self is generated like any operand
         elsif SELF_SEND_OPS.include?(name)
           recv = nil # an operator with no opcode of its own is sent to self like a named method
-        elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args == 2))
+        elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args >= 2))
           raise Unsupported, "operator method #{name} on self"
         end
       end
