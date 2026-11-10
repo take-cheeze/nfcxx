@@ -79,6 +79,7 @@ struct SpvModule {
   uint32_t wgs_var = 0;
   uint32_t sg_size_var = 0;   // the SubgroupSize builtin input, once a function reads it
   bool no_div_trap = false;   // --no-div-trap
+  bool no_checks = false;     // --no-checks: the IR's (nonnull P) and (bounds I N) checks emit nothing
 
   SpvModule(Spv *s, bool kcl) : spv(s), kernel_cl(kcl) {
     push = kcl ? 0 : s->push_var();
@@ -143,6 +144,19 @@ struct SFn {
   uint32_t ftype = 0, ret_t = 0, oldsp_var = 0, frame_var = 0;
   std::vector<uint32_t> state_types, state_param_ids;
   bool sg_used = false;
+  // compiled: compile() has run; traps: the function can leave with the invocation marked dead (it emits a trap, or a call
+  // whose callee can), so its callers check the dead flag after calling it. The functions compile callees first (the call
+  // order), and a call of a function not compiled yet is checked.
+  bool compiled = false, traps = false;
+  std::unordered_set<std::string> nn_regs;   // the registers that are never null (see never_null_regs)
+  // The private slots (see private_slots): name => its Function-storage word array (declared by compile); preg: register =>
+  // the private slot its pointer value points into (the value is the byte offset in the slot)
+  struct PSlot {
+    int64_t words = 0;
+    uint32_t var = 0;
+  };
+  OMap<PSlot> pslots;
+  std::unordered_map<std::string, std::string> preg;
 
   SFn(Node *f, uint32_t id, SpvModule *m, bool wm = false) : form(f), fid(id), mod(m), spv(m->spv), wgs_mode(wm) {
     name = f ? to_s(f->items.at(1)) : "wrapper";
@@ -254,7 +268,7 @@ struct SFn {
     std::unordered_map<std::string, std::vector<std::optional<Ty>>> direct;
     std::unordered_set<std::string> escaped;
     for (Node *s : body) scan_slots(*s, direct, escaped);
-    int64_t off = 0;
+    std::vector<std::tuple<std::string, int64_t, int64_t>> frame_slots;   // name, size, align
     for (const Node *f : slot_forms) {
       std::string sname = to_s(f->items.at(1));
       if (mod->has_wgs) {
@@ -276,11 +290,17 @@ struct SFn {
       if (ty && ty->k != Ty::Void && !escaped.count(sname) && all) {
         locals.set(sname, Local{0, *ty});   // the variable is declared when the function is compiled
       } else {
-        if (align < 8) align = 8;
-        off = (off + align - 1) / align * align;
-        slots[sname] = off;
-        off += size;
+        frame_slots.emplace_back(sname, size, align);
       }
+    }
+    private_slots(frame_slots);
+    int64_t off = 0;
+    for (auto &[sname, size, align0] : frame_slots) {
+      if (pslots.has(sname)) continue;
+      int64_t align = align0 < 8 ? 8 : align0;
+      off = (off + align - 1) / align * align;
+      slots[sname] = off;
+      off += size;
     }
     frame = (off + 15) / 16 * 16;
     std::vector<std::string> calls;
@@ -288,6 +308,238 @@ struct SFn {
     std::unordered_set<std::string> seen;
     for (auto &c : calls)
       if (mod->irmod->defs.has(c) && seen.insert(c).second) callees.push_back(c);
+  }
+
+  // ---- private slots
+
+  // The slots that live in a Function-storage array of words instead of the invocation's stack (memory), so that the device
+  // compiler can keep them in registers: a slot (of at most PSLOT_MAX bytes) whose address does not leave the function. A
+  // pointer into one is its byte offset in the slot (a u64, as an address is), which only these uses take: a load or store
+  // through it, a copy or a constant-size memcpy, memmove or memset to or from it, a null check, and a register made from it
+  // by bitcast, offset, index or a plain copy (a register whose definitions all point into the one slot, or are null). Any
+  // other use (stored to memory, passed to a call, converted to an integer, compared, returned, or a register that may also
+  // point elsewhere) keeps the slot in the stack. Pointers stored in a private slot are kept in the host form, as in memory.
+  static constexpr int64_t PSLOT_MAX = 512;
+
+  enum { PB_NONE, PB_SLOT, PB_OTHER };   // a register's pointer base: unknown (null only), one private slot, anything else
+
+  void private_slots(const std::vector<std::tuple<std::string, int64_t, int64_t>> &cands) {
+    std::unordered_set<std::string> cand, esc;
+    for (auto &[n, size, align] : cands)
+      if (size <= PSLOT_MAX) cand.insert(n);
+    if (cand.empty()) return;
+    std::vector<std::pair<std::string, const Node *>> defs;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) defs.emplace_back(to_s(x.items[1]), &x.items[3]);
+      else if (head_is(x, "set") && x.items.size() > 2) defs.emplace_back(to_s(x.items[1]), &x.items[2]);
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+    std::unordered_map<std::string, std::pair<int, std::string>> base;
+    // the base of an operand or a register's definition
+    std::function<std::pair<int, std::string>(const Node &)> val = [&](const Node &e) -> std::pair<int, std::string> {
+      if (is_reg(e)) {
+        auto it = base.find(e.text);
+        return it == base.end() ? std::make_pair((int)PB_NONE, std::string()) : it->second;
+      }
+      if (e.is_sym('$')) {
+        if (cand.count(e.text) && !esc.count(e.text)) return {PB_SLOT, e.text};
+        return {PB_OTHER, ""};
+      }
+      if (head_is(e, "null")) return {PB_NONE, ""};
+      if (head_is(e, "bitcast") && e.items.size() > 2) return val(e.items[2]);
+      if ((head_is(e, "offset") || head_is(e, "index")) && e.items.size() > 1) return val(e.items[1]);
+      if (head_is(e, "call") && mem_call(e) && e.items.size() > 3) return val(e.items[3]);   // memcpy and the like return d
+      return {PB_OTHER, ""};
+    };
+    auto pslot_in = [&](const Node &a) -> const std::string * {
+      if (a.is_sym('$')) return cand.count(a.text) && !esc.count(a.text) ? &a.text : nullptr;
+      if (!is_reg(a)) return nullptr;
+      auto it = base.find(a.text);
+      return it != base.end() && it->second.first == PB_SLOT ? &it->second.second : nullptr;
+    };
+    std::function<void(const Node &)> deep = [&](const Node &x) {   // every pointer in x escapes
+      if (const std::string *p = pslot_in(x)) esc.insert(*p);
+      if (x.kind == Node::List)
+        for (auto &y : x.items) deep(y);
+    };
+    auto call_uses = [&](const Node &c) {
+      if (mem_call(c)) {   // d and s are accesses; the sizes are constants
+        for (size_t i = 5; i < c.items.size(); i++) deep(c.items[i]);
+        return;
+      }
+      for (size_t i = 3; i < c.items.size(); i++) deep(c.items[i]);
+    };
+    auto rval_uses = [&](const Node &e) {
+      if (e.kind != Node::List) return;   // a plain copy into the register
+      const std::string *hp = head_of(e);
+      std::string h = hp ? *hp : std::string();
+      if (h == "bitcast" || h == "null" || h == "const") return;
+      if (h == "offset") return;
+      if (h == "index") {
+        for (size_t i = 2; i < e.items.size(); i++) deep(e.items[i]);
+        return;
+      }
+      if (h == "load" || h == "load.v") return;
+      if (h == "call") return call_uses(e);
+      deep(e);
+    };
+    std::function<void(const Node &)> uses = [&](const Node &s) {
+      if (s.kind != Node::List) return;
+      const std::string *hp = head_of(s);
+      std::string h = hp ? *hp : std::string();
+      if (h == "let") {
+        if (s.items.size() > 3) rval_uses(s.items[3]);
+      } else if (h == "set" || h == "nonnull" || h == "copy" || h == "label" || h == "break" || h == "continue" ||
+                 h == "goto" || h == "trap" || h == "unreachable" || h == "case" || h == "default") {
+      } else if (h == "store" || h == "store.v") {
+        for (size_t i = 3; i < s.items.size(); i++) deep(s.items[i]);
+      } else if (h == "eval") {
+        if (s.items.size() > 1 && head_is(s.items[1], "call")) call_uses(s.items[1]);
+        else deep(s);
+      } else if (h == "block" || h == "then" || h == "else" || h == "body" || h == "step" || h == "loop") {
+        for (size_t i = 1; i < s.items.size(); i++) uses(s.items[i]);
+      } else if (h == "if" || h == "switch") {
+        if (s.items.size() > 1) deep(s.items[1]);
+        for (size_t i = 2; i < s.items.size(); i++) uses(s.items[i]);
+      } else {
+        deep(s);
+      }
+    };
+    for (;;) {
+      size_t n0 = esc.size();
+      base.clear();
+      for (bool changed = true; changed;) {
+        changed = false;
+        for (auto &[r, e] : defs) {
+          auto v = val(*e);
+          if (v.first == PB_NONE) continue;
+          auto it = base.find(r);
+          if (it == base.end()) {
+            base[r] = v;
+            changed = true;
+          } else if (it->second != v) {
+            // a register that points into two slots, or into one and elsewhere: those slots stay in the stack
+            if (it->second.first == PB_SLOT) esc.insert(it->second.second);
+            if (v.first == PB_SLOT) esc.insert(v.second);
+            if (it->second.first != PB_OTHER) {
+              it->second = {PB_OTHER, ""};
+              changed = true;
+            }
+          }
+        }
+      }
+      for (Node *b : body) uses(*b);
+      if (esc.size() == n0) break;
+    }
+    for (auto &[n, size, align] : cands)
+      if (cand.count(n) && !esc.count(n)) pslots.set(n, PSlot{(size + 3) / 4 > 0 ? (size + 3) / 4 : 1, 0});
+    for (auto &[r, v] : base)
+      if (v.first == PB_SLOT && pslots.has(v.second)) preg[r] = v.second;
+  }
+
+  // memcpy, memmove (constant size) or memset (constant byte and size): the calls the emitter lowers inline (call_expr)
+  static bool mem_call(const Node &c) {
+    if (c.items.size() != 6 || !c.items[2].is_sym('&')) return false;
+    const std::string &nm = c.items[2].text;
+    if (nm == "memcpy" || nm == "memmove" || nm == "__builtin_memcpy" || nm == "__builtin_memmove") return head_is(c.items[5], "const");
+    if (nm == "memset" || nm == "__builtin_memset") return head_is(c.items[4], "const") && head_is(c.items[5], "const");
+    return false;
+  }
+
+  // the private slot an operand points into, or null
+  const std::string *pslot_of(const Node &a) {
+    if (a.is_sym('$')) return pslots.has(a.text) ? &a.text : nullptr;
+    if (!is_reg(a)) return nullptr;
+    auto it = preg.find(a.text);
+    return it == preg.end() ? nullptr : &it->second;
+  }
+
+  // the pointer to the word of private slot `name` that holds the byte at offset rel + 4 * word_off
+  uint32_t pslot_word(const std::string &name, uint32_t rel, int word_off) {
+    uint32_t r = word_off == 0 ? rel : res(IADD, {t64(), rel, spv->c_u64(4 * word_off)});
+    uint32_t widx = res(113, {t32(), res(194, {t64(), r, spv->c_u64(2)})});
+    return res(65, {spv->t_ptr(SC_FUNCTION, t32()), pslots.get(name)->var, widx});
+  }
+
+  uint32_t pslot_load(const std::string &name, uint32_t rel, const Ty &t) {
+    t32();
+    t64();
+    int n = wgs_bytes(t);
+    uint32_t v;
+    if (n == 8) {
+      uint32_t lo = res(113, {t64(), res(61, {t32(), pslot_word(name, rel, 0)})});
+      uint32_t hi = res(113, {t64(), res(61, {t32(), pslot_word(name, rel, 1)})});
+      v = res(197, {t64(), lo, res(196, {t64(), hi, spv->c_u64(32)})});
+      if (t.k == Ty::Float) v = res(124, {sty(t), v});
+    } else {
+      uint32_t w = res(61, {t32(), pslot_word(name, rel, 0)});
+      if (n == 4) {
+        v = t.k == Ty::Float ? res(124, {sty(t), w}) : w;
+      } else {
+        int bits = n * 8;
+        v = res(194, {t32(), w, byte_shift(rel)});
+        v = res(199, {t32(), v, spv->c_u32((1ll << bits) - 1)});
+        v = t.k == Ty::Int && t.boolean ? res(171, {tbool(), v, spv->c_u32(0)}) : canon(v, t);
+      }
+    }
+    return t.k == Ty::Ptr ? ptr_to_device(v) : v;
+  }
+
+  void pslot_store(const std::string &name, uint32_t rel, const Ty &t, uint32_t v0) {
+    t32();
+    t64();
+    uint32_t v = t.k == Ty::Ptr ? ptr_to_host(v0) : v0;
+    int n = wgs_bytes(t);
+    if (n == 8) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t64(), v}) : v;
+      ins({62, pslot_word(name, rel, 0), res(113, {t32(), u})});
+      ins({62, pslot_word(name, rel, 1), res(113, {t32(), res(194, {t64(), u, spv->c_u64(32)})})});
+      return;
+    }
+    if (n == 4) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t32(), v}) : v;
+      ins({62, pslot_word(name, rel, 0), u});
+      return;
+    }
+    // a sub-word store: the other bits of the word are kept
+    int bits = n * 8;
+    int64_t mask = (1ll << bits) - 1;
+    uint32_t vv = t.k == Ty::Int && t.boolean ? bool_to_u32(v) : u32_of(v, t);
+    vv = res(199, {t32(), vv, spv->c_u32(mask)});
+    uint32_t sh = byte_shift(rel);
+    uint32_t wp = pslot_word(name, rel, 0);
+    uint32_t clear = res(200, {t32(), res(196, {t32(), spv->c_u32(mask), sh})});
+    uint32_t w = res(61, {t32(), wp});
+    uint32_t nw = res(197, {t32(), res(199, {t32(), w, clear}), res(196, {t32(), vv, sh})});
+    ins({62, wp, nw});
+  }
+
+  // a load or store at an address that may be in a private slot (ps: the slot, or null for memory)
+  uint32_t any_load(const std::string *ps, uint32_t addr, const Ty &t) { return ps ? pslot_load(*ps, addr, t) : mem_load(addr, t); }
+  void any_store(const std::string *ps, uint32_t addr, const Ty &t, uint32_t v) {
+    if (ps) pslot_store(*ps, addr, t, v);
+    else mem_store(addr, t, v);
+  }
+
+  // copy_bytes when one side (or both) is a private slot: words (or bytes, for a size not a multiple of 4), unrolled up to
+  // 256 bytes
+  void copy_any(const std::string *dps, uint32_t d, const std::string *sps, uint32_t src, int64_t n) {
+    if (!dps && !sps) return copy_bytes(d, src, n);
+    const Ty t = n % 4 == 0 ? U32 : U8;
+    int64_t step = n % 4 == 0 ? 4 : 1;
+    if (n <= 256) {
+      for (int64_t off = 0; off < n; off += step) {
+        uint32_t v = any_load(sps, res(IADD, {t64(), src, spv->c_u64(off)}), t);
+        any_store(dps, res(IADD, {t64(), d, spv->c_u64(off)}), t, v);
+      }
+      return;
+    }
+    counted_loop(n, step, [&](uint32_t off) {
+      uint32_t v = any_load(sps, res(IADD, {t64(), src, off}), t);
+      any_store(dps, res(IADD, {t64(), d, off}), t, v);
+    });
   }
 
   // ---- operands
@@ -366,6 +618,7 @@ struct SFn {
         uint32_t lu = res(IADD, {t64(), local_base(), to_u64(push_load(P_LOCAL_USER), U32)});
         return {res(IADD, {t64(), lu, spv->c_u64(1024 + w->second)}), ty_ptr()};
       }
+      if (pslots.has(x.text)) return {spv->c_u64(0), ty_ptr()};   // a private slot: offset 0
       auto s = slots.find(x.text);
       if (s == slots.end() && locals.has(x.text)) throw Refused("address of the scalar slot " + x.text);
       if (s == slots.end()) throw BadIR("slot " + x.text + " is not declared");
@@ -420,6 +673,7 @@ struct SFn {
 
   // the trap helper: set the flag to code, mark the invocation dead, return zero
   void trap(uint32_t code_) {
+    traps = true;
     uint32_t flag_ptr = res(120, {spv->t_ptr(psb_sc(), t32()), push_load(P_FLAG)});
     ins({239, t32(), spv->id(), flag_ptr, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), spv->c_u32(code_)});
     uint32_t d = state(S_DEAD);
@@ -453,6 +707,7 @@ struct SFn {
   }
 
   void check_dead_after_call() {
+    traps = true;
     uint32_t d = res(61, {t32(), state(S_DEAD)});
     uint32_t c = res(171, {tbool(), d, spv->c_u32(0)});
     uint32_t t = new_label();
@@ -483,6 +738,15 @@ struct SFn {
   }
 
   uint32_t heap_load(uint32_t addr, const Ty &t) {
+    // The OpenCL module loads a byte or a halfword with its own width (a d8/d16 load), extended to the 32-bit register
+    if (mod->kernel_cl && t.k == Ty::Int && !t.boolean && (t.size == 1 || t.size == 2)) {
+      if (t.size == 1) spv->cap(39);   // Int8
+      else spv->cap(22);               // Int16
+      uint32_t et = spv->t_int(t.size * 8);
+      uint32_t p = res(120, {spv->t_ptr(psb_sc(), et), addr});
+      uint32_t v = res_load(p, et, (uint32_t)t.size);
+      return res(t.sign ? 114 : 113, {t32(), v});   // OpSConvert or OpUConvert: the canonical value
+    }
     if (t.k == Ty::Int && (t.size <= 2 || t.boolean)) {
       uint32_t w = load_word(addr);
       uint32_t sh = byte_shift(addr);
@@ -699,6 +963,7 @@ struct SFn {
       }
       uint32_t a = operand(arg(2)).id;
       if (ty.k == Ty::Void) throw Refused("load of void");
+      if (const std::string *ps = pslot_of(arg(2))) return {pslot_load(*ps, a, ty), ty};
       return {mem_load(a, ty), ty};
     }
     if (h == "bitcast") {
@@ -860,6 +1125,12 @@ struct SFn {
     if (!int_ty(ty)) throw Refused(h + " on " + ty.kind_name());
     uint32_t a = operand(xa).id;
     uint32_t b = operand(xb).id;
+    uint32_t code_ = ty.sign ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137);
+    // a constant divisor that is not 0 (nor -1 of a signed division) is always defined: no guard
+    if (head_is(xb, "const")) {
+      int64_t k = as_int(xb.items.at(2));
+      if (k != 0 && !(ty.sign && k == -1)) return canon(res(code_, {sty(ty), a, b}), ty);
+    }
     uint32_t zero = int_const_of(ty, 0);
     uint32_t c;
     if (ty.sign) {
@@ -881,7 +1152,6 @@ struct SFn {
     } else {
       trap_if(c, 1);
     }
-    uint32_t code_ = ty.sign ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137);
     return canon(res(code_, {sty(ty), a, b}), ty);
   }
 
@@ -891,7 +1161,10 @@ struct SFn {
     Opnd c = operand(xb);
     if (!int_ty(c.ty)) throw Refused(std::string("shift count of type ") + c.ty.kind_name());
     int width = ty.size == 8 ? 64 : ty.size * 8;
-    if (wide(c.ty)) trap_if(res(172, {tbool(), c.id, spv->c_u64(width)}), 2);
+    // a constant count below the width needs no check
+    bool in_range = head_is(xb, "const") && (uint64_t)as_int(xb.items.at(2)) < (uint64_t)width;
+    if (in_range) {
+    } else if (wide(c.ty)) trap_if(res(172, {tbool(), c.id, spv->c_u64(width)}), 2);
     else trap_if(res(172, {tbool(), c.id, spv->c_u32(width)}), 2);
     uint32_t cnt = c.id;
     if (wide(ty) && !wide(c.ty)) cnt = res(113, {t64(), cnt});
@@ -1077,6 +1350,35 @@ struct SFn {
       uint32_t v = u32_of(operand(*args.at(1)).id, U32);
       return Opnd{res(code_, {t32(), p, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), v}), U32};
     }
+    if (nm == "__nfcxx_sycl_h2f" || nm == "__nfcxx_sycl_f2h") {
+      // binary16 bits (the low half of a 32-bit word) to float and back, in the hardware: the OpenCL module converts a half
+      // (Float16, Int16); the Vulkan module has no half type, so it unpacks or packs one with GLSL.std.450 UnpackHalf2x16 or
+      // PackHalf2x16 (the other half of the pair is 0)
+      uint32_t f32 = sty(ty_float(4));
+      if (mod->kernel_cl) {
+        spv->cap(9);
+        spv->cap(22);
+        uint32_t h16 = spv->t_float(16);
+        uint32_t i16 = spv->t_int(16);
+        if (nm == "__nfcxx_sycl_h2f") {
+          uint32_t b = res(113, {i16, u32_of(operand(*args.at(0)).id, U32)});
+          uint32_t h = res(124, {h16, b});
+          return Opnd{res(115, {f32, h}), ty_float(4)};
+        }
+        uint32_t h = res(115, {h16, operand(*args.at(0)).id});
+        uint32_t b = res(124, {i16, h});
+        return Opnd{res(113, {t32(), b}), U32};
+      }
+      uint32_t v2 = spv->t_vec(f32, 2);
+      if (nm == "__nfcxx_sycl_h2f") {
+        uint32_t w = u32_of(operand(*args.at(0)).id, U32);
+        uint32_t v = res(12, {v2, spv->glsl_id(), spv->ext_num(62), w});
+        return Opnd{res(81, {f32, v, 0}), ty_float(4)};
+      }
+      uint32_t x = operand(*args.at(0)).id;
+      uint32_t c = res(80, {v2, x, spv->c_float(32, 0.0)});
+      return Opnd{res(12, {t32(), spv->glsl_id(), spv->ext_num(58), c}), U32};
+    }
     if (nm == "copysignf" || nm == "__builtin_copysignf") {
       auto xs = operand_ids(args);
       return Opnd{copysign_bits(xs.at(0), xs.at(1), ty_float(4)), ty_float(4)};
@@ -1096,7 +1398,7 @@ struct SFn {
         head_is(*args[2], "const")) {
       uint32_t d = operand(*args[0]).id;
       uint32_t sv = operand(*args[1]).id;
-      copy_bytes(d, sv, as_int(args[2]->items.at(2)));
+      copy_any(pslot_of(*args[0]), d, pslot_of(*args[1]), sv, as_int(args[2]->items.at(2)));
       return Opnd{d, ty_ptr()};
     }
     if ((nm == "memset" || nm == "__builtin_memset") && args.size() == 3 && head_is(*args[1], "const") &&
@@ -1104,10 +1406,18 @@ struct SFn {
       uint32_t d = operand(*args[0]).id;
       int64_t byte = as_int(args[1]->items.at(2)) & 255;
       int64_t n = as_int(args[2]->items.at(2));
+      const std::string *ps = pslot_of(*args[0]);
+      if (ps && n % 4 == 0 && n <= 256) {   // a private slot: its words, unrolled
+        for (int64_t off = 0; off < n; off += 4) {
+          uint32_t a = res(IADD, {t64(), d, spv->c_u64(off)});
+          pslot_store(*ps, a, U32, spv->c_u32(byte * 0x01010101ll));
+        }
+        return Opnd{d, ty_ptr()};
+      }
       counted_loop(n, 1, [&](uint32_t off) {
         uint32_t a = res(IADD, {t64(), d, off});
         uint32_t c = spv->c_u32(byte);
-        mem_store(a, U8, c);
+        any_store(ps, a, U8, c);
       });
       return Opnd{d, ty_ptr()};
     }
@@ -1116,6 +1426,7 @@ struct SFn {
       uint32_t ft = spv->t_float(32);
       return Opnd{glsl_op(g, xs, ft), ty_float(4)};
     }
+    if (nm == "__nfcxx_sycl_dp4a") return Opnd{dp4a(args), ty_int(4, true)};
     if (starts("__nfcxx_")) throw Refused("unknown device intrinsic " + nm);
     // libstdc++'s assertion failure is noreturn (the host aborts): the device traps, as for an unreachable path
     if (nm == GLIBCXX_ASSERT_FAIL) {
@@ -1126,15 +1437,7 @@ struct SFn {
     // dpct::dp4a(int, int, int) (llama.cpp's SYCL helper for the 8-bit dot product): c plus the dot product of the four signed
     // bytes of a and b. The OpenCL module uses the packed integer dot product, which the Intel compiler also lowers to dp4a;
     // the scalar body is four byte extracts, four multiplies and four adds.
-    if (nm == DP4A_INT && mod->kernel_cl) {
-      spv->cap(6018);   // DotProductInput4x8BitPacked
-      spv->cap(6019);   // DotProduct
-      spv->ext("SPV_KHR_integer_dot_product");
-      uint32_t a = operand(*args.at(0)).id, b = operand(*args.at(1)).id;
-      uint32_t dot = res(4450, {t32(), a, b, 0});   // OpSDot, PackedVectorFormat4x8Bit
-      uint32_t c = operand(*args.at(2)).id;   // the same order as the Ruby emitter, so the modules match
-      return Opnd{res(IADD, {t32(), dot, c}), ty_int(4, true)};
-    }
+    if (nm == DP4A_INT && mod->kernel_cl) return Opnd{dp4a(args), ty_int(4, true)};
     auto &table = wgs_mode ? mod->fns_wgs : mod->fns;
     auto it = table.find(nm);
     SFn *callee_fn = it == table.end() ? nullptr : it->second;
@@ -1154,14 +1457,38 @@ struct SFn {
       Inst c{57, rt, spv->id(), callee_fn->fid};
       c.insert(c.end(), xs.begin(), xs.end());
       ins(std::move(c));
-      check_dead_after_call();
+      if (!callee_fn->compiled || callee_fn->traps) check_dead_after_call();
       return std::nullopt;
     }
     std::vector<uint32_t> l{rt, callee_fn->fid};
     l.insert(l.end(), xs.begin(), xs.end());
     uint32_t r = res_v(57, l);
-    check_dead_after_call();
+    if (!callee_fn->compiled || callee_fn->traps) check_dead_after_call();
     return Opnd{r, *callee_fn->ret};
+  }
+
+  // c + the dot product of the four signed bytes of a and b (dpct::dp4a(int, int, int), __nfcxx_sycl_dp4a): the OpenCL module
+  // uses the packed integer dot product (OpSDot, which the Intel compiler lowers to dp4a); the Vulkan module sums the four
+  // products of the sign-extended bytes (OpBitFieldSExtract). The products fit in 32 bits, so both wrap only at the add of c.
+  uint32_t dp4a(const std::vector<const Node *> &args) {
+    uint32_t a = operand(*args.at(0)).id, b = operand(*args.at(1)).id;
+    uint32_t dot;
+    if (mod->kernel_cl) {
+      spv->cap(6018);   // DotProductInput4x8BitPacked
+      spv->cap(6019);   // DotProduct
+      spv->ext("SPV_KHR_integer_dot_product");
+      dot = res(4450, {t32(), a, b, 0});   // OpSDot, PackedVectorFormat4x8Bit
+    } else {
+      dot = 0;
+      for (int k = 0; k < 4; k++) {
+        uint32_t ea = res(202, {t32(), a, spv->c_u32(8 * k), spv->c_u32(8)});
+        uint32_t eb = res(202, {t32(), b, spv->c_u32(8 * k), spv->c_u32(8)});
+        uint32_t p = res(IMUL, {t32(), ea, eb});
+        dot = k == 0 ? p : res(IADD, {t32(), dot, p});
+      }
+    }
+    uint32_t c = operand(*args.at(2)).id;
+    return res(IADD, {t32(), dot, c});
   }
 
   uint32_t atomic_ptr(const Node &x) {
@@ -1266,7 +1593,7 @@ struct SFn {
         ins({62, lv->var, v});
       } else {
         uint32_t a = operand(arg(2)).id;
-        mem_store(a, ty, v);
+        any_store(pslot_of(arg(2)), a, ty, v);
       }
     } else if (h == "if") {
       Opnd c = operand(arg(1));
@@ -1341,14 +1668,19 @@ struct SFn {
     } else if (h == "label") {
     } else if (h == "trap" || h == "unreachable") {
       trap(5);
+    } else if (h == "bounds" && (mod->no_checks || (head_is(arg(1), "const") && !is_reg(arg(2)) &&
+                                                     (uint64_t)as_int(arg(1).items.at(2)) < (uint64_t)as_int(arg(2))))) {
+      // no checks, or a constant index below a constant bound
+    } else if (h == "nonnull" && mod->no_checks) {
     } else if (h == "bounds") {
       Opnd v = operand(arg(1));
       uint32_t n = is_reg(arg(2)) ? operand(arg(2)).id : int_const_of(v.ty, as_int(arg(2)));
       uint32_t vi = wide(v.ty) ? v.id : u32_of(v.id, v.ty);
       trap_if(res(172, {tbool(), vi, n}), 3);
     } else if (h == "nonnull") {
-      // the address of a function is never null (the front end's check on a function pointer that is a template argument)
-      if (!arg(1).is_sym('&')) {
+      // the address of a function is never null (the front end's check on a function pointer that is a template argument),
+      // nor that of a slot or a static, nor a register made from one (never_null_regs)
+      if (!never_null(arg(1))) {
         uint32_t p = operand(arg(1)).id;
         trap_if(res(170, {tbool(), p, spv->c_u64(0)}), 4);
       }
@@ -1369,7 +1701,7 @@ struct SFn {
       int64_t n = as_int(arg(1));
       uint32_t d = operand(arg(2)).id;
       uint32_t src = operand(arg(3)).id;
-      copy_bytes(d, src, n);
+      copy_any(pslot_of(arg(2)), d, pslot_of(arg(3)), src, n);
     } else {
       throw Refused("statement " + (hp ? h : form_text(s)));
     }
@@ -1501,7 +1833,45 @@ struct SFn {
 
   // ---- the function
 
+  // An operand that is never null: the address of a slot, a static or a function, an offset or index of one, or a register
+  // whose every definition (let or set, anywhere in the function) is one of those.
+  bool never_null(const Node &x) {
+    if (pslot_of(x)) return true;   // a pointer into a private slot (or a null one, which no access reaches)
+    if (x.is_sym('$') || x.is_sym('@') || x.is_sym('&')) return true;
+    if (is_reg(x)) return nn_regs.count(x.text) > 0;
+    if (head_is(x, "bitcast")) return x.items.size() > 2 && never_null(x.items[2]);
+    if (head_is(x, "offset") || head_is(x, "index")) return x.items.size() > 1 && never_null(x.items[1]);
+    return false;
+  }
+
+  // The never-null registers: the greatest set such that each definition of each of them is never null (a register set
+  // from itself plus an offset, in a loop, stays in it).
+  void never_null_regs() {
+    std::unordered_map<std::string, std::vector<const Node *>> defs;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) defs[to_s(x.items[1])].push_back(&x.items[3]);
+      else if (head_is(x, "set") && x.items.size() > 2) defs[to_s(x.items[1])].push_back(&x.items[2]);
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+    for (auto &kv : defs) nn_regs.insert(kv.first);
+    for (bool changed = true; changed;) {
+      changed = false;
+      for (auto &kv : defs) {
+        if (!nn_regs.count(kv.first)) continue;
+        for (const Node *d : kv.second)
+          if (!never_null(*d)) {
+            nn_regs.erase(kv.first);
+            changed = true;
+            break;
+          }
+      }
+    }
+  }
+
   void compile() {
+    never_null_regs();
     uint32_t rt = ret ? sty(*ret) : spv->t_void();
     for (size_t k = 0; k < ptypes.size(); k++) param_ids.push_back(spv->id());
     for (size_t k = 0; k < ptypes.size(); k++) regs["%" + std::to_string(k)] = Reg{false, param_ids[k], ptypes[k]};
@@ -1511,6 +1881,7 @@ struct SFn {
       uint32_t c = spv->t_ptr(SC_FUNCTION, t32());
       state_types = {a, b, c};
       for (int k = 0; k < 3; k++) state_param_ids.push_back(spv->id());
+      push_param_attrs(state_param_ids[0]);
       has_state = true;
       st_push = state_param_ids[0];
       st_sp = state_param_ids[1];
@@ -1535,6 +1906,10 @@ struct SFn {
       Local *lv = locals.get(k);
       if (!lv->var) lv->var = var_decl(sty(lv->ty));
     }
+    for (auto &k : pslots.keys) {
+      PSlot *ps = pslots.get(k);
+      ps->var = var_decl(spv->t_array(t32(), (uint32_t)ps->words));
+    }
     std::vector<const Node *> b(body.begin(), body.end());
     stmts(b);
     if (!term_) {
@@ -1545,6 +1920,7 @@ struct SFn {
         emit_return(z);
       }
     }
+    compiled = true;
   }
 
   std::vector<Inst> function_text() {
@@ -1560,10 +1936,19 @@ struct SFn {
     return out;
   }
 
+  // The push block pointer (the OpenCL module's kernel argument, and the state parameter of every function): FuncParamAttr
+  // NoAlias and NoWrite. Nothing else addresses its bytes (rt_opencl.hpp, rt_level_zero.hpp: the control block's push block)
+  // and the device only reads it, so the device compiler may keep its loads across the stores of the function.
+  void push_param_attrs(uint32_t p) {
+    spv->ann({71, p, 38, 4});   // OpDecorate FuncParamAttr NoAlias
+    spv->ann({71, p, 38, 6});   // OpDecorate FuncParamAttr NoWrite
+  }
+
   // The entry of a kernel: sets this invocation's stack and the dead flag, then calls the kernel's IR function.
   void compile_wrapper(uint32_t ir_fn) {
     if (mod->kernel_cl) {
       uint32_t push_p = spv->id();
+      push_param_attrs(push_p);
       uint32_t tv = spv->t_void();
       uint32_t pp = spv->t_ptr(SC_CROSSWG, mod->push_struct_type());
       ftype = spv->t_fn(tv, {pp});
@@ -1616,7 +2001,7 @@ struct SFn {
 
 // ------------------------------------------------------------------ the module
 
-Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap) {
+Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap, bool no_checks) {
   std::vector<Node> forms = read_forms(src);
   Mod mod;
   std::unordered_map<std::string, int64_t> sizes;
@@ -1677,6 +2062,7 @@ Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap) {
   spv.glsl_id();
   SpvModule smod(&spv, kernel_cl);
   smod.no_div_trap = no_div_trap;
+  smod.no_checks = no_checks;
   smod.irmod = &mod;
 
   // the reach of a function over a call relation (the calls, or every address of a function)

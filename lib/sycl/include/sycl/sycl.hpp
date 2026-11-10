@@ -260,22 +260,64 @@ namespace detail {
 void barrier_on_host();
 }
 
+#ifdef __NFCXX_SYCL_DEVICE__
+// The work-item builtins by SYCL dimension: dimension d is the device's component 2 - d (see device_gid). On the device,
+// nd_item, group and sub_group hold nothing and each query reads these (an object in a frame slot costs a store per field
+// where it is made and a load per query, and its address keeps calls that take it from being inlined).
+namespace detail {
+inline size_t dev_gid(int d) { return d == 0 ? __nfcxx_sycl_gid_z() : d == 1 ? __nfcxx_sycl_gid_y() : __nfcxx_sycl_gid_x(); }
+inline size_t dev_lid(int d) { return d == 0 ? __nfcxx_sycl_lid_z() : d == 1 ? __nfcxx_sycl_lid_y() : __nfcxx_sycl_lid_x(); }
+inline size_t dev_group(int d) {
+  return d == 0 ? __nfcxx_sycl_group_z() : d == 1 ? __nfcxx_sycl_group_y() : __nfcxx_sycl_group_x();
+}
+inline size_t dev_grange(int d) {
+  return d == 0 ? __nfcxx_sycl_grange_z() : d == 1 ? __nfcxx_sycl_grange_y() : __nfcxx_sycl_grange_x();
+}
+inline size_t dev_lrange(int d) {
+  return d == 0 ? __nfcxx_sycl_lrange_z() : d == 1 ? __nfcxx_sycl_lrange_y() : __nfcxx_sycl_lrange_x();
+}
+// the work-item's local linear id and the work-group size over all three components (an unused dimension has range 1 and
+// id 0, so these are the kernel's whatever its dimension)
+inline size_t dev_local_linear() {
+  return ((size_t)__nfcxx_sycl_lid_z() * __nfcxx_sycl_lrange_y() + __nfcxx_sycl_lid_y()) * __nfcxx_sycl_lrange_x() +
+         __nfcxx_sycl_lid_x();
+}
+inline size_t dev_group_size() {
+  return (size_t)__nfcxx_sycl_lrange_x() * __nfcxx_sycl_lrange_y() * __nfcxx_sycl_lrange_z();
+}
+}  // namespace detail
+#endif
+
 template <int D = 1> class group {
  public:
   group() {}
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item's group (the only group a kernel can name): nothing is stored
+  group(const id<D> &, const range<D> &, const range<D> &) {}
+#else
   group(const id<D> &gid, const range<D> &lr, const range<D> &gr) : gid_(gid), lr_(lr), gr_(gr) {}
-  id<D> get_group_id() const { return gid_; }
-  size_t get_group_id(int d) const { return gid_[d]; }
-  size_t operator[](int d) const { return gid_[d]; }
-  range<D> get_local_range() const { return lr_; }
-  size_t get_local_range(int d) const { return lr_[d]; }
-  range<D> get_group_range() const { return gr_; }
-  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gid_[i]; return l; }
+#endif
+  id<D> get_group_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = gid(i); return r; }
+  size_t get_group_id(int d) const { return gid(d); }
+  size_t operator[](int d) const { return gid(d); }
+  range<D> get_local_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = lr(i); return r; }
+  size_t get_local_range(int d) const { return lr(d); }
+  range<D> get_group_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = gr(i); return r; }
+  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr(i) + gid(i); return l; }
   bool leader() const;
 
  private:
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t gid(int d) const { return detail::dev_group(d); }
+  size_t lr(int d) const { return detail::dev_lrange(d); }
+  size_t gr(int d) const { return detail::dev_grange(d) / detail::dev_lrange(d); }
+#else
+  size_t gid(int d) const { return gid_[d]; }
+  size_t lr(int d) const { return lr_[d]; }
+  size_t gr(int d) const { return gr_[d]; }
   id<D> gid_;
   range<D> lr_, gr_;
+#endif
 };
 
 // ------------------------------------------------------------------------------------------------ pointers
@@ -382,6 +424,11 @@ template <class T> inline T sg_shuffle_xor(T x, unsigned mask) {
 
 class sub_group {
  public:
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item's sub-group: nothing is stored, the queries read the builtins (see detail::dev_gid)
+  sub_group() {}
+  sub_group(size_t, size_t) {}
+#else
   sub_group() : lane_(0), sg_(0), nsg_(1), n_(detail::kSubGroupSize) {}
   // lin: the work-item's local linear id, wg: the work-group size
   sub_group(size_t lin, size_t wg) : n_(detail::sg_size()) {
@@ -389,16 +436,17 @@ class sub_group {
     sg_ = lin / n_;
     nsg_ = (wg + n_ - 1) / n_;
   }
-  id<1> get_local_id() const { return id<1>(lane_); }
-  size_t get_local_linear_id() const { return lane_; }
-  range<1> get_local_range() const { return range<1>(n_); }
-  range<1> get_max_local_range() const { return range<1>(n_); }
-  size_t get_local_linear_range() const { return n_; }
-  id<1> get_group_id() const { return id<1>(sg_); }
-  size_t get_group_linear_id() const { return sg_; }
-  range<1> get_group_range() const { return range<1>(nsg_); }
-  size_t get_group_linear_range() const { return nsg_; }
-  bool leader() const { return lane_ == 0; }
+#endif
+  id<1> get_local_id() const { return id<1>(lane()); }
+  size_t get_local_linear_id() const { return lane(); }
+  range<1> get_local_range() const { return range<1>(nlanes()); }
+  range<1> get_max_local_range() const { return range<1>(nlanes()); }
+  size_t get_local_linear_range() const { return nlanes(); }
+  id<1> get_group_id() const { return id<1>(sgid()); }
+  size_t get_group_linear_id() const { return sgid(); }
+  range<1> get_group_range() const { return range<1>(nsg()); }
+  size_t get_group_linear_range() const { return nsg(); }
+  bool leader() const { return lane() == 0; }
   // block load and store: one element per work-item
   template <class T, access::address_space AS, access::decorated Dec> T load(multi_ptr<T, AS, Dec> p) const { return *p; }
   template <int N, class T, access::address_space AS, access::decorated Dec> vec<T, N> load(multi_ptr<T, AS, Dec> p) const {
@@ -414,47 +462,54 @@ class sub_group {
   template <class T> void store(T *p, const T &x) const { *p = x; }
 
  private:
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t lane() const { return detail::dev_local_linear() % detail::sg_size(); }
+  size_t sgid() const { return detail::dev_local_linear() / detail::sg_size(); }
+  size_t nsg() const { size_t n = detail::sg_size(); return (detail::dev_group_size() + n - 1) / n; }
+  size_t nlanes() const { return detail::sg_size(); }
+#else
+  size_t lane() const { return lane_; }
+  size_t sgid() const { return sg_; }
+  size_t nsg() const { return nsg_; }
+  size_t nlanes() const { return n_; }
   size_t lane_, sg_, nsg_, n_;
+#endif
 };
 
 template <int D = 1> class nd_item {
  public:
   nd_item() {}
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item (the only nd_item a kernel sees): nothing is stored, the queries read the builtins
+  nd_item(const id<D> &, const id<D> &, const id<D> &, const range<D> &, const range<D> &) {}
+#else
   nd_item(const id<D> &gl, const id<D> &lo, const id<D> &grp, const range<D> &gr, const range<D> &lr)
       : gl_(gl), lo_(lo), grp_(grp), gr_(gr), lr_(lr) {}
-  id<D> get_global_id() const { return gl_; }
-  size_t get_global_id(int d) const { return gl_[d]; }
-  id<D> get_local_id() const { return lo_; }
-  size_t get_local_id(int d) const { return lo_[d]; }
+#endif
+  id<D> get_global_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = gl(i); return r; }
+  size_t get_global_id(int d) const { return gl(d); }
+  id<D> get_local_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = lo(i); return r; }
+  size_t get_local_id(int d) const { return lo(d); }
   group<D> get_group() const {
     range<D> n;
-    for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i];
-    return group<D>(grp_, lr_, n);
+    for (int i = 0; i < D; i++) n[i] = gr(i) / lr(i);
+    return group<D>(get_group_id_(), get_local_range(), n);
   }
-  size_t get_group(int d) const { return grp_[d]; }
-  range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i]; return n; }
-  size_t get_group_range(int d) const { return get_group_range()[d]; }
-  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr_[i] / lr_[i]) + grp_[i]; return l; }
-  range<D> get_global_range() const { return gr_; }
-  size_t get_global_range(int d) const { return gr_[d]; }
-  range<D> get_local_range() const { return lr_; }
-  size_t get_local_range(int d) const { return lr_[d]; }
-  size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gl_[i]; return l; }
-  size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr_[i] + lo_[i]; return l; }
-  sub_group get_sub_group() const { return sub_group(get_local_linear_id(), lr_.size()); }
+  size_t get_group(int d) const { return grp(d); }
+  range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr(i) / lr(i); return n; }
+  size_t get_group_range(int d) const { return gr(d) / lr(d); }
+  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr(i) / lr(i)) + grp(i); return l; }
+  range<D> get_global_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = gr(i); return r; }
+  size_t get_global_range(int d) const { return gr(d); }
+  range<D> get_local_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = lr(i); return r; }
+  size_t get_local_range(int d) const { return lr(d); }
+  size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr(i) + gl(i); return l; }
+  size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr(i) + lo(i); return l; }
 #ifdef __NFCXX_SYCL_DEVICE__
-  // The device's work-item indices, filled in place (no id or range temporaries: each one is a frame slot of the kernel).
-  // SYCL dimension d is the device's component 2 - d (see device_gid).
-  void device_fill() {
-    for (int d = 0; d < D; d++) {
-      const int c = 2 - d;
-      gl_[d] = c == 0 ? __nfcxx_sycl_gid_x() : c == 1 ? __nfcxx_sycl_gid_y() : __nfcxx_sycl_gid_z();
-      lo_[d] = c == 0 ? __nfcxx_sycl_lid_x() : c == 1 ? __nfcxx_sycl_lid_y() : __nfcxx_sycl_lid_z();
-      grp_[d] = c == 0 ? __nfcxx_sycl_group_x() : c == 1 ? __nfcxx_sycl_group_y() : __nfcxx_sycl_group_z();
-      gr_[d] = c == 0 ? __nfcxx_sycl_grange_x() : c == 1 ? __nfcxx_sycl_grange_y() : __nfcxx_sycl_grange_z();
-      lr_[d] = c == 0 ? __nfcxx_sycl_lrange_x() : c == 1 ? __nfcxx_sycl_lrange_y() : __nfcxx_sycl_lrange_z();
-    }
-  }
+  sub_group get_sub_group() const { return sub_group(); }
+  void device_fill() {}   // nothing to fill (the queries read the builtins)
+#else
+  sub_group get_sub_group() const { return sub_group(get_local_linear_id(), lr_.size()); }
 #endif
   void barrier(access::fence_space = access::fence_space::global_and_local) const {
 #ifdef __NFCXX_SYCL_DEVICE__
@@ -465,8 +520,22 @@ template <int D = 1> class nd_item {
   }
 
  private:
+  id<D> get_group_id_() const { id<D> r; for (int i = 0; i < D; i++) r[i] = grp(i); return r; }
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t gl(int d) const { return detail::dev_gid(d); }
+  size_t lo(int d) const { return detail::dev_lid(d); }
+  size_t grp(int d) const { return detail::dev_group(d); }
+  size_t gr(int d) const { return detail::dev_grange(d); }
+  size_t lr(int d) const { return detail::dev_lrange(d); }
+#else
+  size_t gl(int d) const { return gl_[d]; }
+  size_t lo(int d) const { return lo_[d]; }
+  size_t grp(int d) const { return grp_[d]; }
+  size_t gr(int d) const { return gr_[d]; }
+  size_t lr(int d) const { return lr_[d]; }
   id<D> gl_, lo_, grp_;
   range<D> gr_, lr_;
+#endif
 };
 
 // the lanes of the caller's sub-group exchange values; every lane must reach each of these (the sub-group is collective)
@@ -582,13 +651,20 @@ template <class P> struct is_init_identity { static constexpr bool value = false
 template <> struct is_init_identity<property::reduction::initialize_to_identity> { static constexpr bool value = true; };
 }  // namespace detail
 
-// Properties are accepted and, except no_init, have no effect.
+namespace detail {
+// a queue asked for profiling somewhere in the program: events then read the host clock (it can take microseconds, as
+// with an HPET clock source, so it is not read otherwise)
+inline bool &profiling_on() { static bool on = false; return on; }
+}  // namespace detail
+
+// Properties are accepted and, except no_init and enable_profiling, have no effect.
 class property_list {
  public:
   property_list() {}
   template <class... P> property_list(const P &...) {
     no_init_ = (false || ... || detail::is_no_init<P>::value);
     init_identity_ = (false || ... || detail::is_init_identity<P>::value);
+    if ((false || ... || std::is_same<P, property::queue::enable_profiling>::value)) detail::profiling_on() = true;
   }
   bool no_init() const { return no_init_; }
   bool init_identity() const { return init_identity_; }
@@ -1400,8 +1476,7 @@ template <class Name, class F> void handler::single_task(F f) {
 namespace ext::oneapi::this_work_item {
 template <int D> inline nd_item<D> get_nd_item() {
 #ifdef __NFCXX_SYCL_DEVICE__
-  return nd_item<D>(detail::device_gid<D>(), detail::device_lid<D>(), detail::device_group<D>(), detail::device_global_range<D>(),
-                    detail::device_local_range<D>());
+  return nd_item<D>();   // the device's nd_item reads the builtins
 #else
   const detail::host_item *h = detail::current_host_item();
   if (!h || !h->nd || h->dim != D) {
@@ -1413,7 +1488,7 @@ template <int D> inline nd_item<D> get_nd_item() {
 }
 inline sub_group get_sub_group() {
 #ifdef __NFCXX_SYCL_DEVICE__
-  return get_nd_item<3>().get_sub_group();   // unused dimensions have range 1 and id 0, so the linear id and size are the kernel's
+  return sub_group();   // the device's sub_group reads the builtins
 #else
   const detail::host_item *h = detail::current_host_item();
   if (!h) {
@@ -1689,23 +1764,24 @@ inline unsigned long now_ns() {
 }  // namespace detail
 
 // Profiling times are host clock readings: the submission, the end of the host-side enqueue, and the moment the work was
-// known to be done (the first wait).
+// known to be done (the first wait). They are 0 unless a queue asked for profiling (detail::profiling_on).
 class event {
  public:
-  event() : t_submit_(detail::now_ns()), t_start_(t_submit_), t_end_(0) {}
+  event() : t_submit_(stamp()), t_start_(t_submit_), t_end_(0) {}
   void wait() const { detail::backend_wait(); finish(); }
   void wait_and_throw() const { wait(); }
   static void wait(const std::vector<event> &v) { detail::backend_wait(); for (const event &e : v) e.finish(); }
   static void wait_and_throw(const std::vector<event> &v) { wait(v); }
   template <class P> unsigned long get_profiling_info() const { return profiling_of(static_cast<P *>(nullptr)); }
-  void mark_started() { t_start_ = detail::now_ns(); }
+  void mark_started() { t_start_ = stamp(); }
   info::event_command_status get_info_status() const { return info::event_command_status::complete; }
 
  private:
   unsigned long profiling_of(info::event_profiling::command_submit *) const { return t_submit_; }
   unsigned long profiling_of(info::event_profiling::command_start *) const { return t_start_; }
   unsigned long profiling_of(info::event_profiling::command_end *) const { finish(); return t_end_; }
-  void finish() const { if (!t_end_) { detail::backend_wait(); t_end_ = detail::now_ns(); } }
+  void finish() const { if (!t_end_) { detail::backend_wait(); t_end_ = detail::profiling_on() ? detail::now_ns() : 1; } }
+  static unsigned long stamp() { return detail::profiling_on() ? detail::now_ns() : 0; }
   unsigned long t_submit_, t_start_;
   mutable unsigned long t_end_;
 };

@@ -14,6 +14,15 @@
 #include <cstddef>
 #include <ostream>
 
+#ifdef __NFCXX_SYCL_DEVICE__
+// binary16 bits (the low half of the word) to float and back, in the hardware (the emitters lower these calls: OpFConvert in
+// the OpenCL module, UnpackHalf2x16 / PackHalf2x16 in the Vulkan module and WGSL)
+extern "C" {
+float __nfcxx_sycl_h2f(unsigned h);
+unsigned __nfcxx_sycl_f2h(float f);
+}
+#endif
+
 namespace sycl {
 
 namespace ext::oneapi { class bfloat16; }
@@ -43,6 +52,9 @@ class half {
   uint16_t bits_;
 
   static float to_float(uint16_t h) {
+#ifdef __NFCXX_SYCL_DEVICE__
+    return __nfcxx_sycl_h2f(h);
+#else
     uint32_t sign = (uint32_t)(h & 0x8000) << 16;
     uint32_t exp = (h >> 10) & 0x1f;
     uint32_t man = h & 0x3ff;
@@ -64,9 +76,13 @@ class half {
     float f;
     std::memcpy(&f, &out, 4);
     return f;
+#endif
   }
 
   static uint16_t from_float(float f) {
+#ifdef __NFCXX_SYCL_DEVICE__
+    return (uint16_t)__nfcxx_sycl_f2h(f);
+#else
     uint32_t x;
     std::memcpy(&x, &f, 4);
     uint16_t sign = (uint16_t)((x >> 16) & 0x8000);
@@ -88,6 +104,7 @@ class half {
     uint32_t out = (uint32_t)e << 10 | hm;
     if (rem > 0x1000 || (rem == 0x1000 && (out & 1))) out++;
     return sign | (uint16_t)out;
+#endif
   }
 };
 
@@ -208,5 +225,8 @@ template <class H, class = typename std::enable_if<std::is_same<H, half>::value>
 inline half fmin(half a, half b) { return half((float)a < (float)b ? (float)a : (float)b); }
 
 }  // namespace sycl
+
+// dpct::dp4a(int, int, int) as the device intrinsic (the dpct helper includes this header before it defines dp4a)
+#include "nfcxx_dpct_dp4a.hpp"
 
 #endif

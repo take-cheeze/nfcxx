@@ -1,5 +1,5 @@
 // build/pathb-spirv-emit: the C++ port of scripts/pathb-spirv-emit.rb, the same command line and the same output.
-//   pathb-spirv-emit [--kernel-cl] [--manifest=FILE] [FILE.ir | -] > out.spv
+//   pathb-spirv-emit [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv
 // Exit status: 0 the module was written (binary, to stdout); 3 refused (reason on stderr); 1 malformed IR.
 #include <cstdio>
 #include <cstring>
@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv) {
   std::string manifest_path;
-  bool have_manifest = false, kernel_cl = false, no_div_trap = false;
+  bool have_manifest = false, kernel_cl = false, no_div_trap = false, no_checks = false;
   int i = 1;
   for (; i < argc && std::strncmp(argv[i], "--", 2) == 0; i++) {
     std::string opt = argv[i];
@@ -25,8 +25,10 @@ int main(int argc, char **argv) {
       kernel_cl = true;
     } else if (opt == "--no-div-trap") {
       no_div_trap = true;
+    } else if (opt == "--no-checks") {
+      no_checks = true;
     } else {
-      std::fputs("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--manifest=FILE] [FILE.ir | -] > out.spv\n", stderr);
+      std::fputs("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv\n", stderr);
       return 1;
     }
   }
@@ -45,7 +47,7 @@ int main(int argc, char **argv) {
   }
   Emitted out;
   try {
-    out = emit_module(src, kernel_cl, no_div_trap);
+    out = emit_module(src, kernel_cl, no_div_trap, no_checks);
   } catch (Refused &e) {
     std::string m = "refused: " + e.text + "\n";
     std::fwrite(m.data(), 1, m.size(), stderr);

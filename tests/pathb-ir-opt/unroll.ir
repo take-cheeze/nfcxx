@@ -1,0 +1,99 @@
+(ir-module "unroll.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "s" int 4 4)
+  (slot "mask" int 4 4)
+  (slot "elem" unsigned_long 8 8)
+  (slot "i" int 4 4)
+  (slot "j" unsigned_int 4 4)
+  (slot "k" int 4 4)
+  (slot "p" (ptr int) 8 8)
+  (store int $"s" %0)
+  (store int $"mask" (const int 1))
+  (loop
+    (body
+      (let %1 int (load int $"mask"))
+      (let %2 bool (lt.s int %1 (const int 16)))
+      (if %2 (then) (else (break)))
+      (let %3 int (load int $"s"))
+      (let %4 int (wmul int %3 (const int 3)))
+      (store int $"s" (wadd int %4 %1)))
+    (step
+      (let %5 int (load int $"mask"))
+      (let %6 int (wmul int %5 (const int 2)))
+      (store int $"mask" %6)))
+  (store unsigned_long $"elem" (const unsigned_long 0))
+  (loop
+    (body
+      (let %7 unsigned_long (load unsigned_long $"elem"))
+      (let %8 bool (lt.u unsigned_long %7 (const unsigned_long 32)))
+      (if %8 (then) (else (break)))
+      (let %9 int (load int $"s"))
+      (let %10 int (iconv int %7))
+      (store int $"s" (wadd int %9 %10)))
+    (step
+      (let %11 unsigned_long (load unsigned_long $"elem"))
+      (let %12 unsigned_long (wadd unsigned_long %11 (const unsigned_long 16)))
+      (store unsigned_long $"elem" %12)))
+  (store int $"i" (const int 1))
+  (loop
+    (body
+      (let %13 int (load int $"i"))
+      (let %14 bool (lt.s int %13 (const int 1)))
+      (if %14 (then) (else (break)))
+      (store int $"s" (const int -1)))
+    (step
+      (let %15 int (load int $"i"))
+      (store int $"i" (wadd int %15 (const int 1)))))
+  (store unsigned_int $"j" (const unsigned_int 6))
+  (loop
+    (body
+      (let %16 unsigned_int (load unsigned_int $"j"))
+      (let %17 bool (le.u unsigned_int (const unsigned_int 3) %16))
+      (if %17 (then) (else (break)))
+      (let %18 int (load int $"s"))
+      (let %19 int (iconv int %16))
+      (let %20 int (wmul int %18 (const int 7)))
+      (store int $"s" (wsub int %20 %19)))
+    (step
+      (let %21 unsigned_int (load unsigned_int $"j"))
+      (store unsigned_int $"j" (wsub unsigned_int %21 (const unsigned_int 1)))))
+  (store int $"k" (const int 0))
+  (store (ptr int) $"p" $"k")
+  (loop
+    (body
+      (let %22 int (load int $"k"))
+      (let %23 bool (le.s int %22 (const int 2)))
+      (if %23 (then) (else (break)))
+      (let %24 (ptr int) (load (ptr int) $"p"))
+      (let %25 int (load int $"s"))
+      (store int $"s" (wadd int %25 (const int 1)))
+      (store int %24 (wadd int %22 %0)))
+    (step
+      (let %26 int (load int $"k"))
+      (store int $"k" (wadd int %26 (const int 1)))))
+  (let %27 int (load int $"s"))
+  (let %28 int (load int $"i"))
+  (let %29 int (wmul int %28 (const int 1000)))
+  (return (wadd int %27 %29)))
+(function "shr"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "s" int 4 4)
+  (slot "mask" int 4 4)
+  (store int $"s" %0)
+  (store int $"mask" (const int 8))
+  (loop
+    (body
+      (let %1 int (load int $"mask"))
+      (let %2 bool (lt.s int (const int 0) %1))
+      (if %2 (then) (else (break)))
+      (let %3 int (load int $"s"))
+      (store int $"s" (wadd int %3 %1)))
+    (step
+      (let %5 int (load int $"mask"))
+      (let %6 int (cshr int %5 (const int 1)))
+      (store int $"mask" %6)))
+  (let %7 int (load int $"s"))
+  (return %7))

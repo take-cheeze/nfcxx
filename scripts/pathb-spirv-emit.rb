@@ -3,7 +3,10 @@
 # 64-bit physical addresses (PhysicalStorageBuffer64), so the IR's LP64 layout is kept as it is; 64-bit integers and double
 # are real types; barriers and atomics are the SPIR-V ones.
 #
-# Usage: scripts/mrb scripts/pathb-spirv-emit.rb [--manifest=FILE] [FILE.ir | -] > out.spv
+# Usage: scripts/mrb scripts/pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv
+#   --kernel-cl     the OpenCL (Kernel) module instead of the Vulkan one
+#   --no-div-trap   a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping
+#   --no-checks     the IR's null-pointer and bounds checks, (nonnull P) and (bounds I N), emit nothing (sycl-build.sh --ndebug)
 #
 # Exit status: 0 the module was written (binary, to stdout); 3 refused (reason on stderr); 1 malformed IR.
 #
@@ -22,7 +25,9 @@
 #
 # Checks: division, shifts, bounds, nonnull, trap and float-to-integer conversions set the flag (an atomic max of the code,
 # codes as in pathb-wgsl-emit.rb) and return from the current function with zero results. A call returns in turn while the
-# `dead` flag is set, so no invocation goes on to touch memory after a failed check. A loop's step runs at the top of each
+# `dead` flag is set, so no invocation goes on to touch memory after a failed check. A division by a constant other than 0
+# (and -1 when signed) and a shift by a constant below the width have no check; a call of a function that cannot trap (no
+# check in it or in its callees) does not test the flag. A loop's step runs at the top of each
 # iteration but the first, before the condition (so the continue construct has no checks in it: SPIR-V's structure rules
 # for it are strict); a function's frame is released on every return.
 #
@@ -990,6 +995,7 @@ class SpvModule
   attr_accessor :stack_bytes, :fns, :fns_wgs, :defs, :subgroup_used, :wgs, :wgs_total, :wgs_var
   attr_accessor :sg_size_var   # the SubgroupSize builtin input, once a function reads it
   attr_accessor :no_div_trap   # --no-div-trap: a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping
+  attr_accessor :no_checks     # --no-checks: the IR's (nonnull P) and (bounds I N) checks emit nothing
 
   # kernel_cl: the OpenCL module. The push block, the stack pointer and the dead flag are parameters of every function
   # (per invocation) instead of module globals, which OpenCL kernels cannot have (Private, PushConstant).
@@ -1043,6 +1049,10 @@ end
 class SFn
   attr_reader :name, :fid, :ptypes, :ret, :frame, :callees, :ftype, :param_ids, :code, :vars, :param_lines
   attr_reader :sg_used   # the function lowers a sub-group shuffle (its kernels need whole 16-lane sub-groups)
+  # compiled: compile has run; traps: the function can leave with the invocation marked dead (it emits a trap, or a call whose
+  # callee can), so its callers check the dead flag after calling it. The functions compile callees first (the call order),
+  # and a call of a function not compiled yet is checked.
+  attr_reader :compiled, :traps
 
   def initialize(form, fid, mod, wgs_mode = false)
     @form = form
@@ -1067,6 +1077,10 @@ class SFn
     @pending_brk = nil
     @param_ids = []
     @callees = []
+    @pslots = {}         # private slot name => [variable id, words] (see private_slots)
+    @preg = {}           # register => the private slot its pointer value points into (the value is the offset in the slot)
+    @compiled = false
+    @traps = false
     setup if form
   end
 
@@ -1086,10 +1100,19 @@ class SFn
 
   # The entry of a kernel: sets this invocation's stack (its slot in the stack region, by global linear index) and the
   # dead flag, then calls the kernel's IR function.
+  # The push block pointer (the OpenCL module's kernel argument, and the state parameter of every function): FuncParamAttr
+  # NoAlias and NoWrite. Nothing else addresses its bytes (rt_opencl.hpp, rt_level_zero.hpp: the control block's push block)
+  # and the device only reads it, so the device compiler may keep its loads across the stores of the function.
+  def push_param_attrs(p)
+    @spv.ann([71, p, 38, 4])   # OpDecorate FuncParamAttr NoAlias
+    @spv.ann([71, p, 38, 6])   # OpDecorate FuncParamAttr NoWrite
+  end
+
   def compile_wrapper(ir_fn)
     @param_lines = []
     if @mod.kernel_cl
       push_p = @spv.id
+      push_param_attrs(push_p)
       @ftype = @spv.t_fn(@spv.t_void, [@spv.t_ptr(SC_CROSSWG, @mod.push_struct_type)])
       @param_lines << [55, @spv.t_ptr(SC_CROSSWG, @mod.push_struct_type), push_p]
       sp_v = var_decl(@spv.t_int(64))
@@ -1158,7 +1181,7 @@ class SFn
     direct = {}
     escaped = {}
     @body.each { |s| scan_slots(s, direct, escaped) }
-    off = 0
+    frame_slots = []   # [name, size, align]
     slots.each do |f|
       sname = f[1].to_s
       if @mod.wgs && @mod.wgs.key?([@name, sname])
@@ -1172,15 +1195,255 @@ class SFn
       if ty && ty[0] != "void" && !escaped[sname] && uses.all? { |u| u == ty }
         @locals[sname] = [nil, ty]   # the variable is declared when the function is compiled
       else
-        align = 8 if align < 8
-        off = (off + align - 1) / align * align
-        @slots[sname] = off
-        off += size
+        frame_slots << [sname, size, align]
       end
+    end
+    private_slots(frame_slots)
+    off = 0
+    frame_slots.each do |sname, size, align|
+      next if @pslots.key?(sname)
+      align = 8 if align < 8
+      off = (off + align - 1) / align * align
+      @slots[sname] = off
+      off += size
     end
     @frame = (off + 15) / 16 * 16
     $stderr.write("frame #{@name} #{@frame} #{slots.map { |f| f[1].to_s }.join(' ')[0, 120]}\n") if ENV["NFCXX_EMIT_FRAMES"]
     @callees = collect_calls(@form, []).select { |c| @mod.defs.key?(c) }.uniq
+  end
+
+  # ---- private slots
+
+  # The slots that live in a Function-storage array of words instead of the invocation's stack (memory), so that the device
+  # compiler can keep them in registers: a slot (of at most PSLOT_MAX bytes) whose address does not leave the function. A
+  # pointer into one is its byte offset in the slot (a u64, as an address is), which only these uses take: a load or store
+  # through it, a copy or a constant-size memcpy, memmove or memset to or from it, a null check, and a register made from it
+  # by bitcast, offset, index or a plain copy (a register whose definitions all point into the one slot, or are null). Any
+  # other use (stored to memory, passed to a call, converted to an integer, compared, returned, or a register that may also
+  # point elsewhere) keeps the slot in the stack. Pointers stored in a private slot are kept in the host form, as in memory.
+  PSLOT_MAX = 512
+
+  def reg?(x)
+    x.is_a?(String) && x.start_with?("%")
+  end
+
+  def slot_sym?(x)
+    x.is_a?(IRSym) && x.sig == "$"
+  end
+
+  def private_slots(cands)
+    cand = {}
+    cands.each { |n, size, _| cand[n] = true if size <= PSLOT_MAX }
+    return if cand.empty?
+    esc = {}
+    defs = []
+    walk = lambda do |x|
+      next unless x.is_a?(Array)
+      if head_of(x) == "let" && x.length > 3
+        defs << [x[1].to_s, x[3]]
+      elsif head_of(x) == "set" && x.length > 2
+        defs << [x[1].to_s, x[2]]
+      end
+      x.each { |y| walk.call(y) }
+    end
+    @body.each { |b| walk.call(b) }
+    base = {}   # register => [:slot, name] or [:other]; absent: null only
+    val = lambda do |e|
+      next base[e] if reg?(e)
+      next (cand[e.name] && !esc[e.name] ? [:slot, e.name] : [:other]) if slot_sym?(e)
+      h = head_of(e)
+      next nil if h == "null"
+      next val.call(e[2]) if h == "bitcast" && e.length > 2
+      next val.call(e[1]) if (h == "offset" || h == "index") && e.length > 1
+      next val.call(e[3]) if h == "call" && mem_call?(e) && e.length > 3   # memcpy and the like return d
+      [:other]
+    end
+    pslot_in = lambda do |a|
+      next (cand[a.name] && !esc[a.name] ? a.name : nil) if slot_sym?(a)
+      next nil unless reg?(a)
+      b = base[a]
+      b && b[0] == :slot ? b[1] : nil
+    end
+    deep = lambda do |x|   # every pointer in x escapes
+      ps = pslot_in.call(x)
+      esc[ps] = true if ps
+      x.each { |y| deep.call(y) } if x.is_a?(Array)
+    end
+    call_uses = lambda do |c|
+      if mem_call?(c)   # d and s are accesses; the sizes are constants
+        c.drop(5).each { |y| deep.call(y) }
+      else
+        c.drop(3).each { |y| deep.call(y) }
+      end
+    end
+    rval_uses = lambda do |e|
+      next unless e.is_a?(Array)   # a plain copy into the register
+      h = head_of(e)
+      next if %w[bitcast null const offset load load.v].include?(h)
+      if h == "index"
+        e.drop(2).each { |y| deep.call(y) }
+        next
+      end
+      next call_uses.call(e) if h == "call"
+      deep.call(e)
+    end
+    uses = lambda do |st|
+      next unless st.is_a?(Array)
+      h = head_of(st)
+      if h == "let"
+        rval_uses.call(st[3]) if st.length > 3
+      elsif %w[set nonnull copy label break continue goto trap unreachable case default].include?(h)
+        nil
+      elsif h == "store" || h == "store.v"
+        st.drop(3).each { |y| deep.call(y) }
+      elsif h == "eval"
+        if st.length > 1 && head_of(st[1]) == "call"
+          call_uses.call(st[1])
+        else
+          deep.call(st)
+        end
+      elsif %w[block then else body step loop].include?(h)
+        st.drop(1).each { |y| uses.call(y) }
+      elsif h == "if" || h == "switch"
+        deep.call(st[1]) if st.length > 1
+        st.drop(2).each { |y| uses.call(y) }
+      else
+        deep.call(st)
+      end
+    end
+    loop do
+      n0 = esc.length
+      base = {}
+      changed = true
+      while changed
+        changed = false
+        defs.each do |r, e|
+          v = val.call(e)
+          next if v.nil?
+          cur = base[r]
+          if cur.nil?
+            base[r] = v
+            changed = true
+          elsif cur != v
+            # a register that points into two slots, or into one and elsewhere: those slots stay in the stack
+            esc[cur[1]] = true if cur[0] == :slot
+            esc[v[1]] = true if v[0] == :slot
+            if cur[0] != :other
+              base[r] = [:other]
+              changed = true
+            end
+          end
+        end
+      end
+      @body.each { |b| uses.call(b) }
+      break if esc.length == n0
+    end
+    cands.each do |n, size, _|
+      @pslots[n] = [nil, (size + 3) / 4 > 0 ? (size + 3) / 4 : 1] if cand[n] && !esc[n]
+    end
+    base.each { |r, v| @preg[r] = v[1] if v[0] == :slot && @pslots.key?(v[1]) }
+  end
+
+  # memcpy, memmove (constant size) or memset (constant byte and size): the calls the emitter lowers inline (call_expr)
+  def mem_call?(c)
+    return false unless c.length == 6 && c[2].is_a?(IRSym) && c[2].sig == "&"
+    nm = c[2].name
+    return head_of(c[5]) == "const" if %w[memcpy memmove __builtin_memcpy __builtin_memmove].include?(nm)
+    return head_of(c[4]) == "const" && head_of(c[5]) == "const" if %w[memset __builtin_memset].include?(nm)
+    false
+  end
+
+  # the private slot an operand points into, or nil
+  def pslot_of(a)
+    return (@pslots.key?(a.name) ? a.name : nil) if slot_sym?(a)
+    return nil unless reg?(a)
+    @preg[a]
+  end
+
+  # the pointer to the word of private slot `name` that holds the byte at offset rel + 4 * word_off
+  def pslot_word(name, rel, word_off)
+    t64 = @spv.t_int(64)
+    r = word_off == 0 ? rel : res(IADD, t64, rel, @spv.c_u64(4 * word_off))
+    widx = res(113, @spv.t_int(32), res(194, t64, r, @spv.c_u64(2)))
+    res(65, @spv.t_ptr(SC_FUNCTION, @spv.t_int(32)), @pslots[name][0], widx)
+  end
+
+  def pslot_load(name, rel, t)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    n = wgs_bytes(t)
+    if n == 8
+      lo = res(113, t64, res(61, t32, pslot_word(name, rel, 0)))
+      hi = res(113, t64, res(61, t32, pslot_word(name, rel, 1)))
+      v = res(197, t64, lo, res(196, t64, hi, @spv.c_u64(32)))
+      v = res(124, sty(t), v) if t[0] == "float"
+    else
+      w = res(61, t32, pslot_word(name, rel, 0))
+      if n == 4
+        v = t[0] == "float" ? res(124, sty(t), w) : w
+      else
+        bits = n * 8
+        v = res(194, t32, w, byte_shift(rel))
+        v = res(199, t32, v, @spv.c_u32((1 << bits) - 1))
+        v = t[0] == "int" && t[3] ? res(171, @spv.t_bool, v, @spv.c_u32(0)) : canon(v, t)
+      end
+    end
+    t[0] == "ptr" ? ptr_to_device(v) : v
+  end
+
+  def pslot_store(name, rel, t, v0)
+    t32, t64 = @spv.t_int(32), @spv.t_int(64)
+    v = t[0] == "ptr" ? ptr_to_host(v0) : v0
+    n = wgs_bytes(t)
+    if n == 8
+      u = t[0] == "float" ? res(124, t64, v) : v
+      ins([62, pslot_word(name, rel, 0), res(113, t32, u)])
+      ins([62, pslot_word(name, rel, 1), res(113, t32, res(194, t64, u, @spv.c_u64(32)))])
+      return
+    end
+    if n == 4
+      u = t[0] == "float" ? res(124, t32, v) : v
+      ins([62, pslot_word(name, rel, 0), u])
+      return
+    end
+    # a sub-word store: the other bits of the word are kept
+    bits = n * 8
+    mask = (1 << bits) - 1
+    vv = t[0] == "int" && t[3] ? bool_to_u32(v) : u32_of(v, t)
+    vv = res(199, t32, vv, @spv.c_u32(mask))
+    sh = byte_shift(rel)
+    wp = pslot_word(name, rel, 0)
+    clear = res(200, t32, res(196, t32, @spv.c_u32(mask), sh))
+    w = res(61, t32, wp)
+    nw = res(197, t32, res(199, t32, w, clear), res(196, t32, vv, sh))
+    ins([62, wp, nw])
+  end
+
+  # a load or store at an address that may be in a private slot (ps: the slot, or nil for memory)
+  def any_load(ps, addr, t)
+    ps ? pslot_load(ps, addr, t) : mem_load(addr, t)
+  end
+
+  def any_store(ps, addr, t, v)
+    ps ? pslot_store(ps, addr, t, v) : mem_store(addr, t, v)
+  end
+
+  # copy_bytes when one side (or both) is a private slot: words (or bytes, for a size not a multiple of 4), unrolled up to
+  # 256 bytes
+  def copy_any(dps, d, sps, src, n)
+    return copy_bytes(d, src, n) if dps.nil? && sps.nil?
+    t = n % 4 == 0 ? ["int", 4, false, false] : ["int", 1, false, false]
+    step = n % 4 == 0 ? 4 : 1
+    if n <= 256
+      (0...n).step(step) do |off|
+        v = any_load(sps, res(IADD, @spv.t_int(64), src, @spv.c_u64(off)), t)
+        any_store(dps, res(IADD, @spv.t_int(64), d, @spv.c_u64(off)), t, v)
+      end
+      return
+    end
+    counted_loop(n, step) do |off|
+      v = any_load(sps, res(IADD, @spv.t_int(64), src, off), t)
+      any_store(dps, res(IADD, @spv.t_int(64), d, off), t, v)
+    end
   end
 
   # ---- the instruction stream
@@ -1342,6 +1605,7 @@ class SFn
         lu = res(IADD, @spv.t_int(64), local_base, to_u64(push_load(:local_user, nil), ["int", 4, false, false]))
         return [res(IADD, @spv.t_int(64), lu, @spv.c_u64(1024 + @wgs[x.name])), ["ptr"]]
       end
+      return [@spv.c_u64(0), ["ptr"]] if @pslots.key?(x.name)   # a private slot: offset 0
       off = @slots[x.name]
       raise Refused, "address of the scalar slot #{x.name}" if off.nil? && @locals.key?(x.name)
       raise BadIR, "slot #{x.name} is not declared" if off.nil?
@@ -1427,6 +1691,7 @@ class SFn
 
   # the trap helper: set the flag to code, mark the invocation dead, return zero
   def trap(code)
+    @traps = true
     flag_ptr = res(120, @spv.t_ptr(psb_sc, @spv.t_int(32)), push_load(:flag, nil))
     ins([239, @spv.t_int(32), @spv.id, flag_ptr, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), @spv.c_u32(code)]) # OpAtomicUMax
     store_var(state(:dead), @spv.c_u32(1), @spv.t_int(32))
@@ -1474,6 +1739,7 @@ class SFn
   end
 
   def check_dead_after_call
+    @traps = true
     return dead_exit_to_back if @cont_exit
     d = res(61, @spv.t_int(32), state(:dead))
     c = res(171, @spv.t_bool, d, @spv.c_u32(0))
@@ -1519,6 +1785,14 @@ class SFn
   end
 
   def heap_load(addr, t)
+    # The OpenCL module loads a byte or a halfword with its own width (a d8/d16 load), extended to the 32-bit register
+    if @mod.kernel_cl && t[0] == "int" && !t[3] && (t[1] == 1 || t[1] == 2)
+      @spv.cap(t[1] == 1 ? 39 : 22)   # Int8, Int16
+      et = @spv.t_int(t[1] * 8)
+      p = res(120, @spv.t_ptr(psb_sc, et), addr)
+      v = res_load(p, et, t[1])
+      return res(t[2] ? 114 : 113, @spv.t_int(32), v)   # OpSConvert or OpUConvert: the canonical value
+    end
     if t[0] == "int" && (t[1] <= 2 || t[3])
       w = load_word(addr)
       sh = byte_shift(addr)
@@ -1732,6 +2006,8 @@ class SFn
       if ty[0] == "void"
         raise Refused, "load of void"
       end
+      ps = pslot_of(x[2])
+      return [pslot_load(ps, a, ty), ty] if ps
       if ty[0] == "int" && ty[3]
         return [mem_load(a, ty), ty]
       end
@@ -1877,6 +2153,13 @@ class SFn
     raise Refused, "#{h} on #{ty[0]}" unless int_ty?(ty)
     a, _ = operand(xa)
     b, _ = operand(xb)
+    # cdiv: the quotient; crem: the remainder (truncated toward zero, the sign of the dividend, as C has it)
+    code = ty[2] ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137)
+    # a constant divisor that is not 0 (nor -1 of a signed division) is always defined: no guard
+    if head_of(xb) == "const"
+      k = as_int(xb[2])
+      return canon(res(code, sty(ty), a, b), ty) if k != 0 && !(ty[2] && k == -1)
+    end
     zero = int_const_of(ty, 0)
     if ty[2]
       bits = wide?(ty) ? 64 : 32
@@ -1898,8 +2181,6 @@ class SFn
     else
       trap_if(c, 1)
     end
-    # cdiv: the quotient; crem: the remainder (truncated toward zero, the sign of the dividend, as C has it)
-    code = ty[2] ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137)
     canon(res(code, sty(ty), a, b), ty)
   end
 
@@ -1909,7 +2190,10 @@ class SFn
     c, cty = operand(xb)
     raise Refused, "shift count of type #{cty[0]}" unless int_ty?(cty)
     width = ty[1] == 8 ? 64 : ty[1] * 8
-    if wide?(cty)
+    # a constant count below the width needs no check
+    if head_of(xb) == "const" && (as_int(xb[2]) & 0xffffffffffffffff) < width
+      nil
+    elsif wide?(cty)
       trap_if(res(172, @spv.t_bool, c, @spv.c_u64(width)), 2)
     else
       trap_if(res(172, @spv.t_bool, c, @spv.c_u32(width)), 2)
@@ -2103,6 +2387,36 @@ class SFn
       v = u32_of(operand(args[1])[0], ["int", 4, false, false])
       return [res(code, @spv.t_int(32), p, @spv.c_u32(SCOPE_DEVICE), @spv.c_u32(SEM_RELAXED), v), ["int", 4, false, false]]
     end
+    if name == "__nfcxx_sycl_h2f" || name == "__nfcxx_sycl_f2h"
+      # binary16 bits (the low half of a 32-bit word) to float and back, in the hardware: the OpenCL module converts a half
+      # (Float16, Int16); the Vulkan module has no half type, so it unpacks or packs one with GLSL.std.450 UnpackHalf2x16 or
+      # PackHalf2x16 (the other half of the pair is 0)
+      u32 = ["int", 4, false, false]
+      f32 = sty(["float", 4])
+      if @mod.kernel_cl
+        @spv.cap(9)    # Float16
+        @spv.cap(22)   # Int16
+        h16 = @spv.t_float(16)
+        i16 = @spv.t_int(16)
+        if name == "__nfcxx_sycl_h2f"
+          b = res(113, i16, u32_of(operand(args[0])[0], u32))   # OpUConvert
+          h = res(124, h16, b)                                    # OpBitcast
+          return [res(115, f32, h), ["float", 4]]                 # OpFConvert
+        end
+        h = res(115, h16, operand(args[0])[0])
+        b = res(124, i16, h)
+        return [res(113, @spv.t_int(32), b), u32]
+      end
+      v2 = @spv.t_vec(f32, 2)
+      if name == "__nfcxx_sycl_h2f"
+        w = u32_of(operand(args[0])[0], u32)
+        v = res(12, v2, @spv.glsl_id, @spv.ext_num(62), w)   # UnpackHalf2x16
+        return [res(81, f32, v, 0), ["float", 4]]           # OpCompositeExtract
+      end
+      x = operand(args[0])[0]
+      c = res(80, v2, x, @spv.c_float(32, 0.0))             # OpCompositeConstruct
+      return [res(12, @spv.t_int(32), @spv.glsl_id, @spv.ext_num(58), c), u32]   # PackHalf2x16
+    end
     if name == "copysignf" || name == "__builtin_copysignf"
       xs = args.map { |a| operand(a)[0] }
       return [copysign_bits(xs[0], xs[1], ["float", 4]), ["float", 4]]
@@ -2121,15 +2435,23 @@ class SFn
     if %w[memcpy memmove __builtin_memcpy __builtin_memmove].include?(name) && args.length == 3 && head_of(args[2]) == "const"
       d, _ = operand(args[0])
       sv, _ = operand(args[1])
-      copy_bytes(d, sv, as_int(args[2][2]))
+      copy_any(pslot_of(args[0]), d, pslot_of(args[1]), sv, as_int(args[2][2]))
       return [d, ["ptr"]]
     end
     if %w[memset __builtin_memset].include?(name) && args.length == 3 && head_of(args[1]) == "const" && head_of(args[2]) == "const"
       d, _ = operand(args[0])
       byte = as_int(args[1][2]) & 255
       n = as_int(args[2][2])
+      ps = pslot_of(args[0])
+      if ps && n % 4 == 0 && n <= 256   # a private slot: its words, unrolled
+        (0...n).step(4) do |off|
+          a = res(IADD, @spv.t_int(64), d, @spv.c_u64(off))
+          pslot_store(ps, a, ["int", 4, false, false], @spv.c_u32(byte * 0x01010101))
+        end
+        return [d, ["ptr"]]
+      end
       counted_loop(n, 1) do |off|
-        mem_store(res(IADD, @spv.t_int(64), d, off), ["int", 1, false, false], @spv.c_u32(byte))
+        any_store(ps, res(IADD, @spv.t_int(64), d, off), ["int", 1, false, false], @spv.c_u32(byte))
       end
       return [d, ["ptr"]]
     end
@@ -2137,6 +2459,7 @@ class SFn
       xs = args.map { |a| operand(a)[0] }
       return [glsl_op(LIBM_GLSL[name], xs, @spv.t_float(32)), ["float", 4]]
     end
+    return [dp4a(args), ["int", 4, true, false]] if name == "__nfcxx_sycl_dp4a"
     if name.start_with?("__nfcxx_")
       raise Refused, "unknown device intrinsic #{name}"
     end
@@ -2148,13 +2471,7 @@ class SFn
     end
     # dpct::dp4a(int, int, int): c plus the dot product of the four signed bytes of a and b. The OpenCL module uses the packed
     # integer dot product (OpSDot), which the Intel compiler also lowers to dp4a (see tools/pathb-spirv-emit/emit.cpp)
-    if name == DP4A_INT && @mod.kernel_cl
-      @spv.cap(6018)   # DotProductInput4x8BitPacked
-      @spv.cap(6019)   # DotProduct
-      @spv.ext("SPV_KHR_integer_dot_product")
-      dot = res(4450, @spv.t_int(32), operand(args[0])[0], operand(args[1])[0], 0)   # OpSDot, PackedVectorFormat4x8Bit
-      return [res(IADD, @spv.t_int(32), dot, operand(args[2])[0]), ["int", 4, true, false]]
-    end
+    return [dp4a(args), ["int", 4, true, false]] if name == DP4A_INT && @mod.kernel_cl
     callee_fn = @wgs_mode ? @mod.fns_wgs[name] : @mod.fns[name]
     raise Refused, "call of #{name}, which has no body in the device unit (a host function, or a declaration)" if callee_fn.nil?
     raise Refused, "call of #{name} with #{args.length} arguments, it takes #{callee_fn.ptypes.length}" if args.length != callee_fn.ptypes.length
@@ -2163,12 +2480,37 @@ class SFn
     rt = callee_fn.ret ? sty(callee_fn.ret) : @spv.t_void
     if callee_fn.ret.nil?
       ins([57, rt, @spv.id, callee_fn.fid, *xs])
-      check_dead_after_call
+      check_dead_after_call if !callee_fn.compiled || callee_fn.traps
       return nil
     end
     r = res(57, rt, callee_fn.fid, *xs)
-    check_dead_after_call
+    check_dead_after_call if !callee_fn.compiled || callee_fn.traps
     [r, callee_fn.ret]
+  end
+
+  # c + the dot product of the four signed bytes of a and b (dpct::dp4a(int, int, int), __nfcxx_sycl_dp4a): the OpenCL module
+  # uses the packed integer dot product (OpSDot, which the Intel compiler lowers to dp4a); the Vulkan module sums the four
+  # products of the sign-extended bytes (OpBitFieldSExtract). The products fit in 32 bits, so both wrap only at the add of c.
+  def dp4a(args)
+    a, _ = operand(args[0])
+    b, _ = operand(args[1])
+    t = @spv.t_int(32)
+    if @mod.kernel_cl
+      @spv.cap(6018)   # DotProductInput4x8BitPacked
+      @spv.cap(6019)   # DotProduct
+      @spv.ext("SPV_KHR_integer_dot_product")
+      dot = res(4450, t, a, b, 0)   # OpSDot, PackedVectorFormat4x8Bit
+    else
+      dot = nil
+      4.times do |k|
+        ea = res(202, t, a, @spv.c_u32(8 * k), @spv.c_u32(8))   # OpBitFieldSExtract
+        eb = res(202, t, b, @spv.c_u32(8 * k), @spv.c_u32(8))
+        p = res(IMUL, t, ea, eb)
+        dot = k == 0 ? p : res(IADD, t, dot, p)
+      end
+    end
+    c, _ = operand(args[2])
+    res(IADD, t, dot, c)
   end
 
   def atomic_ptr(x)
@@ -2268,7 +2610,7 @@ class SFn
         ins([62, lv[0], v])
       else
         a, _ = operand(s[2])
-        mem_store(a, ty, v)
+        any_store(pslot_of(s[2]), a, ty, v)
       end
     when "if"
       c, cty = operand(s[1])
@@ -2347,13 +2689,19 @@ class SFn
     when "trap", "unreachable"
       trap(5)
     when "bounds"
+      return if @mod.no_checks
+      # a constant index below a constant bound
+      return if head_of(s[1]) == "const" && !(s[2].is_a?(String) && s[2].start_with?("%")) &&
+                (as_int(s[1][2]) & 0xffffffffffffffff) < (as_int(s[2]) & 0xffffffffffffffff)
       v, vty = operand(s[1])
       n = s[2].is_a?(String) && s[2].start_with?("%") ? operand(s[2])[0] : int_const_of(vty, as_int(s[2]))
       vi = wide?(vty) ? v : u32_of(v, vty)
       trap_if(res(172, @spv.t_bool, vi, n), 3)
     when "nonnull"
-      # the address of a function is never null (the front end's check on a function pointer that is a template argument)
-      unless s[1].is_a?(IRSym) && s[1].sig == "&"
+      return if @mod.no_checks
+      # the address of a function is never null (the front end's check on a function pointer that is a template argument),
+      # nor that of a slot or a static, nor a register made from one (never_null_regs)
+      unless never_null?(s[1])
         p, _ = operand(s[1])
         trap_if(res(170, @spv.t_bool, p, @spv.c_u64(0)), 4)
       end
@@ -2373,7 +2721,7 @@ class SFn
       n = as_int(s[1])
       d, _ = operand(s[2])
       src, _ = operand(s[3])
-      copy_bytes(d, src, n)
+      copy_any(pslot_of(s[2]), d, pslot_of(s[3]), src, n)
     else
       raise Refused, "statement #{h || form_text(s)}"
     end
@@ -2496,7 +2844,49 @@ class SFn
 
   # ---- the function
 
+  # An operand that is never null: the address of a slot, a static or a function, an offset or index of one, or a register
+  # whose every definition (let or set, anywhere in the function) is one of those.
+  def never_null?(x)
+    return true if pslot_of(x)   # a pointer into a private slot (or a null one, which no access reaches)
+    return %w[$ @ &].include?(x.sig) if x.is_a?(IRSym)
+    return @nn_regs.key?(x) if x.is_a?(String) && x.start_with?("%")
+    h = head_of(x)
+    return x.length > 2 && never_null?(x[2]) if h == "bitcast"
+    return x.length > 1 && never_null?(x[1]) if h == "offset" || h == "index"
+    false
+  end
+
+  # The never-null registers: the greatest set such that each definition of each of them is never null (a register set
+  # from itself plus an offset, in a loop, stays in it).
+  def never_null_regs
+    defs = {}
+    walk = lambda do |x|
+      next unless x.is_a?(Array)
+      if head_of(x) == "let" && x.length > 3
+        (defs[x[1].to_s] ||= []) << x[3]
+      elsif head_of(x) == "set" && x.length > 2
+        (defs[x[1].to_s] ||= []) << x[2]
+      end
+      x.each { |y| walk.call(y) }
+    end
+    @body.each { |b| walk.call(b) }
+    @nn_regs = {}
+    defs.each_key { |k| @nn_regs[k] = true }
+    changed = true
+    while changed
+      changed = false
+      defs.each do |k, ds|
+        next unless @nn_regs.key?(k)
+        if ds.any? { |d| !never_null?(d) }
+          @nn_regs.delete(k)
+          changed = true
+        end
+      end
+    end
+  end
+
   def compile
+    never_null_regs
     ret_t = @ret ? sty(@ret) : @spv.t_void
     @ptypes.each { |t| @param_ids << @spv.id }
     @ptypes.each_with_index { |t, k| @regs["%#{k}"] = [:val, @param_ids[k], t] }
@@ -2505,6 +2895,7 @@ class SFn
       state_types = [@spv.t_ptr(SC_CROSSWG, @mod.push_struct_type), @spv.t_ptr(SC_FUNCTION, @spv.t_int(64)),
                      @spv.t_ptr(SC_FUNCTION, @spv.t_int(32))]
       @state_param_ids = state_types.map { @spv.id }
+      push_param_attrs(@state_param_ids[0])
       @state = { push: @state_param_ids[0], sp: @state_param_ids[1], dead: @state_param_ids[2] }
     end
     @state_types = state_types
@@ -2521,6 +2912,7 @@ class SFn
       ins([62, state(:sp), fr])
     end
     @locals.each_value { |lv| lv[0] ||= var_decl(sty(lv[1])) }
+    @pslots.each_value { |ps| ps[0] = var_decl(@spv.t_array(@spv.t_int(32), ps[1])) }
     stmts(@body)
     if !@term
       if @ret.nil?
@@ -2529,6 +2921,7 @@ class SFn
         emit_return(zero_of(@ret))
       end
     end
+    @compiled = true
     @code
   end
 
@@ -2555,7 +2948,7 @@ class SpvModule
   end
 end
 
-def emit_module(src, kernel_cl = false, no_div_trap = false)
+def emit_module(src, kernel_cl = false, no_div_trap = false, no_checks = false)
   forms = parse_forms(tokenize(strip_comments(src)))
   mod = Mod.new
   sizes = {}
@@ -2609,6 +3002,7 @@ def emit_module(src, kernel_cl = false, no_div_trap = false)
   spv.glsl_id
   smod = SpvModule.new(spv, kernel_cl)
   smod.no_div_trap = no_div_trap
+  smod.no_checks = no_checks
   smod.irmod = mod
   smod.defs = mod.defs
   # the work-group statics live in the group's static local region (OpenCL-style modules; the Vulkan module keeps frames)
@@ -2746,6 +3140,7 @@ def main(argv)
   manifest_path = nil
   kernel_cl = false
   no_div_trap = false
+  no_checks = false
   while args.length > 0 && args[0].start_with?("--")
     opt = args.shift
     if opt.start_with?("--manifest=")
@@ -2754,14 +3149,16 @@ def main(argv)
       kernel_cl = true
     elsif opt == "--no-div-trap"
       no_div_trap = true
+    elsif opt == "--no-checks"
+      no_checks = true
     else
-      $stderr.write("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--manifest=FILE] [FILE.ir | -] > out.spv\n")
+      $stderr.write("usage: pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv\n")
       return 1
     end
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    words, manifest, _ = emit_module(src, kernel_cl, no_div_trap)
+    words, manifest, _ = emit_module(src, kernel_cl, no_div_trap, no_checks)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

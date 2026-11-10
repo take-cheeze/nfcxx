@@ -1,0 +1,13 @@
+(ir-module "tail_block.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "twice"
+  (ret int)
+  (params (param %0 "v" int))
+  (block
+    (let %1 int (wadd int %0 %0))
+    (block
+      (return %1))))
+(function "caller"
+  (ret int)
+  (params (param %0 "a" int))
+  (let %1 int (call int &"twice" %0))
+  (return %1))
