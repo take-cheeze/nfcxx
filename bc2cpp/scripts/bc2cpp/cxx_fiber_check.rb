@@ -9,6 +9,7 @@
 require 'tmpdir'
 require 'open3'
 require_relative 'check_support'
+require_relative 'host_cxx'
 
 suite = FixtureCheck.new('cxx_fiber_check')
 check = suite.method(:check)
@@ -17,7 +18,7 @@ unless root && File.file?(File.join(root, 'lib/libmruby.a'))
   puts 'SKIP cxx_fiber_check: set BC2CPP_MRUBY_FULL to a host mruby build'
   exit 0
 end
-cxx = ENV.fetch('CXX', 'clang++')
+cxx = HostCxx.pick('clang++') # CXX, else nfcxx when built, else clang++
 runtime = File.expand_path('../../tools/bc2cpp/runtime', __dir__)
 
 TEST = <<~'CPP'

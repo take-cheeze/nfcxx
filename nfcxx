@@ -58,6 +58,29 @@
 #                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
+# -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
+# -c would; build systems and scripts use it as a type check). Run as `-c -o TMP.o`, the object removed.
+for a in "$@"; do
+  if [ "$a" = -fsyntax-only ]; then
+    fso_args=(); fso_has_o=0; fso_has_E=0
+    for b in "$@"; do
+      case $b in -fsyntax-only) ;; -o) fso_has_o=1; fso_args+=("$b") ;; -E) fso_has_E=1; fso_args+=("$b") ;; *) fso_args+=("$b") ;; esac
+    done
+    [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
+    if [ $fso_has_o = 1 ]; then
+      # An explicit -o is honoured by the real compile; the type check discards it.
+      fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+      fso_new=(); fso_skip=0
+      for b in "${fso_args[@]}"; do
+        if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
+        [ "$b" = -o ] && fso_skip=1; fso_new+=("$b")
+      done
+      "$0" -c "${fso_new[@]}"; exit $?
+    fi
+    fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+    "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
+  fi
+done
 source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
 source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
 set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
@@ -187,7 +210,7 @@ ensure_tool() {
     [ "$waited" -lt 3000 ] || { echo "nfcxx: $lock is stuck (remove it if no build is running)" >&2; return 1; }
   done
   local rc=0
-  tool_fresh || ninja -C "$dir" >&2 || rc=$?
+  tool_fresh || CXX=${NFCXX_CXX:-g++} ninja -C "$dir" >&2 || rc=$?
   rmdir "$lock"
   return $rc
 }
@@ -500,6 +523,7 @@ while [ $# -gt 0 ]; do
     -x) xlang=$2; shift ;;      # -x c++ (CMake's compiler probes pipe a source to -E -x c++ -)
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
+    -fno-rtti|-frtti) ;;                            # accepted, not acted on: RTTI stays available (a program that builds without it builds with it)
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
     -fsanitize=*) sanitize=${sanitize:+$sanitize,}${1#-fsanitize=} ;;
     -fno-sanitize=all) sanitize="" ;;
