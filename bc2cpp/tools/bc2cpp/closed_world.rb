@@ -75,6 +75,14 @@ class ClosedWorld
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
   # A project native that makes a singleton class by hand.
   NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
+  # A ROM table installed on a class object's singleton (`MRB_MT_INIT_ROM(M, mrb_singleton_class_ptr(M, mrb_obj_value(k)),
+  # table)` with `RClass* k`) is mrb_define_class_method's effect: no instance gets a singleton class.
+  CLASS_OBJECT_TABLE = /MRB_MT_INIT_ROM\(\s*\w+\s*,\s*mrb_singleton_class_ptr\(\s*\w+\s*,\s*mrb_obj_value\(\s*(\w+)\s*\)\s*\)\s*,\s*\w+\s*\)/
+
+  def self.without_class_object_tables(text)
+    text.gsub(CLASS_OBJECT_TABLE) { |m| text.match?(/\bRClass\s*\*\s*#{Regexp.last_match(1)}\b/) ? ' ' : m }
+  end
+
   RUBY_SINGLETON = /\b(?:#{SINGLETON_MAKERS.join('|')}|extend)\b|\bclass\s*<<|\bdef\s+(?!self\b)[a-z_]\w*\./
   # PROVEN_MISS: a name passed to one of these is probed for or looked up
   # by name, so a send of it is guarded, not a bug.
@@ -1207,7 +1215,7 @@ class ClosedWorld
       refusals: refusals,
       clone_sent: !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING),
       freeze_possible: !path.match?(NATIVE_CORE) && text.match?(NATIVE_FREEZE),
-      singleton_maker: !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON),
+      singleton_maker: !path.match?(NATIVE_CORE) && without_class_object_tables(text).match?(NATIVE_SINGLETON),
       defines_class: defines_class,
       touch: TouchScan.native_facts(text),
       legacy_names: native_legacy_names(text),
