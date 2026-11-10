@@ -1779,7 +1779,8 @@ module MrbcRb
 
     # The values an assignment's right side may be: operands, and `||` and `&&` of operands (value_into builds them).
     def assign_value?(value)
-      operand?(value) || value.is_a?(Prism::OrNode) || value.is_a?(Prism::AndNode)
+      operand?(value) || value.is_a?(Prism::OrNode) || value.is_a?(Prism::AndNode) || value.is_a?(Prism::RescueModifierNode) ||
+        value.is_a?(Prism::BeginNode)
     end
 
     # `x += v` is `x = x + v` (codegen_op_asgn): the variable goes to the first temporary, the value to the next, the operator
@@ -1882,32 +1883,34 @@ module MrbcRb
       index = node.is_a?(Prism::IndexOperatorWriteNode) || node.is_a?(Prism::IndexOrWriteNode) ||
               node.is_a?(Prism::IndexAndWriteNode)
       recv = node.receiver && unparen(node.receiver)
-      raise Unsupported, 'assignment receiver' unless recv && (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
-      raise Unsupported, 'safe navigation assignment' if index && node.safe_navigation?
+      raise Unsupported, 'assignment receiver' unless recv && operand?(recv)
+      raise Unsupported, 'safe navigation assignment' if node.safe_navigation? && (index || recv.is_a?(Prism::SelfNode))
 
       leading_dot(node) unless index
-      idx = nil
+      idxs = []
       if index
-        args = node.arguments&.arguments || []
+        idxs = (node.arguments&.arguments || []).map { |a| unparen(a) }
         raise Unsupported, 'index assignment with a block' if node.block
-        raise Unsupported, 'index assignment arguments' unless args.size == 1 && (simple?(args[0]) || call_node?(args[0]))
-
-        idx = unparen(args[0])
+        raise Unsupported, 'index assignment arguments' unless idxs.size <= 12 && idxs.all? { |a| operand?(a) }
       end
+      idx = idxs.first if idxs.size == 1
       value = unparen(node.value)
       raise Unsupported, 'assignment value' unless assign_value?(value)
 
       t = temp
-      operand_into(recv, t)
+      operand_into(recv, t) unless recv.is_a?(Prism::SelfNode) && !index # `self.x op= v` reads x with SSEND0 (no LOADSELF)
       if index
-        operand_into(idx, t + 1)
-        index_read(t, recv, idx)
+        idxs.each_with_index { |a, i| operand_into(a, t + 1 + i) }
+        if idxs.size == 1 then index_read(t, recv, idx)
+        elsif idxs.empty? then emit(:SEND0, t, sym_index(:[]))
+        else emit(:SEND, t, sym_index(:[]), idxs.size)
+        end
       else
         skip = safe_jump(t, true) if node.safe_navigation?
-        emit(:SEND0, t, sym_index(node.read_name))
+        emit(recv.is_a?(Prism::SelfNode) ? :SSEND0 : :SEND0, t, sym_index(node.read_name))
         dispatch(skip)
       end
-      @nregs = [@nregs, t + 2].max
+      @nregs = [@nregs, t + 2 + (idxs.size > 1 ? idxs.size : 0)].max
       to_end = nil
       case node
       when Prism::IndexOrWriteNode, Prism::CallOrWriteNode, Prism::IndexAndWriteNode, Prism::CallAndWriteNode
@@ -1929,12 +1932,19 @@ module MrbcRb
       base = t + 1
       operand_into(recv, base)
       skip = safe_jump(base, last) if !index && node.safe_navigation?
-      if index
+      if index && idxs.size == 1
         operand_into(idx, base + 1)
         gen_move(base + 2, t, false)
         gen_move(t, base + 2, true) if last
         emit(:SETIDX, base)
         @nregs = [@nregs, base + 4].max
+      elsif index
+        idxs.each_with_index { |a, i| operand_into(a, base + 1 + i) }
+        vreg = base + 1 + idxs.size
+        gen_move(vreg, t, false)
+        gen_move(t, vreg, true) if last
+        emit(:SEND, base, sym_index(:[]=), idxs.size + 1)
+        @nregs = [@nregs, vreg + 2].max
       else
         gen_move(base + 1, t, false)
         gen_move(t, base + 1, true) if last
@@ -2162,9 +2172,10 @@ module MrbcRb
     # `recv[index] = value` (SETIDX, verified): where the value is needed the result register r holds it, the receiver,
     # index and value follow it, and SETIDX runs on the receiver; otherwise the receiver is in the first temporary.
     def index_assign(recv, index, value, need:)
-      [recv, index, value].each do |v|
+      [recv, index].each do |v|
         raise Unsupported, 'index assignment with a non-simple operand' unless operand?(v)
       end
+      raise Unsupported, 'index assignment with a non-simple operand' unless assign_value?(value)
       r = temp
       base = need ? r + 1 : r
       operand_into(recv, base)
@@ -2179,7 +2190,7 @@ module MrbcRb
     # `recv[i, j] = value`: no SETIDX for several indices, a plain SEND of []= with the indices and the value as its arguments;
     # where the value is needed the result register holds it (copied after the send's arguments are generated).
     def index_assign_many(recv, args, need:)
-      raise Unsupported, 'index assignment with a non-simple operand' unless args.all? { |v| operand?(v) }
+      raise Unsupported, 'index assignment with a non-simple operand' unless args[0...-1].all? { |v| operand?(v) } && assign_value?(args.last)
 
       r = temp
       base = need ? r + 1 : r
@@ -2391,6 +2402,8 @@ module MrbcRb
         # (verified: `self[x]` is LOADSELF, MOVE, GETIDX).
         n_args = (node.arguments&.arguments || []).size
         if name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/) then recv = nil
+        elsif n_args == 1 && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/)
+          nil # `self.x = v` loads self like any receiver (verified: LOADSELF, value, SEND)
         elsif name == :-@ && node.call_operator_loc.nil?
           nil # `-self` is a NODE_NEGATE: self is generated like any operand
         elsif SELF_SEND_OPS.include?(name)
@@ -2400,7 +2413,8 @@ module MrbcRb
         end
       end
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
-      raise Unsupported, 'call with a block or keywords' if args.any? { |a| !operand?(a) }
+      setter = recv && (name == :[]= || name.to_s.match?(/\A[A-Za-z_]\w*=\z/)) # an assigned value may also be a begin block or a rescue modifier
+      raise Unsupported, 'call with a block or keywords' if args.any? { |a| !(operand?(a) || (setter && assign_value?(a))) }
       raise Unsupported, 'call with many arguments' if args.size > 14 # gen_values packs more than 14 into an array
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
       raise Unsupported, 'safe navigation' if node.safe_navigation? && !recv
@@ -2409,8 +2423,8 @@ module MrbcRb
       raise Unsupported, 'unary operator with arguments' if UNARY_OPS.include?(name) && !args.empty?
 
       if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
-        raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
-        raise Unsupported, 'attribute assignment receiver' unless simple?(recv) || (node.safe_navigation? && call_node?(recv))
+        raise Unsupported, 'attribute assignment receiver' unless operand?(recv)
+        raise Unsupported, 'safe navigation attribute assignment on self' if node.safe_navigation? && recv.is_a?(Prism::SelfNode)
 
         return attribute_assign(node, recv, args[0], need: need)
       end
@@ -2424,7 +2438,7 @@ module MrbcRb
       if name == :[]= && recv && args.size == 2
         return index_assign(recv, args[0], args[1], need: need)
       end
-      return index_assign_many(recv, args, need: need) if name == :[]= && recv && args.size > 2
+      return index_assign_many(recv, args, need: need) if name == :[]= && recv && args.size != 2
       raise Unsupported, 'index assignment' if name == :[]=
 
       if recv && BINARY_OPS.key?(name) && args.size == 1
