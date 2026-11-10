@@ -43,7 +43,7 @@ module MrbcRb
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
-    ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
+    TCLASS: 112, METHOD: 99, DEF: 106, EXT1: 115, EXT2: 116, EXT3: 117, ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
     GETCV: 27, SETCV: 28, MATCHERR: 46,
     EXCEPT: 43, RESCUE: 44, RAISEIF: 45,
     BREAK: 67, BLKPUSH: 68, BLKCALL: 54, SUPER: 55, ARGARY: 56
@@ -387,8 +387,7 @@ module MrbcRb
       @line = line
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(blk, self)
       index = @children.size - 1
-      raise Unsupported, 'more than 255 child ireps' if index > 0xff
-
+      
       emit(:BLOCK, sp, index)
       emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), argc)
       dispatch(skip)
@@ -435,12 +434,16 @@ module MrbcRb
       sym = sym_index(node.name)
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_method(node)
       index = @children.size - 1
-      raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
       nregs = @nregs
       @line = def_line(node)
       t = temp
-      if recv
+      if index > 0xff # milestone 13: no TDEF/SDEF fusion past 255 child ireps (codegen_def)
+        value_into(recv, t) if recv
+        emit(recv ? :SCLASS : :TCLASS, t)
+        emit(:METHOD, t + 1, index)
+        emit(:DEF, t, sym)
+      elsif recv
         value_into(recv, t)
         emit(:SDEF, t, sym, index)
       else
@@ -729,7 +732,7 @@ module MrbcRb
            Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
         call_write(node, last: last)
       when Prism::MultiWriteNode
-        multiple_write(node, last: last)
+        node.value.is_a?(Prism::RescueModifierNode) && !@masgn_plain.equal?(node) ? masgn_rescue(node, last: last) : multiple_write(node, last: last)
       when Prism::IfNode
         if_statement(node, last: last)
       when Prism::CaseNode
@@ -1156,8 +1159,7 @@ module MrbcRb
       child.instance_variable_set(:@outer_in_method, inside_method?)
       @children << child.compile_body(locals, stmts, val)
       index = @children.size - 1
-      raise Unsupported, 'more than 255 child ireps' if index > 0xff
-
+      
       index
     end
 
@@ -1403,8 +1405,9 @@ module MrbcRb
       @last = [name, [reg].compact, start]
       @insns << @last
       @rewound = false
+      @code << OP.fetch(:EXT1) if reg && reg > 0xff # genop_2S: a register past 255 takes EXT1
       @code << OP.fetch(name)
-      byte(reg) if reg
+      reg && reg > 0xff ? short(reg) : (byte(reg) if reg)
       position = @code.size
       short(0)
       (@code.size - start).times { @lines << @line }
@@ -2044,7 +2047,7 @@ module MrbcRb
       rights = node.rights
       rest = nil if rest.is_a?(Prism::ImplicitRestNode) # a trailing comma adds nothing
 
-      value = unparen(node.value)
+      value = unparen(@masgn_plain.equal?(node) ? node.value.expression : node.value)
       fixed = value.is_a?(Prism::ArrayNode) && value.elements.none? { |e| e.is_a?(Prism::SplatNode) }
       if value.is_a?(Prism::ArrayNode)
         raise Unsupported, 'multiple assignment right side element' unless value.elements.all? { |e| operand?(e) || array_splat?(e) }
@@ -2348,7 +2351,6 @@ module MrbcRb
           sp += 1
           n += 1
         end
-        raise Unsupported, 'argument stack too deep' if sp > 200
       end
       if variable
         if n.positive?
@@ -2384,6 +2386,7 @@ module MrbcRb
       len = 0
       update = false
       first = true
+      slimit = sp >= 64 ? Float::INFINITY : 99
       kw.elements.each do |e|
         label_key_line(e) if e.is_a?(Prism::AssocNode)
         case e
@@ -2420,12 +2423,19 @@ module MrbcRb
           len += 1
         else raise Unsupported, 'keyword argument element'
         end
+        if sp >= slimit # milestone 13: gen_hash flushes the pairs built so far when the stack reaches GEN_VAL_STACK_MAX
+          sp -= len * 2
+          if update
+            sp -= 1
+          end
+          emit(update ? :HASHADD : :HASH, sp, len)
+          sp += 1
+          update = true
+          len = 0
+        end
         first = false
-        raise Unsupported, 'argument stack too deep' if sp > 90
       end
       if len > 14 # gen_hash builds the pairs into a HASH when there are more than its limit
-        raise Unsupported, 'more than 14 keyword pairs after a ** splat' if update
-
         sp -= len * 2
         emit(:HASH, sp, len)
         return [15, sp + 1]
@@ -2524,6 +2534,9 @@ module MrbcRb
         return a
       end
 
+      # milestone 13: gen_values flushes into ARRAY/ARYPUSH once an argument reaches register 99 (GEN_VAL_STACK_MAX).
+      return call_with_args(node, need: need) if args.size >= 2 && a + 1 < 99 && a + args.size >= 99 && node.name.to_s.match?(PLAIN_NAME)
+
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
       args.each_with_index { |arg, i| operand_into(arg, a + 1 + i) }
@@ -2601,7 +2614,6 @@ module MrbcRb
     # Symbols are numbered in order of first use, as the fork's new_sym does.
     def sym_index(name)
       index = @syms.index(name) || (@syms << name).size - 1
-      raise Unsupported, 'more than 255 symbols' if index > 0xff
 
       index
     end
@@ -2742,8 +2754,7 @@ module MrbcRb
         # LAMBDA takes the child irep like BLOCK does; gen_move folds it straight into a local's register.
         @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(node, self)
         index = @children.size - 1
-        raise Unsupported, 'more than 255 child ireps' if index > 0xff
-
+        
         @nregs = [@nregs, @sp + 1].max
         emit(:LAMBDA, dst, index)
       when Prism::DefinedNode
@@ -3018,8 +3029,7 @@ module MrbcRb
       operand_into(coll, t)
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).send(:compile_for, node, self)
       index = @children.size - 1
-      raise Unsupported, 'more than 255 child ireps' if index > 0xff
-
+      
       reach(t + 2)
       emit(:BLOCK, t + 1, index)
       emit(:SENDB, t, sym_index(:each), 0)
@@ -3270,7 +3280,6 @@ module MrbcRb
     def hash_operand(node, reg)
       node = node.value if node.is_a?(Prism::ImplicitNode)
       raise Unsupported, 'hash element' unless operand?(node)
-      raise Unsupported, 'hash too large for one register window' if reg > 250
 
       operand_into(unparen(node), reg)
       @nregs = [@nregs, reg + 1].max
@@ -3331,7 +3340,6 @@ module MrbcRb
           sp += 1
           count = 0
         end
-        raise Unsupported, 'array stack too deep' if sp > 200
 
         symbols ? symbol_word_into(e, sp, node) : operand_into(unparen(e), sp)
         @nregs = [@nregs, sp + 1].max
@@ -3400,7 +3408,6 @@ module MrbcRb
             first = false
           end
         end
-        raise Unsupported, 'array stack too deep' if sp > 200
 
         operand_into(v, sp)
         sp += 1
@@ -3459,7 +3466,6 @@ module MrbcRb
     # Pool entries are deduplicated in order of first use, as the fork's new_lit_int does.
     def pool_index(i)
       index = @pool.index(i) || (@pool << i).size - 1
-      raise Unsupported, 'more than 255 pool entries' if index > 0xff
 
       index
     end
@@ -3485,17 +3491,31 @@ module MrbcRb
       @last = [name, operands, start]
       @insns << @last
       @rewound = false
+      wide = wide_operands(name, operands)
       @code << OP.fetch(name)
       case name
       when :ENTER then byte((operands[0] >> 16) & 0xff); short(operands[0] & 0xffff)
-      when :LOADI16 then byte(operands[0]); short(operands[1])
-      when :LOADI32 then byte(operands[0]); short(operands[1] >> 16); short(operands[1] & 0xffff)
-      when :BLKPUSH, :ARGARY then byte(operands[0]); short(operands[1])
-      else operands.each { |v| byte(v) }
+      when :LOADI16 then wide ? short(operands[0]) : byte(operands[0]); short(operands[1])
+      when :LOADI32 then wide ? short(operands[0]) : byte(operands[0]); short(operands[1] >> 16); short(operands[1] & 0xffff)
+      when :BLKPUSH, :ARGARY then wide ? short(operands[0]) : byte(operands[0]); short(operands[1])
+      else operands.each_with_index { |v, i| wide && i < 2 && v > 0xff ? short(v) : byte(v) }
       end
       track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
       track(operands[1]) if name == :MOVE
       (@code.size - start).times { @lines << @line }
+    end
+
+    # milestone 13 (wide operands): genop_1/genop_2 prefix EXT1, EXT2 or EXT3 when the first and/or second operand of a B, BB
+    # or BBB instruction exceeds 0xff (the operand is then a big-endian short). Returns whether any operand is wide.
+    def wide_operands(name, operands)
+      return false if %i[ENTER STOP].include?(name)
+
+      a = operands[0].is_a?(Integer) && operands[0] > 0xff
+      b = operands[1].is_a?(Integer) && operands[1] > 0xff && !%i[LOADI16 LOADI32 BLKPUSH ARGARY].include?(name) # their second operand is an S/SS one
+      return false unless a || b
+
+      @code << OP.fetch(a && b ? :EXT3 : (b ? :EXT2 : :EXT1))
+      true
     end
 
     def byte(v)
@@ -4262,6 +4282,18 @@ module MrbcRb
       last ? r : nil
     end
 
+    # milestone 13: the fork's parser applies `a, b = expr rescue other` to the whole assignment (the targets are assigned inside
+    # the rescued region and the rescue value is the statement's value), unlike Prism, which rescues the right side only.
+    def masgn_rescue(node, last:)
+      r = @sp
+      @nregs = [@nregs, r + 1].max
+      clauses = [RescueClause.new([], nil, [node.value.rescue_expression], node.location.end_line)]
+      @masgn_plain = node
+      rescue_region(r, [node], clauses, nil, nil, last)
+      @sp = r
+      last ? r : nil
+    end
+
     RescueClause = Struct.new(:exceptions, :reference, :body, :empty_line)
 
     # codegen_ensure: the body (value in r when +val+), then EXCEPT into the register after it, the ensure clause, RAISEIF.
@@ -4507,8 +4539,7 @@ module MrbcRb
     def block_literal(blk)
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(blk, self)
       index = @children.size - 1
-      raise Unsupported, 'more than 255 child ireps' if index > 0xff
-
+      
       emit(:BLOCK, @sp, index)
       @nregs = [@nregs, @sp + 1].max
     end
