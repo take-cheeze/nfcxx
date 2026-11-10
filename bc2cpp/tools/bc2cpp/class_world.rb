@@ -43,7 +43,7 @@ module ClassWorld
     'Exception' => [%w[Exception Object Kernel BasicObject], :class],
     'StandardError' => [%w[StandardError Exception Object Kernel BasicObject], :class],
     # mrb_init_exception (3rd/mruby/src/error.c) defines it under StandardError in every build; it is C-defined, so
-    # its chain is fixed. scripts/bc2cpp/class_world_check.rb reads error.c to hold this entry to that.
+    # its chain is fixed. rpg-maker-clone scripts/bc2cpp-rpg/class_world_check.rb reads error.c to hold this entry to that.
     'RuntimeError' => [%w[RuntimeError StandardError Exception Object Kernel BasicObject], :class],
     'Enumerator' => [%w[Enumerator Enumerable Object Kernel BasicObject], :class]
   }.freeze
