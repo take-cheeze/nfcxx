@@ -826,7 +826,7 @@ class CodeGen
       end
     end
     out << resumable_cells_setup(boxed, registers, cells_slot) if cells_slot
-    out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
+    out << "  Bc2cppStepGuard bc2cpp_step_guard(M, F, bc2cpp_frame_value);\n"
     out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
     registers.each_with_index do |reg, slot|
       if (cell = boxed.index(reg))
@@ -1717,6 +1717,7 @@ class CodeGen
     struct Bc2cppResumeFrame {
       mrb_int state;
       mrb_int nregs;
+      mrb_int nslots;
       mrb_value* regs;
       void* callee; // CALL_STEP: the frame this suspension asks the fiber to call (a Bc2cppFiberFrame*), or null
       mrb_int pc; // HANDLERS: the address of the instruction the step was last at (the handler lookup reads it)
@@ -1756,14 +1757,52 @@ class CodeGen
     [[noreturn]] static void bc2cpp_resume_bad_state(mrb_state* M) {
       mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: resumable frame resumed in an unknown state");
     }
+    // FRAME_POOL: a step that ran to its end leaves a frame nothing reads again (the driver drops it when the step returns a
+    // value, before any new frame exists), so its Data object and register Array serve the next call of a step of the same
+    // size instead of three allocations and a hidden ivar per call. The pool is a rooted Array that never grows.
+    static const mrb_int BC2CPP_FRAME_POOL_MAX = 32;
+    static mrb_value bc2cpp_frame_pool(mrb_state* M) {
+      static mrb_value pool;
+      static unsigned cached_gen = 0;
+      const unsigned gen = bc2cpp_state_gen(M);
+      if (gen && cached_gen == gen) return pool;
+      const mrb_sym key = BC2CPP_LIT_SYM(M, "$__bc2cpp_frame_pool");
+      pool = mrb_gv_get(M, key);
+      if (!mrb_array_p(pool)) {
+        pool = mrb_ary_new_capa(M, BC2CPP_FRAME_POOL_MAX);
+        mrb_gv_set(M, key, pool);
+      }
+      cached_gen = gen;
+      return pool;
+    }
     // A new frame for a nil `*frame`, else the one the driver passed back.
     static Bc2cppResumeFrame* bc2cpp_resume_frame(mrb_state* M, mrb_value* frame, mrb_int nregs, mrb_int nslots) {
       if (mrb_nil_p(*frame)) {
+        const size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
+        mrb_value pool = bc2cpp_frame_pool(M);
+        const mrb_int n = RARRAY_LEN(pool);
+        for (mrb_int i = n; i-- > 0 && i + 8 >= n;) {
+          const mrb_value v = RARRAY_PTR(pool)[i];
+          Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(v);
+          if (f->nregs != nregs || f->nslots != nslots) continue;
+          mrb_ary_set(M, pool, i, RARRAY_PTR(pool)[n - 1]);
+          mrb_ary_pop(M, pool);
+          mrb_value* regs = f->regs;
+          const mrb_value regs_ary = f->regs_ary;
+          memset(f, 0, size);
+          f->nregs = nregs;
+          f->nslots = nslots;
+          f->regs = regs;
+          f->regs_ary = regs_ary;
+          f->block = mrb_nil_value();
+          *frame = v;
+          return f;
+        }
         mrb_value regs = mrb_ary_new_capa(M, nregs + 2);
         mrb_ary_resize(M, regs, nregs + 2); // nil-filled
-        size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
         Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_calloc(M, 1, size);
         f->nregs = nregs;
+        f->nslots = nslots;
         f->regs = ary_items(regs);
         f->regs_ary = regs;
         f->block = mrb_nil_value();
@@ -1775,15 +1814,20 @@ class CodeGen
       if (!f || f->nregs != nregs) bc2cpp_resume_bad_state(M);
       return f;
     }
-    // A step that returns instead of yielding is finished: drop the frame's references.
+    // A step that returns instead of yielding is finished: drop the frame's references and pool it (FRAME_POOL). The
+    // destructor allocates nothing: the pool's capacity is fixed, so a push never grows it.
     struct Bc2cppStepGuard {
+      mrb_state* M;
       Bc2cppResumeFrame* frame;
+      mrb_value self;
       bool yielding = false;
-      explicit Bc2cppStepGuard(Bc2cppResumeFrame* f) : frame(f) {}
+      Bc2cppStepGuard(mrb_state* m, Bc2cppResumeFrame* f, mrb_value value) : M(m), frame(f), self(value) {}
       ~Bc2cppStepGuard() {
         if (yielding) return;
         frame->state = -1;
         for (mrb_int i = 0; i < frame->nregs + 2; ++i) frame->regs[i] = mrb_nil_value();
+        mrb_value pool = bc2cpp_frame_pool(M);
+        if (RARRAY_LEN(pool) < BC2CPP_FRAME_POOL_MAX) mrb_ary_push(M, pool, self);
       }
       Bc2cppStepGuard(const Bc2cppStepGuard&) = delete;
       Bc2cppStepGuard& operator=(const Bc2cppStepGuard&) = delete;
