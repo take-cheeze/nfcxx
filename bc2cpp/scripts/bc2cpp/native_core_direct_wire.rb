@@ -5,6 +5,8 @@
 #
 #   clang -fsyntax-only -Xclang -ast-dump=json <flags> 3rd/mruby/src/array.c |
 #     ruby tools/bc2cpp/native_core_candidates.rb 3rd/mruby/src/array.c > cand-array.json
+#   (or the nfcxx front end's dump of the same facts: scripts/nfcxx-ast-dump <flags> 3rd/mruby/src/array.c | the same
+#   ruby; tools/bc2cpp/native_ast_source.rb is the one place bc2cpp asks for an AST, BC2CPP_AST_PRODUCER picks.)
 #   ruby scripts/bc2cpp/native_core_direct_wire.rb 3rd/mruby/src/array.c=cand-array.json ... [--check]
 #
 # A row is taken when it is frame-free and defined in its unit, its owner is one the guards cover (Array, String,

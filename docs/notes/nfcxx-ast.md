@@ -51,9 +51,51 @@ Result on the pinned mruby and the repo's gems (clang 18.1.3 as the oracle, 89 s
 functions, 492 with a proven kind, 569 candidate rows, 0 differences. The other 10 sources fail in both producers
 (checkout without the quickjs, lvgl, stb, uni-algo submodules; `symbol.c` needs the generated `presym/table.h`).
 
-## Not covered yet
+## C++ and the main program (main_ast.rb), ROM tables
 
-- `scripts/bc2cpp/main_ast.rb` / `tools/bc2cpp/main_roots.rb` (the user's main program: it reads many more node kinds,
-  literals and name lookups) and `native_rom_extract.rb`'s `*_rom_entries` table extraction (it reads file-scope `VarDecl` initializers, which the dump does not carry yet; only its `defined_functions` is covered). They still read clang.
-- C++ method bodies and calls (`CXXMemberCallExpr`, `CXXMethodDecl`): not emitted; only namespace-level functions.
-- A bool constant in C++ is a `CXXBoolLiteralExpr` even when clang has an implicit cast of an integer literal.
+The dump also carries what `scripts/bc2cpp/main_ast.rb` / `tools/bc2cpp/main_roots.rb` read from the user's host program
+(`BC2CPP_AST_PRODUCER=nfcxx scripts/bc2cpp/main_ast.rb ...` runs the front end in place of `clang++ -ast-dump=json`; the host
+preprocess by `BC2CPP_HOST_CXX` and the manifest format are unchanged, and `scripts/nfcxx-ast-dump -MD -MF f` writes the
+header list the manifest's dependencies need):
+
+| Construct | Emitted as |
+| --- | --- |
+| Member functions, constructors, destructors | `CXXMethodDecl` / `CXXConstructorDecl` / `CXXDestructorDecl` inside the record, `virtual`, `storageClass: static` for a static member, `mangledName` with `_GLOBAL__N_` in an unnamed namespace; a mem-initializer is a `CXXCtorInitializer` child; a default member initializer is the `FieldDecl`'s child |
+| Calls | `CXXMemberCallExpr[MemberExpr[object], args]`; a static member call is a `CallExpr` over a `CXXMethodDecl` reference; a call whose callee depends on a template parameter is `CallExpr[UnresolvedLookupExpr]` (EDG keeps the template pattern, so main_roots' "an unknown function may be called" test sees what it sees in clang) |
+| Lambdas | `LambdaExpr[CXXRecordDecl[CXXMethodDecl operator()]]`; a captured variable inside is a `DeclRefExpr` of the variable, as in clang |
+| Casts | `ImplicitCastExpr` with clang's `castKind` (`LValueToRValue` is synthesized where an lvalue is read as a value, `ArrayToPointerDecay`, `FunctionToPointerDecay`, `IntegralCast`, `NoOp`, ...); main_roots reads those to tell a read from an escape |
+| Constants | `StringLiteral` has `value` in C escapes; an enumerator keeps its name and the enumeration's type, a folded conversion is the `IntegralCast`; `true` is a `CXXBoolLiteralExpr`, `bool b = 1` is `IntegralToBoolean` over the literal (the front end records whether a bool constant came from a conversion) |
+| Statements | range-for (`CXXForRangeStmt`), `if constexpr`, `try` / `catch`, a condition declaration, `new` / `delete` / `throw`, `static_assert` (with its message) |
+| Declarations | default arguments are the `ParmVarDecl`'s child, also for a function declared without a body; file-scope `VarDecl` carries its initializer (a constant aggregate is an `InitListExpr` of `InitListExpr`s) |
+
+The `*_rom_entries` tables of `native_rom_extract.rb` are those file-scope initializers. Checked with
+`native_ast_producers_diff.rb`, which now also compares each table's entries (function, symbol, defined): 62 tables, 732
+entries over the closed world, identical in clang and nfcxx. (`native_rom_extract.rb SOURCE FLAGS...` and
+`native_core_candidates.rb SOURCE --run FLAGS...` run the producer named by `BC2CPP_AST_PRODUCER` themselves.)
+
+Main-program check. The pinned `src/main.cxx` and `mruby-rgss/src/lib.cxx` cannot be parsed in a checkout without the
+SDL2, lvgl, gflags, ng-log, uni-algo and stb submodules (clang fails the same way), so the manifests were compared on a
+synthetic host `main` that exercises the constructs above (and `native_ast_returns_check.rb` has the same fixture) with
+the real `--unit` sources that do parse (`mruby-rgss/src/{sixel,tts,input_bridge,default_font,audio}.cxx`,
+`mruby-rpg2k/src/rgss_ext.cxx`, flags: world include dirs and the analysis presym header). Result: the `refusals` are
+identical, and the `names` differ only by libstdc++ internals: `""` (a `__builtin_nanf("")` that EDG folds), and the
+`__throw_length_error("vector::_M_range_insert")` literals of member-template patterns EDG does not keep. No name that
+comes from the program's own source differs. `functions` differs in implicit and template-injected names (`Base`,
+`_Iter_negate<_Predicate>`, ...): `main_reachability.rb` reads it only for `*_impl` names, and those agree. So the
+manifest is not byte-identical to clang's (the STL internals are the reason), and `clang` stays the default.
+
+## Not covered yet / stays on clang
+
+- `scripts/bc2cpp/tagged_fixnum_check.rb`'s 32-bit probe stays on `g++ -m32` / `clang++ --target=i386-linux-gnu`: nfcxx's
+  `--target=linux_i686` is only for `--freestanding --emit-c` (the driver refuses `--target` without `--freestanding`:
+  "the host's library headers are the host target's"), and in freestanding mode `mruby.h` does not parse (`stdarg.h` is
+  not found), so the probe's `mruby.h` / `static_assert(sizeof(void*) == 4)` cannot be compiled by nfcxx.
+- `tests/bc2cpp/run_llvm_to_pathb.sh` stays on `clang-18 -S -emit-llvm`: its inputs are LLVM IR text, the input language
+  of the translator under test (`scripts/llvm-to-pathb.rb`, docs/notes/pathb-llvm.md). nfcxx's own pipeline produces Path B IR
+  (`scripts/pathb-*`) or QBE IL directly from the EDG IL and has no LLVM IR emitter, so replacing the front step would
+  skip the translator it exists to test; the `// OPT: 1` cases and the TinyGo / wasm-explorer `.ll` files are LLVM optimizer
+  and TinyGo output that nfcxx cannot produce at all. (`tests/llvm-pathb/run.sh` also compares against the clang-18 binary.)
+- A bool constant in C++ whose source was a conversion of a folded integer expression (not a literal) is the
+  `IntegralToBoolean` over an `IntegerLiteral` of the folded value, not over the original expression.
+- Calls EDG folds at compile time (`__builtin_nanf("")`, `sizeof`) lose their arguments; `static_assert` at namespace
+  scope (not in a class or a function) is not emitted.

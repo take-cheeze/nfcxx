@@ -5,7 +5,7 @@ require 'set'
 require_relative 'native_names'
 require_relative 'native_rom_extract'
 
-# Direct-call candidates for mruby core's native methods, from the clang AST.
+# Direct-call candidates for mruby core's native methods, from the clang AST (or the nfcxx front end's: native_ast_source.rb).
 #
 #   clang -fsyntax-only -Xclang -ast-dump=json <flags> 3rd/mruby/src/array.c |
 #     ruby tools/bc2cpp/native_core_candidates.rb 3rd/mruby/src/array.c
@@ -198,6 +198,15 @@ module NativeCoreCandidates
 end
 
 if $PROGRAM_NAME == __FILE__
-  source = ARGV.fetch(0) { abort 'usage: native_core_candidates.rb SOURCE.c < clang-ast.json' }
-  puts JSON.pretty_generate(NativeCoreCandidates.candidates(source, JSON.parse($stdin.read)))
+  source = ARGV.fetch(0) { abort 'usage: native_core_candidates.rb SOURCE.c < ast.json  |  native_core_candidates.rb SOURCE.c --run [FLAGS...]' }
+  if ARGV[1] == '--run'
+    # The AST producer (BC2CPP_AST_PRODUCER=clang|nfcxx, tools/bc2cpp/native_ast_source.rb) runs here.
+    require_relative 'native_ast_source'
+    out, err, status = NativeAstSource.dump(source, ARGV.drop(2), lang: source.end_with?('.c') ? :c : :cxx)
+    abort "native_core_candidates: #{NativeAstSource.producer} failed on #{source}: #{err.lines.first}" unless status.success?
+
+    puts JSON.pretty_generate(NativeCoreCandidates.candidates(source, JSON.parse(out)))
+  else
+    puts JSON.pretty_generate(NativeCoreCandidates.candidates(source, JSON.parse($stdin.read)))
+  end
 end
