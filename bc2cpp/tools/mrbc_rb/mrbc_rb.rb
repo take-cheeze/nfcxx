@@ -138,13 +138,184 @@ module MrbcRb
     compiler.compile(result.value)
   end
 
+  # One file of a multi-file program: its name and its top-level statements.
+  Unit = Struct.new(:filename, :stmts)
+
+  NON_TOKENS = %i[COMMENT NEWLINE IGNORED_NEWLINE EOF EMBDOC_BEGIN EMBDOC_LINE EMBDOC_END].freeze
+
+  # Compiles +files+ ([[source, filename], ...]) as `mrbc -g` compiles them given on one command line: one program (mrbc.c
+  # reads them with mrb_parse_file_continue), so the top-level locals and registers are shared, a file's code is recorded
+  # under its own name in the debug section, and the statements are stamped with the file's own line numbers. Rules (checked
+  # against `mrbc -g -v`):
+  # * The frozen_string_literal comment counts only in the comments before the first token of the whole program, and its
+  #   state holds for every file (the parser's flag is read by codegen at the end).
+  # * A file ends where the lexer reads the newline after its last token: it reaches the end of the file, the parser switches
+  #   to the next file (line 0) and the nodes reduced with that lookahead (a node that is not complete in its last token:
+  #   a variable, a string, a call without parentheses, an assignment, an operator ...) have line 0 and the previous file's
+  #   index. Line 0 takes the line of the previous byte of code. The next file starts at line 1 plus the comment lines that
+  #   directly follow that last statement (they are counted into the same newline token). Unless a blank line follows the
+  #   last statement, which ends the lookahead before the file ends.
+  # * Codegen switches the file at the first node of the next file: the debug section gets one record per file, the ranges
+  #   being the pcs between the switches.
+  def self.compile_files(files)
+    raise Unsupported, 'no files' if files.empty?
+    return compile(*files.first) if files.size == 1
+    raise Unsupported, 'a file named twice' if files.map(&:last).uniq.size != files.size
+
+    locals = []
+    frozen = false
+    token_seen = false
+    offset = 0
+    units = []
+    zero = {}.compare_by_identity
+    files.each_with_index do |(source, filename), i|
+      result = Prism.parse(source, filepath: filename, scopes: [locals.dup], line: 1 + offset)
+      raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
+      raise Unsupported, '__END__ in a multi-file program' if result.data_loc
+      raise Unsupported, 'carriage return' if source.include?("\r")
+
+      stmts = result.value.statements.body
+      locals |= result.value.locals
+      unless token_seen
+        frozen = frozen_magic_comment?(source, frozen)
+        token_seen = tokens?(source)
+      end
+      units << Unit.new(filename, stmts)
+      offset = 0
+      next if i == files.size - 1
+
+      quirk, offset = file_tail(source)
+      tail_zero_nodes(stmts.last, zero) if quirk && !stmts.empty?
+    end
+    raise Unsupported, 'no statements' if units.all? { |u| u.stmts.empty? }
+
+    units.reject! { |u| u.stmts.empty? } # a file without code never switches the file
+    Compiler.new(units.first.filename, frozen_strings: frozen).compile_units(units, locals, zero)
+  end
+
+  def self.tokens?(source) = Prism.lex(source).value.any? { |t, _| !NON_TOKENS.include?(t.type) }
+
+  # How the lexer leaves +source+ (not the last file): [whether the newline lookahead after its last token reaches the end of
+  # the file, the number of lines the next file's numbering is ahead].
+  def self.file_tail(source)
+    last = Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.last
+    return [false, 0] unless last
+    raise Unsupported, 'file ending in a heredoc' if %i[HEREDOC_END HEREDOC_START].include?(last.type)
+    return [false, 0] if last.type == :SEMICOLON # the state after `;` is the start of an expression: newlines are skipped
+
+    tail = source.b.byteslice(last.location.end_offset..)
+    first_line, rest = tail.split("\n".b, 2)
+    raise Unsupported, 'text after the last token' unless first_line.to_s.match?(/\A[ \t\f\v]*(#.*)?\z/n)
+
+    # Without a newline the lexer reaches the end of the file while reading the last token itself (a word's end is known only
+    # after the next character): even the nodes complete in that token get line 0, and the next file is read as part of the
+    # newline. Not modelled.
+    raise Unsupported, 'no newline at the end of a file' if rest.nil?
+
+    lines = rest.split("\n".b, -1)
+    comments = 0
+    lines.each_with_index do |l, i|
+      if l.match?(/\A[ \t\f\v]*#/n) then comments += 1
+      elsif l.match?(/\A[ \t\f\v]*\z/n) then return i == lines.size - 1 ? [true, comments] : [false, 0]
+      else raise Unsupported, 'text after the last statement'
+      end
+    end
+    [true, comments]
+  end
+
+  # Marks in +acc+ the nodes the fork's parser builds after reading the newline that follows the last token of +stmt+: those
+  # that need that lookahead to be reduced. The tail of the statement is followed down: a node whose last token is the
+  # statement's last one. Forms not probed are Unsupported.
+  def self.tail_zero_nodes(stmt, acc)
+    node = stmt
+    loop do
+      case node
+      when Prism::IntegerNode, Prism::FloatNode, Prism::SourceLineNode, Prism::SourceFileNode
+        raise Unsupported, 'negative literal at the end of a file' if node.location.slice.start_with?('-')
+
+        return
+      when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::InstanceVariableReadNode,
+           Prism::GlobalVariableReadNode, Prism::ClassVariableReadNode, Prism::LambdaNode, Prism::DefNode,
+           Prism::ClassNode, Prism::ModuleNode, Prism::AliasMethodNode, Prism::SingletonClassNode
+        raise Unsupported, 'endless def at the end of a file' if node.is_a?(Prism::DefNode) && node.equal_loc
+
+        return
+      when Prism::SymbolNode
+        raise Unsupported, 'symbol form at the end of a file' unless node.opening_loc.nil? || node.opening_loc.slice == ':'
+
+        return
+      when Prism::ArrayNode, Prism::HashNode, Prism::RegularExpressionNode
+        return
+      when Prism::DefinedNode
+        raise Unsupported, 'defined? without parentheses at the end of a file' unless node.rparen_loc
+
+        return
+      when Prism::BeginNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::ForNode
+        raise Unsupported, 'modifier form at the end of a file' if (node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode)) && node.closing_loc.nil?
+        raise Unsupported, 'begin form at the end of a file' if node.is_a?(Prism::BeginNode) && node.end_keyword_loc.nil?
+
+        return
+      when Prism::IfNode, Prism::UnlessNode
+        if node.is_a?(Prism::IfNode) && node.if_keyword_loc.nil? # a ternary
+          acc[node] = true
+          node = node.subsequent
+        elsif node.end_keyword_loc
+          return
+        else # a modifier: the node and its predicate, the last token
+          acc[node] = true
+          node = node.predicate
+        end
+      when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::ConstantPathNode, Prism::StringNode
+        raise Unsupported, 'heredoc at the end of a file' if node.is_a?(Prism::StringNode) && node.opening_loc&.slice&.start_with?('<<')
+
+        acc[node] = true
+        return
+      when Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode,
+           Prism::ClassVariableWriteNode, Prism::ConstantWriteNode, Prism::LocalVariableOperatorWriteNode,
+           Prism::InstanceVariableOperatorWriteNode, Prism::GlobalVariableOperatorWriteNode,
+           Prism::ConstantOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
+           Prism::GlobalVariableOrWriteNode, Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode,
+           Prism::InstanceVariableAndWriteNode, Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode
+        acc[node] = true
+        node = node.value
+      when Prism::AndNode, Prism::OrNode
+        acc[node] = true
+        node = node.right
+      when Prism::ReturnNode
+        acc[node] = true
+        args = node.arguments&.arguments
+        return if args.nil?
+        raise Unsupported, 'return with several values at the end of a file' if args.size != 1
+
+        node = args.first
+      when Prism::CallNode
+        return if node.block.is_a?(Prism::BlockNode) || node.closing_loc&.slice == ')'
+        raise Unsupported, 'safe navigation at the end of a file' if node.call_operator_loc&.slice == '&.'
+        raise Unsupported, 'block pass at the end of a file' if node.block
+
+        acc[node] = true
+        args = node.arguments&.arguments
+        if args && !args.empty?
+          raise Unsupported, 'splat or keywords at the end of a file' if [Prism::SplatNode, Prism::KeywordHashNode, Prism::BlockArgumentNode].any? { |k| args.last.is_a?(k) }
+
+          node = args.last
+        elsif node.receiver && %i[! -@ +@ ~].include?(node.name) && node.message_loc && node.message_loc.start_offset < node.receiver.location.start_offset
+          node = node.receiver
+        else
+          return
+        end
+      else
+        raise Unsupported, "#{node.class} at the end of a file"
+      end
+    end
+  end
+
   # The fork's frozen_string_literal magic comment (frozen_magic_comment in parse.y): every comment line before the first token
   # is searched, the key matching without regard to case and with `-` for `_`, then optional blanks, `:`, blanks and `true` or
   # `false` (any case, not followed by a word character); the last comment that has the key decides. Only the first 255 bytes of
   # a comment line count. `=begin` blocks are skipped.
-  def self.frozen_magic_comment?(source)
+  def self.frozen_magic_comment?(source, frozen = false)
     text = source.b
-    frozen = false
     pos = 0
     key = 'frozen_string_literal'.b
     while pos < text.bytesize
@@ -218,6 +389,42 @@ module MrbcRb
       return_value(value_reg)
       emit(:STOP)
       write_rite
+    end
+
+    # The top-level program of several files compiled as one (MrbcRb.compile_files): +units+ are the files in order, each
+    # with its statements; +zero_nodes+ are the nodes the fork stamps with line 0.
+    def compile_units(units, locals, zero_nodes)
+      @unit_starts = {}.compare_by_identity
+      units.each { |u| @unit_starts[u.stmts.first] = u unless u.stmts.empty? }
+      @zero_nodes = zero_nodes
+      @segments = []
+      @segment_start = 0
+      @segment_name = units.first.filename
+      @filename = @segment_name
+      set_locals(locals)
+      value_reg = generate(units.flat_map(&:stmts), val: true)
+      return_value(value_reg)
+      emit(:STOP)
+      close_segment
+      write_rite
+    end
+
+    # codegen() noticing a node of another file: the code so far belongs to the file before (mrb_debug_info_append_file
+    # skips an empty range and a file named like the previous one).
+    def switch_file(unit)
+      return if unit.filename == @segment_name
+
+      close_segment
+      @segment_start = @code.size
+      @segment_name = unit.filename
+      @filename = unit.filename
+    end
+
+    def close_segment
+      return if @segment_start == @code.size
+      return if @segments.last && @segments.last[0] == @segment_name
+
+      @segments << [@segment_name, @segment_start, @code.size]
     end
 
     # A child irep for a class or module body (scope_body in codegen.c): its own locals, registers, code and tables. It
@@ -521,6 +728,7 @@ module MrbcRb
     def generate(stmts, val:)
       value_reg = nil
       stmts.each_with_index do |node, i|
+        switch_file(@unit_starts[node]) if @unit_starts&.key?(node)
         @line = node.location.start_line
         @line_moved = false
         value_reg = statement(node, last: val && i == stmts.size - 1)
@@ -553,6 +761,7 @@ module MrbcRb
       return if @hold_line
 
       @line = line_of(node)
+      @line = 0 if @zero_nodes&.key?(node)
     end
 
     # Receivers (and the calls they belong to) that are reduced only once the next token is read: that token is the `.` of a
@@ -1425,9 +1634,18 @@ module MrbcRb
     end
 
     def set_jump_line(position, line)
+      line = zero_line(position) if line.zero?
       @lines[position] = line
       @lines[position + 1] = line
     end
+
+    # The line of the +count+ bytes just emitted. The fork's emit stamps s->lineno, but a node with line 0 (the tail of a
+    # file in a multi-file program, see MrbcRb.compile_files) takes the line of the previous byte instead (emit in codegen.c).
+    def record_lines(count)
+      count.times { @lines << (@line.zero? ? zero_line(@lines.size) : @line) }
+    end
+
+    def zero_line(pc) = pc.zero? ? 0 : @lines[pc - 1]
 
     # One branch of an if or a loop body: its statements in order, the last one's value in +t+ when it is needed. An empty
     # branch loads nil (when needed) at the current line.
@@ -1461,7 +1679,7 @@ module MrbcRb
       reg && reg > 0xff ? short(reg) : (byte(reg) if reg)
       position = @code.size
       short(0)
-      (@code.size - start).times { @lines << @line }
+      record_lines(@code.size - start)
       position
     end
 
@@ -2521,7 +2739,7 @@ module MrbcRb
           nil # `-self` is a NODE_NEGATE: self is generated like any operand
         elsif SELF_SEND_OPS.include?(name)
           recv = nil # an operator with no opcode of its own is sent to self like a named method
-        elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args == 2))
+        elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args >= 2))
           raise Unsupported, "operator method #{name} on self"
         end
       end
@@ -3638,7 +3856,7 @@ module MrbcRb
       end
       track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
       track(operands[1]) if name == :MOVE
-      (@code.size - start).times { @lines << @line }
+      record_lines(@code.size - start)
     end
 
     # milestone 13 (wide operands): genop_1/genop_2 prefix EXT1, EXT2 or EXT3 when the first and/or second operand of a B, BB
@@ -5350,29 +5568,44 @@ module MrbcRb
     end
 
     def debug_section
-      name = @filename.b
-      sized('DBG' + "\0", [1].pack('n') + [name.bytesize].pack('n') + name + debug_records.join)
+      names = debug_names.uniq
+      table = names.map { |n| [n.bytesize].pack('n') + n }.join
+      sized('DBG' + "\0", [names.size].pack('n') + table + debug_records(names).join)
     end
 
-    # One debug record per irep, this one first and then its children's (write_debug_record in dump.c). Each covers one file,
-    # from pc 0 of its own code.
-    def debug_records
-      [debug_record(packed_lines)] + @children.flat_map(&:debug_records)
+    # The file names of this irep and then its children's, in the order the fork meets them (get_filename_table_size).
+    def debug_names
+      debug_files.map { |f| f[0].b } + @children.flat_map(&:debug_names)
+    end
+    public :debug_names
+
+    # [name, first pc, end pc] of each file the code of this irep belongs to: a single file but for the top level of a
+    # multi-file program.
+    def debug_files = @segments || [[@filename, 0, @code.size]]
+
+    # One debug record per irep, this one first and then its children's (write_debug_record in dump.c). Each covers its files,
+    # each from its own first pc.
+    def debug_records(names)
+      [debug_record(names)] + @children.flat_map { |c| c.debug_records(names) }
     end
     public :debug_records # called on each child, from the parent's debug section
 
-    def debug_record(packed)
-      file = [0].pack('N') + [0].pack('n') + [packed.bytesize].pack('N') + [2].pack('C') + packed
-      record = [1].pack('n') + file
+    def debug_record(names)
+      files = debug_files.map do |name, first, stop|
+        packed = packed_lines(first, stop)
+        [first].pack('N') + [names.index(name.b)].pack('n') + [packed.bytesize].pack('N') + [2].pack('C') + packed
+      end
+      record = [files.size].pack('n') + files.join
       [record.bytesize + 4].pack('N') + record
     end
 
     # src/debug.c's packed map: (pc delta, line delta) pairs, written only where the line changes.
-    def packed_lines
+    def packed_lines(first = 0, stop = @lines.size)
       out = ''.b
       prev_line = 0
       prev_pc = 0
-      @lines.each_with_index do |line, pc|
+      (first...stop).each do |pc|
+        line = @lines[pc]
         next if line == prev_line
 
         out << pack_int(pc - prev_pc) << pack_int(line - prev_line)
