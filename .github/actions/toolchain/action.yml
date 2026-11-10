@@ -23,9 +23,10 @@ runs:
       shell: bash
       # apt-get update exits non-zero when one source fails (the runner image has a Microsoft source that some runners are
       # refused, 403). The Ubuntu lists are still fetched and the packages come from them, so the update's status is not
-      # a reason to stop: the install's status is.
+      # a reason to stop: the install's status is. A mirror that stalls (a run hung on azure.archive.ubuntu.com for an hour)
+      # is bounded by the timeout: the update is killed and the install runs from the lists already fetched.
       run: |
-        sudo apt-get update || echo "apt-get update: a source failed (see above); installing from the lists that were fetched"
+        sudo timeout 300 apt-get -o Acquire::http::Timeout=30 -o Acquire::Retries=1 update || echo "apt-get update: a source failed or timed out (see above); installing from the lists that were fetched"
         sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ${{ inputs.packages }}
 
     - name: Set up sccache
