@@ -63,6 +63,11 @@ NATIVE = <<~'C'
     MRB_MT_ENTRY(w_shared_s, MRB_SYM(shared), MRB_ARGS_NONE())
   };
   #undef MRB_MT_CLASS
+  #define MRB_MT_CLASS Widget_singleton
+  static const mrb_mt_entry widget_s_rom_entries[] = {
+    MRB_MT_ENTRY(w_single_s, MRB_SYM(single_only), MRB_ARGS_NONE())
+  };
+  #undef MRB_MT_CLASS
   #define MRB_MT_CLASS Gadget
   static const mrb_mt_entry gadget_rom_entries[] = {
     MRB_MT_ENTRY(g_two, MRB_SYM(two), MRB_ARGS_NONE())
@@ -75,6 +80,7 @@ NATIVE = <<~'C'
     struct RClass *w = mrb_define_class_id(mrb, MRB_SYM(Widget), mrb->object_class);
     MRB_MT_INIT_ROM(mrb, w, widget_rom_entries);
     MRB_MT_INIT_ROM(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(w))), widget_class_rom_entries);
+    MRB_MT_INIT_ROM(mrb, mrb_singleton_class_ptr(mrb, mrb_obj_value(w)), widget_s_rom_entries);
     struct RClass *g = mrb_define_class_id(mrb, MRB_SYM(Gadget), mrb->object_class);
     struct RClass *h = mrb_define_class_id(mrb, MRB_SYM(Holder), mrb->object_class);
     MRB_MT_INIT_ROM(mrb, g, gadget_rom_entries);
@@ -180,6 +186,8 @@ Dir.mktmpdir('core-native') do |dir|
   suite.check('a table installed into its MRB_MT_CLASS is installed; a singleton or two-class table is not',
               keys['Widget#spin'] == 'Widget' && entries.count { |e| e[:name] == 'shared' && e[:installed].nil? } == 1 &&
               keys['Gadget#two'].nil?)
+  suite.check('a table under X_singleton installed into X\'s singleton is installed',
+              keys['Widget_singleton#single_only'] == 'Widget_singleton')
 
   engine = suite.compile(ENGINE) { |ireps, _root| ireps }
   core = suite.compile(CORE) do |ireps, root|
@@ -227,7 +235,7 @@ Dir.mktmpdir('core-native') do |dir|
   listed = CoreNativeCandidates.candidates(entries, names, fragments)
   suite.check("only unreachable entries of their own class's tables are listed (#{listed.join(', ')})",
               listed == %w[Widget#alias_body_send Widget#dead_send Widget#defined_beside_alias Widget#defined_only
-                           Widget#empty? Widget#inspect Widget#size= Widget#spin])
+                           Widget#empty? Widget#inspect Widget#size= Widget#spin Widget_singleton#single_only])
   header = CoreNativeCandidates.header(%w[Widget#empty? Widget#size= Widget#spin], entries)
   suite.check('the header names each listed entry by its presym C name',
               header.lines.grep(/\A#define/).sort ==

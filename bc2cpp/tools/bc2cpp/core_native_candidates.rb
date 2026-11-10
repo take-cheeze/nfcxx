@@ -183,6 +183,12 @@ module CoreNativeCandidates
   # names the two index operators (MRB_OPSYM(aref/aset)) for the INDEX_CLOSED proof, whose planner verdict covers
   # every class that can answer them; every other operator stays unnamed.
   OPERATOR_NAMES = { 'aref' => '[]', 'aset' => '[]=' }.freeze
+
+  # A table installed into the class its MRB_MT_CLASS names: `X` for X, and `X_singleton` for X's singleton (NativeRomOwners
+  # spells that owner `X.singleton`). A singleton table under a plain `X` token shares that token with X's own tables.
+  def own_table?(owner, mt_class)
+    owner == mt_class || (owner.is_a?(String) && owner.end_with?('.singleton') && "#{owner.delete_suffix('.singleton')}_singleton" == mt_class)
+  end
   def entries(paths, operator_names: false)
     paths.flat_map do |path|
       text = File.binread(path).force_encoding(Encoding::UTF_8).scrub
@@ -204,7 +210,7 @@ module CoreNativeCandidates
         line.scan(ENTRY) do |fn, kind, cname|
           name = kind == 'OPSYM' ? (operator_names ? OPERATOR_NAMES[cname] : nil) : cname + SUFFIX.fetch(kind)
           out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
-                   installed: owners[table] == mt_class ? mt_class : nil }
+                   installed: own_table?(owners[table], mt_class) ? mt_class : nil }
         end
       end
       out
