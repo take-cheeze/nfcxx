@@ -11,6 +11,9 @@ require 'fileutils'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/world_root'
 require_relative '../../tools/bc2cpp/native_owner_map'
+require_relative '../../tools/bc2cpp/native_singletons'
+require_relative '../../tools/bc2cpp/touch_scan'
+require_relative '../../tools/bc2cpp/closed_world'
 
 failures = []
 check = lambda do |name, ok|
@@ -59,6 +62,23 @@ Dir.mktmpdir do |dir|
   check.call('definitions are the registrations and the ROM entries',
              map.definitions.map { |_o, n, _f| n }.sort == %w[_load empty? heap_only initialize initialize_copy])
   check.call('no entry is left unattributed', !map.by_name.values.any? { |owners| owners.include?(NativeOwnerMap::UNKNOWN) })
+  inline = File.join(dir, 'mruby-rgss/src/inline.cxx')
+  File.write(inline, <<~'C')
+    void init(mrb_state* M) {
+      RClass* rgss = mrb_define_module(M, "RGSS");
+      RClass* gfx = mrb_define_module_under(M, rgss, "Graphics");
+      static const mrb_mt_entry gfx_fns[] = { MRB_MT_ENTRY(gfx_snap, MRB_SYM(snap), MRB_ARGS_NONE()) };
+      MRB_MT_INIT_ROM(M, mrb_singleton_class_ptr(M, mrb_obj_value(gfx)), gfx_fns);
+      static const mrb_mt_entry gfx_inst[] = { MRB_MT_ENTRY(gfx_open, MRB_SYM(open), MRB_ARGS_NONE()) };
+      MRB_MT_INIT_ROM(M, gfx, gfx_inst);
+    }
+  C
+  check.call("NativeSingletons reads a class object's table as the singleton registration",
+             NativeSingletons.unique_singleton?('snap', 'RGSS::Graphics', [inline]))
+  check.call('NativeSingletons does not read an instance entry as a singleton registration',
+             !NativeSingletons.unique_singleton?('open', 'RGSS::Graphics', [inline]))
+  facts = TouchScan.native_facts(NativeDirect.strip_comments(ENGINE))
+  check.call("a class object's table is no singleton-class touch event", facts.none? { |kind, *| kind.to_s.start_with?('singleton_class') })
 end
 
 Dir.mktmpdir do |dir|
