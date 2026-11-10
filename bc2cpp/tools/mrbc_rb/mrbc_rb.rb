@@ -103,6 +103,8 @@ module MrbcRb
         call(node)
       when Prism::ConstantWriteNode
         const_write(node, last: last)
+      when Prism::OrNode, Prism::AndNode
+        logic(node, need: last)
       when Prism::IfNode
         if_statement(node, last: last)
       when Prism::UnlessNode
@@ -240,6 +242,27 @@ module MrbcRb
       @labels << target
     end
 
+    # `a || b` and `a && b`: the left value goes to the first temporary, a jump past the right side tests it (JMPIF for ||,
+    # JMPNOT for &&), and the right side replaces it. As a statement the right side is evaluated only for its effects.
+    def logic(node, need:)
+      left = node.left
+      right = node.right
+      raise Unsupported, 'logic operand' unless (SIMPLE_VALUES.include?(left.class) || left.is_a?(Prism::CallNode)) &&
+                                                (SIMPLE_VALUES.include?(right.class) || right.is_a?(Prism::CallNode))
+
+      t = temp
+      value_into(left, t)
+      to_end = emit_jump(node.is_a?(Prism::OrNode) ? :JMPIF : :JMPNOT, t)
+      set_jump_line(to_end, right.location.start_line)
+      if need
+        value_into(right, t)
+      else
+        statement(right, last: false)
+      end
+      patch_jump(to_end, @code.size)
+      need ? t : nil
+    end
+
     # `X = value`: the value goes to the first temporary, SETCONST stores it, and the last statement returns it.
     def const_write(node, last:)
       t = temp
@@ -326,7 +349,9 @@ module MrbcRb
     # The fork's gen_return: a MOVE or a constant load right before RETURN is folded into the return.
     def return_value(reg)
       name, operands, start = @last
-      if @labels.include?(@code.size)
+      # No fold when the return or the instruction it would rewrite is a jump target (the fork's no_peephole and the
+      # label checks on the last instruction, codegen.c).
+      if @labels.include?(@code.size) || @labels.include?(start)
         emit(:RETURN, reg)
       elsif name == :MOVE && operands[0] == reg
         truncate(start)
@@ -363,6 +388,9 @@ module MrbcRb
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
       when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
+      when Prism::OrNode, Prism::AndNode
+        r = logic(node, need: true)
+        emit(:MOVE, dst, r) unless r == dst
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::CallNode
         result = call(node)

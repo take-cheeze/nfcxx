@@ -90,7 +90,14 @@ SNIPPETS = [
   # frozen string literals (milestone 5)
   "# frozen_string_literal: true\nrequire 'set'",
   "# frozen_string_literal: true\nx = \"ab\"\nx",
-  "# frozen_string_literal: false\nx = \"ab\""
+  "# frozen_string_literal: false\nx = \"ab\"",
+  # || and && (milestone 5)
+  "x = 1\ny = x || 2",
+  "x = 1\nx || 2",
+  "x = 1\ny = x && 2",
+  "x = 1\nx && 2\np 3",
+  "x = 1\nx || 2\np 3",
+  "x = 1\ny = x || 2\ny"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
