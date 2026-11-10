@@ -3503,9 +3503,7 @@ module MrbcRb
       pre << (kwrest_name || :**) if kwrest_name || !keywords.empty?
       kw_names = (keywords.grep(Prism::RequiredKeywordParameterNode) + keywords.grep(Prism::OptionalKeywordParameterNode)).map(&:name)
       # The fork's parser declares the keywords only after the whole list: a default that names one reads a method call.
-      keywords.grep(Prism::OptionalKeywordParameterNode).each do |k|
-        raise Unsupported, 'keyword default that reads a keyword parameter' if reads_local?(k.value, kw_names)
-      end
+      keywords = keywords.map { |k| k.is_a?(Prism::OptionalKeywordParameterNode) ? kw_default_vcalls(k, kw_names) : k }
       margs = (requireds + posts).grep(Prism::MultiTargetNode)
       marg_vars = margs.flat_map { |m| marg_names(m) }
       named = pre + [block_name] + kw_names + marg_vars
@@ -3522,6 +3520,54 @@ module MrbcRb
       requireds.each_with_index { |r, i| destructure_parameter(r, i + 1) if r.is_a?(Prism::MultiTargetNode) }
       first_post = requireds.size + optionals.size + (rest_name ? 1 : 0) + 1
       posts.each_with_index { |r, i| destructure_parameter(r, first_post + i) if r.is_a?(Prism::MultiTargetNode) }
+    end
+
+    # milestone 13 (keyword defaults): the fork's parser declares the keyword parameters only after the whole list, so a
+    # default that names one (`def m(a: 1, b: a)`) reads a method call on self, where Prism has a local variable read. The
+    # reads of this scope's keywords are rebuilt as calls; a write, a read inside a nested scope, or a name an enclosing scope
+    # has as a local (the parser would read that one) is Unsupported.
+    def kw_default_vcalls(param, names)
+      return param unless reads_local?(param.value, names)
+
+      value = vcall_rewrite(param.value, names)
+      raise Unsupported, 'keyword default that reads a keyword parameter' if reads_local?(value, names)
+      raise Unsupported, 'keyword default that reads a keyword parameter' if (scope = @parent) && names.any? { |n| scope_has_local?(scope, n) }
+
+      param.copy(value: value)
+    end
+
+    def scope_has_local?(scope, name)
+      while scope
+        return true if scope.locals.include?(name)
+
+        scope = scope.parent
+      end
+      false
+    end
+
+    def vcall_rewrite(node, names)
+      return node unless node.is_a?(Prism::Node)
+
+      case node
+      when Prism::LocalVariableReadNode
+        return node unless node.depth.zero? && names.include?(node.name)
+
+        return Prism::CallNode.new(node.send(:source), -1, node.location, 0, nil, nil, node.name, node.location, nil, nil, nil, nil, nil)
+      when Prism::BlockNode, Prism::LambdaNode, Prism::DefNode, Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode
+        return node
+      end
+      changes = {}
+      node.deconstruct_keys(nil).each do |key, v|
+        case v
+        when Prism::Node
+          nv = vcall_rewrite(v, names)
+          changes[key] = nv unless nv.equal?(v)
+        when Array
+          nv = v.map { |e| vcall_rewrite(e, names) }
+          changes[key] = nv unless nv.zip(v).all? { |a, b| a.equal?(b) }
+        end
+      end
+      changes.empty? ? node : node.copy(**changes)
     end
 
     # Whether +node+ holds a read or write of a local variable named in +names+.

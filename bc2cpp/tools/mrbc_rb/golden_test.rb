@@ -3331,7 +3331,8 @@ SNIPPETS = [
   "class << Foo::Bar\n  attr_accessor :z\nend",
   "class << (a || b); end",
   # milestone 13 (pattern matching): `expr => pattern`, `expr in pattern` and `case/in` as the fork generates them (codegen_pattern):
-  # value, variable, pin, alternative, `=> name`, array (with rest), find and hash patterns, guards, in conditions and values
+  # value, variable, pin, alternative, `=> name`, array (with rest), find and hash patterns, guards, in conditions and values;
+  # keyword defaults that name a keyword parameter (the fork declares the keywords after the list, so they read method calls)
   "x = 1\nx => a",
   "x = 1\nx => 1",
   "x = 1\nx in 1",
@@ -3424,6 +3425,21 @@ SNIPPETS = [
   "def m(x)\n  case x\n\n  in 1 then 1\n\n  in 2 then 2\n\n  end\nend",
   "def m(x)\n  case x\n  in 1 then 1 # c\n  # c2\n  in 2 then 2\n  end\nend",
   "def m(x)\n  case x\n  in [a, b] if a ==\n    b\n    1\n  end\nend",
+  "def m(a: 1, b: a)\n  b\nend",
+  "def m(a: 1, b: a + 1)\n  b\nend",
+  "def m(a: 1, b: foo(a, 2))\n  b\nend",
+  "def m(a: 1, b: [a, a])\n  b\nend",
+  "def m(a:, b: a)\n  b\nend",
+  "def m(x, a: 1, b: x + a)\n  b\nend",
+  "def m(a: b, b: 1)\n  a\nend",
+  "def m(a: 1, b: (a))\n  b\nend",
+  "def m(a: 1, b: a, c: b)\n  c\nend",
+  "def m(a: 1, b: a ? 1 : 2)\n  b\nend",
+  "def m(a: 1, **o)\n  a\nend",
+  "def m(a: 1, b: \"\#{a}\")\n  b\nend",
+  "def m(a: 1, b: a.x)\n  b\nend",
+  "x = proc { |a: 1, b: a| b }",
+  "x = ->(a: 1, b: a) { b }",
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
