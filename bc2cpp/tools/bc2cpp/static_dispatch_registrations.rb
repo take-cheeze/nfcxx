@@ -1413,7 +1413,7 @@ module StaticDispatchRegistrations
 
     defined = Set.new
     registries.each { |reg| reg.each { |name, defs| defs.each { |d| defined << "#{d.owner}##{name}" } } }
-    map.registrations.each { |owner, name, _fn| defined << "#{owner}##{name}" if owner.is_a?(String) && name }
+    map.definitions.each { |owner, name, _fn| defined << "#{owner}##{name}" if owner.is_a?(String) && name }
     entries.each { |e| defined << "#{e[:mt_class]}##{e[:name]}" if e[:name] }
     superclass = core.map { |file| file[:superclass_of] }.inject({}) { |all, h| all.merge(h) }.merge(engine_superclass_of)
     owners = {}.compare_by_identity
