@@ -5,7 +5,8 @@
 # Covered: a top-level program whose statements are nil, true, false, self, Integer literals, local reads, local writes
 # of those, and method calls on simple operands (a self call or a call with an explicit receiver, with positional
 # arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI),
-# and if/else with a simple or call predicate and bodies of the forms above. Anything else raises Unsupported, so a
+# and if/else with a simple or call predicate and bodies of the forms above, unless, and `class X` or `module X` with a
+# plain constant and an empty body (no superclass). Anything else raises Unsupported, so a
 # caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
@@ -31,7 +32,8 @@ module MrbcRb
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
     ARRAY: 82, ARRAY2: 83, STRING: 92,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
-    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
+    RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
+    CLASS: 103, MODULE: 104
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -101,6 +103,10 @@ module MrbcRb
         if_statement(node, last: last)
       when Prism::UnlessNode
         unless_statement(node, last: last)
+      when Prism::ClassNode
+        class_statement(node, last: last)
+      when Prism::ModuleNode
+        module_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
@@ -144,6 +150,46 @@ module MrbcRb
       emit(:LOADNIL, t) if !else_node && last
       patch_jump(to_end, @code.size) if to_end
       last ? t : nil
+    end
+
+    # codegen_class: the outer namespace (nil for a plain constant) goes into the first temporary, the superclass (nil when
+    # there is none) into the next, and CLASS takes the first temporary as its result. The body follows (class_body).
+    def class_statement(node, last:)
+      raise Unsupported, 'class with a superclass' if node.superclass
+
+      name = plain_constant(node.constant_path)
+      t = temp
+      emit(:LOADNIL, t)
+      emit(:LOADNIL, t + 1)
+      emit(:CLASS, t, sym_index(name))
+      class_body(node, t, last)
+      t
+    end
+
+    # codegen_module: the outer namespace goes into the temporary, which MODULE takes as its result.
+    def module_statement(node, last:)
+      name = plain_constant(node.constant_path)
+      t = temp
+      emit(:LOADNIL, t)
+      emit(:MODULE, t, sym_index(name))
+      class_body(node, t, last)
+      t
+    end
+
+    def plain_constant(path)
+      raise Unsupported, 'class or module path other than a plain constant' unless path.is_a?(Prism::ConstantReadNode)
+
+      path.name
+    end
+
+    # gen_class_body: an empty body loads nil into the result register, which the RETURN peephole folds when the class is
+    # the last statement. Bodies with statements are not verified yet.
+    def class_body(node, t, _last)
+      body = node.body
+      raise Unsupported, 'class or module body' unless body.nil? || body.is_a?(Prism::StatementsNode)
+      raise Unsupported, 'class or module body with statements' unless body.nil? || body.body.empty?
+
+      emit(:LOADNIL, t)
     end
 
     def set_jump_line(position, line)

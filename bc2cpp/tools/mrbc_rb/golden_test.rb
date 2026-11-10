@@ -78,7 +78,18 @@ SNIPPETS = [
   "x = 1\nunless x\n  2\nelse\n  3\nend",
   "x = 1\nunless x\n  2\nend",
   "x = 1\nunless x\n  2\nend\np 3",
-  "unless self\n  1\nend"
+  "unless self\n  1\nend",
+  # class and module with an empty body (step 1: CLASS/MODULE, no child ireps)
+  'class Foo; end',
+  'module Foo; end',
+  "class Foo\nend",
+  "class Foo; ; end",
+  "x = 1\nclass Foo; end",
+  "class Foo; end\nx = 1",
+  "class Foo; end\nclass Bar; end",
+  "module Foo; end\nmodule Bar; end",
+  "class Foo; end\nmodule Foo; end",
+  "module Foo; end\nx = 1\nx"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
