@@ -306,7 +306,7 @@ class CodeGen
       # the method's ZeroDivisionError.
       <<~CPP
         #{head}, mrb_value b) {
-          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return mrb_funcall(M, a, "%", 1, b);
+          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return bc2cpp_funcall_keep(M, a, "%", 1, b);
           int ai = mrb_gc_arena_save(M);
           mrb_value r;
         #ifdef MRB_USE_BIGINT
@@ -317,7 +317,7 @@ class CodeGen
           {
             mrb_int x = mrb_integer(a), y = mrb_integer(b);
             // int_mod: 0 % 0 raises like any zero divisor.
-            if (y == 0) return mrb_funcall(M, a, "%", 1, b);
+            if (y == 0) return bc2cpp_funcall_keep(M, a, "%", 1, b);
             if (x == MRB_INT_MIN && y == -1) return mrb_fixnum_value(0);
             mrb_int mod = x % y;
             if ((x < 0) != (y < 0) && mod != 0) mod += y;
@@ -332,7 +332,7 @@ class CodeGen
       # int_and/int_or/int_xor; a Float operand is the method's own (mis)read of the operand.
       <<~CPP
         #{head}, mrb_value b) {
-          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return mrb_funcall(M, a, "#{op}", 1, b);
+          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
           int ai = mrb_gc_arena_save(M);
           mrb_value r;
         #ifdef MRB_USE_BIGINT
@@ -348,7 +348,7 @@ class CodeGen
     elsif %w[lshift rshift].include?(key)
       numeric_slow_shift_source(key, head)
     elsif key == 'neg'
-      numeric_slow_neg_source(head, float, "  return mrb_funcall(M, a, \"-@\", 0);\n")
+      numeric_slow_neg_source(head, float, "  return bc2cpp_funcall_keep(M, a, \"-@\", 0);\n")
     elsif key == 'zero'
       # Numeric#zero? is `self == 0`; a Float compares as the VM's inline (Float, Integer) pair.
       <<~CPP
@@ -356,7 +356,7 @@ class CodeGen
         #ifndef MRB_NO_FLOAT
           if (mrb_float_p(a)) return mrb_bool_value(mrb_float(a) == 0);
         #endif
-          return mrb_funcall(M, a, "zero?", 0);
+          return bc2cpp_funcall_keep(M, a, "zero?", 0);
         }
 
       CPP
@@ -365,7 +365,7 @@ class CodeGen
       <<~CPP
         #{head}) {
           if (mrb_bigint_p(a)) return a;
-          return mrb_funcall(M, a, "round", 0);
+          return bc2cpp_funcall_keep(M, a, "round", 0);
         }
 
       CPP
@@ -383,7 +383,7 @@ class CodeGen
     float_arm = float ? ' || (mrb_float_p(a) && bc2cpp_slow_num_p(b))' : ''
     <<~CPP
       #{head}, mrb_value b) {
-        if (!((bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))#{float_arm})) return mrb_funcall(M, a, "#{op}", 1, b);
+        if (!((bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))#{float_arm})) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
       #{numeric_slow_int_pair_source(key)}
         int ai = mrb_gc_arena_save(M);
         mrb_value r = #{helper}(M, a, b);
@@ -459,7 +459,7 @@ class CodeGen
       #{head}, mrb_value b) {
         // num_lt & co. (cmpnum): a Float pair never gets here from an operator opcode, the inline
         // OP_CMP pairs in compile_cmp take it, so NaN keeps the method's answer for an explicit send.
-        if (!bc2cpp_slow_num_p(a)) return mrb_funcall(M, a, "#{op}", 1, b);
+        if (!bc2cpp_slow_num_p(a)) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
         mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
         int ai = mrb_gc_arena_save(M);
         mrb_int c = mrb_cmp(M, a, b);
@@ -557,7 +557,7 @@ class CodeGen
   def numeric_slow_div_source(head)
     <<~CPP
       #{head}, mrb_value b) {
-        if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return mrb_funcall(M, a, "/", 1, b);
+        if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return bc2cpp_funcall_keep(M, a, "/", 1, b);
         int ai = mrb_gc_arena_save(M);
         mrb_value r;
       #ifndef MRB_NO_FLOAT
@@ -606,7 +606,7 @@ class CodeGen
     answers = call_facts_answers
     members = numeric_slow_members(answers, '%')
     closed = !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Integer Float String]) }
-    closed ? 'return bc2cpp_nomethod_named(M, a, "%", 1, b);' : 'return mrb_funcall(M, a, "%", 1, b);'
+    closed ? 'return bc2cpp_nomethod_named(M, a, "%", 1, b);' : 'return bc2cpp_funcall_keep(M, a, "%", 1, b);'
   end
 
   def numeric_slow_closed_mod_source(head)
@@ -840,7 +840,7 @@ class CodeGen
     shift = left ? 'width' : '-width'
     <<~CPP
       #{head}, mrb_value b) {
-        if (!(bc2cpp_slow_int_p(a) && mrb_integer_p(b) && mrb_integer(b) != MRB_INT_MIN)) return mrb_funcall(M, a, "#{op}", 1, b);
+        if (!(bc2cpp_slow_int_p(a) && mrb_integer_p(b) && mrb_integer(b) != MRB_INT_MIN)) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
         mrb_int width = mrb_integer(b);
         if (width == 0) return a;
         int ai = mrb_gc_arena_save(M);
@@ -858,7 +858,7 @@ class CodeGen
       #ifdef MRB_USE_BIGINT
             r = #{bint}(M, mrb_bint_new_int(M, val), width);
       #else
-            return mrb_funcall(M, a, "#{op}", 1, b);
+            return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
       #endif
           }
         }

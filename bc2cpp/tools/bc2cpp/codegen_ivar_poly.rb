@@ -81,10 +81,11 @@ class CodeGen
       # SCLASS/ICLASS and returns e.g. Module, and const_chain_value_expr strips the
       # suffix. Such a candidate would be dead code, so it is excluded.
       next false if t.owner.end_with?('.singleton')
-      next false unless compiles_clean?(t.irep)
-
       t_irep = @ireps.fetch(t.irep)
+      # Reject an impossible call shape before compiling the callee as a cleanliness
+      # probe. That probe may recursively compile its entire call graph.
       next false unless poly_arity_fits?(t_irep, n, optional)
+      next false unless compiles_clean?(t.irep)
       next false unless native_arg_types(t, mandatory_arity(t_irep)).all?(&:nil?)
 
       if @only_owners && !@only_owners.include?(t.owner)
@@ -913,8 +914,8 @@ end
   # The by-name helper: INDEX_CHAIN's tail (getidx, with the result in r0, the name compile_poly_small_n spells as
   # `r<d>`) then mrb_funcall.
   def index_helper_open_source(kind, fast, name, argv)
-    return "#{fast}return mrb_funcall(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
-    return "#{fast}return mrb_funcall(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
+    return "#{fast}return bc2cpp_funcall_keep(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
+    return "#{fast}return bc2cpp_funcall_keep(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
 
     tail = without_strict_hints { compile_poly_dispatch(name, 0, 'recv', argv, 1) } ||
            "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
