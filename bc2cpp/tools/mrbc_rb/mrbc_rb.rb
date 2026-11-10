@@ -44,7 +44,7 @@ module MrbcRb
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
     ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
-    GETCV: 27, SETCV: 28,
+    GETCV: 27, SETCV: 28, MATCHERR: 46,
     EXCEPT: 43, RESCUE: 44, RAISEIF: 45,
     BREAK: 67, BLKPUSH: 68, BLKCALL: 54, SUPER: 55, ARGARY: 56
   }.freeze
@@ -57,7 +57,7 @@ module MrbcRb
   # multi-line statement of the kinds in MULTILINE_STATEMENTS follows the entered-node rule (Compiler#enter); any other
   # multi-line statement raises Unsupported.
   MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
-                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::BeginNode, Prism::ForNode].freeze
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::CaseMatchNode, Prism::BeginNode, Prism::ForNode].freeze
 
   # Multi-line statements whose line rules are derived below (see Compiler#enter): the fork stamps each instruction with the
   # line of the classic parser node it entered last, and a node's line is the line of the last token the parser had read
@@ -734,6 +734,8 @@ module MrbcRb
         if_statement(node, last: last)
       when Prism::CaseNode
         case_statement(node, last: last)
+      when Prism::MatchRequiredNode, Prism::MatchPredicateNode, Prism::CaseMatchNode
+        pattern_statement(node, last: last)
       when Prism::UnlessNode
         unless_statement(node, last: last)
       when Prism::WhileNode, Prism::UntilNode
@@ -2528,7 +2530,7 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
 
@@ -2685,6 +2687,7 @@ module MrbcRb
         result = colon_path(node)
         emit(:MOVE, dst, result) unless result == dst
       when Prism::CaseNode then case_value_into(node, dst)
+      when Prism::MatchRequiredNode, Prism::MatchPredicateNode, Prism::CaseMatchNode then pattern_value_into(node, dst)
       when *VALUE_WRITES then write_value_into(node, dst)
       when Prism::RangeNode then built_into(dst) { |base| range_at(node, base) }
       when Prism::LambdaNode
@@ -4522,6 +4525,546 @@ module MrbcRb
         end
       end
       [@pool.size].pack('n') + entries.join
+    end
+
+    # ---- milestone 13: pattern matching (codegen_case_match, codegen_pattern and NODE_MATCH_PAT in codegen.c) ----
+    # The fork's parser builds PAT_* nodes (parse.y p_expr) and its codegen generates them directly, with no desugaring. Only
+    # the pattern forms the fork's grammar has are covered: values (numbers, symbols, strings, nil, true, false, constants),
+    # `x`, `^x`, `a | b`, `pat => x`, arrays with a rest, find patterns and hashes. Anything else is Unsupported.
+
+    def pat_push = push_sp
+    def pat_pop = @sp -= 1
+
+    # The register count only grows with the stack pointer (push), not with an instruction's operands: the fork loads into
+    # the stack top before pushing, and a register above the highest push (a value loaded for an EQ) is not counted.
+    def pe(name, *ops)
+      n = @nregs
+      emit(name, *ops)
+      @nregs = n
+    end
+
+    def pgi(i, dst)
+      n = @nregs
+      gen_int(i, dst)
+      @nregs = n
+    end
+
+    def pgm(dst, src, nopeep)
+      n = @nregs
+      gen_move(dst, src, nopeep)
+      @nregs = n
+    end
+
+    # A pattern as the fork's parser reads it: [:value, node], [:var, name], [:alt, l, r], [:as, pat, name], [:pin, name],
+    # [:array, pre, rest, post], [:find, pre, elems, post], [:hash, pairs, rest] (rest nil, :nil, :any or [:var, name]).
+    def pat_parse(node)
+      case node
+      when Prism::IntegerNode, Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::ConstantReadNode
+        [:value, node]
+      when Prism::StringNode
+        raise Unsupported, 'pattern string' # the fork's lexer returns tSTRING_BEG for a string, never the tSTRING the grammar wants
+      when Prism::ConstantPathNode
+        raise Unsupported, 'pattern constant path' unless pat_const_path?(node)
+
+        [:value, node]
+      when Prism::SymbolNode
+        raise Unsupported, 'pattern symbol' unless node.opening_loc&.slice == ':' && node.closing_loc.nil?
+
+        [:value, node]
+      when Prism::LocalVariableTargetNode
+        raise Unsupported, 'pattern variable outside the current scope' unless node.depth.zero?
+
+        [:var, node.name]
+      when Prism::PinnedVariableNode
+        v = node.variable
+        raise Unsupported, 'pin of a non-local' unless v.is_a?(Prism::LocalVariableReadNode) && v.depth.zero?
+
+        [:pin, v.name]
+      when Prism::AlternationPatternNode
+        [:alt, pat_parse(node.left), pat_parse(node.right)]
+      when Prism::CapturePatternNode
+        t = node.target
+        raise Unsupported, 'capture target' unless t.is_a?(Prism::LocalVariableTargetNode) && t.depth.zero?
+
+        [:as, pat_parse(node.value), t.name]
+      when Prism::ArrayPatternNode
+        raise Unsupported, 'constant array pattern' if node.constant
+
+        rest = node.rest
+        raise Unsupported, 'implicit rest pattern' if rest.is_a?(Prism::ImplicitRestNode)
+
+        raise Unsupported, 'array pattern without rest or elements' if false
+
+        [:array, node.requireds.map { |e| pat_parse(e) }, rest ? pat_rest(rest) : nil, node.posts.map { |e| pat_parse(e) }]
+      when Prism::FindPatternNode
+        raise Unsupported, 'constant find pattern' if node.constant
+
+        [:find, pat_rest(node.left), node.requireds.map { |e| pat_parse(e) }, pat_rest(node.right)]
+      when Prism::HashPatternNode
+        raise Unsupported, 'constant hash pattern' if node.constant
+
+        pat_hash_parse(node)
+      else
+        raise Unsupported, "pattern #{node.class.name.split('::').last}"
+      end
+    end
+
+    def pat_const_path?(node)
+      node = node.parent while node.is_a?(Prism::ConstantPathNode)
+      node.nil? || node.is_a?(Prism::ConstantReadNode)
+    end
+
+    # A rest in an array or find pattern: :any for `*`, [:var, name] for `*name`.
+    def pat_rest(node)
+      raise Unsupported, 'pattern rest' unless node.is_a?(Prism::SplatNode)
+
+      e = node.expression
+      return :any unless e
+
+      raise Unsupported, 'pattern rest' unless e.is_a?(Prism::LocalVariableTargetNode) && e.depth.zero?
+
+      [:var, e.name]
+    end
+
+    def pat_hash_parse(node)
+      pairs = node.elements.map do |a|
+        raise Unsupported, 'hash pattern element' unless a.is_a?(Prism::AssocNode) && a.key.is_a?(Prism::SymbolNode)
+        raise Unsupported, 'quoted hash pattern key' unless a.key.opening_loc.nil? && a.key.closing_loc&.slice == ':'
+
+        k = a.key.unescaped.to_sym
+        v = a.value
+        [k, v.is_a?(Prism::ImplicitNode) ? [:var, k] : pat_parse(v)]
+      end
+      r = node.rest
+      rest = case r
+             when nil then nil
+             when Prism::NoKeywordsParameterNode then :nil
+             when Prism::AssocSplatNode
+               e = r.value
+               if e.nil? then :any
+               elsif e.is_a?(Prism::LocalVariableTargetNode) && e.depth.zero? then [:var, e.name]
+               else raise Unsupported, 'hash pattern rest'
+               end
+             else raise Unsupported, 'hash pattern rest'
+             end
+      [:hash, pairs, rest]
+    end
+
+    # codegen_pattern: +fails+ collects the positions of the jumps taken when the pattern does not match.
+    def pat_gen(pat, target, fails)
+      case pat[0]
+      when :value
+        operand_into(pat[1], @sp)
+        pat_push
+        pat_eqq(target, fails)
+      when :var
+        pgm(local_register(pat[1]), target, true)
+      when :alt
+        left_fail = []
+        success = []
+        pat_gen(pat[1], target, left_fail)
+        if pat[1][0] != :alt && !left_fail.empty? && left_fail.last + 2 == @code.size && @code[left_fail.last - 2] == OP.fetch(:JMPNOT)
+          pos = left_fail.pop
+          pat_retag(pos, :JMPIF)
+          success << pos
+        else
+          success << emit_jump(:JMP)
+        end
+        left_fail.each { |j| dispatch(j) }
+        pat_gen(pat[2], target, fails)
+        success.each { |j| dispatch(j) }
+      when :as
+        pat_gen(pat[1], target, fails)
+        pgm(local_register(pat[2]), target, false)
+      when :pin
+        pgm(@sp, local_register(pat[1]), false)
+        pat_push
+        pat_eqq(target, fails)
+      when :array then pat_array(pat, target, fails)
+      when :find then pat_find(pat, target, fails)
+      when :hash then pat_hash(pat, target, fails)
+      end
+    end
+
+    # The pattern value is in the register below the stack top: `value === target`, jumping to the failure when false.
+    def pat_eqq(target, fails)
+      pgm(@sp, target, false)
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:===), 1)
+      fails << cond_jump(:JMPNOT, @sp, val: true)
+    end
+
+    # Changes the opcode of the conditional jump whose operand is at +pos+ (the last instruction), keeping its size.
+    def pat_retag(pos, name)
+      @code[pos - 2] = OP.fetch(name)
+      @insns[-1] = [name, @insns[-1][1], @insns[-1][2]]
+      @last = @insns[-1]
+    end
+
+    # arr[pre_len..-(post_len+1)] bound to the rest variable.
+    def pat_bind_rest(var, arr_reg, pre_len, post_len)
+      pgm(@sp, arr_reg, false)
+      pat_push
+      pgi(pre_len, @sp)
+      pat_push
+      pgi(post_len.positive? ? -(post_len + 1) : -1, @sp)
+      pe(:RANGE_INC, @sp - 1)
+      pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:[]), 1)
+      pgm(local_register(var[1]), @sp, true)
+    end
+
+    def pat_array(pat, target, fails)
+      _, pre, rest, post = pat
+      arr_reg = @sp
+      pgm(@sp, target, false)
+      pat_push
+      pe(:SEND, arr_reg, sym_index(:deconstruct), 0)
+      if rest.nil?
+        pgm(@sp, arr_reg, false)
+        pat_push
+        pe(:SEND, @sp - 1, sym_index(:size), 0)
+        pgi(pre.size, @sp)
+        pe(:EQ, @sp - 1)
+        fails << cond_jump(:JMPNOT, @sp - 1, val: true)
+        pat_pop
+      elsif pre.size + post.size > 0
+        pgm(@sp, arr_reg, false)
+        pat_push
+        pe(:SEND, @sp - 1, sym_index(:size), 0)
+        pgi(pre.size + post.size, @sp)
+        pe(:GE, @sp - 1)
+        fails << cond_jump(:JMPNOT, @sp - 1, val: true)
+        pat_pop
+      end
+      pre.each_with_index { |e, i| pat_elem_at(e, arr_reg, i, fails) }
+      pat_bind_rest(rest, arr_reg, pre.size, post.size) if rest.is_a?(Array)
+      post.each_with_index { |e, i| pat_elem_at(e, arr_reg, i - post.size, fails) }
+      pat_pop
+    end
+
+    # arr[i] matched against +elem+.
+    def pat_elem_at(elem, arr_reg, i, fails)
+      pgm(@sp, arr_reg, false)
+      pat_push
+      pgi(i, @sp)
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:[]), 1)
+      pat_push
+      pat_gen(elem, @sp - 1, fails)
+      pat_pop
+    end
+
+    def pat_find(pat, target, fails)
+      _, pre, elems, post = pat
+      arr_reg = @sp
+      n = elems.size
+      pgm(@sp, target, false)
+      pat_push
+      pe(:SEND, arr_reg, sym_index(:deconstruct), 0)
+      pgm(@sp, arr_reg, false)
+      pat_push
+      pe(:SEND, @sp - 1, sym_index(:size), 0)
+      pgi(n, @sp)
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:>=), 1)
+      fails << cond_jump(:JMPNOT, @sp, val: true)
+      idx_reg = @sp
+      pgi(0, idx_reg)
+      pat_push
+      loop_start = @code.size
+      match_fail = []
+      pgm(@sp, arr_reg, false)
+      pat_push
+      pe(:SEND, @sp - 1, sym_index(:size), 0)
+      pgi(n, @sp)
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:-), 1)
+      pgm(@sp + 1, idx_reg, false)
+      pat_push
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:>=), 1)
+      fails << cond_jump(:JMPNOT, @sp, val: true)
+      elems.each_with_index do |e, offset|
+        pgm(@sp, arr_reg, false)
+        pat_push
+        pgm(@sp, idx_reg, false)
+        unless offset.zero?
+          pat_push
+          pgi(offset, @sp)
+          pat_push; pat_push; pat_pop; pat_pop; pat_pop
+          pe(:SEND, @sp, sym_index(:+), 1)
+        end
+        pat_push; pat_push; pat_pop; pat_pop; pat_pop
+        pe(:SEND, @sp, sym_index(:[]), 1)
+        pat_push
+        pat_gen(e, @sp - 1, match_fail)
+        pat_pop
+      end
+      if pre.is_a?(Array)
+        pgm(@sp, arr_reg, false)
+        pat_push
+        pgi(0, @sp)
+        pat_push
+        pgm(@sp, idx_reg, false)
+        pe(:RANGE_EXC, @sp - 1)
+        pat_pop; pat_pop
+        pe(:SEND, @sp, sym_index(:[]), 1)
+        pgm(local_register(pre[1]), @sp, true)
+      end
+      if post.is_a?(Array)
+        pgm(@sp, arr_reg, false)
+        pat_push
+        pgm(@sp, idx_reg, false)
+        pat_push
+        pgi(n, @sp)
+        pat_push; pat_push; pat_pop; pat_pop; pat_pop
+        pe(:SEND, @sp, sym_index(:+), 1)
+        pat_push
+        pgi(-1, @sp)
+        pe(:RANGE_INC, @sp - 1)
+        pat_pop; pat_pop
+        pe(:SEND, @sp, sym_index(:[]), 1)
+        pgm(local_register(post[1]), @sp, true)
+      end
+      loop_end = emit_jump(:JMP)
+      match_fail.each { |j| dispatch(j) }
+      pgm(@sp, idx_reg, false)
+      pat_push
+      pgi(1, @sp)
+      pat_push; pat_push; pat_pop; pat_pop; pat_pop
+      pe(:SEND, @sp, sym_index(:+), 1)
+      pgm(idx_reg, @sp, false)
+      back = emit_jump(:JMP)
+      patch_jump(back, loop_start)
+      dispatch(loop_end)
+      pat_pop
+      pat_pop
+    end
+
+    # gen_pat_keys_ary: the keys as an array at the stack top.
+    def pat_keys_array(pairs)
+      pairs.each do |k, _|
+        pe(:LOADSYM, @sp, sym_index(k))
+        pat_push
+      end
+      pe(:ARRAY, @sp - pairs.size, pairs.size)
+      (pairs.size - 1).times { pat_pop }
+    end
+
+    def pat_hash(pat, target, fails)
+      _, pairs, rest = pat
+      hash_reg = @sp
+      nkeys = pairs.size
+      pgm(@sp, target, false)
+      pat_push
+      if rest.nil? && nkeys.positive?
+        pat_keys_array(pairs)
+      else
+        pe(:LOADNIL, @sp)
+        pat_push
+      end
+      pe(:SEND, hash_reg, sym_index(:deconstruct_keys), 1)
+      pat_pop
+      if nkeys.positive?
+        vals_reg = @sp
+        pgm(vals_reg, hash_reg, false)
+        pat_push
+        pat_keys_array(pairs)
+        pe(:SEND, vals_reg, sym_index(:__pat_values), 1)
+        pat_pop
+        fails << cond_jump(:JMPNOT, vals_reg, val: true)
+        pairs.each_with_index do |(_, p), i|
+          pgm(@sp, vals_reg, false)
+          pat_push
+          pgi(i, @sp)
+          pat_push; pat_push; pat_pop; pat_pop; pat_pop
+          pe(:SEND, @sp, sym_index(:[]), 1)
+          pat_push
+          pat_gen(p, @sp - 1, fails)
+          pat_pop
+        end
+        pat_pop
+      end
+      if rest == :nil || (nkeys.zero? && rest.nil?)
+        pgm(@sp, hash_reg, false)
+        pat_push
+        pe(:SEND, @sp - 1, sym_index(:size), 0)
+        pgi(nkeys, @sp)
+        pe(:EQ, @sp - 1)
+        fails << cond_jump(:JMPNOT, @sp - 1, val: true)
+        pat_pop
+      elsif rest.is_a?(Array)
+        recv = @sp
+        pgm(recv, hash_reg, false)
+        pat_push
+        if nkeys.positive?
+          pat_keys_array(pairs)
+          pe(:SEND, recv, sym_index(:__except), 1)
+          pat_pop
+        else
+          pe(:SEND, recv, sym_index(:dup), 0)
+        end
+        pgm(local_register(rest[1]), recv, true)
+        pat_pop
+      end
+      pat_pop
+    end
+
+    # NODE_MATCH_PAT: `expr => pattern` (raises NoMatchingPatternError) and `expr in pattern` (true or false).
+    def match_pattern_statement(node, last:)
+      raise_on_fail = node.is_a?(Prism::MatchRequiredNode)
+      value = unparen(node.value)
+      raise Unsupported, 'pattern subject' unless operand?(value)
+      raise Unsupported, 'array literal pattern subject' if value.is_a?(Prism::ArrayNode)
+
+      pat = pat_parse(node.pattern)
+      check_multiline(value)
+      head = temp
+      value_into(value, head)
+      if pat[0] == :var
+        pgm(local_register(pat[1]), head, false)
+        return pat_result(head, raise_on_fail, last)
+      end
+      @sp = head + 1
+      @nregs = [@nregs, @sp].max
+      fails = []
+      pat_gen(pat, head, fails)
+      saved = @sp
+      return pat_result(head, raise_on_fail, last) if fails.empty?
+
+      @sp = head
+      pat_result_values(raise_on_fail, last)
+      if fails.size == 1 && fails[0] + 2 == @code.size && @code[fails[0] - 2] == OP.fetch(:JMPNOT)
+        pos = fails[0]
+        if raise_on_fail
+          @code[pos - 2] = OP.fetch(:MATCHERR)
+          @code[pos] = OP.fetch(:NOP)
+          @code[pos + 1] = OP.fetch(:NOP)
+          @insns[-1] = [:MATCHERR, @insns[-1][1], @insns[-1][2]]
+          @last = @insns[-1]
+          @sp = saved - 1
+          pat_push if last
+          return last ? head : nil
+        end
+        pat_retag(pos, :JMPIF)
+        match_pos = pos
+      else
+        match_pos = emit_jump(:JMP)
+        fails.each { |j| dispatch(j) }
+      end
+      @sp = head
+      if raise_on_fail
+        pe(:LOADFALSE, @sp)
+        pe(:MATCHERR, @sp)
+      elsif last
+        pe(:LOADFALSE, @sp)
+        pat_push
+      end
+      dispatch(match_pos)
+      @sp = saved - 1
+      pat_push if last
+      last ? head : nil
+    end
+
+    def pat_result(head, raise_on_fail, last)
+      @sp = head
+      pat_result_values(raise_on_fail, last)
+      last ? head : nil
+    end
+
+    # The value of a successful match: nil for `=>`, true for `in`.
+    def pat_result_values(raise_on_fail, last)
+      return unless last
+
+      pe(raise_on_fail ? :LOADNIL : :LOADTRUE, @sp)
+      pat_push
+    end
+
+    # codegen_case_match: the subject goes into the first temporary `head`; each `in` clause matches its pattern against it,
+    # tests its guard, runs its body and jumps to the end; with no clause left NoMatchingPatternError is raised (MATCHERR),
+    # also after an `else` body. The value ends in head.
+    def case_match_statement(node, last:)
+      subject = unparen(node.predicate)
+      raise Unsupported, 'case/in subject' unless subject && operand?(subject) && !subject.is_a?(Prism::ArrayNode)
+
+      check_multiline(subject)
+      clauses = node.conditions.map do |c|
+        raise Unsupported, 'case/in clause' unless c.is_a?(Prism::InNode)
+
+        pat = c.pattern
+        guard = nil
+        guard_unless = false
+        if pat.is_a?(Prism::IfNode) || pat.is_a?(Prism::UnlessNode)
+          guard = pat.predicate
+          guard_unless = pat.is_a?(Prism::UnlessNode)
+          raise Unsupported, 'guard' unless pat.statements&.body&.size == 1
+
+          pat = pat.statements.body.first
+        end
+        [pat_parse(pat), guard, guard_unless, c.statements]
+      end
+      clauses << [nil, nil, false, node.else_clause.statements] if node.else_clause
+      # An empty body is a node on the line of the keyword that follows it (the next `in`, the `else` or the `end`).
+      keywords = node.conditions.map(&:in_loc) + [node.else_clause&.else_keyword_loc, node.end_keyword_loc].compact
+      clauses.each_with_index { |c, i| c << keywords[i + 1].start_line }
+      head = temp
+      value_into(subject, head)
+      @sp = head + 1
+      @nregs = [@nregs, @sp].max
+      end_jumps = []
+      clauses.each do |pat, guard, guard_unless, body, empty_line|
+        fails = []
+        pat_gen(pat, head, fails) if pat
+        if guard
+          g = unparen(guard)
+          raise Unsupported, 'guard value' unless operand?(g)
+
+          check_multiline(g)
+          t = temp
+          operand_into(g, t)
+          j = cond_jump(guard_unless ? :JMPIF : :JMPNOT, t, val: false)
+          raise Unsupported, 'folded guard' unless j
+
+          fails << j
+        end
+        @line = empty_line if body.nil? || body.body.empty?
+        branch(body, @sp, need: last)
+        end_jumps << emit_jump(:JMP)
+        fails.each { |j| dispatch(j) }
+      end
+      pe(:LOADFALSE, @sp)
+      pe(:MATCHERR, @sp)
+      end_jumps.each { |j| dispatch(j) }
+      if last
+        pgm(head, @sp, false)
+        @sp = head + 1
+        head
+      else
+        @sp = head
+        nil
+      end
+    end
+
+    # A match or a case/in as a value: built at the destination when it is a temporary, else at the first temporary and moved.
+    def pattern_value_into(node, dst)
+      saved = @sp
+      base = dst >= @nlocals ? dst : temp
+      begin
+        @sp = base
+        r = pattern_statement(node, last: true)
+      ensure
+        @sp = saved
+      end
+      pgm(dst, r, false)
+    end
+
+    # A statement leaves the stack pointer where it found it (the value, when there is one, is in the first temporary).
+    def pattern_statement(node, last:)
+      saved = @sp
+      node.is_a?(Prism::CaseMatchNode) ? case_match_statement(node, last: last) : match_pattern_statement(node, last: last)
+    ensure
+      @sp = saved
     end
 
     def debug_section
