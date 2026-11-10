@@ -59,6 +59,7 @@ require_relative 'static_dispatch_lists'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'static_dispatch_class_guards'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
 require_relative 'owner_call_direct'
@@ -1242,13 +1243,24 @@ module StaticDispatchRegistrations
     # makes is otherwise a C proc (mrb_proc_new_cfunc_with_env), so the block's
     # irep runs only from the method's own bytecode. Names are only ever added,
     # so both fixpoints converge.
+    guards = closed_only ? class_guards(repo_root, registry, superclass_of) : nil
     sends = lambda do |irep, into|
       grew = false
-      BytecodeIR.for(irep).each_source do |insn, _index|
+      narrowed = guards ? guards.narrowed(irep) : {}
+      BytecodeIR.for(irep).each_source do |insn, index|
         name = if send_ops.include?(insn.op) then insn.sym
                elsif insn.op != :LOADSYM then IMPLICIT_DISPATCH_NAMES[insn.op]
                end
-        next unless name && into.add?(name)
+        next unless name
+
+        # CLASS_GUARD_REACH: a send a class test narrows looks `name` up on that class's relatives only.
+        if (reach = narrowed[index])
+          known = (super_reach[name] ||= Set.new)
+          grew = true unless reach.subset?(known)
+          known.merge(reach)
+          next
+        end
+        next unless into.add?(name)
 
         grew = true
         cite([name], "sent by #{irep_site(irep, method_of, body_of)}, which may run as bytecode")
@@ -1696,6 +1708,24 @@ module StaticDispatchRegistrations
     where = m ? body_of[m].join('#') : 'a class body or block at load'
     file = irep.respond_to?(:file) && irep.file ? " (#{File.basename(irep.file.to_s)})" : ''
     "#{where}#{file}"
+  end
+
+  # CLASS_GUARD_REACH's gates (StaticDispatchClassGuards.build), or nil when one fails.
+  def class_guards(repo_root, registry, superclass_of)
+    ruby, native = outside_world_files(repo_root, closed_only: true)
+    map = NativeOwnerMap.build(native)
+    return nil if map.computed.any? { |owner| owner.is_a?(String) && (owner.match?(StaticDispatchClassGuards::ENGINE_RE) || %w[Kernel Object BasicObject].include?(owner)) }
+
+    native_owners = Hash.new { |h, k| h[k] = [] }
+    map.registrations.each { |owner, name, _fn| native_owners[name] << owner if name }
+    map.aliases.each { |owner, new_name, old_name| [new_name, old_name].each { |n| native_owners[n] << "alias #{owner}" } }
+    owner_names = registry.values.flatten.map(&:owner).to_set.merge(superclass_of.keys)
+    map.registrations.each { |owner, name, _fn| owner_names << owner if owner.is_a?(String) && name }
+    StaticDispatchClassGuards.build(
+      superclass_of: superclass_of, registry: registry, owner_names: owner_names, native_owners: native_owners,
+      ruby_texts: ruby.filter_map { |path| File.file?(path) ? File.read(path) : nil },
+      ancestors: ->(klass) { (@guard_ancestors ||= {}).fetch(klass) { @guard_ancestors[klass] = super_ancestors(klass, superclass_of) } }
+    )
   end
 
   # SUPER_REACH: whether a `super` of `name` may run the entry of `owner`. A module, a singleton or any owner that is
