@@ -2,6 +2,7 @@
 
 require_relative 'branch_hints'
 require_relative 'presym_spelling'
+require_relative 'core_native_candidates'
 
 # CodeGen: per-method compile state and file-level emission.
 
@@ -241,8 +242,9 @@ class CodeGen
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered, rom: rom && [rom, part])
       if part == 'core' && core_rom.any?
         # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
+        # A default hook is looked up on purpose and its absence is the no-op (hook_call, 3rd/mruby/src/class.c): no stub.
         out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
-        emit_left_out_native_lines(out, core_rom)
+        emit_left_out_native_lines(out, core_rom.reject { |owner, name| CoreNativeCandidates::HOOK_DEFAULTS.include?("#{owner}##{name}") })
         out << "#endif\n"
       end
       emit_left_out_native_lines(out, core_ram) if part == 'core'
