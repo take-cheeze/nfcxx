@@ -510,12 +510,19 @@ static void nf_emit_scope(a_scope_ptr scope, int parent)
   }
 }
 
+void nfcxx_ast_dump(void);   /* be/nfcxx_ast.c */
+
 namespace edg {
 
 /* Entry point called by the front end (cfe.c, in namespace edg) after the IL is complete. */
 void back_end(void)
 {
   const char *all = getenv("NFCXX_DECL_ALL");
+  const char *ast = getenv("NFCXX_DECL_AST");
+  if (ast != NULL && ast[0] != '\0' && ast[0] != '0') {
+    nfcxx_ast_dump();   /* be/nfcxx_ast.c: function bodies as clang-shaped JSON */
+    return;
+  }
   nf_next_id = 0;
   nf_count = 0;
   nf_list_all = all != NULL && all[0] != '\0' && all[0] != '0';

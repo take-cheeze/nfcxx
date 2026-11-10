@@ -23,6 +23,7 @@ require_relative 'base_rbs_workers'
 require_relative '../../tools/bc2cpp/native_format_types'
 require_relative '../../tools/bc2cpp/native_return_kinds'
 require_relative '../../tools/bc2cpp/native_ast_returns'
+require_relative '../../tools/bc2cpp/native_ast_source'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -398,14 +399,14 @@ module BaseRbsNative
   # the regex kinds, and says so.
   # +optional+ lets a function returning K or nil be `K?` (the base declarations ask for it; native_fn_kinds.rb does not).
   def ast_function_kinds(path, flags, external = {}, self_index = nil, external_refs = nil, optional: false)
-    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
-    out, err, status = Open3.capture3('clang', *lang, '-fsyntax-only', '-Xclang', '-ast-dump=json', *flags, path)
+    # BC2CPP_AST_PRODUCER=nfcxx reads the nfcxx front end's dump instead of clang's (tools/bc2cpp/native_ast_source.rb).
+    out, err, status = NativeAstSource.dump(path, flags, lang: path.end_with?('.c') ? :c : :cxx)
     unless status.success?
       warn "base_rbs_native: AST returns unavailable for #{path}, regex kinds kept: #{err.lines.first}"
       return {}
     end
 
-    NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path, external: external, self_index: self_index,
+    NativeAstReturns.analyze(JSON.parse(out), path, external: external, self_index: self_index,
                                                                                  external_refs: external_refs, optional: optional)
   end
 
