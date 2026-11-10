@@ -550,7 +550,7 @@ module MrbcRb
     # the value's end, so a multi-line value gives the key that later line). `:k => v` and `"k" => v` keys are built before.
     def label_key_line(assoc)
       key = assoc.key
-      return unless key.is_a?(Prism::SymbolNode) && key.opening_loc.nil? && key.closing_loc&.slice == ':'
+      return unless key.is_a?(Prism::SymbolNode) && key.closing_loc&.slice&.end_with?(':') # `a:`, `"a":`, `'a':`
 
       value = assoc.value # parentheses included: its end is the closing parenthesis
       # The parser reads the token after the value before it builds the pair, so a continuation counts whatever the value is.
@@ -577,10 +577,13 @@ module MrbcRb
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
         @leading_dot[recv] = op.start_line
       when Prism::CallNode
-        raise Unsupported, 'leading-dot receiver' if recv.block.is_a?(Prism::BlockArgumentNode) || recv.safe_navigation?
+        raise Unsupported, 'leading-dot receiver' if recv.safe_navigation?
 
         # A call with a block ends in its `}` or `end`: it is built without the next token, like one ending in `)`.
         @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')' || recv.block.is_a?(Prism::BlockNode)
+      when Prism::ParenthesesNode
+        # Ends in its closing parenthesis: built without the next token. Several lines inside would move the inner nodes.
+        raise Unsupported, 'leading-dot receiver' if recv.location.start_line != recv.location.end_line
       else raise Unsupported, 'leading-dot receiver'
       end
     end

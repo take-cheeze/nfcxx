@@ -931,7 +931,16 @@ SNIPPETS = [
   "x = 1\ncase x\nwhen 1 then foo { |a| a }\nwhen 2 then foo(1,\n                2)\nend",
   "x = 1\ncase x\nwhen \"a\" then 1\nwhen \"b\#{x}\" then 2\nend",
   "x = 1\ncase x\nwhen 1\n  case x\n  when 2 then p 1\n  end\nend",
-  "x = 1\ncase x\nwhen 1 then x\nelse x\nend"
+  "x = 1\ncase x\nwhen 1 then x\nelse x\nend",
+  # label keys of every spelling over several lines
+  "x = 1\nfoo(\"a\":\n  x,\n  b: 2)",
+  "x = 1\nfoo(\"a b\": [x,\n  x], c: 1)",
+  "x = 1\nfoo(:a => [x,\n  x], c: 1)",
+  "x = 1\nfoo(x => [x,\n  x], c: 1)",
+  "x = 1\nfoo(\"a\" => [x,\n  x], c: 1)",
+  "x = 1\nfoo(a: 1, **x,\n    b: 2)",
+  "x = 1\nfoo(a: x,\n    b: [1,\n        2],\n    c: x)",
+  "x = 1\ny = { :a => x,\n  b: x }"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
