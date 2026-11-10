@@ -97,7 +97,16 @@ SNIPPETS = [
   "x = 1\ny = x && 2",
   "x = 1\nx && 2\np 3",
   "x = 1\nx || 2\np 3",
-  "x = 1\ny = x || 2\ny"
+  "x = 1\ny = x || 2\ny",
+  # global variables (milestone 5)
+  "$g = 1",
+  "$g = 1\n$g",
+  "x = $g",
+  "x = 1\np $g",
+  # attribute assignment (milestone 5)
+  "$stdout.sync = true",
+  "x = 1\nx.sync = true",
+  "x = 1\nx.foo = 2\nx"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)

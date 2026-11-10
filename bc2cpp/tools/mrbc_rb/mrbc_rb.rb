@@ -29,7 +29,7 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, FSTRING: 119,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
@@ -40,7 +40,7 @@ module MrbcRb
 
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
-                   Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode].freeze
+                   Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -97,12 +97,14 @@ module MrbcRb
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
-           Prism::ConstantReadNode, Prism::StringNode
+           Prism::ConstantReadNode, Prism::StringNode, Prism::GlobalVariableReadNode
         last ? value_in_register(node) : nil
       when Prism::CallNode
-        call(node)
+        call(node, need: last)
       when Prism::ConstantWriteNode
         const_write(node, last: last)
+      when Prism::GlobalVariableWriteNode
+        global_write(node, last: last)
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
       when Prism::IfNode
@@ -263,6 +265,14 @@ module MrbcRb
       need ? t : nil
     end
 
+    # `$g = value`: as a constant write, with SETGV.
+    def global_write(node, last:)
+      t = temp
+      value_into(node.value, t)
+      emit(:SETGV, t, sym_index(node.name))
+      last ? t : nil
+    end
+
     # `X = value`: the value goes to the first temporary, SETCONST stores it, and the last statement returns it.
     def const_write(node, last:)
       t = temp
@@ -300,7 +310,28 @@ module MrbcRb
     # A method call, as the fork's codegen emits it: the result register is the first temporary, the receiver is copied
     # into it, and the arguments follow it. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the copy.
     # Returns the result register.
-    def call(node)
+    # `recv.name = value`: the result (the value) is in the first temporary r; the receiver is in r+1 and the value in r+2,
+    # and SEND runs on r+1 with that one argument (verified against mrbc -v: the result is the value, not the send's).
+    # Where the value is not needed, the receiver is in the first temporary with the value after it, and SEND runs there.
+    def attribute_assign(node, recv, arg, need:)
+      r = temp
+      if need
+        value_into(recv, r + 1)
+        value_into(arg, r + 2)
+        emit(:MOVE, r, r + 2)
+        emit(:SEND, r + 1, sym_index(node.name), 1)
+        @nregs = [@nregs, r + 4].max
+        r
+      else
+        value_into(recv, r)
+        value_into(arg, r + 1)
+        emit(:SEND, r, sym_index(node.name), 1)
+        @nregs = [@nregs, r + 3].max
+        nil
+      end
+    end
+
+    def call(node, need: true)
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
       recv = node.receiver unless node.receiver.is_a?(Prism::SelfNode)
@@ -308,6 +339,13 @@ module MrbcRb
       raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !SIMPLE_VALUES.include?(a.class) }
       # A receiver may itself be a call: it leaves its result in the same temporary.
       raise Unsupported, 'call with a non-simple receiver' if recv && !(SIMPLE_VALUES.include?(recv.class) || recv.is_a?(Prism::CallNode))
+
+      if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
+        raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
+        raise Unsupported, 'attribute assignment receiver' unless SIMPLE_VALUES.include?(recv.class)
+
+        return attribute_assign(node, recv, args[0], need: need)
+      end
 
       a = temp
       if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
@@ -388,6 +426,7 @@ module MrbcRb
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
       when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
+      when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
       when Prism::OrNode, Prism::AndNode
         r = logic(node, need: true)
         emit(:MOVE, dst, r) unless r == dst
