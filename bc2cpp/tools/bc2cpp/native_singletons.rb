@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'native_direct'
 require_relative 'native_names'
+require_relative 'file_identity'
 
 # NATIVE_SINGLETON_CALL: which native sources register `name` as a singleton method of
 # which class or module, read from the C/C++ registrations themselves.
@@ -46,7 +47,7 @@ module NativeSingletons
       bindings[var] << [outer, name]
     end
     # A function's `RClass* param` that every call site (any sibling file) hands the same class or module.
-    text.scan(/(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |function, param|
+    text.scan(/\b(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |function, param|
       bindings[param] << [:full, param_owners[function]]
     end
     owners = {}
@@ -103,24 +104,33 @@ module NativeSingletons
 
   # { name => [[kind, owner], ...] } for one file, plus how many times the file spells each name:
   # { name => { registrations: [[:instance|:singleton, owner or nil], ...], spellings: n } }.
+  # Parameter owners depend on sibling sources too; both memo layers must include those inputs.
   def file_table(path)
-    @files[path] ||= begin
-      text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
-      owners = class_variables(text, NativeDirect.sibling_param_owners(path))
-      table = Hash.new { |hash, key| hash[key] = { registrations: [], spellings: 0 } }
-      text.scan(STRING_LITERAL) { |(literal)| table[literal][:spellings] += 1 }
-      text.scan(MRB_SYM_TOKEN_RE) { |macro, token| table[resolve_mrb_sym_token(macro, token)][:spellings] += 1 }
-      text.scan(/\bmrb_define_(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*(#{NAME_ARG})\s*,/) do |kind, var, arg, literal, macro, token|
-        where = REGISTRATIONS[kind]
-        next unless where
-        name = literal || resolve_mrb_sym_token(macro, token)
-        _ = arg
-        owner = owners[var]
-        table[name][:registrations] << [where, owner]
-      end
-      table.default_proc = nil
-      table
+    inputs, key = FileIdentity.cached(:native_singletons_inputs, [path]) do
+      files = [path, *NativeDirect.sibling_sources(path)].uniq
+      [files, files.map { |input| FileIdentity.path_key(input) }]
     end
+    @files[key] ||= ScanCache.fetch('native_singletons.file_table', inputs, cache_absent: false) do
+      scan_file_table(path)
+    end
+  end
+
+  def scan_file_table(path)
+    text = NativeDirect.strip_comments(File.binread(path).force_encoding('UTF-8'))
+    owners = class_variables(text, NativeDirect.sibling_param_owners(path))
+    table = Hash.new { |hash, key| hash[key] = { registrations: [], spellings: 0 } }
+    text.scan(STRING_LITERAL) { |(literal)| table[literal][:spellings] += 1 }
+    text.scan(MRB_SYM_TOKEN_RE) { |macro, token| table[resolve_mrb_sym_token(macro, token)][:spellings] += 1 }
+    text.scan(/\bmrb_define_(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*(#{NAME_ARG})\s*,/) do |kind, var, arg, literal, macro, token|
+      where = REGISTRATIONS[kind]
+      next unless where
+      name = literal || resolve_mrb_sym_token(macro, token)
+      _ = arg
+      owner = owners[var]
+      table[name][:registrations] << [where, owner]
+    end
+    table.default_proc = nil
+    table
   end
 
   # The owners ("File.singleton", "Kernel") `paths` register `name` on, or nil when a spelling of the name
