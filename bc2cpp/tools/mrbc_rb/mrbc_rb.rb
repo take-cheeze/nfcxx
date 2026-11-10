@@ -2,8 +2,10 @@
 
 # A Ruby replacement for the fork's `mrbc -g`: Prism tree in, RITE binary out.
 #
-# Milestone 1 covers a top-level program whose statements are nil, true, false, self, Integer literals, local reads and
-# local writes of those. Anything else raises Unsupported, so a caller can fall back to the real mrbc.
+# Covered: a top-level program whose statements are nil, true, false, self, Integer literals, local reads, local writes
+# of those, and method calls on simple operands (a self call or a call with an explicit receiver, with positional
+# arguments of those forms, and the binary operators with their own opcodes, + and - with a literal as ADDI and SUBI).
+# Anything else raises Unsupported, so a caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
 # follow mrbgems/mruby-compiler/core/codegen.c:
@@ -25,8 +27,18 @@ module MrbcRb
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
+    SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72,
+    ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
+
+  # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
+  BINARY_OPS = { :+ => :ADD, :- => :SUB, :* => :MUL, :/ => :DIV, :== => :EQ, :< => :LT, :<= => :LE, :> => :GT,
+                 :>= => :GE }.freeze
+
+  # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
+  SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
+                   Prism::LocalVariableReadNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -50,6 +62,7 @@ module MrbcRb
       @line = 0
       @nregs = 0
       @pool = []
+      @syms = []
       @last = nil # [name, operands, start] of the last instruction, for the RETURN peephole
     end
 
@@ -79,6 +92,8 @@ module MrbcRb
         write_local(node, last: last)
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode
         last ? value_in_register(node) : nil
+      when Prism::CallNode
+        call(node)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
       end
@@ -96,13 +111,66 @@ module MrbcRb
         # The fork loads the value into a temporary first and then removes that move (see gen_move), so the temporary
         # still counts toward nregs.
         temp
-        if value.is_a?(Prism::LocalVariableReadNode)
+        case value
+        when Prism::LocalVariableReadNode
           emit(:MOVE, local, local_register(value.name))
+        when Prism::CallNode
+          # A call or operator result stays in its temporary, and the move into the local is kept (gen_move's peephole
+          # only removes a move after a load).
+          emit(:MOVE, local, call(value))
         else
           value_into(value, local)
         end
         nil
       end
+    end
+
+    # A method call, as the fork's codegen emits it: the result register is the first temporary, the receiver is copied
+    # into it, and the arguments follow it. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the copy.
+    # Returns the result register.
+    def call(node)
+      name = node.name
+      # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
+      recv = node.receiver unless node.receiver.is_a?(Prism::SelfNode)
+      args = node.arguments&.arguments || []
+      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !SIMPLE_VALUES.include?(a.class) }
+      raise Unsupported, 'call with a non-simple receiver' if recv && !SIMPLE_VALUES.include?(recv.class)
+
+      a = temp
+      if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
+         (1..0xff).cover?(args[0].value)
+        value_into(recv, a)
+        emit(name == :+ ? :ADDI : :SUBI, a, args[0].value)
+        @nregs = [@nregs, a + 3].max
+        return a
+      end
+      if recv && BINARY_OPS.key?(name) && args.size == 1
+        value_into(recv, a)
+        value_into(args[0], a + 1)
+        emit(BINARY_OPS.fetch(name), a)
+        @nregs = [@nregs, a + 3].max
+        return a
+      end
+
+      value_into(recv, a) if recv
+      args.each_with_index { |arg, i| value_into(arg, a + 1 + i) }
+      sym = sym_index(name)
+      n = args.size
+      if recv
+        n.zero? ? emit(:SEND0, a, sym) : emit(:SEND, a, sym, n)
+      else
+        n.zero? ? emit(:SSEND0, a, sym) : emit(:SSEND, a, sym, n)
+      end
+      @nregs = [@nregs, a + n + 2].max
+      a
+    end
+
+    # Symbols are numbered in order of first use, as the fork's new_sym does.
+    def sym_index(name)
+      index = @syms.index(name) || (@syms << name).size - 1
+      raise Unsupported, 'more than 255 symbols' if index > 0xff
+
+      index
     end
 
     # The fork's gen_return: a MOVE or a constant load right before RETURN is folded into the return.
@@ -141,6 +209,9 @@ module MrbcRb
       when Prism::SelfNode then emit(:LOADSELF, dst)
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
+      when Prism::CallNode
+        result = call(node)
+        emit(:MOVE, dst, result) unless result == dst
       else raise Unsupported, "value #{node.class.name.split('::').last}"
       end
     end
@@ -237,8 +308,13 @@ module MrbcRb
     end
 
     def irep_record
-      body = [@nlocals, @nregs, 0].pack('nnn') + [0, @code.size].pack('nN') + @code.pack('C*') + pool_block + [0].pack('n')
+      body = [@nlocals, @nregs, 0].pack('nnn') + [0, @code.size].pack('nN') + @code.pack('C*') + pool_block + syms_block
       [body.bytesize + 4].pack('N') + body
+    end
+
+    # write_syms_block: the count, then per symbol its length, its name and a NUL (dump.c).
+    def syms_block
+      [@syms.size].pack('n') + @syms.map { |s| name = s.to_s.b; [name.bytesize].pack('n') + name + "\0".b }.join
     end
 
     # write_pool_block: the count, then per entry its tag and data. A big integer is its length, its base (as a byte),

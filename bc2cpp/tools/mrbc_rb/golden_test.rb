@@ -28,7 +28,30 @@ SNIPPETS = [
   "x = -255\ny = -256",
   "x = 40000\ny = -40000",
   "x = 2147483647\ny = -2147483648",
-  "x = 1\n\ny = x\n\nx"
+  "x = 1\n\ny = x\n\nx",
+  # sends (milestone 2)
+  'p',
+  'p 1',
+  "x = 1\np x",
+  "x = 1\np(x, 2)",
+  'foo(1, 2)',
+  "x = 1\nx.foo",
+  "x = 1\nx.foo(2)",
+  "p\np",
+  "x = 1\np x\np x",
+  "x = nil\nself.foo(x)",
+  # ADDI and SUBI on a literal
+  "x = 1\nx + 2",
+  "x = 1\nx - 3",
+  "x = 1\nx = x + 1",
+  "x = 1\nx + 255",
+  "x = 1\ny = 2\nx + y",
+  "x = 1\nx * 2",
+  "x = 1\nx / 2",
+  "x = 1\ny = 2\nx - y",
+  "x = 1\ny = 2\nx < y",
+  "x = 1\ny = 2\nx == y",
+  "x = 1\nx >= 3"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
