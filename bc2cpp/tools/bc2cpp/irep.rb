@@ -264,12 +264,20 @@ RiteImage = Struct.new(:bytes)
 def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
   paths = Array(src_paths)
-  # BC2CPP_MRBC_RB=1: source files the Ruby emitter (bc2cpp/tools/mrbc_rb) covers are compiled without mrbc (several files as
-  # the one program mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc as before.
+  # The Ruby emitter (bc2cpp/tools/mrbc_rb) compiles the source files it covers without mrbc (several files as the one program
+  # mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc. It is the default:
+  #   BC2CPP_MRBC_RB=0       always mrbc
+  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this)
+  mode = ENV.fetch('BC2CPP_MRBC_RB', '')
   reason = 'disabled'
-  if ENV['BC2CPP_MRBC_RB'] == '1'
+  unless mode == '0'
     image, reason = mrbc_rb_image(paths)
     if image
+      if mode == 'verify'
+        system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
+        expected = File.binread(mrb_path)
+        abort "mrbc_rb: bytes differ from mrbc for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless expected == image
+      end
       mrbc_rb_log(paths.size, 'emitter', '-', symbol)
       File.binwrite(mrb_path, image)
       return RiteImage.new(image)
@@ -299,8 +307,14 @@ def mrbc_rb_image(paths)
             MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
           end
   [image, nil]
-rescue MrbcRb::Unsupported => e
-  [nil, "Unsupported(#{e.message})"]
+rescue MrbcRb::Error => e
+  # Unsupported, or a source Prism rejects (mrbc then reports the syntax error itself).
+  [nil, "#{e.class.name.split('::').last}(#{e.message})"]
+rescue StandardError => e
+  # An emitter bug must not break a build that mrbc can serve; BC2CPP_MRBC_RB=verify (CI) still fails loudly.
+  raise if ENV['BC2CPP_MRBC_RB'] == 'verify'
+
+  [nil, "Crash(#{e.class}: #{e.message[0, 100]})"]
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.

@@ -60,6 +60,8 @@ jobs:
       - name: bc2cpp world ${{ matrix.world }}
         env:
           OPTCARROT_COMPILED_FLAGS: -O2
+          # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference.
+          BC2CPP_MRBC_RB: verify
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
 
   # mrbc_rb (bc2cpp/tools/mrbc_rb): the Ruby RITE emitter, compared byte for byte with the fork's mrbc -g built from the
@@ -94,6 +96,8 @@ jobs:
     env:
       RUBY_YJIT_ENABLE: "1"
       BC2CPP_WORLD_FULL: "1"
+      # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference.
+      BC2CPP_MRBC_RB: verify
     steps:
       - run: git config --global submodule.fetchJobs 4
       - uses: actions/checkout@v7
