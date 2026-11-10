@@ -143,7 +143,20 @@ SNIPPETS = [
   "class Foo; x = [1]; end",
   "x = 1\nclass Foo; x = 2; end\nx",
   "class Foo\n  x = 1\n  if x\n    2\n  end\nend",
-  "class Foo\n  x = 1\n  if x\n    2\n  else\n    3\n  end\n  x\nend"
+  "class Foo\n  x = 1\n  if x\n    2\n  else\n    3\n  end\n  x\nend",
+  # method definitions (milestone 6)
+  "def foo\n  1\nend",
+  "def foo\nend",
+  "def foo\n  1\nend\nfoo",
+  "x = 1\ndef foo\n  2\nend",
+  "def foo(a)\n  a\nend",
+  "def foo(a, b)\n  b\nend",
+  "def foo\n  1\nend\nx = 2",
+  "def foo(a)\n  c = a\n  c\nend",
+  "x = 1\nx[2]",
+  "x = 1\nx[]",
+  "module Foo\n  def bar\n    1\n  end\nend",
+  "# frozen_string_literal: true\ndef foo\n  'a'\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)

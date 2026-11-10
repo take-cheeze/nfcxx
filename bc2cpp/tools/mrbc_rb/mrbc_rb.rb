@@ -31,15 +31,15 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, FSTRING: 119,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
-    CLASS: 103, MODULE: 104, EXEC: 105
+    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
   BINARY_OPS = { :+ => :ADD, :- => :SUB, :* => :MUL, :/ => :DIV, :== => :EQ, :< => :LT, :<= => :LE, :> => :GT,
-                 :>= => :GE }.freeze
+                 :>= => :GE, :[] => :GETIDX }.freeze
 
   # Predicates the fork folds at compile time (no test is emitted for them).
   LITERAL_PREDICATES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::StringNode].freeze
@@ -50,6 +50,8 @@ module MrbcRb
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
+
+  RITE_LV_NULL_MARK = 0xffff
 
   INT32_MIN = -0x8000_0000
   INT32_MAX = 0x7fff_ffff
@@ -104,7 +106,41 @@ module MrbcRb
       self
     end
 
+    # A method body (scope_body for def): self, the parameters and the body's locals, then the hidden block slot. ENTER
+    # takes the number of required parameters in its upper bits (24 = n1:m5:o5:r1:m5:k5:d1:b1 in ops.h). Only required
+    # positional parameters are covered.
+    def compile_method(node)
+      params = node.parameters
+      requireds = params ? params.requireds : []
+      other = params && (params.optionals.any? || params.rest || params.posts.any? || params.keywords.any? ||
+                         params.keyword_rest || params.block)
+      raise Unsupported, 'method parameters other than required ones' if other || !requireds.all? { |r| r.is_a?(Prism::RequiredParameterNode) }
+
+      # Registers: self, the parameters, the hidden block slot (no name), then the body's own locals (mrbc's order).
+      param_names = requireds.map(&:name)
+      set_locals(param_names + [nil] + (node.locals - param_names))
+      @nregs = @nlocals + 1
+      @line = node.location.start_line
+      emit(:ENTER, requireds.size << 18)
+      stmts = node.body ? node.body.body : []
+      value_reg = if stmts.empty?
+                    t = temp
+                    @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
+                    emit(:LOADNIL, t)
+                    t
+                  else
+                    generate(stmts, val: true)
+                  end
+      return_value(value_reg)
+      self
+    end
+
     attr_reader :locals, :nlocals, :children
+
+    # The name of each register from R1: a method's block slot has none (its LVAR entry is the null mark).
+    def lv_names
+      @locals
+    end
 
     # This irep and its children, depth first: the order of the irep records, the debug records and the LVAR records.
     def scopes
@@ -124,6 +160,20 @@ module MrbcRb
       @locals = locals.dup
       @nlocals = @locals.size + 1
       @nregs = @nlocals
+    end
+
+    # A def in a body: TDEF stores the method's symbol in the result register and refers to a child irep.
+    def def_statement(node, last:)
+      raise Unsupported, 'singleton or receiver def' if node.receiver
+      raise Unsupported, 'def with a name that is not plain' unless node.name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/)
+
+      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_method(node)
+      index = @children.size - 1
+      raise Unsupported, 'more than 255 child ireps' if index > 0xff
+
+      t = temp
+      emit(:TDEF, t, sym_index(node.name), index)
+      last ? t : nil
     end
 
     # Generates the statements of a body. The last one is generated as a value when +val+ is set; its register is returned.
@@ -150,6 +200,8 @@ module MrbcRb
         const_write(node, last: last)
       when Prism::GlobalVariableWriteNode
         global_write(node, last: last)
+      when Prism::DefNode
+        def_statement(node, last: last)
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
       when Prism::IfNode
@@ -254,7 +306,7 @@ module MrbcRb
     # scope_body: the index of the child irep, which is the next entry of the parent's reps (a body with no statements
     # creates none).
     def child_body(locals, stmts, val)
-      @children << Compiler.new(@filename).compile_body(locals, stmts, val)
+      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_body(locals, stmts, val)
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
@@ -461,6 +513,10 @@ module MrbcRb
         @nregs = [@nregs, a + 3].max
         return a
       end
+      # `recv[index]` is GETIDX and `recv[]` a plain SEND0 (both verified); other index forms are not covered yet.
+      raise Unsupported, 'index call with several arguments' if name == :[] && args.size > 1
+      raise Unsupported, 'index assignment' if name == :[]=
+
       if recv && BINARY_OPS.key?(name) && args.size == 1
         value_into(recv, a)
         value_into(args[0], a + 1)
@@ -497,7 +553,7 @@ module MrbcRb
       # label checks on the last instruction, codegen.c).
       if @labels.include?(@code.size) || @labels.include?(start)
         emit(:RETURN, reg)
-      elsif name == :MOVE && operands[0] == reg
+      elsif name == :MOVE && operands[0] == reg && operands[0] >= @nlocals # a MOVE into a local is kept (verified with mrbc -v)
         truncate(start)
         emit(:RETURN, operands[1])
       elsif %i[LOADSELF LOADNIL LOADTRUE LOADFALSE].include?(name) && operands[0] == reg
@@ -609,11 +665,12 @@ module MrbcRb
       @last = [name, operands, start]
       @code << OP.fetch(name)
       case name
+      when :ENTER then byte((operands[0] >> 16) & 0xff); short(operands[0] & 0xffff)
       when :LOADI16 then byte(operands[0]); short(operands[1])
       when :LOADI32 then byte(operands[0]); short(operands[1] >> 16); short(operands[1] & 0xffff)
       else operands.each { |v| byte(v) }
       end
-      track(operands.first) unless name == :STOP
+      track(operands.first) unless name == :STOP || name == :ENTER # ENTER's operand is an argument spec
       track(operands[1]) if name == :MOVE
       (@code.size - start).times { @lines << @line }
     end
@@ -636,7 +693,7 @@ module MrbcRb
 
     def write_rite
       # The LVAR section exists only when some irep has locals, as the fork omits it otherwise (lv_defined_p in dump.c).
-      lvar = scopes.any? { |s| !s.locals.empty? } ? lvar_section : ''.b
+      lvar = scopes.any? { |s| !s.lv_names.empty? } ? lvar_section : ''.b
       sections = irep_section + debug_section + lvar + sized("END\0", ''.b)
       ['RITE0400', 20 + sections.bytesize].pack('a8N') + 'MATZ0000'.b + sections
     end
@@ -720,10 +777,14 @@ module MrbcRb
 
     # The names of all ireps' locals, in order of first appearance over the tree, then one reference per local of each irep
     # (create_lv_sym_table and write_lv_record in dump.c).
+    # LVAR: the names of all ireps, once each in depth-first order, then per irep one entry for each register from R1
+    # (the index of its name, or the null mark for an unnamed register).
     def lvar_section
-      names = scopes.flat_map { |s| s.locals.map(&:to_s) }.uniq
+      names = scopes.flat_map { |s| s.lv_names.compact.map(&:to_s) }.uniq
       syms = [names.size].pack('N') + names.map { |n| [n.bytesize].pack('n') + n.b }.join
-      refs = scopes.flat_map { |s| (1...s.nlocals).map { |reg| names.index(s.locals[reg - 1].to_s) } }
+      refs = scopes.flat_map do |s|
+        (0...s.nlocals - 1).map { |i| (name = s.lv_names[i]) ? names.index(name.to_s) : RITE_LV_NULL_MARK }
+      end
       sized('LVAR', syms + refs.pack('n*'))
     end
   end
