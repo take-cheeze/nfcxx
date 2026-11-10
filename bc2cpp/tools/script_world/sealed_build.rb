@@ -61,12 +61,15 @@ module ScriptSealedBuild
       #include <mruby/string.h>
       #include <mruby/variable.h>
       #include <cstdio>
+      #include <cstdlib>
       extern "C" void mrb_script_benchmark_gem_init(mrb_state*) {}
       extern "C" void mrb_script_benchmark_gem_final(mrb_state*) {}
       int main(int argc, char** argv) {
         mrb_state* M = mrb_open();
         if (!M) { std::fprintf(stderr, "cannot initialize mruby\\n"); return 1; }
         if (M->exc) { mrb_print_error(M); mrb_close(M); return 1; }
+        // SCRIPT_WORLD_NO_GC=1: no collection at all, the bound on what the GC costs a batch program.
+        if (std::getenv("SCRIPT_WORLD_NO_GC")) M->gc.disabled = TRUE;
         mrb_value args = mrb_ary_new_capa(M, argc);
         for (int i = 1; i < argc; ++i) mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[i]));
         mrb_define_global_const(M, "ARGV", args);
