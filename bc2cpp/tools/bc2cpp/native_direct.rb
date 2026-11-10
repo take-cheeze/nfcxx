@@ -148,10 +148,19 @@ module NativeDirect
       owner = "#{owner}.singleton" if owner && kind != 'method' && kind != 'private_method'
       table[name][:owners] << owner
     end
-    # An engine gem's ROM entry is the registration it replaced, one per entry (so each spelled name has an owner).
-    NativeOwnerMap.rom_bindings(text).each do |expr, singleton, name, _fn|
+    # An engine gem's ROM entry is the registration it replaced: one owner per entry. The instance half of a module
+    # function is no registration of its own (mrb_define_module_function spells the name once), so it adds neither an
+    # owner nor a spelling.
+    rows = NativeOwnerMap.rom_bindings(text)
+    rows.each do |expr, singleton, name, fn|
       owner = owners[expr]
-      table[name][:owners] << (owner && singleton ? "#{owner}.singleton" : owner)
+      if singleton
+        table[name][:owners] << (owner && "#{owner}.singleton")
+      elsif rows.any? { |e, s, n, f| s && e == expr && n == name && f == fn }
+        table[name][:literals] -= 1
+      else
+        table[name][:owners] << owner
+      end
     end
     table.default_proc = nil
     table
