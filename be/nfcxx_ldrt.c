@@ -665,3 +665,12 @@ void __nfcxx_ubsan_report(int kind, const char *file, int line)
   abort();
 }
 #endif /* defined(__x86_64__) */
+
+/* SSE2 _mm_pause (the spin-loop hint): the host header declares it inline (gnu_inline), so gcc inlines every call and
+   there is no external body; Path B does not inline, and its calls need this definition. */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__ELF__)
+void nfcxx_mm_pause(void) { __builtin_ia32_pause(); }
+void _mm_pause(void) { nfcxx_mm_pause(); }
+/* a C++ caller names the mangled symbol (the header's function is in the C++ namespace, _Z9_mm_pausev) */
+__asm__(".globl _Z9_mm_pausev\n.set _Z9_mm_pausev, nfcxx_mm_pause");
+#endif

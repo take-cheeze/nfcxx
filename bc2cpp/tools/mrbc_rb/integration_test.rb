@@ -13,25 +13,28 @@ unless oracle && File.executable?(oracle)
   exit 0
 end
 
+# Each case is its files in command-line order (several files are one program to mrbc).
 SOURCES = {
-  'simple.rb' => "x = 1\nif x\n  p x\nelse\n  p 2\nend\n",
-  'strings.rb' => "x = \"ab\"\ny = [x, 2]\np y\n",
-  'unless.rb' => "x = nil\nunless x\n  p 1\nend\n"
+  'simple.rb' => { 'simple.rb' => "x = 1\nif x\n  p x\nelse\n  p 2\nend\n" },
+  'strings.rb' => { 'strings.rb' => "x = \"ab\"\ny = [x, 2]\np y\n" },
+  'unless.rb' => { 'unless.rb' => "x = nil\nunless x\n  p 1\nend\n" },
+  'multi' => { 'm1.rb' => "x = 1\ndef f(a); a + x; end\n", 'm2.rb' => "y = x\np y, __FILE__\n", 'm3.rb' => "# c\nclass A\n  def g; 1; end\nend\nz = y\n" }
 }.freeze
 
 failures = 0
-SOURCES.each do |name, src|
+SOURCES.each do |name, files|
   Dir.mktmpdir('mrbc_rb_int') do |dir|
-    File.binwrite(File.join(dir, name), src)
+    files.each { |file, src| File.binwrite(File.join(dir, file), src) }
+    names = files.keys
     Dir.chdir(dir) do
-      ENV.delete('BC2CPP_MRBC_RB')
+      ENV['BC2CPP_MRBC_RB'] = '0'
       ENV['MRBC'] = oracle
-      mrbc_ireps, mrbc_root = compile_ireps([name], 'int', dir, mrbc: oracle)
-      ENV['BC2CPP_MRBC_RB'] = '1'
-      emitter_ireps, emitter_root = compile_ireps([name], 'int', dir)
+      mrbc_ireps, mrbc_root = compile_ireps(names, 'int', dir, mrbc: oracle)
+      ENV['BC2CPP_MRBC_RB'] = 'verify'
+      emitter_ireps, emitter_root = compile_ireps(names, 'int', dir)
       ENV.delete('BC2CPP_MRBC_RB')
       # The emitter must take the file itself, or the comparison would only be mrbc against mrbc.
-      covered = !mrbc_rb_image(name).nil?
+      covered = !mrbc_rb_image(names).first.nil?
       failures += 1 unless covered
       same = covered && mrbc_root == emitter_root && mrbc_ireps.keys.sort == emitter_ireps.keys.sort &&
              mrbc_ireps.keys.all? { |k| mrbc_ireps[k].instructions == emitter_ireps[k].instructions && mrbc_ireps[k].pool == emitter_ireps[k].pool && mrbc_ireps[k].syms == emitter_ireps[k].syms }

@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
     -o) out=$2; shift ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
-    -I?*|-D?*|-U?*|-std=c++*|--freestanding) opts+=("$1") ;;
+    -I?*|-D?*|-U?*|-std=c++*|--freestanding|--cuda) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
     *) src=$1 ;;
   esac

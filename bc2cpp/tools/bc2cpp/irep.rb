@@ -264,22 +264,57 @@ RiteImage = Struct.new(:bytes)
 def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
   paths = Array(src_paths)
-  # BC2CPP_MRBC_RB=1: one source file the Ruby emitter (bc2cpp/tools/mrbc_rb) covers is compiled without mrbc; any other
-  # input, or a construct the emitter does not cover yet, goes to mrbc as before.
-  if paths.size == 1 && ENV['BC2CPP_MRBC_RB'] == '1' && (image = mrbc_rb_image(paths.first))
-    File.binwrite(mrb_path, image)
-    return RiteImage.new(image)
+  # The Ruby emitter (bc2cpp/tools/mrbc_rb) compiles the source files it covers without mrbc (several files as the one program
+  # mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc. It is the default:
+  #   BC2CPP_MRBC_RB=0       always mrbc
+  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this)
+  mode = ENV.fetch('BC2CPP_MRBC_RB', '')
+  reason = 'disabled'
+  unless mode == '0'
+    image, reason = mrbc_rb_image(paths)
+    if image
+      if mode == 'verify'
+        system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
+        expected = File.binread(mrb_path)
+        abort "mrbc_rb: bytes differ from mrbc for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless expected == image
+      end
+      mrbc_rb_log(paths.size, 'emitter', '-', symbol)
+      File.binwrite(mrb_path, image)
+      return RiteImage.new(image)
+    end
   end
+  mrbc_rb_log(paths.size, 'mrbc', reason, symbol)
   system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
   RiteImage.new(File.binread(mrb_path))
 end
 
-# The RITE binary of +path+ from the Ruby emitter, or nil when it does not cover the file.
-def mrbc_rb_image(path)
+# BC2CPP_MRBC_RB_LOG=<file>: one line per run_mrbc call: "<inputs>\t<emitter|mrbc>\t<reason>\t<symbol>", where reason is
+# disabled or Unsupported(<message>) for an mrbc run, and "-" for the emitter.
+def mrbc_rb_log(count, served_by, reason, symbol)
+  log = ENV['BC2CPP_MRBC_RB_LOG']
+  return if log.nil? || log.empty?
+
+  File.open(log, 'a') { |f| f.write("#{count}\t#{served_by}\t#{reason.to_s.tr("\n\t", '  ')}\t#{symbol}\n") }
+end
+
+# [the RITE binary of the source files +paths+ from the Ruby emitter, nil] or [nil, "Unsupported(message)"] when it does not
+# cover them.
+def mrbc_rb_image(paths)
   require_relative '../mrbc_rb/mrbc_rb'
-  MrbcRb.compile(File.binread(path), path)
-rescue MrbcRb::Unsupported
-  nil
+  image = if paths.size == 1
+            MrbcRb.compile(File.binread(paths.first), paths.first)
+          else
+            MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
+          end
+  [image, nil]
+rescue MrbcRb::Error => e
+  # Unsupported, or a source Prism rejects (mrbc then reports the syntax error itself).
+  [nil, "#{e.class.name.split('::').last}(#{e.message})"]
+rescue StandardError => e
+  # An emitter bug must not break a build that mrbc can serve; BC2CPP_MRBC_RB=verify (CI) still fails loudly.
+  raise if ENV['BC2CPP_MRBC_RB'] == 'verify'
+
+  [nil, "Crash(#{e.class}: #{e.message[0, 100]})"]
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.

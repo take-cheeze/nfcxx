@@ -539,7 +539,7 @@
 (function "_ZZ4mainENKUlvE_clEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "_ZZ4mainEUlvE_"))))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (const (struct "_ZZ4mainEUlvE_")))) 8 8)
   (store (ptr (const (struct "_ZZ4mainEUlvE_"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZZ4mainEUlvE_"))) (load (ptr (const (struct "_ZZ4mainEUlvE_"))) $"tmp"))
@@ -550,7 +550,7 @@
 (function "_ZZ4mainENUlvE_D1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_ZZ4mainEUlvE_")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_ZZ4mainEUlvE_"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -603,7 +603,7 @@
 (function "_ZZ4mainENUlvE_D2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_ZZ4mainEUlvE_")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_ZZ4mainEUlvE_"))) 8 8)
   (store (ptr (struct "_ZZ4mainEUlvE_")) $"tmp" %0)
   (let %1 (ptr (struct "_ZZ4mainEUlvE_")) (load (ptr (struct "_ZZ4mainEUlvE_")) $"tmp"))
@@ -613,7 +613,7 @@
 (function "_ZZ4mainEN3LocC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "Loc")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "Loc"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (array 1 (ptr void)) 8 8)
@@ -656,7 +656,7 @@
 (function "_ZZ4mainEN3LocC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "Loc")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "Loc"))) 8 8)
   (store (ptr (struct "Loc")) $"tmp" %0)
   (let %1 (ptr (struct "Loc")) (load (ptr (struct "Loc")) $"tmp"))
@@ -666,7 +666,7 @@
 (function "_ZZ4mainEN3LocD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "Loc")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "Loc"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -719,7 +719,7 @@
 (function "_ZZ4mainEN3LocD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "Loc")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "Loc"))) 8 8)
   (store (ptr (struct "Loc")) $"tmp" %0)
   (let %1 (ptr (struct "Loc")) (load (ptr (struct "Loc")) $"tmp"))

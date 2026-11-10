@@ -41,6 +41,11 @@ module NativeIvarScopes
     File.exist?(path) ? File.realpath(path) : File.expand_path(path)
   end
 
+  # A file is audited when its digest is the pin, or one of the pin's list (a file audited at several revisions).
+  def pinned?(text, pin)
+    Array(pin).include?(Digest::SHA256.hexdigest(text))
+  end
+
   def analyze(native_paths, ruby_paths, root: BC2CPP_WORLD_ROOT)
     return [{}, 'disabled'] if ENV['BC2CPP_NATIVE_IVAR_SCOPES'] == '0'
 
@@ -51,7 +56,7 @@ module NativeIvarScopes
       return [{}, "missing audit input: #{relative}"] unless paths.include?(path)
 
       text = SourceText.read(path, 'native ivar scopes', binary: true)
-      return [{}, "audit changed: #{relative}"] unless text && Digest::SHA256.hexdigest(text) == digest
+      return [{}, "audit changed: #{relative}"] unless text && pinned?(text, digest)
 
       audited[path] = text
     end

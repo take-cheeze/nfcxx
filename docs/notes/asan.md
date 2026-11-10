@@ -8,7 +8,7 @@ from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks
 
 ## qbe backend (default)
 
-`nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
+`nfcxx -fsanitize=address` selects the qbe backend (Path B is the default backend on x86-64 Linux, but has no ASan instrumentation) and sets `NFCXX_ASAN=1`. cproc, patched by
 the `nfcxx-asan-combined` branch of take-cheeze/cproc (commit a44a644, which `3rd/cproc` is pinned to), then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):

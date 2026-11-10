@@ -7,7 +7,7 @@ tested with `tests/lib/run.sh`.
 ## Enabling it
 
 ```
-./nfcxx --freestanding hello.cpp -o hello          # default backend (qbe)
+./nfcxx --freestanding hello.cpp -o hello          # qbe (freestanding is not Path B)
 ./nfcxx --freestanding --backend=gcc hello.cpp -o hello
 ```
 

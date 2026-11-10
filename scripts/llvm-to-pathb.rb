@@ -24,14 +24,16 @@
 # Written in the subset of Ruby that the mruby interpreter (scripts/mrb) runs: string scanning by index, no keyword
 # arguments, no regular expressions.
 
+# A refusal or a malformed input ends the translation with an exception; main reports it and returns the status.
+class ConvertRefused < StandardError; end
+class ConvertMalformed < StandardError; end
+
 def refuse(why)
-  $stderr.puts "refused: #{why}"
-  exit 3
+  raise ConvertRefused, why
 end
 
 def malformed(why)
-  $stderr.puts "error: #{why}"
-  exit 1
+  raise ConvertMalformed, why
 end
 
 # LLVM scalar type -> [IR type, size in bytes]. The IR's integer types are signed; unsigned forms are chosen per
@@ -1780,10 +1782,22 @@ class Translator
   end
 end
 
-args = ARGV.dup
-wasm = args.delete("--wasm") ? true : false
-if args.size != 1
-  $stderr.puts "usage: scripts/mrb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir"
-  exit 1
+def main(argv)
+  args = argv.dup
+  wasm = args.delete("--wasm") ? true : false
+  if args.size != 1
+    $stderr.puts "usage: scripts/mrb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir"
+    return 1
+  end
+  Translator.new(args[0], wasm).run
+  0
+rescue ConvertRefused => e
+  $stderr.puts "refused: #{e.message}"
+  3
+rescue ConvertMalformed => e
+  $stderr.puts "error: #{e.message}"
+  1
 end
-Translator.new(args[0], wasm).run
+
+rc = main(ARGV)
+exit(rc) if rc != 0
