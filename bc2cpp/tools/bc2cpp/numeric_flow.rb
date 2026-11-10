@@ -364,7 +364,7 @@ module NumericFlow
         # Until #unvirtual stores it, the last out of i is the content of ins[s] (an earlier noreturn visit may have
         # stored another).
         outs[i] = nil
-        record_delta(log, dpos, i, st, out)
+        record_delta(log, dpos, i, st, out, step, c)
         ins[s] = VIRTUAL
         cursor = s
         cursor_buf = out
@@ -420,14 +420,43 @@ module NumericFlow
 
   # Logs where +out+ differs from +st+, the out and entry state of instruction +i+: a count, then position/value
   # pairs. Revisits append a new record; dpos[i] names the latest.
-  def record_delta(log, dpos, i, st, out)
+  # Only the full solver calls this: Ctx.for_run always supplies the element block before the provenance block.
+  def record_delta(log, dpos, i, st, out, step, c)
     at = log.size
     dpos[i] = at
     log << 0
     return if out.equal?(st)
 
+    # Ordinary transfers write one register (and its element fact), plus provenance/test
+    # facts. Only SETIV and operations that can run Ruby change ivar slots. Calls and the
+    # three-register immediate form retain the full scan.
     k = 0
     size = st.size
+    kind = step.kind
+    unless kind == K_CALL || kind == K_IMM_LV
+      r = kind == K_RESCUE ? step.b : step.a
+      if kind != K_SETIV && kind != K_SETIDX && r && r < c.nregs
+        value = out[r]
+        log << r << value unless value.equal?(st[r])
+        at_elem = c.elem_base + r
+        value = out[at_elem]
+        log << at_elem << value unless value.equal?(st[at_elem])
+      end
+      if kind == K_SETIV
+        if (slot = c.slot_of[step.ivar])
+          value = out[slot]
+          log << slot << value unless value.equal?(st[slot])
+        end
+      elsif step.silent != S_NONE
+        k = c.nregs
+        while k < c.elem_base
+          value = out[k]
+          log << k << value unless value.equal?(st[k])
+          k += 1
+        end
+      end
+      k = c.pb
+    end
     while k < size
       v = out[k]
       log << k << v unless v.equal?(st[k])
