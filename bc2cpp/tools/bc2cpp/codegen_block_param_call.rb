@@ -155,6 +155,8 @@ module BlockParamCall
   # included), no method_missing on NilClass, and native `call` only on Proc and Method.
   def block_param_nil_call_dead?
     return @block_param_nil_call_dead unless @block_param_nil_call_dead.nil?
+    # A body compiled without the program's world (a resumable variant) must not pin the answer for the rest.
+    return false unless block_core_world
 
     @block_param_nil_call_dead = compute_block_param_nil_call_dead
   end

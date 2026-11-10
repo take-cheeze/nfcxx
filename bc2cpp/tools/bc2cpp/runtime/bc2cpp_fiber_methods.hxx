@@ -144,9 +144,9 @@ static void bc2cpp_method_frame_step(mrb_state* M,
     // A block-call suspension: call the block here. A block whose last act is
     // Fiber.yield (Bc2cppTailYield) hands its value back and the fiber yields
     // it; the next resume value is the block's result.
-    mrb_value args = bc2cpp_resume_frame_value(M, result);
     mrb_value blk = bc2cpp_resume_frame_block(M, result);
-    if (!bc2cpp_block_call(M, blk, RARRAY_LEN(args), RARRAY_PTR(args), out,
+    if (!bc2cpp_block_call(M, blk, bc2cpp_resume_frame_argc(suspended),
+                           bc2cpp_resume_frame_argv(suspended), out,
                            &resume))
       return;
   }

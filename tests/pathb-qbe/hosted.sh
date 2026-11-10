@@ -11,7 +11,9 @@ root=$PWD
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] && [ -x "$root/build/qbe/qbe" ] || { echo "hosted: no Path B harness or QBE (see tests/pathb-qbe/run.sh)" >&2; exit 2; }
 fail=0
-PATHB_QBE_ONLY='cases/(hosted_|abi_|vararg_|base_null|gaps_)|multi/abi_c' tests/pathb-qbe/run.sh | tail -3 || fail=1
+# The status of the probes, not of tail: a failing probe fails this script.
+probes=$(PATHB_QBE_ONLY='cases/(hosted_|abi_|vararg_|base_null|gaps_)|multi/abi_c' tests/pathb-qbe/run.sh 2>&1) || fail=1
+printf '%s\n' "$probes" | tail -3
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 NFCXX_PATH=b tests/run.sh | sed 's/^/pathb-driver: /' > "$tmp/run.out"; grep -q FAIL "$tmp/run.out" && { fail=1; grep FAIL "$tmp/run.out"; } || echo "pathb-driver: tests/cases ok"
 src=$root/build/realworld/tinyxml2
@@ -20,5 +22,5 @@ if [ -f "$src/tinyxml2.cpp" ] || { tests/realworld/run.sh >/dev/null 2>&1; [ -f 
     "$tmp/tx"; got=$?
     [ $got = 12 ] && echo "ok   tinyxml2 through Path B" || { echo "FAIL tinyxml2 through Path B: want 12 got $got"; fail=1; }
   else echo "FAIL tinyxml2 through Path B (build)"; head -3 "$tmp/tx.err"; fail=1; fi
-else echo "skip tinyxml2: sources not available"; fi
+else echo "FAIL tinyxml2: sources not available (tests/realworld/run.sh could not fetch them)"; fail=1; fi
 exit $fail

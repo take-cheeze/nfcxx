@@ -4,9 +4,11 @@
 # Usage: nfcxx [--emit-c] [--backend=qbe|gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
-#   qbe (default): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
+#   pathb (default on x86-64 Linux, unless ASan, freestanding, modules, cosmo, --emit-c, --target, -E, -M or -shared is
+#                  asked for; also NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
+#                  A program it does not build is built with qbe instead (docs/notes/pathb-default.md).
+#   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
-#   pathb:         (opt-in; also NFCXX_PATH=b) EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
@@ -69,7 +71,7 @@ eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
 source "$root/scripts/host-sys.sh"   # host_dialect, host_clang_version, host_sys_includes, host_gnu_version
 sanitize=""
-std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
+std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
@@ -634,6 +636,19 @@ if [ $modules = 1 ]; then
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
+# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (ASan, freestanding,
+# modules, cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is built again with qbe, below
+# (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
+default_backend=0
+if [ -z "$backend" ]; then
+  backend=qbe
+  if [ $backend_explicit = 0 ] && [ $asan = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
+     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ] \
+     && [ "$(uname -sm)" = "Linux x86_64" ]; then
+    backend=pathb; default_backend=1
+  fi
+fi
+
 # -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
 # branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
 asan_c=()   # options for every C compile and link of the program
@@ -806,7 +821,9 @@ fi
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/qbe-cc ;;   # for the .c inputs
+       export NFCXX_CC=$root/scripts/qbe-cc   # for the .c inputs
+       # NFCXX_PATHB_C=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
+       [ "${NFCXX_PATHB_C:-}" != gcc ] || export NFCXX_CC=$root/scripts/gcc-cc ;;
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
@@ -900,6 +917,17 @@ fi
 
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
+if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  # -c: one object per C++ file, named as the gcc and qbe backends name it (-o FILE for one file, else basename.o)
+  for f in ${files[@]+"${files[@]}"}; do
+    case $f in
+      -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
+      *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$dst" || exit $? ;;
+    esac
+  done
+  exit 0
+fi
 if [ $backend = pathb ]; then
   ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
   pobjs=(); plink=(); n=0
@@ -909,8 +937,17 @@ if [ $backend = pathb ]; then
       -*|*.o|*.a|*.so) plink+=("$f") ;;
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$o"
+         prc=0
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
+         if [ $prc != 0 ] && [ $default_backend = 1 ]; then
+           # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
+           # the whole program is built again with qbe, which reports its own errors if it fails too
+           echo "nfcxx: Path B did not build $f (status $prc); building with the qbe backend" >&2
+           rm -rf "$ptmp"
+           exec env NFCXX_BACKEND=qbe "$root/nfcxx" "${nfcxx_argv[@]}"
+         fi
+         [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
     esac
   done

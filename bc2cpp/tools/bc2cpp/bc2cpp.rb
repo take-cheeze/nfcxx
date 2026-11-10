@@ -2359,7 +2359,9 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
     }
     // CLASS_BODY_INCLUDE: Module#include (class.c mrb_mod_include) without the by-name send of `include`. Last module
-    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled). Returns the class.
+    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled) unless that is still
+    // class.c's default no-op, as mrb_mod_include tests it. Returns the class.
+    extern "C" mrb_value mrb_do_nothing(mrb_state*, mrb_value);
     [[maybe_unused]] static mrb_value bc2cpp_mod_include(mrb_state* M, mrb_value self, std::initializer_list<mrb_value> args) {
       struct RClass* c = mrb_class_ptr(self);
       mrb_sym included = mrb_intern_lit(M, "included");
@@ -2367,7 +2369,7 @@ BC2CPP_MAIN = lambda do
         mrb_value m = args.begin()[i];
         mrb_check_type(M, m, MRB_TT_MODULE);
         mrb_include_module(M, c, mrb_class_ptr(m));
-        bc2cpp_funcall_argv(M, m, included, 1, &self);
+        if (!mrb_func_basic_p(M, m, included, mrb_do_nothing)) bc2cpp_funcall_argv(M, m, included, 1, &self);
       }
       return self;
     }
@@ -2383,6 +2385,9 @@ BC2CPP_MAIN = lambda do
     }
     [[maybe_unused]] static mrb_value bc2cpp_mod_attr(mrb_state* M, mrb_value self, bool reader, bool writer, std::initializer_list<mrb_value> args) {
       struct RClass* c = mrb_class_ptr(self);
+      // The root context gets its frame stack with the first send, and the env of a cfunc proc needs `ci`: a class body
+      // can run this before any send (the default `included` is no longer one).
+      if (!M->c->ci) mrb_funcall_argv(M, mrb_nil_value(), mrb_intern_lit(M, "nil?"), 0, nullptr);
       int ai = mrb_gc_arena_save(M);
       for (int pass = 0; pass < 2; pass++) {
         if (!(pass == 0 ? reader : writer)) continue;

@@ -46,7 +46,6 @@
 (function "_Z15unused_templateIiET_PVS0_"
   (ret int)
   (params (param %0 "p" (ptr (volatile int))))
-  (weak)
   (slot "p" (ptr (volatile int)) 8 8)
   (store (ptr (volatile int)) $"p" %0)
   (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))

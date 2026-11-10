@@ -31,7 +31,7 @@
 (function "_ZZ4mainENKUliE_clEi"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "_ZZ4mainEUliE_"))))) (param %1 "k" int))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (const (struct "_ZZ4mainEUliE_")))) 8 8)
   (slot "k" int 4 4)
   (store (ptr (const (struct "_ZZ4mainEUliE_"))) $"tmp" %0)
