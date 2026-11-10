@@ -2,9 +2,8 @@
 # bc2cpp world: scripts/sycl-rewrite.rb, nfcxx's SYCL device-side rewrite (the first slice of the SYCL front end), compiled
 # by bc2cpp as a closed world (the script-world build kind, bc2cpp/tools/script_world/) on the mruby fork of the pinned
 # rpg-maker-clone (tests/bc2cpp/fetch.sh). The check: the accepted and refused SYCL sources of tests/gpu/sycl, the usage
-# and missing-file paths, and an uncaught exception, the sealed executable's stdout, stderr and exit status are
-# byte-identical to the mruby interpreter's on the same script (an uncaught exception compares its report without the
-# backtrace: compiled code has no line table). Prints the best-of-N wall time of the interpreter, the compiled build and
+# and missing-file paths, the sealed executable's stdout, stderr and exit status are byte-identical to the mruby
+# interpreter's on the same script. Prints the best-of-N wall time of the interpreter, the compiled build and
 # CRuby on the benchmark source, and the speedup of the compiled build.
 #   SYCL_REWRITE_BENCH_SRC=file  the source to time (default tests/gpu/sycl/vecadd.cpp, 1 KB: the timing is dominated by
 #                                process startup, so this checks the sealed build runs, not how fast it is)
