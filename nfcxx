@@ -642,9 +642,11 @@ fi
 default_backend=0
 if [ -z "$backend" ]; then
   backend=qbe
+  # A .cu input takes the CUDA pipeline (the rewrite, the forced nfcxx_cuda.h include), which only the qbe and gcc
+  # backends run: Path B's per-file compile would see the raw source.
   if [ $backend_explicit = 0 ] && [ $asan = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ] \
-     && [ "$(uname -sm)" = "Linux x86_64" ]; then
+     && [ ${#cu_inputs[@]} = 0 ] && [ "$(uname -sm)" = "Linux x86_64" ]; then
     backend=pathb; default_backend=1
   fi
 fi
@@ -923,7 +925,13 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$dst" || exit $? ;;
+         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$dst" || prc=$?
+         if [ $prc != 0 ]; then
+           # the default backend failed on this file: the object is built again with qbe, which reports its own errors
+           [ $default_backend = 1 ] || exit $prc
+           echo "nfcxx: Path B did not build $f (status $prc); building with the qbe backend" >&2
+           exec env NFCXX_BACKEND=qbe "$root/nfcxx" "${nfcxx_argv[@]}"
+         fi ;;
     esac
   done
   exit 0
