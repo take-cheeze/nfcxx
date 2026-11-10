@@ -131,17 +131,52 @@ module MrbcRb
     raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
 
     # `# frozen_string_literal: true` makes string literals frozen strings (FSTRING), as the fork's parser does.
-    frozen = result.magic_comments.any? { |c| c.key == 'frozen_string_literal' && c.value == 'true' }
+    frozen = frozen_magic_comment?(source)
     compiler = Compiler.new(filename, frozen_strings: frozen)
     return compiler.compile_empty(empty_program_line(source, result)) if result.value.statements.body.empty?
 
     compiler.compile(result.value)
   end
 
+  # The fork's frozen_string_literal magic comment (frozen_magic_comment in parse.y): every comment line before the first token
+  # is searched, the key matching without regard to case and with `-` for `_`, then optional blanks, `:`, blanks and `true` or
+  # `false` (any case, not followed by a word character); the last comment that has the key decides. Only the first 255 bytes of
+  # a comment line count. `=begin` blocks are skipped.
+  def self.frozen_magic_comment?(source)
+    text = source.b
+    frozen = false
+    pos = 0
+    key = 'frozen_string_literal'.b
+    while pos < text.bytesize
+      pos += Regexp.last_match(0).bytesize if text.byteslice(pos..).match(/\A[ \t\f\r\v\n]+/n)
+      rest = text.byteslice(pos..)
+      if rest.start_with?('#')
+        line = rest.byteslice(1..).split("\n", 2).first.to_s.byteslice(0, 255)
+        pos += 1 + (rest.byteslice(1..).index("\n") || rest.bytesize)
+        norm = line.downcase.tr('-', '_')
+        if (m = norm.match(/#{key}[ \t]*:[ \t]*/n))
+          value = m.post_match
+          if value.match?(/\Atrue(?![a-z0-9_])/n) then frozen = true
+          elsif value.match?(/\Afalse(?![a-z0-9_])/n) then frozen = false
+          end
+        end
+      elsif (pos.zero? || text.getbyte(pos - 1) == 10) && rest.start_with?('=begin')
+        endpos = text.index(/^=end/n, pos) or break
+        pos = text.index("\n", endpos) || text.bytesize
+      else break
+      end
+    end
+    frozen
+  end
+
   # The line the fork stamps on the code of a program without statements (milestone 13): the line the lexer ended on, which
   # is one plus the newlines before `__END__` (or the end of the file), and one more when a comment runs into the end of the
   # file without its newline.
   def self.empty_program_line(source, result)
+    # A program of semicolons only is stamped with the line of the first one (verified with mrbc -v).
+    semicolon = Prism.lex(source).value.map(&:first).find { |t| t.type == :SEMICOLON }
+    return semicolon.location.start_line if semicolon
+
     text = source.b
     text = text.byteslice(0, result.data_loc.start_offset) if result.data_loc
     line = 1 + text.count("\n")
@@ -3481,8 +3516,6 @@ module MrbcRb
       when Prism::SymbolNode
         emit(:SYMBOL, reg, pool_index([:str, elem.unescaped.b]))
       when Prism::InterpolatedSymbolNode, Prism::InterpolatedStringNode
-        raise Unsupported, 'multi-line symbol list with interpolation' if array.location.start_line != array.location.end_line
-
         parts = [[:lit, ''.b]]
         elem.parts.each do |part|
           case part
@@ -3502,7 +3535,7 @@ module MrbcRb
           emit(:SYMBOL, reg, pool_index([:str, parts[0][1]]))
           return
         end
-        dstr_at(parts, reg)
+        word_dstr_at(parts, reg)
         emit(:INTERN, reg) if intern
       else raise Unsupported, "symbol list element #{elem.class.name.split('::').last}"
       end
@@ -4787,6 +4820,23 @@ module MrbcRb
         byte, j = escape_operand(source, i + 1)
         [[byte & 0x9f].pack('C'), j]
       else [c.b, i + 1]
+      end
+    end
+
+    # dstr_at for a word of a %W or %I list: the literals keep the line of the list (hold_line), but an interpolated
+    # expression is a node the fork enters, so it takes its own line, which then stays.
+    def word_dstr_at(parts, base)
+      saved = @hold_line
+      parts.each_with_index do |(kind, v), i|
+        reg = i.zero? ? base : base + 1
+        if kind == :lit
+          emit(:STRING, reg, pool_index([:str, v]))
+        else
+          @hold_line = false
+          interpolation_into(v, reg)
+          @hold_line = saved
+        end
+        emit(:STRCAT, base) unless i.zero?
       end
     end
 
