@@ -29,9 +29,10 @@ module MrbcRb
   OP = {
     NOP: 0, MOVE: 1, LOADL: 2, LOADI8: 3, LOADINEG: 4, LOADI__1: 5,
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
-    LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
+    LOADI16: 14, LOADI32: 15, LOADSYM: 16, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, STRCAT: 93, HASH: 94, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35,
+    SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57
@@ -54,7 +55,12 @@ module MrbcRb
 
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
-                   Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode].freeze
+                   Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode,
+                   Prism::SymbolNode].freeze
+
+  # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
+  # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
+  BUILT_VALUES = [Prism::InterpolatedStringNode, Prism::HashNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -208,6 +214,13 @@ module MrbcRb
         write_local(node, last: last)
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
            Prism::ConstantReadNode, Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode
+        last ? value_in_register(node) : nil
+      when Prism::SymbolNode
+        # An unused symbol still enters the symbol table (sym_idx runs before gen_load_op2 checks val).
+        sym_index(node.unescaped.to_sym)
+        last ? value_in_register(node) : nil
+      when *BUILT_VALUES
+        # Unused strings and hashes generate nothing (codegen_hash returns early, gen_string skips its parts).
         last ? value_in_register(node) : nil
       when Prism::CallNode
         call(node, need: last)
@@ -539,7 +552,7 @@ module MrbcRb
       recv = node.receiver && unparen(node.receiver)
       recv = nil if recv.is_a?(Prism::SelfNode)
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
-      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !simple?(a) }
+      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !simple?(a) && !BUILT_VALUES.include?(a.class) }
       # A receiver may itself be a call: it leaves its result in the same temporary.
       raise Unsupported, 'call with a non-simple receiver' if recv && !(simple?(recv) || call_node?(recv))
 
@@ -637,6 +650,7 @@ module MrbcRb
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
       when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
+      when Prism::SymbolNode then emit(:LOADSYM, dst, sym_index(node.unescaped.to_sym))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
       when Prism::InstanceVariableReadNode then emit(:GETIV, dst, sym_index(node.name))
@@ -644,6 +658,8 @@ module MrbcRb
         r = logic(node, need: true)
         emit(:MOVE, dst, r) unless r == dst
       when Prism::ArrayNode then array_into(node, dst)
+      when Prism::InterpolatedStringNode then built_into(dst) { |base| dstr_at(node, base) }
+      when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
       when Prism::CallNode
         result = call(node)
         emit(:MOVE, dst, result) unless result == dst
@@ -670,6 +686,64 @@ module MrbcRb
       elsif i <= 0x7fff then emit(:LOADI16, dst, i)
       else emit(:LOADI32, dst, i)
       end
+    end
+
+    # Runs the block with the register the literal is built in: the destination when it is a temporary, else the first
+    # temporary, and the result is then moved into the destination (gen_move keeps that move, it only folds loads).
+    def built_into(dst)
+      base = dst >= @nlocals ? dst : temp
+      yield base
+      emit(:MOVE, dst, base) unless dst == base
+    end
+
+    # The fork's string interpolation: the first literal part is a STRING, and each interpolated value is loaded into the
+    # next register and STRCATed, followed by the literal part after it (empty when another interpolation or the end
+    # follows: the fork always appends it).
+    def dstr_at(node, base)
+      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+
+      segments = [''.b]
+      values = []
+      node.parts.each do |part|
+        case part
+        when Prism::StringNode
+          segments.last << part.unescaped.b
+        when Prism::EmbeddedStatementsNode
+          body = part.statements&.body || []
+          raise Unsupported, 'interpolation operand' unless body.size == 1 && SIMPLE_VALUES.include?(body[0].class)
+
+          values << body[0]
+          segments << ''.b
+        else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
+        end
+      end
+      raise Unsupported, 'string without interpolation' if values.empty?
+
+      emit(:STRING, base, pool_index([:str, segments[0]]))
+      values.each_with_index do |v, i|
+        value_into(v, base + 1)
+        emit(:STRCAT, base)
+        emit(:STRING, base + 1, pool_index([:str, segments[i + 1]]))
+        emit(:STRCAT, base)
+      end
+    end
+
+    # A hash literal of leaf keys and values: key and value pairs are loaded from the base register on, and HASH takes the
+    # base register and the pair count (codegen_hash).
+    def hash_at(node, base)
+      raise Unsupported, 'multi-line hash' if node.location.start_line != node.location.end_line
+
+      pairs = node.elements
+      unless pairs.all? { |e| e.is_a?(Prism::AssocNode) && SIMPLE_VALUES.include?(e.key.class) && SIMPLE_VALUES.include?(e.value.class) }
+        raise Unsupported, 'hash element'
+      end
+      raise Unsupported, 'large hash' if pairs.size > 16
+
+      pairs.each_with_index do |e, i|
+        value_into(e.key, base + 2 * i)
+        value_into(e.value, base + 2 * i + 1)
+      end
+      emit(:HASH, base, pairs.size)
     end
 
     # An array literal of leaf values: the elements are loaded from the first temporary on. ARRAY takes that register as
