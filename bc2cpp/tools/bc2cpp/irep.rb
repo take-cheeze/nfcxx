@@ -263,8 +263,23 @@ RiteImage = Struct.new(:bytes)
 
 def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
-  system(mrbc, '-g', '-o', mrb_path, *Array(src_paths), exception: true)
+  paths = Array(src_paths)
+  # BC2CPP_MRBC_RB=1: one source file the Ruby emitter (bc2cpp/tools/mrbc_rb) covers is compiled without mrbc; any other
+  # input, or a construct the emitter does not cover yet, goes to mrbc as before.
+  if paths.size == 1 && ENV['BC2CPP_MRBC_RB'] == '1' && (image = mrbc_rb_image(paths.first))
+    File.binwrite(mrb_path, image)
+    return RiteImage.new(image)
+  end
+  system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
   RiteImage.new(File.binread(mrb_path))
+end
+
+# The RITE binary of +path+ from the Ruby emitter, or nil when it does not cover the file.
+def mrbc_rb_image(path)
+  require_relative '../mrbc_rb/mrbc_rb'
+  MrbcRb.compile(File.binread(path), path)
+rescue MrbcRb::Unsupported
+  nil
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.

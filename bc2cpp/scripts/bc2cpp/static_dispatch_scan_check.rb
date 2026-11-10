@@ -27,6 +27,13 @@
 #   GENERATED_REGISTRATION: no compiled gem's src/register.cxx registers a method by hand (the generated
 #     bc2cpp_register_owner_methods is the only registration, so the lists' left-out entries stay out), and the
 #     closed list may take RGSS owners and engine module singletons, never reopened core classes (CLOSED_OWNER_RE).
+#   SUPER_REACH (closed only): a `super` in a class's method reaches that name on the class's ancestors only; a module,
+#     a singleton or an owner outside the recorded chains stays reached, and an unknown native superclass keeps the name
+#     dynamic.
+#   CLASS_GUARD_REACH (closed only; needs MRBC): a send on a value a class test has just passed (`x.is_a?(C) && x.m`,
+#     `raise unless x.is_a?(C)`) looks `m` up on C, its ancestors and its subclasses only. The tested value must be an
+#     argument nothing rewrites, the send dominated by the true edge, the irep free of handlers, and `is_a?`/`kind_of?`/
+#     `raise` the core natives alone (static_dispatch_class_guards.rb).
 #   CORE_BYTECODE_TOKENS (needs MRBC; skipped without it): core Ruby read as bytecode names a method only through a
 #     send whose receiver may be an engine object (self in a module, Object or Kernel method; any unknown value), a
 #     symbol or an identifier-shaped string; self in a core class method, a literal and a core constant do not. A
@@ -54,6 +61,7 @@
 require_relative '../../tools/bc2cpp/world_root'
 require 'set'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
+require_relative '../../tools/bc2cpp/static_dispatch_class_guards'
 
 S = StaticDispatchRegistrations
 $failures = 0
@@ -376,6 +384,20 @@ check('ancestry: a native exception superclass', exc != :all && exc.superset?(Se
 check('ancestry: any other native superclass is unknown', S.engine_ancestry({ 'Game::N' => 'RGSS::Native' }, []) == :all)
 check('ancestry: an engine Struct', S.engine_ancestry({}, ['Game::Row']).include?('Struct'))
 
+# --- SUPER_REACH ---
+chains = { 'Game::A' => 'Game::B', 'Game::B' => 'Object', 'Game::N' => 'RGSS::Native', 'Game::E' => 'StandardError' }
+check('super: a class reaches its ancestors, not itself', S.super_ancestors('Game::A', chains) == Set['Game::B', 'Object'])
+check('super: a native exception chain ends it', S.super_ancestors('Game::E', chains) == Set['StandardError'])
+check('super: an unknown native superclass is unbounded', S.super_ancestors('Game::N', chains).nil?)
+check('super: a module or singleton owner is unbounded', S.super_ancestors('Game::M', chains).nil? && S.super_ancestors('Game::A.singleton', chains).nil?)
+check('super: a superclass cycle is unbounded', S.super_ancestors('Game::X', { 'Game::X' => 'Game::Y', 'Game::Y' => 'Game::X' }).nil?)
+reach = { 'start' => Set['Game::B'] }
+classes = chains.keys.to_set
+check('super: only an ancestor, a module or a singleton is reached',
+      S.super_reached?(reach, classes, 'Game::B', 'start') && S.super_reached?(reach, classes, 'Game::M', 'start') &&
+      S.super_reached?(reach, classes, 'Game::A.singleton', 'start') && !S.super_reached?(reach, classes, 'Game::A', 'start') &&
+      !S.super_reached?(reach, classes, 'Game::B', 'other'))
+
 # --- CORE_BYTECODE_TOKENS ---
 if ENV['MRBC']
   require 'tmpdir'
@@ -421,7 +443,11 @@ if ENV['MRBC']
         def r(m)
           local_name_only = m
           __send__(local_name_only, reflective_send_name, :reflective_symbol)
+          @quiet_ivar_name = QuietConstName
+          QuietConstName.new
         end
+        def quiet_defined_name; end
+        def calls_it(o) = o.quiet_defined_name2
       end
     RUBY
     tokens = Set.new
@@ -447,6 +473,9 @@ if ENV['MRBC']
     check('core: a reflective file loses the receiver rule, not its symbols',
           text.keys == [reflective] && names&.include?('reflective_send_name') &&
           names.include?('reflective_symbol') && !tokens.include?('reflective_send_name'))
+    check('core: a reflective file names no variable, constant or defined name no op looks up',
+          names && %w[@quiet_ivar_name QuietConstName quiet_defined_name].none? { |n| names.include?(n) } &&
+          names.include?('quiet_defined_name2'))
     check('core: a reflective file names no comment word or local variable',
           names && !names.include?('comment_word_only') && !names.include?('local_name_only'))
 
@@ -557,6 +586,80 @@ if ENV['MRBC']
     RUBY
     listing_ireps, = compile_ireps([listing], 'static_dispatch_scan_check_sym_listing', tmp, mrbc: ENV['MRBC'])
     check('symbol uses: a call that lists methods refuses', StaticDispatchSymbolUses.lookups(listing_ireps).nil?)
+
+    # --- CLASS_GUARD_REACH ---
+    guarded = File.join(tmp, 'class_guards.rb')
+    File.write(guarded, <<~'RUBY')
+      module Game
+        class Row
+          def schema = 1
+          def dump = 2
+        end
+        class Wide < Row
+          def dump = 3
+        end
+        class Other
+          def schema = 4
+          def dump = 5
+        end
+        class Guards
+          def amp(e) = (e.is_a?(Row) && e.schema)
+          def raised(e)
+            raise ArgumentError, 'row' unless e.is_a?(Row)
+            e.dump
+          end
+          def after_if(e)
+            e.schema if e.is_a?(Row)
+            e.dump
+          end
+          def reassigned(e)
+            e = e.to_s
+            e.schema if e.is_a?(Row)
+          end
+          def either(e) = ((e.is_a?(Row) || e.is_a?(Other)) && e.schema)
+          def module_test(e) = (e.is_a?(Comparable) && e.schema)
+          def rescued(e)
+            e.schema if e.is_a?(Row)
+          rescue ArgumentError
+            nil
+          end
+          def kind(e) = (e.kind_of?(Wide) && e.dump)
+        end
+      end
+    RUBY
+    guard_ireps, guard_root = compile_ireps([guarded], 'static_dispatch_scan_check_guards', tmp, mrbc: ENV['MRBC'])
+    guard_registry, = build_registry(guard_ireps, guard_root)
+    guard_bodies = {}
+    guard_registry.each { |name, defs| defs.each { |d| guard_bodies[[d.owner, name]] = guard_ireps[d.irep] if d.irep } }
+    guard_chains = { 'Game::Row' => 'Object', 'Game::Wide' => 'Game::Row', 'Game::Other' => 'Object', 'Game::Guards' => 'Object' }
+    guards = StaticDispatchClassGuards.new(guard_chains, guard_chains.keys.to_set,
+                                           ->(klass) { S.super_ancestors(klass, guard_chains) })
+    reach_of = lambda do |name|
+      irep = guard_bodies.fetch(['Game::Guards', name])
+      found = {}
+      narrowed = guards.narrowed(irep)
+      BytecodeIR.for(irep).each_source { |insn, index| (found[insn.sym] ||= Set.new).merge(narrowed[index]) if narrowed[index] }
+      found
+    end
+    row_reach = Set['Game::Row', 'Game::Wide', 'Object']
+    check('class guard: `&&` after is_a? reaches the class, its subclasses and its ancestors',
+          reach_of.call('amp') == { 'schema' => row_reach })
+    check('class guard: a raise unless is_a? narrows the rest of the method', reach_of.call('raised') == { 'dump' => row_reach })
+    check('class guard: a send after the if is not narrowed, the one inside is',
+          reach_of.call('after_if') == { 'schema' => row_reach })
+    check('class guard: a rewritten value is not narrowed', reach_of.call('reassigned').empty?)
+    check('class guard: two tests joined by || narrow nothing', reach_of.call('either').empty?)
+    check('class guard: a module constant narrows nothing', reach_of.call('module_test').empty?)
+    check('class guard: a handler in the method refuses', reach_of.call('rescued').empty?)
+    check('class guard: kind_of? narrows to the subclass and its ancestors',
+          reach_of.call('kind') == { 'dump' => Set['Game::Wide', 'Game::Row', 'Object'] })
+    gated = { superclass_of: guard_chains, registry: {}, owner_names: guard_chains.keys.to_set, ruby_texts: [],
+              native_owners: { 'is_a?' => ['Kernel'], 'raise' => ['Kernel'] }, ancestors: ->(_) { Set.new } }
+    check('class guard: the core natives alone pass the gates', StaticDispatchClassGuards.build(**gated))
+    check('class guard: a Ruby is_a?, an engine raise, a native is_a? elsewhere or a BasicObject subclass refuses',
+          [gated.merge(ruby_texts: ["class A\n  def is_a?(k) = true\nend"]), gated.merge(registry: { 'raise' => [1] }),
+           gated.merge(native_owners: { 'is_a?' => ['Window'] }),
+           gated.merge(ruby_texts: ["class Proxy < BasicObject\nend"])].none? { |g| StaticDispatchClassGuards.build(**g) })
 
     suffixes = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, Set.new, S::SUFFIX_LITERAL)
     check('suffix: a "=" building a setter name reaches a built string', suffixes.include?('='))
