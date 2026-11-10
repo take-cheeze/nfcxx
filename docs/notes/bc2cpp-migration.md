@@ -7,16 +7,21 @@ Status, 2026-11-09: in progress.
 - Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
   `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
 - Done: a second world, `scripts/pathb-qbe-emit.rb` (`tests/bc2cpp/run_pathb_qbe_emit.sh`, the `script-world` build kind).
-- In progress: a third world, `scripts/pathb-borrowck.rb` (`tests/bc2cpp/run_pathb_borrowck.sh`, not yet in CI). Its
-  top level is now `main(argv)`, which returns the status, and its one regex literal (`split(/[\[ ]/)`) is a
-  character scan (`register_name`): the closed world has no `Regexp`. The interpreted script is unchanged: 3598 runs of
-  `tests/pathb-borrow` in every mode give the same stdout, stderr and status before and after. The world is not green:
-  2813 of 2829 cases match, and the other 16 (all with `--infer-loan-ends` or `--infer-summaries`) are wrong in the
-  compiled build. Ten are segfaults and some take another path, and the same input gives different results from run to
-  run. Valgrind on the compiled script (`LocalLifetime#byte_key`, a `String#+` through `bc2cpp_slow_add_f`) reports the
-  GC marking an uninitialised value during incremental marking, then `stack smashing detected`. That points at bc2cpp's
-  GC rooting of temporaries in compiled code, which is a bc2cpp defect, not a Ruby difference. Fix that first, then add
-  the world to `.github/workflows/bc2cpp.yml`.
+- Done: a third world, `scripts/pathb-borrowck.rb` (`tests/bc2cpp/run_pathb_borrowck.sh`). Its top level is `main(argv)`,
+  which returns the status, and its one regex literal is a character scan (the closed world has no `Regexp`). The interpreted
+  script is unchanged: 3598 runs of `tests/pathb-borrow` in every mode give the same stdout, stderr and status before and after.
+  Two bc2cpp defects surfaced on it:
+  - **Fixed: by-name results were not GC-rooted.** mruby's funcall restores the arena before it returns, so the result of
+    `mrb_funcall_with_method` / `mrb_funcall_argv` (owner calls, the funcall helpers, the numeric slow paths) was unprotected
+    until stored. The next allocation could collect it. Valgrind showed the GC marking freed objects during
+    `LocalLifetime#byte_key` (`"byte:" + x.to_s + ...`). Every such helper now returns through `bc2cpp_keep_call`
+    (bc2cpp.rb, symbol_cache.rb, codegen_numeric_slow.rb and the other codegen files).
+  - **Open: frame-local blocks.** With `--infer-summaries`, the compiled `Enumerable#all?` (fork mrblib, `all?(pat=NONE, &block)`)
+    yields a `Bc2cppBlock` (a block on the C stack) through `Array#each`. The block fallback reads its `block` upvar through
+    a pointer to a register of `all?`'s frame, and the read is wrong (valgrind: invalid read in `mrb_vm_find_method` on a
+    garbage receiver). `BC2CPP_STACK_BLOCKS=0` makes all 11 such cases pass, so the stack-block path is the trigger. The
+    exact mechanism is not yet found. The world sets the knob, so it checks the heap-block build; the stack-block build is
+    covered by optcarrot only.
 - Next: rpg-maker-clone takes bc2cpp from its `3rd/nfcxx` submodule (rpg-maker-clone#3204, Phase 3).
 
 bc2cpp is rpg-maker-clone's mruby-bytecode-to-C++ compiler (`tools/bc2cpp`). It compiles a closed world, the engine

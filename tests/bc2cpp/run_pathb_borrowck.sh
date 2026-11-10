@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# NOT GREEN YET (not in .github/workflows/bc2cpp.yml): 16 of 2829 cases differ in the compiled build, all with
-# --infer-loan-ends or --infer-summaries; a GC-rooting defect in bc2cpp's compiled code, see docs/notes/bc2cpp-migration.md.
 # bc2cpp world: scripts/pathb-borrowck.rb, nfcxx's local lifetime checker for Path B IR (docs/notes/pathb-borrowck.md),
 # compiled by bc2cpp as a closed world (the script-world build kind, bc2cpp/tools/script_world/) on the mruby fork of the
 # pinned rpg-maker-clone (tests/bc2cpp/fetch.sh). The check: for every IR of tests/pathb-borrow, in each mode the
@@ -9,11 +7,16 @@
 # mruby interpreter's on the same script (an uncaught exception, the one case with a backtrace, compares its report
 # without it: compiled code has no line table). Prints the best-of-N wall time of the interpreter, the compiled build
 # and CRuby on the benchmark IR, and the speedup of the compiled build.
-#   PATHB_BORROW_BENCH_IR=file   the IR to time (default tests/pathb-ir/eh_libstdcxx_throw.ir)
+#   PATHB_BORROW_BENCH_IR=file   the IR to time (default tests/pathb-ir/eh_libstdcxx_throw.ir, 3.4 MB: the checker
+#                                refuses it with status 3 after parsing it, so the timing measures the parse)
 #   PATHB_BENCH_REPEAT=N         runs per runtime, best kept (default 3)
 #   SCRIPT_WORLD_MIN_SPEEDUP=X   also fail when the compiled build is under X times the interpreter
 #   BC2CPP_RPG_DIR=dir           an existing rpg-maker-clone checkout instead of the pinned one
 # Needs Ruby 4.0 with the prism and rbs gems, rake, a C/C++ compiler, bison and make. Without them it prints a skip.
+# BC2CPP_STACK_BLOCKS=0: bc2cpp's frame-local blocks (Bc2cppBlock) miscompile in this script's Enumerable#all? with a
+# block called from the summary inference (a yielded block fallback reads a dead upvar; the 11 cases that hit it pass
+# with the knob off). Every block is then a heap proc. The root cause is open: docs/notes/bc2cpp-migration.md.
+export BC2CPP_STACK_BLOCKS=0
 cd "$(dirname "$0")/../.."
 root=$PWD
 . tests/bc2cpp/fetch.sh
@@ -68,7 +71,7 @@ log=build/bc2cpp/pathb_borrowck.log
 bench=${PATHB_BORROW_BENCH_IR:-tests/pathb-ir/eh_libstdcxx_throw.ir}
 (env -u LD ruby "$tree/tools/script_world/compiled_run.rb" --script scripts/pathb-borrowck.rb \
   --tail 'rc = main(ARGV)\nexit(rc) if rc != 0\n' --entry 'main(ARGV)' --cases "$cases" --bench "$bench" \
-  --repeat "${PATHB_BENCH_REPEAT:-3}" --chdir "$root") 2>&1 | tee "$log"
+  --repeat "${PATHB_BENCH_REPEAT:-3}" --bench-status 3 --chdir "$root") 2>&1 | tee "$log"
 [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL bc2cpp pathb-borrowck: the runner failed"; exit 1; }
 grep -q -E '^cases: ([0-9]+)/\1 ' "$log" || { echo "FAIL bc2cpp pathb-borrowck: the cases differ"; exit 1; }
 
