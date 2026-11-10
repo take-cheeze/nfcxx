@@ -86,7 +86,11 @@ SNIPPETS = [
   "X = 1\nX",
   "x = X",
   "x = 1\nx = X",
-  "X = 1\nY = X\nY"
+  "X = 1\nY = X\nY",
+  # frozen string literals (milestone 5)
+  "# frozen_string_literal: true\nrequire 'set'",
+  "# frozen_string_literal: true\nx = \"ab\"\nx",
+  "# frozen_string_literal: false\nx = \"ab\""
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
@@ -126,4 +130,28 @@ SNIPPETS.each do |src|
 end
 
 puts failures.zero? ? "all #{SNIPPETS.size} snippets match" : "#{failures} snippet(s) differ"
+
+# The corpus: every Ruby file under bc2cpp/ that the emitter covers must match the oracle. A file it does not cover is
+# counted, not failed (Unsupported is the honest answer; a wrong binary is not).
+corpus = Dir.glob('bc2cpp/**/*.rb').sort
+covered = 0
+corpus_failures = []
+corpus.each do |path|
+  src = File.binread(path)
+  begin
+    got = MrbcRb.compile(src, path)
+  rescue MrbcRb::Unsupported, MrbcRb::Error
+    next
+  end
+  covered += 1
+  Dir.mktmpdir('mrbc_rb_corpus') do |dir|
+    out = File.join(dir, 'c.mrb')
+    _o, _e, st = Open3.capture3(oracle, '-g', '-o', out, path)
+    corpus_failures << path unless st.success? && File.binread(out) == got
+  end
+end
+puts "corpus: #{covered} of #{corpus.size} files covered, #{corpus_failures.size} differ from the oracle"
+corpus_failures.each { |path| puts "  DIFF #{path}" }
+failures += corpus_failures.size
+puts failures.zero? ? 'all checks pass' : "#{failures} problem(s)"
 exit(failures.zero? ? 0 : 1)

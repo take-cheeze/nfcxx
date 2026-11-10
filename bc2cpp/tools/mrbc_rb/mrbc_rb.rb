@@ -29,7 +29,7 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
@@ -53,12 +53,15 @@ module MrbcRb
     result = Prism.parse(source, filepath: filename)
     raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
 
-    Compiler.new(filename).compile(result.value)
+    # `# frozen_string_literal: true` makes string literals frozen strings (FSTRING), as the fork's parser does.
+    frozen = result.magic_comments.any? { |c| c.key == 'frozen_string_literal' && c.value == 'true' }
+    Compiler.new(filename, frozen_strings: frozen).compile(result.value)
   end
 
   class Compiler
-    def initialize(filename)
+    def initialize(filename, frozen_strings: false)
       @filename = filename
+      @frozen_strings = frozen_strings
       @code = []
       @lines = []
       @line = 0
@@ -358,7 +361,7 @@ module MrbcRb
       when Prism::SelfNode then emit(:LOADSELF, dst)
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
-      when Prism::StringNode then emit(:STRING, dst, pool_index([:str, node.unescaped.b]))
+      when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::CallNode
