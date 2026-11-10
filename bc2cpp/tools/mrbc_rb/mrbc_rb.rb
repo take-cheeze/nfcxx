@@ -75,7 +75,8 @@ module MrbcRb
                           Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
                           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
-                          Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode].freeze
+                          Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode,
+                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
@@ -131,7 +132,21 @@ module MrbcRb
 
     # `# frozen_string_literal: true` makes string literals frozen strings (FSTRING), as the fork's parser does.
     frozen = result.magic_comments.any? { |c| c.key == 'frozen_string_literal' && c.value == 'true' }
-    Compiler.new(filename, frozen_strings: frozen).compile(result.value)
+    compiler = Compiler.new(filename, frozen_strings: frozen)
+    return compiler.compile_empty(empty_program_line(source, result)) if result.value.statements.body.empty?
+
+    compiler.compile(result.value)
+  end
+
+  # The line the fork stamps on the code of a program without statements (milestone 13): the line the lexer ended on, which
+  # is one plus the newlines before `__END__` (or the end of the file), and one more when a comment runs into the end of the
+  # file without its newline.
+  def self.empty_program_line(source, result)
+    text = source.b
+    text = text.byteslice(0, result.data_loc.start_offset) if result.data_loc
+    line = 1 + text.count("\n")
+    line += 1 if text.split("\n", -1).last.to_s.match?(/\A([ \t]*#|=end)/n)
+    line
   end
 
   class Compiler
@@ -163,8 +178,6 @@ module MrbcRb
 
     def compile(program)
       stmts = program.statements.body
-      raise Unsupported, 'empty program' if stmts.empty?
-
       set_locals(program.locals)
       value_reg = generate(stmts, val: true)
       return_value(value_reg)
@@ -192,6 +205,7 @@ module MrbcRb
     def compile_method(node)
       params = node.parameters
       @in_method = true
+      @enter_label = !(params.nil? && node.equal_loc && node.lparen_loc.nil?) # the fork marks a label after ENTER of a method (see merge_strings)
       if params.nil? && node.equal_loc && node.lparen_loc.nil?
         # `def f = expr` has no hidden block slot (verified with mrbc -v: nlocals is 1, unlike `def f() = expr`).
         raise Unsupported, 'endless def without parameters but with locals' unless node.locals.empty?
@@ -236,6 +250,7 @@ module MrbcRb
       when Prism::ItParametersNode then params = nil # `it` is a plain method call to the fork's parser
       else raise Unsupported, 'block parameters'
       end
+      @enter_label = (!node.parameters.nil? && !(node.parameters.is_a?(Prism::BlockParametersNode) && node.parameters.parameters.nil? && node.parameters.locals.empty?)) || node.is_a?(Prism::LambdaNode) # a block without a parameter list has no argument node
       parameters(params, node.locals, node.is_a?(Prism::LambdaNode) ? parent.send(:current_line) : node.opening_loc.start_line, numbered: numbered)
       stmts = body_statements(node.body)
       if node.body.is_a?(Prism::BeginNode) && node.body.statements.nil?
@@ -583,7 +598,8 @@ module MrbcRb
         # A negative literal needs the token after it to be built (see #continuation_line).
         @leading_dot[recv] = op.start_line if recv.location.slice.start_with?('-')
       when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
-           Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode
+           Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode,
+           Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode # built at the closing delimiter, like `)`
         nil
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
         @leading_dot[recv] = op.start_line
@@ -2622,7 +2638,10 @@ module MrbcRb
       when Prism::StringNode
         # A heredoc of several lines is a literal per line, concatenated (dstr_into).
         if node.opening&.start_with?('<<') then dstr_into(node, dst)
-        else emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
+        else
+          raise Unsupported, 'multibyte character literal' if node.opening == '?' && !node.content.ascii_only? # the fork's lexer reads one byte
+
+          emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
         end
       when Prism::SymbolNode then emit(:LOADSYM, dst, sym_index(node.unescaped.to_sym))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
@@ -2752,6 +2771,9 @@ module MrbcRb
 
       case node
       when Prism::StringNode, Prism::XStringNode
+        # The fork's lexer reads one byte after `?` (a multibyte character is a syntax error there).
+        raise Unsupported, 'multibyte character literal' if node.opening == '?' && !node.content.ascii_only?
+
         [[:lit, node.unescaped.b]]
       when Prism::InterpolatedStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode
         return node.parts.flat_map { |part| string_parts(part, top: false) } if node.opening_loc.nil? # adjacent literals
@@ -3035,14 +3057,13 @@ module MrbcRb
     # next register and STRCATed, followed by the literal part after it (empty when another interpolation or the end
     # follows: the fork always appends it).
     def regex_dstr_at(node, base, regex: true)
-      raise Unsupported, 'multi-line interpolated regexp' if regex && node.location.start_line != node.location.end_line
-
       segments = [''.b]
       values = []
       node.parts.each do |part|
         case part
         when Prism::StringNode
           segments.last << (regex ? regex_text(part.content, node) : part.unescaped.b)
+        when Prism::EmbeddedVariableNode then segments.last << part.location.slice.b # `#@a` is plain text to the fork
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
           raise Unsupported, 'interpolation operand' unless body.size == 1 && (SIMPLE_VALUES.include?(body[0].class) ||
@@ -3076,7 +3097,7 @@ module MrbcRb
         c = bytes[i]
         if c == '\\'
           nxt = bytes[i + 1]
-          raise Unsupported, 'regexp escape' if nxt.nil? || nxt == 'u'
+          raise Unsupported, 'regexp escape' if nxt.nil?
 
           if nxt == '/' && slash
             out << '/'
@@ -3102,7 +3123,6 @@ module MrbcRb
     def regex_at(node, base)
       # A regexp is built when the parser reaches its closing slash and flags, so the node carries its end line; a pattern
       # with interpolations has the lines of its expressions to follow (not covered).
-      raise Unsupported, 'multi-line regexp' if node.location.start_line != node.location.end_line && !node.is_a?(Prism::RegularExpressionNode)
       raise Unsupported, 'regexp encoding' if node.euc_jp? || node.windows_31j?
 
       @line = line_of(node) unless @hold_line # the literal is a node of its own (verified: `a\n  .scan(/y/)` stamps line 3)
@@ -3112,6 +3132,9 @@ module MrbcRb
       emit(:GETMCNST, base, sym)
       if node.is_a?(Prism::RegularExpressionNode)
         emit(:STRING, base + 1, pool_index([:str, regex_text(node.content, node)]))
+      elsif node.parts.none?(Prism::EmbeddedStatementsNode) # only `#@a` and the like: plain text to the fork
+        text = node.parts.map { |part| part.is_a?(Prism::StringNode) ? regex_text(part.content, node) : part.location.slice.b }.join.b
+        emit(:STRING, base + 1, pool_index([:str, text]))
       else
         regex_dstr_at(node, base + 1)
       end
@@ -3245,7 +3268,7 @@ module MrbcRb
       literal_words = node.opening_loc&.slice&.start_with?('%')
       saved_hold = @hold_line
       @hold_line = true if literal_words
-      elems.each_with_index { |e, i| symbols ? symbol_word_into(e, a + i, node) : operand_into(unparen(e), a + i) }
+      elems.each_with_index { |e, i| word_into(e, a + i, node, symbols) }
       @hold_line = saved_hold
       @nregs = [@nregs, a + elems.size].max
       if elems.empty?
@@ -3282,7 +3305,7 @@ module MrbcRb
         end
         raise Unsupported, 'array stack too deep' if sp > 200
 
-        symbols ? symbol_word_into(e, sp, node) : operand_into(unparen(e), sp)
+        word_into(e, sp, node, symbols)
         @nregs = [@nregs, sp + 1].max
         sp += 1
         count += 1
@@ -3376,19 +3399,18 @@ module MrbcRb
     # quoted string (a leading literal, then an expression and a literal after it), except that the literal after a last
     # expression is dropped when a space, not the closing bracket, ends the word (verified with mrbc -v on %I[a#{1} b] and
     # %I[a#{1}]).
-    def symbol_word_into(elem, reg, array)
-      raise Unsupported, 'symbol list element with an escape' if elem.location.slice.include?('\\')
-
+    def symbol_word_into(elem, reg, array, intern: true)
       case elem
       when Prism::SymbolNode
         emit(:SYMBOL, reg, pool_index([:str, elem.unescaped.b]))
-      when Prism::InterpolatedSymbolNode
+      when Prism::InterpolatedSymbolNode, Prism::InterpolatedStringNode
         raise Unsupported, 'multi-line symbol list with interpolation' if array.location.start_line != array.location.end_line
 
         parts = [[:lit, ''.b]]
         elem.parts.each do |part|
           case part
           when Prism::StringNode then parts.last[1] << part.unescaped.b
+          when Prism::EmbeddedVariableNode then parts.last[1] << part.location.slice.b # `#@a` is plain text to the fork
           when Prism::EmbeddedStatementsNode
             body = part.statements&.body || []
             raise Unsupported, 'interpolation with several statements' if body.size > 1
@@ -3399,8 +3421,12 @@ module MrbcRb
         end
         parts.pop if parts.last[0] == :lit && parts.last[1].empty? && parts.size > 1 && parts[-2][0] == :expr &&
                      elem.location.end_offset != array.closing_loc.start_offset
+        if parts.size == 1 && intern # only `#@a` texts: a plain word
+          emit(:SYMBOL, reg, pool_index([:str, parts[0][1]]))
+          return
+        end
         dstr_at(parts, reg)
-        emit(:INTERN, reg)
+        emit(:INTERN, reg) if intern
       else raise Unsupported, "symbol list element #{elem.class.name.split('::').last}"
       end
     end
@@ -3729,10 +3755,12 @@ module MrbcRb
       end
       return false unless name == :+ || name == :-
 
-      # Two string literals are merged by `+` (merge_op_string): not covered.
+      # Two string literals are merged by `+` (merge_op_string), unless the first one is a label: the start of the code or the pc after ENTER (lastlabel starts at 0 and the parameter code marks one there).
       if name == :+ && !no_peephole? && @insns.size >= 2 && @insns[-1][0] == :STRING && @insns[-2][0] == :STRING &&
-         !@labels.include?(@insns[-1][2]) && !@labels.include?(@insns[-2][2])
-        raise Unsupported, 'merged string literals'
+         !@labels.include?(@insns[-1][2]) && !@labels.include?(@insns[-2][2]) && @insns[-2][2] != 0 && !(@enter_label && @insns[-3] && @insns[-3][0] == :ENTER)
+        merge_strings(a)
+        @nregs = [@nregs, a + 3].max
+        return true
       end
 
       add_sub(name, a)
@@ -4582,6 +4610,65 @@ module MrbcRb
         (0...s.nlocals - 1).map { |i| (name = s.lv_names[i]) ? names.index(name.to_s) : RITE_LV_NULL_MARK }
       end
       sized('LVAR', syms + refs.pack('n*'))
+    end
+
+    # Milestone 13 (string, regexp and heredoc literal forms).
+
+    # An element of a %w, %W, %i or %I list: a %W word with interpolation is built like a %I one without the INTERN.
+    def word_into(elem, reg, array, symbols)
+      if symbols then symbol_word_into(elem, reg, array)
+      elsif elem.is_a?(Prism::InterpolatedStringNode) && elem.opening_loc.nil? && array.opening_loc.slice.start_with?('%W')
+        symbol_word_into(elem, reg, array, intern: false)
+      else operand_into(unparen(elem), reg)
+      end
+    end
+
+    # merge_op_string: `"a" + "b"` loads the two literals and the ADD is replaced by one STRING of the joined text. The pool
+    # entries are reused: both free (or only the second referenced) -> the first is extended and the second dropped when it
+    # was the last entry; only the first referenced -> the second becomes the joined text; both referenced -> a new entry;
+    # an entry that already holds the joined text is used as is (the two literals stay in the pool). A STRING before the first
+    # literal is a reference (the fork scans OP_STRING only).
+    def merge_strings(dst)
+      first = @insns[-2]
+      b1 = first[1][1]
+      b2 = @insns[-1][1][1]
+      used = 0
+      @insns[0...-2].each do |name, ops, _|
+        next unless name == :STRING
+
+        used |= 1 if ops[1] == b1
+        used |= 2 if ops[1] == b2
+      end
+      joined = @pool[b1][1] + @pool[b2][1]
+      off = @pool.index([:str, joined])
+      if off.nil?
+        case used
+        when 0, 2
+          off = b1
+          @pool[b1] = [:str, joined]
+          @pool.pop if b1 != b2 && used.zero? && b2 + 1 == @pool.size
+        when 1
+          off = b2
+          @pool[b2] = [:str, joined]
+        else
+          @pool << [:str, joined]
+          off = @pool.size - 1
+        end
+      end
+      @code.slice!(first[2]..)
+      @lines.slice!(first[2]..)
+      @insns.pop(2)
+      emit(:STRING, dst, off)
+    end
+
+    # A program without statements is a nil return (and STOP) on the line the lexer ended on (see empty_program_line).
+    public def compile_empty(line)
+      set_locals([])
+      @line = line
+      @nregs = 2 # the fork reserves a register beyond R0 for the return value
+      emit(:RETNIL)
+      emit(:STOP)
+      write_rite
     end
   end
 end
