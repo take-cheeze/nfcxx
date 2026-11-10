@@ -13,7 +13,8 @@
 #     --cases    a file of command lines, one case each (shell words; blank lines and # lines are skipped). A line
 #                starting with `!` is an uncaught-exception case: stdout and the exit status must match and stderr must
 #                match without its backtrace (compiled code has no line table, so mruby prints (unknown):0 there)
-#     --bench    arguments of a timed run (repeatable); --repeat N runs each N times (default 3) and keeps the best
+#     --bench    arguments of a timed run (repeatable); --repeat N runs each N times (default 3) and keeps the best;
+#                --bench-status N is the exit status a timed run must give (default 0)
 #   The roots: BC2CPP_TREE_ROOT (this tree) and BC2CPP_WORLD_ROOT (the world with the mruby fork), as for the
 #   optcarrot probe. SCRIPT_WORLD_COMPILED_FLAGS adds compiler flags to the compiled build.
 require_relative '../bc2cpp/world_root'
@@ -25,7 +26,7 @@ require 'rbconfig'
 require 'shellwords'
 require 'tmpdir'
 
-options = { bench: [], repeat: 3 }
+options = { bench: [], repeat: 3, bench_status: 0 }
 OptionParser.new do |o|
   o.on('--script PATH') { |v| options[:script] = File.expand_path(v) }
   o.on('--tail TEXT') { |v| options[:tail] = v }
@@ -33,6 +34,7 @@ OptionParser.new do |o|
   o.on('--cases FILE') { |v| options[:cases] = File.expand_path(v) }
   o.on('--bench ARGS') { |v| options[:bench] << v }
   o.on('--repeat N', Integer) { |v| options[:repeat] = v }
+  o.on('--bench-status N', Integer) { |v| options[:bench_status] = v }
   o.on('--chdir DIR') { |v| options[:chdir] = File.expand_path(v) }
 end.parse!
 %i[script tail entry cases].each { |key| abort "--#{key} is required" unless options[key] }
@@ -157,11 +159,11 @@ def without_backtrace(stderr)
         .map { |l| l.sub(/\A(?:\S+?:\d+|\(unknown\):0)(?::in \w+)?: /, '') }.join
 end
 
-def best_time(command, repeat, chdir)
+def best_time(command, repeat, chdir, status_ok)
   times = Array.new(repeat) do
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     _out, _err, status = Open3.capture3(*command, stdin_data: '', binmode: true, chdir: chdir)
-    abort "timed run failed: #{command.join(' ')} (#{status.inspect})" unless status.success?
+    abort "timed run failed: #{command.join(' ')} (#{status.inspect})" unless status.exitstatus == status_ok
     Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
   end
   times.min
@@ -212,7 +214,7 @@ Dir.mktmpdir('script-world-') do |temp|
   options[:bench].each do |args|
     argv = Shellwords.split(args)
     puts "benchmark: #{args} (best of #{options[:repeat]})"
-    results = runtimes.to_h { |label, make| [label, best_time(make.call(argv), options[:repeat], chdir)] }
+    results = runtimes.to_h { |label, make| [label, best_time(make.call(argv), options[:repeat], chdir, options[:bench_status])] }
     results.each { |label, seconds| puts format('%s: %.3f s', label, seconds) }
     puts format('bc2cpp speedup over the mruby interpreter: %.1fx; over CRuby: %.2fx',
                 results['mruby interpreter'] / results['mruby + bc2cpp (sealed)'],

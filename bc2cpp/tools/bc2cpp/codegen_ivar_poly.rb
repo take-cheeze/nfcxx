@@ -913,8 +913,8 @@ end
   # The by-name helper: INDEX_CHAIN's tail (getidx, with the result in r0, the name compile_poly_small_n spells as
   # `r<d>`) then mrb_funcall.
   def index_helper_open_source(kind, fast, name, argv)
-    return "#{fast}return mrb_funcall(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
-    return "#{fast}return mrb_funcall(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
+    return "#{fast}return bc2cpp_funcall_keep(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
+    return "#{fast}return bc2cpp_funcall_keep(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
 
     tail = without_strict_hints { compile_poly_dispatch(name, 0, 'recv', argv, 1) } ||
            "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"

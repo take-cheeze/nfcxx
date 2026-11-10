@@ -152,7 +152,7 @@ class CodeGen
     '  case MRB_TT_HASH:',
     '    return mrb_bool_value(mrb_equal(M, recv, arg));',
     '  default:',
-    '    return mrb_funcall(M, recv, "===", 1, arg);',
+    '    return bc2cpp_funcall_keep(M, recv, "===", 1, arg);',
     '  }',
     '}'
   ].freeze

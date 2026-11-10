@@ -1,7 +1,8 @@
 name: bc2cpp
 
 # bc2cpp (bc2cpp/, the mruby-to-C++ compiler moved from rpg-maker-clone, docs/notes/bc2cpp-migration.md) compiling the
-# worlds under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own pathb-qbe-emit.rb) against a pinned
+# worlds under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own pathb-qbe-emit.rb and
+# pathb-borrowck.rb) against a pinned
 # rpg-maker-clone checkout (tests/bc2cpp/fetch.sh). Runs when bc2cpp, a world or the pin changes, and on demand.
 # It needs only the host compiler and Ruby 4.0, not the EDG toolchain.
 on:
@@ -11,12 +12,16 @@ on:
       - "bc2cpp/**"
       - "tests/bc2cpp/**"
       - "scripts/pathb-qbe-emit.rb"
+      - "scripts/pathb-borrowck.rb"
+      - "tests/pathb-borrow/**"
       - ".github/workflows/bc2cpp.yml"
   pull_request:
     paths:
       - "bc2cpp/**"
       - "tests/bc2cpp/**"
       - "scripts/pathb-qbe-emit.rb"
+      - "scripts/pathb-borrowck.rb"
+      - "tests/pathb-borrow/**"
       - ".github/workflows/bc2cpp.yml"
   workflow_dispatch:
 
@@ -31,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [optcarrot, pathb_qbe_emit]
+        world: [optcarrot, pathb_qbe_emit, pathb_borrowck]
     steps:
       # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
       - uses: actions/checkout@v7

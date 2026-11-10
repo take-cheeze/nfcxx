@@ -2524,7 +2524,7 @@ class SummaryInference
       blamed = []
       checker.errors.each do |e|
         place = e.split(': ', 3)[2]
-        reg = place && place.start_with?('*%') ? place[1..-1].split(/[\[ ]/)[0] : nil
+        reg = place && place.start_with?('*%') ? register_name(place[1..-1]) : nil
         i = reg ? slots.index { |slot| slot[0] == reg } : nil
         return nil unless i
         blamed << i unless blamed.include?(i)
@@ -2582,8 +2582,18 @@ def emitted_functions(forms)
   forms.select { |f| bh(f) == 'function' && (!f[1].is_a?(IRStr) || live.key?(bname(f[1]))) }
 end
 
-begin
-  args = ARGV.dup
+# The text up to the first '[' or space: `text.split(/[\[ ]/)[0]` without a Regexp (the closed world has none). The text
+# is never empty at the call site (it follows a '*%' prefix), so the result is the same string.
+def register_name(text)
+  i = 0
+  i += 1 while i < text.length && text[i] != '[' && text[i] != ' '
+  text[0, i]
+end
+
+# The command line goes through main, which returns the exit status: the script is then a closed world for bc2cpp
+# (tests/bc2cpp/run_pathb_borrowck.sh), whose tail is the two statements at the end of this file.
+def main(argv)
+  args = argv.dup
   infer = false
   summaries = false
   emitted_only = false
@@ -2667,14 +2677,18 @@ begin
   end
   if errors.empty?
     puts 'ok: local lifetime checks passed (supported subset only)'
+    0
   else
     errors.each { |e| puts e }
-    exit 1
+    1
   end
 rescue BorrowRefused => e
   $stderr.puts "refused: #{e.message}"
-  exit 3
+  3
 rescue BadIR => e
   $stderr.puts "error: #{e.message}"
-  exit 2
+  2
 end
+
+rc = main(ARGV)
+exit(rc) if rc != 0
