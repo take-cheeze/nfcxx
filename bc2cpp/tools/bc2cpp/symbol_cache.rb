@@ -311,6 +311,10 @@ module SymbolCache
       #{checked ? "  // CALLER_SELF: an explicit-receiver slot's call passes the caller's self after its arguments.\n  mrb_value caller_self = bc2cpp_sym_check[i] == 2 ? va_arg(ap, mrb_value) : mrb_nil_value();" : ''}
         va_end(ap);
       #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2, caller_self);" : ''}
+        #ifdef BC2CPP_SEND_COUNT
+        BC2CPP_SEND_HIT(M, "send", bc2cpp_sym(M, i));
+        struct SendInner { SendInner() { bc2cpp_send_counting_inner() = true; } ~SendInner() { bc2cpp_send_counting_inner() = false; } } send_inner;
+        #endif
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}#{table.owner_call_used ? owner_call_source : ''}

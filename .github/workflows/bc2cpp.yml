@@ -39,11 +39,16 @@ jobs:
         with:
           ruby-version: "4.0"
 
-      # bison and gperf for the fork's mruby build, autoconf and automake for Onigmo (mruby-onig-regexp).
+      # bison and gperf for the fork's mruby build, autoconf and automake for Onigmo (mruby-onig-regexp), gdb for a
+      # crash's backtrace (tests/bc2cpp/run_optcarrot.sh).
       - name: Install build tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool gdb
 
+      # -O2: the runner's Ubuntu g++ 13.3 miscompiles the -O3 build (SIGILL inside a call to bc2cpp_hint_violation that
+      # is never entered); Debian's 13.5 and -O2 both pass.
       - name: bc2cpp world ${{ matrix.world }}
+        env:
+          OPTCARROT_COMPILED_FLAGS: -O2
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
 
   # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
