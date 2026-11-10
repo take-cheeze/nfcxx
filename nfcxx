@@ -919,13 +919,15 @@ fi
 
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
+# The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
+pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # -c: one object per C++ file, named as the gcc and qbe backends name it (-o FILE for one file, else basename.o)
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with qbe, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -946,7 +948,7 @@ if [ $backend = pathb ]; then
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
          prc=0
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$f" -o "$o" || prc=$?
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
