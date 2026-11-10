@@ -99,6 +99,20 @@ Dir.mktmpdir do |dir|
   check.call("mruby's own tables keep their owner", map.by_name['one'] == Set['Thing'])
 end
 
+# A ROM entry's MRB_SYM(blt) names a method: a `mrb_sym blt` local dispatched through is still one spelled name, so the
+# source does not open every module's includers.
+local_sym = <<~'C'
+  void draw(mrb_state* M, mrb_value canvas) {
+    const mrb_sym blt = mrb_intern_lit(M, "blt");
+    mrb_funcall_argv(M, canvas, blt, 0, nullptr);
+  }
+  static const mrb_mt_entry bmp_methods[] = {
+    MRB_MT_ENTRY(bmp_blt, MRB_SYM(blt), MRB_ARGS_NONE())
+  };
+C
+check.call('a local method name is resolved beside a ROM entry of the same name',
+           ClosedWorld.native_local_symbols(local_sym) == { 'blt' => ['blt'] })
+
 if failures.empty?
   puts 'bc2cpp native owner map rom check: PASS'
 else
