@@ -732,7 +732,7 @@ module MrbcRb
            Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
         call_write(node, last: last)
       when Prism::MultiWriteNode
-        multiple_write(node, last: last)
+        node.value.is_a?(Prism::RescueModifierNode) && !@masgn_plain.equal?(node) ? masgn_rescue(node, last: last) : multiple_write(node, last: last)
       when Prism::IfNode
         if_statement(node, last: last)
       when Prism::CaseNode
@@ -2030,7 +2030,7 @@ module MrbcRb
       raise Unsupported, 'multiple assignment with a bare splat' if rest && rest.expression.nil?
       raise Unsupported, 'multiple assignment with parentheses' if node.lparen_loc
 
-      value = unparen(node.value)
+      value = unparen(@masgn_plain.equal?(node) ? node.value.expression : node.value)
       fixed = value.is_a?(Prism::ArrayNode) && value.elements.none? { |e| e.is_a?(Prism::SplatNode) }
       if value.is_a?(Prism::ArrayNode)
         raise Unsupported, 'multiple assignment right side element' unless value.elements.all? { |e| operand?(e) || array_splat?(e) }
@@ -4168,6 +4168,18 @@ module MrbcRb
       @nregs = [@nregs, r + 1].max
       clauses = [RescueClause.new([], nil, [node.rescue_expression], node.location.end_line)]
       rescue_region(r, [node.expression], clauses, nil, nil, last)
+      @sp = r
+      last ? r : nil
+    end
+
+    # milestone 13: the fork's parser applies `a, b = expr rescue other` to the whole assignment (the targets are assigned inside
+    # the rescued region and the rescue value is the statement's value), unlike Prism, which rescues the right side only.
+    def masgn_rescue(node, last:)
+      r = @sp
+      @nregs = [@nregs, r + 1].max
+      clauses = [RescueClause.new([], nil, [node.value.rescue_expression], node.location.end_line)]
+      @masgn_plain = node
+      rescue_region(r, [node], clauses, nil, nil, last)
       @sp = r
       last ? r : nil
     end

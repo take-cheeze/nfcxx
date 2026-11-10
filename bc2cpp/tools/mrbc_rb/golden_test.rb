@@ -3354,6 +3354,11 @@ SNIPPETS = [
   "foo(" + (0..300).map { |i| "k#{i}: d.v#{i}" }.join(", ") + ")",
   "foo(**h, " + (0..60).map { |i| "k#{i}: d.v#{i}" }.join(", ") + ")",
   "x = [" + (0..300).map { |i| "d.v#{i}" }.join(", ") + "]",
+  "def m\n  a, b = foo(1) rescue [nil, 2]\nend",
+  "def m\n  a, b = foo(1) rescue [nil, 2]\n  a\nend",
+  "x.each do |y|\n  a, *b = y.z rescue nil\n  puts a\nend",
+  "@a, c = foo rescue 3",
+  (1..95).map { |i| "l#{i} = #{i}" }.join("\n") + "\nregi = 0\nfoo do |ln|\n  a, regi = pl(a, b, c, d, e, f, regi) rescue [nil, regi]\n  z = 1\nend",
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
