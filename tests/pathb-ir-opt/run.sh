@@ -71,11 +71,11 @@ while read -r inp _ want; do
   [ "$got" = "structured=$want ssa=$want" ] || un="FAIL (on $inp: $got, want $want)"
 done < unroll.args
 echo "unroll: $un"; [ "$un" = ok ] || fail=1
-# --prune-unreachable: the function no root reaches goes; one called by the entry, one whose address it takes, and one a global's
+# --prune-unreachable: the function no root reaches goes; one called by the entry, one whose address it takes, and one a named global's
 # initializer names stay.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --prune-unreachable=__nfcxx_sycl_entry_ prune.ir > "$out/prune.ir" || fail=1
 if [ "$(grep -o '^(function "[^"]*"' "$out/prune.ir" | tr '\n' ' ')" = '(function "virt" (function "fp_target" (function "used" (function "__nfcxx_sycl_entry_k" ' ] \
-   && grep -q '^(global "vt"' "$out/prune.ir"; then echo "prune unreachable: ok"; else echo "prune unreachable: FAIL"; fail=1; fi
+   && grep -q '^(global "vt"' "$out/prune.ir" && ! grep -q '^(global "dead"' "$out/prune.ir"; then echo "prune unreachable: ok"; else echo "prune unreachable: FAIL"; fail=1; fi
 # The EH state globals: their stores go, their loads become null (a pointer) or 0; the slot stores stay for the later passes.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-eh strip_eh.ir > "$out/strip_eh.ir" || fail=1
 if ! grep '(function' "$out/strip_eh.ir" | grep -q 'eh_' && grep -q '(let %1 (ptr (struct "__C8")) (null (ptr (struct "__C8"))))' "$out/strip_eh.ir" \

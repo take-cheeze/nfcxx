@@ -88,4 +88,6 @@ suite.behaviour(DRIVER) do |_, compiled|
               compiled&.first == '[2, 7, 8, 12, 8, 11, 3, 12, 13, 20, 11, 16, 4, 17, 18, 28, 14, 21, ' \
                                  '[4, [], 3], [17, [5], 3], [18, [5, 6], 3], [28, 8, [], 3], [14, 3, [], 3], [21, 3, [4, 9], 3]]')
 end
+require_relative 'resumable_scalar_args_cases'
+ResumableScalarArgsCases.run
 suite.finish
