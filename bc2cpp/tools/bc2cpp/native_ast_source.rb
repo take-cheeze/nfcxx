@@ -1,10 +1,11 @@
 # frozen_string_literal: true
 
 # Where the bc2cpp native analyses (native_ast_returns.rb, native_core_candidates.rb, ...) get a translation unit's AST:
-#   clang  `clang -fsyntax-only -Xclang -ast-dump=json` (the original producer, and the default for now);
+#   clang  `clang -fsyntax-only -Xclang -ast-dump=json` (the original producer; the fallback when nfcxx is not built);
 #   nfcxx  scripts/nfcxx-ast-dump: the nfcxx (EDG) front end's own dump of function bodies, records and file-scope
 #          variables, in the subset of clang's JSON that these consumers read (be/nfcxx_ast.c, docs/notes/nfcxx-ast.md).
-# Chosen by BC2CPP_AST_PRODUCER (clang | nfcxx). Both give the same hash shape, so the analyses are unchanged.
+# nfcxx is the default when its front end is built (scripts/setup-libclang-edg.sh), else clang; BC2CPP_AST_PRODUCER=clang opts
+# out, =nfcxx insists. Both give the same hash shape, so the analyses are unchanged.
 #
 # NativeAstSource.dump(path, flags, lang: :c | :cxx, std: nil) -> [json_text, stderr, status]
 require 'open3'
@@ -15,8 +16,11 @@ module NativeAstSource
 
   module_function
 
-  def producer
-    name = ENV.fetch('BC2CPP_AST_PRODUCER', 'clang')
+  # +auto+: with no BC2CPP_AST_PRODUCER, nfcxx when it is built here, else clang. A consumer whose output is not byte-identical
+  # between the two (main_ast.rb: libstdc++ internals differ in names) passes auto: false and keeps clang unless told otherwise.
+  def producer(auto: true)
+    name = ENV.fetch('BC2CPP_AST_PRODUCER', '')
+    name = (auto && available?('nfcxx') ? 'nfcxx' : 'clang') if name.empty?
     raise ArgumentError, "BC2CPP_AST_PRODUCER must be one of #{PRODUCERS.join(', ')}: #{name.inspect}" unless PRODUCERS.include?(name)
 
     name

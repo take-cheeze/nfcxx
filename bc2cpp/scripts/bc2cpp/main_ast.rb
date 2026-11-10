@@ -33,7 +33,7 @@ resolve = lambda do |name|
 end
 # BC2CPP_AST_PRODUCER=nfcxx reads the nfcxx front end's AST (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md) instead of
 # clang's; the default stays clang. The nfcxx producer needs no clang at all when BC2CPP_HOST_CXX preprocesses.
-producer = NativeAstSource.producer
+producer = NativeAstSource.producer(auto: false)
 clang = producer == 'clang' ? resolve.call(ENV.fetch('CLANG', 'clang++')) : nil
 host_cxx = ENV['BC2CPP_HOST_CXX'] && resolve.call(ENV['BC2CPP_HOST_CXX'])
 target = nil
