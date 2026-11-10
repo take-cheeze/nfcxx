@@ -2207,7 +2207,7 @@ module MrbcRb
     # Whether a call's arguments are more than positional operands: keyword arguments, splats or a block argument.
     def complex_arguments?(node)
       (node.arguments&.arguments || []).any? { |a| a.is_a?(Prism::KeywordHashNode) || a.is_a?(Prism::SplatNode) || a.is_a?(Prism::ForwardingArgumentsNode) } ||
-        node.block.is_a?(Prism::BlockArgumentNode)
+        node.block.is_a?(Prism::BlockArgumentNode) || ((node.arguments&.arguments || []).size > 14 && (node.name.to_s.match?(PLAIN_NAME) || (node.name == :[] && node.receiver)))
     end
 
     # `recv&.name`: the receiver's copy goes to the next register and JMPNIL on it skips the send (the move is forced, as
@@ -2226,10 +2226,12 @@ module MrbcRb
     # gen_args, the block argument last, and the send is SEND/SENDB (SSEND/SSENDB without a receiver) whose argc byte packs
     # the positional count (15 when a splat made it variable) and the keyword count (15 when a ** made it a hash).
     def call_with_args(node, need:)
-      raise Unsupported, 'call with a non-plain method name and complex arguments' unless node.name.to_s.match?(PLAIN_NAME)
+      unless node.name.to_s.match?(PLAIN_NAME) || (node.name == :[] && node.receiver)
+        raise Unsupported, 'call with a non-plain method name and complex arguments'
+      end
 
       recv = node.receiver && unparen(node.receiver)
-      recv = nil if recv.is_a?(Prism::SelfNode)
+      recv = nil if recv.is_a?(Prism::SelfNode) && node.name != :[] # `self[*a]` loads self like any receiver (opt_op is set)
       raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil?
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
 
@@ -2270,6 +2272,7 @@ module MrbcRb
       regular = args.reject { |x| x.is_a?(Prism::KeywordHashNode) }
       kw = args.find { |x| x.is_a?(Prism::KeywordHashNode) }
       sp = a + 1
+      slimit = sp >= 99 ? Float::INFINITY : 99
       n = 0
       variable = false
       regular.each do |arg|
@@ -2277,7 +2280,7 @@ module MrbcRb
         if arg.is_a?(Prism::SplatNode)
           v = arg.expression ? unparen(arg.expression) : anonymous_local(:*, arg)
 
-          if v.is_a?(Prism::ArrayNode) && v.elements.none?(Prism::SplatNode)
+          if v.is_a?(Prism::ArrayNode) && v.elements.none?(Prism::SplatNode) && v.opening_loc&.slice == '['
             # Literal arrays are inlined (empty ones vanish).
             raise Unsupported, 'splat of an array of non-leaf values' unless v.elements.all? { |e| simple?(e) }
 
@@ -2302,11 +2305,24 @@ module MrbcRb
         else
           raise Unsupported, 'argument is not an operand' unless operand?(arg)
 
+          if sp >= slimit # gen_values flushes what it has when the stack reaches GEN_VAL_STACK_MAX
+            sp -= n
+            if !variable
+              n.zero? ? emit(:LOADNIL, sp) : emit(:ARRAY, sp, n)
+              sp += 1
+              variable = true
+            elsif n.positive?
+              sp -= 1
+              emit(:ARYPUSH, sp, n)
+              sp += 1
+            end
+            n = 0
+          end
           operand_into(arg, sp)
           sp += 1
           n += 1
         end
-        raise Unsupported, 'argument stack too deep' if sp > 90
+        raise Unsupported, 'argument stack too deep' if sp > 200
       end
       if variable
         if n.positive?
@@ -2318,7 +2334,11 @@ module MrbcRb
         sp += 1
         n = 15
       elsif n > 14
-        raise Unsupported, 'more than 14 positional arguments'
+        # gen_values packs more than 14 positional arguments into one array, which makes the count variable
+        sp -= n
+        emit(:ARRAY, sp, n)
+        sp += 1
+        n = 15
       end
       nk = 0
       if kw
@@ -2377,7 +2397,13 @@ module MrbcRb
         first = false
         raise Unsupported, 'argument stack too deep' if sp > 90
       end
-      raise Unsupported, 'more than 14 keyword pairs' if len > 14
+      if len > 14 # gen_hash builds the pairs into a HASH when there are more than its limit
+        raise Unsupported, 'more than 14 keyword pairs after a ** splat' if update
+
+        sp -= len * 2
+        emit(:HASH, sp, len)
+        return [15, sp + 1]
+      end
       return [len, sp] unless update
 
       if len.positive?
@@ -2759,6 +2785,9 @@ module MrbcRb
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
           raise Unsupported, 'interpolation with several statements' if body.size > 1
+          # a heredoc interpolated alone into a heredoc line is split differently by the fork (unverified)
+          raise Unsupported, 'heredoc interpolated into a heredoc' if body[0].respond_to?(:opening) &&
+                                                                    body[0].opening&.start_with?('<<')
 
           flush.call(true)
           parts << [:expr, body[0] && unparen(body[0])]
@@ -3069,17 +3098,18 @@ module MrbcRb
 
       symbols = node.opening_loc&.slice&.match?(/\A%[iI]/) # %i and %I: symbols built from pool strings (symbol_word_into)
       raise Unsupported, 'array element' unless symbols || elems.all? { |e| operand?(e) }
-      raise Unsupported, 'array with many elements' if elems.size > (symbols ? 63 : 50)
-
       a = temp
       # codegen_array flushes the elements built so far (ARRAY, then ARYPUSH) when the stack reaches 64, or 99 above 64.
-      raise Unsupported, 'array built in chunks' if elems.size > 1 && a + elems.size - 1 >= (a >= 64 ? 99 : 64)
+      if elems.size > 1 && a + elems.size - 1 >= (a >= 64 ? 99 : 64)
+        return array_literal_chunked(node, dst, symbols) if node.opening_loc&.slice&.start_with?('%')
+
+        return array_splat_into(node, dst)
+      end
       # The elements of %w and %i are strings and symbols the fork does not enter (gen_literal_array): the line stays that of
       # the array node.
       literal_words = node.opening_loc&.slice&.start_with?('%')
       saved_hold = @hold_line
       @hold_line = true if literal_words
-      raise Unsupported, 'symbol list built in chunks' if symbols && a + elems.size > 64 # gen_literal_array flushes at cursp 64
       elems.each_with_index { |e, i| symbols ? symbol_word_into(e, a + i, node) : operand_into(unparen(e), a + i) }
       @hold_line = saved_hold
       @nregs = [@nregs, a + elems.size].max
@@ -3093,19 +3123,56 @@ module MrbcRb
       end
     end
 
+    # gen_literal_array of a %w, %W, %i or %I list too long for one register window: the same flushing as codegen_array.
+    def array_literal_chunked(node, dst, symbols)
+      a = temp
+      saved_hold = @hold_line
+      @hold_line = true
+      sp = a
+      count = 0
+      first = true
+      slimit = a >= 64 ? 99 : 64
+      node.elements.each do |e|
+        if sp >= slimit && count.positive?
+          sp -= count
+          if first
+            emit(:ARRAY, sp, count)
+            first = false
+          else
+            sp -= 1
+            emit(:ARYPUSH, sp, count)
+          end
+          sp += 1
+          count = 0
+        end
+        raise Unsupported, 'array stack too deep' if sp > 200
+
+        symbols ? symbol_word_into(e, sp, node) : operand_into(unparen(e), sp)
+        @nregs = [@nregs, sp + 1].max
+        sp += 1
+        count += 1
+      end
+      @hold_line = saved_hold
+      if first
+        emit(:ARRAY, a, count)
+      elsif count.positive?
+        emit(:ARYPUSH, a, count)
+      end
+      gen_move(dst, a, false)
+    end
+
     # codegen_array with a splat: the elements before the first splat are an ARRAY (an empty one, built with a LOADNIL before it,
     # when the splat is first), each splatted value is ARYCATed on, and the elements after a splat are ARYPUSHed. The result is
     # in the first temporary. An empty literal `*[]` is skipped; the stack walks as the fork's pushes and pops do.
     def array_splat_into(node, dst)
       elems = node.elements
-      raise Unsupported, 'array with many elements' if elems.size > 50
-      raise Unsupported, 'multi-line array with a splat' if node.location.start_line != node.location.end_line
       raise Unsupported, 'splat in a %w array' if node.opening_loc&.slice&.start_with?('%')
 
       base = dst >= @nlocals ? dst : temp
       sp = base
       regular = 0
       first = true
+      slimit = base >= 64 ? 99 : 64 # codegen_array's GEN_LIT_ARY_MAX, raised once when it starts above it
       elems.each do |e|
         splat = e.is_a?(Prism::SplatNode)
         v = splat ? e.expression : e
@@ -3116,6 +3183,18 @@ module MrbcRb
 
         raise Unsupported, 'array element' unless operand?(v)
 
+        if !splat && sp >= slimit && regular.positive? # flush the accumulated elements
+          sp -= regular
+          if first
+            emit(:ARRAY, sp, regular)
+            first = false
+          else
+            sp -= 1
+            emit(:ARYPUSH, sp, regular)
+          end
+          sp += 1
+          regular = 0
+        end
         if splat
           if regular.positive?
             sp -= regular
@@ -3135,7 +3214,7 @@ module MrbcRb
             first = false
           end
         end
-        raise Unsupported, 'array stack too deep' if sp > 60
+        raise Unsupported, 'array stack too deep' if sp > 200
 
         operand_into(v, sp)
         sp += 1
