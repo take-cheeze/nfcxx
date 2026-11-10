@@ -86,7 +86,7 @@ module MrbcRb
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
   BUILT_VALUES = [Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
-                  Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode].freeze
+                  Prism::InterpolatedRegularExpressionNode].freeze
 
   # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
   UNVERIFIED_OPERATORS = %i[-@ +@ ~ =~ !~ <=> ** & | ^ >> ===].freeze # `[]`, `[]=`, `!`, `!=`, `%` and `<<` are verified
@@ -900,7 +900,7 @@ module MrbcRb
       return block_next(node, last: last) if lp == BLOCK_LOOP
 
       args = node.arguments&.arguments
-      raise Unsupported, 'next with several values or a splat' if args && (args.size != 1 || args[0].is_a?(Prism::SplatNode) || operand?(args[0]))
+      raise Unsupported, 'next with several values or a splat' if args && (args.size != 1 || args[0].is_a?(Prism::SplatNode))
 
       statement(unparen(args[0]), last: false) if args # codegen(value, NOVAL) before the JMPUW
       jump = emit_jump(:JMPUW)
