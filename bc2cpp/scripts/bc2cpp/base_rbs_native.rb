@@ -19,10 +19,12 @@ require 'open3'
 require 'fileutils'
 require 'set'
 require 'optparse'
+require_relative '../../tools/bc2cpp/world_root'
 require_relative 'base_rbs_workers'
 require_relative '../../tools/bc2cpp/native_format_types'
 require_relative '../../tools/bc2cpp/native_return_kinds'
 require_relative '../../tools/bc2cpp/native_ast_returns'
+require_relative '../../tools/bc2cpp/native_ast_source'
 
 module BaseRbsNative
   DEFINE_CLASS = /\bmrb_define_(class|module)(_under)?(?:_id)?\s*\(/.freeze
@@ -398,24 +400,48 @@ module BaseRbsNative
   # the regex kinds, and says so.
   # +optional+ lets a function returning K or nil be `K?` (the base declarations ask for it; native_fn_kinds.rb does not).
   def ast_function_kinds(path, flags, external = {}, self_index = nil, external_refs = nil, optional: false)
-    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
-    out, err, status = Open3.capture3('clang', *lang, '-fsyntax-only', '-Xclang', '-ast-dump=json', *flags, path)
+    # BC2CPP_AST_PRODUCER=nfcxx reads the nfcxx front end's dump instead of clang's (tools/bc2cpp/native_ast_source.rb).
+    out, err, status = NativeAstSource.dump(path, flags, lang: path.end_with?('.c') ? :c : :cxx)
     unless status.success?
       warn "base_rbs_native: AST returns unavailable for #{path}, regex kinds kept: #{err.lines.first}"
       return {}
     end
 
-    NativeAstReturns.analyze(JSON.parse(out.force_encoding(Encoding::UTF_8)), path, external: external, self_index: self_index,
+    NativeAstReturns.analyze(JSON.parse(out), path, external: external, self_index: self_index,
                                                                                  external_refs: external_refs, optional: optional)
   end
 
+  # The preprocessor command for `-E -P`: BC2CPP_PREPROCESSOR (`clang`, `nfcxx`, or a program taking clang's -x/-std/-E/-P
+  # options), else nfcxx's EDG preprocessor (scripts/nfcxx-cpp) when EDG is built, else clang. `nfcxx` is the nfcxx checkout
+  # bc2cpp sits in (the repository's bc2cpp/, or rpg-maker-clone's 3rd/nfcxx/bc2cpp).
+  def preprocessor
+    choice = ENV.fetch('BC2CPP_PREPROCESSOR', '')
+    nfcxx_cpp = File.expand_path('../scripts/nfcxx-cpp', BC2CPP_TREE_ROOT)
+    edg = File.expand_path('../build/edg/bin/cpfe', BC2CPP_TREE_ROOT)
+    case choice
+    when 'clang' then 'clang'
+    when 'nfcxx' then nfcxx_cpp
+    when '' then File.executable?(edg) && File.executable?(nfcxx_cpp) ? nfcxx_cpp : 'clang'
+    else choice
+    end
+  end
+
   def preprocess(path, flags)
-    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-std=gnu++17']
-    out, err, status = Open3.capture3('clang', *lang, '-E', '-P', *flags, path)
-    raise "clang -E failed for #{path}: #{err.lines.first}" unless status.success?
+    lang = path.end_with?('.c') ? ['-x', 'c', '-std=gnu11'] : ['-x', 'c++', '-std=gnu++17']
+    pp = preprocessor
+    out, err, status = Open3.capture3(pp, *lang, '-E', '-P', *flags, path)
+    raise "#{File.basename(pp)} -E failed for #{path}: #{err.lines.first}" unless status.success?
 
     # The sources are UTF-8 whatever the locale says; a US-ASCII read fails on the first non-ASCII comment.
     out.force_encoding(Encoding::UTF_8)
+    File.basename(pp) == 'clang' ? out : normalize_edg(out)
+  end
+
+  # EDG's preprocessor prints a designated initializer as `. func = (f)` where clang prints `.func = (f)`; the registration
+  # scan reads `.func`. Closing the space after a `.` that starts an identifier outside string literals is the only
+  # difference the scan sees (checked over mruby and the repository's gems: identical scan results).
+  def normalize_edg(text)
+    text.gsub(/("(?:\\.|[^"\\\n])*")|\. (?=[A-Za-z_])/) { Regexp.last_match(1) || '.' }
   end
 
   def run(out_dir, paths, flags, jobs: BaseRbsWorkers::DEFAULT_JOBS)
