@@ -5,6 +5,7 @@
 # Generated owner-map arms and whole-world mutations remain in their independent checks.
 require_relative 'native_owner_scopes_cases'
 require_relative 'native_path_registrations_cases'
+require_relative 'native_singleton_cache_cases'
 
 failures = []
 checks = 0
@@ -14,7 +15,7 @@ check = lambda do |label, ok|
   failures << label unless ok
 end
 
-[NativeOwnerScopesCases, NativePathRegistrationsCases].each do |cases|
+[NativeOwnerScopesCases, NativePathRegistrationsCases, NativeSingletonCacheCases].each do |cases|
   puts "== #{cases.name}"
   cases.run(check)
 end

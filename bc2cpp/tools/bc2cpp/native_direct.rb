@@ -53,7 +53,7 @@ module NativeDirect
       # An unmatched optional group is nil on CRuby and "" on mruby's onig scan: either way, not matched.
       defs[var] << (under && !under.empty? ? [:under, parts[1], parts[2][/"(\w+)"/, 1]] : [:top, parts[1][/"(\w+)"/, 1]])
     end
-    text.scan(/(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
+    text.scan(/\b(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
       callers = text.scan(/\b#{Regexp.escape(func)}\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*;/).flatten
       defs[param] << [:param, callers, param_owners[func]]
     end
@@ -120,7 +120,7 @@ module NativeDirect
     return path unless File.file?(path)
 
     stat = File.stat(path)
-    [path, stat.mtime.to_i, stat.size]
+    [path, stat.mtime, stat.size]
   end
 
   # Every "name" registration in `path` as [owner, kind]; owner is nil when
