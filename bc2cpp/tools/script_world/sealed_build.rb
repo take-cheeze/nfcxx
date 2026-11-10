@@ -3,6 +3,7 @@
 require_relative '../bc2cpp/world_root'
 require 'fileutils'
 require 'shellwords'
+require_relative '../optcarrot_probe/onig_aliases'
 
 # The script-world build kind (compiled_gems.rb BC2CPP_PROBE_BUILDS): one mruby script as a closed-world program. The
 # script is a gem's mrblib, its top-level statements that need the command line (the tail) are moved into
@@ -40,6 +41,10 @@ module ScriptSealedBuild
 
   def self.prepare(root, temp, compiled_gem, script:, tail:, entry:)
     gems = sealed_gems(root, compiled_gem)
+    # REGEXP_CLOSED: Regexp is the regexp gem (Oniguruma) with the same String-method shims the optcarrot probe uses.
+    gems['mruby-onig-regexp'] = OptcarrotOnigAliases.prepare(root, temp)
+    # ENV_CLOSED: the process environment, read-only (env_world/).
+    gems['mruby-env-world'] = File.expand_path('env_world', __dir__)
     # CONST_RESOLVE: the program reads ScriptWorldProbe, which register.cxx (written after the scan) defines; this stub
     # names it to the scan as a native binding, emit_register overwrites it.
     FileUtils.mkdir_p(File.join(compiled_gem, 'src'))
