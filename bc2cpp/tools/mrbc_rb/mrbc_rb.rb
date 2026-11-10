@@ -57,7 +57,7 @@ module MrbcRb
   # multi-line statement of the kinds in MULTILINE_STATEMENTS follows the entered-node rule (Compiler#enter); any other
   # multi-line statement raises Unsupported.
   MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode,
-                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::BeginNode].freeze
+                  Prism::SingletonClassNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::BeginNode, Prism::ForNode].freeze
 
   # Multi-line statements whose line rules are derived below (see Compiler#enter): the fork stamps each instruction with the
   # line of the classic parser node it entered last, and a node's line is the line of the last token the parser had read
@@ -78,7 +78,7 @@ module MrbcRb
                           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
-  ENTERED = [Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
+  ENTERED = [Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
              Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode, Prism::DefinedNode,
              Prism::RationalNode, Prism::ImaginaryNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
@@ -110,7 +110,7 @@ module MrbcRb
 
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
-  BUILT_VALUES = [Prism::DefinedNode, Prism::RationalNode, Prism::ImaginaryNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
+  BUILT_VALUES = [Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::DefinedNode, Prism::RationalNode, Prism::ImaginaryNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
                   Prism::InterpolatedRegularExpressionNode].freeze
 
   # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
@@ -421,7 +421,8 @@ module MrbcRb
     # A def in a body: TDEF stores the method's symbol in the result register and refers to a child irep.
     def def_statement(node, last:)
       recv = node.receiver && unparen(node.receiver)
-      raise Unsupported, 'receiver def on a non-simple receiver' if recv && !simple?(recv)
+      recv = unparen(recv.body) if recv.is_a?(Prism::ParenthesesNode) && recv.body && !recv.body.is_a?(Prism::StatementsNode) # `def (expr).m`
+      raise Unsupported, 'receiver def on a non-operand receiver' if recv && !simple?(recv) && !operand?(recv)
       raise Unsupported, 'def with a name that is not verified' unless def_name_ok?(node.name)
 
       # codegen_sdef: the name's symbol comes first, then the method's irep, then the receiver, loaded into the result
@@ -452,7 +453,7 @@ module MrbcRb
       enter(node)
 
       args = node.arguments&.arguments
-      raise Unsupported, 'return with an unverified value' if args && args.size == 1 && !(simple?(args[0]) || call_node?(args[0]) || args[0].is_a?(Prism::SplatNode) || operand?(args[0]))
+      raise Unsupported, 'return with an unverified value' if args && args.size == 1 && !(simple?(args[0]) || call_node?(args[0]) || args[0].is_a?(Prism::SplatNode) || operand?(args[0]) || args[0].is_a?(Prism::BeginNode))
 
       t = temp
       args ? return_values_into(args, t) : emit(:LOADNIL, t)
@@ -683,6 +684,7 @@ module MrbcRb
           value_in_register(node)
         else
           string_unused(node) if node.is_a?(Prism::InterpolatedStringNode)
+          small_unused(node)
           nil
         end
       when Prism::CallNode
@@ -750,6 +752,8 @@ module MrbcRb
         value_in_register(node)
       when Prism::SingletonClassNode
         sclass_statement(node, last: last)
+      when Prism::ForNode
+        for_statement(node, last: last)
       when Prism::ClassNode
         class_statement(node, last: last)
       when Prism::ModuleNode
@@ -916,7 +920,7 @@ module MrbcRb
     # as a class body does (class_body).
     def sclass_statement(node, last:)
       obj = unparen(node.expression)
-      raise Unsupported, 'singleton class of a non-simple object' unless simple?(obj)
+      raise Unsupported, 'singleton class of a non-operand object' unless simple?(obj) || operand?(obj)
 
       t = temp
       value_into(obj, t)
@@ -1137,7 +1141,9 @@ module MrbcRb
     # scope_body: the index of the child irep, which is the next entry of the parent's reps (a body with no statements
     # creates none).
     def child_body(locals, stmts, val)
-      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_body(locals, stmts, val)
+      child = Compiler.new(@filename, frozen_strings: @frozen_strings)
+      child.instance_variable_set(:@outer_in_method, inside_method?)
+      @children << child.compile_body(locals, stmts, val)
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
@@ -2447,6 +2453,7 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
+        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::RescueModifierNode) ||
         node.is_a?(Prism::CaseNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
@@ -2569,6 +2576,17 @@ module MrbcRb
           @sp = saved
         end
         gen_move(dst, r, false)
+      when Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode, Prism::ForNode
+        # A class, module or singleton class body as a value (milestone 12): built at the first temporary like a begin block.
+        saved = @sp
+        base = dst >= @nlocals ? dst : temp
+        begin
+          @sp = base
+          r = statement(node, last: true)
+        ensure
+          @sp = saved
+        end
+        gen_move(dst, r, false)
       when Prism::BeginNode, Prism::RescueModifierNode
         # A begin block as a value: built at the destination when it is a temporary, else at the first temporary and moved.
         saved = @sp
@@ -2582,6 +2600,7 @@ module MrbcRb
         gen_move(dst, r, false)
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::InterpolatedStringNode then dstr_into(node, dst)
+      when Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode then built_into(dst) { |base| small_node_at(node, base) }
       when Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode then built_into(dst) { |base| regex_at(node, base) }
       when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
       when Prism::SourceEncodingNode then built_into(dst) { |base| source_into(node, base) }
@@ -2658,9 +2677,9 @@ module MrbcRb
       return heredoc_parts(node) if heredoc
 
       case node
-      when Prism::StringNode
+      when Prism::StringNode, Prism::XStringNode
         [[:lit, node.unescaped.b]]
-      when Prism::InterpolatedStringNode
+      when Prism::InterpolatedStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode
         return node.parts.flat_map { |part| string_parts(part, top: false) } if node.opening_loc.nil? # adjacent literals
 
         parts = [[:lit, ''.b]]
@@ -2819,6 +2838,122 @@ module MrbcRb
       end
     end
 
+    # ---- milestone 12 (small nodes): backtick strings and interpolated symbols ----
+
+    # `cmd` and `a#{x}` are a string built as a quoted one is (gen_string) and sent to self as `Kernel.` (SSEND with the string
+    # as the only argument, the result in the string's base minus one); :"a#{x}" is such a string INTERNed. Unused, a backtick
+    # string is still sent (its string and call are generated), an interpolated symbol generates nothing but its operands.
+    def small_node_at(node, base)
+      raise Unsupported, 'heredoc backtick string' if heredoc_string?(node)
+      raise Unsupported, 'symbol without delimiters' if node.is_a?(Prism::InterpolatedSymbolNode) && node.opening_loc.nil?
+
+      parts = string_parts(node)
+      @line = line_of(node)
+      if node.is_a?(Prism::InterpolatedSymbolNode)
+        parts.pop if parts.size > 1 && parts.last[0] == :lit && parts.last[1].empty? # no literal after a last expression
+        parts.size == 1 ? emit(:STRING, base, pool_index([:str, parts[0][1]])) : dstr_at(parts, base)
+        return emit(:INTERN, base)
+      end
+      reach(base + 3)
+      if parts.size == 1
+        emit(:STRING, base + 1, pool_index([:str, parts[0][1]]))
+      else
+        dstr_at(parts, base + 1)
+      end
+      emit(:SSEND, base, sym_index(:`), 1)
+    end
+
+    def small_unused(node)
+      case node
+      when Prism::XStringNode, Prism::InterpolatedXStringNode then small_node_at(node, temp)
+      when Prism::InterpolatedSymbolNode then string_unused(node)
+      end
+    end
+
+    # ---- milestone 12: for loops (codegen_for) ----
+
+    # `for v in obj; body; end` is `obj.each` with a block whose scope has no locals of its own: the loop variable and every
+    # local of the body live in the enclosing scope and are reached as upvalues. The block takes one parameter (ENTER 0x40000,
+    # register 1), which is stored in the variable (SETUPVAR) before a NOP (the redo target) and the body. Only a single
+    # local variable as the loop variable, a one-line header and a body without redo/retry are covered.
+    def for_statement(node, last:)
+      var = node.index
+      raise Unsupported, 'for with a loop variable other than a local' unless var.is_a?(Prism::LocalVariableTargetNode)
+
+      coll = unparen(node.collection)
+      raise Unsupported, 'for over a non-operand' unless operand?(coll)
+      raise Unsupported, 'multi-line for header' if node.collection.location.end_line != node.location.start_line || var.location.start_line != node.location.start_line
+
+      for_check_body(node.statements)
+      t = temp
+      @line = node.location.start_line
+      operand_into(coll, t)
+      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).send(:compile_for, node, self)
+      index = @children.size - 1
+      raise Unsupported, 'more than 255 child ireps' if index > 0xff
+
+      reach(t + 2)
+      emit(:BLOCK, t + 1, index)
+      emit(:SENDB, t, sym_index(:each), 0)
+      last ? t : nil
+    end
+
+    def compile_for(node, parent)
+      @parent = parent
+      @loops = [BLOCK_LOOP] # LOOP_FOR: break, next and return act as in a block
+      set_locals([])
+      @sp += 1 # the block parameter
+      @nregs = [@nregs, @sp].max
+      @line = node.location.start_line
+      emit(:ENTER, 0x40000)
+      var = node.index
+      FOR_DEPTH.call(node.statements, 0) if node.statements
+      FOR_SHIFT.call(var)
+      idx, lv = upvar_operands(var.name, var.depth)
+      emit(:SETUPVAR, 1, idx, lv)
+      emit(:NOP)
+      stmts = body_statements(node.statements)
+      raise Unsupported, 'empty for body' if stmts.empty?
+
+      return_value(generate(stmts, val: true))
+      self
+    end
+
+    # The locals the body reads and writes belong to the scopes outside the for, one level further out than Prism counts them
+    # (it does not see the for as a scope): a variable +level+ blocks deep is shifted when its depth reaches outside the for.
+    FOR_SHIFT = lambda do |node|
+      depth = node.depth + 1 # a nested for shifts the same node again
+      node.singleton_class.send(:remove_method, :depth) if node.singleton_methods.include?(:depth)
+      node.define_singleton_method(:depth) { depth }
+    end
+
+    FOR_DEPTH = lambda do |node, level|
+      case node
+      when Prism::DefNode, Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode
+        raise Unsupported, 'definition inside a for body'
+      when Prism::LocalVariableReadNode, Prism::LocalVariableWriteNode, Prism::LocalVariableTargetNode,
+           Prism::LocalVariableOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::LocalVariableAndWriteNode
+        FOR_SHIFT.call(node) if node.depth >= level
+      when Prism::ItLocalVariableReadNode, Prism::NumberedParametersNode, Prism::ItParametersNode
+        raise Unsupported, 'implicit block parameter inside a for body' if level.zero?
+      end
+      inner = node.is_a?(Prism::BlockNode) || node.is_a?(Prism::LambdaNode) ? level + 1 : level
+      node.compact_child_nodes.each { |c| FOR_DEPTH.call(c, inner) }
+    end
+
+    def for_check_body(stmts)
+      return unless stmts
+
+      walk = lambda do |n|
+        case n
+        when Prism::RedoNode, Prism::RetryNode
+          raise Unsupported, 'redo or retry inside a for body'
+        end
+        n.compact_child_nodes.each(&walk)
+      end
+      walk.call(stmts)
+    end
+
     # An interpolated regexp's pattern (the pre-gen_string interpolation path, kept for regexps): the first literal part is a STRING, and each interpolated value is loaded into the
     # next register and STRCATed, followed by the literal part after it (empty when another interpolation or the end
     # follows: the fork always appends it).
@@ -2865,10 +3000,11 @@ module MrbcRb
         if c == '\\'
           nxt = bytes[i + 1]
           raise Unsupported, 'regexp escape' if nxt.nil? || nxt == 'u'
-          raise Unsupported, 'escaped delimiter' if !slash && (nxt == node.opening_loc.slice[-1] || nxt == node.closing_loc.slice[0])
 
           if nxt == '/' && slash
             out << '/'
+          elsif !slash && (nxt == node.opening_loc.slice[-1] || nxt == node.closing_loc.slice[0])
+            out << nxt # an escaped delimiter loses its backslash (milestone 12)
           elsif nxt == "\n" # a continuation inside a regexp is dropped (verified with mrbc -v)
             nil
           else
@@ -3720,8 +3856,7 @@ module MrbcRb
     # The literal inside a suffixed number (the digits of `1.5r` without the `r`), as an integer or a float load into +reg+.
     def numeric_literal_at(node, reg)
       text = node.location.slice
-      raise Unsupported, 'negative rational or imaginary literal' if text.start_with?('-')
-
+      text = text.delete_prefix('-') # the negation is a -@ send on the whole literal (numeric_call_at)
       text = text.delete_suffix('i') if node.is_a?(Prism::ImaginaryNode)
       text = text.delete_suffix('r')
       if text.match?(/[.eE]/) && !text.match?(/\A0[xX]/)
@@ -3737,7 +3872,8 @@ module MrbcRb
     end
 
     # The call of Rational or Complex with its result in +a+ (an SSEND whose arguments follow it).
-    def numeric_call_at(node, a)
+    def numeric_call_at(node, a, top: true)
+      negative = top && node.location.slice.start_with?('-')
       reach(a + 1)
       if node.is_a?(Prism::RationalNode)
         numeric_literal_at(node, a + 1)
@@ -3747,7 +3883,7 @@ module MrbcRb
         emit(:LOADI_0, a + 1)
         inner = node.numeric
         case inner
-        when Prism::RationalNode then numeric_call_at(inner, a + 2)
+        when Prism::RationalNode then numeric_call_at(inner, a + 2, top: false)
         when Prism::IntegerNode, Prism::FloatNode then numeric_literal_at(inner, a + 2)
         else raise Unsupported, 'imaginary literal'
         end
@@ -3755,6 +3891,7 @@ module MrbcRb
         name = :Complex
       end
       emit(:SSEND, a, sym_index(name), argc)
+      emit(:SEND, a, sym_index(:-@), 0) if negative
       reach(a + argc + 2)
     end
 
@@ -4046,11 +4183,21 @@ module MrbcRb
     # The enclosing method scope of this (block) scope and the number of block scopes in between (the `lv` of codegen_yield and
     # codegen_super: the walk up to the first scope with mscope set). Only a def counts as one here: a yield or super outside
     # a method is a compile error in the fork.
-    def method_scope
+    def inside_method?
+      @in_method || @outer_in_method || @parent&.send(:inside_method?)
+    end
+
+    def method_scope(optional: false)
       scope = self
       lv = 0
       until scope.instance_variable_get(:@in_method)
-        scope = scope.parent or raise Unsupported, 'yield or super outside a method'
+        raise Unsupported, 'super in a class body inside a method' if scope.instance_variable_get(:@outer_in_method)
+
+        scope = scope.parent
+        # A super outside any method is generated with a nil block (codegen_super: no mscope found); a yield there is an error.
+        return [nil, lv] if scope.nil? && optional
+        raise Unsupported, 'yield outside a method' unless scope
+
         lv += 1
       end
       raise Unsupported, 'block nesting deeper than 15' if lv > 0xf
@@ -4090,7 +4237,9 @@ module MrbcRb
 
     # gen_blkmove: the method's block slot (R[m1 + r + m2 + kd + 1], decoded from the ainfo bits) into the register at @sp;
     # from a block scope it is read with GETUPVAR (whose level operand is lv, not lv - 1).
-    def block_move(ainfo, lv)
+    def block_move(ainfo, lv, no_method = false)
+      return emit(:LOADNIL, @sp) if no_method # super outside a method: nil in place of the block
+
       off = ((ainfo >> 7) & 0x3f) + ((ainfo >> 6) & 1) + ((ainfo >> 1) & 0x1f) + (ainfo & 1) + 1
       lv.zero? ? gen_move(@sp, off, false) : emit(:GETUPVAR, @sp, off, lv)
     end
@@ -4102,8 +4251,8 @@ module MrbcRb
     # into the register after the arguments (BLOCK), as in a call with a block.
     def super_statement(node, last:)
       literal = node.block.is_a?(Prism::BlockNode) ? node.block : nil
-      scope, lv = method_scope
-      ainfo = scope.instance_variable_get(:@ainfo)
+      scope, lv = method_scope(optional: true)
+      ainfo = scope ? scope.instance_variable_get(:@ainfo) : 0
       a = @sp
       @nregs = [@nregs, a + 1].max
       pos = a + 1
@@ -4119,7 +4268,11 @@ module MrbcRb
           @sp = pos + (ainfo.odd? ? 2 : 1) # push() for the block, whose register follows the keywords' slot
         else
           @sp = pos
-          block_move(0, lv) unless literal
+          unless literal
+            saved = @nregs
+            block_move(0, lv, scope.nil?)
+            @nregs = saved if scope.nil? # a bare super's LOADNIL pushes nothing
+          end
           n = 0
         end
         block_literal(literal) if literal
@@ -4133,7 +4286,7 @@ module MrbcRb
         elsif blk
           operand_into(unparen(blk.expression), @sp)
         else
-          block_move(ainfo, lv)
+          block_move(ainfo, lv, scope.nil?)
         end
       end
       @sp = a
