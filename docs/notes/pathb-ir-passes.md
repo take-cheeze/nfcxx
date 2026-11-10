@@ -219,8 +219,12 @@ largest functions, on a 184-function sample of the inlined module, and with the 
 - Unreachable functions (`prune_pass`) are dropped before `--inline`, and again after it, from a SYCL device module.
   Such a module is one with functions named `__nfcxx_sycl_entry_`, which are the roots of all three emitters. The pass is
   on by default with `--inline` or `--sroa`. `--no-prune` keeps every function, and `--prune-unreachable=SUBSTR` names other
-  roots. A function's `&"name"` atoms count as references, called or not, and the functions that a global or data form names
-  are roots too. The emitters only take what the entries reach, so the kernels are the same code. Their slot names (`.iK`)
+  roots. A function's `&"name"` atoms count as references, called or not. A global or data object is kept only when a reached
+  function or object names it (`@"name"`, `$"name"`, `&"name"`): an object no reached code names is dead, and the functions only
+  it names are dropped with it. (Before, every global and data form was a root: on `ggml-sycl.cpp` that kept 5354 of 9756
+  functions, 23.6 MB of text, and `--inline` grew it to over 12 GB; now 290 functions and objects of 15308 are kept, and
+  `--strip-eh --inline` takes 12 s with a 0.47 GB peak, the whole `--strip-eh --inline --sroa` 22 s with 0.54 GB.)
+  The emitters only take what the entries reach, so the kernels are the same code. Their slot names (`.iK`)
   differ, because fewer calls are counted. On mmvq, 1693 of the 7366 functions are reachable before inlining and 564 after
   it. The inline output is 57 MB instead of 672 MB, and every later stage (SSA, e-graph, structurizer, emitter) reads it.
   Modules without SYCL entries (the tests, the CUDA paths) are unchanged.
