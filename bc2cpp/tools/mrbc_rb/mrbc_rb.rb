@@ -62,7 +62,7 @@ module MrbcRb
                           Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
                           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
-                          Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode].freeze
+                          Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
@@ -70,7 +70,8 @@ module MrbcRb
              Prism::SymbolNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::ArrayNode, Prism::CallNode,
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
              Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::RegularExpressionNode,
-             Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode, Prism::ConstantPathNode].freeze
+             Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode, Prism::ConstantPathNode, Prism::ReturnNode,
+             Prism::BreakNode, Prism::NextNode, Prism::MultiWriteNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
@@ -205,7 +206,7 @@ module MrbcRb
         set_locals(pre + [nil] + block_names + kw_names + (node.locals - pre - block_names - kw_names))
       end
       @nregs = @nlocals + 1
-      @line = node.location.start_line
+      @line = def_line(node)
       aspec = (requireds.size << 18) | (optionals.size << 13) | ((rest ? 1 : 0) << 12) | (posts.size << 7) |
               (keywords.size << 2) | (block ? 1 : 0)
       emit(:ENTER, aspec)
@@ -218,6 +219,8 @@ module MrbcRb
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
                     t = temp
+                    raise Unsupported, 'empty body after a continuation' if node.location.slice.match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+
                     @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -258,6 +261,8 @@ module MrbcRb
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
                     t = temp
+                    raise Unsupported, 'empty body after a continuation' if node.location.slice.match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+
                     @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -370,6 +375,8 @@ module MrbcRb
       raise Unsupported, 'call with a block and a non-simple receiver' if recv && !operand?(recv)
 
       line = blk.opening_loc.start_line
+      # The call node was built before its block: its line is that of the end of its receiver, name and arguments.
+      @line = [node.message_loc, node.closing_loc, node.arguments&.location, recv&.location].compact.map(&:end_line).max unless @hold_line
       a = @sp
       @nregs = [@nregs, a + 1].max
       operand_into(recv, a) if recv
@@ -394,6 +401,17 @@ module MrbcRb
 
     def current_line = @line
 
+    # The line of a def: its name's line, which is the line of `def` as long as the header's words (`def`, the receiver and
+    # its dot, the name) share it. Verified with mrbc -v: a break inside the header moves the lines of the def's code and of
+    # its ENTER in ways that depend on the token after the name (a parenthesis after a continuation counts, an `=` does not),
+    # so those headers are Unsupported.
+    def def_line(node)
+      lines = [node.def_keyword_loc, node.receiver&.location, node.operator_loc, node.name_loc].compact.map(&:start_line)
+      raise Unsupported, 'def header spanning lines' if lines.uniq.size != 1 || continuation_count(node.name_loc).positive?
+
+      lines.first
+    end
+
     def set_locals(locals)
       @locals = locals.dup
       @nlocals = @locals.size + 1
@@ -415,6 +433,7 @@ module MrbcRb
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
       nregs = @nregs
+      @line = def_line(node)
       t = temp
       if recv
         value_into(recv, t)
@@ -431,8 +450,10 @@ module MrbcRb
     def return_statement(node, last:)
       raise Unsupported, 'return outside a method body' unless @in_method
 
+      enter(node)
+
       args = node.arguments&.arguments
-      raise Unsupported, 'return with several values' if args && (args.size != 1 || !(simple?(args[0]) || call_node?(args[0])))
+      raise Unsupported, 'return with several values' if args && (args.size != 1 || !operand?(args[0]))
 
       t = temp
       args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
@@ -471,7 +492,7 @@ module MrbcRb
     def enter(node)
       node = unparen(node)
       return unless ENTERED.include?(node.class)
-      return if node.is_a?(Prism::CallNode) && node.block # a call with a block has its own rules (call_with_block)
+      return if node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode) # a call with a block has its own rules (call_with_block)
       return if @hold_line
 
       @line = line_of(node)
@@ -480,7 +501,44 @@ module MrbcRb
     # Receivers (and the calls they belong to) that are reduced only once the next token is read: that token is the `.` of a
     # leading-dot continuation, on a later line.
     def line_of(node)
-      @line_override.fetch(node) { @leading_dot.fetch(node, node.location.end_line) }
+      @line_override.fetch(node) { @leading_dot.fetch(node) { continuation_line(node) } }
+    end
+
+    # A backslash-newline after a node's last token: the lexer skips it as white space (counting the line) when the parser asks
+    # for the token after the node. A node the parser can reduce without that token keeps its own end line; one that needs it
+    # (a variable, constant or string, a call without a closing parenthesis, an operator, a logic operator, an assignment, a
+    # conditional) is built with the line of the token that follows the continuation. Any other node is Unsupported.
+    # The number of backslash-newlines right after +loc+ (a Prism::Location).
+    def continuation_count(loc)
+      m = /\A[ \t]*((?:\\\r?\n[ \t]*)+)/n.match(loc.send(:source).source.byteslice(loc.end_offset, 400).b)
+      m ? m[1].count("\n") : 0
+    end
+
+    def continuation_line(node)
+      line = node.location.end_line
+      m = continuation_count(node.location)
+      return line if m.zero?
+
+      case node
+      when Prism::IntegerNode, Prism::FloatNode
+        # A negative literal is built from the minus sign and the number, which needs the token after it.
+        node.location.slice.start_with?('-') ? line + m : line
+      when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
+           Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode
+        line
+      when Prism::CallNode
+        raise Unsupported, 'line continuation after a call with a block' if node.block.is_a?(Prism::BlockNode)
+
+        node.closing_loc&.slice == ')' ? line : line + m
+      when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::ConstantPathNode, Prism::StringNode,
+           Prism::InterpolatedStringNode, Prism::OrNode, Prism::AndNode, Prism::LocalVariableWriteNode, Prism::ReturnNode,
+           Prism::BreakNode, Prism::NextNode, Prism::MultiWriteNode,
+           Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode, Prism::InstanceVariableWriteNode
+        raise Unsupported, 'line continuation after a heredoc' if heredoc_string?(node)
+
+        line + m
+      else raise Unsupported, 'line continuation after a node of this kind'
+      end
     end
 
     # The key of `label: value` is a symbol node the fork's parser builds in the action of the whole pair (`assoc: tLABEL
@@ -490,7 +548,9 @@ module MrbcRb
       key = assoc.key
       return unless key.is_a?(Prism::SymbolNode) && key.opening_loc.nil? && key.closing_loc&.slice == ':'
 
-      @line_override[key] = line_of(unparen(assoc.value))
+      value = assoc.value # parentheses included: its end is the closing parenthesis
+      # The parser reads the token after the value before it builds the pair, so a continuation counts whatever the value is.
+      @line_override[key] = @leading_dot.fetch(value) { value.location.end_line } + continuation_count(value.location)
     end
 
     # A call whose `.` is on a later line than its receiver's end: the parser reads the `.` (skipping the newline) before it
@@ -504,15 +564,19 @@ module MrbcRb
       return unless recv && op && op.start_line > recv.location.end_line
 
       case recv
-      when Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
+      when Prism::IntegerNode, Prism::FloatNode
+        # A negative literal needs the token after it to be built (see #continuation_line).
+        @leading_dot[recv] = op.start_line if recv.location.slice.start_with?('-')
+      when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
            Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode
         nil
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
         @leading_dot[recv] = op.start_line
       when Prism::CallNode
-        raise Unsupported, 'leading-dot receiver' if recv.block || recv.safe_navigation?
+        raise Unsupported, 'leading-dot receiver' if recv.block.is_a?(Prism::BlockArgumentNode) || recv.safe_navigation?
 
-        @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')'
+        # A call with a block ends in its `}` or `end`: it is built without the next token, like one ending in `)`.
+        @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')' || recv.block.is_a?(Prism::BlockNode)
       else raise Unsupported, 'leading-dot receiver'
       end
     end
@@ -540,8 +604,8 @@ module MrbcRb
         raise Unsupported, 'multi-line statement' unless MULTILINE_STATEMENTS.include?(node.class)
 
         check_multiline(node)
-        enter(node)
       end
+      enter(node) # the fork enters every node, also one whose value is unused
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
@@ -677,7 +741,25 @@ module MrbcRb
       # An empty else-branch is a node on the line of the closing `end`.
       else_line = else_list && else_list.empty? ? node.end_keyword_loc.start_line : nil
       gen_if(node.predicate, then_list, else_list, val: last, then_present: true, empty_line: empty_line,
-                                                            elsif_node: elsif_node?(node), else_line: else_line)
+                                                            elsif_node: elsif_node?(node), else_line: else_line,
+                                                            line: if_node_line(node))
+    end
+
+    # The line of an if or unless node, which the fork enters before its condition: the keyword's line for the block form (the
+    # `end`'s for an `elsif`), and for a modifier or a ternary, which the parser builds after the condition (the modifier) or the
+    # last branch (the ternary), the line the parser is on then, a continuation after it included.
+    def if_node_line(node)
+      kw = node.is_a?(Prism::IfNode) ? node.if_keyword_loc : node.keyword_loc
+      if kw.nil?
+        node.location.end_line + continuation_count(node.location)
+      elsif node.statements && node.statements.location.start_offset < kw.start_offset
+        pred = node.predicate
+        @leading_dot.fetch(pred) { pred.location.end_line } + continuation_count(pred.location)
+      elsif elsif_node?(node)
+        node.end_keyword_loc.start_line
+      else
+        kw.start_line
+      end
     end
 
     # `unless` is an if whose then-branch is the else-clause and whose else-branch is the body (the fork's parser swaps
@@ -691,22 +773,23 @@ module MrbcRb
         then_list = else_node.statements&.body || []
         then_line = then_list.empty? ? node.end_keyword_loc.start_line : nil
         gen_if(node.predicate, then_list, body, val: last, then_present: true, empty_line: then_line,
-                                                           else_line: body_line)
+                                                           else_line: body_line, line: if_node_line(node))
       else
-        gen_if(node.predicate, [], body, val: last, then_present: false, else_line: body_line)
+        gen_if(node.predicate, [], body, val: last, then_present: false, else_line: body_line, line: if_node_line(node))
       end
     end
 
     # codegen_if. +then_list+ and +else_list+ are statement lists (+else_list+ is nil without an else-branch).
     # +then_present+ is whether the fork's then-branch exists (it does for an empty `if` body but not for a bare `unless`).
-    def gen_if(pred, then_list, else_list, val:, then_present:, empty_line: nil, elsif_node: false, else_line: nil)
+    def gen_if(pred, then_list, else_list, val:, then_present:, empty_line: nil, elsif_node: false, else_line: nil, line: nil)
       # The fork folds a literal condition only when it is the condition node itself: `(nil)` is not folded.
       return gen_arm(then_list, val, then_present ? empty_line : nil) if true_always?(pred)
       return gen_arm(else_list || [], val, else_line) if false_always?(pred)
 
       pred = unparen(pred)
       check_condition(pred, elsif_node)
-      @line = pred.location.start_line # the predicate's nodes are visited at their own line
+      leading_dot(pred) if pred.is_a?(Prism::CallNode)
+      @line = line if line # the if node is entered first; the predicate's nodes are then visited at their own lines
       t = temp
       nil_p = nil_check?(pred)
       if nil_p
@@ -787,6 +870,14 @@ module MrbcRb
       t = temp
       return post_test_loop(node, last: last, until_loop: until_loop, forever: forever, t: t) if node.begin_modifier?
 
+      # The loop node is entered before its condition: its keyword's line, or for a modifier (built after the condition) the
+      # line the parser is on then.
+      @line = if node.statements && node.statements.location.start_offset < node.keyword_loc.start_offset
+                @leading_dot.fetch(pred) { pred.location.end_line } + continuation_count(pred.location)
+              else
+                node.keyword_loc.start_line
+              end
+
       if never
         emit(:LOADNIL, t) if last
         return last ? t : nil
@@ -794,6 +885,7 @@ module MrbcRb
 
       pred = unparen(pred)
       check_condition(pred, false) unless forever
+      leading_dot(pred) if pred.is_a?(Prism::CallNode)
       lp = Loop.new(last ? t : nil, @code.size, [])
       @labels << lp.pc0
       @loops << lp
@@ -870,6 +962,7 @@ module MrbcRb
     # value the register is set to nil. Only a break directly in a while or until of this scope is covered.
     def break_statement(node, last:)
       lp = @loops.last or raise Unsupported, 'break outside a while or until loop'
+      enter(node)
       args = node.arguments&.arguments
       raise Unsupported, 'break with several values' if args && args.size != 1
 
@@ -892,6 +985,7 @@ module MrbcRb
 
     def next_statement(node, last:)
       lp = @loops.last or raise Unsupported, 'next outside a while or until loop'
+      enter(node)
       raise Unsupported, 'next with a value' if node.arguments
 
       jump = emit_jump(:JMPUW)
@@ -1325,8 +1419,18 @@ module MrbcRb
       end
     end
 
+    # The fork enters the variable of an operator, or or and assignment (a node it built when it read the name, so it carries
+    # the line of the name and, for a variable or constant, the line after a continuation).
+    def enter_target(kind, node)
+      return if @hold_line
+
+      loc = node.name_loc
+      @line = loc.end_line + (%i[ivar gvar].include?(kind) ? 0 : continuation_count(loc))
+    end
+
     # codegen(lhs, VAL): the variable's value into register +t+.
     def read_target(kind, node, t)
+      enter_target(kind, node)
       case kind
       when :local then emit(:MOVE, t, local_register(node.name))
       when :upvar then getupvar(t, node)
@@ -1445,6 +1549,7 @@ module MrbcRb
       raise Unsupported, 'assignment receiver' unless recv && (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
       raise Unsupported, 'safe navigation assignment' if !index && node.safe_navigation?
 
+      leading_dot(node) unless index
       idx = nil
       if index
         args = node.arguments&.arguments || []
@@ -1533,6 +1638,7 @@ module MrbcRb
         raise Unsupported, 'assignment target receiver' unless (simple?(recv) || call_node?(recv)) && !recv.is_a?(Prism::SelfNode)
         raise Unsupported, 'safe navigation assignment' if !index && target.safe_navigation?
 
+        leading_dot(target) unless index
         callsp = src == cursp ? cursp + 1 : cursp # room for the result when the value is at the stack pointer
         operand_into(recv, callsp)
         if index
@@ -1580,7 +1686,11 @@ module MrbcRb
         if rest.nil? && rights.empty? && !lefts.empty? && lefts.size == elems.size &&
            elems.all? { |e| simple_literals.include?(e.class) } &&
            lefts.all? { |l| l.is_a?(Prism::LocalVariableTargetNode) && l.depth.zero? }
+          # The fork loads these without entering the elements: they carry the line of the assignment.
+          saved_hold = @hold_line
+          @hold_line = true
           lefts.each_with_index { |l, i| value_into(elems[i], local_register(l.name)) }
+          @hold_line = saved_hold
           return nil
         end
         len = elems.size
@@ -1739,6 +1849,7 @@ module MrbcRb
       raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil?
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
 
+      enter(node) # instructions before the first operand (the splat's array) carry the call's line
       a = @sp
       @nregs = [@nregs, a + 1].max
       operand_into(recv, a) if recv
@@ -1894,6 +2005,7 @@ module MrbcRb
     end
 
     def call(node, need: true)
+      leading_dot(node)
       return call_with_block(node, need: need) if node.block.is_a?(Prism::BlockNode)
       return call_with_args(node, need: need) if complex_arguments?(node)
 
@@ -2052,6 +2164,7 @@ module MrbcRb
       if node.is_a?(Prism::LocalVariableReadNode) && node.depth.zero?
         # The register is read in place: the fork's MOVE into a temporary, folded into the RETURN, leaves no instruction
         # behind, so a MOVE of an earlier statement must not be folded.
+        enter(node)
         @last = nil
         return local_register(node.name)
       end
@@ -2375,6 +2488,8 @@ module MrbcRb
 
           if nxt == '/' && slash
             out << '/'
+          elsif nxt == "\n" # a continuation inside a regexp is dropped (verified with mrbc -v)
+            nil
           else
             out << c << nxt
           end
@@ -2391,7 +2506,9 @@ module MrbcRb
     # string is when it has parts), then the flags "i", "x", "m" in that order and the encoding "u" or "n", with nil for flags
     # when only an encoding is given; the send is Regexp.compile. Always STRING, even under frozen_string_literal.
     def regex_at(node, base)
-      raise Unsupported, 'multi-line regexp' if node.location.start_line != node.location.end_line
+      # A regexp is built when the parser reaches its closing slash and flags, so the node carries its end line; a pattern
+      # with interpolations has the lines of its expressions to follow (not covered).
+      raise Unsupported, 'multi-line regexp' if node.location.start_line != node.location.end_line && !node.is_a?(Prism::RegularExpressionNode)
       raise Unsupported, 'regexp encoding' if node.euc_jp? || node.windows_31j?
 
       sym = sym_index(:Regexp)
