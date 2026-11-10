@@ -8,8 +8,9 @@
 # and if/else with a simple or call predicate and bodies of the forms above, unless, and `class X` or `module X` with a
 # plain constant and a body of the forms above (no superclass; the body is a child irep run by EXEC). Milestone 10 adds
 # keyword, splat and block-pass arguments, constant paths (read, write, class and module names), regexp literals, lambda
-# literals and `&.`. Anything else raises Unsupported, so a
-# caller can fall back to the real mrbc.
+# literals and `&.`. Milestone 11 adds exceptions: begin/rescue/else/ensure, `rescue Foo, *list => e`, retry, rescue
+# modifiers, def-level and block-level rescue bodies and the irep's catch handler table (see the exceptions section below).
+# Anything else raises Unsupported, so a caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
 # follow mrbgems/mruby-compiler/core/codegen.c:
@@ -208,8 +209,12 @@ module MrbcRb
       method_keywords(keywords, pre.size) unless keywords.empty?
       emit(:MOVE, local_register(block.name), pre.size + 1) if block
       stmts = body_statements(node.body)
+      if node.body.is_a?(Prism::BeginNode) && node.body.statements.nil?
+        check_empty_gap(node.rparen_loc || params&.location || node.name_loc, first_keyword(node.body))
+      end
       value_reg = if stmts.empty?
                     t = temp
+                    check_empty_gap(node.rparen_loc || params&.location || node.name_loc, node.body ? node.body.location : node.end_keyword_loc)
                     @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -245,8 +250,12 @@ module MrbcRb
       @line = node.is_a?(Prism::LambdaNode) ? node.closing_loc.start_line : node.opening_loc.start_line # a lambda is stamped at its end
       emit(:ENTER, requireds.size << 18)
       stmts = body_statements(node.body)
+      if node.body.is_a?(Prism::BeginNode) && node.body.statements.nil?
+        check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, first_keyword(node.body))
+      end
       value_reg = if stmts.empty?
                     t = temp
+                    check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, node.body ? node.body.location : node.closing_loc)
                     @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
                     emit(:LOADNIL, t)
                     t
@@ -2541,17 +2550,24 @@ module MrbcRb
       r = @sp
       @nregs = [@nregs, r + 1].max
       first_kw = rescue_c ? rescue_c.keyword_loc : (else_c ? else_c.else_keyword_loc : (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc))
-      @line = first_kw.start_line if stmts.empty? # an empty body is a node on the line of the keyword after it
+      if stmts.empty?
+        @line = first_kw.start_line # an empty body is a node on the line of the keyword after it
+        check_empty_gap(node.begin_keyword_loc, first_kw) if node.begin_keyword_loc
+      end
       clauses = []
       clause = rescue_c
       while clause
         # An empty clause body is a node on the line of the keyword after it.
         after = clause.subsequent ? clause.subsequent.keyword_loc : (else_c ? else_c.else_keyword_loc : (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc))
-        clauses << RescueClause.new(clause.exceptions, clause.reference, clause.statements&.body || [], after.start_line)
+        body = clause.statements&.body || []
+        check_empty_gap(clause.then_keyword_loc || clause.reference&.location || clause.exceptions.last&.location || clause.keyword_loc, after) if body.empty?
+        clauses << RescueClause.new(clause.exceptions, clause.reference, body, after.start_line)
         clause = clause.subsequent
       end
       else_stmts = else_c ? (else_c.statements&.body || []) : nil
-      else_line = (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc).start_line
+      else_end = ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc
+      else_line = else_end.start_line
+      check_empty_gap(else_c.else_keyword_loc, else_end) if else_stmts&.empty?
       if ensure_stmts.empty?
         rescue_region(r, stmts, clauses, else_stmts, else_line, last)
       else
@@ -2561,6 +2577,22 @@ module MrbcRb
       end
       @sp = r
       last ? r : nil
+    end
+
+    # The first keyword after the body of a begin node (rescue, else or ensure, or the end).
+    def first_keyword(node)
+      (node.rescue_clause ? node.rescue_clause.keyword_loc : nil) || node.else_clause&.else_keyword_loc ||
+        node.ensure_clause&.ensure_keyword_loc || node.end_keyword_loc
+    end
+
+    # An empty body is a node the parser stamps with the line of the next keyword, unless a `;` came first: then it is the line
+    # of the first `;` (verified: `foo do\n  ;\nend` is line 2). A `;` in a gap that spans lines is not covered (it may
+    # also just end the keyword's own line).
+    def check_empty_gap(from_loc, to_loc)
+      return if from_loc.end_line == to_loc.start_line
+
+      gap = from_loc.copy(start_offset: from_loc.end_offset, length: to_loc.start_offset - from_loc.end_offset).slice
+      raise Unsupported, 'empty body with a semicolon' if gap.include?(';')
     end
 
     # `expr rescue other` is a rescue of StandardError with no variable (the same NODE_RESCUE).
@@ -2636,6 +2668,7 @@ module MrbcRb
           else
             raise Unsupported, 'rescue with a non-operand class' unless operand?(ex)
 
+            @line = ex.location.end_line if ex.is_a?(Prism::ConstantPathNode) # a path node is entered like the rest
             operand_into(ex, r + 1)
             emit(:RESCUE, r, r + 1)
           end

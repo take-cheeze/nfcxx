@@ -768,8 +768,8 @@ SNIPPETS = [
   "def f() = 1",
   "def f(x) = x",
   "Foo = Struct.new(:a) do\n  def p? = a ? 1 : 2\nend",
-# exceptions (milestone 11): begin/rescue/else/ensure, rescue => e and class lists, retry, rescue modifiers, def-level and
-# block-level bodies; the irep's catch handler table follows its iseq
+  # exceptions (milestone 11): begin/rescue/else/ensure, rescue => e and class lists, retry, rescue modifiers, def-level and
+  # block-level bodies; the irep's catch handler table follows its iseq
   "begin\n  foo\nrescue\n  bar\nend\nbaz",
   "begin\n  foo\nrescue\n  bar\nend",
   "begin\n  foo\nrescue\nend\nx",
@@ -921,7 +921,15 @@ SNIPPETS = [
   "def f\n  return foo rescue 1\nend",
   "foo rescue bar rescue baz",
   "foo or bar rescue baz",
-  "a = (b rescue c)\nd = e rescue f"
+  "a = (b rescue c)\nd = e rescue f",
+  "begin\n  foo\nrescue LoadError\n  true\nrescue ::A::B\n  false\nend",
+  "begin\n  foo\nrescue ::A, B::C => e\n  e\nend",
+  "raise ArgumentError, \"x\" unless foo",
+  "begin\n  raise Foo.new(\"x\") if bar\nrescue Foo => e\n  p e.message\nend",
+  "def f(x)\n  raise ArgumentError, \"bad\" if x.nil?\n  x\nrescue ArgumentError => e\n  nil\nensure\n  bar\nend",
+  "begin\n  foo\nrescue Foo,\n       Bar => e\n  e\nend",
+  "x = 0\nbegin\n  x += 1\n  raise \"boom\" if x < 3\nrescue\n  retry\nelse\n  x\nensure\n  p x\nend",
+  "foo do |a|\n  begin\n    bar\n  rescue => e\n    next e\n  end\nend"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
