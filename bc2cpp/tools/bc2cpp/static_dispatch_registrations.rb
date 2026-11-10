@@ -701,7 +701,7 @@ module StaticDispatchRegistrations
       owner, name = up && body_of[up]
       if reflective.include?(file)
         names = (symbols[file] ||= Set.new)
-        names.merge(irep.syms.map(&:to_s))
+        names.merge(reflective_syms(irep))
         core_irep_tokens(irep, names, true, name)
         next
       end
@@ -710,6 +710,26 @@ module StaticDispatchRegistrations
       core_irep_tokens(irep, tokens, self_may, name)
     end
     symbols.sort.to_h
+  end
+
+  # NON_LOOKUP_SYM_OPS: ops whose Symbol operand names what is being defined or a keyword parameter, not a method looked
+  # up. Variable and constant operands (kinds :name and :mcnst) are no lookup either. A name only these hold is no
+  # symbol of a reflective file; an operand of any other op keeps its name.
+  NON_LOOKUP_SYM_OPS = %i[CLASS MODULE DEF TDEF SDEF KEY_P KARG].to_set.freeze
+
+  def reflective_syms(irep)
+    quiet = Set.new
+    other = Set.new
+    BytecodeIR.for(irep).each_source do |insn, _|
+      insn.typed.each do |operand|
+        case operand.kind
+        when :name then quiet << operand.value.to_s
+        when :mcnst then quiet << operand.value[1].to_s
+        when :sym then (NON_LOOKUP_SYM_OPS.include?(insn.op) ? quiet : other) << operand.value.to_s
+        end
+      end
+    end
+    irep.syms.map(&:to_s).to_set - (quiet - other)
   end
 
   def core_reflective?(irep)
