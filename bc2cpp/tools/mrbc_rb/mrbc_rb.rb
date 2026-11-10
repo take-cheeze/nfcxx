@@ -2799,36 +2799,49 @@ module MrbcRb
     # A heredoc body, as the fork's parser splits it (heredoc_string_interp): one literal per source line, the text of a line
     # before an interpolation as a literal of its own (empty when the line starts with it), and the rest of the line, newline
     # included, after it. Prism joins the lines between two interpolations, so they are split again at the newlines of the
-    # text. Escapes stay inside their line's literal (verified: \t, \\, \#, \" and \' in a heredoc, a backslash before another
-    # character in a raw `<<'A'` one); a continuation, a doubled backslash in a raw heredoc and other escapes are not covered.
+    # text (heredoc_chunks, which also decodes the escapes: a line is one literal, an escaped newline does not end it).
     def heredoc_parts(node)
       pieces = node.is_a?(Prism::StringNode) ? [node] : node.parts
       raw = node.opening.include?("'")
-      # The fork reads a raw heredoc like a single-quoted string: `\\` is one backslash (unlike Ruby).
-      bad = ->(text) { raw ? text.match?(/\\[\\\n]/) : text.gsub(/\\[t\\#"']/, '').include?('\\') }
-      if pieces.any? { |x| x.respond_to?(:content_loc) && bad.call(x.content_loc.slice) }
-        raise Unsupported, 'heredoc with an escape other than a tab, backslash, quote or hash'
+      squiggly = node.opening.start_with?('<<~')
+      # Prism leaves a backslash-newline between two pieces out of both: a gap means a continuation.
+      continued = lambda do |list|
+        heredoc_gap(list.last, node.closing_loc).include?("\\\n") ||
+          list.any? { |x| x.content_loc.slice.end_with?("\\\n") } ||
+          list.each_cons(2).any? { |a, b| heredoc_gap(a, b).include?("\\\n") }
       end
+      return squiggly_continued_parts(pieces, raw) if squiggly && pieces.all?(Prism::StringNode) && continued.call(pieces)
 
       parts = []
-      run = ''.b
-      flush = lambda do |before_expr|
-        lits = run.scan(/[^\n]*\n|[^\n]+/n)
-        lits << ''.b if before_expr && (lits.empty? || lits.last.end_with?("\n"))
-        lits.each { |l| parts << [:lit, l] }
-        run = ''.b
+      acc = [] # [text, closed] per line so far; a line is open until its source newline (an escaped one does not close it)
+      add = lambda do |chunks|
+        chunks.each do |c, closed|
+          if acc.last && !acc.last[1]
+            acc.last[0] << c
+            acc.last[1] = closed
+          else acc << [c.dup, closed]
+          end
+        end
       end
+      flush = lambda do |before_expr|
+        acc << [''.b, true] if before_expr && (acc.empty? || acc.last[1])
+        acc.each { |l, _| parts << [:lit, l] }
+        acc = []
+      end
+      prev = nil
       pieces.each do |part|
+        # A gap before a piece is a nested heredoc's body, or a continuation after an interpolation (indentation not covered).
+        if squiggly && prev && heredoc_gap(prev, part).include?("\\\n") && !(prev.is_a?(Prism::EmbeddedStatementsNode) && nested_heredoc_ends_at([prev]))
+          raise Unsupported, 'continuation after an interpolation in a squiggly heredoc'
+        end
+
+        prev = part
         case part
-        when Prism::StringNode then run << part.unescaped.b
-        when Prism::EmbeddedVariableNode then run << part.location.slice.b
+        when Prism::StringNode then add.call(heredoc_chunks(part, raw, squiggly))
+        when Prism::EmbeddedVariableNode then add.call([[part.location.slice.b, false]])
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
           raise Unsupported, 'interpolation with several statements' if body.size > 1
-          # a heredoc interpolated alone into a heredoc line is split differently by the fork (unverified)
-          raise Unsupported, 'heredoc interpolated into a heredoc' if body[0].respond_to?(:opening) &&
-                                                                    body[0].opening&.start_with?('<<')
-
           flush.call(true)
           parts << [:expr, body[0] && unparen(body[0])]
         else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
@@ -2836,7 +2849,71 @@ module MrbcRb
       end
       flush.call(false)
       parts << [:lit, ''.b] if parts.empty?
+      # A heredoc interpolated on the last line of a heredoc leaves one more, empty, literal (verified with mrbc -v).
+      parts << [:lit, ''.b] if nested_heredoc_ends_at(pieces) == node.closing_loc&.start_offset
       parts
+    end
+
+    # A squiggly heredoc with a backslash before a newline: the fork's lexer reads the lines joined by it as one literal. It
+    # counts and removes indentation (heredoc_count_indent and heredoc_remove_indent: a tab counts 8, the smallest indentation
+    # of the non-blank lines is removed from every line, a blank one included, as far as it goes) at the logical lines' heads
+    # only in a raw heredoc, and at each physical line otherwise. Prism dedents every physical line (and counts the joined
+    # ones in a raw heredoc), so the text is cut here from the source.
+    def squiggly_continued_parts(pieces, raw)
+      first = pieces.first.content_loc.start_offset
+      body = pieces.first.content_loc.send(:source).source.b.byteslice(first, pieces.last.content_loc.end_offset - first)
+      chunks = body.scan(/(?:\\.|[^\\\n])*\n|(?:\\.|[^\\\n])+/mn)
+      raise Unsupported, 'heredoc ending in a continuation' if chunks.last.end_with?("\n") && !real_newline?(chunks.last)
+
+      segments = chunks.map { |c| raw ? [c] : c.scan(/(?:\\[^\n]|[^\\\n])*(?:\\\n|\n|\z)/mn).reject(&:empty?) }
+      width = lambda do |seg|
+        total = 0
+        seg.each_byte do |b|
+          break unless [0x20, 0x09, 0x0b, 0x0c, 0x0d].include?(b)
+
+          total += b == 0x09 ? 8 : 1
+        end
+        total
+      end
+      counted = segments.reject { |segs| segs.last.match?(/\A[ \t\v\f\r]*\n?\z/n) }.flatten
+      indent = counted.map(&width).min || 0
+      segments.map do |segs|
+        text = segs.map do |seg|
+          limit = [width.call(seg), indent].min
+          used = 0
+          cut = 0
+          seg.each_byte do |b|
+            break unless [0x20, 0x09, 0x0b, 0x0c, 0x0d].include?(b)
+
+            size = b == 0x09 ? 8 : 1
+            break if used + size > limit
+
+            used += size
+            cut += 1
+          end
+          seg.byteslice(cut..)
+        end.join
+        [:lit, heredoc_decode(text, raw)]
+      end
+    end
+
+    # The source text between two consecutive pieces of a heredoc (the indentation Prism dedents, a backslash-newline, or a
+    # nested heredoc's body).
+    def heredoc_gap(first, second)
+      loc = ->(x) { x.respond_to?(:content_loc) && x.content_loc ? x.content_loc : (x.respond_to?(:location) ? x.location : x) }
+      from = loc.call(first).end_offset
+      loc.call(first).send(:source).source.b.byteslice(from, [loc.call(second).start_offset - from, 0].max)
+    end
+
+    # The end offset of the last nested heredoc terminator inside the interpolations of +pieces+, or nil.
+    def nested_heredoc_ends_at(pieces)
+      ends = []
+      walk = lambda do |n|
+        ends << n.closing_loc.end_offset if heredoc_string?(n) && n.closing_loc
+        n.compact_child_nodes.each(&walk)
+      end
+      pieces.each { |p| walk.call(p) if p.is_a?(Prism::EmbeddedStatementsNode) }
+      ends.max
     end
 
     # Whether a heredoc starts inside +node+ (its body lines are not part of the node's own lines).
@@ -4613,6 +4690,116 @@ module MrbcRb
     end
 
     # Milestone 13 (string, regexp and heredoc literal forms).
+
+    # The literals a text piece of a heredoc contributes, one per source line (a line the fork's lexer ends at its newline; a
+    # backslash before the newline joins the next line to it). A piece without a backslash is its unescaped text split at the
+    # newlines. Otherwise the raw lines are decoded with the fork's escape rules (heredoc_decode) and the result is checked
+    # against Prism's unescaped text; in a squiggly heredoc, where Prism dedents, a line is taken from Prism's text.
+    def heredoc_chunks(part, raw, squiggly)
+      text = part.unescaped.b
+      source = part.content_loc.slice.b
+      return text.scan(/[^\n]*\n|[^\n]+/n).map { |l| [l, l.end_with?("\n")] } unless source.include?('\\')
+
+      chunks = source.scan(/(?:\\.|[^\\\n])*\n|(?:\\.|[^\\\n])+/mn)
+      decoded = chunks.map { |c| heredoc_decode(c, raw) }
+      if squiggly
+        raise Unsupported, 'escape in a squiggly heredoc line' unless chunks.size == 1 && decoded[0].end_with?(text) && !chunks.any? { |c| c.chomp.include?("\n") || (c.end_with?("\n") && !real_newline?(c)) }
+
+        return [[text, real_newline?(source)]]
+      end
+      raise Unsupported, 'heredoc escape that Prism reads differently' unless raw || decoded.join == text
+
+      decoded.zip(chunks).map { |d, c| [d, real_newline?(c)] }
+    end
+
+    # Whether a chunk of heredoc source ends with a newline that no backslash escapes (an even run of backslashes before it).
+    def real_newline?(chunk)
+      chunk.end_with?("\n") && chunk[0...-1][/\\*\z/].size.even?
+    end
+
+    # One heredoc line's escapes as the fork's lexer reads them: a raw (`<<'A'`) heredoc only turns `\\` into one backslash and
+    # keeps every other pair; otherwise read_escape's forms.
+    def heredoc_decode(source, raw)
+      out = ''.b
+      i = 0
+      while i < source.bytesize
+        c = source.getbyte(i)
+        if c != 0x5c
+          out << c
+          i += 1
+          next
+        end
+        nxt = source.byteslice(i + 1, 1)
+        if raw
+          out << (nxt == '\\' ? '\\' : "\\#{nxt}")
+          i += 2
+        elsif nxt == "\n"
+          i += 2
+        else
+          bytes, i = read_escape_bytes(source, i + 1)
+          out << bytes
+        end
+      end
+      out
+    end
+
+    # read_escape in parse.y, for the text after the backslash at +i+: returns the bytes and the index after the escape.
+    SIMPLE_ESCAPES = { 'n' => "\n", 't' => "\t", 'r' => "\r", 'f' => "\f", 'v' => "\v", 'a' => "\a", 'e' => "\e", 'b' => "\b",
+                       's' => ' ', '\\' => '\\' }.freeze
+    def read_escape_bytes(source, i)
+      c = source.byteslice(i, 1)
+      raise Unsupported, 'incomplete escape' if c.nil? || c.empty?
+      return [SIMPLE_ESCAPES[c].b, i + 1] if SIMPLE_ESCAPES.key?(c)
+
+      case c
+      when '0'..'7'
+        digits = source.byteslice(i, 3)[/\A[0-7]{1,3}/]
+        [[digits.to_i(8) & 0xff].pack('C'), i + digits.size]
+      when 'x'
+        digits = source.byteslice(i + 1, 2)[/\A\h{1,2}/] or raise Unsupported, 'invalid hex escape'
+        [[digits.to_i(16)].pack('C'), i + 1 + digits.size]
+      when 'u'
+        if source.byteslice(i + 1, 1) == '{'
+          close = source.index('}', i) or raise Unsupported, 'unterminated unicode escape'
+          codes = source.byteslice(i + 2, close - i - 2).split
+          raise Unsupported, 'unicode escape' if codes.empty? || codes.any? { |h| !h.match?(/\A\h{1,6}\z/) }
+
+          [codes.map { |h| [h.to_i(16)].pack('U') }.join.b, close + 1]
+        else
+          digits = source.byteslice(i + 1, 4)
+          raise Unsupported, 'unicode escape' unless digits.match?(/\A\h{4}\z/)
+
+          [[digits.to_i(16)].pack('U').b, i + 5]
+        end
+      when 'M'
+        raise Unsupported, 'meta escape' unless source.byteslice(i + 1, 1) == '-'
+
+        byte, j = escape_operand(source, i + 2)
+        [[byte | 0x80].pack('C'), j]
+      when 'C', 'c'
+        if c == 'C'
+          raise Unsupported, 'control escape' unless source.byteslice(i + 1, 1) == '-'
+
+          i += 1
+        end
+        return ["\x7f".b, i + 2] if source.byteslice(i + 1, 1) == '?'
+
+        byte, j = escape_operand(source, i + 1)
+        [[byte & 0x9f].pack('C'), j]
+      else [c.b, i + 1]
+      end
+    end
+
+    # The byte after `\M-` or `\C-`: a plain byte, or a whole escape after a backslash.
+    def escape_operand(source, i)
+      c = source.getbyte(i) or raise Unsupported, 'incomplete escape'
+      return [c, i + 1] unless c == 0x5c
+
+      bytes, j = read_escape_bytes(source, i + 1)
+      raise Unsupported, 'escape operand' unless bytes.bytesize == 1
+
+      [bytes.getbyte(0), j]
+    end
 
     # An element of a %w, %W, %i or %I list: a %W word with interpolation is built like a %I one without the INTERN.
     def word_into(elem, reg, array, symbols)
