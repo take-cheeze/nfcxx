@@ -130,6 +130,8 @@ struct SFn {
   std::vector<Node *> body;
   std::vector<Inst> vars, code, param_lines;
   std::unordered_map<std::string, Reg> regs;
+  // the registers that take more than one value (a set, or a let twice): they live in a Function variable; the others are SSA
+  std::unordered_set<std::string> mutable_regs;
   bool term_ = false;
   struct Loop {
     uint32_t brk, cont;   // cont 0: a switch
@@ -1569,15 +1571,19 @@ struct SFn {
       Opnd v = rval(arg(3));
       std::string key = to_s(arg(1));
       auto it = regs.find(key);
-      uint32_t var;
-      if (it == regs.end()) {
-        uint32_t vv = var_decl(sty(ty));
-        regs[key] = Reg{true, vv, ty};
-        var = vv;
+      if (it == regs.end() && !mutable_regs.count(key)) {
+        regs[key] = Reg{false, v.id, ty};   // an SSA value: no variable for the device compiler to promote
       } else {
-        var = it->second.id;
+        uint32_t var;
+        if (it == regs.end()) {
+          uint32_t vv = var_decl(sty(ty));
+          regs[key] = Reg{true, vv, ty};
+          var = vv;
+        } else {
+          var = it->second.id;
+        }
+        ins({62, var, v.id});
       }
-      ins({62, var, v.id});
     } else if (h == "set") {
       auto it = regs.find(to_s(arg(1)));
       if (it == regs.end()) throw BadIR("set of " + to_s(arg(1)) + " before its let");
@@ -1844,6 +1850,22 @@ struct SFn {
     return false;
   }
 
+  // the registers with more than one definition (see mutable_regs)
+  void collect_mutable_regs() {
+    std::unordered_map<std::string, int> lets;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) {
+        std::string k = to_s(x.items[1]);
+        if (++lets[k] > 1) mutable_regs.insert(k);
+      } else if (head_is(x, "set") && x.items.size() > 2) {
+        mutable_regs.insert(to_s(x.items[1]));
+      }
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+  }
+
   // The never-null registers: the greatest set such that each definition of each of them is never null (a register set
   // from itself plus an offset, in a loop, stays in it).
   void never_null_regs() {
@@ -1871,6 +1893,7 @@ struct SFn {
   }
 
   void compile() {
+    collect_mutable_regs();
     never_null_regs();
     uint32_t rt = ret ? sty(*ret) : spv->t_void();
     for (size_t k = 0; k < ptypes.size(); k++) param_ids.push_back(spv->id());
