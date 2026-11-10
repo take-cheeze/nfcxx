@@ -29,6 +29,7 @@ while [ $i -lt ${#args[@]} ]; do
   case $arg in
     --ir) mode=ir ;;
     --freestanding) hosted=0 ;;
+    --cuda) user_opts+=(--cuda) ;;   # a .cu host copy: the <<<...>>> launches are read (nfcxx's cuda_opts, as the EDG path)
     --target=*) target=${arg#--target=} ;;
     --target) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: --target needs a name" >&2; exit 2; }; target=${args[$i]} ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;

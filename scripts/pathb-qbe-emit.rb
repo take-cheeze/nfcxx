@@ -2847,6 +2847,8 @@ ASM_HELPERS = {
 # GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
 # line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
 ALIAS_MARK = "# pathb-alias "
+# `# pathb-raw-asm HEX`: a file-scope asm block (an (asm-decl HEX) form), written to the assembly as it is.
+RAW_ASM_MARK = "# pathb-raw-asm "
 
 def append_weak(il_path, asm_path)
   names = []
@@ -2854,6 +2856,9 @@ def append_weak(il_path, asm_path)
   read_text(il_path).split("\n").each do |line|
     if line.start_with?(WEAK_MARK)
       names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip
+    elsif line.start_with?(RAW_ASM_MARK)
+      text = [line.byteslice(RAW_ASM_MARK.bytesize, line.bytesize - RAW_ASM_MARK.bytesize).strip].pack("H*")
+      extra << (text.end_with?("\n") ? text : text + "\n")
     elsif line.start_with?(ASM_MARK)
       lines = ASM_HELPERS[line.byteslice(ASM_MARK.bytesize, line.bytesize - ASM_MARK.bytesize).strip]
       extra << lines.join("\n") + "\n" unless lines.nil?
@@ -3467,6 +3472,8 @@ def emit_module(text, do_prune = true, ld_trap = false)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
+    elsif h == "asm-decl"
+      mod.out << "#{RAW_ASM_MARK}#{f[1].to_s}"
     elsif h == "alias"
       name, target, kind, weak = alias_parts(f)
       mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"

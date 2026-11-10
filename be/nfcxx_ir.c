@@ -6902,6 +6902,7 @@ void nfcxx_ir_back_end(void)
   const char *file_name = il_header.primary_source_file->file_name;
   const char *slash = strrchr(file_name, '/');
   a_variable_ptr var;
+  an_asm_entry_ptr aep;
   a_routine_ptr rout;
   const char *ov = getenv("NFCXX_IR_OVERFLOW");
 
@@ -6932,6 +6933,15 @@ void nfcxx_ir_back_end(void)
   /* A weakref variable first: its target is then printed as the weak declaration the weakref makes it. */
   for (var = scope->variables; var != NULL; var = var->next) {
     if (var->is_weakref && var->aliased_variable != NULL && !ignore_variable_in_back_end(var)) (void)ir_global_op(var);
+  }
+  /* File-scope asm (the .incbin that defines a .cu's device image, and any other top-level asm): one (asm-decl HEX) form
+     per declaration, the text in hex. pathb-ssa-build writes it into the object as it is (a pathb-text marker). */
+  for (aep = scope->asm_entries; aep != NULL; aep = aep->next) {
+    const char *text = aep->asm_string->variant.string.value;
+    size_t k, n = (size_t)aep->asm_string->variant.string.length;
+    fputs("(asm-decl ", ir_out_globals.f);
+    for (k = 0; k < n; k++) fprintf(ir_out_globals.f, "%02x", (unsigned char)text[k]);
+    fputs(")\n", ir_out_globals.f);
   }
   for (var = scope->variables; var != NULL; var = var->next) {
     /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */
