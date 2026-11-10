@@ -77,12 +77,17 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
   #    sites, none in g++'s build). The copies of a COMDAT group are the same function (the ODR), so inlining one is
   #    what g++ does. gcc compiles a copy of the C without the COMDAT groups' __weak__, and weak-symbols reads the C with
   #    it, so the object's symbols are as weak as before (the definitions, and the references a unit does not define).
-  #    The weak declarations outside a COMDAT group stay (the extern thread_local init function, which is tested for
-  #    null). NFCXX_WEAK_INLINE=0 compiles the C as EDG wrote it.
+  #    Only functions are changed: a COMDAT data object (a variable template, an ASan odr-indicator's object) keeps its
+  #    weak, since removing it makes each unit's copy a strong definition (duplicate symbols in the link). On Mach-O the
+  #    weak attribute is what ld64 coalesces by, so the change is for Linux only. The weak declarations outside a COMDAT
+  #    group stay (the extern thread_local init function, which is tested for null). NFCXX_WEAK_INLINE=0 compiles the C
+  #    as EDG wrote it.
   gsrc=$csrc
-  if [ "${NFCXX_WEAK_INLINE:-1}" != 0 ] && grep -q '__weak__)) /\* COMDAT group:' "$csrc"; then
+  if [ "${NFCXX_WEAK_INLINE:-1}" != 0 ] && [ "$(uname -s)" = Linux ] && grep -q '__weak__)) /\* COMDAT group:' "$csrc"; then
+    # A function's COMDAT tag is followed, in the same declaration, by the group's name and "(" (the function's own name;
+    # EDG puts "# line" markers between the two, hence perl and not sed).
     gsrc=$tmp/inline.c
-    sed 's|__attribute__((__weak__)) /\* COMDAT group:|/* COMDAT group:|g' "$csrc" > "$gsrc"
+    perl -0777 -pe 's{__attribute__\(\(__weak__\)\) /\* COMDAT group: (\w+) \*/([^;{}]*?)(?<!\w)\1\(}{/* COMDAT group: $1 */$2$1(}g' "$csrc" > "$gsrc"
   fi
   build=()
   skip=0
