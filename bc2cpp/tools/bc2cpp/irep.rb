@@ -266,22 +266,41 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   paths = Array(src_paths)
   # BC2CPP_MRBC_RB=1: source files the Ruby emitter (bc2cpp/tools/mrbc_rb) covers are compiled without mrbc (several files as
   # the one program mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc as before.
-  if ENV['BC2CPP_MRBC_RB'] == '1' && (image = mrbc_rb_image(paths))
-    File.binwrite(mrb_path, image)
-    return RiteImage.new(image)
+  reason = 'disabled'
+  if ENV['BC2CPP_MRBC_RB'] == '1'
+    image, reason = mrbc_rb_image(paths)
+    if image
+      mrbc_rb_log(paths.size, 'emitter', '-', symbol)
+      File.binwrite(mrb_path, image)
+      return RiteImage.new(image)
+    end
   end
+  mrbc_rb_log(paths.size, 'mrbc', reason, symbol)
   system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
   RiteImage.new(File.binread(mrb_path))
 end
 
-# The RITE binary of the source files +paths+ from the Ruby emitter, or nil when it does not cover them.
+# BC2CPP_MRBC_RB_LOG=<file>: one line per run_mrbc call: "<inputs>\t<emitter|mrbc>\t<reason>\t<symbol>", where reason is
+# disabled or Unsupported(<message>) for an mrbc run, and "-" for the emitter.
+def mrbc_rb_log(count, served_by, reason, symbol)
+  log = ENV['BC2CPP_MRBC_RB_LOG']
+  return if log.nil? || log.empty?
+
+  File.open(log, 'a') { |f| f.write("#{count}\t#{served_by}\t#{reason.to_s.tr("\n\t", '  ')}\t#{symbol}\n") }
+end
+
+# [the RITE binary of the source files +paths+ from the Ruby emitter, nil] or [nil, "Unsupported(message)"] when it does not
+# cover them.
 def mrbc_rb_image(paths)
   require_relative '../mrbc_rb/mrbc_rb'
-  return MrbcRb.compile(File.binread(paths.first), paths.first) if paths.size == 1
-
-  MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
-rescue MrbcRb::Unsupported
-  nil
+  image = if paths.size == 1
+            MrbcRb.compile(File.binread(paths.first), paths.first)
+          else
+            MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
+          end
+  [image, nil]
+rescue MrbcRb::Unsupported => e
+  [nil, "Unsupported(#{e.message})"]
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.

@@ -34,7 +34,7 @@ SOURCES.each do |name, files|
       emitter_ireps, emitter_root = compile_ireps(names, 'int', dir)
       ENV.delete('BC2CPP_MRBC_RB')
       # The emitter must take the file itself, or the comparison would only be mrbc against mrbc.
-      covered = !mrbc_rb_image(names).nil?
+      covered = !mrbc_rb_image(names).first.nil?
       failures += 1 unless covered
       same = covered && mrbc_root == emitter_root && mrbc_ireps.keys.sort == emitter_ireps.keys.sort &&
              mrbc_ireps.keys.all? { |k| mrbc_ireps[k].instructions == emitter_ireps[k].instructions && mrbc_ireps[k].pool == emitter_ireps[k].pool && mrbc_ireps[k].syms == emitter_ireps[k].syms }
