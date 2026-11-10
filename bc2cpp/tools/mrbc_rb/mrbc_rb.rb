@@ -244,7 +244,8 @@ module MrbcRb
       param_names = requireds.map(&:name)
       set_locals(param_names + [nil] + (node.locals - param_names))
       @nregs = @nlocals + 1
-      @line = node.opening_loc.start_line
+      # A lambda literal's ENTER carries the line of its closing token (the node is complete there; verified on `-> {\n 1\n}`).
+      @line = node.is_a?(Prism::LambdaNode) ? node.closing_loc.start_line : node.opening_loc.start_line
       emit(:ENTER, requireds.size << 18)
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
@@ -482,7 +483,12 @@ module MrbcRb
     def leading_dot(call)
       recv = call.receiver
       op = call.call_operator_loc
+      if call.safe_navigation? && leading_dot_chain?(recv) # the jump's line is not verified
+        raise Unsupported, 'safe navigation after a leading-dot call'
+      end
       return unless recv && op && op.start_line > recv.location.end_line
+
+      raise Unsupported, 'leading-dot safe navigation' if call.safe_navigation?
 
       case recv
       when Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
@@ -496,6 +502,17 @@ module MrbcRb
         @leading_dot[recv] = op.start_line unless recv.closing_loc&.slice == ')'
       else raise Unsupported, 'leading-dot receiver'
       end
+    end
+
+    # Whether +node+ is a call chain with a leading-dot continuation somewhere in it.
+    def leading_dot_chain?(node)
+      while node.is_a?(Prism::CallNode) && node.receiver
+        op = node.call_operator_loc
+        return true if op && op.start_line > node.receiver.location.end_line
+
+        node = node.receiver
+      end
+      false
     end
 
     # Rejects the shapes whose line rules are not verified: heredocs, and operators `||` `&&` over several lines.
@@ -1658,7 +1675,9 @@ module MrbcRb
     # Returns the result register.
     # GETIDX on the receiver and index just generated at +t+ and t+1, as call() emits it: `local[0]` is the fused GETIDX0.
     def getidx_fused(t, recv, idx)
-      if idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
+      if no_peephole? # gen_binop does nothing at a jump target or after a rewind: a plain send
+        emit(:SEND, t, sym_index(:[]), 1)
+      elsif idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
         truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
         emit(:GETIDX0, t, local_register(recv.name))
       else
@@ -1943,10 +1962,15 @@ module MrbcRb
       a = @sp
       @nregs = [@nregs, a + 1].max
       if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
-         (1..0xff).cover?(args[0].value)
+         (-0xff..0xff).cover?(args[0].value)
         operand_into(recv, a)
         enter(args[0]) # the literal is generated (and entered) before the peephole folds it into ADDI
-        emit(name == :+ ? :ADDI : :SUBI, a, args[0].value)
+        n = args[0].value
+        if n.zero?
+          @rewound = true # gen_addsub rewinds the literal's load and emits nothing: `x + 0` is x
+        else
+          emit((name == :+) == n.positive? ? :ADDI : :SUBI, a, n.abs) # a negative literal swaps the operation
+        end
         @nregs = [@nregs, a + 3].max
         return a
       end
@@ -1961,6 +1985,11 @@ module MrbcRb
       if recv && BINARY_OPS.key?(name) && args.size == 1
         operand_into(recv, a)
         operand_into(args[0], a + 1)
+        if name == :[] && no_peephole? # gen_binop does nothing at a jump target or after a rewind: a plain send
+          emit(:SEND, a, sym_index(:[]), 1)
+          @nregs = [@nregs, a + 3].max
+          return a
+        end
         if name == :[] && args[0].is_a?(Prism::IntegerNode) && args[0].value.zero? && recv.is_a?(Prism::LocalVariableReadNode) &&
            recv.depth.zero?
           # gen_binop's GETIDX0 fusion: MOVE a, local; LOADI_0 a+1 become GETIDX0 a, local (verified with mrbc -v).
@@ -2022,6 +2051,8 @@ module MrbcRb
     # An assignment used as a value (gen_assignment with val): the value goes into the result register, the variable takes a
     # copy of it with a MOVE that is always kept (or SETIV, SETGV, SETCONST), and the result stays in that register.
     def write_value_at(node, base)
+      raise Unsupported, 'multi-line assignment as a value' if node.location.start_line != node.location.end_line # lines not verified
+
       saved = @sp
       @sp = base
       case node
@@ -2515,6 +2546,8 @@ module MrbcRb
     def regex_at(node, base)
       raise Unsupported, 'multi-line regexp' if node.location.start_line != node.location.end_line
       raise Unsupported, 'regexp encoding' if node.euc_jp? || node.windows_31j?
+
+      @line = line_of(node) unless @hold_line # the literal is a node of its own (verified: `a\n  .scan(/y/)` stamps line 3)
 
       sym = sym_index(:Regexp)
       emit(:OCLASS, base)

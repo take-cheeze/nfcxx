@@ -1012,7 +1012,25 @@ SNIPPETS = [
   "a = 1\nb = 2\nx = {a => 1,\n     b => 2}",
   "a = 1\nb = 2\nx = {\n  \"a\" => 1,\n  \"b\" => 2,\n  :c => 3,\n}",
   "a = 1\nb = 2\nx = {\n  a: 1, # comment\n  b: 2  # other\n}",
-  "a = 1\nb = 2\nx = [\n  {a: 1},\n  {b: 2}\n]"
+  "a = 1\nb = 2\nx = [\n  {a: 1},\n  {b: 2}\n]",
+  "n + -3",
+  "n - -3",
+  "n - 0",
+  "n + 0",
+  "x = 1\nx + 0",
+  "n - 0 - 0",
+  "args[under ? 3 : 2]",
+  "foo(args[under ? 3 : 2])",
+  "args[bar(under ? 3 : 2)]",
+  "a = 1\na.to_s\n  .scan(/y/).flatten",
+  "x = [\n  /a/,\n  /b/\n]",
+  "foo(/a/,\n    /b\#{1}/)",
+  "x = -> {\n  1\n}",
+  "x = ->(a) do\n  a\nend",
+  "foo(->(a) {\n  a\n}, 2)",
+  "binding.complete(returned, compatible: ->(actual, expected) {\n  comparisons = 1\n  2\n})\n3",
+  "a = 1\na[0] ||= 1",
+  "a = 1\n[a[0] ||= 1, 2]"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
