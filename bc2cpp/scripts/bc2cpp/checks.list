@@ -75,6 +75,7 @@ ruby scripts/bc2cpp/splat_row_memo_check.rb
 ruby scripts/bc2cpp/resumable_locals_check.rb
 ruby scripts/bc2cpp/resumable_args_check.rb
 ruby scripts/bc2cpp/resumable_block_check.rb
+ruby scripts/bc2cpp/resumable_scalar_args_check.rb
 ruby scripts/bc2cpp/resumable_receiver_check.rb
 ruby scripts/bc2cpp/resumable_optional_check.rb
 ruby scripts/bc2cpp/resumable_rest_check.rb
