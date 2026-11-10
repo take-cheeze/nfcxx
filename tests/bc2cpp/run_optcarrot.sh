@@ -30,6 +30,7 @@ echo "bc2cpp: this tree, world rpg-maker-clone $(git -C "$bc2cpp_root" rev-parse
 tree=$root/bc2cpp
 export BC2CPP_TREE_ROOT=$tree BC2CPP_WORLD_ROOT=$bc2cpp_root
 
+mkdir -p "$root/build/bc2cpp" # the logs live here also when BC2CPP_RPG_DIR keeps the world elsewhere
 log=$root/build/bc2cpp/optcarrot.log
 jobs=$(nproc 2>/dev/null || echo 4)
 # The probe's host mrbc (3rd/mruby/bin/mrbc), from the probe's own build config (tools/optcarrot_probe/README.md); rake
