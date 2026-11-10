@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Print the function bodies of C or C++ files as clang-shaped JSON (be/nfcxx_ast.c, docs/notes/nfcxx-ast.md): the
+# nfcxx front end's replacement for `clang -fsyntax-only -Xclang -ast-dump=json` where bc2cpp reads it (one JSON document
+# per file, on stdout; the front end's diagnostics on stderr, a non-zero status when it rejects the file).
+# Takes clang's spelling of the options: -x c|c++, -std=gnuNN|cNN|gnu++NN|c++NN, -I, -isystem, -D, -U, -include; other
+# options (-W*, -f*, -O*, -m*, -MD, -MF f ...) are ignored. A .c file is C unless -x c++ says otherwise.
+# The front end is build/libclang-edg/cmake/bin/cpfe (scripts/setup-libclang-edg.sh; LIBCLANG_EDG_IN_PROCESS=0 is
+# enough), run from its base dir with the host's library headers and GNU version (scripts/host-sys.sh), in EDG's gcc / g++
+# dialect: like clang's gnuNN modes, the C library's default feature macros stay on (unlike scripts/libclang-cursors,
+# which defines _POSIX_SOURCE for the declaration listing).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cpfe=${LIBCLANG_EDG_CPFE:-$root/build/libclang-edg/cmake/bin/cpfe}
+base=${LIBCLANG_EDG_BASE:-$root/build/libclang-edg/edg-base}
+[ -x "$cpfe" ] || { echo "nfcxx-ast-dump: front end not built; run scripts/setup-libclang-edg.sh" >&2; exit 2; }
+source "$root/scripts/host-sys.sh"
+
+opts=(); lang=""; files=(); std=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -x) lang=$2; shift ;;
+    -x?*) lang=${1#-x} ;;
+    -std=*) std=${1#-std=} ;;
+    -I|-isystem) opts+=("-I$(abs_path "$2")"); shift ;;     # the front end runs in another directory
+    -I?*) opts+=("-I$(abs_path "${1#-I}")") ;;
+    -isystem?*) opts+=("-I$(abs_path "${1#-isystem}")") ;;
+    -D|-U) opts+=("$1$2"); shift ;;
+    -D?*|-U?*) opts+=("$1") ;;
+    -include) opts+=(--preinclude "$(abs_path "$2")"); shift ;;
+    -MF|-MT|-MQ|-o) shift ;;
+    -*) ;;
+    *) files+=("$1") ;;
+  esac
+  shift
+done
+[ ${#files[@]} -gt 0 ] || { echo "nfcxx-ast-dump: no input file" >&2; exit 2; }
+
+status=0
+for file in "${files[@]}"; do
+  l=$lang
+  if [ -z "$l" ]; then case $file in *.c) l=c ;; *) l=c++ ;; esac; fi
+  if [ "$l" = c ]; then
+    case $std in
+      c89|c90|gnu89|gnu90) mode=(--c89 --gcc) ;;
+      c99|gnu99) mode=(--c99 --gcc) ;;
+      c17|c18|gnu17|gnu18) mode=(--c17 --gcc) ;;
+      c23|gnu23|c2x|gnu2x) mode=(--c23 --gcc) ;;
+      *) mode=(--c11 --gcc) ;;
+    esac
+    tused=()
+    # EDG's --cNN defines __STRICT_ANSI__ (clang's cNN does too); clang's gnuNN does not, and glibc then keeps pread etc.
+    case $std in c[0-9]*) ;; *) mode+=(-U__STRICT_ANSI__) ;; esac
+  else
+    case $std in
+      c++*|gnu++*) mode=("--c++${std#*++}" --g++) ;;
+      *) mode=(--c++17 --g++) ;;
+    esac
+    tused=(-tused)
+  fi
+  sys_inc=(); while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$l")
+  gnu=$(host_gnu_version); gnu_opts=(); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
+  f=$(realpath "$file")
+  stem=$(basename "$f"); stem=${stem%.*}
+  ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
+  (cd "$base" && NFCXX_DECL_AST=1 "$cpfe" -D__CHAR_BIT__=8 "${mode[@]}" --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${opts[@]+"${opts[@]}"} "${sys_inc[@]}" --sys_include="$base/include" "$f") || status=$?
+  [ $had_ti = 1 ] || rm -f "$ti"
+done
+exit $status
