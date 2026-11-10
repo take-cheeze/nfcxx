@@ -2,12 +2,14 @@ GEM
   remote: https://rubygems.org/
   specs:
     logger (1.7.0)
+    minitest (5.26.2)
     prism (1.9.0)
     rake (13.4.2)
     rbs (4.0.0)
       logger
       prism (>= 1.6.0)
       tsort
+    stackprof (0.2.28)
     tsort (0.2.0)
 
 PLATFORMS
@@ -15,16 +17,20 @@ PLATFORMS
   x86_64-linux
 
 DEPENDENCIES
+  minitest (= 5.26.2)
   prism (= 1.9.0)
   rake (= 13.4.2)
   rbs (= 4.0.0)
+  stackprof (= 0.2.28)
 
 CHECKSUMS
   bundler (4.0.18) sha256=02d9a17429de1847b4e0c9f27a9ee4b20c0a74c0a641b4e77195d6019e3618ac
   logger (1.7.0) sha256=196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203
+  minitest (5.26.2) sha256=f021118a6185b9ba9f5af71f2ba103ad770c75afde9f2ab8da512677c550cde3
   prism (1.9.0) sha256=7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
   rake (13.4.2) sha256=cb825b2bd5f1f8e91ca37bddb4b9aaf345551b4731da62949be002fa89283701
   rbs (4.0.0) sha256=b700e75a8ea721a66b94c4e3af7df26d1e61a786d1205d0b8de93828718c4771
+  stackprof (0.2.28) sha256=4ec2ace02f386012b40ca20ef80c030ad711831f59511da12e83b34efb0f9a04
   tsort (0.2.0) sha256=9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f
 
 BUNDLED WITH

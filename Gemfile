@@ -9,3 +9,12 @@ source 'https://rubygems.org'
 gem 'prism', '1.9.0'
 gem 'rbs', '4.0.0'
 gem 'rake', '13.4.2'
+
+# bc2cpp's fixture checks that use minitest/autorun (bc2cpp/scripts/bc2cpp), and compiler_profile.rb's sampling profiler.
+group :test do
+  gem 'minitest', '5.26.2'
+end
+
+group :profile do
+  gem 'stackprof', '0.2.28'
+end
