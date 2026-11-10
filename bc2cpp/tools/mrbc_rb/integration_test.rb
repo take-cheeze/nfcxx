@@ -27,10 +27,10 @@ SOURCES.each do |name, files|
     files.each { |file, src| File.binwrite(File.join(dir, file), src) }
     names = files.keys
     Dir.chdir(dir) do
-      ENV.delete('BC2CPP_MRBC_RB')
+      ENV['BC2CPP_MRBC_RB'] = '0'
       ENV['MRBC'] = oracle
       mrbc_ireps, mrbc_root = compile_ireps(names, 'int', dir, mrbc: oracle)
-      ENV['BC2CPP_MRBC_RB'] = '1'
+      ENV['BC2CPP_MRBC_RB'] = 'verify'
       emitter_ireps, emitter_root = compile_ireps(names, 'int', dir)
       ENV.delete('BC2CPP_MRBC_RB')
       # The emitter must take the file itself, or the comparison would only be mrbc against mrbc.
