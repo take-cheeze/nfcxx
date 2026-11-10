@@ -4,6 +4,7 @@ require 'set'
 require_relative 'native_direct'
 require_relative 'native_names'
 require_relative 'file_identity'
+require_relative 'native_owner_map'
 
 # NATIVE_SINGLETON_CALL: which native sources register `name` as a singleton method of
 # which class or module, read from the C/C++ registrations themselves.
@@ -128,6 +129,20 @@ module NativeSingletons
       _ = arg
       owner = owners[var]
       table[name][:registrations] << [where, owner]
+    end
+    # An engine gem's ROM entry is the registration it replaced (NativeDirect.scan_file_table): one per entry, and the
+    # instance half beside a module function's singleton entry is no registration of its own.
+    if NativeOwnerMap.engine_source?(path)
+      rows = NativeOwnerMap.rom_bindings(text)
+      rows.each do |expr, singleton, name, fn|
+        if singleton
+          table[name][:registrations] << [:singleton, owners[expr]]
+        elsif rows.any? { |e, s, n, f| s && e == expr && n == name && f == fn }
+          table[name][:spellings] -= 1
+        else
+          table[name][:registrations] << [:instance, owners[expr]]
+        end
+      end
     end
     table.default_proc = nil
     table
