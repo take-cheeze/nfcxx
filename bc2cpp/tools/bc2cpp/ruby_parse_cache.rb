@@ -10,7 +10,7 @@ require 'prism'
 # bytes are equal to the requested ones, so different text never gets another text's tree, and a
 # rewritten file (a check's fixture) replaces its entry instead of growing the cache. The bytes are
 # compared, not the encoding: Prism parses the bytes and ignores the Ruby string's encoding
-# (scripts/bc2cpp/ruby_parse_cache_check.rb).
+# (rpg-maker-clone scripts/bc2cpp-rpg/ruby_parse_cache_check.rb).
 #
 # Trees are shared unfrozen. Prism 1.5 memoizes Node#location on first use, so a frozen node raises
 # on that read; the consumers here only visit the tree and never write to it, which the check

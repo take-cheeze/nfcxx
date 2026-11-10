@@ -49,7 +49,7 @@ module OwnerCallDirect
 
   # NATIVE_DISPOSE: the RGSS registrations of `dispose` (mruby-rgss/src/lib.cxx, `mrb_define_method(M, <var>, "dispose",
   # <body>, MRB_ARGS_NONE())`). Their bodies are internal to lib.cxx, so each is reached through the exported wrapper of
-  # the same body. scripts/bc2cpp/owner_call_direct_native_check.rb holds this table to the registrations.
+  # the same body. rpg-maker-clone scripts/bc2cpp-rpg/owner_call_direct_native_check.rb holds this table to the registrations.
   NATIVE_DISPOSE = {
     'obj_dispose' => 'rgss_obj_dispose_direct',
     'tilemap_dispose' => 'rgss_tilemap_dispose_direct'

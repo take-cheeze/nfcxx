@@ -170,7 +170,7 @@ end
 
 # COMPILED_GEMS_CONFIG: the per-gem table lives in compiled_gems.yml (validated by compiled_gems_config.rb); only the
 # derived owners are computed here, from the source the config names. (Whether a base gem exists is
-# scripts/bc2cpp/compiled_gems_config_check.rb's job: a copy of tools/bc2cpp outside the repository has no gems.)
+# rpg-maker-clone scripts/bc2cpp-rpg/compiled_gems_config_check.rb's job: a copy of tools/bc2cpp outside the repository has no gems.)
 BC2CPP_COMPILED_GEMS_CONFIG = Bc2cppCompiledGemsConfig.load.freeze
 BC2CPP_COMPILED_GEMS = BC2CPP_COMPILED_GEMS_CONFIG.to_h do |entry|
   owners = entry.owners_from == Bc2cppCompiledGemsConfig::CORE ? BC2CPP_CORE_OWNERS : bc2cpp_gem_owners(entry.owners_from)
