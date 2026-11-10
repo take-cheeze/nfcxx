@@ -13,6 +13,11 @@
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
+#   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
+#                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
+#   --prune-unreachable=SUBSTR   drop the functions that no function whose name contains SUBSTR reaches (prune_pass). With
+#                --inline or --sroa this is the default for a SYCL device module (__nfcxx_sycl_entry_ kernels); --no-prune
+#                keeps every function.
 #
 # Exit status: 0 written; 1 malformed IR (on stderr).
 
@@ -77,6 +82,38 @@ def show(x)
   "(" + x.map { |y| show(y) }.join(" ") + ")"
 end
 
+# show(x) appended to buf: one buffer for the whole form (show copies each nested form's text into every enclosing level).
+def show_to(buf, x)
+  if x.is_a?(Array)
+    buf << "("
+    first = true
+    x.each do |y|
+      buf << " " unless first
+      first = false
+      show_to(buf, y)
+    end
+    buf << ")"
+  else
+    buf << x.to_s
+  end
+  buf
+end
+
+# show(a) == show(b) without building the texts (the atoms are compared as text: a size may be an Integer or its digits).
+def same_text?(a, b)
+  if a.is_a?(Array)
+    return false unless b.is_a?(Array) && a.length == b.length
+    i = 0
+    while i < a.length
+      return false unless same_text?(a[i], b[i])
+      i += 1
+    end
+    true
+  else
+    !b.is_a?(Array) && (a.equal?(b) || a.to_s == b.to_s)
+  end
+end
+
 def head(x)
   (x.is_a?(Array) && x[0].is_a?(String)) ? x[0] : nil
 end
@@ -114,11 +151,22 @@ def id_number(s)
   s[1..-1].to_i
 end
 
-def max_id(x)
-  m = 0
-  atoms_of(x).each do |a|
-    k = id_number(a)
-    m = k if k && k > m
+def max_id(x, m = 0)
+  x.each do |y|
+    if y.is_a?(Array)
+      m = max_id(y, m)
+    elsif y.is_a?(String) && y.getbyte(0) == 37 && y.length > 1   # %N: the digits read in place (id_number)
+      k = 0
+      j = 1
+      n = y.length
+      while j < n
+        d = y.getbyte(j)
+        break if d < 48 || d > 57
+        k = k * 10 + d - 48
+        j += 1
+      end
+      m = k if j == n && k > m
+    end
   end
   m
 end
@@ -137,21 +185,97 @@ def refusal(fn, name)
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|
-      return "sret/byval/ellipsis" if head(p) == "sret" || head(p) == "ellipsis"
+      return "ellipsis" if head(p) == "ellipsis"
       return "struct/bool parameter" if head(p) == "param" && (head(p[3]) == "struct" || p[3] == "bool")
     end
   end
   ret = fn.find { |f| head(f) == "ret" }
   return "struct/array result" if ret && (head(ret[1]) == "struct" || head(ret[1]) == "array")
-  atoms = atoms_of(fn)
-  return "printf" if atoms.any? { |a| a == "&\"printf\"" }
-  return "recursion" if atoms.any? { |a| a == "&\"#{name}\"" }
   body = fn.drop(2)
-  return "goto/label" if count_heads(body, "goto") + count_heads(body, "label") > 0
+  # one walk for the atoms and heads that the checks below read
+  self_ref = "&\"#{name}\""
+  facts = { printf: false, self: false, jumps: 0, rets: 0 }
+  scan = lambda do |x|
+    h = x[0]
+    if h.is_a?(String)
+      facts[:jumps] += 1 if h == "goto" || h == "label"
+      facts[:rets] += 1 if h == "return"
+    end
+    x.each do |y|
+      if y.is_a?(Array)
+        scan.call(y)
+      elsif y == "&\"printf\""
+        facts[:printf] = true
+      elsif y == self_ref
+        facts[:self] = true
+      end
+    end
+  end
+  scan.call(body)
+  return "printf" if facts[:printf]
+  return "recursion" if facts[:self]
+  return "goto/label" if facts[:jumps] > 0
   return "work-group static" if fn.any? { |f| head(f) == "slot" && contains_wgs?(f) }
-  rets = count_heads(body, "return")
-  return "return not in tail position" unless rets == 0 || (rets == 1 && head(body.last) == "return")
+  rets = facts[:rets]
+  return nil if rets == 0 || (rets == 1 && head(splice_tail_blocks(body).last) == "return")
+  # Early returns: the inlined body is a loop that runs once, and each return breaks out of it (expand_call). A return inside
+  # a loop or switch of the callee also sets a done flag, and a test of the flag after each enclosing loop or switch breaks on
+  # outwards (early_returns).
+  return "early return of a non-scalar" unless ret.nil? || ret[1] == "void" || scalar_size_of(ret[1])
   nil
+end
+
+def return_in_loop?(x, inside)
+  return false unless x.is_a?(Array)
+  return inside if head(x) == "return"
+  inside ||= head(x) == "loop" || head(x) == "switch"
+  x.any? { |y| return_in_loop?(y, inside) }
+end
+
+# The statements with each return replaced by a store of its operand to the result slot (when the call has a destination)
+# and a break out of the loop that expand_call puts around an early-returning callee. A return inside a loop or switch of
+# the callee (inside) also stores true to the done slot dslot; its break leaves only the innermost loop or switch, so after
+# each loop or switch that holds such a return comes (let %T bool (load bool DONE)) (if %T (then (break))), which leaves
+# the next one out, up to the one-trip loop. A break or continue of the callee keeps its meaning: the tests are placed after
+# the loop or switch, in the statement list that holds it. Returns [form, whether it holds a return inside a loop or switch].
+def early_returns(x, rtype, rslot, dslot = nil, st = nil, inside = false)
+  return [x, false] unless x.is_a?(Array)
+  if head(x) == "return"
+    stmts = []
+    stmts << ["store", rtype, rslot, x[1]] unless rslot.nil? || x.length < 2
+    stmts << ["store", "bool", dslot, ["const", "bool", "1"]] if inside
+    stmts << ["break"]
+    return [stmts.length == 1 ? stmts[0] : ["block"] + stmts, inside]
+  end
+  deep = false
+  out = []
+  x.each do |y|
+    nested = head(y) == "loop" || head(y) == "switch"
+    y2, d = early_returns(y, rtype, rslot, dslot, st, inside || nested)
+    out << y2
+    next unless d
+    deep = true
+    next unless nested
+    t = "%#{st[:next]}"
+    st[:next] += 1
+    out << ["let", t, "bool", ["load", "bool", dslot]]
+    out << ["if", t, ["then", ["break"]]]
+  end
+  [out, deep]
+end
+
+def unqualified(t)
+  t = t[1] while head(t) == "const" && t.length == 2
+  t
+end
+
+# The statements with a trailing (block ...) replaced by its statements, repeatedly: a block only groups statements (the ids
+# are the function's), so a return at the end of the last block is in tail position.
+def splice_tail_blocks(stmts)
+  while stmts.length > 0 && head(stmts.last) == "block"
+    stmts = stmts[0...-1] + stmts.last.drop(1)
+  end
+  stmts
 end
 
 # The statement a call form is: [dest, dest type, call] or [nil, nil, call], or nil.
@@ -171,13 +295,15 @@ def callee_info(fn)
   params = fn.find { |f| head(f) == "params" }.drop(1)
   body = fn.drop(2)
   slots = body.select { |f| head(f) == "slot" }
-  stmts = body.reject { |f| HEADER_HEADS.include?(head(f)) }
+  stmts = splice_tail_blocks(body.reject { |f| HEADER_HEADS.include?(head(f)) })
   ret_op = nil
-  if stmts.length > 0 && head(stmts.last) == "return"
+  early = count_heads(stmts, "return") > (stmts.length > 0 && head(stmts.last) == "return" ? 1 : 0)
+  if !early && stmts.length > 0 && head(stmts.last) == "return"
     ret_op = stmts.last[1]
     stmts = stmts[0...-1]
   end
-  { ret: ret, rtext: show(ret[1]), params: params, slots: slots, stmts: stmts, ret_op: ret_op }
+  { ret: ret, rtext: show(ret[1]), params: params, slots: slots, stmts: stmts, ret_op: ret_op, early: early,
+    deep: early && return_in_loop?(stmts, false) }
 end
 
 # Replaces one call statement by the callee's statements. Returns [hoisted slots, statements] or nil.
@@ -211,7 +337,12 @@ def expand_call(s, fns, st)
   byval_pre = []
   byval_slots = []
   params.each_with_index do |p, i|
-    if head(p[3]) == "byval"
+    if head(p) == "sret"
+      # the result object of a struct-returning callee: the call passes (sret TYPE ADDR), and the callee's stores go to ADDR
+      # (the caller copies the result from there after the call, as before the inline)
+      return nil unless head(args[i]) == "sret"
+      map[p[1]] = args[i][2]
+    elsif head(p[3]) == "byval"
       bt = p[3][1]
       bsize = p[3][2]
       balign = p[3][3]
@@ -234,6 +365,31 @@ def expand_call(s, fns, st)
   hoisted = slots.map { |sl| ["slot", "\"#{unq(sl[1])}.i#{k}\""] + sl.drop(2) } + byval_slots
   stmts = info[:stmts]
   ret_op = info[:ret_op]
+  if info[:early]
+    # (loop (body STMTS... (break)) (step)): each return stores its operand to the result slot and breaks (early_returns)
+    rslot = nil
+    if dest
+      rt = unqualified(rtype)
+      size = scalar_size_of(rt).to_s
+      rslot = "$\"ret.i#{k}\""
+      hoisted_ret = [["slot", "\"ret.i#{k}\"", rt, size, size]]
+    end
+    pre = byval_pre
+    dslot = nil
+    if info[:deep]
+      # the done flag of the returns inside loops or switches (early_returns); false on each entry
+      dslot = "$\"done.i#{k}\""
+      hoisted += [["slot", "\"done.i#{k}\"", "bool", "1", "1"]]
+      pre += [["store", "bool", dslot, ["const", "bool", "0"]]]
+    end
+    body = early_returns(stmts.map { |x| subst(x, map, st) }, rt, rslot, dslot, st)[0]
+    out = pre + [["loop", ["body"] + body + [["break"]], ["step"]]]
+    out << ["let", dest, dtype, ["load", rt, rslot]] if dest
+    hoisted += hoisted_ret if dest
+    st[:inlined] += 1
+    st[:attr_from] << cname if st[:attrs].key?(cname)
+    return [hoisted, out]
+  end
   return nil if dest && ret_op.nil?
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
@@ -280,6 +436,17 @@ def insert_slots(children, slots)
   children[0, idx + 1] + slots + children[(idx + 1)..-1]
 end
 
+# Whether x holds a call statement (call_statement) whose callee is a function of the module: the statements rewrite may expand.
+def calls_module_function?(x, fns)
+  return false unless x.is_a?(Array)
+  parts = call_statement(x)
+  if parts
+    c = parts[2]
+    return true if c.length >= 3 && c[2].is_a?(String) && c[2][0, 2] == "&\"" && fns.key?(unq(c[2]))
+  end
+  x.any? { |y| calls_module_function?(y, fns) }
+end
+
 def inline_pass(forms, max_depth, report)
   fns = {}
   forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
@@ -294,13 +461,18 @@ def inline_pass(forms, max_depth, report)
   attrs = {}     # function name -> its sycl-kernel-attr form (with a reqd-sub-group-size)
   forms.each { |f| attrs[unq(f[1])] = f if head(f) == "sycl-kernel-attr" && f.drop(2).any? { |a| head(a) == "reqd-sub-group-size" } }
   extra = []     # attr forms for callers, appended after the functions
+  # Per function form (by identity, so a rewritten function starts afresh): its largest id, and whether it has a call statement
+  # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
+  ids = {}.compare_by_identity
+  calls = {}.compare_by_identity
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
+      next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
       name = unq(f[1])
-      st = { next: max_id(f) + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons, ic: infos,
-             attrs: attrs, attr_from: [] }
+      st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
+             ic: infos, attrs: attrs, attr_from: [] }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -407,14 +579,19 @@ def promote_address_slots(children)
     t = f[2]
     t = t[1] while head(t) == "const"
     ptr_slots[unq(f[1])] = true if head(t) == "ptr"
-    struct_slots[unq(f[1])] = true if head(f[2]) == "struct"
+    struct_slots[unq(f[1])] = true if %w[struct array].include?(head(unqualified(f[2])))
   end
   return children if ptr_slots.empty?
   counts = Hash.new(0)
-  atoms_flat(children).each { |a| counts[a] += 1 if a.is_a?(String) && a.start_with?("$\"") }
+  slot_atom_counts(children, counts)
   promoted_count = [0]
+  ptr_atom = {}
+  ptr_slots.each_key { |n| ptr_atom["$\"#{n}\""] = true }
+  has_store = {}.compare_by_identity   # filled below, before the walk
   promote_in_list = lambda do |list|
     i = 0
+    orig = 0    # i in the list as it was when idx was built (each promotion deletes the statement at i)
+    idx = nil   # built on the first store to a pointer slot (suffix_index)
     addr = {}   # value name => [struct slot name, byte offset], defined in this list so far
     while i < list.length
       f = list[i]
@@ -427,14 +604,25 @@ def promote_address_slots(children)
         elsif v.is_a?(String) && addr[v]
           target = addr[v]
         end
-        # one walk of the statements after the store gives both their forms and the count of the slot's atom in them
-        rest_forms, rest_count = target ? suffix_forms_and_count(list, i + 1, "$\"#{n}\"") : [nil, 0]
-        if target && counts["$\"#{n}\""] == 1 + rest_count
-          loads = rest_forms.select { |sf| head(sf) == "load" && sf.length == 3 && sf[2] == "$\"#{n}\"" }
-          lets = rest_forms.select { |sf| head(sf) == "let" && sf.length == 4 && head(sf[3]) == "load" && sf[3][2] == "$\"#{n}\"" }
-          if lets.length == loads.length && lets.length > 0
+        if target
+          # the uses of the slot's atom in the statements after the store, from one index of the list (the walk of the
+          # statements after each store made the pass quadratic in a long list). The index stays exact: a promotion changes
+          # only the uses of its own slot, which has no store left in the list after it.
+          idx ||= suffix_index(list, i, ptr_atom)
+          atom = "$\"#{n}\""
+          rest_count = 0
+          (idx[:count][atom] || []).each { |j, c| rest_count += c if j > orig }
+        end
+        if target && counts[atom] == 1 + rest_count
+          later = lambda { |key| (idx[key][atom] || []).select { |j, _| j > orig }.map { |_, sf| sf } }
+          loads = later.call(:load).select { |sf| head(sf) == "load" && sf.length == 3 && sf[2] == atom }
+          lets = later.call(:let).select { |sf| head(sf) == "let" && sf.length == 4 && head(sf[3]) == "load" && sf[3][2] == atom }
+          # another store to the slot after this one: a load after it may read another address (promote_same_address_slots)
+          restores = later.call(:store).count { |sf| head(sf) == "store" && sf[2] == atom }
+          if lets.length == loads.length && lets.length > 0 && restores == 0
             lets.each { |sf| sf[3] = ["offset", "$\"#{target[0]}\"", target[1].to_s] }
             list.delete_at(i)
+            orig += 1
             promoted_count[0] += 1
             next
           end
@@ -452,9 +640,19 @@ def promote_address_slots(children)
         end
       end
       i += 1
+      orig += 1
     end
-    list.each { |x| promote_in_list.call(x) if x.is_a?(Array) }
+    list.each { |x| promote_in_list.call(x) if x.is_a?(Array) && has_store[x] }
   end
+  # the forms with a store to a pointer slot inside: the walk skips the others, where it finds nothing to do (a form keeps its
+  # entry when its store goes, which only costs the walk)
+  mark = lambda do |x|
+    found = head(x) == "store" && x.length == 4 && x[2].is_a?(String) && ptr_atom[x[2]]
+    x.each { |y| found = true if y.is_a?(Array) && mark.call(y) }
+    has_store[x] = true if found
+    found
+  end
+  mark.call(children)
   # a store of a value that is itself a promoted load becomes visible to the next round
   4.times do
     before = promoted_count[0]
@@ -464,8 +662,131 @@ def promote_address_slots(children)
   children
 end
 
+# counts[a] += 1 for each slot atom $"..." in x (atoms_flat without the array).
+def slot_atom_counts(x, counts)
+  x.each do |y|
+    if y.is_a?(Array)
+      slot_atom_counts(y, counts)
+    elsif y.is_a?(String) && y.start_with?("$\"")
+      counts[y] += 1
+    end
+  end
+  counts
+end
+
+# The same for a pointer slot with several stores (an unrolled loop that calls a member function stores `this` in each
+# iteration): when every store writes one address (the same struct slot and byte offset) and every other use is a let of a
+# load, each load is that address and the stores go. A load before every store reads an uninitialized pointer, so it may be
+# given the address too.
+def promote_same_address_slots(children)
+  ptr_slots = {}
+  struct_slots = {}
+  children.each do |f|
+    next unless head(f) == "slot"
+    t = f[2]
+    t = t[1] while head(t) == "const"
+    ptr_slots[unq(f[1])] = true if head(t) == "ptr"
+    struct_slots[unq(f[1])] = true if %w[struct array].include?(head(unqualified(f[2])))
+  end
+  return children if ptr_slots.empty?
+  counts = Hash.new(0)
+  slot_atom_counts(children, counts)
+  targets = {}   # pointer slot => [target, ...] (nil for a store it cannot resolve)
+  lets = Hash.new { |h, k| h[k] = [] }
+  walk = lambda do |list, outer|
+    addr = outer.dup   # value name => [struct slot name, byte offset]; the registers of enclosing lists are visible
+    list.each do |f|
+      next unless f.is_a?(Array)
+      if head(f) == "store" && f.length == 4 && f[2].is_a?(String) && f[2].start_with?("$\"") && ptr_slots[unq(f[2])]
+        v = f[3]
+        t = if v.is_a?(String) && v.start_with?("$\"") && struct_slots[unq(v)] then [unq(v), 0]
+            elsif v.is_a?(String) then addr[v]
+            end
+        (targets[unq(f[2])] ||= []) << t
+      elsif head(f) == "let" && f.length == 4
+        rv = f[3]
+        if head(rv) == "load" && rv.length == 3 && rv[2].is_a?(String) && rv[2].start_with?("$\"") && ptr_slots[unq(rv[2])]
+          lets[unq(rv[2])] << f
+        elsif head(rv) == "offset" && rv.length == 3 && rv[1].is_a?(String) && rv[1].start_with?("$\"") && struct_slots[unq(rv[1])]
+          addr[f[1]] = [unq(rv[1]), rv[2].to_i]
+        elsif head(rv) == "bitcast" && rv.length == 3 && rv[2].is_a?(String) && rv[2].start_with?("$\"") && struct_slots[unq(rv[2])]
+          addr[f[1]] = [unq(rv[2]), 0]
+        elsif head(rv) == "offset" && rv.length == 3 && addr[rv[1]]
+          addr[f[1]] = [addr[rv[1]][0], addr[rv[1]][1] + rv[2].to_i]
+        elsif head(rv) == "bitcast" && rv.length == 3 && addr[rv[2]]
+          addr[f[1]] = addr[rv[2]].dup
+        end
+      elsif head(f) == "set" && f[1].is_a?(String)
+        addr.delete(f[1])
+      end
+      walk.call(f, addr) unless head(f) == "let" || head(f) == "store"
+    end
+  end
+  walk.call(children, {})
+  done = {}
+  targets.each do |n, ts|
+    next if ts.include?(nil) || ts.uniq.length != 1 || lets[n].empty?
+    next unless counts["$\"#{n}\""] == ts.length + lets[n].length
+    t = ts[0]
+    lets[n].each { |f| f[3] = ["offset", "$\"#{t[0]}\"", t[1].to_s] }
+    done["$\"#{n}\""] = true
+  end
+  return children if done.empty?
+  drop = lambda do |list|
+    list.reject { |f| head(f) == "store" && f.length == 4 && done[f[2]] }.map { |f| f.is_a?(Array) ? drop.call(f) : f }
+  end
+  drop.call(children)
+end
+
+# A call of memcpy with a constant size is a copy of that many bytes (alignment 1), which the scalar replacement models (the
+# call would make both objects escape); its result is the destination.
+def memcpy_to_copy(list)
+  out = []
+  list.each do |s|
+    call = head(s) == "let" ? s[3] : (head(s) == "eval" ? s[1] : nil)
+    if head(call) == "call" && call[2] == "&\"memcpy\"" && call.length == 6 && head(call[5]) == "const" && int_text?(call[5][2]) &&
+       call[3].is_a?(String) && call[4].is_a?(String)
+      out << ["copy", call[5][2], call[3], call[4], "1"]
+      out << ["let", s[1], s[2], call[3]] if head(s) == "let"
+      next
+    end
+    out << (s.is_a?(Array) ? memcpy_to_copy(s) : s)
+  end
+  out
+end
+
 def count_in_forms(list, atom)
   atoms_flat(list).count { |a| a == atom }
+end
+
+# The uses of the pointer slots' atoms in the statements list[from..], keyed by the statement's position: :count (atom =>
+# [[position, count]]), and the forms that may be a load, a let of a load, or a store of each atom (:load, :let, :store =>
+# atom => [[position, form]]), in the order of a walk of the statements (all_forms).
+def suffix_index(list, from, ptr_atom)
+  idx = { count: {}, load: {}, let: {}, store: {} }
+  j = from
+  walk = lambda do |x, cnt|
+    if x.is_a?(Array)
+      h = x[0]
+      if h == "load" && x.length == 3 && ptr_atom[x[2]]
+        (idx[:load][x[2]] ||= []) << [j, x]
+      elsif h == "let" && x.length == 4 && head(x[3]) == "load" && ptr_atom[x[3][2]]
+        (idx[:let][x[3][2]] ||= []) << [j, x]
+      elsif h == "store" && x.length >= 3 && ptr_atom[x[2]]
+        (idx[:store][x[2]] ||= []) << [j, x]
+      end
+      x.each { |y| walk.call(y, cnt) }
+    elsif ptr_atom[x]
+      cnt[x] += 1
+    end
+  end
+  while j < list.length
+    cnt = Hash.new(0)
+    walk.call(list[j], cnt)
+    cnt.each { |a, c| (idx[:count][a] ||= []) << [j, c] }
+    j += 1
+  end
+  idx
 end
 
 # [all_forms(list[from..]), count_in_forms(list[from..], atom)] in one walk (the same forms, in the same order).
@@ -487,10 +808,13 @@ def suffix_forms_and_count(list, from, atom)
 end
 
 def sroa_function(children, counter)
+  children = memcpy_to_copy(children)
   children = promote_address_slots(children)
+  children = promote_same_address_slots(children)
   slots = {}   # name => [type, size, align]
   children.each do |f|
-    next unless head(f) == "slot" && head(f[2]) == "struct" && !contains_wgs?(f[2])
+    # an array or a const struct too: the fields are the offsets and types the object is accessed at
+    next unless head(f) == "slot" && %w[struct array].include?(head(unqualified(f[2]))) && !contains_wgs?(f[2])
     slots[unq(f[1])] = [f[2], f[3].to_i, f[4].to_i]
   end
   return children if slots.empty?
@@ -748,16 +1072,23 @@ end
 # Every value a function uses is defined in it (a parameter, or a let or phi). A rewrite that loses a definition is refused.
 def defined_values_ok?(children)
   defined = {}
-  all_forms(children).each do |f|
-    defined[f[1]] = true if (head(f) == "let" || head(f) == "phi") && f[1].is_a?(String)
-    defined[f[1]] = true if (head(f) == "param" || head(f) == "sret") && f[1].is_a?(String)
+  used = []
+  walk = lambda do |x|
+    if x.is_a?(Array)
+      h = x[0]
+      defined[x[1]] = true if (h == "let" || h == "phi" || h == "param" || h == "sret") && x[1].is_a?(String)
+      x.each { |y| walk.call(y) }
+    elsif numbered_id?(x)
+      used << x
+    end
   end
-  atoms_flat(children).all? { |a| !numbered_id?(a) || defined[a] }
+  walk.call(children)
+  used.all? { |a| defined[a] }
 end
 
 # An index that a bounds check has proved to be 0 (`(bounds I 1)` traps unless 0 <= I < 1): (index B I S) is the address B. The
 # check dominates the index in its statement list, or an enclosing one.
-def fold_unit_index(list, unit)
+def fold_unit_index(list, unit, sets = {}.compare_by_identity)
   unit = unit.dup
   list.each_with_index do |s, i|
     next unless s.is_a?(Array)
@@ -769,10 +1100,23 @@ def fold_unit_index(list, unit)
     end
     # set is a store to a variable, not a new value: a register that s sets no longer holds the checked 0 after s, and inside s
     # the fact is dropped too, since a loop in s runs its body again with the set value
-    all_forms(s).each { |sf| unit.delete(sf[1]) if head(sf) == "set" && sf.length == 3 && sf[1].is_a?(String) }
-    s.each { |x| fold_unit_index(x, unit) if x.is_a?(Array) }
+    set_registers(s, sets).each { |r| unit.delete(r) }
+    s.each { |x| fold_unit_index(x, unit, sets) if x.is_a?(Array) }
   end
   list
+end
+
+# The registers that the sets in x (x itself included) assign, memoized per form in memo: the fold only replaces lets of an
+# index, which hold no set, so a form's sets stay the same while it runs.
+NO_SETS = [].freeze
+
+def set_registers(x, memo)
+  memo[x] ||= begin
+    res = []
+    res << x[1] if head(x) == "set" && x.length == 3 && x[1].is_a?(String)
+    x.each { |y| res.concat(set_registers(y, memo)) if y.is_a?(Array) }
+    res.empty? ? NO_SETS : res.uniq
+  end
 end
 
 # ---- constant propagation through scalar slots (part of --sroa) -----------------------------------------------------------
@@ -805,24 +1149,33 @@ def cprop_function(children)
     scalar[unq(f[1])] = f[2]
   end
   return children if scalar.empty?
-  all = all_forms(children)
+  # one walk: the uses of each slot atom, its plain loads and stores of the slot's type, and the registers assigned with set
   uses = Hash.new(0)
-  atoms_flat(children).each { |a| uses[a] += 1 if a.is_a?(String) && a.start_with?("$\"") }
   modelled = Hash.new(0)
-  all.each do |sf|
-    next unless (head(sf) == "load" || head(sf) == "store") && sf.length >= 3 && sf[2].is_a?(String) && sf[2].start_with?("$\"")
-    n = unq(sf[2])
-    modelled["$\"#{n}\""] += 1 if scalar[n] == sf[1]
+  setted = {}
+  scan = lambda do |x|
+    h = x[0]
+    if (h == "load" || h == "store") && x.length >= 3 && x[2].is_a?(String) && x[2].start_with?("$\"")
+      modelled[x[2]] += 1 if scalar[unq(x[2])] == x[1]
+    elsif h == "set" && x.length == 3
+      # a register that is assigned with set is a variable, not a value: its let is never a constant (decided before the
+      # walk, so no value is folded from it)
+      setted[x[1]] = true
+    end
+    x.each do |y|
+      if y.is_a?(Array)
+        scan.call(y)
+      elsif y.is_a?(String) && y.start_with?("$\"")
+        uses[y] += 1
+      end
+    end
   end
+  scan.call(children)
   eligible = {}
   scalar.each { |n, t| eligible[n] = true if uses["$\"#{n}\""] == modelled["$\"#{n}\""] && uses["$\"#{n}\""] > 0 }
   return children if eligible.empty?
 
   consts = {}   # value name => the constant form
-  # a register that is assigned with set is a variable, not a value: its let is never a constant (decided before the walk, so
-  # no value is folded from it)
-  setted = {}
-  all.each { |sf| setted[sf[1]] = true if head(sf) == "set" && sf.length == 3 }
   set_const = lambda { |name, val| consts[name] = val unless setted[name] }
   # the slots a statement may store (anywhere inside it)
   # Memoized per form: the walk only replaces the right side of a let (a load by a constant), which holds no store, so a
@@ -834,7 +1187,7 @@ def cprop_function(children)
       res = []
       res << unq(x[2]) if head(x) == "store" && x.length >= 3 && x[2].is_a?(String) && x[2].start_with?("$\"")
       x.each { |y| res.concat(stored_in.call(y)) if y.is_a?(Array) }
-      res.uniq
+      res.empty? ? NO_SETS : res.uniq
     end
   end
   resolve = lambda { |x| x.is_a?(String) && consts[x] ? consts[x] : x }
@@ -914,18 +1267,33 @@ def cprop_function(children)
 end
 
 # ---- counted loops with a small constant trip count (--sroa) ----------------------------------------------------------------
-# The front end's `for` loop: (loop (body (let C ...) (if C (then) (else (break))) REST...) (step LOAD ADD STORE)). A loop whose
-# condition is `counter < N` (N a constant), whose counter starts at a constant K (the last store before the loop, with no other
-# store to it in between) and is stepped by +1, and whose body has no other break or continue, is unrolled: the trip count
-# T = N - K copies of the body and step, each with its own names, replace it. The counter's stores keep its value in each copy.
+# The front end's `for` loop: (loop (body PREFIX... (if C (then) (else (break))) REST...) (step LOAD OP STORE)). A loop whose
+# condition C compares the counter (a load of a scalar slot in PREFIX) with a constant (lt, le, gt, ge, signed or unsigned, ne,
+# eq, the counter on either side), whose counter starts at a constant K (the last store before the loop, with no other store to
+# it in between), is stepped by a constant (wadd, wsub, wmul, cshl, cshr), is not stored anywhere else in the loop and has its
+# address used only by loads and stores, and whose body has no other break or continue, is unrolled: the counter's values are
+# computed from K until C is false, and one copy of PREFIX, REST and the step per value, each with its own names, replaces the
+# loop (at most UNROLL_MAX copies). The counter's stores keep its value in each copy. A loop that runs no trip is PREFIX alone
+# (the test runs once), and so is the last test after the trips (dropped when PREFIX is only lets without a call).
 UNROLL_MAX = 4
+UNROLL_CMP = { "lt.s" => :<, "lt.u" => :<, "le.s" => :<=, "le.u" => :<=, "gt.s" => :>, "gt.u" => :>, "ge.s" => :>=,
+               "ge.u" => :>=, "eq" => :==, "ne" => :!= }.freeze
+UNROLL_SWAP = { :< => :>, :<= => :>=, :> => :<, :>= => :<=, :== => :==, :!= => :!= }.freeze
+UNROLL_INT = { "int" => [32, true], "unsigned_int" => [32, false], "long" => [64, true], "unsigned_long" => [64, false],
+               "long_long" => [64, true], "unsigned_long_long" => [64, false] }.freeze
 
 def stores_slot?(x, name)
   all_forms(x).any? { |sf| head(sf) == "store" && sf.length >= 3 && sf[2].is_a?(String) && sf[2].start_with?("$\"") && unq(sf[2]) == name }
 end
 
-def has_jump?(x)
-  all_forms(x).any? { |sf| head(sf) == "break" || head(sf) == "continue" }
+# A break or continue that leaves the loop around x: one inside a nested loop belongs to that loop, and a break inside a
+# switch leaves the switch (an inlined early-returning callee is a nested loop, expand_call).
+def has_jump?(x, in_switch = false)
+  return false unless x.is_a?(Array)
+  return true if head(x) == "continue" || (head(x) == "break" && !in_switch)
+  return false if head(x) == "loop"
+  in_switch ||= head(x) == "switch"
+  x.any? { |y| has_jump?(y, in_switch) }
 end
 
 def rename_copy(stmts, counter)
@@ -950,7 +1318,56 @@ def unroll_no(k)
   nil
 end
 
-def try_unroll(list, i, counter)
+# The slots whose address is used other than as the address of a load or store (a call argument, an offset, a stored value):
+# a store through that use may change a loop counter, so such a slot is never one.
+def unroll_escaped_slots(children)
+  total = Hash.new(0)
+  direct = Hash.new(0)
+  walk = lambda do |x|
+    if x.is_a?(Array)
+      h = x[0]
+      if (h == "load" || h == "store") && x.length >= 3 && x[2].is_a?(String) && x[2].start_with?("$\"")
+        direct[x[2]] += 1
+      end
+      x.each { |y| walk.call(y) }
+    elsif x.is_a?(String) && x.start_with?("$\"")
+      total[x] += 1
+    end
+  end
+  walk.call(children)
+  esc = {}
+  total.each { |a, n| esc[unq(a)] = true if n != direct[a] }
+  esc
+end
+
+# The integer constant of (const T N) with T the counter's type, or nil.
+def unroll_const(x, t)
+  const_form?(x) && x[1] == t && int_text?(x[2]) ? x[2].to_i : nil
+end
+
+# v in the range of the counter type, or nil.
+def unroll_fit(v, t)
+  bits, signed = UNROLL_INT[t]
+  lo = signed ? -(1 << (bits - 1)) : 0
+  hi = signed ? (1 << (bits - 1)) - 1 : (1 << bits) - 1
+  v >= lo && v <= hi ? v : nil
+end
+
+# The counter's next value: OP of the step on v and the constant c, nil when it leaves the type's range or a shift count is not
+# in [0, width) (a wrap or a trap is left to the loop).
+def unroll_step(op, v, c, t)
+  bits = UNROLL_INT[t][0]
+  r = case op
+      when "wadd" then v + c
+      when "wsub" then v - c
+      when "wmul" then v * c
+      when "cshl" then c >= 0 && c < bits ? v << c : nil
+      when "cshr" then c >= 0 && c < bits ? v >> c : nil
+      end
+  r && unroll_fit(r, t)
+end
+
+def try_unroll(list, i, counter, escaped = {})
   loop_s = list[i]
   body = loop_s[1].drop(1)
   step = loop_s[2].drop(1)
@@ -961,30 +1378,56 @@ def try_unroll(list, i, counter)
   return unroll_no(2) if has_jump?(prefix) || has_jump?(suffix) || has_jump?(step)
   cond = body[j][1]
   cdef = prefix.find { |x| head(x) == "let" && x[1] == cond }
-  return unroll_no(3) unless cdef && head(cdef[3]) == "lt.s" && cdef[3].length == 4 && cdef[3][1] == "int" && int_text?(cdef[3][3][2]) && const_form?(cdef[3][3])
-  bound = cdef[3][3][2].to_i
-  xname = cdef[3][2]
+  return unroll_no(3) unless cdef && cdef.length == 4 && UNROLL_CMP.key?(head(cdef[3])) && cdef[3].length == 4 &&
+                             UNROLL_INT.key?(cdef[3][1])
+  ty = cdef[3][1]
+  cmp = UNROLL_CMP[head(cdef[3])]
+  if (bound = unroll_const(cdef[3][3], ty)) && cdef[3][2].is_a?(String)
+    xname = cdef[3][2]
+  elsif (bound = unroll_const(cdef[3][2], ty)) && cdef[3][3].is_a?(String)
+    xname = cdef[3][3]
+    cmp = UNROLL_SWAP[cmp]   # K OP x is x OP' K
+  else
+    return unroll_no(3)
+  end
   xdef = prefix.find { |x| head(x) == "let" && x[1] == xname }
-  return unroll_no(4) unless xdef && head(xdef[3]) == "load" && xdef[3][2].is_a?(String) && xdef[3][2].start_with?("$\"")
+  return unroll_no(4) unless xdef && xdef.length == 4 && xdef[2] == ty && head(xdef[3]) == "load" && xdef[3].length == 3 &&
+                             xdef[3][1] == ty && xdef[3][2].is_a?(String) && xdef[3][2].start_with?("$\"")
   slot = unq(xdef[3][2])
-  return unroll_no(5) unless step.length == 3 && head(step[0]) == "let" && head(step[0][3]) == "load" && unq(step[0][3][2]) == slot &&
-                    head(step[1]) == "let" && head(step[1][3]) == "wadd" && step[1][3][3] == ["const", "int", "1"] &&
-                    head(step[2]) == "store" && unq(step[2][2]) == slot && step[2][3] == step[1][1]
-  return unroll_no(6) if stores_slot?(prefix, slot) || stores_slot?(suffix, slot)
+  # the step: (let V T (load T SLOT)) (let W T (OP T V (const T C))) (store T SLOT W), or (store T SLOT (OP T V (const T C)))
+  sop = nil
+  if step.length == 3 && head(step[0]) == "let" && step[0].length == 4 && head(step[0][3]) == "load" && step[0][3][2] == xdef[3][2] &&
+     head(step[1]) == "let" && step[1].length == 4 && head(step[2]) == "store" && step[2].length == 4 && step[2][2] == xdef[3][2] &&
+     step[2][3] == step[1][1]
+    sop = step[1][3]
+  elsif step.length == 2 && head(step[0]) == "let" && step[0].length == 4 && head(step[0][3]) == "load" && step[0][3][2] == xdef[3][2] &&
+        head(step[1]) == "store" && step[1].length == 4 && step[1][2] == xdef[3][2]
+    sop = step[1][3]
+  end
+  return unroll_no(5) unless sop && %w[wadd wsub wmul cshl cshr].include?(head(sop)) && sop.length == 4 && sop[1] == ty &&
+                             sop[2] == step[0][1] && (sc = unroll_const(sop[3], ty)) && step[0][2] == ty && step[0][3][1] == ty &&
+                             (step.length == 2 || step[2][1] == ty) && (step.length == 3 || step[1][1] == ty)
+  return unroll_no(6) if stores_slot?(prefix, slot) || stores_slot?(suffix, slot) || escaped[slot]
   # the counter's value before the loop: the last store to it, with no other store in between
   k0 = nil
   (i - 1).downto(0) do |p|
     st = list[p]
     if head(st) == "store" && st.length == 4 && st[2].is_a?(String) && st[2].start_with?("$\"") && unq(st[2]) == slot
-      return unroll_no(7) unless const_form?(st[3]) && int_text?(st[3][2])
-      k0 = st[3][2].to_i
+      return unroll_no(7) unless st[1] == ty && (k0 = unroll_const(st[3], ty)) && unroll_fit(k0, ty)
       break
     end
     return unroll_no(8) if stores_slot?(st, slot)
   end
   return unroll_no(9) if k0.nil?
-  trip = bound - k0
-  return unroll_no(10) if trip < 1 || trip > UNROLL_MAX
+  # the trips: the counter's values while the test holds
+  trip = 0
+  v = k0
+  while v.send(cmp, bound)
+    trip += 1
+    return unroll_no(10) if trip > UNROLL_MAX
+    v = unroll_step(head(sop), v, sc, ty)
+    return unroll_no(12) if v.nil?
+  end
   if $unroll_limit && (!$unroll_cap_in || $sroa_fn.include?($unroll_cap_in))
     return unroll_no(11) if $unroll_done >= $unroll_limit
     $unroll_done += 1
@@ -993,49 +1436,268 @@ def try_unroll(list, i, counter)
   trip.times do
     copies.concat(rename_copy(prefix + suffix + step, counter))
   end
+  # the last test: its statements run once more (only lets of values, without a call, can go)
+  pure = prefix.all? { |x| head(x) == "let" && x.length == 4 && count_heads(x[3], "call") == 0 }
+  copies.concat(rename_copy(prefix, counter)) unless pure
   copies
 end
 
-def unroll_list!(list, counter)
+def unroll_list!(list, counter, escaped = {})
   i = 0
   while i < list.length
     s = list[i]
     if head(s) == "loop" && s.length == 3
-      rep = try_unroll(list, i, counter)
+      rep = try_unroll(list, i, counter, escaped)
       if rep
         list[i, 1] = rep
         i += rep.length
         next
       end
     end
-    unroll_list!(s, counter) if s.is_a?(Array)
+    unroll_list!(s, counter, escaped) if s.is_a?(Array)
     i += 1
   end
   list
 end
 
-def sroa_pass(forms)
-  forms.map do |f|
-    next f unless head(f) == "function"
+# 8: an unrolled loop's copies are walked in the next round, so a nest of loops unrolls one level per round (with 4 rounds the
+# deep nests of the mmvq kernels stopped half unrolled); the rounds end as soon as one changes nothing
+SROA_ROUNDS = 8
+
+def sroa_function_form(f)
+  begin
     counter = { n: max_id(f) }
     $sroa_fn = unq(f[1])
     children = f.drop(2)
-    unroll_list!(children, counter) if $pass_unroll && ($unroll_in.nil? || unq(f[1]).include?($unroll_in))
-    children = cprop_function(children) if $pass_cprop
-    children = fold_unit_index(children, {}) if $pass_fold_unit
-    new_children = sroa_function(children, counter)
-    if defined_values_ok?(new_children)
+    # Rounds until nothing changes (at most SROA_ROUNDS): a promoted pointer slot or a replaced aggregate makes loop counters
+    # and stored addresses constant, which the next round's unrolling and promotion use.
+    new_children = nil
+    cand = nil
+    SROA_ROUNDS.times do
+      # the round's input (the passes below change the lists in place). A round whose result is its input ends the rounds, the
+      # first one too: the next round would read the same text and give it again.
+      before = copy_form(new_children || children)
+      children = new_children if new_children
+      unroll_list!(children, counter, unroll_escaped_slots(children)) if $pass_unroll && ($unroll_in.nil? || unq(f[1]).include?($unroll_in))
+      children = cprop_function(children) if $pass_cprop
+      children = fold_unit_index(children, {}) if $pass_fold_unit
+      cand = sroa_function(children, counter)
+      break unless defined_values_ok?(cand)
+      new_children = cand
+      break if same_text?(cand, before)
+    end
+    if new_children
       f.take(2) + new_children
     else
       if $sroa_debug
         dv = {}
-        all_forms(new_children).each { |sf| dv[sf[1]] = true if (head(sf) == "let" || head(sf) == "param" || head(sf) == "sret") && sf[1].is_a?(String) }
-        miss = atoms_flat(new_children).find { |a| numbered_id?(a) && !dv[a] }
+        all_forms(cand).each { |sf| dv[sf[1]] = true if (head(sf) == "let" || head(sf) == "param" || head(sf) == "sret") && sf[1].is_a?(String) }
+        miss = atoms_flat(cand).find { |a| numbered_id?(a) && !dv[a] }
         $stderr.write("pathb-ir-opt: scalar replacement of #{$sroa_fn} refused: #{miss} would lose its definition\n")
       end
       f
     end
   end
+end
+
+# The functions are independent, so with jobs > 1 they are shared out among forked workers (by size, largest first, each to the
+# least loaded worker). Each worker sends back the text of its functions, which takes the function's place in the forms (the
+# output writes it as it is; main parses it again for a later pass). The texts are the ones the serial pass gives: no state
+# goes from one function to the next, except the count of --unroll-limit, which keeps the pass serial.
+def sroa_pass(forms, jobs = 1)
+  idx = []
+  forms.each_with_index { |f, i| idx << i if head(f) == "function" }
+  if jobs <= 1 || idx.length < 2 || $unroll_limit || !Process.respond_to?(:fork)
+    return forms.map { |f| head(f) == "function" ? sroa_function_form(f) : f }
+  end
+  require "tmpdir"
+  jobs = idx.length if jobs > idx.length
+  load = Array.new(jobs, 0)
+  share = Array.new(jobs) { [] }
+  idx.map { |i| [form_weight(forms[i]), i] }.sort_by { |w, i| [-w, i] }.each do |w, i|
+    k = load.index(load.min)
+    share[k] << i
+    load[k] += w
+  end
+  paths = []
+  pids = share.each_with_index.map do |mine, k|
+    path = File.join(Dir.tmpdir, "pathb-ir-opt.#{Process.pid}.#{k}")
+    paths << path
+    fork do
+      code = 1
+      begin
+        texts = {}
+        mine.each { |i| texts[i] = show_to(+"", sroa_function_form(forms[i])) }
+        File.open(path, "wb") { |io| Marshal.dump(texts, io) }
+        code = 0
+      rescue Exception => e
+        $stderr.write("pathb-ir-opt: sroa worker: #{e.class}: #{e.message}\n")
+      end
+      $stderr.flush
+      exit!(code)
+    end
+  end
+  ok = pids.map { |pid| Process.wait2(pid)[1].success? }.all?
+  out = forms.dup
+  if ok
+    paths.each { |path| File.open(path, "rb") { |io| Marshal.load(io) }.each { |i, t| out[i] = t } }
+  end
+  paths.each { |path| File.delete(path) if File.exist?(path) }
+  raise BadIR, "a scalar-replacement worker failed" unless ok
+  out
+end
+
+# The number of atoms and forms in x: the size a worker's share is balanced by.
+def form_weight(x)
+  n = 1
+  x.each { |y| n += y.is_a?(Array) ? form_weight(y) : 1 }
+  n
+end
+
+# Store-to-load forwarding on the structured IR (the last pass before the emitters): a load of a scalar that the same statement
+# list has just stored, or has just loaded, becomes the value itself. A store kills every remembered value (it may write
+# through a pointer to any object), and so does anything that is not a plain let, set, store or load: a call, a branch, a
+# nested then/else/body/step list (which runs once, or again, from a different state). A set of a register kills the values
+# that register holds and the addresses it forms.
+FWD_NESTED = %w[then else body step case].freeze
+
+def fwd_scalar?(t)
+  (t.is_a?(String) && !%w[struct array union].include?(t)) || head(t) == "ptr"
+end
+
+def fwd_value?(v)
+  (v.is_a?(String) && v.start_with?("%")) || head(v) == "const"
+end
+
+def fwd_kill_reg(tab, r)
+  tab.delete_if { |k, e| k == r || e[1] == r }
+end
+
+def fwd_list(stmts, tab, st)
+  stmts.map { |s| fwd_stmt(s, tab, st) }
+end
+
+def fwd_stmt(s, tab, st)
+  return s unless s.is_a?(Array) && s[0].is_a?(String)
+  h = s[0]
+  return s if HEADER_HEADS.include?(h)
+  case h
+  when "let"
+    if s.length == 4 && head(s[3]) == "load" && s[3].length == 3 && fwd_scalar?(s[2]) && show(s[3][1]) == show(s[2])
+      key = show(s[3][2])
+      e = tab[key]
+      fwd_kill_reg(tab, s[1])
+      if e && e[0] == show(s[2])
+        st[:fwd] += 1
+        tab[key] = [e[0], s[1]]
+        return ["let", s[1], s[2], e[1]]
+      end
+      tab[key] = [show(s[2]), s[1]]
+      return s
+    end
+    fwd_kill_reg(tab, s[1])
+    s
+  when "store"
+    tab.clear
+    if s.length == 4 && fwd_scalar?(s[1]) && fwd_value?(s[3])
+      tab[show(s[2])] = [show(s[1]), s[3]]
+    end
+    s
+  when "set"
+    fwd_kill_reg(tab, s[1])
+    s
+  when "block"
+    # a block runs once, in order: the values it sees are the ones before it
+    [h, *fwd_list(s.drop(1), tab, st)]
+  else
+    tab.clear
+    s.map { |c| c.is_a?(Array) && FWD_NESTED.include?(head(c)) ? [head(c), *fwd_list(c.drop(1), {}, st)] : (c.is_a?(Array) && head(c) == "block" ? fwd_stmt(c, {}, st) : c) }
+  end
+end
+
+# The forwarding pass over the functions of a structured module (scripts/pathb-ir-opt.rb --forward).
+def forward_pass(forms, report)
+  st = { fwd: 0 }
+  out = forms.map do |f|
+    next f unless head(f) == "function"
+    f.take(2) + fwd_list(f.drop(2), {}, st)
+  end
+  $stderr.write("pathb-ir-opt: forwarded #{st[:fwd]} load(s)\n") if report
+  out
+end
+
+# ---- exception-handling state (--strip-eh) --------------------------------------------------------------------------------
+# The front end keeps the exception-handling state in two globals: the stack of EH entries (__curr_eh_stack_entry, pushed by
+# functions with cleanups or a noexcept guard) and the current cleanup region (__eh_curr_region). Only a throw reads them, and
+# device code does not throw, so on the device their stores are dropped and their loads are null or 0. The pushed entries
+# become slots that are written and never read, which the later passes remove.
+
+EH_GLOBALS = ["@\"__curr_eh_stack_entry\"", "@\"__eh_curr_region\""].freeze
+
+def strip_eh_list(stmts, st)
+  out = []
+  stmts.each do |s|
+    if head(s) == "store" && EH_GLOBALS.include?(s[2])
+      st[:n] += 1
+      next
+    end
+    if head(s) == "let" && head(s[3]) == "load" && EH_GLOBALS.include?(s[3][2])
+      st[:n] += 1
+      out << ["let", s[1], s[2], head(s[2]) == "ptr" ? ["null", s[2]] : ["const", s[2], "0"]]
+      next
+    end
+    out << (s.is_a?(Array) ? strip_eh_list(s, st) : s)
+  end
+  out
+end
+
+def strip_eh_pass(forms, report)
+  st = { n: 0 }
+  forms = forms.map { |f| head(f) == "function" ? strip_eh_list(f, st) : f }
+  $stderr.write("pathb-ir-opt: dropped #{st[:n]} EH state access(es)\n") if report
+  forms
+end
+
+# ---- unreachable functions (--prune-unreachable=SUBSTR) -------------------------------------------------------------------
+# Drops the functions that no root reaches: the roots are the functions whose name contains SUBSTR (the SYCL device build's
+# entry kernels, __nfcxx_sycl_entry_) and every function a non-function form names (an initializer of a global or data form
+# may hold a function's address). A function reaches each function whose &"name" it holds, called or not. The emitters only
+# take the functions their kernels reach, so the dropped ones would only cost the later passes time.
+def function_refs(x, fns, out)
+  if x.is_a?(Array)
+    x.each { |y| function_refs(y, fns, out) }
+  elsif x.is_a?(String) && x.start_with?("&\"") && fns.key?(n = unq(x))
+    out << n
+  end
+  out
+end
+
+SYCL_ENTRY = "__nfcxx_sycl_entry_"
+
+def prune_pass(forms, substr, report)
+  fns = {}
+  forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
+  queue = fns.keys.select { |n| n.include?(substr) }
+  forms.each { |f| function_refs(f, fns, queue) unless head(f) == "function" }
+  seen = {}
+  until queue.empty?
+    n = queue.pop
+    next if seen[n]
+    seen[n] = true
+    function_refs(fns[n].drop(2), fns, []).each { |c| queue << c unless seen[c] }
+  end
+  out = forms.select { |f| head(f) != "function" || seen[unq(f[1])] }
+  $stderr.write("pathb-ir-opt: kept #{seen.size} of #{fns.size} functions (reachable from #{substr})\n") if report
+  out
+end
+
+# The workers of --sroa: NFCXX_IR_OPT_JOBS, or the processor count up to 8 (--jobs=N overrides; 1 is serial).
+def default_jobs
+  return ENV["NFCXX_IR_OPT_JOBS"].to_i if ENV["NFCXX_IR_OPT_JOBS"] && ENV["NFCXX_IR_OPT_JOBS"].to_i > 0
+  require "etc"
+  [Etc.nprocessors, 8].min
+rescue StandardError, LoadError
+  1
 end
 
 def main(argv)
@@ -1047,6 +1709,10 @@ def main(argv)
   sroa = false
   max_depth = 4
   report = false
+  forward = false
+  strip_eh = false
+  prune = nil
+  jobs = default_jobs
   file = nil
   argv.each do |a|
     if a == "--inline"
@@ -1070,6 +1736,16 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a == "--report"
       report = true
+    elsif a == "--forward"
+      forward = true
+    elsif a == "--strip-eh"
+      strip_eh = true
+    elsif a.start_with?("--jobs=")
+      jobs = a[7..-1].to_i
+    elsif a.start_with?("--prune-unreachable=")
+      prune = a[20..-1]
+    elsif a == "--no-prune"
+      prune = false
     elsif a == "-" || !a.start_with?("--")
       file = a
     else
@@ -1078,19 +1754,32 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa
-    $stderr.write("pathb-ir-opt: no pass selected (--inline, --sroa)\n")
+  unless inline || sroa || forward || strip_eh || prune
+    $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
   begin
     forms = parse(tokenize(read_text(file)))
+    # A SYCL device module (entry kernels named __nfcxx_sycl_entry_, the emitters' roots) drops its unreachable functions
+    # before --inline or --sroa unless --no-prune is given: they are most of the module (host code of the same TU), and the
+    # passes and every later stage would spend their time on them.
+    if prune.nil? && (inline || sroa) && forms.any? { |f| head(f) == "function" && f[1].include?(SYCL_ENTRY) }
+      prune = SYCL_ENTRY
+    end
+    forms = prune_pass(forms, prune, report) if prune
+    forms = strip_eh_pass(forms, report) if strip_eh
     forms = inline_pass(forms, max_depth, report) if inline
-    forms = sroa_pass(forms) if sroa
+    # the callees that the inliner copied into every caller are not reached any more
+    forms = prune_pass(forms, prune, report) if prune && inline
+    forms = sroa_pass(forms, jobs) if sroa
+    # a worker's function comes back as its text; a later pass reads forms
+    forms = forms.map { |f| f.is_a?(String) ? parse(tokenize(f))[0] : f } if forward
+    forms = forward_pass(forms, report) if forward
   rescue BadIR => e
     $stderr.write("error: #{e.message}\n")
     return 1
   end
-  forms.each { |f| $stdout.write(show(f) + "\n") }
+  forms.each { |f| $stdout.write(show_to(+"", f) << "\n") }
   0
 end
 

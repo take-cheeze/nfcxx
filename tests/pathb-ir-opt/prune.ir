@@ -1,0 +1,24 @@
+(ir-module "prune.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "vt" (const (array 1 (const long))) 8 8 (init (addr 0 long &"virt" 0)))
+(function "virt"
+  (ret int)
+  (params)
+  (return (const int 3)))
+(function "unused"
+  (ret int)
+  (params)
+  (return (const int 4)))
+(function "fp_target"
+  (ret int)
+  (params (param %0 "x" int))
+  (return %0))
+(function "used"
+  (ret (ptr int))
+  (params (param %0 "x" int))
+  (let %1 (ptr int) (bitcast (ptr int) &"fp_target"))
+  (return %1))
+(function "__nfcxx_sycl_entry_k"
+  (ret void)
+  (params (param %0 "x" int))
+  (let %1 (ptr int) (call (ptr int) &"used" %0))
+  (return))

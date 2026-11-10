@@ -7,14 +7,19 @@
 // Memory. The heap is one shared USM allocation (zeMemAllocShared): the host and the device see it at the same addresses, so
 // a device address is the host address (the identity case of rt_vulkan.hpp). The device must support atomic access to shared
 // allocations (ZE_MEMORY_ACCESS_CAP_FLAG_ATOMIC); the runtime checks it. The allocator starts at 8192.
-// The words the host writes or reads on every dispatch are in a separate host allocation (zeMemAllocHost, ctl_): the flag
-// word at 0, the kernel's captured state at 256 (up to 4096 bytes) and the push block at 4352. The driver migrates a
+// The words the host writes or reads on every dispatch are in separate host allocations (zeMemAllocHost): the flag word
+// (ctl_) and the argument arena (args_: each launch's captured state, up to 4096 bytes, and push block). The driver migrates a
 // shared allocation as a whole when the host touches it, so with them in the heap every dispatch moved all of it to the
 // host and back (0.4 ms per MB, 400 ms per dispatch with the 1 GB default).
 //
 // Dispatch. The local size is the module's specialization constants (ids 0, 1, 2, ze_module_constants_t), and the group size
-// is set with zeKernelSetGroupSize. A module is built once per local size (the same cache as the OpenCL programs). Each
-// dispatch is waited for before the next (zeCommandListHostSynchronize), and the flag is read after it.
+// is set with zeKernelSetGroupSize. A module is built once per local size (the same cache as the OpenCL programs). The
+// immediate list is asynchronous: a launch is appended with a barrier after it (the kernels run in order) and not waited
+// for. Each launch has its own captured state and push block in the argument arena (args_, host memory), and its stacks
+// stay allocated until the wait. The runtime waits (flush: zeCommandListHostSynchronize, then the stacks are freed and the
+// flag is read) before the host touches memory a kernel may use (copies, fills, buffer reads and writes, USM frees), in
+// backend_wait (queue and event waits, host tasks), when the arena or the heap is full, and at exit. A trap is reported
+// at that wait. NFCXX_SYCL_SYNC=1 waits after every launch (a trap is then reported by the dispatch that caused it).
 //
 // Images. Every TU built by scripts/sycl-build.sh registers its image; the runtime loads them all (rt_image.hpp), and each
 // keeps its own statics. Environment: NFCXX_SYCL_IMAGE (a colon-separated list of prefixes in place of the registered ones).
@@ -47,8 +52,7 @@ struct ze_push {
   uint64_t hlo, hsize, dbase;
 };
 static_assert(sizeof(ze_push) == 112, "push block layout");
-constexpr uint64_t ze_push_at = 4352;   // the push block's offset in the control block (ctl_)
-constexpr uint64_t ze_closure_at = 256;
+constexpr uint64_t ze_args_bytes = 1 << 20;   // the argument arena: about 4000 launches with small captured states
 
 // NFCXX_SYCL_STATS=1: the dispatches, launches, waits on the device and the buffers copied between host and device, and the
 // time of each kernel's launches, printed at exit (where a model's time goes; see the launch measurements in the PR)
@@ -73,6 +77,14 @@ struct ze_stats {
   }
 };
 inline ze_stats &stats() { static ze_stats s; return s; }
+// the timers read the host clock, which can take microseconds (an HPET clock source): only with NFCXX_SYCL_STATS
+inline bool stats_on() { static const bool on = std::getenv("NFCXX_SYCL_STATS") != nullptr; return on; }
+inline std::chrono::steady_clock::time_point stats_now() {
+  return stats_on() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+}
+inline double stats_ns(std::chrono::steady_clock::time_point t) {
+  return stats_on() ? std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t).count() : 0.0;
+}
 
 class ze_rt {
  public:
@@ -122,8 +134,9 @@ class ze_rt {
     for (const auto &f : free_) m = std::max(m, f.second);
     return m;
   }
-  // a check that failed in the kernel sets the flag: the program stops with the reason
-  void check_flag() {
+  // a check that failed in the kernel sets the flag: the program stops with the reason (at exit, without running the
+  // exit handlers again)
+  void check_flag(bool at_exit = false) {
     uint32_t flag = 0;
     std::memcpy(&flag, ctl_, 4);
     if (flag) {
@@ -131,8 +144,22 @@ class ze_rt {
                                   "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
                                   "a write to the kernel's captured state"};
       std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
+      if (at_exit) { std::fflush(nullptr); std::_Exit(71); }
       std::exit(71);
     }
+  }
+  // wait for the pending launches: then their stacks are free, their arguments can be overwritten and the flag is read
+  void flush(bool at_exit = false) {
+    if (!pending_) return;
+    auto t_wait = stats_now();
+    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+    stats().ns_wait += stats_ns(t_wait);
+    pending_ = false;
+    args_used_ = 0;
+    flushes_++;
+    for (uint64_t r : deferred_) release(r);
+    deferred_.clear();
+    check_flag(at_exit);
   }
   uint8_t *at(uint64_t addr) const {
     if (dheap_) fail("host access to the device-only heap (NFCXX_SYCL_DEVICE_HEAP)");
@@ -142,13 +169,16 @@ class ze_rt {
   // NFCXX_SYCL_DEVICE_HEAP=0 selects the shared heap; by default the heap is device-only memory (zeMemAllocDevice). Host code reaches it through copy and fill
   // commands on the immediate list, and kernels get its device addresses directly.
   bool device_heap() const { return dheap_; }
+  // a copy or fill runs after the pending launches (the barrier after each) and is waited for with them
   void copy_mem(void *dst, const void *src, uint64_t n) {
     check(zeCommandListAppendMemoryCopy(imm_, dst, src, n, nullptr, 0, nullptr), "zeCommandListAppendMemoryCopy");
-    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+    pending_ = true;
+    flush();
   }
   void fill_mem(void *dst, uint8_t v, uint64_t n) {
     check(zeCommandListAppendMemoryFill(imm_, dst, &v, 1, n, nullptr, 0, nullptr), "zeCommandListAppendMemoryFill");
-    check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
+    pending_ = true;
+    flush();
   }
   // Large allocations (model weights) get their own shared block instead of a range of the heap: the driver makes every
   // shared allocation resident at each launch (zeKernelSetIndirectAccess), and that cost grows with the heap's size.
@@ -164,6 +194,7 @@ class ze_rt {
   }
   bool is_separate(const void *p) const { return separate_.count(const_cast<void *>(p)) != 0; }
   void free_separate(void *p) {
+    flush();
     separate_.erase(p);
     zeMemFree(ctx_, p);
   }
@@ -192,11 +223,10 @@ class ze_rt {
       std::exit(3);
     }
     stats().dispatches++;
-    auto t_dispatch = std::chrono::steady_clock::now();
     struct dispatch_timer {
       std::chrono::steady_clock::time_point t;
-      ~dispatch_timer() { stats().ns_dispatch += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t).count(); }
-    } dispatch_timer_{t_dispatch};
+      ~dispatch_timer() { stats().ns_dispatch += stats_ns(t); }
+    } dispatch_timer_{stats_now()};
     if (closure_bytes != it->closure_size && it->closure_size) {
       std::fprintf(stderr, "sycl: the closure of %s is %u bytes on the host but %u in the device pass (build with the same "
                    "compiler on both sides)\n", key.c_str(), closure_bytes, it->closure_size);
@@ -225,6 +255,7 @@ class ze_rt {
     // fastest). The emitter numbers stacks and local memory over the whole grid, group by group (the slab offset ox/oy/oz is in that
     // index), so each slab's bases are biased by the slab's first index and the region holds just the slab.
     uint64_t stack_total = invocations * stack_bytes;
+    if (pending_ && stack_total + groups * stride > largest_free()) flush();   // the pending launches' stacks may be in the way
     uint64_t room = largest_free();
     int sd = 0;
     for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
@@ -245,8 +276,16 @@ class ze_rt {
       per_launch = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
     }
     const uint64_t chunks = (ng[sd] + per_launch - 1) / per_launch;   // launches along sd for each group above it
-    std::memset(ctl_, 0, 4);   // the flag
-    std::memcpy(ctl_ + ze_closure_at, closure, closure_bytes);
+    // the captured state, once for the launches of this dispatch (again after a wait, which empties the arena)
+    const uint64_t closure_room = (closure_bytes + 63) & ~uint64_t(63);
+    uint64_t closure_at = 0, closure_epoch = ~uint64_t(0);
+    auto place_closure = [&] {
+      if (closure_epoch == flushes_) return;
+      closure_at = args_used_;
+      std::memcpy(args_ + closure_at, closure, closure_bytes);
+      args_used_ += closure_room;
+      closure_epoch = flushes_;
+    };
     ze_kernel_handle_t k = kernel(it->entry, l, it->module, it->subgroup_size);
     for (uint64_t step = 0; step < outer * chunks; step++) {
       // og: the group of each dimension above sd (the linear group index puts x fastest, as the emitter does)
@@ -258,6 +297,9 @@ class ze_rt {
       uint64_t first_group = (above * ng[sd] + s0) * inner;
       uint64_t slab_groups = (uint64_t)cnt * inner;
       uint64_t slab_stack = slab_groups * inv_group * stack_bytes;
+      if (pending_ && slab_stack + slab_groups * stride > largest_free()) flush();
+      if (args_used_ + closure_room + 64 > ze_args_bytes) flush();
+      place_closure();
       uint64_t region = alloc(slab_stack + slab_groups * stride);
       // NFCXX_SYCL_POISON=BYTE (debugging): the stacks and the local memory start filled with BYTE, so a read of memory the
       // kernel never wrote gives the same value on every run
@@ -268,7 +310,7 @@ class ze_rt {
         if (!part || std::strcmp(part, "stack") != 0) std::memset(at(region + slab_stack), byte, slab_groups * stride);
       }
       ze_push p{};
-      p.closure = closure_addr();
+      p.closure = (uint64_t)(uintptr_t)(args_ + closure_at);
       p.statics = mod.statics;
       p.stack = region - first_group * inv_group * stack_bytes;   // biased: the slab's first invocation is at region
       p.local = region + slab_stack - first_group * stride;
@@ -285,27 +327,27 @@ class ze_rt {
       uint32_t *o[3] = {&p.ox, &p.oy, &p.oz};
       *o[sd] = s0;
       for (int e = sd + 1; e < 3; e++) *o[e] = og[e];
-      std::memcpy(ctl_ + ze_push_at, &p, sizeof p);
-      void *push = ctl_ + ze_push_at;
+      void *push = args_ + args_used_;
+      std::memcpy(push, &p, sizeof p);
+      args_used_ += (sizeof p + 63) & ~uint64_t(63);
       check(zeKernelSetArgumentValue(k, 0, sizeof push, &push), "zeKernelSetArgumentValue");
       uint32_t ngs[3] = {ng[0], ng[1], ng[2]};
       ngs[sd] = cnt;
       for (int e = sd + 1; e < 3; e++) ngs[e] = 1;
       ze_group_count_t gc = {ngs[0], ngs[1], ngs[2]};
       stats().launches++;
-      auto t_launch = std::chrono::steady_clock::now();
+      auto t_launch = stats_now();
       check(zeCommandListAppendLaunchKernel(imm_, k, &gc, nullptr, 0, nullptr), "zeCommandListAppendLaunchKernel");
-      double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_launch).count();
-      stats().ns_launch += ns;
-      auto &pk = stats().per_kernel[key];
-      pk.first++;
-      pk.second += ns;
-      check(zeCommandListAppendBarrier(imm_, nullptr, 0, nullptr), "zeCommandListAppendBarrier");
-      auto t_wait = std::chrono::steady_clock::now();
-      check(zeCommandListHostSynchronize(imm_, UINT64_MAX), "zeCommandListHostSynchronize");
-      stats().ns_wait += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t_wait).count();
-      release(region);
-      check_flag();
+      if (stats_on()) {
+        double ns = stats_ns(t_launch);
+        stats().ns_launch += ns;
+        auto &pk = stats().per_kernel[key];
+        pk.first++;
+        pk.second += ns;
+      }
+      pending_ = true;
+      deferred_.push_back(region);
+      if (sync_each_) flush();
     }
     for (int i = 0; i < nbufs; i++) if (modes[i] & 2) { bufs[i]->dev_valid = true; bufs[i]->host_valid = false; }
   }
@@ -313,11 +355,11 @@ class ze_rt {
   // ---- buffer copies (the heap is shared memory: a copy is a memcpy, but the device copy is written by kernels)
   void write(uint64_t addr, const void *src, uint64_t n) {
     if (dheap_) copy_mem((void *)addr, src, n);
-    else std::memcpy(at(addr), src, n);
+    else { flush(); std::memcpy(at(addr), src, n); }
   }
   void read(uint64_t addr, void *dst, uint64_t n) {
     if (dheap_) copy_mem(dst, (const void *)addr, n);
-    else std::memcpy(dst, at(addr), n);
+    else { flush(); std::memcpy(dst, at(addr), n); }
   }
 
   void sync_up(buffer_state *s, int mode) {
@@ -348,6 +390,7 @@ class ze_rt {
     init_device();
     load_images();
   }
+  ~ze_rt() { flush(true); }   // the launches nobody waited for, and their trap
 
   [[noreturn]] void fail(const std::string &why) const {
     std::fprintf(stderr, "sycl: Level Zero runtime: %s\n", why.c_str());
@@ -446,7 +489,9 @@ class ze_rt {
     qdesc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
     qdesc.ordinal = ordinal;
     qdesc.index = 0;
-    qdesc.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+    qdesc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+    qdesc.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;   // each command starts after the one before (no barriers)
+    sync_each_ = std::getenv("NFCXX_SYCL_SYNC") && std::getenv("NFCXX_SYCL_SYNC")[0] == '1';
     qdesc.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
     check(zeCommandListCreateImmediate(ctx_, dev_, &qdesc, &imm_), "zeCommandListCreateImmediate");
 
@@ -485,6 +530,8 @@ class ze_rt {
     check(zeMemAllocHost(ctx_, &hmem, 8192, 64, &c), "zeMemAllocHost of the control block");
     ctl_ = (uint8_t *)c;
     std::memset(ctl_, 0, 8192);
+    check(zeMemAllocHost(ctx_, &hmem, ze_args_bytes, 64, &c), "zeMemAllocHost of the argument arena");
+    args_ = (uint8_t *)c;
   }
 
   void check_limits(const unsigned *l, unsigned lmem, const image_module &mod, uint32_t subgroup_size) const {
@@ -504,7 +551,6 @@ class ze_rt {
       fail(std::to_string(lmem) + " bytes of local memory; the device allows " + std::to_string(local_mem_));
   }
 
-  uint64_t closure_addr() const { return (uint64_t)(uintptr_t)(ctl_ + ze_closure_at); }
 
   // The SPIR-V of one entry point of an image (rt_spirv_split.hpp: the driver then compiles that kernel alone), kept per image.
   const std::vector<uint32_t> &entry_il(const std::string &entry, size_t m) {
@@ -602,7 +648,13 @@ class ze_rt {
   uint8_t *host_ = nullptr;
   bool dheap_ = false;
   std::map<void *, uint64_t> separate_;
-  uint8_t *ctl_ = nullptr;   // the flag, the captured state and the push block (see Memory above)
+  uint8_t *ctl_ = nullptr;   // the flag word (see Memory above)
+  uint8_t *args_ = nullptr;   // the argument arena: each pending launch's captured state and push block (see Dispatch above)
+  uint64_t args_used_ = 0;
+  bool pending_ = false;   // launches appended since the last wait
+  bool sync_each_ = false;   // NFCXX_SYCL_SYNC=1
+  uint64_t flushes_ = 0;   // the waits so far (a wait empties the arena)
+  std::vector<uint64_t> deferred_;   // the stacks of the pending launches, freed at the wait
   uint64_t dev_base_ = 0;
   uint64_t heap_size_ = 0;
   std::map<uint64_t, uint64_t> free_, used_;
@@ -638,9 +690,11 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
   }
   ze_rt::get().dispatch(key, closure, closure_bytes, g, l, lmem, bufs, n, modes);
 }
-inline void backend_wait() {}
+inline void backend_wait() { ze_rt::get().flush(); }
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
   ze_rt &r = ze_rt::get();
+  // the host may touch a host-visible block at once, and a pending launch may still use the memory it is carved from
+  if (kind != 0 || !r.device_heap()) r.flush();
   // device-only heap: shared and host allocations must stay host-visible, so they are separate shared blocks
   if (r.device_heap() && kind != 0) {
     if (void *p = r.alloc_separate(bytes)) return p;
@@ -659,12 +713,12 @@ inline void backend_usm_free(void *p) {
 inline void backend_memcpy(void *dst, const void *src, unsigned long n) {
   ze_rt &r = ze_rt::get();
   if (r.device_heap() && (r.in_heap(dst) || r.in_heap(src))) r.copy_mem(dst, src, n);
-  else std::memmove(dst, src, n);
+  else { r.flush(); std::memmove(dst, src, n); }
 }
 inline void backend_memset(void *p, int v, unsigned long n) {
   ze_rt &r = ze_rt::get();
   if (r.device_heap() && r.in_heap(p)) r.fill_mem(p, (uint8_t)v, n);
-  else std::memset(p, v, n);
+  else { r.flush(); std::memset(p, v, n); }
 }
 inline bool backend_is_usm(const void *p) { return ze_rt::get().in_heap(p) || ze_rt::get().is_separate(p); }
 

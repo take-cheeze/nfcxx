@@ -20,6 +20,7 @@
 # trapping, as a GPU gives a meaningless value there (ggml-sycl divides by a dimension of an absent mask, ne33 = 0).
 # --ndebug: -DNDEBUG on the device pass only (the host pass keeps its asserts). For a TU that reaches ggml.h's assert() from a
 # device-side function: the device pass refuses the call to the host __assert_fail, and the device has no assert to lower it to.
+# It also drops the SPIR-V emitter's null-pointer and bounds checks (--no-checks): a failed one no longer traps.
 # --cxx=CMD: the host compiler (default: $CXX; else nfcxx for WebGPU when built, else g++). The closure types' mangling and
 # layout must match the device pass's (this front end; g++ mostly agrees), because the host finds a kernel by
 # typeid(F).name() and copies the closure bytes. The server refuses a closure whose size differs.
@@ -33,7 +34,7 @@ while [ $# -gt 0 ]; do
     --cpu) mode=cpu ;;
     --backend=*) backend=${1#--backend=}; case $backend in webgpu|vulkan|opencl|level-zero) ;; *) echo "sycl-build: --backend must be webgpu, vulkan, opencl or level-zero" >&2; exit 2 ;; esac ;;
     --keep-ir) keep=1 ;;
-    --ndebug) ndebug=-DNDEBUG ;;
+    --ndebug) ndebug=-DNDEBUG; emitopts+=(--no-checks) ;;   # SPIR-V: no null-pointer and bounds checks (as assert)
     --no-div-trap) emitopts+=(--no-div-trap) ;;   # SPIR-V: a zero divisor divides by 1 instead of trapping (as a GPU's)
     --cxx=*) cxx=${1#--cxx=} ;;
     -std=*) std=${1#-std=} ;;
@@ -79,13 +80,13 @@ absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 "$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
 # NFCXX_IR_OPT=inline (a comma list of passes): the IR-to-IR passes of scripts/pathb-ir-opt.rb before the device emitter
 # (docs/notes/pathb-ir-passes.md). Unset: the IR goes to the emitter as the front end wrote it.
-# Default: inline,sroa (the inliner, then scalar replacement with constant propagation and counted-loop unrolling). NFCXX_IR_OPT=off
+# Default: strip-eh,inline,sroa (the device has no exceptions: the EH state accesses go; then the inliner, then scalar replacement with constant propagation and counted-loop unrolling). NFCXX_IR_OPT=off
 # turns the passes off.
 # Vulkan: the entry kernel gets at most 12 unrolls. The 13th (the one-iteration linear-id loop of __nfcxx_sycl_entry_nd in
 # tests/sycl/groups.cpp) gives wrong float group reductions on lavapipe only; RADV and NVIDIA run it correctly, and the
 # unroll is an optimization, so skipping it cannot change results (docs/notes/pathb-ir-passes.md).
-if [ "$backend" = vulkan ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=inline,sroa,unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12
-else ir_opt=${NFCXX_IR_OPT-inline,sroa}; fi
+if [ "$backend" = vulkan ] && [ -z "${NFCXX_IR_OPT+x}" ]; then ir_opt=strip-eh,inline,sroa,unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12
+else ir_opt=${NFCXX_IR_OPT-strip-eh,inline,sroa}; fi
 if [ "$ir_opt" != off ] && [ -n "$ir_opt" ]; then
   irpasses=(); for p in ${ir_opt//,/ }; do irpasses+=("--$p"); done
   "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$absout.dev.ir" > "$absout.dev.opt.ir"
@@ -101,6 +102,11 @@ if [ "${NFCXX_CFG:-structurize}" = structurize ]; then
     fi && \
     "${RUBY:-ruby}" "$root/scripts/pathb-ssa-structurize.rb" "$absout.dev.ssa" > "$absout.dev.opt.ir"
   mv "$absout.dev.opt.ir" "$absout.dev.ir"
+fi
+# store-to-load forwarding on the structured IR (scripts/pathb-ir-opt.rb --forward): a load that repeats a value the same
+# statement list has just stored or loaded takes that value. NFCXX_FORWARD=off turns it off.
+if [ "${NFCXX_FORWARD:-on}" = on ]; then
+  "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward "$absout.dev.ir" > "$absout.dev.fwd.ir" && mv "$absout.dev.fwd.ir" "$absout.dev.ir"
 fi
 rc=0
 # the SPIR-V emitter: scripts/spirv-emit (NFCXX_SPIRV_EMITTER picks the Ruby script, its C++ port, or both compared)

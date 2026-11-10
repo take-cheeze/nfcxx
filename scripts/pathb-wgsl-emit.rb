@@ -354,6 +354,9 @@ LIBM_F32 = {
   "copysignf" => "bitcast<f32>((bitcast<u32>(X) & 0x7fffffffu) | (bitcast<u32>(Y) & 0x80000000u))",
 }
 LIBM_F32.keys.each { |k| LIBM_F32["__builtin_" + k] = LIBM_F32[k] }
+# binary16 bits (the low half of a u32) to f32 and back (lib/sycl-ggml/sycl/half_type.hpp on the device)
+LIBM_F32["__nfcxx_sycl_h2f"] = "unpack2x16float(X).x"
+LIBM_F32["__nfcxx_sycl_f2h"] = "pack2x16float(vec2<f32>(X, 0.0))"
 
 SYCL_ATOMICS = ["add", "max", "min", "umax", "umin", "and", "or", "xor", "xchg", "load", "fadd", "fmin", "fmax", "cas"]
 
@@ -1074,7 +1077,13 @@ class Fn
       need(:"atomic_#{kind}")
       xs = args.map { |a| operand(a)[0] }
       return "at_#{kind}(#{xs.join(', ')})"
-    elsif name.start_with?("__nfcxx_")
+    elsif name == "__nfcxx_sycl_dp4a"
+      # c + the dot product of the four signed bytes of a and b (lib/sycl-ggml/sycl/nfcxx_dpct_dp4a.hpp): extractBits of an
+      # i32 sign-extends; the products fit in 32 bits, so the sum wraps only at the add of c, as the device's
+      a, b, c = args.map { |e| operand(e)[0] }
+      prods = (0...4).map { |k| "extractBits(#{a}, #{8 * k}u, 8u) * extractBits(#{b}, #{8 * k}u, 8u)" }
+      return "(#{prods.join(' + ')} + #{c})"
+    elsif name.start_with?("__nfcxx_") && !LIBM_F32.key?(name)   # the half conversions are in LIBM_F32
       raise Refused, "unknown device intrinsic #{name}"
     end
     if LIBM_F32.key?(name)

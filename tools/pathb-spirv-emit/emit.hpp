@@ -14,4 +14,5 @@ struct Emitted {
 
 // Throws Refused or BadIR (ir.hpp).
 // no_div_trap: a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping (--no-div-trap).
-Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap = false);
+// no_checks: the IR's null-pointer and bounds checks, (nonnull P) and (bounds I N), emit nothing (--no-checks).
+Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap = false, bool no_checks = false);

@@ -1,0 +1,13 @@
+(ir-module "sret.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "make"
+  (ret void)
+  (params (sret %0 (struct "S")) (param %1 "v" int))
+  (store int %0 %1)
+  (return))
+(function "caller"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "tmp" (struct "S") 4 4)
+  (eval (call void &"make" (sret (struct "S") $"tmp") %0))
+  (let %1 int (load int $"tmp"))
+  (return %1))

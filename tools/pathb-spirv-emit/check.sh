@@ -27,8 +27,9 @@ fi
 one() {
   local ir=$1 b mode tag rc
   b=$(basename "$ir" .ir)
-  for mode in "" --kernel-cl; do
-    tag=${mode:+-cl}
+  # the two modules, and each with the options of a release build (sycl-build.sh --ndebug --no-div-trap)
+  for mode in "" --kernel-cl "--no-checks --no-div-trap" "--kernel-cl --no-checks --no-div-trap"; do
+    case $mode in "") tag= ;; --kernel-cl) tag=-cl ;; --kernel-cl*) tag=-cl-nc ;; *) tag=-nc ;; esac
     NFCXX_SPIRV_EMITTER=check "$root/scripts/spirv-emit" $mode --manifest="$out/$b$tag.man" "$ir" > /dev/null 2> "$out/$b$tag.err"
     rc=$?
     if [ $rc = 99 ]; then echo "$b${tag}: DIFFERS $(head -1 "$out/$b$tag.err" | sed 's/.*: //')"; else echo "$b${tag}: same (exit $rc)"; fi
