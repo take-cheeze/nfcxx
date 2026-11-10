@@ -31,7 +31,9 @@ module OptcarrotRegister
     [parent, singleton]
   end
 
-  def emit_register(diagnostics, out_dir)
+  # `symbol`, `gem` and `mod` name the program's generated files, compiled gem and install module; the defaults are
+  # optcarrot's (tools/script_world passes its own).
+  def emit_register(diagnostics, out_dir, symbol: 'optcarrot_probe', gem: 'optcarrot_compiled', mod: 'OptcarrotProbe')
     # A class in `embeds` keeps its ivars in a DATA struct (MRB_SET_INSTANCE_TT) that only compiled methods read, so
     # every one of its compiled methods must be installed; installing every entry point covers that too.
     embeds = section_lines(diagnostics, 'classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)')
@@ -51,8 +53,8 @@ module OptcarrotRegister
     File.open(File.join(out_dir, 'register.cxx'), 'w') do |file|
       file.puts '#include <cstring>'
       file.puts '#include <mruby.h>'
-      file.puts '#include "optcarrot_probe_decls.h"'
-      file.puts '#include "optcarrot_probe_gen.cpp"'
+      file.puts "#include \"#{symbol}_decls.h\""
+      file.puts "#include \"#{symbol}_gen.cpp\""
       file.puts 'static mrb_value optcarrot_install(mrb_state* M, mrb_value) {'
       embeds.each do |owner|
         klass, = owner_class_expr(owner)
@@ -92,13 +94,13 @@ module OptcarrotRegister
       file.puts '  }'
       file.puts '  return mrb_false_value();'
       file.puts '}'
-      file.puts 'extern "C" void mrb_optcarrot_compiled_gem_init(mrb_state* M) {'
-      file.puts '  struct RClass* mod = mrb_define_module(M, "OptcarrotProbe");'
+      file.puts "extern \"C\" void mrb_#{gem}_gem_init(mrb_state* M) {"
+      file.puts "  struct RClass* mod = mrb_define_module(M, #{mod.dump});"
       file.puts '  mrb_define_module_function(M, mod, "install!", optcarrot_install, MRB_ARGS_NONE());'
       file.puts '  mrb_define_module_function(M, mod, "install_prelude!", optcarrot_install_prelude, MRB_ARGS_NONE());'
       file.puts '  mrb_define_module_function(M, mod, "install_hoisted!", optcarrot_install_hoisted, MRB_ARGS_REQ(2));'
       file.puts '}'
-      file.puts 'extern "C" void mrb_optcarrot_compiled_gem_final(mrb_state*) {}'
+      file.puts "extern \"C\" void mrb_#{gem}_gem_final(mrb_state*) {}"
     end
     rows.size
   end

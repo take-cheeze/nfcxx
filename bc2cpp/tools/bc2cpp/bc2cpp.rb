@@ -699,7 +699,7 @@ BC2CPP_MAIN = lambda do
   # sources bind (ENV, Regexp, the generated prism and rbs nodes) exist before a class body reads them. A game build runs
   # its compiled gems' units among the others', where that order is not fixed: it keeps the narrower set. The optcarrot
   # probe's benchmark is run from main() after mrb_open, so it is ordered like bc2cpp-self.
-  if %w[bc2cpp-self optcarrot-probe].include?(ENV['BC2CPP_BUILD_NAME'])
+  if ENV['BC2CPP_BUILD_NAME'] == 'bc2cpp-self' || BC2CPP_PROBE_BUILDS.key?(ENV['BC2CPP_BUILD_NAME'])
     known_names |= IntegerConstants.foreign_const_names((foreign_ruby_srcs + outside_ruby).uniq).to_a
   end
   CodeGen.known_const_names = known_names.to_set

@@ -67,4 +67,11 @@ suite.check('an unknown kind is refused', violations('unknown', engine).any? { |
 suite.check('the self kind is not an engine build for the review scope', !ReviewScope::ENGINE_BUILDS.include?(KIND))
 suite.check('the other kinds keep their review scope', ReviewScope::ENGINE_BUILDS.sort == %w[closed wio])
 
+BC2CPP_PROBE_BUILDS.each do |kind, (program, compiled)|
+  suite.check("#{kind} is a closed-world build, not an engine build", BC2CPP_CLOSED_WORLD_BUILDS.include?(kind) && !ReviewScope::ENGINE_BUILDS.include?(kind))
+  suite.check("#{kind} wants its program and compiled gems",
+              violations(kind, []).any? { |e| e.include?('gem list lacks') && e.include?(program) && e.include?(compiled) })
+  suite.check("#{kind} refuses mruby-compiler", violations(kind, [program, compiled, 'mruby-compiler']).any? { |e| e.include?('mruby-compiler') })
+end
+
 suite.finish!

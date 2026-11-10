@@ -13,7 +13,7 @@
 # program compiled with the closed world (classes such as TcUse) is not the program the lists review,
 # so its sites are listed but not judged by them.
 #
-# Every other closed-world build is held to every owner: optcarrot-probe is a different program with no
+# Every other closed-world build is held to every owner: a probe build (optcarrot-probe, script-world) is a different program with no
 # reviewed sites of its own, so any site it has fails it; the sealed desktop host (`host`) compiles only
 # engine owners, so every owner is the same set there.
 require 'set'
@@ -24,7 +24,7 @@ module ReviewScope
   ALL = :all
   # The closed-world builds whose program is the engine (compiled_gems.rb: their closed world is
   # BC2CPP_CLOSED_WORLD_GEMS; optcarrot-probe's is the Optcarrot benchmark).
-  ENGINE_BUILDS = (BC2CPP_CLOSED_WORLD_BUILDS - %w[optcarrot-probe bc2cpp-self]).freeze
+  ENGINE_BUILDS = (BC2CPP_CLOSED_WORLD_BUILDS - BC2CPP_PROBE_BUILDS.keys - %w[bc2cpp-self]).freeze
   # The engine owners, plus the module of each `X.singleton` owner (a module_function copy's shared
   # body is compiled under the module's own owner, e.g. LCF for LCF.singleton).
   ENGINE_OWNERS = BC2CPP_COMPILED_GEMS.values.flat_map { |g| g[:owners] }.then do |owners|
