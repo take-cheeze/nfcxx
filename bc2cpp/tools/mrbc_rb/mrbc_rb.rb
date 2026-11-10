@@ -8,7 +8,9 @@
 # and if/else with a simple or call predicate and bodies of the forms above, unless, and `class X` or `module X` with a
 # plain constant and a body of the forms above (no superclass; the body is a child irep run by EXEC). Milestone 10 adds
 # keyword, splat and block-pass arguments, constant paths (read, write, class and module names), regexp literals, lambda
-# literals and `&.`. Anything else raises Unsupported, so a
+# literals and `&.`. Milestone 11 adds hashes with non-leaf elements (calls, nested literals, `**splat`, `{a:}`), %i and %I arrays,
+# arrays with splats, index calls with several arguments and index assignment with any operands, assignments used as values,
+# ranges, float literals, `__ENCODING__` and `__FILE__`. Anything else raises Unsupported, so a
 # caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
@@ -33,7 +35,7 @@ module MrbcRb
     LOADI16: 14, LOADI32: 15, LOADSYM: 16, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40, JMPNIL: 41, JMPUW: 42, ADDILV: 73, SUBILV: 74, AREF: 87, ASET: 88, APOST: 89, ARYCAT: 84, ARYPUSH: 85, ARYSPLAT: 86,
     ARRAY: 82, ARRAY2: 83, STRING: 92, STRCAT: 93, HASH: 94, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35,
-    SETIDX: 37, GETIDX0: 36, GETIV: 25, SETIV: 26, FSTRING: 119,
+    SETIDX: 37, INTERN: 90, SYMBOL: 91, RANGE_INC: 100, RANGE_EXC: 101, GETIDX0: 36, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEYEND: 59, KARG: 60,
@@ -595,6 +597,8 @@ module MrbcRb
         break_statement(node, last: last)
       when Prism::NextNode
         next_statement(node, last: last)
+      when Prism::RangeNode, Prism::FloatNode, Prism::SourceEncodingNode, Prism::SourceFileNode
+        value_statement(node, last: last)
       when Prism::SingletonClassNode
         sclass_statement(node, last: last)
       when Prism::ClassNode
@@ -1442,7 +1446,7 @@ module MrbcRb
       operand_into(recv, t)
       if index
         operand_into(idx, t + 1)
-        emit(:GETIDX, t)
+        getidx_fused(t, recv, idx)
       else
         emit(:SEND0, t, sym_index(node.read_name))
       end
@@ -1652,6 +1656,16 @@ module MrbcRb
     # in place with no move. The pointer is restored when the call is done; the result stays in the base register, which
     # the caller then owns. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the receiver's register.
     # Returns the result register.
+    # GETIDX on the receiver and index just generated at +t+ and t+1, as call() emits it: `local[0]` is the fused GETIDX0.
+    def getidx_fused(t, recv, idx)
+      if idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
+        truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
+        emit(:GETIDX0, t, local_register(recv.name))
+      else
+        emit(:GETIDX, t)
+      end
+    end
+
     # `recv.name = value`: the result (the value) is in the first temporary r; the receiver is in r+1 and the value in r+2,
     # and SEND runs on r+1 with that one argument (verified against mrbc -v: the result is the value, not the send's).
     # Where the value is not needed, the receiver is in the first temporary with the value after it, and SEND runs there.
@@ -1677,7 +1691,7 @@ module MrbcRb
     # index and value follow it, and SETIDX runs on the receiver; otherwise the receiver is in the first temporary.
     def index_assign(recv, index, value, need:)
       [recv, index, value].each do |v|
-        raise Unsupported, 'index assignment with a non-simple operand' unless simple?(v)
+        raise Unsupported, 'index assignment with a non-simple operand' unless operand?(v)
       end
       r = temp
       base = need ? r + 1 : r
@@ -1687,6 +1701,21 @@ module MrbcRb
       emit(:MOVE, r, base + 2) if need
       emit(:SETIDX, base)
       @nregs = [@nregs, base + 4].max
+      need ? r : nil
+    end
+
+    # `recv[i, j] = value`: no SETIDX for several indices, a plain SEND of []= with the indices and the value as its arguments;
+    # where the value is needed the result register holds it (copied after the send's arguments are generated).
+    def index_assign_many(recv, args, need:)
+      raise Unsupported, 'index assignment with a non-simple operand' unless args.all? { |v| operand?(v) }
+
+      r = temp
+      base = need ? r + 1 : r
+      operand_into(recv, base)
+      args.each_with_index { |v, i| operand_into(v, base + 1 + i) }
+      emit(:MOVE, r, base + args.size) if need
+      emit(:SEND, base, sym_index(:[]=), args.size)
+      @nregs = [@nregs, base + args.size + 2].max
       need ? r : nil
     end
 
@@ -1725,7 +1754,7 @@ module MrbcRb
       @nregs = [@nregs, a + 1].max
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
-      argc, blk = gen_args(node.block, a, node.arguments&.arguments || [])
+      argc, blk = gen_args(node.block, a, node.arguments&.arguments || [], node.closing_loc&.start_line)
       emit_send(a, recv, node.name, argc, blk)
       patch_jump(skip, @code.size) if skip
       a
@@ -1752,7 +1781,7 @@ module MrbcRb
     # value registers (nk is their count) unless a ** is present: then a HASH is built and extended with HASHADD/HASHCAT
     # (nk = 15). The block argument is loaded in the register after all of these. The stack pointer is left at the register
     # after the arguments, which the send's own result push then counts.
-    def gen_args(blk, a, args)
+    def gen_args(blk, a, args, close_line = nil)
       regular = args.reject { |x| x.is_a?(Prism::KeywordHashNode) }
       kw = args.find { |x| x.is_a?(Prism::KeywordHashNode) }
       sp = a + 1
@@ -1809,7 +1838,7 @@ module MrbcRb
       end
       nk = 0
       if kw
-        nk, sp = gen_keywords(kw, sp)
+        nk, sp = gen_keywords(kw, sp, close_line)
       end
       @sp = sp
       @nregs = [@nregs, sp + 1].max
@@ -1823,7 +1852,7 @@ module MrbcRb
 
     # gen_hash with val: pairs stay as key and value registers; a ** starts (or extends) a HASH built from the pairs before it
     # and merges the splatted value with HASHCAT; pairs after it are added with HASHADD. Returns [nk, the next register].
-    def gen_keywords(kw, sp)
+    def gen_keywords(kw, sp, close_line = nil)
       len = 0
       update = false
       first = true
@@ -1852,10 +1881,12 @@ module MrbcRb
           update = true
           len = 0
         when Prism::AssocNode
-          raise Unsupported, 'keyword pair' unless operand?(e.key) && operand?(e.value)
+          assoc_key_line(e, e.equal?(kw.elements.last) ? close_line : nil)
+          v = e.value.is_a?(Prism::ImplicitNode) ? e.value.value : e.value
+          raise Unsupported, 'keyword pair' unless operand?(e.key) && operand?(v)
 
           operand_into(unparen(e.key), sp)
-          operand_into(unparen(e.value), sp + 1)
+          operand_into(unparen(v), sp + 1)
           sp += 2
           len += 1
         else raise Unsupported, 'keyword argument element'
@@ -1920,10 +1951,11 @@ module MrbcRb
         return a
       end
       # `recv[index]` is GETIDX and `recv[]` a plain SEND0 (both verified); other index forms are not covered yet.
-      raise Unsupported, 'index call with several arguments' if name == :[] && args.size > 1
+      raise Unsupported, 'explicit []= call' if name == :[]= && node.call_operator_loc # `a.[]=(i, v)` is a plain send
       if name == :[]= && recv && args.size == 2
         return index_assign(recv, args[0], args[1], need: need)
       end
+      return index_assign_many(recv, args, need: need) if name == :[]= && recv && args.size > 2
       raise Unsupported, 'index assignment' if name == :[]=
 
       if recv && BINARY_OPS.key?(name) && args.size == 1
@@ -1964,7 +1996,130 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| operand?(e) })
+        (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) })) || extra_operand?(node)
+    end
+
+    # Operands added in milestone 11: an assignment as a value (`foo(x = 1)`), a range, `__ENCODING__`, `__LINE__`, `__FILE__`.
+    def extra_operand?(node)
+      case node
+      when Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode,
+           Prism::ConstantWriteNode, Prism::SourceEncodingNode, Prism::SourceFileNode,
+           Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+           Prism::GlobalVariableOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
+           Prism::GlobalVariableOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
+           Prism::GlobalVariableAndWriteNode, Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
+           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
+        true
+      when Prism::RangeNode
+        [node.left, node.right].all? { |side| side.nil? || operand?(side) }
+      when Prism::FloatNode then true
+      when Prism::ArrayNode # with splats
+        node.elements.all? { |e| e.is_a?(Prism::SplatNode) ? (e.expression && operand?(e.expression)) : operand?(e) }
+      else false
+      end
+    end
+
+    # An assignment used as a value (gen_assignment with val): the value goes into the result register, the variable takes a
+    # copy of it with a MOVE that is always kept (or SETIV, SETGV, SETCONST), and the result stays in that register.
+    def write_value_at(node, base)
+      saved = @sp
+      @sp = base
+      case node
+      when Prism::LocalVariableWriteNode then write_local(node, last: true)
+      when Prism::InstanceVariableWriteNode then ivar_write(node, last: true)
+      when Prism::GlobalVariableWriteNode then global_write(node, last: true)
+      when Prism::ConstantWriteNode then const_write(node, last: true)
+      when Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+           Prism::GlobalVariableOperatorWriteNode then operator_write(node, last: true)
+      when Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode, Prism::CallOperatorWriteNode,
+           Prism::CallOrWriteNode, Prism::CallAndWriteNode then call_write(node, last: true)
+      else logic_write(node, last: true)
+      end
+    ensure
+      @sp = saved
+    end
+
+    # A range, float, `__ENCODING__` or `__FILE__` as a statement. As the last one it is a value in a register. Unused, a range
+    # evaluates only its ends (codegen_dot2 with no value), a float still enters its pool entry (codegen_float numbers it before
+    # gen_load_op2 looks at val), `__ENCODING__` is still a call, and `__FILE__` generates nothing.
+    def value_statement(node, last:)
+      return value_in_register(node) if last
+
+      case node
+      when Prism::RangeNode
+        raise Unsupported, 'multi-line range' if node.location.start_line != node.location.end_line
+
+        [node.left, node.right].each { |side| statement(unparen(side), last: false) if side }
+      when Prism::FloatNode
+        float_pool_index(node) unless node.location.slice.start_with?('-') # a negation numbers its literal only for a value
+      when Prism::SourceEncodingNode then source_value_into(node, temp)
+      end
+      nil
+    end
+
+    # codegen_dot2 and codegen_dot3: both ends (nil for a missing one) in consecutive registers, then RANGE_INC or RANGE_EXC.
+    def range_at(node, base)
+      raise Unsupported, 'multi-line range' if node.location.start_line != node.location.end_line
+
+      @line = node.location.end_line unless @hold_line
+      node.left ? operand_into(unparen(node.left), base) : emit(:LOADNIL, base)
+      node.right ? operand_into(unparen(node.right), base + 1) : emit(:LOADNIL, base + 1)
+      emit(node.exclude_end? ? :RANGE_EXC : :RANGE_INC, base)
+    end
+
+    # A float literal (codegen_float, codegen_negate): LOADL of a pool entry (tag 5, the double, little endian). The value is read
+    # as mrb_read_float does (see read_float), and a negative literal is the negation of the positive one.
+    def float_into(node, dst)
+      @line = node.location.end_line unless @hold_line
+      emit(:LOADL, dst, float_pool_index(node))
+    end
+
+    def float_pool_index(node)
+      text = node.location.slice
+      negative = text.start_with?('-')
+      value = read_float(negative ? text[1..] : text)
+      value = -value if negative
+      pool_index([:float, [value].pack('E')])
+    end
+
+    # mrb_read_float (src/readfloat.c): the integer part and up to 18 fraction digits are read as integers, the result is
+    # int + frac / 10**digits (two roundings, unlike strtod), then multiplied by 10**exponent from a table of exact powers.
+    def read_float(text)
+      m = /\A(\d[\d_]*)(?:\.(\d[\d_]*))?(?:[eE]([+-]?\d[\d_]*))?\z/.match(text) or raise Unsupported, "float literal #{text}"
+      int_digits = m[1].delete('_')
+      frac_digits = (m[2] || '').delete('_')
+      raise Unsupported, 'float literal with a long integer part' if int_digits.size > 18
+      raise Unsupported, 'float literal with a long fraction' if frac_digits.size > 18
+
+      res = int_digits.to_i.to_f
+      res += frac_digits.to_i.to_f / "1e#{frac_digits.size}".to_f unless frac_digits.empty?
+      if m[3]
+        e = m[3].delete('_').to_i
+        e = e.clamp(-10_000, 10_000)
+        pow = if e >= 0 then e <= 308 ? "1e#{e}".to_f : Float::INFINITY
+              else -e <= 323 ? "1e#{e}".to_f : 0.0
+              end
+        res *= pow
+      end
+      res
+    end
+
+    # `__ENCODING__` is a call of that name on self (parse.y: new_fcall) and `__FILE__` the file name as a string. `__LINE__` is
+    # an integer literal to the fork, which folds it in conditions and operators: not covered.
+    def source_value_into(node, dst)
+      @line = node.location.end_line unless @hold_line
+      case node
+      when Prism::SourceFileNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, @filename.b]))
+      else
+        emit(:SSEND0, dst, sym_index(:__ENCODING__))
+        @nregs = [@nregs, dst + 2].max
+      end
+    end
+
+    # %i[...] and %I[...]: the words are symbols or interpolated symbols, built by symbol_word_into.
+    def symbol_list?(node)
+      node.opening_loc&.slice&.match?(/\A%[iI]/) &&
+        node.elements.all? { |e| e.is_a?(Prism::SymbolNode) || e.is_a?(Prism::InterpolatedSymbolNode) }
     end
 
     # Generates an operand into register +dst+ with the stack pointer at +dst+ (everything above it is free), as the fork
@@ -2072,6 +2227,17 @@ module MrbcRb
       when Prism::InterpolatedStringNode then dstr_into(node, dst)
       when Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode then built_into(dst) { |base| regex_at(node, base) }
       when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
+      when Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode, Prism::ConstantWriteNode,
+           Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode, Prism::GlobalVariableOperatorWriteNode,
+           Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode, Prism::GlobalVariableOrWriteNode,
+           Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode, Prism::GlobalVariableAndWriteNode,
+           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
+           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode
+        built_into(dst) { |base| write_value_at(node, base) }
+      when Prism::RangeNode then built_into(dst) { |base| range_at(node, base) }
+      when Prism::SourceFileNode then source_value_into(node, dst)
+      when Prism::FloatNode then float_into(node, dst)
+      when Prism::SourceEncodingNode then built_into(dst) { |base| source_value_into(node, base) }
       when Prism::CallNode
         result = call(node)
         emit(:MOVE, dst, result) unless result == dst
@@ -2376,27 +2542,107 @@ module MrbcRb
     # A hash literal of leaf keys and values: key and value pairs are loaded from the base register on, and HASH takes the
     # base register and the pair count (codegen_hash).
     def hash_at(node, base)
-      pairs = node.elements
-      unless pairs.all? { |e| e.is_a?(Prism::AssocNode) && SIMPLE_VALUES.include?(e.key.class) && SIMPLE_VALUES.include?(e.value.class) }
-        raise Unsupported, 'hash element'
-      end
-      raise Unsupported, 'large hash' if pairs.size > 16
+      hash_elements_at(node.elements, base, node.closing_loc.start_line)
+    end
 
-      pairs.each_with_index do |e, i|
-        value_into(e.key, base + 2 * i)
-        value_into(e.value, base + 2 * i + 1)
+    # codegen_hash (value used): key and value registers are pushed pair by pair; a `**splat` flushes the pairs before it into
+    # a HASH (or HASHADD onto the hash built so far), generates the splatted value and HASHCATs it. The pairs left over at the
+    # end are a HASH, or a HASHADD when a splat came before. The register stack is walked here as the fork's pushes and pops do.
+    def hash_elements_at(elements, base, close_line)
+      sp = base
+      regular = 0
+      update = false
+      first = true
+      elements.each do |e|
+        case e
+        when Prism::AssocSplatNode
+          raise Unsupported, 'anonymous keyword splat' unless e.value
+
+          if first
+            emit(:HASH, sp, 0)
+            sp += 1
+            update = true
+          elsif regular.positive?
+            sp -= regular * 2
+            if update
+              sp -= 1
+              emit(:HASHADD, sp, regular)
+            else
+              emit(:HASH, sp, regular)
+            end
+            sp += 1
+          end
+          hash_operand(e.value, sp)
+          sp += 1
+          if regular.positive? || update
+            sp -= 2
+            emit(:HASHCAT, sp)
+            sp += 1
+          end
+          update = true
+          regular = 0
+        when Prism::AssocNode
+          assoc_key_line(e, e.equal?(elements.last) ? close_line : nil)
+          hash_operand(e.key, sp)
+          hash_operand(e.value, sp + 1)
+          sp += 2
+          regular += 1
+        else raise Unsupported, 'hash element'
+        end
+        first = false
       end
-      emit(:HASH, base, pairs.size)
+      if elements.empty?
+        emit(:HASH, base, 0)
+      elsif regular.positive?
+        sp -= regular * 2
+        if update
+          sp -= 1
+          emit(:HASHADD, sp, regular)
+        else
+          emit(:HASH, sp, regular)
+        end
+      end
+    end
+
+    # The line of a pair's key: for `label: value` the parser builds the key symbol after the value (assoc: tIDENTIFIER
+    # tLABEL_TAG arg), so it carries the line the parser had reached then, the value's end line (verified with mrbc -v: in
+    # `{\n  a: 1,\n  b: {\n    c: 2,\n  },\n}` the :b is on line 5). A `key => value` pair's key is built first and keeps its own
+    # line, provided the `=>` follows it on that line. A `a:` with no value is built at the lookahead token, which must be on its line.
+    def assoc_key_line(pair, last_close_line = nil)
+      key = pair.key
+      if pair.operator_loc # `key => value`
+        raise Unsupported, 'hash pair split over lines' if pair.operator_loc.start_line != key.location.end_line
+      elsif pair.value.is_a?(Prism::ImplicitNode)
+        # The lookahead is the comma after it (same line), or for the last pair the token after the pair, which may be a
+        # trailing comma or the closing bracket on a later line: only the one-line case is covered.
+        if last_close_line && last_close_line != key.location.end_line
+          raise Unsupported, 'last hash pair without a value ending a line'
+        end
+      else
+        @leading_dot[key] = pair.value.location.end_line
+      end
+    end
+
+    # One key or value of a hash literal, generated at register +reg+ (the fork pushes it there). `{a:}` has an implicit value:
+    # the local or method named by the key.
+    def hash_operand(node, reg)
+      node = node.value if node.is_a?(Prism::ImplicitNode)
+      raise Unsupported, 'hash element' unless operand?(node)
+      raise Unsupported, 'hash too large for one register window' if reg > 250
+
+      operand_into(unparen(node), reg)
+      @nregs = [@nregs, reg + 1].max
     end
 
     # An array literal of leaf values: the elements are loaded from the first temporary on. ARRAY takes that register as
     # its destination; otherwise ARRAY2 takes the destination and the register of the first element (codegen.c, NODE_ARRAY).
     def array_into(node, dst)
       elems = node.elements
-      raise Unsupported, 'array element' unless elems.all? { |e| operand?(e) }
-      # %i builds its symbols with SYMBOL and a pool string (not covered); a long list is built in chunks (gen_values).
-      raise Unsupported, '%i array' if node.opening_loc&.slice&.match?(/\A%[iI]/)
-      raise Unsupported, 'array with many elements' if elems.size > 50
+      return array_splat_into(node, dst) if elems.any?(Prism::SplatNode)
+
+      symbols = node.opening_loc&.slice&.match?(/\A%[iI]/) # %i and %I: symbols built from pool strings (symbol_word_into)
+      raise Unsupported, 'array element' unless symbols || elems.all? { |e| operand?(e) }
+      raise Unsupported, 'array with many elements' if elems.size > (symbols ? 63 : 50)
 
       a = temp
       # The elements of %w and %i are strings and symbols the fork does not enter (gen_literal_array): the line stays that of
@@ -2404,7 +2650,8 @@ module MrbcRb
       literal_words = node.opening_loc&.slice&.start_with?('%')
       saved_hold = @hold_line
       @hold_line = true if literal_words
-      elems.each_with_index { |e, i| operand_into(unparen(e), a + i) }
+      raise Unsupported, 'symbol list built in chunks' if symbols && a + elems.size > 64 # gen_literal_array flushes at cursp 64
+      elems.each_with_index { |e, i| symbols ? symbol_word_into(e, a + i, node) : operand_into(unparen(e), a + i) }
       @hold_line = saved_hold
       @nregs = [@nregs, a + elems.size].max
       if elems.empty?
@@ -2414,6 +2661,104 @@ module MrbcRb
         emit(:ARRAY, a, elems.size)
       else
         emit(:ARRAY2, dst, a, elems.size)
+      end
+    end
+
+    # codegen_array with a splat: the elements before the first splat are an ARRAY (an empty one, built with a LOADNIL before it,
+    # when the splat is first), each splatted value is ARYCATed on, and the elements after a splat are ARYPUSHed. The result is
+    # in the first temporary. An empty literal `*[]` is skipped; the stack walks as the fork's pushes and pops do.
+    def array_splat_into(node, dst)
+      elems = node.elements
+      raise Unsupported, 'array with many elements' if elems.size > 50
+      raise Unsupported, 'multi-line array with a splat' if node.location.start_line != node.location.end_line
+      raise Unsupported, 'splat in a %w array' if node.opening_loc&.slice&.start_with?('%')
+
+      base = dst >= @nlocals ? dst : temp
+      sp = base
+      regular = 0
+      first = true
+      elems.each do |e|
+        splat = e.is_a?(Prism::SplatNode)
+        v = splat ? e.expression : e
+        raise Unsupported, 'anonymous splat' unless v
+
+        v = unparen(v)
+        next if splat && v.is_a?(Prism::ArrayNode) && v.elements.empty? && v.opening_loc&.slice == '['
+
+        raise Unsupported, 'array element' unless operand?(v)
+
+        if splat
+          if regular.positive?
+            sp -= regular
+            if first
+              emit(:ARRAY, sp, regular)
+              first = false
+            else
+              sp -= 1
+              emit(:ARYPUSH, sp, regular)
+            end
+            sp += 1
+            regular = 0
+          elsif first
+            emit(:LOADNIL, sp)
+            emit(:ARRAY, sp, 0)
+            sp += 1
+            first = false
+          end
+        end
+        raise Unsupported, 'array stack too deep' if sp > 60
+
+        operand_into(v, sp)
+        sp += 1
+        if splat
+          sp -= 2
+          emit(:ARYCAT, sp)
+          sp += 1
+        else
+          regular += 1
+        end
+      end
+      if first
+        sp -= regular
+        emit(:ARRAY, sp, regular)
+      elsif regular.positive?
+        sp -= regular + 1
+        emit(:ARYPUSH, sp, regular)
+      end
+      gen_move(dst, base, false)
+    end
+
+    # An element of %i or %I (gen_literal_array with sym, gen_string and gen_intern): a plain word is a STRING that gen_intern
+    # rewrites to SYMBOL; a word with interpolation is built as a string is and then INTERNed. The pieces are those of a
+    # quoted string (a leading literal, then an expression and a literal after it), except that the literal after a last
+    # expression is dropped when a space, not the closing bracket, ends the word (verified with mrbc -v on %I[a#{1} b] and
+    # %I[a#{1}]).
+    def symbol_word_into(elem, reg, array)
+      raise Unsupported, 'symbol list element with an escape' if elem.location.slice.include?('\\')
+
+      case elem
+      when Prism::SymbolNode
+        emit(:SYMBOL, reg, pool_index([:str, elem.unescaped.b]))
+      when Prism::InterpolatedSymbolNode
+        raise Unsupported, 'multi-line symbol list with interpolation' if array.location.start_line != array.location.end_line
+
+        parts = [[:lit, ''.b]]
+        elem.parts.each do |part|
+          case part
+          when Prism::StringNode then parts.last[1] << part.unescaped.b
+          when Prism::EmbeddedStatementsNode
+            body = part.statements&.body || []
+            raise Unsupported, 'interpolation with several statements' if body.size > 1
+
+            parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
+          else raise Unsupported, "symbol list part #{part.class.name.split('::').last}"
+          end
+        end
+        parts.pop if parts.last[0] == :lit && parts.last[1].empty? && parts.size > 1 && parts[-2][0] == :expr &&
+                     elem.location.end_offset != array.closing_loc.start_offset
+        dstr_at(parts, reg)
+        emit(:INTERN, reg)
+      else raise Unsupported, "symbol list element #{elem.class.name.split('::').last}"
       end
     end
 
@@ -2503,6 +2848,8 @@ module MrbcRb
         case entry
         in [:bigint, digits, base]
           [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
+        in [:float, bytes]
+          [5].pack('C') + bytes # IREP_TT_FLOAT, then the double in little endian
         in [:str, bytes]
           # A string: tag 0, its length, its bytes and a NUL (dump.c's default case).
           [0].pack('C') + [bytes.bytesize].pack('n') + bytes + "\0".b
