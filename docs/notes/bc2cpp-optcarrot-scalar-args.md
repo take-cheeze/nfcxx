@@ -31,6 +31,9 @@ Use uninstrumented release binaries for timing; profiling changes call overhead.
 The remaining sampled runtime costs include PPU pixel/tile work, GC rooting,
 and native resumable frame dispatch.
 
-A scalar-argument fixture (zero versus nil, a single Array argument, multiple arguments, splats, interleaved fibers,
-full GC, direct calls from C, repeated `Frame#value` identity) was dropped from nfcxx: it is to be classified and run
-in rpg-maker-clone. Existing resumable block, argument, and rest-argument checks pass with the stress library.
+`resumable_rest_check.rb` also runs the generic scalar-argument cases in
+`resumable_scalar_args_cases.rb`: zero versus nil, a single Array argument and
+destructuring, multiple arguments, splats, interleaved fibers, full GC, direct
+calls from C, and repeated `Frame#value` identity. The existing registered suite
+provides the required full-core library and C++ compiler. These cases and the
+existing resumable block/argument checks pass with the stress library.
