@@ -1658,6 +1658,13 @@ BC2CPP_MAIN = lambda do
       bc2cpp_root(M, v);
       return v;
     }
+    // A by-name call's result, rooted. mruby's funcall restores the arena before it returns, so a bare result is
+    // unprotected until something stores it: the next allocation can collect it (tests/bc2cpp/run_pathb_borrowck.sh).
+    template <class F> static inline mrb_value bc2cpp_keep_call(mrb_state* M, F call) {
+      int ai = mrb_gc_arena_save(M);
+      return bc2cpp_arena_keep(M, ai, call());
+    }
+    #define bc2cpp_funcall_keep(M, ...) bc2cpp_keep_call(M, [&] { return mrb_funcall(M, __VA_ARGS__); })
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
       bc2cpp_root(M, v);
       return v;
@@ -2339,7 +2346,7 @@ BC2CPP_MAIN = lambda do
           mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", mid, recv);
         }
       }
-      return mrb_funcall_argv(M, recv, mid, argc, argv);
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_argv(M, recv, mid, argc, argv); });
     }
     // SSEND_HELPER: a class body's other by-name self send (extend, ...): visibility is ignored, as mrb_funcall does.
     [[maybe_unused]] static mrb_value bc2cpp_ssend(mrb_state* M, mrb_value self, mrb_sym mid, std::initializer_list<mrb_value> args) {
@@ -2410,7 +2417,7 @@ BC2CPP_MAIN = lambda do
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
         }
       }
-      return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value());
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value()); });
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
@@ -2678,7 +2685,7 @@ BC2CPP_MAIN = lambda do
       c = c->super;
       mrb_method_t m = bc2cpp_find_method(M, &c, mid);
       if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
-      return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk);
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk); });
     }
   CPP
   # BLOCK_KEYWORD_CALL: a by-name call with a keyword Hash and a block (mrb_funcall_with_block carries no keywords).
@@ -2686,8 +2693,8 @@ BC2CPP_MAIN = lambda do
   puts <<~CPP
     [[maybe_unused]] static mrb_value bc2cpp_funcall_kw(mrb_state* M, mrb_value self, mrb_sym mid, mrb_int argc,
                                                         const mrb_value* argv, mrb_value kdict, mrb_value blk) {
-      if (mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict)) return mrb_funcall_send(M, self, mid, argc, argv, kdict, blk);
-      return mrb_funcall_with_block(M, self, mid, argc, argv, blk);
+      if (mrb_hash_p(kdict) && !mrb_hash_empty_p(M, kdict)) return bc2cpp_keep_call(M, [&] { return mrb_funcall_send(M, self, mid, argc, argv, kdict, blk); });
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_block(M, self, mid, argc, argv, blk); });
     }
   CPP
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native

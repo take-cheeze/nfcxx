@@ -56,7 +56,7 @@ class CodeGen
   # raises the proof violation if nothing answers) for anything else, or the old by-name call.
   def numeric_slow_hash_cmp_arm(op)
     target = core_compiled_hash_cmp_target(op)
-    return "return mrb_funcall(M, a, \"#{op}\", 1, b);" unless target
+    return "return bc2cpp_funcall_keep(M, a, \"#{op}\", 1, b);" unless target
 
     "// CORE_COMPILED_HASH_CMP :#{op} -- compiled core body, no by-name call (ADR 0371)\n    " \
       "if (mrb_obj_ptr(a)->c != M->hash_class) return bc2cpp_nomethod_named(M, a, \"#{op}\", 1, b);\n    " \
