@@ -42,7 +42,8 @@ module MrbcRb
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEY_P: 58, KEYEND: 59, KARG: 60,
     ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97,
     RANGE_INC: 100, RANGE_EXC: 101, SYMBOL: 91, GETCV: 27, SETCV: 28,
-    EXCEPT: 43, RESCUE: 44, RAISEIF: 45
+    EXCEPT: 43, RESCUE: 44, RAISEIF: 45,
+    BREAK: 67, BLKPUSH: 68, BLKCALL: 54, SUPER: 55, ARGARY: 56
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -60,7 +61,7 @@ module MrbcRb
   # when it built the node, which is the node's end line.
   MULTILINE_STATEMENTS = [Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
                           Prism::InstanceVariableWriteNode, Prism::CallNode, Prism::StringNode, Prism::InterpolatedStringNode,
-                          Prism::HashNode, Prism::ArrayNode].freeze
+                          Prism::HashNode, Prism::ArrayNode, Prism::LambdaNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
@@ -71,7 +72,7 @@ module MrbcRb
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
              Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::ClassVariableReadNode,
              Prism::ClassVariableWriteNode, Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode,
-             Prism::FloatNode].freeze
+             Prism::FloatNode, Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode, Prism::SourceLineNode].freeze
@@ -208,6 +209,7 @@ module MrbcRb
     # SETUPVAR). +parent+ is the Compiler of the enclosing scope.
     def compile_block(node, parent)
       @parent = parent
+      @loops = [BLOCK_LOOP] # the LOOP_BLOCK entry of lambda_body: break, next and return inside a block are its forms
       params = node.parameters
       numbered = 0
       case params
@@ -355,9 +357,8 @@ module MrbcRb
 
       line = blk.opening_loc.start_line
       parts = [*(recv ? [recv.location] : []), *args.map(&:location)]
-      unless @line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line }
-        raise Unsupported, 'call with a block spanning lines'
-      end
+      multi = !(@line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line })
+      block_call_lines(node, recv, args, line) if multi
 
       a = @sp
       @nregs = [@nregs, a + 1].max
@@ -369,6 +370,7 @@ module MrbcRb
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
+      @line = line if multi # BLOCK and the send are stamped with the line of the block node
       emit(:BLOCK, sp, index)
       emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), argc)
       patch_jump(skip, @code.size) if skip
@@ -413,13 +415,13 @@ module MrbcRb
     # codegen_return: the value (nil for a plain `return`) goes into the first temporary and gen_return folds a MOVE or a
     # constant load into it. Only inside a method body; a statement's value register is that temporary.
     def return_statement(node, last:)
-      raise Unsupported, 'return outside a method body' unless @in_method
+      raise Unsupported, 'return outside a method body' unless @in_method || @parent
 
       args = node.arguments&.arguments
-      raise Unsupported, 'return with several values' if args && (args.size != 1 || !(simple?(args[0]) || call_node?(args[0])))
+      raise Unsupported, 'return with an unverified value' if args && args.size == 1 && !(simple?(args[0]) || call_node?(args[0]) || args[0].is_a?(Prism::SplatNode) || operand?(args[0]))
 
       t = temp
-      args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
+      args ? return_values_into(args, t) : emit(:LOADNIL, t)
       return_value(t, @loops.empty? && @regions.empty? ? :RETURN : :RETURN_BLK) # a return inside a loop or a rescue region is the in-block form
       last ? t : nil
     end
@@ -440,6 +442,7 @@ module MrbcRb
     def block_statement?(node)
       node = unparen(node)
       return true if node.is_a?(Prism::CallNode) && node.block
+      return true if (node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode)) && node.block.is_a?(Prism::BlockNode)
 
       node.respond_to?(:value) && node.value && block_statement?(node.value)
     end
@@ -499,6 +502,10 @@ module MrbcRb
         case n
         when Prism::OrNode, Prism::AndNode, Prism::ParenthesesNode
           raise Unsupported, 'multi-line logic or parentheses' if n.location.start_line != n.location.end_line
+        when Prism::KeywordHashNode
+          # A keyword whose value spans lines: the parser builds the key (the symbol) only after the value, so its line is the
+          # value's end (seen as a wrong line for `foo(k: [\n 1\n])`); not derived here.
+          raise Unsupported, 'multi-line keyword value' if n.elements.any? { |e| e.location.start_line != e.location.end_line }
         when Prism::StringNode, Prism::InterpolatedStringNode
           raise Unsupported, 'heredoc' if n.opening_loc&.slice&.start_with?('<<')
         when Prism::CallNode
@@ -633,6 +640,17 @@ module MrbcRb
         break_statement(node, last: last)
       when Prism::NextNode
         next_statement(node, last: last)
+      when Prism::RedoNode
+        redo_statement(node, last: last)
+      when Prism::YieldNode
+        yield_statement(node, last: last)
+      when Prism::SuperNode, Prism::ForwardingSuperNode
+        super_statement(node, last: last)
+      when Prism::DefinedNode
+        # An unused defined? generates nothing (not covered); a used one is a value (value_into).
+        raise Unsupported, 'unused defined?' unless last
+
+        value_in_register(node)
       when Prism::SingletonClassNode
         sclass_statement(node, last: last)
       when Prism::ClassNode
@@ -812,7 +830,7 @@ module MrbcRb
       t
     end
 
-    Loop = Struct.new(:reg, :pc0, :breaks)
+    Loop = Struct.new(:reg, :pc0, :breaks, :pc1)
 
     # codegen_while and codegen_until: the loop's value register is the first temporary (a loop's value is nil, or the value
     # of a `break`). The condition is generated at pc0 and tested with JMPNOT (JMPIF for until) to the exit; a NOP (the
@@ -843,6 +861,7 @@ module MrbcRb
           to_exit = cond_jump(until_loop ? :JMPIF : :JMPNOT, t, val: false)
         end
         @labels << @code.size
+        lp.pc1 = @code.size
         emit(:NOP)
         # An empty body is a node on the line of the closing `end`, which is visited after the NOP (verified).
         @line = node.closing_loc.start_line if node.statements.nil? || node.statements.body.empty?
@@ -892,6 +911,7 @@ module MrbcRb
           to_exit = cond_jump(until_loop ? :JMPIF : :JMPNOT, t, val: false)
         end
         @labels << @code.size
+        lp.pc1 = @code.size
         emit(:NOP)
         dispatch(to_body)
         branch(stmts, nil, need: false)
@@ -910,6 +930,8 @@ module MrbcRb
     # value the register is set to nil. Only a break directly in a while or until of this scope is covered.
     def break_statement(node, last:)
       lp = @loops.last or raise Unsupported, 'break outside a while or until loop'
+      return block_break(node, last: last) if lp == BLOCK_LOOP
+
       args = node.arguments&.arguments
       raise Unsupported, 'break with several values' if args && args.size != 1
 
@@ -934,8 +956,12 @@ module MrbcRb
       return next_in_region(node, last: last) if @regions.last && @regions.last.loops == @loops.size
 
       lp = @loops.last or raise Unsupported, 'next outside a while or until loop'
-      raise Unsupported, 'next with a value' if node.arguments
+      return block_next(node, last: last) if lp == BLOCK_LOOP
 
+      args = node.arguments&.arguments
+      raise Unsupported, 'next with several values or a splat' if args && (args.size != 1 || args[0].is_a?(Prism::SplatNode))
+
+      statement(unparen(args[0]), last: false) if args # codegen(value, NOVAL) before the JMPUW
       jump = emit_jump(:JMPUW)
       patch_jump(jump, lp.pc0)
       last ? temp : nil
@@ -1771,7 +1797,7 @@ module MrbcRb
       operand_into(recv, t)
       if index
         operand_into(idx, t + 1)
-        emit(:GETIDX, t)
+        index_read(recv, idx, t)
       else
         emit(:SEND0, t, sym_index(node.read_name))
       end
@@ -2253,6 +2279,11 @@ module MrbcRb
       if recv && BINARY_OPS.key?(name) && args.size == 1
         operand_into(recv, a)
         operand_into(args[0], a + 1)
+        if name == :[] && no_peephole? # gen_binop gives up (a plain SEND) when the argument ends at a jump target
+          emit(:SEND, a, sym_index(:[]), 1)
+          @nregs = [@nregs, a + 3].max
+          return a
+        end
         if name == :[] && args[0].is_a?(Prism::IntegerNode) && args[0].value.zero? && recv.is_a?(Prism::LocalVariableReadNode) &&
            recv.depth.zero?
           # gen_binop's GETIDX0 fusion: MOVE a, local; LOADI_0 a+1 become GETIDX0 a, local (verified with mrbc -v).
@@ -2292,7 +2323,7 @@ module MrbcRb
     # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
     def operand?(node)
       node = unparen(node)
-      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
+      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
         node.is_a?(Prism::CaseNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| operand?(e) || array_splat?(e) })
@@ -2444,6 +2475,17 @@ module MrbcRb
 
         @nregs = [@nregs, @sp + 1].max
         emit(:LAMBDA, dst, index)
+      when Prism::DefinedNode
+        built_into(dst) { |base| defined_yield(node, base) }
+      when Prism::YieldNode
+        result = yield_statement(node, last: true)
+        emit(:MOVE, dst, result) unless result == dst
+      when Prism::SuperNode, Prism::ForwardingSuperNode
+        result = super_statement(node, last: true)
+        emit(:MOVE, dst, result) unless result == dst
+      when Prism::BreakNode, Prism::NextNode, Prism::ReturnNode, Prism::RedoNode
+        # A jump as a value (`x || next`): the fork pushes its (never used) value in the register the jump was generated at.
+        raise Unsupported, 'jump as a value away from its register' unless statement(node, last: true) == dst
       else raise Unsupported, "value #{node.class.name.split('::').last}"
       end
     end
@@ -2814,6 +2856,7 @@ module MrbcRb
       when :ENTER then byte((operands[0] >> 16) & 0xff); short(operands[0] & 0xffff)
       when :LOADI16 then byte(operands[0]); short(operands[1])
       when :LOADI32 then byte(operands[0]); short(operands[1] >> 16); short(operands[1] & 0xffff)
+      when :BLKPUSH, :ARGARY then byte(operands[0]); short(operands[1])
       else operands.each { |v| byte(v) }
       end
       track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
@@ -2886,6 +2929,7 @@ module MrbcRb
       aspec = ((numbered.positive? ? numbered : requireds.size) << 18) | (optionals.size << 13) | ((rest_name ? 1 : 0) << 12) |
               (posts.size << 7) | (keywords.size << 2) | ((kwrest_name ? 1 : 0) << 1) | (block_name ? 1 : 0)
       emit(:ENTER, aspec)
+      @ainfo = method_ainfo(requireds.size + optionals.size, rest_name, posts.size, keywords.empty? && !kwrest_name ? [] : [nil], block_name)
       method_optionals(optionals) unless optionals.empty?
       method_keywords(keywords, pre.size, kwrest_name) unless keywords.empty?
       emit(:MOVE, local_register(block_name), pre.size + 1) if block_name
@@ -3604,6 +3648,230 @@ module MrbcRb
       jump = emit_jump(:JMPUW)
       patch_jump(jump, region.pc0)
       last ? temp : nil
+    end
+
+    # ---- Block control flow (milestone 11) ----
+
+    # The read of `recv[idx]` in an index operator assignment, as gen_binop does it: GETIDX0 fuses `MOVE t, local; LOADI_0 t+1`
+    # (a local receiver and the index 0), a plain SEND replaces GETIDX when the code is at a jump target.
+    def index_read(recv, idx, t)
+      if no_peephole?
+        emit(:SEND, t, sym_index(:[]), 1)
+      elsif idx.is_a?(Prism::IntegerNode) && idx.value.zero? && recv.is_a?(Prism::LocalVariableReadNode) && recv.depth.zero?
+        truncate(@code.size - 5) # the MOVE (3 bytes) and the LOADI_0 (2 bytes) go
+        emit(:GETIDX0, t, local_register(recv.name))
+      else
+        emit(:GETIDX, t)
+      end
+    end
+
+    # A call with a block whose receiver or arguments are not all on the line of the block's opening: the parts are generated
+    # with the line rules of an ordinary call (each node entered at its own line, a leading-dot receiver at the dot's line),
+    # and BLOCK and the send carry the line of the block node, its opening. Parts after the opening line are not covered.
+    def block_call_lines(node, recv, args, line)
+      parts = [*(recv ? [recv] : []), *args]
+      raise Unsupported, 'call with a block spanning lines' unless parts.all? { |part| part.location.end_line <= line }
+      raise Unsupported, 'safe navigation in a call with a block spanning lines' if node.safe_navigation? # DIFF seen
+
+      leading_dot(node)
+      parts.each { |part| check_multiline(part) }
+    end
+
+    # The LOOP_BLOCK entry that lambda_body pushes for a block or lambda body (a marker: it has no registers or jumps).
+    BLOCK_LOOP = :block
+
+    # The value of a `break` or `next` (gen_retval): a plain `break`/`next` loads nil; one value goes into the first temporary.
+    def jump_value(node, t)
+      args = node.arguments&.arguments
+      raise Unsupported, 'break or next with a value of an unverified form' if args&.size == 1 && !args[0].is_a?(Prism::SplatNode) && !operand?(args[0])
+
+      args ? return_values_into(args, t) : emit(:LOADNIL, t)
+    end
+
+    # The value of a `return` (gen_retval): one value as it is, a splat as ARYSPLAT of the value, several values as an array
+    # literal of them (single-line only: the fork's node lines for the list are not derived).
+    def return_values_into(args, t)
+      if args.size == 1 && !args[0].is_a?(Prism::SplatNode)
+        value_into(unparen(args[0]), t)
+      elsif args.size == 1
+        v = args[0].expression
+        raise Unsupported, 'anonymous splat' unless v && operand?(v)
+
+        operand_into(unparen(v), t)
+        emit(:ARYSPLAT, t)
+      else
+        raise Unsupported, 'return values of an unverified form' unless args.all? { |a| operand?(a) && !a.is_a?(Prism::SplatNode) }
+        unless args.all? { |a| a.location.start_line == @line && a.location.end_line == @line }
+          raise Unsupported, 'return values spanning lines'
+        end
+
+        args.each_with_index { |e, i| operand_into(unparen(e), t + i) }
+        @nregs = [@nregs, t + args.size].max
+        emit(:ARRAY, t, args.size)
+      end
+    end
+
+    # codegen_break in a block (loop_break, LOOP_BLOCK): the value goes into the first temporary and OP_BREAK returns it
+    # from the block to the caller of the method the block was passed to (gen_return folds a MOVE into it).
+    def block_break(node, last:)
+      t = temp
+      jump_value(node, t)
+      return_value(t, :BREAK)
+      last ? t : nil
+    end
+
+    # codegen_next in a block (not LOOP_NORMAL): the value goes into the first temporary and the block returns it; a plain
+    # `next` is RETNIL.
+    def block_next(node, last:)
+      raise Unsupported, 'next with a splat' if node.arguments&.arguments&.any?(Prism::SplatNode) # not gen_retval: unverified
+
+      t = temp
+      jump_value(node, t)
+      return_value(t)
+      last ? t : nil
+    end
+
+    # codegen_redo: JMPUW to the pc1 of the innermost loop that is not a begin or rescue one: in a block that is the start of
+    # its code (lambda_body's label at pc 0), in a while or until the NOP that starts the body.
+    def redo_statement(_node, last:)
+      lp = @loops.last or raise Unsupported, 'redo outside a loop or block'
+      jump = emit_jump(:JMPUW)
+      patch_jump(jump, lp == BLOCK_LOOP ? 0 : (lp.pc1 or raise(Unsupported, 'redo in this loop')))
+      last ? temp : nil
+    end
+
+    # s->ainfo of lambda_body for a method: (required + optional) << 7 | rest << 6 | post << 1 | keywords | block << 13.
+    def method_ainfo(req_opt, rest, posts, keywords, block)
+      ((req_opt & 0x3f) << 7) | ((rest ? 1 : 0) << 6) | ((posts & 0x1f) << 1) | (keywords.empty? ? 0 : 1) | ((block ? 1 : 0) << 13)
+    end
+
+    # The enclosing method scope of this (block) scope and the number of block scopes in between (the `lv` of codegen_yield and
+    # codegen_super: the walk up to the first scope with mscope set). Only a def counts as one here: a yield or super outside
+    # a method is a compile error in the fork.
+    def method_scope
+      scope = self
+      lv = 0
+      until scope.instance_variable_get(:@in_method)
+        scope = scope.parent or raise Unsupported, 'yield or super outside a method'
+        lv += 1
+      end
+      raise Unsupported, 'block nesting deeper than 15' if lv > 0xf
+
+      [scope, lv]
+    end
+
+    # codegen_yield: the result register is pushed first, the arguments follow it (gen_values, gen_hash), then BLKPUSH loads
+    # the method's block into the result register (operand: ainfo << 4 | lv, truncated to 16 bits) and BLKCALL calls it; a
+    # splat or keywords use SEND :call with the packed argument count instead (a fast path only for plain positional arguments).
+    def yield_statement(node, last:)
+      scope, lv = method_scope
+      a = @sp
+      @nregs = [@nregs, a + 1].max
+      args = node.arguments&.arguments || []
+      argc, = gen_args(nil, a, args)
+      emit(:BLKPUSH, a, ((scope.instance_variable_get(:@ainfo) << 4) | lv) & 0xffff)
+      if argc < 15
+        emit(:BLKCALL, a, argc)
+      else
+        emit(:SEND, a, sym_index(:call), argc)
+      end
+      last ? a : nil
+    ensure
+      @sp = a if a
+    end
+
+    # A literal block whose BLOCK goes into the register at @sp (the child irep is the next of this scope's children).
+    def block_literal(blk)
+      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(blk, self)
+      index = @children.size - 1
+      raise Unsupported, 'more than 255 child ireps' if index > 0xff
+
+      emit(:BLOCK, @sp, index)
+      @nregs = [@nregs, @sp + 1].max
+    end
+
+    # gen_blkmove: the method's block slot (R[m1 + r + m2 + kd + 1], decoded from the ainfo bits) into the register at @sp;
+    # from a block scope it is read with GETUPVAR (whose level operand is lv, not lv - 1).
+    def block_move(ainfo, lv)
+      off = ((ainfo >> 7) & 0x3f) + ((ainfo >> 6) & 1) + ((ainfo >> 1) & 0x1f) + (ainfo & 1) + 1
+      lv.zero? ? gen_move(@sp, off, false) : emit(:GETUPVAR, @sp, off, lv)
+    end
+
+    # codegen_super (`super(a)`, `super a`, `super()`) and codegen_zsuper (bare `super`). Without arguments the method's own
+    # parameters are passed: ARGARY builds them (and the block) from the method's ainfo, or, for a method with none, just the
+    # block slot is copied; an explicit call generates its arguments as a send does and then the block (the `&blk` argument,
+    # or the method's own block slot). SUPER takes the result register and the packed argument count. A literal block goes
+    # into the register after the arguments (BLOCK), as in a call with a block.
+    def super_statement(node, last:)
+      literal = node.block.is_a?(Prism::BlockNode) ? node.block : nil
+      if literal
+        line = literal.opening_loc.start_line
+        parts = (node.respond_to?(:arguments) ? node.arguments&.arguments : nil) || []
+        unless @line == line && node.location.start_line == line && parts.all? { |l| l.location.start_line == line && l.location.end_line == line }
+          raise Unsupported, 'super with a block spanning lines'
+        end
+      end
+      scope, lv = method_scope
+      ainfo = scope.instance_variable_get(:@ainfo)
+      a = @sp
+      @nregs = [@nregs, a + 1].max
+      pos = a + 1
+      if node.is_a?(Prism::ForwardingSuperNode)
+        n = 15
+        if ainfo.positive?
+          emit(:ARGARY, pos, ((ainfo << 4) | lv) & 0xffff)
+          @nregs = [@nregs, pos + 3].max
+          if ainfo.odd?
+            n |= 15 << 4
+            emit(:LOADNIL, pos + 2) if ainfo[13].zero?
+          end
+          @sp = pos + (ainfo.odd? ? 2 : 1) # push() for the block, whose register follows the keywords' slot
+        else
+          @sp = pos
+          block_move(0, lv) unless literal
+          n = 0
+        end
+        block_literal(literal) if literal
+      else
+        blk = node.block
+        raise Unsupported, 'anonymous block argument' if blk.is_a?(Prism::BlockArgumentNode) && !blk.expression
+
+        n, = gen_args(nil, a, node.arguments&.arguments || [])
+        if literal
+          block_literal(literal)
+        elsif blk
+          operand_into(unparen(blk.expression), @sp)
+        else
+          block_move(ainfo, lv)
+        end
+      end
+      @sp = a
+      emit(:SUPER, a, n)
+      last ? a : nil
+    ensure
+      @sp = a if a
+    end
+
+    # `defined?(yield)` and `defined?(super)` (codegen_defined): block_given? is called on self (with the block-argument slot counted in nregs), JMPNOT
+    # skips the string "yield" (STRING, never FSTRING) to a LOADNIL, as an if with a value.
+    def defined_yield(node, dst)
+      if node.value.is_a?(Prism::SuperNode) || node.value.is_a?(Prism::ForwardingSuperNode)
+        # `defined?(super)` is nil: the fork does not determine the method context (codegen_defined, NODE_SUPER).
+        @nregs = [@nregs, dst + 1].max
+        return emit(:LOADNIL, dst)
+      end
+      raise Unsupported, 'defined? of something other than yield' unless node.value.is_a?(Prism::YieldNode)
+      raise Unsupported, 'defined?(yield) away from its register' unless dst == @sp || dst < @nlocals
+
+      method_scope # a yield outside a method is a compile error
+      @nregs = [@nregs, dst + 2].max
+      emit(:SSEND0, dst, sym_index(:block_given?))
+      to_else = cond_jump(:JMPNOT, dst, val: true)
+      emit(:STRING, dst, pool_index([:str, 'yield'.b]))
+      to_end = emit_jump(:JMP)
+      dispatch(to_else)
+      emit(:LOADNIL, dst)
+      dispatch(to_end)
     end
 
     # ---- RITE, as src/dump.c writes it: header, IREP, DBG, LVAR, END ----
