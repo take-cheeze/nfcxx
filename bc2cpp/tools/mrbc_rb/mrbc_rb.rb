@@ -35,7 +35,7 @@ module MrbcRb
     SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
-    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57,
+    CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57, KEYEND: 59, KARG: 60,
     GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98
   }.freeze
 
@@ -134,22 +134,47 @@ module MrbcRb
       self
     end
 
-    # A method body (scope_body for def): self, the parameters and the body's locals, then the hidden block slot. ENTER
-    # takes the number of required parameters in its upper bits (24 = n1:m5:o5:r1:m5:k5:d1:b1 in ops.h). Only required
-    # positional parameters are covered.
+    # A method body (scope_body for def, lambda_body in codegen.c): self, the parameters in the order required, optional,
+    # rest, post-required, then the keyword dictionary slot "**" when there are keywords, the hidden block slot (no name),
+    # the named block parameter, the keywords, and the body's own locals in the parser's order. ENTER takes
+    # the aspec in its 24 bits: req << 18 | opt << 13 | rest << 12 | post << 7 | keywords << 2 | block (ops.h, MRB_ARGS_*).
+    # Optional parameters add a jump table of one OP_JMP per parameter plus one for "all supplied" right after ENTER, then
+    # the default expressions, each assigned like a local write whose value is unused. Required keywords are KARG, then
+    # KEYEND, then the keyword hash is rebuilt into the "**" slot (LOADSYM, MOVE pairs and HASH); a named block parameter is
+    # copied out of the block slot last. Optional keywords, **rest, anonymous & and destructuring are Unsupported.
     def compile_method(node)
       params = node.parameters
       requireds = params ? params.requireds : []
-      other = params && (params.optionals.any? || params.rest || params.posts.any? || params.keywords.any? ||
-                         params.keyword_rest || params.block)
-      raise Unsupported, 'method parameters other than required ones' if other || !requireds.all? { |r| r.is_a?(Prism::RequiredParameterNode) }
+      optionals = params ? params.optionals : []
+      posts = params ? params.posts : []
+      keywords = params ? params.keywords : []
+      rest = params&.rest
+      block = params&.block
+      if params && (params.keyword_rest || (rest && !rest.is_a?(Prism::RestParameterNode)))
+        raise Unsupported, 'keyword rest or forwarding parameter'
+      end
+      raise Unsupported, 'destructuring parameter' unless (requireds + posts).all? { |r| r.is_a?(Prism::RequiredParameterNode) }
+      raise Unsupported, 'optional keyword parameter' unless keywords.all? { |k| k.is_a?(Prism::RequiredKeywordParameterNode) }
+      raise Unsupported, 'anonymous block parameter' if block && block.name.nil?
+      raise Unsupported, 'too many parameters' if [requireds, optionals, posts, keywords].any? { |l| l.size > 0x1f }
 
-      # Registers: self, the parameters, the hidden block slot (no name), then the body's own locals (mrbc's order).
-      param_names = requireds.map(&:name)
-      set_locals(param_names + [nil] + (node.locals - param_names))
+      # Registers, in mrbc's order.
+      pre = requireds.map(&:name) + optionals.map(&:name)
+      pre << (rest.name || :*) if rest
+      pre += posts.map(&:name)
+      pre << :** unless keywords.empty?
+      kw_names = keywords.map(&:name)
+      block_names = [block&.name].compact
+      set_locals(pre + [nil] + block_names + kw_names + (node.locals - pre - block_names - kw_names))
       @nregs = @nlocals + 1
       @line = node.location.start_line
-      emit(:ENTER, requireds.size << 18)
+      aspec = (requireds.size << 18) | (optionals.size << 13) | ((rest ? 1 : 0) << 12) | (posts.size << 7) |
+              (keywords.size << 2) | (block ? 1 : 0)
+      emit(:ENTER, aspec)
+      @in_method = true
+      method_optionals(optionals) unless optionals.empty?
+      method_keywords(keywords, pre.size) unless keywords.empty?
+      emit(:MOVE, local_register(block.name), pre.size + 1) if block
       raise Unsupported, 'method body with rescue or ensure' unless node.body.nil? || node.body.is_a?(Prism::StatementsNode)
 
       stmts = node.body ? node.body.body : []
@@ -201,6 +226,38 @@ module MrbcRb
                   end
       return_value(value_reg)
       self
+    end
+
+
+    # The optional parameters' jump table: one JMP per parameter to its default's code, and a last JMP past all defaults
+    # (taken when every optional argument was given). Each default is assigned as a local write whose value is unused.
+    def method_optionals(optionals)
+      jumps = (optionals.size + 1).times.map { emit_jump(:JMP) }
+      optionals.each_with_index do |opt, i|
+        # A jump's operand bytes take the line current when it is dispatched (emit_S writes s->lineno): the line of the
+        # previous default's last node, or the def line for the first.
+        patch_jump(jumps[i], @code.size)
+        set_jump_line(jumps[i], @line)
+        @line = opt.value.location.start_line
+        write_local(opt, last: false)
+      end
+      patch_jump(jumps.last, @code.size)
+      set_jump_line(jumps.last, @line)
+    end
+
+    # Required keywords: KARG into each keyword's register, KEYEND, then the hash of the keywords is rebuilt into the "**"
+    # slot (register +dict+ is the one after the positional parameters) starting at the first temporary.
+    def method_keywords(keywords, npre)
+      dict = npre # the "**" slot is the last of the leading names, R[npre]
+      keywords.each { |k| emit(:KARG, local_register(k.name), sym_index(k.name)) }
+      emit(:KEYEND)
+      base = temp
+      keywords.each_with_index do |k, i|
+        emit(:LOADSYM, base + 2 * i, sym_index(k.name))
+        emit(:MOVE, base + 2 * i + 1, local_register(k.name))
+      end
+      emit(:HASH, base, keywords.size)
+      emit(:MOVE, dict, base)
     end
 
     attr_reader :locals, :nlocals, :children, :parent
@@ -314,6 +371,20 @@ module MrbcRb
       last ? t : nil
     end
 
+    # codegen_return: the value (nil for a plain `return`) goes into the first temporary and gen_return folds a MOVE or a
+    # constant load into it. Only inside a method body; a statement's value register is that temporary.
+    def return_statement(node, last:)
+      raise Unsupported, 'return outside a method body' unless @in_method
+
+      args = node.arguments&.arguments
+      raise Unsupported, 'return with several values' if args && (args.size != 1 || !(simple?(args[0]) || call_node?(args[0])))
+
+      t = temp
+      args ? value_into(unparen(args[0]), t) : emit(:LOADNIL, t)
+      return_value(t)
+      last ? t : nil
+    end
+
     # Generates the statements of a body. The last one is generated as a value when +val+ is set; its register is returned.
     def generate(stmts, val:)
       value_reg = nil
@@ -361,6 +432,8 @@ module MrbcRb
         ivar_write(node, last: last)
       when Prism::DefNode
         def_statement(node, last: last)
+      when Prism::ReturnNode
+        return_statement(node, last: last)
       when Prism::OrNode, Prism::AndNode
         logic(node, need: last)
       when Prism::IfNode
@@ -609,7 +682,7 @@ module MrbcRb
     end
 
     def write_local(node, last:)
-      return write_upvar(node, last: last) if node.depth.positive?
+      return write_upvar(node, last: last) if node.respond_to?(:depth) && node.depth.positive? # a default is no upvalue
 
       local = local_register(node.name)
       value = unparen(node.value)
@@ -775,8 +848,10 @@ module MrbcRb
       name, operands, start = @last
       # No fold when the return or the instruction it would rewrite is a jump target (the fork's no_peephole and the
       # label checks on the last instruction, codegen.c).
-      if @labels.include?(@code.size) || @labels.include?(start)
+      if @labels.include?(@code.size)
         emit(:RETURN, reg)
+      elsif %i[RETURN RETSELF RETNIL RETTRUE RETFALSE].include?(name)
+        nil # gen_return emits nothing after a return
       elsif name == :MOVE && operands[0] == reg && operands[0] >= @nlocals # a MOVE into a local is kept (verified with mrbc -v)
         truncate(start)
         emit(:RETURN, operands[1])
