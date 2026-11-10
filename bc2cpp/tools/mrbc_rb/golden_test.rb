@@ -4230,6 +4230,121 @@ end
 
 puts failures.zero? ? "all #{SNIPPETS.size} snippets match" : "#{failures} snippet(s) differ"
 
+# Multi-file programs (MrbcRb.compile_files): the files of one command line `mrbc -g a.rb b.rb c.rb`, compiled as one program.
+# Each group below must match the oracle (a group the emitter leaves Unsupported is a failure here: they are all covered).
+MULTI_FILE_GROUPS = [
+  ["a = 1\n", "b = a + 1\n"],
+  ["a = 1\n", '', "b = a\n"],
+  ["a = 1\n", "\n\n", "b = a\n"],
+  ["a = 1\n", "# only\n", "b = a\n"],
+  ['', "a = 1\n"],
+  ["a = 1\n", ''],
+  # the frozen_string_literal comment counts before the first token of the program only, and holds for every file
+  ["# frozen_string_literal: true\n", "x = 'a'\n"],
+  ["x = 'a'\n", "# frozen_string_literal: true\ny = 'b'\n"],
+  ["# frozen_string_literal: true\nx = 'a'\n", "# frozen_string_literal: false\ny = 'b'\n"],
+  # the last statement of a file is built after the lookahead newline reached the file's end: line 0, previous byte's line
+  ["a = 1\nputs a\n", "puts a\n"],
+  ["z = 0\n\n\nputs z\n", "y = 1\n"],
+  ["z = 0\n\n\nx = z\n", "y = 1\n"],
+  ["z = 0\n\n\nx = z + 1\n", "y = 1\n"],
+  ["z = 0\n\n\nputs 'a'\n", "y = 1\n"],
+  ["z = 0\n\n\n@a = 1\n", "y = 1\n"],
+  ["z = 0\n\n\nputs z if z\n", "y = 1\n"],
+  ["z = 0\n\n\nputs z.y\n", "y = 1\n"],
+  ["z = 0\n\n\nz += 1\n", "y = 1\n"],
+  ["z = 0\n\n\nz && 1\n", "y = 1\n"],
+  ["z = 0\n\n\nputs(1)\n", "y = 1\n"],
+  ["z = 0\n\n\nputs :a\n", "y = 1\n"],
+  ["z = 0\n\n\ndef m; end\n", "y = 1\n"],
+  ["z = 0\n\n\nputs __FILE__\n", "y = 1\n"],
+  ["z = 0\n\n\nputs 1, __LINE__\n", "y = 1\n"],
+  # trailing comments are counted into the newline token: the next file's lines start that much later
+  ["a = 1\nputs a\n# c\n", "puts a\n"],
+  ["a = 1\n\nputs a\n# c1\n# c2\n", "\n\nputs __LINE__\nputs a\n"],
+  ["a = 1\nputs a\n# c1\n\n# c2\n", "puts __LINE__\n"],
+  ["a = 1\nputs a\n  # c1\n  ", "puts __LINE__\n"],
+  ["a = 1;\n", "puts __LINE__\n"],
+  # shared top-level locals, __FILE__ and __LINE__ per file, scopes
+  ["a = 1\ndef f; a; end\n", "a = 2\nputs __FILE__\n"],
+  ["a = 1\nb = [1].map { |x| x + a }\n", "c = b.map { |y| y + a }\nputs c\n"],
+  ["class A\n  def x; 1; end\nend\n", "class B < A\nend\n"],
+  ["module M\nend\n", "module N\nend\nputs 1\n"],
+  ["a = 1\nputs a\n", "# c\nb = 1\nputs b\n", "# d\n\nputs a, b\n"],
+  ["puts 1\n", "puts 2\n", "puts 3\n"],
+  ["x = 1\nputs x\n", "y = 2\nputs y\n", "z = 3\nputs z\n"],
+  ["@a = 1\n", "@b = 2\n"],
+  ["A = 1\nB = A\n", "C = B\n"],
+  ["a = 1\nif a\n  puts a\nend\n", "puts a\n"],
+  ["a = 1\nwhile a < 3\n  a += 1\nend\n", "puts a\n"],
+  ["puts 'a'\n", "puts 'b'\n"]
+].freeze
+
+multi_failures = 0
+MULTI_FILE_GROUPS.each_with_index do |group, gi|
+  Dir.mktmpdir('mrbc_rb_multi') do |dir|
+    paths = group.each_with_index.map do |src, i|
+      File.join(dir, "g#{gi}_#{i}.rb").tap { |path| File.binwrite(path, src) }
+    end
+    mrb = File.join(dir, 'o.mrb')
+    _o, err, status = Open3.capture3(oracle, '-g', '-o', mrb, *paths)
+    unless status.success?
+      puts "SKIP: the oracle failed on group #{gi}: #{err.strip}"
+      next
+    end
+    begin
+      got = MrbcRb.compile_files(group.zip(paths))
+    rescue MrbcRb::Unsupported => e
+      puts "UNSUPPORTED multi-file group #{gi} #{group.inspect}: #{e.message}"
+      multi_failures += 1
+      next
+    end
+    next if got == File.binread(mrb)
+
+    puts "FAIL multi-file group #{gi} #{group.inspect}"
+    multi_failures += 1
+  end
+end
+puts multi_failures.zero? ? "all #{MULTI_FILE_GROUPS.size} multi-file groups match" : "#{multi_failures} multi-file group(s) differ"
+failures += multi_failures
+
+# Real multi-file inputs: the mrblib files of the gems next to the oracle (the order the build compiles them: sorted), each set
+# whole and then each pair of neighbours. Unsupported is counted, not failed; a wrong binary is.
+mruby_dir = File.expand_path('../..', oracle)
+world_root = File.expand_path('../..', mruby_dir)
+sets = { 'core mrblib' => Dir["#{mruby_dir}/mrblib/*.rb"].sort.reject { |p| p.end_with?('/10error.rb') } }
+(Dir["#{mruby_dir}/mrbgems/*"] + Dir["#{world_root}/3rd/*"] + Dir["#{world_root}/mruby-*"]).sort.each do |gem_dir|
+  sets[File.basename(gem_dir)] = Dir["#{gem_dir}/mrblib/**/*.rb"].sort
+end
+sets.reject! { |_, files| files.size < 2 }
+multi_total = multi_same = multi_unsupported = 0
+sets.each do |name, files|
+  ([files] + files.each_cons(2).to_a).each do |paths|
+    multi_total += 1
+    Dir.mktmpdir('mrbc_rb_multi') do |dir|
+      mrb = File.join(dir, 'o.mrb')
+      _o, _e, status = Open3.capture3(oracle, '-g', '-o', mrb, *paths)
+      unless status.success?
+        multi_total -= 1
+        next
+      end
+      begin
+        got = MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
+      rescue MrbcRb::Unsupported, MrbcRb::Error
+        multi_unsupported += 1
+        next
+      end
+      if got == File.binread(mrb)
+        multi_same += 1
+      else
+        puts "  DIFF #{name}: #{paths.map { |p| File.basename(p) }.join(' ')}"
+        failures += 1
+      end
+    end
+  end
+end
+puts "multi-file corpus: #{multi_same} of #{multi_total} file sets identical (#{sets.size} gems, #{multi_unsupported} unsupported)"
+
 # The corpus: every Ruby file under bc2cpp/ that the emitter covers must match the oracle. A file it does not cover is
 # counted, not failed (Unsupported is the honest answer; a wrong binary is not).
 corpus = Dir.glob('bc2cpp/**/*.rb').sort
