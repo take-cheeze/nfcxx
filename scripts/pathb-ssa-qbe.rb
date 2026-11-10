@@ -136,6 +136,8 @@ module Qbe
   # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
   def half_bits(lit)
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    raise QbeUnsupported, "float16 literal #{text}" if text.match?(/nan/i)
+
     v = Float(text)
     raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
 
@@ -173,6 +175,10 @@ module Qbe
     return half_bits(lit) if n == 2
 
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    # NaN is written as text (`(const float NaN)`, the emitter's spelling); its bits are the positive quiet NaN, as
+    # float_lit spells it.
+    return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if text.match?(/nan/i)
+
     v = Float(text)
     raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
 
