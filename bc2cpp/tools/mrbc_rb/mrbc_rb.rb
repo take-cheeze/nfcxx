@@ -8,7 +8,9 @@
 # and if/else with a simple or call predicate and bodies of the forms above, unless, and `class X` or `module X` with a
 # plain constant and a body of the forms above (no superclass; the body is a child irep run by EXEC). Milestone 10 adds
 # keyword, splat and block-pass arguments, constant paths (read, write, class and module names), regexp literals, lambda
-# literals and `&.`. Anything else raises Unsupported, so a
+# literals and `&.`. Milestone 11 adds every operator method (folded for integer literals, SEND otherwise), unary minus,
+# plus and not, Float, big Integer, Rational and Imaginary literals, operator and setter names in def, alias, undef,
+# defined? (not for constants), the special variables, __FILE__ and __LINE__. Anything else raises Unsupported, so a
 # caller can fall back to the real mrbc.
 #
 # The bytes are those of the fork's classic compiler (take-cheeze/mruby, pinned by rpg-maker-clone). The rules below
@@ -37,7 +39,7 @@ module MrbcRb
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, RETURN_BLK: 62, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, SDEF: 108, SCLASS: 111, ENTER: 57, KEYEND: 59, KARG: 60,
-    GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97
+    ALIAS: 109, UNDEF: 110, GETUPVAR: 33, SETUPVAR: 34, SSENDB: 49, SENDB: 52, BLOCK: 98, GETMCNST: 31, SETMCNST: 32, OCLASS: 102, HASHADD: 95, HASHCAT: 96, LAMBDA: 97
   }.freeze
 
   # Binary operators with their own opcode: the receiver is in the result register, the argument in the next one.
@@ -58,14 +60,16 @@ module MrbcRb
                           Prism::HashNode, Prism::ArrayNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
-  ENTERED = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
+  ENTERED = [Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
+             Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode, Prism::DefinedNode,
+             Prism::RationalNode, Prism::ImaginaryNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
              Prism::SymbolNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::ArrayNode, Prism::CallNode,
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
              Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
-  TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
+  TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode, Prism::SourceLineNode].freeze
   FALSE_ALWAYS = [Prism::NilNode, Prism::FalseNode].freeze
 
   # `(expr)` with one statement is the statement itself: the fork's codegen does not see the parentheses.
@@ -77,17 +81,18 @@ module MrbcRb
   end
 
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
-  SIMPLE_VALUES = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
+  SIMPLE_VALUES = [Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
+                   Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
                    Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode,
                    Prism::SymbolNode].freeze
 
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
-  BUILT_VALUES = [Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
+  BUILT_VALUES = [Prism::DefinedNode, Prism::RationalNode, Prism::ImaginaryNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
                   Prism::InterpolatedRegularExpressionNode].freeze
 
   # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
-  UNVERIFIED_OPERATORS = %i[-@ +@ ~ =~ !~ <=> ** & | ^ >> ===].freeze # `[]`, `[]=`, `!`, `!=`, `%` and `<<` are verified
+  UNVERIFIED_OPERATORS = [].freeze # every operator is verified (milestone 11)
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -394,7 +399,7 @@ module MrbcRb
     def def_statement(node, last:)
       recv = node.receiver && unparen(node.receiver)
       raise Unsupported, 'receiver def on a non-simple receiver' if recv && !simple?(recv)
-      raise Unsupported, 'def with a name that is not plain' unless node.name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/)
+      raise Unsupported, 'def with a name that is not verified' unless def_name_ok?(node.name)
 
       # codegen_sdef: the name's symbol comes first, then the method's irep, then the receiver, loaded into the result
       # register, which SDEF takes. A plain def is TDEF on the same register.
@@ -538,6 +543,32 @@ module MrbcRb
       when Prism::LambdaNode
         # An unused lambda generates nothing at all, not even its body (codegen_lambda returns early without a value).
         last ? value_in_register(node) : nil
+      when Prism::RationalNode, Prism::ImaginaryNode
+        t = temp
+        numeric_call_at(node, t)
+        last ? t : nil
+      when Prism::DefinedNode
+        # `defined?` never evaluates its argument: nothing is generated when its value is unused.
+        last ? value_in_register(node) : nil
+      when Prism::SourceFileNode, Prism::SourceLineNode
+        last ? value_in_register(node) : nil
+      when *SPECIAL_READS
+        # codegen_nth_ref and codegen_back_ref number the symbol even when the value is unused.
+        sym_index(special_variable_name(node))
+        last ? value_in_register(node) : nil
+      when Prism::AliasMethodNode
+        alias_statement(node, last: last)
+      when Prism::UndefNode
+        undef_statement(node, last: last)
+      when Prism::FloatNode
+        # An unused float still enters the pool (new_lit_float runs before gen_load_op2 checks val).
+        if last
+          value_in_register(node)
+        else
+          # A negative literal is a negation of a literal to the fork, which generates nothing for an unused one.
+          pool_index([:float, float_bits(node)]) unless node.location.slice.start_with?('-')
+          nil
+        end
       when Prism::SymbolNode
         # An unused symbol still enters the symbol table (sym_idx runs before gen_load_op2 checks val).
         sym_index(node.unescaped.to_sym)
@@ -1195,6 +1226,7 @@ module MrbcRb
       when :LOADI8 then ops[1]
       when :LOADI16 then ops[1] >= 0x8000 ? ops[1] - 0x10000 : ops[1]
       when :LOADI32 then ops[1] >= 0x8000_0000 ? ops[1] - 0x1_0000_0000 : ops[1]
+      when :LOADL then (e = @pool[ops[1]]).is_a?(Array) && e[0] == :int ? e[1] : nil
       else
         name.to_s =~ /\ALOADI_(\d)\z/ ? Regexp.last_match(1).to_i : nil
       end
@@ -1887,6 +1919,10 @@ module MrbcRb
         # (verified: `self[x]` is LOADSELF, MOVE, GETIDX).
         n_args = (node.arguments&.arguments || []).size
         if name.to_s.match?(/\A[A-Za-z_]\w*[?!]?\z/) then recv = nil
+        elsif name == :-@ && node.call_operator_loc.nil?
+          nil # `-self` is a NODE_NEGATE: self is generated like any operand
+        elsif SELF_SEND_OPS.include?(name)
+          recv = nil # an operator with no opcode of its own is sent to self like a named method
         elsif !((BINARY_OPS.key?(name) && n_args == 1) || (name == :[]= && n_args == 2))
           raise Unsupported, "operator method #{name} on self"
         end
@@ -1897,6 +1933,7 @@ module MrbcRb
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
       raise Unsupported, 'safe navigation' if node.safe_navigation? && !(recv && name.to_s.match?(PLAIN_NAME))
       raise Unsupported, "operator method #{name}" if recv && UNVERIFIED_OPERATORS.include?(name)
+      raise Unsupported, 'unary operator with arguments' if UNARY_OPS.include?(name) && !args.empty?
 
       if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
         raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
@@ -1905,20 +1942,10 @@ module MrbcRb
         return attribute_assign(node, recv, args[0], need: need)
       end
 
-      # The parser folds an operator on two integer literals (1 + 2), which is not reproduced here.
-      raise Unsupported, 'operator on two literals' if recv.is_a?(Prism::IntegerNode) && (BINARY_OPS.key?(name) || %i[<< >> % ** & | ^].include?(name)) &&
-                                                       args.size == 1 && args[0].is_a?(Prism::IntegerNode)
-
       a = @sp
       @nregs = [@nregs, a + 1].max
-      if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
-         (1..0xff).cover?(args[0].value)
-        operand_into(recv, a)
-        enter(args[0]) # the literal is generated (and entered) before the peephole folds it into ADDI
-        emit(name == :+ ? :ADDI : :SUBI, a, args[0].value)
-        @nregs = [@nregs, a + 3].max
-        return a
-      end
+      return unary_call(node, recv, a, need) if recv && UNARY_OPS.include?(name) && args.empty?
+
       # `recv[index]` is GETIDX and `recv[]` a plain SEND0 (both verified); other index forms are not covered yet.
       raise Unsupported, 'index call with several arguments' if name == :[] && args.size > 1
       if name == :[]= && recv && args.size == 2
@@ -1937,6 +1964,8 @@ module MrbcRb
           @nregs = [@nregs, a + 3].max
           return a
         end
+        return a if binary_folded(name, a)
+
         emit(BINARY_OPS.fetch(name), a)
         @nregs = [@nregs, a + 3].max
         return a
@@ -1945,6 +1974,10 @@ module MrbcRb
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
       args.each_with_index { |arg, i| operand_into(arg, a + 1 + i) }
+      # A call on self has no receiver of its own, but the fork's folding peepholes still look at the instructions before it.
+      return a if args.size == 1 && binary_folded(name, a)
+      return a if args.empty? && UNARY_OPS.include?(name) && unary_folded(name, a)
+
       sym = sym_index(name)
       n = args.size
       if recv
@@ -2041,7 +2074,13 @@ module MrbcRb
       when Prism::TrueNode then emit(:LOADTRUE, dst)
       when Prism::FalseNode then emit(:LOADFALSE, dst)
       when Prism::SelfNode then emit(:LOADSELF, dst)
-      when Prism::IntegerNode then load_int(node.value, dst)
+      when Prism::IntegerNode then integer_into(node, dst)
+      when Prism::FloatNode then float_into(node, dst)
+      when Prism::SourceFileNode, Prism::SourceLineNode then source_into(node, dst)
+      when Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode
+        emit(:GETGV, dst, sym_index(special_variable_name(node)))
+      when Prism::DefinedNode then built_into(dst) { |base| defined_at(node, base) }
+      when Prism::RationalNode, Prism::ImaginaryNode then built_into(dst) { |base| numeric_call_at(node, base) }
       when Prism::LocalVariableReadNode
         node.depth.zero? ? emit(:MOVE, dst, local_register(node.name)) : getupvar(dst, node)
       when Prism::StringNode
@@ -2453,7 +2492,7 @@ module MrbcRb
       when :LOADI32 then byte(operands[0]); short(operands[1] >> 16); short(operands[1] & 0xffff)
       else operands.each { |v| byte(v) }
       end
-      track(operands.first) unless name == :STOP || name == :ENTER # ENTER's operand is an argument spec
+      track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
       track(operands[1]) if name == :MOVE
       (@code.size - start).times { @lines << @line }
     end
@@ -2470,6 +2509,427 @@ module MrbcRb
       return unless reg.is_a?(Integer)
 
       @nregs = [@nregs, reg + 1].max
+    end
+
+    # ---- milestone 11: operators, float literals and special defs ----
+
+    UNARY_OPS = %i[-@ +@ ~].freeze
+    SELF_SEND_OPS = %i[!= % << >> ** & | ^ <=> =~ !~ === ~ ! +@ -@].freeze
+    FOLD_OPS = %i[+ - * / % << >> & | ^].freeze
+    INT64_MIN = -0x8000_0000_0000_0000
+    INT64_MAX = 0x7fff_ffff_ffff_ffff
+
+    # mrb_num_shift (numeric.c) on 64-bit integers: the shifted value, or nil when the fork does not fold it.
+    def num_shift(val, width)
+      if width.negative?
+        -width >= 63 ? (val.negative? ? -1 : 0) : val >> -width
+      elsif val.positive?
+        return nil if width > 63 || val > (INT64_MAX >> width)
+
+        val << width
+      else
+        return nil if width > 63 || val < (INT64_MIN >> width)
+
+        width == 63 ? INT64_MIN : val * (1 << width)
+      end
+    end
+
+    def int64(v) = v.between?(INT64_MIN, INT64_MAX) ? v : nil
+
+    # The value of a two-literal operation as the fork folds it (gen_addsub, gen_muldiv, gen_binop), or nil.
+    def fold_value(name, n0, n)
+      case name
+      when :+ then int64(n0 + n)
+      when :- then int64(n0 - n)
+      when :* then int64(n0 * n)
+      when :/ then n.zero? ? nil : int64(n0.div(n))
+      when :% then n.zero? ? nil : n0 % n
+      when :<< then num_shift(n0, n)
+      when :>> then num_shift(n0, -n)
+      when :& then n0 & n
+      when :| then n0 | n
+      when :^ then n0 ^ n
+      end
+    end
+
+    # gen_int of a folded value, in place of the instructions starting at +start+.
+    def fold_load(start, n, dst)
+      truncate(start)
+      gen_int(n, dst)
+    end
+
+    # The fork's gen_int: the shortest load of +i+; a value beyond 32 bits is a pool entry (new_lit_int).
+    def gen_int(i, dst)
+      if i.negative?
+        if i == -1 then emit(:LOADI__1, dst)
+        elsif i >= -0xff then emit(:LOADINEG, dst, -i)
+        elsif i >= -0x8000 then emit(:LOADI16, dst, i & 0xffff)
+        elsif i >= INT32_MIN then emit(:LOADI32, dst, i & 0xffff_ffff)
+        else emit(:LOADL, dst, pool_index([:int, i]))
+        end
+      elsif i <= INT32_MAX
+        load_int(i, dst)
+      else
+        emit(:LOADL, dst, pool_index([:int, i]))
+      end
+    end
+
+    # An integer literal: a value of 32 bits is a load; a larger one is a big integer pool entry of its digits (as the lexer
+    # kept them, without sign, prefix or underscores) and base, the base negated for a negative literal (codegen NODE_BIGINT
+    # and codegen_negate).
+    def integer_into(node, dst)
+      v = node.value
+      return load_int(v, dst) if v.between?(INT32_MIN, INT32_MAX)
+
+      text = node.location.slice.delete('_')
+      neg = text.start_with?('-')
+      text = text.sub(/\A[-+]/, '')
+      base = 10
+      if (m = /\A0([xXbBoOdD])(.*)\z/.match(text))
+        base = { 'x' => 16, 'b' => 2, 'o' => 8, 'd' => 10 }.fetch(m[1].downcase)
+        text = m[2]
+      elsif text.size > 1 && text.start_with?('0')
+        base = 8
+        text = text[1..]
+      end
+      text = text.downcase # the lexer keeps hexadecimal letters in lower case
+      raise Unsupported, 'integer literal too big' if text.size > 255
+
+      emit(:LOADL, dst, pool_index([:bigint, text, neg ? -base : base]))
+    end
+
+    # The operation of a binary call whose operands are generated into +a+ and +a+ + 1, when the fork's peepholes handle it
+    # (true: nothing more to emit): two integer loads in a row are folded (gen_addsub, gen_muldiv, gen_binop), and + and -
+    # with an integer load last become ADDI and SUBI (gen_addsub).
+    def binary_folded(name, a)
+      return false unless FOLD_OPS.include?(name)
+
+      if !no_peephole? && @insns.size >= 2 && !@labels.include?(@insns[-1][2]) && (n = int_operand(@insns[-1])) &&
+         (n0 = int_operand(@insns[-2]))
+        r = fold_value(name, n0, n)
+        if r
+          fold_load(@insns[-2][2], r, a)
+          @nregs = [@nregs, a + 3].max
+          return true
+        end
+      end
+      return false unless name == :+ || name == :-
+
+      # Two string literals are merged by `+` (merge_op_string): not covered.
+      if name == :+ && !no_peephole? && @insns.size >= 2 && @insns[-1][0] == :STRING && @insns[-2][0] == :STRING &&
+         !@labels.include?(@insns[-1][2]) && !@labels.include?(@insns[-2][2])
+        raise Unsupported, 'merged string literals'
+      end
+
+      add_sub(name, a)
+      @nregs = [@nregs, a + 3].max
+      true
+    end
+
+    # gen_uniop: when the last instruction is an integer load, the operator is applied to it at compile time (whatever
+    # register it loads: a call on self has no receiver of its own, and the fork folds the load before it).
+    def unary_folded(name, a)
+      return false if no_peephole? || !(n = int_operand(@insns.last))
+
+      raise Unsupported, 'negated INT64_MIN' if name == :-@ && n == INT64_MIN
+
+      n = { :-@ => -n, :+@ => n, :~ => ~n }.fetch(name)
+      fold_load(@insns.last[2], n, a)
+      @nregs = [@nregs, a + 2].max
+      true
+    end
+
+    # `-x`, `+x`, `~x` and their method-call forms. A `-x` without a dot is the fork's NODE_NEGATE (codegen_negate): a numeric
+    # literal operand is negated at compile time (and nothing at all is generated when the value is unused); anything else is
+    # generated, folded when it ended in an integer load (gen_uniop) and sent with a plain SEND of no arguments. `+x`, `~x`
+    # and `x.-@` are ordinary calls, with SEND0.
+    def unary_call(node, recv, a, need)
+      name = node.name
+      negate = name == :-@ && node.call_operator_loc.nil?
+      if negate && !node.receiver.is_a?(Prism::ParenthesesNode) && !recv.location.slice.start_with?('-') &&
+         (recv.is_a?(Prism::IntegerNode) || recv.is_a?(Prism::FloatNode) || recv.is_a?(Prism::SourceLineNode))
+        return a unless need
+
+        if recv.is_a?(Prism::FloatNode)
+          emit(:LOADL, a, pool_index([:float, float_bits(recv, negate: true)]))
+        else
+          v = recv.is_a?(Prism::SourceLineNode) ? recv.location.start_line : recv.value # __LINE__ is an integer literal
+          raise Unsupported, 'negated integer literal beyond 32 bits' unless v.abs < INT32_MAX
+
+          load_int(-v, a)
+        end
+        return a
+      end
+      operand_into(recv, a)
+      return a if unary_folded(name, a)
+
+      sym = sym_index(name)
+      negate ? emit(:SEND, a, sym, 0) : emit(:SEND0, a, sym)
+      @nregs = [@nregs, a + 2].max
+      a
+    end
+
+    # ---- float literals: mrb_read_float (src/readfloat.c) in Ruby, and the pool entry (IREP_TT_FLOAT, 8 bytes little endian) ----
+
+    def mrb_pow10(exp)
+      if exp >= 0
+        exp < 309 ? Float("1e#{exp}") : Float::INFINITY
+      else
+        exp = -exp
+        exp < 324 ? Float("1e-#{exp}") : 0.0
+      end
+    end
+
+    # The double the fork's lexer reads for the digits of a float literal (no sign): an integer part, up to 18 fraction digits
+    # divided by an exact power of ten, then the exponent multiplied in. Values whose integer or fraction digits exceed 53
+    # bits are not covered (the C conversion from uint64 is not reproduced).
+    def read_float(text)
+      text = text.delete('_')
+      m = /\A(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?\z/.match(text) or raise Unsupported, "float literal #{text}"
+      int_digits = m[1]
+      frac_digits = (m[2] || '')[0, 18]
+      raise Unsupported, 'float with many digits' if int_digits.size > 15 || frac_digits.size > 15
+
+      res = int_digits.to_i.to_f
+      res += frac_digits.to_i.to_f / mrb_pow10(frac_digits.size) unless frac_digits.empty?
+      if m[3]
+        e = m[3].to_i
+        e = 10_000 * (e.negative? ? -1 : 1) if e.abs >= 10_000
+        res *= mrb_pow10(e)
+      end
+      res
+    end
+
+    # The 8 bytes of a float literal's pool entry (the value negated for a negative literal, which the fork negates).
+    def float_bits(node, negate: false)
+      text = node.location.slice
+      neg = text.start_with?('-')
+      f = read_float(text.sub(/\A[-+]/, ''))
+      f = -f if neg != negate
+      [f].pack('E')
+    end
+
+    def float_into(node, dst)
+      emit(:LOADL, dst, pool_index([:float, float_bits(node)]))
+    end
+
+    # The names a `def` may have: plain names, predicates and bangs, setters and the operators.
+    DEF_OPERATORS = %i[== != === =~ !~ [] []= + - * / % ** << >> & | ^ ~ ! < <= > >= <=> +@ -@ !@ ~@ `].freeze
+    def def_name_ok?(name)
+      name.to_s.match?(/\A[A-Za-z_]\w*[?!=]?\z/) || DEF_OPERATORS.include?(name)
+    end
+
+    # ---- alias, undef, the special variables, __FILE__ and __LINE__, defined? ----
+
+    # gen_load_nil(s, val): the value of alias and undef is nil, loaded only when it is used.
+    def nil_value(last)
+      return nil unless last
+
+      t = temp
+      emit(:LOADNIL, t)
+      t
+    end
+
+    def static_symbol(node)
+      raise Unsupported, 'alias or undef of a dynamic symbol' unless node.is_a?(Prism::SymbolNode)
+
+      node.unescaped.to_sym
+    end
+
+    # codegen_alias: both names' symbols are numbered (new first), then ALIAS takes the two indexes.
+    def alias_statement(node, last:)
+      a = sym_index(static_symbol(node.new_name))
+      b = sym_index(static_symbol(node.old_name))
+      emit(:ALIAS, a, b)
+      nil_value(last)
+    end
+
+    # codegen_undef: one UNDEF per name.
+    def undef_statement(node, last:)
+      node.names.each { |n| emit(:UNDEF, sym_index(static_symbol(n))) }
+      nil_value(last)
+    end
+
+    # `$1`, `$&` and the like (codegen_nth_ref, codegen_back_ref) are reads of the global of that name.
+    def special_variable_name(node)
+      node.is_a?(Prism::NumberedReferenceReadNode) ? :"$#{node.number}" : node.name
+    end
+
+    SPECIAL_READS = [Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode].freeze
+
+    # codegen_str of the file name, and the line number as an integer load.
+    def source_into(node, dst)
+      if node.is_a?(Prism::SourceFileNode)
+        emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, @filename.b]))
+      else
+        load_int(node.location.start_line, dst)
+      end
+    end
+
+    # The pushes of the fork's helpers for `defined?`: nregs counts the highest stack pointer they reach.
+    def reach(sp)
+      @nregs = [@nregs, sp].max
+    end
+
+    # codegen_defined_push_str.
+    def defined_str(r, str)
+      emit(:STRING, r, pool_index([:str, str.b]))
+    end
+
+    # codegen_defined_bool_to_str: the boolean in +r+ becomes +str+ or nil.
+    def defined_bool_to_str(r, str)
+      skip = emit_jump(:JMPNOT, r)
+      defined_str(r, str)
+      done = emit_jump(:JMP)
+      dispatch(skip)
+      emit(:LOADNIL, r)
+      dispatch(done)
+    end
+
+    DEFINED_STRINGS = { Prism::NilNode => 'nil', Prism::TrueNode => 'true', Prism::FalseNode => 'false',
+                        Prism::SelfNode => 'self', Prism::LocalVariableReadNode => 'local-variable' }.freeze
+    DEFINED_ASSIGNMENTS = [Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode,
+                           Prism::ConstantWriteNode, Prism::ClassVariableWriteNode,
+                           Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+                           Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode,
+                           Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
+                           Prism::GlobalVariableOrWriteNode, Prism::LocalVariableAndWriteNode,
+                           Prism::InstanceVariableAndWriteNode, Prism::GlobalVariableAndWriteNode, Prism::MultiWriteNode,
+                           Prism::ClassVariableOrWriteNode, Prism::ClassVariableAndWriteNode,
+                           Prism::ClassVariableOperatorWriteNode, Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode,
+                           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode,
+                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode].freeze
+    DEFINED_EXPRESSIONS = [Prism::IntegerNode, Prism::FloatNode, Prism::StringNode, Prism::SymbolNode,
+                           Prism::RegularExpressionNode, Prism::AndNode, Prism::OrNode, Prism::SourceFileNode,
+                           Prism::SourceLineNode, Prism::ArrayNode, Prism::HashNode, Prism::ParenthesesNode,
+                           Prism::IfNode, Prism::UnlessNode, Prism::InterpolatedStringNode, Prism::RangeNode,
+                           Prism::LambdaNode, Prism::InterpolatedRegularExpressionNode, Prism::BeginNode,
+                           Prism::WhileNode, Prism::CaseNode, Prism::ReturnNode, Prism::NumberedReferenceReadNode,
+                           Prism::BackReferenceReadNode].freeze
+
+    # `defined?(expr)` as a value in register +r+ (codegen_defined): the argument is never evaluated; what the fork answers is
+    # decided by the node kind. Constants (a catch handler) and the rest are not covered.
+    def defined_at(node, r)
+      expr = node.value
+      raise Unsupported, 'defined? without an argument' unless expr
+
+      case expr
+      when *DEFINED_STRINGS.keys then defined_str(r, DEFINED_STRINGS.fetch(expr.class))
+      when *DEFINED_ASSIGNMENTS then defined_str(r, 'assignment')
+      when *DEFINED_EXPRESSIONS then defined_str(r, 'expression')
+      when Prism::InstanceVariableReadNode
+        defined_self_send(r, :instance_variable_defined?, expr.name)
+        defined_bool_to_str(r, 'instance-variable')
+      when Prism::GlobalVariableReadNode
+        defined_gvar(r, expr.name)
+        defined_bool_to_str(r, 'global-variable')
+      when Prism::ClassVariableReadNode
+        defined_cvar(r, expr.name)
+        defined_bool_to_str(r, 'class variable')
+      when Prism::YieldNode
+        reach(r + 2)
+        emit(:SSEND0, r, sym_index(:block_given?))
+        reach(r + 1)
+        defined_bool_to_str(r, 'yield')
+      when Prism::SuperNode, Prism::ForwardingSuperNode
+        emit(:LOADNIL, r)
+      when Prism::CallNode
+        # `-x` is a NODE_NEGATE to the fork, which answers like any other expression.
+        return defined_str(r, 'expression') if expr.name == :-@ && expr.call_operator_loc.nil?
+        # An attribute or index assignment is an assignment node to the fork.
+        return defined_str(r, 'assignment') if expr.name.to_s.end_with?('=') && !%i[== === != <= >=].include?(expr.name)
+
+        defined_respond_to(expr, r)
+        defined_bool_to_str(r, 'method')
+      else raise Unsupported, "defined? of #{expr.class.name.split('::').last}"
+      end
+    end
+
+    # codegen_defined_respond_to: `recv.respond_to?(:name, true)` (SSEND without a receiver) is run, never the method.
+    def defined_respond_to(call, r)
+      raise Unsupported, 'defined? of a call with a block' if call.block
+
+      recv = call.receiver && unparen(call.receiver)
+      noself = recv.nil? || recv.is_a?(Prism::SelfNode)
+      raise Unsupported, 'defined? of a call on a non-operand receiver' unless noself || operand?(recv)
+
+      reach(r + 1)
+      saved = @sp
+      @sp = r
+      operand_into(recv, r) unless noself
+      @sp = saved
+      emit(:LOADSYM, r + 1, sym_index(call.name))
+      emit(:LOADTRUE, r + 2)
+      reach(r + 4)
+      emit(noself ? :SSEND : :SEND, r, sym_index(:respond_to?), 2)
+    end
+
+    # codegen_defined_self_send1_sym: `self.method(:sym)` for an instance variable.
+    def defined_self_send(r, method, arg)
+      emit(:LOADSYM, r + 1, sym_index(arg))
+      reach(r + 3)
+      emit(:SSEND, r, sym_index(method), 1)
+    end
+
+    # codegen_defined_gvar: `global_variables.include?(:$name)`.
+    def defined_gvar(r, name)
+      reach(r + 2)
+      emit(:SSEND0, r, sym_index(:global_variables))
+      emit(:LOADSYM, r + 1, sym_index(name))
+      reach(r + 3)
+      emit(:SEND, r, sym_index(:include?), 1)
+    end
+
+    # codegen_defined_cvar: `__defined_cvar_scope.class_variable_defined?(:@@name)`.
+    def defined_cvar(r, name)
+      reach(r + 2)
+      emit(:SSEND0, r, sym_index(:__defined_cvar_scope))
+      emit(:LOADSYM, r + 1, sym_index(name))
+      reach(r + 3)
+      emit(:SEND, r, sym_index(:class_variable_defined?), 1)
+    end
+
+    # ---- Rational and Imaginary literals: the fork's parser turns `1r` into `Rational(1)` and `2i` into `Complex(0, 2)` ----
+
+    # The literal inside a suffixed number (the digits of `1.5r` without the `r`), as an integer or a float load into +reg+.
+    def numeric_literal_at(node, reg)
+      text = node.location.slice
+      raise Unsupported, 'negative rational or imaginary literal' if text.start_with?('-')
+
+      text = text.delete_suffix('i') if node.is_a?(Prism::ImaginaryNode)
+      text = text.delete_suffix('r')
+      if text.match?(/[.eE]/) && !text.match?(/\A0[xX]/)
+        raise Unsupported, 'rational literal with an exponent' if text.match?(/[eE]/)
+
+        emit(:LOADL, reg, pool_index([:float, [read_float(text)].pack('E')]))
+      else
+        v = Integer(text.delete('_'))
+        raise Unsupported, 'rational or imaginary literal beyond 32 bits' unless v <= INT32_MAX
+
+        load_int(v, reg)
+      end
+    end
+
+    # The call of Rational or Complex with its result in +a+ (an SSEND whose arguments follow it).
+    def numeric_call_at(node, a)
+      reach(a + 1)
+      if node.is_a?(Prism::RationalNode)
+        numeric_literal_at(node, a + 1)
+        argc = 1
+        name = :Rational
+      else
+        emit(:LOADI_0, a + 1)
+        inner = node.numeric
+        case inner
+        when Prism::RationalNode then numeric_call_at(inner, a + 2)
+        when Prism::IntegerNode, Prism::FloatNode then numeric_literal_at(inner, a + 2)
+        else raise Unsupported, 'imaginary literal'
+        end
+        argc = 2
+        name = :Complex
+      end
+      emit(:SSEND, a, sym_index(name), argc)
+      reach(a + argc + 2)
     end
 
     # ---- RITE, as src/dump.c writes it: header, IREP, DBG, LVAR, END ----
@@ -2503,6 +2963,11 @@ module MrbcRb
         case entry
         in [:bigint, digits, base]
           [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
+        in [:int, v]
+          # new_lit_int: IREP_TT_INT64 when it does not fit in 32 bits, else IREP_TT_INT32
+          v.between?(INT32_MIN, INT32_MAX) ? [1, v & 0xffff_ffff].pack('CN') : [3, (v >> 32) & 0xffff_ffff, v & 0xffff_ffff].pack('CNN')
+        in [:float, bits]
+          [5].pack('C') + bits # IREP_TT_FLOAT: the double, little endian
         in [:str, bytes]
           # A string: tag 0, its length, its bytes and a NUL (dump.c's default case).
           [0].pack('C') + [bytes.bytesize].pack('n') + bytes + "\0".b
