@@ -29,7 +29,7 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118
   }.freeze
@@ -40,7 +40,7 @@ module MrbcRb
 
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
   SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
-                   Prism::LocalVariableReadNode, Prism::StringNode].freeze
+                   Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -93,10 +93,13 @@ module MrbcRb
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
-      when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode
+      when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
+           Prism::ConstantReadNode, Prism::StringNode
         last ? value_in_register(node) : nil
       when Prism::CallNode
         call(node)
+      when Prism::ConstantWriteNode
+        const_write(node, last: last)
       when Prism::IfNode
         if_statement(node, last: last)
       when Prism::UnlessNode
@@ -234,6 +237,14 @@ module MrbcRb
       @labels << target
     end
 
+    # `X = value`: the value goes to the first temporary, SETCONST stores it, and the last statement returns it.
+    def const_write(node, last:)
+      t = temp
+      value_into(node.value, t)
+      emit(:SETCONST, t, sym_index(node.name))
+      last ? t : nil
+    end
+
     def write_local(node, last:)
       local = local_register(node.name)
       value = node.value
@@ -269,7 +280,8 @@ module MrbcRb
       recv = node.receiver unless node.receiver.is_a?(Prism::SelfNode)
       args = node.arguments&.arguments || []
       raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !SIMPLE_VALUES.include?(a.class) }
-      raise Unsupported, 'call with a non-simple receiver' if recv && !SIMPLE_VALUES.include?(recv.class)
+      # A receiver may itself be a call: it leaves its result in the same temporary.
+      raise Unsupported, 'call with a non-simple receiver' if recv && !(SIMPLE_VALUES.include?(recv.class) || recv.is_a?(Prism::CallNode))
 
       a = temp
       if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
@@ -347,6 +359,7 @@ module MrbcRb
       when Prism::IntegerNode then load_int(node.value, dst)
       when Prism::LocalVariableReadNode then emit(:MOVE, dst, local_register(node.name))
       when Prism::StringNode then emit(:STRING, dst, pool_index([:str, node.unescaped.b]))
+      when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::CallNode
         result = call(node)

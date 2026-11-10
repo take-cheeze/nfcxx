@@ -78,7 +78,15 @@ SNIPPETS = [
   "x = 1\nunless x\n  2\nelse\n  3\nend",
   "x = 1\nunless x\n  2\nend",
   "x = 1\nunless x\n  2\nend\np 3",
-  "unless self\n  1\nend"
+  "unless self\n  1\nend",
+  # call receivers that are calls, constants (milestone 5)
+  "x = 1\nx.foo.bar",
+  "x = 1\nx.foo.bar(2)",
+  "X = 1",
+  "X = 1\nX",
+  "x = X",
+  "x = 1\nx = X",
+  "X = 1\nY = X\nY"
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
