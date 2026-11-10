@@ -55,14 +55,22 @@ module MrbcRb
   # when it built the node, which is the node's end line.
   MULTILINE_STATEMENTS = [Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
                           Prism::InstanceVariableWriteNode, Prism::CallNode, Prism::StringNode, Prism::InterpolatedStringNode,
-                          Prism::HashNode, Prism::ArrayNode].freeze
+                          Prism::HashNode, Prism::ArrayNode, Prism::OrNode, Prism::AndNode, Prism::ReturnNode,
+                          Prism::LocalVariableOperatorWriteNode, Prism::InstanceVariableOperatorWriteNode,
+                          Prism::GlobalVariableOperatorWriteNode, Prism::ConstantOperatorWriteNode,
+                          Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode, Prism::GlobalVariableOrWriteNode,
+                          Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode, Prism::InstanceVariableAndWriteNode,
+                          Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
+                          Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
+                          Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
              Prism::SymbolNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::ArrayNode, Prism::CallNode,
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
-             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode].freeze
+             Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::RegularExpressionNode,
+             Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode, Prism::ConstantPathNode].freeze
 
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode].freeze
@@ -129,6 +137,7 @@ module MrbcRb
       @insns = [] # every emitted instruction as [name, operands, start], for the peepholes that look two back (gen_move)
       @rewound = false # the pc was rewound to the last instruction (the fork's pc == lastpc): no peephole until the next emit
       @leading_dot = {}.compare_by_identity # receiver node => line of the next token, for `recv\n  .name` (see #line_of)
+      @line_override = {}.compare_by_identity # node => the line the fork stamps it with when that is not its end line
     end
 
     def compile(program)
@@ -242,7 +251,9 @@ module MrbcRb
       param_names = requireds.map(&:name)
       set_locals(param_names + [nil] + (node.locals - param_names))
       @nregs = @nlocals + 1
-      @line = node.opening_loc.start_line
+      # The scope starts at the line of the parent's last entered node: a block node is stamped with the line of its opening
+      # `{` or `do`, a lambda with the line of its end.
+      @line = node.is_a?(Prism::LambdaNode) ? parent.send(:current_line) : node.opening_loc.start_line
       emit(:ENTER, requireds.size << 18)
       stmts = node.body ? node.body.body : []
       value_reg = if stmts.empty?
@@ -359,29 +370,29 @@ module MrbcRb
       raise Unsupported, 'call with a block and a non-simple receiver' if recv && !operand?(recv)
 
       line = blk.opening_loc.start_line
-      parts = [*(recv ? [recv.location] : []), *args.map(&:location)]
-      unless @line == line && node.location.start_line == line && parts.all? { |l| l.start_line == line && l.end_line == line }
-        raise Unsupported, 'call with a block spanning lines'
-      end
-
       a = @sp
       @nregs = [@nregs, a + 1].max
       operand_into(recv, a) if recv
       skip = safe_jump(a, need) if node.safe_navigation?
       argc, = gen_args(nil, a, args)
       sp = @sp
+      # The block node is stamped with the line of its opening `{` or `do` (the parser records the line right after that
+      # token), and it is entered after the receiver and the arguments: BLOCK and SENDB carry that line.
+      @line = line
       @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(blk, self)
       index = @children.size - 1
       raise Unsupported, 'more than 255 child ireps' if index > 0xff
 
       emit(:BLOCK, sp, index)
       emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), argc)
-      patch_jump(skip, @code.size) if skip
+      dispatch(skip)
       @nregs = [@nregs, sp + 1].max
       a
     ensure
       @sp = a if a
     end
+
+    def current_line = @line
 
     def set_locals(locals)
       @locals = locals.dup
@@ -469,7 +480,17 @@ module MrbcRb
     # Receivers (and the calls they belong to) that are reduced only once the next token is read: that token is the `.` of a
     # leading-dot continuation, on a later line.
     def line_of(node)
-      @leading_dot.fetch(node, node.location.end_line)
+      @line_override.fetch(node) { @leading_dot.fetch(node, node.location.end_line) }
+    end
+
+    # The key of `label: value` is a symbol node the fork's parser builds in the action of the whole pair (`assoc: tLABEL
+    # arg_value`), after the value: it takes the line the parser is on after the value (verified with mrbc -v: the line of
+    # the value's end, so a multi-line value gives the key that later line). `:k => v` and `"k" => v` keys are built before.
+    def label_key_line(assoc)
+      key = assoc.key
+      return unless key.is_a?(Prism::SymbolNode) && key.opening_loc.nil? && key.closing_loc&.slice == ':'
+
+      @line_override[key] = line_of(unparen(assoc.value))
     end
 
     # A call whose `.` is on a later line than its receiver's end: the parser reads the `.` (skipping the newline) before it
@@ -503,7 +524,7 @@ module MrbcRb
         n = stack.pop
         case n
         when Prism::OrNode, Prism::AndNode, Prism::ParenthesesNode
-          raise Unsupported, 'multi-line logic or parentheses' if n.location.start_line != n.location.end_line
+          nil
         when Prism::StringNode, Prism::InterpolatedStringNode
           raise Unsupported, 'heredoc' if n.opening_loc&.slice&.start_with?('<<')
         when Prism::CallNode
@@ -615,9 +636,7 @@ module MrbcRb
     # A condition (an if/unless/while/until predicate) is generated as a value on one line: the fork stamps each node with
     # its own line, and a statement's @line is the line of its first node.
     def check_condition(pred, elsif_node)
-      return if pred.location.start_line == pred.location.end_line && (elsif_node || pred.location.start_line == @line)
-
-      raise Unsupported, 'condition on another line than its statement'
+      return
     end
 
     # `x.nil?` in a condition is tested with JMPNIL on the receiver (codegen_if's nil_p).
@@ -1034,8 +1053,6 @@ module MrbcRb
     # JMPNOT for &&), and the right side replaces it. As a statement the right side is evaluated only for its effects. A
     # literal left side is folded away (codegen_and and codegen_or): `true && b` is b, `nil && b` is nil.
     def logic(node, need:)
-      raise Unsupported, 'multi-line logic operator' if node.location.start_line != node.location.end_line
-
       left = node.left # a parenthesized literal is not folded
       right = unparen(node.right)
       is_or = node.is_a?(Prism::OrNode)
@@ -1092,6 +1109,7 @@ module MrbcRb
     # generated at the stack pointer (a constant, another path or an operand) and GETMCNST reads the name from it; a leading
     # `::` is OCLASS in its place. The result is in the register the path started at.
     def colon_path(node)
+      enter(node)
       a = @sp
       sym = sym_index(node.name)
       parent = node.parent && unparen(node.parent)
@@ -1412,7 +1430,7 @@ module MrbcRb
       to_end = emit_jump(jump_name(node), reg)
       value_into(value, t)
       write_target_from(kind, node, t, last)
-      patch_jump(to_end, @code.size)
+      dispatch(to_end)
       last ? t : nil
     end
 
@@ -1479,7 +1497,7 @@ module MrbcRb
         emit(:SEND, base, sym_index(node.write_name), 1)
         @nregs = [@nregs, base + 3].max
       end
-      patch_jump(to_end, @code.size) if to_end
+      dispatch(to_end)
       last ? t : nil
     end
 
@@ -1727,7 +1745,7 @@ module MrbcRb
       skip = safe_jump(a, need) if node.safe_navigation?
       argc, blk = gen_args(node.block, a, node.arguments&.arguments || [])
       emit_send(a, recv, node.name, argc, blk)
-      patch_jump(skip, @code.size) if skip
+      dispatch(skip)
       a
     ensure
       @sp = a if a
@@ -1828,6 +1846,7 @@ module MrbcRb
       update = false
       first = true
       kw.elements.each do |e|
+        label_key_line(e) if e.is_a?(Prism::AssocNode)
         case e
         when Prism::AssocSplatNode
           v = e.value && unparen(e.value)
@@ -1937,7 +1956,16 @@ module MrbcRb
           @nregs = [@nregs, a + 3].max
           return a
         end
-        emit(BINARY_OPS.fetch(name), a)
+        # gen_binop (`[]`) and gen_addsub (a string literal after a string literal) look at the instructions just emitted.
+        if name == :+ && !no_peephole? && @insns.last(2).map(&:first) == %i[STRING STRING] && !@labels.include?(@insns.last[2]) &&
+           !@labels.include?(@insns[-2][2])
+          raise Unsupported, 'string literals added (merged by the fork)'
+        end
+        if name == :[] && no_peephole? # a jump target right here: gen_binop gives up and the plain SEND is emitted
+          emit(:SEND, a, sym_index(:[]), 1)
+        else
+          emit(BINARY_OPS.fetch(name), a)
+        end
         @nregs = [@nregs, a + 3].max
         return a
       end
@@ -1952,7 +1980,7 @@ module MrbcRb
       else
         n.zero? ? emit(:SSEND0, a, sym) : emit(:SSEND, a, sym, n)
       end
-      patch_jump(skip, @code.size) if skip
+      dispatch(skip)
       @nregs = [@nregs, a + n + 2].max
       a
     ensure
@@ -2210,11 +2238,13 @@ module MrbcRb
     # The value of an interpolated expression in register +dst+, which is the top of the stack.
     def interpolation_into(node, dst)
       raise Unsupported, 'interpolation operand' unless interpolation_operand?(node)
-      raise Unsupported, 'multi-line interpolation' if node && (node.location.start_line != node.location.end_line || heredoc_inside?(node))
+      raise Unsupported, 'multi-line interpolation' if node && (heredoc_inside?(node) ||
+                                                                (@in_heredoc && node.location.start_line != node.location.end_line))
 
       # Every node the fork generates stamps the line it was parsed on, so the code of an expression in a heredoc body is on
-      # that body's line, and so is the rest of the string and of the statement after it.
-      if node
+      # that body's line, and so is the rest of the string and of the statement after it. In a quoted string the expression's
+      # own nodes set their lines as they are entered.
+      if node && @in_heredoc
         @line_moved = true if @line != node.location.start_line
         @line = node.location.start_line
       end
@@ -2235,30 +2265,38 @@ module MrbcRb
     # An interpolated or concatenated string whose value is unused: only the expressions are evaluated, in order, for their
     # effects (gen_string with val 0).
     def string_unused(node)
-      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+      heredoc = heredoc_string?(node)
+      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line && heredoc_inside?(node)
 
       string_parts(node).each do |kind, v|
         next unless kind == :expr && v
 
         raise Unsupported, 'interpolation operand' unless interpolation_operand?(v)
-        raise Unsupported, 'multi-line interpolation' if v.location.start_line != v.location.end_line || heredoc_inside?(v)
+        raise Unsupported, 'multi-line interpolation' if heredoc_inside?(v) || (heredoc && v.location.start_line != v.location.end_line)
 
-        @line_moved = true if @line != v.location.start_line
-        @line = v.location.start_line
+        if heredoc
+          @line_moved = true if @line != v.location.start_line
+          @line = v.location.start_line
+        end
         statement(v, last: false)
       end
     end
+
+    def heredoc_string?(node) = node.respond_to?(:opening) && node.opening&.start_with?('<<')
 
     # gen_string with a value: the first part is loaded into the base register, each further part into the next one and
     # STRCATed onto the base. Under `# frozen_string_literal: true` a string of literals only is one FSTRING of the
     # concatenated bytes (gen_frozen_string).
     def dstr_into(node, dst)
-      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line
+      heredoc = heredoc_string?(node)
+      raise Unsupported, 'multi-line interpolated string' if node.location.start_line != node.location.end_line && heredoc_inside?(node)
 
       parts = string_parts(node)
-      # The node's own line, as every node the fork generates (a heredoc: the `<<` line).
-      @line_moved = true if @line != node.location.start_line
-      @line = node.location.start_line
+      # The node's own line, as every node the fork generates: the line it ends on (a quoted string spanning lines, or
+      # adjacent literals, is built when the parser reaches the end), for a heredoc the `<<` line.
+      line = heredoc ? node.location.start_line : line_of(node)
+      @line_moved = true if heredoc && @line != line
+      @line = line
       if @frozen_strings && parts.all? { |kind, _| kind == :lit }
         return emit(:FSTRING, dst, pool_index([:str, parts.map(&:last).join.b]))
       end
@@ -2266,7 +2304,13 @@ module MrbcRb
       # A single literal is a plain string load, folded into a local like any other (gen_move).
       return emit(:STRING, dst, pool_index([:str, parts[0][1]])) if parts.size == 1
 
-      built_into(dst) { |base| dstr_at(parts, base) }
+      saved = @in_heredoc
+      @in_heredoc = heredoc
+      begin
+        built_into(dst) { |base| dstr_at(parts, base) }
+      ensure
+        @in_heredoc = saved
+      end
     end
 
     def dstr_at(parts, base)
@@ -2383,6 +2427,7 @@ module MrbcRb
       raise Unsupported, 'large hash' if pairs.size > 16
 
       pairs.each_with_index do |e, i|
+        label_key_line(e)
         value_into(e.key, base + 2 * i)
         value_into(e.value, base + 2 * i + 1)
       end
