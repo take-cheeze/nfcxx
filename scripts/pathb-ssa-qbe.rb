@@ -887,9 +887,19 @@ end
 
 # `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
 # the driver appends (scripts/pathb-ssa-build): an abort, as scripts/pathb-qbe-emit.rb's shared abort block.
+# The call is out of the flow: a `jnz` to a trap block of its own (the call, then hlt: the helper does not return),
+# and the operation goes on in the block after it. A call in the hot path cost about 40% of token generation.
     def check_call(cond, code)
       asm_helpers << "check" unless asm_helpers.include?("check")
-      @lines << "  call $pathb_check(w #{cond}, w #{code})"
+      @temps += 1
+      trap = "ckt#{@temps}"
+      ok = "cko#{@temps}"
+      @lines << "  jnz #{cond}, @#{trap}, @#{ok}"
+      @lines << "@#{trap}"
+      @lines << "  call $pathb_check(w 1, w #{code})"
+      @lines << "  hlt"
+      @lines << "@#{ok}"
+      @label = ok # a jump out of the split block is the one that the phi of its target names
     end
 
     def barrier_lines
