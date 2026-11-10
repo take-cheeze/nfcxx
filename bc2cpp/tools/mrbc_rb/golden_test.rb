@@ -211,7 +211,32 @@ SNIPPETS = [
   "x = 1\np x, {a: x}",
   "x = {a: 1}\nx.size",
   "{}\n3",
-  'x = {a: 1, b: 2, c: 3}'
+  'x = {a: 1, b: 2, c: 3}',
+  # nested calls, the register stack (milestone 9)
+  'foo(bar(1))',
+  "x = 1\nfoo(bar(x), x.baz)",
+  "x = 1\nx.b(x.d).e",
+  "x = 1\nx.size + 1",
+  "x = 1\nfoo(x + 1)",
+  "x = 1\ny = foo(bar(x))",
+  "x = 1\ny = foo(bar(x))\ny",
+  "x = foo(1)\nx",
+  "x = 1\nfoo(1, bar(x), 2)",
+  'foo(bar(baz(1)))',
+  "x = 1\nfoo(bar(baz(x), 2), 3)",
+  "x = 1\nx.a(1).b(2).c(3)",
+  "x = 1\nx.a(x.b(x.c(1)))",
+  "x = 1\nx + x.size",
+  "x = 1\nx.size < x.foo(1)",
+  "x = 1\nfoo(x * bar(2))",
+  "x = 1\nfoo(bar(1) + baz(2))",
+  "x = 1\nfoo(x + 1 + 2)",
+  "x = 1\nfoo([x, 1])",
+  "x = 1\nfoo(bar([1, 2]), \"s\")",
+  "x = 1\nif foo(bar(x))\n  p 1\nend",
+  "x = 1\nif x.size > 1\n  p foo(1)\nelse\n  p bar(baz(2))\nend",
+  "x = 1\nx.foo(self.bar)",
+  'self.foo(bar(1))'
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)

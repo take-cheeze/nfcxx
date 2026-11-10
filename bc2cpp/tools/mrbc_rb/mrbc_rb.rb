@@ -42,6 +42,11 @@ module MrbcRb
   BINARY_OPS = { :+ => :ADD, :- => :SUB, :* => :MUL, :/ => :DIV, :== => :EQ, :< => :LT, :<= => :LE, :> => :GT,
                  :>= => :GE, :[] => :GETIDX }.freeze
 
+  # Statements that may span several lines because their line rules are verified (if/unless arms, class and module bodies,
+  # def); any other multi-line statement raises Unsupported: the fork stamps its code with a line that is not the start
+  # line (a %w array over two lines is stamped with its last line), and that rule is not reproduced yet.
+  MULTILINE_OK = [Prism::IfNode, Prism::UnlessNode, Prism::ClassNode, Prism::ModuleNode, Prism::DefNode].freeze
+
   # Predicates the fork folds at compile time (no test is emitted for them).
   LITERAL_PREDICATES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::StringNode].freeze
 
@@ -61,6 +66,9 @@ module MrbcRb
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
   BUILT_VALUES = [Prism::InterpolatedStringNode, Prism::HashNode].freeze
+
+  # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
+  UNVERIFIED_OPERATORS = %i[-@ +@ ~ =~ !~ <=> ** & | ^ >> ===].freeze # `[]`, `[]=`, `!`, `!=`, `%` and `<<` are verified
 
   # Pool entry tags (include/mruby/irep.h).
   IREP_TT_BIGINT = 7
@@ -92,6 +100,7 @@ module MrbcRb
       @lines = []
       @line = 0
       @nregs = 0
+      @sp = 0 # the register stack pointer: the first free register; see #call
       @pool = []
       @syms = []
       @children = [] # child ireps of class and module bodies, in the order EXEC refers to them
@@ -180,6 +189,7 @@ module MrbcRb
       @locals = locals.dup
       @nlocals = @locals.size + 1
       @nregs = @nlocals
+      @sp = @nlocals # the register stack starts after the locals
     end
 
     # A def in a body: TDEF stores the method's symbol in the result register and refers to a child irep.
@@ -209,6 +219,10 @@ module MrbcRb
     # Generates one statement. The last statement returns the register that holds its value.
     def statement(node, last:)
       node = unparen(node)
+      if node.location.start_line != node.location.end_line && !MULTILINE_OK.include?(node.class) &&
+         !(node.is_a?(Prism::CallNode) && node.block)
+        raise Unsupported, 'multi-line statement'
+      end
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
@@ -505,8 +519,12 @@ module MrbcRb
       end
     end
 
-    # A method call, as the fork's codegen emits it: the result register is the first temporary, the receiver is copied
-    # into it, and the arguments follow it. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the copy.
+    # A method call, as the fork's codegen emits it. The registers above the locals are a stack (the fork's cursp, here
+    # @sp = the first free register): a call's result register is the stack pointer at its start, its receiver is
+    # generated into that register, and each argument is generated into the next one with the pointer advanced to it, so a
+    # nested call (or an operator on a call) takes the argument's register as its own result register and its result lands
+    # in place with no move. The pointer is restored when the call is done; the result stays in the base register, which
+    # the caller then owns. A binary + or - with a literal from 1 to 255 is ADDI or SUBI on the receiver's register.
     # Returns the result register.
     # `recv.name = value`: the result (the value) is in the first temporary r; the receiver is in r+1 and the value in r+2,
     # and SEND runs on r+1 with that one argument (verified against mrbc -v: the result is the value, not the send's).
@@ -552,9 +570,10 @@ module MrbcRb
       recv = node.receiver && unparen(node.receiver)
       recv = nil if recv.is_a?(Prism::SelfNode)
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
-      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !simple?(a) && !BUILT_VALUES.include?(a.class) }
-      # A receiver may itself be a call: it leaves its result in the same temporary.
-      raise Unsupported, 'call with a non-simple receiver' if recv && !(simple?(recv) || call_node?(recv))
+      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !operand?(a) }
+      raise Unsupported, 'call with a non-simple receiver' if recv && (!operand?(recv) || BUILT_VALUES.include?(recv.class))
+      raise Unsupported, 'safe navigation' if node.safe_navigation?
+      raise Unsupported, "operator method #{name}" if recv && UNVERIFIED_OPERATORS.include?(name)
 
       if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
         raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
@@ -563,10 +582,15 @@ module MrbcRb
         return attribute_assign(node, recv, args[0], need: need)
       end
 
-      a = temp
+      # The parser folds an operator on two integer literals (1 + 2), which is not reproduced here.
+      raise Unsupported, 'operator on two literals' if recv.is_a?(Prism::IntegerNode) && BINARY_OPS.key?(name) &&
+                                                       args.size == 1 && args[0].is_a?(Prism::IntegerNode)
+
+      a = @sp
+      @nregs = [@nregs, a + 1].max
       if recv && %i[+ -].include?(name) && args.size == 1 && args[0].is_a?(Prism::IntegerNode) &&
          (1..0xff).cover?(args[0].value)
-        value_into(recv, a)
+        operand_into(recv, a)
         emit(name == :+ ? :ADDI : :SUBI, a, args[0].value)
         @nregs = [@nregs, a + 3].max
         return a
@@ -579,15 +603,15 @@ module MrbcRb
       raise Unsupported, 'index assignment' if name == :[]=
 
       if recv && BINARY_OPS.key?(name) && args.size == 1
-        value_into(recv, a)
-        value_into(args[0], a + 1)
+        operand_into(recv, a)
+        operand_into(args[0], a + 1)
         emit(BINARY_OPS.fetch(name), a)
         @nregs = [@nregs, a + 3].max
         return a
       end
 
-      value_into(recv, a) if recv
-      args.each_with_index { |arg, i| value_into(arg, a + 1 + i) }
+      operand_into(recv, a) if recv
+      args.each_with_index { |arg, i| operand_into(arg, a + 1 + i) }
       sym = sym_index(name)
       n = args.size
       if recv
@@ -597,6 +621,25 @@ module MrbcRb
       end
       @nregs = [@nregs, a + n + 2].max
       a
+    ensure
+      @sp = a if a
+    end
+
+    # Whether +node+ may be a call's receiver or argument: a leaf, an array of leaves, or a call (checked when generated).
+    def operand?(node)
+      node = unparen(node)
+      SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || BUILT_VALUES.include?(node.class) ||
+        (node.is_a?(Prism::ArrayNode) && node.elements.all? { |e| simple?(e) })
+    end
+
+    # Generates an operand into register +dst+ with the stack pointer at +dst+ (everything above it is free), as the fork
+    # pushes an operand and generates it into the new top of the stack.
+    def operand_into(node, dst)
+      saved = @sp
+      @sp = dst
+      value_into(node, dst)
+    ensure
+      @sp = saved
     end
 
     # Symbols are numbered in order of first use, as the fork's new_sym does.
@@ -633,7 +676,12 @@ module MrbcRb
     # The register the value of +node+ is in: a local is read in place, anything else is loaded into a temporary.
     def value_in_register(node)
       node = unparen(node)
-      return local_register(node.name) if node.is_a?(Prism::LocalVariableReadNode)
+      if node.is_a?(Prism::LocalVariableReadNode)
+        # The register is read in place: the fork's MOVE into a temporary, folded into the RETURN, leaves no instruction
+        # behind, so a MOVE of an earlier statement must not be folded.
+        @last = nil
+        return local_register(node.name)
+      end
 
       t = temp
       value_into(node, t)
@@ -777,10 +825,11 @@ module MrbcRb
       index + 1
     end
 
-    # The first temporary, as the fork's codegen starts its stack after the locals. Using one raises the register count.
+    # The first free register (@sp), which starts after the locals as the fork's codegen starts its stack. Using one raises
+    # the register count.
     def temp
-      @nregs = [@nregs, @nlocals + 1].max
-      @nlocals
+      @nregs = [@nregs, @sp + 1].max
+      @sp
     end
 
     # Emits one instruction and records its source line for each of its bytes. Operands follow the formats in ops.h:
