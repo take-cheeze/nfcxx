@@ -71,6 +71,19 @@ done
 if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
   # Weak directives are for EDG's own output only (the original .c file names the directives' symbols).
   asmf=$tmp/out.s
+  # 6. gcc never inlines a function declared weak (another unit's copy could replace it at link time), and EDG marks
+  #    every COMDAT function weak, so each inline member and template instance stayed a call: shared_ptr's refcount
+  #    (__gnu_cxx::__exchange_and_add, one lock xadd), operator-> and get() were out-of-line in libggml-vulkan (3155 call
+  #    sites, none in g++'s build). The copies of a COMDAT group are the same function (the ODR), so inlining one is
+  #    what g++ does. gcc compiles a copy of the C without the COMDAT groups' __weak__, and weak-symbols reads the C with
+  #    it, so the object's symbols are as weak as before (the definitions, and the references a unit does not define).
+  #    The weak declarations outside a COMDAT group stay (the extern thread_local init function, which is tested for
+  #    null). NFCXX_WEAK_INLINE=0 compiles the C as EDG wrote it.
+  gsrc=$csrc
+  if [ "${NFCXX_WEAK_INLINE:-1}" != 0 ] && grep -q '__weak__)) /\* COMDAT group:' "$csrc"; then
+    gsrc=$tmp/inline.c
+    sed 's|__attribute__((__weak__)) /\* COMDAT group:|/* COMDAT group:|g' "$csrc" > "$gsrc"
+  fi
   build=()
   skip=0
   for a in ${args[@]+"${args[@]}"}; do
@@ -78,6 +91,7 @@ if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
     case $a in
       -c) build+=(-S) ;;
       -o) build+=(-o "$asmf"); skip=1 ;;
+      "$csrc") build+=("$gsrc") ;;
       *) build+=("$a") ;;
     esac
   done
