@@ -760,18 +760,8 @@ class CodeGen
     field[:value] || field[:name].sub('bc2cpp_saved_', '')
   end
 
-  # A rescue body is its own C function, where the method's frame locals (bc2cpp_fai, the registers it roots) are not
-  # in scope: no back-edge of it restores the arena (codegen_method.rb backedge_frame_begin).
-  def emit_rescue_try_body(*args, **kwargs)
-    saved = @backedge
-    @backedge = nil
-    emit_rescue_try_body_unguarded(*args, **kwargs)
-  ensure
-    @backedge = saved
-  end
-
-  def emit_rescue_try_body_unguarded(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
-                                     available_upvars: [], inline_mand: nil)
+  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
+                           available_upvars: [], inline_mand: nil)
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
                  extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
