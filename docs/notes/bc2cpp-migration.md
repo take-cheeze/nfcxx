@@ -7,6 +7,16 @@ Status, 2026-11-09: in progress.
 - Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
   `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
 - Done: a second world, `scripts/pathb-qbe-emit.rb` (`tests/bc2cpp/run_pathb_qbe_emit.sh`, the `script-world` build kind).
+- In progress: a third world, `scripts/pathb-borrowck.rb` (`tests/bc2cpp/run_pathb_borrowck.sh`, not yet in CI). Its
+  top level is now `main(argv)`, which returns the status, and its one regex literal (`split(/[\[ ]/)`) is a
+  character scan (`register_name`): the closed world has no `Regexp`. The interpreted script is unchanged: 3598 runs of
+  `tests/pathb-borrow` in every mode give the same stdout, stderr and status before and after. The world is not green:
+  2813 of 2829 cases match, and the other 16 (all with `--infer-loan-ends` or `--infer-summaries`) are wrong in the
+  compiled build. Ten are segfaults and some take another path, and the same input gives different results from run to
+  run. Valgrind on the compiled script (`LocalLifetime#byte_key`, a `String#+` through `bc2cpp_slow_add_f`) reports the
+  GC marking an uninitialised value during incremental marking, then `stack smashing detected`. That points at bc2cpp's
+  GC rooting of temporaries in compiled code, which is a bc2cpp defect, not a Ruby difference. Fix that first, then add
+  the world to `.github/workflows/bc2cpp.yml`.
 - Next: rpg-maker-clone takes bc2cpp from its `3rd/nfcxx` submodule (rpg-maker-clone#3204, Phase 3).
 
 bc2cpp is rpg-maker-clone's mruby-bytecode-to-C++ compiler (`tools/bc2cpp`). It compiles a closed world, the engine
