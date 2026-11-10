@@ -31,7 +31,7 @@ module MrbcRb
     LOADI_0: 6, LOADI_1: 7, LOADI_2: 8, LOADI_3: 9, LOADI_4: 10, LOADI_5: 11, LOADI_6: 12, LOADI_7: 13,
     LOADI16: 14, LOADI32: 15, LOADNIL: 17, LOADSELF: 18, LOADTRUE: 19, LOADFALSE: 20,
     SSEND: 47, SSEND0: 48, SEND: 50, SEND0: 51, ADDI: 70, SUBI: 72, JMP: 38, JMPIF: 39, JMPNOT: 40,
-    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, SETIDX: 37, FSTRING: 119,
+    ARRAY: 82, ARRAY2: 83, STRING: 92, GETCONST: 29, SETCONST: 30, GETGV: 21, SETGV: 22, GETIDX: 35, SETIDX: 37, GETIV: 25, SETIV: 26, FSTRING: 119,
     ADD: 69, SUB: 71, MUL: 75, DIV: 76, EQ: 77, LT: 78, LE: 79, GT: 80, GE: 81,
     RETSELF: 63, RETNIL: 64, RETTRUE: 65, RETFALSE: 66, RETURN: 61, STOP: 118,
     CLASS: 103, MODULE: 104, EXEC: 105, TDEF: 107, ENTER: 57
@@ -44,8 +44,16 @@ module MrbcRb
   # Predicates the fork folds at compile time (no test is emitted for them).
   LITERAL_PREDICATES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::StringNode].freeze
 
+  # `(expr)` with one statement is the statement itself: the fork's codegen does not see the parentheses.
+  def self.unparen(node)
+    while node.is_a?(Prism::ParenthesesNode) && node.body.is_a?(Prism::StatementsNode) && node.body.body.size == 1
+      node = node.body.body.first
+    end
+    node
+  end
+
   # Operands that a call's receiver or argument may be: the forms value_into loads without a call of its own.
-  SIMPLE_VALUES = [Prism::IntegerNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
+  SIMPLE_VALUES = [Prism::IntegerNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode,
                    Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode].freeze
 
   # Pool entry tags (include/mruby/irep.h).
@@ -67,6 +75,10 @@ module MrbcRb
   end
 
   class Compiler
+    def unparen(node) = MrbcRb.unparen(node)
+    def simple?(node) = SIMPLE_VALUES.include?(unparen(node).class)
+    def call_node?(node) = unparen(node).is_a?(Prism::CallNode)
+
     def initialize(filename, frozen_strings: false)
       @filename = filename
       @frozen_strings = frozen_strings
@@ -190,11 +202,12 @@ module MrbcRb
 
     # Generates one statement. The last statement returns the register that holds its value.
     def statement(node, last:)
+      node = unparen(node)
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
       when Prism::LocalVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::IntegerNode,
-           Prism::ConstantReadNode, Prism::StringNode, Prism::GlobalVariableReadNode
+           Prism::ConstantReadNode, Prism::StringNode, Prism::GlobalVariableReadNode, Prism::InstanceVariableReadNode
         last ? value_in_register(node) : nil
       when Prism::CallNode
         call(node, need: last)
@@ -202,6 +215,8 @@ module MrbcRb
         const_write(node, last: last)
       when Prism::GlobalVariableWriteNode
         global_write(node, last: last)
+      when Prism::InstanceVariableWriteNode
+        ivar_write(node, last: last)
       when Prism::DefNode
         def_statement(node, last: last)
       when Prism::OrNode, Prism::AndNode
@@ -223,8 +238,8 @@ module MrbcRb
     # (or to the end), and the then-branch ends with a JMP to the end when there is an else-branch or a value is needed.
     # A missing else-branch loads nil when the value is needed. Returns the value's register when +last+.
     def if_statement(node, last:)
-      predicate = node.predicate
-      raise Unsupported, 'if predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+      predicate = unparen(node.predicate)
+      raise Unsupported, 'if predicate' unless simple?(predicate) || call_node?(predicate)
       # The fork folds a literal predicate away (`if 1` compiles to its body only); not reproduced yet.
       raise Unsupported, 'literal if predicate' if LITERAL_PREDICATES.include?(predicate.class)
 
@@ -265,7 +280,7 @@ module MrbcRb
     # there is none) into the next, and CLASS takes the first temporary as its result. The body follows (class_body).
     def class_statement(node, last:)
       superclass = node.superclass
-      raise Unsupported, 'superclass that is not a simple value' if superclass && !SIMPLE_VALUES.include?(superclass.class)
+      raise Unsupported, 'superclass that is not a simple value' if superclass && !simple?(superclass)
 
       name = plain_constant(node.constant_path)
       t = temp
@@ -326,8 +341,8 @@ module MrbcRb
     # runs when the predicate holds, so it is generated first, exactly as the then-branch of an if/else. Without one, the
     # value form loads nil for the predicate-true case, and the statement form skips the body with JMPIF.
     def unless_statement(node, last:)
-      predicate = node.predicate
-      raise Unsupported, 'unless predicate' unless SIMPLE_VALUES.include?(predicate.class) || predicate.is_a?(Prism::CallNode)
+      predicate = unparen(node.predicate)
+      raise Unsupported, 'unless predicate' unless simple?(predicate) || call_node?(predicate)
       raise Unsupported, 'literal unless predicate' if LITERAL_PREDICATES.include?(predicate.class)
 
       body = node.statements&.body || []
@@ -409,10 +424,10 @@ module MrbcRb
     # `a || b` and `a && b`: the left value goes to the first temporary, a jump past the right side tests it (JMPIF for ||,
     # JMPNOT for &&), and the right side replaces it. As a statement the right side is evaluated only for its effects.
     def logic(node, need:)
-      left = node.left
-      right = node.right
-      raise Unsupported, 'logic operand' unless (SIMPLE_VALUES.include?(left.class) || left.is_a?(Prism::CallNode)) &&
-                                                (SIMPLE_VALUES.include?(right.class) || right.is_a?(Prism::CallNode))
+      left = unparen(node.left)
+      right = unparen(node.right)
+      raise Unsupported, 'logic operand' unless (simple?(left) || call_node?(left)) &&
+                                                (simple?(right) || call_node?(right))
 
       t = temp
       value_into(left, t)
@@ -428,6 +443,14 @@ module MrbcRb
     end
 
     # `$g = value`: as a constant write, with SETGV.
+    # `@ivar = value`: as a global write, with SETIV.
+    def ivar_write(node, last:)
+      t = temp
+      value_into(node.value, t)
+      emit(:SETIV, t, sym_index(node.name))
+      last ? t : nil
+    end
+
     def global_write(node, last:)
       t = temp
       value_into(node.value, t)
@@ -445,7 +468,7 @@ module MrbcRb
 
     def write_local(node, last:)
       local = local_register(node.name)
-      value = node.value
+      value = unparen(node.value)
       if last
         t = temp
         value_into(value, t)
@@ -497,7 +520,7 @@ module MrbcRb
     # index and value follow it, and SETIDX runs on the receiver; otherwise the receiver is in the first temporary.
     def index_assign(recv, index, value, need:)
       [recv, index, value].each do |v|
-        raise Unsupported, 'index assignment with a non-simple operand' unless SIMPLE_VALUES.include?(v.class)
+        raise Unsupported, 'index assignment with a non-simple operand' unless simple?(v)
       end
       r = temp
       base = need ? r + 1 : r
@@ -513,15 +536,16 @@ module MrbcRb
     def call(node, need: true)
       name = node.name
       # `self.foo` is a call on self, emitted as SSEND with no receiver copy.
-      recv = node.receiver unless node.receiver.is_a?(Prism::SelfNode)
-      args = node.arguments&.arguments || []
-      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !SIMPLE_VALUES.include?(a.class) }
+      recv = node.receiver && unparen(node.receiver)
+      recv = nil if recv.is_a?(Prism::SelfNode)
+      args = (node.arguments&.arguments || []).map { |a| unparen(a) }
+      raise Unsupported, 'call with a block or keywords' if node.block || args.any? { |a| !simple?(a) }
       # A receiver may itself be a call: it leaves its result in the same temporary.
-      raise Unsupported, 'call with a non-simple receiver' if recv && !(SIMPLE_VALUES.include?(recv.class) || recv.is_a?(Prism::CallNode))
+      raise Unsupported, 'call with a non-simple receiver' if recv && !(simple?(recv) || call_node?(recv))
 
       if recv && node.call_operator_loc && name.to_s.match?(/\A[A-Za-z_]\w*=\z/) && args.size == 1
         raise Unsupported, 'attribute assignment on self' if recv.is_a?(Prism::SelfNode)
-        raise Unsupported, 'attribute assignment receiver' unless SIMPLE_VALUES.include?(recv.class)
+        raise Unsupported, 'attribute assignment receiver' unless simple?(recv)
 
         return attribute_assign(node, recv, args[0], need: need)
       end
@@ -595,6 +619,7 @@ module MrbcRb
 
     # The register the value of +node+ is in: a local is read in place, anything else is loaded into a temporary.
     def value_in_register(node)
+      node = unparen(node)
       return local_register(node.name) if node.is_a?(Prism::LocalVariableReadNode)
 
       t = temp
@@ -603,6 +628,7 @@ module MrbcRb
     end
 
     def value_into(node, dst)
+      node = unparen(node)
       case node
       when Prism::NilNode then emit(:LOADNIL, dst)
       when Prism::TrueNode then emit(:LOADTRUE, dst)
@@ -613,6 +639,7 @@ module MrbcRb
       when Prism::StringNode then emit(@frozen_strings ? :FSTRING : :STRING, dst, pool_index([:str, node.unescaped.b]))
       when Prism::ConstantReadNode then emit(:GETCONST, dst, sym_index(node.name))
       when Prism::GlobalVariableReadNode then emit(:GETGV, dst, sym_index(node.name))
+      when Prism::InstanceVariableReadNode then emit(:GETIV, dst, sym_index(node.name))
       when Prism::OrNode, Prism::AndNode
         r = logic(node, need: true)
         emit(:MOVE, dst, r) unless r == dst
@@ -649,7 +676,7 @@ module MrbcRb
     # its destination; otherwise ARRAY2 takes the destination and the register of the first element (codegen.c, NODE_ARRAY).
     def array_into(node, dst)
       elems = node.elements
-      raise Unsupported, 'array element' unless elems.all? { |e| SIMPLE_VALUES.include?(e.class) }
+      raise Unsupported, 'array element' unless elems.all? { |e| simple?(e) }
 
       a = temp
       elems.each_with_index { |e, i| value_into(e, a + i) }

@@ -161,6 +161,14 @@ SNIPPETS = [
   "x = 1\nx[2] = 3",
   "x = 1\nx[2] = 3\nx",
   "x = 1\nx[2] = 3\n3",
+  # instance variables and parentheses (milestone 8)
+  "x = @a",
+  "class Foo\n  @a = 1\n  x = @a\nend",
+  "@a = 1\n@a",
+  "x = 1\n(x)",
+  "x = 1\ny = (x)\ny",
+  "x = 1\np (x)",
+  "x = 1\n(x) || 2",
   "class Foo < Bar; end",
   "class Foo < Bar\n  1\nend",
   "class Foo < Bar; end\nclass Baz; end"
