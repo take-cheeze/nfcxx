@@ -67,6 +67,10 @@ on:
       mrbc_rb:
         description: "BC2CPP_MRBC_RB for every world/checks job: snapshot, verify, or record (= verify plus BC2CPP_MRBC_SNAPSHOT_RECORD; the record files are uploaded as artifacts for snapshot.rb --update --from-record)"
         default: ""
+      oracle_update:
+        description: "mrbc-snapshot: regenerate snapshot_world.txt with the upstream mruby oracle and upload it as an artifact"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -163,17 +167,36 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
 
-      - name: Build the oracle once and check the snapshot against it
+      # The oracle is upstream mruby 4.0.0 (the tag's commit), not the world's submodule: the snapshot records what a stable
+      # mruby's mrbc writes, so a fork bump does not move the table.
+      - name: Build the oracle (upstream mruby 4.0.0) and check the snapshot against it
+        env:
+          MRUBY_ORACLE_SHA: 831da26b9021de0369d17b71b5667e2941a1a32d
         run: |
           set -eu
           root=$PWD
           . tests/bc2cpp/fetch.sh
           bc2cpp_fetch
-          (cd "$bc2cpp_root/3rd/mruby" && env -u LD BUNDLE_GEMFILE="$root/Gemfile" bundle exec rake -j"$(nproc)") > build/bc2cpp/snapshot-oracle.log 2>&1 ||
+          oracle_dir="$RUNNER_TEMP/mruby-4.0.0"
+          git init -q "$oracle_dir"
+          git -C "$oracle_dir" fetch -q --depth 1 https://github.com/mruby/mruby "$MRUBY_ORACLE_SHA"
+          git -C "$oracle_dir" checkout -q FETCH_HEAD
+          (cd "$oracle_dir" && env -u LD BUNDLE_GEMFILE="$root/Gemfile" bundle exec rake -j"$(nproc)") > build/bc2cpp/snapshot-oracle.log 2>&1 ||
             { tail -20 build/bc2cpp/snapshot-oracle.log; exit 1; }
           echo "BC2CPP_RPG_DIR=$bc2cpp_root" >> "$GITHUB_ENV"
-          echo "ORACLE=$bc2cpp_root/3rd/mruby/bin/mrbc" >> "$GITHUB_ENV"
-          MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          echo "ORACLE=$oracle_dir/bin/mrbc" >> "$GITHUB_ENV"
+          if [ "${{ inputs.oracle_update }}" = true ]; then
+            MRBC="$oracle_dir/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update
+          else
+            MRBC="$oracle_dir/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          fi
+
+      - name: Upload the regenerated snapshot
+        if: inputs.oracle_update == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot_world
+          path: bc2cpp/tools/mrbc_rb/snapshot_world.txt
 
       - name: Golden and CLI tests against the snapshot (no mrbc in the environment)
         run: |
