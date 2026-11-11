@@ -320,6 +320,8 @@ def scan_slot_uses(x, types, bad)
     if y.is_a?(Ref) && y.sigil == "$"
       key = "$#{y.raw}"
       ok = (h == "load" || h == "store") && i == 2 && types[key] && same_slot_type?(x[1], types[key])
+      # The scope facts (NFCXX_IR_SCOPES=1) name a slot without taking its address: they do not stop its promotion.
+      ok ||= (h == "decl" || h == "scope-end") && i == 1
       bad[key] = true unless ok
     else
       twice ||= scan_slot_uses(y, types, bad)
@@ -561,6 +563,11 @@ class Converter
         out << ["let", reg, t, rw(rv)]
       end
     when "set" then push(i[1], rw(i[2]), pushed)
+    when "decl", "scope-end"
+      # (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its scope ends (NFCXX_IR_SCOPES=1): about a slot in
+      # memory, for AddressSanitizer's use after scope (pathb-ssa-qbe.rb); a promoted slot has no memory, so its facts are dropped.
+      k = slot_key(i[1])
+      out << rw(i) unless k && @promoted.key?(k)
     when "store"
       k = slot_key(i[2])
       if k && @promoted.key?(k)

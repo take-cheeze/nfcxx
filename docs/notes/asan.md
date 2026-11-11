@@ -177,11 +177,11 @@ cproc's (above). The driver:
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B: heap, stack, global and alloca checks so far (section "Path B"); wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B: heap, stack, global, alloca and use-after-scope checks so far (section "Path B"); wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
-- Path B is instrumented for loads, stores, stack, global and alloca redzones only (section "Path B"), and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
+- Path B is instrumented for loads, stores, stack, global and alloca redzones and use after scope only (section "Path B"), and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
   no checks (`asan-plan.md`).
 - EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented; its C++ VLA allocator is
   replaced under the flag on hosted links (section "C++ variable-length arrays"). `operator new` ends in `malloc`, which
@@ -217,7 +217,7 @@ A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host w
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
 instrumented (`poly.md`, "Sanitizers and valgrind").
 
-## Path B (explicit only; milestones 1 to 4 of `asan-plan.md`)
+## Path B (explicit only; milestones 1 to 4 and 6 of `asan-plan.md`)
 
 `nfcxx --backend=pathb -fsanitize=address` (or `NFCXX_PATH=b`) builds with the SSA emitter (`scripts/pathb-ssa-qbe.rb`) and
 `NFCXX_PATHB_ASAN=1` (`pathb-cc` passes `--asan` to `pathb-ssa-build`). Before each load, store, bit-field access, block copy
@@ -246,9 +246,15 @@ the record sits in the left redzone. Before the `ret`, `__nfcxx_asan_alloca_rele
 longjmp or throw is cleared by libasan's `longjmp` interceptor, as for slots.
 
 Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, stack, global and
-alloca overflows (also of an over-aligned object) and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
+alloca overflows (also of an over-aligned object), use after scope and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
 `lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`). Not found yet, listed in `tests/asan/pathb-pending.txt` with the
-milestone that adds them: use after scope (M6) and use after return. The report names the source line (`in main .../heap_overflow.cpp:5`): `pathb-cc` asks the
+milestone that adds them: a compound literal's scope (M6b) and use after return. Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `NFCXX_IR_SCOPES=1` (`pathb-cc` sets it
+with the flag; `pathb-stage2.md`); for a slot in memory the emitter calls `__asan_unpoison_stack_memory` at the `decl` and
+`__asan_poison_stack_memory` at the `scope-end`, with the slot's object (its size rounded up to 8), so a read after the block, a `break`, `continue`
+or `goto` out of it reports `stack-use-after-scope`, as on qbe. A promoted slot has no memory and its facts are dropped. A compound literal and
+other compiler temporaries are not named locals: they get no scope fact (`scope_compound_escape.cpp` is pending).
+
+The report names the source line (`in main .../heap_overflow.cpp:5`): `pathb-cc` asks the
 front end for the IR's `(loc FILE LINE)` lines (`NFCXX_IR_LOC=1`), the emitter writes QBE `dbgfile` before each function (the file of its
 first `loc`) and `dbgloc LINE` after each `loc` of that file, and the assembler's `.loc` directives give the object a line table, with or
 without `-g`. A location from another file (an inlined header) is left out.

@@ -383,6 +383,7 @@ module Qbe
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
       @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
       @asan_alloca = false   # --asan: the function has an alloca, so it keeps the head of its chain in the slot %aah
+      @asan_osz = {}   # --asan: the slot's temporary (%oN) => its size rounded up to 8, for the scope facts
       @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
 
@@ -530,6 +531,23 @@ end
         @lines << "  %o#{i} =l add %o#{i}l, #{rz}"
       end
       @asan_objs << [i, "%o#{i}l", osz]
+      @asan_osz["%o#{i}"] = osz
+    end
+
+    # --asan, milestone 6 (use after scope): (decl $"x" val|ref) unpoisons the local's object, (scope-end $"x") poisons it, with
+    # libasan's stack-memory calls, so a read after the scope reports stack-use-after-scope (the front end prints the facts under
+    # NFCXX_IR_SCOPES=1). Only a slot in memory has an object; the facts of a promoted slot never get here (pathb-ssa.rb).
+    def asan_scope(item, entering)
+      return unless Qbe.asan
+
+      ref = item[1]
+      return unless ref.is_a?(Ref) && ref.sigil == "$"
+
+      tmp = @slot["$#{ref.raw}"]
+      osz = tmp && @asan_osz[tmp]
+      return unless osz
+
+      @lines << "  call $__asan_#{entering ? 'unpoison' : 'poison'}_stack_memory(l #{tmp}, l #{osz})"
     end
 
     # --asan: poison both redzones of every slot (after all the allocations, at the function's entry).
@@ -932,6 +950,8 @@ end
         end
       when "unreachable", "trap" then @lines << "  hlt"
       when "loc" then set_loc(item)
+      when "decl" then asan_scope(item, true)
+      when "scope-end" then asan_scope(item, false)
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])

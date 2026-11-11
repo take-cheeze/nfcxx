@@ -7,7 +7,7 @@
 #   * cstruct: `-B<symbol> -S` (mrb_dump_irep_cstruct in cdump.c: the irep tree as C structs).
 # `-g` together with `-S`: cdump.c writes the symbol id of the file name, the number the symbol had in mrbc's own symbol table;
 # file_syms.rb reproduces it from the sources (pass its result as file_syms:). Without file_syms: the first symbol after the
-# presyms (FILENAME_SYM_BASE, 1472 for the fork's host mrbc) is only right for one input file.
+# presyms (FILENAME_SYM_BASE, 1474 for the fork's host mrbc) is only right for one input file.
 
 module MrbcRb
   module RiteDump
@@ -18,7 +18,7 @@ module MrbcRb
 
     Irep = Struct.new(:nlocals, :nregs, :clen, :ilen, :iseq, :pool, :syms, :reps, :lv, :debug)
 
-    FILENAME_SYM_BASE = 1472
+    FILENAME_SYM_BASE = 1474
 
     module_function
 

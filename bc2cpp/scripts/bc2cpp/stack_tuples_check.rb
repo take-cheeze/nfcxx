@@ -301,6 +301,51 @@ RUBY2
 REDEFINED_EXPECTED = { 'TupRedef.new.sized' => '99' }.freeze
 OWNERS_REDEF = %w[Array TupRedef].freeze
 
+# STRING_EQ_LITERAL (codegen_string_eq.rb): `x == "literal"` compares the bytes when x is exactly a String and builds the
+# literal only on the other path. The cases cover a match, a mismatch in content and in length, other classes, a String
+# subclass that defines ==, an == that mutates and keeps its argument (it must see a fresh literal each time), and
+# a literal that is kept (the pair is not rewritten).
+STR_EQ = <<~RUBY3
+  class SubStr < String
+    def ==(other); true; end
+  end
+
+  class StrProbe
+    attr_reader :seen
+    def ==(other); @seen = other; other << "!"; false; end
+  end
+
+  class StrEq
+    def same(x); x == "abc"; end
+    def branch(x); x == "abc" ? 1 : 2; end
+    def twice(x); (x == "a") || (x == "b"); end
+    def neq(x); x != "abc"; end
+    def kept(x); s = "abc"; x == s; s; end
+  end
+RUBY3
+STR_EQ_EXPECTED = {
+  'StrEq.new.same("abc")' => 'true',
+  'StrEq.new.same("abd")' => 'false',
+  'StrEq.new.same("ab")' => 'false',
+  'StrEq.new.same("abcd")' => 'false',
+  'StrEq.new.same("")' => 'false',
+  'StrEq.new.same(:abc)' => 'false',
+  'StrEq.new.same(nil)' => 'false',
+  'StrEq.new.same(1)' => 'false',
+  'StrEq.new.same(SubStr.new("zzz"))' => 'true',
+  'StrEq.new.branch("abc")' => '1',
+  'StrEq.new.branch("x")' => '2',
+  'StrEq.new.twice("b")' => 'true',
+  'StrEq.new.twice("c")' => 'false',
+  'StrEq.new.neq("abc")' => 'false',
+  'StrEq.new.neq("x")' => 'true',
+  'StrEq.new.neq(nil)' => 'true',
+  'StrEq.new.neq(SubStr.new("zzz"))' => 'false',
+  'p = StrProbe.new; s = StrEq.new; s.same(p); s.same(p); p.seen' => '"abc!"',
+  'StrEq.new.kept("abc")' => '"abc"',
+}.freeze
+OWNERS_STR = %w[SubStr StrProbe StrEq].freeze
+
 # The text of one method's C++ body, from its `// Owner#name (compiled from ...)` header to the next method's header.
 def method_chunk(code, owner, name)
   code.split(%r{^(?=// \S+#\S+ \(compiled from)}).find { |chunk| chunk.start_with?("// #{owner}##{name} (") } || ''
@@ -376,12 +421,28 @@ Dir.mktmpdir('stack-tuples') do |dir|
   check.call('redefined Array#size: byte-identical with BC2CPP_STACK_TUPLES=0',
              redef_code == generate_without_tuples(REDEFINED, OWNERS_REDEF))
 
+  str_dir = File.join(dir, 'str')
+  Dir.mkdir(str_dir)
+  str_code, str_err = runtime.generate(STR_EQ, str_dir, core: true, only_owners: OWNERS_STR)
+  %w[same branch twice neq].each do |name|
+    check.call("StrEq##{name} compares the literal's bytes, with no String built for it",
+               method_chunk(str_code, 'StrEq', name).include?('STRING_EQ_LITERAL'))
+  end
+  check.call('StrEq#kept keeps its literal, so the pair is not rewritten',
+             !method_chunk(str_code, 'StrEq', 'kept').include?('STRING_EQ_LITERAL'))
+  saved = ENV.fetch('BC2CPP_STRING_EQ_LITERAL', nil)
+  ENV['BC2CPP_STRING_EQ_LITERAL'] = '0'
+  str_off_code = Dir.mktmpdir('string-eq-off') { |off| runtime.generate(STR_EQ, off, core: true, only_owners: OWNERS_STR).first }
+  saved.nil? ? ENV.delete('BC2CPP_STRING_EQ_LITERAL') : ENV['BC2CPP_STRING_EQ_LITERAL'] = saved
+  check.call('kill switch: BC2CPP_STRING_EQ_LITERAL=0 rewrites nothing', !str_off_code.include?('STRING_EQ_LITERAL'))
+
   # 2. parity, interpreted against compiled
   build = runtime.full_or_build
   if build
     [[OWNERS_POS, pos_dir, pos_err, POSITIVE_EXPECTED, 'positive'],
      [OWNERS_NEG, neg_dir, neg_err, NEGATIVE_EXPECTED, 'negative'],
-     [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined']].each do |owners, sub, err, expected, label|
+     [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined'],
+     [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)
       check.call("#{label}: built and ran", built)

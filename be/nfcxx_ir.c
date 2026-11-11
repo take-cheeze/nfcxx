@@ -471,19 +471,26 @@ static int ir_raw_used(ir_tab *t, const char *raw)
 /* Add an entry with a new name. Names are unique within the table: a clash gets a .N suffix. */
 static const char *ir_tab_add(ir_tab *t, const void *key, const char *base, const char *sigil)
 {
-  char cand[300];
+  /* The candidate is as long as the name needs: a template's mangled name is longer than a fixed buffer, and a truncated
+     "NAME.N" is the same string for every N, so a second name with the same first 299 bytes made the loop below spin forever. */
+  size_t cap;
+  char *cand;
   int k = 0;
   ir_ent *en;
   if (base == NULL || base[0] == '\0') base = "tmp";
-  (void)snprintf(cand, sizeof cand, "%s", base);
+  cap = strlen(base) + 24;
+  cand = (char *)malloc(cap);
+  if (cand == NULL) abort();
+  (void)snprintf(cand, cap, "%s", base);
   while (ir_raw_used(t, cand)) {
     k++;
-    (void)snprintf(cand, sizeof cand, "%s.%d", base, k);
+    (void)snprintf(cand, cap, "%s.%d", base, k);
   }
   en = ir_tab_push(t);
   en->key = key;
   en->raw = ir_dup(cand);
   en->op = ir_fmt("%s\"%s\"", sigil, cand);
+  free(cand);
   return en->op;
 }
 
@@ -1002,6 +1009,9 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
    other state is created, so the default output is unchanged. */
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
+static int ir_scopes = 0;               /* NFCXX_IR_SCOPES=1: print only (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its
+                                           scope ends (block end, return, a jump out of it), for AddressSanitizer's use after scope */
+#define IR_SCOPE_FACTS() (ir_borrow || ir_scopes)
 
 /* (borrow-layout (struct "N") SIZE ALIGN (field "F" OFF TYPE)...): which bytes of a struct are fields, so a borrow of
    the whole struct does not require its padding initialized (docs/notes/pathb-borrowck.md, "Semantic struct layouts").
@@ -1181,7 +1191,9 @@ static void ir_layout_note(a_type_ptr t)
 typedef struct ir_decl_rec {
   a_variable_ptr var;
   struct ir_decl_rec *prev;
+  int lazy; /* opened at its first use while the body is lowered (ir_fact_first_use): no declaration statement, so ir_scan_labels cannot have counted it */
 } ir_decl_rec;
+static int ir_labels_scanned = 0; /* 1 once ir_scan_labels has run for the function: a local opened after that is not in any label's depth */
 static ir_decl_rec *ir_decl_top = NULL;
 static int ir_decl_n;                   /* the length of ir_decl_top */
 static ir_decl_rec *ir_decl_seen = NULL; /* every local opened in the function so far, closed or not */
@@ -1242,11 +1254,12 @@ static int ir_fact_var(a_variable_ptr var)
 static void ir_fact_open(a_variable_ptr var)
 {
   ir_decl_rec *r;
-  if (!ir_borrow || !ir_fact_var(var)) return;
+  if (!IR_SCOPE_FACTS() || !ir_fact_var(var)) return;
   r = (ir_decl_rec *)malloc(sizeof *r);
   if (r == NULL) abort();
   r->var = var;
   r->prev = ir_decl_top;
+  r->lazy = 0;
   ir_decl_top = r;
   ir_decl_n++;
   r = (ir_decl_rec *)malloc(sizeof *r);
@@ -1264,17 +1277,19 @@ static void ir_obl_live(a_variable_ptr var, const char *op, int d);
 static void ir_fact_first_use(a_variable_ptr var, const char *op)
 {
   ir_decl_rec *r;
-  if (!ir_borrow || !ir_fact_var(var) || var->source_corresp.name == NULL) return;
+  if (!IR_SCOPE_FACTS() || !ir_fact_var(var) || var->source_corresp.name == NULL) return;
   for (r = ir_decl_seen; r != NULL; r = r->prev)
     if (r->var == var) return;
   ir_line(ir_depth, ir_fmt("(decl %s %s)", op, ir_is_ref_type(var->type) ? "ref" : "val"));
   ir_obl_live(var, op, ir_depth);
   ir_fact_open(var);
+  if (ir_decl_top != NULL && ir_decl_top->var == var) ir_decl_top->lazy = ir_labels_scanned;
 }
 
 /* Forget the locals of the function (at its end). */
 static void ir_fact_forget(void)
 {
+  ir_labels_scanned = 0;
   while (ir_decl_seen != NULL) {
     ir_decl_rec *r = ir_decl_seen;
     ir_decl_seen = r->prev;
@@ -1328,7 +1343,7 @@ static int ir_is_class_type(a_type_ptr t)
 /* The registration of local var, marked (see above), when it is an object of class type. */
 static void ir_obl_live(a_variable_ptr var, const char *op, int d)
 {
-  if (ir_is_class_type(var->type) && op[0] == '$') ir_line(d, ir_fmt("\005%s\002(drop-live %s)\002", op, op + 1));
+  if (ir_borrow && ir_is_class_type(var->type) && op[0] == '$') ir_line(d, ir_fmt("\005%s\002(drop-live %s)\002", op, op + 1));
 }
 
 /* The local whose whole object a call's first argument arg addresses (&V, V of the class arg points to), or NULL. */
@@ -1378,7 +1393,7 @@ static int ir_fact_seen(a_variable_ptr var)
 static void ir_fact_decl(a_statement_ptr s, int d)
 {
   an_il_entity_list_entry_ptr entry;
-  if (!ir_borrow) return;
+  if (!IR_SCOPE_FACTS()) return;
   for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
     a_variable_ptr var;
     const char *op;
@@ -1398,7 +1413,7 @@ static void ir_fact_close_to(ir_decl_rec *mark, int d, int emit)
 {
   while (ir_decl_top != mark && ir_decl_top != NULL) {
     ir_decl_rec *r = ir_decl_top;
-    if (emit && ir_borrow) ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+    if (emit && IR_SCOPE_FACTS()) ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
     ir_decl_top = r->prev;
     ir_decl_n--;
   }
@@ -1410,10 +1425,10 @@ static void ir_tmp_mark(int d, int entry);
 static void ir_fact_close_all(int d)
 {
   ir_decl_rec *r;
-  if (!ir_borrow) return;
+  if (!IR_SCOPE_FACTS()) return;
   for (r = ir_decl_top; r != NULL; r = r->prev)
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
-  ir_tmp_mark(d, 0);
+  if (ir_borrow) ir_tmp_mark(d, 0);
 }
 
 /* The labels of a function, with the open-local count at each (flag only). A block restores the count at its end, as
@@ -1483,12 +1498,20 @@ static void ir_fact_jump(void *lbl, int d)
 {
   ir_lbl_depth *l;
   ir_decl_rec *r;
-  int n;
-  if (!ir_borrow) return;
+  int n = 0;
+  if (!IR_SCOPE_FACTS()) return;
   for (l = ir_lbl_list; l != NULL && l->lbl != lbl; l = l->next) ;
   if (l == NULL) return;
-  for (r = ir_decl_top, n = ir_decl_n; r != NULL && n > l->depth; r = r->prev, n--)
+  /* The label's depth (ir_scan_labels) counts the locals that a declaration statement opens. A local opened at its first use (the
+     variable of a range-based for) is not in it: counting it here closed one local too many, the last one declared, before a break
+     out of a switch inside its block, and its destructor then read it after its scope ended. Such a local is left open by a jump:
+     its scope ends with its block (ir_fact_close_to). */
+  for (r = ir_decl_top; r != NULL; r = r->prev) if (!r->lazy) n++;
+  for (r = ir_decl_top; r != NULL && n > l->depth; r = r->prev) {
+    if (r->lazy) continue;
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+    n--;
+  }
 }
 
 /* Temporaries (flag only): the lowering's own (make_local_temporary reuses one from a full expression to the next) and
@@ -6772,11 +6795,12 @@ static void ir_function(a_routine_ptr rout)
       ir_store(pending[i].var->type, slot.s, pending[i].reg, 0);
     }
   }
-  if (ir_borrow) {
+  if (IR_SCOPE_FACTS()) {
     /* The open-local count at each label, before any jump is lowered (a forward goto needs its target's count). */
     int n = ir_decl_n;
     ir_lbl_free();
     ir_scan_labels(scope->assoc_block, &n);
+    ir_labels_scanned = 1;
   }
   if (scope->assoc_block->kind == stmk_block) {
     ir_stmt_list(scope->assoc_block->variant.block.statements, 1);
@@ -6922,6 +6946,10 @@ void nfcxx_ir_back_end(void)
   {
     const char *bf = getenv("NFCXX_PATHB_BORROW");
     ir_borrow = bf != NULL && strcmp(bf, "1") == 0;
+  }
+  {
+    const char *sf = getenv("NFCXX_IR_SCOPES");
+    ir_scopes = sf != NULL && strcmp(sf, "1") == 0;
   }
   nf_ld_blob = 1; /* long double types print as a 16-byte array in the IR */
   ir_buf_open(&ir_out_globals);
