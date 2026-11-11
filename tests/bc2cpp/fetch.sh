@@ -8,7 +8,7 @@
 #   BC2CPP_WORLD_FULL=1     every submodule the fixture checks read (the world's scripts/checkout-submodules.bash),
 #                           not only the ones the optcarrot world needs
 # Bumping the pin is a one-line change here; the mruby fork commit (3rd/mruby) comes with it.
-rpg_pin=211cf1a484ba14509c8fcaaad84840e0890fd888 # take-cheeze/rpg-maker-clone claude/cxx-frame-use-q8r4 (frame-free C++ natives, over #3228)
+rpg_pin=171021a469fe7242f70365e08cf831e2ce31e2b6 # take-cheeze/rpg-maker-clone#3231 (frame-free C++ natives)
 rpg_url=https://github.com/take-cheeze/rpg-maker-clone
 # The submodules the optcarrot world reads: the mruby fork, the gems of the probe's closed world and optcarrot itself.
 bc2cpp_submodules=(3rd/mruby 3rd/mruby-onig-regexp 3rd/mruby-stringio 3rd/mruby-marshal 3rd/optcarrot)
