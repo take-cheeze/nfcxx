@@ -40,6 +40,10 @@ module BytecodeIR
     # With the emitter's annotation the answer is exact (compact and `::`-rooted paths included): the qualified path as written
     # resolved against the lexical namespace, nil when that is dynamic or relative to an unknown namespace.
     if irep.class_scope && (op = ClassScope.op_at(irep, insn))
+      # A constant-path outer (`class A::B`, `class ::A::B`) stays the caller's to resolve, as in the dataflow below: `A` may be an
+      # alias of another class, so the written path is not necessarily the class's name.
+      return nil if op[:outer] == :path || (op[:outer] == :root && op[:path]&.include?('::'))
+
       return op[:path]
     end
 
