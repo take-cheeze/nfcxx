@@ -1032,7 +1032,7 @@ class CodeGen
         out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) ++bc2cpp_sym_acc_#{region[:sym_addr]};\n"
       end
     end
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{end_label}:;\n"
     case meth
