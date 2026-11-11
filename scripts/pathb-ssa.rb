@@ -1374,7 +1374,7 @@ rescue Fail => e
 end
 
 # pathb-ssa-qbe.rb requires this file for its converter, so the command line runs only as the program.
-if $PROGRAM_NAME == __FILE__
+if $0 == __FILE__
   rc = main(ARGV)
   exit(rc) if rc != 0
 end

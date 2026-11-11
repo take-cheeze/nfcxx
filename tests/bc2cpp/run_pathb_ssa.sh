@@ -62,7 +62,7 @@ cases=build/bc2cpp/pathb_ssa.cases
 log=build/bc2cpp/pathb_ssa.log
 bench=${PATHB_SSA_BENCH_SRC:-tests/gpu/sycl/vecadd.cpp}
 (env -u LD ruby "$tree/tools/script_world/compiled_run.rb" --script scripts/pathb-ssa.rb \
-  --tail 'if $PROGRAM_NAME == __FILE__\n  rc = main(ARGV)\n  exit(rc) if rc != 0\nend\n' --entry 'main(ARGV)' --cases "$cases" --bench "--check $bench" \
+  --tail 'if $0 == __FILE__\n  rc = main(ARGV)\n  exit(rc) if rc != 0\nend\n' --entry 'main(ARGV)' --cases "$cases" --bench "--check $bench" \
   --repeat "${PATHB_BENCH_REPEAT:-3}" --bench-status 0 --chdir "$root") 2>&1 | tee "$log"
 [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL bc2cpp pathb-ssa: the runner failed"; exit 1; }
 grep -q -E '^cases: ([0-9]+)/\1 ' "$log" || { echo "FAIL bc2cpp pathb-ssa: the cases differ"; exit 1; }
