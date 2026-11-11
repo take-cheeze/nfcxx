@@ -27,7 +27,7 @@
 # -g with -S: cdump.c writes the symbol id of each file name, the number the symbol had in the C mrbc's symbol table. That is
 # the presym count of the mrbc plus one for the first file, and for each further file it depends on what the lexer interned
 # of the files before it: file_syms.rb reproduces it (MrbcRb::FileSyms), given the presym set of the mrbc build to match
-# (MRBC_RB_PRESYM=fork|bootstrap|<file>, default: the fork's host mrbc, 1472 presyms; mruby's own bootstrap mrbc has 282).
+# (MRBC_RB_PRESYM=fork|bootstrap|<file>, default: the fork's host mrbc, 1474 presyms; mruby's own bootstrap mrbc has 282).
 #
 # Environment:
 #   MRBC_FALLBACK=<mrbc>   the real mrbc to run for what is not covered
