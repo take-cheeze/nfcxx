@@ -1,0 +1,7 @@
+probe	standard	route	status	compile_exit	run_exit
+cpp11-N2347-scoped_enum	c++11	qbe	pass	0	0
+cpp11-N2347-scoped_enum	c++11	gcc	fail	1	0
+cpp11-N2347-scoped_enum	c++11	pathb	pass	0	0
+cpp14-N3472-binary_literals	c++14	qbe	pass	0	0
+cpp14-N3472-binary_literals	c++14	host	pass	0	0
+cpp11-N1653-paper	c++11	gcc	pass	0	0

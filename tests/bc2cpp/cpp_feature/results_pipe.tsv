@@ -1,0 +1,2 @@
+probe	standard	route	status	compile_exit	run_exit
+cpp14-N3472-binary_literals	c++14	pathb	pass	0	0
