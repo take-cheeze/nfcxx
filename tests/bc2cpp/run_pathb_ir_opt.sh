@@ -51,7 +51,7 @@ cases=build/bc2cpp/pathb_ir_opt.cases
 log=build/bc2cpp/pathb_ir_opt.log
 bench=${PATHB_IR_OPT_BENCH_IR:-tests/pathb-ir-opt/helper.ir}
 (env -u LD ruby "$tree/tools/script_world/compiled_run.rb" --script scripts/pathb-ir-opt.rb \
-  --tail 'unless $pathb_ir_opt_lib\n  rc = main(ARGV)\n  exit(rc) if rc != 0\nend\n' --entry 'main(ARGV)' --cases "$cases" --bench "$bench" \
+  --tail 'unless $pathb_ir_opt_lib\n  rc = main(ARGV)\n  exit(rc) if rc != 0\nend\n' --entry 'main(ARGV)' --cases "$cases" --bench "--inline --sroa $bench" \
   --repeat "${PATHB_BENCH_REPEAT:-3}" --bench-status 0 --chdir "$root") 2>&1 | tee "$log"
 [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL bc2cpp pathb-ir-opt: the runner failed"; exit 1; }
 grep -q -E '^cases: ([0-9]+)/\1 ' "$log" || { echo "FAIL bc2cpp pathb-ir-opt: the cases differ"; exit 1; }
