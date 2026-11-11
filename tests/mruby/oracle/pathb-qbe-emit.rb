@@ -3257,7 +3257,7 @@ end
 def main(argv)
   args = argv.dup
   if !args.empty? && args[0] == "--append-weak"
-    return die("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s\n", 1) if args.length != 3
+    return die("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s [TARGET]\n", 1) if args.length != 3
     return append_weak(args[1], args[2])
   end
   do_prune = true
