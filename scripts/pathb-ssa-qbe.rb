@@ -996,6 +996,14 @@ end
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
           end
+          # On Darwin an extern object is usually in a dylib (libc++'s vtable or typeinfo for std::length_error): the
+          # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
+          # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
+          if info[:extern] && RbConfig::CONFIG["host_os"].match?(/darwin/)
+            t = fresh
+            @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
+            return t
+          end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]

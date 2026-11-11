@@ -58,6 +58,8 @@ shim=$(scripts/ehshim) || shim=
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
+# Darwin: extern data through the GOT (pathb-cc does the same; pathb-qbe-emit.rb, --extern-data-got).
+emit_opts=(); [ "$(uname -s)" = Darwin ] && emit_opts=(--extern-data-got)
 mrb=$root/scripts/mrb
 ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
@@ -124,7 +126,7 @@ run_one() {
     scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
-  "$mrb" "$emit" "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
+  "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
   if [ $rc = 3 ]; then
     refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$n.emit")"); return
   fi
@@ -209,7 +211,7 @@ run_multi() {
     b=multi_${n}_$(basename "$f" .cpp); obj=$tmp/$b.o; srcs+=("$f")
     scripts/pathb-dump --ir "$f" > "$tmp/$b.ir" 2> "$tmp/$b.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end ($f): $(head -1 "$tmp/$b.fe")"); return; }
-    "$mrb" "$emit" "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
+    "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
     if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$b.emit")"); return; fi
     if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: emitter: $(head -1 "$tmp/$b.emit")"); return; fi
     "$qbe" "$tmp/$b.ssa" > "$tmp/$b.s" 2> "$tmp/$b.qbe" || {
@@ -273,7 +275,7 @@ run_multi() {
 # Probe the harness: a stage 2 harness has no sizes on slots and the emitter says so.
 probe=$(ls tests/cases/*.cpp | head -1)
 scripts/pathb-dump --ir "$probe" > "$tmp/probe.ir" 2>/dev/null
-"$mrb" "$emit" "$tmp/probe.ir" > /dev/null 2> "$tmp/probe.err"; prc=$?
+"$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$tmp/probe.ir" > /dev/null 2> "$tmp/probe.err"; prc=$?
 if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2
 fi
