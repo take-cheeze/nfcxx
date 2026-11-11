@@ -77,8 +77,10 @@ CFG
 # Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration) in every build. Without it EDG takes the
 # host's float128 (defines_linux.h), which Apple clang lacks on arm64, and on wasm32 keeps a target long double in the
 # host's binary128 (float_pt.c: fetch_host_fp_value). Berkeley SoftFloat 3e, pinned, with x86's NaN rules (8086-SSE),
-# built into build/softfloat with the host C compiler (emcc for the emscripten build).
-sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
+# built with the host C compiler into build/softfloat-native, and with emcc into build/softfloat (the wasm build's directory, which
+# .github/workflows/wasm-explorer-build.yml caches): an archive of one compiler's objects cannot link into the other's output.
+if [ "$emscripten" = 1 ]; then sf=$root/build/softfloat; else sf=$root/build/softfloat-native; fi
+sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
 if [ "$emscripten" = 1 ]; then sf_cc=emcc; sf_ar=emar; else sf_cc=${CC:-cc}; sf_ar=${AR:-ar}; fi
 if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
   command -v "$sf_cc" >/dev/null || { echo "setup-pathb: $sf_cc is not on PATH" >&2; exit 1; }
