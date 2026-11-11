@@ -647,6 +647,10 @@ jobs:
               tests/ehshim/run.sh
           - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
             run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
+          # Explicit --backend=pathb: the SSA emitter's __asan_load/store checks (docs/notes/asan.md, "Path B"). The default
+          # backend with -fsanitize=address is still qbe, which the test job's AddressSanitizer step covers.
+          - name: AddressSanitizer on Path B (heap checks; tests/asan/pathb-pending.txt lists the later milestones)
+            run: ASAN_BACKEND=pathb tests/asan/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
             run: |
               sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
