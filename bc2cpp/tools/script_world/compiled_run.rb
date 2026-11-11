@@ -10,7 +10,8 @@
 #     --script   the script (it must end with --tail)
 #     --tail     the script's final statements; they become the body of ScriptWorld.run, with --entry in their place
 #     --entry    the expression that runs it and gives the exit status (e.g. main(ARGV))
-#     --cases    a file of command lines, one case each (shell words; blank lines and # lines are skipped). A line
+#     --cases    a file of command lines, one case each (shell words; blank lines and # lines are skipped; a first word
+#                `<FILE` gives the run FILE as stdin, otherwise stdin is empty). A line
 #                starting with `!` is an uncaught-exception case: stdout and the exit status must match and stderr must
 #                match without its backtrace (compiled code has no line table, so mruby prints (unknown):0 there)
 #     --bench    arguments of a timed run (repeatable); --repeat N runs each N times (default 3) and keeps the best;
@@ -144,8 +145,16 @@ def mruby_config(temp, gems, flags)
   config
 end
 
-def run_case(command, chdir)
-  stdout, stderr, status = Open3.capture3(*command, stdin_data: '', binmode: true, chdir: chdir)
+# A leading `<FILE` word of a case or benchmark line is not an argument: the file (relative to the working directory) is
+# the run's stdin. Returns [arguments, stdin bytes].
+def split_stdin(args, chdir)
+  return [args, ''] unless args.first&.start_with?('<')
+
+  [args.drop(1), File.binread(File.expand_path(args.first[1..], chdir))]
+end
+
+def run_case(command, chdir, stdin = '')
+  stdout, stderr, status = Open3.capture3(*command, stdin_data: stdin, binmode: true, chdir: chdir)
   [stdout, stderr, status.exitstatus || "signal #{status.termsig}"]
 end
 
@@ -163,10 +172,10 @@ def without_backtrace(stderr)
         .map { |l| l.sub(/\A(?:\S+?:\d+|\(unknown\):0)(?::in \w+)?: /, '') }.join
 end
 
-def best_time(command, repeat, chdir, status_ok)
+def best_time(command, repeat, chdir, status_ok, stdin = '')
   times = Array.new(repeat) do
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    _out, _err, status = Open3.capture3(*command, stdin_data: '', binmode: true, chdir: chdir)
+    _out, _err, status = Open3.capture3(*command, stdin_data: stdin, binmode: true, chdir: chdir)
     abort "timed run failed: #{command.join(' ')} (#{status.inspect})" unless status.exitstatus == status_ok
     Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
   end
@@ -199,9 +208,10 @@ Dir.mktmpdir('script-world-') do |temp|
 
   cases = shell_cases(options[:cases])
   bad = 0
-  cases.each do |args, uncaught|
-    expected = run_case(runtimes['mruby interpreter'].call(args), chdir)
-    got = run_case(runtimes['mruby + bc2cpp (sealed)'].call(args), chdir)
+  cases.each do |case_args, uncaught|
+    args, stdin = split_stdin(case_args, chdir)
+    expected = run_case(runtimes['mruby interpreter'].call(args), chdir, stdin)
+    got = run_case(runtimes['mruby + bc2cpp (sealed)'].call(args), chdir, stdin)
     if uncaught
       expected[1] = without_backtrace(expected[1])
       got[1] = without_backtrace(got[1])
@@ -209,16 +219,18 @@ Dir.mktmpdir('script-world-') do |temp|
     next if expected == got
 
     bad += 1
-    puts "DIFF #{args.join(' ')}: interpreted status #{expected[2]}, compiled status #{got[2]}; " \
+    puts "DIFF #{case_args.join(' ')}: interpreted status #{expected[2]}, compiled status #{got[2]}; " \
          "stdout #{expected[0] == got[0] ? 'same' : 'differs'}, stderr #{expected[1] == got[1] ? 'same' : 'differs'}"
   end
   puts "cases: #{cases.size - bad}/#{cases.size} give the same stdout, stderr and exit status compiled as interpreted"
   abort 'FAIL script world: compiled and interpreted runs differ' unless bad.zero?
 
   options[:bench].each do |args|
-    argv = Shellwords.split(args)
+    argv, stdin = split_stdin(Shellwords.split(args), chdir)
     puts "benchmark: #{args} (best of #{options[:repeat]})"
-    results = runtimes.to_h { |label, make| [label, best_time(make.call(argv), options[:repeat], chdir, options[:bench_status])] }
+    results = runtimes.to_h do |label, make|
+      [label, best_time(make.call(argv), options[:repeat], chdir, options[:bench_status], stdin)]
+    end
     results.each { |label, seconds| puts format('%s: %.3f s', label, seconds) }
     puts format('bc2cpp speedup over the mruby interpreter: %.1fx; over CRuby: %.2fx',
                 results['mruby interpreter'] / results['mruby + bc2cpp (sealed)'],

@@ -1,0 +1,2 @@
+probe	standard	route	status	compile_exit	run_exit
+cpp11-N2347-scoped_enum	c++11	msvc	pass	0	0
