@@ -451,6 +451,12 @@ jobs:
       - name: Tools
         run: brew install ccache ninja cmake
 
+      - name: Emscripten SDK (the SoftFloat build of the harness uses emcc)
+        run: |
+          scripts/setup-emsdk.sh
+          source build/emsdk/emsdk_env.sh
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+
       - name: EDG front end
         run: scripts/setup-edg.sh
 
