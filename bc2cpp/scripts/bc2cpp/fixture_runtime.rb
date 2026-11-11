@@ -95,7 +95,12 @@ module Bc2cppFixtureRuntime
   # The gems that depend on it keep their bytecode; the program compiles the Fiber-dependent part of the Enumerator
   # (CoreMethods.enumerator_fiber_step?) so the C++ Fiber runs it.
   NOFIBER_GEMS = %w[mruby-fiber mruby-os-memsize].freeze
-  NOFIBER_PLACEHOLDER_GEM_DIR = File.join(ROOT, 'mruby-fiber-placeholder').freeze
+  # The root copy is staged by rpg-maker-clone (compiled-gem-templates/stage.rb); an unstaged checkout uses the template,
+  # which is the same gem tree.
+  NOFIBER_PLACEHOLDER_GEM_DIR = [File.join(ROOT, 'mruby-fiber-placeholder'),
+                                 File.join(ROOT, 'compiled-gem-templates', 'mruby-fiber-placeholder')]
+                                .find { |d| File.file?(File.join(d, 'mrbgem.rake')) }
+                                .freeze
   NOFIBER_CORE_CONFIG = <<~RUBY
     MRuby::Build.new('host') do |conf|
       toolchain :gcc
