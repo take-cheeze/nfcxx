@@ -67,12 +67,15 @@ fi
 if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/sw" 2>/dev/null \
    && ! "$tmp/sw" >/dev/null 2>"$tmp/rep" && grep -q AddressSanitizer "$tmp/rep"; then ok "default backend is instrumented"
 else bad "default backend is instrumented" "no report"; fi
+# These two need the Path B harness (scripts/setup-pathb.sh), which only the Path B run has: the gcc and qbe runs skip them.
+if [ "$B" = pathb ]; then
 if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address --backend=pathb tests/asan/cases/heap_overflow.cpp -o "$tmp/x" 2>"$tmp/err" \
    && ! "$tmp/x" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep"; then ok "--backend=pathb is instrumented"
 else bad "--backend=pathb is instrumented" "$(head -2 "$tmp/err" "$tmp/rep" | tr '\n' ' ')"; fi
 if env -u NFCXX_BACKEND NFCXX_PATH=b "$nfcxx" -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/x" 2>"$tmp/err" \
    && ! "$tmp/x" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep"; then ok "NFCXX_PATH=b is instrumented"
 else bad "NFCXX_PATH=b is instrumented" "$(head -2 "$tmp/err" "$tmp/rep" | tr '\n' ' ')"; fi
+fi
 # -fsafe-pointers and -fsanitize=address both replace malloc: refused together
 if "$nfcxx" -fsafe-pointers -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsafe-pointers with asan refused" "compiled"
 elif grep -q "replace malloc" "$tmp/err"; then ok "-fsafe-pointers with asan refused"; else bad "-fsafe-pointers with asan refused" "$(head -2 "$tmp/err")"; fi
