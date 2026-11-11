@@ -20,14 +20,14 @@ for f in tests/ehshim/*.cpp; do
   if [ $((got & 255)) -ne $((want & 255)) ]; then echo "FAIL $f: host $cxx exits $got, expected $want"; fail=1; continue; fi
   for b in $backends; do
     case $b in
-      gcc) env_=(NFCXX_BACKEND=gcc) ;;
-      qbe) env_=(NFCXX_BACKEND=qbe) ;;
+      gcc) flag_=(--backend=gcc) ;;
+      qbe) flag_=(--backend=qbe) ;;
       pathb)
         if [ ! -x "${PATHB_CPFE:-$PWD/build/pathb/cmake/bin/cpfe}" ]; then echo "skip $f ($b: no Path B harness)"; continue; fi
-        env_=(NFCXX_PATH=b) ;;
+        flag_=(--backend=pathb) ;;
       *) echo "FAIL $f: unknown backend $b"; fail=1; continue ;;
     esac
-    if ! env "${env_[@]}" ./nfcxx "$f" -o "$tmp/$name.$b" 2> "$tmp/$name.$b.err"; then
+    if ! ./nfcxx "${flag_[@]}" "$f" -o "$tmp/$name.$b" 2> "$tmp/$name.$b.err"; then
       echo "FAIL $f ($b): compile"; grep -v prelinker "$tmp/$name.$b.err" | head -5; fail=1; continue
     fi
     "$tmp/$name.$b" > "$tmp/$name.$b.out" 2>/dev/null; got=$?
@@ -37,14 +37,15 @@ for f in tests/ehshim/*.cpp; do
   done
 done
 # foreign/: exceptions thrown with plain `throw` by a library built by g++ (lib.cpp), caught by main.cpp built by nfcxx
-# on both backends (and by g++ for the reference output); also with NFCXX_EH_UNWIND=1 on the gcc backend.
+# on both backends (and by g++ for the reference output); also with --eh-unwind on the gcc backend.
 d=tests/ehshim/foreign
 if "$cxx" -std=c++17 -O1 -shared -fPIC "$d/lib.cpp" -o "$tmp/libforeign.so" 2> "$tmp/foreign.err" &&
    "$cxx" -std=c++17 -pthread -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.host" 2>> "$tmp/foreign.err"; then
   "$tmp/foreign.host" > "$tmp/foreign.host.out"
   for c in "gcc 0" "qbe 0" "gcc 1"; do
-    set -- $c; name="$d ($1$([ $2 = 1 ] && echo ', NFCXX_EH_UNWIND=1'))"
-    if ! NFCXX_BACKEND=$1 NFCXX_EH_UNWIND=$2 ./nfcxx -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.$1$2" 2> "$tmp/foreign.$1$2.err"; then
+    set -- $c; name="$d ($1$([ $2 = 1 ] && echo ', --eh-unwind'))"
+    ehf=(); [ $2 = 0 ] || ehf=(--eh-unwind)
+    if ! ./nfcxx --backend=$1 ${ehf[@]+"${ehf[@]}"} -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.$1$2" 2> "$tmp/foreign.$1$2.err"; then
       echo "FAIL $name: compile"; grep -v prelinker "$tmp/foreign.$1$2.err" | head -5; fail=1; continue
     fi
     if "$tmp/foreign.$1$2" > "$tmp/foreign.$1$2.out" 2>&1 && cmp -s "$tmp/foreign.host.out" "$tmp/foreign.$1$2.out"; then echo "ok   $name"

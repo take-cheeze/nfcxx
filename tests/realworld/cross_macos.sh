@@ -55,7 +55,7 @@ lua)
   for f in "$src"/l*.c; do
     case $(basename "$f") in luac.c|ltests.c|onelua.c) continue ;; esac
     b=$(basename "$f" .c)
-    NFCXX_C_INPUT=1 scripts/qbe-cc -S "$f" -o "$W/$b.s" >/dev/null
+    scripts/qbe-cc --c-input -S "$f" -o "$W/$b.s" >/dev/null
     llvm-mc -triple=arm64-apple-darwin -filetype=obj "$W/$b.s" -o "$W/$b.o"
     objs+=("$W/$b.o")
   done
