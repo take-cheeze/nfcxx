@@ -31,9 +31,10 @@ resolve = lambda do |name|
 
   File.realpath(path)
 end
-# BC2CPP_AST_PRODUCER=nfcxx reads the nfcxx front end's AST (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md) instead of
-# clang's; the default stays clang. The nfcxx producer needs no clang at all when BC2CPP_HOST_CXX preprocesses.
-producer = NativeAstSource.producer(auto: false)
+# The nfcxx front end's AST (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md) is the default where it is built; clang's is the
+# fallback, and BC2CPP_AST_PRODUCER=clang opts out. The two manifests' roots agree on everything a consumer reads
+# (scripts/bc2cpp/main_ast_producers_diff.rb). The nfcxx producer needs no clang at all when BC2CPP_HOST_CXX preprocesses.
+producer = NativeAstSource.producer
 clang = producer == 'clang' ? resolve.call(ENV.fetch('CLANG', 'clang++')) : nil
 host_cxx = ENV['BC2CPP_HOST_CXX'] && resolve.call(ENV['BC2CPP_HOST_CXX'])
 target = nil
