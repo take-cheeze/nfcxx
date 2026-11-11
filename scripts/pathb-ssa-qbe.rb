@@ -2046,7 +2046,10 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
   end
 end
 
-if $PROGRAM_NAME == __FILE__
-  file = ARGV.first or abort "usage: pathb-ssa-qbe.rb FILE.ssa"
+def main(argv)
+  file = argv.first or abort "usage: pathb-ssa-qbe.rb FILE.ssa"
   print Qbe.module_il(read_forms(File.read(file)))
+  0
 end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
