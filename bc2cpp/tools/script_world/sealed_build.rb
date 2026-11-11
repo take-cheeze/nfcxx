@@ -70,6 +70,8 @@ module ScriptSealedBuild
         if (M->exc) { mrb_print_error(M); mrb_close(M); return 1; }
         // SCRIPT_WORLD_NO_GC=1: no collection at all, the bound on what the GC costs a batch program.
         if (std::getenv("SCRIPT_WORLD_NO_GC")) M->gc.disabled = TRUE;
+        // SCRIPT_WORLD_GC_INTERVAL=N: collect at N percent of the live size (mruby's default is 200).
+        if (const char* r = std::getenv("SCRIPT_WORLD_GC_INTERVAL")) M->gc.interval_ratio = std::atoi(r);
         mrb_value args = mrb_ary_new_capa(M, argc);
         for (int i = 1; i < argc; ++i) mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[i]));
         mrb_define_global_const(M, "ARGV", args);
