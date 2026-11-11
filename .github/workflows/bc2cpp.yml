@@ -92,6 +92,9 @@ jobs:
           - cpp_feature_checklist
           - cpp_feature_report
           - strip_atomic
+          - pathb_egraph
+          - pathb_structure
+          - pathb_ssa_qbe
     steps:
       # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
       - uses: actions/checkout@v7
