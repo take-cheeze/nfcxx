@@ -38,10 +38,28 @@ jobs:
 
       # The Swift toolchain (for the Swift examples, see below) is installed first: after the caches and the other
       # toolchains below it has run the runner out of disk ("ENOSPC" while extracting it).
+      # Not swift-actions/setup-swift: on Linux it refreshes the signing keys from keyserver.ubuntu.com before it
+      # installs, and when that keyserver fails (it has, for whole runs) the job stops before any step of the build.
+      # The toolchain comes from swift.org instead, pinned by SHA-256: that digest is of the release tarball whose
+      # signature was checked against swift.org/keys/all-keys.asc, so nothing here depends on a keyserver.
       - name: Install Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.0"
+        env:
+          SWIFT_URL: https://download.swift.org/swift-6.0.3-release/ubuntu2404/swift-6.0.3-RELEASE/swift-6.0.3-RELEASE-ubuntu24.04.tar.gz
+          SWIFT_SHA256: 33e923609f6d89ee455af0a017ae4941ce16878c4940882cbf6a1656de294e8b
+        run: |
+          set -euo pipefail
+          # the toolchain's shared-library dependencies (the list of the official swift:6.0 Ubuntu 24.04 image)
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils git gnupg2 libc6-dev libcurl4-openssl-dev \
+            libedit2 libgcc-13-dev libncurses-dev libpython3-dev libsqlite3-0 libstdc++-13-dev libxml2-dev \
+            libz3-dev pkg-config tzdata zlib1g-dev
+          curl -fsSL --retry 4 --retry-delay 5 -o "$RUNNER_TEMP/swift.tar.gz" "$SWIFT_URL"
+          echo "$SWIFT_SHA256  $RUNNER_TEMP/swift.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/swift"
+          tar -xzf "$RUNNER_TEMP/swift.tar.gz" -C "$RUNNER_TEMP/swift" --strip-components=1
+          rm "$RUNNER_TEMP/swift.tar.gz"
+          echo "$RUNNER_TEMP/swift/usr/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/swift/usr/bin/swift" --version
 
       - name: Install the build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
