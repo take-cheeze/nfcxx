@@ -75,6 +75,7 @@ module EscapeReport
     world.reflective_sites.each { |label, idx| rows << ['reflective', "#{label}:#{idx}", owner_of[label] || '?', '', '', '', '', '', 0, ''].join("\t") }
     world.dynamic_sites.each { |label, idx, what| rows << ['dynamic', "#{label}:#{idx}", owner_of[label] || '?', '', what, '', '', '', 0, ''].join("\t") }
     callee_rows(analyzer, world, rows)
+    argdef_rows(analyzer, world, rows)
     rows.filter_map { |r| r.split("\t").values_at(5, 10) if r.start_with?("site\t") }.uniq.each do |kind, classes|
       next unless kind.start_with?('block:') && classes != '-'
 
@@ -114,6 +115,20 @@ module EscapeReport
     prog.each_source do |insn, j|
       regs = verdict.holding_at(j).map(&:to_i).sort.join(',')
       rows << ['point', site_id, j, insn.op, regs, verdict.escape_at?(j) ? 'escape' : '-'].join("\t")
+    end
+  end
+
+  # BC2CPP_ESCAPE_ARG_NAMES=name,name: one `argdef` row per definition of each name, saying whether it keeps argument 0
+  # (`captures`) or not, to find the definition that makes a literal passed to that name escape.
+  #   argdef  name  owner#method  kind  captures|keeps-nothing
+  def self.argdef_rows(analyzer, world, rows)
+    ENV.fetch('BC2CPP_ESCAPE_ARG_NAMES', '').split(',').each do |name|
+      list = world.defs_named(name)
+      rows << ['argdef', name, list ? list.size : 'dynamic', world.native_name?(name) ? 'native' : '-', '', '', '', '', 0, ''].join("\t")
+      Array(list).each do |d|
+        verdict = analyzer.captures?(d, [:arg, 0]) ? 'captures' : 'keeps-nothing'
+        rows << ['argdef', name, "#{d.owner}##{d.name}", d.irep ? 'bytecode' : (d.kind || 'opaque').to_s, verdict, '', '', '', 0, ''].join("\t")
+      end
     end
   end
 
