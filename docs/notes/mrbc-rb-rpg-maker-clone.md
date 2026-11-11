@@ -122,6 +122,15 @@ Measured on the scratch copy of `3rd/mruby` (default gembox, `enable_debug`, `en
 `mrbc_rb` spawned per file 38.8 s; in-process hook 24.1 s. Both emitter builds: mrbtest 1866/1869 (as before), all 97 generated C
 files byte-identical to the C-mrbc build, 124 compiles by the emitter and 1 by the fallback.
 
+### A build without a C mrbc: `fallback_provider`
+
+`conf.mrbcfile =` leaves the build without a real mrbc, so a file the emitter does not cover (mrbtest's `test/t/*.rb`) has nothing
+to fall back to unless `MRBC_FALLBACK` is set. `MrbcRb::MrubyBuild.fallback_provider = -> { ...build it...; path }` lets the
+build provide one on demand: the callable runs at most once (thread-safe), only when a file is handed to the fallback and
+`MRBC_FALLBACK` is not set in ENV, and a build the emitter covers completely never builds a C mrbc. rpg-maker-clone's
+`build_config.rb` points it at the `host/mrbc` sub-build that mruby would have made first. `mruby_build_test.rb` checks it
+without an oracle.
+
 ## What remains
 
 * mrbtest's test files and any other file the emitter raises Unsupported on need either `MRBC_FALLBACK` or more emitter
