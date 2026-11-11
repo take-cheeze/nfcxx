@@ -13,36 +13,40 @@
 #   -s                           implemented (static, for -B)
 #   --remove-lv                  implemented (RITE binary without the LVAR section; cdump ignores it, as mrbc does)
 #   -e, -E                       implemented (mrbc only prints "no longer needed" to stderr)
-#   -c, -v, --verbose, --version, --copyright, -h, --no-ext-ops, --no-optimize, an input of "-" (stdin)
-#                                not implemented here (they print mrbc's own text, run its parser or its codegen options)
+#   -c                           implemented (check syntax: "<prog>:<first input>:Syntax OK", by compiling with the emitter)
+#   --version, --copyright, -h   implemented (the version text is the fork's: MRBC_RB_VERSION overrides it)
+#   -v, --verbose, --no-ext-ops, --no-optimize, an input of "-" (stdin)
+#                                not implemented here (-v/--verbose print the C parser's AST dump and the disassembly with
+#                                the addresses of the irep structs); `--disasm` (an addition of this command) prints the instruction listing of -v alone, byte
+#                                for byte what mrbc -v prints from its first `irep` line on, except the irep addresses (codedump.rb)
 # Anything not implemented, a construct the emitter does not cover (MrbcRb::Unsupported), a source Prism rejects (mrbc then
 # reports the syntax error itself) and an emitter crash is handed to the real mrbc named by MRBC_FALLBACK, executed with
 # the original arguments. Without MRBC_FALLBACK the command fails (exit 1) and says what was not covered.
 #
-# -g with -S: cdump.c writes the symbol id of each file name, the number the symbol had in the C mrbc's symbol table. For a
-# single input that is the presym count of the mrbc plus one (MRBC_RB_FILENAME_SYM_BASE, default 1472, the fork's; cli_test.rb
-# checks it; for another mrbc build it is MRB_PRESYM_MAX of that build's include/mruby/presym/id.h). With several inputs the
-# ids depend on what the parser interned between the files: not implemented, unless MRBC_RB_LOOSE_FILENAME_SYM=1 (placeholder
-# ids base+1, base+2, ...: not mrbc's bytes, but the generated *_init_syms sets the real ones at start-up, so the program is
-# the same; this is what mruby's own build can use as `build.mrbcfile`).
+# -g with -S: cdump.c writes the symbol id of each file name, the number the symbol had in the C mrbc's symbol table. That is
+# the presym count of the mrbc plus one for the first file, and for each further file it depends on what the lexer interned
+# of the files before it: file_syms.rb reproduces it (MrbcRb::FileSyms), given the presym set of the mrbc build to match
+# (MRBC_RB_PRESYM=fork|bootstrap|<file>, default: the fork's host mrbc, 1472 presyms; mruby's own bootstrap mrbc has 282).
 #
 # Environment:
 #   MRBC_FALLBACK=<mrbc>   the real mrbc to exec for what is not covered
-#   MRBC_RB_FILENAME_SYM_BASE=<n>, MRBC_RB_LOOSE_FILENAME_SYM=1   -g -S, see above
+#   MRBC_RB_PRESYM=fork|bootstrap|<file>   the presym set of the mrbc to match, for -g -S (see above)
 #   MRBC_RB_LOG=<file>     one line per run: "<emitter|fallback|error>\t<reason>\t<args>"
 
 require_relative '../mrbc_rb'
 require_relative '../rite_dump'
+require_relative '../file_syms'
+require_relative '../codedump'
 
 class MrbcRbCli
   class NotCovered < StandardError; end
 
   def initialize(argv)
     @argv = argv
-    @prog = 'mrbc_rb'
+    @prog = $PROGRAM_NAME
     @outfile = nil
     @initname = nil
-    @dump_struct = @static = @debug = @no_lv = false
+    @dump_struct = @static = @debug = @no_lv = @check = @disasm = false
   end
 
   def log(served, reason = '-')
@@ -94,11 +98,21 @@ class MrbcRbCli
       when 'g' then @debug = true
       when 's' then @static = true
       when 'E', 'e' then warn "#{@prog}: -e/-E option no longer needed."
-      when 'c', 'v', 'h' then raise NotCovered, "option #{arg}"
+      when 'c' then @check = true
+      when 'h' then usage_error(nil)
+      when 'v' then raise NotCovered, "option #{arg}"
       when '-'
         case arg
         when '--remove-lv' then @no_lv = true
-        else raise NotCovered, "option #{arg}"
+        when '--version'
+          puts VERSION_TEXT.call
+          exit 0
+        when '--disasm' then @disasm = true
+        when '--copyright'
+          puts COPYRIGHT_TEXT
+          exit 0
+        when '--verbose', '--no-ext-ops', '--no-optimize' then raise NotCovered, "option #{arg}"
+        else usage_error(nil)
         end
       else
         break # the default case of mrbc.c: the rest are inputs
@@ -108,8 +122,30 @@ class MrbcRbCli
     i
   end
 
+  USAGE = <<~USAGE
+    switches:
+    -c           check syntax only
+    -o<outfile>  place the output into <outfile>; required for multi-files
+    -v           print version number, then turn on verbose mode
+    -g           produce debugging information
+    -B<symbol>   binary <symbol> output in C language format
+    -S           dump C struct (requires -B)
+    -s           define <symbol> as static variable
+    --remove-lv  remove local variables
+    --no-ext-ops prohibit using OP_EXTs
+    --no-optimize disable peephole optimization
+    --verbose    run at verbose mode
+    --version    print the version
+    --copyright  print the copyright
+  USAGE
+  VERSION_TEXT = -> { ENV.fetch('MRBC_RB_VERSION', 'mruby 4.0.0 (2026-04-20)') }
+  COPYRIGHT_TEXT = 'mruby - Copyright (c) 2010-2026 mruby developers'
+
+  # mrbc.c: a bad option prints its message (stderr) and then the usage (stdout), exit status 1.
   def usage_error(msg)
-    warn "#{@prog}: #{msg}"
+    warn "#{@prog}: #{msg}" if msg
+    puts "Usage: #{@prog} [switches] programfile..."
+    USAGE.each_line { |l| puts "  #{l}" }
     exit 1
   end
 
@@ -119,16 +155,22 @@ class MrbcRbCli
     rescue NotCovered => e
       fallback(e.message)
     end
-    # Errors mrbc reports with its own words are left to it.
-    fallback('no program file') if first >= @argv.size
+    if first >= @argv.size
+      warn "#{@prog}: no program file given"
+      exit 1
+    end
     inputs = @argv[first..]
     fallback('-S without -B') if @dump_struct && !@initname
-    if @dump_struct && @debug && inputs.size > 1 && ENV['MRBC_RB_LOOSE_FILENAME_SYM'] != '1'
-      fallback('-g -S with several files (file name symbol ids)')
-    end
-    if @outfile.nil?
-      fallback('several inputs without -o') if inputs.size > 1
+    if @outfile.nil? && !@check && !@disasm
+      if inputs.size > 1
+        warn "#{@prog}: output file should be specified to compile multiple files"
+        exit 1
+      end
       @outfile = outfile_name(inputs.first, @initname ? '.c' : '.mrb')
+    end
+    unless File.file?(inputs.first) && File.readable?(inputs.first)
+      warn "#{@prog}: cannot open program file. (#{inputs.first})"
+      exit 1
     end
     fallback('an input is not readable') unless inputs.all? { |f| File.file?(f) && File.readable?(f) }
 
@@ -144,8 +186,18 @@ class MrbcRbCli
       fallback("Crash(#{e.class}: #{e.message[0, 100]})")
     end
 
+    if @disasm
+      $stdout.binmode
+      $stdout.write(MrbcRb::Codedump.listing(MrbcRb::RiteDump.parse(image)))
+      exit 0
+    end
+    if @check
+      puts "#{@prog}:#{inputs.first}:Syntax OK"
+      exit 0
+    end
+
     out = begin
-      render(image)
+      render(image, inputs)
     rescue MrbcRb::RiteDump::Unsupported, StandardError => e
       fallback("dump(#{e.class}: #{e.message[0, 100]})")
     end
@@ -154,9 +206,11 @@ class MrbcRbCli
     exit 0
   end
 
-  def render(image)
+  def render(image, inputs)
     if @initname && @dump_struct
-      MrbcRb::RiteDump.cstruct(MrbcRb::RiteDump.strip(image, debug: @debug, lvar: true), @initname, static: @static)
+      file_syms = MrbcRb::FileSyms.ids(inputs.map { |f| [File.binread(f), f] }) if @debug
+      MrbcRb::RiteDump.cstruct(MrbcRb::RiteDump.strip(image, debug: @debug, lvar: true), @initname, static: @static,
+                                                                                         file_syms: file_syms)
     else
       bin = MrbcRb::RiteDump.strip(image, debug: @debug, lvar: !@no_lv)
       @initname ? MrbcRb::RiteDump.cfunc(bin, @initname, static: @static) : bin

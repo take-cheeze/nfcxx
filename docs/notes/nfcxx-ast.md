@@ -3,8 +3,8 @@
 bc2cpp reads a translation unit's AST to compute facts about native (C/C++) functions. It used clang's JSON AST dump.
 `scripts/nfcxx-ast-dump` produces the same facts' input from the nfcxx front end (EDG): one JSON document per file with
 the function definitions, complete record definitions and file-scope variables, and every function body's statements and
-expressions. `BC2CPP_AST_PRODUCER=nfcxx` selects it; the default stays `clang` until the comparison below has been
-run on the full closed world (`tools/bc2cpp/native_ast_source.rb`).
+expressions. It is the default producer wherever the front end is built (`scripts/setup-libclang-edg.sh`), clang the fallback;
+`BC2CPP_AST_PRODUCER=clang` opts out (`tools/bc2cpp/native_ast_source.rb`).
 
 ## What the consumers need (the information model)
 
@@ -73,18 +73,40 @@ The `*_rom_entries` tables of `native_rom_extract.rb` are those file-scope initi
 entries over the closed world, identical in clang and nfcxx. (`native_rom_extract.rb SOURCE FLAGS...` and
 `native_core_candidates.rb SOURCE --run FLAGS...` run the producer named by `BC2CPP_AST_PRODUCER` themselves.)
 
-Main-program check. The pinned `src/main.cxx` and `mruby-rgss/src/lib.cxx` cannot be parsed in a checkout without the
-SDL2, lvgl, gflags, ng-log, uni-algo and stb submodules (clang fails the same way), so the manifests were compared on a
-synthetic host `main` that exercises the constructs above (and `native_ast_returns_check.rb` has the same fixture) with
-the real `--unit` sources that do parse (`mruby-rgss/src/{sixel,tts,input_bridge,default_font,audio}.cxx`,
-`mruby-rpg2k/src/rgss_ext.cxx`, flags: world include dirs and the analysis presym header). Result: the `refusals` are
-identical, and the `names` differ only by libstdc++ internals: `""` (a `__builtin_nanf("")` that EDG folds), and the
-`__throw_length_error("vector::_M_range_insert")` literals of member-template patterns EDG does not keep. No name that
-comes from the program's own source differs. `functions` differs in implicit and template-injected names (`Base`,
-`_Iter_negate<_Predicate>`, ...): `main_reachability.rb` reads it only for `*_impl` names, and those agree. So the
-manifest is not byte-identical to clang's (the STL internals are the reason), and `clang` stays the default.
+Main-program check (`bc2cpp/scripts/bc2cpp/main_ast_producers_diff.rb`, step 1c of `tests/bc2cpp/run_nfcxx_parity.sh`). The pinned
+`src/main.cxx` and `mruby-rgss/src/lib.cxx` cannot be parsed in a checkout without the SDL2, lvgl, gflags, ng-log, uni-algo and stb
+submodules (both producers fail the same way), so the manifests are compared on `tests/bc2cpp/fixtures/main_ast_stl_host.cxx` (the
+constructs above plus `<vector>`, `<map>`, `<string>`, `<functional>`, `<memory>`, `<algorithm>`, `<cmath>`) alone and beside every C++
+unit of the closed world that parses (17 of 26 here: the other 9 need submodules and fail in both). The manifests' `roots` are not
+byte-identical, and need not be: `main_reachability.rb` reads them as follows, so only these must agree, and the script fails on any
+other difference:
+
+- `refusals`: identical.
+- `names` (every name is added to the retained-method set and tested against a Ruby method name or the `[\w?!=]{2,}` fragment
+  pattern): nfcxx reports no name clang does not. Clang alone reports 12 names, all libstdc++ internals: the messages of its
+  `static_assert`s (`"incomplete type"`, `"U must be unsigned"`, ...), the throw strings of member-template patterns EDG does not
+  keep (`"vector::_M_realloc_insert"`) and the `""` of a folded `__builtin_nanf("")`. Each contains a space or `::` or is empty, so
+  none can be a Ruby method name or a fragment, and none is written as a string literal in any file of the program itself (the
+  check reads the manifest's dependency list outside `/usr/include/c++` and `/usr/lib/gcc`). A name that comes from the program's
+  own source and differs fails the check.
+- `functions` (read only for `native_impls = functions | names`, tested as `"#{cpp_name(owner, method)}_impl"`; `cpp_name` is
+  `Owner_method` with a class-constant owner): clang alone reports ~735 implicit and template-injected names (`Base`, `~Derived`,
+  `_Bind<type-parameter-0-0 (...)>`, `_Vector_impl`, `~(lambda at ...)`) and nfcxx ~109 of its own (`_AllocNode`, `_Iter_comp_val`).
+  None is an identifier ending in `_impl` that does not start with an underscore, so none can equal a method's `Owner_method_impl`;
+  the check fails if one does.
+
+The analysis headers' presym `id.h` (`scripts/bc2cpp/analysis_headers.rb`: the closed world's native sources preprocessed with
+`MRB_PRESYM_SCANNING`, read by mruby's presym scanner) is generated with `BC2CPP_PREPROCESSOR=clang` and `=nfcxx` by
+`analysis_headers_pp_diff.rb`: 682 IDs from 78 of 82 sources (the 4 others need submodules and fail in both), byte-identical.
 
 ## Not covered yet / stays on clang
+
+What still names clang in bc2cpp and its tests (everything else runs nfcxx when built, and clang only as the fallback):
+
+- Fallback only: `NativeAstSource` (`clang -ast-dump=json` when `build/libclang-edg` is absent or `BC2CPP_AST_PRODUCER=clang`),
+  `BaseRbsNative.preprocessor` (`clang -E` without `build/edg`), `main_ast.rb`'s `CLANG` (clang++, only under the clang producer).
+- Oracle: `tests/bc2cpp/run_nfcxx_parity.sh` and the `nfcxx-clang-parity` CI job (the only job that installs clang).
+- `bc2cpp/tools/bc2cpp/native_binding_split.rb` reads `scripts/native/binding_facts.py` (libclang's Python API), not the AST dump.
 
 - `scripts/bc2cpp/tagged_fixnum_check.rb`'s 32-bit probe stays on `g++ -m32` / `clang++ --target=i386-linux-gnu`: nfcxx's
   `--target=linux_i686` is only for `--freestanding --emit-c` (the driver refuses `--target` without `--freestanding`:

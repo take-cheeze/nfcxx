@@ -16,8 +16,7 @@ module NativeAstSource
 
   module_function
 
-  # +auto+: with no BC2CPP_AST_PRODUCER, nfcxx when it is built here, else clang. A consumer whose output is not byte-identical
-  # between the two (main_ast.rb: libstdc++ internals differ in names) passes auto: false and keeps clang unless told otherwise.
+  # +auto+: with no BC2CPP_AST_PRODUCER, nfcxx when it is built here, else clang (auto: false: clang unless told otherwise).
   def producer(auto: true)
     name = ENV.fetch('BC2CPP_AST_PRODUCER', '')
     name = (auto && available?('nfcxx') ? 'nfcxx' : 'clang') if name.empty?

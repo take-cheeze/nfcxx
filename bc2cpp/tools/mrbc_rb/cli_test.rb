@@ -11,6 +11,7 @@ require 'open3'
 require 'rbconfig'
 require_relative 'mrbc_rb'
 require_relative 'rite_dump'
+require_relative 'file_syms'
 
 oracle = ENV.fetch('MRBC', nil)
 unless oracle && File.executable?(oracle)
@@ -20,22 +21,23 @@ end
 
 CLI = File.expand_path('bin/mrbc_rb', __dir__)
 D = MrbcRb::RiteDump
+FS = MrbcRb::FileSyms
 
 # [flags the oracle gets, lambda image -> expected output of the dump functions] per combination.
 COMBOS = [
-  [%w[-o-], ->(img) { D.strip(img, debug: false, lvar: true) }],
-  [%w[-g -o-], ->(img) { D.strip(img, debug: true, lvar: true) }],
-  [%w[--remove-lv -o-], ->(img) { D.strip(img, debug: false, lvar: false) }],
-  [%w[-g --remove-lv -o-], ->(img) { D.strip(img, debug: true, lvar: false) }],
-  [%w[-Bsym -o-], ->(img) { D.cfunc(D.strip(img, debug: false, lvar: true), 'sym') }],
-  [%w[-Bsym -s -o-], ->(img) { D.cfunc(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
-  [%w[-g -Bsym -o-], ->(img) { D.cfunc(D.strip(img, debug: true, lvar: true), 'sym') }],
-  [%w[-Bsym -S -o-], ->(img) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym') }],
-  [%w[-Bsym -S -s -o-], ->(img) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
-  [%w[-Bsym -S -s --remove-lv -o-], ->(img) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
-  # -g -S: the file name symbol id is known for one input file only (the first symbol after the presyms)
-  [%w[-g -Bsym -S -o-], ->(img) { D.cstruct(D.strip(img, debug: true, lvar: true), 'sym') }, :single],
-  [%w[-g -Bsym -S -s -o-], ->(img) { D.cstruct(D.strip(img, debug: true, lvar: true), 'sym', static: true) }, :single]
+  [%w[-o-], ->(img, _f) { D.strip(img, debug: false, lvar: true) }],
+  [%w[-g -o-], ->(img, _f) { D.strip(img, debug: true, lvar: true) }],
+  [%w[--remove-lv -o-], ->(img, _f) { D.strip(img, debug: false, lvar: false) }],
+  [%w[-g --remove-lv -o-], ->(img, _f) { D.strip(img, debug: true, lvar: false) }],
+  [%w[-Bsym -o-], ->(img, _f) { D.cfunc(D.strip(img, debug: false, lvar: true), 'sym') }],
+  [%w[-Bsym -s -o-], ->(img, _f) { D.cfunc(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
+  [%w[-g -Bsym -o-], ->(img, _f) { D.cfunc(D.strip(img, debug: true, lvar: true), 'sym') }],
+  [%w[-Bsym -S -o-], ->(img, _f) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym') }],
+  [%w[-Bsym -S -s -o-], ->(img, _f) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
+  [%w[-Bsym -S -s --remove-lv -o-], ->(img, _f) { D.cstruct(D.strip(img, debug: false, lvar: true), 'sym', static: true) }],
+  # -g -S: the file name symbol ids come from the sources (file_syms.rb)
+  [%w[-g -Bsym -S -o-], ->(img, f) { D.cstruct(D.strip(img, debug: true, lvar: true), 'sym', file_syms: FS.ids(f)) }],
+  [%w[-g -Bsym -S -s -o-], ->(img, f) { D.cstruct(D.strip(img, debug: true, lvar: true), 'sym', static: true, file_syms: FS.ids(f)) }]
 ].freeze
 
 mruby_dir = File.expand_path('../..', oracle)
@@ -46,6 +48,10 @@ sets = { 'core mrblib' => Dir["#{mruby_dir}/mrblib/*.rb"].sort.reject { |p| p.en
 end
 sets.reject! { |_, files| files.empty? }
 inputs = sets.map { |name, files| [name, files] } + Dir.glob('bc2cpp/**/*.rb').sort.map { |f| [f, [f]] }
+# MRBC_RB_CLI_SAMPLE=n: check every n-th single file of bc2cpp/ (the gem sets, which hold the multi-file cases, are always all
+# checked). CI uses it to keep the job short; unset = everything.
+sample = Integer(ENV.fetch('MRBC_RB_CLI_SAMPLE', '1'))
+inputs = inputs.each_with_index.select { |(_, files), i| files.size > 1 || (i % sample).zero? }.map(&:first)
 
 failures = 0
 checked = Hash.new(0)
@@ -57,15 +63,14 @@ inputs.each do |name, paths|
     skipped += 1
     next
   end
-  COMBOS.each do |flags, make, only|
-    next if only == :single && paths.size > 1
-
+  sources = paths.map { |p| [File.binread(p), p] }
+  COMBOS.each do |flags, make|
     expected, err, st = Open3.capture3(oracle, *flags, *paths, binmode: true)
     unless st.success?
       puts "  oracle failed for #{flags.join(' ')} #{name}: #{err[0, 80]}"
       next
     end
-    got = make.call(img)
+    got = make.call(img, sources)
     if got.b == expected.b
       checked[flags.join(' ')] += 1
     else
@@ -90,7 +95,7 @@ Dir.mktmpdir('mrbc_rb_cli') do |dir|
   unsupported = File.join(dir, 'u.rb')
   File.write(unsupported, "begin\n  1\nrescue => e\n  2\nend\nnot_a_covered_thing = ObjectSpace.each_object { |o| o }\n")
   cases = [
-    [%w[-o-], [a]], [%w[-g -o-], [a, b]], [%w[-Bsym -o- -S], [a, b]], [%w[-Bsym -o- -S -s], [a]], [%w[-g -Bsym -o- -S], [a]], [%w[-g -Bsym -o- -S -s], [a]], [%w[-Bsym -o- --remove-lv], [a]],
+    [%w[-o-], [a]], [%w[-g -o-], [a, b]], [%w[-Bsym -o- -S], [a, b]], [%w[-Bsym -o- -S -s], [a]], [%w[-g -Bsym -o- -S], [a]], [%w[-g -Bsym -o- -S], [a, b]], [%w[-g -Bsym -o- -S -s], [b, a]], [%w[-g -Bsym -o- -S -s], [a]], [%w[-Bsym -o- --remove-lv], [a]],
     [%w[-B sym -o -], [a]], [%w[-e -o-], [a]]
   ]
   cases.each do |flags, files|
@@ -123,20 +128,34 @@ Dir.mktmpdir('mrbc_rb_cli') do |dir|
     failures += 1 unless same
   end
 
-  # Not covered: fails without MRBC_FALLBACK, runs the real mrbc with it.
-  _o, err, st = run_cli({ 'MRBC_FALLBACK' => nil }, '-Bsym', '-S', '-g', '-o-', a, b)
+  # Not covered: fails without MRBC_FALLBACK, runs the real mrbc with it (-v: the AST dump and the irep addresses of the C
+  # compiler; --no-optimize: another code generator).
+  _o, err, st = run_cli({ 'MRBC_FALLBACK' => nil }, '--no-optimize', '-o-', a)
   ok = !st.success? && err.include?('MRBC_FALLBACK')
   puts ok ? 'ok   cli: an uncovered option set fails with a clear message without MRBC_FALLBACK' : "FAIL cli failure message: #{err}"
   failures += 1 unless ok
-  exp, _e, = Open3.capture3(oracle, '-Bsym', '-S', '-g', '-o-', a, b, binmode: true)
-  got, err, st = run_cli({ 'MRBC_FALLBACK' => oracle }, '-Bsym', '-S', '-g', '-o-', a, b)
+  exp, _e, = Open3.capture3(oracle, '--no-optimize', '-o-', a, binmode: true)
+  got, err, st = run_cli({ 'MRBC_FALLBACK' => oracle }, '--no-optimize', '-o-', a)
   ok = st.success? && got == exp
   puts ok ? 'ok   cli: MRBC_FALLBACK runs the real mrbc for what is not covered' : "FAIL cli fallback: #{err}"
   failures += 1 unless ok
-  exp, _e, ost = Open3.capture3(oracle, '-c', a)
-  got, = run_cli({ 'MRBC_FALLBACK' => oracle }, '-c', a)
-  ok = ost.success? && got == exp && got.include?('Syntax OK')
-  puts ok ? 'ok   cli: -c goes to the real mrbc' : 'FAIL cli -c'
+  # -c, --version, --copyright, -h and the usage errors, without the fallback: the oracle's text with its program name
+  # replaced (mrbc prints argv[0]).
+  [[%w[-c], [a]], [%w[-c], [a, b]], [%w[--version], []], [%w[--copyright], []], [%w[-h], []], [%w[--bogus], []], [[], []],
+   [%w[-o], [a]], [%w[-o- -Bsym -S -g], [File.join(dir, 'missing.rb')]], [%w[-g], [a, b]]].each do |flags, files|
+    exp, eerr, est = Open3.capture3(oracle, *flags, *files, binmode: true)
+    got, gerr, gst = run_cli({ 'MRBC_FALLBACK' => nil }, *flags, *files)
+    norm = ->(t) { t.gsub(oracle, 'PROG').gsub(CLI, 'PROG').gsub(dir, 'DIR') }
+    ok = est.exitstatus == gst.exitstatus && norm.call(exp) == norm.call(got) && norm.call(eerr) == norm.call(gerr)
+    puts ok ? "ok   cli #{flags.join(' ')} #{files.size} file(s): same text and status" : "FAIL cli #{flags.join(' ')}: #{norm.call(got)[0, 100].inspect} #{norm.call(gerr)[0, 100].inspect}"
+    failures += 1 unless ok
+  end
+  # --disasm: the listing of mrbc -v (from its first irep line), irep addresses aside.
+  exp, = Open3.capture3(oracle, '-v', '-o', '/dev/null', a, b, binmode: true)
+  got, = run_cli({ 'MRBC_FALLBACK' => nil }, '--disasm', a, b)
+  addr = ->(t) { t.b.gsub(/^irep 0x[0-9a-f]+/, 'irep ADDR') }
+  ok = addr.call(exp[/^irep 0x.*/m]) == addr.call(got)
+  puts ok ? 'ok   cli: --disasm is the listing of mrbc -v' : 'FAIL cli --disasm'
   failures += 1 unless ok
   # A syntax error: mrbc's own report and exit status, through the fallback.
   bad = File.join(dir, 'bad.rb')
