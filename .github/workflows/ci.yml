@@ -484,6 +484,19 @@ jobs:
           printf '#include <cstdio>\nint main(){std::printf("pathb macos ok\\n");return 0;}\n' > hello.cpp
           NFCXX_PATH=b ./nfcxx hello.cpp -o hello && ./hello
 
+      # The default driver, with no NFCXX_PATH: it picks Path B, and a program Path B does not finish falls back to
+      # gcc with a message on stderr. This step records which one happened on arm64, so the fallback rate is measured.
+      - name: Default driver hello (which backend builds it)
+        if: always()
+        run: |
+          ./nfcxx hello.cpp -o hello_default 2> default-driver.err && ./hello_default
+          if grep -q 'building the program with the gcc backend' default-driver.err; then
+            echo "default driver: fell back to the gcc backend"
+          else
+            echo "default driver: Path B built it"
+          fi
+          cat default-driver.err
+
       - name: Path B probes (tests/pathb-qbe/run.sh subset)
         if: always()
         run: PATHB_QBE_ONLY='cases/(floats|gaps_float|gaps_sort)' tests/pathb-qbe/run.sh --trace off

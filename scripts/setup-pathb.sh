@@ -106,14 +106,6 @@ USE_SOFTFLOAT=1
 USE_FLOAT128_FOR_HOST_FP_VALUE=0
 USE_QUADMATH_LIBRARY=0
 CFG
-  # The target is the native build's, x86-64 Linux, which EDG otherwise infers from the host compiler's macros
-  # (__linux__ selects defines_linux.h, __x86_64 these flags); a wasm32 host has neither. __linux__ is defined for
-  # cpfe's sources below. tests: the IR of the native and of this front end are compared (pathb-wasm-frontend.md).
-  cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
-TARG_SUPPORTS_X86_64=1
-GNU_X86_ASM_EXTENSIONS_ALLOWED=1
-GNU_X86_ATTRIBUTES_ALLOWED=1
-CFG
   # ... and EDG takes its host's alignments from the target too (defines_linux.h, targ_def.h): these are wasm32's, which
   # the front end checks when it starts (il_alloc.c, check_host_alignment). They lay out its own memory only. A constant
   # is 8-aligned (its 64-bit host integers, below), a pointer 4.
@@ -124,6 +116,15 @@ CFG
   # The largest size_t the front end represents: x86-64's, not the host's ULONG_MAX (targ_def.h's default).
   echo 'TARG_SIZE_T_MAX=18446744073709551615ULL' >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef"
 fi
+# The target is x86-64 for every host, native or emscripten: EDG otherwise infers the x86 asm extensions from the
+# host compiler's macros (__x86_64 in lang_feat.h), so an arm64 host compiles nfcxx_ir.c without the x86 asm
+# operand classes it names (aoc_reg_a, aoc_cc, ...). Path B emits x86-64 code (pathb-cc), so the front end parses
+# x86 asm for that target on every host. On an x86-64 Linux host these are the values EDG already infers.
+cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
+TARG_SUPPORTS_X86_64=1
+GNU_X86_ASM_EXTENSIONS_ALLOWED=1
+GNU_X86_ATTRIBUTES_ALLOWED=1
+CFG
 cat > "$tree/cmake/macro-conf/nfcxx-pathb/cpfe-cp.cmakedef" <<'CFG'
 import <linux-gcc-release/cpfe-cp>
 CFG
