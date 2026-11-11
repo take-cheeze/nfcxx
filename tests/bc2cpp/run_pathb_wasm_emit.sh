@@ -7,7 +7,7 @@
 # mruby interpreter's on the same script (an uncaught exception compares its report without the backtrace).
 # Prints the best-of-N wall time of the interpreter, the compiled build and CRuby on the benchmark IR, and the speedup
 # of the compiled build.
-#   PATHB_WASM_BENCH_IR=file     the IR to time (default tests/pathb-ir/eh_libstdcxx_throw.ir, 3.4 MB)
+#   PATHB_WASM_BENCH_IR=file     the IR to time (default tests/pathb-ir/bool_load.ir: the emitter refuses the 3.4 MB eh_libstdcxx_throw.ir, a variadic call)
 #   PATHB_BENCH_REPEAT=N         runs per runtime, best kept (default 3)
 #   SCRIPT_WORLD_MIN_SPEEDUP=X   also fail when the compiled build is under X times the interpreter
 #   BC2CPP_RPG_DIR=dir           an existing rpg-maker-clone checkout instead of the pinned one
@@ -44,7 +44,7 @@ cases=build/bc2cpp/pathb_wasm_emit.cases
   for ir in $(find tests/pathb-ir -maxdepth 1 -name '*.ir' | LC_ALL=C sort | head -12); do
     echo "--names $ir"
   done
-  sample=tests/pathb-ir/eh_libstdcxx_throw.ir
+  sample=tests/pathb-ir/asm_barrier.ir
   echo "--asan tests/pathb-ir/asm_barrier.ir"
   echo "--memory64 tests/pathb-ir/asm_barrier.ir"
   echo "--threads tests/pathb-ir/asm_barrier.ir"
@@ -59,7 +59,7 @@ cases=build/bc2cpp/pathb_wasm_emit.cases
 } > "$cases"
 
 log=build/bc2cpp/pathb_wasm_emit.log
-bench=${PATHB_WASM_BENCH_IR:-tests/pathb-ir/eh_libstdcxx_throw.ir}
+bench=${PATHB_WASM_BENCH_IR:-tests/pathb-ir/bool_load.ir}
 (env -u LD ruby "$tree/tools/script_world/compiled_run.rb" --script scripts/pathb-wasm-emit.rb \
   --tail 'rc = main(ARGV)\nexit(rc) if rc != 0\n' --entry 'main(ARGV)' --cases "$cases" --bench "$bench" \
   --repeat "${PATHB_BENCH_REPEAT:-3}" --bench-status 0 --chdir "$root") 2>&1 | tee "$log"
