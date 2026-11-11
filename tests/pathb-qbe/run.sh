@@ -64,7 +64,7 @@ std_of() { sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$1" | head -1; }
 flags_of() { sed -n 's,^// NFCXX-FLAGS: *,,p' "$1" | head -1; }
 
 # check_asm <source> <asm>: the "// ASM-COUNT: FUNCTION PREFIX N" lines of a probe. The assembly of FUNCTION must
-# contain exactly N call instructions whose callee starts with PREFIX. Volatile accesses are calls of helper
+# contain exactly N call instructions whose callee starts with PREFIX (a tail call, a jmp to it, counts as a call). Volatile accesses are calls of helper
 # functions (docs/notes/pathb-stage3.md), so this shows that QBE kept every one of them (and, with N = 0 on the same
 # code without volatile, that the count means something). Prints the reason and fails when a count is wrong.
 check_asm() {
@@ -73,7 +73,7 @@ check_asm() {
     got=$(awk -v f="$fnname" -v p="$prefix" '
       $0 == f ":" { on = 1; next }
       on && /^\.size / { on = 0 }
-      on && $1 == "callq" && index($2, p) == 1 { n++ }
+      on && ($1 == "callq" || $1 == "jmp") && index($2, p) == 1 { n++ }
       END { print n + 0 }' "$asm")
     if [ "$got" != "$want" ]; then echo "asm check: $fnname has $got calls to $prefix*, expected $want"; return 1; fi
   done < <(sed -n 's,^// ASM-COUNT: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([0-9]*\).*,\1 \2 \3,p' "$src")
@@ -83,8 +83,8 @@ check_asm() {
     got=$(awk -v f="$fnname" -v a="$prefix" -v b="$want" '
       $0 == f ":" { on = 1; next }
       on && /^\.size / { on = 0 }
-      on && $1 == "callq" && index($2, a) == 1 && !pa { pa = NR }
-      on && $1 == "callq" && index($2, b) == 1 && !pb { pb = NR }
+      on && ($1 == "callq" || $1 == "jmp") && index($2, a) == 1 && !pa { pa = NR }
+      on && ($1 == "callq" || $1 == "jmp") && index($2, b) == 1 && !pb { pb = NR }
       END { print (pa && pb && pa < pb) ? "ok" : "no" }' "$asm")
     if [ "$got" != ok ]; then echo "asm check: in $fnname, a call of $prefix* does not come before a call of $want*"; return 1; fi
   done < <(sed -n 's,^// ASM-ORDER: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\).*,\1 \2 \3,p' "$src")
