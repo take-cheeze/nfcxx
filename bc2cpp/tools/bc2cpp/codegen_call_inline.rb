@@ -11,9 +11,9 @@ require_relative 'bytecode_ir'
 # `rD = Owner_name_impl(M, recv, args...);`. This pass leaves that decision alone and replaces just that line, so
 # every guard, fallback and proof stays where it was. Inlining adds no assumption about the receiver.
 #
-# The callee (CallInlineCallee) qualifies when its whole body is straight-line or branching register code: no block,
-# no rescue or ensure, no send or constant or ivar (anything that names `self` or looks a method up), no argument
-# beyond the mandatory ones, and at most INLINE_CALL_MAX_INSNS instructions. Its registers move to a fresh range in a
+# The callee qualifies when its whole body is straight-line or branching register code: no block, no rescue or
+# ensure, no constant, no argument beyond the mandatory ones, at most INLINE_CALL_MAX_INSNS instructions, and a send
+# only when the callee is not mruby's own Ruby (see INLINE_CALL_SEND_OPS). Its registers move to a fresh range in a
 # nested scope (`r1000...`, never colliding with the caller's own or an inlined block's), the receiver and arguments
 # are copied into R0..Rn, each RETURN becomes an assignment to the call's destination and a jump to the end, and
 # every other instruction goes through compile_insn with the shifted registers, as an inlined block body does, so the
@@ -32,10 +32,14 @@ class CodeGen
     :LOADI__1, :LOADI_0, :LOADI_1, :LOADI_2, :LOADI_3, :LOADI_4, :LOADI_5, :LOADI_6, :LOADI_7,
     :LOADI8, :LOADINEG, :LOADI16, :LOADI32,
     :ADD, :SUB, :MUL, :DIV, :LT, :LE, :GT, :GE, :EQ, :ADDI, :SUBI,
-    :LOADSELF, :GETIV, :SETIV,
+    :LOADSELF, :GETIV, :SETIV, :GETIDX, :GETIDX0, :SETIDX,
     :JMP, :JMPIF, :JMPNOT, :JMPNIL,
     :RETURN, :RETNIL, :RETTRUE, :RETFALSE, :RETSELF
   ].freeze
+  # Sends are allowed in a callee that is not mruby's own Ruby (CallInline's second rule): a core body is compiled with
+  # no closed-world proof and binds statically only to core definitions (compile_method), a state the caller's
+  # function is not in.
+  INLINE_CALL_SEND_OPS = Set[:SEND, :SEND0, :SSEND, :SSEND0].freeze
   INLINE_CALL_LINE = /^(?<ind>[ \t]*)r(?<dest>\d+) = (?<impl>[A-Za-z_][\w$]*_impl)\(M, (?<args>(?:self|r\d+)(?:, r\d+)*)\);[ \t]*$/
 
   def inline_calls_enabled?
@@ -75,7 +79,8 @@ class CodeGen
     BytecodeIR.for(irep).each_source { |insn, i| insns << [insn, i] }
     body = insns.reject { |insn, _| insn.op == :ENTER }
     return nil if body.empty? || body.size > INLINE_CALL_MAX_INSNS
-    return nil unless body.all? { |insn, _| INLINE_CALL_OPS.include?(insn.op) }
+    allowed = d.core ? INLINE_CALL_OPS : INLINE_CALL_OPS | INLINE_CALL_SEND_OPS
+    return nil unless body.all? { |insn, _| allowed.include?(insn.op) }
     return nil unless body.any? { |insn, _| %i[RETURN RETNIL RETTRUE RETFALSE RETSELF].include?(insn.op) }
 
     body

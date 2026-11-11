@@ -386,7 +386,8 @@ OWNERS_CHR = %w[ChrSub ChrApp].freeze
 # CALL_INLINE (codegen_call_inline.rb): a call the compiler already binds to one definition (here by the receiver being
 # exactly a fresh IcPoint) becomes the callee's instructions when the callee is a small register-only body. The cases cover
 # the Integer, Float, String and nil operands of the inlined arithmetic and compare (the slow arms), a branching callee, a
-# callee that is only a move, and a callee that sends (not inlined).
+# callee that is only a move, index reads and writes, callees that send (explicit and self sends, one inlined twice
+# into one method), a NoMethodError raised inside an inlined body, and a callee with a block (not inlined).
 CALL_INL = <<~RUBY5
   class IcPoint
     def initialize(x, y); @x = x; @y = y; end
@@ -399,6 +400,13 @@ CALL_INL = <<~RUBY5
     def bump(d); @x += d; end
     def twice(a); sumxy + a; end
     def me; self; end
+    def cells; @cells ||= [10, 20, 30]; end
+    def at(i); cells[i]; end
+    def put(i, v); cells[i] = v; end
+    def zork(o); o.zork; end
+    def sq2(n); sq(n) + sq(n); end
+    def each_sq(a); a.map { |x| x * x }; end
+    def label(n); n > 0 ? 'pos' : 'neg'; end
   end
 
   class IcUse
@@ -410,6 +418,11 @@ CALL_INL = <<~RUBY5
     def twice(n); pt = IcPoint.new(0, 0); [pt.sq(n), pt.sq(n + 1)]; end
     def state(n); pt = IcPoint.new(1, 2); pt.bump(n); [pt.sumxy, pt.twice(10)]; end
     def same; pt = IcPoint.new(0, 0); pt.me.equal?(pt); end
+    def indexed(i); pt = IcPoint.new(0, 0); [pt.at(i), pt.put(i, 7), pt.at(i)]; end
+    def sends(n); pt = IcPoint.new(0, 0); [pt.sq2(n), pt.sq2(n + 1), pt.flag(n)]; end
+    def missing(o); IcPoint.new(0, 0).zork(o); end
+    def blocky(a); IcPoint.new(0, 0).each_sq(a); end
+    def named(n); pt = IcPoint.new(0, 0); [pt.label(n), pt.label(-n)]; end
   end
 RUBY5
 CALL_INL_EXPECTED = {
@@ -429,7 +442,15 @@ CALL_INL_EXPECTED = {
   'IcUse.new.state(5)' => '[8, 18]',
   'IcUse.new.state(1.5)' => '[4.5, 14.5]',
   'begin; IcUse.new.state(nil); rescue TypeError => e; e.class; end' => 'TypeError',
-  'IcUse.new.same' => 'true'
+  'IcUse.new.same' => 'true',
+  'IcUse.new.indexed(1)' => '[20, 7, 7]',
+  'IcUse.new.indexed(9)' => '[nil, 7, 7]',
+  'begin; IcUse.new.indexed("x"); rescue => e; e.class; end' => 'TypeError',
+  'IcUse.new.sends(3)' => '[18, 32, false]',
+  'IcUse.new.sends(nil.to_i)' => '[0, 2, false]',
+  'begin; IcUse.new.missing(1); rescue NoMethodError => e; e.class; end' => 'NoMethodError',
+  'IcUse.new.blocky([1, 2, 3])' => '[1, 4, 9]',
+  'IcUse.new.named(2)' => '["pos", "neg"]'
 }.freeze
 OWNERS_INL = %w[IcPoint IcUse].freeze
 
@@ -546,9 +567,16 @@ Dir.mktmpdir('stack-tuples') do |dir|
     chunk = method_chunk(inl_code, 'IcUse', name)
     callees.each { |c| check.call("IcUse##{name} inlines #{c}", chunk.include?("// CALL_INLINE #{c} (")) }
   end
+  { 'indexed' => ['IcPoint#at', 'IcPoint#put'], 'sends' => ['IcPoint#sq2', 'IcPoint#flag'], 'missing' => ['IcPoint#zork'] }.each do |name, callees|
+    chunk = method_chunk(inl_code, 'IcUse', name)
+    callees.each { |c| check.call("IcUse##{name} inlines #{c}", chunk.include?("// CALL_INLINE #{c} (")) }
+  end
+  check.call('IcUse#named keeps the call to a callee that builds a String literal (STRING is not inlined)',
+             !method_chunk(inl_code, 'IcUse', 'named').include?('CALL_INLINE'))
+  check.call('IcUse#blocky keeps the call to a callee with a block', !method_chunk(inl_code, 'IcUse', 'blocky').include?('CALL_INLINE'))
   check.call('IcPoint#twice inlines its self call to IcPoint#sumxy (an SSEND bound to one definition)',
              method_chunk(inl_code, 'IcPoint', 'twice').include?('// CALL_INLINE IcPoint#sumxy ('))
-  check.call('IcUse#nosend keeps the call to a callee that sends', !method_chunk(inl_code, 'IcUse', 'nosend').include?('CALL_INLINE'))
+  check.call('IcUse#nosend inlines IcPoint#flag, a callee that sends', method_chunk(inl_code, 'IcUse', 'nosend').include?('// CALL_INLINE IcPoint#flag ('))
   check.call('inlined bodies use their own register range, and the call line is gone',
              !method_chunk(inl_code, 'IcUse', 'square').include?('IcPoint_sq_impl(M'))
   saved_inl = ENV.fetch('BC2CPP_INLINE_CALLS', nil)
