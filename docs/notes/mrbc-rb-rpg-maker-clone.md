@@ -39,14 +39,18 @@ Flags of `mrbc.c`: `-o<file>`/`-o <file>`, `-S`, `-B<sym>`/`-B <sym>`, `-c`, `-v
 Implemented, byte for byte against the fork's mrbc (cli_test.rb: all 737 inputs, every gem's mrblib set, the core mrblib and
 every file of bc2cpp/, 12 flag combinations each): `-o`, default output names, `-g`, `--remove-lv`, `-B` (C byte array),
 `-B -s`, `-B -S` (cdump.c's C struct dump, with `-s`, and `--remove-lv`, which cdump ignores as mrbc does), `-g -B`,
-`-g -B -S` for one or several input files, `-e`/`-E`; and, as text, with the oracle's exit status: `-c` (`<prog>:<first
-input>:Syntax OK`, decided by compiling with the emitter), `--version`, `--copyright` (the fork's text; `MRBC_RB_VERSION`
-replaces the version line), `-h`, an unknown option, a missing input / output file name / `-B` name (usage text and status of
-mrbc.c).
-Handed to the real mrbc (`MRBC_FALLBACK`), or an error naming the reason without it: `-v`, `--verbose` (the C parser's AST
-dump, then the disassembly with the addresses of the irep structs: neither is reproducible from a Prism tree/RITE image
-byte for byte), `--no-ext-ops`, `--no-optimize`, stdin, a syntax error (mrbc words its own) and a construct the emitter
-does not cover.
+`-g -B -S` for one or several input files, `-e`/`-E`, `--no-optimize`, `--no-ext-ops` (an operand that needs an OP_EXT is an
+error in both), `-` (stdin), `-S` and `-s` without `-B` (mrbc ignores them: the plain binary); and, as text, with the oracle's exit
+status: `-c` (`<prog>:<first input>:Syntax OK`, decided by compiling with the emitter), `--version`, `--copyright` (the fork's
+text; `MRBC_RB_VERSION` replaces the version line), `-h`, an unknown option, a missing input / output file name / `-B` name
+(usage text and status of mrbc.c), and `-v` where the run ends without compiling (mrbc prints the version when it parses the
+first `-v`: so `-v` alone, `-v` with an unreadable input or a usage error show it first, as mrbc does).
+`bin/mrbc_rb --help` (an addition; mrbc has none, it prints its usage and exits 1 for any unknown switch) lists these, the
+additions (`--disasm`, `--help`) and the fallback; `-h` stays byte for byte mrbc's usage.
+Handed to the real mrbc (`MRBC_FALLBACK`), or an error naming the reason without it: `-v`/`--verbose` with a program (the C
+parser's AST dump, then the disassembly with the addresses of the irep structs: neither is reproducible from a Prism tree/RITE
+image byte for byte; `--disasm` is the listing alone), a syntax error (mrbc words its own message), an input after the first that
+mrbc cannot open (mrbc still writes the output of the others and exits 0), and a construct the emitter does not cover.
 
 `codedump.rb` is a Ruby port of `src/codedump.c` (the listing `mrbc -v` prints after the AST dump): every instruction of
 every irep, local variable names, catch tables, `OP_EXT1..3`, `mrb_sym_dump` quoting. `codedump_test.rb` checks it against
@@ -130,6 +134,42 @@ build provide one on demand: the callable runs at most once (thread-safe), only 
 `MRBC_FALLBACK` is not set in ENV, and a build the emitter covers completely never builds a C mrbc. rpg-maker-clone's
 `build_config.rb` points it at the `host/mrbc` sub-build that mruby would have made first. `mruby_build_test.rb` checks it
 without an oracle.
+
+## Verification modes and the CI policy (`BC2CPP_MRBC_RB`)
+
+| Mode | Needs a mrbc | What it checks |
+| --- | --- | --- |
+| (unset) | no | nothing: the emitter's bytes are used as they are; mrbc only serves what the emitter does not cover |
+| `verify` | yes (`MRBC`) | every compile also runs `mrbc -g`; any byte difference aborts. With `BC2CPP_MRBC_SNAPSHOT_RECORD=<file>` each compile appends `<key> <value>` |
+| `snapshot` | no | the emitter's image must hash to what mrbc once wrote for the same input (`bc2cpp/tools/mrbc_rb/snapshot.txt`, `snapshot_world.txt`); an input that is not in the table aborts |
+| `0` | yes | always mrbc |
+
+Table keys are content hashes (the files' bytes, in order; world files by their path relative to the world root only when the
+source reads `__FILE__`/`__dir__`), so the table does not depend on where a checkout is or on which world commit it is at.
+**A changed world pin alone does not fail anything**: `snapshot.rb --verify/--check` print one note ("world pin changed from X to Y:
+inputs are matched by content hash ...") and the `# world:` / `# oracle:` headers are informational. What fails is an input that is
+not in the table, or whose value differs from the emitter's (drift of the emitter or, with the oracle, of mrbc). After a bump that
+changes many inputs they are one line ("world pin changed from X to Y: N inputs not in snapshot; run snapshot.rb --update ...")
+instead of N. `snapshot_test.rb` checks this on a fake world at another commit.
+
+Keeping the table complete: run the job in `verify` with `BC2CPP_MRBC_SNAPSHOT_RECORD`, then
+`MRBC=<fork mrbc> BC2CPP_RPG_DIR=<world> ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update --from-record <record files>` (merges the
+records into `snapshot_world.txt`, refuses to write when the emitter differs from mrbc). In CI: dispatch `bc2cpp.yml` with
+`mrbc_rb=record`; the world and checks jobs run `verify` with a record file each and upload it (`mrbc-record-*` artifacts).
+
+Policy per job (measured on the pinned world, `bc2cpp.rb` compile stage of each job under `BC2CPP_NO_MRBC=1`):
+
+* `mrbc-snapshot`: the one job with the oracle (builds it, `--check`) and the oracle-free test run.
+* `world` `pathb_qbe_emit`, `pathb_borrowck`: `snapshot`. 2 inputs each (the closed world's mrblib sets plus the generated script
+  program), all in the table after `--update --from-record` (3 entries in all); 0 missing. A change to `scripts/pathb-qbe-emit.rb` or
+  `scripts/pathb-borrowck.rb` changes the program's hash: the job then says "input not in snapshot" and the entry is re-recorded as above.
+* `world` `optcarrot`: stays on `verify`. It compiles a generated `benchmark.rb` written under a temporary directory that is
+  part of the key (`__FILE__`), so no table entry can match.
+* `checks` (3 shards): stay on `verify`. The fixtures compile generated programs: of the 24 checks run to completion, 64 distinct
+  inputs were recorded and none was in the table. A `record` dispatch collects them for a later switch.
+* Neither world job gets faster by itself: the sealed libmruby build still needs a real `mrbc` binary (`self.mrbcfile`), and the
+  duplicate `mrbc -g` run of `verify` costs no measurable time (36.5 s snapshot vs 36.2 s verify, 37.3 s vs 38.0 s for the compile stage of
+  `pathb_qbe_emit` and `pathb_borrowck`). What snapshot mode removes is the dependence on the oracle for those inputs, not the oracle build.
 
 ## What remains
 
