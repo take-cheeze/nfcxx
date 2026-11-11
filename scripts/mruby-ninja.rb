@@ -862,19 +862,22 @@ module MrubyNinja
   end
 end
 
-if __FILE__ == $PROGRAM_NAME
-  cmd, *args = ARGV
-  case cmd
-  when 'generate'
-    abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT' unless args.size == 3
-    MrubyNinja.generate(*args)
-  when 'presym'
-    abort 'usage: mruby-ninja.rb presym MRUBY_SRC BUILD_DIR PPP...' if args.size < 2
-    MrubyNinja.presym(args[0], args[1], args[2..])
-  when 'gemtask'
-    abort 'usage: mruby-ninja.rb gemtask MRUBY_SRC CONFIG BUILDDIR GEMBUILD GEMNAME TARGET' unless args.size == 6
-    MrubyNinja.gemtask(*args)
-  else
-    abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT | presym MRUBY_SRC BUILD_DIR PPP... | gemtask ...'
-  end
+def main(argv)
+    cmd, *args = argv
+    case cmd
+    when 'generate'
+      abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT' unless args.size == 3
+      MrubyNinja.generate(*args)
+    when 'presym'
+      abort 'usage: mruby-ninja.rb presym MRUBY_SRC BUILD_DIR PPP...' if args.size < 2
+      MrubyNinja.presym(args[0], args[1], args[2..])
+    when 'gemtask'
+      abort 'usage: mruby-ninja.rb gemtask MRUBY_SRC CONFIG BUILDDIR GEMBUILD GEMNAME TARGET' unless args.size == 6
+      MrubyNinja.gemtask(*args)
+    else
+      abort 'usage: mruby-ninja.rb generate MRUBY_SRC CONFIG OUT | presym MRUBY_SRC BUILD_DIR PPP... | gemtask ...'
+    end
+  0
 end
+
+exit(main(ARGV)) if __FILE__ == $PROGRAM_NAME

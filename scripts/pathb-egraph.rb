@@ -1916,4 +1916,8 @@ rescue Fail, Unsupported => e
   1
 end
 
-exit(egraph_cli(ARGV)) if $PROGRAM_NAME == __FILE__
+def main(argv)
+  egraph_cli(argv)
+end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

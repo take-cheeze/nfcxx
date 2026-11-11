@@ -68,4 +68,10 @@ def strip(text)
   out.join
 end
 
-$stdout.write(strip($stdin.read))
+def main(argv)
+  $stdout.write(strip($stdin.read))
+  0
+end
+
+rc = main(ARGV)
+exit(rc) if rc != 0

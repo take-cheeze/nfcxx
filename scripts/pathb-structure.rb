@@ -255,8 +255,11 @@ module PathbStructure
   end
 end
 
-if $PROGRAM_NAME == __FILE__
+def main(argv)
   text = ARGF.read
   abort "usage: pathb-structure.rb FILE.ssa" if text.nil? || text.empty?
   puts sx(PathbStructure.structure(PathbEgraph.parse_fn(PathbEgraph::F(text))))
+  0
 end
+
+exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

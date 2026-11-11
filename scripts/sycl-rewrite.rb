@@ -23,9 +23,12 @@ def ident_char?(c)
   (o >= 48 && o <= 57) || (o >= 65 && o <= 90) || (o >= 97 && o <= 122) || o == 95
 end
 
+# A source the rewrite does not handle: main reports it and returns status 3. Raised, not exited, so the compiled build
+# (script-world) returns the same status as the interpreter (an exit inside a method is an uncaught exception there).
+class Refused < StandardError; end
+
 def refuse(msg)
-  $stderr.puts "refused: #{msg}"
-  exit(3)
+  raise Refused, msg
 end
 
 # The positions of the whole word w in s (not inside a longer identifier).
@@ -186,9 +189,17 @@ def main(argv)
     $stderr.puts "usage: sycl-rewrite.rb FILE.cpp > device.cpp"
     return 1
   end
-  src = File.open(argv[0], "rb") { |f| f.read }
-  $stdout.write(rewrite(src))
-  0
+  begin
+    src = File.open(argv[0], "rb") { |f| f.read }
+    $stdout.write(rewrite(src))
+    0
+  rescue Refused => e
+    $stderr.puts "refused: #{e.message}"
+    3
+  rescue SystemCallError => e
+    $stderr.puts "sycl-rewrite.rb: #{e.message}"
+    1
+  end
 end
 
 rc = main(ARGV)
