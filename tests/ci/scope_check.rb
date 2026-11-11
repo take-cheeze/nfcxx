@@ -86,9 +86,12 @@ check.call('ci.yml has no gcc_only gating (comments aside)') do
   workflow.lines.reject { |line| line.lstrip.start_with?('#') }.none? { |line| line.include?('gcc_only') }
 end
 
+LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
+
 def outcomes(full, pathb)
   needs = { 'pathb-changes' => { 'result' => 'success', 'outputs' => {
-    'full_ci' => full.to_s, 'changed' => pathb.to_s
+    'full_ci' => full.to_s, 'changed' => pathb.to_s,
+    'test_matrix' => JSON.generate(LEGS.map { |name| { 'name' => name, 'run' => 'true' } })
   } } }
   [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
@@ -122,6 +125,41 @@ end
 end
 rejects.call('inconsistent selection') { CiScope.validate(outcomes(false, true)) }
 
+# The legs of the test matrix: each leg the selection names must have run in this run and succeeded.
+jobs_of = ->(conclusions = {}) { LEGS.map { |name| { 'name' => name, 'conclusion' => conclusions.fetch(name, 'success') } } + [{ 'name' => 'build', 'conclusion' => 'success' }] }
+check.call('gate accepts every leg succeeding') { CiScope.validate(outcomes(true, true), jobs_of.call); true }
+check.call('gate without a job list checks the jobs only') { CiScope.validate(outcomes(true, true)); true }
+check.call('gate accepts the legs of a run that left general coverage out') { CiScope.validate(outcomes(false, false), []); true }
+LEGS.each do |leg|
+  %w[failure cancelled skipped].each do |conclusion|
+    rejects.call("leg #{leg}: #{conclusion}") { CiScope.validate(outcomes(true, true), jobs_of.call(leg => conclusion)) }
+  end
+  rejects.call("leg #{leg}: no conclusion yet") { CiScope.validate(outcomes(true, true), jobs_of.call(leg => nil)) }
+  rejects.call("leg #{leg}: did not run") { CiScope.validate(outcomes(true, true), jobs_of.call.reject { |job| job['name'] == leg }) }
+end
+check.call('a leg that ran twice passes only when every run passed') do
+  jobs = jobs_of.call + [{ 'name' => LEGS.first, 'conclusion' => 'failure' }]
+  begin
+    CiScope.validate(outcomes(true, true), jobs)
+    false
+  rescue ArgumentError
+    true
+  end
+end
+rejects.call('an empty job list') { CiScope.validate(outcomes(true, true), []) }
+rejects.call('a job list that is not a list') { CiScope.validate(outcomes(true, true), { 'jobs' => [] }) }
+[nil, '', 'not json', '[]', '{}', '[{"run":"x"}]', '[{"name":""}]', '[{"name":"a"},{"name":"a"}]', '[1]'].each do |value|
+  needs = outcomes(true, true)
+  needs['pathb-changes']['outputs']['test_matrix'] = value
+  rejects.call("invalid test_matrix #{value.inspect}") { CiScope.validate(needs, jobs_of.call) }
+end
+check.call('test_matrix is not read when general coverage is left out') do
+  needs = outcomes(false, false)
+  needs['pathb-changes']['outputs'].delete('test_matrix')
+  CiScope.validate(needs)
+  true
+end
+
 env = { 'NEEDS_JSON' => JSON.generate(outcomes(false, false)) }
 _, error, status = Open3.capture3(env, RbConfig.ruby, SCRIPT, '--gate')
 check.call('gate CLI accepts authorized skips') { status.success? && error.empty? }
@@ -131,6 +169,30 @@ env['NEEDS_JSON'] = JSON.generate(needs)
 _, error, status = Open3.capture3(env, RbConfig.ruby, SCRIPT, '--gate')
 check.call('gate CLI rejects cancellation') do
   !status.success? && error.include?('test: expected success, got "cancelled"')
+end
+
+Dir.mktmpdir('ci-scope-gate') do |directory|
+  file = File.join(directory, 'jobs.json')
+  gate = lambda do |needs, jobs|
+    env = { 'NEEDS_JSON' => JSON.generate(needs), 'JOBS_FILE' => jobs.nil? ? '' : file }
+    File.write(file, JSON.generate(jobs)) unless jobs.nil?
+    Open3.capture3(env, RbConfig.ruby, SCRIPT, '--gate')
+  end
+  _, error, status = gate.call(outcomes(true, true), jobs_of.call)
+  check.call('gate CLI accepts every selected job and leg') { status.success? && error.empty? }
+  _, error, status = gate.call(outcomes(true, true), jobs_of.call(LEGS.last => 'failure'))
+  check.call('gate CLI rejects a failed leg') { !status.success? && error.include?("test leg #{LEGS.last.inspect}: expected success") }
+  _, error, status = gate.call(outcomes(true, true), jobs_of.call.reject { |job| job['name'] == LEGS.first })
+  check.call('gate CLI rejects a leg that did not run') { !status.success? && error.include?("test leg #{LEGS.first.inspect}: it did not run") }
+  _, error, status = gate.call(outcomes(true, true), nil)
+  check.call('gate CLI rejects a run without its job list') { !status.success? && error.include?('the job list of this run (JOBS_FILE) is missing') }
+  _, error, status = gate.call(outcomes(false, false), nil)
+  check.call('gate CLI needs no job list when general coverage is left out') { status.success? && error.empty? }
+end
+
+workflow_gate = workflow[/^  build-and-test:.*?(?=^  \S)/m].to_s
+check.call('ci.yml lists the jobs of the run for the gate') do
+  workflow_gate.include?('actions: read') && workflow_gate.include?('filter=latest') && workflow_gate.include?('JOBS_FILE: ${{ runner.temp }}/jobs.json')
 end
 
 Dir.mktmpdir('ci-scope') do |directory|
