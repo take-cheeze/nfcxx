@@ -15,7 +15,7 @@ module MrbcRb
   # Symbols the parser makes in its actions (:"a b", "a b": labels) are interned in token order here too (mrbc
   # does it one reduction later: the same count unless one such symbol is the last thing of a file).
   #
-  # The presym set is a property of the mrbc build: presym_fork.txt is the fork's host mrbc (1472), presym_bootstrap.txt
+  # The presym set is a property of the mrbc build: presym_fork.txt is the fork's host mrbc (1474), presym_bootstrap.txt
   # is mruby's own bootstrap mrbc (282); MRBC_RB_PRESYM=bootstrap|fork|<file: one name per line, or a presym/table.h>.
   module FileSyms
     DIR = __dir__

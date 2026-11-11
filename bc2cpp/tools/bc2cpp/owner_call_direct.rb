@@ -59,16 +59,60 @@ module OwnerCallDirect
     'RGSS::Window' => 'obj_dispose', 'RGSS::Bitmap' => 'obj_dispose', 'RGSS::Tilemap' => 'tilemap_dispose'
   }.freeze
 
-  # The direct rows of the native `dispose` registrations, keyed like entries.
+  # NATIVE_ROWS: the other engine natives an owner call reaches by name from a gem that cannot name their bodies (each is
+  # internal to its file), as `[owner, name, wrapper, aspec, visibility]`: the wrapper is the body under an exported
+  # name (OWNER_ROW in mruby-rgss/src/{lib,audio}.cxx and mruby-lcf/src/lcf.cxx) and the rest is the ROM entry's own.
+  # rpg-maker-clone scripts/bc2cpp-rpg/owner_call_direct_native_check.rb holds the table to the ROM entries and the wrappers.
+  NATIVE_ROWS = [
+    %w[RGSS::Audio.singleton _bgm_play rgss_row_audio_s_bgm_play MRB_ARGS_ARG(1,\ 4) public],
+    %w[RGSS::Audio.singleton _bgs_play rgss_row_audio_s_bgs_play MRB_ARGS_ARG(1,\ 2) public],
+    %w[RGSS::Audio.singleton _me_play rgss_row_audio_s_me_play MRB_ARGS_ARG(1,\ 3) public],
+    %w[RGSS::Audio.singleton _se_play rgss_row_audio_s_se_play MRB_ARGS_ARG(1,\ 3) public],
+    %w[RGSS::Audio.singleton _bgm_play_mem rgss_row_audio_s_bgm_play_mem MRB_ARGS_ARG(2,\ 4) public],
+    %w[RGSS::Audio.singleton _bgs_play_mem rgss_row_audio_s_bgs_play_mem MRB_ARGS_ARG(2,\ 2) public],
+    %w[RGSS::Audio.singleton _me_play_mem rgss_row_audio_s_me_play_mem MRB_ARGS_ARG(2,\ 3) public],
+    %w[RGSS::Audio.singleton _se_play_mem rgss_row_audio_s_se_play_mem MRB_ARGS_ARG(2,\ 3) public],
+    %w[RGSS::Audio _bgm_play rgss_row_audio_bgm_play MRB_ARGS_ARG(1,\ 4) private],
+    %w[RGSS::Audio _bgs_play rgss_row_audio_bgs_play MRB_ARGS_ARG(1,\ 2) private],
+    %w[RGSS::Audio _me_play rgss_row_audio_me_play MRB_ARGS_ARG(1,\ 3) private],
+    %w[RGSS::Audio _se_play rgss_row_audio_se_play MRB_ARGS_ARG(1,\ 3) private],
+    %w[RGSS::Audio _bgm_play_mem rgss_row_audio_bgm_play_mem MRB_ARGS_ARG(2,\ 4) private],
+    %w[RGSS::Audio _bgs_play_mem rgss_row_audio_bgs_play_mem MRB_ARGS_ARG(2,\ 2) private],
+    %w[RGSS::Audio _me_play_mem rgss_row_audio_me_play_mem MRB_ARGS_ARG(2,\ 3) private],
+    %w[RGSS::Audio _se_play_mem rgss_row_audio_se_play_mem MRB_ARGS_ARG(2,\ 3) private],
+    %w[RGSS::Sprite opacity= rgss_row_sprite_opacity_set MRB_ARGS_REQ(1) public],
+    %w[RGSS::Plane opacity= rgss_row_plane_opacity_set MRB_ARGS_REQ(1) public],
+    %w[RGSS::Window opacity= rgss_row_window_opacity_set MRB_ARGS_REQ(1) public],
+    %w[RGSS::Bitmap _init_memory rgss_row_bitmap_init_memory MRB_ARGS_REQ(1)\ |\ MRB_ARGS_OPT(1) public],
+    %w[RGSS::Bitmap _init_file rgss_row_bitmap_init_file MRB_ARGS_REQ(1)\ |\ MRB_ARGS_OPT(1) public],
+    %w[RGSS::Bitmap _transition_alpha rgss_row_bitmap_transition_alpha MRB_ARGS_REQ(3) public],
+    %w[RGSS::Bitmap hue_change rgss_row_bitmap_hue_change MRB_ARGS_REQ(1) public],
+    %w[RGSS::Bitmap get_pixel rgss_row_bitmap_get_pixel MRB_ARGS_REQ(2) public],
+    %w[RGSS::Bitmap blt_quads rgss_row_bitmap_blt_quads MRB_ARGS_REQ(4) public],
+    %w[RGSS::Bitmap tone_blt rgss_row_bitmap_tone_blt MRB_ARGS_REQ(2) public],
+    %w[RGSS::Bitmap mosaic_blt rgss_row_bitmap_mosaic_blt MRB_ARGS_REQ(2) public],
+    %w[RGSS::Bitmap wave_blt rgss_row_bitmap_wave_blt MRB_ARGS_REQ(3) public],
+    %w[RGSS::Bitmap blend_text rgss_row_bitmap_blend_text MRB_ARGS_REQ(10)\ |\ MRB_ARGS_OPT(1) public],
+    %w[RGSS::Input.singleton _poll rgss_row_input_s_poll MRB_ARGS_NONE() public],
+    %w[RGSS::Input _poll rgss_row_input_poll MRB_ARGS_NONE() private],
+    %w[LCF.singleton utf8_to_cp932 lcf_row_s_utf8_to_cp932 MRB_ARGS_REQ(1) public],
+    %w[LCF utf8_to_cp932 lcf_row_utf8_to_cp932 MRB_ARGS_REQ(1) private]
+  ].map { |owner, name, wrapper, aspec, visibility| [owner, name, wrapper, aspec.delete('\\'), visibility.to_sym] }.freeze
+
+  # The direct rows of the native registrations (`dispose` and NATIVE_ROWS), keyed like entries.
   def native_entries
-    NATIVE_DISPOSE_OWNERS.to_h do |owner, body|
+    rows = NATIVE_DISPOSE_OWNERS.to_h do |owner, body|
       [[owner, 'dispose'], { owner: owner, entry: NATIVE_DISPOSE.fetch(body), aspec: 'MRB_ARGS_NONE()', visibility: :public }]
     end
+    NATIVE_ROWS.each do |owner, name, wrapper, aspec, visibility|
+      rows[[owner, name]] = { owner: owner, entry: wrapper, aspec: aspec, visibility: visibility }
+    end
+    rows
   end
 
   # Declarations of the wrappers native_entries names, for the generated code that carries their rows.
   def native_prototypes
-    NATIVE_DISPOSE.values.map { |fn| "mrb_value #{fn}(mrb_state* M, mrb_value self);\n" }.join
+    (NATIVE_DISPOSE.values + NATIVE_ROWS.map { |row| row[2] }).map { |fn| "mrb_value #{fn}(mrb_state* M, mrb_value self);\n" }.join
   end
 
   # `code` with the owner set of each call the direct entries complete replaced by BC2CPP_OWNERS_D. `slots` maps an
