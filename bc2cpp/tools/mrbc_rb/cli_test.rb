@@ -36,7 +36,8 @@ unless oracle && File.executable?(oracle)
     end
   end
   puts "cli_test (snapshot, no MRBC): #{ok} match, #{bad} differ, #{missing} missing"
-  exit(bad.zero? && missing.zero? ? 0 : 1)
+  puts 'cli_test: nothing was checked (set BC2CPP_RPG_DIR to a world checkout, or MRBC to the oracle)' if ok.zero?
+  exit(bad.zero? && missing.zero? && !ok.zero? ? 0 : 1)
 end
 
 CLI = File.expand_path('bin/mrbc_rb', __dir__)
