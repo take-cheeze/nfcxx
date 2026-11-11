@@ -13,7 +13,7 @@ require 'pathname'
 # Each pattern is one VM dependency from the plan's table. `count` is the baseline measured on the closed-build
 # sources of this tree; a count above it is a regression.
 DEPENDENCIES = {
-  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 69 },
+  'mrb_funcall' => { pattern: /\bmrb_funcall\w*/, count: 68 },
   # The by-name helpers over `mrb_funcall_argv` / `mrb_funcall_send`: their one copy in the runtime header
   # (RUNTIME_HEADER), the per-unit callers of the symbol-table helpers, and the two `_rsm` variant sites that dispatch
   # by name on purpose.
