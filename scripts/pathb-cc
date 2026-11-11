@@ -41,8 +41,16 @@ safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_I
 # The IR's (loc ...) lines give the report its source lines, and its (decl)/(scope-end) facts the use after scope (NFCXX_IR_SCOPES).
 asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || { asan=(--asan); export NFCXX_IR_LOC=1 NFCXX_IR_SCOPES=1; }
 [ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: NFCXX_PATHB_ASAN and NFCXX_SAFE_POINTERS both replace malloc; use one" >&2; exit 2; }
+# A stage (the front end, the SSA route) that runs over NFCXX_PATHB_TIMEOUT seconds (default 300; 0: no limit) is stopped with
+# status 124. A hang is worse than a refusal: the driver builds the program with gcc after any status but 0, and a stuck stage
+# never gets there (the front end looped on a type name over 300 bytes; the largest STL test takes 50 s). Needs timeout(1).
+tmo() { if [ "${NFCXX_PATHB_TIMEOUT:-300}" != 0 ] && command -v timeout >/dev/null 2>&1; then timeout -k 5 "${NFCXX_PATHB_TIMEOUT:-300}" "$@"; else "$@"; fi; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
-else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
+else
+  frc=0; tmo "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir" || frc=$?
+  [ $frc != 124 ] || echo "pathb-cc: $src: the front end ran over ${NFCXX_PATHB_TIMEOUT:-300} s (NFCXX_PATHB_TIMEOUT) and was stopped" >&2
+  [ $frc = 0 ] || exit $frc
+fi
 # The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless NFCXX_IR_OPT names them (inline,
 # or a comma-separated list). IR over NFCXX_IR_OPT_MAX bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
 # tests' input) is emitted as it is.
@@ -70,16 +78,17 @@ case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ss
 rc=0
 [ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: NFCXX_PATHB_ASAN needs the SSA emitter (NFCXX_PATHB_EMITTER=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
-  if [ $rc != 0 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
+  NFCXX_QBE="$qbe" tmo "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  if [ $rc != 0 ] && [ $rc != 124 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    NFCXX_QBE="$qbe" tmo "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; NFCXX_PATHB_EMITTER=mruby
     # selects that emitter explicitly).
-    echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2
+    if [ $rc = 124 ]; then echo "pathb-cc: $src: SSA route: ran over ${NFCXX_PATHB_TIMEOUT:-300} s (NFCXX_PATHB_TIMEOUT) and was stopped" >&2
+    else echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2; fi
     [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
     exit $rc
   fi
