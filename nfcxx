@@ -771,7 +771,7 @@ done
 # Path B hosted on macOS (the SDK's libc++): its __config evaluates __has_feature and friends in #if, which EDG's g++
 # mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
 # and its own feature checks.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h")
+[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
 gnu_opts=()
 if [ "$dialect" = clang ]; then
   cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
