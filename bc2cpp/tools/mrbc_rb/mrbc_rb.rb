@@ -28,6 +28,7 @@
 # The opcode numbers are the positions of the OPCODE lines of the fork's ops.h. golden_test.rb checks them against it.
 
 require 'prism'
+require_relative 'rite_dump'
 
 module MrbcRb
   class Error < StandardError; end
@@ -128,17 +129,28 @@ module MrbcRb
   INT32_MIN = -0x8000_0000
   INT32_MAX = 0x7fff_ffff
 
+  # The result of a compilation: +image+ is the RITE binary (what `mrbc -g` writes), +tree+ the irep tree (RiteDump::Irep, the
+  # same one RiteDump.parse(image) reads back, with debug info and LVAR) built from the emitter's own data, so the C dumps and
+  # the listing need no parse of the image.
+  Result = Struct.new(:image, :tree)
+
   # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
-  def self.compile(source, filename)
+  def self.compile(source, filename) = compile_result(source, filename).image
+
+  # Like compile, returning a Result.
+  def self.compile_result(source, filename)
     result = Prism.parse(source, filepath: filename)
     raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
 
     # `# frozen_string_literal: true` makes string literals frozen strings (FSTRING), as the fork's parser does.
     frozen = frozen_magic_comment?(source)
     compiler = Compiler.new(filename, frozen_strings: frozen)
-    return compiler.compile_empty(empty_program_line(source, result)) if result.value.statements.body.empty?
-
-    compiler.compile(result.value)
+    if result.value.statements.body.empty?
+      compiler.compile_empty(empty_program_line(source, result))
+    else
+      compiler.compile(result.value)
+    end
+    compiler.result
   end
 
   # One file of a multi-file program: its name and its top-level statements.
@@ -160,9 +172,12 @@ module MrbcRb
   #   last statement, which ends the lookahead before the file ends.
   # * Codegen switches the file at the first node of the next file: the debug section gets one record per file, the ranges
   #   being the pcs between the switches.
-  def self.compile_files(files)
+  def self.compile_files(files) = compile_files_result(files).image
+
+  # Like compile_files, returning a Result.
+  def self.compile_files_result(files)
     raise Unsupported, 'no files' if files.empty?
-    return compile(*files.first) if files.size == 1
+    return compile_result(*files.first) if files.size == 1
     raise Unsupported, 'a file named twice' if files.map(&:last).uniq.size != files.size
 
     locals = []
@@ -193,7 +208,9 @@ module MrbcRb
     raise Unsupported, 'no statements' if units.all? { |u| u.stmts.empty? }
 
     units.reject! { |u| u.stmts.empty? } # a file without code never switches the file
-    Compiler.new(units.first.filename, frozen_strings: frozen).compile_units(units, locals, zero)
+    compiler = Compiler.new(units.first.filename, frozen_strings: frozen)
+    compiler.compile_units(units, locals, zero)
+    compiler.result
   end
 
   def self.tokens?(source) = Prism.lex(source).value.any? { |t, _| !NON_TOKENS.include?(t.type) }
@@ -5182,8 +5199,38 @@ module MrbcRb
       # The LVAR section exists only when some irep has locals, as the fork omits it otherwise (lv_defined_p in dump.c).
       lvar = scopes.any? { |s| !s.lv_names.empty? } ? lvar_section : ''.b
       sections = irep_section + debug_section + lvar + sized("END\0", ''.b)
-      ['RITE0400', 20 + sections.bytesize].pack('a8N') + 'MATZ0000'.b + sections
+      @image = ['RITE0400', 20 + sections.bytesize].pack('a8N') + 'MATZ0000'.b + sections
     end
+
+    # The Result of the program just compiled (write_rite ran): the image and the irep tree of the same data.
+    public def result
+      lv = scopes.any? { |s| !s.lv_names.empty? }
+      MrbcRb::Result.new(@image, tree(lv))
+    end
+
+    # The irep tree (RiteDump::Irep) of this scope and its children, as RiteDump.parse reads it from the image.
+    def tree(with_lv)
+      iseq = @code.pack('C*') + catch_table_block
+      pool = @pool.map do |entry|
+        case entry
+        in [:bigint, digits, base] then [:bigint, [digits.bytesize, base & 0xff].pack('CC') + digits.b]
+        in [:int, v] then v.between?(INT32_MIN, INT32_MAX) ? [:i32, v] : [:i64, v]
+        in [:float, bits] then [:float, bits.unpack1('E')]
+        in [:str, bytes] then [:str, bytes.b]
+        end
+      end
+      lv = nil
+      if with_lv && @nlocals - 1 > 0
+        lv = (0...@nlocals - 1).map { |i| (name = lv_names[i]) ? name.to_s.b : nil }
+      end
+      debug = debug_files.map do |name, first, stop|
+        packed = packed_lines(first, stop)
+        [first, name.b, packed.bytesize, packed]
+      end
+      RiteDump::Irep.new(@nlocals, @nregs, @catches.size, @code.size, iseq, pool, @syms.map { |s| s.to_s.b },
+                         @children.map { |c| c.tree(with_lv) }, lv, debug)
+    end
+    public :tree
 
     # IREP's body starts with its version, "0400"; the records follow it.
     def irep_section

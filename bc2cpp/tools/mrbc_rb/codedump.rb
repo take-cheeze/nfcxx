@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'rite_dump'
+require_relative 'cdump'
 
 module MrbcRb
   # The instruction listing of `mrbc -v` (mrb_codedump_all, src/codedump.c), for the irep tree of a RITE image (what
@@ -117,7 +118,7 @@ module MrbcRb
     def sym_dump(sym)
       return '(null)'.b if sym.nil?
 
-      symname_p(sym) ? sym.b : RiteDump.str_dump(sym).b
+      symname_p(sym) ? sym.b : CDump.str_dump(sym).b
     end
 
     # The listing of the irep tree +root+ (RiteDump.parse of an image).

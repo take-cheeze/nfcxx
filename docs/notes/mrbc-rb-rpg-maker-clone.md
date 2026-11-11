@@ -94,6 +94,34 @@ the fallback; without `MRBC_FALLBACK` those stop the build and name the file.
 
 The build_config change (host build) is in the patch below, opt-in with `MRUBY_MRBC_RB=1`.
 
+### The library and the in-process hook (`cli.rb`, `cdump.rb`, `mruby_build.rb`)
+
+`bin/mrbc_rb` is a 3-line wrapper (`exit MrbcRb::Cli.run(ARGV)`); everything it did lives in `bc2cpp/tools/mrbc_rb/cli.rb`:
+`MrbcRb::Cli.run(argv, stdin:, stdout:, stderr:, env:, prog:)` returns the exit status (no `exit`, no `ENV`/`$stdout` reads; the
+fallback mrbc is a subprocess whose output and status are passed on). Structured APIs below it: `MrbcRb.compile_result(src, name)` /
+`MrbcRb.compile_files_result([[src, name], ...])` return a `MrbcRb::Result` (`image` = the RITE bytes, `tree` = the irep tree
+`RiteDump::Irep` built from the emitter's own data), and `MrbcRb::CDump.dump(tree, name, static:, file_syms:)` writes `-B -S` from a
+tree (`CDump.strip` applies `-g` / `--remove-lv` to a tree; `RiteDump.cstruct(image)` keeps the bytes path for `.mrb` input).
+`--disasm` and `-S` no longer parse the image they just built (`lib_test.rb` checks that tree == `RiteDump.parse(image)` on 703 inputs).
+
+mruby's own build is Ruby, so it can skip the spawn too. `mruby_build.rb` prepends a `MRuby::Command::Mrbc#run` that builds the same
+command line and calls `Cli.run` in the rake process (one Prism load for the whole build, no ~0.2 s process start per file); it only
+serves a build whose `mrbcfile` is `bin/mrbc_rb`, anything else runs as before. For rpg-maker-clone's `build_config.rb`, in
+the `MRUBY_MRBC_RB=1` block of the patch below (the `require` can be at the top of the file):
+
+```ruby
+  if ENV['MRUBY_MRBC_RB'] == '1'
+    require File.expand_path('3rd/nfcxx/bc2cpp/tools/mrbc_rb/mruby_build', __dir__)   # in-process Mrbc#run
+    conf.mrbcfile = MrbcRb::MrubyBuild::WRAPPER   # = 3rd/nfcxx/bc2cpp/tools/mrbc_rb/bin/mrbc_rb: skips mruby's bootstrap mrbc
+    ENV['MRBC_RB_PRESYM'] ||= 'bootstrap'
+  end
+```
+
+Measured on the scratch copy of `3rd/mruby` (default gembox, `enable_debug`, `enable_test`, `all test`, `MRBC_RB_PRESYM=bootstrap`,
+`MRBC_FALLBACK` = the bootstrap mrbc, 4 cores, minirake without `-j`): C-mrbc build (bootstrap mrbc compiled first) 31 s;
+`mrbc_rb` spawned per file 38.8 s; in-process hook 24.1 s. Both emitter builds: mrbtest 1866/1869 (as before), all 97 generated C
+files byte-identical to the C-mrbc build, 124 compiles by the emitter and 1 by the fallback.
+
 ## What remains
 
 * mrbtest's test files and any other file the emitter raises Unsupported on need either `MRBC_FALLBACK` or more emitter
