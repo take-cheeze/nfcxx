@@ -48,6 +48,8 @@ module EscapeReport
     ireps = world.ireps
     owner_of = owner_table(world)
     rows = []
+    # BC2CPP_ESCAPE_POINTS=1 adds a `point` row per instruction of each creation site (see point_rows).
+    points = ENV['BC2CPP_ESCAPE_POINTS'] == '1'
     ireps.each_value do |irep|
       owner = owner_of[irep.label] || '?'
       origin = CoreDefs.core_source?(irep.file) ? 'core' : 'engine'
@@ -56,11 +58,12 @@ module EscapeReport
         next unless kind
         lexical = owner_of[irep.label]&.split('#', 2)&.first
         klass = constructed_class(codegen, world, irep, i, insn, lexical)
-        verdict = analyzer.creation(irep, i, value_class: klass)
+        verdict = analyzer.creation(irep, i, value_class: klass, points: points)
         today = TODAY[[irep.label, insn.addr]] || LAMBDA_REGIONS[[irep.label, insn.addr]] || '-'
         rows << ['site', "#{irep.label}:#{i}", owner, origin, insn.op, kind, verdict.escapes? ? 'escapes' : 'confined',
                  verdict.escapes? ? verdict.reason : '-', verdict.uses.count { |u| u.kind == :call }, today,
                  receiver_classes(analyzer, irep, i, insn)].join("\t")
+        point_rows(rows, irep, i, verdict) if points
         # Only a confined `new` gets an ivars row: creation refuses any `new` whose constructed class is unknown.
         next unless kind == 'object' && !verdict.escapes?
 
@@ -83,6 +86,22 @@ module EscapeReport
                'initialize', 'self', verdict, '-', 0, '-'].join("\t")
     end
     File.write(path, "#{rows.join("\n")}\n")
+  end
+
+  # `point` rows (BC2CPP_ESCAPE_POINTS=1): the registers that may hold the creation's value on entry to each
+  # instruction of the site's method, a comma list (empty when none, `escaped` when the flow stopped early).
+  #   point  irep_label:site  instruction index  op  registers
+  def self.point_rows(rows, irep, site, verdict)
+    site_id = "#{irep.label}:#{site}"
+    prog = BytecodeIR.for(irep)
+    unless verdict.holding
+      rows << ['point', site_id, '-', '-', 'escaped'].join("\t")
+      return
+    end
+    prog.each_source do |insn, j|
+      regs = verdict.holding_at(j).map(&:to_i).sort.join(',')
+      rows << ['point', site_id, j, insn.op, regs].join("\t")
+    end
   end
 
   # One row per definition of each callee name that receives a literal block: does its block position
