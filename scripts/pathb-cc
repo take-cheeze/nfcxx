@@ -134,7 +134,13 @@ if [ "$emitter" = mruby ]; then
   fi
   "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$tmp/$n.ssa" > "$tmp/$n.s"
   # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target"
+  # Status 3: the target's assembler has no form for something in the unit (an ifunc or file-scope asm on Apple): refused.
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target" 2> "$tmp/$n.aw" || rc=$?
+  if [ $rc != 0 ]; then
+    echo "pathb-cc: $src: $(head -1 "$tmp/$n.aw")" >&2
+    [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
+    exit $rc
+  fi
 fi
 if [ -n "$keep" ]; then mkdir -p "$keep"; cp "$tmp/$n.ir" "$tmp/$n.s" "$keep/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$keep/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then

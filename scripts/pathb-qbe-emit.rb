@@ -2866,9 +2866,12 @@ def arm64_apple?(target)
   arm64_target?(target) && target.end_with?("_apple")
 end
 
-# The directives that make the symbol SYM (as the IL names it) a weak definition.
-def weak_lines(sym, target)
+# The directives that make the symbol SYM (as the IL names it) a weak definition, or (defined false, the unit does not
+# define it) a weak reference: on Apple, .weak_reference, which ld64 resolves to null in an executable only with dynamic
+# lookup (tests/pathb-qbe/run.sh links with it when the assembly has one).
+def weak_lines(sym, target, defined = true)
   return [".weak #{sym}"] unless arm64_apple?(target)
+  return ["\t.weak_reference _#{sym}"] unless defined
   ["\t.globl _#{sym}", "\t.weak_definition _#{sym}"]
 end
 
@@ -2896,10 +2899,26 @@ RAW_ASM_MARK = "# pathb-raw-asm "
 def append_weak(il_path, asm_path, target)
   names = []
   extra = []
-  read_text(il_path).split("\n").each do |line|
+  il_lines = read_text(il_path).split("\n")
+  apple = arm64_apple?(target)
+  # Apple: a weak name the unit defines (a label of the assembly, or an alias) is .weak_definition, else .weak_reference.
+  defined = {}
+  refused = nil
+  if apple
+    read_text(asm_path).split("\n").each { |l| defined[l[0...-1]] = true if l.end_with?(":") && !l.start_with?("\t") }
+    il_lines.each do |line|
+      next unless line.start_with?(ALIAS_MARK)
+      p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
+      defined["_" + p[1]] = true if p.length >= 3
+    end
+  end
+  il_lines.each do |line|
     if line.start_with?(WEAK_MARK)
       names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip
     elsif line.start_with?(RAW_ASM_MARK)
+      # A file-scope asm block is ELF text (its sections and directives are the ELF ones): Apple's assembler has no form for it.
+      refused ||= "file-scope asm has ELF directives, no Mach-O form (refused)" if apple
+      next if apple
       text = [line.byteslice(RAW_ASM_MARK.bytesize, line.bytesize - RAW_ASM_MARK.bytesize).strip].pack("H*")
       extra << (text.end_with?("\n") ? text : text + "\n")
     elsif line.start_with?(ASM_MARK)
@@ -2917,14 +2936,24 @@ def append_weak(il_path, asm_path, target)
     elsif line.start_with?(ALIAS_MARK)
       p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
       next if p.length < 3
+      if apple
+        # Apple: the same .set on the underscore names; no .type (Apple's assembler has none), and no ifunc form.
+        refused ||= "ifunc #{p[1]}: Mach-O has no indirect function symbol (refused)" if p[0] == "ifunc"
+        next if p[0] == "ifunc"
+        extra << (["\t.globl _#{p[1]}", "\t.set _#{p[1]}, _#{p[2]}"] +
+                  (p.length > 3 && p[3] == "weak" ? ["\t.weak_definition _#{p[1]}"] : [])).join("\n") + "\n"
+        next
+      end
       extra << ["\t#{p.length > 3 && p[3] == "weak" ? ".weak" : ".globl"} #{p[1]}",
                 "\t.type #{p[1]}, #{p[0] == "function" ? "@function" : p[0] == "ifunc" ? "@gnu_indirect_function" : "@object"}",
                 "\t.set #{p[1]}, #{p[2]}"].join("\n") + "\n"
     end
   end
+  # A refused unit writes nothing: the caller reports status 3 and the driver builds it with gcc, as for other refusals.
+  return die("pathb-qbe-emit: #{refused}\n", 3) if refused
   unless names.empty? && extra.empty?
     File.open(asm_path, "a") do |f|
-      f.write("\n" + names.map { |n| weak_lines(n, target).map { |l| l + "\n" }.join }.join + extra.join)
+      f.write("\n" + names.map { |n| weak_lines(n, target, defined.key?("_" + n) || !apple).map { |l| l + "\n" }.join }.join + extra.join)
     end
   end
   0

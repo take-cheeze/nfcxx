@@ -136,14 +136,21 @@ run_one() {
   if ! "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$ssa" > "$s" 2> "$tmp/$n.qbe"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$n.qbe")"); return
   fi
-  "$mrb" "$emit" --append-weak "$ssa" "$s" "$qbe_target"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
+  # QBE has no weak linkage: .weak for the IR's (weak) definitions. Status 3: the target's assembler has no form for something
+  # in the unit (an ifunc or file-scope asm on Apple), a refusal as an emitter refusal is.
+  "$mrb" "$emit" --append-weak "$ssa" "$s" "$qbe_target" 2> "$tmp/$n.aw"; rc=$?
+  if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$n.aw")"); return; fi
+  if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: append-weak: $(head -1 "$tmp/$n.aw")"); return; fi
   if ! check_asm "$f" "$s" > "$tmp/$n.asmcheck"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: $(head -1 "$tmp/$n.asmcheck")"); return
   fi
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" "$ldrt" $shim -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/$n.ld"; then
+  # Apple's ld64 cannot link a weak reference to a symbol nothing defines (the ELF link gives it address 0): on Darwin such a
+  # reference is bound at load time instead (dynamic lookup: an absent symbol reads as null, as on ELF).
+  wl=; if [ "$(uname -s)" = Darwin ] && grep -q '^[[:space:]]*\.weak_reference ' "$s"; then wl="-Wl,-undefined,dynamic_lookup"; fi
+  if ! cc -o "$exe" "$obj" $wl "$ldrt" $shim -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -185,6 +192,10 @@ run_one() {
     failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc $gcc_rc)")
     return
   fi
+  # Apple's clang rejects the alias attribute ("aliases are not supported on darwin"): the gcc backend cannot be compared.
+  if [ "$gcc_rc" = compile-error ] && [ "$(uname -s)" = Darwin ] && grep -q 'aliases are not supported on darwin' "$tmp/$n.gccerr"; then
+    match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: its host rejects aliases)"); return
+  fi
   if [ "$gcc_rc" != "$((want & 255))" ] && [ "$gcc_rc" != "$want" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc")
     return
@@ -216,7 +227,9 @@ run_multi() {
     if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: emitter: $(head -1 "$tmp/$b.emit")"); return; fi
     "$qbe" "$tmp/$b.ssa" > "$tmp/$b.s" 2> "$tmp/$b.qbe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$b.qbe")"); return; }
-    "$mrb" "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s"
+    "$mrb" "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s" "$qbe_target" 2> "$tmp/$b.aw"; rc=$?
+    if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$b.aw")"); return; fi
+    if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: append-weak: $(head -1 "$tmp/$b.aw")"); return; fi
     cc -c -o "$obj" "$tmp/$b.s" 2> "$tmp/$b.as" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
     # `// SHARED: yes` in a unit: that unit goes into a shared library the program links against (its object has to
