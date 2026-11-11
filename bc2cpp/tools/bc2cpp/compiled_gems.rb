@@ -732,6 +732,19 @@ end
 # SHARED_GENERATION: the bc2cpp.rb run of compiled gem `spec` -- [environment, sources, generated file],
 # exactly what each *-compiled/mrbgem.rake used to build inline. Called from a codegen task, once the gem list is
 # complete.
+#
+# The mrbc binary is optional (see run_mrbc in irep.rb): the Ruby emitter compiles the sources, and the run needs no mrbc and
+# no mrbc build. The build's own mrbc (spec.build.mrbcfile) is handed over as the fallback for an input the emitter does not
+# cover only when BC2CPP_USE_BUILD_MRBC=1 (the caller then also makes the generated-file task depend on it); an MRBC in the
+# caller's environment reaches bc2cpp.rb as it is.
+def bc2cpp_optional_mrbc(spec)
+  return nil unless ENV['BC2CPP_USE_BUILD_MRBC'].to_s == '1'
+
+  spec.build.mrbcfile.to_s
+rescue StandardError
+  nil
+end
+
 def bc2cpp_compiled_gem_job(spec, gems_root)
   require 'shellwords'
   this_gem = BC2CPP_COMPILED_GEMS.fetch(spec.name)
@@ -739,7 +752,6 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
   native_srcs = bc2cpp_rgss_native_srcs(gems_root, spec.build.name) + core_native_srcs("#{gems_root}/3rd/mruby") +
                 external_gem_native_srcs(gems_root)
   env = {
-    'MRBC' => spec.build.mrbcfile.to_s,
     'OUT_SYMBOL' => this_gem[:out_symbol],
     'OUT_DIR' => spec.build_dir,
     'ONLY_OWNERS' => this_gem[:owners].join(','),
@@ -761,6 +773,8 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     # names can be compile-time symbols in const tables.
     'BC2CPP_ROM_METHOD_TABLES' => '1'
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
+  mrbc = bc2cpp_optional_mrbc(spec)
+  env['MRBC'] = mrbc if mrbc
   env['BC2CPP_NATIVE_VM_DIR'] = spec.build.instance_variable_get(:@native_vm_dir)
   env['BC2CPP_MAIN_AST'] = ENV['BC2CPP_MAIN_AST'] if ENV['BC2CPP_MAIN_AST']
   env['BC2CPP_NATIVE_INVENTORY'] = ENV['BC2CPP_NATIVE_INVENTORY'] if ENV['BC2CPP_NATIVE_INVENTORY']
