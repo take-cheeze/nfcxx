@@ -62,9 +62,56 @@ end
 
 # The same tokens as a character loop: a parenthesis, a string, a $ @ or & prefixed string, or a run of other characters
 # (which stops before a quote). One scan: the loop tested every character with a regex, which dominated the run time.
-TOKEN_RE = /\(|\)|"(?:\\.|[^"\\])*"|[$@&]"(?:\\.|[^"\\])*"|[^\s()"]+/
+TOKEN_WS = " \t\r\n\f\v"
+
+# The end (after the closing quote) of the string that starts at i, or nil: a backslash escapes the next character
+# except a newline, as `.` does not match one.
+def quoted_end(s, i)
+  j = i + 1
+  while j < s.size
+    if s[j] == "\\"
+      return nil unless j + 1 < s.size && s[j + 1] != "\n"
+
+      j += 2
+    elsif s[j] == '"'
+      return j + 1
+    else
+      j += 1
+    end
+  end
+  nil
+end
+
+def scan_tokens(s)
+  out = []
+  i = 0
+  n = s.size
+  while i < n
+    c = s[i]
+    if c == "(" || c == ")"
+      out << c
+      i += 1
+    elsif c == '"' && (e = quoted_end(s, i))
+      out << s[i...e]
+      i = e
+    elsif "$@&".include?(c) && i + 1 < n && s[i + 1] == '"' && (e = quoted_end(s, i + 1))
+      out << s[i...e]
+      i = e
+    elsif c != '"' && !TOKEN_WS.include?(c)
+      j = i + 1
+      j += 1 while j < n && !TOKEN_WS.include?(s[j]) && s[j] != "(" && s[j] != ")" && s[j] != '"'
+      out << s[i...j]
+      i = j
+    else
+      i += 1
+    end
+  end
+  out
+end
+
 def tokenize(s)
-  s.scan(TOKEN_RE).map do |t|
+  out = scan_tokens(s)
+  out.map do |t|
     if t.start_with?('"')
       Str.new(t)
     elsif t.length > 1 && t[1] == '"' && "$@&".include?(t[0])
@@ -87,9 +134,9 @@ def normalise_literals(x)
   if float_type?(type)
     x[2] = "1e999" if val == "+Infinity"
     x[2] = "-1e999" if val == "-Infinity"
-  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && INT_TYPES.key?(type)
+  elsif hex_literal?(val) && INT_TYPES.key?(type)
     x[2] = canon(Integer(val, 16), type).to_s
-  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && type == "bool"
+  elsif hex_literal?(val) && type == "bool"
     x[2] = canon(Integer(val, 16), type).to_s
   end
   x
@@ -270,7 +317,7 @@ class Cfg
   end
 
   def case_value(c)
-    raise Unsupported, "case label #{sx(c)}" unless head(c) == "const" && c[2].is_a?(String) && c[2] =~ /\A-?\d+\z/
+    raise Unsupported, "case label #{sx(c)}" unless head(c) == "const" && c[2].is_a?(String) && int_literal?(c[2])
 
     c[2].to_i
   end
@@ -1137,11 +1184,11 @@ end
       case head(x)
       when "const"
         if float_type?(x[1])
-          raise Unsupported, "float constant #{sx(x)}" unless x[2] =~ /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/
+          raise Unsupported, "float constant #{sx(x)}" unless float_literal?(x[2])
 
           return round_float(Float(x[2]), x[1])
         end
-        raise Unsupported, "constant #{sx(x)}" unless x[2] =~ /\A-?\d+\z/
+        raise Unsupported, "constant #{sx(x)}" unless int_literal?(x[2])
 
         canon(x[2].to_i, x[1])
       when "null" then 0
@@ -1201,6 +1248,47 @@ end
 
 # ---- driver ---------------------------------------------------------------------------------------------------------
 
+# Literal shapes the converter reads, as character scans (the script-world build has no Regexp). A non-string is not a
+# literal, as `=~` on it would not match.
+HEX_DIGITS = "0123456789abcdefABCDEF"
+
+def hex_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("+", "-") ? s[1..] : s
+  t.length >= 3 && t[0] == "0" && (t[1] == "x" || t[1] == "X") && t[2..].each_char.all? { |c| HEX_DIGITS.include?(c) }
+end
+
+def int_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("-") ? s[1..] : s
+  !t.empty? && t.each_char.all? { |c| c >= "0" && c <= "9" }
+end
+
+def float_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("-") ? s[1..] : s
+  n = t.length
+  digits = ->(j) { k = j; k += 1 while k < n && t[k] >= "0" && t[k] <= "9"; k }
+  j = digits.(0)
+  return false if j == 0
+  if j < n && t[j] == "."
+    k = digits.(j + 1)
+    return false if k == j + 1
+    j = k
+  end
+  if j < n && (t[j] == "e" || t[j] == "E")
+    j += 1
+    j += 1 if j < n && (t[j] == "+" || t[j] == "-")
+    k = digits.(j)
+    return false if k == j
+    j = k
+  end
+  j == n
+end
+
 def main(argv)
   mode = :print
   run_args = []
@@ -1213,7 +1301,11 @@ def main(argv)
     run_args = argv[0..-2].map { |a| Integer(a, 10) }
     argv = argv[-1..]
   end
-  file = argv.last or abort "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
+  file = argv.last
+  unless file
+    warn "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
+    return 1
+  end
 
   forms = read_forms(File.read(file))
   install_module(forms)
@@ -1238,7 +1330,7 @@ def main(argv)
       next
     rescue Fail => e
       warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
-      exit 1
+      return 1
     end
     converted += 1
     promoted_total += conv.promoted.size
@@ -1268,17 +1360,21 @@ def main(argv)
       "trap"
     end
     puts "structured=#{structured} ssa=#{ssa}"
-    exit 1 if structured != "unsupported" && structured != ssa
+    return 1 if structured != "unsupported" && structured != ssa
   else
     puts output
   end
   0
 rescue Unsupported => e
   warn "pathb-ssa: #{e.message}"
-  exit 2
+  2
 rescue Fail => e
   warn "pathb-ssa: #{e.message}"
-  exit 1
+  1
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+# pathb-ssa-qbe.rb requires this file for its converter, so the command line runs only as the program.
+if $PROGRAM_NAME == __FILE__
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end
