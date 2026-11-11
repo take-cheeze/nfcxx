@@ -255,11 +255,28 @@ module PathbStructure
   end
 end
 
-def main(argv)
-  text = ARGF.read
-  abort "usage: pathb-structure.rb FILE.ssa" if text.nil? || text.empty?
-  puts sx(PathbStructure.structure(PathbEgraph.parse_fn(PathbEgraph::F(text))))
-  0
+# The function text: the files named (- is standard input, no names read standard input), as ARGF reads them.
+def structure_input(argv)
+  return $stdin.read if argv.empty?
+
+  argv.map { |f| f == "-" ? $stdin.read : File.read(f) }.join
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+def main(argv)
+  text = structure_input(argv)
+  if text.nil? || text.empty?
+    $stderr.write "usage: pathb-structure.rb FILE.ssa\n"
+    return 1
+  end
+  puts sx(PathbStructure.structure(PathbEgraph.parse_fn(PathbEgraph::F(text))))
+  0
+rescue SystemCallError => e
+  $stderr.write "pathb-structure: #{e.message}\n"
+  1
+end
+
+# pathb-flat-opt requires this file for the structured form, so the command line runs only as the program.
+if $0 == __FILE__
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end
