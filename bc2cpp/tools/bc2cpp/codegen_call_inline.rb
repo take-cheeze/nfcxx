@@ -158,6 +158,9 @@ module CallInlineCompileInsn
     text = super
     return text unless %i[SEND SEND0 SSEND SSEND0].include?(insn.op) && reg_offset.zero? && inline_calls_enabled? && !@resumable && !@rsm_variant
     return text unless text.is_a?(String) && text.include?('_impl(M, ')
+    # A guarded expansion (COMPUTED_SEND_GUARDED, a switch over the argument count) is read back by the passes that
+    # built it (SPLAT_SHARED checks its arms' text); its arms keep their calls.
+    return text if text.include?('COMPUTED_SEND') || text.include?('switch (')
 
     lines = text.lines
     hits = lines.each_index.select { |i| lines[i].match?(CodeGen::INLINE_CALL_LINE) }
