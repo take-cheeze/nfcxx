@@ -156,6 +156,8 @@ jobs:
   mrbc-snapshot:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -181,6 +183,19 @@ jobs:
             MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update
           else
             MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          fi
+
+      # The regenerated table goes back to the branch it was built from, so the check on that branch can verify it.
+      # A push with GITHUB_TOKEN does not start another workflow run.
+      - name: Commit the regenerated snapshot to this branch
+        if: inputs.oracle_update == true && github.ref_type == 'branch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bc2cpp/tools/mrbc_rb/snapshot_world.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "mrbc: regenerate snapshot_world.txt with the fork oracle"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
       - name: Upload the regenerated snapshot
