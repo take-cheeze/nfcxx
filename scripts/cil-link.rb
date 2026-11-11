@@ -50,9 +50,10 @@ long nfcxx_vcall(const char *name, long i0, long i1, long i2, long i3, long i4, 
 }
 C
 
+class Die < StandardError; end
+
 def die(msg)
-  $stderr.puts("cil-link: #{msg}")
-  exit 1
+  raise Die, msg
 end
 
 # Python's repr of a list of strings, for the one message that prints one.
@@ -157,6 +158,194 @@ def quote_big_ints(text)
   out.join
 end
 
+# A JSON parser for the fragments (the compiled world has no JSON). Objects become Hashes, arrays Arrays, numbers
+# Integers or Floats, strings UTF-8 Strings. Numbers of 19 or more digits are read as strings by quote_big_ints first.
+class JsonParser
+  def initialize(text)
+    @s = text
+    @i = 0
+    @n = text.bytesize
+  end
+
+  def fail_at(what)
+    raise Die, "#{what} at byte #{@i}"
+  end
+
+  def ws
+    while @i < @n
+      c = @s.getbyte(@i)
+      break unless c == 32 || c == 9 || c == 10 || c == 13
+      @i += 1
+    end
+  end
+
+  def parse
+    ws
+    v = value
+    ws
+    fail_at("unexpected trailing data") if @i < @n
+    v
+  end
+
+  def value
+    fail_at("unexpected end of input") if @i >= @n
+    c = @s.getbyte(@i)
+    if c == 123
+      object
+    elsif c == 91
+      array
+    elsif c == 34
+      string
+    elsif c == 45 || digit?(c)
+      number
+    elsif @s.byteslice(@i, 4) == "true"
+      @i += 4
+      true
+    elsif @s.byteslice(@i, 5) == "false"
+      @i += 5
+      false
+    elsif @s.byteslice(@i, 4) == "null"
+      @i += 4
+      nil
+    else
+      fail_at("unexpected token")
+    end
+  end
+
+  def object
+    h = {}
+    @i += 1
+    ws
+    if @i < @n && @s.getbyte(@i) == 125
+      @i += 1
+      return h
+    end
+    while true
+      ws
+      fail_at("expected a string key") unless @i < @n && @s.getbyte(@i) == 34
+      k = string
+      ws
+      fail_at("expected ':'") unless @i < @n && @s.getbyte(@i) == 58
+      @i += 1
+      ws
+      h[k] = value
+      ws
+      fail_at("unterminated object") if @i >= @n
+      c = @s.getbyte(@i)
+      @i += 1
+      break if c == 125
+      fail_at("expected ',' or '}'") unless c == 44
+    end
+    h
+  end
+
+  def array
+    a = []
+    @i += 1
+    ws
+    if @i < @n && @s.getbyte(@i) == 93
+      @i += 1
+      return a
+    end
+    while true
+      ws
+      a << value
+      ws
+      fail_at("unterminated array") if @i >= @n
+      c = @s.getbyte(@i)
+      @i += 1
+      break if c == 93
+      fail_at("expected ',' or ']'") unless c == 44
+    end
+    a
+  end
+
+  def hex4
+    fail_at("bad \\u escape") if @i + 4 > @n
+    v = 0
+    4.times do
+      c = @s.getbyte(@i)
+      d = if c >= 48 && c <= 57 then c - 48
+          elsif c >= 97 && c <= 102 then c - 87
+          elsif c >= 65 && c <= 70 then c - 55
+          else fail_at("bad \\u escape")
+          end
+      v = v * 16 + d
+      @i += 1
+    end
+    v
+  end
+
+  def utf8(cp)
+    if cp < 0x80
+      cp.chr
+    elsif cp < 0x800
+      (0xC0 | (cp >> 6)).chr + (0x80 | (cp & 0x3F)).chr
+    elsif cp < 0x10000
+      (0xE0 | (cp >> 12)).chr + (0x80 | ((cp >> 6) & 0x3F)).chr + (0x80 | (cp & 0x3F)).chr
+    else
+      (0xF0 | (cp >> 18)).chr + (0x80 | ((cp >> 12) & 0x3F)).chr + (0x80 | ((cp >> 6) & 0x3F)).chr +
+        (0x80 | (cp & 0x3F)).chr
+    end
+  end
+
+  def string
+    @i += 1
+    out = String.new
+    while true
+      fail_at("unterminated string") if @i >= @n
+      c = @s.getbyte(@i)
+      @i += 1
+      break if c == 34
+      if c == 92
+        fail_at("unterminated string") if @i >= @n
+        e = @s.getbyte(@i)
+        @i += 1
+        if e == 110 then out << "\n"
+        elsif e == 116 then out << "\t"
+        elsif e == 114 then out << "\r"
+        elsif e == 98 then out << "\b"
+        elsif e == 102 then out << "\f"
+        elsif e == 34 || e == 92 || e == 47 then out << e.chr
+        elsif e == 117
+          cp = hex4
+          if cp >= 0xD800 && cp < 0xDC00 && @s.byteslice(@i, 2) == "\\u"
+            @i += 2
+            lo = hex4
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+          end
+          out << utf8(cp)
+        else
+          fail_at("bad escape")
+        end
+      else
+        out << c.chr
+      end
+    end
+    out.respond_to?(:force_encoding) ? out.force_encoding("UTF-8") : out
+  end
+
+  def number
+    st = @i
+    @i += 1 if @s.getbyte(@i) == 45
+    @i += 1 while @i < @n && digit?(@s.getbyte(@i))
+    fl = false
+    if @i < @n && @s.getbyte(@i) == 46
+      fl = true
+      @i += 1
+      @i += 1 while @i < @n && digit?(@s.getbyte(@i))
+    end
+    if @i < @n && (@s.getbyte(@i) == 101 || @s.getbyte(@i) == 69)
+      fl = true
+      @i += 1
+      @i += 1 if @i < @n && (@s.getbyte(@i) == 43 || @s.getbyte(@i) == 45)
+      @i += 1 while @i < @n && digit?(@s.getbyte(@i))
+    end
+    t = @s.byteslice(st, @i - st)
+    fl ? t.to_f : t.to_i
+  end
+end
+
 def restore_big_ints(frag)
   frag["data"].each do |d|
     d["items"].each do |it|
@@ -167,8 +356,8 @@ def restore_big_ints(frag)
 end
 
 def load_fragment(path)
-  restore_big_ints(JSON.parse(quote_big_ints(read_file(path))))
-rescue StandardError => e
+  restore_big_ints(JsonParser.new(quote_big_ints(read_file(path))).parse)
+rescue Die, SystemCallError => e
   die("#{path}: #{e.message}")
 end
 
@@ -184,12 +373,13 @@ def build_shim(dirname, cc, out)
   end
 end
 
-def main(args)
+def link(args)
   out = nil
   paths = []
   ilasm = nil
   cc = "cc"
   keep_il = false
+  il_only = false
   i = 0
   while i < args.size
     a = args[i]
@@ -210,6 +400,8 @@ def main(args)
     end
     if a == "--keep-il"
       keep_il = true
+    elsif a == "--il-only"
+      il_only = true
     elsif !a.start_with?("-")
       paths << a
     end
@@ -432,10 +624,14 @@ def main(args)
   lines << entry.join("\n")
   lines << "}"
 
+  text = lines.join("\n") + "\n"
+  if il_only # print the CIL text and stop: no ilasm, no shim, no launcher
+    $stdout.write(text)
+    return
+  end
   ilasm = "#{File.dirname($0)}/../build/cil/ilasm" if ilasm.nil? || ilasm.empty?
   build_shim(File.dirname(out), cc, out) if variadic
 
-  text = lines.join("\n") + "\n"
   dll = out + ".dll"
   write_file("#{out}.il", text) if keep_il # debugging: keep the CIL text next to the output
   die("ilasm not found at #{ilasm} (run scripts/setup-cil.sh, or pass --ilasm)") unless File.exist?(ilasm)
@@ -455,4 +651,13 @@ def main(args)
   File.chmod(493, out) # 0755
 end
 
-main(ARGV)
+def main(args)
+  link(args)
+  0
+rescue Die => e
+  $stderr.puts("cil-link: #{e.message}")
+  1
+end
+
+rc = main(ARGV)
+exit(rc) if rc != 0
