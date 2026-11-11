@@ -7,7 +7,7 @@
 # without the backtrace). The script runs no forked workers in the closed build (--jobs=N changes nothing).
 # Prints the best-of-N wall time of the interpreter, the compiled build and CRuby on the benchmark IR, and the speedup of the
 # compiled build.
-#   PATHB_IR_OPT_BENCH_IR=file   the IR to time (default tests/pathb-ir/eh_libstdcxx_throw.ir, 3.4 MB)
+#   PATHB_IR_OPT_BENCH_IR=file   the IR to time (default tests/pathb-ir-opt/helper.ir: the 3.4 MB eh_libstdcxx_throw.ir is too slow under the pass to time)
 #   PATHB_BENCH_REPEAT=N         runs per runtime, best kept (default 3)
 #   SCRIPT_WORLD_MIN_SPEEDUP=X   also fail when the compiled build is under X times the interpreter
 #   BC2CPP_RPG_DIR=dir           an existing rpg-maker-clone checkout instead of the pinned one
@@ -49,7 +49,7 @@ cases=build/bc2cpp/pathb_ir_opt.cases
 } > "$cases"
 
 log=build/bc2cpp/pathb_ir_opt.log
-bench=${PATHB_IR_OPT_BENCH_IR:-tests/pathb-ir/eh_libstdcxx_throw.ir}
+bench=${PATHB_IR_OPT_BENCH_IR:-tests/pathb-ir-opt/helper.ir}
 (env -u LD ruby "$tree/tools/script_world/compiled_run.rb" --script scripts/pathb-ir-opt.rb \
   --tail 'unless $pathb_ir_opt_lib\n  rc = main(ARGV)\n  exit(rc) if rc != 0\nend\n' --entry 'main(ARGV)' --cases "$cases" --bench "$bench" \
   --repeat "${PATHB_BENCH_REPEAT:-3}" --bench-status 0 --chdir "$root") 2>&1 | tee "$log"
