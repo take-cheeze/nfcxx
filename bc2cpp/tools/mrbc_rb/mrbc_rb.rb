@@ -621,10 +621,10 @@ module MrbcRb
     # each instruction belongs to, so only a call whose parts all start and end on the line of its block are covered.
     def call_with_block(node, need:)
       blk = node.block
-      raise Unsupported, 'call with a block and a non-plain method name' unless node.name.to_s.match?(PLAIN_NAME)
-
       recv = node.receiver && unparen(node.receiver)
-      recv = nil if recv.is_a?(Prism::SelfNode)
+      # `self.+(b) { }`: noself needs opt_op == OP_NOP, so an operator name loads self like any receiver (the block
+      # disables the operator opcodes, but the receiver test happens first).
+      recv = nil if recv.is_a?(Prism::SelfNode) && !OPT_OP_NAMES.include?(node.name)
       raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil? && !self_receiver?(node)
       args = (node.arguments&.arguments || []).map { |a| unparen(a) }
       raise Unsupported, 'call with a block and a non-operand argument' unless args.all? { |x| operand?(x) || x.is_a?(Prism::KeywordHashNode) || x.is_a?(Prism::SplatNode) }
@@ -646,7 +646,7 @@ module MrbcRb
       index = @children.size - 1
       
       emit(:BLOCK, sp, index)
-      emit(recv ? :SENDB : :SSENDB, a, sym_index(node.name), argc)
+      emit_send(a, recv, node.name, argc, true)
       dispatch(skip)
       @nregs = [@nregs, sp + 1].max
       a
@@ -2498,6 +2498,8 @@ module MrbcRb
     end
 
     PLAIN_NAME = /\A[A-Za-z_]\w*[?!]?\z/
+    # The names codegen_call maps to an operator opcode (opt_op): a `self` receiver is a real operand for them.
+    OPT_OP_NAMES = %i[+ - * / < <= > >= == [] []=].freeze
 
     # Whether a call's arguments are more than positional operands: keyword arguments, splats or a block argument.
     def complex_arguments?(node)
@@ -2524,12 +2526,9 @@ module MrbcRb
     # gen_args, the block argument last, and the send is SEND/SENDB (SSEND/SSENDB without a receiver) whose argc byte packs
     # the positional count (15 when a splat made it variable) and the keyword count (15 when a ** made it a hash).
     def call_with_args(node, need:)
-      unless node.name.to_s.match?(PLAIN_NAME) || (node.name == :[] && node.receiver)
-        raise Unsupported, 'call with a non-plain method name and complex arguments'
-      end
-
+      # `self[*a]` and `self.+(b, &blk)` load self like any receiver (opt_op is set); other names are sent to self.
       recv = node.receiver && unparen(node.receiver)
-      recv = nil if recv.is_a?(Prism::SelfNode) && node.name != :[] # `self[*a]` loads self like any receiver (opt_op is set)
+      recv = nil if recv.is_a?(Prism::SelfNode) && !OPT_OP_NAMES.include?(node.name)
       raise Unsupported, 'safe navigation without a receiver' if node.safe_navigation? && recv.nil? && !self_receiver?(node)
       raise Unsupported, 'call with a non-simple receiver' if recv && !operand?(recv)
 
@@ -2549,6 +2548,8 @@ module MrbcRb
 
     # The send instruction: with a receiver SEND (SEND0 when there is nothing to pass), without one SSEND (SSEND0).
     def emit_send(a, recv, name, argc, blk)
+      return emit(name == :[]= ? :SETIDX : BINARY_OPS.fetch(name), a) if recv && operator_opcode?(name, argc)
+
       sym = sym_index(name)
       if blk
         emit(recv ? :SENDB : :SSENDB, a, sym, argc)
@@ -2557,6 +2558,19 @@ module MrbcRb
       else
         emit(recv ? :SEND : :SSEND, a, sym, argc)
       end
+    end
+
+    # codegen_call picks the operator opcode from the method name before it looks at the arguments or the block: `+ - * / < <= >
+    # >= ==` with one positional argument and `[]=` with two are ADD ... EQ and SETIDX even when a block or a block argument
+    # follows (the block register is loaded and then ignored). Keywords next to them are not covered.
+    def operator_opcode?(name, argc)
+      return false unless (BINARY_OPS.key?(name) && name != :[]) || name == :[]=
+
+      n = argc & 0xf
+      return false unless n == (name == :[]= ? 2 : 1)
+      raise Unsupported, 'operator method with keyword arguments and a block' if argc != n
+
+      true
     end
 
     # gen_values, gen_hash and the block argument of codegen_call: the arguments of the call whose result register is +a+
