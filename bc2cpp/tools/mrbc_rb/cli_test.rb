@@ -12,11 +12,31 @@ require 'rbconfig'
 require_relative 'mrbc_rb'
 require_relative 'rite_dump'
 require_relative 'file_syms'
+require_relative 'golden_data'
 
 oracle = ENV.fetch('MRBC', nil)
 unless oracle && File.executable?(oracle)
-  puts 'SKIP: set MRBC to the fork mrbc to run the CLI check'
-  exit 0
+  # No oracle: the command's `-g -o-` output (the RITE image every other format is cut from) against the snapshot, for the
+  # single files of bc2cpp/ and the gem sets of a world checkout, through bin/mrbc_rb itself. The other output formats need MRBC.
+  require 'open3'
+  require_relative 'snapshot'
+  cli = File.expand_path('bin/mrbc_rb', __dir__)
+  bad = ok = missing = 0
+  MrbcRb::Snapshot.each_input.each do |label, sources|
+    next if sources.any? { |_, p| !File.file?(p) } # snippets and groups are golden_test.rb's
+
+    out, _e, st = Open3.capture3(RbConfig.ruby, cli, '-g', '-o-', *sources.map(&:last), binmode: true)
+    next unless st.success?
+
+    begin
+      MrbcRb::Snapshot.check(sources, out) == :ok ? ok += 1 : (bad += 1; puts "DIFFERS #{label}")
+    rescue MrbcRb::Snapshot::NotInSnapshot
+      missing += 1
+      puts "MISSING #{label}"
+    end
+  end
+  puts "cli_test (snapshot, no MRBC): #{ok} match, #{bad} differ, #{missing} missing"
+  exit(bad.zero? && missing.zero? ? 0 : 1)
 end
 
 CLI = File.expand_path('bin/mrbc_rb', __dir__)

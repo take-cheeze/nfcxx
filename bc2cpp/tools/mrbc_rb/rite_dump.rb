@@ -48,6 +48,22 @@ module MrbcRb
       rebuild(secs)
     end
 
+    # The binary with the file names of its DBG section replaced by f0, f1, ... (the names are the only thing in a -g image that
+    # depends on where the sources were found; the records reference them by index, so nothing else changes). What the
+    # snapshot hashes (snapshot.rb), so that it is the same wherever the world is checked out.
+    def neutral_files(image)
+      secs = sections(image).map do |ident, body|
+        next [ident, body] unless ident == "DBG\0"
+
+        n = body.byteslice(0, 2).unpack1('n')
+        pos = 2
+        n.times { pos += 2 + body.byteslice(pos, 2).unpack1('n') }
+        names = Array.new(n) { |i| [i.to_s.then { |d| "f#{d}" }.bytesize, "f#{i}"].pack('na*') }.join.b
+        [ident, [n].pack('n') + names + body.byteslice(pos..)]
+      end
+      rebuild(secs)
+    end
+
     # `-B name` (static: -s): the C byte array.
     def cfunc(image, name, static: false)
       out = +"#include <stdint.h>\n#{static ? 'static' : "#ifdef __cplusplus\nextern\n#endif"}\nconst uint8_t #{name}[] = {"

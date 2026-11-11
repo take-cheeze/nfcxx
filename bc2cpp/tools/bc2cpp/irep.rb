@@ -8,7 +8,8 @@
 #                          unset, `mrbc` on PATH is used if there is one
 #   no mrbc at all         the emitter serves every input; one it does not cover aborts naming the files and the reason
 #   BC2CPP_NO_MRBC=1       never run an mrbc, even if MRBC is set or one is on PATH (same as having none)
-#   BC2CPP_MRBC_RB=0       always mrbc;  =verify  emitter and mrbc must agree byte for byte (needs an mrbc)
+#   BC2CPP_MRBC_RB=0       always mrbc;  =verify  emitter and mrbc must agree byte for byte (needs an mrbc);
+#                          =snapshot  the emitter's bytes must match the recorded hash of mrbc's output (no mrbc; see below)
 #   BC2CPP_MRBC_RB_LOG=f   one line per compile naming who served it
 require_relative 'insn_operands'
 require_relative 'insn_decoder'
@@ -291,7 +292,10 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   # mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc when there is one. It is
   # the default:
   #   BC2CPP_MRBC_RB=0       always mrbc (aborts when there is none)
-  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this)
+  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this);
+  #                          BC2CPP_MRBC_SNAPSHOT_RECORD=<file> appends "<key> <mrbc's value>" per input, for snapshot.rb --update
+  #   BC2CPP_MRBC_RB=snapshot  no mrbc needed: the emitter's bytes must hash to what mrbc once wrote for the same sources
+  #                          (bc2cpp/tools/mrbc_rb/snapshot.txt); an input not in it aborts, see mrbc_rb/snapshot.rb
   mode = ENV.fetch('BC2CPP_MRBC_RB', '')
   reason = 'disabled'
   unless mode == '0'
@@ -303,6 +307,18 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
         system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
         expected = File.binread(mrb_path)
         abort "mrbc_rb: bytes differ from mrbc for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless expected == image
+        if (record = ENV['BC2CPP_MRBC_SNAPSHOT_RECORD']) && !record.empty?
+          require_relative '../mrbc_rb/snapshot'
+          MrbcRb::Snapshot.record(paths.map { |path| [File.binread(path), path] }, expected, record)
+        end
+      elsif mode == 'snapshot'
+        require_relative '../mrbc_rb/snapshot'
+        begin
+          verdict = MrbcRb::Snapshot.check(paths.map { |path| [File.binread(path), path] }, image)
+        rescue MrbcRb::Snapshot::NotInSnapshot => e
+          abort "mrbc_rb: #{e.message}"
+        end
+        abort "mrbc_rb: bytes differ from the snapshot of mrbc's output for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless verdict == :ok
       end
       mrbc_rb_log(paths.size, 'emitter', '-', symbol)
       File.binwrite(mrb_path, image)
