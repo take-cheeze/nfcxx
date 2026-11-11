@@ -3430,6 +3430,20 @@ def stub_long_double(forms)
   out
 end
 
+# The x87 thunks are x86-64 assembly (fstpt, fldt, the SysV argument registers). The target is the host's, or
+# PATHB_X87_TARGET (x86_64 or arm64) when set; on arm64 a module that needs a thunk is refused (status 3), and the driver
+# builds it with gcc (docs/notes/pathb-longdouble.md). A long double program that needs no thunk is emitted as before.
+def x87_target
+  t = `printenv PATHB_X87_TARGET`.strip
+  t = `uname -m`.strip if t.empty?
+  t
+end
+
+def x87_check!(what)
+  return if %w[x86_64 amd64].include?(x87_target)
+  raise Refused, "long double #{what}: the x87 ABI thunks are x86-64 assembly (target #{x87_target}); built with gcc instead"
+end
+
 # Marker comments for the x87 thunks (append_weak writes the assembly) that live code needs: a call thunk when some kept
 # function or global refers to __nfcxx_x87c_F, an entry thunk when __nfcxx_ldr_F was kept.
 def emit_x87_thunks(mod, forms)
@@ -3448,14 +3462,20 @@ def emit_x87_thunks(mod, forms)
     name = pstr(f[2])
     if kind == "call" || kind == "callc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?("__nfcxx_x87c_" + name)
+      next unless refs.key?("__nfcxx_x87c_" + name)
+      x87_check!("call of #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}"
     elsif kind == "icall" || kind == "icallc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
       sym = (kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + name
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?(sym)
+      next unless refs.key?(sym)
+      x87_check!("indirect call through #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}"
     elsif kind == "entry" || kind == "entryc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6 || !(f[3] == "weak" || f[3] == "global" || f[3] == "local")
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}" if kept.key?("__nfcxx_ldr_" + name)
+      next unless kept.key?("__nfcxx_ldr_" + name)
+      x87_check!("function #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}"
     else
       raise BadIR, "x87-thunk kind #{form_text(f)}"
     end
