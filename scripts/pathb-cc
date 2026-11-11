@@ -6,6 +6,8 @@
 #   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
 # Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 #   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
+#   -fno-inline      do not run the IR inliner (scripts/pathb-ir-opt.rb --inline); it is on by default
+#   -fir-opt-max=N   the inliner is not run on IR over N bytes (default 8388608)
 #   NFCXX_SAFE_POINTERS=1  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
 #                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
 #   NFCXX_PATHB_ASAN=1  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
@@ -20,10 +22,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 qbe=${QBE:-$root/build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-cc: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 
-opts=(); src=""; out=""
+opts=(); src=""; out=""; inline=1; irmax=8388608
 while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2; shift ;;
+    -fno-inline) inline=0 ;;
+    -fir-opt-max=*) irmax=${1#-fir-opt-max=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
     -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
@@ -43,22 +47,19 @@ asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || { asan=(--asan); export NFCXX_IR_L
 [ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: NFCXX_PATHB_ASAN and NFCXX_SAFE_POINTERS both replace malloc; use one" >&2; exit 2; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
-# The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless NFCXX_IR_OPT names them (inline,
-# or a comma-separated list). IR over NFCXX_IR_OPT_MAX bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
-# tests' input) is emitted as it is.
-passes=${NFCXX_IR_OPT:-}
+# The IR inliner (scripts/pathb-ir-opt.rb --inline, docs/notes/pathb-ir-passes.md) is on unless -fno-inline. IR over
+# -fir-opt-max=N bytes is not optimized. A given IR file (PATHB_IR, the tests' input) is emitted as it is.
 raw=0
-if [ -n "$passes" ] && [ "$passes" != none ] && [ -z "${PATHB_IR:-}" ]; then
+if [ "$inline" = 1 ] && [ -z "${PATHB_IR:-}" ]; then
   size=$(stat -c %s "$tmp/$n.ir")
-  if [ "$size" -gt "${NFCXX_IR_OPT_MAX:-8388608}" ]; then
-    echo "pathb-cc: $src: IR is $size bytes, over NFCXX_IR_OPT_MAX: not optimized" >&2
+  if [ "$size" -gt "$irmax" ]; then
+    echo "pathb-cc: $src: IR is $size bytes, over -fir-opt-max=$irmax: not optimized" >&2
   else
-    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); done
     cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
-    if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
+    if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" --inline "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
       mv "$tmp/$n.opt.ir" "$tmp/$n.ir"
     else
-      cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; echo "pathb-cc: $src: the IR passes refused the unit, not optimized" >&2
+      cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; echo "pathb-cc: $src: the IR inliner refused the unit, not optimized" >&2
     fi
   fi
 fi

@@ -96,7 +96,7 @@ eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 source "$root/scripts/host-sys.sh"   # host_dialect, host_clang_version, host_sys_includes, host_gnu_version
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
-cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
+cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0; pb_ir_opts=()
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
 dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
@@ -525,6 +525,8 @@ while [ $# -gt 0 ]; do
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
+    -fno-inline) pb_ir_opts+=("$1") ;;             # Path B: no IR inliner (scripts/pathb-cc; on by default)
+    -fir-opt-max=*) pb_ir_opts+=("$1") ;;          # Path B: the largest IR the inliner runs on
     -fsanitize=*) sanitize=${sanitize:+$sanitize,}${1#-fsanitize=} ;;
     -fno-sanitize=all) sanitize="" ;;
     -fno-sanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)" >&2; exit 2 ;;
@@ -923,7 +925,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     t=$(trace_start)
     if [ $backend = pathb ]; then
       # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route), not cproc.
-      "$root/scripts/pathb-cc" -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
+      "$root/scripts/pathb-cc" -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_ir_opts[@]+"${pb_ir_opts[@]}"} "$c" -o "$o"
     elif [ $backend != gcc ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
@@ -966,7 +968,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_ir_opts[@]+"${pb_ir_opts[@]}"} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -987,7 +989,7 @@ if [ $backend = pathb ]; then
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
          prc=0
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_ir_opts[@]+"${pb_ir_opts[@]}"} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):

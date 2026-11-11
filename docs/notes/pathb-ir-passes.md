@@ -42,6 +42,10 @@ Known gap: after inlining, the SSA emitter (scripts/pathb-ssa-qbe.rb) refuses so
 
 ## Use
 
+**Path B host builds** (`scripts/pathb-cc`, the nfcxx driver's `NFCXX_PATH=b` and the default C++ route when Path B is chosen) run the
+inliner by default. `-fno-inline` turns it off, and `-fir-opt-max=N` sets the largest IR it runs on (default 8388608 bytes; larger
+units go unoptimized with a message). These are flags, not environment variables. The device passes below still read `NFCXX_IR_OPT`.
+
 `NFCXX_IR_OPT=inline` makes `scripts/sycl-build.sh` run the pass on the device IR before the SPIR-V emitter (any list of passes
 separated by commas). Unset, the IR is unchanged.
 
