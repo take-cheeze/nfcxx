@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # BYTECODE_CONSTANT_FACTS: the class, value and Fixnum interval of every constant binding, computed on
 # BytecodeIR.

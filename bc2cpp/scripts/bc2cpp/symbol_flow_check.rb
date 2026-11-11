@@ -10,6 +10,7 @@
 require 'set'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/ir_symbol_flow'
 
 suite = FixtureCheck.new('symbol_flow_check')

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 # Mirrors strict OP_ENTER positional binding. Only the optional initializer slot

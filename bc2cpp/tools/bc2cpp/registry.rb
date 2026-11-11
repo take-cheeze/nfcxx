@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_numeric'
 require_relative 'core_mixins'
@@ -538,7 +539,6 @@ def build_registry(ireps, root_label)
         name = insn.sym
         next unless name == 'new'
 
-        d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
         next unless struct_new_receiver?(irep, idx, insn)

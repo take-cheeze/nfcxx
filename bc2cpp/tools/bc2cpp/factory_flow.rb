@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'ir_symbol_flow'
 
 # Uses of a factory constant, including MOVE aliases, over normal and handler edges.

@@ -192,7 +192,7 @@ end
 baseline_dir = Dir.mktmpdir('bc2cpp-protect-cxx')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS, skip_unsupported: false)
+code, _baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS, skip_unsupported: false)
 check.call('the fixture generates', !code.empty?)
 check.call('rescue and ensure boundaries are bc2cpp_protect sites', code.scan(/\bbc2cpp_protect(?:_call)?\(M, /).size >= 4)
 check.call('no boundary calls the VM protect function (the Fiber loop included)',

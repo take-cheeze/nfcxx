@@ -27,6 +27,7 @@ FD = ForeignDefiners
 
 walks = 0
 original = FD.method(:scan_files)
+FD.singleton_class.send(:remove_method, :scan_files)
 FD.define_singleton_method(:scan_files) do |files|
   walks += 1
   original.call(files)
@@ -85,6 +86,7 @@ Dir.mktmpdir('foreign_definers_cache') do |dir|
   check.call('no owners scans nothing; an unparseable file raises when asked', quiet && raised)
 end
 
+FD.singleton_class.send(:remove_method, :scan_files)
 FD.define_singleton_method(:scan_files, original)
 
 tools = File.expand_path('../../tools/bc2cpp', __dir__)

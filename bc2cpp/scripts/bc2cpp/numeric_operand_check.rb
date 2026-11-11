@@ -81,7 +81,6 @@ end
 flow = lambda do |list, oracle = StubOracle.new, opaque = Set.new, **irep_options|
   NumericFlow.states(irep_of(list, **irep_options), oracle, opaque)
 end
-names = ->(mask) { { INT => 'INT', FLT => 'FLT', ARR => 'ARR', NIL_ => 'NIL', OTHER => 'OTHER' }.select { |bit, _| mask.anybits?(bit) }.values.join('|') }
 
 puts '-- NumericFlow (host)'
 straight = [insn(0, :LOADI_1, "R2\t(1)"), insn(2, :LOADI_2, "R3\t(2)"), insn(4, :ADD, "R2\t(R3)"),

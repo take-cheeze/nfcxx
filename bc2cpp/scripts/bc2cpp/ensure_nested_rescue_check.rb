@@ -101,7 +101,7 @@ end
 baseline_dir = Dir.mktmpdir('bc2cpp-ensure-nested-rescue')
 at_exit { FileUtils.remove_entry(baseline_dir) }
 puts '-- generated code'
-code, baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS, skip_unsupported: false)
+code, _baseline_err = Bc2cppFixtureRuntime.generate(SRC, baseline_dir, core: true, only_owners: OWNERS, skip_unsupported: false)
 with = body_of(code, 'EnFx_singleton_with_impl')
 check.call('with: the IO.open-shaped method compiles, the nested rescue under bc2cpp_protect in the ensure lambda',
            !with.empty? && !with.include?('#error') && with.include?('ENSURE_NESTED_RESCUE') &&

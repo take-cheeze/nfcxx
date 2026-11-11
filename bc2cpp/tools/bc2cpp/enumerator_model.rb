@@ -7,6 +7,7 @@ require_relative 'source_text'
 require_relative 'const_site_cache'
 require_relative 'integer_constants'
 require_relative 'core_fact_sigs'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 
 # ENUMERATOR_MODEL: what the compiler may assume about mruby's Enumerator machinery,

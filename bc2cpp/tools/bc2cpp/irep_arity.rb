@@ -386,7 +386,7 @@ def optional_block_arg_table(irep)
   enter = irep.enter
   return nil unless enter
 
-  _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
+  _mand, opt, rest, mand2, _kw, kwrest, block = enter.enter_fields
   # STEP_KEYWORDS: named keywords may follow (`def f(a, b = 1, k: 2, &blk)`), resolved by keyword_arg_table(rest_block: true).
   return nil unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.positive?
 

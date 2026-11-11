@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # Container shapes on the IR: the literal that built the Array or Hash a register holds, the registers
 # its elements and pairs came from, and the value class each producer of a register gives. RecordHash,

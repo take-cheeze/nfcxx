@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # The irep tree around a Program. Irep#reps is index-aligned with an instruction's block operand and holds
 # the child's label, which only the caller's ireps table resolves, so the lookup is passed in rather than

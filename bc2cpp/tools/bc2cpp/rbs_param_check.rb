@@ -3,6 +3,7 @@
 require 'prism'
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'call_site_index'
 require_relative 'dynamic_names'

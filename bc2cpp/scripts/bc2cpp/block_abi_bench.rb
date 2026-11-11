@@ -51,7 +51,7 @@ unless Bc2cppFixtureRuntime.mrbc
 end
 build = Bc2cppFixtureRuntime.full_or_build or abort 'needs a full libmruby'
 Dir.mktmpdir('bc2cpp-bench') do |dir|
-  code, err = Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: %w[BbFx])
+  _code, err = Bc2cppFixtureRuntime.generate(SRC, dir, core: true, only_owners: %w[BbFx])
   body = <<~CPP
     static int scenario(mrb_state* M) {
       const char* shape = std::getenv("BENCH_SHAPE");

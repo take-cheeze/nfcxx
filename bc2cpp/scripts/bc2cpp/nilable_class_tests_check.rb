@@ -216,7 +216,7 @@ runtime_source = <<~RUBY
   end
 RUBY
 Dir.mktmpdir('mono-exact-runtime') do |dir|
-  code, err = Bc2cppFixtureRuntime.generate(runtime_source, dir, only_owners: %w[MonoSpot MonoChild MonoWrong MonoHolder])
+  _code, err = Bc2cppFixtureRuntime.generate(runtime_source, dir, only_owners: %w[MonoSpot MonoChild MonoWrong MonoHolder])
   singleton_code, = Bc2cppFixtureRuntime.generate(SOURCE + "class Holder; def touch(o); o.singleton_class; end; end",
                                                 File.join(dir, 'singleton'), only_owners: %w[Spot ChildSpot Mark Holder])
   check.call('a singleton maker withdraws the general exact receiver proof', !singleton_code.include?('MONO_EXACT_FLOW :bump'))

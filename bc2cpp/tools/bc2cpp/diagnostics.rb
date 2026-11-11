@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 # Steps 6e and 6h: annotation candidates and static call targets (diagnostic only).

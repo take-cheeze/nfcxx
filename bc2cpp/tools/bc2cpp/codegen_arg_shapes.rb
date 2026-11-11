@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'core_fact_sigs'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 
 # ARG_SHAPES: direct calls for the argument shapes the
