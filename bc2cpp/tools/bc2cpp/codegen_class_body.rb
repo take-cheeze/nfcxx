@@ -158,7 +158,7 @@ class CodeGen
 
         lines << registration
         lines << "  r#{insn.reg} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(insn.sym.to_s)}));\n"
-      elsif %i[SSEND SSEND0].include?(insn.op) && AliasSites.settled?(@registry, irep.label, idx)
+      elsif %i[SSEND SSEND0].include?(insn.op) && (AliasSites.settled?(@registry, irep.label, idx) || core_alias_send?(irep, idx, owner))
         # A settled alias_method site is the registry's definition (ALIAS_SITES), so it installs nothing here: a by-name
         # call copies `old` as it stands at run time, and a body run twice copies its own def (alias_handled_by_ir?).
         lines << "  // #{insn.sym} alias handled by the bytecode IR\n"
@@ -585,6 +585,15 @@ class CodeGen
     self.class.core_aliases.any? { |(key_owner, _), names| key_owner == owner && names.include?(name) }
   end
 
+  # A core `alias_method :new, :old` CORE_ALIASES registers `new` for (from the definition of `old`): copying `old` by
+  # name again would need it in the table, which SETTLED_ALIASES (core_native_candidates.rb) may leave it out of.
+  def core_alias_send?(irep, idx, owner)
+    return false unless CoreDefs.core_source?(irep.file) && self.class.core_aliases
+
+    site = AliasSites.site(irep, idx)
+    site && self.class.core_aliases.fetch([owner, site.old_name.to_s], []).include?(site.new_name.to_s)
+  end
+
   # An alias copies the method `old` names when the unit runs. That is a native (C) method, which mruby's own init defines
   # before any gem_init runs, or a method this body registers earlier. A Ruby method the gem registers after the units
   # is not there yet, so it is refused: the registry lists it (a def with a body).
@@ -667,7 +676,11 @@ class CodeGen
   # An `alias NEW OLD` naming a method the build leaves out of its tables, on either side (see class_body_alias).
   def omitted_alias?(insn, owner, omitted)
     old = insn.first_of(:name)&.value
-    omitted.include?("#{owner}##{insn.sym}") || (!old.nil? && omitted.include?("#{owner}##{old}"))
+    return true if omitted.include?("#{owner}##{insn.sym}")
+    return false unless !old.nil? && omitted.include?("#{owner}##{old}")
+
+    # SETTLED_ALIASES (core_native_candidates.rb) leaves a source out only where CORE_ALIASES registers the alias.
+    raise "bc2cpp: #{owner}##{old} is left out, but its alias #{insn.sym} is not registered from it (CORE_ALIASES)"
   end
 end
 
