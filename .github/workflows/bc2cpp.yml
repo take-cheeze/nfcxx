@@ -103,14 +103,13 @@ jobs:
           - pathb_egraph
           - pathb_structure
           - pathb_ssa_qbe
-        # Per-world policy (docs/notes/mrbc-rb-rpg-maker-clone.md, "Verification modes"): the pathb worlds compile inputs that are all in
-        # the snapshot table (measured: 0 missing), so they run without the oracle's cross-check; optcarrot compiles a generated
-        # benchmark.rb whose temporary path is part of its key (never in a table), so it stays on verify.
-        # Worlds not listed here keep the default mode.
+        # Per-world policy (docs/notes/mrbc-rb-rpg-maker-clone.md, "Verification modes"): every world runs verify unless a
+        # dispatch says otherwise. pathb_qbe_emit and pathb_borrowck were briefly on snapshot, but they compile bc2cpp's own mrblib sets, so any
+        # new or edited file under bc2cpp/host-libs (e.g. array_drop.rb) is "not in snapshot" and the job fails until the table is
+        # re-recorded, for no measured time saving. optcarrot compiles a generated benchmark.rb whose temporary path is part of
+        # its key (never in a table), so it is pinned to verify whatever the default.
         include:
           - { world: optcarrot, mrbc_rb: verify }
-          - { world: pathb_qbe_emit, mrbc_rb: snapshot }
-          - { world: pathb_borrowck, mrbc_rb: snapshot }
     steps:
       # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
       - uses: actions/checkout@v7
@@ -133,7 +132,7 @@ jobs:
           # The Ruby emitter is the default compiler. verify also runs the fork's mrbc and fails on any byte difference;
           # snapshot compares with what that mrbc once wrote (bc2cpp/tools/mrbc_rb/snapshot*.txt) and aborts on an input that is not
           # in the table (fix: dispatch this workflow with mrbc_rb=record, then snapshot.rb --update --from-record on the artifact).
-          BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || matrix.mrbc_rb }}
+          BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || matrix.mrbc_rb || 'verify' }}
           BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-{1}.txt', runner.temp, matrix.world) || '' }}
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
 
@@ -228,10 +227,14 @@ jobs:
       # the fixtures compile generated programs (measured on 24 checks: 64 distinct inputs, none in the snapshot table). A dispatch with
       # mrbc_rb=record also writes the inputs of each check to a record file (uploaded below) for snapshot.rb --update --from-record.
       BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || 'verify' }}
-      BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-checks-{1}.txt', runner.temp, matrix.shard) || '' }}
     steps:
       - run: git config --global submodule.fetchJobs 4
       - uses: actions/checkout@v7
+
+      # The runner context is not available in a job-level env, so the record path is exported from a step.
+      - name: Snapshot record path
+        if: inputs.mrbc_rb == 'record'
+        run: echo "BC2CPP_MRBC_SNAPSHOT_RECORD=$RUNNER_TEMP/mrbc-record-checks-${{ matrix.shard }}.txt" >> "$GITHUB_ENV"
 
       - name: World checkout
         run: tests/bc2cpp/world.sh
