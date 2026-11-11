@@ -8,60 +8,7 @@
 # --hir FILE (with --borrow): mrustc's `-Z dump-hir` output, whose `impl Copy` items tell which of
 # the program's own types are copied rather than moved, and `impl Drop` items which are dropped as a
 # whole. Without it, no move or drop obligation is marked.
-$borrow = !ARGV.delete("--borrow").nil?
-if (i = ARGV.index("--hir"))
-  hir = File.read(ARGV[i + 1])
-  ARGV.slice!(i, 2)
-  # The paths of the program's types with an `impl Copy`, whatever its bounds: an instance whose
-  # impl does not apply then counts as Copy too, which only misses that instance's moves.
-  $copy_impls = hir.scan(/^impl\b.*?::marker::Copy for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
-  # And those with an `impl Drop`: a value of one is dropped as a whole (drop_units).
-  $drop_impls = hir.scan(/^impl\b.*?::ops::drop::Drop for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
-end
-# --ast FILE (with --borrow): mrustc's `-Z dump-ast` output, which still tells an explicit `&mut x`
-# from a method call's autoref (mir_two_phase_locals). Without it, no borrow is two-phase.
-if (i = ARGV.index("--ast"))
-  $ast_src = File.read(ARGV[i + 1])
-  ARGV.slice!(i, 2)
-end
-abort "usage: #{$0} [--borrow [--hir FILE] [--ast FILE]] INPUT.mir [OUTPUT.ir]" if ARGV.empty?
-input = ARGV[0]
-outpath = ARGV[1]
-src = File.read(input)
-$mir_src = src
-require_relative "monomir-std" if $borrow
 
-types = {}
-src.scan(/^type (.+?) \{\n(.*?)\n\}/m) do |name, body|
-  size = 0; align = 1; fields = []; drop = nil; tag = nil
-  # tag encoding block is multiline: @[FIELD, SUB] = { "BYTES" =IDX, ... * =IDX, ... }
-  m = body.match(/@\[(\d+),\s*([^\]]*)\] = \{(.*?)\}/m)
-  if m
-    tagfield = m[1].to_i; tagsub = m[2].strip; tagbody = m[3]
-    arms = []
-    tagbody.scan(/("(?:\\.|[^"\\])*"|\*)\s*(?:=\s*(\d+))?/) do |val, idx|
-      arms << {val: val, idx: idx.nil? || idx.empty? ? nil : idx.to_i}
-    end
-    tag = {field: tagfield, sub: tagsub, arms: arms}
-    body = body.sub(m[0], "")
-  end
-  body.each_line do |ln|
-    ln = ln.strip
-    m = ln.match(/^SIZE (\d+), ALIGN (\d+);/)
-    if m
-      size = m[1].to_i; align = m[2].to_i; next
-    end
-    m = ln.match(/^DROP (\S+);$/)
-    if m
-      drop = m[1].strip; next
-    end
-    m = ln.match(/^(\d+) = (.+);$/)
-    if m
-      fields << {off: m[1].to_i, type: m[2].strip}
-    end
-  end
-  types[name.strip] = {size: size, align: align, fields: fields, drop: drop, tag: tag}
-end
 
 def split_top(s)
   res = []; depth = 0; cur = ""; instr = false; esc = false
@@ -618,31 +565,6 @@ def encode_pb_str(bytes)
   res
 end
 
-statics = []
-src.scan(/^static (.+?): (.+?) = (.*?);\n/m) do |name, ty, init|
-  statics << {name: name.strip, type: ty.strip, init: init.strip}
-end
-$statics_names = statics.map { |st| st[:name] }
-$statics_types = {}
-statics.each { |st| $statics_types[st[:name]] = st[:type] }
-
-fn_path_map = {}
-src.scan(/\/\* (.+?) \*\/\nfn (\S+?)\(/) do |comment, fname|
-  fn_path_map[comment.strip] = fname.strip
-end
-$fn_path_map = fn_path_map
-
-src.scan(/^fn \S+?\([^\n]*?\)\s*:[^\n]+? \{\n(.*?)\n\}/m) do |m|
-  body = m[0]
-  var_fn_ty = {}
-  body.scan(/^\tlet (var\d+): fn (\S+?);$/) { |v, t| var_fn_ty[v] = t }
-  body.scan(/^\t\tASSIGN (var\d+) = fn (.+);$/) do |v, path|
-    if var_fn_ty[v]
-      $fn_path_map[path.strip] ||= var_fn_ty[v]
-    end
-  end
-end
-
 def resolve_fn_item(expr)
   m = expr.strip.match(/^fn (.+)$/)
   return nil if m.nil?
@@ -736,8 +658,6 @@ def abi_shape(ty, types)
   ["two", classes]
 end
 
-$abi_table = {}
-
 def abi_form(ty, types)
   return nil if ty.nil?
   key = ty.strip
@@ -788,40 +708,6 @@ def abi_form(ty, types)
   $abi_table[key] = form
   form
 end
-
-functions = []
-src.scan(/^fn ([^\n]+?)\s*\{\n(.*?)\n\}/m) do |header, body|
-  functions << {header: header.strip, body: body}
-end
-MonomirStd.scan(src) if $borrow
-$extern_map = {}
-src.scan(/^fn ([^\n]+?) = ([^\n]*?);\n/) do |header, linkage|
-  functions << {header: header.strip, body: nil, linkage: linkage.strip}
-  hm = header.strip.match(/^(\S+?)\s*\(/)
-  lm = linkage.strip.match(/^"([^"]+)"/)
-  if hm && lm
-    $extern_map[pb_sym(hm[1])] = lm[1]
-  end
-end
-
-lines = []
-lines << "(ir-module \"#{File.basename(input)}\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))"
-
-types.each do |tname, tinfo|
-  next if tname.start_with?("*") || tname.start_with?("[") || tname.start_with?("fn")
-  next if ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize", "f32", "f64", "bool", "char", "(", "!"].any? { |p| tname == p || tname.start_with?(p) }
-  sz = tinfo[:size]; al = tinfo[:align]
-  al = 8 if al > 8
-  al = 1 if al < 1
-  form = abi_form(tname, types)
-  next if form.nil?
-  lines << "(abi-type #{tname.inspect} #{sz} #{al} #{form})"
-end
-
-lines << "(abi-type \"i128\" 16 8 (leaf 0 l) (leaf 8 l))"
-lines << "(abi-type \"u128\" 16 8 (leaf 0 l) (leaf 8 l))"
-
-$fat_types = {}
 def note_fat(ty, types)
   return unless ty
   ty = ty.strip
@@ -829,65 +715,6 @@ def note_fat(ty, types)
   rest = ty.sub(/^&mut\s+|^&move\s+|^&\s*/, "")
   return unless fat_rest?(rest, types)
   $fat_types[ty] = true
-end
-
-src.scan(/^\tlet \S+: (&[^\n;]+);$/) { |m| note_fat(m[0], types) }
-src.scan(/^fn \S+?\((.*?)\)\s*:/) { |m| m[0].split(",").each { |p| note_fat(p.strip, types) } }
-$fat_types.each_key do |ft|
-  lines << "(abi-type #{ft.inspect} 16 8 (leaf 0 l) (leaf 8 l))"
-end
-
-statics.each do |st|
-  sname = pb_sym(st[:name])
-  ty = st[:type]
-  size, align = type_size_align(ty, types)
-  align = 1 if align == 0
-  size = 0 if size < 0
-  pathb_ty = rust_type_to_pathb(ty, types)
-  init = st[:init]
-  base = init[/^"(.*)"\{/m, 1]
-  base = "" if base.nil?
-  base_bytes = unescape_mir(base)
-  base_bytes += [0] * (size - base_bytes.size) if base_bytes.size < size
-  relocs = []
-  init.scan(/@(\d+)\+(\d+)\s*=\s*("(?:\\.|[^"\\])*"|[^,}]+)/) do |off, len, target|
-    relocs << [off.to_i, len.to_i, target.strip]
-  end
-  # covered ranges by relocations
-  covered = Array.new(size, false)
-  relocs.each do |off, len, target|
-    (off...(off+len)).each { |i| covered[i] = true if i < size }
-  end
-  items = []
-  # bytes segments for uncovered ranges (split into <=8-byte chunks)
-  i = 0
-  while i < size
-    if covered[i]
-      i += 1; next
-    end
-    j = i
-    while j < size && !covered[j] && (j - i) < 8
-      j += 1
-    end
-    seglen = j - i
-    segbytes = base_bytes[i, seglen] || []
-    segenc = encode_pb_str(segbytes)
-    segname = "#{sname}_bytes#{i}"
-    lines << "(data #{segname.inspect} (array #{seglen} (const char)) (string \"#{segenc}\"))"
-    items << "(bytes #{i} #{seglen} @\"#{segname}\")"
-    i = j
-  end
-  relocs.each do |off, len, target|
-    if target.start_with?('"')
-      tname = target.gsub(/^"|"$/, '')
-      str_data = "#{sname}_str#{off}"
-      lines << "(data #{str_data.inspect} (array #{tname.bytesize + 1} (const char)) (string \"#{tname}\"))"
-      items << "(addr #{off} (ptr (const char)) @\"#{str_data}\" 0)"
-    else
-      items << "(addr #{off} (ptr (const char)) &\"#{pb_sym(target)}\" 0)"
-    end
-  end
-  lines << "(global #{sname.inspect} #{pathb_ty} #{size} #{align} (weak) (init #{items.join(' ')}))"
 end
 
 def mir_unescape_str(s)
@@ -2345,6 +2172,182 @@ def store_rvalue(dst_place, rhs, types, locals, params, param_reg, stmts, regi, 
   end
   regi = store_place(dst_place, val, vpt, types, locals, params, param_reg, stmts, regi)
   regi
+end
+
+def main(argv)
+$borrow = !argv.delete("--borrow").nil?
+if (i = argv.index("--hir"))
+  hir = File.read(argv[i + 1])
+  argv.slice!(i, 2)
+  # The paths of the program's types with an `impl Copy`, whatever its bounds: an instance whose
+  # impl does not apply then counts as Copy too, which only misses that instance's moves.
+  $copy_impls = hir.scan(/^impl\b.*?::marker::Copy for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
+  # And those with an `impl Drop`: a value of one is dropped as a whole (drop_units).
+  $drop_impls = hir.scan(/^impl\b.*?::ops::drop::Drop for ::"bin#"::((?:\w+::)*\w+)/).flatten.uniq
+end
+# --ast FILE (with --borrow): mrustc's `-Z dump-ast` output, which still tells an explicit `&mut x`
+# from a method call's autoref (mir_two_phase_locals). Without it, no borrow is two-phase.
+if (i = argv.index("--ast"))
+  $ast_src = File.read(argv[i + 1])
+  argv.slice!(i, 2)
+end
+abort "usage: #{$0} [--borrow [--hir FILE] [--ast FILE]] INPUT.mir [OUTPUT.ir]" if argv.empty?
+input = argv[0]
+outpath = argv[1]
+src = File.read(input)
+$mir_src = src
+require_relative "monomir-std" if $borrow
+
+types = {}
+src.scan(/^type (.+?) \{\n(.*?)\n\}/m) do |name, body|
+  size = 0; align = 1; fields = []; drop = nil; tag = nil
+  # tag encoding block is multiline: @[FIELD, SUB] = { "BYTES" =IDX, ... * =IDX, ... }
+  m = body.match(/@\[(\d+),\s*([^\]]*)\] = \{(.*?)\}/m)
+  if m
+    tagfield = m[1].to_i; tagsub = m[2].strip; tagbody = m[3]
+    arms = []
+    tagbody.scan(/("(?:\\.|[^"\\])*"|\*)\s*(?:=\s*(\d+))?/) do |val, idx|
+      arms << {val: val, idx: idx.nil? || idx.empty? ? nil : idx.to_i}
+    end
+    tag = {field: tagfield, sub: tagsub, arms: arms}
+    body = body.sub(m[0], "")
+  end
+  body.each_line do |ln|
+    ln = ln.strip
+    m = ln.match(/^SIZE (\d+), ALIGN (\d+);/)
+    if m
+      size = m[1].to_i; align = m[2].to_i; next
+    end
+    m = ln.match(/^DROP (\S+);$/)
+    if m
+      drop = m[1].strip; next
+    end
+    m = ln.match(/^(\d+) = (.+);$/)
+    if m
+      fields << {off: m[1].to_i, type: m[2].strip}
+    end
+  end
+  types[name.strip] = {size: size, align: align, fields: fields, drop: drop, tag: tag}
+end
+
+statics = []
+src.scan(/^static (.+?): (.+?) = (.*?);\n/m) do |name, ty, init|
+  statics << {name: name.strip, type: ty.strip, init: init.strip}
+end
+$statics_names = statics.map { |st| st[:name] }
+$statics_types = {}
+statics.each { |st| $statics_types[st[:name]] = st[:type] }
+
+fn_path_map = {}
+src.scan(/\/\* (.+?) \*\/\nfn (\S+?)\(/) do |comment, fname|
+  fn_path_map[comment.strip] = fname.strip
+end
+$fn_path_map = fn_path_map
+
+src.scan(/^fn \S+?\([^\n]*?\)\s*:[^\n]+? \{\n(.*?)\n\}/m) do |m|
+  body = m[0]
+  var_fn_ty = {}
+  body.scan(/^\tlet (var\d+): fn (\S+?);$/) { |v, t| var_fn_ty[v] = t }
+  body.scan(/^\t\tASSIGN (var\d+) = fn (.+);$/) do |v, path|
+    if var_fn_ty[v]
+      $fn_path_map[path.strip] ||= var_fn_ty[v]
+    end
+  end
+end
+
+$abi_table = {}
+
+functions = []
+src.scan(/^fn ([^\n]+?)\s*\{\n(.*?)\n\}/m) do |header, body|
+  functions << {header: header.strip, body: body}
+end
+MonomirStd.scan(src) if $borrow
+$extern_map = {}
+src.scan(/^fn ([^\n]+?) = ([^\n]*?);\n/) do |header, linkage|
+  functions << {header: header.strip, body: nil, linkage: linkage.strip}
+  hm = header.strip.match(/^(\S+?)\s*\(/)
+  lm = linkage.strip.match(/^"([^"]+)"/)
+  if hm && lm
+    $extern_map[pb_sym(hm[1])] = lm[1]
+  end
+end
+
+lines = []
+lines << "(ir-module \"#{File.basename(input)}\" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))"
+
+types.each do |tname, tinfo|
+  next if tname.start_with?("*") || tname.start_with?("[") || tname.start_with?("fn")
+  next if ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize", "f32", "f64", "bool", "char", "(", "!"].any? { |p| tname == p || tname.start_with?(p) }
+  sz = tinfo[:size]; al = tinfo[:align]
+  al = 8 if al > 8
+  al = 1 if al < 1
+  form = abi_form(tname, types)
+  next if form.nil?
+  lines << "(abi-type #{tname.inspect} #{sz} #{al} #{form})"
+end
+
+lines << "(abi-type \"i128\" 16 8 (leaf 0 l) (leaf 8 l))"
+lines << "(abi-type \"u128\" 16 8 (leaf 0 l) (leaf 8 l))"
+
+$fat_types = {}
+
+src.scan(/^\tlet \S+: (&[^\n;]+);$/) { |m| note_fat(m[0], types) }
+src.scan(/^fn \S+?\((.*?)\)\s*:/) { |m| m[0].split(",").each { |p| note_fat(p.strip, types) } }
+$fat_types.each_key do |ft|
+  lines << "(abi-type #{ft.inspect} 16 8 (leaf 0 l) (leaf 8 l))"
+end
+
+statics.each do |st|
+  sname = pb_sym(st[:name])
+  ty = st[:type]
+  size, align = type_size_align(ty, types)
+  align = 1 if align == 0
+  size = 0 if size < 0
+  pathb_ty = rust_type_to_pathb(ty, types)
+  init = st[:init]
+  base = init[/^"(.*)"\{/m, 1]
+  base = "" if base.nil?
+  base_bytes = unescape_mir(base)
+  base_bytes += [0] * (size - base_bytes.size) if base_bytes.size < size
+  relocs = []
+  init.scan(/@(\d+)\+(\d+)\s*=\s*("(?:\\.|[^"\\])*"|[^,}]+)/) do |off, len, target|
+    relocs << [off.to_i, len.to_i, target.strip]
+  end
+  # covered ranges by relocations
+  covered = Array.new(size, false)
+  relocs.each do |off, len, target|
+    (off...(off+len)).each { |i| covered[i] = true if i < size }
+  end
+  items = []
+  # bytes segments for uncovered ranges (split into <=8-byte chunks)
+  i = 0
+  while i < size
+    if covered[i]
+      i += 1; next
+    end
+    j = i
+    while j < size && !covered[j] && (j - i) < 8
+      j += 1
+    end
+    seglen = j - i
+    segbytes = base_bytes[i, seglen] || []
+    segenc = encode_pb_str(segbytes)
+    segname = "#{sname}_bytes#{i}"
+    lines << "(data #{segname.inspect} (array #{seglen} (const char)) (string \"#{segenc}\"))"
+    items << "(bytes #{i} #{seglen} @\"#{segname}\")"
+    i = j
+  end
+  relocs.each do |off, len, target|
+    if target.start_with?('"')
+      tname = target.gsub(/^"|"$/, '')
+      str_data = "#{sname}_str#{off}"
+      lines << "(data #{str_data.inspect} (array #{tname.bytesize + 1} (const char)) (string \"#{tname}\"))"
+      items << "(addr #{off} (ptr (const char)) @\"#{str_data}\" 0)"
+    else
+      items << "(addr #{off} (ptr (const char)) &\"#{pb_sym(target)}\" 0)"
+    end
+  end
+  lines << "(global #{sname.inspect} #{pathb_ty} #{size} #{align} (weak) (init #{items.join(' ')}))"
 end
 
 # --borrow: the drop glue of the program's enums, which is compiler-generated and switches on the
@@ -3972,3 +3975,8 @@ if outpath
 else
   puts output
 end
+  0
+end
+
+rc = main(ARGV)
+exit(rc) if rc != 0
