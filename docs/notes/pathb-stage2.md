@@ -137,6 +137,10 @@ Pointer and aggregate addressing has no C-level expression:
   `NFCXX_IR_SANITIZE` (`-fsanitize=`), or under `NFCXX_IR_LOC=1`: the source position of the statements that follow,
   which a failing check reports, and which a refusal of the wasm emitter names (`docs/notes/pathb-wasm.md`). Without
   either variable the IR is the same as before.
+- `(decl $"x" val|ref)`, `(scope-end $"x")`: printed only under `NFCXX_IR_SCOPES=1`, the part of the borrow facts (`pathb-borrowck.md`) that
+  says where a named local's scope begins and ends: `decl` at its declaration, `scope-end` at the end of its block, before a `return`, and before a
+  `goto`, `break` or `continue` that leaves it. A scalar slot that is only named by them is still promoted, and the facts of a promoted slot are
+  dropped (`scripts/pathb-ssa.rb`); AddressSanitizer's use after scope reads the rest (`docs/notes/asan.md`). No other borrow fact is printed.
   `(likely)`/`(unlikely)` is the first statement of an `if` arm that has `[[likely]]`/`[[unlikely]]`; a consumer may use it for
   block layout and must otherwise ignore it. `(unreachable missing-return)` is `(unreachable)` for a function left without a
   value, printed under the same variable. See `ubsan.md`.

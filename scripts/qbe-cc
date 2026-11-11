@@ -5,9 +5,26 @@
 # system cc. Unknown gcc flags (-w, -O2, -fwrapv, ...) are dropped: QBE/cproc
 # don't exploit C undefined behavior, so signed overflow wraps and strict
 # aliasing isn't assumed.
+# Options of this wrapper (the nfcxx driver passes them; each has an environment variable as a fallback, and the option wins):
+#   --c-input        (NFCXX_C_INPUT=1)    the source is C written by hand, not EDG's generated C (docs/notes/realworld.md)
+#   --eh-unwind      (NFCXX_EH_UNWIND=1)  the program's unwinder flag is 1 (the link; docs/notes/eh-shim.md)
+#   -fsanitize=address (NFCXX_ASAN=1)     keep the line markers and link libasan (docs/notes/asan.md)
 set -euo pipefail
 # ccache when it is installed (NFCXX_CCACHE=0 turns it off): the C compiles of the same preprocessed C repeat across runs.
 CCBIN=(cc); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null; then CCBIN=(ccache cc); fi
+c_input=${NFCXX_C_INPUT:-}; eh_unwind=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind=1; asan_on=${NFCXX_ASAN:-}
+_args=()
+for _a in "$@"; do
+  case $_a in
+    --c-input) c_input=1 ;;
+    --eh-unwind) eh_unwind=1 ;;
+    -fsanitize=address) asan_on=1; _args+=("$_a") ;;
+    *) _args+=("$_a") ;;
+  esac
+done
+set -- ${_args[@]+"${_args[@]}"}
+# cproc (3rd/cproc, not ours) reads NFCXX_ASAN itself to instrument the loads and stores: the one variable this script exports.
+[ -z "$asan_on" ] || export NFCXX_ASAN=1
 root=$(cd "$(dirname "$0")/.." && pwd)
 cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
@@ -62,7 +79,7 @@ case " ${cppflags[*]+${cppflags[*]}} " in *" -std="*) ;; *) cppflags+=(-std=gnu1
 [ -z "${NFCXX_QBE_KERNEL:-}" ] || kcproc+=(-p -g -V)   # -g: the GNU keyword asm (the kernel is gnu11); -V: volatile accesses kept
 # -G: GNU C's cleanup attribute, which runs at the end of the object's scope (the kernel's guard()); nfcxx's EDG-made C
 # uses the attribute for its throw-only cleanups instead (docs/notes/cproc-nfcxx.md)
-[ -z "${NFCXX_QBE_KERNEL:-}${NFCXX_C_INPUT:-}" ] || kcproc+=(-G)
+[ -z "${NFCXX_QBE_KERNEL:-}$c_input" ] || kcproc+=(-G)
 
 if [ $compile = 0 ] && [ -n "${NFCXX_CIL:-}" ]; then
   # The CIL backend (scripts/cil-cc): the link is cil-link.rb over the translation units' fragments (docs/notes/cil.md).
@@ -77,14 +94,14 @@ if [ $compile = 0 ]; then
   # qbe-prep maps to fabs/fabsf (a C-only program does not pull libm in through libstdc++).
   # libnfcxxld.a (be/nfcxx_ldrt.c) is the runtime of the helper calls cproc emits for long double and __float128.
   # Its __float128 to_chars wrappers need libstdc++; the archive member is only pulled in when a program calls a helper.
-  # -fsanitize=address (NFCXX_ASAN=1): the program links libasan, whose preinit runs before main (docs/notes/asan.md)
-  asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
+  # -fsanitize=address: the program links libasan, whose preinit runs before main (docs/notes/asan.md)
+  asan=(); [ -z "$asan_on" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
-  # NFCXX_EH_UNWIND=1 (nfcxx's gate, nfcxx): the program's unwinder flag is 1. The gcc backend gets it from its
+  # --eh-unwind (nfcxx's gate, nfcxx): the program's unwinder flag is 1. The gcc backend gets it from its
   # objects (lib/ehshim/nfcxx_eh_unwind.h); the cproc objects cannot (no weak definitions), so a flag object is linked in.
   ehflag=(); ehdir=""
-  if [ "${NFCXX_EH_UNWIND:-}" = 1 ]; then
+  if [ $eh_unwind = 1 ]; then
     ehdir=$(mktemp -d); printf 'int __nfcxx_eh_unwind_frames = 1;\n' > "$ehdir/flag.c"
     ${CCBIN[@]+"${CCBIN[@]}"} -c "$ehdir/flag.c" -o "$ehdir/flag.o"
     ehflag=("$ehdir/flag.o")
@@ -100,8 +117,8 @@ fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 t=$(trace_start)
-# -P drops the line markers, which -fsanitize=address needs for the source lines of its reports (NFCXX_ASAN=1 keeps them)
-pflag=(-P); [ -z "${NFCXX_ASAN:-}" ] || pflag=()
+# -P drops the line markers, which -fsanitize=address needs for the source lines of its reports (-fsanitize=address keeps them)
+pflag=(-P); [ -z "$asan_on" ] || pflag=()
 # macOS: the SDK's headers declare nullability keywords (_Nullable, _Nonnull) that cproc does not know; cproc's own
 # configure defines them away only for its internal preprocessor, which this clang -E does not use.
 # NFCXX_MACOS_SYSROOT=DIR: a macOS arm64 compile check from any host. The C is preprocessed by clang for arm64-apple-darwin
@@ -135,7 +152,7 @@ if [ -n "${NFCXX_QBE_KERNEL:-}" ]; then
   # The kernel needs gcc's identity (compiler_types.h stops on "Unknown compiler" without __GNUC__). The linemarkers
   # stay, so cproc's errors name the header and line (the migration log, NFCXX_QBE_LOG, is read by them).
   ${CCBIN[@]+"${CCBIN[@]}"} -E ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.c"
-elif [ -n "${NFCXX_C_INPUT:-}" ]; then
+elif [ -n "$c_input" ]; then
   # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
   # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs
   # __SIZE_TYPE__, limits.h needs __INT_MAX__. So pre-define the host target's macros, but not the
@@ -161,7 +178,7 @@ trace_end "$t" "cc -E (preprocess)" qbe-backend
 # just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after the weak directives (scripts/weak-symbols).
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
-prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
+prepflags=(); [ -z "$c_input" ] || prepflags=(--c-input)
 # NFCXX_QBE_DCE=1: qbe-prep drops the definitions of static functions nothing uses (what gcc does by not emitting them).
 # cproc and QBE compile every one, so a file that includes a big header of static inline functions pays for all of them.
 # The assembly is smaller, not identical, so it is opt-in; scripts/weak-symbols gets only --c-input.
@@ -180,7 +197,7 @@ arm64=(); case "$(uname -m)" in arm64|aarch64) arm64=(--arm64) ;; esac
 # compiles a construct itself or refuses it (and qbe-try keeps the gcc object); in particular volatile stays volatile
 # (cproc -V), where qbe-prep would drop it.
 if [ -n "${NFCXX_QBE_KERNEL:-}" ] ||
-   { [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
+   { [ -z "$c_input" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|__sync_|volatile|_Float|__bf16|f(16|32|64|128)|return;' "$tmp/pp.c" &&
      ! grep -q "$(printf '\r')" "$tmp/pp.c"; }; then
   cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
 else
@@ -270,7 +287,7 @@ marked=(); [ ${#asmarg[@]} -eq 0 ] || marked=(--marked="$tmp/asm.s")
 # Hand-written C: without __GNUC__ (see above) glibc's <sys/cdefs.h> defines __attribute__ away, so an
 # __attribute__((weak)) of the source is gone from prep.c. A plain preprocess of the same source keeps it; the names come from
 # that text (scripts/weak-symbols gives .weak only to the ones the assembly defines). Run only when a weak attribute is there.
-if [ -n "${NFCXX_C_INPUT:-}" ] && [ $macos = 0 ]; then
+if [ -n "$c_input" ] && [ $macos = 0 ]; then
   if ${CCBIN[@]+"${CCBIN[@]}"} -E ${pflag[@]+"${pflag[@]}"} ${cppflags[@]+"${cppflags[@]}"} "$src" > "$tmp/pp.weak.c" 2>/dev/null &&
      grep -q -E '__attribute__ *\(\([^;{}]*(__)?weak(__)?[ ,)]' "$tmp/pp.weak.c"; then
     "$(dirname "$0")/weak-symbols" --c-input ${marked[@]+"${marked[@]}"} "$tmp/pp.weak.c" "$tmp/out.s"

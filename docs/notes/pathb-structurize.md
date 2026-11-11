@@ -4,7 +4,7 @@
 structured back ends (SPIR-V, PTX, WGSL, WASM) can consume optimized SSA.
 
     ruby scripts/pathb-ssa.rb FILE.ir | ruby scripts/pathb-ssa-structurize.rb - > FILE.sir
-    NFCXX_STRUCTURIZE_VERBOSE=1 ...   # the method chosen for each function, on stderr
+    ruby scripts/pathb-ssa-structurize.rb --verbose ...   # the method chosen for each function, on stderr
 
 ## Method
 

@@ -76,7 +76,7 @@ do. Each decides who handles the exception, as the two-phase unwinder would if E
    as for `std::make_exception_ptr` and is thrown as a rethrow of it (`__eh_throw_detached`, which passes the shim's reference on to
    the throw). Its destructor and storage go back to libstdc++ when the last handler or `exception_ptr` lets it go. For
    `__cxa_rethrow` the library's handler is ended first (`__cxa_end_catch`, which its frame would call on the way out), unless the
-   program is built with `NFCXX_EH_UNWIND=1`, where the unwinder runs that frame's cleanup.
+   program is built with `--eh-unwind` (`NFCXX_EH_UNWIND=1`), where the unwinder runs that frame's cleanup.
 
 So `catch (const c10::Error&)`, `catch (const std::exception&)` (EDG's runtime walks the base classes of the library's
 `type_info`), `catch (int)`, `catch (...)` with `throw;`, `std::current_exception` and `std::rethrow_exception` all work on them,
@@ -121,7 +121,7 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
 | `tests/eval/host.cpp` | a libstdc++ exception inside an nfceval snippet, caught by the snippet or returned as `RuntimeError` |
 | `tests/ehshim/run.sh` | programs that cproc or Path B cannot compile (`<future>`, `<regex>`; `__atomic_test_and_set`): `future_promise.cpp`, `regex_error.cpp` on the gcc backend; `exception_ptr_fuzz.cpp` (random mixes of throws, nested handlers, `throw;`, stored pointers) on gcc, qbe and Path B. Each backend's output and exit code must equal the same program built by the host g++ |
 | `tests/ehshim/eh_threads.cpp` | eight threads at once each constructing objects with destructors and throwing and catching `std::runtime_error` and `int` in a loop, `std::uncaught_exceptions` in between, then output flushed at exit; gcc, qbe and Path B |
-| `tests/ehshim/foreign` (in `tests/ehshim/run.sh`) | a library built by g++ that throws with plain `throw`, called by a program built by nfcxx (gcc, qbe, and gcc with `NFCXX_EH_UNWIND=1`): `std::runtime_error`, a class derived from it caught exactly and as `std::exception`, `int`, `const char*`, `catch (...)` and `throw;`, `exception_ptr`, `throw;` inside the library, the library's own handlers inside the program's try block and beyond a frame of the program, a second thread, each object destroyed once; output equal to the all-g++ build |
+| `tests/ehshim/foreign` (in `tests/ehshim/run.sh`) | a library built by g++ that throws with plain `throw`, called by a program built by nfcxx (gcc, qbe, and gcc with `--eh-unwind` (`NFCXX_EH_UNWIND=1`): `std::runtime_error`, a class derived from it caught exactly and as `std::exception`, `int`, `const char*`, `catch (...)` and `throw;`, `exception_ptr`, `throw;` inside the library, the library's own handlers inside the program's try block and beyond a frame of the program, a second thread, each object destroyed once; output equal to the all-g++ build |
 | `tests/bundle/torch.sh` | `c10::Error` from libc10 (a bad `reshape`, a CUDA tensor without a GPU), by hand |
 
 ## Limits

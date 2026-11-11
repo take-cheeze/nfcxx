@@ -1,7 +1,7 @@
 # AddressSanitizer for the other backends: plan
 
 Status: the gcc backend is done, the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
-use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 4 (heap checks, stack, global and alloca redzones: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
+use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 4 and 6 and use after return (heap checks, stack, global and alloca redzones, use after scope, fake frames: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
 This note plans the rest of Path B and the wasm emitter. Nothing of wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
@@ -33,13 +33,13 @@ Options considered:
 | C. A QBE pass after `promote`/`ssa` | Fewer redundant checks and also covers Path B output, but loses C types, volatile and line info, and needs blit expansion and abi0 handling. Revisit for check elimination. |
 
 Milestones:
-1. Done: `NFCXX_ASAN=1` selects the instrumentation; `scripts/qbe-cc` links with `-fsanitize=address` under it.
+1. Done: `-fsanitize=address` selects the instrumentation (`scripts/qbe-cc` reads it; `NFCXX_ASAN=1` is the fallback); `qbe-cc` links with libasan under it.
 2. Done (`funcinst`): a check before every load and store, the chunks of a block copy (`funccopy`) included. No exemptions
    were needed: the `va_arg` save area is ordinary stack memory, and the scalar `IVAARG` instruction is not checked. Tests:
    heap overflow, use after free, double free.
 3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at the declaration, unpoisons in `funcret`. alloca, C-input VLA and over-aligned objects too (`asandynalloc` and the over-aligned branch of `asanalloc`).
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
-5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
+5. Source lines (done): `qbe-cc` keeps the line markers under `-fsanitize=address`, cproc emits `dbgloc` and `dbgfile`.
 6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
    objects are poisoned with `__asan_poison_stack_memory` when the block is left (normal end, break, continue, goto, and
    the jumps EDG lowers from C++ break, continue and switch) and unpoisoned by their declaration or by a jump into the
@@ -67,7 +67,7 @@ All accesses are explicit IR (`load`, `store`, `bfload`/`bfstore`, `copy`, `zero
 interposers. Volatile accesses (`vhelper`, 1445) are the existing "access becomes a call" example.
 
 Milestones:
-1. Done: `NFCXX_PATHB_ASAN=1`: `__asan_load/storeN` before each load, store, bit-field, copy and zero-fill; the link adds libasan and the VLA
+1. Done: `pathb-cc --asan` (`NFCXX_PATHB_ASAN=1`): `__asan_load/storeN` before each load, store, bit-field, copy and zero-fill; the link adds libasan and the VLA
    runtime. Tests: `ASAN_BACKEND=pathb tests/asan/run.sh` (heap overflow, use after free, double free, mismatch, leak, vector, VLA
    overflow; the rest is listed in `tests/asan/pathb-pending.txt`). A VLA's `(bounds ...)` trap is dropped under the flag so libasan
    reports it; a constant bound still traps until M2 and M3.
@@ -80,7 +80,10 @@ Milestones:
    block) and setjmp/longjmp EH (libasan's longjmp interceptor unpoisons the dead frame; `clean_throw_reuse.cpp`, `scope_*_clean`). Test: `clean_alloca_reuse.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
 5. Done: the driver and the runner are `tests/asan/run.sh` with `ASAN_BACKEND=pathb` (a CI entry in `pathb-test`), and the report has source lines:
    `NFCXX_IR_LOC=1` under the flag, QBE `dbgfile` per function and `dbgloc` per `(loc ...)` (`asan_dbgloc`, `function_text`).
-6. Use after scope needs `(scope-begin/end $slot)` IR forms from `ir.c`.
+6. Done: the IR forms are the borrow facts `(decl $"x" val)` and `(scope-end $"x")`, printed alone under `NFCXX_IR_SCOPES=1`
+   (`be/nfcxx_ir.c`), poisoned and unpoisoned with `__asan_poison_stack_memory` / `__asan_unpoison_stack_memory` (`asan_scope`). A compound literal
+   (a compiler temporary, `(decl $"tmp.N" temp)`, `ir_cl_use`) gets facts at its first use and at the end of the block whose scope holds it, where that is
+   safe (`asan.md` "Use after scope"): `scope_compound_escape.cpp` passes.
 7. Optional: redundant-check elimination within a block, own runtime.
 Risks: slots passed to `__asan_*` escape and lose QBE promotion (slower code); bit-fields access whole units; libasan ABI version.
 

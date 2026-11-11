@@ -29,6 +29,7 @@
 
 require 'prism'
 require_relative 'rite_dump'
+require_relative 'annotations'
 
 module MrbcRb
   class Error < StandardError; end
@@ -134,7 +135,8 @@ module MrbcRb
   # The result of a compilation: +image+ is the RITE binary (what `mrbc -g` writes), +tree+ the irep tree (RiteDump::Irep, the
   # same one RiteDump.parse(image) reads back, with debug info and LVAR) built from the emitter's own data, so the C dumps and
   # the listing need no parse of the image.
-  Result = Struct.new(:image, :tree)
+  # +annotations+ is the class-scope side table (annotations.rb), nil when the producer has none.
+  Result = Struct.new(:image, :tree, :annotations)
 
   # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
   # Compiler switches of the command line (mrbc's `--no-ext-ops` and `--no-optimize`), per thread: +no_ext_ops+ makes a
@@ -180,11 +182,19 @@ module MrbcRb
   NIL_BLOCK_NAME = '__nil_block__'
 
   def self.fork_source(source)
+    # At the very end of a file without a newline the fork's lexer reads `x:` as a plain word, the colon is dropped (verified:
+    # `foo x:` is `foo x`, a call of foo with the call x).
+    if !source.end_with?("\n") && source.match?(/[A-Za-z_]\w*[?!]?:\z/) && Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.last&.type == :LABEL
+      source = source.byteslice(0, source.bytesize - 1)
+    end
     dots = source.match?(/\.\.[ \t]*(#[^\n]*)?\r?\n/)
     fors = source.match?(/\bfor\s*\(/)
     nilblk = source.match?(/&nil\b/) && !Prism.parse(source).errors.empty?
     shareable = source.include?('shareable_constant_value')
-    return source unless dots || fors || nilblk || shareable
+    # `/(?<x>re)/ =~ s`: Prism declares the named groups as locals (MatchWriteNode); the fork has no such thing, the regexp is
+    # a plain receiver of `=~` and x stays a method call. Parentheses around the literal make it one for Prism too.
+    matchw = source.include?('(?<') ? match_writes(source) : nil
+    return source unless dots || fors || nilblk || shareable || matchw
 
     tokens = Prism.lex(source).value.map(&:first)
     bytes = source.b
@@ -197,6 +207,7 @@ module MrbcRb
         inserts << [e, ';'] if bytes.byteslice(e..).match?(/\A[ \t]*(#[^\n]*)?\r?\n/n)
       end
     end
+    matchw&.each { |re| inserts << [re.end_offset, ')'] << [re.start_offset, '('] }
     if shareable # the fork ignores `# shareable_constant_value:` (Prism wraps the constant writes): disarm the magic comment, same length
       tokens.each do |t|
         next unless t.type == :COMMENT && (at = t.value.index('shareable_constant_value'))
@@ -240,6 +251,18 @@ module MrbcRb
     out.force_encoding(source.encoding)
   end
 
+  # The locations of the regexp literals that are the left side of a named-capture match (Prism::MatchWriteNode), or nil.
+  def self.match_writes(source)
+    found = []
+    stack = [Prism.parse(source).value]
+    until stack.empty?
+      n = stack.pop
+      found << n.call.receiver.location if n.is_a?(Prism::MatchWriteNode)
+      stack.concat(n.compact_child_nodes)
+    end
+    found.empty? ? nil : found
+  end
+
   # One file of a multi-file program: its name and its top-level statements.
   Unit = Struct.new(:filename, :stmts)
 
@@ -271,6 +294,7 @@ module MrbcRb
     files = files[0..stop] if stop
     return compile_result(*files.first) if files.size == 1
 
+    files, joined = join_leading_dots(files)
     locals = []
     frozen = false
     token_seen = false
@@ -284,7 +308,11 @@ module MrbcRb
 
       source = fork_source(source)
       result = Prism.parse(source, filepath: filename, scopes: [locals.dup], line: 1 + offset)
-      raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
+      unless result.errors.empty?
+        raise Unsupported, 'a leading dot joined to the last line of the previous file does not parse' if joined.include?(i)
+
+        raise Error, "parse error: #{result.errors.map(&:message).join('; ')}"
+      end
 
       stmts = result.value.statements.body
       locals |= result.value.locals
@@ -296,8 +324,11 @@ module MrbcRb
       offset = 0
       next if i == files.size - 1
 
-      quirk, offset, word_end = file_tail(source)
       raise Unsupported, 'a file without a newline at the end followed by a leading dot' if !source.end_with?("\n") && joins_previous?(files[i + 1].first)
+      next if joined.include?(i + 1) && source.empty? # the part of a file before the line that continues in the next one
+
+      quirk, offset, word_end = file_tail(source)
+      quirk = false if joined.include?(i + 1) # the file goes on (its last line is the next unit's first)
       # init_var_header: a node built while the parser is at line 0 of the next file (index n) has the index n - 1, or 0
       # (a file named like an earlier one has that one's index).
       tail_zero_nodes(stmts.last, zero, names[[names.index(files[i + 1].last) - 1, 0].max], word_end) if quirk && !stmts.empty?
@@ -308,6 +339,51 @@ module MrbcRb
     compiler = Compiler.new(units.first.filename, frozen_strings: frozen)
     compiler.compile_units(units, locals, zero)
     compiler.result
+  end
+
+  # A file without a newline at the end whose next file starts with a leading `.` or `&.`: the lexer reads the next file's
+  # `.` as the continuation of the last line, so that statement is one made of both. Its nodes are all built in the next file
+  # (the receiver completes at the `.`, the call and a surrounding assignment after it: the whole statement is on the next
+  # file's line 1, and the file switch happens at its first code). Handled when the last statement is on the last line,
+  # alone, and the next file's `.` is on its first line: the unit is that line followed by the next file's text on the same
+  # line (the later lines keep their numbers), and the lines before it a unit of the first file.
+  # Returns [files, the indices of those joined units].
+  def self.join_leading_dots(files)
+    joined = []
+    out = []
+    pending = nil
+    files.each_with_index do |(source, name), i|
+      source = pending + source if pending
+      pending = nil
+      nxt = files[i + 1]
+      if nxt && !source.end_with?("\n") && joins_previous?(nxt.first)
+        raise Unsupported, 'a comment line before the leading dot' unless nxt.first.b.match?(/\A[ \t\f\v\r]*(?:\.(?!\.)|&\.)/n)
+
+        result = Prism.parse(fork_source(source), filepath: name)
+        stmts = result.value.statements.body
+        last = stmts.last
+        lines = source.b.count("\n") + 1
+        raise Unsupported, 'a file ending in a line that is not one statement' unless result.errors.empty? && last && last.location.start_line == lines &&
+                                                                                      (stmts.size == 1 || stmts[-2].location.end_line < lines)
+
+        toks = Prism.lex(fork_source(source)).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }
+        tok = toks.last
+        # (verified: a name or constant alone, after `=`, `!`, `-`, `return` or another name; a literal, a variable of the
+        # instance or global kind, a call after `.`, an operator expression ... have nodes built earlier, in the first file)
+        raise Unsupported, 'a file ending in a line that does not end in a plain name' unless tok && %i[IDENTIFIER CONSTANT].include?(tok.type) &&
+                                                                                              tok.location.end_offset == source.bytesize &&
+                                                                                              [nil, :EQUAL, :BANG, :UMINUS, :KEYWORD_RETURN, :IDENTIFIER].include?(toks[-2]&.type)
+
+        cut = source.b.rindex("\n".b)
+        cut = cut ? cut + 1 : 0
+        out << [source.byteslice(0, cut), name] # (possibly empty: no code, the unit is dropped)
+        pending = source.byteslice(cut..)
+        joined << i + 1 # the index in +out+ of the next file: out.size - 1 + 1 (nothing is merged away)
+      else
+        out << [source, name]
+      end
+    end
+    [out, joined]
   end
 
   def self.tokens?(source) = Prism.lex(source).value.any? { |t, _| !NON_TOKENS.include?(t.type) }
@@ -551,6 +627,8 @@ module MrbcRb
   end
 
   class Compiler
+    include Annotations::Recorder
+
     def unparen(node) = MrbcRb.unparen(node)
     def simple?(node) = SIMPLE_VALUES.include?(unparen(node).class)
     def call_node?(node) = unparen(node).is_a?(Prism::CallNode)
@@ -685,6 +763,7 @@ module MrbcRb
     # SETUPVAR). +parent+ is the Compiler of the enclosing scope.
     def compile_block(node, parent)
       @parent = parent
+      ann_enter(parent, :block)
       @loops = [BLOCK_LOOP] # the LOOP_BLOCK entry of lambda_body: break, next and return inside a block are its forms
       params = node.parameters
       numbered = 0
@@ -895,6 +974,7 @@ module MrbcRb
       sym = sym_index(node.name)
       child = Compiler.new(@filename, frozen_strings: @frozen_strings)
       child.instance_variable_set(:@zero_end, @zero_nodes&.key?(node)) # the `end` was scanned across the end of the file
+      child.ann_enter(self, :method)
       @children << child.compile_method(node)
       index = @children.size - 1
 
@@ -905,11 +985,14 @@ module MrbcRb
         value_into(recv, t) if recv
         emit(recv ? :SCLASS : :TCLASS, t)
         emit(:METHOD, t + 1, index)
+        ann_def_node(node, index)
         emit(:DEF, t, sym)
       elsif recv
         value_into(recv, t)
+        ann_def_node(node, index)
         emit(:SDEF, t, sym, index)
       else
+        ann_def_node(node, index)
         emit(:TDEF, t, sym, index)
         @nregs = nregs unless last # the result register is only counted when the value is pushed (codegen_def)
       end
@@ -1071,7 +1154,7 @@ module MrbcRb
            Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode,
            Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode # built at the closing delimiter, like `)`
         nil
-      when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
+      when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode, Prism::ConstantPathNode
         @leading_dot[recv] = op.start_line
       when Prism::CallNode
         # A call with a block ends in its `}` or `end`: it is built without the next token, like one ending in `)`.
@@ -1106,6 +1189,7 @@ module MrbcRb
         check_multiline(node)
       end
       enter(node) # the fork enters every node, also one whose value is unused
+      ann_statement(node)
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
@@ -1435,6 +1519,7 @@ module MrbcRb
 
       t = temp
       value_into(obj, t)
+      ann_extra(%i[SCLASS], ann_sclass_facts(node))
       emit(:SCLASS, t)
       class_body(node, t, last)
       t
@@ -1619,6 +1704,7 @@ module MrbcRb
       name = namespace_into(node.constant_path, t)
       # The superclass, when there is one, goes into the register after the namespace (codegen_class).
       superclass ? operand_into(superclass, t + 1) : emit(:LOADNIL, t + 1)
+      ann_extra(%i[CLASS], ann_class_facts(node))
       emit(:CLASS, t, sym_index(name))
       class_body(node, t, last)
       t
@@ -1628,6 +1714,7 @@ module MrbcRb
     def module_statement(node, last:)
       t = temp
       name = namespace_into(node.constant_path, t)
+      ann_extra(%i[MODULE], ann_class_facts(node))
       emit(:MODULE, t, sym_index(name))
       class_body(node, t, last)
       t
@@ -1672,6 +1759,7 @@ module MrbcRb
     def child_body(locals, stmts, val)
       child = Compiler.new(@filename, frozen_strings: @frozen_strings)
       child.instance_variable_set(:@outer_in_method, inside_method?)
+      child.ann_enter(self, :body)
       @children << child.compile_body(locals, stmts, val)
       index = @children.size - 1
       
@@ -2060,6 +2148,7 @@ module MrbcRb
 
         operand_into(parent, a)
       end
+      ann_const_path(node)
       emit(:GETMCNST, a, sym)
       a
     end
@@ -2104,6 +2193,7 @@ module MrbcRb
         end
       end
       @sp = saved
+      ann_const_path(target)
       emit(:SETMCNST, t, sym)
       last ? t : nil
     end
@@ -2605,12 +2695,17 @@ module MrbcRb
         operand_into(recv, callsp)
         if index
           args = target.arguments&.arguments || []
-          raise Unsupported, 'index assignment target' unless args.size == 1 && !target.block && (simple?(args[0]) || call_node?(args[0]))
+          raise Unsupported, 'index assignment target' unless !args.empty? && args.size <= 12 && !target.block &&
+                                                              args.all? { |a| simple?(a) || call_node?(a) }
 
-          operand_into(unparen(args[0]), callsp + 1)
-          gen_move(callsp + 2, src, false)
-          setidx(callsp)
-          @nregs = [@nregs, callsp + 4].max
+          args.each_with_index { |a, i| operand_into(unparen(a), callsp + 1 + i) }
+          gen_move(callsp + 1 + args.size, src, false)
+          if args.size == 1
+            setidx(callsp)
+          else
+            emit(:SEND, callsp, sym_index(:[]=), args.size + 1)
+          end
+          @nregs = [@nregs, callsp + args.size + 3].max
         else
           gen_move(callsp + 1, src, false)
           emit(:SEND, callsp, sym_index(target.name), 1)
@@ -3059,6 +3154,10 @@ module MrbcRb
     end
 
     def call(node, need: true)
+      ann_call(node) { call_inner(node, need: need) }
+    end
+
+    def call_inner(node, need:)
       leading_dot(node)
       return call_with_block(node, need: need) if node.block.is_a?(Prism::BlockNode)
 
@@ -3307,6 +3406,7 @@ module MrbcRb
     def truncate(start)
       @code.slice!(start..)
       @lines.slice!(start..)
+      ann_truncate(start)
       @insns.pop while @insns.last && @insns.last[2] >= start
       @rewound = true # rewind_pc: the pc is the last instruction's, so no peephole until something is emitted
     end
@@ -3894,6 +3994,7 @@ module MrbcRb
 
     def compile_for(node, parent)
       @parent = parent
+      ann_enter(parent, :for)
       @loops = [BLOCK_LOOP] # LOOP_FOR: break, next and return act as in a block
       set_locals([])
       @sp += 1 # the block parameter
@@ -4417,6 +4518,7 @@ module MrbcRb
       track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
       track(operands[1]) if name == :MOVE
       record_lines(@code.size - start)
+      ann_emit(name, start, operands)
     end
 
     # milestone 13 (wide operands): genop_1/genop_2 prefix EXT1, EXT2 or EXT3 when the first and/or second operand of a B, BB
@@ -5639,7 +5741,7 @@ module MrbcRb
     # The Result of the program just compiled (write_rite ran): the image and the irep tree of the same data.
     public def result
       lv = scopes.any? { |s| !s.lv_names.empty? }
-      MrbcRb::Result.new(@image, tree(lv))
+      MrbcRb::Result.new(@image, tree(lv), ann_result)
     end
 
     # The irep tree (RiteDump::Irep) of this scope and its children, as RiteDump.parse reads it from the image.

@@ -1235,6 +1235,7 @@ module StaticDispatchRegistrations
     # SUPER_REACH (closed only): a `super` in a class's method reaches only the same name on that class's ancestors, so
     # name => the ancestor classes some such `super` may reach. Any other `super` makes the name dynamic as before.
     super_reach = {}
+    super_unknown = Set.new
     ireps.each_value do |irep|
       BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
         up = method_of[irep.label]
@@ -1245,6 +1246,7 @@ module StaticDispatchRegistrations
         if reach
           (super_reach[name] ||= Set.new).merge(reach)
         else
+          super_unknown << name
           dynamic << name
           cite([name], "super in #{owner}##{name}")
         end
@@ -1376,6 +1378,8 @@ module StaticDispatchRegistrations
       registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups, proven: proven, ran: ran,
       core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new,
+      ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
+                                         gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
       frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
   end
 
@@ -1802,6 +1806,66 @@ module StaticDispatchRegistrations
 
   # SUPER_REACH: whether a `super` of `name` may run the entry of `owner`. A module, a singleton or any owner that is
   # no class of the closed world could sit anywhere in the chain, so only a class outside every recorded chain is safe.
+  # CTOR_ROWS (closed only): the `initialize` / `initialize_copy` entries a build keeps as constructor rows
+  # (MRB_MT_CTOR_ROW, include/mruby/class.h): method lookup no longer sees them, and mrb_obj_new, Class#new, dup and clone
+  # still run them (mrb_vm_find_ctor). That is the same program when only a construction looks the name up:
+  #   - no Symbol literal names it (SYMBOL_USES: no send, method, respond_to? or define_method of it), and no bytecode
+  #     sends it (a private self-call `initialize(...)`);
+  #   - no `super` may reach the owner's entry (SUPER_REACH; a super is a lookup by name), and none has an unknown reach;
+  #   - every native that looks the name up by itself (a funcall or method search of it outside the constructions in
+  #     class.c and kernel.c) does it on an instance of a class it defines, which is no superclass of the owner;
+  #   - no owner call of the generated code lists the owner for the name (an owner call looks the name up).
+  # Compiled entries become rows in their generated table, native ROM entries through the exclusion header (2).
+  CTOR_ROW_NAMES = CoreNativeCandidates::CTOR_ROW_NAMES
+  CONSTRUCTION_SOURCES = %r{/src/(?:class|kernel)\.c\z}
+
+  def ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown, gens: [])
+    return Set.new unless symbol_lookups
+
+    owner_called = Hash.new { |h, k| h[k] = Set.new }
+    marks = CTOR_ROW_NAMES.to_h { |name| ["/* CLOSED_WORLD owner-call: #{name} */", name] }
+    gens.each do |gen|
+      gen.each_line do |line|
+        next unless line.include?('owner-call: initialize')
+
+        marks.each { |mark, name| owner_called[name].merge(line.scan(/"([A-Z][\w:.]*)"/).flatten) if line.include?(mark) }
+      end
+    end
+
+    sent = Set.new
+    ireps.each_value do |irep|
+      BytecodeIR.for(irep).each_source { |insn, _| sent << insn.sym if BytecodeIR::Ops::SEND.include?(insn.op) && CTOR_ROW_NAMES.include?(insn.sym) }
+    end
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    callers = Hash.new { |h, k| h[k] = Set.new }
+    native.each do |path|
+      next if path.match?(CONSTRUCTION_SOURCES)
+
+      text = File.binread(path).force_encoding(Encoding::UTF_8).scrub.gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
+      CTOR_ROW_NAMES.each do |name|
+        lookup = /\bmrb_(?:funcall\w*|method_search_vm|vm_find_method|respond_to)\s*\([^;]*(?:"#{name}"|MRB_SYM\(#{name}\))/
+        next unless text.match?(lookup)
+
+        callers[name].merge(text.scan(/\bmrb_define_class(?:_under)?(?:_id)?\s*\([^;]*?"(\w+)"/).flatten)
+      end
+    end
+    candidates.filter_map do |m|
+      owner = m[:owner]
+      name = m[:name]
+      # A native registration outside a ROM table has no row to keep (and is removed at run time when listed).
+      next unless CTOR_ROW_NAMES.include?(name) && owner.is_a?(String) && !owner.end_with?('.singleton')
+      next if m[:native] && !m[:rom]
+      next if symbol_lookups.include?(name) || sent.include?(name) || super_unknown.include?(name)
+      next if super_reach[name]&.include?(owner) || owner_called[name].include?(owner)
+
+      chain = [owner]
+      chain << superclass_of[chain.last] while superclass_of[chain.last].is_a?(String) && !chain.include?(superclass_of[chain.last])
+      next if chain.any? { |klass| callers[name].include?(klass.split('::').last) }
+
+      "#{owner}##{name}"
+    end.to_set
+  end
+
   def super_reached?(super_reach, class_owners, owner, name)
     reach = super_reach[name]
     !reach.nil? && (reach.include?(owner) || !class_owners.include?(owner))
@@ -1836,6 +1900,7 @@ module StaticDispatchRegistrations
     analysis[:registered].select do |m|
       m[:owner].match?(re) &&
         ((analysis[:initializers_proven] || Set.new).include?("#{m[:owner]}##{m[:name]}") || proven[m[:name]] ||
+          (m[:native] && m[:rom] && (analysis[:ctor_rows] || Set.new).include?("#{m[:owner]}##{m[:name]}")) ||
           (!dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments], analysis[:suffix_bases] || analysis[:dynamic]) &&
            !super_reached?(analysis[:super_reach] || {}, analysis[:class_owners] || Set.new, m[:owner], m[:name])))
     end
@@ -1888,6 +1953,7 @@ module StaticDispatchRegistrations
                                    core_left_out: closed[:core_excluded][1].to_set.freeze,
                                    engine_rom: eligible(closed).select { |m| m[:rom] }
                                                                .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
+                                   ctor_rows: closed[:ctor_rows].freeze,
                                    frame_free: closed[:frame_free].freeze, digest: digest)
   end
 

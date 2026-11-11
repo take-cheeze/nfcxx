@@ -42,7 +42,7 @@ class CodeGen
       found = if definition.entry?
                 class_object_param_values(irep, definition.reg, depth, active)
               else
-                class_object_writer_values(irep, BytecodeIR.for(irep).source_at(definition.index), depth, active)
+                class_object_writer_values(irep, BytecodeIR.for(irep).source_at(definition.index), depth, active, definition.index)
               end
       return nil unless found
 
@@ -51,13 +51,18 @@ class CodeGen
     values
   end
 
-  def class_object_writer_values(irep, writer, depth, active)
+  def class_object_writer_values(irep, writer, depth, active, index = nil)
     case writer.op
     when :GETCONST, :GETMCNST
       name = writer.const_name
       return nil unless name && @closed_world.class_valued_constant?(name)
 
-      @closed_world.classes_named(name)
+      # The one class the lexical lookup of the constant reaches (constant_object_owner), not every class that shares
+      # its last segment.
+      owner = index && entry_arg_body_owner[irep.label]&.owner
+      exact = owner && constant_object_owner(irep, index + 1, writer.reg, owner)
+      named = @closed_world.classes_named(name)
+      named.include?(exact) ? [exact] : named
     when :GETUPVAR
       index, level = writer.upvar_ref
       return nil unless index

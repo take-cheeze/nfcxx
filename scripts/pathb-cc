@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Path B compiler: one C++ file to an object file.
 #   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
-#   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; NFCXX_PATHB_EMITTER=mruby selects scripts/pathb-qbe-emit.rb
+#   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; --emitter=mruby selects scripts/pathb-qbe-emit.rb
 #   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
 #   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
-# Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
-#   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
-#   NFCXX_SAFE_POINTERS=1  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
+# Usage: scripts/pathb-cc [options] [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
+# The options below are what the nfcxx driver passes; each has an environment variable as a fallback (for scripts and tests that
+# predate the flag), and the flag wins when both are given.
+#   --keep=DIR       (PATHB_KEEP)  keep file.ir, file.ssa and file.s there
+#   --safe-pointers  (NFCXX_SAFE_POINTERS=1)  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
 #                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
-#   NFCXX_PATHB_ASAN=1  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
+#   --asan           (NFCXX_PATHB_ASAN=1)  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
 #                    each access through a computed address. Link the program with -fsanitize=address. Not with the mruby emitter or -fsafe-pointers.
-#   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
+#   --sanitize=LIST  (NFCXX_IR_SANITIZE)  the checks of -fsanitize=undefined (docs/notes/ubsan.md), made by the front end (pathb-dump)
+#   --ir-opt=LIST    (NFCXX_IR_OPT)  the IR passes (scripts/pathb-ir-opt.rb), below; --ir-opt-max=BYTES (NFCXX_IR_OPT_MAX)
+#   --emitter=ssa|mruby  (NFCXX_PATHB_EMITTER)  the QBE IL emitter
+#   --long-double=trap  (PATHB_LONG_DOUBLE=trap, or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
 #                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
@@ -20,10 +25,26 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 qbe=${QBE:-$root/build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-cc: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 
+# The settings (variables are the defaults, flags override)
 opts=(); src=""; out=""
+safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
+asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
+passes=${NFCXX_IR_OPT:-}; ir_opt_max=${NFCXX_IR_OPT_MAX:-8388608}
+emitter=${NFCXX_PATHB_EMITTER:-ssa}
+ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
+keep=${PATHB_KEEP:-}
+dump_opts=()
 while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2; shift ;;
+    --safe-pointers) safe_on=1 ;;
+    --asan) asan_on=1 ;;
+    --sanitize=*) dump_opts+=("$1") ;;
+    --ir-opt=*) passes=${1#--ir-opt=} ;;
+    --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
+    --emitter=*) emitter=${1#--emitter=} ;;
+    --long-double=trap) ld_trap=1 ;;
+    --keep=*) keep=${1#--keep=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
     -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
@@ -37,20 +58,20 @@ done
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
-safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
-asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || { asan=(--asan); export NFCXX_IR_LOC=1; }   # the IR's (loc ...) lines give the report its source lines
-[ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: NFCXX_PATHB_ASAN and NFCXX_SAFE_POINTERS both replace malloc; use one" >&2; exit 2; }
+safe=(); [ $safe_on = 0 ] || { safe=(--safe); dump_opts+=(--ir-loc); }
+# The IR's (loc ...) lines give the report its source lines, and its (decl)/(scope-end) facts the use after scope (--ir-scopes).
+asan=(); [ $asan_on = 0 ] || { asan=(--asan); dump_opts+=(--ir-loc --ir-scopes); }
+[ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: --asan and --safe-pointers both replace malloc; use one" >&2; exit 2; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
-else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
-# The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless NFCXX_IR_OPT names them (inline,
-# or a comma-separated list). IR over NFCXX_IR_OPT_MAX bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
+else "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
+# The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless --ir-opt names them (inline,
+# or a comma-separated list). IR over --ir-opt-max bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
 # tests' input) is emitted as it is.
-passes=${NFCXX_IR_OPT:-}
 raw=0
 if [ -n "$passes" ] && [ "$passes" != none ] && [ -z "${PATHB_IR:-}" ]; then
   size=$(stat -c %s "$tmp/$n.ir")
-  if [ "$size" -gt "${NFCXX_IR_OPT_MAX:-8388608}" ]; then
-    echo "pathb-cc: $src: IR is $size bytes, over NFCXX_IR_OPT_MAX: not optimized" >&2
+  if [ "$size" -gt "$ir_opt_max" ]; then
+    echo "pathb-cc: $src: IR is $size bytes, over --ir-opt-max: not optimized" >&2
   else
     irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); done
     cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
@@ -61,25 +82,24 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ -z "${PATHB_IR:-}" ]; then
     fi
   fi
 fi
-ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
+ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
 # The emitter. The SSA route (scripts/pathb-ssa-build) is the default, --safe included (its checks carry the (loc ...)
-# locations the reports print); NFCXX_PATHB_EMITTER=mruby selects the mruby pathb-qbe-emit.rb.
-emitter=${NFCXX_PATHB_EMITTER:-ssa}
-case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
+# locations the reports print); --emitter=mruby selects the mruby pathb-qbe-emit.rb.
+case $emitter in ssa|mruby) ;; *) echo "pathb-cc: --emitter (NFCXX_PATHB_EMITTER) must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
 rc=0
-[ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: NFCXX_PATHB_ASAN needs the SSA emitter (NFCXX_PATHB_EMITTER=ssa)" >&2; exit 2; }
+[ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: --asan needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
-    # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; NFCXX_PATHB_EMITTER=mruby
+    # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; --emitter=mruby
     # selects that emitter explicitly).
     echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2
-    [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
+    [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
     exit $rc
   fi
 fi
@@ -87,14 +107,14 @@ if [ "$emitter" = mruby ]; then
   "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ]; then
     echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
-    [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
+    [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
     exit $rc
   fi
   "$qbe" "$tmp/$n.ssa" > "$tmp/$n.s"
   # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
   "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
 fi
-if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.s" "$PATHB_KEEP/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$PATHB_KEEP/"; fi
+if [ -n "$keep" ]; then mkdir -p "$keep"; cp "$tmp/$n.ir" "$tmp/$n.s" "$keep/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$keep/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then
   as -o "$out" "$tmp/$n.s"   # cosmocc does not take assembly input; the QBE output is x86_64 ELF, as gcc-cc does (--cosmo)
 else

@@ -151,6 +151,8 @@ ruby scripts/bc2cpp/immediate_ivars_check.rb
 ruby scripts/bc2cpp/placement_harness_check.rb
 ruby scripts/bc2cpp/ir_entry_seeds_check.rb
 ruby scripts/bc2cpp/self_new_leaf_check.rb
+ruby scripts/bc2cpp/class_object_new_check.rb
+ruby scripts/bc2cpp/ctor_rows_check.rb
 ruby scripts/bc2cpp/sealed_int16_local_check.rb
 ruby scripts/bc2cpp/freeze_fold_check.rb
 ruby scripts/bc2cpp/direct_new_args_check.rb

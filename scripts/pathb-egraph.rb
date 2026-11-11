@@ -28,8 +28,6 @@ module PathbEgraph
   CHECKED_OPS = %w[cdiv crem cshl cshr wshl].freeze
   # Float operations that cannot trap (fadd and the rest; cf2i traps on NaN and on overflow, so it stays opaque).
   FLOAT_OPS = %w[fadd fsub fmul fdiv fneg fconv i2f u2f lt.f le.f].freeze
-  # A float literal as printed in the IR: an integer or a decimal, with an optional exponent.
-  FLOAT_LIT = /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/
   KidRef = Struct.new(:i)                  # an operand of a node: the i-th class of its kids
   Node = Struct.new(:op, :ty, :args, :kids, :cls, :value)
   EFn = Struct.new(:name, :ret, :params, :header, :blocks)   # blocks: id => { phis:, instrs:, term: }
@@ -178,13 +176,16 @@ module PathbEgraph
   def self.verify(fn)
     rpo = reverse_postorder(fn)
     preds, idom = idoms(fn, rpo)
+    # (a while loop: a return inside a block inside a lambda is not taken as the lambda's return by the compiled world)
     dominates = lambda do |a, b|
-      loop do
-        return true if a == b
-        return false if b.zero?
-
-        b = idom[b]
+      found = nil
+      while found.nil?
+        if a == b then found = true
+        elsif b.zero? then found = false
+        else b = idom[b]
+        end
       end
+      found
     end
     params = fn.params[1..].filter_map { |p| p[1] if p.is_a?(Array) && reg?(p[1]) }
     defs = {}
@@ -239,7 +240,7 @@ module PathbEgraph
       next sx(form) unless head(form) == "ssa-function"
 
       out, st = optimize_fn(parse_fn(form), **opts)
-      out = dispatch_structurize(out) if dispatch
+      out = dispatch_structurize(out) || out if dispatch # nil: the function has no dispatch form, keep it
       st.each { |k, v| stats[k] += v }
       render(out)
     end
@@ -502,7 +503,7 @@ module PathbEgraph
          (v = literal_int(rv[2]))
         [t, canon(v, t)]
       elsif rv[0] == "const" && rv.size == 3 && rv[1] == t && float_type?(t) && rv[2].is_a?(String) &&
-            rv[2].match?(FLOAT_LIT)
+            float_literal?(rv[2])
         v = round_float(Float(rv[2]), t)
         [t, v] if v.finite?
       elsif rv[0] == "null" && rv.size == 2 && rv[1] == t && ptr_ty?(t)
@@ -1341,12 +1342,14 @@ module PathbEgraph
       preds, idom = PathbEgraph.idoms(efn, rpo)
       dominates = lambda do |a, b|
         x = b
-        loop do
-          return true if x == a
-          return false if x == 0 || !idom.key?(x)
-
-          x = idom[x]
+        found = nil
+        while found.nil?
+          if x == a then found = true
+          elsif x == 0 || !idom.key?(x) then found = false
+          else x = idom[x]
+          end
         end
+        found
       end
       def_block = {}
       out.each do |id, blk|
@@ -1478,9 +1481,48 @@ module PathbEgraph
       v.nil? ? nil : canon(v, op[1])
     end
 
+    # /\A-?\d+\z/ and /\A-?0x\h+\z/i and the float literal /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/ as character scans: the
+    # script world has no Regexp. digits_from(s, i) is the index after the run of digits starting at i (i when none).
+    def digits_from(s, i)
+      i += 1 while i < s.size && s[i] >= "0" && s[i] <= "9"
+      i
+    end
+
+    def decimal_literal?(s)
+      i = s.start_with?("-") ? 1 : 0
+      j = digits_from(s, i)
+      j > i && j == s.size
+    end
+
+    def hex_literal?(s)
+      i = s.start_with?("-") ? 1 : 0
+      return false unless s.size > i + 2 && s[i] == "0" && (s[i + 1] == "x" || s[i + 1] == "X")
+      s[(i + 2)..].each_char.all? { |c| (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F") }
+    end
+
+    # A float literal as printed in the IR: an integer or a decimal, with an optional exponent.
+    def float_literal?(s)
+      i = s.start_with?("-") ? 1 : 0
+      j = digits_from(s, i)
+      return false if j == i
+      if s[j] == "."
+        k = digits_from(s, j + 1)
+        return false if k == j + 1
+        j = k
+      end
+      if s[j] == "e" || s[j] == "E"
+        j += 1
+        j += 1 if s[j] == "-" || s[j] == "+"
+        k = digits_from(s, j)
+        return false if k == j
+        j = k
+      end
+      j == s.size
+    end
+
     def literal_int(s)
-      return Integer(s, 10) if s.match?(/\A-?\d+\z/)
-      return nil unless s.match?(/\A-?0x\h+\z/i)
+      return Integer(s, 10) if decimal_literal?(s)
+      return nil unless hex_literal?(s)
 
       s.start_with?("-") ? -s.delete("-")[2..].hex : s[2..].hex
     end
@@ -1884,35 +1926,44 @@ def egraph_cli(argv)
     when "--dispatch" then opts[:dispatch] = true
     when "--cost"
       model = argv.shift.to_s.to_sym
-      abort "pathb-egraph: --cost nodes or weighted" unless PathbEgraph::Optimizer::COST_MODELS.include?(model)
+      unless PathbEgraph::Optimizer::COST_MODELS.include?(model)
+        $stderr.write "pathb-egraph: --cost nodes or weighted\n"
+        return 1
+      end
       opts[:cost] = model
     else file = a
     end
   end
-  abort "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] [--cost nodes|weighted] [--dispatch] FILE.ssa" unless file
+  unless file
+    $stderr.write "usage: pathb-egraph.rb [--check] [--stats] [--iters N] [--nodes N] [--cost nodes|weighted] [--dispatch] FILE.ssa\n"
+    return 1
+  end
 
   text = file == "-" ? $stdin.read : File.read(file)
   if check
     fns = read_forms(text).select { |f| head(f) == "ssa-function" }
     fns.each { |f| PathbEgraph.verify(PathbEgraph.parse_fn(f)) }
-    warn "pathb-egraph: #{fns.size} functions verified"
+    $stderr.write "pathb-egraph: #{fns.size} functions verified\n"
     return 0
   end
   out, st = PathbEgraph.optimize_module(text, **opts)
   puts out
   if stats
-    warn "pathb-egraph: #{st[:functions]} functions, lets #{st[:lets_before]} -> #{st[:lets_after]} " \
+    $stderr.write "pathb-egraph: #{st[:functions]} functions, lets #{st[:lets_before]} -> #{st[:lets_after]} " \
          "(pure #{st[:pure_before]} -> #{st[:pure_after]}), e-nodes #{st[:enodes_input]} + #{st[:enodes_added]} added, " \
          "#{st[:iterations]} iterations, saturated #{st[:saturated]} blocks, cut by iterations #{st[:cut_iters]}, " \
          "cut by nodes #{st[:cut_nodes]}, folded #{st[:condbr_folded]} condbr and #{st[:switch_folded]} switch, " \
          "removed #{st[:blocks_removed]} blocks, #{st[:phis_replaced]} phis replaced, #{st[:phis_removed]} dead phis, " \
          "common subexpressions across blocks #{st[:cse]}, " \
          "loads merged #{st[:loads_merged]}, " \
-         "stores forwarded #{st[:stores_forwarded]}, dead stores removed #{st[:stores_removed]}"
+         "stores forwarded #{st[:stores_forwarded]}, dead stores removed #{st[:stores_removed]}\n"
   end
   0
 rescue Fail, Unsupported => e
-  warn "pathb-egraph: #{e.message}"
+  $stderr.write "pathb-egraph: #{e.message}\n"
+  1
+rescue SystemCallError => e
+  $stderr.write "pathb-egraph: #{e.message}\n"
   1
 end
 
@@ -1920,4 +1971,8 @@ def main(argv)
   egraph_cli(argv)
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+# pathb-structure.rb requires this file for its parser, so the command line runs only as the program.
+if $0 == __FILE__
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

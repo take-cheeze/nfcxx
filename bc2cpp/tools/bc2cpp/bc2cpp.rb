@@ -140,6 +140,7 @@ require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_setter_pools'
 require_relative 'codegen_self_new'
+require_relative 'codegen_class_object_new'
 require_relative 'codegen_overloaded_construct'
 require_relative 'codegen_checked_send'
 require_relative 'lexical_consts'
@@ -204,6 +205,7 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 # Last: its compile_method and compile_insn prepends must be outermost.
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
+require_relative 'codegen_chr_append'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
