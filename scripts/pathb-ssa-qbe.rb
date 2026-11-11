@@ -47,6 +47,9 @@ module Qbe
   class << self
     attr_accessor :safe, :asan, :module_has_data, :sp_objects, :sp_funcs
   end
+  # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
+  # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
+  ASAN_RZ = 32
   # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
   SP_NOPAD = -(1 << 63)
   # The library's block functions whose pointer arguments are range-checked at a call (pathb-qbe-emit.rb's SP_MEMFN):
@@ -370,6 +373,7 @@ module Qbe
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
       @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
+      @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
 
     def emit
@@ -470,6 +474,10 @@ module Qbe
         size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
+        if Qbe.asan
+          asan_slot(i, [size, 1].max, align)
+          next
+        end
         # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
         pad = Qbe.safe ? 1 : 0
         @sp_objs << ["%o#{i}", size] if Qbe.safe
@@ -486,7 +494,43 @@ end
       unless @sp_objs.empty?
         @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
       end
+      asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+    end
+
+    # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
+    # the left redzone before it, so an object of up to 16 stays aligned; a larger alignment is rounded up inside a block
+    # with that much spare). Its size is rounded up to 8, the shadow granule, so the right redzone starts on a granule.
+    def asan_slot(i, size, align)
+      rz = Qbe::ASAN_RZ
+      osz = (size + 7) & ~7
+      total = rz + osz + rz
+      if align > 16
+        @lines << "  %o#{i}r =l alloc16 #{total + align}"
+        @lines << "  %o#{i}q =l add %o#{i}r, #{rz + align - 1}"
+        @lines << "  %o#{i} =l and %o#{i}q, #{-align}"
+        @lines << "  %o#{i}l =l sub %o#{i}, #{rz}"
+      else
+        @lines << "  %o#{i}l =l alloc16 #{total}"
+        @lines << "  %o#{i} =l add %o#{i}l, #{rz}"
+      end
+      @asan_objs << [i, "%o#{i}l", osz]
+    end
+
+    # --asan: poison both redzones of every slot (after all the allocations, at the function's entry).
+    def asan_poison
+      @asan_objs.each do |i, left, osz|
+        @lines << "  call $__asan_poison_memory_region(l #{left}, l #{Qbe::ASAN_RZ})"
+        @lines << "  %o#{i}e =l add %o#{i}, #{osz}"
+        @lines << "  call $__asan_poison_memory_region(l %o#{i}e, l #{Qbe::ASAN_RZ})"
+      end
+    end
+
+    # --asan: before a return, the whole of each slot's block is addressable again, for the next frame on this stack.
+    def asan_leave
+      @asan_objs.each do |_i, left, osz|
+        @lines << "  call $__asan_unpoison_memory_region(l #{left}, l #{osz + 2 * Qbe::ASAN_RZ})"
+      end
     end
 
     def note_type(item)
@@ -842,6 +886,7 @@ end
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret"
+        asan_leave
         # --safe: the frame is released before the return (pathb-qbe-emit.rb's SP_LEAVE, with the first object).
         @lines << "  call $__nfcxx_sp_leave(l #{@sp_objs.first[0]})" if Qbe.safe && !@sp_objs.empty?
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
