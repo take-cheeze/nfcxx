@@ -444,12 +444,15 @@ class CodeGen
     # SELF_NEW_LEAF: `self` of a singleton method of a class the closed world proves a leaf is that class
     # object itself, whatever its constant names now, so the miss is an error too.
     leaf_self = self_implicit && @closed_world&.known_subclasses(known) == [known]
-    else_arm = if argv.size < FUNCALL_ARGC_MAX &&
-                  (leaf_self || new_receiver_constant_proven?(irep, idx, name, known, owner_def&.owner))
+    proven_identity = argv.size < FUNCALL_ARGC_MAX &&
+                      (leaf_self || new_receiver_constant_proven?(irep, idx, name, known, owner_def&.owner))
+    else_arm = if proven_identity
                  guard_violation_line(d, recv, name, argv + ['bc2cpp_kwh'], 'NEW_IDENTITY')
                else
                  dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])
                end
+    # INITIALIZER_DIRECT: a violation never dispatches, so the construct reaches #initialize only through `_impl`.
+    note += "  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{init_def.owner}\n" if proven_identity
     "#{note}" \
       "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
       "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
