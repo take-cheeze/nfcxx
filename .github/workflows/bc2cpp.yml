@@ -104,10 +104,10 @@ jobs:
       - name: bc2cpp worlds, shard ${{ matrix.shard }} of 3
         env:
           OPTCARROT_COMPILED_FLAGS: -O2
-          # The Ruby emitter is the default compiler. The per-world mode in worlds.list (verify also runs the fork's mrbc and
-          # fails on any byte difference; snapshot compares with what that mrbc once wrote, bc2cpp/tools/mrbc_rb/snapshot*.txt,
-          # and aborts on an input that is not in the table: dispatch this workflow with mrbc_rb=record, then snapshot.rb
-          # --update --from-record on the artifact) is replaced by a dispatch's mrbc_rb input.
+          # The Ruby emitter is the default compiler. Every world runs verify (it also runs the fork's mrbc and fails on any
+          # byte difference) unless worlds.list names another mode or a dispatch's mrbc_rb input replaces it (snapshot compares
+          # with what that mrbc once wrote, bc2cpp/tools/mrbc_rb/snapshot*.txt, and aborts on an input that is not in the table:
+          # dispatch with mrbc_rb=record, then snapshot.rb --update --from-record on the artifact).
           BC2CPP_MRBC_RB_OVERRIDE: ${{ inputs.mrbc_rb }}
           BC2CPP_MRBC_RECORD_DIR: ${{ runner.temp }}
         run: ruby tests/bc2cpp/run_worlds.rb --shard ${{ matrix.shard }}/3
@@ -203,10 +203,14 @@ jobs:
       # the fixtures compile generated programs (measured on 24 checks: 64 distinct inputs, none in the snapshot table). A dispatch with
       # mrbc_rb=record also writes the inputs of each check to a record file (uploaded below) for snapshot.rb --update --from-record.
       BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || 'verify' }}
-      BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-checks-{1}.txt', runner.temp, matrix.shard) || '' }}
     steps:
       - run: git config --global submodule.fetchJobs 4
       - uses: actions/checkout@v7
+
+      # The runner context is not available in a job-level env, so the record path is exported from a step.
+      - name: Snapshot record path
+        if: inputs.mrbc_rb == 'record'
+        run: echo "BC2CPP_MRBC_SNAPSHOT_RECORD=$RUNNER_TEMP/mrbc-record-checks-${{ matrix.shard }}.txt" >> "$GITHUB_ENV"
 
       - name: World checkout
         run: tests/bc2cpp/world.sh

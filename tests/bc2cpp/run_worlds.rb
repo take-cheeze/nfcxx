@@ -85,7 +85,7 @@ worlds.each do |world|
   end
 
   STALE_DIRS.each { |d| FileUtils.rm_rf(File.join(WORLD_BUILD, d)) }
-  mode = override.empty? ? list[world][1] : override
+  mode = override.empty? ? (list[world][1] || 'verify') : override
   env = {}
   env['BC2CPP_MRBC_RB'] = mode == 'record' ? 'verify' : mode if mode
   env['BC2CPP_MRBC_SNAPSHOT_RECORD'] = File.join(record_dir, "mrbc-record-#{world}.txt") if mode == 'record' && !record_dir.empty?
