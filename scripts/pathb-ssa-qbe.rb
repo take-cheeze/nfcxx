@@ -356,7 +356,7 @@ module Qbe
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
   # is %o<i>, allocated on the stack at entry.
   class Fn
-    attr_reader :lines
+    attr_reader :lines, :dbg_file
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
     def initialize(form, globals = {}, abi = {}, link = {})
@@ -570,6 +570,21 @@ end
     def set_loc(item)
       file = item[1].respond_to?(:raw) ? item[1].raw : item[1].to_s
       @loc = [file.delete_prefix('"').delete_suffix('"').gsub(/\\(.)/, '\1'), Qbe.int_lit(item[2])]
+      asan_dbgloc
+    end
+
+    # --asan: the source line of an access, for libasan's report. QBE's `dbgfile` is a top-level directive that applies to the
+    # functions after it, so a function takes the file of its first (loc ...) (module_il writes the `dbgfile` before it), and
+    # a `dbgloc LINE` follows each (loc ...) of that file (a location from another file, an inlined header, is left out).
+    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given.
+    def asan_dbgloc
+      return unless Qbe.asan
+
+      file, line = @loc
+      return if line <= 0 || file.empty? || file.match?(/["\\\n]/)
+
+      @dbg_file ||= file
+      @lines << "  dbgloc #{line}" if file == @dbg_file
     end
 
     # (asm-block "HEX" (opnd KIND "CODE" SIZE ARG)...): a general x86 template (be/nfcxx_ir.c). The operand block holds eight
@@ -1939,7 +1954,7 @@ end
     ctx = module_context(forms)
     emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
+    (ctx[:data] + helpers + emitted.map { |fn| (fn.dbg_file ? "dbgfile #{fn.dbg_file.inspect}\n\n" : "") + fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
   end
 
   # The part of a module that every function shares: the data of its globals and the references a function may make
@@ -2206,7 +2221,8 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
   def function_text(ctx, fn_form)
     fn = Fn.new(fn_form, ctx[:refs], ctx[:abi], ctx[:link]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
-    (helpers + [fn.lines.join("\n")]).join("\n\n")
+    dbg = fn.dbg_file ? ["dbgfile #{fn.dbg_file.inspect}"] : []   # --asan: the function's source file (see Fn#asan_dbgloc)
+    (helpers + dbg + [fn.lines.join("\n")]).join("\n\n")
   end
 end
 

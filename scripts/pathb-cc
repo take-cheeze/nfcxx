@@ -38,7 +38,7 @@ done
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
 safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
-asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan=(--asan)
+asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || { asan=(--asan); export NFCXX_IR_LOC=1; }   # the IR's (loc ...) lines give the report its source lines
 [ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: NFCXX_PATHB_ASAN and NFCXX_SAFE_POINTERS both replace malloc; use one" >&2; exit 2; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi

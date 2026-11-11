@@ -248,5 +248,7 @@ longjmp or throw is cleared by libasan's `longjmp` interceptor, as for slots.
 Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, stack, global and
 alloca overflows (also of an over-aligned object) and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
 `lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`). Not found yet, listed in `tests/asan/pathb-pending.txt` with the
-milestone that adds them: use after scope (M6) and use after return. A Path B report has no source line: the
-frames carry addresses only.
+milestone that adds them: use after scope (M6) and use after return. The report names the source line (`in main .../heap_overflow.cpp:5`): `pathb-cc` asks the
+front end for the IR's `(loc FILE LINE)` lines (`NFCXX_IR_LOC=1`), the emitter writes QBE `dbgfile` before each function (the file of its
+first `loc`) and `dbgloc LINE` after each `loc` of that file, and the assembler's `.loc` directives give the object a line table, with or
+without `-g`. A location from another file (an inlined header) is left out.
