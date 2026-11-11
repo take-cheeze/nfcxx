@@ -212,19 +212,6 @@ class CodeGen
   # The declarations opening every iteration: block registers reset to nil, as
   # a fresh block activation would be, and R0 (the block's self, never
   # renumbered) aliased to `self`, which GETIV/SETIV codegen names directly.
-  # BACKEDGE_RESTORE, inline loops: the end of each iteration, where `next` lands too. It restores the arena and
-  # re-roots the frame's registers and this block's own (codegen_method.rb backedge_frame_begin), so an inlined loop
-  # of sends stops growing the arena as a bytecode loop does. Empty where the method has no restore (@backedge).
-  def inline_iter_end(irep, block_irep, offset, iter_label)
-    label = "      #{iter_label}:;\n"
-    return label unless @backedge && @backedge[:irep].equal?(irep) && block_irep
-
-    roots = (1...block_irep.nregs).map { |i| "bc2cpp_root(M, r#{i + offset});" }
-    roots << "bc2cpp_root(M, r#{offset});"
-    lines = @backedge[:text].lines.map { |l| "      #{l.strip}\n" }
-    label + lines.join + roots.map { |r| "      #{r}\n" }.join
-  end
-
   def inline_block_frame(block_irep, offset)
     out = String.new
     (1...block_irep.nregs).each { |i| out << "      mrb_value r#{i + offset} = mrb_nil_value();\n" }
@@ -290,7 +277,7 @@ class CodeGen
     # start nil like every other block register.
     out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{addr});\n" if region[:bind_counter]
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "  }\n"
     # Integer#times returns the receiver, which r<dest_reg> still holds.
@@ -337,7 +324,7 @@ class CodeGen
     bound = region[:spread] ? (0...region[:spread]).map { |k| param_reg + k } : [param_reg]
     out << ElementReadRoots.loop_keep(body, bound)
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
@@ -384,7 +371,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{addr});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
@@ -415,7 +402,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
@@ -457,7 +444,7 @@ class CodeGen
     out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{addr}, bc2cpp_heach_i_#{addr});\n"
     out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{addr}, bc2cpp_heach_i_#{addr});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
@@ -489,7 +476,7 @@ class CodeGen
     out << inline_block_frame(block_irep, offset)
     out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{addr}, bc2cpp_ekey_i_#{addr});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
@@ -535,7 +522,7 @@ class CodeGen
     out << "      r#{param_reg} = FIXABLE(bc2cpp_range_i_#{addr}) ? mrb_fixnum_value(bc2cpp_range_i_#{addr}) : " \
            "mrb_int_value(M, bc2cpp_range_i_#{addr});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "      if (bc2cpp_range_i_#{addr} >= bc2cpp_range_z_#{addr}) break;\n"
     out << "      ++bc2cpp_range_i_#{addr};\n"
     out << "    }\n"
@@ -589,7 +576,7 @@ class CodeGen
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = FIXABLE(#{counter}) ? mrb_fixnum_value(#{counter}) : mrb_int_value(M, #{counter});\n"
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "      mrb_ary_push(M, #{acc}, #{result_var});\n"
     out << "      if (#{counter} >= #{last}) break;\n"
     out << "      ++#{counter};\n"
@@ -645,7 +632,7 @@ class CodeGen
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
     out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     case meth
     when 'map'
       out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
@@ -743,7 +730,7 @@ class CodeGen
     end
     out << ElementReadRoots.loop_keep(body, [is_fold ? param2_reg : param_reg])
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     case meth
     when 'any?'
       out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_true_value(); goto #{break_label}; }\n"
@@ -1155,7 +1142,7 @@ class CodeGen
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
     out << ElementReadRoots.loop_keep(body, [param_reg])
     out << body
-    out << inline_iter_end(irep, block_irep, offset, iter_label)
+    out << "      #{iter_label}:;\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"
     out << "    }\n"
     # The key loop re-checks live RARRAY_LEN (the same live-length rule as the
