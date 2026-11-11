@@ -8,7 +8,7 @@ from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks
 
 ## qbe backend (default)
 
-`nfcxx -fsanitize=address` selects the qbe backend (Path B is the default backend on x86-64 Linux, but has no ASan instrumentation) and sets `NFCXX_ASAN=1`. cproc, patched by
+`nfcxx -fsanitize=address` takes Path B, the default backend on x86-64 Linux, which instruments the code itself (since PR #892; section "Path B"). A program Path B does not build is built again with the gcc backend, which instruments it too (`docs/notes/pathb-default.md`, "Fallback"); `--backend=gcc` or `--backend=qbe` selects the others for one command. With `--backend=qbe` the driver gives `qbe-cc` the `-fsanitize=address` option (the variable `NFCXX_ASAN=1` still works for scripts that run `qbe-cc` themselves). cproc, patched by
 the `nfcxx-asan-combined` branch of take-cheeze/cproc (commit a44a644, which `3rd/cproc` is pinned to), then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
@@ -89,7 +89,7 @@ Limits, all false negatives (nothing is reported that is valid, the missing chec
 The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
 under it.
 
-Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
+Source lines: with `-fsanitize=address` (or `NFCXX_ASAN=1`), `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
 expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
 QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
 start token, so a multi-line expression may name a line inside it; `qbe-prep` skips the markers as comments.
@@ -164,11 +164,11 @@ cproc's (above). The driver:
 
 - on the gcc backend, passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link
   (`--c_to_obj_option` for `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final
-  link agree. On qbe `qbe-cc` drops the sanitizer flag, and `NFCXX_ASAN=1` (exported by the driver) makes cproc instrument
-  and `qbe-cc` link libasan;
+  link agree. On qbe the same `-fsanitize=address` reaches `qbe-cc` (the driver no longer exports `NFCXX_ASAN`; the variable is the
+  fallback for a script that runs `qbe-cc` directly): it makes cproc instrument and `qbe-cc` link libasan;
 - links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
   (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
-- on Path B (the default backend, `NFCXX_PATH=b` or `--backend=pathb`) exports `NFCXX_PATHB_ASAN=1`:
+- on Path B (the default backend, `--backend=pathb` or `NFCXX_PATH=b`) passes `--asan` to `scripts/pathb-cc` (the variable `NFCXX_PATHB_ASAN=1` is its fallback):
   the SSA emitter calls libasan's `__asan_load{1,2,4,8,16}`/`__asan_store{...}` (or `__asan_loadN`/`__asan_storeN` with a size)
   before each access through a computed address, and the link adds `-fsanitize=address` and the VLA runtime (section "Path B");
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
@@ -177,7 +177,7 @@ cproc's (above). The driver:
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B: heap, stack, global, alloca, use-after-scope and use-after-return checks (section "Path B"); wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `qbe-cc -fsanitize=address` selects it). Path B: heap, stack, global, alloca, use-after-scope and use-after-return checks (section "Path B"); wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
@@ -219,8 +219,8 @@ instrumented (`poly.md`, "Sanitizers and valgrind").
 
 ## Path B (explicit only; milestones 1 to 4 and 6, and use after return)
 
-`nfcxx --backend=pathb -fsanitize=address` (or `NFCXX_PATH=b`) builds with the SSA emitter (`scripts/pathb-ssa-qbe.rb`) and
-`NFCXX_PATHB_ASAN=1` (`pathb-cc` passes `--asan` to `pathb-ssa-build`). Before each load, store, bit-field access, block copy
+`nfcxx -fsanitize=address` on Path B (`--backend=pathb`, or the default) builds with the SSA emitter (`scripts/pathb-ssa-qbe.rb`) and
+`pathb-cc --asan` (the driver passes it; `NFCXX_PATHB_ASAN=1` is the fallback; `pathb-cc` passes `--asan` to `pathb-ssa-build`). Before each load, store, bit-field access, block copy
 and zero-fill through a computed address it emits `call $__asan_load4(l addr)` (or the store, or the `N` form with a size); a
 static address (a slot, a global, an address-of) is not checked. libasan is the runtime, so the report text is gcc's, and the
 call also keeps QBE from forwarding or merging the access. The link adds `-fsanitize=address` and the VLA runtime, for C-only
@@ -248,7 +248,7 @@ longjmp or throw is cleared by libasan's `longjmp` interceptor, as for slots.
 Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, stack, global and
 alloca overflows (also of an over-aligned object), use after scope, use after return and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
 `lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`). Not found yet, listed in `tests/asan/pathb-pending.txt` with the
-milestone that adds them: a compound literal's scope (M6b). Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `NFCXX_IR_SCOPES=1` (`pathb-cc` sets it
+milestone that adds them: a compound literal's scope (M6b). Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `pathb-dump --ir-scopes` (`NFCXX_IR_SCOPES=1`; `pathb-cc` passes it
 with the flag; `pathb-stage2.md`); for a slot in memory the emitter calls `__asan_unpoison_stack_memory` at the `decl` and
 `__asan_poison_stack_memory` at the `scope-end`, with the slot's object (its size rounded up to 8), so a read after the block, a `break`, `continue`
 or `goto` out of it reports `stack-use-after-scope`, as on qbe. A promoted slot has no memory and its facts are dropped. A compound literal and
@@ -263,6 +263,6 @@ always allocated as well; the base is picked branch-free (qbe's `asanselect`), g
 the real frame, and a frame left by a throw or longjmp is not given back (false negatives only). The description has the name without a line.
 
 The report names the source line (`in main .../heap_overflow.cpp:5`): `pathb-cc` asks the
-front end for the IR's `(loc FILE LINE)` lines (`NFCXX_IR_LOC=1`), the emitter writes QBE `dbgfile` before each function (the file of its
+front end for the IR's `(loc FILE LINE)` lines (`pathb-dump --ir-loc`, `NFCXX_IR_LOC=1`), the emitter writes QBE `dbgfile` before each function (the file of its
 first `loc`) and `dbgloc LINE` after each `loc` of that file, and the assembler's `.loc` directives give the object a line table, with or
 without `-g`. A location from another file (an inlined header) is left out.

@@ -8,14 +8,20 @@ says what the default covers, what falls back, and how to get the old behaviour.
 Path B is chosen when all of these hold:
 
 - no `--backend=` and no `NFCXX_BACKEND` (both are used as given);
-- no `-fsanitize=address` (Path B instruments heap accesses only so far, and only when asked for, `docs/notes/asan.md` "Path B");
 - not `--freestanding` (Path B compiles hosted programs only);
 - no C++ modules (`docs/notes/modules.md`);
 - not `--cosmo` (cosmocc is a gcc-backend link);
 - not `--emit-c`, `--target=`, `-E`, `-M` or `-shared`;
 - the host is `Linux x86_64` (`scripts/pathb-cc` assembles x86-64 QBE output with `cc`).
 
-Anything else gets qbe, as before (a fallback from Path B goes to gcc, below). `-fsanitize=undefined` and `-fsafe-pointers` still select Path B, as they did.
+Anything else gets qbe, as before (a fallback from Path B goes to gcc, below). `-fsanitize=address` is not an exclusion: since PR #892 Path B instruments the code itself
+(`scripts/pathb-cc --asan`, `docs/notes/asan.md` "Path B"), and a program it does not build is rebuilt with the gcc backend, which has ASan too.
+`-fsafe-pointers` still selects Path B, as it did (`-fsanitize=undefined` is meant to, `docs/notes/ubsan.md`).
+
+Path B is asked for by name with `--backend=pathb` (the old spelling is `NFCXX_PATH=b`; both keep the hard errors, below), and the flags that
+were environment variables for the scripts under it are `scripts/pathb-cc` options now (`--asan`, `--safe-pointers`, `--ir-opt=LIST`, `--emitter=`,
+`--sanitize=`, `--keep=`) and `scripts/pathb-dump` options (`--ir-loc`, `--ir-scopes`, `--borrow`, `--sanitize=`, `--cuda-device`). Each variable still works as
+the fallback; the flag wins.
 
 ## CUDA (.cu inputs)
 
@@ -31,21 +37,21 @@ A default-selected Path B build that fails on any `.cpp` file is rebuilt with th
 the file and the status, then runs itself again with `NFCXX_BACKEND=gcc`. gcc compiles EDG's C with C semantics
 (`-fwrapv -fno-strict-aliasing`), so the message says so: a refused program does not get Path B's UB-freedom. Status 3 is a construct Path B refuses (the
 reason is on stderr from `scripts/pathb-cc`); other statuses are Path B faults. If gcc fails too, its error is what is
-shown. An explicit `--backend=pathb` or `NFCXX_PATH=b` keeps the hard errors.
+shown. An explicit `--backend=pathb` (or `NFCXX_PATH=b`) keeps the hard errors.
 
 ## Why these exclusions
 
 | Option | Under Path B | Default now |
 |---|---|---|
-| `-fsanitize=address` | refused | qbe |
 | `--freestanding` | refused | qbe |
 | C++ modules | refused | qbe |
 | `--cosmo` | would run Path B silently | qbe (gcc) |
 | non-x86-64 host | `pathb-cc` assembles x86-64 code | qbe |
 
+`-fsanitize=address` is not in the table: it takes Path B by default, with the gcc fallback.
 ## Going back
 
-`NFCXX_BACKEND=qbe ./nfcxx ...` restores the old default for a whole shell, and `--backend=qbe` for one command.
+`--backend=qbe` for one command, or `NFCXX_BACKEND=qbe` for a whole shell, restores the old default.
 
 ## Known gaps behind the choice
 
