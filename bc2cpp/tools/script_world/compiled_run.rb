@@ -106,8 +106,6 @@ end
 
 def mruby_config(temp, gems, flags)
   compiled_gems = gems.reject { |name, _| name.start_with?('script-') }.values.map { |dir| "gem #{dir.dump}" }
-  # The closed build's gems that the interpreted build needs too: Regexp and ENV (sealed_build.rb).
-  interpreted_gems = %w[mruby-onig-regexp mruby-env-world].map { |g| "gem #{gems.fetch(g).dump}" }
   config = File.join(temp, 'mruby_build_config.rb')
   File.write(config, <<~RUBY)
     base = proc do
@@ -117,10 +115,7 @@ def mruby_config(temp, gems, flags)
       cxx.defines << 'MRB_ARY_LENGTH_MAX=0' << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'
     end
     MRuby::Build.new('host') { toolchain }
-    MRuby::Build.new('scriptinterpreted') do
-      instance_eval(&base)
-      #{interpreted_gems.join("\n      ")}
-    end
+    MRuby::Build.new('scriptinterpreted') { instance_eval(&base) }
     MRuby::Build.new('scriptcompiled') do
       toolchain
       self.mrbcfile = #{File.expand_path(MRBC).dump}
