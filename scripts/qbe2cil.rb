@@ -64,9 +64,12 @@ REL_OPS = ['eq', 'ne', 'lt', 'le', 'gt', 'ge']
 
 # ---- byte helpers ----------------------------------------------------------------------------------------------
 
+# A refusal or a Python-side error: main prints it and returns status 1. Raised, not exited: an exit inside a helper is an
+# uncaught exception in the compiled (script-world) build.
+class Die < StandardError; end
+
 def die(msg)
-  $stderr.puts 'qbe2cil: ' + msg
-  exit 1
+  raise Die, msg
 end
 
 def ws?(b)
@@ -1658,7 +1661,7 @@ class Function
   end
 end
 
-def main(argv)
+def convert(argv)
   die 'usage: qbe2cil.rb IN.ssa TAIL.s TU_NAME OUT.json' if argv.size < 4
   src, tail_path, tu, out_path = argv[0], argv[1], argv[2], argv[3]
   lines = split_lines(read_text(src))
@@ -1697,4 +1700,16 @@ def main(argv)
   File.open(out_path, 'wb') { |f| f.write(out.join) }
 end
 
-main(ARGV)
+def main(argv)
+  convert(argv)
+  0
+rescue Die => e
+  $stderr.puts 'qbe2cil: ' + e.message
+  1
+rescue SystemCallError => e
+  $stderr.puts 'qbe2cil: ' + e.message
+  1
+end
+
+rc = main(ARGV)
+exit(rc) if rc != 0
