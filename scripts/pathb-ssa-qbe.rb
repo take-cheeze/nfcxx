@@ -385,6 +385,8 @@ module Qbe
       @asan_alloca = false   # --asan: the function has an alloca, so it keeps the head of its chain in the slot %aah
       @asan_data = []  # --asan: the data items of the fake frames' descriptions (function_text writes them before the function)
       @asan_fakes = [] # --asan, use after return: [fake frame temporary, its size, its class] of each slot that has one
+      @asan_ssz = {}   # --asan: the slot's name ($"x") => its exact size, for the elision of checks
+      @asan_known = {} # --asan: a register => [slot name, byte offset] when it holds a constant offset into a slot's own object
       @asan_osz = {}   # --asan: the slot's temporary (%oN) => its size rounded up to 8, for the scope facts
       @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
@@ -488,6 +490,7 @@ module Qbe
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
         if Qbe.asan
+          @asan_ssz["$#{s[1].raw}"] = size
           asan_slot(i, [size, 1].max, align, s[1].raw)
           next
         end
@@ -1066,6 +1069,9 @@ end
 
     def let_lines(r, t, rv)
       dst = reg(r)
+      if Qbe.asan && %w[offset bitcast].include?(head(rv)) && (k = asan_slot_addr(rv))
+        @asan_known[r] = k
+      end
       c = Qbe.cls(t)
       case head(rv)
       when "wadd", "wsub", "wmul"
@@ -1272,11 +1278,36 @@ end
     # __asan_load1/2/4/8/16 or __asan_store1/2/4/8/16, and __asan_loadN/__asan_storeN(addr, size) for any other size. The
     # call also keeps QBE from forwarding or merging the access, as a volatile access is kept. A static address (a slot,
     # a global, an address-of) is not checked: nothing poisons those yet (milestones 2 and 3 of the plan).
+    # --asan: [slot name, offset] when the address operand `x` is a constant offset into a slot's own object (the slot, or
+    # (offset X C) and (bitcast T X) of one, or a register holding one), else nil.
+    def asan_slot_addr(x)
+      case x
+      when Ref then x.sigil == "$" && @asan_ssz.key?("$#{x.raw}") ? ["$#{x.raw}", 0] : nil
+      when String then @asan_known[x]
+      when Array
+        case head(x)
+        when "bitcast" then asan_slot_addr(x[2])
+        when "offset"
+          b = asan_slot_addr(x[1])
+          c = (Qbe.int_lit(x[2]) rescue nil)
+          b && c ? [b[0], b[1] + c] : nil
+        end
+      end
+    end
+
+    # --asan: a check is not needed for an access that stays inside a local's own object through its own address: the slot's
+    # redzones and its poison are for pointers that reach it from elsewhere. (A fixed offset in bounds cannot overflow.)
+    def asan_known_inbounds?(x, bytes)
+      k = asan_slot_addr(x)
+      k && k[1] >= 0 && k[1] + bytes <= @asan_ssz[k[0]]
+    end
+
     def asan_check(x, addr, bytes, kind)
       return unless Qbe.asan
       return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
       n = bytes.to_i
       return if n <= 0
+      return if asan_known_inbounds?(x, n)
       if [1, 2, 4, 8, 16].include?(n)
         @lines << "  call $__asan_#{kind}#{n}(l #{addr})"
       else
