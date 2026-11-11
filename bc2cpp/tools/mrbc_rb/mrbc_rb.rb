@@ -90,6 +90,9 @@ module MrbcRb
              Prism::FloatNode, Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode, Prism::ConstantPathNode, Prism::ReturnNode,
              Prism::BreakNode, Prism::NextNode, Prism::MultiWriteNode, Prism::SuperNode, Prism::ForwardingSuperNode].freeze
 
+  # The empty heredocs the fork's parser gives the value nil (see Compiler#heredoc_parts), by node identity.
+  NIL_HEREDOCS = ObjectSpace::WeakMap.new
+
   # Conditions the fork folds at compile time (true_always and false_always in codegen.c): no test is emitted for them.
   TRUE_ALWAYS = [Prism::IntegerNode, Prism::FloatNode, Prism::TrueNode, Prism::SourceLineNode].freeze
   FALSE_ALWAYS = [Prism::NilNode, Prism::FalseNode].freeze
@@ -465,7 +468,7 @@ module MrbcRb
       end
       value_reg = if stmts.empty?
                     t = temp
-                    raise Unsupported, 'empty body after a continuation' if node.location.slice.gsub(/^[ \t]*#[^\n]*/, '').match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+                    empty_body_continuation!(node, node.rparen_loc || params&.location || node.name_loc)
                     check_empty_gap(node.rparen_loc || params&.location || node.name_loc, node.body ? node.body.location : node.end_keyword_loc)
                     @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
@@ -500,7 +503,7 @@ module MrbcRb
       end
       value_reg = if stmts.empty?
                     t = temp
-                    raise Unsupported, 'empty body after a continuation' if node.location.slice.gsub(/^[ \t]*#[^\n]*/, '').match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+                    empty_body_continuation!(node, node.parameters ? node.parameters.location : node.opening_loc)
                     check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, node.body ? node.body.location : node.closing_loc)
                     @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
                     emit(:LOADNIL, t)
@@ -1312,6 +1315,17 @@ module MrbcRb
 
       args = node.arguments&.arguments
       # milestone 13: with the loop's value unused, several values are a NOVAL array (nothing) and `break *a` the plain value.
+      if args && args.size > 1 && lp.reg
+        # several values are an array literal built at the loop's value register
+        raise Unsupported, 'break value outside the loop statement level' unless @sp == lp.reg
+        raise Unsupported, 'break with several values' unless args.size <= 14 && args.all? { |a| operand?(a) && !a.is_a?(Prism::SplatNode) }
+
+        args.each_with_index { |a, i| operand_into(unparen(a), lp.reg + i) }
+        @nregs = [@nregs, lp.reg + args.size].max
+        emit(:ARRAY, lp.reg, args.size)
+        lp.breaks << emit_jump(:JMPUW)
+        return last ? temp : nil
+      end
       raise Unsupported, 'break with several values' if args && args.size != 1 && lp.reg
       raise Unsupported, 'break with a splat' if args && args.size == 1 && args[0].is_a?(Prism::SplatNode) && (lp.reg || args[0].expression.nil?)
 
@@ -2175,29 +2189,46 @@ module MrbcRb
 
       leading_dot(node) unless index
       idxs = []
+      reads = nil # the index arguments of the read when they differ from those of the write (a splat among them)
+      splat_read = false
       if index
-        idxs = (node.arguments&.arguments || []).map { |a| unparen(a) }
+        raw = (node.arguments&.arguments || []).map { |a| unparen(a) }
         raise Unsupported, 'index assignment with a block' if node.block
-        raise Unsupported, 'index assignment arguments' unless idxs.size <= 12 && idxs.all? { |a| operand?(a) }
+        # The fork assigns through the splat's value as a plain argument (`o[*a] += 1` reads o[*a] and writes o[a]).
+        if raw.any?(Prism::SplatNode)
+          raise Unsupported, 'index assignment arguments' if raw.any? { |a| !(a.is_a?(Prism::SplatNode) ? a.expression && operand?(a.expression) : operand?(a)) }
+
+          flat = literal_splat_arguments(raw)
+          flat ? reads = flat : splat_read = true
+          idxs = raw.map { |a| a.is_a?(Prism::SplatNode) ? unparen(a.expression) : a }
+        else
+          idxs = raw
+        end
+        raise Unsupported, 'index assignment arguments' unless idxs.size <= 12 && idxs.all? { |a| operand?(a) } && (reads || idxs).size <= 12
       end
       idx = idxs.first if idxs.size == 1
+      ridxs = reads || idxs
       value = unparen(node.value)
       raise Unsupported, 'assignment value' unless assign_value?(value)
 
       t = temp
       operand_into(recv, t) unless recv.is_a?(Prism::SelfNode) && !index # `self.x op= v` reads x with SSEND0 (no LOADSELF)
-      if index
-        idxs.each_with_index { |a, i| operand_into(a, t + 1 + i) }
-        if idxs.size == 1 then index_read(t, recv, idx)
-        elsif idxs.empty? then emit(:SEND0, t, sym_index(:[]))
-        else emit(:SEND, t, sym_index(:[]), idxs.size)
+      if index && splat_read
+        argc, = gen_args(nil, t, raw)
+        emit(:SEND, t, sym_index(:[]), argc)
+        @sp = t
+      elsif index
+        ridxs.each_with_index { |a, i| operand_into(a, t + 1 + i) }
+        if ridxs.size == 1 then index_read(t, recv, ridxs[0])
+        elsif ridxs.empty? then emit(:SEND0, t, sym_index(:[]))
+        else emit(:SEND, t, sym_index(:[]), ridxs.size)
         end
       else
         skip = safe_jump(t, true) if node.safe_navigation?
         emit(recv.is_a?(Prism::SelfNode) ? :SSEND0 : :SEND0, t, sym_index(node.read_name))
         dispatch(skip)
       end
-      @nregs = [@nregs, t + 2 + (idxs.size > 1 ? idxs.size : 0)].max
+      @nregs = [@nregs, t + 2 + (ridxs.size > 1 ? ridxs.size : 0)].max
       to_end = nil
       case node
       when Prism::IndexOrWriteNode, Prism::CallOrWriteNode, Prism::IndexAndWriteNode, Prism::CallAndWriteNode
@@ -2547,7 +2578,13 @@ module MrbcRb
 
     # The send instruction: with a receiver SEND (SEND0 when there is nothing to pass), without one SSEND (SSEND0).
     def emit_send(a, recv, name, argc, blk)
-      return emit(name == :[]= ? :SETIDX : BINARY_OPS.fetch(name), a) if recv && operator_opcode?(name, argc)
+      if recv && operator_opcode?(name, argc)
+        return emit(:SETIDX, a) if name == :[]=
+        # keywords after the one positional argument: the last instruction is the last keyword's value, which gen_addsub folds
+        return if !blk && argc != (argc & 0xf) && binary_folded(name, a)
+
+        return emit(BINARY_OPS.fetch(name), a)
+      end
 
       sym = sym_index(name)
       if blk
@@ -2561,13 +2598,13 @@ module MrbcRb
 
     # codegen_call picks the operator opcode from the method name before it looks at the arguments or the block: `+ - * / < <= >
     # >= ==` with one positional argument and `[]=` with two are ADD ... EQ and SETIDX even when a block or a block argument
-    # follows (the block register is loaded and then ignored). Keywords next to them are not covered.
+    # follows (the block register is loaded and then ignored). With keywords the last keyword's value is the last instruction, so
+    # `a.+(1, k: 2)` is ADDI (emit_send).
     def operator_opcode?(name, argc)
       return false unless (BINARY_OPS.key?(name) && name != :[]) || name == :[]=
 
       n = argc & 0xf
       return false unless n == (name == :[]= ? 2 : 1)
-      raise Unsupported, 'operator method with keyword arguments and a block' if argc != n
 
       true
     end
@@ -2593,7 +2630,7 @@ module MrbcRb
 
           if v.is_a?(Prism::ArrayNode) && v.elements.none?(Prism::SplatNode) && v.opening_loc&.slice == '['
             # Literal arrays are inlined (empty ones vanish).
-            raise Unsupported, 'splat of an array of non-leaf values' unless v.elements.all? { |e| simple?(e) }
+            raise Unsupported, 'splat of an array of non-leaf values' unless v.elements.all? { |e| operand?(e) }
 
             v.elements.each { |e| operand_into(unparen(e), sp); sp += 1; n += 1 }
             next
@@ -2735,6 +2772,8 @@ module MrbcRb
     def call(node, need: true)
       leading_dot(node)
       return call_with_block(node, need: need) if node.block.is_a?(Prism::BlockNode)
+
+      node = flatten_literal_splats(node)
       return call_with_args(node, need: need) if complex_arguments?(node)
 
       enter(node)
@@ -2876,6 +2915,42 @@ module MrbcRb
       @sp = a if a
     end
 
+    # gen_values inlines the elements of a splatted literal array (`*[a, b]` is `a, b`, `*[]` vanishes) and the call is then an
+    # ordinary one, which codegen_call folds as such (`o[*[:k]]` is GETIDX, `a.-(*[1])` SUBI). The arguments of +node+ with
+    # those splats replaced, or its arguments flattened by #literal_splat_arguments, or +node+ itself.
+    def flatten_literal_splats(node)
+      return node if node.name == :[]= || node.block || node.arguments.nil?
+
+      flat = literal_splat_arguments(node.arguments.arguments)
+      return node unless flat
+
+      node.copy(arguments: flat.empty? ? nil : node.arguments.copy(arguments: flat))
+    end
+
+    # The arguments with each splatted literal array of leaves replaced by its elements, or nil when some argument is a splat
+    # of anything else (or a keyword, block or forwarding argument), when no splat is a literal array or when there are more
+    # than 14 values.
+    def literal_splat_arguments(args)
+      return nil if args.any? { |a| a.is_a?(Prism::KeywordHashNode) || a.is_a?(Prism::BlockArgumentNode) || a.is_a?(Prism::ForwardingArgumentsNode) }
+
+      found = false
+      flat = []
+      args.each do |a|
+        a = unparen(a)
+        if a.is_a?(Prism::SplatNode)
+          v = a.expression && unparen(a.expression)
+          return nil unless v.is_a?(Prism::ArrayNode) && v.opening_loc&.slice == '[' && v.elements.none?(Prism::SplatNode) &&
+                            v.elements.all? { |e| operand?(e) }
+
+          found = true
+          flat.concat(v.elements)
+        else
+          flat << a
+        end
+      end
+      found && flat.size <= 14 ? flat : nil
+    end
+
     def index_splat_assign?(node)
       node.name == :[]= && node.receiver && node.call_operator_loc.nil? && node.block.nil? &&
         node.arguments&.arguments&.any?(Prism::SplatNode) && node.arguments.arguments.none?(Prism::KeywordHashNode)
@@ -2980,7 +3055,8 @@ module MrbcRb
         node.depth.zero? ? emit(:MOVE, dst, local_register(node.name)) : getupvar(dst, node)
       when Prism::StringNode
         # A heredoc of several lines is a literal per line, concatenated (dstr_into).
-        if node.opening&.start_with?('<<') then dstr_into(node, dst)
+        if NIL_HEREDOCS[node] then emit(:LOADNIL, dst)
+        elsif node.opening&.start_with?('<<') then dstr_into(node, dst)
         else
           raise Unsupported, 'multibyte character literal' if node.opening == '?' && !node.content.ascii_only? # the fork's lexer reads one byte
 
@@ -3133,8 +3209,6 @@ module MrbcRb
           when Prism::EmbeddedStatementsNode
             body = part.statements&.body || []
             raise Unsupported, 'interpolation with several statements' if body.size > 1
-            raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
-
             parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
           else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
           end
@@ -3185,6 +3259,7 @@ module MrbcRb
         acc = []
       end
       prev = nil
+      nested_line = nil # the line of the last interpolation that holds a heredoc
       pieces.each do |part|
         # A gap before a piece is a nested heredoc's body, or a continuation after an interpolation (indentation not covered).
         if squiggly && prev && heredoc_gap(prev, part).include?("\\\n") && !(prev.is_a?(Prism::EmbeddedStatementsNode) && nested_heredoc_ends_at([prev]))
@@ -3198,10 +3273,15 @@ module MrbcRb
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
           raise Unsupported, 'interpolation with several statements' if body.size > 1
-          raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
-
           flush.call(true)
-          parts << [:expr, body[0] && unparen(body[0])]
+          e = body[0] && unparen(body[0])
+          # An empty heredoc in a heredoc body has the value nil in the fork's parser, but only the first heredoc of a line: the
+          # ones after it on the same line are empty strings (verified with mrbc -v).
+          nested_heredocs(e).each do |h|
+            NIL_HEREDOCS[h] = true if empty_heredoc?(h) && nested_line != h.location.start_line
+            nested_line = h.location.start_line
+          end
+          parts << [:expr, e]
         else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
         end
       end
@@ -3261,6 +3341,15 @@ module MrbcRb
       loc = ->(x) { x.respond_to?(:content_loc) && x.content_loc ? x.content_loc : (x.respond_to?(:location) ? x.location : x) }
       from = loc.call(first).end_offset
       loc.call(first).send(:source).source.b.byteslice(from, [loc.call(second).start_offset - from, 0].max)
+    end
+
+    # The heredoc literals in +node+ (an interpolated expression), in source order.
+    def nested_heredocs(node)
+      return [] unless node
+
+      found = heredoc_string?(node) ? [node] : []
+      node.compact_child_nodes.each { |c| found.concat(nested_heredocs(c)) }
+      found.sort_by { |h| h.location.start_offset }
     end
 
     # The end offset of the last nested heredoc terminator inside the interpolations of +pieces+, or nil.
@@ -3384,7 +3473,8 @@ module MrbcRb
       parts = string_parts(node)
       @line = line_of(node)
       if node.is_a?(Prism::InterpolatedSymbolNode)
-        parts.pop if parts.size > 1 && parts.last[0] == :lit && parts.last[1].empty? # no literal after a last expression
+        # no literal after a last expression, except in a `"a#{x}": v` label (the parser builds that one as a string)
+        parts.pop if parts.size > 1 && parts.last[0] == :lit && parts.last[1].empty? && node.closing_loc&.slice != '":'
         parts.size == 1 ? emit(:STRING, base, pool_index([:str, parts[0][1]])) : dstr_at(parts, base)
         return emit(:INTERN, base)
       end
@@ -3412,7 +3502,7 @@ module MrbcRb
     # local variable as the loop variable, a one-line header and a body without redo/retry are covered.
     def for_statement(node, last:)
       var = node.index
-      raise Unsupported, 'for with a loop variable other than a local' unless var.is_a?(Prism::LocalVariableTargetNode)
+      raise Unsupported, 'for with a loop variable other than a local' unless for_variable_ok?(var)
 
       coll = unparen(node.collection)
       raise Unsupported, 'for over a non-operand' unless operand?(coll)
@@ -3431,6 +3521,16 @@ module MrbcRb
       last ? t : nil
     end
 
+    # The loop variables covered: a local, an instance or a global variable, and a list of locals (the fork destructures it like
+    # a block's `|a, b|`: AREF and SETUPVAR per variable; a rest or post-required target is not covered).
+    def for_variable_ok?(var)
+      case var
+      when Prism::LocalVariableTargetNode, Prism::InstanceVariableTargetNode, Prism::GlobalVariableTargetNode then true
+      when Prism::MultiTargetNode then var.rest.nil? && var.rights.empty? && var.lefts.all?(Prism::LocalVariableTargetNode)
+      else false
+      end
+    end
+
     def compile_for(node, parent)
       @parent = parent
       @loops = [BLOCK_LOOP] # LOOP_FOR: break, next and return act as in a block
@@ -3441,9 +3541,22 @@ module MrbcRb
       emit(:ENTER, 0x40000)
       var = node.index
       FOR_DEPTH.call(node.statements, 0) if node.statements
-      FOR_SHIFT.call(var)
-      idx, lv = upvar_operands(var.name, var.depth)
-      emit(:SETUPVAR, 1, idx, lv)
+      case var
+      when Prism::InstanceVariableTargetNode then emit(:SETIV, 1, sym_index(var.name))
+      when Prism::GlobalVariableTargetNode then emit(:SETGV, 1, sym_index(var.name))
+      when Prism::MultiTargetNode
+        var.lefts.each_with_index do |t, i|
+          FOR_SHIFT.call(t)
+          @nregs = [@nregs, @sp + 1].max
+          emit(:AREF, @sp, 1, i)
+          idx, lv = upvar_operands(t.name, t.depth)
+          emit(:SETUPVAR, @sp, idx, lv)
+        end
+      else
+        FOR_SHIFT.call(var)
+        idx, lv = upvar_operands(var.name, var.depth)
+        emit(:SETUPVAR, 1, idx, lv)
+      end
       emit(:NOP)
       stmts = body_statements(node.statements)
       if stmts.empty?
@@ -3850,8 +3963,6 @@ module MrbcRb
           when Prism::EmbeddedStatementsNode
             body = part.statements&.body || []
             raise Unsupported, 'interpolation with several statements' if body.size > 1
-            raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
-
             parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
           else raise Unsupported, "symbol list part #{part.class.name.split('::').last}"
           end
@@ -4050,22 +4161,18 @@ module MrbcRb
       node.compact_child_nodes.any? { |c| reads_local?(c, names) }
     end
 
-    # A required parameter, or a destructuring one whose targets are names or nested destructuring (with no rest or
-    # post-required targets, which the fork does not generate code for at the top level and generates as APOST below it).
-    def plain_or_marg?(node, top: true)
+    # A required parameter, or a destructuring one whose targets are names or nested destructuring, with a rest (named or
+    # anonymous) and post-required targets (the fork generates no code for those at the top level and APOST below it).
+    def plain_or_marg?(node)
       case node
       when Prism::RequiredParameterNode then true
       when Prism::MultiTargetNode
-        node.rest.is_a?(Prism::SplatNode) || node.rest.nil? ? marg_targets_ok?(node, top) : false
+        return false unless node.rest.nil? || (node.rest.is_a?(Prism::SplatNode) &&
+                                               (node.rest.expression.nil? || node.rest.expression.is_a?(Prism::RequiredParameterNode)))
+
+        (node.lefts + node.rights).all? { |t| plain_or_marg?(t) }
       else false
       end
-    end
-
-    def marg_targets_ok?(node, top)
-      return false unless top || (node.rest.nil? && node.rights.empty?)
-      return false unless node.rest.nil? || node.rest.expression.nil? || node.rest.expression.is_a?(Prism::RequiredParameterNode)
-
-      (node.lefts + node.rights).all? { |t| plain_or_marg?(t, top: false) }
     end
 
     # The names the parser gives a destructuring parameter's variables (level by level: the level's targets in order, an
@@ -4086,8 +4193,11 @@ module MrbcRb
 
     # The destructuring of a required parameter held in register +src+ (lambda_body): each leading target is read with AREF
     # into the first temporary and assigned (gen_assignment, which folds the AREF into the variable's register); a nested
-    # destructuring is read the same way and destructured from that temporary. A rest or post-required target gets no code.
-    def destructure_parameter(marg, src)
+    # destructuring is read the same way and destructured from that temporary (codegen_masgn). The top level generates nothing
+    # for a rest or post-required target; a nested one copies the array to the next register and splits it with APOST (leading
+    # count, post count): a named rest and the post targets are then assigned from there (an anonymous rest is not assigned,
+    # and without a named rest or post targets there is no APOST).
+    def destructure_parameter(marg, src, top: true)
       marg.lefts.each_with_index do |t, i|
         sp = @sp
         @nregs = [@nregs, sp + 1].max
@@ -4096,12 +4206,30 @@ module MrbcRb
           saved = @sp
           @sp = sp + 1
           begin
-            destructure_parameter(t, sp)
+            destructure_parameter(t, sp, top: false)
           ensure
             @sp = saved
           end
         else
           gen_move(local_register(t.name), sp, false)
+        end
+      end
+      return if top
+
+      named = marg.rest.is_a?(Prism::SplatNode) && marg.rest.expression
+      return unless named || !marg.rights.empty?
+
+      dst = @sp
+      post = marg.rights.size
+      gen_move(dst, src, false)
+      @nregs = [@nregs, dst + post + 1].max
+      emit(:APOST, dst, marg.lefts.size, post)
+      gen_move(local_register(marg.rest.expression.name), dst, false) if named
+      marg.rights.each_with_index do |t, i|
+        if t.is_a?(Prism::MultiTargetNode)
+          destructure_parameter(t, dst + 1 + i, top: false)
+        else
+          gen_move(local_register(t.name), dst + 1 + i, false)
         end
       end
     end
@@ -4672,6 +4800,16 @@ module MrbcRb
     # An empty body is a node the parser stamps with the line of the next keyword, unless a `;` came first: then it is the line
     # of the first `;` (verified: `foo do\n  ;\nend` is line 2). A `;` in a gap that spans lines is not covered (it may
     # also just end the keyword's own line).
+    # A multi-line def or block with an empty body is covered when it has no backslash-newline and no `;` up to the end of its
+    # header (a `;` after the header is check_empty_gap's: the line of the implicit nil is the `end`'s).
+    def empty_body_continuation!(node, header)
+      return if node.location.start_line == node.location.end_line
+
+      text = node.location.slice.gsub(/^[ \t]*#[^\n]*/, '')
+      head = node.location.copy(start_offset: node.location.start_offset, length: header.end_offset - node.location.start_offset).slice
+      raise Unsupported, 'empty body after a continuation' if text.match?(/\\\n/) || head.gsub(/#[^\n]*/, '').include?(';')
+    end
+
     def check_empty_gap(from_loc, to_loc)
       return if from_loc.end_line == to_loc.start_line
 
