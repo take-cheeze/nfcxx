@@ -3,6 +3,7 @@
 require_relative 'native_ivar_scopes'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_regions'
 

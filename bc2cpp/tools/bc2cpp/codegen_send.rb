@@ -4,6 +4,7 @@ require 'strscan'
 require_relative 'branch_hints'
 require_relative 'reg_name'
 require_relative 'tagged_fixnum'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'class_world_gate'
 

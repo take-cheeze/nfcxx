@@ -271,7 +271,7 @@ BC2CPP_MAIN = lambda do
   # Mruby's own Ruby defining a native-named method (File#inspect) is hidden from the registry, so it gets no hint.
   conversion_sigs = ConversionReturns.write_sigs(srcs.select { |path| path.end_with?('.rb') && !CoreDefs.core_source?(path) })
   ireps, root_label = compile_ireps(srcs, symbol, out_dir)
-  order = dfs_order(ireps, root_label)
+  dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)

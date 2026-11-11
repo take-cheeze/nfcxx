@@ -72,7 +72,7 @@ Dir.mktmpdir('trace-merge-check') do |dir|
   File.write(cand, CANDIDATES)
   decl = File.join(dir, 'declarations.rbs')
   File.write(decl, DECLARED)
-  out, err, status = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
+  _out, err, status = Open3.capture3(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/trace_merge.rb'), cand, decl,
                                     '--out', File.join(ROOT, 'sig/trace_proposals.rbs'))
   check.call('an output under sig/ is refused', !status.success? && err.include?('must not be under sig/'))
   check.call('the refused run wrote nothing under sig/', !File.exist?(File.join(ROOT, 'sig/trace_proposals.rbs')))

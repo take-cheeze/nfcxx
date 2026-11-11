@@ -2,7 +2,6 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
-require_relative 'bytecode_ir'
 
 # SYMBOL_FLOW: finite symbol sets for constant dispatch tables, for yield_reach.rb.
 #

@@ -117,7 +117,7 @@ Dir.mktmpdir('ir-trace-evidence-check') do |dir|
   File.write(facts_path, JSON.generate(facts))
   File.write(cand_path, CANDIDATES)
   script = File.join(BC2CPP_TREE_ROOT, 'scripts/bc2cpp/type_check.rb')
-  out, _err, status = Open3.capture3(RbConfig.ruby, script, '--facts', facts_path, '--no-sends', '--trace', cand_path, '--all', '--format', 'json', '--out', File.join(dir, 'report.json'))
+  _out, _err, status = Open3.capture3(RbConfig.ruby, script, '--facts', facts_path, '--no-sends', '--trace', cand_path, '--all', '--format', 'json', '--out', File.join(dir, 'report.json'))
   report = JSON.parse(File.read(File.join(dir, 'report.json')))
   codes = report['diagnostics'].map { |d| d['code'] }
   check.call('the CLI emits TC1009 for the trace-evidenced rows', codes.count('TC1009') == 4)

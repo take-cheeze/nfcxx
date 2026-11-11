@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 require_relative 'numeric_flow'
 require_relative 'call_context_arguments'

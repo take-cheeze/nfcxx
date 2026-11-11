@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 # Debug report for element classes of mutable containers: with BC2CPP_ELEMENT_REPORT=<path>,

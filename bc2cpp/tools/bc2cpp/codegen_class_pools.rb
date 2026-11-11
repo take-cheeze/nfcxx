@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'numeric_flow'
 require_relative 'core_hierarchy_sigs'
@@ -245,7 +246,7 @@ class CodeGen
     cand = {}
     return cand unless @foreign_method_names && @outside_tokens
 
-    sites, poisoned = entry_arg_call_index
+    _sites, poisoned = entry_arg_call_index
     enclosing = CallSiteIndex.enclosing_def_names(@ireps)
     super_names = Set.new
     @ireps.each_value do |irep|

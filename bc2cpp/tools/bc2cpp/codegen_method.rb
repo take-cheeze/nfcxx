@@ -454,7 +454,6 @@ class CodeGen
     # The range's own loops are inlined in the try body.
     guarded_inline = { at: {}, after: {}, pending: [] }
     run_inline_loop_passes(irep, d, mand, suppressed.dup, suppressed, glue_at, guarded: (@resumable ? nil : guarded_inline))
-    proven_inlined = suppressed.dup
 
     # BLOCK_CFUNC_FALLBACK_SUPPORT: the catch-all, run last, for BLOCK/SENDB pairs
     # no named inliner claimed (checked via `suppressed`). A qualifying region

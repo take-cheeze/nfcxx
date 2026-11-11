@@ -161,7 +161,7 @@ unless ENV['CC_GENERATED_ONLY'] == '1'
   if build
     Dir.mktmpdir('record-object-runtime') do |dir|
       owners = %w[Scene Leaky Item ObjectScene ObjectLeak ObjectUnknown]
-      code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: owners)
+      _code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, only_owners: owners)
       driver = <<~'RUBY'
         show = lambda do |name, &block|
           begin

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'irep_arity'
 

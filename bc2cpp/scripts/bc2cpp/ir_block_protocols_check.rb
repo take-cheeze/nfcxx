@@ -32,7 +32,6 @@ unless ENV['MRBC']
   exit
 end
 
-root = BC2CPP_WORLD_ROOT
 Dir.mktmpdir('ir-block-protocols') do |dir|
   File.write(File.join(dir, 'fixture.rb'), <<~RUBY)
     class BlockProtocols

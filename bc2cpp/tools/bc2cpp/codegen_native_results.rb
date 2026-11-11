@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'native_result_facts'
 require_relative 'native_class_results'

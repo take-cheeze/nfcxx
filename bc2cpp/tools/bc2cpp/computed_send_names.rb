@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'integer_constants'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 require_relative 'bytecode_ir_containers'
 require_relative 'send_names'

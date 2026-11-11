@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_resumable'
 
 # CodeGen: resumable compiled methods. A method that reaches Fiber.yield cannot

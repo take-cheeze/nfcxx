@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes, per guarded numeric operator whose operands NumericFlow could not prove,

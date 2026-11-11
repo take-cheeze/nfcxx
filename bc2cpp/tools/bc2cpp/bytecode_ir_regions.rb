@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # Instruction-level queries the block-region recognizers (codegen_loop_regions,
 # codegen_loop_inline, codegen_block_fallback) and the Irep scans (irep.rb,

@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
