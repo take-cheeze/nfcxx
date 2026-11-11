@@ -1912,22 +1912,34 @@ end
 
     # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a sequentially
     # consistent call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
-    ATOMIC_FETCH = /\A__atomic_fetch_(add|sub)_([48])\z/
+    # (Plain string tests: the bundled script runs under mruby, which has no regular expressions.)
+    ATOMIC_FETCH_PREFIX = "__atomic_fetch_"
+
+    # [op, size] of a __atomic_fetch_{add,sub}_{4,8} call, or nil.
+    def atomic_fetch_kind(c)
+      f = c[2]
+      return nil if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+      name = f.raw.delete('"')
+      return nil unless name.start_with?(ATOMIC_FETCH_PREFIX)
+      rest = name[ATOMIC_FETCH_PREFIX.length..]
+      op = rest[0, 3]
+      size = rest[4..]
+      return nil unless rest[3] == "_" && (op == "add" || op == "sub") && (size == "4" || size == "8")
+      [op, size]
+    end
 
     def atomic_fetch?(c)
-      f = c[2]
-      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
-      return false unless f.raw.delete('"') =~ ATOMIC_FETCH && c.length == 6
+      return false unless atomic_fetch_kind(c)
       order = c[5]
       head(order) == "const" && order[2].to_s == "5"
     end
 
     def atomic_fetch_lines(dst, cls, c)
-      m = c[2].raw.delete('"').match(ATOMIC_FETCH)
-      w = m[2] == "4" ? "w" : "l"
+      op, size = atomic_fetch_kind(c)
+      w = size == "4" ? "w" : "l"
       addr = op(c[3])
       val = op(c[4])
-      if m[1] == "sub"
+      if op == "sub"
         neg = fresh
         @lines << "  #{neg} =#{w} sub 0, #{val}"
         val = neg
