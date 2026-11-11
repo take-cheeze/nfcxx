@@ -326,15 +326,15 @@ module MrbcRb
     end
 
     # `-B name -S`: the irep tree of +image+ as C structs (with the debug tables when +image+ has the DBG section: -g).
-    def cstruct(image, name, static: false, sym_base: nil)
+    def cstruct(image, name, static: false, sym_base: nil, file_syms: nil)
       root = parse(image)
       base = sym_base || Integer(ENV.fetch('MRBC_RB_FILENAME_SYM_BASE', FILENAME_SYM_BASE))
       files = []
       each_irep(root) { |i| files.concat(i.debug.map { |f| f[1] }) if i.debug }
       files.uniq!
-      loose = ENV['MRBC_RB_LOOSE_FILENAME_SYM'] == '1'
-      raise Unsupported, 'file name symbol ids of several files (-g -S)' if files.size > 1 && !loose
-      file_syms = files.each_with_index.to_h { |f, i| [f, base + 1 + i] }
+      # file_syms: { file name => id } from FileSyms.ids; without it only one file is known (the first symbol after the presyms)
+      raise Unsupported, 'file name symbol ids of several files (-g -S)' if files.size > 1 && !file_syms
+      file_syms ||= files.each_with_index.to_h { |f, i| [f, base + 1 + i] }
       out = +"#include <mruby.h>\n#include <mruby/irep.h>\n#include <mruby/debug.h>\n#include <mruby/proc.h>\n\n"
       out << "#define mrb_BRACED(...) {__VA_ARGS__}\n"
       out << "#define mrb_DEFINE_SYMS_VAR(name, len, syms, qualifier) \\\n"
