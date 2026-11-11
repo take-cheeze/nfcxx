@@ -339,6 +339,20 @@ alias_markers = ir_forms.select { |f| head(f) == "alias" }.map do |a|
   "# pathb-alias #{a[3]} #{Qbe.symbol(name_of.call(a[1]))} #{Qbe.symbol(name_of.call(a[2]))}#{weak}"
 end
 
+# Weak references (scripts/pathb-qbe-emit.rb's weak_refs): (declare "NAME" (weak)) is a function declared
+# __attribute__((weak)) that the module refers to and does not define, and (global ... (weak) (extern)) an object. The
+# symbol may be absent at link time, so it is marked .weak (QBE has no weak linkage): without it `if (absent_fn)` was
+# an undefined reference. A defined weak symbol has its marker from the definition.
+defined_syms = {}
+ir_forms.each { |f| defined_syms[name_of.call(f[1])] = true if head(f) == "function" || (head(f) == "global" && f.none? { |p| head(p) == "extern" }) }
+weak_ref_markers = ir_forms.filter_map do |f|
+  next unless (head(f) == "declare" && f.length == 3 && head(f[2]) == "weak") ||
+              (head(f) == "global" && f.any? { |p| head(p) == "extern" } && f.any? { |p| head(p) == "weak" && p.length == 1 })
+  next if defined_syms.key?(name_of.call(f[1]))
+
+  "# pathb-weak #{Qbe.symbol(name_of.call(f[1]))}"
+end
+
 # The (constructor [PRIO]) and (destructor [PRIO]) functions of the module: their pointers go in the start-up tables.
 startup_markers = ssa_forms.select { |f| head(f) == "ssa-function" }.flat_map do |f|
   name = Qbe.symbol(name_of.call(f[1]))
@@ -360,7 +374,7 @@ end
 asm_decl_markers = ir_forms.select { |f| head(f) == "asm-decl" }.map do |f|
   "# pathb-text #{Base64.strict_encode64(text_of_asm_decl(f))}"
 end
-il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + startup_markers + [asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + weak_ref_markers + startup_markers + [asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }
