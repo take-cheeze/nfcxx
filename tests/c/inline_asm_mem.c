@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: extended asm templates beyond the fences and barriers are refused
 // X86-ONLY: x86 inline assembly (memory operands and multiple alternatives in thunks; docs/notes/inline-asm.md)
 // The kernel's shapes: "+m" atomics, "Ir" bit numbers, xchg, "rm"/"g"/"qm" alternatives, "i"(&symbol), "m" on arrays and on a large struct
 typedef struct { int counter; } atomic_t;

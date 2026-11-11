@@ -46,7 +46,7 @@ for b in $backends; do
     if [ $ok = 1 ] && [ -z "$xf" ]; then echo "ok   $b $n"; pass=$((pass + 1))
     elif [ $ok = 0 ] && [ -n "$xf" ]; then echo "xfail $b $n: $xf [$why]"; xfail=$((xfail + 1))
     elif [ $ok = 1 ]; then echo "XPASS $b $n: remove the XFAIL-$b marker"; fail=$((fail + 1))
-    else echo "FAIL $b $n: $why"; fail=$((fail + 1)); fi
+    else echo "FAIL $b $n: $why"; [ ! -s "$tmp/out" ] || head -c 400 "$tmp/out" | sed "s/^/    | /"; fail=$((fail + 1)); fi
     rm -f "$tmp/t" "$tmp/out"
   done
 done

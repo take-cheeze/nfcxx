@@ -235,8 +235,13 @@ module PathbEgraph
 
   # Optimizes every ssa-function of a module text; other forms are printed unchanged.
   def self.optimize_module(text, dispatch: false, **opts)
+    optimize_forms(read_forms(text), dispatch: dispatch, **opts)
+  end
+
+  # The same for the module's forms, already read (scripts/pathb-ssa-build holds them: no second read of the text).
+  def self.optimize_forms(forms, dispatch: false, **opts)
     stats = Hash.new(0)
-    lines = read_forms(text).map do |form|
+    lines = forms.map do |form|
       next sx(form) unless head(form) == "ssa-function"
 
       out, st = optimize_fn(parse_fn(form), **opts)

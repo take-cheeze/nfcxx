@@ -138,6 +138,7 @@
     (step
       (let %17 bool (ne int (const int 0) (const int 0)))
       (if %17 (then) (else (break)))))
+  (store unsigned_int $"l2" (const unsigned_int 0))
   (bfstore unsigned_int 4 $"l2" 0 4 (const unsigned_int 15))
   (bfstore unsigned_int 4 $"l2" 4 4 (const unsigned_int 1))
   (loop

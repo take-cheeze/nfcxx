@@ -96,6 +96,7 @@ ruby scripts/bc2cpp/method_lookup_report_check.rb
 ruby scripts/bc2cpp/method_lookup_hook_check.rb
 ruby scripts/bc2cpp/unregistered_verify_check.rb
 ruby scripts/bc2cpp/shard_output_check.rb
+ruby scripts/bc2cpp/runtime_header_check.rb
 ruby scripts/bc2cpp/left_out_accessors_check.rb
 ruby scripts/bc2cpp/core_native_candidates_check.rb
 ruby scripts/bc2cpp/core_private_ruby_check.rb
@@ -212,4 +213,5 @@ ruby scripts/bc2cpp/native_core_candidates_check.rb
 ruby scripts/bc2cpp/decided_fold_count_check.rb
 ruby scripts/bc2cpp/class_bodies_check.rb
 ruby scripts/bc2cpp/const_site_cache_check.rb
+ruby scripts/bc2cpp/native_frame_use_check.rb
 # ci:parallel end

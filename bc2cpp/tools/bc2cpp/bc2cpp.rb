@@ -26,6 +26,7 @@ type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __F
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shard_output'
+require_relative 'runtime_header'
 require_relative 'shared_generation'
 require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
@@ -51,6 +52,7 @@ require_relative 'tagged_fixnum'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_lists'
+require_relative 'native_frame_use'
 require_relative 'unique_class_names'
 require_relative 'construct_class_names'
 require_relative 'annotation_contradictions'
@@ -205,6 +207,7 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
+require_relative 'codegen_call_inline'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
@@ -1545,6 +1548,8 @@ BC2CPP_MAIN = lambda do
     shards = 1
   end
   ShardOutput.capture_stdout(symbol, out_dir, shards) if shards > 1
+  # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
+  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -1576,6 +1581,8 @@ BC2CPP_MAIN = lambda do
     RecvTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
   end
 
+  # RUNTIME_HEADER: from here to END_MARK the text depends on the build only, never on the unit's owners.
+  print RuntimeHeader::BEGIN_MARK
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <initializer_list>'
@@ -1828,6 +1835,8 @@ BC2CPP_MAIN = lambda do
   # takes a mark before its `try` and restores it here, as bc2cpp_protect does
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
+  # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -2456,7 +2465,7 @@ BC2CPP_MAIN = lambda do
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
         }
       }
-      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value()); });
+      return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, call_id, &m, c, argc, argv, mrb_nil_value()); });
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
@@ -2736,6 +2745,7 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_block(M, self, mid, argc, argv, blk); });
     }
   CPP
+  print RuntimeHeader::END_MARK
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
   # profiling primitives directly (profiler_section_begin/_end, frame_begin/
   # _end) instead of building an RProc for RGSS::Profiler.section/frame and
@@ -2796,7 +2806,6 @@ BC2CPP_MAIN = lambda do
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
-  print gen.emit_stringio_read_decl
   print gen.emit_forward_decls(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
@@ -2964,6 +2973,7 @@ BC2CPP_MAIN = lambda do
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
+  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free)
   print SymbolCache.emit(symbol_table)
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code

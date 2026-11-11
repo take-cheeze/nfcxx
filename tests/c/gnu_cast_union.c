@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: a union returned by value is refused
 // GNU casts to a union type (the kernel's (union ibs_fetch_ctl)config), in code and in a static initializer; an aligned
 // attribute below a member's alignment is ignored outside a packed struct, as gcc does; zero-length arrays
 union ctl { unsigned long val; struct { unsigned int lo, hi; } w; };

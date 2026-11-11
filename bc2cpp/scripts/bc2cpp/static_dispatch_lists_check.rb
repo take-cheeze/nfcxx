@@ -6,7 +6,8 @@
 # build, and a fixture has to be unaffected.
 #
 #   the file
-#     - a dump parses back to the same sets, and a file without one of them is refused;
+#     - a dump parses back to the same sets, and a file without one of the proof's sets is refused (frame_free, which
+#       is no part of the proof, reads as empty);
 #     - 'none' and (for a fixture) an unset variable are empty lists, but an unset variable stops a real gem build;
 #     - a file that does not exist stops the run;
 #     - a file computed from other sources than the tree (its digest) is refused by verify_current!, and
@@ -46,10 +47,12 @@ lists = LISTS::Lists.new(open: Set['A#a'], closed: Set['A#a', 'B#b'], core_exclu
 suite.check('a dump parses back to the same lists', LISTS.parse(LISTS.dump(lists)).to_h == lists.to_h)
 suite.check('the closed build takes the closed set, any other build the open one',
             lists.for_build('closed') == lists.closed && lists.for_build('wio') == lists.open)
-LISTS::KEYS.each do |key|
+LISTS::REQUIRED_KEYS.each do |key|
   broken = JSON.parse(LISTS.dump(lists)).tap { |data| data.delete(key) }
   suite.check("a file without #{key} is refused", raises.call { LISTS.parse(JSON.generate(broken)) })
 end
+older = JSON.parse(LISTS.dump(lists)).tap { |data| data.delete('frame_free') }
+suite.check('a file without frame_free reads it as empty', LISTS.parse(JSON.generate(older)).frame_free.empty?)
 
 Dir.mktmpdir('static_dispatch_lists') do |dir|
   path = File.join(dir, 'lists.json')
