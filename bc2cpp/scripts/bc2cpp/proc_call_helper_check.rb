@@ -42,7 +42,7 @@ code = suite.generate(SRC, OWNERS)
 suite.check('core bodies call the helper', code.include?('bc2cpp_proc_call_argv(M, '))
 helper = code[/static mrb_value bc2cpp_proc_call_argv\(mrb_state\* M.*?\n *\}\n/m].to_s
 suite.check('the helper no longer sends call by name', !helper.empty? && !helper.include?('mrb_funcall_argv'))
-suite.check('the helper runs the method it found', code.include?('mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv'))
+suite.check('the helper runs the method it found', code.include?('bc2cpp_call_found(M, recv, call_id, &m, c, argc, argv'))
 suite.check('the failure reports share one helper', code.scan(/mrb_funcall_id\(M, err, puts_id/).size <= 1)
 
 DRIVER = <<~'RUBY'

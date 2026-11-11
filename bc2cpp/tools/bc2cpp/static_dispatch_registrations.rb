@@ -68,6 +68,7 @@ require_relative 'core_enumerator_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
 require_relative 'native_owner_map'
+require_relative 'native_frame_use'
 require_relative 'index_closed_planner'
 require_relative 'closed_world'
 require_relative 'alias_sites'
@@ -1018,6 +1019,23 @@ module StaticDispatchRegistrations
       map.rom.filter_map { |owner, name, _fn| pick.call(owner, name, true) }
   end
 
+  # FRAME_FREE (closed only): the Owner#name of each registered C native whose body NativeFrameUse proves reads its frame
+  # only through the argument readers, for the generated call helper (NativeFrameUse.cpp_source). A row is resolved at
+  # run time to the function the owner's own table holds under the name, so an alias (the same function) or an undef
+  # (nothing there) is harmless; a key is left out when Ruby defines the name on that owner too (the table would hold
+  # the compiled method's function) or when the owner has a computed-name registration (any function could be there).
+  def frame_free_names(repo_root, registry)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    sources = native.select { |path| path.end_with?('.c') }
+    map = NativeOwnerMap.build(native)
+    NativeFrameUse.rows(sources, sources).filter_map do |owner, name, _function|
+      key = "#{owner}##{name}"
+      next if map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
+
+      key
+    end.to_set
+  end
+
   # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
   # defining NativeOwnerMap::FAMILIES) defines its name, it looks nothing up, so that one argument -- a string literal
   # or a presym operand -- is blanked before native_name_tokens reads the file. Every other occurrence of the name
@@ -1261,12 +1279,12 @@ module StaticDispatchRegistrations
     # generated `bc2cpp_pool_str` value is the same string, so the generated-code scan may skip that value only.
     pool_pure = symbol_lookups ? literal_sites.keys.to_set - looked_up : Set.new
     runs.each do |gem, r|
-      gen = r[:gen]
+      gen = NativeFrameUse.strip_rows(r[:gen])
       if symbol_lookups
         gen, reach = proc_parameters_scan(gen)
         (super_reach['parameters'] ||= Set.new).merge(reach) if reach
       end
-      literals = c_literals(gen, exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?),
+      literals = c_literals(gen, exempt: lookup_free_names(gen, subclassed, symbol_values: !symbol_lookups.nil?),
                                      pool_pure: pool_pure, symbol_values: !symbol_lookups.nil?)
       dynamic.merge(literals)
       cite(literals, "a C string literal in #{gem}'s generated code")
@@ -1353,7 +1371,7 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
-    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of,
+    core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven) : nil
 
     { super_reach: super_reach, class_owners: class_owners,
@@ -1361,7 +1379,8 @@ module StaticDispatchRegistrations
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups, proven: proven, ran: ran,
       core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new,
       ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
-                                         gens: runs.values.map { |r| r[:gen] }) : Set.new }
+                                         gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
+      frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
   end
 
   # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
@@ -1935,7 +1954,7 @@ module StaticDispatchRegistrations
                                    engine_rom: eligible(closed).select { |m| m[:rom] }
                                                                .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
                                    ctor_rows: closed[:ctor_rows].freeze,
-                                   digest: digest)
+                                   frame_free: closed[:frame_free].freeze, digest: digest)
   end
 
   def read_lists(path)
