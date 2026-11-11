@@ -912,7 +912,10 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
     t=$(trace_start)
-    if [ $backend != gcc ]; then
+    if [ $backend = pathb ]; then
+      # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route), not cproc.
+      "$root/scripts/pathb-cc" -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
+    elif [ $backend != gcc ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
