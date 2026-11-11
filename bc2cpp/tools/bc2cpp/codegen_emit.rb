@@ -576,6 +576,7 @@ class CodeGen
         bc2cpp_set_instance_tts(M);
         bc2cpp_register_owner_methods(M);
         bc2cpp_capture_direct_construct_classes(M);
+        bc2cpp_frame_free_install(M);
       }
       [[maybe_unused]] static void bc2cpp_gem_final() {
         bc2cpp_reset_symbol_cache();
@@ -1134,15 +1135,6 @@ class CodeGen
 
     @direct_construct_used << owner
     "#{direct_construct_class_fn(owner)}()"
-  end
-
-  # STRINGIO_DIRECT_READ (codegen_send.rb): the file-scope prototypes of mrb_stringio_read_direct and mrb_io_read_direct,
-  # which mruby-stringio and mruby-io define with C linkage. Only a unit that emits the read form declares it.
-  def emit_stringio_read_decl
-    return '' unless @stringio_direct_read_used
-
-    "extern \"C\" mrb_bool mrb_stringio_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n" \
-      "extern \"C\" mrb_bool mrb_io_read_direct(mrb_state*, mrb_value, mrb_value, mrb_value*);\n\n"
   end
 
   # Declarations for direct compiled construction actually used:

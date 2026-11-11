@@ -51,6 +51,7 @@ require_relative 'tagged_fixnum'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_lists'
+require_relative 'native_frame_use'
 require_relative 'unique_class_names'
 require_relative 'construct_class_names'
 require_relative 'annotation_contradictions'
@@ -1828,6 +1829,8 @@ BC2CPP_MAIN = lambda do
   # takes a mark before its `try` and restores it here, as bc2cpp_protect does
   # for an mruby exception: reset mrb->jmp and pop the leftover callinfos,
   # unsharing each popped frame's env as the VM's cipop does.
+  # FRAME_FREE: which found natives a call runs without a frame (native_frame_use.rb).
+  puts NativeFrameUse.cpp_source(StaticDispatchLists.current(required: false).frame_free)
   puts <<~'CPP'
     struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
     static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
@@ -2456,7 +2459,7 @@ BC2CPP_MAIN = lambda do
           mrb_no_method_error(M, call_id, mrb_ary_new_from_values(M, argc, argv), "%s method '%n' called for %T", "protected", call_id, recv);
         }
       }
-      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, call_id, &m, c, argc, argv, mrb_nil_value()); });
+      return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, call_id, &m, c, argc, argv, mrb_nil_value()); });
     }
     // KEYWORD_SPLAT_DYNAMIC: a `**v` value as a Hash. nil means no keywords; anything else converts with to_hash, as
     // a Ruby call does, and a value that does not convert raises TypeError.
@@ -2796,7 +2799,6 @@ BC2CPP_MAIN = lambda do
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
-  print gen.emit_stringio_read_decl
   print gen.emit_forward_decls(compiled)
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)

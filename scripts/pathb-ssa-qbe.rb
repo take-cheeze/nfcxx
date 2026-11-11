@@ -1244,8 +1244,10 @@ end
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call"
+        if atomic_fetch?(rv)
+          atomic_fetch_lines(dst, c, rv)
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
-        if unqual(rv[1]) == "bool"
+        elsif unqual(rv[1]) == "bool"
           raw = fresh
           @lines << "  #{raw} =w #{call_text(rv)}"
           low = fresh
@@ -1316,8 +1318,9 @@ end
           @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{a}"
         end
       when "const", "null", nil
-        @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
-        raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String)
+        # A bare slot address (a Ref): the inliner's copies of an argument's slot (an SSA rewrite can leave one as a let's value).
+        @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
+        raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
       else raise QbeUnsupported, "operator #{head(rv) || sx(rv)}"
       end
     end
@@ -1911,6 +1914,43 @@ end
           @lines << "  call $__nfcxx_sp_check(l #{args[i].split(" ", 2)[1]}, l #{args[2].split(" ", 2)[1]}, #{sp_where})"
         end
       end
+    end
+
+    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a sequentially
+    # consistent call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
+    # (Plain string tests: the bundled script runs under mruby, which has no regular expressions.)
+    ATOMIC_FETCH_PREFIX = "__atomic_fetch_"
+
+    # [op, size] of a __atomic_fetch_{add,sub}_{4,8} call, or nil.
+    def atomic_fetch_kind(c)
+      f = c[2]
+      return nil if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+      name = f.raw.delete('"')
+      return nil unless name.start_with?(ATOMIC_FETCH_PREFIX)
+      rest = name[ATOMIC_FETCH_PREFIX.length..]
+      op = rest[0, 3]
+      size = rest[4..]
+      return nil unless rest[3] == "_" && (op == "add" || op == "sub") && (size == "4" || size == "8")
+      [op, size]
+    end
+
+    def atomic_fetch?(c)
+      return false unless atomic_fetch_kind(c)
+      order = c[5]
+      head(order) == "const" && order[2].to_s == "5"
+    end
+
+    def atomic_fetch_lines(dst, cls, c)
+      op, size = atomic_fetch_kind(c)
+      w = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      val = op(c[4])
+      if op == "sub"
+        neg = fresh
+        @lines << "  #{neg} =#{w} sub 0, #{val}"
+        val = neg
+      end
+      @lines << "  #{dst} =#{w} xadd #{addr}, #{val}"
     end
 
     def call_text(c)

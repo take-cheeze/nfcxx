@@ -25,6 +25,9 @@ extern "C" {
 #include <mruby/internal.h>
 // clang-format on
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #define STACK_INIT_SIZE 128
 #define CALLINFO_INIT_SIZE 32
 #define MRB_STACK_GROWTH 128
@@ -585,6 +588,9 @@ static mrb_value funcall_with_block_m(mrb_state* mrb,
     mrb->jmp = NULL;
   } else {
     mrb_method_t m;
+    // FRAME_FREE: a native running without its frame that sends gets the frame first, below the callee's.
+    if (mrb->direct_call)
+      mrb_direct_materialize(mrb);
     mrb_callinfo* ci = mrb->c->ci;
     mrb_int n = mrb_ci_nregs(ci);
 
@@ -674,14 +680,14 @@ mrb_value mrb_funcall_send_with_method(mrb_state* mrb,
 // The hot case (a found cfunc, positional arguments, a running context):
 // funcall_with_block_m's steps with the generic argument capture and the nregs
 // call folded away. Anything else takes the general path.
-mrb_value mrb_funcall_with_method(mrb_state* mrb,
-                                  mrb_value self,
-                                  mrb_sym mid,
-                                  const mrb_method_t* m,
-                                  struct RClass* owner,
-                                  mrb_int argc,
-                                  const mrb_value* argv,
-                                  mrb_value blk) {
+static mrb_value funcall_found_framed(mrb_state* mrb,
+                                      mrb_value self,
+                                      mrb_sym mid,
+                                      const mrb_method_t* m,
+                                      struct RClass* owner,
+                                      mrb_int argc,
+                                      const mrb_value* argv,
+                                      mrb_value blk) {
   struct mrb_context* c = mrb->c;
   mrb_callinfo* pci = c->ci;
   if (mrb_unlikely(!mrb->jmp || !c->stbase || !pci->stack || argc < 0 ||
@@ -712,6 +718,24 @@ mrb_value mrb_funcall_with_method(mrb_state* mrb,
   mrb_gc_arena_restore(mrb, ai);
   mrb_gc_protect(mrb, val);
   return val;
+}
+
+// The frame-free decision for every caller of a found method, C included (mrb_obj_init's initialize):
+// a function the closed build registered as frame-free (mrb->frame_free_p) runs through mrb_call_direct.
+mrb_value mrb_funcall_with_method(mrb_state* mrb,
+                                  mrb_value self,
+                                  mrb_sym mid,
+                                  const mrb_method_t* m,
+                                  struct RClass* owner,
+                                  mrb_int argc,
+                                  const mrb_value* argv,
+                                  mrb_value blk) {
+  if (mrb->direct_call)
+    mrb_direct_materialize(mrb);
+  if (mrb->frame_free_p && mrb_nil_p(blk) && MRB_METHOD_FUNC_P(*m) &&
+      mrb->frame_free_p(mrb, MRB_METHOD_FUNC(*m)))
+    return mrb_call_direct(mrb, self, mid, MRB_METHOD_FUNC(*m), owner, argc, argv);
+  return funcall_found_framed(mrb, self, mid, m, owner, argc, argv, blk);
 }
 
 MRB_API mrb_value mrb_funcall_argv(mrb_state* mrb,
@@ -747,6 +771,7 @@ static void check_argument_count(mrb_state* mrb,
 // The proc's body runs in the caller's C frame (Proc#call on a native block):
 // only a cfunc proc can.
 mrb_value mrb_exec_irep(mrb_state* mrb, mrb_value self, const struct RProc* p) {
+  MRB_DIRECT_FRAME(mrb, "mrb_exec_irep");
   mrb_callinfo* ci = mrb->c->ci;
   if (ci->cci == CINFO_NONE || !MRB_PROC_CFUNC_P(p))
     no_irep(mrb);
@@ -796,6 +821,71 @@ static void check_block(mrb_state* mrb, mrb_value blk) {
   }
 }
 
+// FRAME_FREE (tools/bc2cpp/native_frame_use.rb, the fork's mruby.h): a native whose body reads its frame only through
+// the argument readers runs with the arguments in a mrb_direct_call, and gets the frame funcall_with_block_m would have
+// built when it raises, sends, yields or reads the frame another way.
+MRB_API void mrb_direct_materialize(mrb_state* mrb) {
+  struct mrb_direct_call* d = mrb->direct_call;
+  if (!d)
+    return;
+  mrb->direct_call = NULL;
+  mrb_callinfo* ci = cipush(mrb, mrb_ci_nregs(mrb->c->ci), CINFO_DIRECT, NULL, NULL, NULL, 0, 0);
+  funcall_args_capture(mrb, 0, d->argc, d->stack + 1, NULL, mrb_nil_value(), ci);
+  ci->u.target_class = d->owner;
+  ci->mid = d->mid;
+  ci->proc = NULL;
+  ci->stack[0] = d->stack[0];
+}
+
+MRB_API void mrb_direct_frame_needed(mrb_state* mrb, const char* what) {
+#ifdef MRB_FRAMEFREE_VERIFY
+  fprintf(stderr, "bc2cpp: FRAMEFREE_VERIFY: %s reached by a native called without a frame (%s)\n", what,
+          mrb_sym_name(mrb, mrb->direct_call->mid));
+  fflush(stderr);
+  abort();
+#else
+  (void)what;
+  mrb_direct_materialize(mrb);
+#endif
+}
+
+MRB_API mrb_value mrb_call_direct(mrb_state* mrb, mrb_value self, mrb_sym mid, mrb_func_t f, struct RClass* owner,
+                                  mrb_int argc, const mrb_value* argv) {
+  if (mrb_unlikely(!mrb->jmp || mrb->direct_call || argc < 0 || argc > MRB_DIRECT_ARGS_MAX || !mrb->c->stbase ||
+                   mrb->c->ci - mrb->c->cibase > MRB_CALL_LEVEL_MAX)) {
+    mrb_method_t m;
+    MRB_METHOD_FROM_FUNC(m, f);
+    if (mrb->direct_call)
+      mrb_direct_materialize(mrb);
+    return funcall_found_framed(mrb, self, mid, &m, owner, argc, argv, mrb_nil_value());
+  }
+  struct mrb_direct_call d;
+  int ai = mrb_gc_arena_save(mrb);
+  d.stack[0] = self;
+  mrb_gc_protect(mrb, self);
+  for (mrb_int i = 0; i < argc; i++) {
+    d.stack[i + 1] = argv[i];
+    mrb_gc_protect(mrb, argv[i]);
+  }
+  d.stack[argc + 1] = mrb_nil_value();
+  d.argc = argc;
+  d.mid = mid;
+  d.owner = owner;
+  mrb->exc = NULL;
+  mrb->direct_call = &d;
+  mrb_value val = f(mrb, self);
+  if (mrb->direct_call == &d)
+    mrb->direct_call = NULL;
+  else
+    cipop(mrb);  // the frame it was given
+  if (mrb->exc != NULL) {
+    mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));
+  }
+  mrb_gc_arena_restore(mrb, ai);
+  mrb_gc_protect(mrb, val);
+  return val;
+}
+
 static mrb_value yield_with_attr(mrb_state* mrb,
                                  mrb_value b,
                                  mrb_int argc,
@@ -803,6 +893,7 @@ static mrb_value yield_with_attr(mrb_state* mrb,
                                  mrb_value self,
                                  struct RClass* c,
                                  mrb_bool vis_break) {
+  MRB_DIRECT_FRAME(mrb, "yield");
   check_block(mrb, b);
 
   mrb_callinfo* ci = mrb->c->ci;
