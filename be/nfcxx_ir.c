@@ -471,19 +471,26 @@ static int ir_raw_used(ir_tab *t, const char *raw)
 /* Add an entry with a new name. Names are unique within the table: a clash gets a .N suffix. */
 static const char *ir_tab_add(ir_tab *t, const void *key, const char *base, const char *sigil)
 {
-  char cand[300];
+  /* The candidate is as long as the name needs: a template's mangled name is longer than a fixed buffer, and a truncated
+     "NAME.N" is the same string for every N, so a second name with the same first 299 bytes made the loop below spin forever. */
+  size_t cap;
+  char *cand;
   int k = 0;
   ir_ent *en;
   if (base == NULL || base[0] == '\0') base = "tmp";
-  (void)snprintf(cand, sizeof cand, "%s", base);
+  cap = strlen(base) + 24;
+  cand = (char *)malloc(cap);
+  if (cand == NULL) abort();
+  (void)snprintf(cand, cap, "%s", base);
   while (ir_raw_used(t, cand)) {
     k++;
-    (void)snprintf(cand, sizeof cand, "%s.%d", base, k);
+    (void)snprintf(cand, cap, "%s.%d", base, k);
   }
   en = ir_tab_push(t);
   en->key = key;
   en->raw = ir_dup(cand);
   en->op = ir_fmt("%s\"%s\"", sigil, cand);
+  free(cand);
   return en->op;
 }
 
