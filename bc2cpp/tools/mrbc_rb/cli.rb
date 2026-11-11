@@ -23,7 +23,10 @@
 #                                and mrbc reports the error
 #   an input of "-"              implemented: standard input as the (first) program, named "-" in the debug section; the output name
 #                                defaults to "-" (standard output), as in mrbc
-#   -v, --verbose                not implemented here: mrbc prints the C parser's AST dump (parser_dump of the fork's own node types,
+#   -S without -B                implemented: mrbc ignores it (the binary is written)
+#   --help                       an addition: the switches handled here and the fallback (HELP), exit 0
+#   -v, --verbose                not implemented here (only the exits that need no compile print what mrbc prints first: the version
+#                                line of -v with no input, an unreadable input or a usage error): mrbc prints the C parser's AST dump (parser_dump of the fork's own node types,
 #                                with the line numbers its lexer reached) and then the disassembly with `irep 0x<address of the irep
 #                                struct>` lines, which differ from run to run (ASLR), so no output of this command can be byte for
 #                                byte what a run of mrbc -v printed. `--disasm` (an addition of this command) prints the instruction listing of -v
@@ -80,6 +83,32 @@ module MrbcRb
       --version    print the version
       --copyright  print the copyright
     USAGE
+    HELP = <<~HELP
+      This is the Ruby implementation of mrbc (bc2cpp/tools/mrbc_rb): it writes what the fork's C mrbc writes, byte for byte,
+      without an mrbc binary. Handled here, as mrbc does (same output, same status):
+        -o<outfile> | -o <outfile>   output file ("-" is standard output); default: the input's name with .mrb (.c with -B)
+        -g                           debug information
+        -B<symbol> | -B <symbol>     C byte array;  -S: the C struct dump (needs -B, ignored without it, as in mrbc)
+        -s                           static symbol (with -B)
+        --remove-lv                  no local variable names (the RITE binary; the C struct dump keeps them, as in mrbc)
+        -c                           check syntax: "<prog>:<first input>:Syntax OK"
+        -e, -E                       accepted (mrbc: "no longer needed" on stderr)
+        --no-optimize, --no-ext-ops  as in mrbc (no peephole / no OP_EXT; an operand needing one is an error)
+        -                            standard input as the first program
+        several inputs               one program (-o is required)
+        --version, --copyright, -h   mrbc's text (MRBC_RB_VERSION replaces the version line); -h and an unknown switch print the
+                                     usage and exit 1
+        --help                       this text (an addition; exit 0)
+        --disasm                     an addition: the instruction listing `mrbc -v` prints (codedump.rb), without the AST dump
+      Not reproducible here, so handed to the real mrbc named by MRBC_FALLBACK, run with the original arguments (its output
+      and status are passed on):
+        -v, --verbose                the C parser's AST dump and `irep 0x<address>` lines (the address changes from run to run)
+        a syntax error               mrbc words its own message
+        a later input that cannot be opened (mrbc still writes the output of the others), a construct the emitter does not
+        cover, an emitter crash
+      Without MRBC_FALLBACK these fail (exit 1) and say what was not covered.
+      Environment: MRBC_FALLBACK=<mrbc>, MRBC_RB_PRESYM=fork|bootstrap|<file> (the presym set -g -S matches), MRBC_RB_LOG=<file>
+    HELP
     DEFAULT_VERSION = 'mruby 4.0.0 (2026-04-20)'
     COPYRIGHT_TEXT = 'mruby - Copyright (c) 2010-2026 mruby developers'
 
@@ -98,6 +127,8 @@ module MrbcRb
       @outfile = nil
       @initname = nil
       @dump_struct = @static = @debug = @no_lv = @check = @disasm = @no_ext_ops = @no_optimize = false
+      @verbose = @version_shown = false
+      @verbose_flag = nil
       @stdin_data = nil
     end
 
@@ -185,20 +216,27 @@ module MrbcRb
         when 'E', 'e' then @err.puts "#{@prog}: -e/-E option no longer needed."
         when 'c' then @check = true
         when 'h' then usage_error(nil)
-        when 'v' then raise NotCovered, "option #{arg}"
+        when 'v'
+          # mrbc shows the version when it parses the first -v. Compiling in verbose mode is the real mrbc's (see #body, it
+          # prints the version itself), so it is only printed here for the ways out that need no compile (#v_version).
+          @verbose_flag = :v unless @verbose
+          @verbose = true
         when '-'
           case arg
           when '--remove-lv' then @no_lv = true
           when '--version'
-            @out.puts @env.fetch('MRBC_RB_VERSION', DEFAULT_VERSION)
+            v_version
+            show_version
             finish 0
           when '--disasm' then @disasm = true
           when '--copyright'
+            v_version
             @out.puts COPYRIGHT_TEXT
             finish 0
           when '--no-ext-ops' then @no_ext_ops = true
           when '--no-optimize' then @no_optimize = true
-          when '--verbose' then raise NotCovered, "option #{arg}"
+          when '--verbose' then @verbose = true
+          when '--help' then help
           else usage_error(nil)
           end
         else
@@ -211,10 +249,29 @@ module MrbcRb
 
     # mrbc.c: a bad option prints its message (stderr) and then the usage (stdout), exit status 1.
     def usage_error(msg)
+      v_version
       @err.puts "#{@prog}: #{msg}" if msg
       @out.puts "Usage: #{@prog} [switches] programfile..."
       USAGE.each_line { |l| @out.puts "  #{l}" }
       finish 1
+    end
+
+    # mrb_show_version
+    def show_version = @out.puts(@env.fetch('MRBC_RB_VERSION', DEFAULT_VERSION))
+
+    # The version line the first `-v` printed, for a run that ends without compiling (usage, a missing file, --version...).
+    def v_version
+      return unless @verbose_flag == :v && !@version_shown
+
+      @version_shown = true
+      show_version
+    end
+
+    # --help (an addition: mrbc has none, it prints its usage for any unknown switch and exits 1).
+    def help
+      @out.puts "Usage: #{@prog} [switches] programfile..."
+      @out.puts HELP
+      finish 0
     end
 
     def body
@@ -224,11 +281,12 @@ module MrbcRb
         fallback(e.message)
       end
       if first >= @argv.size
+        v_version
         @err.puts "#{@prog}: no program file given"
         finish 1
       end
       inputs = @argv[first..]
-      fallback('-S without -B') if @dump_struct && !@initname
+      # -S without -B: mrbc's dump_file looks at -S only inside its -B branch, so the output is the plain binary.
       if @outfile.nil? && !@check && !@disasm
         if inputs.size > 1
           @err.puts "#{@prog}: output file should be specified to compile multiple files"
@@ -239,9 +297,12 @@ module MrbcRb
       # mrbc reads standard input for a first input of "-"; a later "-" is a file of that name (mrbc then cannot open it).
       stdin_first = inputs.first == '-'
       unless stdin_first || (File.file?(inputs.first) && File.readable?(inputs.first))
+        v_version
         @err.puts "#{@prog}: cannot open program file. (#{inputs.first})"
         finish 1
       end
+      # Verbose mode: the C parser's AST dump and the irep addresses, which only the real mrbc prints.
+      fallback('verbose mode (-v, --verbose)') if @verbose
       fallback('an input is not readable') unless inputs.each_with_index.all? { |f, i| (i.zero? && stdin_first) || (File.file?(f) && File.readable?(f)) }
 
       sources = inputs.each_with_index.map { |f, i| [i.zero? && stdin_first ? read_stdin : File.binread(f), f] }

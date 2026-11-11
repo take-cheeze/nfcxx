@@ -1,6 +1,6 @@
 # Compile-time tracing
 
-`nfcxx --trace=FILE` (or `NFCXX_TRACE=FILE`) writes a Chrome trace-event JSON file. Open it in
+`nfcxx --trace=FILE` (or `NFCXX_TRACE=FILE`, the fallback) writes a Chrome trace-event JSON file. Open it in
 [ui.perfetto.dev](https://ui.perfetto.dev) with "Open trace file". The times are wall-clock.
 
 ## What is timed
@@ -22,9 +22,9 @@ with the C compile and link, and the gcc backend's C compile is also inside that
 are timed separately, so for the QBE backend the front end plus link is roughly the `eccp` span
 minus the `qbe-backend` spans. Splitting EDG's own passes would need changes inside EDG.
 
-## A whole build: `NFCXX_TIME_LOG`
+## A whole build: `--time-log`
 
-`NFCXX_TIME_LOG=FILE` appends every span to FILE as one text line, `SECONDS<Tab>CATEGORY<Tab>SPAN<Tab>SOURCE`, without
+`nfcxx --time-log=FILE` (or `NFCXX_TIME_LOG=FILE`, which a build system can set once for every compile; the flag wins) appends every span to FILE as one text line, `SECONDS<Tab>CATEGORY<Tab>SPAN<Tab>SOURCE`, without
 writing a trace file. The compiles of a parallel build (one driver per source) share the file, and the scripts a driver
 runs (the QBE steps) log under its source too. Rank the stages, or sum them per stage:
 

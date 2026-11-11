@@ -10,7 +10,15 @@
 # (scripts/host-sys.sh; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
 # (only EDG's include_c++, no C library headers).
 # --gnu-version=N (or --gnu_version=N) sets the GNU version of the front end, as nfcxx does; it overrides the host's.
-# NFCXX_PATHB_STATS=1 prints per-node-kind lowered/unsupported counts to stderr (--ir only).
+# --stats (NFCXX_PATHB_STATS=1) prints per-node-kind lowered/unsupported counts to stderr (--ir only).
+# The IR back end (be/nfcxx_ir.c, in the front end's process) reads its settings from the environment; these options set
+# them, and take precedence over a variable already in the environment (--ir only):
+#   --ir-loc          (NFCXX_IR_LOC=1)       (loc "FILE" LINE) lines: the source place of the statements after them
+#   --ir-scopes       (NFCXX_IR_SCOPES=1)    (decl ...) and (scope-end ...) facts for locals
+#   --borrow          (NFCXX_PATHB_BORROW=1) the facts the borrow checker reads (docs/notes/pathb-borrowck.md)
+#   --sanitize=LIST   (NFCXX_IR_SANITIZE)    the checks of -fsanitize=undefined or CHECK[,CHECK...] (docs/notes/ubsan.md)
+#   --overflow=trap   (NFCXX_IR_OVERFLOW=trap) signed overflow is a trap
+#   --cuda-device     (NFCXX_PATHB_CUDA=1)   a .cu file's device unit: the front end reads it as CUDA, without exceptions
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
 # wasm32 (its plain char is unsigned in EDG's table, so --signed_chars is passed). It needs --freestanding: the host's C
@@ -23,11 +31,19 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 
 source "$root/scripts/host-sys.sh"
 std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""
+cuda_device=0; [ -z "${NFCXX_PATHB_CUDA:-}" ] || cuda_device=1
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   arg=${args[$i]}
   case $arg in
     --ir) mode=ir ;;
+    --stats) export NFCXX_PATHB_STATS=1 ;;
+    --ir-loc) export NFCXX_IR_LOC=1 ;;
+    --ir-scopes) export NFCXX_IR_SCOPES=1 ;;
+    --borrow) export NFCXX_PATHB_BORROW=1 ;;
+    --sanitize=*) export NFCXX_IR_SANITIZE=${arg#--sanitize=} ;;
+    --overflow=*) export NFCXX_IR_OVERFLOW=${arg#--overflow=} ;;
+    --cuda-device) cuda_device=1 ;;
     --freestanding) hosted=0 ;;
     --cuda) user_opts+=(--cuda) ;;   # a .cu host copy: the <<<...>>> launches are read (nfcxx's cuda_opts, as the EDG path)
     --target=*) target=${arg#--target=} ;;
@@ -63,6 +79,7 @@ if [ -n "$target" ]; then
 fi
 
 sys_inc=(); gnu_opts=()
+cuda_device_opts=(); [ $cuda_device = 0 ] || cuda_device_opts=(--cuda --no_exceptions)
 # Hosted: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
 # marker of scripts/setup-edg.sh), the EH variables of the IR are thread-local too, as the nfcxx driver has them.
 eh_tls=(); [ "$hosted" = 0 ] || [ ! -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
@@ -84,8 +101,8 @@ for file in "${files[@]}"; do
   # -tused: instantiate the templates this file uses, as eccp does for a single file that is compiled and linked
   # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR. C has no templates.
   tused=(); [ $lang = c ] || tused=(-tused)
-  # NFCXX_PATHB_CUDA=1 (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${NFCXX_PATHB_CUDA:+--cuda --no_exceptions} ${eh_tls[@]+"${eh_tls[@]}"} --sys_include="$base/include" "$f") || status=$?
+  # --cuda-device (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${cuda_device_opts[@]+"${cuda_device_opts[@]}"} ${eh_tls[@]+"${eh_tls[@]}"} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status
