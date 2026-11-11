@@ -4,7 +4,7 @@
 # Path B: SSA to structured IR (docs/notes/pathb-structurize.md). Reads the SSA text of scripts/pathb-ssa.rb and writes a
 # structured IR module (docs/notes/pathb-stage2.md, section 6) that the structured back ends accept, SPIR-V among them.
 #
-#   ruby scripts/pathb-ssa-structurize.rb [FILE.ssa | -] > out.ir
+#   ruby scripts/pathb-ssa-structurize.rb [--verbose] [FILE.ssa | -] > out.ir
 #
 # Two methods, per function:
 #   - structured: the CFG is rebuilt as loops (natural loops, a single exit each) and ifs (a block's two arms meet at its
@@ -13,7 +13,7 @@
 #     of a loop, and a block ends by setting the state and leaving the switch.
 # A value that another block reads, or that a phi defines, is a register declared at the top of the function; a value used
 # only in its own block stays a let, so the patterns the emitters read off a let (the closure cast) still work.
-# NFCXX_STRUCTURIZE_VERBOSE=1 prints the method chosen for each function on stderr.
+# --verbose prints the method chosen for each function on stderr.
 #
 # Exit status: 0 written; 1 malformed SSA (on stderr); 3 a type that cannot be zeroed.
 
@@ -24,8 +24,65 @@ class Unstructurable < StandardError; end
 INT_TYPES = %w[bool char signed_char unsigned_char short unsigned_short int unsigned_int long unsigned_long long_long
                unsigned_long_long float double long_double std::float32_t std::float64_t].freeze
 
+# The tokens of the SSA text: "(", ")", a double-quoted string (escapes with a backslash, an optional $ or & before the
+# opening quote), or a run of characters that are neither white space nor parentheses. A character scan with the rules
+# of the regexp it replaces, /\(|\)|[$&]?"(?:\\.|[^"\\])*"|[^\s()]+/ (the script world has no Regexp): an unterminated
+# string falls back to the run, a backslash before a newline does not escape it.
+def space_char?(c)
+  c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\v"
+end
+
+# The index just after the quoted string whose opening quote is at i, or nil when it is not terminated.
+def quoted_end(text, i)
+  n = text.length
+  j = i + 1
+  while j < n
+    c = text[j]
+    if c == "\""
+      return j + 1
+    elsif c == "\\"
+      return nil if j + 1 >= n || text[j + 1] == "\n"
+      j += 2
+    else
+      j += 1
+    end
+  end
+  nil
+end
+
 def tokenize(text)
-  text.scan(/\(|\)|[$&]?"(?:\\.|[^"\\])*"|[^\s()]+/)
+  toks = []
+  n = text.length
+  i = 0
+  while i < n
+    c = text[i]
+    if space_char?(c)
+      i += 1
+    elsif c == "(" || c == ")"
+      toks << c
+      i += 1
+    else
+      q = c == "\"" ? i : ((c == "$" || c == "&") && i + 1 < n && text[i + 1] == "\"" ? i + 1 : nil)
+      e = q ? quoted_end(text, q) : nil
+      if e
+        toks << text[i...e]
+        i = e
+      else
+        j = i
+        j += 1 while j < n && !space_char?(text[j]) && text[j] != "(" && text[j] != ")"
+        toks << text[i...j]
+        i = j
+      end
+    end
+  end
+  toks
+end
+
+# Whether s is one or more ASCII digits.
+def all_digits?(s)
+  return false if s.empty?
+  s.each_char { |c| return false unless c >= "0" && c <= "9" }
+  true
 end
 
 def parse_tokens(toks)
@@ -214,7 +271,7 @@ class FnEmitter
   def prepare_names
     max = 0
     atoms(@fn.header + @fn.params + @fn.slots + @fn.attrs).each do |a|
-      max = a[1..-1].to_i if value_name?(a) && a[1..-1] =~ /\A\d+\z/ && a[1..-1].to_i > max
+      max = a[1..-1].to_i if value_name?(a) && all_digits?(a[1..-1]) && a[1..-1].to_i > max
     end
     @names = {}
     fresh = max
@@ -564,12 +621,12 @@ def structurize_fn(form)
     body = em.structured
     method = "structured"
   rescue Unstructurable => e
-    $stderr.write("pathb-ssa-structurize: #{fn.name}: state machine (#{e.message})\n") if ENV["NFCXX_STRUCTURIZE_VERBOSE"]
+    $stderr.write("pathb-ssa-structurize: #{fn.name}: state machine (#{e.message})\n") if $structurize_verbose
     em = FnEmitter.new(fn)
     body = em.state_machine
     method = "state-machine"
   end
-  $stderr.write("pathb-ssa-structurize: #{fn.name}: #{method}\n") if ENV["NFCXX_STRUCTURIZE_VERBOSE"]
+  $stderr.write("pathb-ssa-structurize: #{fn.name}: #{method}\n") if $structurize_verbose
   function_out(fn, body, em.decls)
 end
 
@@ -578,10 +635,17 @@ def structurize_text(text)
   forms.map { |f| head(f) == "ssa-function" ? structurize_fn(f) : f }
 end
 
+$structurize_verbose = false
+
 def main(argv)
-  file = argv.empty? || argv[0] == "-" ? nil : argv[0]
-  text = file ? File.read(file) : $stdin.read
+  args = argv.dup
+  while !args.empty? && args.first == "--verbose"
+    args.shift
+    $structurize_verbose = true
+  end
+  file = args.empty? || args[0] == "-" ? nil : args[0]
   begin
+    text = file ? File.read(file) : $stdin.read
     forms = structurize_text(text)
   rescue BadSSA => e
     $stderr.write("error: #{e.message}\n")
@@ -589,9 +653,13 @@ def main(argv)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3
+  rescue SystemCallError => e
+    $stderr.write("error: #{e.message}\n")
+    return 1
   end
   forms.each { |f| $stdout.write(show(f) + "\n") }
   0
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+rc = main(ARGV)
+exit(rc) if rc != 0

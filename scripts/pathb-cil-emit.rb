@@ -1531,9 +1531,9 @@ def string_bytes(f, em)
   raw + [0] * (total - raw.size)
 end
 
-def main
-  src = ARGV[0]
-  out_path = ARGV[1]
+def convert(argv)
+  src = argv[0]
+  out_path = argv[1]
   raise PyError, 'IndexError: list index out of range' if src.nil? || out_path.nil?
   bytes = if src == '-'
             $stdin.read.to_s  # sys.stdin.buffer: as it is
@@ -1583,12 +1583,16 @@ def main
   File.open(out_path, 'wb') { |fh| fh.write(json_val(fragment, 0)) }
 end
 
-begin
-  main
+def main(argv)
+  convert(argv)
+  0
 rescue Refused => e
   $stderr.write("pathb-cil-emit: refused: #{e.message}\n")
-  exit 1
+  1
 rescue StandardError => e
   $stderr.write("pathb-cil-emit: error: #{e.message}\n")
-  exit 1
+  1
 end
+
+rc = main(ARGV)
+exit(rc) if rc != 0

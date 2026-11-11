@@ -8,6 +8,9 @@ require_relative 'static_dispatch_symbol_uses'
 module InitializerTables
   PREFIX = 'INITIALIZER_TABLE_EVIDENCE '
   DIRECT = %r{// INITIALIZER_DIRECT (\w+):(\d+) (\S+)}
+  # Every emitted copy of a construction site (`new` or an initialize's `super`), direct or not; `?` is a copy whose
+  # instruction index is unknown, which refuses every site of its irep.
+  SITE = %r{// INITIALIZER_SITE (\w+):(\d+|\?)}
   BYTECODE_PROC = /\bmrb_(?:proc_new|closure_new)\s*\(/
 
   module_function
@@ -140,18 +143,45 @@ class CodeGen
     result
   end
 
+  # A site is direct when every emitted copy of it is a direct call and sits in a stub-safe, non-resumable method that
+  # does not run at load. A block's copies live in the method function that encloses it.
   def initializer_table_evidence(compiled, stub_keys)
     plan = initializer_table_plan
     own = compiled.select { |m| m[:name] == 'initialize' }.to_set { |m| m[:owner] }
     result = { candidates: plan[:candidates].select { |candidate| own.include?(candidate[:owner]) }, direct: [], refused: plan[:refused] }
+    copies = Hash.new(0)
+    direct = Hash.new(0)
+    unattributed = Set.new
     compiled.each do |m|
-      next if m[:guard] || m[:resumable] || !stub_keys.include?("#{m[:owner]}##{m[:name]}") || m[:code].match?(InitializerTables::BYTECODE_PROC)
+      eligible = !(m[:guard] || m[:resumable]) && stub_keys.include?("#{m[:owner]}##{m[:name]}") &&
+                 !m[:code].match?(InitializerTables::BYTECODE_PROC)
+      m[:code].scan(InitializerTables::SITE) do |label, index|
+        index == '?' ? unattributed << label : copies[[label, index.to_i]] += 1
+      end
+      next unless eligible
 
       m[:code].scan(InitializerTables::DIRECT) do |label, index, owner|
-        result[:direct] << [label, index.to_i, owner] if label == m[:label]
+        direct[[label, index.to_i, owner]] += 1 if enclosing_method_label(label) == m[:label]
       end
     end
+    direct.each do |(label, index, owner), count|
+      result[:direct] << [label, index, owner] if !unattributed.include?(label) && copies[[label, index]] == count
+    end
     result
+  end
+
+  # The method body irep that encloses +label+ (itself when it is one), nil in a class body or the root.
+  def enclosing_method_label(label)
+    @enclosing_method_label ||= {}
+    return @enclosing_method_label[label] if @enclosing_method_label.key?(label)
+
+    bodies = (@registry_body_labels ||= @registry.each_value.flat_map { |defs| defs.filter_map(&:irep) }.to_set)
+    @parent_label ||= @ireps.each_value.each_with_object({}) do |irep, map|
+      irep.reps.each { |child| map[child.respond_to?(:label) ? child.label : child] = irep.label }
+    end
+    up = label
+    up = @parent_label[up] until up.nil? || bodies.include?(up)
+    @enclosing_method_label[label] = up
   end
 
   def initializer_foreign_reflection?

@@ -9,12 +9,139 @@
 #   scripts/pathb-ssa-qbe.rb FILE.ssa > FILE.qbe      then:  build/qbe/qbe FILE.qbe > FILE.s
 #
 require_relative "pathb-ssa"
-require "base64"
-require "digest"
 
 QbeUnsupported = Class.new(StandardError)
 
 module Qbe
+  # The text helpers below stand where the script used Regexp, Digest, Base64 and format("%a"): the script world has none
+  # of them. Each is the character scan of the pattern named, and pathb-ssa-qbe is fuzzed against the originals.
+  DIGITS = "0123456789"
+  HEX_DIGITS = "0123456789abcdef"
+
+  # /\A\d+\z/
+  def self.all_digits?(s)
+    s = s.to_s
+    !s.empty? && s.each_char.all? { |c| DIGITS.include?(c) }
+  end
+
+  # /\A%\d+\z/
+  def self.reg_name?(s) = s.start_with?("%") && all_digits?(s[1..])
+
+  # /nan/i
+  def self.nan_text?(text) = text.to_s.downcase.include?("nan")
+
+  # The number of significant digits a float literal prints: text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+  def self.sig_digits(text)
+    cut = [text.index("e"), text.index("E")].compact.min
+    mant = (cut ? text[0, cut] : text).delete("-+.")
+    i = 0
+    i += 1 while i < mant.size && mant[i] == "0"
+    mant.size - i
+  end
+
+  # raw.gsub(/\\(.)/, '\1'): a backslash and the character after it become that character (a newline is not matched by .)
+  def self.unescape_backslashes(raw)
+    out = +""
+    i = 0
+    while i < raw.size
+      if raw[i] == "\\" && i + 1 < raw.size && raw[i + 1] != "\n"
+        out << raw[i + 1]
+        i += 2
+      else
+        out << raw[i]
+        i += 1
+      end
+    end
+    out
+  end
+
+  # line.gsub(/@@J(\d+)_(\d+)@@/) { yield target, pred }
+  def self.each_phi_placeholder(line)
+    out = +""
+    i = 0
+    while i < line.size
+      j = line.index("@@J", i)
+      unless j
+        out << line[i..]
+        break
+      end
+      out << line[i, j - i]
+      a = j + 3
+      b = a
+      b += 1 while b < line.size && DIGITS.include?(line[b])
+      c = b + 1
+      d = c
+      d += 1 while d < line.size && DIGITS.include?(line[d])
+      if b > a && line[b] == "_" && d > c && line[d, 2] == "@@"
+        out << yield(line[a, b - a], line[c, d - c])
+        i = d + 2
+      else
+        out << "@"
+        i = j + 1
+      end
+    end
+    out
+  end
+
+  # The hex float C's %a prints for a finite double (Ruby's spelling: 0x1.8p+1, 0x0p+0, a subnormal normalised).
+  def self.hex_float(v)
+    lo, hi = [v].pack("E").unpack("L<L<") # (two halves: unpack1("Q<") is refused above 2**63)
+    sign = hi >> 31 == 1 ? "-" : ""
+    ebits = (hi >> 20) & 0x7ff
+    mant = ((hi & 0xfffff) << 32) | lo
+    return "#{sign}0x0p+0" if ebits.zero? && mant.zero?
+
+    exp = ebits - 1023
+    if ebits.zero? # a subnormal is normalised, as Ruby's %a spells it: shift the leading one up to bit 52
+      n = 0
+      n += 1 while (mant >> n) > 0
+      shift = 53 - n
+      mant = (mant << shift) & 0xfffffffffffff
+      exp = -1022 - shift
+    end
+    lead = 1
+    frac = +""
+    13.times { |k| frac << HEX_DIGITS[(mant >> (48 - 4 * k)) & 15] }
+    n = frac.size
+    n -= 1 while n > 0 && frac[n - 1] == "0"
+    frac = frac[0, n]
+    "#{sign}0x#{lead}#{frac.empty? ? "" : "."}#{frac}p#{exp >= 0 ? "+" : "-"}#{exp.abs}"
+  end
+
+  # Digest::SHA1.hexdigest(str) (FIPS 180-4, 32-bit words held in Integers).
+  def self.sha1_hex(str)
+    m = 0xffffffff
+    rotl = ->(x, n) { ((x << n) | (x >> (32 - n))) & m }
+    msg = str.b.bytes
+    len = msg.size * 8
+    msg << 0x80
+    msg << 0 while msg.size % 64 != 56
+    8.times { |k| msg << ((len >> (56 - 8 * k)) & 0xff) }
+    h = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]
+    (msg.size / 64).times do |block|
+      off = block * 64
+      w = Array.new(80, 0)
+      16.times { |t| w[t] = (msg[off + 4 * t] << 24) | (msg[off + 4 * t + 1] << 16) | (msg[off + 4 * t + 2] << 8) | msg[off + 4 * t + 3] }
+      (16...80).each { |t| w[t] = rotl.call(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1) }
+      a, b, c, d, e = h
+      80.times do |t|
+        if t < 20 then f = (b & c) | ((~b & m) & d); k = 0x5a827999
+        elsif t < 40 then f = b ^ c ^ d; k = 0x6ed9eba1
+        elsif t < 60 then f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc
+        else f = b ^ c ^ d; k = 0xca62c1d6
+        end
+        tmp = (rotl.call(a, 5) + f + e + k + w[t]) & m
+        e = d
+        d = c
+        c = rotl.call(b, 30)
+        b = a
+        a = tmp
+      end
+      h = [(h[0] + a) & m, (h[1] + b) & m, (h[2] + c) & m, (h[3] + d) & m, (h[4] + e) & m]
+    end
+    h.map { |x| format("%08x", x) }.join
+  end
+
   INT_W = %w[bool char signed_char unsigned_char short unsigned_short int unsigned_int].freeze
   INT_L = %w[long long_long unsigned_long unsigned_long_long].freeze
   LOAD = { "bool" => "loadub", "char" => "loadsb", "signed_char" => "loadsb", "unsigned_char" => "loadub",
@@ -128,8 +255,8 @@ module Qbe
   def int_lit(s)
     return s if s.is_a?(Integer)
     raise QbeUnsupported, "not an integer literal: #{s.inspect}" unless s.is_a?(String)
-    return Integer(s, 16) if s.match?(/\A0[xX]/)
-    return -Integer(s[1..], 16) if s.match?(/\A-0[xX]/)
+    return Integer(s, 16) if s.start_with?("0x", "0X")
+    return -Integer(s[1..], 16) if s.start_with?("-0x", "-0X")
 
     Integer(s, 10)
   rescue ArgumentError, TypeError
@@ -142,12 +269,12 @@ module Qbe
   # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
   def half_bits(lit)
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
-    raise QbeUnsupported, "float16 literal #{text}" if text.match?(/nan/i)
+    raise QbeUnsupported, "float16 literal #{text}" if Qbe.nan_text?(text)
 
     v = Float(text)
     raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
 
-    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    sig = Qbe.sig_digits(text)
     sign = text.start_with?("-") ? 0x8000 : 0
     a = v.abs
     return sign if a.zero?
@@ -183,12 +310,12 @@ module Qbe
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
     # NaN is written as text (`(const float NaN)`, the emitter's spelling); its bits are the positive quiet NaN, as
     # float_lit spells it.
-    return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if text.match?(/nan/i)
+    return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if Qbe.nan_text?(text)
 
     v = Float(text)
     raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
 
-    sig = text.sub(/[eE].*/, "").delete("-+.").sub(/\A0+/, "").length
+    sig = Qbe.sig_digits(text)
     if n == 4
       packed = [v].pack("e")
       back = packed.unpack1("e")
@@ -196,7 +323,8 @@ module Qbe
     else
       packed = [v].pack("E")
       back = v
-      bits = packed.unpack1("Q<")
+      lo, hi = packed.unpack("L<L<") # (two halves: unpack1("Q<") is refused above 2**63 by the script world's mruby)
+      bits = (hi << 32) | lo
     end
     same = sig.zero? || format("%.#{[sig - 1, 0].max}e", back.abs) == format("%.#{[sig - 1, 0].max}e", v.abs)
     raise QbeUnsupported, "float literal #{text} is not of its type" unless same
@@ -224,17 +352,21 @@ module Qbe
   # (QBE reads it with scanf). Infinities are written as inf; NaN is not a literal of the subset.
   def float_lit(t, text)
     # NaN is the positive quiet NaN, as the emitter spells it (its sign and payload are not in the IR).
-    return "#{cls(t)}_nan" if text.to_s.match?(/nan/i)
+    return "#{cls(t)}_nan" if Qbe.nan_text?(text)
 
     v = round_float(Float(text.to_s), unqual(t))
     return "#{cls(t)}_nan" if v.nan?
 
-    body = v.infinite? ? (v.positive? ? "inf" : "-inf") : format("%a", v)
+    body = v.infinite? ? (v.positive? ? "inf" : "-inf") : Qbe.hex_float(v)
     "#{cls(t)}_#{body}"
   end
 
   # The QBE symbol of a quoted SSA name: letters, digits, `_` and `.` stay; any other byte is escaped.
-  def symbol(raw) = raw.delete('"').gsub(/[^A-Za-z0-9_.]/) { |c| "_x#{c.ord.to_s(16)}_" }
+  def symbol(raw)
+    raw.delete('"').each_char.map do |c|
+      (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || DIGITS.include?(c) || c == "_" || c == "." ? c : "_x#{c.ord.to_s(16)}_"
+    end.join
+  end
 
   # The data of one global (install_module's rules, emitted as QBE data): zero bytes, integer and pointer scalars, and
   # addresses of other module globals. A global with an extern or thread-local storage class, a float, a bitfield or
@@ -567,7 +699,7 @@ end
     # and gcc's header goes in front of the object (the magic, the description, the pc), as libasan reads it for the report.
     # asan_leave gives the fake frame back, and libasan then poisons it as stack-use-after-return.
     def asan_fake_frame(i, size, total, frame, cls, name)
-      nm = name.delete('"').gsub(/[^A-Za-z0-9_.]/, "_")
+      nm = name.delete('"').chars.map { |c| (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_" || c == "." ? c : "_" }.join
       desc = "__asan_desc.#{@name}.#{i}"
       @asan_data << "data $#{desc} = align 1 { b \"1 #{Qbe::ASAN_RZ} #{size} #{nm.length} #{nm}\", b 0 }"
       @lines << "  %o#{i}rl =l alloc16 #{total}"
@@ -634,7 +766,7 @@ end
     # A (loc FILE LINE) statement: the statements after it in the block are at that location.
     def set_loc(item)
       file = item[1].respond_to?(:raw) ? item[1].raw : item[1].to_s
-      @loc = [file.delete_prefix('"').delete_suffix('"').gsub(/\\(.)/, '\1'), Qbe.int_lit(item[2])]
+      @loc = [Qbe.unescape_backslashes(file.delete_prefix('"').delete_suffix('"')), Qbe.int_lit(item[2])]
       asan_dbgloc
     end
 
@@ -646,7 +778,7 @@ end
       return unless Qbe.asan
 
       file, line = @loc
-      return if line <= 0 || file.empty? || file.match?(/["\\\n]/)
+      return if line <= 0 || file.empty? || (file.include?('"') || file.include?("\\") || file.include?("\n"))
 
       @dbg_file ||= file
       @lines << "  dbgloc #{line}" if file == @dbg_file
@@ -723,7 +855,7 @@ end
         counts = Hash.new(0)
         walk = lambda do |x|
           if x.is_a?(String)
-            counts[x] += 1 if x.match?(/\A%\d+\z/)
+            counts[x] += 1 if Qbe.reg_name?(x)
           elsif x.is_a?(Array)
             x.each { |y| walk.call(y) }
           end
@@ -774,8 +906,8 @@ end
 
     def resolve_phi_predecessors
       @lines.map! do |l|
-        l.gsub(/@@J(\d+)_(\d+)@@/) do
-          key = [Regexp.last_match(1), Regexp.last_match(2)]
+        Qbe.each_phi_placeholder(l) do |target, pred|
+          key = [target, pred]
           "@#{@jumper.fetch(key) { block_label(key[1]) }}"
         end
       end
@@ -947,7 +1079,7 @@ end
       # `(zero-fill N DST)`: clear N bytes at DST (be/nfcxx_ir.c emits it for a zero-initialised object of more than 128
       # stores, as the QBE emitter does: one call of memset).
       when "zero-fill"
-        raise QbeUnsupported, "zero-fill of a register count" unless item[1].is_a?(Integer) || item[1].to_s.match?(/\A\d+\z/)
+        raise QbeUnsupported, "zero-fill of a register count" unless item[1].is_a?(Integer) || Qbe.all_digits?(item[1])
         if item[2].is_a?(String) && item[2].start_with?("%")
           t = @types[item[2]]
           raise QbeUnsupported, "zero-fill of an address with no declared type #{item[2]}" if t.nil?
@@ -1953,6 +2085,9 @@ end
   # runs the template with the operands' registers, and writes the outputs back. ops are {kind:, code:, size:, arg:} in
   # gcc's order (kind: in, out, inout or mem; code: a register letter, a digit for a tied operand, or m). Returns
   # [symbol, assembly text]. Raises QbeUnsupported for a template or an operand outside this helper.
+  # A tied operand's code: a single digit (/\A\d\z/).
+  def self.tied_code?(code) = code.size == 1 && DIGITS.include?(code)
+
   def self.asm_block(hex, ops)
     tpl = [hex].pack("H*")
     regs = Array.new(ops.size)
@@ -1973,13 +2108,13 @@ end
     end
     free = ASM_POOL.reject { |r| used[r] }
     ops.each_with_index do |o, i|
-      next if regs[i] || o[:code].match?(/\A\d\z/)
+      next if regs[i] || tied_code?(o[:code])
       raise QbeUnsupported, "asm: more operands than registers" if free.empty?
 
       regs[i] = free.shift
     end
     ops.each_with_index do |o, i|
-      next unless o[:code].match?(/\A\d\z/)
+      next unless tied_code?(o[:code])
 
       src = o[:code].to_i
       raise QbeUnsupported, "asm: a tied operand names operand #{src}" if src >= ops.size || src == i
@@ -1999,9 +2134,15 @@ end
         i += 2
         next
       end
-      m = tpl[i..].match(/\A%([bwkq]?)(\d+)/)
-      raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" unless m
+      # /\A%([bwkq]?)(\d+)/ at i: letter is the size override, digits the operand, used the characters it covers
+      j = i + 1
+      letter = %w[b w k q].include?(tpl[j]) ? tpl[j] : ""
+      j += letter.size
+      k = j
+      k += 1 while k < tpl.size && DIGITS.include?(tpl[k])
+      raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" if k == j
 
+      m = [tpl[i...k], letter, tpl[j...k]]
       idx = m[2].to_i
       raise QbeUnsupported, "asm template: operand #{idx} of #{ops.size}" if idx >= ops.size
 
@@ -2017,7 +2158,7 @@ end
               end
       i += m[0].size
     end
-    digest = Digest::SHA1.hexdigest("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}")[0, 12]
+    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}")[0, 12]
     sym = "__pathb_asm_#{digest}"
     lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
     ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
@@ -2042,7 +2183,7 @@ end
 
   # The helpers of a module, as marker lines the driver turns into assembly (scripts/pathb-ssa-build's marker_asm).
   def self.asm_text_markers(link)
-    (link[:asm_texts] || {}).values.map { |text| "# pathb-text #{Base64.strict_encode64(text)}" }.join("\n")
+    (link[:asm_texts] || {}).values.map { |text| "# pathb-text #{[text].pack("m0")}" }.join("\n")
   end
 
   def module_il(forms)
@@ -2191,8 +2332,12 @@ end
     data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
-    refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
-                .to_h { |name, f| [name, { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }] }
+    refs = {} # (a loop: Hash#to_h in the script world's mruby ignores its block)
+    flags.each do |name, f|
+      next unless state[name].is_a?(String) || state[name] == :extern
+
+      refs[name] = { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }
+    end
     strs.each do |d|
       name = d[1].raw
       refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
@@ -2300,8 +2445,10 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
       nxt = s[i + 1]
       raise QbeUnsupported, "string escape #{nxt.inspect}" if nxt.nil?
 
-      if nxt =~ /[0-7]/
-        digits = s[i + 1, 3][/\A[0-7]{1,3}/]
+      if "01234567".include?(nxt)
+        n = 1
+        n += 1 while n < 3 && i + 1 + n < s.size && "01234567".include?(s[i + 1 + n])
+        digits = s[i + 1, n]
         out << digits.to_i(8)
         i += 1 + digits.size
       else
@@ -2322,9 +2469,20 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
 end
 
 def main(argv)
-  file = argv.first or abort "usage: pathb-ssa-qbe.rb FILE.ssa"
+  file = argv.first
+  unless file
+    $stderr.write "usage: pathb-ssa-qbe.rb FILE.ssa\n"
+    return 1
+  end
   print Qbe.module_il(read_forms(File.read(file)))
   0
+rescue SystemCallError => e
+  $stderr.write "pathb-ssa-qbe: #{e.message}\n"
+  1
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+# pathb-ssa-build requires this file for its emitter, so the command line runs only as the program.
+if $0 == __FILE__
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

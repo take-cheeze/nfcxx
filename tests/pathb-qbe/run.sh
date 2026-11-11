@@ -36,6 +36,10 @@
 # with EXPECT) is a failure, and the script exits 1. Needs the stage 3 harness: PATHB_CPFE and PATHB_BASE must
 # point at a build made by scripts/setup-pathb.sh (see docs/notes/pathb-stage3.md). Exit 2 when the harness or
 # the QBE binary is missing.
+# The C++ and atomic libraries of the host (macOS has libc++ and no libstdc++, libgcc_s or libatomic).
+if [ "$(uname -s)" = Darwin ]; then cxx_link_libs="-lc++"; atomic_link_lib=""; else cxx_link_libs="-lstdc++ -lgcc_s"; atomic_link_lib="-latomic"; fi
+# Run-time limit for a test program: timeout(1) where the host has it (macOS does not ship it).
+tmo="timeout 10 "; command -v timeout >/dev/null 2>&1 || tmo=""
 cd "$(dirname "$0")/../.."
 root=$PWD
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
@@ -130,11 +134,11 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" "$ldrt" $shim -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" "$ldrt" $shim -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
-  sh -c 'timeout 10 "$0" > "$1" 2> "$2"; exit $?' "$exe" "$tmp/$n.stdout" "$tmp/$n.rt"; got=$?
+  sh -c "${tmo}"'"$0" > "$1" 2> "$2"; exit $?' "$exe" "$tmp/$n.stdout" "$tmp/$n.rt"; got=$?
   ran=$((ran + 1))
   if [ "$mode" = trap ]; then
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
@@ -164,7 +168,7 @@ run_one() {
     return
   fi
   if NFCXX_BACKEND=gcc ./nfcxx $std "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
-    sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/$n.gcc" "$tmp/$n.gcc.stdout"; gcc_rc=$?
+    sh -c "${tmo}"'"$0" > "$1" 2>/dev/null; exit $?' "$tmp/$n.gcc" "$tmp/$n.gcc.stdout"; gcc_rc=$?
   else
     gcc_rc=compile-error
   fi
@@ -225,11 +229,11 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" $shim $rpath "$ldrt" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $shim $rpath "$ldrt" -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))
-  sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$exe" "$tmp/multi_$n.stdout"; got=$?
+  sh -c "${tmo}"'"$0" > "$1" 2>/dev/null; exit $?' "$exe" "$tmp/multi_$n.stdout"; got=$?
   ran=$((ran + 1))
   want=$(for f in "$d"/*.cpp; do expect_of "$f"; done | head -1)
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
@@ -243,7 +247,7 @@ run_multi() {
   fi
   gcc_rc=compile-error
   if NFCXX_BACKEND=gcc ./nfcxx "${srcs[@]}" -o "$tmp/multi_$n.gcc" > /dev/null 2> "$tmp/multi_$n.gccerr"; then
-    sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/multi_$n.gcc" "$tmp/multi_$n.gcc.stdout"; gcc_rc=$?
+    sh -c "${tmo}"'"$0" > "$1" 2>/dev/null; exit $?' "$tmp/multi_$n.gcc" "$tmp/multi_$n.gcc.stdout"; gcc_rc=$?
   fi
   if [ $((got & 255)) -ne $((want & 255)) ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc $gcc_rc)"); return
