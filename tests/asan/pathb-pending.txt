@@ -1,8 +1,6 @@
 # Cases Path B does not detect yet, with the milestone of docs/notes/asan-plan.md that adds them (tests/asan/run.sh skips them
-# with ASAN_BACKEND=pathb, and a case that starts to pass should be removed from this list). Milestone 1 (loads and stores
-# through a computed address, heap blocks) is done.
-stack_overflow         M2 stack redzones (a constant array bound still traps without a report)
-aligned_overflow       M2 stack redzones
+# with ASAN_BACKEND=pathb, and a case that starts to pass should be removed from this list). Milestones 1 (loads and stores
+# through a computed address, heap blocks) and 2 (stack redzones) are done.
 alloca_overflow        M4 alloca
 global_overflow        M3 global redzones (a constant array bound still traps without a report)
 use_after_scope        M6 scope IR forms
