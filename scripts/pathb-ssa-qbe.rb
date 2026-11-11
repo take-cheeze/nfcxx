@@ -45,7 +45,7 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
-    attr_accessor :safe, :module_has_data, :sp_objects, :sp_funcs
+    attr_accessor :safe, :asan, :module_has_data, :sp_objects, :sp_funcs
   end
   # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
   SP_NOPAD = -(1 << 63)
@@ -53,6 +53,8 @@ module Qbe
   # the argument indices, the length being argument 2.
   SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
+  # --asan (NFCXX_PATHB_ASAN=1, docs/notes/asan-plan.md): a call of libasan's check before each access through a computed address.
+  self.asan = false
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
@@ -776,6 +778,7 @@ end
         v = op(item[3])
         a = op(item[2])
         safe_check(item[2], a, Qbe.size(item[1]))
+        asan_check(item[2], a, Qbe.size(item[1]), "store")
         @lines << "  #{Qbe.store_op(item[1])} #{v}, #{a}"
       when "store.v" then volatile_store_lines(item)
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
@@ -794,6 +797,8 @@ end
         n = Qbe.int_lit(item[1])
         safe_check(item[2], dst, n)
         safe_check(item[3], src, n)
+        asan_check(item[3], src, n, "load")
+        asan_check(item[2], dst, n, "store")
         @lines << "  blit #{src}, #{dst}, #{n}"
       # `(zero-fill N DST)`: clear N bytes at DST (be/nfcxx_ir.c emits it for a zero-initialised object of more than 128
       # stores, as the QBE emitter does: one call of memset).
@@ -807,6 +812,7 @@ end
         n = Qbe.int_lit(item[1])
         dst = op(item[2])
         safe_check(item[2], dst, n)
+        asan_check(item[2], dst, n, "store")
         @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
@@ -1013,6 +1019,7 @@ end
         # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
         a = op(rv[2])
         safe_check(rv[2], a, Qbe.size(rv[1]))
+        asan_check(rv[2], a, Qbe.size(rv[1]), "load")
         if unqual(rv[1]) == "bool"
           raw = fresh
           @lines << "  #{raw} =w loadub #{a}"
@@ -1080,6 +1087,7 @@ end
       op_name = Qbe.load_op(rv[1])
       a = op(rv[2])
       safe_check(rv[2], a, Qbe.size(rv[1]))
+      asan_check(rv[2], a, Qbe.size(rv[1]), "load")
       @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
     end
 
@@ -1088,6 +1096,7 @@ end
       a = op(item[2])
       v = op(item[3])
       safe_check(item[2], a, Qbe.size(item[1]))
+      asan_check(item[2], a, Qbe.size(item[1]), "store")
       @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
     end
 
@@ -1098,6 +1107,22 @@ end
       return unless Qbe.safe
       return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
       @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, #{sp_where})"
+    end
+
+    # --asan: before an access of `bytes` bytes at `addr` (the text of the IR operand `x`), a call of libasan's check:
+    # __asan_load1/2/4/8/16 or __asan_store1/2/4/8/16, and __asan_loadN/__asan_storeN(addr, size) for any other size. The
+    # call also keeps QBE from forwarding or merging the access, as a volatile access is kept. A static address (a slot,
+    # a global, an address-of) is not checked: nothing poisons those yet (milestones 2 and 3 of the plan).
+    def asan_check(x, addr, bytes, kind)
+      return unless Qbe.asan
+      return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
+      n = bytes.to_i
+      return if n <= 0
+      if [1, 2, 4, 8, 16].include?(n)
+        @lines << "  call $__asan_#{kind}#{n}(l #{addr})"
+      else
+        @lines << "  call $__asan_#{kind}N(l #{addr}, l #{n})"
+      end
     end
 
     # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
@@ -1158,6 +1183,7 @@ end
       # sign-extends from its own top bit.
       rb = uc == "l" ? 64 : 32
       t = fresh
+      asan_check(rv[3], op(rv[3]), unit, "load")
       @lines << "  #{t} =#{uc} #{Qbe::BF_LOAD[unit]} #{op(rv[3])}"
       if rb - boff - width > 0
         t2 = fresh
@@ -1196,6 +1222,7 @@ end
         v = t2
       end
       old = fresh
+      asan_check(x[3], addr, unit, "store")
       @lines << "  #{old} =#{uc} #{Qbe::BF_LOAD[unit]} #{addr}"
       # The value is cut to the field in the register width: a unit narrower than the register keeps high bits otherwise.
       rb = uc == "l" ? 64 : 32
@@ -1275,6 +1302,11 @@ end
 
     # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
     def bounds_lines(idx, n)
+      # --asan: a variable-length array (a register bound) is a malloc block of its own under -fsanitize=address
+      # (lib/asan/nfcxx_vla_asan.c), so libasan reports an access past its end: the trap would hide that report. A constant
+      # bound still traps until the stack and global redzones (milestones 2 and 3 of docs/notes/asan-plan.md) make libasan report it.
+      return if Qbe.asan && ((n.is_a?(String) && n.start_with?("%")) || expression?(n))
+
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
       # The bound: a typed constant, or a register (a variable-length array's element count) of the index's class, so

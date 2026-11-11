@@ -168,18 +168,20 @@ cproc's (above). The driver:
   and `qbe-cc` link libasan;
 - links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
   (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
-- refuses Path B (`NFCXX_PATH=b` or `--backend=pathb`): its emitter has no instrumentation yet;
+- on an explicit Path B (`NFCXX_PATH=b` or `--backend=pathb`; the default selection still goes to qbe) exports `NFCXX_PATHB_ASAN=1`:
+  the SSA emitter calls libasan's `__asan_load{1,2,4,8,16}`/`__asan_store{...}` (or `__asan_loadN`/`__asan_storeN` with a size)
+  before each access through a computed address, and the link adds `-fsanitize=address` and the VLA runtime (section "Path B");
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
   every other `-fsanitize=...` value is refused (`nfcc` refuses all of them).
 
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B: heap checks only so far (section "Path B"); wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
-- Path B and wasm are not instrumented: the driver refuses Path B, and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
+- Path B is instrumented for loads and stores only (section "Path B"), and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
   no checks (`asan-plan.md`).
 - EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented; its C++ VLA allocator is
   replaced under the flag on hosted links (section "C++ variable-length arrays"). `operator new` ends in `malloc`, which
@@ -214,3 +216,22 @@ cases have the same expected text on both.
 A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
 instrumented (`poly.md`, "Sanitizers and valgrind").
+
+## Path B (explicit only; milestone 1 of `asan-plan.md`)
+
+`nfcxx --backend=pathb -fsanitize=address` (or `NFCXX_PATH=b`) builds with the SSA emitter (`scripts/pathb-ssa-qbe.rb`) and
+`NFCXX_PATHB_ASAN=1` (`pathb-cc` passes `--asan` to `pathb-ssa-build`). Before each load, store, bit-field access, block copy
+and zero-fill through a computed address it emits `call $__asan_load4(l addr)` (or the store, or the `N` form with a size); a
+static address (a slot, a global, an address-of) is not checked. libasan is the runtime, so the report text is gcc's, and the
+call also keeps QBE from forwarding or merging the access. The link adds `-fsanitize=address` and the VLA runtime, for C-only
+programs as well. The default backend with the flag is still qbe; `tests/asan/run.sh` with `ASAN_BACKEND=pathb` is the gate.
+
+Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, and a VLA overflow
+(C++ and C: each VLA is a malloc block of its own under `lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`).
+Not found yet, listed in `tests/asan/pathb-pending.txt` with the milestone that adds them: stack, global and alloca overflows
+(M2 to M4), use after scope (M6), and use after return. Two things differ from the other backends until then:
+
+- Path B's own `(bounds I N)` check still traps on an index outside a *constant* array bound, so an overflow of a stack or
+  global array aborts with no report (and is not silent). A VLA's register bound is not checked under the flag, so its
+  overflow reaches libasan.
+- The report has no source line: the frames carry addresses only.

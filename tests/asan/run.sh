@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # AddressSanitizer (nfcxx -fsanitize=address; docs/notes/asan.md, asan-plan.md). The backend is $ASAN_BACKEND (gcc, the
-# default, or qbe: cproc's checks of every load and store). Path B and other sanitizers are refused.
+# default; qbe: cproc's checks of every load and store; pathb: the SSA emitter's __asan_load/store calls, milestone 1 of the plan,
+# and tests/asan/pathb-pending.txt names the cases the later milestones add). Other sanitizers are refused.
 #
 #   tests/asan/cases/*.cpp  with a `// ASAN: text` line (`// ASAN-QBE: text` replaces it on qbe): the program must be killed by asan (exit 1 from the runtime's
 #                           default abort_on_error=0) and the report on stderr must contain `text`;
@@ -20,8 +21,14 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 for f in tests/asan/cases/*.cpp tests/asan/cases/*.c; do
   n=$(basename "$f"); n=${n%.*}
   want=$(sed -n 's,^// ASAN: *\(.*\),\1,p' "$f" | head -1)
-  # qbe may word the same error differently (its redzones are poisoned by __asan_poison_memory_region)
-  [ "$B" = qbe ] && alt=$(sed -n 's,^// ASAN-QBE: *\([^ ]*\).*,\1,p' "$f" | head -1) && [ -n "$alt" ] && want=$alt
+  # qbe may word the same error differently (its redzones are poisoned by __asan_poison_memory_region); so may Path B
+  # (`// ASAN-PATHB: text`: a C VLA is a heap block there, not a stack object)
+  if [ "$B" != gcc ]; then
+    alt=$(sed -n "s,^// ASAN-$(echo "$B" | tr a-z A-Z): *\([^ ]*\).*,\1,p" "$f" | head -1); [ -z "$alt" ] || want=$alt
+  fi
+  if [ "$B" = pathb ] && why=$(grep -E "^$n +" tests/asan/pathb-pending.txt); then
+    echo "SKIP $n (Path B: ${why#$n })"; skip=$((skip + 1)); continue
+  fi
   opts=$(sed -n 's,^// ASAN-OPTIONS: *\(.*\),\1,p' "$f" | head -1)
   only=$(sed -n 's,^// ASAN-ONLY: *\([a-z]*\).*,\1,p' "$f" | head -1)
   if [ -n "$only" ] && [ "$only" != "$B" ]; then echo "SKIP $n (needs the $only backend)"; skip=$((skip + 1)); continue; fi
@@ -56,14 +63,22 @@ fi
 "$tmp/off" >/dev/null 2>"$tmp/rep"; if ! grep -q Sanitizer "$tmp/rep"; then ok "-fno-sanitize=address"; else bad "-fno-sanitize=address" "still instrumented"; fi
 
 # Backend selection: with no --backend the default (qbe) is instrumented too; a qbe run with --backend=qbe is the same.
-# Path B and other sanitizers are refused.
+# An explicit Path B (--backend=pathb, NFCXX_PATH=b) is instrumented as well. Other sanitizers are refused.
 if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/sw" 2>/dev/null \
    && ! "$tmp/sw" >/dev/null 2>"$tmp/rep" && grep -q AddressSanitizer "$tmp/rep"; then ok "default backend is instrumented"
 else bad "default backend is instrumented" "no report"; fi
-if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address --backend=pathb tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "--backend=pathb refused" "compiled"
-elif grep -q "Path B" "$tmp/err"; then ok "--backend=pathb refused"; else bad "--backend=pathb refused" "$(head -2 "$tmp/err")"; fi
-if NFCXX_PATH=b "$nfcxx" -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "Path B refused" "compiled"
-elif grep -q "Path B" "$tmp/err"; then ok "Path B refused"; else bad "Path B refused" "$(head -2 "$tmp/err")"; fi
+# These two need the Path B harness (scripts/setup-pathb.sh), which only the Path B run has: the gcc and qbe runs skip them.
+if [ "$B" = pathb ]; then
+if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address --backend=pathb tests/asan/cases/heap_overflow.cpp -o "$tmp/x" 2>"$tmp/err" \
+   && ! "$tmp/x" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep"; then ok "--backend=pathb is instrumented"
+else bad "--backend=pathb is instrumented" "$(head -2 "$tmp/err" "$tmp/rep" | tr '\n' ' ')"; fi
+if env -u NFCXX_BACKEND NFCXX_PATH=b "$nfcxx" -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/x" 2>"$tmp/err" \
+   && ! "$tmp/x" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep"; then ok "NFCXX_PATH=b is instrumented"
+else bad "NFCXX_PATH=b is instrumented" "$(head -2 "$tmp/err" "$tmp/rep" | tr '\n' ' ')"; fi
+fi
+# -fsafe-pointers and -fsanitize=address both replace malloc: refused together
+if "$nfcxx" -fsafe-pointers -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsafe-pointers with asan refused" "compiled"
+elif grep -q "replace malloc" "$tmp/err"; then ok "-fsafe-pointers with asan refused"; else bad "-fsafe-pointers with asan refused" "$(head -2 "$tmp/err")"; fi
 if "$nfcxx" -fsanitize=undefined tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsanitize=undefined refused" "compiled"
 elif grep -q "not supported" "$tmp/err"; then ok "-fsanitize=undefined refused"; else bad "-fsanitize=undefined refused" "$(head -2 "$tmp/err")"; fi
 
