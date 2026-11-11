@@ -1,0 +1,16 @@
+(ir-module "sync_entry.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "Ks" 8 8 (leaf 0 l))
+
+(function "__nfcxx_sycl_entry_k0"
+  (ret void)
+  (params)
+  (let %0 (ptr void) (call (ptr void) &"__nfcxx_sycl_closure"))
+  (let %1 (ptr (struct "Ks")) (bitcast (ptr (struct "Ks")) %0))
+  (let %2 (ptr int) (bitcast (ptr int) %1))
+  (let %3 int (call int &"__nfcxx_sycl_gid_x"))
+  (let %4 int (call int &"__nfcxx_sycl_lid_x"))
+  (eval (call void &"__nfcxx_sycl_barrier"))
+  (let %5 int (call int &"__nfcxx_sycl_atomic_add" %2 %4))
+  (let %6 (ptr int) (index %2 %3 4))
+  (store int %6 %5)
+  (return))
