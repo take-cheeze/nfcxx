@@ -29,6 +29,7 @@
 
 require 'prism'
 require_relative 'rite_dump'
+require_relative 'annotations'
 
 module MrbcRb
   class Error < StandardError; end
@@ -134,7 +135,8 @@ module MrbcRb
   # The result of a compilation: +image+ is the RITE binary (what `mrbc -g` writes), +tree+ the irep tree (RiteDump::Irep, the
   # same one RiteDump.parse(image) reads back, with debug info and LVAR) built from the emitter's own data, so the C dumps and
   # the listing need no parse of the image.
-  Result = Struct.new(:image, :tree)
+  # +annotations+ is the class-scope side table (annotations.rb), nil when the producer has none.
+  Result = Struct.new(:image, :tree, :annotations)
 
   # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
   # Compiler switches of the command line (mrbc's `--no-ext-ops` and `--no-optimize`), per thread: +no_ext_ops+ makes a
@@ -551,6 +553,8 @@ module MrbcRb
   end
 
   class Compiler
+    include Annotations::Recorder
+
     def unparen(node) = MrbcRb.unparen(node)
     def simple?(node) = SIMPLE_VALUES.include?(unparen(node).class)
     def call_node?(node) = unparen(node).is_a?(Prism::CallNode)
@@ -685,6 +689,7 @@ module MrbcRb
     # SETUPVAR). +parent+ is the Compiler of the enclosing scope.
     def compile_block(node, parent)
       @parent = parent
+      ann_enter(parent, :block)
       @loops = [BLOCK_LOOP] # the LOOP_BLOCK entry of lambda_body: break, next and return inside a block are its forms
       params = node.parameters
       numbered = 0
@@ -895,6 +900,7 @@ module MrbcRb
       sym = sym_index(node.name)
       child = Compiler.new(@filename, frozen_strings: @frozen_strings)
       child.instance_variable_set(:@zero_end, @zero_nodes&.key?(node)) # the `end` was scanned across the end of the file
+      child.ann_enter(self, :method)
       @children << child.compile_method(node)
       index = @children.size - 1
 
@@ -905,11 +911,14 @@ module MrbcRb
         value_into(recv, t) if recv
         emit(recv ? :SCLASS : :TCLASS, t)
         emit(:METHOD, t + 1, index)
+        ann_def_node(node, index)
         emit(:DEF, t, sym)
       elsif recv
         value_into(recv, t)
+        ann_def_node(node, index)
         emit(:SDEF, t, sym, index)
       else
+        ann_def_node(node, index)
         emit(:TDEF, t, sym, index)
         @nregs = nregs unless last # the result register is only counted when the value is pushed (codegen_def)
       end
@@ -1106,6 +1115,7 @@ module MrbcRb
         check_multiline(node)
       end
       enter(node) # the fork enters every node, also one whose value is unused
+      ann_statement(node)
       case node
       when Prism::LocalVariableWriteNode
         write_local(node, last: last)
@@ -1435,6 +1445,7 @@ module MrbcRb
 
       t = temp
       value_into(obj, t)
+      ann_extra(%i[SCLASS], ann_sclass_facts(node))
       emit(:SCLASS, t)
       class_body(node, t, last)
       t
@@ -1619,6 +1630,7 @@ module MrbcRb
       name = namespace_into(node.constant_path, t)
       # The superclass, when there is one, goes into the register after the namespace (codegen_class).
       superclass ? operand_into(superclass, t + 1) : emit(:LOADNIL, t + 1)
+      ann_extra(%i[CLASS], ann_class_facts(node))
       emit(:CLASS, t, sym_index(name))
       class_body(node, t, last)
       t
@@ -1628,6 +1640,7 @@ module MrbcRb
     def module_statement(node, last:)
       t = temp
       name = namespace_into(node.constant_path, t)
+      ann_extra(%i[MODULE], ann_class_facts(node))
       emit(:MODULE, t, sym_index(name))
       class_body(node, t, last)
       t
@@ -1672,6 +1685,7 @@ module MrbcRb
     def child_body(locals, stmts, val)
       child = Compiler.new(@filename, frozen_strings: @frozen_strings)
       child.instance_variable_set(:@outer_in_method, inside_method?)
+      child.ann_enter(self, :body)
       @children << child.compile_body(locals, stmts, val)
       index = @children.size - 1
       
@@ -2060,6 +2074,7 @@ module MrbcRb
 
         operand_into(parent, a)
       end
+      ann_const_path(node)
       emit(:GETMCNST, a, sym)
       a
     end
@@ -2104,6 +2119,7 @@ module MrbcRb
         end
       end
       @sp = saved
+      ann_const_path(target)
       emit(:SETMCNST, t, sym)
       last ? t : nil
     end
@@ -3307,6 +3323,7 @@ module MrbcRb
     def truncate(start)
       @code.slice!(start..)
       @lines.slice!(start..)
+      ann_truncate(start)
       @insns.pop while @insns.last && @insns.last[2] >= start
       @rewound = true # rewind_pc: the pc is the last instruction's, so no peephole until something is emitted
     end
@@ -3894,6 +3911,7 @@ module MrbcRb
 
     def compile_for(node, parent)
       @parent = parent
+      ann_enter(parent, :for)
       @loops = [BLOCK_LOOP] # LOOP_FOR: break, next and return act as in a block
       set_locals([])
       @sp += 1 # the block parameter
@@ -4417,6 +4435,7 @@ module MrbcRb
       track(operands.first) unless %i[STOP ENTER ALIAS UNDEF].include?(name) # ENTER's operand is an argument spec; ALIAS and UNDEF take symbols
       track(operands[1]) if name == :MOVE
       record_lines(@code.size - start)
+      ann_emit(name, start, operands)
     end
 
     # milestone 13 (wide operands): genop_1/genop_2 prefix EXT1, EXT2 or EXT3 when the first and/or second operand of a B, BB
@@ -5639,7 +5658,7 @@ module MrbcRb
     # The Result of the program just compiled (write_rite ran): the image and the irep tree of the same data.
     public def result
       lv = scopes.any? { |s| !s.lv_names.empty? }
-      MrbcRb::Result.new(@image, tree(lv))
+      MrbcRb::Result.new(@image, tree(lv), ann_result)
     end
 
     # The irep tree (RiteDump::Irep) of this scope and its children, as RiteDump.parse reads it from the image.

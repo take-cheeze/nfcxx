@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_ops'
+require_relative 'class_scope'
 
 # CodeGen: LEXICAL_CONST.
 #
@@ -120,8 +121,14 @@ module LexicalConsts
         label, parent = stack.pop
         next if @scope.key?(label)
 
-        @scope[label] = parent
         irep = @ireps.fetch(label)
+        if irep.class_scope
+          # The emitter's cref chain is exact: no reaching-definition proof of the outer registers.
+          @scope[label] = ClassScope.lexical_scope(irep)
+          irep.reps.each { |child| stack << [child, nil] }
+          next
+        end
+        @scope[label] = parent
         body = {}
         BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).each do |idx, child|
           body[child] = body_scope(irep, idx, BytecodeIR.for(irep).source_at(idx), parent)
@@ -143,15 +150,42 @@ module LexicalConsts
         BytecodeIR.for(irep).each_with_op_in(DEFINITION_SCAN_OPS) do |insn, idx|
           case insn.op
           when :CLASS, :MODULE
-            define(scope, insn.sym, klass: true)
+            ann = irep.class_scope && ClassScope.op_at(irep, insn)
+            # qname: the class's real qualified name (nil when not known); defined: the scope its name is defined in.
+            if ann && ann[:outer] != :lexical
+              # `class A::B` / `class ::B` defines B in A (or Object), not in the lexical scope; dynamic or relative: unknown.
+              qname = ann[:path]
+              if qname
+                parent, _, leaf = qname.rpartition('::')
+                define(parent.empty? ? LexicalConsts::TOP : parent, leaf, klass: true)
+              else
+                @unknown << insn.sym
+              end
+            elsif ann.nil? && scope != :unknown && !all_writers?(irep, idx, reg_number(insn)) { |_j, w| w.op == :LOADNIL }
+              # Dataflow: a `class ::X` (every outer writer OCLASS) defines X at the top level; any other outer is not the
+              # lexical scope, so X's scope is unknown.
+              if all_writers?(irep, idx, reg_number(insn)) { |_j, w| w.op == :OCLASS }
+                qname = insn.sym
+                define(LexicalConsts::TOP, insn.sym, klass: true)
+              else
+                @unknown << insn.sym
+              end
+            else
+              qname = LexicalConsts.qualify(scope, insn.sym) unless scope == :unknown
+              define(scope, insn.sym, klass: true)
+            end
             next unless insn.op == :CLASS && scope != :unknown
 
             # The superclass register is the one after the class's own; only a LOADNIL on every path there is "none"
             # (`class X < (c ? B : nil)` joins a class into it).
-            super_reg = reg_number(insn) + 1
-            unless all_writers?(irep, idx, super_reg) { |_j, w| w.op == :LOADNIL }
-              @explicit_super << LexicalConsts.qualify(scope, insn.sym)
-            end
+            explicit = if ann
+                         ann[:superclass][:kind] != :none
+                       else
+                         !all_writers?(irep, idx, reg_number(insn) + 1) { |_j, w| w.op == :LOADNIL }
+                       end
+            next unless explicit
+
+            qname ? @explicit_super << qname : @mixin_unknown = true
           when :SETCONST
             define(scope, insn.const_name, value: true)
           when :SETMCNST

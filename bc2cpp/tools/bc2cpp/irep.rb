@@ -14,6 +14,7 @@ require_relative 'insn_operands'
 require_relative 'insn_decoder'
 require_relative 'irep_scans'
 require_relative 'irep_cache'
+require_relative 'class_scope'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
@@ -88,6 +89,9 @@ class Irep
   # label => Irep of the whole tree this irep belongs to (set by load_ireps);
   # an ivar, not a member, so Struct#==/hash/inspect never walk the cycle.
   attr_accessor :tree
+
+  # The emitter's class-scope record of this irep (see class_scope.rb), nil when the tree came from mrbc. An ivar, not a member.
+  attr_accessor :class_scope
 
   # Instruction whose address is +addr+, as an index into #instructions.
   def index_of_addr(addr)
@@ -270,7 +274,8 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # `rites` is optional: the irep tree as RiteBinary::RiteIrep records in depth-first pre-order (what RiteBinary.parse(bytes)
 # returns). The emitter hands it over (MrbcRb::Result#ireps) so decode_ireps need not parse the image it just serialized;
 # an image from mrbc (or read from a file) has none and is parsed.
-RiteImage = Struct.new(:bytes, :rites)
+# +annotations+: the emitter's class-scope table (MrbcRb::Annotations), nil for an mrbc-compiled image.
+RiteImage = Struct.new(:bytes, :rites, :annotations)
 
 # The `mrbc` binary is optional. +mrbc+ is the command (MRBC from the environment, else `mrbc` on PATH); it counts only
 # when it names an executable file, so with MRBC unset and no `mrbc` on PATH there is no fallback and the emitter must
@@ -306,7 +311,7 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
       end
       mrbc_rb_log(paths.size, 'emitter', '-', symbol)
       File.binwrite(mrb_path, image)
-      return RiteImage.new(image, rites_from_tree(result.tree))
+      return RiteImage.new(image, rites_from_tree(result.tree), result.annotations)
     end
   end
   unless mrbc
@@ -447,9 +452,10 @@ end
 
 # The whole Irep tree of a RITE image: [ireps (label => Irep), root_label].
 def load_ireps(image, cache: ENV['BC2CPP_IREP_CACHE_DIR'])
-  return decode_ireps(image) if cache.nil? || cache.empty?
-
-  IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+  decoded = cache.nil? || cache.empty? ? decode_ireps(image) : IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+  # Attached after the cache fetch: the cache holds only the decoded tree (see class_scope.rb).
+  ClassScope.attach(decoded[0], decoded[1], image.annotations) if image.respond_to?(:annotations)
+  decoded
 end
 
 def decode_ireps(image)
