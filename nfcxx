@@ -6,7 +6,7 @@
 #              [-o out] [-std=c++NN] file.cpp...
 #   pathb (default on x86-64 Linux, unless ASan, freestanding, modules, cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; also NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
-#                  A program it does not build is built with qbe instead (docs/notes/pathb-default.md).
+#                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
 #   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
@@ -660,7 +660,7 @@ if [ $modules = 1 ]; then
 fi
 
 # The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (ASan, freestanding,
-# modules, cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is built again with qbe, below
+# modules, cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
 if [ -z "$backend" ]; then
@@ -952,10 +952,10 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
          prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
-           # the default backend failed on this file: the object is built again with qbe, which reports its own errors
+           # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
-           echo "nfcxx: Path B did not build $f (status $prc); building with the qbe backend" >&2
-           exec env NFCXX_BACKEND=qbe "$root/nfcxx" "${nfcxx_argv[@]}"
+           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
+           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
          fi ;;
     esac
   done
@@ -975,10 +975,10 @@ if [ $backend = pathb ]; then
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
-           # the whole program is built again with qbe, which reports its own errors if it fails too
-           echo "nfcxx: Path B did not build $f (status $prc); building with the qbe backend" >&2
+           # the whole program is built again with gcc, which reports its own errors if it fails too
+           echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            rm -rf "$ptmp"
-           exec env NFCXX_BACKEND=qbe "$root/nfcxx" "${nfcxx_argv[@]}"
+           exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
          fi
          [ $prc = 0 ] || exit $prc
          pobjs+=("$o") ;;
