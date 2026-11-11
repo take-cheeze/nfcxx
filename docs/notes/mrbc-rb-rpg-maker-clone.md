@@ -36,33 +36,55 @@ output directory name inside `#include` lines); every compile was served by the 
 Flags of `mrbc.c`: `-o<file>`/`-o <file>`, `-S`, `-B<sym>`/`-B <sym>`, `-c`, `-v`, `-g`, `-s`, `-e`/`-E`, `-h`, `--version`,
 `--verbose`, `--copyright`, `--remove-lv`, `--no-ext-ops`, `--no-optimize`, several inputs (one program), `-` for stdin.
 
-Implemented, byte for byte against the fork's mrbc (cli_test.rb: all 736 inputs, every gem's mrblib set, the core mrblib and
-every file of bc2cpp/): `-o`, default output names, `-g`, `--remove-lv`, `-B` (C byte array), `-B -s`, `-B -S` (cdump.c's C
-struct dump, with `-s`, and `--remove-lv`, which cdump ignores as mrbc does), `-g -B`, `-g -B -S` for one input file, `-e`/`-E`.
-Handed to the real mrbc (`MRBC_FALLBACK`), or an error naming the reason without it: `-c`, `-v`, `--verbose`, `--version`,
-`--copyright`, `-h`, `--no-ext-ops`, `--no-optimize`, stdin, a file mrbc cannot open, a syntax error (mrbc words its own), a
-construct the emitter does not cover, and `-g -B -S` of several files.
+Implemented, byte for byte against the fork's mrbc (cli_test.rb: all 737 inputs, every gem's mrblib set, the core mrblib and
+every file of bc2cpp/, 12 flag combinations each): `-o`, default output names, `-g`, `--remove-lv`, `-B` (C byte array),
+`-B -s`, `-B -S` (cdump.c's C struct dump, with `-s`, and `--remove-lv`, which cdump ignores as mrbc does), `-g -B`,
+`-g -B -S` for one or several input files, `-e`/`-E`; and, as text, with the oracle's exit status: `-c` (`<prog>:<first
+input>:Syntax OK`, decided by compiling with the emitter), `--version`, `--copyright` (the fork's text; `MRBC_RB_VERSION`
+replaces the version line), `-h`, an unknown option, a missing input / output file name / `-B` name (usage text and status of
+mrbc.c).
+Handed to the real mrbc (`MRBC_FALLBACK`), or an error naming the reason without it: `-v`, `--verbose` (the C parser's AST
+dump, then the disassembly with the addresses of the irep structs: neither is reproducible from a Prism tree/RITE image
+byte for byte), `--no-ext-ops`, `--no-optimize`, stdin, a syntax error (mrbc words its own) and a construct the emitter
+does not cover.
 
-`-g -S` writes, per irep, the symbol id of the file name, which is the id the name got in the C mrbc's symbol table. For one
-input that is that build's presym count plus one (`MRBC_RB_FILENAME_SYM_BASE`, default 1472 = the fork's mrbc; mruby's own bootstrap
-mrbc has 282: `MRB_PRESYM_MAX` in its `include/mruby/presym/id.h`). For several files it depends on what the parser interned
-between the files. The generated `<name>_init_syms` assigns `filename_sym` from the file name at start-up, so the value is a
-placeholder: `MRBC_RB_LOOSE_FILENAME_SYM=1` numbers the files base+1, base+2, ... (not mrbc's bytes, the same program).
+### The file name symbol ids of `-g -S` (`file_syms.rb`)
+
+`-g -S` writes, per irep, the symbol id of the file name, which is the id the name got in the C mrbc's symbol table. mrbc
+interns the first file name before it parses and every further name in the partial hook (`mrb_parser_set_filename`), which
+the lexer calls when it reaches the end of the previous file; by then the lexer has interned every identifier, constant,
+`@ivar`, `@@cvar`, `$gvar`, label, method name (also a keyword after `.`) and `:sym` of the earlier files (a
+`:"a b"` / `"a b": 1` literal is interned by its parser action; `%i[]` words and `a.b = 1`'s `b=` only in codegen, later).
+So the id of file k is the build's presym count + 1 + the number of distinct symbols interned before it that take a number:
+
+* a presym (`MRB_PRESYM_MAX` of the mrbc build; the set is the table in its `include/mruby/presym/table.h`) keeps its fixed
+  id and takes none: `presym_fork.txt` (the fork's host mrbc, 1472, the default) and `presym_bootstrap.txt` (mruby's own
+  bootstrap mrbc, 282) are embedded; `MRBC_RB_PRESYM=fork|bootstrap|<names file or presym/table.h>` chooses;
+* `symbol.c` packs a name of at most 4 characters of `[_A-Za-z0-9]` into the symbol value itself (`sym_inline_pack`): no
+  number either (that was the missing rule: without it the count was off by the short names).
+
+The token stream comes from `Prism.lex` (identifier tokens correspond to mruby's lexer interns). Checked against the oracle:
+all 10 multi-file gem sets (mruby-io, mruby-lcf, rgss, rpg2k, ...), 76 file sets of golden_test, and hand-made cases for
+string symbols, labels, heredocs, interpolation, numbered parameters, `__END__` (the one known difference: mruby's lexer
+stops at `__END__` for all the files after it).
 
 ## Can mruby's own build use it as `build.mrbcfile`?
 
-Yes, with two conditions. Tried on a copy of rpg-maker-clone's `3rd/mruby` (`gembox 'default'`, `enable_debug`, `enable_test`,
-`conf.mrbcfile = .../bin/mrbc_rb`): the build completes, `bin/mruby` runs, and mruby's test suite (`mrbtest`, 1869 assertions)
-passes except one sandbox network test (UDPSocket). Of the 43 generated `gem_init.c`/mrbtest C files, 42 are identical to the
-build with the C mrbc and `mruby-io` (several files, `-g -S`) differs only in the file name symbol ids.
+Yes. Re-run on a copy of rpg-maker-clone's `3rd/mruby` (`gembox 'default'`, `enable_debug`, `enable_test`,
+`conf.mrbcfile = .../bin/mrbc_rb`, `MRBC_RB_PRESYM=bootstrap`, `MRBC_FALLBACK` = the C build's bootstrap mrbc): the build
+completes and `rake test` (mrbtest) gives the same result as the build with the C mrbc: 1869 assertions, 1866 OK, 0 KO,
+1 Crash (the sandbox's UDPSocket test, the same in the C build), 2 Skip. All 97 generated C files (`gem_init.c`,
+`gem_test.c`, `mrblib.c`, `assert.c`; the two builds in the same directory, as the paths are embedded) are
+**byte-identical** to the C-mrbc build, `mruby-io` included; no `MRBC_RB_LOOSE_FILENAME_SYM`. 122 compiles were served by the
+emitter, 3 (mrbtest's `test/t/*.rb`: an empty interpolated heredoc, a destructuring parameter, a syntax Prism rejects) by
+the fallback; without `MRBC_FALLBACK` those stop the build and name the file.
 
 * The file must exist and be executable at `build.mrbcfile` (it is a prerequisite of every `gem_init.c` and run by popen);
   `bin/mrbc_rb` has a `#!/usr/bin/env ruby` line and needs Ruby with Prism (Ruby 3.4+). `conf.mrbcfile=` (an external mrbc) also
   stops mruby from building its own bootstrap mrbc (`create_mrbc_build`), which is the point; cross builds take the host's.
-* Two environment variables: `MRBC_RB_LOOSE_FILENAME_SYM=1` while `enable_debug` puts `-g` in mrbc's options (the host build of
-  rpg-maker-clone does; the Wio/PSP/Maix cross builds already strip it), and `MRBC_FALLBACK=<C mrbc>` only if something outside
-  the gems' mrblib is compiled: mrbtest's `test/t/*.rb` (the emitter does not cover some constructs there: `a[1] = 2` as an
-  explicit call, `while` as a value, ...). The gems' mrblib and the core mrblib are all covered.
+* `MRBC_RB_PRESYM=bootstrap` only to match the C mrbc's bytes (the id numbers of the file names; the program is the same
+  without it, since the generated `*_init_syms` assigns the names at start-up). The default set is the fork's host mrbc.
+* `MRBC_FALLBACK=<C mrbc>` only if something outside the gems' mrblib is compiled: mrbtest's `test/t/*.rb` (see above).
 
 The build_config change (host build) is in the patch below, opt-in with `MRUBY_MRBC_RB=1`.
 
@@ -74,7 +96,7 @@ The build_config change (host build) is in the patch below, opt-in with `MRUBY_M
   `MRUBY_MRBC_RB=1` the host build's `mrbcfile` is the script, so `task host_mrbc` (it depends on `MRuby.targets['host'].mrbcfile`) no
   longer builds a binary: point it at `exefile("#{build_dir}/bin/mrbc")` of the `mruby-bin-mrbc` gem (still in the host build) if
   the oracle build is wanted.
-* `-g -S` of several files is not byte-identical (placeholders), see above. `-c`, `-v`, `--verbose` need the C mrbc's text.
+* `-v`, `--verbose` (AST dump + disassembly with irep addresses) need the C mrbc.
 
 ## Patch for take-cheeze/rpg-maker-clone (apply with `patch -p1` from its root)
 
@@ -115,7 +137,7 @@ The build_config change (host build) is in the patch below, opt-in with `MRUBY_M
      # bc2cpp.rb analysis (tools/bc2cpp/compiled_gems.rb bc2cpp_compiled_gem_job holds this gem's environment).
 --- a/build_config.rb
 +++ b/build_config.rb
-@@ -649,6 +649,18 @@
+@@ -649,6 +649,17 @@
  
    enable_debug
  
@@ -123,12 +145,11 @@ The build_config change (host build) is in the patch below, opt-in with `MRUBY_M
 +  # array by `mrbc -B<sym> -o- -S [-s] files`) runs nfcxx's mrbc-compatible command instead of the C mrbc, so no mrbc has to be
 +  # built first (`conf.mrbcfile=` makes mruby skip its own `mrbc` bootstrap build). What the emitter does not cover goes to the
 +  # real mrbc named by MRBC_FALLBACK (mrbtest's test/t/*.rb has such files); without MRBC_FALLBACK the build stops and says which.
-+  #  * enable_debug above adds `-g` to mrbc's options, and `-g -S` of several files needs MRBC_RB_LOOSE_FILENAME_SYM=1: the
-+  #    file name symbol ids in the C structs are placeholders (the generated *_init_syms assigns the real ones at start-up).
-+  #  * MRBC_RB_FILENAME_SYM_BASE: the mrbc build's presym count, only to match a C mrbc's bytes (not needed to run).
++  #  * enable_debug above adds `-g` to mrbc's options: `-g -S` of several files is reproduced (file name symbol ids,
++  #    file_syms.rb); MRBC_RB_PRESYM=bootstrap makes them the ones mruby's own bootstrap mrbc would write (only for byte equality).
 +  if ENV['MRUBY_MRBC_RB'] == '1'
 +    conf.mrbcfile = File.expand_path('3rd/nfcxx/bc2cpp/tools/mrbc_rb/bin/mrbc_rb', __dir__)
-+    ENV['MRBC_RB_LOOSE_FILENAME_SYM'] ||= '1'
++    ENV['MRBC_RB_PRESYM'] ||= 'bootstrap'
 +  end
 +
    if cross
