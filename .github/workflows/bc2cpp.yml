@@ -221,7 +221,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/libclang-edg
-          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh') }}
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
 
       - name: Build the AST front end
         if: steps.libclang-edg.outputs.cache-hit != 'true'
