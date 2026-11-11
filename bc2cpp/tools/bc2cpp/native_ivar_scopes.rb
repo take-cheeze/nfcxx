@@ -13,7 +13,8 @@ module NativeIvarScopes
                                    27b968ac91121591b1062306fc7789f8c8a748f1e2203b6544cf21319753f0ab
                                    0fec5fb83a27afe86cc94be51eeca8e93f652274cf1d5e2933c8694489b5ac9a
                                    ef08dd05d4af765093a318ee244170826638c69abcad905c9b8e25f4ade66037
-                                   5b4c16217d5c03fcdc3f2e9049d4320c872a5e6bc648501c034537c850b942ac],
+                                   5b4c16217d5c03fcdc3f2e9049d4320c872a5e6bc648501c034537c850b942ac
+                                   2f0829f38ba8b270051a69fd1b5306ca8971c60309c8dc24811ce92b45b40a12],
     'include/rgss_construct.hxx' => '24a6783a902be749f6c1f7502a2bd2cad073629cecb9ca1b9d586d63f6a8ef83',
     'include/rgss_native_direct.hxx' => 'f12c29d9699d2bd2966711c48d9d1e4568239171d26dc2f7b2438456c140b1b2'
   }.freeze
