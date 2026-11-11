@@ -12,7 +12,13 @@ struct s { float lo, hi; } lim = { -INFINITY, FLT_MAX };
 int main(void) {
   unsigned int b;
   /* one exit code per condition (11..16): a failure on one host (macOS arm64 qbe) then names the global that is wrong */
-  if (!isinf(g_pinf)) return 11;
+  if (!isinf(g_pinf)) {   /* what is in it: 21 the right double infinity (so isinf is what is wrong), 22 zero, 23 a float infinity in either half, 24 other */
+    unsigned long long u; memcpy(&u, &g_pinf, 8);
+    if (u == 0x7ff0000000000000ull) return 21;
+    if (u == 0) return 22;
+    if ((u >> 32) == 0x7f800000u || (u & 0xffffffffu) == 0x7f800000u) return 23;
+    return 24;
+  }
   if (g_pinf < 0) return 12;
   if (!isinf(g_ninf)) return 13;
   if (g_ninf > 0) return 14;
