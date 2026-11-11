@@ -63,7 +63,7 @@ module EscapeReport
         today = TODAY[[irep.label, insn.addr]] || LAMBDA_REGIONS[[irep.label, insn.addr]] || '-'
         rows << ['site', "#{irep.label}:#{i}", owner, origin, insn.op, kind, verdict.escapes? ? 'escapes' : 'confined',
                  verdict.escapes? ? verdict.reason : '-', verdict.uses.count { |u| u.kind == :call }, today,
-                 receiver_classes(analyzer, irep, i, insn)].join("\t")
+                 receiver_classes(analyzer, irep, i, insn), escape_detail(irep, verdict)].join("\t")
         point_rows(rows, irep, i, verdict) if points
         # Only a confined `new` gets an ivars row: creation refuses any `new` whose constructed class is unknown.
         next unless kind == 'object' && !verdict.escapes?
@@ -87,6 +87,17 @@ module EscapeReport
                'initialize', 'self', verdict, '-', 0, '-'].join("\t")
     end
     File.write(path, "#{rows.join("\n")}\n")
+  end
+
+  # The instruction of the first escape, as `op:name` (the call's name for a send, else the op alone), `-` when the
+  # value does not escape. The twelfth column of a `site` row: it says which callee or store keeps the value.
+  def self.escape_detail(irep, verdict)
+    return '-' unless verdict.escapes?
+
+    addr = verdict.reasons.first[1]
+    found = nil
+    BytecodeIR.for(irep).each_source { |insn, _| found ||= insn if insn.addr == addr }
+    found ? [found.op, found.sym].compact.join(':') : '-'
   end
 
   # `point` rows (BC2CPP_ESCAPE_POINTS=1): the registers that may hold the creation's value on entry to each
