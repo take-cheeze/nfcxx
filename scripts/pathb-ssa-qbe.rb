@@ -313,11 +313,14 @@ module Qbe
     return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if Qbe.nan_text?(text)
 
     v = Float(text)
-    raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
+    raise QbeUnsupported, "float literal #{text}" if v.nan?
+    # An infinity (the reader gives +Infinity as 1e999): `double d = INFINITY;`, numeric_limits<double>::infinity() as a
+    # static initializer. It was refused, and a unit with one fell back to gcc.
+    return v.positive? ? (n == 4 ? 0x7f800000 : 0x7ff00000 << 32) : (n == 4 ? 0xff800000 : 0xfff00000 << 32) if v.infinite?
 
     sig = Qbe.sig_digits(text)
     if n == 4
-      packed = [v].pack("e")
+      packed = [to_float32(v)].pack("e")   # FLT_MAX is the literal 3.4028235E38: pack("e") alone would make it an infinity
       back = packed.unpack1("e")
       bits = packed.unpack1("L<")
     else
@@ -389,6 +392,9 @@ module Qbe
   def build_data(g, by_name, state)
     flags = global_flags(g)
     return :extern if flags.include?("extern")
+    # (section "S"), from __attribute__((section("S"))): the data is not placed in a section here, and a table that the
+    # linker delimits with __start_S / __stop_S would be empty, so the global is refused, not put in .data.
+    raise QbeUnsupported, "section attribute #{sx(g.find { |x| head(x) == "section" })}" if flags.include?("section")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -2384,14 +2390,19 @@ end
     end
 # The functions this module defines, and the external functions it takes the address of as a value (not a direct
 # call, which goes through the PLT): each gets one pointer cell, defined once here.
-funcs = forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) }
+funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a list was searched linearly
+forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
 cells = []
+cell_seen = {}
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
     if x.sigil == "&"
       sym = Qbe.symbol(x.raw)
-      cells << sym unless funcs.include?(sym) || cells.include?(sym)
+      unless funcs.key?(sym) || cell_seen.key?(sym)
+        cell_seen[sym] = true
+        cells << sym
+      end
     end
     next
   end

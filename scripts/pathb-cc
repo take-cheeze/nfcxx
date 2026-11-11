@@ -8,6 +8,9 @@
 # The options below are what the nfcxx driver passes; each has an environment variable as a fallback (for scripts and tests that
 # predate the flag), and the flag wins when both are given.
 #   --keep=DIR       (PATHB_KEEP)  keep file.ir, file.ssa and file.s there
+#   --timeout=SEC    (NFCXX_PATHB_TIMEOUT)  a stage (the front end, the SSA route) that runs over SEC seconds (default 300; 0: no limit)
+#                    is stopped with status 124: the driver builds the program with gcc after any status but 0, so a stuck stage must end
+#                    (the front end once looped on a type name over 300 bytes; the largest STL test takes 50 s). Needs timeout(1).
 #   --safe-pointers  (NFCXX_SAFE_POINTERS=1)  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
 #                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
 #   --asan           (NFCXX_PATHB_ASAN=1)  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
@@ -35,6 +38,7 @@ passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
 ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
+timeout_s=${NFCXX_PATHB_TIMEOUT:-300}
 dump_opts=()
 while [ $# -gt 0 ]; do
   case $1 in
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
     --emitter=*) emitter=${1#--emitter=} ;;
     --long-double=trap) ld_trap=1 ;;
     --keep=*) keep=${1#--keep=} ;;
+    --timeout=*) timeout_s=${1#--timeout=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
     -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
@@ -67,8 +72,13 @@ safe=(); [ $safe_on = 0 ] || { safe=(--safe); dump_opts+=(--ir-loc); }
 # The IR's (loc ...) lines give the report its source lines, and its (decl)/(scope-end) facts the use after scope (--ir-scopes).
 asan=(); [ $asan_on = 0 ] || { asan=(--asan); dump_opts+=(--ir-loc --ir-scopes); }
 [ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: --asan and --safe-pointers both replace malloc; use one" >&2; exit 2; }
+tmo() { if [ "$timeout_s" != 0 ] && command -v timeout >/dev/null 2>&1; then timeout -k 5 "$timeout_s" "$@"; else "$@"; fi; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
-else "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
+else
+  frc=0; tmo "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir" || frc=$?
+  [ $frc != 124 ] || echo "pathb-cc: $src: the front end ran over $timeout_s s (--timeout) and was stopped" >&2
+  [ $frc = 0 ] || exit $frc
+fi
 # The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md): inline by default; --ir-opt names others (a
 # comma-separated list), and none or off turns them off. IR over --ir-opt-max bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
 # tests' input) is emitted as it is.
@@ -94,16 +104,17 @@ case $emitter in ssa|mruby) ;; *) echo "pathb-cc: --emitter (NFCXX_PATHB_EMITTER
 rc=0
 [ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: --asan needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
-  if [ $rc != 0 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
+  tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  if [ $rc != 0 ] && [ $rc != 124 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; --emitter=mruby
     # selects that emitter explicitly).
-    echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2
+    if [ $rc = 124 ]; then echo "pathb-cc: $src: SSA route: ran over $timeout_s s (--timeout) and was stopped" >&2
+    else echo "pathb-cc: $src: SSA route: $(head -1 "$tmp/$n.emit")" >&2; fi
     [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
     exit $rc
   fi
