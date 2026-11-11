@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: extended asm templates beyond the fences and barriers are refused
 // X86-ONLY: x86 flag outputs (=@ccCOND, __GCC_ASM_FLAG_OUTPUTS__): the kernel's test_bit and dec_and_test shapes (docs/notes/inline-asm.md)
 static int test_bit(long nr, const unsigned long *addr) {
 	_Bool oldbit;

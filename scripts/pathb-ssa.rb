@@ -831,7 +831,20 @@ def round_float(v, t)
   raise Unsupported, "float type #{sx(t)} in the interpreter" unless float_type?(t)
 
   f = v.to_f
-  t == "float" ? [f].pack("f").unpack1("f") : f
+  t == "float" ? to_float32(f) : f
+end
+
+# The float nearest to the double f (ties to even). pack("f") gives an infinity for any double above FLT_MAX, but IEEE
+# rounds the doubles below FLT_MAX + half an ulp (2**128 - 2**103) down to FLT_MAX: the front end prints FLT_MAX as the
+# float literal 3.4028235E38, which is one of them.
+FLT_MAX_VALUE = 3.4028234663852886e+38
+FLT_OVERFLOW_AT = 3.4028235677973366e+38
+
+def to_float32(f)
+  r = [f].pack("f").unpack1("f")
+  return r unless r.infinite? && !f.infinite? && f.abs < FLT_OVERFLOW_AT
+
+  f.positive? ? FLT_MAX_VALUE : -FLT_MAX_VALUE
 end
 
 # An integer converted to a float is exact up to 2**53. Beyond that, rounding through a double before the float
@@ -1382,6 +1395,52 @@ def float_literal?(s)
   j == n
 end
 
+# Converts the functions of a module (the forms of an IR file) to SSA: the printed forms in order (the other forms
+# unchanged), then the counts of functions seen, converted and promoted slots, and `main`'s structured and SSA forms; nil
+# when a converted function does not verify (the message is on stderr already).
+# live: a Hash of the names a caller keeps ({ "name" => true }): a function outside it is skipped, not converted (its
+# conversion would be dropped afterwards; scripts/pathb-ssa-build's prune). nil converts every function.
+def convert_module(forms, live = nil)
+  install_module(forms)
+  converted = 0
+  functions = 0
+  promoted_total = 0
+  main_fn = nil
+  main_out = nil
+  output = []
+  fi = 0
+  while fi < forms.size
+    form = forms[fi]
+    fi += 1
+    unless head(form) == "function"
+      output << sx(form)
+      next
+    end
+    next if live && !live.key?(form[1].raw.delete('"'))
+
+    functions += 1
+    fn = fn_of(form)
+    begin
+      conv = Converter.new(fn).run
+    rescue Unsupported => e
+      $stderr.write(("pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted") + "\n")
+      output << sx(form)
+      next
+    rescue Fail => e
+      $stderr.write(("pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}") + "\n")
+      return nil
+    end
+    converted += 1
+    promoted_total += conv.promoted.size
+    if fn.name.raw == '"main"'
+      main_fn = fn
+      main_out = conv.out
+    end
+    output << conv.render
+  end
+  [output, functions, converted, promoted_total, main_fn, main_out]
+end
+
 def main(argv)
   mode = :print
   run_args = []
@@ -1401,41 +1460,10 @@ def main(argv)
   end
 
   forms = read_forms(File.read(file))
-  install_module(forms)
-  converted = 0
-  functions = 0
-  promoted_total = 0
-  main_fn = nil
-  main_out = nil
-  output = []
-  fi = 0
-  while fi < forms.size
-    form = forms[fi]
-    fi += 1
-    unless head(form) == "function"
-      output << sx(form)
-      next
-    end
-    functions += 1
-    fn = fn_of(form)
-    begin
-      conv = Converter.new(fn).run
-    rescue Unsupported => e
-      $stderr.write(("pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted") + "\n")
-      output << sx(form)
-      next
-    rescue Fail => e
-      $stderr.write(("pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}") + "\n")
-      return 1
-    end
-    converted += 1
-    promoted_total += conv.promoted.size
-    if fn.name.raw == '"main"'
-      main_fn = fn
-      main_out = conv.out
-    end
-    output << conv.render
-  end
+  result = convert_module(forms)
+  return 1 if result.nil?
+
+  output, functions, converted, promoted_total, main_fn, main_out = result
 
   case mode
   when :check

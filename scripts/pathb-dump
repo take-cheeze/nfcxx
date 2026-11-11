@@ -88,10 +88,14 @@ if [ "$hosted" != 0 ]; then
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
 fi
 
+# The feature-test macros of the host's C library, as the driver's --emit-c branch and the macOS EDG base set them: on
+# Darwin _DARWIN_C_SOURCE (the SDK's stdlib.h declares at_quick_exit and quick_exit only then, and libc++'s <cstdlib>
+# names them), elsewhere _POSIX_SOURCE.
+posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
 # Hosted on macOS: the SDK's libc++ and <cstdlib> need the Darwin feature-test macros (_DARWIN_C_SOURCE; at_quick_exit),
 # clang's feature macros (lib/pathb/clang_macros.h), and an empty features.h first on the include path so that libc++
 # does not take glibc's (lib/pathb/darwin-include). The driver passes the same options (nfcxx, hosted Path B on Darwin).
-posix_def=(-D_POSIX_SOURCE); darwin_opts=()
+darwin_opts=()
 if [ "$hosted" != 0 ] && [ "$(uname -s)" = Darwin ]; then
   posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
   darwin_opts=(--preinclude "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")

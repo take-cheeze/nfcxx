@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: asm goto is refused
 // X86-ONLY: x86 asm goto (thunk label stubs; docs/notes/inline-asm.md): a patchable nop with a jump-table entry, patched at
 // run time into a jmp to its label as the kernel's jump_label code does, conditional jumps to labels, %lN, outputs
 struct static_key { int enabled; };

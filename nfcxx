@@ -979,7 +979,16 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     t=$(trace_start)
     if [ $backend = pathb ]; then
       # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route), not cproc.
-      "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
+      prc=0
+      "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
+      if [ $prc != 0 ]; then
+        # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
+        # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
+        [ $default_backend = 1 ] || exit $prc
+        echo "nfcxx: Path B did not build $c (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
+        rm -rf "$ctmp"
+        exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
+      fi
     elif [ $backend != gcc ]; then
       "$NFCXX_CC" --c-input ${qbecc_flags[@]+"${qbecc_flags[@]}"} -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
@@ -1004,7 +1013,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lm -latomic
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm -latomic
     elif [ $backend != gcc ]; then "$NFCXX_CC" ${qbecc_flags[@]+"${qbecc_flags[@]}"} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput

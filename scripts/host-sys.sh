@@ -47,7 +47,15 @@ host_gnu_version() {
   # EDG's builtin table gates builtins that GCC added in a minor release (GCC 15.2 has the AVX10.2 conversions,
   # which 150000 does not).
   local maj min pat
-  ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) || return 0
+  ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) || ver=
+  if [ -z "$ver" ] && [ "$(host_dialect)" = clang ]; then
+    # Apple clang has no -dumpfullversion (it wants an input file): there is no GNU version to report. The g++-mode
+    # harness (Path B) still needs GNU 15's builtins: __is_reference, __is_convertible, __is_nothrow_convertible,
+    # __is_scoped_enum, __remove_cv and the rest that libc++ (macOS SDK) uses in place of clang's. Those builtins
+    # are gated on gnu_version alone in EDG's table (fe_init.c), so the emulated level is what makes them exist.
+    echo 150000; return 0
+  fi
+  [ -n "$ver" ] || return 0
   IFS=. read -r maj min pat <<< "$ver"
   echo $(( ${maj:-0} * 10000 + ${min:-0} * 100 + ${pat:-0} ))
   return 0
