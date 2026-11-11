@@ -3500,6 +3500,9 @@ def emit_module(text, do_prune = true, ld_trap = false)
        !f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.weakdata[pstr(f[1])] = true
     end
+    if $extern_got && f.drop(5).any? { |p| head_of(p) == "extern" } && !f.drop(5).any? { |p| head_of(p) == "thread" }
+      mod.weakdata[pstr(f[1])] = true   # the GOT route: the same form as a weak extern
+    end
     if f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.thread[pstr(f[1])] = f.drop(5).any? { |p| head_of(p) == "extern" } ? "ext" : "def"
     end
@@ -3559,6 +3562,12 @@ def main(argv)
   end
   if !args.empty? && args[0] == "--long-double=trap"
     ld_trap = true
+    args = args.drop(1)
+  end
+  if !args.empty? && args[0] == "--extern-data-got"
+    # Darwin (pathb-cc): an extern data object (not thread-local) is read through the GOT, `copy extern $x`, as clang does.
+    # An adrp/add pair to its @page is a relocation ld64 cannot resolve for a symbol in a dylib (libc++'s vtables).
+    $extern_got = true
     args = args.drop(1)
   end
   if !args.empty? && args[0] == "--safe"
