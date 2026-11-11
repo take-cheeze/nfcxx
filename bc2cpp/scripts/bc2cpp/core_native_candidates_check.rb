@@ -314,6 +314,35 @@ Dir.mktmpdir('math-diagnostics') do |dir|
               CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('acos'))
 end
 
+# NATIVE_TEXT_STRIPS: the engine's name scan reads native text through the same strips, under the same proofs.
+math_path = '/x/3rd/mruby/mrbgems/mruby-math/src/math.c'
+domain_source = <<~'C'
+  static void domain_error(mrb_state *mrb, const char *func) {
+    struct RClass *math = mrb_module_get_id(mrb, MRB_SYM(Math));
+    struct RClass *domainerror = mrb_class_get_under_id(mrb, math, MRB_SYM(DomainError));
+    mrb_raisef(mrb, domainerror, "Numerical argument is out of domain - %s", func);
+  }
+  static mrb_value math_log(mrb_state *mrb, mrb_value self) { domain_error(mrb, "log"); }
+C
+engine_names = lambda do |path, text, **opts|
+  found = Set.new
+  StaticDispatchRegistrations.native_name_tokens(StaticDispatchRegistrations.strip_native_text(path, text, **opts), found, [])
+  found
+end
+suite.check('engine scan: a verified diagnostic label is no name', !engine_names.call(math_path, domain_source, diagnostic_literals: true).include?('log'))
+suite.check('engine scan: without the literal-lookup proof the label stays', engine_names.call(math_path, domain_source).include?('log'))
+suite.check('engine scan: the same helper outside mruby-math stays', engine_names.call('/x/other.c', domain_source, diagnostic_literals: true).include?('log'))
+suite.check('engine scan: a real lookup of the label still counts',
+            engine_names.call(math_path, domain_source + 'void f(mrb_state *mrb) { mrb_funcall(mrb, v, "log", 0); }', diagnostic_literals: true).include?('log'))
+suite.check('engine scan: a changed helper keeps the label',
+            engine_names.call(math_path, domain_source.sub('mrb_raisef(mrb, domainerror,', 'mrb_funcall(mrb, v, func, 0); mrb_raisef(mrb, domainerror,'),
+                              diagnostic_literals: true).include?('log'))
+enum_source = 'return mrb_funcall_id(mrb, self, MRB_SYM(to_enum), 1, mrb_symbol_value(MRB_SYM(index)));'
+suite.check('engine scan: the to_enum Symbol is no name while no Enumerator is made',
+            !engine_names.call('/x/array.c', enum_source, enumerator_free: -> { true }).include?('index'))
+suite.check('engine scan: it stays without the proof', engine_names.call('/x/array.c', enum_source, enumerator_free: -> { false }).include?('index'))
+suite.check('engine scan: it stays when no proof is asked for', engine_names.call('/x/array.c', enum_source).include?('index'))
+
 Dir.mktmpdir('operator-names') do |dir|
   path = File.join(dir, 'vm.c')
   scan = lambda do |text|

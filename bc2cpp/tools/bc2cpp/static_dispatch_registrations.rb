@@ -608,11 +608,22 @@ module StaticDispatchRegistrations
     dirs << "#{root}/app/" << "#{root}/src/"
   end
 
+  # NATIVE_TEXT_STRIPS (closed only): native text read with the strips CoreNativeCandidates.reachable applies, each under
+  # its own proof: the Symbol a native hands to a `to_enum` that no program ever makes (`enumerator_free`, a callable
+  # giving CoreEnumeratorFree's verdict) and a label only formatted into an exception message (`diagnostic_literals`, set
+  # with the literal-lookup proof) look nothing up.
+  def strip_native_text(path, src, enumerator_free: nil, diagnostic_literals: false)
+    src = CoreNativeCandidates.strip_enumerator_symbols(src, enumerator_free)
+    src = CoreNativeCandidates.strip_diagnostic_literals(src) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
+    src
+  end
+
   # `core`: with closed_only, the closed world's {mrbc:, superclass_of:, struct_owners:} turns on CORE_BYTECODE_TOKENS
   # for the Ruby under 3rd/ (and adds the program-core gems' mrblib, which no other scan reads).
   # `text`: a Set that also receives every token read as text (Ruby read as text, native naming-macro arguments),
   # the only tokens SUFFIX_BASES needs.
-  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil)
+  # `enumerator_free`, `diagnostic_literals`: see strip_native_text.
+  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil, enumerator_free: nil, diagnostic_literals: false)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
     tokens = Set.new
     text ||= Set.new
@@ -640,6 +651,7 @@ module StaticDispatchRegistrations
       src = File.read(path, encoding: 'BINARY')
       found = Set.new
       if closed_only && native.include?(path)
+        src = strip_native_text(path, src, enumerator_free: enumerator_free, diagnostic_literals: diagnostic_literals)
         native_name_tokens(src, found, naming, text_tokens: text)
       else
         src.scan(/[A-Za-z_][A-Za-z0-9_]*[?!=]?/) do |t|
@@ -1214,7 +1226,11 @@ module StaticDispatchRegistrations
     class_owners = superclass_of.keys.to_set
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
     text = Set.new
-    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text)
+    # One Enumerator-freedom proof for the name scan here and the removal of the core entries in core_excluded.
+    @enumerator_free_proof = @core_files_memo = nil
+    enumerator_free = closed_only ? -> { (@enumerator_free_proof ||= engine_enumerator_free(repo_root, mrbc, ireps, engine_tuple, symbol_lookups)).holds } : nil
+    outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text, enumerator_free: enumerator_free,
+                                                diagnostic_literals: !symbol_lookups.nil?)
     dynamic.merge(outside)
     looked_up = literal_sites.keys.to_set
     looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
@@ -1355,7 +1371,12 @@ module StaticDispatchRegistrations
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
   # (LIVE_CORE: a body counts once its name is reachable) and build_registry's tuple.
+  # Compiled once per analysis (analyze resets the memo): the name scan's Enumerator proof and core_excluded both read it.
   def core_files(repo_root, mrbc)
+    (@core_files_memo ||= {})[[repo_root, mrbc]] ||= compile_core_files(repo_root, mrbc)
+  end
+
+  def compile_core_files(repo_root, mrbc)
     third = "#{File.expand_path(repo_root)}/3rd/"
     # CLOSED_LINKED_ONLY: an unlinked gem's mrblib never loads there.
     unlinked = closed_unlinked_dirs(repo_root)
@@ -1488,8 +1509,14 @@ module StaticDispatchRegistrations
     BlockReturns.from_signatures(loaded).reject(&:problem).group_by(&:name)
   end
 
+  def engine_enumerator_free(repo_root, mrbc, ireps, engine_tuple, symbol_lookups)
+    _ruby, native = outside_world_files(repo_root, closed_only: true)
+    enumerator_free_proof(core_files(repo_root, mrbc), ireps, native, NativeOwnerMap.build(native), engine_tuple, symbol_lookups, repo_root)
+  end
+
   # The proof alone, for scripts/bc2cpp/core_enumerator_free_report.rb.
   def enumerator_free_result(repo_root, mrbc)
+    @core_files_memo = nil
     ireps, _registry, _superclass_of, _owners, tuple = closed_world(repo_root, mrbc)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     enumerator_free_proof(core_files(repo_root, mrbc), ireps, native, NativeOwnerMap.build(native), tuple,
