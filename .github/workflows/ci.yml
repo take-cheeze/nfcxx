@@ -437,6 +437,41 @@ jobs:
         if: always()
         run: ccache -s || true
 
+  # Probe (draft): how far Path B gets on macOS arm64. Each step runs on its own, so the first failure does not hide the next.
+  macos-pathb-probe:
+    name: macOS arm64 Path B probe
+    runs-on: macos-15
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Tools
+        run: brew install ccache ninja cmake
+
+      - name: EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: QBE
+        if: always()
+        run: scripts/setup-qbe.sh
+
+      - name: Path B harness
+        if: always()
+        run: scripts/setup-pathb.sh
+
+      - name: Hosted Path B hello (NFCXX_PATH=b)
+        if: always()
+        run: |
+          printf '#include <cstdio>\nint main(){std::printf("pathb macos ok\\n");return 0;}\n' > hello.cpp
+          NFCXX_PATH=b ./nfcxx hello.cpp -o hello && ./hello
+
+      - name: Path B probes (tests/pathb-qbe/run.sh subset)
+        if: always()
+        run: PATHB_QBE_ONLY='cases/(floats|gaps_float|gaps_sort)' tests/pathb-qbe/run.sh --trace off
+
   # The mrustc suite (tests/mrustc/run.sh): Rust programs that mrustc compiles to C, with every crate they link compiled
   # through nfcxx's C pipeline (cproc, QBE). A cache miss builds mrustc and its Rust 1.90 standard library
   # (scripts/setup-mrustc.sh: minutes, and a download of the rustc source). Only mrustc's compiler and the library output
