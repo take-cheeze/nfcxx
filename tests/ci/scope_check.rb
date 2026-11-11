@@ -4,6 +4,7 @@
 require 'tmpdir'
 require 'fileutils'
 require 'rbconfig'
+require 'yaml'
 require_relative '../../scripts/ci-scope'
 
 SCRIPT = File.expand_path('../../scripts/ci-scope.rb', __dir__)
@@ -41,7 +42,7 @@ end
 %w[scripts/pathb-qbe-emit.rb scripts/new-helper be/a.cpp 3rd/edg 3rd/qbe 3rd/cproc
    nfcxx nfcc/driver.c lib/new.c tests/run.sh tests/pathb-ir/a.ir tests/cases/a.cpp
    tests/mruby/a.sh .github/actions/toolchain/action.yml tools/qbe-prep/main.cpp
-   .github/workflows/ci.yml].each do |path|
+   .github/workflows/ci.yml .github/ci-test-matrix.yml].each do |path|
   check.call("Path B dependency: #{path}") do
     CiScope.select('pull_request', [path]) == { 'full_ci' => 'true', 'changed' => 'true' }
   end
@@ -54,6 +55,35 @@ end
 end
 check.call('empty diff keeps both matrices') do
   CiScope.select('pull_request', []) == { 'full_ci' => 'true', 'changed' => 'true' }
+end
+
+# The `test` job's matrix (.github/ci-test-matrix.yml): gcc-only entries exist only where the gcc backend runs.
+matrix = YAML.safe_load_file(CiScope::TEST_MATRIX)
+names = matrix.map { |entry| entry['name'] }
+check.call('matrix entries have a name and a run') { matrix.all? { |entry| entry['name'] && entry['run'] } }
+check.call('matrix names are unique') { names.uniq == names }
+check.call('entries named (gcc backend) are gcc_only') do
+  matrix.all? { |entry| entry['gcc_only'] || !entry['name'].include?('(gcc backend)') }
+end
+check.call('there are gcc-only entries') { matrix.any? { |entry| entry['gcc_only'] } }
+with_gcc = CiScope.test_matrix(matrix, true)
+without = CiScope.test_matrix(matrix, false)
+check.call('with gcc every entry is kept') { with_gcc.map { |entry| entry['name'] } == names }
+check.call('without gcc the gcc-only entries are left out') do
+  without.map { |entry| entry['name'] } == matrix.reject { |entry| entry['gcc_only'] }.map { |entry| entry['name'] }
+end
+check.call('the gcc_only flag is not passed on') { (with_gcc + without).none? { |entry| entry.key?('gcc_only') } }
+check.call('other keys are kept') { with_gcc.zip(matrix).all? { |kept, entry| kept == entry.reject { |key, _| key == 'gcc_only' } } }
+{ 'refs/heads/main' => true, 'refs/pull/7/merge' => false, 'refs/heads/other' => false, '' => true }.each do |ref, want|
+  check.call("gcc backend for GITHUB_REF #{ref.inspect}") { CiScope.gcc?({ 'GITHUB_REF' => ref }) == want }
+end
+check.call('gcc backend when GITHUB_REF is unset (local run)') { CiScope.gcc?({}) }
+workflow = File.read(File.expand_path('../../.github/workflows/ci.yml', __dir__))
+check.call('ci.yml takes the test matrix from the selection step') do
+  workflow.include?('fromJSON(needs.pathb-changes.outputs.test_matrix)') && workflow.include?('test_matrix: ${{ steps.paths.outputs.test_matrix }}')
+end
+check.call('ci.yml has no gcc_only gating (comments aside)') do
+  workflow.lines.reject { |line| line.lstrip.start_with?('#') }.none? { |line| line.include?('gcc_only') }
 end
 
 def outcomes(full, pathb)
@@ -134,7 +164,8 @@ Dir.mktmpdir('ci-scope') do |directory|
     env = { 'BASE' => base, 'GITHUB_EVENT_NAME' => 'pull_request', 'GITHUB_OUTPUT' => output_path }
     _, error, status = Open3.capture3(env, RbConfig.ruby, SCRIPT)
     check.call('selector CLI writes both outputs') do
-      status.success? && error.empty? && File.read(output_path) == "full_ci=true\nchanged=true\n"
+      status.success? && error.empty? && File.read(output_path).lines.first(2) == ["full_ci=true\n", "changed=true\n"] &&
+        File.read(output_path).lines[2].to_s.start_with?('test_matrix=[')
     end
     check.call('missing base fails the diff') do
       begin
