@@ -584,6 +584,10 @@ class CodeGen
     @resumable.flat = true if @resumable
     # REGISTER_FLOW: an ordinary method keeps each instruction's text
     # apart until the whole body exists, so dead copies can be dropped.
+    # STRING_EQ_LITERAL (codegen_string_eq.rb): after every other pass, so no address it glues is claimed twice.
+    string_eq_literal_pass(irep, d, suppressed, glue_at, targets,
+                           ->(addr) { suppressed.include?(addr) || glue_at.key?(addr) || prefix_at.key?(addr) ||
+                                      guarded_inline[:at].key?(addr) || guarded_inline[:after].key?(addr) })
     flow_captured = RegisterFlow.captured_registers(irep) if !@resumable && prefix_at.empty? && RegisterFlow.enabled?
     flow_bodies = flow_captured && Array.new(BytecodeIR.for(irep).size, '')
     flow_labels = flow_captured && Array.new(BytecodeIR.for(irep).size, '')
