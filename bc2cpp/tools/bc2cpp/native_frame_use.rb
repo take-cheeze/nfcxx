@@ -2,9 +2,10 @@
 
 require 'set'
 require_relative 'native_expression_devirt'
+require_relative 'owner_call_direct'
 
 # FRAME_FREE: which registered native methods the fork can call without pushing a frame (mrb_call_direct, vm.c), decided
-# for every native by one property of its C body instead of a list of names.
+# for every native by one property of its C or C++ body instead of a list of names.
 #
 # A native reads the frame it runs in only through a few services. The fork serves the argument readers from the
 # call's own arguments and gives the native its frame on demand (mrb_direct_materialize) when it raises or pushes
@@ -18,7 +19,7 @@ require_relative 'native_expression_devirt'
 #   CI     any other read of the frame                     framed
 #   OPEN   a call through a function pointer               framed
 #
-# The seeds are the named services below. Every other function of the C corpus gets its effects from its own body:
+# The seeds are the named services below. Every other function of the corpus gets its effects from its own body:
 # a reference to the frame (`->ci`, `mrb_callinfo`, `mrb_ci_*`, `cipush`, ...) is CI, and a call adds the effects of
 # the callee, so a new frame-reading API of the fork is framed until it is named here as one of the allowed kinds.
 module NativeFrameUse
@@ -45,15 +46,18 @@ module NativeFrameUse
   POINTER_DECL = /(?<!return)(?<!else)\b[A-Za-z_]\w*[ \t\*]+\(\s*\*\s*(\w+)\s*\)\s*\([^()]*\)(?=\s*[=;,])/
   NOT_CALLS = Set.new(%w[if while for switch return sizeof defined else do case]).freeze
 
-  Def = Struct.new(:name, :path, :body, :signature, keyword_init: true)
+  Def = Struct.new(:name, :path, :body, :signature, :owner, keyword_init: true)
 
   module_function
 
-  # { name => [Def] } for every function defined at the left margin of the C sources (mruby's own style).
+  # { name => [Def] } for every function defined at the left margin of the C sources (mruby's own style), and every
+  # function, member function, constructor and destructor of the C++ sources and headers (cpp_definitions).
   def definitions(paths)
     defs = Hash.new { |h, k| h[k] = [] }
     paths.each do |path|
-      next unless File.file?(path) && path.end_with?('.c')
+      next unless File.file?(path)
+      next cpp_definitions(path, defs) if path.match?(CPP_SOURCE)
+      next unless path.end_with?('.c')
 
       source = NativeExpressionDevirt.read_source(path)
       source.scan(/^(?:[A-Za-z_][\w \t\*]*[ \t\*])?([A-Za-z_]\w*)[ \t]*\([^;{}]*?\)[ \t]*\n?\{/m) do
@@ -70,6 +74,296 @@ module NativeFrameUse
 
   def strip_comments(text)
     text.gsub(%r{/\*.*?\*/|//[^\n]*}m, ' ')
+  end
+
+  # CPP_SOURCE: the C++ sources and every header. Their functions are found by scope (namespaces, classes, templates,
+  # qualified definitions) rather than by mruby's left-margin style, and their bodies are read by own_cpp.
+  CPP_SOURCE = /\.(?:cc|cpp|cxx|h|hh|hpp|hxx|inc)\z/
+  CPP_KEYWORDS = Set.new(%w[if while for switch return sizeof defined else do case catch throw new delete decltype alignof
+                            alignas static_assert noexcept typeid static_cast dynamic_cast const_cast reinterpret_cast
+                            __attribute__ __declspec template typename operator]).freeze
+
+  # The source with comments, the contents of string and character literals and preprocessor lines (with their
+  # continuations) turned into spaces, newlines kept: the same byte offsets, and no brace that is not code.
+  def blank_code(source)
+    out = source.b.dup
+    i = 0
+    n = out.bytesize
+    line_start = true
+    while i < n
+      c = out.getbyte(i)
+      if line_start && c == 0x23 # '#': a directive to the end of its last continued line
+        j = i
+        j += 1 while j < n && !(out.getbyte(j) == 0x0a && out.getbyte(j - 1) != 0x5c)
+        (i...j).each { |k| out.setbyte(k, 0x20) unless out.getbyte(k) == 0x0a }
+        i = j
+        next
+      end
+      if c == 0x2f && out.getbyte(i + 1) == 0x2f
+        j = out.index("\n", i) || n
+        (i...j).each { |k| out.setbyte(k, 0x20) }
+        i = j
+        next
+      elsif c == 0x2f && out.getbyte(i + 1) == 0x2a
+        j = out.index('*/', i + 2)
+        j = j ? j + 2 : n
+        (i...j).each { |k| out.setbyte(k, 0x20) unless out.getbyte(k) == 0x0a }
+        i = j
+        next
+      elsif c == 0x22 && i.positive? && out.getbyte(i - 1) == 0x52 && (m = out.byteslice(i, n - i).match(/\A"([^(\s]*)\(/n))
+        close = out.index(")#{m[1]}\"", i)
+        j = close ? close + m[1].bytesize + 2 : n
+        (i + 1...j - 1).each { |k| out.setbyte(k, 0x20) unless out.getbyte(k) == 0x0a }
+        i = j
+        next
+      elsif c == 0x22 || (c == 0x27 && !(i.positive? && out.byteslice(i - 1, 1).match?(/[0-9A-Fa-f]/n)))
+        j = i + 1
+        while j < n && out.getbyte(j) != c && out.getbyte(j) != 0x0a
+          j += out.getbyte(j) == 0x5c ? 2 : 1
+        end
+        (i + 1...[j, n].min).each { |k| out.setbyte(k, 0x20) }
+        i = j + 1
+        line_start = false
+        next
+      end
+      line_start = c == 0x0a || (line_start && (c == 0x20 || c == 0x09))
+      i += 1
+    end
+    out
+  end
+
+  # { open brace offset => close brace offset } of blanked code.
+  def brace_pairs(code)
+    pairs = {}
+    stack = []
+    code.each_byte.with_index do |c, i|
+      if c == 0x7b then stack << i
+      elsif c == 0x7d && (open = stack.pop) then pairs[open] = i
+      end
+    end
+    pairs
+  end
+
+  # The parenthesised groups at depth 0 of a head, as [open, close] offsets.
+  def paren_groups(head)
+    groups = []
+    depth = 0
+    start = nil
+    head.each_byte.with_index do |c, i|
+      if c == 0x28
+        start = i if depth.zero?
+        depth += 1
+      elsif c == 0x29 && depth.positive?
+        depth -= 1
+        groups << [start, i] if depth.zero?
+      end
+    end
+    groups
+  end
+
+  FUNCTION_TAIL = /\A\s*(?:(?:const|volatile|noexcept(?:\s*\([^()]*\))?|override|final|mutable|&&?|throw\s*\(\s*\))\s*)*
+                   (?:->[^{};]*|:(?!:)[^{};]*)?\s*\z/x
+  FUNCTION_NAME = /((?:[A-Za-z_]\w*\s*(?:<[^<>;{}()]*>)?\s*::\s*)*(?:~\s*[A-Za-z_]\w*|operator\b\s*(?:\(\s*\)|\[\s*\]|[^\w\s(]+|[A-Za-z_][\w\s]*?)|[A-Za-z_]\w*))
+                   \s*(?:<[^<>;{}()]*>)?\s*\z/x
+
+  # A C++ name as a key of the corpus: `operator==` and `~T` are no identifiers a body spells, so they become ones
+  # the class's member list (cpp_definitions) can name.
+  def cpp_key(name)
+    name = name.gsub(/\s+/, '')
+    return "dtor_#{name.delete_prefix('~')}" if name.start_with?('~')
+    return "operator_#{name.delete_prefix('operator').unpack1('H*')}" if name.start_with?('operator') && name !~ /\Aoperator\w/
+
+    name
+  end
+
+  # The head before a brace as [:function, class or nil, name] / [:class, name] / [:scope] / nil (an initializer, an
+  # enum, a lambda at namespace scope: none defines a function by name).
+  def classify_head(head)
+    text = head.gsub(/\b__attribute__\s*\(\(.*?\)\)|\[\[.*?\]\]/m, ' ')
+    text = text.sub(/\A.*\b(?:public|private|protected)\s*:(?!:)/m, '')
+    return [:scope] if text.match?(/\bnamespace\b[\w\s:]*\z/) || text.match?(/\bextern\s*"\s*"\s*\z/)
+    return nil if text.match?(/\benum\b/) && !text.include?('(')
+    if (m = text.match(/\b(?:class|struct|union)\s+(?:alignas\s*\([^()]*\)\s*)?([A-Za-z_]\w*)(?:\s+final)?\s*(?::(?!:)[^(){};]*)?\z/))
+      return [:class, m[1]]
+    end
+    return [:class, nil] if text.match?(/\b(?:struct|union|class)\s*\z/)
+
+    paren_groups(text).each do |open, close|
+      next unless text[close + 1..].match?(FUNCTION_TAIL)
+      next unless (m = text[0...open].match(FUNCTION_NAME))
+      next if text[0...open].match?(/(?:=|\]|\breturn)\s*\z/)
+
+      parts = m[1].gsub(/<[^<>]*>/, '').split('::').map(&:strip)
+      name = parts.last
+      next if CPP_KEYWORDS.include?(name)
+
+      return [:function, parts.size > 1 ? parts[-2] : nil, name]
+    end
+    nil
+  end
+
+  # C++ definitions into `defs`. A class's members are also listed under the class's name as a body that calls them
+  # all, so a body that names the class (a local of that type, a construction, a cast) takes the effects of its
+  # constructors, destructor, operators and methods: the calls C++ makes without spelling them.
+  def cpp_definitions(path, defs)
+    source = NativeExpressionDevirt.read_source(path).b
+    code = blank_code(source)
+    pairs = brace_pairs(code)
+    members = Hash.new { |h, k| h[k] = Set.new }
+    walk = lambda do |from, to, klass|
+      head_start = from
+      i = from
+      while i < to
+        c = code.getbyte(i)
+        if c == 0x3b || c == 0x7d
+          head_start = i + 1
+        elsif c == 0x7b
+          close = pairs[i] || to
+          head = code.byteslice(head_start, i - head_start)
+          kind = classify_head(head)
+          case kind&.first
+          when :scope then walk.call(i + 1, close, klass)
+          when :class then walk.call(i + 1, close, kind[1] || klass)
+          when :function
+            owner = kind[1] || klass
+            key = cpp_key(kind[2])
+            body = source.byteslice(i, close - i + 1).force_encoding(Encoding::UTF_8)
+            signature = source.byteslice(head_start, i - head_start).force_encoding(Encoding::UTF_8)
+            defs[key] << Def.new(name: key, path: path, body: body, signature: signature, owner: owner)
+            members[owner] << key if owner
+            if owner.nil? && key.start_with?('operator_')
+              signature.scan(/\b([A-Z]\w*)\b/).flatten.each { |type| members[type] << key }
+            end
+          end
+          i = close
+          head_start = close + 1
+        end
+        i += 1
+      end
+    end
+    walk.call(0, code.bytesize, nil)
+    members.each do |klass, names|
+      body = "{ #{names.to_a.sort.map { |n| "#{n}();" }.join(' ')} }"
+      defs[klass] << Def.new(name: klass, path: path, body: body, signature: '')
+    end
+  end
+
+  # The code of a source outside its function bodies, as [namespace scope, { class name => its own scope }]: where
+  # the globals and each class's members are declared.
+  def scope_code(path)
+    code = blank_code(NativeExpressionDevirt.read_source(path))
+    pairs = brace_pairs(code)
+    members = Hash.new { |h, k| h[k] = +'' }
+    blank = ->(from, to) { (from...to).each { |k| code.setbyte(k, 0x20) unless code.getbyte(k) == 0x0a } }
+    walk = lambda do |from, to|
+      head_start = from
+      i = from
+      while i < to
+        c = code.getbyte(i)
+        if c == 0x3b || c == 0x7d
+          head_start = i + 1
+        elsif c == 0x7b
+          close = pairs[i] || to
+          kind = classify_head(code.byteslice(head_start, i - head_start))
+          case kind&.first
+          when :function then blank.call(i + 1, close)
+          when :class
+            walk.call(i + 1, close)
+            members[kind[1]] << code.byteslice(i + 1, close - i - 1) << "\n"
+            blank.call(i + 1, close)
+          when :scope then walk.call(i + 1, close)
+          end
+          i = close
+          head_start = close + 1
+        end
+        i += 1
+      end
+    end
+    walk.call(0, code.bytesize)
+    [code.force_encoding(Encoding::UTF_8), members.transform_values { |m| m.force_encoding(Encoding::UTF_8) }]
+  end
+
+  # The function-pointer types of the corpus: `typedef R (*T)(...)` and `using T = R (*)(...)`.
+  def pointer_types(paths)
+    types = Set.new
+    paths.each do |p|
+      next unless File.file?(p) && (p.end_with?('.c') || p.match?(CPP_SOURCE))
+
+      t = strip_comments(NativeExpressionDevirt.read_source(p))
+      t.scan(/\btypedef\b[^;{}]*?\(\s*\*\s*(\w+)\s*\)\s*\(/) { |(n)| types << n }
+      t.scan(/\busing\s+(\w+)\s*=[^;{}]*\(\s*\*\s*\)\s*\(/) { |(n)| types << n }
+    end
+    types
+  end
+
+  # The names `code` declares as something called through a pointer: a function pointer (spelled, or of a pointer
+  # type), a std::function.
+  def callable_decls(code, types, scope: false)
+    names = Set.new
+    # `(*name)(...)`; at scope also `(*name)` alone, once callable_names took the parameter lists out (in a body that
+    # is a dereference).
+    code.scan(scope ? /\(\s*\*\s*(\w+)\s*\)\s*[(;,=\[]/ : /\(\s*\*\s*(\w+)\s*\)\s*\(/) { |(n)| names << n }
+    code.scan(/\bstd::function\s*<[^;{}]*?>\s*(?:const\s*)?&{0,2}\s*([A-Za-z_]\w*)/) { |(n)| names << n }
+    unless types.empty?
+      code.scan(/\b(?:#{types.map { |t| Regexp.escape(t) }.join('|')})\b\s*(?:const\s*)?[&*]?\s*([A-Za-z_]\w*)\s*[;,=)\[]/) { |(n)| names << n }
+    end
+    names - types
+  end
+
+  # CALLABLE: what the corpus declares callable (callable_decls) at namespace scope (globals, named bare) and in a
+  # class or struct (members, called after `->` or `.`, or named bare in a member function of that class), and the
+  # pointer types for the locals and parameters a body declares. A body that names one is OPEN.
+  Callables = Struct.new(:globals, :members, :by_class, :types)
+  NO_CALLABLES = Callables.new(globals: Set.new.freeze, members: Set.new.freeze, by_class: {}.freeze, types: Set.new.freeze).freeze
+
+  def callable_names(paths)
+    types = pointer_types(paths)
+    globals = Set.new
+    members = Set.new
+    by_class = Hash.new { |h, k| h[k] = Set.new }
+    # A prototype's parameters declare nothing: every group but a declarator's `(*name)` goes.
+    params = /\((?!\s*\*)(?:[^()]|\g<0>)*\)/
+    paths.each do |p|
+      next unless File.file?(p) && (p.end_with?('.c') || p.match?(CPP_SOURCE))
+
+      ns, cls = scope_code(p)
+      globals.merge(callable_decls(ns.gsub(params, ' '), types, scope: true))
+      cls.each do |klass, text|
+        names = callable_decls(text.gsub(params, ' '), types, scope: true)
+        members.merge(names)
+        by_class[klass].merge(names) if klass
+      end
+    end
+    Callables.new(globals: globals.freeze, members: members.freeze, by_class: by_class.to_h.freeze, types: types.freeze)
+  end
+
+  # The effects of a C++ body: [kinds, callees]. Every identifier is a callee -- a call, a function named as a value
+  # (a callback, a template argument), a type whose members run implicitly -- so a lambda or functor is read where its
+  # body is written, and a call of a template's callable parameter adds nothing of its own. A member call of a name
+  # the corpus does not define is the standard library's. A name the corpus declares callable (callable_names) is
+  # OPEN, a `catch` or `throw` is CI (it unwinds or stops a raise outside the frame the raise path gives it).
+  def own_cpp(body, callables, signature = '', owner: nil)
+    text = strip_comments(body)
+    code = blank_code(body).force_encoding(Encoding::UTF_8)
+    kinds = Set.new
+    kinds << :CI if code.match?(FRAME_TOKEN) || code.match?(/\b(?:catch|throw)\b/)
+    kinds << :OPEN if code.match?(/\(\s*\*\s*\w+\s*\)\s*\(/)
+    text.scan(/\bmrb_get_args\s*\(\s*\w+\s*,\s*("(?:[^"\\]|\\.)*"|[^,)]+)/) do |(format)|
+      if format.start_with?('"') then kinds << :BLOCK if format.include?('&')
+      else kinds << :CI
+      end
+    end
+    idents = code.scan(/\b[A-Za-z_]\w*\b/).to_set
+    local = callable_decls("#{blank_code(signature).force_encoding(Encoding::UTF_8)} #{code}", callables.types)
+    # Storing into a callable (`g_hook = fn`) calls nothing; every other use of a global or local one may. A member is
+    # called through its object (`p->f(...)`): the same member name is often a plain field of another struct, and a
+    # member passed on is called where it arrives, through a parameter or variable of a pointer type.
+    read = code.gsub(/(?:->|\.)?\s*\b[A-Za-z_]\w*\s*=(?!=)/, ' ')
+    accessed = read.scan(/(?:->|\.)\s*([A-Za-z_]\w*)\s*\(/).flatten.to_set
+    idents_read = read.scan(/\b[A-Za-z_]\w*\b/).to_set
+    kinds << :OPEN if idents_read.intersect?(callables.globals) || idents_read.intersect?(local) ||
+                      accessed.intersect?(callables.members) || (owner && idents_read.intersect?(callables.by_class.fetch(owner, Set.new)))
+    [kinds, idents.reject { |n| CPP_KEYWORDS.include?(n) }.to_set]
   end
 
   # The collector walks every context's frames to mark them; that is not a read of the running frame.
@@ -110,14 +404,14 @@ module NativeFrameUse
 
   # { name => Set of kinds } to a fixpoint. A function of the corpus with several definitions (a static helper of the
   # same name in two files) takes the union.
-  def effects(defs)
+  def effects(defs, callables = NO_CALLABLES)
     direct = {}
     calls = {}
     defs.each do |name, list|
       kinds = Set.new
       callees = Set.new
       list.each do |d|
-        k, c = own(d.body, d.path, d.signature)
+        k, c = d.path.match?(CPP_SOURCE) ? own_cpp(d.body, callables, d.signature, owner: d.owner) : own(d.body, d.path, d.signature)
         kinds.merge(k)
         callees.merge(c)
       end
@@ -170,11 +464,17 @@ module NativeFrameUse
   end
 
   # [[owner class name, method name, function]] of the registrations in `paths` whose function takes no frame.
-  # `corpus` is every C source the closed world links (the library's own included): the effects follow calls across
-  # files. A function the corpus does not define is not frame-free.
-  def rows(paths, corpus)
-    table = effects(definitions(corpus))
+  # `corpus` is every native source the closed world links (the library's own included): the effects follow calls
+  # across files. A function the corpus does not define is not frame-free. `owner_map` (NativeOwnerMap) adds the ROM
+  # tables and the C++ registrations that name their function; a lambda registered in place names none, so it is framed.
+  def rows(paths, corpus, owner_map: nil)
+    table = effects(definitions(corpus), callable_names(corpus))
     out = []
+    if owner_map
+      (owner_map.rom + owner_map.registrations).each do |owner, name, function|
+        out << [owner, name, function] if owner && function && table.key?(function) && frame_free?(table[function])
+      end
+    end
     by_name, = NativeExpressionDevirt.class_registrations(paths)
     by_name.each do |name, registrations|
       registrations.each do |r|
@@ -186,7 +486,7 @@ module NativeFrameUse
       end
     end
     paths.each do |path|
-      next unless File.file?(path) && path.end_with?('.c')
+      next unless File.file?(path) && (path.end_with?('.c') || path.match?(CPP_SOURCE))
 
       plain_defines(path).each { |row| out << row if table.key?(row[2]) && frame_free?(table[row[2]]) }
     end
@@ -211,13 +511,19 @@ module NativeFrameUse
       CPP
     end
 
-    capacity = 1 << (rows.size * 2).bit_length
+    # An owner call's direct row (OwnerCallDirect.native_entries) runs the entry's body through an exported wrapper
+    # that only calls it, so the wrapper is frame-free when its row is; the table lookup never finds it.
+    wrappers = OwnerCallDirect.native_entries.filter_map { |(owner, name), e| e[:entry] if keys.include?("#{owner}##{name}") }.uniq.sort
+    capacity = 1 << ((rows.size + wrappers.size) * 2).bit_length
     table = rows.map { |owner, name| "  { #{c_string(owner)}, #{c_string(name)} }," }.join("\n")
+    wrapper_decls = wrappers.map { |fn| "mrb_value #{fn}(mrb_state* M, mrb_value self);\n" }.join
+    wrapper_adds = wrappers.map { |fn| "  bc2cpp_ff_add(#{fn});\n" }.join
     <<~CPP
       // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame.
       #include <stdint.h>
       #include <string.h>
       extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
+      #{wrapper_decls.chomp}
       struct bc2cpp_ff_row { const char* owner; const char* name; };
       static const bc2cpp_ff_row bc2cpp_ff_rows[] = {
       #{ROWS_BEGIN}
@@ -270,6 +576,7 @@ module NativeFrameUse
           if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
           bc2cpp_ff_add(MRB_METHOD_FUNC(m));
         }
+      #{wrapper_adds.chomp}
       }
       static inline bool bc2cpp_frame_free_p(mrb_state* M, mrb_func_t f) {
         if (bc2cpp_ff_state != M) bc2cpp_ff_build(M);

@@ -1026,9 +1026,8 @@ module StaticDispatchRegistrations
   # the compiled method's function) or when the owner has a computed-name registration (any function could be there).
   def frame_free_names(repo_root, registry)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
-    sources = native.select { |path| path.end_with?('.c') }
     map = NativeOwnerMap.build(native)
-    NativeFrameUse.rows(sources, sources).filter_map do |owner, name, _function|
+    NativeFrameUse.rows(native, native, owner_map: map).filter_map do |owner, name, _function|
       key = "#{owner}##{name}"
       next if map.computed.include?(owner) || Array(registry[name]).any? { |d| d.owner == owner }
 
