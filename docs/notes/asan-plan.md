@@ -1,8 +1,8 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, and the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
-use after return; `asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter.
-Nothing of Path B or wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
+use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestone 1 (heap checks: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
+This note plans the rest of Path B and the wasm emitter. Nothing of wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -54,7 +54,12 @@ Milestones:
    (gcc's), objects over 16-byte alignment, VLA and alloca (the real frame only).
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
-## Path B: emit from `pathb-qbe-emit.rb`
+## Path B: emit from the SSA route (`pathb-ssa-qbe.rb`)
+
+The default emitter is the SSA route, not `pathb-qbe-emit.rb` (the mruby emitter named below, which `NFCXX_PATHB_EMITTER=mruby`
+selects and which has no ASan support). Milestone 1 is in `pathb-ssa-qbe.rb`: `Qbe.asan`, set by `--asan`, and `asan_check`, called
+beside each `safe_check`. The names below are the mruby emitter's; the SSA route's are `load`/`store`/`copy`/`zero-fill`/`bfload`/
+`bfstore` and their volatile forms in `item_lines` (statements) and `let_lines` (loads).
 
 All accesses are explicit IR (`load`, `store`, `bfload`/`bfstore`, `copy`, `zero-fill`); the emitter chokepoints are
 `r_load` (~1455), `s_store` (~1640), `r_bfload`/`s_bfstore` (~1704/1746), `s_copy` (1849, `memmove`), `s_zero_fill`
@@ -62,7 +67,10 @@ All accesses are explicit IR (`load`, `store`, `bfload`/`bfstore`, `copy`, `zero
 interposers. Volatile accesses (`vhelper`, 1445) are the existing "access becomes a call" example.
 
 Milestones:
-1. `NFCXX_PATHB_ASAN=1`: emit `__asan_load/storeN` before `r_load`, `s_store`, bit-field and copy/zero-fill; link libasan. Tests: heap overflow, use after free.
+1. Done: `NFCXX_PATHB_ASAN=1`: `__asan_load/storeN` before each load, store, bit-field, copy and zero-fill; the link adds libasan and the VLA
+   runtime. Tests: `ASAN_BACKEND=pathb tests/asan/run.sh` (heap overflow, use after free, double free, mismatch, leak, vector, VLA
+   overflow; the rest is listed in `tests/asan/pathb-pending.txt`). A VLA's `(bounds ...)` trap is dropped under the flag so libasan
+   reports it; a constant bound still traps until M2 and M3.
 2. Slot redzones: enlarge each address-taken slot to `[rz | obj | rz]` (as the over-aligned slot code ~2529 does), poison in `@start`, unpoison before every `ret` and the `@abort` block. Non-address-taken slots stay promotable and need none.
 3. Global redzones in `emit_global` (2426) with `__asan_register_globals` from a constructor.
 4. setjmp/longjmp EH (EDG's ABI; libasan's longjmp interceptor unpoisons the stack), VLA (EDG lowers to `__vla_alloc` pool calls, seen as malloc blocks) and alloca. Test: copy of `tests/asan/cases/clean.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
