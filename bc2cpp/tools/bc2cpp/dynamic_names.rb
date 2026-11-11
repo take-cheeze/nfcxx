@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'factory_flow'
 require_relative 'core_defs'
+require_relative 'class_scope'
 
 # Method names a computed-name send (`send("#{stem}=", v)`, `method(name)`, ...) could reach
 # although no call site spells them: the proofs that enumerate call sites (ArgTypes,
@@ -240,7 +241,13 @@ module DynamicNames
   end
 
   # Every write of the name argument reaching the send is a LOADSYM: one non-literal arm of a join makes it computed.
+  # The emitter's record of the call as written (ClassScope.call_at) also answers yes for the forms the register dataflow
+  # refuses (a call past 14 arguments packs them into an Array, a splat after the name); anything it does not call a literal
+  # Symbol (`c ? :a : :b`) is left to the dataflow.
   def self.literal_name_argument?(irep, program, idx, insn)
+    call = irep.class_scope && ClassScope.call_at(irep, insn)
+    return true if call && call[:args].first&.fetch(:kind) == :sym
+
     writers = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
               BytecodeIR.reaching_writer_indices(irep, idx, (insn.reg + 1))
     writers && writers.all? { |i| program.instruction_at(i).op == :LOADSYM } || false

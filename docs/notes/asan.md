@@ -3,7 +3,7 @@
 `nfcxx -fsanitize=address x.cpp -o x` builds a program whose memory errors are reported by AddressSanitizer (libasan): heap, stack and global
 buffer overflows, use after free, use after scope, use after return, double free, `new[]`/`delete` mismatch, and
 (LeakSanitizer, on by default in libasan) leaks at exit. The checks are gcc's on the gcc backend and cproc's on qbe
-(the default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
+(the former default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
 from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
 
 ## qbe backend (default)
@@ -168,18 +168,20 @@ cproc's (above). The driver:
   and `qbe-cc` link libasan;
 - links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
   (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
-- refuses Path B (`NFCXX_PATH=b` or `--backend=pathb`): its emitter has no instrumentation yet;
+- on Path B (the default backend, `NFCXX_PATH=b` or `--backend=pathb`) exports `NFCXX_PATHB_ASAN=1`:
+  the SSA emitter calls libasan's `__asan_load{1,2,4,8,16}`/`__asan_store{...}` (or `__asan_loadN`/`__asan_storeN` with a size)
+  before each access through a computed address, and the link adds `-fsanitize=address` and the VLA runtime (section "Path B");
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
   every other `-fsanitize=...` value is refused (`nfcc` refuses all of them).
 
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-combined`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B: heap, stack, global, alloca, use-after-scope and use-after-return checks (section "Path B"); wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
-- Path B and wasm are not instrumented: the driver refuses Path B, and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
+- Path B is instrumented for loads, stores, stack, global and alloca redzones, use after scope and use after return (section "Path B"), and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
   no checks (`asan-plan.md`).
 - EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented; its C++ VLA allocator is
   replaced under the flag on hosted links (section "C++ variable-length arrays"). `operator new` ends in `malloc`, which
@@ -214,3 +216,53 @@ cases have the same expected text on both.
 A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
 instrumented (`poly.md`, "Sanitizers and valgrind").
+
+## Path B (explicit only; milestones 1 to 4 and 6, and use after return)
+
+`nfcxx --backend=pathb -fsanitize=address` (or `NFCXX_PATH=b`) builds with the SSA emitter (`scripts/pathb-ssa-qbe.rb`) and
+`NFCXX_PATHB_ASAN=1` (`pathb-cc` passes `--asan` to `pathb-ssa-build`). Before each load, store, bit-field access, block copy
+and zero-fill through a computed address it emits `call $__asan_load4(l addr)` (or the store, or the `N` form with a size); a
+static address (a slot, a global, an address-of) is not checked. libasan is the runtime, so the report text is gcc's, and the
+call also keeps QBE from forwarding or merging the access. The link adds `-fsanitize=address` and the VLA runtime, for C-only
+programs as well. The default backend with the flag is Path B (falling back to gcc); `tests/asan/run.sh` with `ASAN_BACKEND=pathb` is the gate.
+
+Stack redzones (milestone 2): a slot that stays in memory (an array, a struct, anything whose address is taken; the SSA pass promotes the
+others to registers) is allocated as `[32 bytes | object | 32 bytes]`, the object's size rounded up to the 8-byte shadow granule and its
+alignment kept (over 16, rounded up inside a block with that much spare). Both redzones are poisoned at the function's entry
+(`__asan_poison_memory_region`) and the whole block is unpoisoned before the `ret`, so the report for an overflow is `use-after-poison`, as
+on qbe. A frame left by a throw or longjmp never runs its unpoison; libasan's `longjmp` interceptor clears the dead frame
+(`tests/asan/cases/clean_throw_reuse.cpp` checks a later call that reuses it). Promoted slots (registers) need no redzone.
+
+Global redzones (milestone 3): each global and string literal that is not thread-local is aligned to 8 and padded to a multiple of 8, with 32 bytes
+after it in its own data item; a module constructor (`__nfcxx_asan_gctor`, `.init_array` priority 101, after libasan's start in the
+preinit array) poisons them, so the report is `use-after-poison`, as on qbe. There is no redzone before an object. `(bounds I N)` is not
+checked under the flag: stack, global and VLA arrays have redzones, so libasan reports the access, and, as with gcc's ASan, an
+overflow that stays inside the enclosing object (an array member of a struct) is not reported.
+
+alloca (milestone 4): a block of `[32 | object | 32]` bytes (the size rounded up to 8, 16-aligned) from QBE's `alloc16`, linked by
+`__nfcxx_asan_alloca_mark` (`lib/asan/nfcxx_vla_asan.c`, built with `no_sanitize_address`) into a chain whose head is a slot of the function;
+the record sits in the left redzone. Before the `ret`, `__nfcxx_asan_alloca_release` unpoisons every block of the chain
+(`tests/asan/cases/clean_alloca_reuse.cpp` fails without it: a later frame on the same stack meets the stale redzone). A frame left by a
+longjmp or throw is cleared by libasan's `longjmp` interceptor, as for slots.
+
+Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, stack, global and
+alloca overflows (also of an over-aligned object), use after scope, use after return and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
+`lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`). Not found yet, listed in `tests/asan/pathb-pending.txt` with the
+milestone that adds them: a compound literal's scope (M6b). Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `NFCXX_IR_SCOPES=1` (`pathb-cc` sets it
+with the flag; `pathb-stage2.md`); for a slot in memory the emitter calls `__asan_unpoison_stack_memory` at the `decl` and
+`__asan_poison_stack_memory` at the `scope-end`, with the slot's object (its size rounded up to 8), so a read after the block, a `break`, `continue`
+or `goto` out of it reports `stack-use-after-scope`, as on qbe. A promoted slot has no memory and its facts are dropped. A compound literal and
+other compiler temporaries are not named locals: they get no scope fact (`scope_compound_escape.cpp` is pending).
+
+Use after return: each slot in memory that fits a fake frame (alignment up to 16, a frame up to 64 KiB with its redzones, rounded up to 64) asks libasan's
+fake stack for one at the entry, `__asan_stack_malloc_N(frame)` (0 when `detect_stack_use_after_return` is off or the class is full), with the real frame
+always allocated as well; the base is picked branch-free (qbe's `asanselect`), gcc's header is stored in front of the object (the magic
+`0x41B58AB3`, the description `1 32 SIZE NAMELEN NAME` as a data item, the pc of the function), and each `ret` gives a fake frame back with
+`__asan_stack_free_N(frame, size)` on a branch, after the unpoison of the block, so libasan poisons the frame and a later read reports
+`stack-use-after-return` with `This frame has 1 object(s)`, as on qbe. One fake frame per slot, as qbe; an over-aligned slot, an alloca and a VLA stay in
+the real frame, and a frame left by a throw or longjmp is not given back (false negatives only). The description has the name without a line.
+
+The report names the source line (`in main .../heap_overflow.cpp:5`): `pathb-cc` asks the
+front end for the IR's `(loc FILE LINE)` lines (`NFCXX_IR_LOC=1`), the emitter writes QBE `dbgfile` before each function (the file of its
+first `loc`) and `dbgloc LINE` after each `loc` of that file, and the assembler's `.loc` directives give the object a line table, with or
+without `-g`. A location from another file (an inlined header) is left out.

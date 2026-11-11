@@ -42,7 +42,8 @@
 #                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
 #   NFCXX_CACHE_LOG=FILE: with NFCXX_CACHE, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
-#                  backends instrument the code; Path B is refused. docs/notes/asan.md. -fno-sanitize=address undoes it;
+#                  backends instrument the code; Path B (the default backend) calls libasan's checks before each access
+#                  through a computed address (docs/notes/asan-plan.md); --backend=qbe or gcc selects the others. docs/notes/asan.md. -fno-sanitize=address undoes it;
 #                  other -fsanitize= values are refused.
 #   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
 #                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
@@ -659,7 +660,7 @@ if [ $modules = 1 ]; then
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
-# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (ASan, freestanding,
+# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (freestanding,
 # modules, cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
@@ -667,20 +668,21 @@ if [ -z "$backend" ]; then
   backend=qbe
   # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  if [ $backend_explicit = 0 ] && [ $asan = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
+  if [ $backend_explicit = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
 fi
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
-# branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
+# branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B calls libasan's checks before each access
+# (NFCXX_PATHB_ASAN, set below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
-  [ "${NFCXX_PATH:-}" != b ] && [ "$backend" != pathb ] || { echo "nfcxx: -fsanitize=address does not work with Path B yet; use the gcc or qbe backend (docs/notes/asan-plan.md)" >&2; exit 2; }
   case $backend in
     gcc) ;;
-    qbe) export NFCXX_ASAN=1 ;;
+    qbe) [ "${NFCXX_PATH:-}" = b ] || export NFCXX_ASAN=1 ;;
+    pathb) ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
   asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+${asanopts[@]+"${asanopts[@]}"}})
@@ -840,8 +842,11 @@ if [ $safeptr = 1 ]; then
   export NFCXX_SAFE_POINTERS=1
   backend=pathb
 fi
-[ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
+# NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot build is an error, not a
+# fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
+[ "${NFCXX_PATH:-}" != b ] || { backend=pathb; default_backend=0; }
 [ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
+[ $asan = 0 ] || [ $backend != pathb ] || export NFCXX_PATHB_ASAN=1   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
@@ -935,7 +940,12 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
-    if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
+    if [ $backend = pathb ]; then
+      # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
+      # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
+      cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lm -latomic
+    elif [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -1001,7 +1011,7 @@ if [ $backend = pathb ]; then
     "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$cosmo_elf" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"$cosmo_libc" -lC -lcxx -lc -lcosmo -lm
     "$cosmo_root/bin/fixupobj" "$cosmo_elf" && "$cosmo_root/bin/apelink" -V -1 -l "$cosmo_root/bin/ape-x86_64.elf" -o "$out" "$cosmo_elf"
   else
-  cc ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} -o "$out" ${sprt[@]+"${sprt[@]}"} ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   fi
   trace_end "$t" "link" pathb
   exit 0

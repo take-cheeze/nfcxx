@@ -1,0 +1,5 @@
+# Cases Path B does not detect yet, with the milestone of docs/notes/asan-plan.md that adds them (tests/asan/run.sh skips them
+# with ASAN_BACKEND=pathb, and a case that starts to pass should be removed from this list). Milestones 1 (loads and stores
+# through a computed address, heap blocks), 2 (stack redzones) and 3 (global redzones) and 4 (alloca) and 6 (use after scope) are done, and use after return.
+scope_compound_escape M6b a compound literal is a compiler temporary of the block: the front end gives no scope fact for it
+vla_loop_return        n/a: it checks a stack VLA's redzones are addressable after the return; a Path B C VLA is a heap block (redzones stay poisoned)

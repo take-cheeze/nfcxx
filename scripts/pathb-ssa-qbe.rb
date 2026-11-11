@@ -172,17 +172,23 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
-    attr_accessor :safe, :module_has_data, :sp_objects, :sp_funcs
+    attr_accessor :safe, :asan, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
+  # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
+  # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
+  ASAN_RZ = 32
   # The size of a frame object that QBE lays out with no padding byte after it (pathb-qbe-emit.rb's SP_NOPAD).
   SP_NOPAD = -(1 << 63)
   # The library's block functions whose pointer arguments are range-checked at a call (pathb-qbe-emit.rb's SP_MEMFN):
   # the argument indices, the length being argument 2.
   SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
+  # --asan (NFCXX_PATHB_ASAN=1, docs/notes/asan-plan.md): a call of libasan's check before each access through a computed address.
+  self.asan = false
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
+  self.asan_objects = []   # --asan, milestone 3: [symbol, size rounded up to 8] of each global with a redzone after it
 
   module_function
 
@@ -462,6 +468,14 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
+    if Qbe.asan && !flags.include?("thread")
+      # --asan (milestone 3): a redzone after the object, in its own data item. The object is aligned to 8 (the shadow granule) and
+      # padded to a multiple of 8, so the redzone starts on a granule; asan_constructor poisons it at startup.
+      align = [align, 8].max
+      osz = (size + 7) & ~7
+      parts << "z #{osz - size + Qbe::ASAN_RZ}"
+      Qbe.asan_objects << [symbol(g[1].raw), osz]
+    end
     if Qbe.safe && !flags.include?("thread")
       parts << "z 1"   # padding: see the safe-pointers section of docs/notes/safe-pointers.md
       Qbe.sp_objects << [symbol(g[1].raw), size]
@@ -474,7 +488,7 @@ module Qbe
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
   # is %o<i>, allocated on the stack at entry.
   class Fn
-    attr_reader :lines
+    attr_reader :lines, :dbg_file, :asan_data
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
     def initialize(form, globals = {}, abi = {}, link = {})
@@ -500,6 +514,13 @@ module Qbe
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
       @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
+      @asan_alloca = false   # --asan: the function has an alloca, so it keeps the head of its chain in the slot %aah
+      @asan_data = []  # --asan: the data items of the fake frames' descriptions (function_text writes them before the function)
+      @asan_fakes = [] # --asan, use after return: [fake frame temporary, its size, its class] of each slot that has one
+      @asan_ssz = {}   # --asan: the slot's name ($"x") => its exact size, for the elision of checks
+      @asan_known = {} # --asan: a register => [slot name, byte offset] when it holds a constant offset into a slot's own object
+      @asan_osz = {}   # --asan: the slot's temporary (%oN) => its size rounded up to 8, for the scope facts
+      @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
 
     def emit
@@ -600,6 +621,11 @@ module Qbe
         size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
+        if Qbe.asan
+          @asan_ssz["$#{s[1].raw}"] = size
+          asan_slot(i, [size, 1].max, align, s[1].raw)
+          next
+        end
         # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
         pad = Qbe.safe ? 1 : 0
         @sp_objs << ["%o#{i}", size] if Qbe.safe
@@ -616,7 +642,112 @@ end
       unless @sp_objs.empty?
         @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
       end
+      if Qbe.asan && @blocks.any? { |b| b[2..].any? { |it| head(it) == "let" && it[3].is_a?(Array) && head(it[3]) == "alloca" } }
+        @asan_alloca = true
+        @lines << "  %aah =l alloc8 8"
+        @lines << "  storel 0, %aah"
+      end
+      asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+    end
+
+    # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
+    # the left redzone before it, so an object of up to 16 stays aligned; a larger alignment is rounded up inside a block
+    # with that much spare). Its size is rounded up to 8, the shadow granule, so the right redzone starts on a granule.
+    def asan_slot(i, size, align, name = '""')
+      rz = Qbe::ASAN_RZ
+      osz = (size + 7) & ~7
+      total = rz + osz + rz
+      if align > 16
+        @lines << "  %o#{i}r =l alloc16 #{total + align}"
+        @lines << "  %o#{i}q =l add %o#{i}r, #{rz + align - 1}"
+        @lines << "  %o#{i} =l and %o#{i}q, #{-align}"
+        @lines << "  %o#{i}l =l sub %o#{i}, #{rz}"
+      else
+        frame = (total + 63) & ~63
+        cls = (0..10).find { |c| (64 << c) >= frame }
+        if cls
+          asan_fake_frame(i, size, total, frame, cls, name)
+        else
+          @lines << "  %o#{i}l =l alloc16 #{total}"
+        end
+        @lines << "  %o#{i} =l add %o#{i}l, #{rz}"
+      end
+      @asan_objs << [i, "%o#{i}l", osz]
+      @asan_osz["%o#{i}"] = osz
+    end
+
+    # --asan, milestone 6 (use after scope): (decl $"x" val|ref) unpoisons the local's object, (scope-end $"x") poisons it, with
+    # libasan's stack-memory calls, so a read after the scope reports stack-use-after-scope (the front end prints the facts under
+    # NFCXX_IR_SCOPES=1). Only a slot in memory has an object; the facts of a promoted slot never get here (pathb-ssa.rb).
+    def asan_scope(item, entering)
+      return unless Qbe.asan
+
+      ref = item[1]
+      return unless ref.is_a?(Ref) && ref.sigil == "$"
+
+      tmp = @slot["$#{ref.raw}"]
+      osz = tmp && @asan_osz[tmp]
+      return unless osz
+
+      @lines << "  call $__asan_#{entering ? 'unpoison' : 'poison'}_stack_memory(l #{tmp}, l #{osz})"
+    end
+
+    # --asan, milestone 7 (use after return): the slot's frame is libasan's fake frame when it can give one (the runtime keeps a fake
+    # stack per thread; __asan_stack_malloc_N(frame) returns 0 when detect_stack_use_after_return is off or the class is full), else
+    # the real frame, which is always allocated too (qbe's asanalloc, docs/notes/asan.md): the base is picked branch-free,
+    # and gcc's header goes in front of the object (the magic, the description, the pc), as libasan reads it for the report.
+    # asan_leave gives the fake frame back, and libasan then poisons it as stack-use-after-return.
+    def asan_fake_frame(i, size, total, frame, cls, name)
+      nm = name.delete('"').chars.map { |c| (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_" || c == "." ? c : "_" }.join
+      desc = "__asan_desc.#{@name}.#{i}"
+      @asan_data << "data $#{desc} = align 1 { b \"1 #{Qbe::ASAN_RZ} #{size} #{nm.length} #{nm}\", b 0 }"
+      @lines << "  %o#{i}rl =l alloc16 #{total}"
+      @lines << "  %o#{i}f =l call $__asan_stack_malloc_#{cls}(l #{frame})"
+      @lines << "  %o#{i}n =l sub 0, %o#{i}f"
+      @lines << "  %o#{i}m0 =l or %o#{i}f, %o#{i}n"
+      @lines << "  %o#{i}m =l sar %o#{i}m0, 63"
+      @lines << "  %o#{i}x0 =l xor %o#{i}rl, %o#{i}f"
+      @lines << "  %o#{i}x =l and %o#{i}x0, %o#{i}m"
+      @lines << "  %o#{i}l =l xor %o#{i}rl, %o#{i}x"
+      @lines << "  storel #{0x41B58AB3}, %o#{i}l"
+      @lines << "  %o#{i}h8 =l add %o#{i}l, 8"
+      @lines << "  storel $#{desc}, %o#{i}h8"
+      @lines << "  %o#{i}h16 =l add %o#{i}l, 16"
+      @lines << "  storel $#{@name}, %o#{i}h16"
+      @asan_fakes << ["%o#{i}f", frame, cls]
+    end
+
+    # --asan: poison both redzones of every slot (after all the allocations, at the function's entry).
+    def asan_poison
+      @asan_objs.each do |i, left, osz|
+        @lines << "  call $__asan_poison_memory_region(l #{left}, l #{Qbe::ASAN_RZ})"
+        @lines << "  %o#{i}e =l add %o#{i}, #{osz}"
+        @lines << "  call $__asan_poison_memory_region(l %o#{i}e, l #{Qbe::ASAN_RZ})"
+      end
+    end
+
+    # --asan: before a return, the whole of each slot's block is addressable again, for the next frame on this stack.
+    def asan_leave
+      if @asan_alloca
+        h = fresh
+        @lines << "  #{h} =l loadl %aah"
+        @lines << "  call $__nfcxx_asan_alloca_release(l #{h})"
+      end
+      @asan_objs.each do |_i, left, osz|
+        @lines << "  call $__asan_unpoison_memory_region(l #{left}, l #{osz + 2 * Qbe::ASAN_RZ})"
+      end
+      # Each fake frame is given back on a branch (libasan's free reads the frame, so it is not called with 0).
+      @asan_fakes.each do |fake, frame, cls|
+        @temps += 1
+        fr = "afr#{@temps}"
+        nx = "afn#{@temps}"
+        @lines << "  jnz #{fake}, @#{fr}, @#{nx}"
+        @lines << "@#{fr}"
+        @lines << "  call $__asan_stack_free_#{cls}(l #{fake}, l #{frame})"
+        @lines << "@#{nx}"
+        @label = nx
+      end
     end
 
     def note_type(item)
@@ -636,6 +767,21 @@ end
     def set_loc(item)
       file = item[1].respond_to?(:raw) ? item[1].raw : item[1].to_s
       @loc = [Qbe.unescape_backslashes(file.delete_prefix('"').delete_suffix('"')), Qbe.int_lit(item[2])]
+      asan_dbgloc
+    end
+
+    # --asan: the source line of an access, for libasan's report. QBE's `dbgfile` is a top-level directive that applies to the
+    # functions after it, so a function takes the file of its first (loc ...) (module_il writes the `dbgfile` before it), and
+    # a `dbgloc LINE` follows each (loc ...) of that file (a location from another file, an inlined header, is left out).
+    # The assembler turns them into .file and .loc, so the object has a line table whether or not -g was given.
+    def asan_dbgloc
+      return unless Qbe.asan
+
+      file, line = @loc
+      return if line <= 0 || file.empty? || (file.include?('"') || file.include?("\\") || file.include?("\n"))
+
+      @dbg_file ||= file
+      @lines << "  dbgloc #{line}" if file == @dbg_file
     end
 
     # (asm-block "HEX" (opnd KIND "CODE" SIZE ARG)...): a general x86 template (be/nfcxx_ir.c). The operand block holds eight
@@ -908,6 +1054,7 @@ end
         v = op(item[3])
         a = op(item[2])
         safe_check(item[2], a, Qbe.size(item[1]))
+        asan_check(item[2], a, Qbe.size(item[1]), "store")
         @lines << "  #{Qbe.store_op(item[1])} #{v}, #{a}"
       when "store.v" then volatile_store_lines(item)
       # `(copy N DST SRC)`: N bytes from SRC to DST (the interpreter's copy_cells). QBE's blit copies a byte count.
@@ -926,6 +1073,8 @@ end
         n = Qbe.int_lit(item[1])
         safe_check(item[2], dst, n)
         safe_check(item[3], src, n)
+        asan_check(item[3], src, n, "load")
+        asan_check(item[2], dst, n, "store")
         @lines << "  blit #{src}, #{dst}, #{n}"
       # `(zero-fill N DST)`: clear N bytes at DST (be/nfcxx_ir.c emits it for a zero-initialised object of more than 128
       # stores, as the QBE emitter does: one call of memset).
@@ -939,6 +1088,7 @@ end
         n = Qbe.int_lit(item[1])
         dst = op(item[2])
         safe_check(item[2], dst, n)
+        asan_check(item[2], dst, n, "store")
         @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
@@ -968,6 +1118,7 @@ end
         jump_to(item[3])
         @lines << "  jnz #{cond}, @#{block_label(item[2])}, @#{block_label(item[3])}"
       when "ret"
+        asan_leave
         # --safe: the frame is released before the return (pathb-qbe-emit.rb's SP_LEAVE, with the first object).
         @lines << "  call $__nfcxx_sp_leave(l #{@sp_objs.first[0]})" if Qbe.safe && !@sp_objs.empty?
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
@@ -978,6 +1129,8 @@ end
         end
       when "unreachable", "trap" then @lines << "  hlt"
       when "loc" then set_loc(item)
+      when "decl" then asan_scope(item, true)
+      when "scope-end" then asan_scope(item, false)
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
@@ -1048,6 +1201,9 @@ end
 
     def let_lines(r, t, rv)
       dst = reg(r)
+      if Qbe.asan && %w[offset bitcast].include?(head(rv)) && (k = asan_slot_addr(rv))
+        @asan_known[r] = k
+      end
       c = Qbe.cls(t)
       case head(rv)
       when "wadd", "wsub", "wmul"
@@ -1145,6 +1301,7 @@ end
         # A bool object holding another byte is read as true, and a load yields 0 or 1 (EDG's model): normalise the byte.
         a = op(rv[2])
         safe_check(rv[2], a, Qbe.size(rv[1]))
+        asan_check(rv[2], a, Qbe.size(rv[1]), "load")
         if unqual(rv[1]) == "bool"
           raw = fresh
           @lines << "  #{raw} =w loadub #{a}"
@@ -1198,6 +1355,21 @@ end
         @lines << "  #{wide} =l extuw #{size}"
         size = wide
       end
+      if Qbe.asan
+        # --asan (milestone 4): [32 | object | 32], the object's size rounded up to 8, linked into the frame's chain
+        # (lib/asan/nfcxx_vla_asan.c) that asan_leave releases before the return.
+        up = fresh
+        osz = fresh
+        total = fresh
+        blk = fresh
+        @lines << "  #{up} =l add #{size}, 7"
+        @lines << "  #{osz} =l and #{up}, -8"
+        @lines << "  #{total} =l add #{osz}, #{2 * Qbe::ASAN_RZ}"
+        @lines << "  #{blk} =l alloc16 #{total}"
+        @lines << "  call $__nfcxx_asan_alloca_mark(l #{blk}, l #{osz}, l %aah)"
+        @lines << "  #{dst} =l add #{blk}, #{Qbe::ASAN_RZ}"
+        return
+      end
       @lines << "  #{dst} =l alloc16 #{size}"
     end
 
@@ -1212,6 +1384,7 @@ end
       op_name = Qbe.load_op(rv[1])
       a = op(rv[2])
       safe_check(rv[2], a, Qbe.size(rv[1]))
+      asan_check(rv[2], a, Qbe.size(rv[1]), "load")
       @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
     end
 
@@ -1220,6 +1393,7 @@ end
       a = op(item[2])
       v = op(item[3])
       safe_check(item[2], a, Qbe.size(item[1]))
+      asan_check(item[2], a, Qbe.size(item[1]), "store")
       @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
     end
 
@@ -1230,6 +1404,47 @@ end
       return unless Qbe.safe
       return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
       @lines << "  call $__nfcxx_sp_check(l #{addr}, l #{bytes}, #{sp_where})"
+    end
+
+    # --asan: before an access of `bytes` bytes at `addr` (the text of the IR operand `x`), a call of libasan's check:
+    # __asan_load1/2/4/8/16 or __asan_store1/2/4/8/16, and __asan_loadN/__asan_storeN(addr, size) for any other size. The
+    # call also keeps QBE from forwarding or merging the access, as a volatile access is kept. A static address (a slot,
+    # a global, an address-of) is not checked: nothing poisons those yet (milestones 2 and 3 of the plan).
+    # --asan: [slot name, offset] when the address operand `x` is a constant offset into a slot's own object (the slot, or
+    # (offset X C) and (bitcast T X) of one, or a register holding one), else nil.
+    def asan_slot_addr(x)
+      case x
+      when Ref then x.sigil == "$" && @asan_ssz.key?("$#{x.raw}") ? ["$#{x.raw}", 0] : nil
+      when String then @asan_known[x]
+      when Array
+        case head(x)
+        when "bitcast" then asan_slot_addr(x[2])
+        when "offset"
+          b = asan_slot_addr(x[1])
+          c = (Qbe.int_lit(x[2]) rescue nil)
+          b && c ? [b[0], b[1] + c] : nil
+        end
+      end
+    end
+
+    # --asan: a check is not needed for an access that stays inside a local's own object through its own address: the slot's
+    # redzones and its poison are for pointers that reach it from elsewhere. (A fixed offset in bounds cannot overflow.)
+    def asan_known_inbounds?(x, bytes)
+      k = asan_slot_addr(x)
+      k && k[1] >= 0 && k[1] + bytes <= @asan_ssz[k[0]]
+    end
+
+    def asan_check(x, addr, bytes, kind)
+      return unless Qbe.asan
+      return if x.is_a?(Ref) || (x.is_a?(Array) && head(x) == "addr")
+      n = bytes.to_i
+      return if n <= 0
+      return if asan_known_inbounds?(x, n)
+      if [1, 2, 4, 8, 16].include?(n)
+        @lines << "  call $__asan_#{kind}#{n}(l #{addr})"
+      else
+        @lines << "  call $__asan_#{kind}N(l #{addr}, l #{n})"
+      end
     end
 
     # The unqualified type: const and volatile are access qualifiers, not part of the value's class.
@@ -1290,6 +1505,7 @@ end
       # sign-extends from its own top bit.
       rb = uc == "l" ? 64 : 32
       t = fresh
+      asan_check(rv[3], op(rv[3]), unit, "load")
       @lines << "  #{t} =#{uc} #{Qbe::BF_LOAD[unit]} #{op(rv[3])}"
       if rb - boff - width > 0
         t2 = fresh
@@ -1328,6 +1544,7 @@ end
         v = t2
       end
       old = fresh
+      asan_check(x[3], addr, unit, "store")
       @lines << "  #{old} =#{uc} #{Qbe::BF_LOAD[unit]} #{addr}"
       # The value is cut to the field in the register width: a unit narrower than the register keeps high bits otherwise.
       rb = uc == "l" ? 64 : 32
@@ -1407,6 +1624,12 @@ end
 
     # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
     def bounds_lines(idx, n)
+      # --asan: no trap. A variable-length array is a malloc block of its own under -fsanitize=address
+      # (lib/asan/nfcxx_vla_asan.c), and stack and global arrays have redzones (milestones 2 and 3 of docs/notes/asan-plan.md), so
+      # libasan reports an access past the end, and the trap would hide that report. As with gcc's ASan, an overflow that stays
+      # inside the enclosing object (an array member of a struct) is not reported.
+      return if Qbe.asan
+
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
       # The bound: a typed constant, or a register (a variable-length array's element count) of the index's class, so
@@ -1967,7 +2190,7 @@ end
     ctx = module_context(forms)
     emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (ctx[:data] + helpers + emitted.map { |fn| fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
+    (ctx[:data] + helpers + emitted.map { |fn| (fn.dbg_file ? "dbgfile #{fn.dbg_file.inspect}\n\n" : "") + fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
   end
 
   # The part of a module that every function shares: the data of its globals and the references a function may make
@@ -2073,6 +2296,7 @@ end
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
     self.sp_objects = []
+    self.asan_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
@@ -2105,6 +2329,7 @@ end
     data = type_decls + string_decls + global_decls
     data << volatile_helpers if uses_volatile?(forms)
     data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
+    data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = {} # (a loop: Hash#to_h in the script world's mruby ignores its block)
@@ -2160,6 +2385,16 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
     out << "# pathb-startup .init_array 101 __nfcxx_sp_gctor"
   end
 
+  # --asan: the constructor that poisons the redzone after each global and string of the module (milestone 3 of
+  # docs/notes/asan-plan.md; at priority 101 as the safe-pointers one is, after libasan's own start in the preinit array).
+  def asan_constructor
+    calls = Qbe.asan_objects.each_with_index.flat_map do |(sym, osz), i|
+      ["\t%g#{i} =l add $#{sym}, #{osz}", "\tcall $__asan_poison_memory_region(l %g#{i}, l #{Qbe::ASAN_RZ})"]
+    end
+    ["function $__nfcxx_asan_gctor() {\n@start\n#{calls.join("\n")}\n\tret\n}",
+     "# pathb-startup .init_array 101 __nfcxx_asan_gctor"]
+  end
+
   # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
   # emitter writes them, pathb-qbe-emit.rb's emit_string). Only a char array is emitted.
   def string_data(d)
@@ -2179,6 +2414,13 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
 
     bytes = raw + [0] * (total - raw.size)
     parts = bytes.map { |b| "b #{b}" }
+    if Qbe.asan
+      # --asan: a redzone after the string, as after a global (see build_data).
+      elem = 8 if elem < 8
+      osz = (total + 7) & ~7
+      parts << "z #{osz - total + Qbe::ASAN_RZ}"
+      Qbe.asan_objects << [symbol(name), osz]
+    end
     if Qbe.safe
       parts << "z 1"   # padding; the string is registered with the safe-pointers constructor
       Qbe.sp_objects << [symbol(name), total]
@@ -2221,7 +2463,8 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
   def function_text(ctx, fn_form)
     fn = Fn.new(fn_form, ctx[:refs], ctx[:abi], ctx[:link]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
-    (helpers + [fn.lines.join("\n")]).join("\n\n")
+    dbg = fn.dbg_file ? ["dbgfile #{fn.dbg_file.inspect}"] : []   # --asan: the function's source file (see Fn#asan_dbgloc)
+    (helpers + fn.asan_data + dbg + [fn.lines.join("\n")]).join("\n\n")
   end
 end
 

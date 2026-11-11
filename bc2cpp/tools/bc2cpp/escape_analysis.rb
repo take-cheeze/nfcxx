@@ -538,10 +538,14 @@ module EscapeAnalysis
       @ireps.each_value do |irep|
         BytecodeIR::Tree.child_labels(irep, CLOSURE_OPS).each { |_, label| closure_bodies << label }
       end
+      # A reflective send is a candidate until the scan has seen every definition: it is reflective only when its name
+      # can resolve (reflective_name_defined?), else it raises NoMethodError and reads nothing.
+      send_candidates = []
       @ireps.each_value do |irep|
         EscapeAnalysis.op_sites(irep, SCANNED_OP_LIST).each do |insn, idx|
-          if (BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)) ||
-             (CONST_READS.include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name))
+          if BytecodeIR::Ops::SEND.include?(insn.op) && REFLECTIVE_SENDS.include?(insn.sym)
+            send_candidates << [irep.label, idx, insn.sym]
+          elsif CONST_READS.include?(insn.op) && REFLECTIVE_CONSTS.include?(insn.const_name)
             @reflective_sites << [irep.label, idx]
           end
           if DEF_OPS.include?(insn.op) && insn.sym
@@ -554,6 +558,18 @@ module EscapeAnalysis
           end
         end
       end
+      send_candidates.each do |label, idx, name|
+        @reflective_sites << [label, idx] if reflective_name_defined?(name)
+      end
+    end
+
+    # Can a send of +name+ reach a native definition, the only kind that reads a caller's frame by name? A Ruby method
+    # named eval reads nothing (a reflective send inside it is counted at its own site), and a computed alias_method
+    # only copies a method that exists. The closed-world build leaves out the gems that define eval and binding
+    # (BC2CPP_OPEN_WORLD_GEMS), so no native registers them there and such a send is a plain NoMethodError. nil native
+    # names (no audit) admit every name.
+    def reflective_name_defined?(name)
+      native_name?(name)
     end
 
     # The registry owns a def by its lexical class; one inside a block (Class.new { def ... }) lands on

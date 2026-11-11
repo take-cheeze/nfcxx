@@ -12,11 +12,39 @@ require 'rbconfig'
 require_relative 'mrbc_rb'
 require_relative 'rite_dump'
 require_relative 'file_syms'
+require_relative 'golden_data'
 
 oracle = ENV.fetch('MRBC', nil)
 unless oracle && File.executable?(oracle)
-  puts 'SKIP: set MRBC to the fork mrbc to run the CLI check'
-  exit 0
+  # No oracle: the command's `-g -o-` output (the RITE image every other format is cut from) against the snapshot, for the
+  # single files of bc2cpp/ and the gem sets of a world checkout, through bin/mrbc_rb itself. The other output formats need MRBC.
+  require 'open3'
+  require_relative 'snapshot'
+  cli = File.expand_path('bin/mrbc_rb', __dir__)
+  if (problem = MrbcRb::Snapshot.world_pin_problem)
+    puts problem
+    exit 1
+  end
+  bad = ok = missing = 0
+  MrbcRb::Snapshot.each_input.each do |label, sources|
+    next if sources.any? { |_, p| !File.file?(p) } # snippets and groups are golden_test.rb's
+
+    # as the oracle is run: from the world root with the world-relative names (see Snapshot.relative)
+    rel, world = MrbcRb::Snapshot.relative(sources)
+    opts = world ? { chdir: world } : {}
+    out, _e, st = Open3.capture3(RbConfig.ruby, cli, '-g', '-o-', *rel.map(&:last), binmode: true, **opts)
+    next unless st.success?
+
+    begin
+      MrbcRb::Snapshot.check(sources, out) == :ok ? ok += 1 : (bad += 1; puts "DIFFERS #{label}")
+    rescue MrbcRb::Snapshot::NotInSnapshot
+      missing += 1
+      puts "MISSING #{label}"
+    end
+  end
+  puts "cli_test (snapshot, no MRBC): #{ok} match, #{bad} differ, #{missing} missing"
+  puts 'cli_test: nothing was checked (set BC2CPP_RPG_DIR to a world checkout, or MRBC to the oracle)' if ok.zero?
+  exit(bad.zero? && missing.zero? && !ok.zero? ? 0 : 1)
 end
 
 CLI = File.expand_path('bin/mrbc_rb', __dir__)
@@ -83,8 +111,8 @@ puts "dump functions: #{inputs.size - skipped} inputs (#{skipped} not covered by
 checked.each { |flags, n| puts "  #{flags}: #{n} identical" }
 
 # The command itself.
-def run_cli(env, *args)
-  Open3.capture3(env, RbConfig.ruby, CLI, *args, binmode: true)
+def run_cli(env, *args, stdin: '')
+  Open3.capture3(env, RbConfig.ruby, CLI, *args, binmode: true, stdin_data: stdin)
 end
 
 Dir.mktmpdir('mrbc_rb_cli') do |dir|
@@ -109,6 +137,50 @@ Dir.mktmpdir('mrbc_rb_cli') do |dir|
     end
   end
 
+  # --no-optimize, --no-ext-ops and standard input ("-"): the same bytes as mrbc, with no fallback.
+  ops = File.join(dir, 'ops.rb')
+  File.write(ops, "x = 1\na = [1, 2]\na[0] = x + 2\na[1] += 3\nfoo(-x, a[0], x == 1, !x)\ny = x\nputs \"\#{y}\" if y\nz = [:a, :b]\n")
+  wide = File.join(dir, 'wide.rb')
+  File.write(wide, (0...300).map { |i| "m#{i}\n" }.join) # 300 symbols: an operand past 255 takes an OP_EXT prefix
+  [[%w[--no-optimize -o-], [a]], [%w[-g --no-optimize -o-], [ops, b]], [%w[--no-optimize -Bsym -S -o-], [ops]], [%w[--no-ext-ops -o-], [a]],
+   [%w[--no-ext-ops --no-optimize -g -o-], [ops]]].each do |flags, files|
+    exp, _e, st = Open3.capture3(oracle, *flags, *files, binmode: true)
+    got, err, gst = run_cli({ 'MRBC_FALLBACK' => nil }, *flags, *files)
+    ok = st.success? && gst.success? && got == exp
+    puts ok ? "ok   cli #{flags.join(' ')} #{files.size} file(s)" : "FAIL cli #{flags.join(' ')}: #{err[0, 120]}"
+    failures += 1 unless ok
+  end
+  # --no-ext-ops with an operand that needs OP_EXT: mrbc fails; the emitter refuses and the fallback reports it
+  exp, eerr, est = Open3.capture3(oracle, '--no-ext-ops', '-o-', wide, binmode: true)
+  _o, err, gst = run_cli({ 'MRBC_FALLBACK' => nil }, '--no-ext-ops', '-o-', wide)
+  got, gerr, gst2 = run_cli({ 'MRBC_FALLBACK' => oracle }, '--no-ext-ops', '-o-', wide)
+  ok = !est.success? && !gst.success? && err.include?('MRBC_FALLBACK') && gst2.exitstatus == est.exitstatus && got == exp && gerr == eerr
+  puts ok ? 'ok   cli --no-ext-ops with a wide operand: the real mrbc reports the error' : "FAIL cli --no-ext-ops wide: #{err[0, 100]} #{gerr[0, 100]}"
+  failures += 1 unless ok
+  exp, _e, = Open3.capture3(oracle, '-o-', wide, binmode: true)
+  got, err, gst = run_cli({ 'MRBC_FALLBACK' => nil }, '-o-', wide)
+  ok = gst.success? && got == exp
+  puts ok ? 'ok   cli: wide operands without --no-ext-ops' : "FAIL cli wide: #{err[0, 100]}"
+  failures += 1 unless ok
+  # standard input: `mrbc -` writes to standard output by default; `- other.rb` reads stdin first
+  [[%w[-], [], ops], [%w[-g -o-], ['-'], ops], [%w[-g -o-], ['-', a], ops], [%w[-c], ['-'], ops], [%w[-Bsym -o-], ['-'], ops]].each do |flags, files, prog|
+    exp, _e, st = Open3.capture3(oracle, *flags, *files, binmode: true, stdin_data: File.binread(prog))
+    got, err, gst = run_cli({ 'MRBC_FALLBACK' => nil }, *flags, *files, stdin: File.binread(prog))
+    got = got.gsub(CLI, 'PROG').gsub(oracle, 'PROG') if flags.include?('-c') # the program name is printed
+    exp = exp.gsub(CLI, 'PROG').gsub(oracle, 'PROG') if flags.include?('-c')
+    ok = st.success? && gst.success? && got == exp
+    puts ok ? "ok   cli stdin: #{(flags + files).join(' ')}" : "FAIL cli stdin #{(flags + files).join(' ')}: #{err[0, 120]}"
+    failures += 1 unless ok
+  end
+  # a syntax error on stdin and `-` after the first input go through the real mrbc, which reads the same bytes
+  [[['-o-'], ['-'], "def (\n"], [['-o-'], [a, '-'], "x = 1\n"]].each do |flags, files, prog|
+    exp, eerr, est = Open3.capture3(oracle, *flags, *files, binmode: true, stdin_data: prog)
+    got, gerr, gst = run_cli({ 'MRBC_FALLBACK' => oracle }, *flags, *files, stdin: prog)
+    ok = est.exitstatus == gst.exitstatus && got == exp && gerr.gsub(CLI, 'P').gsub(oracle, 'P') == eerr.gsub(oracle, 'P')
+    puts ok ? "ok   cli stdin through the fallback: #{files.map { |f| File.basename(f) }.join(' ')}" : "FAIL cli stdin fallback #{files.inspect}: #{gerr[0, 100]}"
+    failures += 1 unless ok
+  end
+
   # -o FILE and the default output name
   Dir.chdir(dir) do
     system(oracle, '-g', '-o', 'ref.mrb', 'a.rb', 'b.rb', exception: true)
@@ -129,13 +201,16 @@ Dir.mktmpdir('mrbc_rb_cli') do |dir|
   end
 
   # Not covered: fails without MRBC_FALLBACK, runs the real mrbc with it (-v: the AST dump and the irep addresses of the C
-  # compiler; --no-optimize: another code generator).
-  _o, err, st = run_cli({ 'MRBC_FALLBACK' => nil }, '--no-optimize', '-o-', a)
+  # compiler).
+  _o, err, st = run_cli({ 'MRBC_FALLBACK' => nil }, '--verbose', '-o-', a)
   ok = !st.success? && err.include?('MRBC_FALLBACK')
   puts ok ? 'ok   cli: an uncovered option set fails with a clear message without MRBC_FALLBACK' : "FAIL cli failure message: #{err}"
   failures += 1 unless ok
-  exp, _e, = Open3.capture3(oracle, '--no-optimize', '-o-', a, binmode: true)
-  got, err, st = run_cli({ 'MRBC_FALLBACK' => oracle }, '--no-optimize', '-o-', a)
+  exp, _e, = Open3.capture3(oracle, '--verbose', '-o-', a, binmode: true)
+  got, err, st = run_cli({ 'MRBC_FALLBACK' => oracle }, '--verbose', '-o-', a)
+  norm_addr = ->(t) { t.b.gsub(/irep 0x[0-9a-f]+/, 'irep ADDR') }
+  exp = norm_addr.call(exp)
+  got = norm_addr.call(got)
   ok = st.success? && got == exp
   puts ok ? 'ok   cli: MRBC_FALLBACK runs the real mrbc for what is not covered' : "FAIL cli fallback: #{err}"
   failures += 1 unless ok

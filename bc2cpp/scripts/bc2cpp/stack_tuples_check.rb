@@ -301,6 +301,88 @@ RUBY2
 REDEFINED_EXPECTED = { 'TupRedef.new.sized' => '99' }.freeze
 OWNERS_REDEF = %w[Array TupRedef].freeze
 
+# STRING_EQ_LITERAL (codegen_string_eq.rb): `x == "literal"` compares the bytes when x is exactly a String and builds the
+# literal only on the other path. The cases cover a match, a mismatch in content and in length, other classes, a String
+# subclass that defines ==, an == that mutates and keeps its argument (it must see a fresh literal each time), and
+# a literal that is kept (the pair is not rewritten).
+STR_EQ = <<~RUBY3
+  class SubStr < String
+    def ==(other); true; end
+  end
+
+  class StrProbe
+    attr_reader :seen
+    def ==(other); @seen = other; other << "!"; false; end
+  end
+
+  class StrEq
+    def same(x); x == "abc"; end
+    def branch(x); x == "abc" ? 1 : 2; end
+    def twice(x); (x == "a") || (x == "b"); end
+    def neq(x); x != "abc"; end
+    def kept(x); s = "abc"; x == s; s; end
+  end
+RUBY3
+STR_EQ_EXPECTED = {
+  'StrEq.new.same("abc")' => 'true',
+  'StrEq.new.same("abd")' => 'false',
+  'StrEq.new.same("ab")' => 'false',
+  'StrEq.new.same("abcd")' => 'false',
+  'StrEq.new.same("")' => 'false',
+  'StrEq.new.same(:abc)' => 'false',
+  'StrEq.new.same(nil)' => 'false',
+  'StrEq.new.same(1)' => 'false',
+  'StrEq.new.same(SubStr.new("zzz"))' => 'true',
+  'StrEq.new.branch("abc")' => '1',
+  'StrEq.new.branch("x")' => '2',
+  'StrEq.new.twice("b")' => 'true',
+  'StrEq.new.twice("c")' => 'false',
+  'StrEq.new.neq("abc")' => 'false',
+  'StrEq.new.neq("x")' => 'true',
+  'StrEq.new.neq(nil)' => 'true',
+  'StrEq.new.neq(SubStr.new("zzz"))' => 'false',
+  'p = StrProbe.new; s = StrEq.new; s.same(p); s.same(p); p.seen' => '"abc!"',
+  'StrEq.new.kept("abc")' => '"abc"',
+}.freeze
+OWNERS_STR = %w[SubStr StrProbe StrEq].freeze
+
+# CHR_APPEND (codegen_chr_append.rb): `str << n.chr` appends the byte of an exact String when n is an Integer from 0 to 255
+# and builds no one-character String. The cases cover the loop body of an inlined each (shifted registers), the plain
+# statement, a value outside 0..255 (the RangeError), a frozen String (the FrozenError), an Array and a String subclass
+# that defines <<, and a chr result that is read again (not rewritten).
+CHR_APP = <<~RUBY4
+  class ChrSub < String
+    def <<(other); super("!"); end
+  end
+
+  class ChrApp
+    def bytes(a); s = "".b; a.each { |c| s << (c & 255).chr }; s; end
+    def direct(n); s = "x"; s << n.chr; s; end
+    def frozen(n); s = "x".freeze; s << n.chr; s; end
+    def into_array(n); a = []; a << n.chr; a; end
+    def sub(s, n); s << n.chr; s; end
+    def kept(n); c = n.chr; s = "a"; s << c; [s, c]; end
+    def not_integer(n); s = "q"; s << n.chr; s; end
+  end
+RUBY4
+CHR_APP_EXPECTED = {
+  'ChrApp.new.bytes([72, 105, 33])' => '"Hi!"',
+  'ChrApp.new.bytes([])' => '""',
+  'ChrApp.new.bytes([256 + 65, 66])' => '"AB"',
+  'ChrApp.new.direct(65)' => '"xA"',
+  'ChrApp.new.direct(0).bytes.to_a' => '[120, 0]',
+  'ChrApp.new.direct(255).bytes.to_a' => '[120, 255]',
+  'begin; ChrApp.new.direct(256); rescue RangeError => e; e.message; end' => '"256 out of char range"',
+  'begin; ChrApp.new.direct(-1); rescue RangeError => e; e.message; end' => '"-1 out of char range"',
+  'begin; ChrApp.new.frozen(65); rescue => e; e.class; end' => 'FrozenError',
+  'ChrApp.new.into_array(66)' => '["B"]',
+  'ChrApp.new.sub(ChrSub.new("q"), 65)' => '"q!"',
+  'ChrApp.new.sub("plain", 67)' => '"plainC"',
+  'ChrApp.new.kept(68)' => '["aD", "D"]',
+  'begin; ChrApp.new.not_integer(1.5); rescue => e; e.class; end' => 'NoMethodError',
+}.freeze
+OWNERS_CHR = %w[ChrSub ChrApp].freeze
+
 # The text of one method's C++ body, from its `// Owner#name (compiled from ...)` header to the next method's header.
 def method_chunk(code, owner, name)
   code.split(%r{^(?=// \S+#\S+ \(compiled from)}).find { |chunk| chunk.start_with?("// #{owner}##{name} (") } || ''
@@ -376,12 +458,44 @@ Dir.mktmpdir('stack-tuples') do |dir|
   check.call('redefined Array#size: byte-identical with BC2CPP_STACK_TUPLES=0',
              redef_code == generate_without_tuples(REDEFINED, OWNERS_REDEF))
 
+  str_dir = File.join(dir, 'str')
+  Dir.mkdir(str_dir)
+  str_code, str_err = runtime.generate(STR_EQ, str_dir, core: true, only_owners: OWNERS_STR)
+  %w[same branch twice neq].each do |name|
+    check.call("StrEq##{name} compares the literal's bytes, with no String built for it",
+               method_chunk(str_code, 'StrEq', name).include?('STRING_EQ_LITERAL'))
+  end
+  check.call('StrEq#kept keeps its literal, so the pair is not rewritten',
+             !method_chunk(str_code, 'StrEq', 'kept').include?('STRING_EQ_LITERAL'))
+  saved = ENV.fetch('BC2CPP_STRING_EQ_LITERAL', nil)
+  ENV['BC2CPP_STRING_EQ_LITERAL'] = '0'
+  str_off_code = Dir.mktmpdir('string-eq-off') { |off| runtime.generate(STR_EQ, off, core: true, only_owners: OWNERS_STR).first }
+  saved.nil? ? ENV.delete('BC2CPP_STRING_EQ_LITERAL') : ENV['BC2CPP_STRING_EQ_LITERAL'] = saved
+  check.call('kill switch: BC2CPP_STRING_EQ_LITERAL=0 rewrites nothing', !str_off_code.include?('STRING_EQ_LITERAL'))
+
+  chr_dir = File.join(dir, 'chr')
+  Dir.mkdir(chr_dir)
+  chr_code, chr_err = runtime.generate(CHR_APP, chr_dir, core: true, only_owners: OWNERS_CHR)
+  %w[bytes direct].each do |name|
+    check.call("ChrApp##{name} appends the byte, with no one-character String built",
+               method_chunk(chr_code, 'ChrApp', name).include?('CHR_APPEND: r'))
+  end
+  check.call('ChrApp#kept reads the chr result again, so the pair is not rewritten',
+             !method_chunk(chr_code, 'ChrApp', 'kept').include?('CHR_APPEND'))
+  saved_chr = ENV.fetch('BC2CPP_CHR_APPEND', nil)
+  ENV['BC2CPP_CHR_APPEND'] = '0'
+  chr_off_code = Dir.mktmpdir('chr-append-off') { |off| runtime.generate(CHR_APP, off, core: true, only_owners: OWNERS_CHR).first }
+  saved_chr.nil? ? ENV.delete('BC2CPP_CHR_APPEND') : ENV['BC2CPP_CHR_APPEND'] = saved_chr
+  check.call('kill switch: BC2CPP_CHR_APPEND=0 rewrites nothing', !chr_off_code.include?('CHR_APPEND'))
+
   # 2. parity, interpreted against compiled
   build = runtime.full_or_build
   if build
     [[OWNERS_POS, pos_dir, pos_err, POSITIVE_EXPECTED, 'positive'],
      [OWNERS_NEG, neg_dir, neg_err, NEGATIVE_EXPECTED, 'negative'],
-     [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined']].each do |owners, sub, err, expected, label|
+     [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined'],
+     [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare'],
+     [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)
       check.call("#{label}: built and ran", built)

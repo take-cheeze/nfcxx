@@ -15,6 +15,13 @@
 #
 # Only a build whose mrbc is that wrapper is served in-process; any other `mrbcfile` runs as before. MRBC_RB_PRESYM,
 # MRBC_RB_LOG and MRBC_FALLBACK are read from ENV per call, as for the command.
+#
+# A build that has no real mrbc at hand (mrbcfile= skips mruby's bootstrap mrbc) can still serve the files the emitter does not
+# cover: set MrbcRb::MrubyBuild.fallback_provider to a callable that builds the real mrbc and returns its path. It is called at
+# most once, only when a file is handed to the fallback and MRBC_FALLBACK is not set in ENV (an explicit MRBC_FALLBACK wins),
+# and not at all for a build the emitter covers completely.
+#
+#   MrbcRb::MrubyBuild.fallback_provider = -> { Rake::Task[real_mrbc].invoke; real_mrbc }
 
 require 'shellwords'
 require 'stringio'
@@ -26,6 +33,36 @@ module MrbcRb
 
     def self.ours?(command)
       File.expand_path(command.to_s) == WRAPPER
+    end
+
+    @fallback_provider = nil
+    @fallback_path = nil
+    @fallback_lock = Mutex.new
+
+    class << self
+      attr_writer :fallback_provider
+
+      # The path the provider returned (it runs once, also when mruby's rake runs the compiles on several threads).
+      def provided_fallback
+        return nil unless @fallback_provider
+
+        @fallback_lock.synchronize { @fallback_path ||= @fallback_provider.call.to_s }
+      end
+    end
+
+    # ENV, except that MRBC_FALLBACK (unset or empty) is the provider's path, asked for only when Cli looks it up.
+    class Env
+      def initialize(env)
+        @env = env
+      end
+
+      def fetch(key, *default, &block)
+        if key == 'MRBC_FALLBACK' && @env.fetch(key, '').empty?
+          path = MrbcRb::MrubyBuild.provided_fallback
+          return path if path && !path.empty?
+        end
+        @env.fetch(key, *default, &block)
+      end
     end
 
     # MRuby::Command::Mrbc#run, in-process.
@@ -42,7 +79,7 @@ module MrbcRb
         argv = Shellwords.split(opt) + filename(infiles)
         puts "#{MrbcRb::MrubyBuild::WRAPPER} #{argv.shelljoin}" if Rake.verbose
         buf = StringIO.new.binmode
-        status = MrbcRb::Cli.run(argv, stdin: StringIO.new, stdout: buf, stderr: $stderr, env: ENV, prog: MrbcRb::MrubyBuild::WRAPPER)
+        status = MrbcRb::Cli.run(argv, stdin: StringIO.new, stdout: buf, stderr: $stderr, env: Env.new(ENV), prog: MrbcRb::MrubyBuild::WRAPPER)
         unless status.zero?
           rm_f out.path
           fail "Command failed with status (#{status}): [#{WRAPPER[0, 42]}...]"

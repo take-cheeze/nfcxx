@@ -8,12 +8,14 @@
 #                          unset, `mrbc` on PATH is used if there is one
 #   no mrbc at all         the emitter serves every input; one it does not cover aborts naming the files and the reason
 #   BC2CPP_NO_MRBC=1       never run an mrbc, even if MRBC is set or one is on PATH (same as having none)
-#   BC2CPP_MRBC_RB=0       always mrbc;  =verify  emitter and mrbc must agree byte for byte (needs an mrbc)
+#   BC2CPP_MRBC_RB=0       always mrbc;  =verify  emitter and mrbc must agree byte for byte (needs an mrbc);
+#                          =snapshot  the emitter's bytes must match the recorded hash of mrbc's output (no mrbc; see below)
 #   BC2CPP_MRBC_RB_LOG=f   one line per compile naming who served it
 require_relative 'insn_operands'
 require_relative 'insn_decoder'
 require_relative 'irep_scans'
 require_relative 'irep_cache'
+require_relative 'class_scope'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
@@ -88,6 +90,9 @@ class Irep
   # label => Irep of the whole tree this irep belongs to (set by load_ireps);
   # an ivar, not a member, so Struct#==/hash/inspect never walk the cycle.
   attr_accessor :tree
+
+  # The emitter's class-scope record of this irep (see class_scope.rb), nil when the tree came from mrbc. An ivar, not a member.
+  attr_accessor :class_scope
 
   # Instruction whose address is +addr+, as an index into #instructions.
   def index_of_addr(addr)
@@ -270,7 +275,8 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # `rites` is optional: the irep tree as RiteBinary::RiteIrep records in depth-first pre-order (what RiteBinary.parse(bytes)
 # returns). The emitter hands it over (MrbcRb::Result#ireps) so decode_ireps need not parse the image it just serialized;
 # an image from mrbc (or read from a file) has none and is parsed.
-RiteImage = Struct.new(:bytes, :rites)
+# +annotations+: the emitter's class-scope table (MrbcRb::Annotations), nil for an mrbc-compiled image.
+RiteImage = Struct.new(:bytes, :rites, :annotations)
 
 # The `mrbc` binary is optional. +mrbc+ is the command (MRBC from the environment, else `mrbc` on PATH); it counts only
 # when it names an executable file, so with MRBC unset and no `mrbc` on PATH there is no fallback and the emitter must
@@ -291,7 +297,10 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   # mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc when there is one. It is
   # the default:
   #   BC2CPP_MRBC_RB=0       always mrbc (aborts when there is none)
-  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this)
+  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this);
+  #                          BC2CPP_MRBC_SNAPSHOT_RECORD=<file> appends "<key> <mrbc's value>" per input, for snapshot.rb --update
+  #   BC2CPP_MRBC_RB=snapshot  no mrbc needed: the emitter's bytes must hash to what mrbc once wrote for the same sources
+  #                          (bc2cpp/tools/mrbc_rb/snapshot.txt); an input not in it aborts, see mrbc_rb/snapshot.rb
   mode = ENV.fetch('BC2CPP_MRBC_RB', '')
   reason = 'disabled'
   unless mode == '0'
@@ -303,10 +312,22 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
         system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
         expected = File.binread(mrb_path)
         abort "mrbc_rb: bytes differ from mrbc for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless expected == image
+        if (record = ENV['BC2CPP_MRBC_SNAPSHOT_RECORD']) && !record.empty?
+          require_relative '../mrbc_rb/snapshot'
+          MrbcRb::Snapshot.record(paths.map { |path| [File.binread(path), path] }, expected, record)
+        end
+      elsif mode == 'snapshot'
+        require_relative '../mrbc_rb/snapshot'
+        begin
+          verdict = MrbcRb::Snapshot.check(paths.map { |path| [File.binread(path), path] }, image)
+        rescue MrbcRb::Snapshot::NotInSnapshot => e
+          abort "mrbc_rb: #{e.message}"
+        end
+        abort "mrbc_rb: bytes differ from the snapshot of mrbc's output for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless verdict == :ok
       end
       mrbc_rb_log(paths.size, 'emitter', '-', symbol)
       File.binwrite(mrb_path, image)
-      return RiteImage.new(image, rites_from_tree(result.tree))
+      return RiteImage.new(image, rites_from_tree(result.tree), result.annotations)
     end
   end
   unless mrbc
@@ -447,9 +468,10 @@ end
 
 # The whole Irep tree of a RITE image: [ireps (label => Irep), root_label].
 def load_ireps(image, cache: ENV['BC2CPP_IREP_CACHE_DIR'])
-  return decode_ireps(image) if cache.nil? || cache.empty?
-
-  IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+  decoded = cache.nil? || cache.empty? ? decode_ireps(image) : IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+  # Attached after the cache fetch: the cache holds only the decoded tree (see class_scope.rb).
+  ClassScope.attach(decoded[0], decoded[1], image.annotations) if image.respond_to?(:annotations)
+  decoded
 end
 
 def decode_ireps(image)

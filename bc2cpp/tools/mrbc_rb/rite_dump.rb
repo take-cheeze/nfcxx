@@ -7,7 +7,7 @@
 #   * cstruct: `-B<symbol> -S` (mrb_dump_irep_cstruct in cdump.c: the irep tree as C structs).
 # `-g` together with `-S`: cdump.c writes the symbol id of the file name, the number the symbol had in mrbc's own symbol table;
 # file_syms.rb reproduces it from the sources (pass its result as file_syms:). Without file_syms: the first symbol after the
-# presyms (FILENAME_SYM_BASE, 1472 for the fork's host mrbc) is only right for one input file.
+# presyms (FILENAME_SYM_BASE, 1474 for the fork's host mrbc) is only right for one input file.
 
 module MrbcRb
   module RiteDump
@@ -18,7 +18,7 @@ module MrbcRb
 
     Irep = Struct.new(:nlocals, :nregs, :clen, :ilen, :iseq, :pool, :syms, :reps, :lv, :debug)
 
-    FILENAME_SYM_BASE = 1472
+    FILENAME_SYM_BASE = 1474
 
     module_function
 
@@ -45,6 +45,22 @@ module MrbcRb
     # The binary +image+ (with debug info and LVAR) as mrbc writes it with or without -g and --remove-lv.
     def strip(image, debug:, lvar:)
       secs = sections(image).reject { |ident, _| (ident == "DBG\0" && !debug) || (ident == 'LVAR' && !lvar) }
+      rebuild(secs)
+    end
+
+    # The binary with the file names of its DBG section replaced by f0, f1, ... (the names are the only thing in a -g image that
+    # depends on where the sources were found; the records reference them by index, so nothing else changes). What the
+    # snapshot hashes (snapshot.rb), so that it is the same wherever the world is checked out.
+    def neutral_files(image)
+      secs = sections(image).map do |ident, body|
+        next [ident, body] unless ident == "DBG\0"
+
+        n = body.byteslice(0, 2).unpack1('n')
+        pos = 2
+        n.times { pos += 2 + body.byteslice(pos, 2).unpack1('n') }
+        names = Array.new(n) { |i| [i.to_s.then { |d| "f#{d}" }.bytesize, "f#{i}"].pack('na*') }.join.b
+        [ident, [n].pack('n') + names + body.byteslice(pos..)]
+      end
       rebuild(secs)
     end
 

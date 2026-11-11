@@ -530,7 +530,8 @@ EOC
        readelf -h m16.o | grep -q "Intel 80386"; then ok "kernel mode: -m16 compiles to an i386 object (qbe i386_regparm3)"
     else bad "kernel mode: -m16 compiles to an i386 object (qbe i386_regparm3)" "$(NFCXX_QBE_KERNEL=1 "$nfcc" -m16 -march=i386 -mregparm=3 -c util.c -o m16.o 2>&1 | head -2 | tr '\n' ' ')"; fi
     # volatile (cproc -V): each access is a call QBE cannot merge, forward or drop -- two loads stay two, two stores stay
-    # two, and a polling loop loads on every iteration; signed char loads are sign-extended
+    # two, and a polling loop loads on every iteration; signed char loads are sign-extended. A helper call in tail
+    # position is a jmp to it (QBE's tail calls), which counts as a call here.
     cat > kvol.c <<'EOC'
 int twice(volatile int *p) { return *p + *p; }
 void two_stores(volatile long *p) { *p = 1; *p = 2; }
@@ -538,8 +539,8 @@ signed char sc(volatile signed char *p) { return *p; }
 int main(void) { volatile int x = 20; volatile long y; volatile signed char c = -5; two_stores(&y); return twice(&x) + (int)y + sc(&c) + 5; }
 EOC
     if NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" -S kvol.c -o kvol.s 2>/dev/null &&
-       [ "$(awk '/^twice:/,/^\.size twice/' kvol.s | grep -c 'call.*nfcxx_vload4')" = 2 ] &&
-       [ "$(awk '/^two_stores:/,/^\.size two_stores/' kvol.s | grep -c 'call.*nfcxx_vstore8')" = 2 ] &&
+       [ "$(awk '/^twice:/,/^\.size twice/' kvol.s | grep -c -E '(callq|jmp) .*nfcxx_vload4')" = 2 ] &&
+       [ "$(awk '/^two_stores:/,/^\.size two_stores/' kvol.s | grep -c -E '(callq|jmp) .*nfcxx_vstore8')" = 2 ] &&
        NFCXX_QBE_KERNEL=1 "$nfcc" "${K[@]}" kvol.c -o kvol 2>/dev/null && { ./kvol; [ $? = 42 ]; }; then
       ok "kernel mode: volatile accesses kept"
     else bad "kernel mode: volatile accesses kept" "$(grep -c nfcxx_v kvol.s 2>/dev/null) helper calls"; fi
