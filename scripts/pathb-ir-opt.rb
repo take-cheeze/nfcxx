@@ -1676,8 +1676,8 @@ SYCL_ENTRY = "__nfcxx_sycl_entry_"
 def quoted_names(x, out)
   if x.is_a?(Array)
     x.each { |y| quoted_names(y, out) }
-  elsif x.is_a?(String) && x.match?(/\A[$&@]?"/)
-    out << unq(x.sub(/\A@/, ""))
+  elsif x.is_a?(String) && (x[0] == "\"" || (x.length > 1 && (x[0] == "$" || x[0] == "&" || x[0] == "@") && x[1] == "\""))
+    out << unq(x[0] == "@" ? x[1..-1] : x)
   end
   out
 end
