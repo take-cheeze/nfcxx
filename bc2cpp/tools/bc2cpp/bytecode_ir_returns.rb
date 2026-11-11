@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # RETURN_SITES: how a body leaves its frame and where the values it returns come from, for the return
 # analyses (the Fixnum, Array and class return proofs, DECLARED_RETURN_CHECK and the exact-class return table).

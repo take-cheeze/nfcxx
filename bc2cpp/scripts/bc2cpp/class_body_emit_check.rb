@@ -154,7 +154,6 @@ suite.compile(SINGLETON_CONST) do |ireps, _root|
   outer = ireps.values.find { |irep| BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS).any? }
   gen = CodeGen.new(ireps, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   nested = BytecodeIR.class_bodies(outer, :CLASS, :MODULE, :SCLASS).values.first
-  child = BytecodeIR.class_bodies(outer, :CLASS, :MODULE, :SCLASS).keys.first
   _, refused_child = gen.compile_class_body(ireps.fetch(nested), 'Outer.singleton')
   suite.check('a singleton body that writes a constant is refused', refused_child == [:SETCONST_IN_SINGLETON])
 end

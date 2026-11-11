@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 # CodeGen: TUPLE_RETURN_FACTS. `a, b = pair(x)` is `SEND; AREF; AREF`: when every definition of `pair`

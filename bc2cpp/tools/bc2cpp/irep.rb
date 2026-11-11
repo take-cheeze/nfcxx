@@ -14,6 +14,7 @@ require_relative 'insn_operands'
 require_relative 'insn_decoder'
 require_relative 'irep_scans'
 require_relative 'irep_cache'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
 MRBC = ENV['MRBC'].to_s.empty? ? 'mrbc' : ENV['MRBC']

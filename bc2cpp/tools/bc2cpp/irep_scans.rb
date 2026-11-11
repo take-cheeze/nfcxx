@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 
 # Backward register scans over an Irep's instructions: the reaching-definition

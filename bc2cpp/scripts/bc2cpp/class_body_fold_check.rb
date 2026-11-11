@@ -30,7 +30,6 @@ UNFOLDABLE = <<~'RUBY'
 RUBY
 
 suite.compile(FOLDED) do |ireps, root|
-  body = ireps.values.find { |irep| BytecodeIR.for(irep).each_source.any? { |insn, _| insn.op == :SETCONST } }
   gen = CodeGen.new(ireps, build_registry(ireps, root)[0], {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   units = gen.compile_top_class_units(ireps.fetch(root))
   code = units.find { |unit| unit[:path] == 'Router' }.to_h[:code].to_s

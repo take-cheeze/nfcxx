@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 require_relative 'bytecode_ir_returns'
 
 # NUMERIC_CLASSES: the IR's side of NumericFlow. The flow reads every instruction fact from the

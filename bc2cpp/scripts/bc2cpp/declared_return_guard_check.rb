@@ -137,7 +137,6 @@ gen.check_declared_returns
 check.call('the listing says runtime-checked, fact',
            gen.declared_return_report.include?('  DECLARED_RET Foo#count -> Integer: runtime-checked (%a{bc2cpp:hint}), fact fixnum') &&
              gen.declared_return_diagnostics.empty?)
-ctx = { registry: { 'pick' => [defs[1]], 'find' => [defs[2]] }, declared: hints.to_h { |e| [e.label, e] }, sig_of: {} }
 aliased = GuardHarness.new(defs, ireps)
 aliased.aliased << 'count'
 check.call('an aliased hinted name is refused (error) and carries no fact',

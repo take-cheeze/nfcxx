@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'fixpoint'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'lexical_scopes'
 

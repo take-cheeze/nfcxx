@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'compiled_gems'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'touch_scan'
 require_relative 'core_hierarchy_sigs'

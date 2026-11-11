@@ -5,6 +5,7 @@
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
 require_relative 'codegen_declared_returns'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_returns'
 require_relative 'bytecode_ir_containers'
 require_relative 'foreign_string_results'

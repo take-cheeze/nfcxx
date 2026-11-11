@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'tmpdir'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'block_returns'
 require_relative 'codegen_return_classes'

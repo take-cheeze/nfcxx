@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 module BytecodeIR
   # A yielding helper keeps its registers in the caller's persistent frame.

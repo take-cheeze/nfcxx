@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 require_relative 'bytecode_ir_ops'
 
 # Op sets the receiver-class trace (trace_new_target_walk in dispatch_targets.rb) dispatches on. Each set is

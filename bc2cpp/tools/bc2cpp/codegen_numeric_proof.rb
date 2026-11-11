@@ -4,6 +4,7 @@ require_relative 'branch_hints'
 require_relative 'tagged_fixnum'
 require_relative 'fixpoint'
 require_relative 'numeric_flow'
+require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_regions'
 
 # CodeGen: NUMERIC_OPERAND_PROOF.

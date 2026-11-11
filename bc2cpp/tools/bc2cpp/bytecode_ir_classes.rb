@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_core'
 
 # Class and module body discovery on the IR, shared by every walk that
 # descends into a CLASS/MODULE/SCLASS body.

@@ -66,7 +66,7 @@ Dir.mktmpdir('bc2cpp-keyword-receiver') do |dir|
     suite.check('a keyword send on an unproven receiver with two definers stays refused',
                 refusals.fetch('RtUse_unproven_impl', 0).positive?)
   end
-  code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
+  _code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
 
   build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
   if build.nil?

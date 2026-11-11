@@ -253,8 +253,8 @@ t('str.upto') { r = []; 'a'.upto('e') { |x| r << x }; r }
 t('str.upto excl') { r = []; 'a'.upto('e', true) { |x| r << x }; r }
 t('str.gsub') { ['hello'.gsub('l') { |m| m.upcase }, 'hello'.gsub('l', 'L'), 'hello'.gsub('l', 'l' => '1')] }
 t('str.sub') { ['hello'.sub('l') { |m| m.upcase }, 'hello'.sub('l', 'L')] }
-t('str.gsub!') { s = 'hello'; [s.gsub!('l') { 'L' }, s] }
-t('str.sub!') { s = 'hello'; [s.sub!('l') { 'L' }, s] }
+t('str.gsub!') { s = String.new('hello'); [s.gsub!('l') { 'L' }, s] }
+t('str.sub!') { s = String.new('hello'); [s.sub!('l') { 'L' }, s] }
 t('str.gsub none') { 'hello'.gsub('l').class }
 t('str.%') { ['%d-%s' % [1, 'a'], '%05.1f' % 3.14159] }
 t('kernel.`') { `echo hi` }
@@ -473,7 +473,7 @@ t('gen fiber map') do
 end
 
 # ---- misc semantic edges
-t('block_given') { def bg; block_given?; end; [bg, bg { }, bg(&nil)] }
+t('block_given') { def bg(&_blk); block_given?; end; [bg, bg { }, bg(&nil)] }
 t('respond') { [A.respond_to?(:each), A.respond_to?(:each_slice), Array.method_defined?(:uniq)] }
 t('instance_methods') { Array.instance_methods(false).sort.first(3) }
 t('proc block arg') { pr = proc { |x| x * 3 }; [A.map(&pr), A.each(&pr).size] }
