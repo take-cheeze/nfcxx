@@ -29,7 +29,10 @@ unless oracle && File.executable?(oracle)
   MrbcRb::Snapshot.each_input.each do |label, sources|
     next if sources.any? { |_, p| !File.file?(p) } # snippets and groups are golden_test.rb's
 
-    out, _e, st = Open3.capture3(RbConfig.ruby, cli, '-g', '-o-', *sources.map(&:last), binmode: true)
+    # as the oracle is run: from the world root with the world-relative names (see Snapshot.relative)
+    rel, world = MrbcRb::Snapshot.relative(sources)
+    opts = world ? { chdir: world } : {}
+    out, _e, st = Open3.capture3(RbConfig.ruby, cli, '-g', '-o-', *rel.map(&:last), binmode: true, **opts)
     next unless st.success?
 
     begin

@@ -62,8 +62,28 @@ module MrbcRb
 
     def digest(bytes) = Digest::SHA256.hexdigest(bytes)
 
+    # Sources of the world are compiled, hashed and checked under their path relative to the world root, as `cd <world> && mrbc
+    # scripts/x.rb` sees them: a source that reads its own name (__FILE__, __dir__) puts it into the image, and the absolute
+    # path is wherever the checkout happens to be. Other paths (the repo's bc2cpp/, snippets) stay as given.
+    # Returns [sources with relative paths, the world root when any path was made relative].
+    def relative(sources, world = world_root)
+      return [sources, nil] unless world
+
+      root = File.expand_path(world) + '/'
+      changed = false
+      rel = sources.map do |src, path|
+        abs = File.expand_path(path)
+        next [src, path] unless abs.start_with?(root)
+
+        changed = true
+        [src, abs[root.size..]]
+      end
+      [rel, changed ? File.expand_path(world) : nil]
+    end
+
     # +sources+: [[content, path], ...] in command-line order.
     def key(sources)
+      sources, = relative(sources)
       parts = sources.map { |src, _| digest(src.b) }
       parts.concat(sources.map { |_, path| "path:#{path}" }) if sources.any? { |src, _| src.b.match?(PATH_DEPENDENT) }
       digest("g\n#{sources.size}\n#{parts.join("\n")}")[0, 32]
@@ -139,6 +159,16 @@ module MrbcRb
 
     # :ok, or raises NotInSnapshot / returns :differs. +image+ is the emitter's output for +sources+.
     def check(sources, image, path = file)
+      rel, = relative(sources)
+      if rel != sources && sources.any? { |src, _| src.b.match?(PATH_DEPENDENT) }
+        # the image the caller built has the checkout's absolute path in it: what is compared is the emitter's image of the
+        # same sources under their world-relative names
+        image = begin
+          rel.size == 1 ? MrbcRb.compile(rel[0][0], rel[0][1]) : MrbcRb.compile_files(rel)
+        rescue MrbcRb::Error
+          image
+        end
+      end
       recorded = table(path)[key(sources)]
       unless recorded
         hint = world_pin_problem || 'run snapshot.rb --update with the oracle'
@@ -197,6 +227,7 @@ module MrbcRb
 
     # [emitter image or nil (not covered), oracle image or nil (rejected), compile error] for +sources+.
     def compile_both(sources, oracle)
+      sources, world = relative(sources)
       emitted = begin
         sources.size == 1 ? MrbcRb.compile(sources[0][0], sources[0][1]) : MrbcRb.compile_files(sources)
       rescue MrbcRb::Error
@@ -205,11 +236,11 @@ module MrbcRb
       Dir.mktmpdir('snapshot') do |dir|
         # the oracle sees the names the input has: a file is read where it is, a snippet is written under its name in a
         # scratch directory the oracle runs in
-        on_disk = sources.all? { |src, path| File.file?(path) && File.binread(path) == src.b }
+        on_disk = world ? true : sources.all? { |src, path| File.file?(path) && File.binread(path) == src.b }
         sources.each { |src, path| File.binwrite(File.join(dir, path), src) } unless on_disk
         out = File.join(dir, 'o.mrb')
         names = sources.map(&:last)
-        opts = on_disk ? {} : { chdir: dir }
+        opts = world ? { chdir: world } : on_disk ? {} : { chdir: dir }
         _o, _e, st = Open3.capture3(oracle, '-g', '-o', out, *names, binmode: true, **opts)
         [emitted, st.success? ? File.binread(out) : nil]
       end
