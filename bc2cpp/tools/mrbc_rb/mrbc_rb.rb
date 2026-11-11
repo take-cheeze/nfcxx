@@ -227,6 +227,11 @@ module MrbcRb
   #   being the pcs between the switches.
   def self.compile_files(files)
     raise Unsupported, 'no files' if files.empty?
+
+    # `__END__` ends the whole program (the lexer returns the end of the input there): the files after it are never read,
+    # not even entered in the filename table, and its own file is the last one.
+    stop = files.index { |source, _| source.match?(/^__END__(\r?\n|\z)/) && Prism.parse(source).data_loc }
+    files = files[0..stop] if stop
     return compile(*files.first) if files.size == 1
 
     locals = []
@@ -237,11 +242,11 @@ module MrbcRb
     zero = {}.compare_by_identity
     names = files.map(&:last).uniq
     files.each_with_index do |(source, filename), i|
+      raise Unsupported, 'endless range at the end of a file' if i < files.size - 1 && source.match?(/\.\.\.?(?:[ \t\r\n]|#[^\n]*)*\z/)
+
       source = fork_source(source)
       result = Prism.parse(source, filepath: filename, scopes: [locals.dup], line: 1 + offset)
       raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
-      raise Unsupported, '__END__ in a multi-file program' if result.data_loc
-      raise Unsupported, 'carriage return' if source.include?("\r")
 
       stmts = result.value.statements.body
       locals |= result.value.locals
@@ -253,10 +258,11 @@ module MrbcRb
       offset = 0
       next if i == files.size - 1
 
-      quirk, offset = file_tail(source)
+      quirk, offset, word_end = file_tail(source)
+      raise Unsupported, 'a file without a newline at the end followed by a leading dot' if !source.end_with?("\n") && joins_previous?(files[i + 1].first)
       # init_var_header: a node built while the parser is at line 0 of the next file (index n) has the index n - 1, or 0
       # (a file named like an earlier one has that one's index).
-      tail_zero_nodes(stmts.last, zero, names[[names.index(files[i + 1].last) - 1, 0].max]) if quirk && !stmts.empty?
+      tail_zero_nodes(stmts.last, zero, names[[names.index(files[i + 1].last) - 1, 0].max], word_end) if quirk && !stmts.empty?
     end
     raise Unsupported, 'no statements' if units.all? { |u| u.stmts.empty? }
 
@@ -269,57 +275,116 @@ module MrbcRb
   # How the lexer leaves +source+ (not the last file): [whether the newline lookahead after its last token reaches the end of
   # the file, the number of lines the next file's numbering is ahead].
   def self.file_tail(source)
-    last = Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.last
+    # (heredoc bodies are lexed before the rest of their line: the last token is the one that ends last)
+    last = Prism.lex(source).value.map(&:first).reject { |t| NON_TOKENS.include?(t.type) }.each_with_index.max_by { |t, i| [t.location.end_offset, i] }&.first
     return [false, 0] unless last
-    raise Unsupported, 'file ending in a heredoc' if %i[HEREDOC_END HEREDOC_START].include?(last.type)
+    raise Unsupported, 'file ending in a heredoc' if last.type == :HEREDOC_START
+    heredoc = last.type == :HEREDOC_END
     return [false, 0] if last.type == :SEMICOLON # the state after `;` is the start of an expression: newlines are skipped
 
     tail = source.b.byteslice(last.location.end_offset..)
+    # The heredoc's terminator line ends the token, newline included; the nodes of its statement were built on the line of
+    # the `<<`, long before the end of the file: nothing is built at line 0 there.
+    tail = "\n".b + tail if heredoc && last.location.slice.end_with?("\n")
     first_line, rest = tail.split("\n".b, 2)
-    raise Unsupported, 'text after the last token' unless first_line.to_s.match?(/\A[ \t\f\v]*(#.*)?\z/n)
+    raise Unsupported, 'text after the last token' unless first_line.to_s.match?(/\A[ \t\f\v\r]*(#.*)?\z/n)
 
-    # Without a newline the lexer reaches the end of the file while reading the last token itself (a word's end is known only
-    # after the next character): even the nodes complete in that token get line 0, and the next file is read as part of the
-    # newline. Not modelled.
-    raise Unsupported, 'no newline at the end of a file' if rest.nil?
-
-    lines = rest.split("\n".b, -1)
+    # The end of the file is read as a newline (nextc returns -2), whether or not there is one, and the file switch happens
+    # there. Without a newline a word-like last token (a name, a number, a keyword: its end is known only after the next
+    # character) reads the end of the file while it is scanned, so every node completed from it on, its own leaf included,
+    # is built at line 0 (+word_end+ is where that token ends). The lookahead after the newline then goes on into the next
+    # file (see #joins_previous?).
+    word_end = tail.empty? && WORD_TOKENS.include?(last.type) ? last.location.end_offset : nil
+    raise Unsupported, 'operator token at the very end of a file' if tail.empty? && !word_end && !CLOSING_TOKENS.include?(last.type)
+    lines = rest.to_s.split("\n".b, -1)
     comments = 0
     lines.each_with_index do |l, i|
-      if l.match?(/\A[ \t\f\v]*#/n) then comments += 1
-      elsif l.match?(/\A[ \t\f\v]*\z/n) then return i == lines.size - 1 ? [true, comments] : [false, 0]
+      if l.match?(/\A[ \t\f\v\r]*#/n) then comments += 1
+      elsif l.match?(/\A[ \t\f\v\r]*\z/n) then return i == lines.size - 1 ? [!heredoc, heredoc ? 0 : comments, word_end] : [false, 0, nil]
       else raise Unsupported, 'text after the last statement'
       end
     end
-    [true, comments]
+    [!heredoc, heredoc ? 0 : comments, word_end] # the comment lines after a heredoc are not counted into the next file's lines (verified)
+  end
+
+  # Tokens that end where they are read (no character after them is needed).
+  CLOSING_TOKENS = %i[PARENTHESIS_RIGHT BRACKET_RIGHT BRACE_RIGHT STRING_END LABEL_END SYMBOL_END].freeze
+
+  # Tokens whose scan reads the character after them.
+  WORD_TOKENS = %i[IDENTIFIER CONSTANT INTEGER FLOAT INTEGER_IMAGINARY INTEGER_RATIONAL INTEGER_RATIONAL_IMAGINARY FLOAT_IMAGINARY
+                   FLOAT_RATIONAL FLOAT_RATIONAL_IMAGINARY INSTANCE_VARIABLE CLASS_VARIABLE GLOBAL_VARIABLE BACK_REFERENCE
+                   NUMBERED_REFERENCE METHOD_NAME KEYWORD_END KEYWORD_NIL KEYWORD_TRUE KEYWORD_FALSE KEYWORD_SELF
+                   KEYWORD___FILE__ KEYWORD___LINE__ KEYWORD___ENCODING__ KEYWORD_REDO KEYWORD_RETRY KEYWORD_RETURN
+                   KEYWORD_BREAK KEYWORD_NEXT KEYWORD_SUPER KEYWORD_YIELD KEYWORD_DEFINED KEYWORD_THEN KEYWORD_DO
+                   REGEXP_END KEYWORD_ENSURE KEYWORD_ELSE KEYWORD_BEGIN KEYWORD_ALIAS KEYWORD_UNDEF].freeze
+
+  # Whether the lookahead after a file ends without a newline goes on into +source+, the next file, and joins it to the file
+  # before: a leading `.` or `&.` (after blank-free whitespace and comment lines) continues the last statement.
+  def self.joins_previous?(source)
+    source.b.match?(/\A(?:[ \t\f\v\r]*#[^\n]*\n)*[ \t\f\v\r]*(?:\.(?!\.)|&\.)/n)
   end
 
   # Marks in +acc+ the nodes the fork's parser builds after reading the newline that follows the last token of +stmt+: those
   # that need that lookahead to be reduced. The tail of the statement is followed down: a node whose last token is the
   # statement's last one. Forms not probed are Unsupported.
-  def self.tail_zero_nodes(stmt, acc, name)
+  def self.tail_zero_nodes(stmt, acc, name, word_end = nil)
     node = stmt
     loop do
+      acc[node] = name if word_end && node.location.end_offset == word_end
+      if word_end && node.location.end_offset == word_end
+        # Nodes the fork builds at the `end` keyword (the jump back of a loop, the empty clauses of a case or a rescue, the body
+        # of a block) are built at line 0 too: verified only for the forms below.
+        ended = (node.respond_to?(:end_keyword_loc) && node.end_keyword_loc&.end_offset == word_end) ||
+                (node.respond_to?(:closing_loc) && node.closing_loc&.slice == 'end') ||
+                (node.respond_to?(:block) && node.block.respond_to?(:closing_loc) && node.block.closing_loc&.slice == 'end')
+        ok = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode, Prism::ForNode, Prism::SingletonClassNode].any? { |k| node.is_a?(k) } ||
+             ((node.is_a?(Prism::IfNode) && !node.subsequent.is_a?(Prism::IfNode)) || node.is_a?(Prism::UnlessNode))
+        raise Unsupported, 'end keyword at the very end of a file' if ended && !ok
+      end
       case node
       when Prism::IntegerNode, Prism::FloatNode, Prism::SourceLineNode, Prism::SourceFileNode
-        raise Unsupported, 'negative literal at the end of a file' if node.location.slice.start_with?('-')
+        acc[node] = name if node.location.slice.start_with?('-') # a negative literal is built after the lookahead (tUMINUS_NUM)
 
         return
       when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::InstanceVariableReadNode,
            Prism::GlobalVariableReadNode, Prism::ClassVariableReadNode, Prism::LambdaNode, Prism::DefNode,
            Prism::ClassNode, Prism::ModuleNode, Prism::AliasMethodNode, Prism::SingletonClassNode
-        raise Unsupported, 'endless def at the end of a file' if node.is_a?(Prism::DefNode) && node.equal_loc
+        # An endless def on one line: every instruction of its body is on the def's line, built at line 0 (previous byte) or not.
+        raise Unsupported, 'multi-line endless def at the end of a file' if node.is_a?(Prism::DefNode) && node.equal_loc && node.location.start_line != node.location.end_line
 
         return
       when Prism::SymbolNode
-        raise Unsupported, 'symbol form at the end of a file' unless node.opening_loc.nil? || node.opening_loc.slice == ':'
+        raise Unsupported, 'symbol form at the end of a file' unless node.opening_loc.nil? || [':', ':"', ":'"].include?(node.opening_loc.slice)
 
         return
-      when Prism::ArrayNode, Prism::HashNode, Prism::RegularExpressionNode, Prism::MatchLastLineNode
+      when Prism::ArrayNode
+        return if node.opening_loc # `[...]` and `%w[...]` end in their closing bracket
+
+        # An array without brackets (`x = 1, *a`, `x = *a`) is built after the lookahead, like its last element.
+        acc[node] = name
+        node = node.elements.last
+        node = node.expression if node.is_a?(Prism::SplatNode)
+        return unless node
+      when Prism::HashNode, Prism::RegularExpressionNode, Prism::MatchLastLineNode, Prism::ParenthesesNode,
+           Prism::RationalNode, Prism::ImaginaryNode
         return
+      when Prism::InterpolatedStringNode
+        raise Unsupported, 'heredoc at the end of a file' if node.opening_loc&.slice&.start_with?('<<')
+
+        acc[node] = name # a string waits for the token after it (adjacent literals are one string)
+        return
+      when Prism::InterpolatedSymbolNode, Prism::InterpolatedRegularExpressionNode, Prism::XStringNode, Prism::InterpolatedXStringNode
+        return
+      when Prism::UndefNode
+        acc[node] = name
+        return
+      when Prism::RangeNode, Prism::FlipFlopNode
+        raise Unsupported, 'endless range at the end of a file' unless node.right
+
+        acc[node] = name
+        node = node.right
       when Prism::DefinedNode
-        raise Unsupported, 'defined? without parentheses at the end of a file' unless node.rparen_loc
-
+        acc[node] = name unless node.rparen_loc # `defined? x` waits for the token after it
         return
       when Prism::BeginNode, Prism::WhileNode, Prism::UntilNode, Prism::CaseNode, Prism::ForNode
         raise Unsupported, 'modifier form at the end of a file' if (node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode)) && node.closing_loc.nil?
@@ -336,6 +401,8 @@ module MrbcRb
           acc[node] = name
           node = node.predicate
         end
+      when Prism::ElseNode # the else branch of a ternary
+        node = node.statements.body.last
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::ConstantPathNode, Prism::StringNode
         raise Unsupported, 'heredoc at the end of a file' if node.is_a?(Prism::StringNode) && node.opening_loc&.slice&.start_with?('<<')
 
@@ -356,21 +423,38 @@ module MrbcRb
         acc[node] = name
         args = node.arguments&.arguments
         return if args.nil?
-        raise Unsupported, 'return with several values at the end of a file' if args.size != 1
 
-        node = args.first
-      when Prism::CallNode
-        return if node.block.is_a?(Prism::BlockNode) || node.closing_loc&.slice == ')'
-        raise Unsupported, 'safe navigation at the end of a file' if node.call_operator_loc&.slice == '&.'
-        raise Unsupported, 'block pass at the end of a file' if node.block
+        node = args.last # several values make an array built after the last one: only the last matters
+        if node.is_a?(Prism::SplatNode)
+          node = node.expression
+          return unless node
+        end
+      when Prism::MultiWriteNode
+        acc[node] = name
+        node = node.value
+      when Prism::CallNode, Prism::SuperNode, Prism::ForwardingSuperNode
+        close = node.respond_to?(:closing_loc) ? node.closing_loc : (node.respond_to?(:rparen_loc) ? node.rparen_loc : nil)
+        return if node.block.is_a?(Prism::BlockNode) || close&.slice == ')'
 
         acc[node] = name
-        args = node.arguments&.arguments
-        if args && !args.empty?
-          raise Unsupported, 'splat or keywords at the end of a file' if [Prism::SplatNode, Prism::KeywordHashNode, Prism::BlockArgumentNode].any? { |k| args.last.is_a?(k) }
-
+        args = node.respond_to?(:arguments) ? node.arguments&.arguments : nil
+        if node.block # `&blk`: the last argument, built after the lookahead
+          node = node.block.expression
+          return unless node
+        elsif args && !args.empty?
           node = args.last
-        elsif node.receiver && %i[! -@ +@ ~].include?(node.name) && node.message_loc && node.message_loc.start_offset < node.receiver.location.start_offset
+          case node
+          when Prism::SplatNode
+            node = node.expression
+            return unless node
+          when Prism::KeywordHashNode
+            acc[node] = name
+            last = node.elements.last
+            acc[last.key] = name if last.is_a?(Prism::AssocNode) && last.operator_loc.nil? # `a: v`: the key is built after the value
+            node = last.value
+            return unless node
+          end
+        elsif node.respond_to?(:receiver) && node.receiver && %i[! -@ +@ ~].include?(node.name) && node.message_loc && node.message_loc.start_offset < node.receiver.location.start_offset
           node = node.receiver
         else
           return
@@ -545,7 +629,7 @@ module MrbcRb
                     t = temp
                     empty_body_continuation!(node, node.rparen_loc || params&.location || node.name_loc)
                     check_empty_gap(node.rparen_loc || params&.location || node.name_loc, node.body ? node.body.location : node.end_keyword_loc)
-                    @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
+                    @line = @zero_end ? 0 : node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
                     t
                   else
@@ -767,7 +851,9 @@ module MrbcRb
       # codegen_sdef: the name's symbol comes first, then the method's irep, then the receiver, loaded into the result
       # register, which SDEF takes. A plain def is TDEF on the same register.
       sym = sym_index(node.name)
-      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_method(node)
+      child = Compiler.new(@filename, frozen_strings: @frozen_strings)
+      child.instance_variable_set(:@zero_end, @zero_nodes&.key?(node)) # the `end` was scanned across the end of the file
+      @children << child.compile_method(node)
       index = @children.size - 1
 
       nregs = @nregs
@@ -1098,8 +1184,8 @@ module MrbcRb
       when Prism::SuperNode, Prism::ForwardingSuperNode
         super_statement(node, last: last)
       when Prism::DefinedNode
-        # An unused defined? generates nothing (not covered); a used one is a value (value_into).
-        raise Unsupported, 'unused defined?' unless last
+        # An unused defined? generates nothing (verified: no code, no symbols); a used one is a value (value_into).
+        return nil unless last
 
         value_in_register(node)
       when Prism::SingletonClassNode
@@ -1162,14 +1248,17 @@ module MrbcRb
                   when Prism::IfNode then sub.if_keyword_loc
                   else sub.else_keyword_loc
                   end
-        empty_line = keyword.start_line
+        empty_line = sub.nil? ? end_line(node) : keyword.start_line
       end
       # An empty else-branch is a node on the line of the closing `end`.
-      else_line = else_list && else_list.empty? ? node.end_keyword_loc.start_line : nil
+      else_line = else_list && else_list.empty? ? end_line(node) : nil
       gen_if(node.predicate, then_list, else_list, val: last, then_present: true, empty_line: empty_line,
                                                             elsif_node: elsif_node?(node), else_line: else_line,
                                                             line: if_node_line(node))
     end
+
+    # The line of the closing `end` as a node built at it has it: 0 when the `end` was scanned across the end of a file.
+    def end_line(node) = @zero_nodes&.key?(node) ? 0 : node.end_keyword_loc.start_line
 
     # The line of an if or unless node, which the fork enters before its condition: the keyword's line for the block form (the
     # `end`'s for an `elsif`), and for a modifier or a ternary, which the parser builds after the condition (the modifier) or the
@@ -1194,10 +1283,10 @@ module MrbcRb
       body = node.statements&.body || []
       else_node = node.else_clause
       # An empty branch is a node on the line of the keyword that follows it (`else` or `end`).
-      body_line = body.empty? ? (else_node ? else_node.else_keyword_loc : node.end_keyword_loc).start_line : nil
+      body_line = body.empty? ? (else_node ? else_node.else_keyword_loc.start_line : end_line(node)) : nil
       if else_node
         then_list = else_node.statements&.body || []
-        then_line = then_list.empty? ? node.end_keyword_loc.start_line : nil
+        then_line = then_list.empty? ? end_line(node) : nil
         gen_if(node.predicate, then_list, body, val: last, then_present: true, empty_line: then_line,
                                                            else_line: body_line, line: if_node_line(node))
       else
@@ -1645,7 +1734,7 @@ module MrbcRb
       # An empty body is a node on the line of the keyword that follows it (the next `when`, the `else` or the `end`).
       keywords = node.conditions.map(&:keyword_loc) + [node.else_clause&.else_keyword_loc, node.end_keyword_loc].compact
       clauses = node.conditions.each_with_index.map { |w, i| [w.conditions, w.statements, keywords[i + 1].start_line] }
-      clauses << [[], node.else_clause.statements, node.end_keyword_loc.start_line] if node.else_clause
+      clauses << [[], node.else_clause.statements, end_line(node)] if node.else_clause
       end_jumps = []
       next_jump = nil
       clauses.each do |conds, body, empty_line|
@@ -1709,7 +1798,7 @@ module MrbcRb
     def range_at(node, base)
       raise Unsupported, 'multi-line range' if node.location.start_line != node.location.end_line
 
-      @line = node.location.start_line # the node is entered before its ends (an omitted end is a nil on its line)
+      @line = @zero_nodes&.key?(node) ? 0 : node.location.start_line # the node is entered before its ends (an omitted end is a nil on its line)
       [node.left, node.right].each_with_index do |e, i|
         e ? operand_into(unparen(e), base + i) : emit(:LOADNIL, base + i)
       end
@@ -3531,7 +3620,7 @@ module MrbcRb
       # adjacent literals, is built when the parser reaches the end), for a heredoc the `<<` line.
       line = heredoc ? node.location.start_line : line_of(node)
       @line_moved = true if heredoc && @line != line
-      @line = line
+      @line = @zero_nodes&.key?(node) ? 0 : line
       if @frozen_strings && parts.all? { |kind, _| kind == :lit }
         return emit(:FSTRING, dst, pool_index([:str, parts.map(&:last).join.b]))
       end
@@ -3611,7 +3700,9 @@ module MrbcRb
       t = temp
       @line = node.location.start_line
       operand_into(coll, t)
-      @children << Compiler.new(@filename, frozen_strings: @frozen_strings).send(:compile_for, node, self)
+      child = Compiler.new(@filename, frozen_strings: @frozen_strings)
+      child.instance_variable_set(:@zero_end, @zero_nodes&.key?(node))
+      @children << child.send(:compile_for, node, self)
       index = @children.size - 1
       
       reach(t + 2)
@@ -3699,7 +3790,7 @@ module MrbcRb
       if stmts.empty?
         # An empty body is RETNIL on the line of the closing `end` (milestone 14, verified); a `;` before it is not covered.
         check_empty_gap(node.do_keyword_loc || node.collection.location, node.end_keyword_loc)
-        @line = node.end_keyword_loc.start_line
+        @line = @zero_end ? 0 : node.end_keyword_loc.start_line
         @nregs = [@nregs, @sp + 1].max
         emit(:RETNIL)
         return self
@@ -3816,7 +3907,7 @@ module MrbcRb
       # with interpolations has the lines of its expressions to follow (not covered).
       raise Unsupported, 'regexp encoding' if node.euc_jp? || node.windows_31j?
 
-      @line = line_of(node) unless @hold_line # the literal is a node of its own (verified: `a\n  .scan(/y/)` stamps line 3)
+      @line = (@zero_nodes&.key?(node) ? 0 : line_of(node)) unless @hold_line # the literal is a node of its own (verified: `a\n  .scan(/y/)` stamps line 3)
 
       sym = sym_index(:Regexp)
       emit(:OCLASS, base)
@@ -4622,6 +4713,7 @@ module MrbcRb
     def alias_statement(node, last:)
       a = sym_index(static_symbol(node.new_name))
       b = sym_index(static_symbol(node.old_name))
+      @line = 0 if @zero_nodes&.key?(node)
       emit(:ALIAS, a, b)
       nil_value(last)
     end
