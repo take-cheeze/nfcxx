@@ -509,22 +509,17 @@ module NativeFrameUse
           return mrb_funcall_with_method(M, recv, mid, m, c, argc, argv, blk);
         }
         static inline void bc2cpp_frame_free_install(mrb_state*) {}
+        static inline bool bc2cpp_frame_free_wrappers(const mrb_func_t*, size_t) { return false; }
       CPP
     end
 
-    # An owner call's direct row (OwnerCallDirect.native_entries) runs the entry's body through an exported wrapper
-    # that only calls it, so the wrapper is frame-free when its row is; the table lookup never finds it.
-    wrappers = OwnerCallDirect.native_entries.filter_map { |(owner, name), e| e[:entry] if keys.include?("#{owner}##{name}") }.uniq.sort
-    capacity = 1 << ((rows.size + wrappers.size) * 2).bit_length
+    capacity = 1 << ((rows.size + wrapper_names(keys).size) * 2).bit_length
     table = rows.map { |owner, name| "  { #{c_string(owner)}, #{c_string(name)} }," }.join("\n")
-    wrapper_decls = wrappers.map { |fn| "mrb_value #{fn}(mrb_state* M, mrb_value self);\n" }.join
-    wrapper_adds = wrappers.map { |fn| "  bc2cpp_ff_add(#{fn});\n" }.join
     <<~CPP
       // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame.
       #include <stdint.h>
       #include <string.h>
       extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
-      #{wrapper_decls.chomp}
       struct bc2cpp_ff_row { const char* owner; const char* name; };
       static const bc2cpp_ff_row bc2cpp_ff_rows[] = {
       #{ROWS_BEGIN}
@@ -532,6 +527,15 @@ module NativeFrameUse
       #{ROWS_END}
       };
       static mrb_state* bc2cpp_ff_state = nullptr;
+      // FRAME_FREE_WRAPPERS: an owner call's direct-row wrappers (frame_free_wrappers_source), handed over by the unit.
+      static const mrb_func_t* bc2cpp_ff_wrapper_fns = nullptr;
+      static size_t bc2cpp_ff_wrapper_count = 0;
+      static inline bool bc2cpp_frame_free_wrappers(const mrb_func_t* fns, size_t n) {
+        bc2cpp_ff_wrapper_fns = fns;
+        bc2cpp_ff_wrapper_count = n;
+        bc2cpp_ff_state = nullptr;
+        return true;
+      }
       static mrb_func_t bc2cpp_ff_set[#{capacity}];
       static inline unsigned bc2cpp_ff_slot(mrb_func_t f) { return (unsigned)(((uintptr_t)f >> 4) * 2654435761u) & #{capacity - 1}; }
       static void bc2cpp_ff_add(mrb_func_t f) {
@@ -577,7 +581,7 @@ module NativeFrameUse
           if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
           bc2cpp_ff_add(MRB_METHOD_FUNC(m));
         }
-      #{wrapper_adds.chomp}
+        for (size_t i = 0; i < bc2cpp_ff_wrapper_count; ++i) bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i]);
       }
       static inline bool bc2cpp_frame_free_p(mrb_state* M, mrb_func_t f) {
         if (bc2cpp_ff_state != M) bc2cpp_ff_build(M);
@@ -598,6 +602,26 @@ module NativeFrameUse
                                                 mrb_int argc, const mrb_value* argv, mrb_value blk) {
         return mrb_funcall_with_method(M, recv, mid, m, c, argc, argv, blk);
       }
+    CPP
+  end
+
+  # FRAME_FREE_WRAPPERS: an owner call's direct row (OwnerCallDirect.native_entries) runs the entry's body through an
+  # exported wrapper that only calls it, so the wrapper is frame-free when its row is; the table lookup never finds it.
+  def wrapper_names(keys)
+    OwnerCallDirect.native_entries.filter_map { |(owner, name), e| e[:entry] if keys.include?("#{owner}##{name}") }.uniq.sort
+  end
+
+  # The unit's hand-over of those wrappers, printed after OwnerCallDirect.native_prototypes: there, at global scope,
+  # each name has its one declaration (the runtime text may sit in a namespace of its own, where a declaration
+  # would name another function).
+  def wrappers_source(keys)
+    names = ENV['BC2CPP_FRAMEFREE'] == '0' ? [] : wrapper_names(keys)
+    return '' if names.empty?
+
+    <<~CPP
+      static const mrb_func_t bc2cpp_ff_wrapper_list[] = { #{names.join(', ')} };
+      [[maybe_unused]] static const bool bc2cpp_ff_wrappers_handed =
+          bc2cpp_frame_free_wrappers(bc2cpp_ff_wrapper_list, sizeof bc2cpp_ff_wrapper_list / sizeof bc2cpp_ff_wrapper_list[0]);
     CPP
   end
 
