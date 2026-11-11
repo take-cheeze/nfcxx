@@ -831,7 +831,20 @@ def round_float(v, t)
   raise Unsupported, "float type #{sx(t)} in the interpreter" unless float_type?(t)
 
   f = v.to_f
-  t == "float" ? [f].pack("f").unpack1("f") : f
+  t == "float" ? to_float32(f) : f
+end
+
+# The float nearest to the double f (ties to even). pack("f") gives an infinity for any double above FLT_MAX, but IEEE
+# rounds the doubles below FLT_MAX + half an ulp (2**128 - 2**103) down to FLT_MAX: the front end prints FLT_MAX as the
+# float literal 3.4028235E38, which is one of them.
+FLT_MAX_VALUE = 3.4028234663852886e+38
+FLT_OVERFLOW_AT = 3.4028235677973366e+38
+
+def to_float32(f)
+  r = [f].pack("f").unpack1("f")
+  return r unless r.infinite? && !f.infinite? && f.abs < FLT_OVERFLOW_AT
+
+  f.positive? ? FLT_MAX_VALUE : -FLT_MAX_VALUE
 end
 
 # An integer converted to a float is exact up to 2**53. Beyond that, rounding through a double before the float
