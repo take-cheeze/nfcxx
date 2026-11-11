@@ -288,6 +288,21 @@ module StaticDispatchRegistrations
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
   PROC_SPEC_NAMES = /static const char\* const bc2cpp_proc_spec_\d+_names\[\] = \{[^}]*\};/
+  # PROC_PARAMETERS (closed only; bc2cpp.rb's bc2cpp_proc_specs_install): the stand-in Proc#parameters is looked up from
+  # M->proc_class and defined there, so only Proc's own chain can answer or lose it. A `parameters` of an engine class
+  # is neither looked up nor replaced; a module or singleton owner stays reached (super_reached?).
+  PROC_PARAMETERS_LOOKUP = /struct RClass\* found = M->proc_class;\n\s*mrb_method_t method = bc2cpp_find_method\(M, &found, mrb_intern_lit\(M, "parameters"\)\);/
+  PROC_PARAMETERS_DEFINE = /mrb_define_method\(M, M->proc_class, "parameters", bc2cpp_proc_parameters_m, MRB_ARGS_OPT\(1\)\);/
+  PROC_CHAIN = %w[Proc Object BasicObject Kernel].to_set.freeze
+
+  # `gen` without the two `parameters` literals of PROC_PARAMETERS, and the classes that name may still reach (nil when
+  # the text is not the emitted one).
+  def proc_parameters_scan(gen)
+    return [gen, nil] unless gen.match?(PROC_PARAMETERS_LOOKUP)
+
+    blank = ->(m) { m.sub('"parameters"', ' ' * 12) }
+    [gen.gsub(PROC_PARAMETERS_LOOKUP, &blank).gsub(PROC_PARAMETERS_DEFINE, &blank), PROC_CHAIN]
+  end
   # A definition on the running class (a class body's `mrb_define_method(M, mrb_class_ptr(self), "name", ...)`, or the
   # class register rN of codegen_class_body.rb): its name is a method being defined, not a lookup, as REGISTRATION_CALL's.
   SELF_REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,/
@@ -1244,7 +1259,12 @@ module StaticDispatchRegistrations
     # generated `bc2cpp_pool_str` value is the same string, so the generated-code scan may skip that value only.
     pool_pure = symbol_lookups ? literal_sites.keys.to_set - looked_up : Set.new
     runs.each do |gem, r|
-      literals = c_literals(r[:gen], exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?),
+      gen = r[:gen]
+      if symbol_lookups
+        gen, reach = proc_parameters_scan(gen)
+        (super_reach['parameters'] ||= Set.new).merge(reach) if reach
+      end
+      literals = c_literals(gen, exempt: lookup_free_names(r[:gen], subclassed, symbol_values: !symbol_lookups.nil?),
                                      pool_pure: pool_pure, symbol_values: !symbol_lookups.nil?)
       dynamic.merge(literals)
       cite(literals, "a C string literal in #{gem}'s generated code")
