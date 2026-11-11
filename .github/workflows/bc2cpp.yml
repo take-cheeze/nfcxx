@@ -160,7 +160,8 @@ jobs:
           unset MRBC
           export BC2CPP_NO_MRBC=1
           bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
-          bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
+          # cli_test starts bin/mrbc_rb once per input (about 0.2 s each): every 10th input keeps the step to a few minutes.
+          MRBC_RB_CLI_SAMPLE=10 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
           bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --verify
 
   # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
