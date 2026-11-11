@@ -1058,11 +1058,11 @@ class CodeGen
          impl = "#{cpp_name(target_def.owner, target_def.name)}_impl"
          args, = direct_call_args(target_def, args, impl)
          direct = target_def.name == 'initialize' && idx ? "  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{target_def.owner}\n" : ''
-         "#{direct}  #{RegName[d_reg]} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
+         "#{direct}#{super_direct_marker(irep, idx)}  #{RegName[d_reg]} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
        elsif zsuper_plan && d_reg
          note_super_site(:zsuper_forward, owner_def, irep, idx)
          direct = zsuper_plan[:target_def].name == 'initialize' && idx ? "  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{zsuper_plan[:target_def].owner}\n" : ''
-         direct + compile_zsuper_forward(zsuper_plan, d_reg)
+         direct + super_direct_marker(irep, idx) + compile_zsuper_forward(zsuper_plan, d_reg)
        elsif zsuper_lookup && d_reg
          note_super_site(:zsuper_lookup, owner_def, irep, idx)
          compile_zsuper_lookup(zsuper_lookup, d_reg)
@@ -1256,6 +1256,11 @@ class CodeGen
 
     mand, opt = shape
     n.to_i.between?(mand, mand + opt)
+  end
+
+  # SUPER_DIRECT: this copy of a `super` calls its target's `_impl`, with no lookup (InitializerTables.super_direct).
+  def super_direct_marker(irep, idx)
+    irep && idx ? "  // SUPER_DIRECT #{irep.label}:#{idx}\n" : ''
   end
 
   # BC2CPP_SUPER_LOG=<file>: one line per SUPER site compiled, with the path that took it (SUPER fallback breakdown).
