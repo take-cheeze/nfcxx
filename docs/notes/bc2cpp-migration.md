@@ -94,7 +94,8 @@ check.
   a sealed mruby build whose Ruby bc2cpp compiled to C++.
 - The check is checksum 59662 on every runtime. The script prints each runtime's frames per second and the compiled
   build's hot-path speedup over the interpreter. `OPTCARROT_MIN_SPEEDUP=X` also fails below X; it is off by default.
-- `.github/workflows/bc2cpp.yml` runs one job per world, when `tests/bc2cpp/` changes or on demand.
+- `.github/workflows/bc2cpp.yml` runs every world, when `tests/bc2cpp/` changes or on demand, three worlds to a job
+  (`tests/bc2cpp/worlds.list`, balanced by weight by `tests/bc2cpp/run_worlds.rb`).
 
 At the first pin (rpg-maker-clone `df3ee7c52`, 32-core desktop, host gcc 15), 180 frames took:
 
@@ -111,8 +112,10 @@ The gate stays off until that regression is fixed. The whole script runs in abou
 ## Adding a world
 
 A world is a program bc2cpp compiles as a closed world, plus a check that its compiled build behaves like the
-interpreter. Each world is one `tests/bc2cpp/run_<name>.sh` that sources `fetch.sh`, plus one entry in the workflow's
-`world` matrix.
+interpreter. Each world is one `tests/bc2cpp/run_<name>.sh` that sources `fetch.sh`, plus one line in
+`tests/bc2cpp/worlds.list` (the world, its weight in minutes, and optionally its `BC2CPP_MRBC_RB` mode). The workflow's `world`
+job runs the list in shards (`run_worlds.rb --shard N/3`): a new world needs no workflow change until the shards
+outgrow their timeout.
 
 The second world is one of nfcxx's own mruby scripts ([mruby-scripting.md](mruby-scripting.md)):
 `scripts/pathb-qbe-emit.rb`, the largest (3.5K lines) and the one with the heaviest real input (the 3.4 MB IR of
