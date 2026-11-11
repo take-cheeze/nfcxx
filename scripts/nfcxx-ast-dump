@@ -15,7 +15,7 @@ base=${LIBCLANG_EDG_BASE:-$root/build/libclang-edg/edg-base}
 [ -x "$cpfe" ] || { echo "nfcxx-ast-dump: front end not built; run scripts/setup-libclang-edg.sh" >&2; exit 2; }
 source "$root/scripts/host-sys.sh"
 
-opts=(); lang=""; files=(); std=""
+opts=(); lang=""; files=(); std=""; depfile=""
 while [ $# -gt 0 ]; do
   case $1 in
     -x) lang=$2; shift ;;
@@ -27,7 +27,8 @@ while [ $# -gt 0 ]; do
     -D|-U) opts+=("$1$2"); shift ;;
     -D?*|-U?*) opts+=("$1") ;;
     -include) opts+=(--preinclude "$(abs_path "$2")"); shift ;;
-    -MF|-MT|-MQ|-o) shift ;;
+    -MF) depfile=$2; shift ;;       # the headers read, as a make rule (clang -MD -MF)
+    -MT|-MQ|-o) shift ;;
     -*) ;;
     *) files+=("$1") ;;
   esac
@@ -64,5 +65,12 @@ for file in "${files[@]}"; do
   ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
   (cd "$base" && NFCXX_DECL_AST=1 "$cpfe" -D__CHAR_BIT__=8 "${mode[@]}" --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${opts[@]+"${opts[@]}"} "${sys_inc[@]}" --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
+  if [ -n "$depfile" ]; then
+    # -M prints one `target.o: /path` line per header, mixed with the diagnostics; one make rule is written.
+    deps=$(cd "$base" && "$cpfe" -D__CHAR_BIT__=8 "${mode[@]}" --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${opts[@]+"${opts[@]}"} "${sys_inc[@]}" --sys_include="$base/include" -M "$f" 2>/dev/null) || status=$?
+    { printf '%s.o:' "$stem"
+      printf '%s\n' "$deps" | sed -n 's/^[^ ][^ ]*\.o: \(\/.*\)$/\1/p' | while IFS= read -r d; do printf ' %s' "${d// /\\ }"; done
+      echo; } > "$depfile"
+  fi
 done
 exit $status
