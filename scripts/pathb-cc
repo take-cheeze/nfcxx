@@ -8,6 +8,8 @@
 #   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
 #   NFCXX_SAFE_POINTERS=1  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
 #                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
+#   NFCXX_PATHB_ASAN=1  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
+#                    each access through a computed address. Link the program with -fsanitize=address. Not with the mruby emitter or -fsafe-pointers.
 #   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
 #                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
@@ -36,6 +38,8 @@ done
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
 safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
+asan=(); [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan=(--asan)
+[ ${#asan[@]} = 0 ] || [ ${#safe[@]} = 0 ] || { echo "pathb-cc: NFCXX_PATHB_ASAN and NFCXX_SAFE_POINTERS both replace malloc; use one" >&2; exit 2; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
 # The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless NFCXX_IR_OPT names them (inline,
@@ -63,12 +67,13 @@ ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(-
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
 case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
 rc=0
+[ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: NFCXX_PATHB_ASAN needs the SSA emitter (NFCXX_PATHB_EMITTER=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; NFCXX_PATHB_EMITTER=mruby

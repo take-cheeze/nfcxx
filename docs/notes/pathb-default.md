@@ -8,7 +8,7 @@ says what the default covers, what falls back, and how to get the old behaviour.
 Path B is chosen when all of these hold:
 
 - no `--backend=` and no `NFCXX_BACKEND` (both are used as given);
-- no `-fsanitize=address` (Path B has no instrumentation, `docs/notes/asan-plan.md`);
+- no `-fsanitize=address` (Path B instruments heap accesses only so far, and only when asked for, `docs/notes/asan.md` "Path B");
 - not `--freestanding` (Path B compiles hosted programs only);
 - no C++ modules (`docs/notes/modules.md`);
 - not `--cosmo` (cosmocc is a gcc-backend link);

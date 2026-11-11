@@ -32,7 +32,7 @@ EXIT_USAGE = 2
 EXIT_PARTIAL = 3
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--no-opt] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--no-opt] [--safe | --asan] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -222,6 +222,7 @@ no_opt = false
 no_prune = false
 ld_trap = false
 safe = false
+asan = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -232,12 +233,15 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--no-prune" then no_prune = true
   when "--long-double=trap" then ld_trap = true
   when "--safe" then safe = true
+  when "--asan" then asan = true
   else usage_exit
   end
 end
 usage_exit unless args.size == 1
 usage_exit if safe && output.nil?
+usage_exit if asan && safe   # both replace malloc and check accesses: one at a time
 Qbe.safe = safe
+Qbe.asan = asan
 
 file = args.first
 ssa = convert(file, ld_trap)

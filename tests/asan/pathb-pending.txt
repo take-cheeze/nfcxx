@@ -1,0 +1,14 @@
+# Cases Path B does not detect yet, with the milestone of docs/notes/asan-plan.md that adds them (tests/asan/run.sh skips them
+# with ASAN_BACKEND=pathb, and a case that starts to pass should be removed from this list). Milestone 1 (loads and stores
+# through a computed address, heap blocks) is done.
+stack_overflow         M2 stack redzones (a constant array bound still traps without a report)
+aligned_overflow       M2 stack redzones
+alloca_overflow        M4 alloca
+global_overflow        M3 global redzones (a constant array bound still traps without a report)
+use_after_scope        M6 scope IR forms
+scope_break_escape     M6 scope IR forms
+scope_compound_escape  M6 scope IR forms
+scope_continue_escape  M6 scope IR forms
+scope_goto_escape      M6 scope IR forms
+use_after_return       later: fake stack frames (not in the plan's Path B list)
+vla_loop_return        n/a: it checks a stack VLA's redzones are addressable after the return; a Path B C VLA is a heap block (redzones stay poisoned)
