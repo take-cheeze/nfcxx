@@ -1,16 +1,22 @@
 # frozen_string_literal: true
 
-# Run mrbc and build the whole Irep tree from its RITE binary.
-
-# MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
-# `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
+# Compile the sources to a RITE binary and build the whole Irep tree from it.
+#
+# The compiler is the Ruby emitter (bc2cpp/tools/mrbc_rb); the fork's `mrbc` is an optional fallback and oracle:
+#   MRBC=<mrbc>            the fallback for an input the emitter does not cover (a caller may pass it explicitly, e.g.
+#                          mrbgem.rake passes `spec.build.mrbcfile`: the right mrbc depends on which build invokes this);
+#                          unset, `mrbc` on PATH is used if there is one
+#   no mrbc at all         the emitter serves every input; one it does not cover aborts naming the files and the reason
+#   BC2CPP_NO_MRBC=1       never run an mrbc, even if MRBC is set or one is on PATH (same as having none)
+#   BC2CPP_MRBC_RB=0       always mrbc;  =verify  emitter and mrbc must agree byte for byte (needs an mrbc)
+#   BC2CPP_MRBC_RB_LOG=f   one line per compile naming who served it
 require_relative 'insn_operands'
 require_relative 'insn_decoder'
 require_relative 'irep_scans'
 require_relative 'irep_cache'
 require_relative 'bytecode_ir_containers'
 
-MRBC = ENV['MRBC'] || 'mrbc'
+MRBC = ENV['MRBC'].to_s.empty? ? 'mrbc' : ENV['MRBC']
 
 # The Struct-style surface of a record class: the members named by its MEMBERS constant, construction from one Hash of
 # them, [] / []=, members, to_h, and ==, eql?, hash and inspect over the members. A record keeps ivars beyond its members
@@ -261,10 +267,81 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # ---------------------------------------------------------------------------
 RiteImage = Struct.new(:bytes)
 
+# The `mrbc` binary is optional. +mrbc+ is the command (MRBC from the environment, else `mrbc` on PATH); it counts only
+# when it names an executable file, so with MRBC unset and no `mrbc` on PATH there is no fallback and the emitter must
+# serve every input (an input it does not cover aborts the run, naming the files and the reason).
+def mrbc_command(mrbc)
+  return nil if ENV['BC2CPP_NO_MRBC'].to_s == '1' || mrbc.nil? || mrbc.to_s.empty?
+  return (File.file?(mrbc) && File.executable?(mrbc) ? mrbc : nil) if mrbc.to_s.include?(File::SEPARATOR)
+
+  ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |dir| File.join(dir, mrbc) }
+     .find { |path| File.file?(path) && File.executable?(path) }
+end
+
 def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
-  system(mrbc, '-g', '-o', mrb_path, *Array(src_paths), exception: true)
+  paths = Array(src_paths)
+  mrbc = mrbc_command(mrbc)
+  # The Ruby emitter (bc2cpp/tools/mrbc_rb) compiles the source files it covers without mrbc (several files as the one program
+  # mrbc makes of them); any other input, or a construct the emitter does not cover yet, goes to mrbc when there is one. It is
+  # the default:
+  #   BC2CPP_MRBC_RB=0       always mrbc (aborts when there is none)
+  #   BC2CPP_MRBC_RB=verify  emitter and mrbc both compile every input and the bytes must be identical (CI uses this)
+  mode = ENV.fetch('BC2CPP_MRBC_RB', '')
+  reason = 'disabled'
+  unless mode == '0'
+    image, reason = mrbc_rb_image(paths)
+    if image
+      if mode == 'verify'
+        abort 'mrbc_rb: BC2CPP_MRBC_RB=verify needs an mrbc (set MRBC)' unless mrbc
+        system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
+        expected = File.binread(mrb_path)
+        abort "mrbc_rb: bytes differ from mrbc for #{symbol} (#{paths.size} input(s): #{paths.first}...)" unless expected == image
+      end
+      mrbc_rb_log(paths.size, 'emitter', '-', symbol)
+      File.binwrite(mrb_path, image)
+      return RiteImage.new(image)
+    end
+  end
+  unless mrbc
+    mrbc_rb_log(paths.size, 'none', reason, symbol)
+    abort "bc2cpp: the Ruby emitter (mrbc_rb) cannot compile #{paths.size > 1 ? "#{paths.size} files" : 'the file'} for #{symbol} " \
+          "and no mrbc is available (MRBC is unset or not executable, and none is on PATH): #{reason}\n" \
+          "  files: #{paths.first(5).join(' ')}#{paths.size > 5 ? " ... (#{paths.size} in all)" : ''}\n" \
+          '  Set MRBC=<fork mrbc> to compile what the emitter does not cover with it, or extend bc2cpp/tools/mrbc_rb.'
+  end
+  mrbc_rb_log(paths.size, 'mrbc', reason, symbol)
+  system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
   RiteImage.new(File.binread(mrb_path))
+end
+
+# BC2CPP_MRBC_RB_LOG=<file>: one line per run_mrbc call: "<inputs>\t<emitter|mrbc>\t<reason>\t<symbol>", where reason is
+# disabled or Unsupported(<message>) for an mrbc run, and "-" for the emitter.
+def mrbc_rb_log(count, served_by, reason, symbol)
+  log = ENV['BC2CPP_MRBC_RB_LOG']
+  return if log.nil? || log.empty?
+
+  File.open(log, 'a') { |f| f.write("#{count}\t#{served_by}\t#{reason.to_s.tr("\n\t", '  ')}\t#{symbol}\n") }
+end
+
+# [the RITE binary of the source files +paths+ from the Ruby emitter, nil] or [nil, "Unsupported(message)"] when it does not
+# cover them.
+def mrbc_rb_image(paths)
+  require_relative '../mrbc_rb/mrbc_rb'
+  image = if paths.size == 1
+            MrbcRb.compile(File.binread(paths.first), paths.first)
+          else
+            MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
+          end
+  [image, nil]
+rescue MrbcRb::Error => e
+  # Unsupported, or a source Prism rejects (mrbc then reports the syntax error itself).
+  [nil, "#{e.class.name.split('::').last}(#{e.message})"]
+rescue StandardError => e
+  # An emitter bug must not break a build that mrbc can serve; BC2CPP_MRBC_RB=verify (CI) still fails loudly.
+  raise if ENV['BC2CPP_MRBC_RB'] == 'verify'
+
+  [nil, "Crash(#{e.class}: #{e.message[0, 100]})"]
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.

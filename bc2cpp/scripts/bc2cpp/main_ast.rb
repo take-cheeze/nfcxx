@@ -7,6 +7,7 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/main_roots'
+require_relative '../../tools/bc2cpp/native_ast_source'
 
 main, output, *flags = ARGV
 abort 'usage: ruby scripts/bc2cpp/main_ast.rb MAIN OUTPUT [--lookup-names-only] [--unit NATIVE_SOURCE]... [-- CLANG_FLAGS...]' unless main && output
@@ -30,7 +31,11 @@ resolve = lambda do |name|
 
   File.realpath(path)
 end
-clang = resolve.call(ENV.fetch('CLANG', 'clang++'))
+# The nfcxx front end's AST (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md) is the default where it is built; clang's is the
+# fallback, and BC2CPP_AST_PRODUCER=clang opts out. The two manifests' roots agree on everything a consumer reads
+# (scripts/bc2cpp/main_ast_producers_diff.rb). The nfcxx producer needs no clang at all when BC2CPP_HOST_CXX preprocesses.
+producer = NativeAstSource.producer
+clang = producer == 'clang' ? resolve.call(ENV.fetch('CLANG', 'clang++')) : nil
 host_cxx = ENV['BC2CPP_HOST_CXX'] && resolve.call(ENV['BC2CPP_HOST_CXX'])
 target = nil
 if host_cxx
@@ -41,7 +46,9 @@ if host_cxx
 end
 expected_command = { 'clang' => clang, 'host_cxx' => host_cxx, 'target' => target, 'flags' => flags,
                      'sources' => [main, *units], 'lookup_names_only' => lookup_names_only }
+expected_command['ast_producer'] = producer unless producer == 'clang'
 tools = [File.realpath(__FILE__), File.realpath(File.join(__dir__, '../../tools/bc2cpp/main_roots.rb')), clang, host_cxx].compact
+tools += [File.realpath(NativeAstSource.nfcxx_tool), File.realpath(ENV.fetch('LIBCLANG_EDG_CPFE') { File.join(NativeAstSource::REPO_ROOT, 'build/libclang-edg/cmake/bin/cpfe') })] if producer == 'nfcxx'
 tool_digests = tools.to_h { |path| [path, Digest::SHA256.file(path).hexdigest] }
 if File.file?(output)
   previous = JSON.parse(File.read(output))
@@ -78,12 +85,21 @@ Dir.mktmpdir('bc2cpp-main-ast') do |dir|
         abort "target preprocessing failed: #{source}" unless status.success?
       end
     end
-    command = [clang, *flags, '-Werror=date-time', '-fsyntax-only', '-Xclang', '-ast-dump=json']
-    command += host_cxx ? ["--target=#{target}", '-x', 'c++-cpp-output', input] : ['-MD', '-MF', depfile, source]
-    File.open(astfile, 'w') do |io|
-      pid = Process.spawn(*command, out: io)
-      _, status = Process.wait2(pid)
-      abort "AST compilation failed: #{source}" unless status.success?
+    if producer == 'nfcxx'
+      # The front end's own dump; -MD/-MF make scripts/nfcxx-ast-dump list the headers it read (the host preprocess above already wrote them).
+      dump_flags = host_cxx ? flags : [*flags, '-MD', '-MF', depfile]
+      out, err, status = NativeAstSource.dump(input, dump_flags, lang: :cxx, name: 'nfcxx')
+      abort "AST compilation failed: #{source}: #{err.lines.find { |l| l =~ /error/ } || err.lines.first}" unless status.success?
+
+      File.write(astfile, out)
+    else
+      command = [clang, *flags, '-Werror=date-time', '-fsyntax-only', '-Xclang', '-ast-dump=json']
+      command += host_cxx ? ["--target=#{target}", '-x', 'c++-cpp-output', input] : ['-MD', '-MF', depfile, source]
+      File.open(astfile, 'w') do |io|
+        pid = Process.spawn(*command, out: io)
+        _, status = Process.wait2(pid)
+        abort "AST compilation failed: #{source}" unless status.success?
+      end
     end
     unit = JSON.parse(File.read(astfile))
     namespace_ids.call(unit, index)

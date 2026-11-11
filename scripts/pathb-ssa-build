@@ -260,11 +260,15 @@ end
 globals = ssa_forms.select { |f| head(f) == "abi-type" } + globals
 # The string literals: top-level data forms, which the SSA text does not carry.
 globals += ir_forms.select { |f| head(f) == "data" }
-text = no_opt ? ssa : PathbEgraph.optimize_module(ssa).first
-fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 # Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one).
+# It runs before the optimizer: optimize_module works on each function alone, so a function nothing reaches costs
+# optimization time for no output (the STL route timed out on it, docs/notes/library-suite-results.md).
+live = no_prune ? nil : live_names(ir_forms)
+kept = ->(f) { live.nil? || head(f) != "ssa-function" || live.key?(f[1].raw.delete('"')) }
+pruned_ssa = no_opt || live.nil? ? ssa : ssa_forms.select(&kept).map { |f| sx(f) }.join("\n")
+text = no_opt ? ssa : PathbEgraph.optimize_module(pruned_ssa).first
+fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 unless no_prune
-  live = live_names(ir_forms)
   fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
   # An abi-type is a layout every function may need, not a definition to prune: it is kept.
   globals = globals.select { |g| head(g) == "abi-type" || live.key?(g[1].raw.delete('"')) }
@@ -300,7 +304,18 @@ startup_markers = ssa_forms.select { |f| head(f) == "ssa-function" }.flat_map do
   end
 end
 
-il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + startup_markers).reject(&:empty?).join("\n\n") + "\n"
+# File-scope asm (the IR's (asm-decl HEX) forms, from be/nfcxx_ir.c): its text goes into the object as it is, as a
+# pathb-text marker. A .cu's device image is defined this way (pathb-ptx-emit --embed), as the qbe route does.
+# The text of an (asm-decl HEX) form: its hex digits as bytes, one line (a line ends with a newline for the assembler).
+def text_of_asm_decl(f)
+  text = [f[1].to_s].pack("H*")
+  text.end_with?("\n") ? text : text + "\n"
+end
+
+asm_decl_markers = ir_forms.select { |f| head(f) == "asm-decl" }.map do |f|
+  "# pathb-text #{Base64.strict_encode64(text_of_asm_decl(f))}"
+end
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + startup_markers + [asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }

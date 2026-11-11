@@ -1972,7 +1972,8 @@ static ir_val ir_x87_const(a_constant_ptr c, a_type_ptr t)
 /* A scalar constant operand of type t. */
 static ir_val ir_const_value(a_constant_ptr c, a_type_ptr t)
 {
-  if (c->kind == ck_integer && ir_is_pointer(t)) return ir_mk_value(ir_zero(t), t);
+  /* An integer constant of pointer type is a null pointer only when it is zero: (void *) 0x1000 is an address. */
+  if (c->kind == ck_integer && ir_is_pointer(t) && strcmp(ir_capture_constant(c), "0") == 0) return ir_mk_value(ir_zero(t), t);
   return ir_mk_value(ir_fmt("(const %s %s)", ir_valtext(t), ir_capture_constant(c)), t);
 }
 
@@ -4711,6 +4712,9 @@ static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f)
 /* A struct of exactly 16 bytes whose one member, at offset 0, is a long double or another such struct. A union is not
    one: a union with a long double is memory class or INTEGER class (the psABI merge), and a struct with a second member
    needs 32 bytes or shares the eightbyte. The unit tests cover the classes gcc gives. */
+/* The most members a class has for its constant list (a class with more is refused: ir_class_members returns -1). A
+   vulkan.hpp dispatch loader has over 256 function pointers. */
+#define IR_MAX_MEMBERS 4096
 static int ir_class_members(a_type_ptr t, ir_member *out, int max);
 
 static int ir_is_x87_agg(a_type_ptr t)
@@ -4908,8 +4912,8 @@ static int ir_abi_collect(a_type_ptr t, unsigned long long base, ir_leaf *lv, in
     }
     case tk_class:
     case tk_struct: {
-      ir_member mem[256];
-      int cnt = ir_class_members(t, mem, 256), i, j;
+      ir_member mem[IR_MAX_MEMBERS];
+      int cnt = ir_class_members(t, mem, IR_MAX_MEMBERS), i, j;
       if (cnt < 0) { *why = "virtual base"; return 0; }
       for (i = 0; i < cnt; i++) {
         if (mem[i].bf != NULL && ir_is_i128(mem[i].t)) {
@@ -5234,8 +5238,8 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     return;
   }
   if (c->kind == ck_aggregate && (s->kind == tk_class || s->kind == tk_struct)) {
-    ir_member mem[256];
-    int n = ir_class_members(t, mem, 256);
+    ir_member mem[IR_MAX_MEMBERS];
+    int n = ir_class_members(t, mem, IR_MAX_MEMBERS);
     int i = 0;
     a_constant_ptr ce;
     if (n < 0) {
@@ -5483,8 +5487,8 @@ static void ir_gi_items(unsigned long long off, a_constant_ptr c, a_type_ptr t)
     return;
   }
   if (c->kind == ck_aggregate && (s->kind == tk_class || s->kind == tk_struct)) {
-    ir_member mem[256];
-    int n = ir_class_members(t, mem, 256);
+    ir_member mem[IR_MAX_MEMBERS];
+    int n = ir_class_members(t, mem, IR_MAX_MEMBERS);
     int i = 0;
     a_constant_ptr ce;
     if (n < 0) {
@@ -6618,6 +6622,14 @@ static void ir_startup_markers(a_routine_ptr rout)
   }
 }
 
+/* A local entity: a member of a class, or a lambda's operator(), declared in a function. Its mangled name starts _ZZ, and
+   EDG's source correspondence names the enclosing routine. */
+static int ir_is_local_entity(a_routine_ptr rout)
+{
+  const char *n = rout->source_corresp.name;
+  return rout->source_corresp.enclosing_routine != NULL || (n != NULL && strncmp(n, "_ZZ", 3) == 0);
+}
+
 /* Lower one routine body into the function output. Same selection as the IL dump (stage 1). */
 static void ir_function(a_routine_ptr rout)
 {
@@ -6799,8 +6811,19 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_write(&hdr, nf_out);
   ir_buf_write(&params, nf_out);
   fputs(")", nf_out);
-  if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
+  /* A local entity (a member of a class, or a lambda's operator(), defined in a function) has the linkage of that function:
+     EDG gives it internal storage class, which it does not have. It is weak below, as a copy of an inline function. */
+  if (rout->storage_class == sc_static && !ir_is_local_entity(rout)) fputs("\n  (static)", nf_out);
+  /* An explicit instantiation (template void f<16>(...);) is the one definition the program has for that instance: a
+     strong symbol that is a root of pruning, as a plain function is. Its implicit instances in other units stay weak. */
+  else if (rout->explicit_instantiation) ;
   else if (rout->use_comdat || rout->suppress_inline_body) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  /* An implicit instance of a function template is one of the copies of its COMDAT group: weak, as the C back end writes it.
+     EDG does not always flag these as COMDAT. */
+  else if (rout->is_template_function) fputs("\n  (weak)", nf_out);
+  /* An inline function (C++ inline: an in-class definition, a defaulted member, an inline template member) has a copy in
+     each unit that uses it, one COMDAT group: weak, as EDG marks it for the C back end. Out-of-line members are not. */
+  else if (rout->is_inline || ir_is_local_entity(rout)) fputs("\n  (weak)", nf_out);
   else if (rout->is_weak && rout->source_corresp.name != NULL && strncmp(rout->source_corresp.name, "_ZT", 3) == 0)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
@@ -6879,6 +6902,7 @@ void nfcxx_ir_back_end(void)
   const char *file_name = il_header.primary_source_file->file_name;
   const char *slash = strrchr(file_name, '/');
   a_variable_ptr var;
+  an_asm_entry_ptr aep;
   a_routine_ptr rout;
   const char *ov = getenv("NFCXX_IR_OVERFLOW");
 
@@ -6909,6 +6933,15 @@ void nfcxx_ir_back_end(void)
   /* A weakref variable first: its target is then printed as the weak declaration the weakref makes it. */
   for (var = scope->variables; var != NULL; var = var->next) {
     if (var->is_weakref && var->aliased_variable != NULL && !ignore_variable_in_back_end(var)) (void)ir_global_op(var);
+  }
+  /* File-scope asm (the .incbin that defines a .cu's device image, and any other top-level asm): one (asm-decl HEX) form
+     per declaration, the text in hex. pathb-ssa-build writes it into the object as it is (a pathb-text marker). */
+  for (aep = scope->asm_entries; aep != NULL; aep = aep->next) {
+    const char *text = aep->asm_string->variant.string.value;
+    size_t k, n = (size_t)aep->asm_string->variant.string.length;
+    fputs("(asm-decl ", ir_out_globals.f);
+    for (k = 0; k < n; k++) fprintf(ir_out_globals.f, "%02x", (unsigned char)text[k]);
+    fputs(")\n", ir_out_globals.f);
   }
   for (var = scope->variables; var != NULL; var = var->next) {
     /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */

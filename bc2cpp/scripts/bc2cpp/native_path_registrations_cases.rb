@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require 'fileutils'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/native_names'
@@ -34,7 +35,9 @@ module NativePathRegistrationsCases
 
     begin
       Dir.mktmpdir('native_path_registrations') do |dir|
-        path = File.join(dir, 'thing.c')
+        # Under 3rd/: a core table is read as its entries (an engine gem's is read as the registrations it replaced).
+        path = File.join(dir, '3rd', 'mruby', 'thing.c')
+        FileUtils.mkdir_p(File.dirname(path))
         File.write(path, SOURCE)
         fresh = original.call([path])
         first = NED.path_registrations(path)

@@ -15,9 +15,9 @@
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
-#   --prune-unreachable=SUBSTR   drop the functions that no function whose name contains SUBSTR reaches (prune_pass). With
-#                --inline or --sroa this is the default for a SYCL device module (__nfcxx_sycl_entry_ kernels); --no-prune
-#                keeps every function.
+#   --prune-unreachable=SUBSTR   drop the functions and the global or data objects that no function whose name contains SUBSTR
+#                reaches, by name (prune_pass). With --inline or --sroa this is the default for a SYCL device module
+#                (__nfcxx_sycl_entry_ kernels); --no-prune keeps every function.
 #
 # Exit status: 0 written; 1 malformed IR (on stderr).
 
@@ -205,7 +205,21 @@ def copy_form(x)
 end
 
 # Why a function cannot be inlined, or nil when it can.
+# Caps on inlining (docs/notes/pathb-ir-passes.md). A callee of more than $inline_max_callee nodes is not inlined, and the
+# module is not inlined past $inline_max_growth times its size on entry (each inlined copy is a full copy of the callee, and
+# the callees grow with each round). 0 turns a cap off.
+$inline_max_callee = 400
+$inline_max_growth = 2.0
+
+def node_count(x)
+  return 0 unless x.is_a?(Array)
+  n = 1
+  x.each { |y| n += node_count(y) }
+  n
+end
+
 def refusal(fn, name)
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   params = fn.find { |f| head(f) == "params" }
   if params
@@ -490,11 +504,17 @@ def inline_pass(forms, max_depth, report)
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
   ids = IdentityMap.new
   calls = IdentityMap.new
+  total = node_count(forms)
+  budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
+      if budget && total > budget
+        refused["module over --max-growth"] = (refused["module over --max-growth"] || 0) + 1
+        next
+      end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
              ic: infos, attrs: attrs, attr_from: [] }
@@ -502,7 +522,9 @@ def inline_pass(forms, max_depth, report)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]
+      before = node_count(f)
       forms[i] = ["function", f[1]] + insert_slots(children, st[:hoist])
+      total += node_count(forms[i]) - before
       fns[name] = forms[i]
       reasons.delete(name)
       infos.delete(name)
@@ -1644,35 +1666,39 @@ def strip_eh_pass(forms, report)
 end
 
 # ---- unreachable functions (--prune-unreachable=SUBSTR) -------------------------------------------------------------------
-# Drops the functions that no root reaches: the roots are the functions whose name contains SUBSTR (the SYCL device build's
-# entry kernels, __nfcxx_sycl_entry_) and every function a non-function form names (an initializer of a global or data form
-# may hold a function's address). A function reaches each function whose &"name" it holds, called or not. The emitters only
-# take the functions their kernels reach, so the dropped ones would only cost the later passes time.
-def function_refs(x, fns, out)
+# Drops the functions and the global or data objects that no root reaches. The roots are the functions whose name contains
+# SUBSTR (the SYCL device build's entry kernels, __nfcxx_sycl_entry_). A reached function or object reaches each function or
+# object whose name it holds (a &"f", $"x" or @"g" atom), called or not. The IR names every global and function, so a form that
+# no reached code names cannot be used by the device; the emitters take only what their kernels reach.
+SYCL_ENTRY = "__nfcxx_sycl_entry_"
+
+# The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
+def quoted_names(x, out)
   if x.is_a?(Array)
-    x.each { |y| function_refs(y, fns, out) }
-  elsif x.is_a?(String) && x.start_with?("&\"") && fns.key?(n = unq(x))
-    out << n
+    x.each { |y| quoted_names(y, out) }
+  elsif x.is_a?(String) && x.match?(/\A[$&@]?"/)
+    out << unq(x.sub(/\A@/, ""))
   end
   out
 end
 
-SYCL_ENTRY = "__nfcxx_sycl_entry_"
-
+# The functions and objects (global, data) that the functions whose names contain substr reach. An object is reached only
+# when a reached function or object names it: the other top-level forms of a module (static tables of host code, for one)
+# are not roots, so the functions that only they name are dropped too. A name shared by two forms keeps both (a conservative
+# match on the name, never a miss).
 def prune_pass(forms, substr, report)
-  fns = {}
-  forms.each { |f| fns[unq(f[1])] = f if head(f) == "function" }
-  queue = fns.keys.select { |n| n.include?(substr) }
-  forms.each { |f| function_refs(f, fns, queue) unless head(f) == "function" }
+  nodes = {}
+  forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
+  queue = nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
   seen = {}
   until queue.empty?
     n = queue.pop
     next if seen[n]
     seen[n] = true
-    function_refs(fns[n].drop(2), fns, []).each { |c| queue << c unless seen[c] }
+    quoted_names(nodes[n].drop(2), []).each { |c| queue << c if nodes.key?(c) && !seen[c] }
   end
-  out = forms.select { |f| head(f) != "function" || seen[unq(f[1])] }
-  $stderr.write("pathb-ir-opt: kept #{seen.size} of #{fns.size} functions (reachable from #{substr})\n") if report
+  out = forms.select { |f| !%w[function global data].include?(head(f)) || seen[unq(f[1])] }
+  $stderr.write("pathb-ir-opt: kept #{seen.size} of #{nodes.size} functions and objects (reachable from #{substr})\n") if report
   out
 end
 
@@ -1715,6 +1741,10 @@ def main(argv)
       $pass_fold_unit = false
     elsif a.start_with?("--max-depth=")
       max_depth = a[12..-1].to_i
+    elsif a.start_with?("--max-callee=")
+      $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--max-growth=")
+      $inline_max_growth = a[13..-1].to_f
     elsif a == "--report"
       report = true
     elsif a == "--forward"

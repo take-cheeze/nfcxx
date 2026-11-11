@@ -66,13 +66,22 @@ module EscapeAnalysis
   Use = Struct.new(:index, :kind, :name, :reg, keyword_init: true)
   # reasons: [[symbol, instruction address]]; empty = the value does not escape. tracked: every register
   # of the analysed frame that may hold it. returned: a `returns` flow handed the value back as its result.
-  Verdict = Struct.new(:reasons, :uses, :tracked, :returned, keyword_init: true) do
+  # holding: with points: true and no escape, holding[i] is the set of registers that may hold the value on entry to
+  # instruction i (an empty set when i is unreachable); nil when the flow did not run to completion, so the sets are
+  # not complete and holding_at answers nil.
+  Verdict = Struct.new(:reasons, :uses, :tracked, :returned, :holding, keyword_init: true) do
     def escapes?
       !reasons.empty?
     end
 
     def reason
       reasons.first&.first
+    end
+
+    def holding_at(index)
+      return nil unless holding
+
+      holding[index] || Set.new
     end
   end
 
@@ -611,7 +620,7 @@ module EscapeAnalysis
 
     # The value written to the leading register of the instruction at +index+: a LAMBDA, BLOCK, ARRAY, HASH,
     # STRING or the result of a `new` send (then +value_class+ is the constructed class when known).
-    def creation(irep, index, value_class: nil, self_klass: nil)
+    def creation(irep, index, value_class: nil, self_klass: nil, points: false)
       insn = EscapeAnalysis.insn_at(irep, index)
       return failed(:no_destination) unless insn.reg
       return failed(:reflection) unless @world.reflective_sites.empty?
@@ -625,7 +634,7 @@ module EscapeAnalysis
 
       flow(irep, { index => { insn.reg => true } }, created_at: index,
                                                    value_class: CREATED_CLASS[insn.op] || value_class,
-                                                   self_klass: self_klass)
+                                                   self_klass: self_klass, points: points)
     end
 
     # Does the constructor of +klass+ keep no reference to self? BasicObject#initialize is mrb_do_nothing
@@ -843,7 +852,7 @@ module EscapeAnalysis
     # state holds on entry to that index. +block_sources+: BLKPUSH indices that introduce the value;
     # +block_tracked+: the value is a method's block, so closures that BLKPUSH it from a nested level see it.
     def flow(irep, starts, created_at: nil, self_tracked: false, block_sources: [], block_tracked: false,
-             value_class: nil, returns: false, self_klass: nil, block_given: false)
+             value_class: nil, returns: false, self_klass: nil, block_given: false, points: false)
       prog = BytecodeIR.for(irep)
       return failed(:cfg_unresolved) unless prog.resolved?
       return failed(:handlers_unresolved) unless prog.handlers_resolved?
@@ -900,7 +909,8 @@ module EscapeAnalysis
 
       ever.merge(Array(starts.values.flat_map(&:keys)))
       read_by_closures(run, ever, block_tracked: block_tracked)
-      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned)
+      holding = points ? state.map { |regs| (regs || Set.new).dup.freeze } : nil
+      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned, holding: holding)
     end
 
     def failed(reason)

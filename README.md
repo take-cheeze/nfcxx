@@ -11,7 +11,8 @@ scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (
 scripts/setup-cppfront.sh # cppfront v0.8.2 (Cpp2 to C++1) into build/, for .cpp2 inputs (experimental; docs/notes/cpp2.md)
 ./nfcxx hello.cpp2 -o hello  # Cpp2: cppfront translates it, then the C++ pipeline above (experimental)
 tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, includes, a syntax error (experimental)
-./nfcxx hello.cpp -o hello   # C++ -> C -> cproc -> QBE -> asm (default backend)
+./nfcxx hello.cpp -o hello   # default on x86-64 Linux: C++ -> EDG IL -> Path B IR -> QBE -> asm (docs/notes/pathb-default.md)
+./nfcxx --backend=qbe ...     # C++ -> C -> cproc -> QBE -> asm (the default elsewhere, and for ASan, freestanding, modules, cosmo)
 ./nfcxx --backend=gcc ...    # C++ -> C -> gcc -O2 -fwrapv -fno-strict-aliasing
 ./nfcxx --emit-c hello.cpp   # print the generated C
 ./nfcxx -fsanitize=address x.cpp -o x # AddressSanitizer via the gcc backend (docs/notes/asan.md); tests/asan/run.sh

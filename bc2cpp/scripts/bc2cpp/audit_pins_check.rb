@@ -29,4 +29,8 @@ pins.each do |table, rel, digests|
   suite.check("#{table} #{rel} matches its pin (now #{current})", digests.include?(current))
 end
 
+suite.check('a pin list accepts any one of its digests', NativeIvarScopes.pinned?('a', [Digest::SHA256.hexdigest('b'), Digest::SHA256.hexdigest('a')]))
+suite.check('a single pin accepts its digest', NativeIvarScopes.pinned?('a', Digest::SHA256.hexdigest('a')))
+suite.check('a pin list refuses a file none of its digests match', !NativeIvarScopes.pinned?('c', [Digest::SHA256.hexdigest('a')]))
+
 suite.finish!

@@ -59,6 +59,7 @@ require_relative 'static_dispatch_lists'
 require_relative 'symbol_cache'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
+require_relative 'static_dispatch_class_guards'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
 require_relative 'owner_call_direct'
@@ -701,7 +702,7 @@ module StaticDispatchRegistrations
       owner, name = up && body_of[up]
       if reflective.include?(file)
         names = (symbols[file] ||= Set.new)
-        names.merge(irep.syms.map(&:to_s))
+        names.merge(reflective_syms(irep))
         core_irep_tokens(irep, names, true, name)
         next
       end
@@ -710,6 +711,26 @@ module StaticDispatchRegistrations
       core_irep_tokens(irep, tokens, self_may, name)
     end
     symbols.sort.to_h
+  end
+
+  # NON_LOOKUP_SYM_OPS: ops whose Symbol operand names what is being defined or a keyword parameter, not a method looked
+  # up. Variable and constant operands (kinds :name and :mcnst) are no lookup either. A name only these hold is no
+  # symbol of a reflective file; an operand of any other op keeps its name.
+  NON_LOOKUP_SYM_OPS = %i[CLASS MODULE DEF TDEF SDEF KEY_P KARG].to_set.freeze
+
+  def reflective_syms(irep)
+    quiet = Set.new
+    other = Set.new
+    BytecodeIR.for(irep).each_source do |insn, _|
+      insn.typed.each do |operand|
+        case operand.kind
+        when :name then quiet << operand.value.to_s
+        when :mcnst then quiet << operand.value[1].to_s
+        when :sym then (NON_LOOKUP_SYM_OPS.include?(insn.op) ? quiet : other) << operand.value.to_s
+        end
+      end
+    end
+    irep.syms.map(&:to_s).to_set - (quiet - other)
   end
 
   def core_reflective?(irep)
@@ -940,28 +961,34 @@ module StaticDispatchRegistrations
   end
 
   # NATIVE_CANDIDATES (closed only): each native registration on a literal engine owner (NativeOwnerMap), which the
-  # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed. Not ROM method-table entries
-  # (MRB_MT_ENTRY), whose runtime removal adds a RAM tombstone. A key is left out when Ruby defines the name on that
-  # owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef names it there, when the
-  # owner has a computed-name registration, or when it is already a candidate. Pruning needs the registration's
-  # owner and name, not a statically named C function: lambda and template bodies still install a fixed key.
+  # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed, and each engine ROM method-table entry
+  # (MRB_MT_ENTRY) the build can leave out at compile time (ENGINE_ROM, CoreNativeCandidates.engine_rom_keys), flagged
+  # `rom`: a ROM entry is never removed at run time, which only adds a RAM tombstone. A key is left out when Ruby
+  # defines the name on that owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef
+  # names it there, when the owner has a computed-name registration, or when it is already a candidate. Pruning needs
+  # the registration's owner and name, not a statically named C function: lambda and template bodies still install a
+  # fixed key.
   def native_candidates(repo_root, registry, candidates)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     map = NativeOwnerMap.build(native)
     keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
-    map.registrations.filter_map do |owner, name, _fn|
+    rom_keys = CoreNativeCandidates.engine_rom_keys(CoreNativeCandidates.engine_entries(native), map.rom)
+    pick = lambda do |owner, name, rom|
       next unless owner.is_a?(String) && name && !map.computed.include?(owner)
 
       gem = bc2cpp_native_strip_gem(owner)
       key = "#{owner}##{name}"
       next unless gem && GEMS.include?(gem) && !blocked.include?(key)
+      next if rom && !rom_keys.include?(key)
       next if Array(registry[name]).any? { |d| d.owner == owner }
       next unless keys.add?(key)
 
-      { owner: owner, name: name, entry: nil, gem: gem, native: true }
+      { owner: owner, name: name, entry: nil, gem: gem, native: true, rom: rom }.compact
     end
+    map.registrations.filter_map { |owner, name, _fn| pick.call(owner, name, false) } +
+      map.rom.filter_map { |owner, name, _fn| pick.call(owner, name, true) }
   end
 
   # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
@@ -1160,13 +1187,22 @@ module StaticDispatchRegistrations
     # SYMBOL_USES has proven every lookup in the closed bytecode takes a literal: a compared literal could otherwise
     # be the name a computed `send(x)` ends up looking up (`send(x) if x == "name"`).
     literal_sites = Hash.new { |h, k| h[k] = [] }
+    # SUPER_REACH (closed only): a `super` in a class's method reaches only the same name on that class's ancestors, so
+    # name => the ancestor classes some such `super` may reach. Any other `super` makes the name dynamic as before.
+    super_reach = {}
     ireps.each_value do |irep|
       BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
         up = method_of[irep.label]
         next unless up
 
-        dynamic << body_of[up][1]
-        cite([body_of[up][1]], "super in #{body_of[up].join('#')}")
+        owner, name = body_of[up]
+        reach = closed_only && super_ancestors(owner, superclass_of)
+        if reach
+          (super_reach[name] ||= Set.new).merge(reach)
+        else
+          dynamic << name
+          cite([name], "super in #{owner}##{name}")
+        end
       end
       irep.pool.each do |s|
         next unless s.is_a?(String)
@@ -1175,6 +1211,7 @@ module StaticDispatchRegistrations
         fragments << s if s.match?(FRAGMENT)
       end
     end
+    class_owners = superclass_of.keys.to_set
     core = { mrbc: mrbc, superclass_of: superclass_of, struct_owners: struct_owners }
     text = Set.new
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text)
@@ -1212,13 +1249,24 @@ module StaticDispatchRegistrations
     # makes is otherwise a C proc (mrb_proc_new_cfunc_with_env), so the block's
     # irep runs only from the method's own bytecode. Names are only ever added,
     # so both fixpoints converge.
+    guards = closed_only ? class_guards(repo_root, registry, superclass_of) : nil
     sends = lambda do |irep, into|
       grew = false
-      BytecodeIR.for(irep).each_source do |insn, _index|
+      narrowed = guards ? guards.narrowed(irep) : {}
+      BytecodeIR.for(irep).each_source do |insn, index|
         name = if send_ops.include?(insn.op) then insn.sym
                elsif insn.op != :LOADSYM then IMPLICIT_DISPATCH_NAMES[insn.op]
                end
-        next unless name && into.add?(name)
+        next unless name
+
+        # CLASS_GUARD_REACH: a send a class test narrows looks `name` up on that class's relatives only.
+        if (reach = narrowed[index])
+          known = (super_reach[name] ||= Set.new)
+          grew = true unless reach.subset?(known)
+          known.merge(reach)
+          next
+        end
+        next unless into.add?(name)
 
         grew = true
         cite([name], "sent by #{irep_site(irep, method_of, body_of)}, which may run as bytecode")
@@ -1252,8 +1300,9 @@ module StaticDispatchRegistrations
       if (overridden.include?(key) || initializers_proven.include?(key)) && !proven[name] && !force.include?(key)
         bytecode_blocks && label != m ? true : load_bodies.include?(m)
       else
-        ran << key if dynamic.include?(name) || proven[name] || force.include?(key)
-        dynamic.include?(name) || proven[name] || force.include?(key)
+        runs_here = dynamic.include?(name) || proven[name] || force.include?(key) || super_reached?(super_reach, class_owners, owner, name)
+        ran << key if runs_here
+        runs_here
       end
     end)
 
@@ -1269,7 +1318,8 @@ module StaticDispatchRegistrations
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| r[:gen] }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven) : nil
 
-    { registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
+    { super_reach: super_reach, class_owners: class_owners,
+      registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
       closed_only: closed_only, suffix_bases: suffix_bases, symbol_lookups: symbol_lookups, proven: proven, ran: ran,
       core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new }
   end
@@ -1369,7 +1419,7 @@ module StaticDispatchRegistrations
 
     defined = Set.new
     registries.each { |reg| reg.each { |name, defs| defs.each { |d| defined << "#{d.owner}##{name}" } } }
-    map.registrations.each { |owner, name, _fn| defined << "#{owner}##{name}" if owner.is_a?(String) && name }
+    map.definitions.each { |owner, name, _fn| defined << "#{owner}##{name}" if owner.is_a?(String) && name }
     entries.each { |e| defined << "#{e[:mt_class]}##{e[:name]}" if e[:name] }
     superclass = core.map { |file| file[:superclass_of] }.inject({}) { |all, h| all.merge(h) }.merge(engine_superclass_of)
     owners = {}.compare_by_identity
@@ -1666,14 +1716,62 @@ module StaticDispatchRegistrations
     "#{where}#{file}"
   end
 
+  # CLASS_GUARD_REACH's gates (StaticDispatchClassGuards.build), or nil when one fails.
+  def class_guards(repo_root, registry, superclass_of)
+    ruby, native = outside_world_files(repo_root, closed_only: true)
+    map = NativeOwnerMap.build(native)
+    return nil if map.computed.any? { |owner| owner.is_a?(String) && (owner.match?(StaticDispatchClassGuards::ENGINE_RE) || %w[Kernel Object BasicObject].include?(owner)) }
+
+    native_owners = Hash.new { |h, k| h[k] = [] }
+    map.registrations.each { |owner, name, _fn| native_owners[name] << owner if name }
+    map.aliases.each { |owner, new_name, old_name| [new_name, old_name].each { |n| native_owners[n] << "alias #{owner}" } }
+    owner_names = registry.values.flatten.map(&:owner).to_set.merge(superclass_of.keys)
+    map.registrations.each { |owner, name, _fn| owner_names << owner if owner.is_a?(String) && name }
+    StaticDispatchClassGuards.build(
+      superclass_of: superclass_of, registry: registry, owner_names: owner_names, native_owners: native_owners,
+      ruby_texts: ruby.filter_map { |path| File.file?(path) ? File.read(path) : nil },
+      ancestors: ->(klass) { (@guard_ancestors ||= {}).fetch(klass) { @guard_ancestors[klass] = super_ancestors(klass, superclass_of) } }
+    )
+  end
+
+  # SUPER_REACH: whether a `super` of `name` may run the entry of `owner`. A module, a singleton or any owner that is
+  # no class of the closed world could sit anywhere in the chain, so only a class outside every recorded chain is safe.
+  def super_reached?(super_reach, class_owners, owner, name)
+    reach = super_reach[name]
+    !reach.nil? && (reach.include?(owner) || !class_owners.include?(owner))
+  end
+
+  # The proper superclass chain of a closed-world class `owner` (its own instance methods' `super`), or nil when it
+  # is not fully known: the owner is no class here, or a superclass is a native class outside mruby's Object/exception
+  # chain (engine_ancestry), whose ancestors this cannot see.
+  def super_ancestors(owner, superclass_of)
+    return nil unless superclass_of.key?(owner)
+
+    chain = Set.new
+    klass = owner
+    while (sup = superclass_of[klass]) && sup != :none
+      return nil unless chain.add?(sup)
+      break if %w[Object BasicObject].include?(sup)
+
+      unless superclass_of.key?(sup)
+        return nil unless native_superclass_chain(sup.split('::').last)
+
+        break
+      end
+
+      klass = sup
+    end
+    chain
+  end
+
   def eligible(analysis)
     re = owner_re(analysis[:closed_only])
     proven = analysis[:proven] || {}
     analysis[:registered].select do |m|
       m[:owner].match?(re) &&
         ((analysis[:initializers_proven] || Set.new).include?("#{m[:owner]}##{m[:name]}") || proven[m[:name]] ||
-          !dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments],
-                         analysis[:suffix_bases] || analysis[:dynamic]))
+          (!dynamic_name?(m[:name], analysis[:dynamic], analysis[:fragments], analysis[:suffix_bases] || analysis[:dynamic]) &&
+           !super_reached?(analysis[:super_reach] || {}, analysis[:class_owners] || Set.new, m[:owner], m[:name])))
     end
   end
 
@@ -1721,7 +1819,10 @@ module StaticDispatchRegistrations
 
     StaticDispatchLists::Lists.new(open: open_names.freeze, closed: closed_names.freeze,
                                    core_excluded: closed[:core_excluded][0].to_set.freeze,
-                                   core_left_out: closed[:core_excluded][1].to_set.freeze, digest: digest)
+                                   core_left_out: closed[:core_excluded][1].to_set.freeze,
+                                   engine_rom: eligible(closed).select { |m| m[:rom] }
+                                                               .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
+                                   digest: digest)
   end
 
   def read_lists(path)
@@ -1767,9 +1868,9 @@ module StaticDispatchRegistrations
       passes += 1
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       nxt = pass(repo_root, mrbc, lists, lists_path, digest)
-      log.puts format('static dispatch lists: pass %<n>d, open %<o>d closed %<c>d core ROM %<r>d core run-time %<t>d (%<s>.0fs)',
+      log.puts format('static dispatch lists: pass %<n>d, open %<o>d closed %<c>d core ROM %<r>d core run-time %<t>d engine ROM %<e>d (%<s>.0fs)',
                       n: passes, o: nxt.open.size, c: nxt.closed.size, r: nxt.core_excluded.size,
-                      t: nxt.core_left_out.size, s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+                      t: nxt.core_left_out.size, e: nxt.engine_rom.size, s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
       if same_lists?(nxt, lists)
         File.write("#{out}.tmp", StaticDispatchLists.dump(nxt))
         File.rename("#{out}.tmp", out)
@@ -1802,7 +1903,7 @@ if $PROGRAM_NAME == __FILE__
   elsif emit_dir
     lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || 'mrbc', emit_dir)
     warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
-         "core run-time #{lists.core_left_out.size}"
+         "core run-time #{lists.core_left_out.size}, engine ROM #{lists.engine_rom.size}"
   else
     abort "usage: [MRBC=<host mrbc>] ruby #{$PROGRAM_NAME} --emit DIR | --check DIR | --digest"
   end

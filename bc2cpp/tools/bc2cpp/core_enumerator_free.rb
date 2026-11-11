@@ -825,7 +825,7 @@ module CoreEnumeratorFree
       e[:installed] ? definers[e[:installed]] << e[:name] : foreign << e[:name]
       foreign << e[:name]
     end
-    map.registrations.each { |owner, name, _fn| (definers[owner] << name) if owner.is_a?(String) && name; foreign << name if name }
+    map.definitions.each { |owner, name, _fn| (definers[owner] << name) if owner.is_a?(String) && name; foreign << name if name }
     map.aliases.each { |owner, new_name, _old| definers[owner] << new_name; foreign << new_name }
     wild = entries.reject { |e| e[:installed] }.filter_map { |e| e[:name] }
     wild.each { |name| definers['*wild*'] << name }
@@ -846,7 +846,7 @@ module CoreEnumeratorFree
     mixins.each { |target, mod| (included[target] ||= []) << mod unless included[target]&.include?(mod) }
     supers = native_class_supers(native, strip: strip)
     native_classes = {}
-    map.registrations.each do |owner, _name, _fn|
+    map.definitions.each do |owner, _name, _fn|
       next unless owner.is_a?(String)
 
       key = owner.delete_suffix('.singleton')
@@ -881,7 +881,7 @@ module CoreEnumeratorFree
     external -= %w[initialize new]
     owners = engine_group.engine_owners.map { |o| o.delete_suffix('.singleton') }.uniq
     external_owners = owners.select { |o| spelled.include?(o) || spelled.include?(o.split('::').last) }.to_set
-    creators, problems = native_creators(native, entries, map.registrations, strip: strip)
+    creators, problems = native_creators(native, entries, map.definitions, strip: strip)
     problems += mixin_problems
     Inputs.new(engine: engine_group, core: core_groups, hierarchy: hierarchy, foreign: foreign, external: external,
                external_owners: external_owners, ivar_external: ivar_strings, symbol_lookups: symbol_lookups,

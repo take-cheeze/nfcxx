@@ -536,6 +536,12 @@ cases = [
   ['element block on block calls', element_irep, Set.new, element_factory],
   ['context-specific ENTER edges', enter_irep, Set.new, context_factory]
 ]
+footprint_body = Irep.new(label: 'delta-transfer-footprints', nregs: 64, catch_handlers: [], reps: [], pool: [], instructions: [
+  insn(0, :GETIV, "R1\t@n"), insn(1, :MOVE, "R2\tR1"), insn(2, :MOVE, "R3\tR2"),
+  insn(3, :SEND0, "R3\t:is_a?"), insn(4, :LOADNIL, 'R1 (nil)'), insn(5, :SETIV, "@n\tR1"),
+  insn(6, :GETCONST, "R4\t:Known"), insn(7, :RESCUE, "R4\tR5"), insn(8, :ADDILV, "R1\tR6\t1"),
+  insn(9, :SETIDX, "R2\t(R3)\t(R4)"), insn(10, :SENDB, "R4\t:map\tn=0"), insn(11, :RETURN, 'R1')])
+cases << ['wide frame with slot stores, silent calls, rescue and multi-register writes', footprint_body, Set[2], class_factory]
 cases.each do |name, body, opaque, factory|
   shared_oracle = factory.call
   copied_oracle = factory.call
@@ -643,6 +649,26 @@ ensure
 end
 
 puts '-- state deltas (host)'
+delta_random = Random.new(20261110)
+delta_instructions = scalar_instructions + footprint_body.instructions + [insn(0, :EQ, "R1\t(R2)")]
+delta_matches = delta_instructions.all? do |instruction|
+  40.times.all? do
+    oracle = ClassLogOracle.new({}, INT)
+    oracle.define_singleton_method(:upvar_mask) { |*_args| INT }
+    context = NF::Ctx.for_run(footprint_body, oracle, Set[2], {}, Set.new)
+    context.test_id([[1, 3], ClassLogOracle::Predicate.new(INT)])
+    input = Array.new(context.nregs + context.nslots) { [INT, FLT, OTHER, NF::ARR, NF::NIL].sample(random: delta_random) }
+    input += Array.new(context.nregs) { [INT, NF::ELEM_UNKNOWN].sample(random: delta_random) }
+    input += Array.new(context.nregs) { delta_random.rand(context.nregs + context.nslots + 1) }
+    input += Array.new(context.nregs) { delta_random.rand(2) }
+    step = NF.decode_step(instruction)
+    out = NF.step_transfer(0, instruction, step, input.freeze, context)
+    log, positions = [], []
+    NF.record_delta(log, positions, 0, input, out, step, context)
+    NF.apply_delta(input.dup, log, positions[0]) == out
+  end
+end
+check.call('transfer deltas replay every changed mask, element, slot, alias and test across randomized states', delta_matches)
 # NUMERIC_STATE_DELTAS (docs/bc2cpp-numeric-flow-state.md): counts the delta paths the fixtures reach.
 module DeltaPaths
   COUNTS = Hash.new(0)

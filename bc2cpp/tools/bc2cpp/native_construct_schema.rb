@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'native_owner_map'
 require_relative 'source_text'
 
 # NATIVE_CONSTRUCT_SCHEMA_AUDIT (audit only, never read by codegen).
@@ -91,7 +92,7 @@ module NativeConstructSchema
 
   # Scrape [init_fn, format] for native class `klass`: the class variable from
   # mrb_define_class_under, the init from mrb_define_method(..., "initialize",
-  # FN), the format from FN's first mrb_get_args. nil means :unresolved.
+  # FN) or an MRB_MT_ENTRY(FN, MRB_SYM(initialize), ...) of its ROM table, the format from FN's first mrb_get_args. nil means :unresolved.
   def self.scrape(native_paths, klass)
     Array(native_paths).each do |path|
       src = SourceText.read(path, 'NativeConstructSchema.scrape')
@@ -102,16 +103,17 @@ module NativeConstructSchema
       cm = src.match(/(\w+)\s*=\s*mrb_define_class_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"#{Regexp.escape(klass)}"/)
       next unless cm
 
-      im = src.match(/mrb_define_method\s*\(\s*\w+\s*,\s*#{Regexp.escape(cm[1])}\s*,\s*"initialize"\s*,\s*(\w+)/)
-      next unless im
+      init = src.match(/mrb_define_method\s*\(\s*\w+\s*,\s*#{Regexp.escape(cm[1])}\s*,\s*"initialize"\s*,\s*(\w+)/)&.[](1)
+      init ||= NativeOwnerMap.rom_bindings(src).find { |expr, singleton, name, _fn| expr == cm[1] && !singleton && name == 'initialize' }&.last
+      next unless init
 
-      body = fn_body(src, im[1])
+      body = fn_body(src, init)
       next unless body
 
       fm = body.match(/mrb_get_args\s*\(\s*\w+\s*,\s*"([^"]*)"/)
       next unless fm
 
-      return [im[1], fm[1]]
+      return [init, fm[1]]
     end
     nil
   end

@@ -14,9 +14,15 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/native_ast_returns'
+require_relative '../../tools/bc2cpp/native_ast_source'
+require_relative '../../tools/bc2cpp/main_roots'
 
-unless system('clang --version', out: File::NULL, err: File::NULL)
-  puts 'SKIP native_ast_returns_check: clang is not installed'
+# Every producer available here is checked against the same expectations (clang, and nfcxx once
+# scripts/setup-libclang-edg.sh has built its front end); BC2CPP_AST_PRODUCER=clang|nfcxx limits it to one.
+producers = ENV['BC2CPP_AST_PRODUCER'] ? [ENV['BC2CPP_AST_PRODUCER']] : NativeAstSource::PRODUCERS
+producers = producers.select { |name| NativeAstSource.available?(name) }
+if producers.empty?
+  puts 'SKIP native_ast_returns_check: neither clang nor the nfcxx front end is available'
   exit 0
 end
 
@@ -90,29 +96,103 @@ OPTIONAL = {
   'nil_escape_branch_fn' => 'String?'
 }.freeze
 
+# The host program's roots (tools/bc2cpp/main_roots.rb) over C++ the producers must read alike: member and static member
+# calls, virtual methods, a mem-initializer, lambdas (captured variables), a template (instantiated and as a pattern), a
+# default argument and a default member initializer, a range-for, a condition declaration, try / catch, bool conversions,
+# a string array, a presym-like enumerator, an unnamed namespace and an exported (constructor-attribute) function.
+MAIN_FIXTURE = <<~CPP
+  struct mrb_state { int x; };
+  struct mrb_value { int v; };
+  enum mruby_presym { MRB_SYM__each = 1, MRB_SYM_Q__nil = 2 };
+  typedef unsigned int mrb_sym;
+  mrb_value mrb_funcall(mrb_state *, mrb_value, const char *, int, ...);
+  mrb_value mrb_funcall_id(mrb_state *, mrb_value, mrb_sym, int, ...);
+  struct Base { virtual ~Base() {} virtual int hook(mrb_state *m, mrb_value v) { mrb_funcall(m, v, "virtual_hook", 0); return 1; } };
+  struct Derived : Base {
+    const char *name = "default_member_init";
+    Derived() : Base() {}
+    int hook(mrb_state *m, mrb_value v) override { mrb_funcall(m, v, "derived_hook", 0); return 2; }
+    void run(mrb_state *m, mrb_value v) const { mrb_funcall(m, v, "member_call", 0); }
+    static void srun(mrb_state *m, mrb_value v) { mrb_funcall(m, v, "static_member", 0); }
+  };
+  template <typename T> void tcall(mrb_state *m, mrb_value v, T) { mrb_funcall(m, v, "templated_call", 0); }
+  template <typename F> int callf(F f) { return f(1); }
+  static void defaulted(mrb_state *m, mrb_value v, const char *n = "default_arg") { (void)n; mrb_funcall(m, v, "default_body", 0); }
+  static void via(mrb_state *m, mrb_value v, bool flag) {
+    mrb_funcall(m, v, flag ? "flag_on" : "flag_off", 0);
+    bool b = 1; bool c = true; (void)b; (void)c;
+    mrb_sym s = MRB_SYM__each;
+    mrb_funcall_id(m, v, s, 0);
+    mrb_funcall_id(m, v, MRB_SYM_Q__nil, 0);
+  }
+  namespace { void anon(mrb_state *m, mrb_value v) { mrb_funcall(m, v, "anon_ns_call", 0); } }
+  extern "C" void exported(mrb_state *m) __attribute__((constructor));
+  extern "C" void exported(mrb_state *m) { mrb_funcall(m, mrb_value{0}, "ctor_attr", 0); }
+  static const char *lookup(int) { return "from_condition"; }
+  int main(int argc, char **argv) {
+    mrb_state st; mrb_state *m = &st; mrb_value self = {0};
+    mrb_funcall(m, self, "main_call", 0);
+    defaulted(m, self); via(m, self, argc > 1); anon(m, self);
+    Derived d; d.run(m, self); Derived::srun(m, self); Base *b = &d; b->hook(m, self);
+    tcall(m, self, 3);
+    auto fn = [&]() { mrb_funcall(m, self, "lambda_call", 0); }; fn();
+    auto lam = [m, self](int z) { mrb_funcall(m, self, "lambda_two", z); }; lam(1);
+    callf([](int z) { return z; });
+    const char *lit[] = {"arr_a", "arr_b"};
+    for (const char *n : lit) mrb_funcall(m, self, n, 0);
+    if (const char *c = lookup(argc)) mrb_funcall(m, self, c, 0);
+    try { mrb_funcall(m, self, "in_try", 0); } catch (int) { mrb_funcall(m, self, "in_catch", 0); }
+    mrb_funcall(m, self, argv[0], 0);
+    mrb_funcall(m, self, "send", 1);
+    return 0;
+  }
+CPP
+
 failures = []
+Dir.mktmpdir('native_ast_returns_check') do |dir|
+  main_source = File.join(dir, 'main_fixture.cxx')
+  File.write(main_source, MAIN_FIXTURE)
+  roots = producers.to_h do |name|
+    ast, err, status = NativeAstSource.dump(main_source, ['-std=gnu++17'], lang: :cxx, name: name)
+    abort "#{name} failed on the main fixture: #{err}" unless status.success?
+
+    result = MainRoots.analyze({ 'kind' => 'TranslationUnitDecl', 'inner' => [JSON.parse(ast)] })
+    [name, { names: result.names.to_a.sort, refusals: result.refusals.sort }]
+  end
+  %w[main_call virtual_hook derived_hook member_call static_member templated_call lambda_call lambda_two default_arg
+     flag_on flag_off anon_ns_call ctor_attr arr_a arr_b from_condition in_try in_catch each nil?
+     default_member_init].each do |want|
+    roots.each { |name, got| failures << "#{name}: main roots lack #{want.inspect}" unless got[:names].include?(want) }
+  end
+  reflective = ['native call to reflective method send', 'unresolved method name passed to mrb_funcall in main']
+  roots.each { |name, got| failures << "#{name}: main refusals #{got[:refusals].inspect}" unless got[:refusals] == reflective }
+  failures << "main roots differ between #{roots.keys.join(' and ')}" unless roots.values.uniq.size == 1
+end
+
 Dir.mktmpdir('native_ast_returns_check') do |dir|
   source = File.join(dir, 'fixture.cxx')
   File.write(source, FIXTURE)
-  ast, err, status = Open3.capture3('clang', '-fsyntax-only', '-Xclang', '-ast-dump=json', '-x', 'c++', source)
-  abort "clang failed: #{err}" unless status.success?
+  producers.each do |name|
+    ast, err, status = NativeAstSource.dump(source, [], lang: :cxx, name: name)
+    abort "#{name} failed: #{err}" unless status.success?
 
-  kinds = NativeAstReturns.analyze(JSON.parse(ast), source)
-  EXPECTED.each do |fn, want|
-    got = kinds[fn]
-    failures << "#{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
-  end
-  failures << "functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
+    kinds = NativeAstReturns.analyze(JSON.parse(ast), source)
+    EXPECTED.each do |fn, want|
+      got = kinds[fn]
+      failures << "#{name}: #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    end
+    failures << "#{name}: functions found #{kinds.keys.sort.inspect}, expected #{EXPECTED.keys.sort.inspect}" unless kinds.keys.sort == EXPECTED.keys.sort
 
-  optional = NativeAstReturns.analyze(JSON.parse(ast), source, optional: true)
-  EXPECTED.merge(OPTIONAL).each do |fn, want|
-    got = optional[fn]
-    failures << "optional #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    optional = NativeAstReturns.analyze(JSON.parse(ast), source, optional: true)
+    EXPECTED.merge(OPTIONAL).each do |fn, want|
+      got = optional[fn]
+      failures << "#{name}: optional #{fn}: expected #{want.inspect}, got #{got.inspect}" unless got == want
+    end
   end
 end
 
 if failures.empty?
-  puts "native AST returns check: #{EXPECTED.size} functions classified"
+  puts "native AST returns check: #{EXPECTED.size} functions classified (#{producers.join(', ')})"
 else
   failures.each { |failure| warn "  #{failure}" }
   abort "native AST returns check: #{failures.size} failure(s)"

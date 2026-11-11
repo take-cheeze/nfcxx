@@ -434,7 +434,7 @@ class CodeGen
 
   # The suspension every step site ends with: park +state+ with +value+ in R[0], return the frame to the driver, and continue
   # at the resume label with the resumed value in r<dest>. +call+ marks a block call (bc2cpp_resumable_resume_from_c).
-  def resumable_suspend_lines(state, dest, value, call: false)
+  def resumable_suspend_lines(state, dest, value, call: false, call_argc: nil)
     [
       "  F->state = #{state};",
       '  bc2cpp_step_guard.yielding = true;',
@@ -442,6 +442,7 @@ class CodeGen
       "  R[0] = #{value};",
       '  mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_regs_ary));',
       "  bc2cpp_resume_frame_set_call(M, bc2cpp_frame_value, #{call});",
+      *(call_argc && call_argc <= 1 ? ["  F->block_call = #{3 + call_argc}; // scalar block arguments"] : []),
       '  return bc2cpp_frame_value;',
       "  Lbc2cpp_resume_#{state}:;",
       "  r#{dest} = R[1];"
@@ -457,7 +458,10 @@ class CodeGen
     state = @resumable.new_state
     dest = insn.reg
     values = argument_registers(dest, argc)
-    packed = values.empty? ? 'mrb_ary_new(M)' : "bc2cpp_block_args_from(M, {#{values.join(', ')}})"
+    packed = if values.empty? then 'mrb_nil_value()'
+             elsif values.size == 1 then values.first
+             else "bc2cpp_block_args_from(M, {#{values.join(', ')}})"
+             end
     # `block.call(*args)`: the one argument register already holds the Array of values.
     packed = "r#{dest.to_i + 1}" if splat
     [
@@ -465,7 +469,7 @@ class CodeGen
       # The block this suspension calls (a `yield`'s, or a proc held in a variable): the fiber's adapter reads it back.
       # Read during this suspension only; the block stays rooted by its register, which the spill keeps in the frame.
       "  F->block = r#{dest};",
-      *resumable_suspend_lines(state, dest, packed, call: true),
+      *resumable_suspend_lines(state, dest, packed, call: true, call_argc: splat ? nil : argc),
       '  F->block = mrb_nil_value();',
       ''
     ].join("\n")
@@ -826,7 +830,7 @@ class CodeGen
       end
     end
     out << resumable_cells_setup(boxed, registers, cells_slot) if cells_slot
-    out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
+    out << "  Bc2cppStepGuard bc2cpp_step_guard(M, F, bc2cpp_frame_value);\n"
     out << "  // RESUMABLE_LOCAL_REGISTERS\n" if locals
     registers.each_with_index do |reg, slot|
       if (cell = boxed.index(reg))
@@ -1717,6 +1721,7 @@ class CodeGen
     struct Bc2cppResumeFrame {
       mrb_int state;
       mrb_int nregs;
+      mrb_int nslots;
       mrb_value* regs;
       void* callee; // CALL_STEP: the frame this suspension asks the fiber to call (a Bc2cppFiberFrame*), or null
       mrb_int pc; // HANDLERS: the address of the instruction the step was last at (the handler lookup reads it)
@@ -1724,7 +1729,7 @@ class CodeGen
       mrb_int has_handlers; // HANDLERS: the step has a handler table and has not declined the exception in flight
       void* unwind_key; // UNWIND: the heap frame of the method frame a `break`/`return` ends
       int unwind_mode; // 0 none, 1 break (resume the target with the value), 2 return (the target finishes with it)
-      int block_call; // BLOCK_CALL of the last suspension: 0 none yet (block_call? is nil), 1 false, 2 true
+      int block_call; // 0 none, 1 yield, 2 packed Array, 3 no arguments, 4 one scalar argument
       mrb_value regs_ary; // the hidden ivar's Array, which is never replaced: read here instead of by name
       mrb_value block; // BLOCK_CALL: the block a suspension asks the fiber to call; rooted by the register holding it
       long long slots[1];
@@ -1756,14 +1761,52 @@ class CodeGen
     [[noreturn]] static void bc2cpp_resume_bad_state(mrb_state* M) {
       mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: resumable frame resumed in an unknown state");
     }
+    // FRAME_POOL: a step that ran to its end leaves a frame nothing reads again (the driver drops it when the step returns a
+    // value, before any new frame exists), so its Data object and register Array serve the next call of a step of the same
+    // size instead of three allocations and a hidden ivar per call. The pool is a rooted Array that never grows.
+    static const mrb_int BC2CPP_FRAME_POOL_MAX = 32;
+    static mrb_value bc2cpp_frame_pool(mrb_state* M) {
+      static mrb_value pool;
+      static unsigned cached_gen = 0;
+      const unsigned gen = bc2cpp_state_gen(M);
+      if (gen && cached_gen == gen) return pool;
+      const mrb_sym key = BC2CPP_LIT_SYM(M, "$__bc2cpp_frame_pool");
+      pool = mrb_gv_get(M, key);
+      if (!mrb_array_p(pool)) {
+        pool = mrb_ary_new_capa(M, BC2CPP_FRAME_POOL_MAX);
+        mrb_gv_set(M, key, pool);
+      }
+      cached_gen = gen;
+      return pool;
+    }
     // A new frame for a nil `*frame`, else the one the driver passed back.
     static Bc2cppResumeFrame* bc2cpp_resume_frame(mrb_state* M, mrb_value* frame, mrb_int nregs, mrb_int nslots) {
       if (mrb_nil_p(*frame)) {
+        const size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
+        mrb_value pool = bc2cpp_frame_pool(M);
+        const mrb_int n = RARRAY_LEN(pool);
+        for (mrb_int i = n; i-- > 0 && i + 8 >= n;) {
+          const mrb_value v = RARRAY_PTR(pool)[i];
+          Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(v);
+          if (f->nregs != nregs || f->nslots != nslots) continue;
+          mrb_ary_set(M, pool, i, RARRAY_PTR(pool)[n - 1]);
+          mrb_ary_pop(M, pool);
+          mrb_value* regs = f->regs;
+          const mrb_value regs_ary = f->regs_ary;
+          memset(f, 0, size);
+          f->nregs = nregs;
+          f->nslots = nslots;
+          f->regs = regs;
+          f->regs_ary = regs_ary;
+          f->block = mrb_nil_value();
+          *frame = v;
+          return f;
+        }
         mrb_value regs = mrb_ary_new_capa(M, nregs + 2);
         mrb_ary_resize(M, regs, nregs + 2); // nil-filled
-        size_t size = sizeof(Bc2cppResumeFrame) + sizeof(long long) * (size_t)nslots;
         Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_calloc(M, 1, size);
         f->nregs = nregs;
+        f->nslots = nslots;
         f->regs = ary_items(regs);
         f->regs_ary = regs;
         f->block = mrb_nil_value();
@@ -1775,22 +1818,41 @@ class CodeGen
       if (!f || f->nregs != nregs) bc2cpp_resume_bad_state(M);
       return f;
     }
-    // A step that returns instead of yielding is finished: drop the frame's references.
+    // A step that returns instead of yielding is finished: drop the frame's references and pool it (FRAME_POOL). The
+    // destructor allocates nothing: the pool's capacity is fixed, so a push never grows it.
     struct Bc2cppStepGuard {
+      mrb_state* M;
       Bc2cppResumeFrame* frame;
+      mrb_value self;
       bool yielding = false;
-      explicit Bc2cppStepGuard(Bc2cppResumeFrame* f) : frame(f) {}
+      Bc2cppStepGuard(mrb_state* m, Bc2cppResumeFrame* f, mrb_value value) : M(m), frame(f), self(value) {}
       ~Bc2cppStepGuard() {
         if (yielding) return;
         frame->state = -1;
         for (mrb_int i = 0; i < frame->nregs + 2; ++i) frame->regs[i] = mrb_nil_value();
+        mrb_value pool = bc2cpp_frame_pool(M);
+        if (RARRAY_LEN(pool) < BC2CPP_FRAME_POOL_MAX) mrb_ary_push(M, pool, self);
       }
       Bc2cppStepGuard(const Bc2cppStepGuard&) = delete;
       Bc2cppStepGuard& operator=(const Bc2cppStepGuard&) = delete;
     };
     static mrb_value bc2cpp_resume_frame_value(mrb_state* M, mrb_value self) {
       Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
+      // Frame#value exposes an Array for block calls. Materialize only when
+      // that API is used; the C++ driver consumes 0/1 arguments directly.
+      if (f && f->block_call >= 3) {
+        mrb_value args = mrb_ary_new_from_values(M, f->block_call - 3, f->regs);
+        f->regs[0] = args;
+        f->block_call = 2;
+        mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(f->regs_ary));
+      }
       return f ? f->regs[0] : mrb_nil_value();
+    }
+    static mrb_int bc2cpp_resume_frame_argc(Bc2cppResumeFrame* f) {
+      return f->block_call >= 3 ? f->block_call - 3 : RARRAY_LEN(f->regs[0]);
+    }
+    static const mrb_value* bc2cpp_resume_frame_argv(Bc2cppResumeFrame* f) {
+      return f->block_call >= 3 ? f->regs : RARRAY_PTR(f->regs[0]);
     }
     // Whether a frame's last suspension was a block call (BLOCK_CALL) rather than a Fiber.yield: set by each suspension.
     static void bc2cpp_resume_frame_set_call(mrb_state* M, mrb_value frame, bool call) {
@@ -1798,7 +1860,7 @@ class CodeGen
     }
     static mrb_value bc2cpp_resume_frame_block_call(mrb_state* M, mrb_value self) {
       Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
-      return !f || f->block_call == 0 ? mrb_nil_value() : mrb_bool_value(f->block_call == 2);
+      return !f || f->block_call == 0 ? mrb_nil_value() : mrb_bool_value(f->block_call >= 2);
     }
     static mrb_value bc2cpp_resume_frame_block(mrb_state* M, mrb_value self) {
       Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(self);
@@ -1854,9 +1916,8 @@ class CodeGen
         return bc2cpp_run_callee_from_c(M, callee);
       }
       if (!mrb_test(bc2cpp_resume_frame_block_call(M, frame))) return bc2cpp_resumable_yield_from_c(M, frame);
-      mrb_value args = bc2cpp_resume_frame_value(M, frame);
       mrb_value blk = bc2cpp_resume_frame_block(M, frame);
-      return bc2cpp_yield_foreign(M, blk, RARRAY_LEN(args), RARRAY_PTR(args));
+      return bc2cpp_yield_foreign(M, blk, bc2cpp_resume_frame_argc(suspended), bc2cpp_resume_frame_argv(suspended));
     }
   CPP
 end

@@ -12,7 +12,7 @@ C++ --EDG front end--+--> Path A: EDG C back end -> C -> host cc / cproc+QBE   (
                                                     -> C+HVX / SPIR-V,WGSL   (planned)
 ```
 
-Status per component, with the test that covers each claim: `docs/README.md`. Path A is what `./nfcxx` does today: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default),
+Status per component, with the test that covers each claim: `docs/README.md`. Path B is the default on x86-64 Linux (`docs/notes/pathb-default.md`). Path A is what `./nfcxx` does elsewhere and for ASan, freestanding, modules and cosmo: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default off x86-64 Linux),
 or through gcc with `--backend=gcc`. Path B is the long-term design: structured control flow,
 explicit address spaces, explicit safety checks inserted when lowering from EDG's IL.
 

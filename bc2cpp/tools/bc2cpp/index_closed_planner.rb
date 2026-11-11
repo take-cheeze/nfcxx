@@ -57,7 +57,7 @@ class IndexClosedPlanner
                    guard: 'rgss_table_p', call: 'rgss_table_aref_impl(M, recv, mrb_as_int(M, %<key>s), 0, 0)',
                    decl: ['mrb_bool rgss_table_p(mrb_value)',
                           'mrb_value rgss_table_aref_impl(mrb_state*, mrb_value, mrb_int, mrb_int, mrb_int)'],
-                   needs: ['mrb_define_method(M, table, "[]", table_get,',
+                   needs: ['MRB_MT_ENTRY(table_get, MRB_OPSYM(aref),',
                            'mrb_value table_get(mrb_state* M, V self) { mrb_int x, y = 0, z = 0; ' \
                            'mrb_get_args(M, "i|ii", &x, &y, &z); return table_get_impl(M, self, x, y, z); }',
                            'rgss_table_aref_impl(mrb_state* M, mrb_value self, mrb_int x, mrb_int y, mrb_int z) ' \
@@ -108,7 +108,7 @@ class IndexClosedPlanner
                    guard: 'rgss_table_p', call: 'rgss_table_aset_impl(M, recv, 2, %<idx>s, %<val>s, mrb_nil_value(), mrb_nil_value())',
                    decl: ['mrb_bool rgss_table_p(mrb_value)',
                           'mrb_value rgss_table_aset_impl(mrb_state*, mrb_value, mrb_int, mrb_value, mrb_value, mrb_value, mrb_value)'],
-                   needs: ['mrb_define_method(M, table, "[]=", table_set,',
+                   needs: ['MRB_MT_ENTRY(table_set, MRB_OPSYM(aset),',
                            'mrb_value table_set(mrb_state* M, V self) { mrb_value a0, a1, a2 = mrb_nil_value(), ' \
                            'a3 = mrb_nil_value(); mrb_get_args(M, "oo|oo", &a0, &a1, &a2, &a3); ' \
                            'return table_set_impl(M, self, mrb_get_argc(M), a0, a1, a2, a3); }',
