@@ -11,7 +11,13 @@ double arr[3] = { -INFINITY, 1.5, INFINITY };
 struct s { float lo, hi; } lim = { -INFINITY, FLT_MAX };
 int main(void) {
   unsigned int b;
-  if (!isinf(g_pinf) || g_pinf < 0 || !isinf(g_ninf) || g_ninf > 0 || !isinf(g_huge) || g_huge < 0) return 1;
+  /* one exit code per condition (11..16): a failure on one host (macOS arm64 qbe) then names the global that is wrong */
+  if (!isinf(g_pinf)) return 11;
+  if (g_pinf < 0) return 12;
+  if (!isinf(g_ninf)) return 13;
+  if (g_ninf > 0) return 14;
+  if (!isinf(g_huge)) return 15;
+  if (g_huge < 0) return 16;
   if (!isinf(f_pinf) || f_pinf < 0 || !isinf(f_ninf) || f_ninf > 0) return 2;
   memcpy(&b, &f_max, 4); if (b != 0x7f7fffffu) return 3;
   memcpy(&b, &f_nmax, 4); if (b != 0xff7fffffu) return 4;
