@@ -248,11 +248,23 @@ longjmp or throw is cleared by libasan's `longjmp` interceptor, as for slots.
 Found: heap overflow, use after free, double free, alloc/dealloc mismatch, leaks, a `std::vector` overflow, stack, global and
 alloca overflows (also of an over-aligned object), use after scope, use after return and a VLA overflow (C++ and C: each VLA is a malloc block of its own under
 `lib/asan/nfcxx_vla_asan.c`, so the report is `heap-buffer-overflow`). Not found yet, listed in `tests/asan/pathb-pending.txt` with the
-milestone that adds them: a compound literal's scope (M6b). Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `pathb-dump --ir-scopes` (`NFCXX_IR_SCOPES=1`; `pathb-cc` passes it
+milestone that adds them: none but `vla_loop_return`. Use after scope (milestone 6): the front end prints `(decl $"x" val)` and `(scope-end $"x")` for named locals under `pathb-dump --ir-scopes` (`NFCXX_IR_SCOPES=1`; `pathb-cc` passes it
 with the flag; `pathb-stage2.md`); for a slot in memory the emitter calls `__asan_unpoison_stack_memory` at the `decl` and
 `__asan_poison_stack_memory` at the `scope-end`, with the slot's object (its size rounded up to 8), so a read after the block, a `break`, `continue`
-or `goto` out of it reports `stack-use-after-scope`, as on qbe. A promoted slot has no memory and its facts are dropped. A compound literal and
-other compiler temporaries are not named locals: they get no scope fact (`scope_compound_escape.cpp` is pending).
+or `goto` out of it reports `stack-use-after-scope`, as on qbe. A promoted slot has no memory and its facts are dropped. A compound literal
+is a compiler temporary, not a named local, and has facts of its own (`(decl $"tmp.N" temp)`, `be/nfcxx_ir.c` `ir_cl_use`): the front end gives it
+an unnamed variable on the variable list of the block whose scope holds it (the one EDG's C output declares it in, so the gcc backend poisons it at
+the same place), and nothing tells it from the lowering's other temporaries, so every unnamed lowering-generated temporary whose scope is a block being lowered and that is an array of arithmetic
+or pointer elements (C and C++) or a struct or union (C input only: the front end's destructor query does not take the structs of the lowering, and C has none) is a candidate. The `decl` is printed where the temporary is first used (not at the block's
+top, which a case label would skip) and the `scope-end` where its block ends and at a return, as marked lines that the function's end resolves
+(`ir_cl_write`): a temporary keeps its facts only if its slot is named on no line before its `decl` or after its last `scope-end`, the lines from its
+`decl` to its last use are straight-line code (no branch, loop, label, jump or return, so each path to a use passed the `decl`), and the function has
+no exception-handling frame (the EH entry and its jump buffer are temporaries the runtime reads from callees). Only with `NFCXX_IR_SCOPES=1` and
+without `NFCXX_PATHB_BORROW`: the borrow facts and the default IR are unchanged. A `break`, `continue` or `goto` leaves such a temporary open (a
+pointer kept past the jump is not reported); a scalar temporary, a C++ class temporary (`(P){..}` in C++) and one in a function with `try` or destructor frames have no
+facts. Tests: `scope_compound_escape.cpp` and `scope_compound_escape_c.c` (reports), `clean_compound_literal.cpp`, `clean_compound_literal_cxx.cpp`
+and `clean_compound_literal_c.c` (compound literals in blocks, loops, calls, switch, goto, statement expressions, lambdas, templates, with
+temporaries bound to references and initializer lists; no report).
 
 Use after return: each slot in memory that fits a fake frame (alignment up to 16, a frame up to 64 KiB with its redzones, rounded up to 64) asks libasan's
 fake stack for one at the entry, `__asan_stack_malloc_N(frame)` (0 when `detect_stack_use_after_return` is off or the class is full), with the real frame

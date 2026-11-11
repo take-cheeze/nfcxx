@@ -5210,6 +5210,22 @@ SNIPPETS = [
   "x = <<~A\n  a \#@y \\\n    b\nA",
   "x = <<A\n  a \#{y} \\\n    b\nA",
   "def m\n  x = <<~A.strip\n    a \#{y} \\\n      b\n  A\nend",
+  # emitter gaps: a named-capture match is a plain `=~` call to the fork (no local is declared), a leading dot after a constant
+  # path, an index target with several arguments in a multiple assignment, and a def with too many parameters (the oracle
+  # rejects it: the emitter must not emit it)
+  "/(?<x>a+)/ =~ str",
+  "if /(?<x>a+)(?<y>b)/ =~ s\n  p x, y\nend",
+  "x = 1\n/(?<x>a)/ =~ s\np x",
+  "def f(s)\n  return unless /(?<a>\\d+)/ =~ s\n  a.to_i\nend",
+  "m = /(?<x>a)/ =~ s ? x : 2\n/(?<z>a)/x =~ s and p z",
+  "/(?<x>a)/ =~\n  s",
+  "x = Foo::Bar\n  .baz { |e| e }\n  .qux",
+  "check.call(\"a\", Foo::ENTRIES\n  .select { |e| e.conversion == :check }.all? { |e| e.rbs && e.rbs.split(\" | \").all? { |c| c.match?(/\\A[A-Z]\\w*\\z/) } })",
+  "x = ::Foo\n  .bar",
+  "a, b[1, 2] = 1, 2",
+  "x[0x8000, 0x2000], x[3, 4] = x[3, 4], x[0x8000, 0x2000]",
+  "def f(a)\n  a[1, 2], a[2] = a[2], a[1, 2]\nend",
+  "def f(#{(0..31).map { |i| "a#{i}" }.join(', ')})\nend"
 ].freeze
 
 MULTI_FILE_GROUPS = [
@@ -5499,5 +5515,17 @@ MULTI_FILE_GROUPS = [
   ["z = 0\n", "foo {\n  ;\n}"],
   ["z = 0\n", "x = (a, b = 1, 2)"],
   ["z = 0\n", "x = <<~A\n  a \#{y} \\\n    b\nA"],
-  ["def m = super\n", "def n = b { super }\n"]
+  ["def m = super\n", "def n = b { super }\n"],
+  # emitter gaps: a command call whose last argument is a label at the very end of the last file (no newline: the colon is
+  # dropped), and a file without a newline at the end whose next file starts with a leading dot
+  ["z = 0\n", "foo x:"],
+  ["z = 0\n", "foo a, x:"],
+  ["z = 0\nfoo x?:"],
+  ["z = 0\n", "bar\nfoo x:"],
+  ["x = foo", "  .bar(1)\ny = 2\n"],
+  ["a = 1\nb = 2\nx = foo", "  .bar(a)\ny = 3\n"],
+  ["puts", "&.foo\n"],
+  ["x = Foo", ".bar"],
+  ["x = a = b", "  .bar\n  .baz\nz = 1\n"],
+  ["a = 1\nreturn foo", "  .bar", "z = 1\n"]
 ].freeze

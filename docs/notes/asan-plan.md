@@ -80,9 +80,10 @@ Milestones:
    block) and setjmp/longjmp EH (libasan's longjmp interceptor unpoisons the dead frame; `clean_throw_reuse.cpp`, `scope_*_clean`). Test: `clean_alloca_reuse.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
 5. Done: the driver and the runner are `tests/asan/run.sh` with `ASAN_BACKEND=pathb` (a CI entry in `pathb-test`), and the report has source lines:
    `NFCXX_IR_LOC=1` under the flag, QBE `dbgfile` per function and `dbgloc` per `(loc ...)` (`asan_dbgloc`, `function_text`).
-6. Done (except compound literals): the IR forms are the borrow facts `(decl $"x" val)` and `(scope-end $"x")`, printed alone under `NFCXX_IR_SCOPES=1`
-   (`be/nfcxx_ir.c`), poisoned and unpoisoned with `__asan_poison_stack_memory` / `__asan_unpoison_stack_memory` (`asan_scope`). A compiler temporary
-   (a compound literal) has no fact: `scope_compound_escape.cpp` is pending.
+6. Done: the IR forms are the borrow facts `(decl $"x" val)` and `(scope-end $"x")`, printed alone under `NFCXX_IR_SCOPES=1`
+   (`be/nfcxx_ir.c`), poisoned and unpoisoned with `__asan_poison_stack_memory` / `__asan_unpoison_stack_memory` (`asan_scope`). A compound literal
+   (a compiler temporary, `(decl $"tmp.N" temp)`, `ir_cl_use`) gets facts at its first use and at the end of the block whose scope holds it, where that is
+   safe (`asan.md` "Use after scope"): `scope_compound_escape.cpp` passes.
 7. Optional: redundant-check elimination within a block, own runtime.
 Risks: slots passed to `__asan_*` escape and lose QBE promotion (slower code); bit-fields access whole units; libasan ABI version.
 

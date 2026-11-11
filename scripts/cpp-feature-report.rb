@@ -1,13 +1,28 @@
 # Usage: scripts/mrb scripts/cpp-feature-report.rb checklist.tsv results.tsv
+# An invalid result: main reports the message and returns status 1 (raised, not exited, as in cpp-feature-checklist.rb).
+class ReportError < StandardError; end
 def fail_report(message)
-  $stderr.puts message
-  exit 1
+  raise ReportError, message
 end
+
+def read_rows(path)
+  File.open(path, 'rb') { |f| f.read.split("\n")[1..-1].map { |line| line.split("\t", -1) } }
+end
+
 def main(argv)
-  fail_report('usage: cpp-feature-report.rb checklist.tsv results.tsv') unless argv.size == 2
-  def read_rows(path)
-    File.open(path, 'rb') { |f| f.read.split("\n")[1..-1].map { |line| line.split("\t", -1) } }
+  begin
+    report(argv)
+  rescue ReportError => e
+    $stderr.puts e.message
+    1
+  rescue SystemCallError => e
+    $stderr.puts "cpp-feature-report.rb: #{e.message}"
+    1
   end
+end
+
+def report(argv)
+  fail_report('usage: cpp-feature-report.rb checklist.tsv results.tsv') unless argv.size == 2
   checklist = read_rows(argv[0])
   results = {}
   read_rows(argv[1]).each do |row|

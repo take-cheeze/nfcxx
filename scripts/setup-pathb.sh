@@ -40,6 +40,11 @@ link_all "$src" "$tree" src cmake
 link_all "$src/src" "$tree/src" CMakeLists.txt attribute.c
 link_all "$src/cmake" "$tree/cmake" macro-conf
 link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-pathb
+# EDG's top CMakeLists.txt builds a Release on macOS as a universal binary (CMAKE_OSX_ARCHITECTURES arm64;x86_64). The
+# harness is for the host only: its SoftFloat archive is the host's, so a second architecture cannot link. Drop that line.
+rm -f "$tree/CMakeLists.txt"
+sed '/set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")/d' "$src/CMakeLists.txt" > "$tree/CMakeLists.txt"
+! grep -q 'CMAKE_OSX_ARCHITECTURES "arm64;x86_64"' "$tree/CMakeLists.txt" || { echo "setup-pathb: universal-binary patch failed" >&2; exit 1; }
 
 # 1. Back end swap: c_gen_be.c is no longer compiled; nfcxx_be.c takes its place in the CORE list.
 sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c nfcxx_ir.c cfe.c/' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
@@ -74,6 +79,36 @@ LOWER_VARIABLE_LENGTH_ARRAYS=1
 import <support/platform/linux/cpfe>
 import <support/build-type/release/cpfe>
 CFG
+if [ "$emscripten" != 1 ]; then  # native host: SoftFloat from the host C compiler; the wasm build is below
+# Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration) on every host. Without it EDG takes the
+# host's float128 (defines_linux.h), which Apple clang lacks on arm64. Berkeley SoftFloat 3e, pinned, with x86's NaN
+# rules (8086-SSE), built with the host C compiler into build/softfloat-native.
+sf=$root/build/softfloat-native
+sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
+sf_cc=${CC:-cc}; sf_ar=${AR:-ar}
+if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
+  command -v "$sf_cc" >/dev/null || { echo "setup-pathb: $sf_cc is not on PATH" >&2; exit 1; }
+  rm -rf "$sf"; git clone -q https://github.com/ucb-bar/berkeley-softfloat-3.git "$sf"
+  git -C "$sf" checkout -q $sf_commit
+  make -s -C "$sf/build/$sf_config" -j"${PATHB_JOBS:-4}" MAKELIB="$sf_ar crs \$@" \
+    COMPILE_C="$sf_cc -c -Werror-implicit-function-declaration -DSOFTFLOAT_FAST_INT64 \$(SOFTFLOAT_OPTS) \$(C_INCLUDES) -O2 -o \$@"
+fi
+export EDG_SOFTFLOAT_INCLUDE_PATH=$sf/source/include EDG_SOFTFLOAT_LIB_PATH=$sf/build/$sf_config/softfloat.a
+cat >> "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
+USE_SOFTFLOAT=1
+USE_FLOAT128_FOR_HOST_FP_VALUE=0
+USE_QUADMATH_LIBRARY=0
+CFG
+# The target is x86-64 for every host: EDG otherwise infers the x86 asm extensions from the host compiler's macros
+# (__x86_64 in lang_feat.h), so an arm64 host compiles nfcxx_ir.c without the x86 asm operand classes it names
+# (aoc_reg_a, aoc_cc, ...). Path B emits x86-64 code (pathb-cc), so the front end parses x86 asm for that target on
+# every host. On an x86-64 Linux host these are the values EDG already infers.
+cat >> "$tree/cmake/macro-conf/nfcxx-pathb/cpfe.cmakedef" <<'CFG'
+TARG_SUPPORTS_X86_64=1
+GNU_X86_ASM_EXTENSIONS_ALLOWED=1
+GNU_X86_ATTRIBUTES_ALLOWED=1
+CFG
+fi
 if [ "$emscripten" = 1 ]; then
   # Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration), not the host's types. Without it EDG
   # keeps a target long double (x86-64's 80-bit x87 format) in the host's long double, which on wasm32 is binary128
