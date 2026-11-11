@@ -466,7 +466,17 @@ jobs:
 
       - name: Path B harness
         if: always()
-        run: scripts/setup-pathb.sh
+        run: |
+          set -o pipefail
+          scripts/setup-pathb.sh 2>&1 | tee "$RUNNER_TEMP/pathb-harness.log"
+
+      - name: Keep the harness log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-pathb-harness-log
+          path: ${{ runner.temp }}/pathb-harness.log
+          if-no-files-found: ignore
 
       - name: Hosted Path B hello (NFCXX_PATH=b)
         if: always()
