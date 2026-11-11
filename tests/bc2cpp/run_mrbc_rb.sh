@@ -27,3 +27,4 @@ bundle exec ruby bc2cpp/tools/mrbc_rb/codedump_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/integration_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/lib_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/structured_test.rb
+bundle exec ruby bc2cpp/tools/mrbc_rb/mruby_build_test.rb
