@@ -76,7 +76,7 @@ module MrbcRb
                           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
                           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode,
-                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::RescueModifierNode, Prism::UndefNode].freeze
+                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode, Prism::RescueModifierNode, Prism::UndefNode, Prism::ParenthesesNode, Prism::MatchRequiredNode, Prism::MatchPredicateNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::UndefNode, Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
@@ -87,7 +87,7 @@ module MrbcRb
              Prism::LocalVariableWriteNode, Prism::ConstantWriteNode, Prism::GlobalVariableWriteNode,
              Prism::InstanceVariableWriteNode, Prism::OrNode, Prism::AndNode, Prism::ClassVariableReadNode,
              Prism::ClassVariableWriteNode, Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode,
-             Prism::FloatNode, Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::LambdaNode, Prism::ConstantPathNode, Prism::ReturnNode,
+             Prism::FloatNode, Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode, Prism::LambdaNode, Prism::ConstantPathNode, Prism::ReturnNode,
              Prism::BreakNode, Prism::NextNode, Prism::MultiWriteNode, Prism::SuperNode, Prism::ForwardingSuperNode].freeze
 
   # The empty heredocs the fork's parser gives the value nil (see Compiler#heredoc_parts), by node identity.
@@ -115,7 +115,7 @@ module MrbcRb
   # Literals built in the register they are generated in (the fork's cursp): value_into builds these at the destination
   # when it is a temporary, else at the first temporary followed by a MOVE. Allowed where the destination is known.
   BUILT_VALUES = [Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::DefinedNode, Prism::RationalNode, Prism::ImaginaryNode, Prism::InterpolatedStringNode, Prism::HashNode, Prism::RegularExpressionNode,
-                  Prism::InterpolatedRegularExpressionNode].freeze
+                  Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode].freeze
 
   # Calls with a receiver whose method the fork's codegen treats specially (index, negation and so on): not verified here.
   UNVERIFIED_OPERATORS = [].freeze # every operator is verified (milestone 11)
@@ -130,6 +130,7 @@ module MrbcRb
 
   # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
   def self.compile(source, filename)
+    source = fork_source(source)
     result = Prism.parse(source, filepath: filename)
     raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
 
@@ -139,6 +140,70 @@ module MrbcRb
     return compiler.compile_empty(empty_program_line(source, result)) if result.value.statements.body.empty?
 
     compiler.compile(result.value)
+  end
+
+  # Source forms the fork reads differently from Prism, rewritten (without moving a line) to the form Prism reads as the fork
+  # does:
+  # * The fork's lexer ends a statement at a newline after `..` or `...` (an endless range): `(a..\n b)` is `(a..)` and `b`,
+  #   where Prism reads the range a..b. A `;` after the operator gives Prism the fork's reading (a newline inside brackets or
+  #   arguments is a syntax error for the fork, and the `;` makes it one for Prism too).
+  # * `&nil` as a parameter (the fork: no block is accepted, ENTER bit 23, no local; Prism rejects it) is a block parameter
+  #   named NIL_BLOCK_NAME, which `parameters` turns into that flag.
+  # * `for (a, b), c in x`: the fork's grammar takes the list of targets whose first one is parenthesized, Prism reads the
+  #   parentheses as the start of an expression (a syntax error). Parentheses around the whole list are the same list.
+  NIL_BLOCK_NAME = '__nil_block__'
+
+  def self.fork_source(source)
+    dots = source.match?(/\.\.[ \t]*(#[^\n]*)?\r?\n/)
+    fors = source.match?(/\bfor\s*\(/)
+    nilblk = source.match?(/&nil\b/) && !Prism.parse(source).errors.empty?
+    return source unless dots || fors || nilblk
+
+    tokens = Prism.lex(source).value.map(&:first)
+    bytes = source.b
+    inserts = []
+    if dots
+      tokens.each do |t|
+        next unless %i[DOT_DOT DOT_DOT_DOT].include?(t.type)
+
+        e = t.location.end_offset
+        inserts << [e, ';'] if bytes.byteslice(e..).match?(/\A[ \t]*(#[^\n]*)?\r?\n/n)
+      end
+    end
+    if nilblk
+      tokens.each_with_index do |t, i|
+        n = tokens[i + 1]
+        inserts << [n.location.start_offset, NIL_BLOCK_NAME, 3] if %i[AMPERSAND UAMPERSAND].include?(t.type) && n&.type == :KEYWORD_NIL && n.location.start_offset == t.location.end_offset
+      end
+    end
+    if fors
+      tokens.each_with_index do |t, i|
+        next unless t.type == :KEYWORD_FOR && tokens[i + 1]&.type == :PARENTHESIS_LEFT
+
+        depth = 0
+        close = (i + 1...tokens.size).find do |k|
+          depth += 1 if tokens[k].type == :PARENTHESIS_LEFT
+          depth -= 1 if tokens[k].type == :PARENTHESIS_RIGHT
+          depth.zero?
+        end
+        next unless close && tokens[close + 1]&.type == :COMMA
+
+        depth = 0
+        stop = (close + 1...tokens.size).find do |k|
+          depth += 1 if %i[PARENTHESIS_LEFT BRACKET_LEFT BRACE_LEFT].include?(tokens[k].type)
+          depth -= 1 if %i[PARENTHESIS_RIGHT BRACKET_RIGHT BRACE_RIGHT].include?(tokens[k].type)
+          depth.zero? && tokens[k].type == :KEYWORD_IN
+        end
+        next unless stop
+
+        inserts << [tokens[i + 1].location.start_offset, '('] << [tokens[stop - 1].location.end_offset, ')']
+      end
+    end
+    return source if inserts.empty?
+
+    out = bytes.dup
+    inserts.sort_by { |o, _| -o }.each { |o, text, drop| out[o, drop || 0] = text }
+    out.force_encoding(source.encoding)
   end
 
   # One file of a multi-file program: its name and its top-level statements.
@@ -163,7 +228,6 @@ module MrbcRb
   def self.compile_files(files)
     raise Unsupported, 'no files' if files.empty?
     return compile(*files.first) if files.size == 1
-    raise Unsupported, 'a file named twice' if files.map(&:last).uniq.size != files.size
 
     locals = []
     frozen = false
@@ -171,7 +235,9 @@ module MrbcRb
     offset = 0
     units = []
     zero = {}.compare_by_identity
+    names = files.map(&:last).uniq
     files.each_with_index do |(source, filename), i|
+      source = fork_source(source)
       result = Prism.parse(source, filepath: filename, scopes: [locals.dup], line: 1 + offset)
       raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
       raise Unsupported, '__END__ in a multi-file program' if result.data_loc
@@ -188,7 +254,9 @@ module MrbcRb
       next if i == files.size - 1
 
       quirk, offset = file_tail(source)
-      tail_zero_nodes(stmts.last, zero) if quirk && !stmts.empty?
+      # init_var_header: a node built while the parser is at line 0 of the next file (index n) has the index n - 1, or 0
+      # (a file named like an earlier one has that one's index).
+      tail_zero_nodes(stmts.last, zero, names[[names.index(files[i + 1].last) - 1, 0].max]) if quirk && !stmts.empty?
     end
     raise Unsupported, 'no statements' if units.all? { |u| u.stmts.empty? }
 
@@ -229,7 +297,7 @@ module MrbcRb
   # Marks in +acc+ the nodes the fork's parser builds after reading the newline that follows the last token of +stmt+: those
   # that need that lookahead to be reduced. The tail of the statement is followed down: a node whose last token is the
   # statement's last one. Forms not probed are Unsupported.
-  def self.tail_zero_nodes(stmt, acc)
+  def self.tail_zero_nodes(stmt, acc, name)
     node = stmt
     loop do
       case node
@@ -247,7 +315,7 @@ module MrbcRb
         raise Unsupported, 'symbol form at the end of a file' unless node.opening_loc.nil? || node.opening_loc.slice == ':'
 
         return
-      when Prism::ArrayNode, Prism::HashNode, Prism::RegularExpressionNode
+      when Prism::ArrayNode, Prism::HashNode, Prism::RegularExpressionNode, Prism::MatchLastLineNode
         return
       when Prism::DefinedNode
         raise Unsupported, 'defined? without parentheses at the end of a file' unless node.rparen_loc
@@ -260,18 +328,18 @@ module MrbcRb
         return
       when Prism::IfNode, Prism::UnlessNode
         if node.is_a?(Prism::IfNode) && node.if_keyword_loc.nil? # a ternary
-          acc[node] = true
+          acc[node] = name
           node = node.subsequent
         elsif node.end_keyword_loc
           return
         else # a modifier: the node and its predicate, the last token
-          acc[node] = true
+          acc[node] = name
           node = node.predicate
         end
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::ConstantPathNode, Prism::StringNode
         raise Unsupported, 'heredoc at the end of a file' if node.is_a?(Prism::StringNode) && node.opening_loc&.slice&.start_with?('<<')
 
-        acc[node] = true
+        acc[node] = name
         return
       when Prism::LocalVariableWriteNode, Prism::InstanceVariableWriteNode, Prism::GlobalVariableWriteNode,
            Prism::ClassVariableWriteNode, Prism::ConstantWriteNode, Prism::LocalVariableOperatorWriteNode,
@@ -279,13 +347,13 @@ module MrbcRb
            Prism::ConstantOperatorWriteNode, Prism::LocalVariableOrWriteNode, Prism::InstanceVariableOrWriteNode,
            Prism::GlobalVariableOrWriteNode, Prism::ConstantOrWriteNode, Prism::LocalVariableAndWriteNode,
            Prism::InstanceVariableAndWriteNode, Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode
-        acc[node] = true
+        acc[node] = name
         node = node.value
       when Prism::AndNode, Prism::OrNode
-        acc[node] = true
+        acc[node] = name
         node = node.right
       when Prism::ReturnNode
-        acc[node] = true
+        acc[node] = name
         args = node.arguments&.arguments
         return if args.nil?
         raise Unsupported, 'return with several values at the end of a file' if args.size != 1
@@ -296,7 +364,7 @@ module MrbcRb
         raise Unsupported, 'safe navigation at the end of a file' if node.call_operator_loc&.slice == '&.'
         raise Unsupported, 'block pass at the end of a file' if node.block
 
-        acc[node] = true
+        acc[node] = name
         args = node.arguments&.arguments
         if args && !args.empty?
           raise Unsupported, 'splat or keywords at the end of a file' if [Prism::SplatNode, Prism::KeywordHashNode, Prism::BlockArgumentNode].any? { |k| args.last.is_a?(k) }
@@ -415,19 +483,26 @@ module MrbcRb
     # codegen() noticing a node of another file: the code so far belongs to the file before (mrb_debug_info_append_file
     # skips an empty range and a file named like the previous one).
     def switch_file(unit)
-      return if unit.filename == @segment_name
+      @unit_name = unit.filename
+      switch_to(unit.filename)
+    end
+
+    def switch_to(name)
+      return if name == @segment_name
 
       close_segment
       @segment_start = @code.size
-      @segment_name = unit.filename
-      @filename = unit.filename
+      @segment_name = name
+      @filename = name
     end
 
     def close_segment
       return if @segment_start == @code.size
       return if @segments.last && @segments.last[0] == @segment_name
 
-      @segments << [@segment_name, @segment_start, @code.size]
+      # mrb_debug_info_append_file copies the lines of its range when it is called: a later rewrite of that code (a folded
+      # load) is not seen by the record.
+      @segments << [@segment_name, @segment_start, @code.size, @lines[@segment_start...@code.size]]
     end
 
     # A child irep for a class or module body (scope_body in codegen.c): its own locals, registers, code and tables. It
@@ -759,6 +834,13 @@ module MrbcRb
     # enter (the lhs of an assignment, `self` as a receiver, the elements of %w and %i) never call this.
     def enter(node)
       node = unparen(node)
+      # A node built after the file switch carries an earlier file index (init_var_header); every other node its own file's.
+      # The fork's codegen checks the index of every node it generates, not only of the entered ones.
+      if @zero_nodes
+        switch_to(@zero_nodes.key?(node) ? @zero_nodes[node] : @unit_name)
+        # An operator write reads its variable (a node of its own file) before it generates anything.
+        switch_to(@unit_name) if @zero_nodes.key?(node) && node.class.name.end_with?('OperatorWriteNode', 'OrWriteNode', 'AndWriteNode')
+      end
       return unless ENTERED.include?(node.class)
       return if node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode) # a call with a block has its own rules (call_with_block)
       return if @hold_line
@@ -847,7 +929,7 @@ module MrbcRb
         @leading_dot[recv] = op.start_line if recv.location.slice.start_with?('-')
       when Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::SelfNode, Prism::SymbolNode,
            Prism::InstanceVariableReadNode, Prism::GlobalVariableReadNode, Prism::ArrayNode, Prism::HashNode,
-           Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode # built at the closing delimiter, like `)`
+           Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode # built at the closing delimiter, like `)`
         nil
       when Prism::LocalVariableReadNode, Prism::ConstantReadNode, Prism::StringNode
         @leading_dot[recv] = op.start_line
@@ -944,13 +1026,12 @@ module MrbcRb
         sym_index(node.unescaped.to_sym)
         last ? value_in_register(node) : nil
       when *BUILT_VALUES
-        raise Unsupported, 'unused interpolated regexp' if !last && node.is_a?(Prism::InterpolatedRegularExpressionNode)
-
         # Unused hashes generate nothing (codegen_hash returns early); an unused string evaluates its expressions only.
         if last
           value_in_register(node)
         else
           string_unused(node) if node.is_a?(Prism::InterpolatedStringNode)
+          regex_unused(node) if node.is_a?(Prism::InterpolatedRegularExpressionNode) || node.is_a?(Prism::InterpolatedMatchLastLineNode)
           small_unused(node)
           nil
         end
@@ -1029,7 +1110,7 @@ module MrbcRb
         class_statement(node, last: last)
       when Prism::ModuleNode
         module_statement(node, last: last)
-      when Prism::RangeNode
+      when Prism::RangeNode, Prism::FlipFlopNode
         range_statement(node, last: last)
       else
         raise Unsupported, "node #{node.class.name.split('::').last}"
@@ -1514,8 +1595,8 @@ module MrbcRb
     # Nodes the fork enters but ENTERED lacks: a single-line one stamps its own line (case_statement sets it).
     # milestone 13: subjects the fork does not enter either (their own parts do): an if, a begin block, parentheses.
     CASE_BLOCKISH = [Prism::IfNode, Prism::UnlessNode, Prism::BeginNode, Prism::ParenthesesNode].freeze
-    CASE_UNENTERED = [Prism::ConstantPathNode, Prism::RangeNode, Prism::RegularExpressionNode,
-                      Prism::InterpolatedRegularExpressionNode].freeze
+    CASE_UNENTERED = [Prism::ConstantPathNode, Prism::RangeNode, Prism::FlipFlopNode, Prism::RegularExpressionNode,
+                      Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode].freeze
 
     # A subject or a `when` value the case code covers: a node the fork enters (so its line is set by value_into), a
     # constant path or a range of such.
@@ -2694,6 +2775,8 @@ module MrbcRb
       @sp = sp
       @nregs = [@nregs, sp + 1].max
       if blk
+        raise Unsupported, 'block argument nil beside a &nil parameter' if blk.expression.respond_to?(:name) && blk.expression.name == NIL_BLOCK_NAME.to_sym
+
         operand_into(blk.expression ? unparen(blk.expression) : anonymous_local(:&, blk), sp)
       end
       [n | (nk << 4), !blk.nil?]
@@ -2963,7 +3046,7 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || ((node.is_a?(Prism::RangeNode) || node.is_a?(Prism::FlipFlopNode)) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
 
@@ -3114,7 +3197,7 @@ module MrbcRb
       when Prism::ArrayNode then array_into(node, dst)
       when Prism::InterpolatedStringNode then dstr_into(node, dst)
       when Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode then built_into(dst) { |base| small_node_at(node, base) }
-      when Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode then built_into(dst) { |base| regex_at(node, base) }
+      when Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode then built_into(dst) { |base| regex_at(node, base) }
       when Prism::HashNode then built_into(dst) { |base| hash_at(node, base) }
       when Prism::SourceEncodingNode then built_into(dst) { |base| source_into(node, base) }
       when Prism::CallNode
@@ -3129,7 +3212,7 @@ module MrbcRb
         emit(:MOVE, dst, result) unless result == dst
       when Prism::MatchRequiredNode, Prism::MatchPredicateNode, Prism::CaseMatchNode then pattern_value_into(node, dst)
       when *VALUE_WRITES then write_value_into(node, dst)
-      when Prism::RangeNode then built_into(dst) { |base| range_at(node, base) }
+      when Prism::RangeNode, Prism::FlipFlopNode then built_into(dst) { |base| range_at(node, base) }
       when Prism::LambdaNode
         # LAMBDA takes the child irep like BLOCK does; gen_move folds it straight into a local's register.
         @children << Compiler.new(@filename, frozen_strings: @frozen_strings).compile_block(node, self)
@@ -3419,6 +3502,22 @@ module MrbcRb
       end
     end
 
+    # An unused interpolated regexp (codegen_regx without a value): only the embedded expressions are evaluated, in order.
+    def regex_unused(node)
+      node.parts.each do |part|
+        next unless part.is_a?(Prism::EmbeddedStatementsNode)
+
+        body = part.statements&.body || []
+        raise Unsupported, 'interpolation with several statements' if body.size > 1
+        next if body.empty?
+
+        v = unparen(body[0])
+        raise Unsupported, 'interpolation operand' unless interpolation_operand?(v)
+
+        statement(v, last: false)
+      end
+    end
+
     def heredoc_string?(node) = node.respond_to?(:opening) && node.opening&.start_with?('<<')
 
     # gen_string with a value: the first part is loaded into the base register, each further part into the next one and
@@ -3526,8 +3625,34 @@ module MrbcRb
     def for_variable_ok?(var)
       case var
       when Prism::LocalVariableTargetNode, Prism::InstanceVariableTargetNode, Prism::GlobalVariableTargetNode then true
-      when Prism::MultiTargetNode then var.rest.nil? && var.rights.empty? && var.lefts.all?(Prism::LocalVariableTargetNode)
+      when Prism::SplatNode then var.expression.nil? || (!var.expression.is_a?(Prism::MultiTargetNode) && for_variable_ok?(var.expression))
+      when Prism::MultiTargetNode
+        rest = var.rest.is_a?(Prism::ImplicitRestNode) ? nil : var.rest
+        (var.lefts + var.rights).all? { |t| for_variable_ok?(t) } && (rest.nil? || for_variable_ok?(rest))
       else false
+      end
+    end
+
+    # The loop variable as the fork's grammar reads it: redundant parentheses (`for ((a, *b)) in`) are the same list, and a
+    # list of one target with a trailing comma (`for a, in`) is that target.
+    def for_normalize(var)
+      loop do
+        return var unless var.is_a?(Prism::MultiTargetNode)
+
+        rest = var.rest.is_a?(Prism::ImplicitRestNode) ? nil : var.rest
+        return var unless var.lefts.size == 1 && rest.nil? && var.rights.empty?
+
+        var = var.lefts[0]
+      end
+    end
+
+    # Every local target of the loop variable lives one scope further out (see FOR_SHIFT).
+    def for_shift_targets(var)
+      case var
+      when Prism::LocalVariableTargetNode then FOR_SHIFT.call(var)
+      when Prism::SplatNode then for_shift_targets(var.expression) if var.expression
+      when Prism::MultiTargetNode
+        (var.lefts + [var.rest] + var.rights).each { |t| for_shift_targets(t) if t && !t.is_a?(Prism::ImplicitRestNode) }
       end
     end
 
@@ -3539,18 +3664,30 @@ module MrbcRb
       @nregs = [@nregs, @sp].max
       @line = node.location.start_line
       emit(:ENTER, 0x40000)
-      var = node.index
+      var = for_normalize(node.index)
       FOR_DEPTH.call(node.statements, 0) if node.statements
       case var
       when Prism::InstanceVariableTargetNode then emit(:SETIV, 1, sym_index(var.name))
       when Prism::GlobalVariableTargetNode then emit(:SETGV, 1, sym_index(var.name))
-      when Prism::MultiTargetNode
-        var.lefts.each_with_index do |t, i|
-          FOR_SHIFT.call(t)
+      when Prism::MultiTargetNode, Prism::SplatNode
+        # gen_massignment(var, 1, VAL): AREF for each leading target, then APOST on a copy of the argument for the splat and the
+        # trailing targets, and a final MOVE of the argument (the statement's value) after a splat. Redundant parentheses
+        # (`for ((a, *b)) in`) are the same list, and `for a, in` is `for a in`.
+        for_shift_targets(var)
+        lefts, rest, rights = var.is_a?(Prism::SplatNode) ? [[], var, []] : [var.lefts, var.rest, var.rights]
+        rest = nil if rest.is_a?(Prism::ImplicitRestNode)
+        lefts.each_with_index do |t, i|
           @nregs = [@nregs, @sp + 1].max
           emit(:AREF, @sp, 1, i)
-          idx, lv = upvar_operands(t.name, t.depth)
-          emit(:SETUPVAR, @sp, idx, lv)
+          assign_target(t, @sp, @sp + 1)
+        end
+        if rest || !rights.empty?
+          gen_move(@sp, 1, true)
+          @nregs = [@nregs, @sp + rights.size + 1].max
+          emit(:APOST, @sp, lefts.size, rights.size)
+          assign_target(rest.expression, @sp, @sp) if rest&.expression
+          rights.each_with_index { |r, i| assign_target(r, @sp + 1 + i, @sp) }
+          gen_move(@sp, 1, false)
         end
       else
         FOR_SHIFT.call(var)
@@ -3684,7 +3821,7 @@ module MrbcRb
       sym = sym_index(:Regexp)
       emit(:OCLASS, base)
       emit(:GETMCNST, base, sym)
-      if node.is_a?(Prism::RegularExpressionNode)
+      if node.is_a?(Prism::RegularExpressionNode) || node.is_a?(Prism::MatchLastLineNode)
         emit(:STRING, base + 1, pool_index([:str, regex_text(node.content, node)]))
       elsif node.parts.none?(Prism::EmbeddedStatementsNode) # only `#@a` and the like: plain text to the fork
         text = node.parts.map { |part| part.is_a?(Prism::StringNode) ? regex_text(part.content, node) : part.location.slice.b }.join.b
@@ -4079,7 +4216,8 @@ module MrbcRb
 
       rest_name = forwarding ? :* : (rest && (rest.name || :*))
       kwrest_name = forwarding ? :** : (keyword_rest && (keyword_rest.name || :**))
-      block_name = forwarding ? :& : (block && (block.name || :&))
+      nil_block = block.is_a?(Prism::BlockParameterNode) && block.name == NIL_BLOCK_NAME.to_sym
+      block_name = forwarding ? :& : (block && !nil_block ? (block.name || :&) : nil)
       required_names = numbered.positive? ? (1..numbered).map { |i| :"_#{i}" } : requireds.map { |r| r.is_a?(Prism::MultiTargetNode) ? nil : r.name }
       pre = required_names + optionals.map(&:name)
       pre << rest_name if rest_name
@@ -4091,11 +4229,11 @@ module MrbcRb
       margs = (requireds + posts).grep(Prism::MultiTargetNode)
       marg_vars = margs.flat_map { |m| marg_names(m) }
       named = pre + [block_name] + kw_names + marg_vars
-      set_locals(pre + [nil] + [block_name].compact + kw_names + marg_vars + (node_locals - named))
+      set_locals(pre + [nil] + [block_name].compact + kw_names + marg_vars + (node_locals - named - (nil_block ? [block.name] : [])))
       @nregs = @nlocals + 1
       @line = line
       aspec = ((numbered.positive? ? numbered : requireds.size) << 18) | (optionals.size << 13) | ((rest_name ? 1 : 0) << 12) |
-              (posts.size << 7) | (keywords.size << 2) | ((kwrest_name ? 1 : 0) << 1) | (block_name ? 1 : 0)
+              (posts.size << 7) | (keywords.size << 2) | ((kwrest_name ? 1 : 0) << 1) | (block_name ? 1 : 0) | (nil_block ? 1 << 23 : 0)
       emit(:ENTER, aspec)
       @ainfo = method_ainfo(requireds.size + optionals.size, rest_name, posts.size, keywords.empty? && !kwrest_name ? [] : [nil], block_name)
       method_optionals(optionals) unless optionals.empty?
@@ -4615,8 +4753,6 @@ module MrbcRb
 
     # codegen_defined_respond_to: `recv.respond_to?(:name, true)` (SSEND without a receiver) is run, never the method.
     def defined_respond_to(call, r)
-      raise Unsupported, 'defined? of a call with a block' if call.block
-
       recv = call.receiver && unparen(call.receiver)
       noself = recv.nil? || recv.is_a?(Prism::SelfNode)
       raise Unsupported, 'defined? of a call on a non-operand receiver' unless noself || operand?(recv)
@@ -5344,7 +5480,7 @@ module MrbcRb
     end
 
     # codegen_pattern: +fails+ collects the positions of the jumps taken when the pattern does not match.
-    def pat_gen(pat, target, fails)
+    def pat_gen(pat, target, fails, known = nil)
       case pat[0]
       when :value
         operand_into(pat[1], @sp)
@@ -5355,7 +5491,7 @@ module MrbcRb
       when :alt
         left_fail = []
         success = []
-        pat_gen(pat[1], target, left_fail)
+        pat_gen(pat[1], target, left_fail, known)
         if pat[1][0] != :alt && !left_fail.empty? && left_fail.last + 2 == @code.size && @code[left_fail.last - 2] == OP.fetch(:JMPNOT)
           pos = left_fail.pop
           pat_retag(pos, :JMPIF)
@@ -5364,16 +5500,16 @@ module MrbcRb
           success << emit_jump(:JMP)
         end
         left_fail.each { |j| dispatch(j) }
-        pat_gen(pat[2], target, fails)
+        pat_gen(pat[2], target, fails, known)
         success.each { |j| dispatch(j) }
       when :as
-        pat_gen(pat[1], target, fails)
+        pat_gen(pat[1], target, fails, known)
         pgm(local_register(pat[2]), target, false)
       when :pin
         pgm(@sp, local_register(pat[1]), false)
         pat_push
         pat_eqq(target, fails)
-      when :array then pat_array(pat, target, fails)
+      when :array then pat_array(pat, target, fails, known)
       when :find then pat_find(pat, target, fails)
       when :hash then pat_hash(pat, target, fails)
       end
@@ -5407,7 +5543,32 @@ module MrbcRb
       pgm(local_register(var[1]), @sp, true)
     end
 
-    def pat_array(pat, target, fails)
+    # +known+ is the length of the array literal the subject is (codegen_case_match and NODE_MATCH_PAT know it): the target is
+    # the array itself, with no deconstruct and no size test (a length that cannot match is a plain JMP to the failure), and
+    # the elements are read with GETIDX.
+    def pat_array_known(pat, target, fails, known)
+      _, pre, rest, post = pat
+      if rest.nil? ? known != pre.size : known < pre.size + post.size
+        fails << emit_jump(:JMP)
+        return
+      end
+      pre.each_with_index { |e, i| pat_elem_known(e, target, i, fails) }
+      pat_bind_rest(rest, target, pre.size, post.size) if rest.is_a?(Array)
+      post.each_with_index { |e, i| pat_elem_known(e, target, i - post.size, fails) }
+    end
+
+    def pat_elem_known(elem, arr_reg, i, fails)
+      pgm(@sp, arr_reg, false)
+      pat_push
+      pgi(i, @sp)
+      pe(:GETIDX, @sp - 1)
+      pat_gen(elem, @sp - 1, fails)
+      pat_pop
+    end
+
+    def pat_array(pat, target, fails, known = nil)
+      return pat_array_known(pat, target, fails, known) if known
+
       _, pre, rest, post = pat
       arr_reg = @sp
       pgm(@sp, target, false)
@@ -5609,12 +5770,12 @@ module MrbcRb
       raise_on_fail = node.is_a?(Prism::MatchRequiredNode)
       value = unparen(node.value)
       raise Unsupported, 'pattern subject' unless operand?(value)
-      raise Unsupported, 'array literal pattern subject' if value.is_a?(Prism::ArrayNode)
 
       pat = pat_parse(node.pattern)
       check_multiline(value)
       head = temp
       value_into(value, head)
+      known = node.value.is_a?(Prism::ArrayNode) ? value.elements.size : nil # parentheses make a statement list: not known
       if pat[0] == :var
         pgm(local_register(pat[1]), head, false)
         return pat_result(head, raise_on_fail, last)
@@ -5622,10 +5783,28 @@ module MrbcRb
       @sp = head + 1
       @nregs = [@nregs, @sp].max
       fails = []
-      pat_gen(pat, head, fails)
+      if known && pat[0] == :array && pat[2].nil? && pat[3].empty? && known == pat[1].size
+        # An array literal against an array pattern of the same length (no rest, no post): the elements are read with GETIDX
+        # and the array is popped before the result is built. A pattern that can fail then leaves the stack pointer one
+        # register low (the fork pops the array twice), so the result is built at head - 1.
+        pat[1].each_with_index do |e, i|
+          pgm(@sp, head, false)
+          pat_push
+          pgi(i, @sp)
+          pat_push
+          pe(:GETIDX, @sp - 2)
+          pat_pop
+          pat_gen(e, @sp - 1, fails)
+          pat_pop
+        end
+        pat_pop
+      else
+        pat_gen(pat, head, fails, known)
+      end
       saved = @sp
       return pat_result(head, raise_on_fail, last) if fails.empty?
 
+      head = saved - 1
       @sp = head
       pat_result_values(raise_on_fail, last)
       if fails.size == 1 && fails[0] + 2 == @code.size && @code[fails[0] - 2] == OP.fetch(:JMPNOT)
@@ -5679,7 +5858,9 @@ module MrbcRb
     # also after an `else` body. The value ends in head.
     def case_match_statement(node, last:)
       subject = unparen(node.predicate)
-      raise Unsupported, 'case/in subject' unless subject && operand?(subject) && !subject.is_a?(Prism::ArrayNode)
+      raise Unsupported, 'case/in subject' unless subject && operand?(subject)
+
+      known = node.predicate.is_a?(Prism::ArrayNode) ? subject.elements.size : nil # parentheses make a statement list: not known
 
       check_multiline(subject)
       clauses = node.conditions.map do |c|
@@ -5708,7 +5889,7 @@ module MrbcRb
       end_jumps = []
       clauses.each do |pat, guard, guard_unless, body, empty_line|
         fails = []
-        pat_gen(pat, head, fails) if pat
+        pat_gen(pat, head, fails, known) if pat
         if guard
           g = unparen(guard)
           raise Unsupported, 'guard value' unless operand?(g)
@@ -5717,9 +5898,21 @@ module MrbcRb
           t = temp
           operand_into(g, t)
           j = cond_jump(guard_unless ? :JMPIF : :JMPNOT, t, val: false)
-          raise Unsupported, 'folded guard' unless j
-
-          fails << j
+          if j
+            fails << j
+          else
+            # A guard folded away returns JMPLINK_START, which the fork stores as the clause's failure chain: the jumps of the
+            # pattern are never patched. Each keeps the link it was emitted with: the offset to the previous jump's operand
+            # (absolute 0 for the first).
+            prev = 0
+            fails.each do |pos|
+              off = (prev - (pos + 2)) & 0xffff
+              @code[pos] = off >> 8
+              @code[pos + 1] = off & 0xff
+              prev = pos
+            end
+            fails.clear
+          end
         end
         @line = empty_line if body.nil? || body.body.empty?
         branch(body, @sp, need: last)
@@ -5746,6 +5939,9 @@ module MrbcRb
       begin
         @sp = base
         r = pattern_statement(node, last: true)
+        # An array literal matched by a same-length array pattern that can fail leaves the fork's result one register low
+        # (see match_pattern_statement), where a consumer reads it by its stack pointer: only a statement is covered.
+        raise Unsupported, 'array literal pattern subject with a failing pattern as a value' if r < base
       ensure
         @sp = saved
       end
@@ -5784,8 +5980,8 @@ module MrbcRb
     public :debug_records # called on each child, from the parent's debug section
 
     def debug_record(names)
-      files = debug_files.map do |name, first, stop|
-        packed = packed_lines(first, stop)
+      files = debug_files.map do |name, first, stop, snapshot|
+        packed = packed_lines(first, stop, snapshot)
         [first].pack('N') + [names.index(name.b)].pack('n') + [packed.bytesize].pack('N') + [2].pack('C') + packed
       end
       record = [files.size].pack('n') + files.join
@@ -5793,12 +5989,12 @@ module MrbcRb
     end
 
     # src/debug.c's packed map: (pc delta, line delta) pairs, written only where the line changes.
-    def packed_lines(first = 0, stop = @lines.size)
+    def packed_lines(first = 0, stop = @lines.size, snapshot = nil)
       out = ''.b
       prev_line = 0
       prev_pc = 0
       (first...stop).each do |pc|
-        line = @lines[pc]
+        line = snapshot ? snapshot[pc - first] : @lines[pc]
         next if line == prev_line
 
         out << pack_int(pc - prev_pc) << pack_int(line - prev_line)
