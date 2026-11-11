@@ -265,7 +265,11 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # possible. The RITE binary (`-g`) carries everything bc2cpp needs: the irep
 # tree, iseq bytes, pool, symbols, local-variable names, file and catch table.
 # ---------------------------------------------------------------------------
-RiteImage = Struct.new(:bytes)
+#
+# `rites` is optional: the irep tree as RiteBinary::RiteIrep records in depth-first pre-order (what RiteBinary.parse(bytes)
+# returns). The emitter hands it over (MrbcRb::Result#ireps) so decode_ireps need not parse the image it just serialized;
+# an image from mrbc (or read from a file) has none and is parsed.
+RiteImage = Struct.new(:bytes, :rites)
 
 # The `mrbc` binary is optional. +mrbc+ is the command (MRBC from the environment, else `mrbc` on PATH); it counts only
 # when it names an executable file, so with MRBC unset and no `mrbc` on PATH there is no fallback and the emitter must
@@ -290,8 +294,9 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mode = ENV.fetch('BC2CPP_MRBC_RB', '')
   reason = 'disabled'
   unless mode == '0'
-    image, reason = mrbc_rb_image(paths)
-    if image
+    result, reason = mrbc_rb_image(paths)
+    if result
+      image = result.image
       if mode == 'verify'
         abort 'mrbc_rb: BC2CPP_MRBC_RB=verify needs an mrbc (set MRBC)' unless mrbc
         system(mrbc, '-g', '-o', mrb_path, *paths, exception: true)
@@ -300,7 +305,7 @@ def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
       end
       mrbc_rb_log(paths.size, 'emitter', '-', symbol)
       File.binwrite(mrb_path, image)
-      return RiteImage.new(image)
+      return RiteImage.new(image, rites_from_tree(result.tree))
     end
   end
   unless mrbc
@@ -324,14 +329,14 @@ def mrbc_rb_log(count, served_by, reason, symbol)
   File.open(log, 'a') { |f| f.write("#{count}\t#{served_by}\t#{reason.to_s.tr("\n\t", '  ')}\t#{symbol}\n") }
 end
 
-# [the RITE binary of the source files +paths+ from the Ruby emitter, nil] or [nil, "Unsupported(message)"] when it does not
-# cover them.
+# [the RITE binary of the source files +paths+ from the Ruby emitter (a MrbcRb::Result: binary plus irep tree), nil]
+# or [nil, "Unsupported(message)"] when it does not cover them.
 def mrbc_rb_image(paths)
   require_relative '../mrbc_rb/mrbc_rb'
   image = if paths.size == 1
-            MrbcRb.compile(File.binread(paths.first), paths.first)
+            MrbcRb.compile_result(File.binread(paths.first), paths.first)
           else
-            MrbcRb.compile_files(paths.map { |path| [File.binread(path), path] })
+            MrbcRb.compile_files_result(paths.map { |path| [File.binread(path), path] })
           end
   [image, nil]
 rescue MrbcRb::Error => e
@@ -342,6 +347,36 @@ rescue StandardError => e
   raise if ENV['BC2CPP_MRBC_RB'] == 'verify'
 
   [nil, "Crash(#{e.class}: #{e.message[0, 100]})"]
+end
+
+# The irep tree of MrbcRb::Result (MrbcRb::RiteDump::Irep, nested) as the flat depth-first RiteBinary::RiteIrep records
+# RiteBinary.parse reads from the same image: the catch table is split off the iseq tail, the bigint's length byte dropped, and
+# a DBG section (always there: -g) / LVAR section (when some irep has locals) is as RiteBinary.parse leaves it.
+def rites_from_tree(root)
+  flat = []
+  walk = ->(i) { flat << i; i.reps.each(&walk) }
+  walk.call(root)
+  with_lv = flat.any?(&:lv)
+  flat.map do |i|
+    code = i.iseq.byteslice(0, i.ilen)
+    catches = Array.new(i.clen) do |n|
+      type, from, to, target = i.iseq.byteslice(i.ilen + 13 * n, 13).unpack('CNNN')
+      RiteBinary::RawCatch.new(type: type, begin_addr: from, end_addr: to, target: target)
+    end
+    pool = i.pool.map do |kind, v|
+      case kind
+      when :i32 then RiteBinary::PoolEntry.new(:int32, v)
+      when :i64 then RiteBinary::PoolEntry.new(:int64, v)
+      when :bigint then RiteBinary::PoolEntry.new(:bigint, v.byteslice(1..))
+      else RiteBinary::PoolEntry.new(kind, v)
+      end
+    end
+    debug = i.debug.map do |first, name, _size, lines|
+      RiteBinary::DebugFile.new(first, name.dup.force_encoding(Encoding::UTF_8), RiteBinary::LINE_PACKED_MAP, lines)
+    end
+    RiteBinary::RiteIrep.new(nlocals: i.nlocals, nregs: i.nregs, rlen: i.reps.size, iseq: code, catch_handlers: catches,
+                             pool: pool, syms: i.syms, lv: with_lv ? (i.lv || []) : nil, debug_files: debug)
+  end
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
@@ -417,7 +452,7 @@ def load_ireps(image, cache: ENV['BC2CPP_IREP_CACHE_DIR'])
 end
 
 def decode_ireps(image)
-  rites = RiteBinary.parse(image.bytes)
+  rites = (image.respond_to?(:rites) && image.rites) || RiteBinary.parse(image.bytes)
   labels = Array.new(rites.length)
   children = Array.new(rites.length) { [] }
   assign_irep_labels(rites, 0, 0, [1], labels, children)
