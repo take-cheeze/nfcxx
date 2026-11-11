@@ -143,9 +143,9 @@ else
   bad "quoted include: nfcxx links and runs" "compile or link failed"
 fi
 
-# 12. Intermediates: a compile and link leaves no .ii, .ti or .o in its directory; NFCXX_KEEP_INTERMEDIATES=1 keeps the
-# records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records (in
-# NFCXX_INSTANTIATE=auto, the prelinker's mode; the default instantiates in each unit and has no records).
+# 12. Intermediates: a compile and link leaves no .ii, .ti or .o in its directory; --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1) keeps
+# the records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records (in
+# --instantiate=auto, NFCXX_INSTANTIATE=auto, the prelinker's mode; the default instantiates in each unit and has no records).
 mkdir -p "$tmp/cwd" && printf 'template <class T> T twice(T x) { return x + x; }\n' > "$tmp/cwd/common.h"
 printf '#include "common.h"\nint fx(int v) { return twice(v); }\n' > "$tmp/cwd/x.cpp"
 printf 'int fx(int);\nint main() { return fx(2) == 4 ? 0 : 1; }\n' > "$tmp/cwd/main.cpp"
@@ -155,13 +155,19 @@ if [ "$got" -eq 0 ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; th
 else
   bad "compile and link leave no .ii, .ti or .o in the directory" "exit $got, $(ls -A "$tmp/cwd" | tr '\n' ' ')"
 fi
-keep_msg=$(cd "$tmp/cwd" && NFCXX_INSTANTIATE=auto NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+keep_msg=$(cd "$tmp/cwd" && "$nfcxx" --instantiate=auto --keep-intermediates -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
 if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
-  ok "NFCXX_KEEP_INTERMEDIATES=1 keeps the records in the named directory"
+  ok "--keep-intermediates keeps the records in the named directory"
 else
-  bad "NFCXX_KEEP_INTERMEDIATES=1 keeps the records" "named '$keep_msg'"
+  bad "--keep-intermediates keeps the records" "named '$keep_msg'"
 fi
 [ -n "$keep_msg" ] && rm -rf "$keep_msg"
+# the environment variables are the fallback of the same options
+keep_msg=$(cd "$tmp/cwd" && NFCXX_INSTANTIATE=auto NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ]; then ok "NFCXX_KEEP_INTERMEDIATES=1 and NFCXX_INSTANTIATE=auto still work"
+else bad "NFCXX_KEEP_INTERMEDIATES=1 and NFCXX_INSTANTIATE=auto still work" "named '$keep_msg'"; fi
+[ -n "$keep_msg" ] && rm -rf "$keep_msg"
+check "--instantiate takes used or auto only" sh -c "! '$nfcxx' --instantiate=bogus -c '$tmp/cwd/x.cpp' -o '$tmp/cwd/bogus.o' 2>/dev/null"
 
 # 13. -c recompile clears the records of the object it compiles. Link x.o alone (writes x.ii), compile y.o and link it
 # alone (writes y.ii), recompile x.o, then link both: the stale x.ii must not make an instance assigned to two objects.
@@ -234,6 +240,28 @@ n=$(grep -c '^== ' "$c15/plog"); k=$(grep -c '^key ' "$c15/plog"); s=$(grep -cx 
 [ "$n" = 4 ] && [ "$k" = 4 ] && [ "$s" = 4 ] && ok "cache log: parallel compiles keep whole blocks" \
   || bad "cache log: parallel compiles keep whole blocks" "$n blocks, $k keys, $s states"
 unset NFCXX_CACHE_LOG NFCXX_CACHE NFCXX_INSTANTIATE
+# 15b. The same cache and log as options (no environment): --cache=DIR, --cache-log=FILE; the option is no part of the key (a
+# second directory name gives the same key), and it wins over the variable.
+rm -rf "$c15/cache" "$c15/log" "$c15/o"; mkdir -p "$c15/o"
+printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+check "cache flag: a compile is stored" "$nfcxx" --cache="$c15/cache" --cache-log="$c15/log" --instantiate=auto -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+check "cache flag: the second compile is a hit, and its object links" sh -c "
+  rm -f '$c15/o/tpl.o' '$c15/o/tpl.ti' '$c15/o/tpl.ii' &&
+  '$nfcxx' --cache='$c15/cache' --cache-log='$c15/log' --instantiate=auto -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -qx hit '$c15/log' &&
+  '$nfcxx' --instantiate=auto -c '$c15/main.cpp' -o '$c15/o/main.o' && '$nfcxx' --instantiate=auto '$c15/o/main.o' '$c15/o/tpl.o' -o '$c15/prog' && '$c15/prog'"
+[ "$(c15_entries)" = 1 ] && ok "cache flag: one entry" || bad "cache flag: one entry" "$(c15_entries) entries"
+check "cache flag: --cache wins over NFCXX_CACHE" sh -c "
+  NFCXX_CACHE='$c15/other' '$nfcxx' --cache='$c15/cache' --instantiate=auto -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && ! test -d '$c15/other'"
+
+# 16. Option flags that were environment variables: each is accepted, and a bad value is refused. (The variables still work.)
+f16=$tmp/f16; mkdir -p "$f16"; printf 'int main() { return 0; }\n' > "$f16/m.cpp"
+check "flags: --eh-unwind --no-eh-shim --ir-opt=off build and run" sh -c "'$nfcxx' --eh-unwind --no-eh-shim --ir-opt=off '$f16/m.cpp' -o '$f16/m' && '$f16/m'"
+check "flags: --no-eh-unwind after --eh-unwind" "$nfcxx" --eh-unwind --no-eh-unwind -c "$f16/m.cpp" -o "$f16/m.o"
+check "flags: --time-log writes one line per stage" sh -c "
+  '$nfcxx' --time-log='$f16/tl' '$f16/m.cpp' -o '$f16/m2' && test -s '$f16/tl' && awk -F'\t' 'NF != 4 { bad = 1 } END { exit bad }' '$f16/tl'"
+check "flags: --promote-slots=bogus is refused" sh -c "! '$nfcxx' --promote-slots=bogus -c '$f16/m.cpp' -o '$f16/b.o' 2>/dev/null"
+check "flags: --unroll=off --struct-slots=off --promote-slots=off are accepted" "$nfcxx" --unroll=off --struct-slots=off --promote-slots=off -c "$f16/m.cpp" -o "$f16/c.o"
+check "flags: -fuse-ld=bfd links (the linker is named)" sh -c "'$nfcxx' -fuse-ld=bfd '$f16/m.cpp' -o '$f16/m3' && '$f16/m3'"
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
