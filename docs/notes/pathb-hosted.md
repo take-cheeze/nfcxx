@@ -15,7 +15,7 @@ as the gcc backend.
   runs in another directory).
 - **`scripts/pathb-cc`**: one C++ file to an object (`pathb-dump --ir | pathb-qbe-emit.rb | qbe | cc -c`, `PATHB_KEEP=dir`
   keeps the intermediate files).
-- **Driver opt-in**: `NFCXX_PATH=b ./nfcxx ...` (or `--backend=pathb`) compiles every `.cpp` with `pathb-cc`, `.c` files with the
+- **Driver**: the default on x86-64 Linux (`docs/notes/pathb-default.md`); `NFCXX_PATH=b ./nfcxx ...` (or `--backend=pathb`) forces it compiles every `.cpp` with `pathb-cc`, `.c` files with the
   QBE C path, and links with EDG's runtime (`-lC` first, then `-lstdc++ -lgcc_s -lpthread -lm -latomic`).
   `NFCXX_PATH=b tests/run.sh` runs `tests/cases` through it; `tests/pathb-qbe/hosted.sh` is the CI-able check.
 - `scripts/setup-pathb.sh`: `PATHB_EDG_SRC` (EDG checkout elsewhere, for worktrees with an empty `3rd/`), `PATHB_JOBS`.

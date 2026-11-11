@@ -558,7 +558,9 @@ jobs:
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(be/|3rd/edg$|3rd/qbe$|scripts/pathb-|scripts/(setup-pathb\.sh|setup-edg\.sh|setup-qbe\.sh|host-sys\.sh|mrb|setup-mruby\.sh|mruby-tool-config\.rb|sycl-build\.sh|spirv-emit|qbe-prep|ehshim|safeptr-rt|cpp-feature-)|tests/(pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|lib/(sycl|ehshim|safeptr)/|tools/(pathb-spirv-emit|qbe-prep)/|^nfcxx$|tests/realworld/tinyxml2_main\.cpp$|\.github/workflows/ci\.yml$)'; then
+          # Since the default driver is Path B (docs/notes/pathb-default.md), the driver's helpers, the runtime library
+          # and the C compiler wrapper count too: scripts/, lib/, nfcc/, 3rd/cproc, tests/run.sh, tests/realworld/.
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(be/|3rd/edg$|3rd/qbe$|3rd/cproc$|scripts/|nfcc/|lib/|tests/run\.sh$|tests/realworld/|\.github/actions/|scripts/(setup-pathb\.sh|setup-edg\.sh|setup-qbe\.sh|host-sys\.sh|mrb|setup-mruby\.sh|mruby-tool-config\.rb|sycl-build\.sh|spirv-emit|qbe-prep|ehshim|safeptr-rt|cpp-feature-)|tests/(pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|lib/(sycl|ehshim|safeptr)/|tools/(pathb-spirv-emit|qbe-prep)/|^nfcxx$|tests/realworld/tinyxml2_main\.cpp$|\.github/workflows/ci\.yml$)'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"

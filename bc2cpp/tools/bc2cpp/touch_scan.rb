@@ -160,6 +160,8 @@ module TouchScan
   # each identifier an event argument spells, so native_classify never needs the text. A funcall whose name is a
   # helper's parameter carries the names the helper's calls spell as a fourth element (helper_names).
   def self.native_facts(text)
+    # A ROM table on a class object's singleton (ClosedWorld::CLASS_OBJECT_TABLE) makes no singleton class an event.
+    text = ClosedWorld.without_class_object_tables(text)
     events = []
     text.scan(NATIVE_SUPER_ASSIGN) { events << ['super', nil, 'direct ->super assignment'] }
     text.to_enum(:scan, NATIVE_EVENT).map { Regexp.last_match }.each do |m|

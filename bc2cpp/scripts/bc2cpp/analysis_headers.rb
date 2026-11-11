@@ -43,9 +43,12 @@ module AnalysisHeaders
   # The sources the closed world reads: the RGSS natives, the core and external gems' natives (BaseRbsAll). The analysis
   # also parses the compiler's own C (mruby-compiler's codegen.c and y.tab.c, which name MRB_SYM(nil)), so its presym
   # IDs cover those names too. The closed build leaves the compiler out of its natives, so the scan adds it here.
+  # native_fn_kinds.rb also parses the RGSS sources the closed build does not compile (tts.cxx beside tts_off.cxx), whose
+  # MRB_MT_ENTRY names need an ID to parse, so those are scanned as well.
   def native_sources
     compiler = Dir[File.join(BaseRbsAll::MRUBY_ROOT, 'mrbgems', 'mruby-compiler', 'core', '*.c')]
-    (BaseRbsAll.closed_native_sources + compiler).uniq.sort
+    rgss = Dir[File.join(BaseRbsAll::ROOT, 'mruby-rgss', 'src', '*.cxx')]
+    (BaseRbsAll.closed_native_sources + compiler + rgss).uniq.sort
   end
 
   # The presym names every source names, as mruby's scanner reads them from the preprocessed output.

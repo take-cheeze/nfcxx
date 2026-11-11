@@ -225,7 +225,7 @@ end
 build = ENV['CC_GENERATED_ONLY'] == '1' ? nil : Bc2cppFixtureRuntime.full_or_build
 
 Dir.mktmpdir('bc2cpp-gc-root') do |dir|
-  code, = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
+  code, err = Bc2cppFixtureRuntime.generate(SOURCE, dir, core: true, only_owners: OWNERS)
   suite.check('an embedded ivar store roots the value it replaces', code.include?('bc2cpp_keep_old(M, ((GcRoot_ivars*)'))
   suite.check('the global, element and attr_writer stores root theirs',
               code.include?('bc2cpp_gv_set(M,') && code.include?('bc2cpp_keep_old(M, ARY_PTR(a)[n]);') &&
@@ -237,6 +237,31 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
   if build.nil?
     puts '  SKIP gc root behaviour: needs a full-core libmruby (BC2CPP_MRUBY_FULL, or rake and g++)'
   else
+    arena_scenario = <<~CPP
+      static int scenario(mrb_state* M) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value value = mrb_str_new_lit(M, "retained");
+        mrb_gc_arena_restore(M, ai);
+        bc2cpp_root(M, value);
+        if (M->gc.arena_idx != ai + 1) return 1;
+        for (int n = 0; n < 1000; ++n) bc2cpp_root(M, value);
+        bc2cpp_root(M, mrb_fixnum_value(1));
+        if (M->gc.arena_idx != ai + 1) return 2;
+        mrb_value other = mrb_str_new_lit(M, "other");
+        int before = M->gc.arena_idx;
+        bc2cpp_root(M, value);
+        if (M->gc.arena_idx != before + 1) return 3;
+        bc2cpp_root(M, other);
+        mrb_gc_arena_restore(M, ai);
+        bc2cpp_root(M, value);
+        if (M->gc.arena_idx != ai + 1) return 4;
+        mrb_full_gc(M);
+        if (RSTRING_LEN(value) != 8 || memcmp(RSTRING_PTR(value), "retained", 8)) return 5;
+        return 0;
+      }
+    CPP
+    arena_ok, = Bc2cppFixtureRuntime.run(dir, err, OWNERS, arena_scenario, build: build, full: true, vms: [true])
+    suite.check('duplicate arena roots are bounded and a restore requires a fresh root', arena_ok)
     _, rooted, built = run_cases(dir, build)
     suite.check('fixture builds and runs', built)
     if built

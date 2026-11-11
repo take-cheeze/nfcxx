@@ -161,8 +161,15 @@ static mrb_value bc2cpp_rooted_array(mrb_state* M, mrb_sym key) {
 // A parked frame is held only by C++ until its fiber's refs are rebuilt, and
 // the arena protecting its objects is popped, so its values are pinned here
 // until the next refresh.
+// STATE_EPOCH (bc2cpp_lit_sym.hxx): the global is read by name once per state; its Array is never replaced.
 static mrb_value bc2cpp_pins(mrb_state* M) {
-  return bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_pins"));
+  static mrb_value cached;
+  static unsigned cached_gen = 0;
+  const unsigned gen = bc2cpp_state_gen(M);
+  if (gen && cached_gen == gen) return cached;
+  cached = bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_pins"));
+  cached_gen = gen;
+  return cached;
 }
 
 static void bc2cpp_unpin(mrb_state* M) {
@@ -558,7 +565,13 @@ static bool bc2cpp_fiber_own_p(mrb_value v);
 // bc2cpp_current_fiber and Bc2cppFiber::caller are raw values the GC does not
 // see.
 static mrb_value bc2cpp_running_fibers(mrb_state* M) {
-  return bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_running"));
+  static mrb_value cached;
+  static unsigned cached_gen = 0;
+  const unsigned gen = bc2cpp_state_gen(M);
+  if (gen && cached_gen == gen) return cached;
+  cached = bc2cpp_rooted_array(M, BC2CPP_LIT_SYM(M, "$__bc2cpp_running"));
+  cached_gen = gen;
+  return cached;
 }
 
 // Fiber#resume / #transfer: the yielded value, or the body's result once

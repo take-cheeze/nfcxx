@@ -32,6 +32,7 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   c_src = "#{build_dir}/bc2cpp_sources.c"
   obj = objfile(c_src.ext)
   mrbc_file = build.mrbcfile
+  mrbc_rb_cli = File.expand_path('../../tools/mrbc_rb/bin/mrbc_rb', __dir__)
   file c_src => [stamp, mrbc_file, __FILE__] do |t|
     names = File.readlines("#{baked_dir}/index", chomp: true)
     FileUtils.mkdir_p(File.dirname(t.name))
@@ -51,7 +52,10 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
         rel = "#{name}.rb"
         # The file name recorded in the debug info is the baked name, so a backtrace reads tools/bc2cpp/x.rb:LINE.
         out = "#{baked_dir}/#{name}.c"
-        ok = system(mrbc_file, '-g', "-Bbc2cpp_src_#{i}", '-o', out, rel, chdir: baked_dir)
+        # bc2cpp/tools/mrbc_rb/bin/mrbc_rb is mrbc's command line on the Ruby emitter; what it does not cover it hands to the
+        # real mrbc (MRBC_FALLBACK). BC2CPP_MRBC_RB=0 runs mrbc itself.
+        mrbc_cmd = ENV['BC2CPP_MRBC_RB'] == '0' ? [mrbc_file] : [RbConfig.ruby, mrbc_rb_cli]
+        ok = system({ 'MRBC_FALLBACK' => mrbc_file }, *mrbc_cmd, '-g', "-Bbc2cpp_src_#{i}", '-o', out, rel, chdir: baked_dir)
         raise "mruby-bc2cpp-sources: mrbc failed on #{rel}" unless ok
 
         f.puts File.read(out)

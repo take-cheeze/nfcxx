@@ -79,15 +79,16 @@ if [ "$emscripten" = 1 ]; then
   # keeps a target long double (x86-64's 80-bit x87 format) in the host's long double, which on wasm32 is binary128
   # (float_pt.c: fetch_host_fp_value, the comment in store_host_fp_value). Berkeley SoftFloat 3e, pinned, with x86's
   # NaN rules (8086-SSE), built with emcc into build/softfloat.
-  sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1
-  if [ ! -f "$sf/build/Linux-x86_64-GCC/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
+  # The SoftFloat configuration of the target (x86-64 NaN rules), not of the host: its build directory in the pinned checkout.
+  sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
+  if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
     command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.sh, then source its env)" >&2; exit 1; }
     rm -rf "$sf"; git clone -q https://github.com/ucb-bar/berkeley-softfloat-3.git "$sf"
     git -C "$sf" checkout -q $sf_commit
-    make -s -C "$sf/build/Linux-x86_64-GCC" -j"${PATHB_JOBS:-4}" MAKELIB='emar crs $@' \
+    make -s -C "$sf/build/$sf_config" -j"${PATHB_JOBS:-4}" MAKELIB='emar crs $@' \
       COMPILE_C='emcc -c -Werror-implicit-function-declaration -DSOFTFLOAT_FAST_INT64 $(SOFTFLOAT_OPTS) $(C_INCLUDES) -O2 -o $@'
   fi
-  export EDG_SOFTFLOAT_INCLUDE_PATH=$sf/source/include EDG_SOFTFLOAT_LIB_PATH=$sf/build/Linux-x86_64-GCC/softfloat.a
+  export EDG_SOFTFLOAT_INCLUDE_PATH=$sf/source/include EDG_SOFTFLOAT_LIB_PATH=$sf/build/$sf_config/softfloat.a
   # The host integers EDG holds target sizes and offsets in (a_targ_size_t is a_host_large_unsigned) are the host's
   # ptrdiff_t and size_t, 32 bits on wasm32, too small for x86-64's size_t (SIZE_MAX became 2^32 - 1). targ_def.h allows
   # any large host integer there: the tree's copy (never the submodule's) takes the 64-bit ones.

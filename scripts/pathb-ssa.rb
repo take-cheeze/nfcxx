@@ -844,6 +844,10 @@ def literal(v, type)
   raise Unsupported, "initialiser #{sx(v)}" unless head(v) == "const"
 
   if float_type?(v[1])
+    # NaN is written as text that Float() cannot read (normalise_literals). Its value here is the positive quiet NaN, as
+    # the QBE emitter spells it (Qbe.float_lit).
+    return Float::NAN if v[2].is_a?(String) && v[2].match?(/nan/i)
+
     round_float(Float(v[2]), v[1])
   else
     canon(int_lit(v[2]), v[1])

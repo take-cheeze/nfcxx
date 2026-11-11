@@ -4,7 +4,7 @@
 # converts it (3rd/mruby/src/class.c, the case for each letter). An RBS signature for a native method may name a type
 # only where the conversion is a check: a value that is not an instance of the class raises TypeError, so the declared
 # class holds for every call that returns. A coercion (`i`, `f`, `n`) accepts a value that is not the class and converts
-# it, so its declaration would be a lie about the callers; it is `untyped`. See scripts/bc2cpp/native_format_types_check.rb.
+# it, so its declaration would be a lie about the callers; it is `untyped`. See rpg-maker-clone scripts/bc2cpp-rpg/native_format_types_check.rb.
 module NativeFormatTypes
   # rbs: the RBS type a call guarantees (nil: none). conversion: :check (TypeError otherwise), :coerce (converted by
   # mruby), :any (no check), :truthy (mrb_test), :class (ensure_class_type).

@@ -326,17 +326,23 @@ module NativeConstructorSigs
     out
   end
 
-  # The body text of the C function `mrb_define_method(M, <var of klass>, "name", fn, ...)` registers: a lambda's
-  # own braces, or the definition of the named function in the same sources.
+  # The body text of the C function `mrb_define_method(M, <var of klass>, "name", fn, ...)` (or the MRB_MT_ENTRY of a ROM
+  # table installed on that class) registers: a lambda's own braces, or the definition of the named function.
   def registered_body(klass, name, sources)
     needle = "\"#{name}\""
     sources.each do |path|
       text = stripped(path)
       # The name is a whole argument, so its literal must occur in the file; a file without it (or without any
       # mrb_define_method) has no registration to match and never needs its class table (see class_vars).
-      next unless text.include?('mrb_define_method') && text.include?(needle)
+      next unless (text.include?('mrb_define_method') && text.include?(needle)) || text.include?('MRB_MT_ENTRY')
 
       vars = nil
+      NativeOwnerMap.rom_bindings(text).each do |expr, singleton, entry_name, fn|
+        next if singleton || entry_name != name
+
+        vars ||= class_vars(path, text)
+        return function_body(sources, fn) if vars[expr] == klass
+      end
       define_method_calls(text).each do |open, args|
         next unless args[2] == needle
 

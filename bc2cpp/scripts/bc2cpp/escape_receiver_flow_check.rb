@@ -252,6 +252,79 @@ ensure
   FileUtils.remove_entry(verdict_dir)
 end
 
+# Per-point may-hold sets (escape_analysis.rb, Verdict#holding_at): with BC2CPP_ESCAPE_POINTS=1 the report gives a
+# `point` row per instruction of each creation site's method, the registers that may hold the value on entry to it.
+# The fixtures have known aliasing; a value that is returned escapes, so each one is measured without leaving the frame.
+POINTS_SRC = <<~'RUBY'
+  class PT
+    def straight; a = [1, 2]; a.size; end
+    def alias_copy; a = [1, 2]; b = a; b.size; end
+    def branch(c); a = [1, 2]; if c; b = a; end; a.size; end
+    def escapes; @k = [1, 2]; nil; end
+  end
+RUBY
+
+# [site row, point rows] of the array creation in method +name+ of owner PT.
+def points_site(rows, name)
+  site = rows.find { |r| r[0] == 'site' && r[2] == "PT##{name}" && r[5] == 'array' }
+  return [nil, []] unless site
+
+  [site, rows.select { |r| r[0] == 'point' && r[1] == site[1] }]
+end
+
+# The registers listed at the last instruction with op +op+ (the return), as integers; nil without such a row.
+def points_held_at(points, op)
+  row = points.select { |r| r[3] == op }.max_by { |r| r[2].to_i }
+  return nil unless row
+
+  row[4].to_s.split(',').map(&:to_i)
+end
+
+puts '-- escape points (generation)'
+points_dir = Dir.mktmpdir('bc2cpp-escape-points')
+begin
+  tsv = File.join(points_dir, 'points.tsv')
+  saved = ENV.fetch('BC2CPP_ESCAPE_REPORT', nil)
+  saved_points = ENV.fetch('BC2CPP_ESCAPE_POINTS', nil)
+  ENV['BC2CPP_ESCAPE_REPORT'] = tsv
+  ENV['BC2CPP_ESCAPE_POINTS'] = '1'
+  begin
+    Bc2cppFixtureRuntime.generate(POINTS_SRC, points_dir, core: true, only_owners: %w[PT])
+  ensure
+    saved.nil? ? ENV.delete('BC2CPP_ESCAPE_REPORT') : ENV['BC2CPP_ESCAPE_REPORT'] = saved
+    saved_points.nil? ? ENV.delete('BC2CPP_ESCAPE_POINTS') : ENV['BC2CPP_ESCAPE_POINTS'] = saved_points
+  end
+  rows = File.readlines(tsv, chomp: true).map { |line| line.split("\t", -1) }
+
+  site, points = points_site(rows, 'straight')
+  creation_index = site && site[1].split(':').last.to_i
+  at_return = points_held_at(points, 'RETURN')
+  check.call('straight: the value is held by exactly one register at the return', at_return && at_return.size == 1)
+  creation_row = points.find { |r| r[2].to_i == creation_index }
+  check.call('straight: the creation instruction does not hold the value on entry',
+             creation_row && at_return && !creation_row[4].to_s.split(',').map(&:to_i).include?(at_return.first))
+
+  _, points = points_site(rows, 'alias_copy')
+  at_return = points_held_at(points, 'RETURN')
+  check.call('alias_copy: a copy adds a second register that holds the value at the return',
+             at_return && at_return.size >= 2)
+
+  _, points = points_site(rows, 'branch')
+  at_return = points_held_at(points, 'RETURN')
+  check.call('branch: a copy made on one branch is held by both registers at the merge',
+             at_return && at_return.size >= 2)
+
+  site, points = points_site(rows, 'escapes')
+  escape_rows = points.select { |r| r[5] == 'escape' }
+  check.call('escapes: the site is reported escaping, at an instruction that holds only the value',
+             site && escape_rows.size == 1 && escape_rows.first[4].to_s.split(',').size == 1)
+  escape_index = escape_rows.first && escape_rows.first[2].to_i
+  check.call('escapes: the flow runs on past the escape, so later instructions have sets',
+             escape_index && points.any? { |r| r[2].to_i > escape_index && r[4].to_s != 'escaped' })
+ensure
+  FileUtils.remove_entry(points_dir)
+end
+
 puts '-- behaviour (needs a full-core libmruby)'
 build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?

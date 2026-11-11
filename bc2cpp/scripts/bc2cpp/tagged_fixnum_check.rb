@@ -25,6 +25,7 @@
 require 'open3'
 require 'tmpdir'
 require_relative 'fixture_runtime'
+require_relative 'host_cxx'
 require_relative '../../tools/bc2cpp/tagged_fixnum'
 
 # The fixture is its own closed world: the repository signatures name classes it does not define.
@@ -58,7 +59,7 @@ if Bc2cppFixtureRuntime.compiler?
       Open3.capture2e(compiler, '-std=c++17', '-fsyntax-only', '-DMRB_PRESYM_SCANNING', *flags,
                       "-I#{ROOT}/3rd/mruby/include", src)
     end
-    report = lambda do |name, expected, flags, compiler = ENV.fetch('CXX', 'g++')|
+    report = lambda do |name, expected, flags, compiler = HostCxx.pick('g++')|
       out, status = probe.call(expected, flags, compiler)
       check.call("#{name}: BC2CPP_TAGGED_FIXNUM is #{expected} and the prelude compiles", status.success?)
       puts out.lines.first(10).join unless status.success?
@@ -74,7 +75,10 @@ if Bc2cppFixtureRuntime.compiler?
     FileUtils.mkdir_p(File.join(stubs, 'gnu'))
     File.write(File.join(stubs, 'gnu/stubs-32.h'), '')
     host_include = Dir['/usr/include/*-linux-gnu'].first
-    m32 = [[ENV.fetch('CXX', 'g++'), %w[-m32]],
+    # nfcxx is not a candidate: it has no 32-bit target for hosted code (--target is freestanding --emit-c only) and would take
+    # -m32 as an ISA option and compile a 64-bit word, so a CXX that is nfcxx gives way to g++ here.
+    m32_cxx = HostCxx.nfcxx?(ENV.fetch('CXX', '')) || ENV.fetch('CXX', '').empty? ? 'g++' : ENV.fetch('CXX')
+    m32 = [[m32_cxx, %w[-m32]],
            ['clang++', ['--target=i386-linux-gnu', '-isystem', stubs, *(host_include ? ['-isystem', host_include] : [])]]]
           .find do |compiler, flags|
             Open3.capture2e(compiler, *flags, '-fsyntax-only', '-x', 'c++', '-', stdin_data: "#include <stdio.h>\n")

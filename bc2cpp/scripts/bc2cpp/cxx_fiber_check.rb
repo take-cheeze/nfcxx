@@ -9,6 +9,7 @@
 require 'tmpdir'
 require 'open3'
 require_relative 'check_support'
+require_relative 'host_cxx'
 
 suite = FixtureCheck.new('cxx_fiber_check')
 check = suite.method(:check)
@@ -17,7 +18,7 @@ unless root && File.file?(File.join(root, 'lib/libmruby.a'))
   puts 'SKIP cxx_fiber_check: set BC2CPP_MRUBY_FULL to a host mruby build'
   exit 0
 end
-cxx = ENV.fetch('CXX', 'clang++')
+cxx = HostCxx.pick('clang++') # CXX, else nfcxx when built, else clang++
 runtime = File.expand_path('../../tools/bc2cpp/runtime', __dir__)
 
 TEST = <<~'CPP'
@@ -222,10 +223,13 @@ EXPECTED = <<~OUT
   after exception ["boom", false]
 OUT
 
+# The runtime builds without RTTI; nfcxx refuses -fno-rtti (RTTI always stays available, which is fine for code that builds without it).
+rtti_flags = File.basename(cxx.to_s).start_with?('nfcxx') ? [] : ['-fno-rtti']
+
 Dir.mktmpdir('cxx_fiber') do |dir|
   File.write(File.join(dir, 'test.cpp'), TEST)
   bin = File.join(dir, 'test')
-  out, status = Open3.capture2e(cxx, '-std=gnu++17', '-fno-rtti', '-I', runtime, '-I', File.join(root, 'include'),
+  out, status = Open3.capture2e(cxx, '-std=gnu++17', *rtti_flags, '-I', runtime, '-I', File.join(root, 'include'),
                                 File.join(dir, 'test.cpp'), File.join(root, 'lib/libmruby.a'), '-lm', '-o', bin)
   check.call('the runtime and the test compile and link', status.success?)
   abort out unless status.success?

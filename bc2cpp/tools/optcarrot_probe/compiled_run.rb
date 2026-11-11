@@ -284,7 +284,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       gem #{sealed_gems.fetch('optcarrot-benchmark').dump}
       if #{profiling}
         cc.flags << '-pg'
-        cxx.flags << %w(-pg -fno-inline)
+        cxx.flags << %w(-pg) + (ENV['GPROF_INLINE'] == '1' ? [] : %w(-fno-inline))
         linker.flags << '-pg'
       end
     end
@@ -426,5 +426,11 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       puts "\ngprof profile for #{label} (instrumented build; top entries):"
       puts profile.lines.first(55).join
     end
+  end
+
+  # OPTCARROT_KEEP_DIR=dir: the generated C++ (gem/src, gem/generated) outlives the temporary directory, to read it.
+  if (keep = ENV['OPTCARROT_KEEP_DIR']) && !keep.empty?
+    FileUtils.rm_rf(keep)
+    FileUtils.cp_r(File.join(temp, 'gem'), keep)
   end
 end

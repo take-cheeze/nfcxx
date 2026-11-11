@@ -136,6 +136,8 @@ module Qbe
   # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
   def half_bits(lit)
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    raise QbeUnsupported, "float16 literal #{text}" if text.match?(/nan/i)
+
     v = Float(text)
     raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
 
@@ -173,6 +175,10 @@ module Qbe
     return half_bits(lit) if n == 2
 
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
+    # NaN is written as text (`(const float NaN)`, the emitter's spelling); its bits are the positive quiet NaN, as
+    # float_lit spells it.
+    return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if text.match?(/nan/i)
+
     v = Float(text)
     raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
 
@@ -438,6 +444,8 @@ module Qbe
     # The AbiInfo of an aggregate that is passed or returned by value: it must have an abi-type, and its class must be
     # one this emitter passes (not an empty class, not an unsupported one).
     def aggregate_info(tyform, what)
+      # A const or volatile struct is passed and returned as the struct: the qualifier does not change its layout.
+      tyform = unqual(tyform)
       raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
 
       info = @abi[Qbe.name_of(tyform[1])]
@@ -787,6 +795,19 @@ end
         safe_check(item[2], dst, n)
         safe_check(item[3], src, n)
         @lines << "  blit #{src}, #{dst}, #{n}"
+      # `(zero-fill N DST)`: clear N bytes at DST (be/nfcxx_ir.c emits it for a zero-initialised object of more than 128
+      # stores, as the QBE emitter does: one call of memset).
+      when "zero-fill"
+        raise QbeUnsupported, "zero-fill of a register count" unless item[1].is_a?(Integer) || item[1].to_s.match?(/\A\d+\z/)
+        if item[2].is_a?(String) && item[2].start_with?("%")
+          t = @types[item[2]]
+          raise QbeUnsupported, "zero-fill of an address with no declared type #{item[2]}" if t.nil?
+          raise QbeUnsupported, "zero-fill of the by-value aggregate #{item[2]}" unless head(unqual(t)) == "ptr"
+        end
+        n = Qbe.int_lit(item[1])
+        dst = op(item[2])
+        safe_check(item[2], dst, n)
+        @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -868,9 +889,19 @@ end
 
 # `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
 # the driver appends (scripts/pathb-ssa-build): an abort, as scripts/pathb-qbe-emit.rb's shared abort block.
+# The call is out of the flow: a `jnz` to a trap block of its own (the call, then hlt: the helper does not return),
+# and the operation goes on in the block after it. A call in the hot path cost about 40% of token generation.
     def check_call(cond, code)
       asm_helpers << "check" unless asm_helpers.include?("check")
-      @lines << "  call $pathb_check(w #{cond}, w #{code})"
+      @temps += 1
+      trap = "ckt#{@temps}"
+      ok = "cko#{@temps}"
+      @lines << "  jnz #{cond}, @#{trap}, @#{ok}"
+      @lines << "@#{trap}"
+      @lines << "  call $pathb_check(w 1, w #{code})"
+      @lines << "  hlt"
+      @lines << "@#{ok}"
+      @label = ok # a jump out of the split block is the one that the phi of its target names
     end
 
     def barrier_lines
@@ -1435,14 +1466,15 @@ end
       a = op(rv[2])
       count_cls = Qbe.cls(switch_operand_type(rv[3]))
       n = op(rv[3])
+      # The count is checked at its own width (a long count such as 0x100000005 must trap, not wrap to 5 when narrowed).
+      bad = fresh
+      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
+      check_call(bad, 3)
       if count_cls == "l" && c == "w"
         narrowed = fresh
         @lines << "  #{narrowed} =w copy #{n}"
         n = narrowed
       end
-      bad = fresh
-      @lines << "  #{bad} =w cuge#{count_cls} #{n}, #{w}"
-      check_call(bad, 3)
       if %w[cshl wshl].include?(head(rv))
         shifted = fresh
         @lines << "  #{shifted} =#{c} shl #{a}, #{n}"

@@ -4,7 +4,7 @@ require_relative 'native_core_result_sigs'
 
 # NATIVE_RESULT_FACTS: what a call that returns from an RGSS native hands back, per exact
 # receiver class. A fact pins the registration's callee text and the delegation chain down to the
-# function whose `return`s decide the kind; scripts/bc2cpp/native_result_facts_check.rb re-audits both.
+# function whose `return`s decide the kind; rpg-maker-clone scripts/bc2cpp-rpg/native_result_facts_check.rb re-audits both.
 # The kind of each fact is declared in sig/bc2cpp/declarations.rbs#rgss_results, not here (see NativeResultFacts.kind).
 # Kinds: :fixnum (mrb_fixnum_value), :float (mrb_float_value), a class name (mrb_obj_new of that constant).
 # Left out on purpose, as not one class on every path: Viewport#rect/#ox/#oy (an unset ivar reads nil),

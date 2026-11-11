@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'scan_cache'
+require_relative 'native_owner_map'
 require_relative 'native_rom_owners'
 
 # Extracts a deliberately small set of direct-call expressions from mruby's
@@ -522,6 +523,17 @@ module NativeExpressionDevirt
       table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
     end
 
+    engine = NativeOwnerMap.engine_source?(path)
+    if engine
+      # An engine gem's instance table stands for the mrb_define_method calls it replaced: an owner, no function read. The
+      # instance half of a module function is no instance registration, as for mrb_define_module_function.
+      rows = NativeOwnerMap.rom_bindings(source)
+      rows.each do |expr, singleton, name, function|
+        next if singleton || rows.any? { |e, s, n, f| s && e == expr && n == name && f == function }
+
+        opaque_owners[name] << class_variables.dig(expr, :class_name)
+      end
+    end
     rom_entries(source).each do |table, arguments|
       next if singleton_tables.include?(table)
 
@@ -530,6 +542,7 @@ module NativeExpressionDevirt
       next unless name
 
       owners = Array(table_owners[table]).uniq
+      next if engine
       owner = owners.one? ? owners.first : nil
       registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner,
                                aspec: aspec.strip, path: path }
@@ -616,9 +629,22 @@ module NativeExpressionDevirt
   def scan_file_class_method_registrations(path)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     source = read_source(path)
-    return [] unless CLASS_METHOD_MACROS.any? { |macro| source.include?(macro) }
+    engine_tables = NativeOwnerMap.engine_source?(path) && source.include?('MRB_MT_INIT_ROM')
+    return [] unless engine_tables || CLASS_METHOD_MACROS.any? { |macro| source.include?(macro) }
 
     class_variables = class_variable_map(source)
+    # An engine gem's class-object table (and the instance entry beside it that makes it a module function) stands for
+    # the mrb_define_class_method / mrb_define_module_function call it replaced.
+    if engine_tables
+      rows = NativeOwnerMap.rom_bindings(source)
+      rows.each do |expr, singleton, name, function|
+        next unless singleton
+
+        paired = rows.any? { |e, s, n, f| !s && e == expr && n == name && f == function }
+        registrations[name] << { owner: class_variables.dig(expr, :class_name), function: function, path: path,
+                                 macro: paired ? 'mrb_define_module_function' : 'mrb_define_class_method' }
+      end
+    end
     CLASS_METHOD_MACROS.each do |macro|
       macro_calls(source, macro).each do |arguments|
         next unless arguments.length == 5

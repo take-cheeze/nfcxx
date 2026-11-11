@@ -72,6 +72,7 @@ module NativeOwnerMap
   CLASS_GET_ID_RE = /\Amrb_(?:class|module)_get_id\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*\)\z/
   ROM_TABLE_RE = /\bmrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{/
   ROM_ENTRY_RE = /MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/
+  ROM_ENTRY_FN_RE = /MRB_MT_ENTRY\s*\(\s*(\w+)\s*,\s*#{MRB_SYM_TOKEN_RE}/
 
   # by_name: literal name => Set of owners (class strings, '.singleton' suffixed, or UNKNOWN).
   # computed: owners of registrations whose name is not a literal (any name may be defined there);
@@ -82,8 +83,16 @@ module NativeOwnerMap
   # install (unknown_defs). `verdict` refuses them unless the caller trusts that (core_dynamic_trusted:).
   # NIL_NATIVE_ANSWERS: `instance` is the instance-table registrations alone, as [owner, name, core] (name nil when
   # computed), and `mixins` each native include/prepend as [target, module, core]; see nil_native_answers.
+  # `rom` is each ROM-table entry whose installing class is known, as [owner, name, function] (`owner` as in
+  # `registrations`, `.singleton` suffixed for a class-object table). It is kept apart from `registrations`: a left-out
+  # registration is removed at run time, which on a ROM entry only adds a RAM tombstone (NATIVE_CANDIDATES).
   Result = Struct.new(:by_name, :computed, :computed_unknown, :core_dynamic_unknown, :refusals, :calls, :registrations, :aliases,
-                      :instance, :mixins, keyword_init: true)
+                      :instance, :mixins, :rom, keyword_init: true) do
+    # Every native definition with a known owner: what defines a name, as opposed to what a left-out removal can delete.
+    def definitions
+      registrations + rom
+    end
+  end
 
   module_function
 
@@ -309,7 +318,7 @@ module NativeOwnerMap
 
   def new_result
     Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
-               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0, instance: [], mixins: [])
+               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0, instance: [], mixins: [], rom: [])
   end
 
   # A file's Result is a function of the file and the sibling sources scan_file reads, so ScanCache stores it under
@@ -333,13 +342,14 @@ module NativeOwnerMap
     result.aliases.concat(file.aliases)
     result.instance.concat(file.instance)
     result.mixins.concat(file.mixins)
+    result.rom.concat(file.rom)
   end
 
   def to_plain(result)
     Result.new(by_name: result.by_name.transform_values(&:to_a), computed: result.computed.to_a,
                computed_unknown: result.computed_unknown, core_dynamic_unknown: result.core_dynamic_unknown,
                refusals: result.refusals.to_h, calls: result.calls, registrations: result.registrations,
-               aliases: result.aliases, instance: result.instance, mixins: result.mixins)
+               aliases: result.aliases, instance: result.instance, mixins: result.mixins, rom: result.rom)
   end
 
   def from_plain(plain)
@@ -348,7 +358,7 @@ module NativeOwnerMap
     Result.new(by_name: by_name, computed: Set.new(plain.computed), registrations: plain.registrations,
                aliases: plain.aliases, computed_unknown: plain.computed_unknown,
                core_dynamic_unknown: plain.core_dynamic_unknown, refusals: Hash.new(0).merge(plain.refusals),
-               calls: plain.calls, instance: plain.instance, mixins: plain.mixins)
+               calls: plain.calls, instance: plain.instance, mixins: plain.mixins, rom: plain.rom)
   end
 
   # One file's registrations, in the order its calls appear, as a Result of its own.
@@ -415,7 +425,7 @@ module NativeOwnerMap
         result.by_name[name].merge(owners)
       end
     end
-    scan_rom_tables(typed, vars_at, result)
+    scan_rom_tables(typed, vars_at, result, core: core)
     result
   end
 
@@ -424,11 +434,55 @@ module NativeOwnerMap
   # a block, or whose table has no installer in this file, is UNKNOWN.
   # The class a MRB_MT_INIT_ROM installs its table on: NativeRomOwners reads the variable's binding in the same function
   # (define_class, a core field, a naming call), which covers the chained `mrb->x_class = x = mrb_define_class...` form.
-  def rom_installer_owner(text, pos, arg)
-    NativeRomOwners.owner_of(text, pos, arg.strip)
+  # A class variable bound through a function parameter (`define_rect(M, m)`) is not an assignment the text reader
+  # sees, so what it cannot name is read like a registration call's class: from the block's `vars` (block_owners).
+  def rom_installer_owner(text, pos, arg, vars = nil)
+    arg = arg.strip
+    owner = NativeRomOwners.owner_of(text, pos, arg)
+    return owner if owner != UNKNOWN || vars.nil?
+
+    if (m = arg.match(NativeRomOwners::SINGLETON))
+      base = owner_of(m[1].strip, vars)
+      return base == UNKNOWN ? UNKNOWN : "#{base}.singleton"
+    end
+    owner_of(arg, vars)
   end
 
-  def scan_rom_tables(text, vars_at, result)
+  # An engine gem's source (mruby-rgss, mruby-lcf), as opposed to mruby's or a third-party gem's: its ROM tables are read
+  # as the registrations they replace, where the core's are read by NativeRomOwners.
+  def engine_source?(path)
+    !path.to_s.include?('/3rd/')
+  end
+
+  # The ROM tables an engine gem installs, as [class_expr, singleton, name, function] in text order: `class_expr` is the
+  # class variable the table is installed on (`rect`; for a class object's table, the variable under
+  # mrb_singleton_class_ptr). The text-level twin of mrb_define_method(M, class_expr, "name", function, ...) for the
+  # scanners that read a registration's function.
+  def rom_bindings(text)
+    tables = []
+    text.scan(ROM_TABLE_RE) do
+      match = Regexp.last_match
+      body = brace_body(text, match.end(0) - 1)
+      tables << [match[1], match.begin(0), body.scan(ROM_ENTRY_FN_RE).map { |fn, macro, tok| [fn, resolve_mrb_sym_token(macro, tok)] }] if body
+    end
+    out = []
+    text.scan(/\b(?:MRB_MT_INIT_ROM|mrb_mt_init_rom)\s*\(/) do
+      match = Regexp.last_match
+      args, = call_args(text, match.end(0) - 1)
+      # A table name may be defined once per preprocessor branch: the install reads the nearest definition above it.
+      table = args && args.size >= 3 && tables.reverse_each.find { |name, at, _| name == args[2].strip && at < match.begin(0) }
+      next unless table
+
+      singleton = args[1].strip.match(NativeRomOwners::SINGLETON)
+      expr = singleton ? singleton[1].strip : args[1].strip
+      table.last.each { |fn, name| out << [expr, !singleton.nil?, name, fn] }
+    end
+    out
+  end
+
+  # `core`: mruby's own sources keep the text reader's owners and add no `rom` rows (their ROM tables are read by
+  # NativeRomOwners alone), so the engine gems' parameter-bound classes are the only change.
+  def scan_rom_tables(text, vars_at, result, core: false)
     installers = Hash.new { |h, k| h[k] = Set.new }
     # Tables installed on a singleton class (a class object's, or the main object's): never on an instance's lookup
     # path, as for the define_class_method / define_singleton_method families.
@@ -438,7 +492,7 @@ module NativeOwnerMap
       args, = call_args(text, match.end(0) - 1)
       next unless args && args.size >= 3
 
-      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s)
+      installers[args[2]] << rom_installer_owner(text, match.begin(0), args[1].to_s, core ? nil : vars_at.call(match.begin(0)))
       singleton << args[2] if args[1].to_s.strip.match?(NativeRomOwners::SINGLETON)
     end
     attributed = []
@@ -448,10 +502,11 @@ module NativeOwnerMap
       next unless body
 
       owners = installers.fetch(match[1], Set[UNKNOWN])
-      body.scan(ROM_ENTRY_RE) do |macro, tok|
+      body.scan(ROM_ENTRY_FN_RE) do |fn, macro, tok|
         name = resolve_mrb_sym_token(macro, tok)
         result.by_name[name].merge(owners)
         owners.each { |owner| result.instance << [owner, name, false] } unless singleton.include?(match[1])
+        owners.each { |owner| result.rom << [owner, name, fn] if !core && owner.is_a?(String) && owner != UNKNOWN }
       end
       attributed << [match.begin(0), match.end(0) + body.size]
     end

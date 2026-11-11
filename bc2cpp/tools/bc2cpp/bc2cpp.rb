@@ -27,6 +27,7 @@ TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shard_output'
 require_relative 'shared_generation'
+require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
 require_relative 'inframe_placement'
 require_relative 'file_identity'
@@ -1650,7 +1651,12 @@ BC2CPP_MAIN = lambda do
   puts <<~'CPP'
     // The runtime's one arena root: every other root (the keeps below, a numeric slow path's result) goes through it.
     static inline void bc2cpp_root(mrb_state* M, mrb_value v) {
-      if (!mrb_immediate_p(v)) mrb_gc_protect(M, v);
+      if (mrb_immediate_p(v)) return;
+      // A consecutive keep needs no second slot. Read the current arena, so a
+      // restore (including one in a nested call) cannot leave a stale hit.
+      int ai = M->gc.arena_idx;
+      if (ai > 0 && M->gc.arena[ai - 1] == mrb_basic_ptr(v)) return;
+      mrb_gc_protect(M, v);
     }
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.
     static inline mrb_value bc2cpp_arena_keep(mrb_state* M, int ai, mrb_value v) {
@@ -1665,6 +1671,13 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_arena_keep(M, ai, call());
     }
     #define bc2cpp_funcall_keep(M, ...) bc2cpp_keep_call(M, [&] { return mrb_funcall(M, __VA_ARGS__); })
+    // STACK_TUPLES promotion: a placed array's buffer becomes a heap Array at the instruction where it escapes. Rooted
+    // like any new object, since the escaping store or return holds it only in a C local until then.
+    static inline mrb_value bc2cpp_promote_array(mrb_state* M, const mrb_value* v, mrb_int n) {
+      mrb_value a = mrb_ary_new_from_values(M, n, v);
+      bc2cpp_root(M, a);
+      return a;
+    }
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
       bc2cpp_root(M, v);
       return v;
@@ -2353,7 +2366,9 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_funcall_argv(M, self, mid, (mrb_int)args.size(), args.begin());
     }
     // CLASS_BODY_INCLUDE: Module#include (class.c mrb_mod_include) without the by-name send of `include`. Last module
-    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled). Returns the class.
+    // first; each module is then sent its `included` hook (a Ruby method, possibly compiled) unless that is still
+    // class.c's default no-op, as mrb_mod_include tests it. Returns the class.
+    extern "C" mrb_value mrb_do_nothing(mrb_state*, mrb_value);
     [[maybe_unused]] static mrb_value bc2cpp_mod_include(mrb_state* M, mrb_value self, std::initializer_list<mrb_value> args) {
       struct RClass* c = mrb_class_ptr(self);
       mrb_sym included = mrb_intern_lit(M, "included");
@@ -2361,7 +2376,7 @@ BC2CPP_MAIN = lambda do
         mrb_value m = args.begin()[i];
         mrb_check_type(M, m, MRB_TT_MODULE);
         mrb_include_module(M, c, mrb_class_ptr(m));
-        bc2cpp_funcall_argv(M, m, included, 1, &self);
+        if (!mrb_func_basic_p(M, m, included, mrb_do_nothing)) bc2cpp_funcall_argv(M, m, included, 1, &self);
       }
       return self;
     }
@@ -2377,6 +2392,9 @@ BC2CPP_MAIN = lambda do
     }
     [[maybe_unused]] static mrb_value bc2cpp_mod_attr(mrb_state* M, mrb_value self, bool reader, bool writer, std::initializer_list<mrb_value> args) {
       struct RClass* c = mrb_class_ptr(self);
+      // The root context gets its frame stack with the first send, and the env of a cfunc proc needs `ci`: a class body
+      // can run this before any send (the default `included` is no longer one).
+      if (!M->c->ci) mrb_funcall_argv(M, mrb_nil_value(), mrb_intern_lit(M, "nil?"), 0, nullptr);
       int ai = mrb_gc_arena_save(M);
       for (int pass = 0; pass < 2; pass++) {
         if (!(pass == 0 ? reader : writer)) continue;
@@ -2874,6 +2892,7 @@ BC2CPP_MAIN = lambda do
   warn "== declared return guards (DECLARED_RETURN_GUARD): #{guard_sites.size} bc2cpp_declared_return_violation =="
   guard_sites.uniq.sort.each { |k| warn "  DECLARED_RETURN_GUARD_SITE #{k}" }
   warn ''
+  CoreCFacts.report(gen)
   miss_sites = ProvenMiss.sites(compiled)
   warn "== closed world proven-class miss sites: #{miss_sites.size} =="
   miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }

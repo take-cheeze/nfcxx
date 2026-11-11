@@ -1,7 +1,7 @@
 # The bc2cpp-generated gems: one entry per `*-compiled` mrbgem, in the order every consumer iterates them
 # (tools/bc2cpp/compiled_gems.rb loads this as BC2CPP_COMPILED_GEMS; tools/bc2cpp/compiled_gems_config.rb validates it).
 # Plain data, not code, so a gem is added or retargeted here and the validator
-# (scripts/bc2cpp/compiled_gems_config_check.rb) fails loudly on a typo.
+# (rpg-maker-clone scripts/bc2cpp-rpg/compiled_gems_config_check.rb) fails loudly on a typo.
 #
 # Keys per gem:
 #   owners_from        where the gem's owners come from -- never listed here, so a list cannot drift from the source:

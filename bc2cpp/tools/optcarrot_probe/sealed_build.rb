@@ -65,6 +65,7 @@ module OptcarrotSealedBuild
       #include <mruby/string.h>
       #include <mruby/variable.h>
       #include <cstdio>
+      #include <cstdlib>
       extern "C" void mrb_optcarrot_benchmark_gem_init(mrb_state*) {}
       extern "C" void mrb_optcarrot_benchmark_gem_final(mrb_state*) {}
       int main(int argc, char** argv) {
@@ -72,6 +73,8 @@ module OptcarrotSealedBuild
         mrb_state* M = mrb_open();
         if (!M) { std::fprintf(stderr, "cannot initialize mruby\\n"); return 1; }
         if (M->exc) { mrb_print_error(M); mrb_close(M); return 1; }
+        // OPTCARROT_NO_GC=1: no collection at all, the bound on what the GC costs (tools/optcarrot_probe/README.md).
+        if (std::getenv("OPTCARROT_NO_GC")) M->gc.disabled = TRUE;
         mrb_value args = mrb_ary_new_capa(M, 2);
         mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[1]));
         mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[2]));

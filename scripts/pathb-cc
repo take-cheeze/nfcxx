@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
     -o) out=$2; shift ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
-    -I?*|-D?*|-U?*|-std=c++*|--freestanding) opts+=("$1") ;;
+    -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
     *) src=$1 ;;
   esac
@@ -38,6 +38,25 @@ n=$(basename "${src%.*}")
 safe=(); [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || { safe=(--safe); export NFCXX_IR_LOC=1; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else "$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"; fi
+# The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md), off unless NFCXX_IR_OPT names them (inline,
+# or a comma-separated list). IR over NFCXX_IR_OPT_MAX bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
+# tests' input) is emitted as it is.
+passes=${NFCXX_IR_OPT:-}
+raw=0
+if [ -n "$passes" ] && [ "$passes" != none ] && [ -z "${PATHB_IR:-}" ]; then
+  size=$(stat -c %s "$tmp/$n.ir")
+  if [ "$size" -gt "${NFCXX_IR_OPT_MAX:-8388608}" ]; then
+    echo "pathb-cc: $src: IR is $size bytes, over NFCXX_IR_OPT_MAX: not optimized" >&2
+  else
+    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); done
+    cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
+    if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
+      mv "$tmp/$n.opt.ir" "$tmp/$n.ir"
+    else
+      cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; echo "pathb-cc: $src: the IR passes refused the unit, not optimized" >&2
+    fi
+  fi
+fi
 ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
 # The emitter. The SSA route (scripts/pathb-ssa-build) is the default, --safe included (its checks carry the (loc ...)
 # locations the reports print); NFCXX_PATHB_EMITTER=mruby selects the mruby pathb-qbe-emit.rb.
@@ -46,6 +65,11 @@ case $emitter in ssa|mruby) ;; *) echo "pathb-cc: NFCXX_PATHB_EMITTER must be ss
 rc=0
 if [ "$emitter" = ssa ]; then
   NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  if [ $rc != 0 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
+    echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
+    cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
+    NFCXX_QBE="$qbe" "$root/scripts/pathb-ssa-build" -o "$tmp/$n.s" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; NFCXX_PATHB_EMITTER=mruby
     # selects that emitter explicitly).

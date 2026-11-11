@@ -55,12 +55,15 @@ module NativeReturnClasses
     exact_self = exact_self_owners(paths)
     paths.each do |path|
       NativeRomOwners.analyze_file(path)[:tables].each_value do |info|
-        next if info[:owner] == NativeRomOwners::UNKNOWN
+        # nil: a table installed with a state variable other than `mrb` (the engine gems' `M`), which owner_map.rom reads.
+        next if info[:owner].nil? || info[:owner] == NativeRomOwners::UNKNOWN
 
         info[:entries].each { |fn, name| rom << [info[:owner], name, fn] }
       end
     end
     owner_map = NativeOwnerMap.build(paths)
+    # The owner map also names a table's class through a function parameter (the engine gems' `define_rect(M, m)`).
+    rom.concat(owner_map.rom.uniq - rom)
     # Define-family registrations carry their function too; a registration with no C function identifier has no body.
     owner_map.registrations.each { |owner, name, fn| rom << [owner, name, fn] }
     # An alias (define_alias / define_alias_id) is a registration of its name with the function of the name it copies,

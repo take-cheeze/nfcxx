@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# A drop-in for the fork's `mrbc` command line (see ../cli.rb for the switches, the fallback and the environment).
+require_relative '../cli'
+exit MrbcRb::Cli.run(ARGV)

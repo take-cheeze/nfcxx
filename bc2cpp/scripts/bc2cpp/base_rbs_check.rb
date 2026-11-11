@@ -13,6 +13,7 @@ require 'tmpdir'
 require 'tempfile'
 require 'open3'
 require_relative 'base_rbs_native'
+require_relative '../../tools/bc2cpp/native_ast_source'
 require_relative 'base_rbs' unless defined?(BaseRbs)
 
 ROOT = BC2CPP_WORLD_ROOT
@@ -211,7 +212,8 @@ end
 end
 
 puts '== native RBS serial/parallel equivalence'
-if system('clang', '--version', out: File::NULL, err: File::NULL)
+# The AST producer and preprocessor are nfcxx's front end when built, else clang (NativeAstSource.producer, BaseRbsNative.preprocessor).
+if NativeAstSource.available?(NativeAstSource.producer)
   Dir.mktmpdir('base-rbs-native-check') do |dir|
     header = <<~CPP
       struct mrb_state {};
@@ -295,7 +297,7 @@ if system('clang', '--version', out: File::NULL, err: File::NULL)
     end
   end
 else
-  puts '  SKIP native equivalence: clang is not installed'
+  puts '  SKIP native equivalence: neither the nfcxx front end (scripts/setup-libclang-edg.sh) nor clang is available'
 end
 
 if failures.empty?

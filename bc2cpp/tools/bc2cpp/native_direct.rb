@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'native_names'
+require_relative 'native_owner_map'
 require_relative 'native_direct_table'
 require_relative 'scan_cache'
 
@@ -53,7 +54,7 @@ module NativeDirect
       # An unmatched optional group is nil on CRuby and "" on mruby's onig scan: either way, not matched.
       defs[var] << (under && !under.empty? ? [:under, parts[1], parts[2][/"(\w+)"/, 1]] : [:top, parts[1][/"(\w+)"/, 1]])
     end
-    text.scan(/(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
+    text.scan(/\b(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
       callers = text.scan(/\b#{Regexp.escape(func)}\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*;/).flatten
       defs[param] << [:param, callers, param_owners[func]]
     end
@@ -120,7 +121,7 @@ module NativeDirect
     return path unless File.file?(path)
 
     stat = File.stat(path)
-    [path, stat.mtime.to_i, stat.size]
+    [path, stat.mtime, stat.size]
   end
 
   # Every "name" registration in `path` as [owner, kind]; owner is nil when
@@ -146,6 +147,20 @@ module NativeDirect
       owner = owners[var]
       owner = "#{owner}.singleton" if owner && kind != 'method' && kind != 'private_method'
       table[name][:owners] << owner
+    end
+    # An engine gem's ROM entry is the registration it replaced: one owner per entry. The instance half of a module
+    # function is no registration of its own (mrb_define_module_function spells the name once), so it adds neither an
+    # owner nor a spelling.
+    rows = NativeOwnerMap.rom_bindings(text)
+    rows.each do |expr, singleton, name, fn|
+      owner = owners[expr]
+      if singleton
+        table[name][:owners] << (owner && "#{owner}.singleton")
+      elsif rows.any? { |e, s, n, f| s && e == expr && n == name && f == fn }
+        table[name][:literals] -= 1
+      else
+        table[name][:owners] << owner
+      end
     end
     table.default_proc = nil
     table

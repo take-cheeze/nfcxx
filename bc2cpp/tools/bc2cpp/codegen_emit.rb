@@ -2,6 +2,7 @@
 
 require_relative 'branch_hints'
 require_relative 'presym_spelling'
+require_relative 'core_native_candidates'
 
 # CodeGen: per-method compile state and file-level emission.
 
@@ -153,6 +154,7 @@ class CodeGen
     natives = left_out_natives(compiled, unregistered)
     core_rom = left_out_core_rom
     core_ram = left_out_core_ram
+    engine_rom = left_out_engine_rom
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -183,7 +185,7 @@ class CodeGen
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
-    if [accessors, natives, core_rom, core_ram].any?(&:any?) ||
+    if [accessors, natives, core_rom, core_ram, engine_rom].any?(&:any?) ||
        compiled.any? do |m|
          names = [m[:name], *Array(self.class.core_aliases&.dig([m[:owner], m[:name]]))]
          names.any? { |name| unregistered.include?("#{m[:owner]}##{name}") }
@@ -241,14 +243,21 @@ class CodeGen
       emit_owner_registration_lines(out, part_targets, by_owner, unregistered, rom: rom && [rom, part])
       if part == 'core' && core_rom.any?
         # CORE_NATIVE_CANDIDATES: the build's tables already lack these entries; only a verify build stubs them.
+        # A default hook is looked up on purpose and its absence is the no-op (hook_call, 3rd/mruby/src/class.c): no stub.
         out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
-        emit_left_out_native_lines(out, core_rom)
+        emit_left_out_native_lines(out, core_rom.reject { |owner, name| CoreNativeCandidates::HOOK_DEFAULTS.include?("#{owner}##{name}") })
         out << "#endif\n"
       end
       emit_left_out_native_lines(out, core_ram) if part == 'core'
       if part == 'program'
         emit_left_out_accessor_lines(out, accessors)
         emit_left_out_native_lines(out, natives)
+        if engine_rom.any?
+          # ENGINE_ROM: the build's tables already lack these entries; only a verify build stubs them.
+          out << "#ifdef BC2CPP_UNREGISTERED_VERIFY\n"
+          emit_left_out_native_lines(out, engine_rom)
+          out << "#endif\n"
+        end
       end
       out << "}\n"
     end
@@ -448,6 +457,18 @@ class CodeGen
                      ENV['BC2CPP_BUILD_NAME'] == 'closed'
 
     static_dispatch_lists.core_left_out.map { |key| key.split('#', 2) }.sort
+  end
+
+  # ENGINE_ROM: [owner, name] of each engine ROM entry of this gem's owners that the closed build leaves out of its tables
+  # (StaticDispatchLists#engine_rom). Only a verify build has anything to register.
+  def left_out_engine_rom
+    symbol = ENV['OUT_SYMBOL']
+    return [] unless symbol && ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    gem = BC2CPP_COMPILED_GEMS.find { |_name, g| g[:out_symbol] == symbol }&.first
+    return [] unless gem
+
+    static_dispatch_lists.engine_rom.map { |key| key.split('#', 2) }.select { |owner, _| bc2cpp_native_strip_gem(owner) == gem }.sort
   end
 
   # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no

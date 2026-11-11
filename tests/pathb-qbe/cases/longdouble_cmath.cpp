@@ -17,6 +17,11 @@ static int fails;
 
 typedef std::numeric_limits<long double> NL;
 
+// The printed libm calls take their arguments through rt(): a volatile read, so the calls run at run time (gcc folds a call
+// with constant arguments at compile time, and the folded result can differ in the last bit from libm, as it did once the
+// gcc backend inlined the wrappers). rt() is the same for both backends.
+static long double rt(long double c) { volatile long double v = c; return v; }
+
 int main() {
   CHECK(NL::digits == 64 && NL::max_exponent == 16384 && NL::is_iec559 && NL::has_infinity && NL::radix == 2);
   CHECK(NL::epsilon() == 1.0842021724855044340e-19L && NL::min() > 0 && NL::min() < 1e-4931L);
@@ -53,15 +58,15 @@ int main() {
   CHECK(std::islessgreater(1.0L, x) && !std::islessgreater(x, x) && !std::islessgreater(nan, x));
 
   // functions printed bit for bit (the results of the C library are the same objects in both builds)
-  printf("%La %La %La %La\n", std::sin(1.0L), std::cos(1.0L), std::tan(1.0L), std::atan(1.0L));
-  printf("%La %La %La %La\n", std::asin(0.5L), std::acos(0.5L), std::atan2(1.0L, 3.0L), std::exp(1.0L));
-  printf("%La %La %La %La\n", std::log(10.0L), std::log10(2.0L), std::log1p(0.25L), std::expm1(0.25L));
-  printf("%La %La %La %La\n", std::sinh(1.0L), std::cosh(1.0L), std::tanh(1.0L), std::asinh(1.0L));
-  printf("%La %La\n", std::lgamma(5.5L), std::erfc(0.3L));
+  printf("%La %La %La %La\n", std::sin(rt(1.0L)), std::cos(rt(1.0L)), std::tan(rt(1.0L)), std::atan(rt(1.0L)));
+  printf("%La %La %La %La\n", std::asin(rt(0.5L)), std::acos(rt(0.5L)), std::atan2(rt(1.0L), rt(3.0L)), std::exp(rt(1.0L)));
+  printf("%La %La %La %La\n", std::log(rt(10.0L)), std::log10(rt(2.0L)), std::log1p(rt(0.25L)), std::expm1(rt(0.25L)));
+  printf("%La %La %La %La\n", std::sinh(rt(1.0L)), std::cosh(rt(1.0L)), std::tanh(rt(1.0L)), std::asinh(rt(1.0L)));
+  printf("%La %La\n", std::lgamma(rt(5.5L)), std::erfc(rt(0.3L)));
 
   // C++17 special functions (templates over long double in <cmath>/<bits/specfun.h>)
-  printf("%La %La %La\n", std::legendre(3, 0.5L), std::hermite(4, 0.75L), std::laguerre(2, 1.5L));
-  printf("%La %La\n", std::comp_ellint_1(0.5L), std::riemann_zeta(2.0L));
+  printf("%La %La %La\n", std::legendre(3, rt(0.5L)), std::hermite(4, rt(0.75L)), std::laguerre(2, rt(1.5L)));
+  printf("%La %La\n", std::comp_ellint_1(rt(0.5L)), std::riemann_zeta(rt(2.0L)));
 
   // numeric algorithms and complex
   std::vector<long double> v{0.1L, 0.2L, 0.3L};

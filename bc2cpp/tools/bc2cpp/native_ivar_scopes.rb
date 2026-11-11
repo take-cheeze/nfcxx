@@ -11,7 +11,9 @@ module NativeIvarScopes
     'mruby-rgss/src/lib.cxx' => %w[eda898bc7ee051089bbba85bdb74f7cd4f892966c8df49a687ea7f7c9d570eb0
                                    1c00ea527391818a1ef2ac74b1de433abc0f97a92423fa9cf9a35906bb6e6a1f
                                    27b968ac91121591b1062306fc7789f8c8a748f1e2203b6544cf21319753f0ab
-                                   0fec5fb83a27afe86cc94be51eeca8e93f652274cf1d5e2933c8694489b5ac9a],
+                                   0fec5fb83a27afe86cc94be51eeca8e93f652274cf1d5e2933c8694489b5ac9a
+                                   ef08dd05d4af765093a318ee244170826638c69abcad905c9b8e25f4ade66037
+                                   5b4c16217d5c03fcdc3f2e9049d4320c872a5e6bc648501c034537c850b942ac],
     'include/rgss_construct.hxx' => '24a6783a902be749f6c1f7502a2bd2cad073629cecb9ca1b9d586d63f6a8ef83',
     'include/rgss_native_direct.hxx' => 'f12c29d9699d2bd2966711c48d9d1e4568239171d26dc2f7b2438456c140b1b2'
   }.freeze
@@ -40,6 +42,11 @@ module NativeIvarScopes
     File.exist?(path) ? File.realpath(path) : File.expand_path(path)
   end
 
+  # A file is audited when its digest is the pin, or one of the pin's list (a file audited at several revisions).
+  def pinned?(text, pin)
+    Array(pin).include?(Digest::SHA256.hexdigest(text))
+  end
+
   def analyze(native_paths, ruby_paths, root: BC2CPP_WORLD_ROOT)
     return [{}, 'disabled'] if ENV['BC2CPP_NATIVE_IVAR_SCOPES'] == '0'
 
@@ -50,7 +57,7 @@ module NativeIvarScopes
       return [{}, "missing audit input: #{relative}"] unless paths.include?(path)
 
       text = SourceText.read(path, 'native ivar scopes', binary: true)
-      return [{}, "audit changed: #{relative}"] unless text && Digest::SHA256.hexdigest(text) == digest
+      return [{}, "audit changed: #{relative}"] unless text && pinned?(text, digest)
 
       audited[path] = text
     end
