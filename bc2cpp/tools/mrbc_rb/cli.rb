@@ -16,10 +16,18 @@
 #   -e, -E                       implemented (mrbc only prints "no longer needed" to stderr)
 #   -c                           implemented (check syntax: "<prog>:<first input>:Syntax OK", by compiling with the emitter)
 #   --version, --copyright, -h   implemented (the version text is the fork's: MRBC_RB_VERSION overrides it)
-#   -v, --verbose, --no-ext-ops, --no-optimize, an input of "-" (stdin)
-#                                not implemented here (-v/--verbose print the C parser's AST dump and the disassembly with
-#                                the addresses of the irep structs); `--disasm` (an addition of this command) prints the instruction listing of -v alone, byte
-#                                for byte what mrbc -v prints from its first `irep` line on, except the irep addresses (codedump.rb)
+#   --no-optimize                implemented: the emitter's no_peephole? is always true and codegen_call sends every operator as a plain
+#                                method call (the paths whose result without the optimizer is not verified are Unsupported)
+#   --no-ext-ops                 implemented: the bytes do not change (the switch only makes genop_1/genop_2/genjmp2 fail when an
+#                                operand needs an OP_EXT prefix), so the emitter refuses (Unsupported) exactly where it would emit one
+#                                and mrbc reports the error
+#   an input of "-"              implemented: standard input as the (first) program, named "-" in the debug section; the output name
+#                                defaults to "-" (standard output), as in mrbc
+#   -v, --verbose                not implemented here: mrbc prints the C parser's AST dump (parser_dump of the fork's own node types,
+#                                with the line numbers its lexer reached) and then the disassembly with `irep 0x<address of the irep
+#                                struct>` lines, which differ from run to run (ASLR), so no output of this command can be byte for
+#                                byte what a run of mrbc -v printed. `--disasm` (an addition of this command) prints the instruction listing of -v
+#                                alone, byte for byte what mrbc -v prints from its first `irep` line on, except the irep addresses (codedump.rb)
 # Anything not implemented, a construct the emitter does not cover (MrbcRb::Unsupported), a source Prism rejects (mrbc then
 # reports the syntax error itself) and an emitter crash is handed to the real mrbc named by MRBC_FALLBACK, run with
 # the original arguments (its output and exit status are passed on). Without MRBC_FALLBACK the command fails (exit 1) and says what was not covered.
@@ -89,7 +97,8 @@ module MrbcRb
       @prog = prog
       @outfile = nil
       @initname = nil
-      @dump_struct = @static = @debug = @no_lv = @check = @disasm = false
+      @dump_struct = @static = @debug = @no_lv = @check = @disasm = @no_ext_ops = @no_optimize = false
+      @stdin_data = nil
     end
 
     def run
@@ -118,7 +127,7 @@ module MrbcRb
         finish 1
       end
       log('fallback', reason)
-      stdin_data = @argv.include?('-') ? @in.read : nil
+      stdin_data = @argv.include?('-') ? read_stdin : nil
       begin
         out, err, st = Open3.capture3(real, *@argv, stdin_data: stdin_data, binmode: true)
       rescue SystemCallError => e
@@ -128,6 +137,14 @@ module MrbcRb
       write_stream(@out, out)
       write_stream(@err, err)
       finish(st.exitstatus || (st.termsig ? 128 + st.termsig : 1))
+    end
+
+    # The program of `mrbc -`: all of standard input, read once (a fallback gets the same bytes).
+    def read_stdin
+      @stdin_data ||= begin
+        @in.binmode if @in.respond_to?(:binmode)
+        @in.read.to_s.b
+      end
     end
 
     def write_stream(io, data)
@@ -143,7 +160,7 @@ module MrbcRb
         arg = argv[i]
         break unless arg.start_with?('-')
         # "-" alone is an input (stdin); mrbc.c switches on arg[1], a NUL, and takes it as the default case.
-        raise NotCovered, 'input from stdin' if arg == '-'
+        break if arg == '-'
 
         case arg[1]
         when 'o'
@@ -179,7 +196,9 @@ module MrbcRb
           when '--copyright'
             @out.puts COPYRIGHT_TEXT
             finish 0
-          when '--verbose', '--no-ext-ops', '--no-optimize' then raise NotCovered, "option #{arg}"
+          when '--no-ext-ops' then @no_ext_ops = true
+          when '--no-optimize' then @no_optimize = true
+          when '--verbose' then raise NotCovered, "option #{arg}"
           else usage_error(nil)
           end
         else
@@ -217,15 +236,17 @@ module MrbcRb
         end
         @outfile = outfile_name(inputs.first, @initname ? '.c' : '.mrb')
       end
-      unless File.file?(inputs.first) && File.readable?(inputs.first)
+      # mrbc reads standard input for a first input of "-"; a later "-" is a file of that name (mrbc then cannot open it).
+      stdin_first = inputs.first == '-'
+      unless stdin_first || (File.file?(inputs.first) && File.readable?(inputs.first))
         @err.puts "#{@prog}: cannot open program file. (#{inputs.first})"
         finish 1
       end
-      fallback('an input is not readable') unless inputs.all? { |f| File.file?(f) && File.readable?(f) }
+      fallback('an input is not readable') unless inputs.each_with_index.all? { |f, i| (i.zero? && stdin_first) || (File.file?(f) && File.readable?(f)) }
 
-      sources = inputs.map { |f| [File.binread(f), f] }
+      sources = inputs.each_with_index.map { |f, i| [i.zero? && stdin_first ? read_stdin : File.binread(f), f] }
       compiled = begin
-        MrbcRb.compile_files_result(sources)
+        MrbcRb.with_options(no_ext_ops: @no_ext_ops, no_optimize: @no_optimize) { MrbcRb.compile_files_result(sources) }
       rescue MrbcRb::Error => e
         fallback("#{e.class.name.split('::').last}(#{e.message})")
       rescue StandardError => e
