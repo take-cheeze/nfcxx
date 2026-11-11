@@ -680,16 +680,14 @@ mrb_value mrb_funcall_send_with_method(mrb_state* mrb,
 // The hot case (a found cfunc, positional arguments, a running context):
 // funcall_with_block_m's steps with the generic argument capture and the nregs
 // call folded away. Anything else takes the general path.
-mrb_value mrb_funcall_with_method(mrb_state* mrb,
-                                  mrb_value self,
-                                  mrb_sym mid,
-                                  const mrb_method_t* m,
-                                  struct RClass* owner,
-                                  mrb_int argc,
-                                  const mrb_value* argv,
-                                  mrb_value blk) {
-  if (mrb->direct_call)
-    mrb_direct_materialize(mrb);
+static mrb_value funcall_found_framed(mrb_state* mrb,
+                                      mrb_value self,
+                                      mrb_sym mid,
+                                      const mrb_method_t* m,
+                                      struct RClass* owner,
+                                      mrb_int argc,
+                                      const mrb_value* argv,
+                                      mrb_value blk) {
   struct mrb_context* c = mrb->c;
   mrb_callinfo* pci = c->ci;
   if (mrb_unlikely(!mrb->jmp || !c->stbase || !pci->stack || argc < 0 ||
@@ -720,6 +718,24 @@ mrb_value mrb_funcall_with_method(mrb_state* mrb,
   mrb_gc_arena_restore(mrb, ai);
   mrb_gc_protect(mrb, val);
   return val;
+}
+
+// The frame-free decision for every caller of a found method, C included (mrb_obj_init's initialize):
+// a function the closed build registered as frame-free (mrb->frame_free_p) runs through mrb_call_direct.
+mrb_value mrb_funcall_with_method(mrb_state* mrb,
+                                  mrb_value self,
+                                  mrb_sym mid,
+                                  const mrb_method_t* m,
+                                  struct RClass* owner,
+                                  mrb_int argc,
+                                  const mrb_value* argv,
+                                  mrb_value blk) {
+  if (mrb->direct_call)
+    mrb_direct_materialize(mrb);
+  if (mrb->frame_free_p && mrb_nil_p(blk) && MRB_METHOD_FUNC_P(*m) &&
+      mrb->frame_free_p(mrb, MRB_METHOD_FUNC(*m)))
+    return mrb_call_direct(mrb, self, mid, MRB_METHOD_FUNC(*m), owner, argc, argv);
+  return funcall_found_framed(mrb, self, mid, m, owner, argc, argv, blk);
 }
 
 MRB_API mrb_value mrb_funcall_argv(mrb_state* mrb,
@@ -839,7 +855,9 @@ MRB_API mrb_value mrb_call_direct(mrb_state* mrb, mrb_value self, mrb_sym mid, m
                    mrb->c->ci - mrb->c->cibase > MRB_CALL_LEVEL_MAX)) {
     mrb_method_t m;
     MRB_METHOD_FROM_FUNC(m, f);
-    return mrb_funcall_with_method(mrb, self, mid, &m, owner, argc, argv, mrb_nil_value());
+    if (mrb->direct_call)
+      mrb_direct_materialize(mrb);
+    return funcall_found_framed(mrb, self, mid, &m, owner, argc, argv, mrb_nil_value());
   }
   struct mrb_direct_call d;
   int ai = mrb_gc_arena_save(mrb);

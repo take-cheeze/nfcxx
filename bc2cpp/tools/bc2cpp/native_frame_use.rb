@@ -208,6 +208,7 @@ module NativeFrameUse
                                                   mrb_int argc, const mrb_value* argv, mrb_value blk) {
           return mrb_funcall_with_method(M, recv, mid, m, c, argc, argv, blk);
         }
+        static inline void bc2cpp_frame_free_install(mrb_state*) {}
       CPP
     end
 
@@ -278,12 +279,16 @@ module NativeFrameUse
         }
         return false;
       }
-      // A found method's call: a native proven frame-free runs without a frame; the block, a Ruby method and every other
-      // function keep mrb_funcall_with_method.
+      static mrb_bool bc2cpp_frame_free_hook(mrb_state* M, mrb_func_t f) { return bc2cpp_frame_free_p(M, f); }
+      // mrb_funcall_with_method makes the frame-free decision for every caller of a found method, C included
+      // (mrb_obj_init's initialize): a native proven frame-free runs through mrb_call_direct, the rest keep their frame.
+      // Installed at the end of each compiled gem's init, so the rows resolve against the classes defined so far.
+      static inline void bc2cpp_frame_free_install(mrb_state* M) {
+        bc2cpp_ff_state = nullptr;
+        M->frame_free_p = bc2cpp_frame_free_hook;
+      }
       static inline mrb_value bc2cpp_call_found(mrb_state* M, mrb_value recv, mrb_sym mid, const mrb_method_t* m, struct RClass* c,
                                                 mrb_int argc, const mrb_value* argv, mrb_value blk) {
-        if (mrb_nil_p(blk) && MRB_METHOD_FUNC_P(*m) && bc2cpp_frame_free_p(M, MRB_METHOD_FUNC(*m)))
-          return mrb_call_direct(M, recv, mid, MRB_METHOD_FUNC(*m), c, argc, argv);
         return mrb_funcall_with_method(M, recv, mid, m, c, argc, argv, blk);
       }
     CPP

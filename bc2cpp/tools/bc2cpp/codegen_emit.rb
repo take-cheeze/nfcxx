@@ -576,6 +576,7 @@ class CodeGen
         bc2cpp_set_instance_tts(M);
         bc2cpp_register_owner_methods(M);
         bc2cpp_capture_direct_construct_classes(M);
+        bc2cpp_frame_free_install(M);
       }
       [[maybe_unused]] static void bc2cpp_gem_final() {
         bc2cpp_reset_symbol_cache();
