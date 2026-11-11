@@ -127,7 +127,6 @@ class CodeGen
 
   def compile_method(label)
     @ir_inline_remaining = 512
-    @backedge = nil
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
     # mruby's own methods are compiled with no closed-world proof (the closed
@@ -367,7 +366,6 @@ class CodeGen
       end
       initial[blk_slot] = 'bc2cpp_blk' if has_blk
       out << emit_register_initializers(irep.nregs, initial, boxed: boxed_registers(block_fallback_regions))
-      out << backedge_frame_begin(irep, boxed_registers(block_fallback_regions))
       out << sealed_int16_declarations(irep)
       out << stack_tuple_declarations(irep)
       out << array_hash_fixnum_prologue(d)
@@ -1041,39 +1039,6 @@ class CodeGen
   # R0 stays, unused or not: it is the line ParamTrace instruments (param_trace.rb REG0_RE).
   # +boxed+ (STEP_CLOSURES): registers that live in a heap cells Array (bc2cpp_cells_ary) the blocks' envs keep; a register is
   # a reference to its cell, so every use of it reads and writes the cell.
-  # BACKEDGE_RESTORE: a loop's back-edge drops the arena entries its iteration made. Every by-name result is
-  # rooted there (bc2cpp_keep_call, mruby's own funcall protect), so a loop of sends grows the arena without bound
-  # (llvm-to-pathb: 2 GB RSS against 30 MB). At a backward jump the compiled frame restores the arena to the index it
-  # saved in the prologue, then re-roots self, the boxed cells and every register: the VM's own register model, where
-  # the frame's values are exactly its registers. Only the plain method body does this: its locals are the registers,
-  # so a frame with C-local stack tuples keeps the arena as it was (no restore emitted).
-  def backedge_frame_begin(irep, boxed)
-    @backedge = nil
-    return '' unless stack_tuple_declarations(irep).empty?
-
-    roots = String.new
-    roots << "    bc2cpp_root(M, self);\n"
-    roots << "    bc2cpp_root(M, bc2cpp_cells_ary);\n" unless boxed.empty?
-    (1...irep.nregs).each { |reg| roots << "    bc2cpp_root(M, #{RegName[reg]});\n" }
-    @backedge = { irep: irep, text: "mrb_gc_arena_restore(M, bc2cpp_fai);\n#{roots}" }
-    "  [[maybe_unused]] int bc2cpp_fai = mrb_gc_arena_save(M);\n"
-  end
-
-  # The restore a backward jump from +irep+ emits before it goes to +target+, or "" when none applies.
-  def backedge_restore_text(irep, insn, target)
-    return '' unless @backedge && @backedge[:irep].equal?(irep) && target.to_i <= insn.addr.to_i
-
-    @backedge[:text]
-  end
-
-  # A conditional jump; a backward one restores and re-roots first, in the taken branch only.
-  def backedge_conditional(irep, insn, target, test)
-    back = backedge_restore_text(irep, insn, target)
-    return "  if (#{test}) goto L#{target};\n" if back.empty?
-
-    "  if (#{test}) {\n#{back}    goto L#{target};\n  }\n"
-  end
-
   def emit_register_initializers(nregs, arguments, boxed: [])
     cells = String.new
     unless boxed.empty?
