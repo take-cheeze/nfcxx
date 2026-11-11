@@ -668,8 +668,7 @@ if [ -z "$backend" ]; then
   # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
   if [ $backend_explicit = 0 ] && [ $asan = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
-     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ] \
-     && [ "$(uname -sm)" = "Linux x86_64" ]; then
+     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
 fi
