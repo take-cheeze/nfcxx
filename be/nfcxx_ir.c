@@ -2402,10 +2402,29 @@ static void ir_nonnull(an_expr_node_ptr src, ir_val p)
   ir_emit(ir_fmt("(nonnull %s)", p.s));
 }
 
+#if BUILTIN_FUNCTIONS_ENABLED
+/* The operand a GNU __builtin_choose_expr(COND, A, B) selects: the node keeps its three operands, and the front end has
+   decided which one is evaluated (the other is not, and keeps no side effect). NULL when the list is short. */
+static an_expr_node_ptr ir_choose_operand(an_expr_node_ptr e)
+{
+  an_expr_node_ptr c = e->variant.builtin_choose_expr.operands;
+  if (c == NULL || c->next == NULL) return NULL;
+  return e->variant.builtin_choose_expr.choose_first ? c->next : c->next->next;
+}
+#endif
+
 static ir_val ir_rval(an_expr_node_ptr e)
 {
   if (e == NULL) return ir_mk_void();
   switch (e->kind) {
+#if BUILTIN_FUNCTIONS_ENABLED
+    case enk_builtin_choose_expr: {
+      an_expr_node_ptr pick = ir_choose_operand(e);
+      if (pick == NULL) return ir_gap(e->type, "node builtin_choose_expr", 2, (int)e->kind);
+      ir_note(2, enk_builtin_choose_expr, 1);
+      return ir_rval(pick);
+    }
+#endif
     case enk_constant:
       ir_note(2, enk_constant, 1);
       return ir_constant(e->variant.constant.ptr, e->type);
@@ -2461,6 +2480,15 @@ static ir_val ir_lval(an_expr_node_ptr e)
   }
   if (e->kind == enk_object_lifetime) return ir_lval(e->variant.object_lifetime.expr);
   if (e->kind == enk_operation) return ir_lval_op(e);
+#if BUILTIN_FUNCTIONS_ENABLED
+  if (e->kind == enk_builtin_choose_expr) { /* `pick(1) = 40`: the chosen operand keeps its lvalue-ness */
+    an_expr_node_ptr pick = ir_choose_operand(e);
+    if (pick != NULL) {
+      ir_note(2, enk_builtin_choose_expr, 1);
+      return ir_lval(pick);
+    }
+  }
+#endif
   if (e->kind == enk_routine) {
     /* A function designator (the operand of & outside a constant expression, for example `throw &f`): its address. */
     ir_note(2, enk_routine, 1);
@@ -5558,6 +5586,26 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
       ir_emit("(unsupported init virtual-base)");
       return;
     }
+    {
+      /* A bit-field is stored into its storage unit by read-modify-write, and the unit (a packed struct's narrowed one too)
+         can reach bits that no field names: gcc zeroes the object before the list's stores, so those bits are zero.
+         Without it the stack garbage that was there stays in them. Each unit is zeroed first, once. */
+      int k;
+      unsigned long long zend = 0, zstart = 0;
+      for (k = 0; k < n; k++) {
+        unsigned long long uoff = 0;
+        unsigned unit = 0, boff = 0;
+        if (mem[k].bf == NULL || ir_is_i128(mem[k].t) || !ir_bf_layout(mem[k].bf, ir_size_of(t), &uoff, &unit, &boff)) continue;
+        if (zend != zstart && uoff >= zstart && uoff + unit <= zend) continue; /* the unit of the last field */
+        if (!ir_zero_bytes(dst.s, uoff, unit, ir_align_of(t))) {
+          ir_note(4, dik_constant, 0);
+          ir_emit("(unsupported init zero-aggregate)");
+          return;
+        }
+        zstart = uoff;
+        zend = uoff + unit;
+      }
+    }
     for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
       if (mem[i].bf != NULL) {
         ir_val v = ir_constant(ce, mem[i].t);
@@ -5924,6 +5972,11 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
   else if (var->is_weak || ir_force_weak) fputs(var->storage_class == sc_extern ? " (weak)" : " (weak attr)", nf_out); /* __attribute__((weak)): declaration / definition */
   if (ir_var_is_thread(var)) fputs(" (thread)", nf_out); /* __thread / thread_local: one copy per thread */
+#if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
+  /* __attribute__((section("S"))): the emitters do not place data in a section, so scripts/pathb-ssa-build refuses the
+     global (it was put in .data, silently, and a __start_S / __stop_S table was empty). */
+  if (var->section != NULL && var->storage_class != sc_extern) fprintf(nf_out, " (section \"%s\")", var->section);
+#endif
   ir_global_init(var);
   fputs(")\n", nf_out);
   ir_buf_end(&g);
@@ -6562,6 +6615,54 @@ static void ir_decl_zero(a_statement_ptr s)
   }
 }
 
+#if GNU_EXTENSIONS_ALLOWED
+/* A GNU case range `case LO ... HI:` is one (case V) label for each value, one after the other: they all mark the same
+   place. The IR has no range label; a range of more than IR_CASE_RANGE_MAX values (`-5000000000L ... 5000000000L`) is
+   refused. (The front end gave only LO before, and the other values of the range went to the default label.) */
+#define IR_CASE_RANGE_MAX 1024
+static void ir_case_range(a_switch_case_entry_ptr entry, int d)
+{
+  a_type_ptr t = entry->case_value->type;
+  unsigned long long lo, hi, lo_hi, hi_hi, n, i;
+  int sgn = ir_is_signed(t);
+  const char *vt = ir_valtext(t);
+  ir_i128_parts(entry->case_value, &lo, &lo_hi);
+  ir_i128_parts(entry->range_end, &hi, &hi_hi);
+  /* The refusal comes after the first label: code in a switch body before its first label is unreachable, and the emitter
+     leaves unreachable code out, a refusal marker included. */
+  if (ir_size_of(t) > 8 || (sgn ? (long long)hi < (long long)lo : hi < lo)) {
+    ir_line(d, ir_fmt("(case %s)", ir_const_value(entry->case_value, t).s));
+    ir_line(d, "(unsupported stmt switch-case-range)");
+    return;
+  }
+  n = hi - lo + 1; /* modulo 2^64: a range that spans the whole of a 64-bit type wraps to 0, and is refused with the large ones */
+  if (n == 0 || n > IR_CASE_RANGE_MAX) {
+    ir_line(d, ir_fmt("(case %s)", ir_const_value(entry->case_value, t).s));
+    ir_line(d, "(unsupported stmt switch-case-range)");
+    return;
+  }
+  for (i = 0; i < n; i++) {
+    unsigned long long v = lo + i;
+    if (sgn) ir_line(d, ir_fmt("(case (const %s %lld))", vt, (long long)v));
+    else ir_line(d, ir_fmt("(case (const %s %llu))", vt, v));
+  }
+}
+#endif
+
+/* A local with __attribute__((cleanup(f))): the front end leaves the call of f out of the IL ("the front end does not make
+   that call explicit", il_def.h), and this back end does not run it where the scope ends (block end, return, break,
+   continue, goto). Dropping it would compile without error to a program that never calls f, so the function is refused. */
+static void ir_decl_cleanup(a_statement_ptr s, int d)
+{
+  an_il_entity_list_entry_ptr entry;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    if (entry->entity.kind == iek_variable && ((a_variable_ptr)entry->entity.ptr)->cleanup_routine != NULL) {
+      ir_line(d, "(unsupported stmt cleanup-attribute)");
+      return;
+    }
+  }
+}
+
 static void ir_stmt(a_statement_ptr s, int d)
 {
   ir_depth = d;
@@ -6722,6 +6823,12 @@ static void ir_stmt(a_statement_ptr s, int d)
             ir_line(d, ir_fmt("(case (const long %lld))", (long long)lo));
           }
         } else {
+#if GNU_EXTENSIONS_ALLOWED
+          if (entry->range_end != NULL) {
+            ir_case_range(entry, d);
+            return;
+          }
+#endif
           ir_line(d, ir_fmt("(case %s)", ir_const_value(entry->case_value, entry->case_value->type).s));
         }
       } else {
@@ -6783,6 +6890,7 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_decl, 1);
       ir_fact_decl(s, d);
       ir_decl_zero(s);
+      ir_decl_cleanup(s, d);
       return;
     case stmk_set_vla_size: {
       /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */
