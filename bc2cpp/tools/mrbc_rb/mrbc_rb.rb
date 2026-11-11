@@ -1249,9 +1249,15 @@ module MrbcRb
                   else sub.else_keyword_loc
                   end
         empty_line = sub.nil? ? end_line(node) : keyword.start_line
+        gap_line = empty_gap_line(node.then_keyword_loc || node.predicate.location, keyword, !node.then_keyword_loc.nil?)
+        empty_line = gap_line if gap_line != keyword.start_line # a `;` makes the nil a node of the `;`'s line
       end
       # An empty else-branch is a node on the line of the closing `end`.
       else_line = else_list && else_list.empty? ? end_line(node) : nil
+      if else_list&.empty? && sub.is_a?(Prism::ElseNode)
+        gap_line = empty_gap_line(sub.else_keyword_loc, node.end_keyword_loc, true)
+        else_line = gap_line if gap_line != node.end_keyword_loc.start_line
+      end
       gen_if(node.predicate, then_list, else_list, val: last, then_present: true, empty_line: empty_line,
                                                             elsif_node: elsif_node?(node), else_line: else_line,
                                                             line: if_node_line(node))
@@ -1284,9 +1290,18 @@ module MrbcRb
       else_node = node.else_clause
       # An empty branch is a node on the line of the keyword that follows it (`else` or `end`).
       body_line = body.empty? ? (else_node ? else_node.else_keyword_loc.start_line : end_line(node)) : nil
+      if body.empty?
+        kw = else_node ? else_node.else_keyword_loc : node.end_keyword_loc
+        gap_line = empty_gap_line(node.then_keyword_loc || node.predicate.location, kw, !node.then_keyword_loc.nil?)
+        body_line = gap_line if gap_line != kw.start_line
+      end
       if else_node
         then_list = else_node.statements&.body || []
         then_line = then_list.empty? ? end_line(node) : nil
+        if then_list.empty?
+          gap_line = empty_gap_line(else_node.else_keyword_loc, node.end_keyword_loc, true)
+          then_line = gap_line if gap_line != node.end_keyword_loc.start_line
+        end
         gen_if(node.predicate, then_list, body, val: last, then_present: true, empty_line: then_line,
                                                            else_line: body_line, line: if_node_line(node))
       else
@@ -1302,11 +1317,12 @@ module MrbcRb
       return gen_arm(then_list, val, then_present ? empty_line : nil) if true_always?(pred)
       return gen_arm(else_list || [], val, else_line) if false_always?(pred)
 
+      parenthesized = pred.is_a?(Prism::ParenthesesNode) # `(x.nil?)` is a begin node to the fork: no JMPNIL
       pred = unparen(pred)
       check_condition(pred, elsif_node)
       leading_dot(pred) if pred.is_a?(Prism::CallNode)
       t = temp
-      nil_p = nil_check?(pred)
+      nil_p = !parenthesized && nil_check?(pred)
       if nil_p
         pred.receiver ? operand_into(unparen(pred.receiver), t) : emit(:LOADNIL, t)
       else
@@ -1413,7 +1429,9 @@ module MrbcRb
         lp.pc1 = @code.size
         emit(:NOP)
         # An empty body is a node on the line of the closing `end`, which is visited after the NOP (verified).
-        @line = node.closing_loc.start_line if node.statements.nil? || node.statements.body.empty?
+        if node.statements.nil? || node.statements.body.empty?
+          @line = empty_gap_line(node.do_keyword_loc || node.predicate.location, node.closing_loc, !node.do_keyword_loc.nil?)
+        end
         branch(node.statements, nil, need: false)
         back = emit_jump(:JMP)
         patch_jump(back, lp.pc0)
@@ -1733,8 +1751,16 @@ module MrbcRb
       @sp = base
       # An empty body is a node on the line of the keyword that follows it (the next `when`, the `else` or the `end`).
       keywords = node.conditions.map(&:keyword_loc) + [node.else_clause&.else_keyword_loc, node.end_keyword_loc].compact
-      clauses = node.conditions.each_with_index.map { |w, i| [w.conditions, w.statements, keywords[i + 1].start_line] }
-      clauses << [[], node.else_clause.statements, end_line(node)] if node.else_clause
+      clauses = node.conditions.each_with_index.map do |w, i|
+        line = keywords[i + 1].start_line
+        line = empty_gap_line(w.then_keyword_loc || w.conditions.last.location, keywords[i + 1], !w.then_keyword_loc.nil?) if w.statements.nil? || w.statements.body.empty?
+        [w.conditions, w.statements, line]
+      end
+      if node.else_clause
+        line = end_line(node)
+        line = empty_gap_line(node.else_clause.else_keyword_loc, node.end_keyword_loc, true) if (node.else_clause.statements.nil? || node.else_clause.statements.body.empty?) && line != 0
+        clauses << [[], node.else_clause.statements, line]
+      end
       end_jumps = []
       next_jump = nil
       clauses.each do |conds, body, empty_line|
@@ -3279,6 +3305,12 @@ module MrbcRb
         begin
           @sp = base
           r = statement(node, last: true)
+          # A local variable read last in a body is read in place (a return folds the MOVE away); as a value the fork emits
+          # the MOVE into the temporary (gen_lvar, no peephole), which later moves must not fold.
+          if r && r < @nlocals
+            emit(:MOVE, base, r)
+            r = base
+          end
         ensure
           @sp = saved
         end
@@ -4320,7 +4352,13 @@ module MrbcRb
       margs = (requireds + posts).grep(Prism::MultiTargetNode)
       marg_vars = margs.flat_map { |m| marg_names(m) }
       named = pre + [block_name] + kw_names + marg_vars
-      set_locals(pre + [nil] + [block_name].compact + kw_names + marg_vars + (node_locals - named - (nil_block ? [block.name] : [])))
+      # The required keywords are declared as they are read, an optional one once its default is parsed: the locals that default
+      # assigns come first (verified: `d: (u = 1), e:` declares e, u, d).
+      required_kw = keywords.grep(Prism::RequiredKeywordParameterNode).map(&:name)
+      optional_kw = keywords.grep(Prism::OptionalKeywordParameterNode).flat_map { |k| (assigned_locals(k.value) & node_locals) + [k.name] }
+      default_locals = (optional_kw - kw_names).uniq - named
+      set_locals(pre + [nil] + [block_name].compact + required_kw + optional_kw.uniq + marg_vars +
+                 (node_locals - named - default_locals - (nil_block ? [block.name] : [])))
       @nregs = @nlocals + 1
       @line = line
       aspec = ((numbered.positive? ? numbered : requireds.size) << 18) | (optionals.size << 13) | ((rest_name ? 1 : 0) << 12) |
@@ -4381,6 +4419,14 @@ module MrbcRb
         end
       end
       changes.empty? ? node : node.copy(**changes)
+    end
+
+    # The names of the locals of this scope that +node+ assigns (a nested scope's are its own).
+    def assigned_locals(node)
+      return [] if node.is_a?(Prism::BlockNode) || node.is_a?(Prism::LambdaNode) || node.is_a?(Prism::DefNode)
+
+      own = node.class.name.match?(/\APrism::LocalVariable(Write|Target|OperatorWrite|OrWrite|AndWrite)Node\z/) && node.depth.zero? ? [node.name] : []
+      own + node.compact_child_nodes.flat_map { |c| assigned_locals(c) }
     end
 
     # Whether +node+ holds a read or write of a local variable named in +names+.
@@ -4977,7 +5023,8 @@ module MrbcRb
       if !rescue_c && ensure_stmts.empty?
         if stmts.empty?
           # An empty `begin; end` is a nil: loaded only where its value is used.
-          @line = (ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc)&.end_line || @line
+          kw = ensure_c ? ensure_c.ensure_keyword_loc : node.end_keyword_loc
+          @line = node.begin_keyword_loc && kw ? empty_gap_line(node.begin_keyword_loc, kw, true) : (kw&.end_line || @line)
           return nil unless last
 
           t = temp
@@ -5036,6 +5083,25 @@ module MrbcRb
       text = node.location.slice.gsub(/^[ \t]*#[^\n]*/, '')
       head = node.location.copy(start_offset: node.location.start_offset, length: header.end_offset - node.location.start_offset).slice
       raise Unsupported, 'empty body after a continuation' if text.match?(/\\\n/) || head.gsub(/#[^\n]*/, '').include?(';')
+    end
+
+    # The line of the nil node of an empty body between +from_loc+ and +to_loc+ (the keyword that ends it): the fork builds it when
+    # it reads the first token after the body's opener, a `;` or that keyword (the opener's own terminator, when it is not a
+    # keyword, is consumed by the header: `if c` newline or `;`).
+    def empty_gap_line(from_loc, to_loc, keyword_opener)
+      gap = from_loc.copy(start_offset: from_loc.end_offset, length: to_loc.start_offset - from_loc.end_offset).slice
+      gap = gap.gsub(/^=begin\b.*?^=end\b[^\n]*/m) { |m| m.gsub(/[^\n]/, ' ') }.gsub(/#[^\n]*/) { |m| ' ' * m.size }
+      return to_loc.start_line unless gap.include?(';')
+
+      i = 0
+      unless keyword_opener
+        i += 1 while gap[i] =~ /[ \t\r]/
+        i += 1 if gap[i] == ';' || gap[i] == "\n"
+      end
+      i += 1 while gap[i] =~ /[ \t\r\n]/
+      return to_loc.start_line unless gap[i] == ';'
+
+      from_loc.end_line + gap[0, i].count("\n")
     end
 
     def check_empty_gap(from_loc, to_loc)
