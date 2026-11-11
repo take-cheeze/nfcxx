@@ -3,6 +3,10 @@
 #   1. AST producers: native_ast_returns_check.rb (the fixture) runs every available producer (clang, nfcxx) and fails if
 #      either misses an expectation; native_ast_producers_diff.rb compares clang's and nfcxx's return kinds, frame-free
 #      verdicts and candidate rows over mruby's src/*.c (docs/notes/nfcxx-ast.md).
+#      The presym id.h of scripts/bc2cpp/analysis_headers.rb is generated with both preprocessors (analysis_headers_pp_diff.rb)
+#      and must be byte-identical; it is the overlay the AST producers parse with.
+#   1c. main_ast.rb (the host program's roots, BC2CPP_AST_PRODUCER clang vs nfcxx) over a host main with libstdc++ and every
+#      parseable C++ unit of the world (main_ast_producers_diff.rb): refusals, names and `*_impl` functions agree.
 #   2. Preprocessor: BaseRbsNative.preprocess + scan with BC2CPP_PREPROCESSOR=clang against =nfcxx (scripts/nfcxx-cpp),
 #      over a fixed list of mruby sources; the registrations found must be identical.
 #   3. cxx_fiber_check.rb with CXX=nfcxx (NFCXX_PARITY_FIBER=1; builds a full-core libmruby, minutes).
@@ -31,31 +35,11 @@ for p in clang nfcxx; do
 done
 
 echo "== 1b. native_ast_producers_diff over mruby src/*.c"
-# The presym ids the sources name (the analysis overlay of scripts/bc2cpp/analysis_headers.rb, from mruby's own scanner),
-# without a closed build: a directory holding only analysis/include/mruby/presym/id.h.
+# The analysis overlay of scripts/bc2cpp/analysis_headers.rb (mruby's presym scanner over the closed world's native sources),
+# generated with each preprocessor: the presym id.h must be byte-identical. $closed/analysis/include has the shared result.
 closed=$root/build/nfcxx-parity/closed
 rm -rf "$closed"; mkdir -p "$closed"
-run_ruby -e '
-  require "fileutils"
-  require File.expand_path("bc2cpp/scripts/bc2cpp/analysis_headers", Dir.pwd)
-  work = File.join(File.expand_path(ARGV[0]), "analysis")
-  FileUtils.mkdir_p(work)
-  sources = Dir[File.join(BaseRbsAll::MRUBY_ROOT, "src", "*.c")].sort
-  # mruby'"'"'s presym scanner reads the preprocessed text, so the two preprocessors must name the same symbols.
-  by_pp = %w[clang nfcxx].to_h do |pp|
-    ENV["BC2CPP_PREPROCESSOR"] = pp
-    [pp, AnalysisHeaders.scan(sources, nil, work).uniq.sort_by { |s| [s.size, s] }]
-  end
-  abort "FAIL nfcxx_parity: presym scan differs: clang-only #{(by_pp["clang"] - by_pp["nfcxx"]).first(5)}, nfcxx-only #{(by_pp["nfcxx"] - by_pp["clang"]).first(5)}" unless by_pp["clang"] == by_pp["nfcxx"]
-  names = by_pp["clang"]
-  abort "FAIL nfcxx_parity: the presym scan found no names" if names.empty?
-  presym = MRuby::Presym.new(Struct.new(:build_dir).new(work))
-  FileUtils.mkdir_p(presym.header_dir)
-  presym.write_id_header(names)
-  FileUtils.rm_rf(File.join(work, "scan"))
-  warn "presym ids: #{names.size} names from #{sources.size} sources"
-' "$closed"
-# presym.header_dir is analysis/include/mruby/presym (analysis_headers.rb writes the same layout).
+run_ruby bc2cpp/scripts/bc2cpp/analysis_headers_pp_diff.rb "$closed" || { echo "FAIL nfcxx_parity: analysis headers differ between the preprocessors"; exit 1; }
 test -f "$closed/analysis/include/mruby/presym/id.h" || { echo "FAIL nfcxx_parity: no presym id.h generated"; exit 1; }
 rc=0
 diff_out=$(run_ruby bc2cpp/scripts/bc2cpp/native_ast_producers_diff.rb --closed="$closed") || rc=$?
@@ -63,6 +47,16 @@ echo "$diff_out" | tail -15
 [ "$rc" = 0 ] || { echo "FAIL nfcxx_parity: the AST producers differ (exit $rc)"; exit 1; }
 parsed=$(echo "$diff_out" | grep -c ' functions, ' || true)
 [ "$parsed" -ge 20 ] || { echo "FAIL nfcxx_parity: only $parsed sources parsed by both producers (vacuous)"; exit 1; }
+
+echo "== 1c. main_ast.rb: clang vs nfcxx over the host main and every parseable C++ unit"
+# The manifests' roots (refusals, names, the `*_impl` functions) must agree; only libstdc++ internals may differ
+# (bc2cpp/scripts/bc2cpp/main_ast_producers_diff.rb states the rule); it sets BC2CPP_AST_PRODUCER for each side.
+rc=0
+main_out=$(run_ruby bc2cpp/scripts/bc2cpp/main_ast_producers_diff.rb --closed="$closed") || rc=$?
+echo "$main_out" | tail -12
+[ "$rc" = 0 ] || { echo "FAIL nfcxx_parity: main_ast producers differ (exit $rc)"; exit 1; }
+compared=$(echo "$main_out" | grep -c ' names (' || true)
+[ "$compared" -ge 3 ] || { echo "FAIL nfcxx_parity: only $compared main_ast case(s) compared (vacuous)"; exit 1; }
 
 echo "== 2. preprocessor: clang vs nfcxx"
 run_ruby -e '

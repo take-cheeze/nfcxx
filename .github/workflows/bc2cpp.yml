@@ -180,8 +180,8 @@ jobs:
           ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
           source "$RUNNER_TEMP/bc2cpp-checks.sh"
 
-  # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers and both preprocessors on the pinned world's
-  # mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
+  # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers (return kinds, and the host program's main_ast roots) and both
+  # preprocessors (and the analysis headers' presym ids) on the pinned world's mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
   # toolchain action restores build/edg, build/qbe and build/cproc from the cache that ci.yml's build job saves (same keys,
   # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
   # configuration, cached below. The checkout takes only the submodules those need.
@@ -199,7 +199,8 @@ jobs:
       - name: EDG, QBE and cproc sources
         run: git submodule update --init --depth 1 3rd/edg 3rd/qbe 3rd/cproc
 
-      # clang: the AST dump and preprocessor oracle. bison, gperf, autoconf, automake and libtool: the fork's mruby build
+      # clang: the oracle of the parity checks (nfcxx is the default AST producer, preprocessor and host compiler wherever it is
+      # built; clang stays installed only here, and is the fallback elsewhere). bison, gperf, autoconf, automake and libtool: the fork's mruby build
       # (the Fiber check).
       - uses: ./.github/actions/toolchain
         with:
@@ -227,7 +228,7 @@ jobs:
         if: steps.libclang-edg.outputs.cache-hit != 'true'
         run: LIBCLANG_EDG_IN_PROCESS=0 scripts/setup-libclang-edg.sh
 
-      - name: nfcxx against clang (AST producers, preprocessors, C++ Fiber)
+      - name: nfcxx against clang (AST producers, main_ast, preprocessors, C++ Fiber)
         run: tests/bc2cpp/run_nfcxx_parity.sh
 
       - name: sccache stats
