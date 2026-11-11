@@ -674,7 +674,7 @@ class Converter
   # Replaces phis whose arguments are all one value (or themselves), then drops phis nothing uses.
   def simplify
     repl = {}
-    loop do
+    while true
       changed = false
       @out.each_value do |blk|
         blk[:phis].reject! do |ph|
@@ -692,7 +692,7 @@ class Converter
       blk[:term] = map_atoms(blk[:term], repl)
       blk[:phis].each { |ph| ph.inc.transform_values! { |v| map_atoms(v, repl) } }
     end
-    loop do
+    while true
       uses = Hash.new(0)
       @out.each_value do |blk|
         blk[:instrs].each { |i| count_atoms(head(i) == "let" ? i[2..] : i[1..], uses) }
@@ -1393,7 +1393,10 @@ def main(argv)
   main_fn = nil
   main_out = nil
   output = []
-  forms.each do |form|
+  fi = 0
+  while fi < forms.size
+    form = forms[fi]
+    fi += 1
     unless head(form) == "function"
       output << sx(form)
       next
