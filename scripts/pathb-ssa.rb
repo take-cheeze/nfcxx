@@ -77,12 +77,8 @@ end
 
 # A literal the IR writes in a form Integer() or Float() does not read: a hex integer (the value of its type, as canon
 # gives it) and an infinity (1e999 is read by Float as the same value). NaN is left as written: Float() cannot read it.
-def normalise_literals(x)
-  return x unless x.is_a?(Array)
-
-  x = x.map { |y| normalise_literals(y) }
-  return x unless head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
-
+# x is a (const TYPE VALUE ...) form, changed in place.
+def normalise_const!(x)
   type, val = x[1], x[2]
   if float_type?(type)
     x[2] = "1e999" if val == "+Infinity"
@@ -92,25 +88,47 @@ def normalise_literals(x)
   elsif val.match?(/\A[-+]?0[xX]\h+\z/) && type == "bool"
     x[2] = canon(Integer(val, 16), type).to_s
   end
+end
+
+def normalise_literals(x)
+  return x unless x.is_a?(Array)
+
+  x = x.map { |y| normalise_literals(y) }
+  normalise_const!(x) if head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
   x
 end
 
+# One pass over the text, no token array in between and no second walk for the literals: a (const ...) form is
+# normalised as its parenthesis closes (tokenize and normalise_literals give the same forms).
 def read_forms(text)
-  stack = [[]]
-  tokenize(text).each do |t|
-    case t
-    when "(" then stack.push([])
-    when ")"
-      raise Fail, "unbalanced parentheses" if stack.size < 2
+  stack = []
+  cur = []
+  text.scan(TOKEN_RE) do |t|
+    case t.getbyte(0)
+    when 40 # (
+      stack.push(cur)
+      cur = []
+    when 41 # )
+      raise Fail, "unbalanced parentheses" if stack.empty?
 
-      done = stack.pop
-      stack.last << done
-    else stack.last << t
+      done = cur
+      cur = stack.pop
+      cur << done
+      normalise_const!(done) if done[0] == "const" && done.size >= 3 && done[1].is_a?(String) && done[2].is_a?(String)
+    when 34 # "
+      cur << Str.new(t)
+    else
+      c = t.getbyte(0)
+      if t.length > 1 && t.getbyte(1) == 34 && (c == 36 || c == 64 || c == 38)
+        cur << Ref.new(t[0], t[1..])
+      else
+        cur << t
+      end
     end
   end
-  raise Fail, "unbalanced parentheses" unless stack.size == 1
+  raise Fail, "unbalanced parentheses" unless stack.empty?
 
-  normalise_literals(stack[0])
+  cur
 end
 
 def sx(x)
@@ -1212,6 +1230,51 @@ end
 
 # ---- driver ---------------------------------------------------------------------------------------------------------
 
+# A function whose structured form does not verify after conversion (its message went to stderr already).
+VerifyFailed = Class.new(StandardError)
+
+# Converts the functions of a module (the forms of an IR file) to SSA: the printed forms in order (the other forms
+# unchanged), then the counts of functions seen, converted and promoted slots, and `main`'s structured and SSA forms.
+# live: a Hash of the names a caller keeps ({ "name" => true }): a function outside it is skipped, not converted (its
+# conversion would be dropped afterwards; scripts/pathb-ssa-build's prune). nil converts every function.
+def convert_module(forms, live = nil)
+  install_module(forms)
+  converted = 0
+  functions = 0
+  promoted_total = 0
+  main_fn = nil
+  main_out = nil
+  output = []
+  forms.each do |form|
+    unless head(form) == "function"
+      output << sx(form)
+      next
+    end
+    next if live && !live.key?(form[1].raw.delete('"'))
+
+    functions += 1
+    fn = fn_of(form)
+    begin
+      conv = Converter.new(fn).run
+    rescue Unsupported => e
+      warn "pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted"
+      output << sx(form)
+      next
+    rescue Fail => e
+      warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
+      raise VerifyFailed
+    end
+    converted += 1
+    promoted_total += conv.promoted.size
+    if fn.name.raw == '"main"'
+      main_fn = fn
+      main_out = conv.out
+    end
+    output << conv.render
+  end
+  [output, functions, converted, promoted_total, main_fn, main_out]
+end
+
 def main(argv)
   mode = :print
   run_args = []
@@ -1227,38 +1290,7 @@ def main(argv)
   file = argv.last or abort "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
 
   forms = read_forms(File.read(file))
-  install_module(forms)
-  converted = 0
-  functions = 0
-  promoted_total = 0
-  main_fn = nil
-  main_out = nil
-  output = []
-  forms.each do |form|
-    unless head(form) == "function"
-      output << sx(form)
-      next
-    end
-    functions += 1
-    fn = fn_of(form)
-    begin
-      conv = Converter.new(fn).run
-    rescue Unsupported => e
-      warn "pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted"
-      output << sx(form)
-      next
-    rescue Fail => e
-      warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
-      exit 1
-    end
-    converted += 1
-    promoted_total += conv.promoted.size
-    if fn.name.raw == '"main"'
-      main_fn = fn
-      main_out = conv.out
-    end
-    output << conv.render
-  end
+  output, functions, converted, promoted_total, main_fn, main_out = convert_module(forms)
 
   case mode
   when :check
@@ -1284,6 +1316,8 @@ def main(argv)
     puts output
   end
   0
+rescue VerifyFailed
+  exit 1
 rescue Unsupported => e
   warn "pathb-ssa: #{e.message}"
   exit 2

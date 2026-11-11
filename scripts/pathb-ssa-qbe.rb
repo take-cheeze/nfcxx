@@ -10,6 +10,7 @@
 #
 require_relative "pathb-ssa"
 require "base64"
+require "set"
 require "digest"
 
 QbeUnsupported = Class.new(StandardError)
@@ -2199,14 +2200,18 @@ end
     end
 # The functions this module defines, and the external functions it takes the address of as a value (not a direct
 # call, which goes through the PLT): each gets one pointer cell, defined once here.
-funcs = forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) }
+funcs = Set.new(forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) })   # a Set: every & reference is looked up
 cells = []
+cell_seen = {}
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
     if x.sigil == "&"
       sym = Qbe.symbol(x.raw)
-      cells << sym unless funcs.include?(sym) || cells.include?(sym)
+      unless funcs.include?(sym) || cell_seen.key?(sym)
+        cell_seen[sym] = true
+        cells << sym
+      end
     end
     next
   end

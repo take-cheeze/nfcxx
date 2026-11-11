@@ -137,6 +137,9 @@ end
 
 def x87_thunks_asm(forms, il)
   out = []
+  # The function header lines of the IL, found once: an entry thunk asks whether one defines __nfcxx_ldr_F, and matching
+  # a regex against the whole IL for each form is quadratic in the module.
+  headers = nil
   forms.each do |f|
     kind = f[1].to_s
     name = Qbe.symbol(sname(f[2]))
@@ -149,7 +152,8 @@ def x87_thunks_asm(forms, il)
       sym = Qbe.symbol((kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + sname(f[2]))
       out << x87_icall_thunk(key, Qbe.int_lit(f[3]), Qbe.int_lit(f[4]), kind == "icallc") if il.include?("$#{sym}(")
     when "entry", "entryc"
-      defined = il.match?(/^(export )?function [^\n]*\$#{Regexp.escape(Qbe.symbol("__nfcxx_ldr_" + sname(f[2])))}\(/)
+      headers ||= il.scan(/^(?:export )?function [^\n]*/).join("\n")
+      defined = headers.include?("$#{Qbe.symbol("__nfcxx_ldr_" + sname(f[2]))}(")
       out << x87_entry_thunk(name, f[3].to_s, Qbe.int_lit(f[4]), Qbe.int_lit(f[5]), kind == "entryc") if defined
     end
   end
