@@ -1,8 +1,8 @@
 name: bc2cpp
 
 # bc2cpp (bc2cpp/, the mruby-to-C++ compiler moved from rpg-maker-clone, docs/notes/bc2cpp-migration.md) compiling the
-# worlds under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own pathb-qbe-emit.rb and
-# pathb-borrowck.rb) against a pinned
+# worlds under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own Ruby scripts, one
+# world each, see the matrix) against a pinned
 # rpg-maker-clone checkout (tests/bc2cpp/fetch.sh). Runs when bc2cpp, a world or the pin changes, and on demand.
 # It needs only the host compiler and Ruby 4.0, not the EDG toolchain.
 on:
@@ -72,7 +72,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [optcarrot, pathb_qbe_emit, pathb_borrowck]
+        world:
+          - optcarrot
+          - pathb_qbe_emit
+          - pathb_borrowck
+          - pathb_wgsl_emit
+          - pathb_spirv_kernel_emit
+          - pathb_spirv_emit
+          - pathb_wasm_emit
+          - pathb_ir_opt
+          - pathb_ssa
+          - pathb_ssa_structurize
+          - pathb_cil_emit
+          - qbe2cil
+          - cil_link
+          - llvm_to_pathb
+          - sycl_rewrite
+          - mrustc_prep
+          - cpp_feature_checklist
+          - cpp_feature_report
+          - strip_atomic
     steps:
       # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
       - uses: actions/checkout@v7
