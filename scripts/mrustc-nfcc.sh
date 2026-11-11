@@ -45,7 +45,7 @@ nfcxx_compile() {
   cc -E -P -D__CPROC__ "$c" > "$tmp/$name.pp.c"
   "$root/scripts/mrb" "$root/scripts/mrustc-prep.rb" "$tmp/$name.pp.c" "$tmp/$name.prep.c" "$tmp/$name.tail.s" "$tmp/$name.weak" \
     "$tmp/$name.asm.c"
-  NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -c "$tmp/$name.prep.c" -o "$dir/$name.o"
+  "$root/scripts/qbe-cc" --c-input -c "$tmp/$name.prep.c" -o "$dir/$name.o"
   if [ -s "$tmp/$name.weak" ]; then
     objcopy --weaken-symbols="$tmp/$name.weak" "$dir/$name.o" "$tmp/$name.weakened.o"
     mv "$tmp/$name.weakened.o" "$dir/$name.o"

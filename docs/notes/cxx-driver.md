@@ -24,9 +24,37 @@ below, on the gcc backend.
 | `-include FILE` | EDG's `--preinclude`: the header is found through the include paths and its macros are visible (Effekseer's `-include EGL/egl.h`) |
 | `-c` with `-MD`/`-MMD` and `-MF`/`-MT`/`-MQ`/`-MP` | the host preprocessor writes the dependency file (`-M`/`-MM`), as `nfcc` does; a dependency option without `-c` is refused |
 
-### Compile cache (`NFCXX_CACHE`)
+### Flags and environment variables
 
-Opt-in: with `NFCXX_CACHE=DIR`, a `-c` compile of one C++ source with `-o OBJ` is kept under `DIR/objects/<key>`, and an identical
+Options are flags; the environment variables are the fallback (a build system or script that cannot change a command line sets one
+once), and the flag wins when both are given. Tool and host locations stay variables, as `CC=` does.
+
+| Flag | Variable (fallback) | What it does |
+| --- | --- | --- |
+| `--backend=pathb\|qbe\|gcc` | `NFCXX_BACKEND`; `NFCXX_PATH=b` is `--backend=pathb` | the backend; `--backend=pathb` is Path B by name (no fallback to gcc) |
+| `--ir-opt=LIST` | `NFCXX_IR_OPT` | the Path B IR passes (`docs/notes/pathb-ir-passes.md`); `--ir-opt=off` turns the .cu device passes off |
+| `--eh-unwind`, `--no-eh-unwind` | `NFCXX_EH_UNWIND=1` | cleanups of unwound frames run in the system unwinder (gcc and qbe backends) |
+| `--no-eh-shim` | `NFCXX_EHSHIM=0` | link without the EH shim |
+| `--instantiate=used\|auto` | `NFCXX_INSTANTIATE` | where templates are instantiated |
+| `--cache=DIR`, `--cache-log=FILE` | `NFCXX_CACHE`, `NFCXX_CACHE_LOG` | the compile cache, below |
+| `--keep-intermediates` | `NFCXX_KEEP_INTERMEDIATES=1` | keep the temporary directory of a compile and link |
+| `--trace=FILE`, `--time-log=FILE` | `NFCXX_TRACE`, `NFCXX_TIME_LOG` | `docs/notes/tracing.md` |
+| `-fuse-ld=NAME` | `NFCXX_LD=NAME` | the linker (`ld.NAME` on PATH) |
+| `--promote-slots=on\|off`, `--unroll=on\|off`, `--struct-slots=on\|off` | `NFCXX_PROMOTE_SLOTS`, `NFCXX_UNROLL`, `NFCXX_STRUCT_SLOTS` (0 or 1) | optimizations of .cu device code (`docs/notes/gpu.md`) |
+| `--pathb-c=gcc` | `NFCXX_PATHB_C=gcc` | with Path B, the .c inputs go through `gcc-cc` |
+| `--dialect=`, `--obfuscate-kernels`, `--cuda-driver=`, `--module-dir=` | `NFCXX_DIALECT`, `NFCXX_OBFUSCATE_KERNELS`, `NFCXX_CUDA_DRIVER` | as before |
+
+Stay variables: `NFCXX_GCC`, `NFCXX_CC`, `NFCXX_CXX`, `NFCXX_COSMOCC`, `NFCXX_SYSTEM_PATHS`, `NFCXX_SYS_INCLUDES`, `NFCXX_K1OM_ROOT`,
+`NFCXX_MACOS_SYSROOT`, the CUDA tuning (`NFCXX_SM`, `NFCXX_CUDA_*`, `NFCXX_INLINE_DEVICE`, ...) and the SYCL build's (`NFCXX_SYCL_*`).
+Between our own scripts the settings are flags too: `scripts/pathb-cc` (`--asan`, `--safe-pointers`, `--sanitize=`, `--ir-opt=`,
+`--emitter=`, `--keep=`), `scripts/pathb-dump` (`--ir-loc`, `--ir-scopes`, `--borrow`, `--sanitize=`, `--overflow=`, `--cuda-device`),
+`scripts/pathb-ssa-build` (`--qbe=PATH`) and `scripts/qbe-cc` (`--c-input`, `--eh-unwind`, `-fsanitize=address`). The front end (`be/nfcxx_ir.c`)
+itself reads `NFCXX_IR_LOC`, `NFCXX_IR_SCOPES`, `NFCXX_IR_SANITIZE`, `NFCXX_PATHB_BORROW` and `NFCXX_PATHB_MODE` from its environment; `pathb-dump` sets
+them from its flags, so only that one script exports them.
+
+### Compile cache (`--cache=DIR`)
+
+Opt-in: with `--cache=DIR` (or `NFCXX_CACHE=DIR`; the flag wins), a `-c` compile of one C++ source with `-o OBJ` is kept under `DIR/objects/<key>`, and an identical
 compile later copies the object back with its `<stem>.ti` and `<stem>.ii` (the link reads those records beside the object). The key
 covers the command as given, the absolute output path (the prelinker records it in the `.ti`), the working directory, the source
 and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, the driver and `scripts/` (and `tools/weak-symbols`, `tools/qbe-prep`), the EDG and QBE binaries,
@@ -40,10 +68,10 @@ options and the toolkit version macros, the SM, `NFCXX_CUDA_JIT` and the module 
 (`cpfe`, `scripts/pathb-dump`, its base directory), `pathb-ptx-emit` and the ptxas version. A hit skips the device
 front end, the emitter and ptxas; the rewriter, the embed step and the host compile still run. On ggml-cuda (RTX 2060
 machine) mmvq.cu went from 249 s to 23 s (ptxas was 222 s of it), while binbcast.cu is almost all host compile: two of about
-350 s each (the second pass, for its kernel instances, runs with the cache off), and about 8 s of device stages. `NFCXX_CACHE_LOG` logs these lookups as `== F.cu device unit`. `tests/cuda/run.sh`
+350 s each (the second pass, for its kernel instances, runs with the cache off), and about 8 s of device stages. `--cache-log` logs these lookups as `== F.cu device unit`. `tests/cuda/run.sh`
 covers a miss, a hit whose program runs, and a changed kernel.
 
-With `NFCXX_CACHE_LOG=FILE` set as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The log variable is left out of the key, so logging never causes a miss.
+With `--cache-log=FILE` (or `NFCXX_CACHE_LOG=FILE`) as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The cache and log options (and `--time-log`, `--trace`) are left out of the key, so logging never causes a miss.
 
 Refused (eccp says `unknown option`): `-fno-rtti`, `-fno-exceptions`, and every other option not in the table, since
 each of them would change the meaning of the code or is not implemented.

@@ -2,29 +2,42 @@
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
 # Usage: nfcxx [--emit-c] [--backend=qbe|gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
+# Options are flags; most also have an NFCXX_* environment variable (listed with each), the fallback for build systems and
+# scripts that cannot change a command line. When both are given the flag wins. Tool and host locations stay environment
+# variables, as CC= does: NFCXX_GCC, NFCXX_CC, NFCXX_CXX, NFCXX_COSMOCC, NFCXX_SYSTEM_PATHS, NFCXX_SYS_INCLUDES,
+# NFCXX_K1OM_ROOT, NFCXX_MACOS_SYSROOT, and the CUDA tuning variables (NFCXX_SM, NFCXX_CUDA_*, docs/notes/gpu.md).
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
 #   pathb (default on x86-64 Linux, unless ASan, freestanding, modules, cosmo, --emit-c, --target, -E, -M or -shared is
-#                  asked for; also NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
+#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
 #   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
+#   --ir-opt=LIST (NFCXX_IR_OPT): the Path B IR passes (docs/notes/pathb-ir-passes.md), a comma-separated list or none. Off by
+#                  default for host code; a .cu file's device code runs inline,sroa unless it is set (--ir-opt=off turns them off).
+#   --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (gcc and qbe
+#                  backends; docs/notes/eh-shim.md). --no-eh-unwind undoes it. --no-eh-shim (NFCXX_EHSHIM=0) links without the EH shim.
+#   --instantiate=used|auto (NFCXX_INSTANTIATE): templates are instantiated in each unit that uses them (default) or by EDG's
+#                  prelinker at link time (docs/notes/cxx-driver.md).
+#   --promote-slots=on|off, --unroll=on|off, --struct-slots=on|off (NFCXX_PROMOTE_SLOTS, NFCXX_UNROLL, NFCXX_STRUCT_SLOTS = 0|1):
+#                  the optimizations of a .cu file's device code (docs/notes/gpu.md); on by default.
+#   --pathb-c=gcc (NFCXX_PATHB_C=gcc): with Path B, the .c inputs go through gcc-cc instead of Path B's C front end.
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
 #   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
 #                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
 #   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.sh) translates it to C++ first.
 #                  docs/notes/cpp2.md.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
-#   NFCXX_TIME_LOG=FILE: appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
+#   --time-log=FILE (NFCXX_TIME_LOG=FILE): appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
 #                  of a parallel build can share it (sort -rn FILE ranks them). A .cu file's stages are the rewriter's two
 #                  passes, the device front end, the PTX emitter, ptxas, the embed step and the host compile (eccp).
 #   --module-dir=DIR: where C++ module interface files (NAME.eifc) are written and read; the default is the directory of -o.
 #                  A program with `export module` or `import` is built one source at a time (docs/notes/modules.md).
 #   NFCXX_CUDA_HOST_SYMBOLS=FILE: internal (the second pass of a .cu compile, see "Kernel instances from the host
 #                  compile" below): the demangled symbols of the first pass's output, for the device rewrite.
-#   NFCXX_KEEP_INTERMEDIATES=1: a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
+#   --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1): a compile and link keeps its intermediates (the .o files, <stem>.ii, <stem>.ti) in the
 #                  temporary directory the driver names on stderr, instead of removing it on exit. A -c compile keeps
 #                  <stem>.ii and <stem>.ti beside its object in any case: the link that follows reads them there.
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
@@ -36,15 +49,16 @@
 #                  CUDA driver API through libcudart instead (default auto; scripts/cuda-driver-wrap.sh,
 #                  docs/notes/cuda-driver.md); NFCXX_CUDA_DRIVER= for every command.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
-#   NFCXX_LD=NAME: link with -fuse-ld=NAME (mold, lld, gold, bfd; needs ld.NAME on PATH). Default: the system linker.
-#   NFCXX_CACHE=DIR: keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
+#   -fuse-ld=NAME (NFCXX_LD=NAME): link with that linker (mold, lld, gold, bfd; needs ld.NAME on PATH). Default: the system linker.
+#   --cache=DIR (NFCXX_CACHE=DIR): keeps each -c compile in DIR and takes it back when nothing it depends on changed (docs/notes/cxx-driver.md).
 #                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
 #                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
-#   NFCXX_CACHE_LOG=FILE: with NFCXX_CACHE, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
-#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
-#                  backends instrument the code; Path B (the default backend) calls libasan's checks before each access
-#                  through a computed address (docs/notes/asan-plan.md); --backend=qbe or gcc selects the others. docs/notes/asan.md. -fno-sanitize=address undoes it;
-#                  other -fsanitize= values are refused.
+#   --cache-log=FILE (NFCXX_CACHE_LOG=FILE): with --cache, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
+#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
+#                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
+#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe selects
+#                  cproc's instrumentation. docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
+#                  refused (-fsanitize=undefined and its checks are the UBSan option above).
 #   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
 #                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
 #                  freed or returned-from object cannot be used; a failure prints "file:line: safety error: ..." and
@@ -100,6 +114,22 @@ cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
 dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
+# Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
+path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
+ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
+eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
+eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
+cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
+keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
+time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
+instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
+promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots=${NFCXX_STRUCT_SLOTS:-1}   # --promote-slots= ...
+ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
+pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
+pb_flags=()   # the options scripts/pathb-cc gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
+onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
+  case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
+}
 # CUDA kernel names are obfuscated (docs/notes/gpu.md, "Kernel name obfuscation"): --obfuscate-kernels, or NFCXX_OBFUSCATE_KERNELS=1
 # in the environment (which reaches a CMake build through nfcxx-cuda without any change to its command line).
 obfuscate=0; case ${NFCXX_OBFUSCATE_KERNELS:-0} in 0|"") ;; *) obfuscate=1 ;; esac
@@ -119,12 +149,12 @@ cudatmp=""
 # images. A file with no kernel gets no device image.
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
 cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when it is set (a diagnostic; no effect on the key).
+cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when --cache-log (NFCXX_CACHE_LOG) is set (a diagnostic; no effect on the key).
   # Parallel compiles share the file, so each append takes a lock (mkdir, which is portable) and is a single printf.
-  [ -n "${NFCXX_CACHE_LOG:-}" ] || return 0
-  while ! mkdir "$NFCXX_CACHE_LOG.lock" 2>/dev/null; do sleep 0.05; done
-  printf '%s\n' "$*" >> "$NFCXX_CACHE_LOG"
-  rmdir "$NFCXX_CACHE_LOG.lock"
+  [ -n "$cache_log_file" ] || return 0
+  while ! mkdir "$cache_log_file.lock" 2>/dev/null; do sleep 0.05; done
+  printf '%s\n' "$*" >> "$cache_log_file"
+  rmdir "$cache_log_file.lock"
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
@@ -269,13 +299,13 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   local groups=${cu_keep:-$cudatmp}/$base.groups ext=cubin
   [ "${NFCXX_CUDA_JIT:-0}" != 1 ] || ext=ptx
   rm -rf "$groups"
-  # The device image cache (with NFCXX_CACHE): the front end, the emitter and ptxas depend only on the device unit and
+  # The device image cache (with --cache): the front end, the emitter and ptxas depend only on the device unit and
   # its kernel list, the options below and the tools, so a device unit seen before takes its IR and groups from the
   # cache. The rewriter runs every time (its output is the key).
   local dkey="" dent=""
-  if [ -n "${NFCXX_CACHE:-}" ]; then
+  if [ -n "$cache_dir" ]; then
     dkey=$(cu_device_key "$dev" "$sm" "$ptxas" "$ext" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"})
-    dent=$NFCXX_CACHE/cu-device/$dkey
+    dent=$cache_dir/cu-device/$dkey
   fi
   if [ -n "$dent" ] && [ -f "$dent/ir" ]; then
     cp "$dent/ir" "$dev.ir"; cp -R "$dent/groups" "$groups"
@@ -293,14 +323,15 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
   "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
   trace_end "$t" "pathb-ptx-emit --embed: $base.cu" cuda
 }
-ir_opt_device() {  # ir_opt_device IR: the IR passes of NFCXX_IR_OPT on the device IR in place (default inline,sroa; off turns them off)
-  local ir=$1 v=${NFCXX_IR_OPT-inline,sroa} p
+ir_opt_device() {  # ir_opt_device IR: the IR passes of --ir-opt on the device IR in place (default inline,sroa; off turns them off)
+  local ir=$1 v=inline,sroa p
+  [ $ir_opt_set = 0 ] || v=$ir_opt
   if [ "$v" = off ] || [ -z "$v" ]; then return 0; fi
   local o=(); for p in ${v//,/ }; do o+=("--$p"); done
   # NFCXX_KEEP_DEVICE_IR=PATH: the device IR before the passes is copied to PATH.pre, after them to PATH.post
   if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.pre"; fi
   "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" "${o[@]}" "$ir" > "$ir.opt" && mv "$ir.opt" "$ir" \
-    || { echo "nfcxx: the IR passes failed on $ir (NFCXX_IR_OPT=off turns them off)" >&2; exit 2; }
+    || { echo "nfcxx: the IR passes failed on $ir (--ir-opt=off turns them off)" >&2; exit 2; }
   if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.post"; fi
   return 0
 }
@@ -315,7 +346,7 @@ cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFC
   arch=$(amdgpu_arch) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)" >&2; exit 2; }
   clang=$(amdgpu_clang) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)" >&2; exit 2; }
   ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  "$root/scripts/pathb-dump" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   ir_opt_device "$dev.ir"
   local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
@@ -329,10 +360,10 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
     printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
     printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-1000000}"
     printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-1}"
-    printf 'promote %s\n' "${NFCXX_PROMOTE_SLOTS:-1}"
-    printf 'unroll %s\n' "${NFCXX_UNROLL:-1}"
-    printf 'struct-slots %s\n' "${NFCXX_STRUCT_SLOTS:-1}"
-    printf 'ir-opt %s\n' "${NFCXX_IR_OPT-inline,sroa}"; cache_sha < "$root/scripts/pathb-ir-opt.rb"
+    printf 'promote %s\n' "$promote_slots"
+    printf 'unroll %s\n' "$unroll"
+    printf 'struct-slots %s\n' "$struct_slots"
+    if [ $ir_opt_set = 1 ]; then printf 'ir-opt %s\n' "$ir_opt"; else printf 'ir-opt inline,sroa\n'; fi; cache_sha < "$root/scripts/pathb-ir-opt.rb"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
     cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
     for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
@@ -345,7 +376,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
 cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DEV.ir and the module images in GROUPS
   local src=$1 dev=$2 groups=$3 sm=$4 ptxas=$5 ext=$6 t k; shift 6
   t=$(trace_start)
-  NFCXX_PATHB_CUDA=1 "$root/scripts/pathb-dump" "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  "$root/scripts/pathb-dump" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   ir_opt_device "$dev.ir"
   trace_end "$t" "pathb-dump --ir (device front end): $(basename "$src")" cuda
@@ -359,12 +390,12 @@ cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DE
   # The device functions a kernel calls are compiled into it (pathb-ptx-emit's default); NFCXX_INLINE_DEVICE=0 keeps the calls.
   local inl=()
   if [ "${NFCXX_INLINE_DEVICE:-1}" = 0 ]; then inl=(--inline=off); fi
-  # The scalar frame slots live in registers (pathb-ptx-emit's default); NFCXX_PROMOTE_SLOTS=0 keeps them in the frame.
-  if [ "${NFCXX_PROMOTE_SLOTS:-1}" = 0 ]; then inl+=(--promote=off); fi
-  # A loop that `#pragma unroll` marks with a constant trip count is unrolled (pathb-ptx-emit's default); NFCXX_UNROLL=0 keeps it a loop.
-  if [ "${NFCXX_UNROLL:-1}" = 0 ]; then inl+=(--unroll=off); fi
-  # The struct locals whose fields are registers (pathb-ptx-emit's default); NFCXX_STRUCT_SLOTS=0 keeps them in memory.
-  if [ "${NFCXX_STRUCT_SLOTS:-1}" = 0 ]; then inl+=(--struct-slots=off); fi
+  # The scalar frame slots live in registers (pathb-ptx-emit's default); --promote-slots=off keeps them in the frame.
+  if [ "$promote_slots" = 0 ]; then inl+=(--promote=off); fi
+  # A loop that `#pragma unroll` marks with a constant trip count is unrolled (pathb-ptx-emit's default); --unroll=off keeps it a loop.
+  if [ "$unroll" = 0 ]; then inl+=(--unroll=off); fi
+  # The struct locals whose fields are registers (pathb-ptx-emit's default); --struct-slots=off keeps them in memory.
+  if [ "$struct_slots" = 0 ]; then inl+=(--struct-slots=off); fi
   "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu ${inl[@]+"${inl[@]}"} --groups-dir="$groups" \
     --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-1000000} \
     ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
@@ -416,7 +447,7 @@ ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when ecc
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
-  if [ -n "$eccp_dir" ] && [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ]; then rm -rf "$eccp_dir"; fi
+  if [ -n "$eccp_dir" ] && [ $keep_intermediates = 0 ]; then rm -rf "$eccp_dir"; fi
   if [ -n "${cudatmp:-}" ]; then rm -rf "$cudatmp"; fi
   if [ -n "${ctmp:-}" ]; then rm -rf "$ctmp"; fi
   trace_finish
@@ -497,7 +528,21 @@ while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
     --emit-hip) emit_hip=1 ;;   # the .cu input as HIP source on stdout (docs/notes/gpu.md, "CUDA source to HIP")
-    --backend=*) backend=${1#--backend=}; backend_explicit=1 ;;
+    --backend=*) backend=${1#--backend=}; backend_explicit=1; [ "$backend" != pathb ] || path_b=1 ;;
+    --ir-opt=*) ir_opt=${1#--ir-opt=}; ir_opt_set=1 ;;
+    --eh-unwind) eh_unwind_on=1 ;;
+    --no-eh-unwind) eh_unwind_on=0 ;;
+    --no-eh-shim) eh_shim_on=0 ;;
+    --cache=*) cache_dir=${1#--cache=} ;;
+    --cache-log=*) cache_log_file=${1#--cache-log=} ;;
+    --keep-intermediates) keep_intermediates=1 ;;
+    --time-log=*) time_log=${1#--time-log=} ;;
+    --instantiate=*) instantiate=${1#--instantiate=} ;;
+    --promote-slots=*) promote_slots=$(onoff --promote-slots "${1#*=}") ;;
+    --unroll=*) unroll=$(onoff --unroll "${1#*=}") ;;
+    --struct-slots=*) struct_slots=$(onoff --struct-slots "${1#*=}") ;;
+    --pathb-c=*) pathb_c=${1#--pathb-c=} ;;
+    -fuse-ld=*) if command -v "ld.${1#-fuse-ld=}" >/dev/null 2>&1; then ld_name=${1#-fuse-ld=}; else files+=("$1"); fi ;;
     --obfuscate-kernels) obfuscate=1 ;;
     -fsanitize=address) asan=1 ;;
     -fsafe-pointers) safeptr=1 ;;
@@ -616,6 +661,9 @@ fi
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
 trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too
+# The time log is read by every script that sources scripts/trace.sh (the qbe-cc that eccp runs, ...): the one setting that is
+# handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
+[ -z "$time_log" ] || export NFCXX_TIME_LOG=$(abs_path "$time_log")
 [ -z "$trace" ] || trace_begin "$trace"
 cu_prepare
 cpp2_prepare
@@ -675,13 +723,13 @@ if [ -z "$backend" ]; then
 fi
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
-# branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B calls libasan's checks before each access
-# (NFCXX_PATHB_ASAN, set below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
+# branch nfcxx-asan-combined, the pin of 3rd/cproc; qbe-cc reads the -fsanitize=address it is given). Both link libasan. Path B calls
+# libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
     gcc) ;;
-    qbe) [ "${NFCXX_PATH:-}" = b ] || export NFCXX_ASAN=1 ;;
+    qbe) ;;   # qbe-cc is given -fsanitize=address (asan_c below)
     pathb) ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
@@ -706,29 +754,29 @@ source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shar
 extra=()
 sys_inc=()
 hosted_libs=()
-# Template instantiation. Default (NFCXX_INSTANTIATE=used): each unit instantiates the templates it uses, as g++ does,
+# Template instantiation. Default (--instantiate=used, or NFCXX_INSTANTIATE): each unit instantiates the templates it uses, as g++ does,
 # so the link recompiles nothing (libggml-sycl: 8 minutes in all, a 3 s link). The C output has the instances as weak
 # symbols in one .text, not as COMDAT groups, so the link would keep every unit's copy (libggml-sycl: 77 MB of code): each
 # function and object gets its own section, and the link drops the sections nothing reaches (--gc-sections), among them
-# the copies the link did not choose (24 MB). NFCXX_INSTANTIATE=auto: EDG's automatic instantiation, where the prelinker
+# the copies the link did not choose (24 MB). --instantiate=auto: EDG's automatic instantiation, where the prelinker
 # assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
 # 98 passes, a 33-minute link; 59 MB of code).
 inst_opts=()
-case ${NFCXX_INSTANTIATE:-used} in
+case $instantiate in
   auto) ;;
   used)
     inst_opts=(--no_auto_instantiation -tused)
     # Mach-O: ld64 coalesces the weak definitions itself (and takes no --gc-sections)
     [ "$(uname -s)" = Darwin ] || inst_opts+=(--c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
                                               --c_to_obj_option -Wl,--gc-sections) ;;
-  *) echo "nfcxx: NFCXX_INSTANTIATE is auto or used (got $NFCXX_INSTANTIATE)" >&2; exit 2 ;;
+  *) echo "nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got $instantiate)" >&2; exit 2 ;;
 esac
 # --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
-# its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with NFCXX_PATH=b.
+# its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
 if [ $cosmo = 1 ]; then
-  [ "${NFCXX_PATH:-}" != b ] || backend=pathb
+  [ $path_b = 0 ] || backend=pathb
   if [ $backend != pathb ]; then
-    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or NFCXX_PATH=b" >&2; exit 2; }
+    [ $backend_explicit = 0 ] || [ $backend = gcc ] || { echo "nfcxx: --cosmo needs --backend=gcc or --backend=pathb" >&2; exit 2; }
     backend=gcc
   fi
   cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
@@ -771,7 +819,7 @@ done
 # Path B hosted on macOS (the SDK's libc++): its __config evaluates __has_feature and friends in #if, which EDG's g++
 # mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
 # and its own feature checks.
-[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h")
+[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
 gnu_opts=()
 if [ "$dialect" = clang ]; then
   cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
@@ -836,27 +884,34 @@ if [ -n "$sanitize" ]; then
     esac
   done
   [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  export NFCXX_IR_SANITIZE=$sanitize
+  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc: the front end's checks (NFCXX_IR_SANITIZE)
   backend=pathb
 fi
 if [ $safeptr = 1 ]; then
   # The checks are emitted from the Path B IR (docs/notes/safe-pointers.md), and the runtime replaces malloc and free.
   [ $freestanding = 0 ] || { echo "nfcxx: -fsafe-pointers needs Path B, which compiles hosted programs only" >&2; exit 2; }
   [ $asan = 0 ] || { echo "nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one" >&2; exit 2; }
-  export NFCXX_SAFE_POINTERS=1
+  pb_flags+=(--safe-pointers)
   backend=pathb
 fi
-# NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot build is an error, not a
-# fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
-[ "${NFCXX_PATH:-}" != b ] || { backend=pathb; default_backend=0; }
+# --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
+# build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
+[ $path_b = 0 ] || { backend=pathb; default_backend=0; }
 [ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
-[ $asan = 0 ] || [ $backend != pathb ] || export NFCXX_PATHB_ASAN=1   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
+[ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
+[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
+# The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
+qbecc_flags=()
+if [ $backend = qbe ]; then
+  [ $asan = 0 ] || qbecc_flags+=(-fsanitize=address)
+  [ $eh_unwind_on = 0 ] || qbecc_flags+=(--eh-unwind)
+fi
 case $backend in
-  pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
+  pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (--backend=pathb) compiles hosted programs only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc   # for the .c inputs
-       # NFCXX_PATHB_C=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
-       [ "${NFCXX_PATHB_C:-}" != gcc ] || export NFCXX_CC=$root/scripts/gcc-cc ;;
+       # --pathb-c=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
+       [ "$pathb_c" != gcc ] || export NFCXX_CC=$root/scripts/gcc-cc ;;
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
@@ -865,7 +920,7 @@ esac
 
 # Hosted link (not -c, -shared or --freestanding): two additions to what eccp links.
 #  - the EH shim (lib/ehshim, docs/notes/eh-shim.md): exceptions thrown by libstdc++.so and std::exception_ptr on EDG's
-#    exception runtime; NFCXX_EHSHIM=0 leaves it out;
+#    exception runtime; --no-eh-shim (NFCXX_EHSHIM=0) leaves it out;
 #  - libC.a (EDG's runtime) ahead of libstdc++, as Path B links it: eccp puts -lC last, after -lstdc++, so `operator new`
 #    came from libstdc++.so and threw a gcc-ABI std::bad_alloc that EDG's handlers cannot catch.
 # With -fsanitize=address, the C++ VLA runtime (lib/asan/nfcxx_vla_asan.c, docs/notes/asan.md) goes ahead of libC.a: it
@@ -873,7 +928,7 @@ esac
 shim=(); rtlib=(); vlart=()
 if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
   t=$(trace_start)
-  s=$("$root/scripts/ehshim") || s=""
+  s=""; [ $eh_shim_on = 0 ] || s=$("$root/scripts/ehshim") || s=""
   trace_end "$t" "EH shim" driver
   # cosmo: the shim interoperates with libstdc++.so (its type_info vtables and __cxa layout); cosmo links libc++ only
   [ $cosmo = 1 ] || { [ -z "$s" ] || shim=("$s"); }
@@ -906,12 +961,13 @@ fi
 picopts+=(${pie_opts[@]+${pie_opts[@]+"${pie_opts[@]}"}})
 for o in ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}}; do picopts+=(--c_to_obj_option "$o"); done
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
-# NFCXX_LD=NAME: the linker gcc runs, as -fuse-ld=NAME (mold, lld, gold, bfd; ld.NAME must be on PATH). The C++ link gets
-# it through eccp's link options, as the -Wl options do.
-if [ -n "${NFCXX_LD:-}" ]; then
-  command -v "ld.$NFCXX_LD" >/dev/null || { echo "nfcxx: NFCXX_LD=$NFCXX_LD: ld.$NFCXX_LD is not on PATH" >&2; exit 2; }
-  ldopts+=("-fuse-ld=$NFCXX_LD"); picopts+=(--c_to_obj_option "-fuse-ld=$NFCXX_LD")
+# -fuse-ld=NAME, or NFCXX_LD=NAME: the linker gcc runs (mold, lld, gold, bfd; ld.NAME must be on PATH). The C++ link gets
+# it through eccp's link options, as the -Wl options do. The qbe backend's C compiler gets its options here too.
+if [ -n "$ld_name" ]; then
+  command -v "ld.$ld_name" >/dev/null || { echo "nfcxx: NFCXX_LD=$ld_name: ld.$ld_name is not on PATH" >&2; exit 2; }
+  ldopts+=("-fuse-ld=$ld_name"); picopts+=(--c_to_obj_option "-fuse-ld=$ld_name")
 fi
+for o in ${qbecc_flags[@]+"${qbecc_flags[@]}"}; do case $o in -fsanitize=address) ;; *) picopts+=(--c_to_obj_option "$o") ;; esac; done
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
@@ -924,7 +980,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend = pathb ]; then
       # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route), not cproc.
       prc=0
-      "$root/scripts/pathb-cc" -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
+      "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
       if [ $prc != 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
@@ -934,7 +990,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
       fi
     elif [ $backend != gcc ]; then
-      NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
+      "$NFCXX_CC" --c-input ${qbecc_flags[@]+"${qbecc_flags[@]}"} -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     fi
@@ -958,7 +1014,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
       cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm -latomic
-    elif [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
+    elif [ $backend != gcc ]; then "$NFCXX_CC" ${qbecc_flags[@]+"${qbecc_flags[@]}"} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -975,7 +1031,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -996,7 +1052,7 @@ if [ $backend = pathb ]; then
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
          prc=0
-         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
+         "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
@@ -1041,14 +1097,14 @@ eflist=(); userinc=(); no_as_needed=0; as_needed=0
 # -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
 keep_static=(--c_to_obj_option -fkeep-static-functions)
 "${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
-# NFCXX_EH_UNWIND=1: a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's --nfcxx_eh_unwind;
+# --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's --nfcxx_eh_unwind;
 # lib_src/throw.c). gcc: the frames need unwind tables (-fexceptions) and the declarations of
 # lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first. qbe: cproc lowers the cleanups to landing pads (qbe.c,
 # ehcleanupobj); the unwinder flag comes from the link (scripts/qbe-cc).
 eh_unwind=(${eh_tls[@]+"${eh_tls[@]}"})
-if [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = gcc ]; then
+if [ $eh_unwind_on = 1 ] && [ "$backend" = gcc ]; then
   eh_unwind+=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
-elif [ "${NFCXX_EH_UNWIND:-}" = 1 ] && [ "$backend" = qbe ]; then
+elif [ $eh_unwind_on = 1 ] && [ "$backend" = qbe ]; then
   eh_unwind+=(--nfcxx_eh_unwind)
 fi
 for f in ${files[@]+${files[@]+"${files[@]}"}}; do
@@ -1122,21 +1178,22 @@ link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of 
 # to more than one file"), so these records are removed before the link and again once it succeeds (set -e: a failed link
 # exits before the second removal).
 link_records_rm
-# Compile cache (opt-in: NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
+# Compile cache (opt-in: --cache=DIR, or NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
 # everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
 # object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
 # the driver and its scripts, the EDG and QBE binaries, and the host compilers. A hit copies the object back with its
 # <stem>.ti and <stem>.ii, which the link reads beside it. Not cached: .cu (its device images are, in cu_rewrite), C and
 # -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
 # spaces in the header list is not handled.
-cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With NFCXX_CACHE_LOG
+cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With --cache-log
   # the whole lookup is logged in one write: the output, the key inputs, the key, and hit or miss.
   local src=$1 out=$2 deps f pre=() inputs key state
   for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
   deps=$("${NFCXX_CXX:-g++}" -M "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} "$src" 2>/dev/null) || return 1
   deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
   inputs=$({
-    printf 'nfcxx-cache-1\nargv:'; printf ' %q' "${nfcxx_argv[@]}"; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
+    # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
+    printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
     # The logs and the trace are diagnostics: they must not change the key.
     (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
     cache_sha < "$root/nfcxx"
@@ -1153,15 +1210,18 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
   })
   key=$(printf '%s\n' "$inputs" | cache_sha | cut -c1-40)
-  state=miss; [ ! -f "$NFCXX_CACHE/objects/$key/obj" ] || state=hit
+  state=miss; [ ! -f "$cache_dir/objects/$key/obj" ] || state=hit
   cache_log "== $out ($src)"$'\n'"$inputs"$'\n'"key $key"$'\n'"$state"
   printf '%s\n' "$key"
 }
 cache_entry=""
-if [ -n "${NFCXX_CACHE:-}" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
+key_argv=(); for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
+  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
+done
+if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
    && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
   if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
-    cache_entry=$NFCXX_CACHE/objects/$key
+    cache_entry=$cache_dir/objects/$key
     if [ -f "$cache_entry/obj" ]; then
       rm -f "${out%.*}.ti" "${out%.*}.ii"
       cp "$cache_entry/obj" "$out"
@@ -1174,7 +1234,7 @@ fi
 eccp_bin=$(ecp_arg "$edg/eccp"); eccp_out=$(ecp_arg "$out")
 if [ $moves = 1 ]; then
   eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
-  [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || echo "nfcxx: intermediates kept in $eccp_dir (NFCXX_KEEP_INTERMEDIATES=1)" >&2
+  [ $keep_intermediates = 0 ] || echo "nfcxx: intermediates kept in $eccp_dir (--keep-intermediates)" >&2
 fi
 t=$(trace_start)
 (
@@ -1213,7 +1273,9 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
   done < "$cudatmp/$(basename "${cu_inputs[0]}" .cu).dev.kernels.unresolved"
   if [ $found = 1 ]; then
     t=$(trace_start)
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= "$root/nfcxx" "${args0[@]}" || exit $?
+    # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
+    args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
+    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi

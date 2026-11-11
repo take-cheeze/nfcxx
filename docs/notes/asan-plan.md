@@ -33,13 +33,13 @@ Options considered:
 | C. A QBE pass after `promote`/`ssa` | Fewer redundant checks and also covers Path B output, but loses C types, volatile and line info, and needs blit expansion and abi0 handling. Revisit for check elimination. |
 
 Milestones:
-1. Done: `NFCXX_ASAN=1` selects the instrumentation; `scripts/qbe-cc` links with `-fsanitize=address` under it.
+1. Done: `-fsanitize=address` selects the instrumentation (`scripts/qbe-cc` reads it; `NFCXX_ASAN=1` is the fallback); `qbe-cc` links with libasan under it.
 2. Done (`funcinst`): a check before every load and store, the chunks of a block copy (`funccopy`) included. No exemptions
    were needed: the `va_arg` save area is ordinary stack memory, and the scalar `IVAARG` instruction is not checked. Tests:
    heap overflow, use after free, double free.
 3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at the declaration, unpoisons in `funcret`. alloca, C-input VLA and over-aligned objects too (`asandynalloc` and the over-aligned branch of `asanalloc`).
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
-5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
+5. Source lines (done): `qbe-cc` keeps the line markers under `-fsanitize=address`, cproc emits `dbgloc` and `dbgfile`.
 6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
    objects are poisoned with `__asan_poison_stack_memory` when the block is left (normal end, break, continue, goto, and
    the jumps EDG lowers from C++ break, continue and switch) and unpoisoned by their declaration or by a jump into the
@@ -67,7 +67,7 @@ All accesses are explicit IR (`load`, `store`, `bfload`/`bfstore`, `copy`, `zero
 interposers. Volatile accesses (`vhelper`, 1445) are the existing "access becomes a call" example.
 
 Milestones:
-1. Done: `NFCXX_PATHB_ASAN=1`: `__asan_load/storeN` before each load, store, bit-field, copy and zero-fill; the link adds libasan and the VLA
+1. Done: `pathb-cc --asan` (`NFCXX_PATHB_ASAN=1`): `__asan_load/storeN` before each load, store, bit-field, copy and zero-fill; the link adds libasan and the VLA
    runtime. Tests: `ASAN_BACKEND=pathb tests/asan/run.sh` (heap overflow, use after free, double free, mismatch, leak, vector, VLA
    overflow; the rest is listed in `tests/asan/pathb-pending.txt`). A VLA's `(bounds ...)` trap is dropped under the flag so libasan
    reports it; a constant bound still traps until M2 and M3.

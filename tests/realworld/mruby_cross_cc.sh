@@ -32,7 +32,7 @@ if [ "$mode" = preprocess ]; then
   cc -E ${fl[@]+"${fl[@]}"} "$src" -o "$out"
 elif [ "$mode" = compile ]; then
   [ -n "$src" ] && [ -n "$out" ] || { echo "mruby_cross_cc: compile needs a .c input and -o" >&2; exit 2; }
-  NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -S "$src" -o "$tmp/x.s" ${fl[@]+"${fl[@]}"} >/dev/null
+  "$root/scripts/qbe-cc" --c-input -S "$src" -o "$tmp/x.s" ${fl[@]+"${fl[@]}"} >/dev/null
   llvm-mc -triple=arm64-apple-darwin -filetype=obj "$tmp/x.s" -o "$out"
 else
   [ -n "$out" ] || { echo "mruby_cross_cc: link needs -o" >&2; exit 2; }
