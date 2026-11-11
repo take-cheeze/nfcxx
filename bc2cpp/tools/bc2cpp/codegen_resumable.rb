@@ -974,6 +974,9 @@ class CodeGen
 
   def resumable_drive_loop_cpp(step_name)
     <<~CPP.gsub(/^(?=.)/, '  ')
+      // However the loop ends (a return, or an unwind such as the return token of Enumerable#all?), the caller's frame-local
+      // block goes out of scope: the frame must not keep it. (A frame that parks in a Fiber returns above this point.)
+      Bc2cppResumeRelease bc2cpp_release = { M, &frame };
       for (;;) {
         mrb_value result = #{step_name}(M, self, frame, resume);
         if (!bc2cpp_resume_frame_p(M, result)) return result;
@@ -1756,6 +1759,26 @@ class CodeGen
     static bool bc2cpp_resume_frame_p(mrb_state* M, mrb_value v) {
       return mrb_data_p(v) && DATA_TYPE(v) == &bc2cpp_resume_frame_type;
     }
+    // A finished frame stays reachable (the arena holds it until its caller restores), so the collector can still mark its
+    // registers. The entry copied the caller's block into some of them, and a frame-local block (a Bc2cppBlock, red) is
+    // gone with the caller's scope: drop those references, or mrb_gc_mark would read the dead frame.
+    static void bc2cpp_resume_frame_release(mrb_state* M, mrb_value frame) {
+      if (!bc2cpp_resume_frame_p(M, frame)) return;
+      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)DATA_PTR(frame);
+      if (!f) return;
+      // The register array is longer than nregs (the block's slot and the cells follow the registers): all of it is marked.
+      struct RArray* regs = mrb_ary_ptr(f->regs_ary);
+      for (mrb_int i = 0; i < ARY_LEN(regs); ++i) {
+        mrb_value v = ARY_PTR(regs)[i];
+        if (mrb_type(v) == MRB_TT_PROC && mrb_basic_ptr(v)->gc_color == MRB_GC_RED) ARY_PTR(regs)[i] = mrb_nil_value();
+      }
+      if (mrb_type(f->block) == MRB_TT_PROC && mrb_basic_ptr(f->block)->gc_color == MRB_GC_RED) f->block = mrb_nil_value();
+    }
+    struct Bc2cppResumeRelease {
+      mrb_state* M;
+      mrb_value* frame;
+      ~Bc2cppResumeRelease() { bc2cpp_resume_frame_release(M, *frame); }
+    };
     [[noreturn]] static void bc2cpp_resume_bad_state(mrb_state* M) {
       mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: resumable frame resumed in an unknown state");
     }
