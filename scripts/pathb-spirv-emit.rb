@@ -1208,7 +1208,6 @@ class SFn
       off += size
     end
     @frame = (off + 15) / 16 * 16
-    $stderr.write("frame #{@name} #{@frame} #{slots.map { |f| f[1].to_s }.join(' ')[0, 120]}\n") if ENV["NFCXX_EMIT_FRAMES"]
     @callees = collect_calls(@form, []).select { |c| @mod.defs.key?(c) }.uniq
   end
 
