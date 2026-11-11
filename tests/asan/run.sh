@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AddressSanitizer (nfcxx -fsanitize=address; docs/notes/asan.md, asan-plan.md). The backend is $ASAN_BACKEND (gcc, the
-# default; qbe: cproc's checks of every load and store; pathb: the SSA emitter's __asan_load/store calls and stack redzones, milestones 1 to 4 and 6 of the plan,
+# default; qbe: cproc's checks of every load and store; pathb: the SSA emitter's __asan_load/store calls and stack redzones, milestones 1 to 4, 6 and use after return of the plan,
 # and tests/asan/pathb-pending.txt names the cases the later milestones add). Other sanitizers are refused.
 #
 #   tests/asan/cases/*.cpp  with a `// ASAN: text` line (`// ASAN-QBE: text` replaces it on qbe): the program must be killed by asan (exit 1 from the runtime's
