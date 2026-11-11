@@ -176,8 +176,7 @@ module CoreExactDirect
     owners = to_enum_owner_call_owners
     body = if owners
              "  mrb_value obj = bc2cpp_direct_alloc(M, mrb_class_get(M, \"Enumerator\"));\n" \
-               "  (void)bc2cpp_owner_call_argv_named(M, obj, \"initialize\", 0, BC2CPP_OWNERS(#{owner_call_owner_list(owners)}), " \
-               "mrb_nil_value(), argc, argv);\n" \
+               "  mrb_obj_init(M, obj, argc, argv, mrb_nil_value());\n" \
                "  return obj;\n"
            else
              "  return mrb_obj_new(M, mrb_class_get(M, \"Enumerator\"), argc, argv);\n"
