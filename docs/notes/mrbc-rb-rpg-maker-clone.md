@@ -48,6 +48,12 @@ dump, then the disassembly with the addresses of the irep structs: neither is re
 byte for byte), `--no-ext-ops`, `--no-optimize`, stdin, a syntax error (mrbc words its own) and a construct the emitter
 does not cover.
 
+`codedump.rb` is a Ruby port of `src/codedump.c` (the listing `mrbc -v` prints after the AST dump): every instruction of
+every irep, local variable names, catch tables, `OP_EXT1..3`, `mrb_sym_dump` quoting. `codedump_test.rb` checks it against
+`mrbc -v` (from its first `irep` line on, addresses of the irep structs replaced) on all 739 inputs plus hand-made catch /
+OP_EXT / literal cases: identical. The command line exposes it as `--disasm` (an addition; `-v` itself stays with the C mrbc
+because of the AST dump).
+
 ### The file name symbol ids of `-g -S` (`file_syms.rb`)
 
 `-g -S` writes, per irep, the symbol id of the file name, which is the id the name got in the C mrbc's symbol table. mrbc
@@ -96,7 +102,7 @@ The build_config change (host build) is in the patch below, opt-in with `MRUBY_M
   `MRUBY_MRBC_RB=1` the host build's `mrbcfile` is the script, so `task host_mrbc` (it depends on `MRuby.targets['host'].mrbcfile`) no
   longer builds a binary: point it at `exefile("#{build_dir}/bin/mrbc")` of the `mruby-bin-mrbc` gem (still in the host build) if
   the oracle build is wanted.
-* `-v`, `--verbose` (AST dump + disassembly with irep addresses) need the C mrbc.
+* `-v`, `--verbose` (the C parser's AST dump before the listing, which `--disasm` reproduces) need the C mrbc.
 
 ## Patch for take-cheeze/rpg-maker-clone (apply with `patch -p1` from its root)
 

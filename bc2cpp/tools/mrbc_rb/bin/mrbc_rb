@@ -17,7 +17,8 @@
 #   --version, --copyright, -h   implemented (the version text is the fork's: MRBC_RB_VERSION overrides it)
 #   -v, --verbose, --no-ext-ops, --no-optimize, an input of "-" (stdin)
 #                                not implemented here (-v/--verbose print the C parser's AST dump and the disassembly with
-#                                the addresses of the irep structs: `--disasm` of rite_dump.rb lists the instructions of a binary)
+#                                the addresses of the irep structs); `--disasm` (an addition of this command) prints the instruction listing of -v alone, byte
+#                                for byte what mrbc -v prints from its first `irep` line on, except the irep addresses (codedump.rb)
 # Anything not implemented, a construct the emitter does not cover (MrbcRb::Unsupported), a source Prism rejects (mrbc then
 # reports the syntax error itself) and an emitter crash is handed to the real mrbc named by MRBC_FALLBACK, executed with
 # the original arguments. Without MRBC_FALLBACK the command fails (exit 1) and says what was not covered.
@@ -35,6 +36,7 @@
 require_relative '../mrbc_rb'
 require_relative '../rite_dump'
 require_relative '../file_syms'
+require_relative '../codedump'
 
 class MrbcRbCli
   class NotCovered < StandardError; end
@@ -44,7 +46,7 @@ class MrbcRbCli
     @prog = $PROGRAM_NAME
     @outfile = nil
     @initname = nil
-    @dump_struct = @static = @debug = @no_lv = @check = false
+    @dump_struct = @static = @debug = @no_lv = @check = @disasm = false
   end
 
   def log(served, reason = '-')
@@ -105,6 +107,7 @@ class MrbcRbCli
         when '--version'
           puts VERSION_TEXT.call
           exit 0
+        when '--disasm' then @disasm = true
         when '--copyright'
           puts COPYRIGHT_TEXT
           exit 0
@@ -158,7 +161,7 @@ class MrbcRbCli
     end
     inputs = @argv[first..]
     fallback('-S without -B') if @dump_struct && !@initname
-    if @outfile.nil? && !@check
+    if @outfile.nil? && !@check && !@disasm
       if inputs.size > 1
         warn "#{@prog}: output file should be specified to compile multiple files"
         exit 1
@@ -183,6 +186,11 @@ class MrbcRbCli
       fallback("Crash(#{e.class}: #{e.message[0, 100]})")
     end
 
+    if @disasm
+      $stdout.binmode
+      $stdout.write(MrbcRb::Codedump.listing(MrbcRb::RiteDump.parse(image)))
+      exit 0
+    end
     if @check
       puts "#{@prog}:#{inputs.first}:Syntax OK"
       exit 0

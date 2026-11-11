@@ -78,8 +78,8 @@ jobs:
 
   # mrbc_rb (bc2cpp/tools/mrbc_rb): the Ruby RITE emitter, compared byte for byte with the fork's mrbc -g built from the
   # pinned world, then the command line (bin/mrbc_rb: all output formats, on every gem's mrblib set and every bc2cpp
-  # source; ~2 min, so run in full rather than sampled) and bc2cpp's loader through it. tests/bc2cpp/run_mrbc_rb.sh runs
-  # the three tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
+  # source, and the `-v` listing; ~3 min together, so run in full rather than sampled) and bc2cpp's loader through it. tests/bc2cpp/run_mrbc_rb.sh runs
+  # the tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
   mrbc-rb:
     runs-on: ubuntu-24.04
     timeout-minutes: 40

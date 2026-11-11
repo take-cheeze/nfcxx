@@ -2,10 +2,10 @@
 # The mrbc_rb golden comparison (bc2cpp/tools/mrbc_rb/golden_test.rb): the Ruby RITE emitter's bytes against the fork's
 # `mrbc -g`, built here from the pinned world's 3rd/mruby with its own build config (the default one, as the emitter was
 # checked). Then the other two checks that need that oracle: cli_test.rb (bin/mrbc_rb, every output format of mrbc, also on
-# the several-file gem sets with -g -S) and integration_test.rb (bc2cpp's own loader through the emitter). Fails if the
+# the several-file gem sets with -g -S), codedump_test.rb (the instruction listing of mrbc -v) and integration_test.rb (bc2cpp's own loader through the emitter). Fails if the
 # oracle does not build or any comparison differs. Runs with the root Gemfile (Prism 1.9.0).
 #   BC2CPP_RPG_DIR=dir        use an existing rpg-maker-clone checkout (tests/bc2cpp/fetch.sh)
-#   MRBC_RB_CLI_SAMPLE=n      cli_test.rb: check only every n-th single file of bc2cpp/ (default: all; ~2 min)
+#   MRBC_RB_CLI_SAMPLE=n      cli_test.rb, codedump_test.rb: check only every n-th single file of bc2cpp/ (default: all; ~2 min)
 set -eu
 cd "$(dirname "$0")/../.."
 root=$PWD
@@ -23,4 +23,5 @@ echo "mrbc_rb: oracle $mruby/bin/mrbc (world rpg-maker-clone $(git -C "$bc2cpp_r
 export MRBC="$mruby/bin/mrbc"
 bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
+bundle exec ruby bc2cpp/tools/mrbc_rb/codedump_test.rb
 bundle exec ruby bc2cpp/tools/mrbc_rb/integration_test.rb

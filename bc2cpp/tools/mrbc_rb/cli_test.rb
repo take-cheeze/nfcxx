@@ -150,6 +150,13 @@ Dir.mktmpdir('mrbc_rb_cli') do |dir|
     puts ok ? "ok   cli #{flags.join(' ')} #{files.size} file(s): same text and status" : "FAIL cli #{flags.join(' ')}: #{norm.call(got)[0, 100].inspect} #{norm.call(gerr)[0, 100].inspect}"
     failures += 1 unless ok
   end
+  # --disasm: the listing of mrbc -v (from its first irep line), irep addresses aside.
+  exp, = Open3.capture3(oracle, '-v', '-o', '/dev/null', a, b, binmode: true)
+  got, = run_cli({ 'MRBC_FALLBACK' => nil }, '--disasm', a, b)
+  addr = ->(t) { t.b.gsub(/^irep 0x[0-9a-f]+/, 'irep ADDR') }
+  ok = addr.call(exp[/^irep 0x.*/m]) == addr.call(got)
+  puts ok ? 'ok   cli: --disasm is the listing of mrbc -v' : 'FAIL cli --disasm'
+  failures += 1 unless ok
   # A syntax error: mrbc's own report and exit status, through the fallback.
   bad = File.join(dir, 'bad.rb')
   File.write(bad, "def (\n")
