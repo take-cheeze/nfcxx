@@ -439,9 +439,14 @@ module BaseRbsNative
 
   # EDG's preprocessor prints a designated initializer as `. func = (f)` where clang prints `.func = (f)`; the registration
   # scan reads `.func`. Closing the space after a `.` that starts an identifier outside string literals is the only
-  # difference the scan sees (checked over mruby and the repository's gems: identical scan results).
+  # difference the scan sees (checked over mruby and the repository's gems: identical scan results). It also prints mruby's
+  # presym scanning tags `<@! name !@>` (mruby/presym/scanning.h) as `< @ ! name ! @ >`, which mruby's presym scanner does
+  # not read, so those are closed up too (analysis_headers.rb scans with this preprocessor).
   def normalize_edg(text)
-    text.gsub(/("(?:\\.|[^"\\\n])*")|\. (?=[A-Za-z_])/) { Regexp.last_match(1) || '.' }
+    text.gsub(/("(?:\\.|[^"\\\n])*")|\. (?=[A-Za-z_])|< @ !|! @ >/) do
+      m = Regexp.last_match
+      m[1] || { '< @ !' => '<@!', '! @ >' => '!@>' }.fetch(m[0], '.')
+    end
   end
 
   def run(out_dir, paths, flags, jobs: BaseRbsWorkers::DEFAULT_JOBS)
