@@ -5135,6 +5135,87 @@ SNIPPETS = [
   "case x\nin 'a' | 'b' if y\n 1\nend",
   "case x\nin 'a'|'b'\n 1\nend",
   "case x\nin %q(a) | 'b'\n 1\nend",
+  # milestone 17 (gaps: self writers, pairs without values, multiple assignment values, empty bodies with `;`, constant paths)
+  "self.a ||= begin\n  b\nend",
+  "self.a ||= (\n  b\n)",
+  "self.a += begin\n  b\nrescue C\n  1\nend",
+  "def m\n  self.a ||= b(\n    1)\nend",
+  "self.a ||= foo do\n  1\nend",
+  "self.a ||= [\n  1\n]",
+  "self.a &&= {\n  a: 1\n}",
+  "self.a ||= <<A\nx\nA",
+  "x ||= -> {}\nk = 1",
+  "x = 1\nx ||= @@a",
+  "def a = super",
+  "def a = b { super }",
+  "def a = @a ||= b { super }",
+  "def m(a)\n  foo a:\nend",
+  "def m(a)\n  super a:\nend",
+  "def m(a)\n  super 1, a:\nend",
+  "def m(a)\n  yield a:\nend",
+  "def m(a)\n  x = foo a:\nend",
+  "def m(a)\n  foo a:\n\n\nend",
+  "def m(a)\n  foo a:\n  # c\nend",
+  "h = {\n  x:\n}",
+  "foo(x:\n)",
+  "foo(x:,\n  y:\n)",
+  "h = {\n  x:, # c\n\n  y:\n  # d\n}",
+  "def m(x)\n  y = {x:\n  }.z\nend",
+  "foo x:",
+  "foo x:\n\n# c",
+  "x = (a, b = 1, 2)",
+  "x = 1\nif (a, = x) && a\n  1\nend",
+  "foo((a, b = 1, 2))",
+  "foo(1, (a, b = c), 3)",
+  "def m(e)\n  while (s, i = e.next rescue nil)\n    s\n  end\nend",
+  "x = [(a, b = 1, 2), 3]",
+  "x ||= (a, b = c)",
+  "case x\nwhen (a, b = c)\n  1\nend",
+  "A::B =\n  1",
+  "A::B = {\n  a: 1\n}",
+  "A::B = [1, 2]",
+  "A::B = x ? 1 : 2",
+  "A::B = \"a\" \\\n  \"b\"",
+  "A::B = 1 + 2",
+  "::B = {\n}",
+  "::B =\n  1",
+  "::B = foo(\n  1)",
+  "# shareable_constant_value: literal\nA = [1]\nB = {a: 1}\nX::Y = 2",
+  "def m\n  self[1, 2]\nend",
+  "def m\n  self[]\nend",
+  "def m(x)\n  x = self[1, 2] + 3\nend",
+  "def m(s)\n  case s[1] += 1\n  when 1 then 2\n  end\nend",
+  "def m(s)\n  case (s += 1)\n  when 1 then 2\n  end\nend",
+  "def m(s)\n  case s.a ||= 1\n  when 1 then 2\n  end\nend",
+  "def m(s)\n  self.a, b = 1, 2\nend",
+  "def m(s)\n  a, self.b = 1, 2\nend",
+  "def m(s)\n  self[1], b = 1, 2\nend",
+  "def m(s)\n  A::B.c, d = 1, 2\nend",
+  "foo {\n  ;\n}",
+  "foo do |x|\n  ;\nend",
+  "foo do\n\n  ;\n\nend",
+  "foo do\n  # c\n  ;\nend",
+  "begin\n  foo\nrescue E\n  ;\nend",
+  "begin\n  foo\nrescue E => e\n  ;\nend",
+  "begin\n  foo\nrescue\n  1\nelse\n  ;\nend",
+  "def m\n  ;\nend",
+  "def m(a)\n  ;\n  ;\nend",
+  "def m(a);\nend",
+  "def m ;\nend",
+  "for a in b\n  ;\nend",
+  "foo { ;\n}",
+  "->() {\n  ;\n}",
+  "->(a) do ;\nend",
+  "x = <<~A\n  foo \\\n    bar \#{y}\nA",
+  "x = <<~A\n  a \#{y} \\\n    b\nA",
+  "x = <<~A\n  a \#{y} b \\\n    c \\\n      d\nA",
+  "x = <<~A\n  a \#{y} b \\\n    c\n  e\nA",
+  "x = <<~A\n  a \#{y}\n    b \\\n    c \#{y}\nA",
+  "x = <<~A\n  a \#{y}\n  b \\\n    c\nA",
+  "x = <<~A\n  a \#{y} \\\n    b \#{y} \\\n      c\nA",
+  "x = <<~A\n  a \#@y \\\n    b\nA",
+  "x = <<A\n  a \#{y} \\\n    b\nA",
+  "def m\n  x = <<~A.strip\n    a \#{y} \\\n      b\n  A\nend",
 ].freeze
 
 oracle = ENV.fetch('MRBC', nil)
@@ -5174,6 +5255,37 @@ SNIPPETS.each do |src|
 end
 
 puts failures.zero? ? "all #{SNIPPETS.size} snippets match" : "#{failures} snippet(s) differ"
+
+# `--no-optimize`: every 3rd snippet again, against `mrbc -g --no-optimize` (the emitter with no_optimize: no peephole, every
+# operator a plain send). A snippet the emitter leaves Unsupported there is counted, not failed; a wrong binary is.
+noopt_same = noopt_unsupported = noopt_skipped = 0
+SNIPPETS.each_with_index do |src, i|
+  next unless (i % 3).zero?
+
+  Dir.mktmpdir('mrbc_rb') do |dir|
+    rb = File.join(dir, 't.rb')
+    mrb = File.join(dir, 't.mrb')
+    File.binwrite(rb, src + "\n")
+    _out, _err, status = Open3.capture3(oracle, '-g', '--no-optimize', '-o', mrb, 't.rb', chdir: dir)
+    unless status.success?
+      noopt_skipped += 1
+      next
+    end
+    begin
+      actual = MrbcRb.with_options(no_optimize: true) { MrbcRb.compile(src + "\n", 't.rb') }
+    rescue MrbcRb::Unsupported, MrbcRb::Error
+      noopt_unsupported += 1
+      next
+    end
+    if actual == File.binread(mrb)
+      noopt_same += 1
+    else
+      failures += 1
+      puts "FAIL --no-optimize #{src.inspect}"
+    end
+  end
+end
+puts "--no-optimize: #{noopt_same} snippets identical, #{noopt_unsupported} unsupported, #{noopt_skipped} rejected by the oracle"
 
 # Multi-file programs (MrbcRb.compile_files): the files of one command line `mrbc -g a.rb b.rb c.rb`, compiled as one program.
 # Each group below must match the oracle (a group the emitter leaves Unsupported is a failure here: they are all covered).
@@ -5454,7 +5566,17 @@ MULTI_FILE_GROUPS = [
   ["a = 1\nputs a", "puts a\n"],
   ["a = 1\nz", "puts a\n", "puts 3"],
   ["a = 1 # c", "puts __LINE__"],
-  ["z = 0\nz", " # x\nputs 1\n"]
+  ["z = 0\nz", " # x\nputs 1\n"],
+  # milestone 17 (gaps): a pair without a value and the other new forms at the end of the last file
+  ["z = 0\n", "foo x:\n"],
+  ["z = 0\n", "def m(a)\n  foo a:\nend"],
+  ["z = 0\n", "h = {\n  x:\n}"],
+  ["z = 0\n", "self.a ||= (\n  b\n)"],
+  ["z = 0\n", "A::B = {\n}"],
+  ["z = 0\n", "foo {\n  ;\n}"],
+  ["z = 0\n", "x = (a, b = 1, 2)"],
+  ["z = 0\n", "x = <<~A\n  a \#{y} \\\n    b\nA"],
+  ["def m = super\n", "def n = b { super }\n"]
 ].freeze
 
 multi_failures = 0
