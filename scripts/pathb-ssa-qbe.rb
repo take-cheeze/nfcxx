@@ -45,7 +45,7 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
-    attr_accessor :safe, :asan, :module_has_data, :sp_objects, :sp_funcs
+    attr_accessor :safe, :asan, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -61,6 +61,7 @@ module Qbe
   self.module_has_data = false
   self.sp_objects = []
   self.sp_funcs = []
+  self.asan_objects = []   # --asan, milestone 3: [symbol, size rounded up to 8] of each global with a redzone after it
 
   module_function
 
@@ -335,6 +336,14 @@ module Qbe
     end
     parts << "z #{size - cur}" if size > cur
     parts = ["z #{size}"] if parts.empty?
+    if Qbe.asan && !flags.include?("thread")
+      # --asan (milestone 3): a redzone after the object, in its own data item. The object is aligned to 8 (the shadow granule) and
+      # padded to a multiple of 8, so the redzone starts on a granule; asan_constructor poisons it at startup.
+      align = [align, 8].max
+      osz = (size + 7) & ~7
+      parts << "z #{osz - size + Qbe::ASAN_RZ}"
+      Qbe.asan_objects << [symbol(g[1].raw), osz]
+    end
     if Qbe.safe && !flags.include?("thread")
       parts << "z 1"   # padding: see the safe-pointers section of docs/notes/safe-pointers.md
       Qbe.sp_objects << [symbol(g[1].raw), size]
@@ -1347,10 +1356,11 @@ end
 
     # `(bounds I N)`: an index outside [0, N) traps (code 6). The unsigned comparison also rejects a negative index.
     def bounds_lines(idx, n)
-      # --asan: a variable-length array (a register bound) is a malloc block of its own under -fsanitize=address
-      # (lib/asan/nfcxx_vla_asan.c), so libasan reports an access past its end: the trap would hide that report. A constant
-      # bound still traps until the stack and global redzones (milestones 2 and 3 of docs/notes/asan-plan.md) make libasan report it.
-      return if Qbe.asan && ((n.is_a?(String) && n.start_with?("%")) || expression?(n))
+      # --asan: no trap. A variable-length array is a malloc block of its own under -fsanitize=address
+      # (lib/asan/nfcxx_vla_asan.c), and stack and global arrays have redzones (milestones 2 and 3 of docs/notes/asan-plan.md), so
+      # libasan reports an access past the end, and the trap would hide that report. As with gcc's ASan, an overflow that stays
+      # inside the enclosing object (an array member of a struct) is not reported.
+      return if Qbe.asan
 
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
@@ -2009,6 +2019,7 @@ end
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
     self.sp_objects = []
+    self.asan_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
     state = {}
     abi, type_decls = abi_types(forms)
@@ -2041,6 +2052,7 @@ end
     data = type_decls + string_decls + global_decls
     data << volatile_helpers if uses_volatile?(forms)
     data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
+    data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
     flags = gs.to_h { |g| [g[1].raw, global_flags(g)] }
     refs = flags.select { |name, _| state[name].is_a?(String) || state[name] == :extern }
@@ -2092,6 +2104,16 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
     out << "# pathb-startup .init_array 101 __nfcxx_sp_gctor"
   end
 
+  # --asan: the constructor that poisons the redzone after each global and string of the module (milestone 3 of
+  # docs/notes/asan-plan.md; at priority 101 as the safe-pointers one is, after libasan's own start in the preinit array).
+  def asan_constructor
+    calls = Qbe.asan_objects.each_with_index.flat_map do |(sym, osz), i|
+      ["\t%g#{i} =l add $#{sym}, #{osz}", "\tcall $__asan_poison_memory_region(l %g#{i}, l #{Qbe::ASAN_RZ})"]
+    end
+    ["function $__nfcxx_asan_gctor() {\n@start\n#{calls.join("\n")}\n\tret\n}",
+     "# pathb-startup .init_array 101 __nfcxx_asan_gctor"]
+  end
+
   # The bytes of a string literal and its data line: its bytes, then zeros up to the array's size (as the existing
   # emitter writes them, pathb-qbe-emit.rb's emit_string). Only a char array is emitted.
   def string_data(d)
@@ -2111,6 +2133,13 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
 
     bytes = raw + [0] * (total - raw.size)
     parts = bytes.map { |b| "b #{b}" }
+    if Qbe.asan
+      # --asan: a redzone after the string, as after a global (see build_data).
+      elem = 8 if elem < 8
+      osz = (total + 7) & ~7
+      parts << "z #{osz - total + Qbe::ASAN_RZ}"
+      Qbe.asan_objects << [symbol(name), osz]
+    end
     if Qbe.safe
       parts << "z 1"   # padding; the string is registered with the safe-pointers constructor
       Qbe.sp_objects << [symbol(name), total]
