@@ -68,10 +68,14 @@ RESCUE = "class Router\n  def ok?\n    true\n  end\n\n  def no?\n    begin\n    
 # A block call is SENDB: its result is the value a `break` supplies, so it is never read.
 BLOCK_CALL = HEAD + replace_once(ROUTE, "  r += 1 if ok?\n", "  r += 1 if ok? { 3 }\n") + RUN
 
-# The generated C++ of Router#route with BC2CPP_RETURN_FOLD set to +gate+ ('1' or '0') for +source+.
+# The generated C++ of Router#route with BC2CPP_RETURN_FOLD set to +gate+ ('1' or '0') for +source+. The counts below
+# read the tests of Router#route's own instructions, so a callee stays a call here: BC2CPP_INLINE_CALLS=0 (CALL_INLINE
+# would copy `maybe`'s own test into the caller).
 route_code = lambda do |gate, source = COMPLETE|
   previous = ENV['BC2CPP_RETURN_FOLD']
+  previous_inline = ENV['BC2CPP_INLINE_CALLS']
   ENV['BC2CPP_RETURN_FOLD'] = gate
+  ENV['BC2CPP_INLINE_CALLS'] = '0'
   suite.compile(source) do |ireps, root|
     registry = build_registry(ireps, root)[0]
     world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: {}, walked: [], native_paths: [], ruby_paths: [])
@@ -82,6 +86,7 @@ route_code = lambda do |gate, source = COMPLETE|
   end
 ensure
   ENV['BC2CPP_RETURN_FOLD'] = previous
+  previous_inline.nil? ? ENV.delete('BC2CPP_INLINE_CALLS') : ENV['BC2CPP_INLINE_CALLS'] = previous_inline
 end
 
 tests = ->(code) { code.scan(/mrb_test\(|mrb_nil_p\(/).size }
