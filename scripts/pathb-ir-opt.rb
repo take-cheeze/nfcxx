@@ -23,6 +23,31 @@
 
 class BadIR < StandardError; end
 
+# A map keyed by object identity (what Hash#compare_by_identity gave): the key is its object_id, and the entry keeps the
+# key object, so its id cannot be reused while the map holds it. The pinned mruby has no compare_by_identity.
+class IdentityMap
+  def initialize
+    @h = {}
+  end
+
+  def [](k)
+    e = @h[k.object_id]
+    e && e[1]
+  end
+
+  def []=(k, v)
+    @h[k.object_id] = [k, v]
+    v
+  end
+
+  def fetch(k)
+    e = @h[k.object_id]
+    return e[1] if e
+    block_given? ? yield(k) : raise(KeyError, "key not found")
+  end
+end
+
+
 HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
@@ -463,8 +488,8 @@ def inline_pass(forms, max_depth, report)
   extra = []     # attr forms for callers, appended after the functions
   # Per function form (by identity, so a rewritten function starts afresh): its largest id, and whether it has a call statement
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
-  ids = {}.compare_by_identity
-  calls = {}.compare_by_identity
+  ids = IdentityMap.new
+  calls = IdentityMap.new
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
@@ -587,7 +612,7 @@ def promote_address_slots(children)
   promoted_count = [0]
   ptr_atom = {}
   ptr_slots.each_key { |n| ptr_atom["$\"#{n}\""] = true }
-  has_store = {}.compare_by_identity   # filled below, before the walk
+  has_store = IdentityMap.new   # filled below, before the walk
   promote_in_list = lambda do |list|
     i = 0
     orig = 0    # i in the list as it was when idx was built (each promotion deletes the statement at i)
@@ -1088,7 +1113,7 @@ end
 
 # An index that a bounds check has proved to be 0 (`(bounds I 1)` traps unless 0 <= I < 1): (index B I S) is the address B. The
 # check dominates the index in its statement list, or an enclosing one.
-def fold_unit_index(list, unit, sets = {}.compare_by_identity)
+def fold_unit_index(list, unit, sets = IdentityMap.new)
   unit = unit.dup
   list.each_with_index do |s, i|
     next unless s.is_a?(Array)
@@ -1180,7 +1205,7 @@ def cprop_function(children)
   # the slots a statement may store (anywhere inside it)
   # Memoized per form: the walk only replaces the right side of a let (a load by a constant), which holds no store, so a
   # form's stores do not change while the walk runs. Nested containers are then read once, not once per enclosing container.
-  stored_memo = {}.compare_by_identity
+  stored_memo = IdentityMap.new
   stored_in = lambda do |x|
     next [] unless x.is_a?(Array)
     stored_memo[x] ||= begin
@@ -1500,51 +1525,11 @@ def sroa_function_form(f)
   end
 end
 
-# The functions are independent, so with jobs > 1 they are shared out among forked workers (by size, largest first, each to the
-# least loaded worker). Each worker sends back the text of its functions, which takes the function's place in the forms (the
-# output writes it as it is; main parses it again for a later pass). The texts are the ones the serial pass gives: no state
-# goes from one function to the next, except the count of --unroll-limit, which keeps the pass serial.
-def sroa_pass(forms, jobs = 1)
-  idx = []
-  forms.each_with_index { |f, i| idx << i if head(f) == "function" }
-  if jobs <= 1 || idx.length < 2 || $unroll_limit || !Process.respond_to?(:fork)
-    return forms.map { |f| head(f) == "function" ? sroa_function_form(f) : f }
-  end
-  require "tmpdir"
-  jobs = idx.length if jobs > idx.length
-  load = Array.new(jobs, 0)
-  share = Array.new(jobs) { [] }
-  idx.map { |i| [form_weight(forms[i]), i] }.sort_by { |w, i| [-w, i] }.each do |w, i|
-    k = load.index(load.min)
-    share[k] << i
-    load[k] += w
-  end
-  paths = []
-  pids = share.each_with_index.map do |mine, k|
-    path = File.join(Dir.tmpdir, "pathb-ir-opt.#{Process.pid}.#{k}")
-    paths << path
-    fork do
-      code = 1
-      begin
-        texts = {}
-        mine.each { |i| texts[i] = show_to(+"", sroa_function_form(forms[i])) }
-        File.open(path, "wb") { |io| Marshal.dump(texts, io) }
-        code = 0
-      rescue Exception => e
-        $stderr.write("pathb-ir-opt: sroa worker: #{e.class}: #{e.message}\n")
-      end
-      $stderr.flush
-      exit!(code)
-    end
-  end
-  ok = pids.map { |pid| Process.wait2(pid)[1].success? }.all?
-  out = forms.dup
-  if ok
-    paths.each { |path| File.open(path, "rb") { |io| Marshal.load(io) }.each { |i, t| out[i] = t } }
-  end
-  paths.each { |path| File.delete(path) if File.exist?(path) }
-  raise BadIR, "a scalar-replacement worker failed" unless ok
-  out
+# The functions are independent, and the serial pass gives the reference texts. The forked workers this pass used to run
+# (--jobs=N) need Process, which the closed (script-world) build does not have, so the pass is serial; --jobs=N is still
+# accepted and changes nothing.
+def sroa_pass(forms, _jobs = 1)
+  forms.map { |f| head(f) == "function" ? sroa_function_form(f) : f }
 end
 
 # The number of atoms and forms in x: the size a worker's share is balanced by.
@@ -1691,12 +1676,8 @@ def prune_pass(forms, substr, report)
   out
 end
 
-# The workers of --sroa: NFCXX_IR_OPT_JOBS, or the processor count up to 8 (--jobs=N overrides; 1 is serial).
+# The workers of --sroa: the serial pass (see sroa_pass), so one.
 def default_jobs
-  return ENV["NFCXX_IR_OPT_JOBS"].to_i if ENV["NFCXX_IR_OPT_JOBS"] && ENV["NFCXX_IR_OPT_JOBS"].to_i > 0
-  require "etc"
-  [Etc.nprocessors, 8].min
-rescue StandardError, LoadError
   1
 end
 
