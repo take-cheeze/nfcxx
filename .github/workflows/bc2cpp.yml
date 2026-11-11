@@ -59,6 +59,9 @@ on:
       - "be/nfcxx_*.h"
       - ".github/actions/toolchain/**"
       - ".github/workflows/bc2cpp.yml"
+  # Only mrbc-snapshot runs on the schedule (the fork's mrbc moves with the pinned world: drift must show without a change here).
+  schedule:
+    - cron: "23 4 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -67,6 +70,7 @@ concurrency:
 
 jobs:
   world:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -101,6 +105,7 @@ jobs:
   # source, and the `-v` listing; ~3 min together, so run in full rather than sampled) and bc2cpp's loader through it. tests/bc2cpp/run_mrbc_rb.sh runs
   # the tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
   mrbc-rb:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -117,10 +122,53 @@ jobs:
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh
 
+  # mrbc-snapshot: the oracle-free verification. bc2cpp/tools/mrbc_rb/snapshot.txt (and snapshot_world.txt for the inputs of the pinned
+  # world, with the world commit in its header: a pin bump fails once, 'run snapshot.rb --update') records, per input (content hash of the file
+  # set), the hash of what the fork's mrbc -g wrote. This job is the one that has the oracle: it builds it once at the pinned
+  # world, checks that every input the tests and the pinned world enumerate is in the table and still gives the recorded value
+  # (drift of the fork or an incomplete table fails), then runs the emitter tests with NO mrbc, against the table. Jobs that
+  # do not need to build mrbc can use BC2CPP_MRBC_RB=snapshot instead of verify. Scheduled too: the fork's mrbc moves with the
+  # pinned world (tests/bc2cpp/fetch.sh), and a stale table must show up without anyone touching bc2cpp.
+  mrbc-snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+
+      - name: Build the oracle once and check the snapshot against it
+        run: |
+          set -eu
+          root=$PWD
+          . tests/bc2cpp/fetch.sh
+          bc2cpp_fetch
+          (cd "$bc2cpp_root/3rd/mruby" && env -u LD BUNDLE_GEMFILE="$root/Gemfile" bundle exec rake -j"$(nproc)") > build/bc2cpp/snapshot-oracle.log 2>&1 ||
+            { tail -20 build/bc2cpp/snapshot-oracle.log; exit 1; }
+          echo "BC2CPP_RPG_DIR=$bc2cpp_root" >> "$GITHUB_ENV"
+          echo "ORACLE=$bc2cpp_root/3rd/mruby/bin/mrbc" >> "$GITHUB_ENV"
+          MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+
+      - name: Golden and CLI tests against the snapshot (no mrbc in the environment)
+        run: |
+          unset MRBC
+          export BC2CPP_NO_MRBC=1
+          bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
+          # cli_test starts bin/mrbc_rb once per input (about 0.2 s each): every 10th input keeps the step to a few minutes.
+          MRBC_RB_CLI_SAMPLE=10 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
+          bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --verify
+
   # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
   # bc2cpp-checks job. They run inside the pinned world (tests/bc2cpp/fetch.sh), whose bc2cpp paths reach this checkout
   # through its 3rd/nfcxx, with the world's own Nix dev shell, so the commands and their toolchain are unchanged.
   checks:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -208,6 +256,7 @@ jobs:
   # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
   # configuration, cached below. The checkout takes only the submodules those need.
   nfcxx-clang-parity:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
