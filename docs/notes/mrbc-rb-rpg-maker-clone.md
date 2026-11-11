@@ -160,9 +160,9 @@ records into `snapshot_world.txt`, refuses to write when the emitter differs fro
 Policy per job (measured on the pinned world, `bc2cpp.rb` compile stage of each job under `BC2CPP_NO_MRBC=1`):
 
 * `mrbc-snapshot`: the one job with the oracle (builds it, `--check`) and the oracle-free test run.
-* `world` `pathb_qbe_emit`, `pathb_borrowck`: `snapshot`. 2 inputs each (the closed world's mrblib sets plus the generated script
-  program), all in the table after `--update --from-record` (3 entries in all); 0 missing. A change to `scripts/pathb-qbe-emit.rb` or
-  `scripts/pathb-borrowck.rb` changes the program's hash: the job then says "input not in snapshot" and the entry is re-recorded as above.
+* `world` `pathb_qbe_emit`, `pathb_borrowck`: `verify` (they were on `snapshot` briefly). They compile bc2cpp's own mrblib sets
+  (`bc2cpp/host-libs/*/mrblib`), so every new or edited file there is "not in snapshot" and the job fails until the table is
+  re-recorded; and the switch saves no time (below). The record/dispatch route above stays available.
 * `world` `optcarrot`: stays on `verify`. It compiles a generated `benchmark.rb` written under a temporary directory that is
   part of the key (`__FILE__`), so no table entry can match.
 * `checks` (3 shards): stay on `verify`. The fixtures compile generated programs: of the 24 checks run to completion, 64 distinct

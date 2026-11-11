@@ -311,16 +311,17 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   suite.check('a lambda registered in place names no function and has no row', cxx_rows.none? { |_o, n, _f| n == 'inline' })
 
   source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
-  suite.check('the helper lists each row and calls mrb_call_direct for a member',
+  suite.check('the helper lists each row and installs the frame-free hook mrb_funcall_with_method consults',
               source.include?('{ "IO", "getbyte" }') && source.include?('{ "Thing.singleton", "make" }') &&
-              source.include?('mrb_call_direct('))
+              source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
+  suite.check('the found call defers the decision to mrb_funcall_with_method', !source.include?('mrb_call_direct('))
   owner, name, wrapper, = OwnerCallDirect::NATIVE_ROWS.first
   wrapped = NativeFrameUse.cpp_source(Set["#{owner}##{name}"])
   suite.check('a frame-free row\'s owner-call wrapper joins the set', wrapped.include?("bc2cpp_ff_add(#{wrapper});"))
   suite.check('a framed row\'s wrapper does not', !source.include?("bc2cpp_ff_add(#{wrapper});"))
-  suite.check('without rows the helper is the plain call', !NativeFrameUse.cpp_source(Set.new).include?('mrb_call_direct'))
+  suite.check('without rows no hook is installed', !NativeFrameUse.cpp_source(Set.new).include?('frame_free_p'))
   ENV['BC2CPP_FRAMEFREE'] = '0'
-  suite.check('BC2CPP_FRAMEFREE=0 turns the rewrite off', !NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('mrb_call_direct'))
+  suite.check('BC2CPP_FRAMEFREE=0 turns the rewrite off', !NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('frame_free_p'))
   ENV.delete('BC2CPP_FRAMEFREE')
 end
 

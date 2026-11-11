@@ -1,6 +1,7 @@
 // A native called with mrb_call_direct against the same native called through a pushed frame (mrb_funcall_with_method):
 // the same result, the same exception (class, message, backtrace length) and the same depth of frames afterwards, and
-// no frame pushed for a call that returns normally.
+// no frame pushed for a call that returns normally. With mrb->frame_free_p set, mrb_funcall_with_method makes the same
+// call frame-free for any caller, and so does mrb_obj_new's initialize.
 #include <mruby.h>
 #include <mruby/array.h>
 #include <mruby/class.h>
@@ -43,6 +44,14 @@ static mrb_value n_argc(mrb_state* mrb, mrb_value self) {
   for (mrb_int i = 0; i < argc; i++) sum += mrb_integer(argv[i]);
   return mrb_int_value(mrb, sum);
 }
+static mrb_value n_init(mrb_state* mrb, mrb_value self) {
+  mrb_int n = 0;
+  mrb_get_args(mrb, "|i", &n);
+  seen_depth = depth(mrb);
+  if (n < 0) mrb_raise(mrb, E_ARGUMENT_ERROR, "negative init");
+  return self;
+}
+static mrb_bool all_free(mrb_state*, mrb_func_t) { return TRUE; }
 static mrb_value n_opt(mrb_state* mrb, mrb_value self) {
   mrb_value a, b = mrb_nil_value();
   mrb_bool given;
@@ -53,18 +62,19 @@ static mrb_value n_opt(mrb_state* mrb, mrb_value self) {
 
 struct Outcome { bool raised; std::string repr; ptrdiff_t bt; ptrdiff_t depth_after; ptrdiff_t depth_inside; };
 
-static Outcome run(mrb_state* mrb, bool direct, mrb_value self, const char* name, mrb_int argc, const mrb_value* argv) {
+static Outcome run(mrb_state* mrb, int mode, mrb_value self, const char* name, mrb_int argc, const mrb_value* argv) {
   struct RClass* c = mrb_class(mrb, self);
   mrb_sym mid = mrb_intern_cstr(mrb, name);
   mrb_method_t m = mrb_method_search_vm(mrb, &c, mid);
   Outcome o{};
   ptrdiff_t before = depth(mrb);
   seen_depth = -1;
-  struct Call { mrb_value self; mrb_sym mid; mrb_method_t* m; struct RClass* c; mrb_int argc; const mrb_value* argv; bool direct; } call{self, mid, &m, c, argc, argv, direct};
+  struct Call { mrb_value self; mrb_sym mid; mrb_method_t* m; struct RClass* c; mrb_int argc; const mrb_value* argv; int mode; } call{self, mid, &m, c, argc, argv, mode};
+  mrb->frame_free_p = mode == 2 ? all_free : nullptr;
   mrb_bool error = FALSE;
   mrb_value r = mrb_protect_error(mrb, [](mrb_state* mrb, void* p) -> mrb_value {
     Call* k = (Call*)p;
-    if (k->direct) return mrb_call_direct(mrb, k->self, k->mid, MRB_METHOD_FUNC(*k->m), k->c, k->argc, k->argv);
+    if (k->mode == 1) return mrb_call_direct(mrb, k->self, k->mid, MRB_METHOD_FUNC(*k->m), k->c, k->argc, k->argv);
     return mrb_funcall_with_method(mrb, k->self, k->mid, k->m, k->c, k->argc, k->argv, mrb_nil_value());
   }, &call, &error);
   o.raised = error;
@@ -80,6 +90,31 @@ static Outcome run(mrb_state* mrb, bool direct, mrb_value self, const char* name
     o.bt = 0;
   }
   o.depth_after = depth(mrb) - before;
+  mrb->frame_free_p = nullptr;
+  return o;
+}
+
+static Outcome construct(mrb_state* mrb, bool hooked, struct RClass* k, mrb_int argc, const mrb_value* argv) {
+  Outcome o{};
+  ptrdiff_t before = depth(mrb);
+  seen_depth = -1;
+  mrb->frame_free_p = hooked ? all_free : nullptr;
+  struct Call { struct RClass* k; mrb_int argc; const mrb_value* argv; } call{k, argc, argv};
+  mrb_bool error = FALSE;
+  mrb_value r = mrb_protect_error(mrb, [](mrb_state* mrb, void* p) -> mrb_value {
+    Call* c = (Call*)p;
+    return mrb_obj_new(mrb, c->k, c->argc, c->argv);
+  }, &call, &error);
+  o.raised = error;
+  o.depth_inside = seen_depth - before;
+  if (error) {
+    mrb_value msg = mrb_funcall(mrb, r, "message", 0);
+    o.repr = std::string(RSTRING_PTR(msg), RSTRING_LEN(msg));
+    mrb_value bt = mrb_funcall(mrb, r, "backtrace", 0);
+    o.bt = mrb_array_p(bt) ? RARRAY_LEN(bt) : -1;
+  }
+  o.depth_after = depth(mrb) - before;
+  mrb->frame_free_p = nullptr;
   return o;
 }
 
@@ -106,14 +141,31 @@ int main() {
   };
   int failures = 0, total = 0;
   for (const Case& c : cases) {
-    Outcome f = run(mrb, false, self, c.name, c.argc, c.argv);
-    Outcome d = run(mrb, true, self, c.name, c.argc, c.argv);
-    bool same = f.raised == d.raised && f.repr == d.repr && f.bt == d.bt && f.depth_after == d.depth_after;
+    Outcome f = run(mrb, 0, self, c.name, c.argc, c.argv);
+    Outcome d = run(mrb, 1, self, c.name, c.argc, c.argv);
+    Outcome h = run(mrb, 2, self, c.name, c.argc, c.argv); /* mrb_funcall_with_method with the hook: as direct */
+    bool same = f.raised == d.raised && f.repr == d.repr && f.bt == d.bt && f.depth_after == d.depth_after &&
+                h.raised == d.raised && h.repr == d.repr && h.bt == d.bt && h.depth_after == d.depth_after &&
+                h.depth_inside == d.depth_inside;
     bool frames = c.pushed_when_direct ? true : (d.depth_inside == f.depth_inside - 1);
     ++total;
     printf("%s %s(%d): framed{%s %s bt=%ld} direct{%s %s bt=%ld} inside framed=%ld direct=%ld\n", same && frames ? "ok  " : "FAIL", c.name, (int)c.argc,
            f.raised ? "raised" : "value", f.repr.c_str(), (long)f.bt, d.raised ? "raised" : "value", d.repr.c_str(), (long)d.bt,
            (long)f.depth_inside, (long)d.depth_inside);
+    if (!(same && frames)) ++failures;
+  }
+  /* mrb_obj_new's initialize, a C caller of mrb_funcall_with_method */
+  struct RClass* ik = mrb_define_class(mrb, "Built", mrb->object_class);
+  mrb_define_method(mrb, ik, "initialize", n_init, MRB_ARGS_OPT(1));
+  for (const mrb_value* arg : { &one, &neg }) {
+    Outcome f = construct(mrb, false, ik, 1, arg);
+    Outcome h = construct(mrb, true, ik, 1, arg);
+    bool same = f.raised == h.raised && f.repr == h.repr && f.bt == h.bt && f.depth_after == h.depth_after;
+    bool frames = f.raised || h.depth_inside == f.depth_inside - 1;
+    ++total;
+    printf("%s new(%ld): framed{%s bt=%ld inside=%ld} hooked{%s bt=%ld inside=%ld}\n", same && frames ? "ok  " : "FAIL",
+           (long)mrb_integer(*arg), f.raised ? "raised" : "value", (long)f.bt, (long)f.depth_inside, h.raised ? "raised" : "value",
+           (long)h.bt, (long)h.depth_inside);
     if (!(same && frames)) ++failures;
   }
   printf("frame_free_raise_check: %d of %d cases %s\n", total - failures, total, failures ? "FAILED" : "pass");
