@@ -16,10 +16,6 @@ module NativeResultFacts
     Fact.new(function, chain)
   end
 
-  def self.rect_lambda(function)
-    Fact.new("[](mrb_state* M, V self) { return rgss::#{function}(M, self); }", [function])
-  end
-
   def self.component(owner, field)
     Fact.new("component_get<#{owner}, &#{owner}::#{field}>", ['component_get'])
   end
@@ -32,10 +28,10 @@ module NativeResultFacts
       'text_size' => accessor('bmp_text_size', %w[bmp_text_size bmp_text_size_native_body bmp_text_size_body])
     },
     'RGSS::Rect' => {
-      'x' => rect_lambda('rect_x_direct'),
-      'y' => rect_lambda('rect_y_direct'),
-      'width' => rect_lambda('rect_width_direct'),
-      'height' => rect_lambda('rect_height_direct')
+      'x' => accessor('rect_x', %w[rect_x rect_x_direct]),
+      'y' => accessor('rect_y', %w[rect_y rect_y_direct]),
+      'width' => accessor('rect_width', %w[rect_width rect_width_direct]),
+      'height' => accessor('rect_height', %w[rect_height rect_height_direct])
     },
     'RGSS::Color' => {
       'red' => component('Color', 'red'),
