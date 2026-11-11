@@ -1500,51 +1500,11 @@ def sroa_function_form(f)
   end
 end
 
-# The functions are independent, so with jobs > 1 they are shared out among forked workers (by size, largest first, each to the
-# least loaded worker). Each worker sends back the text of its functions, which takes the function's place in the forms (the
-# output writes it as it is; main parses it again for a later pass). The texts are the ones the serial pass gives: no state
-# goes from one function to the next, except the count of --unroll-limit, which keeps the pass serial.
-def sroa_pass(forms, jobs = 1)
-  idx = []
-  forms.each_with_index { |f, i| idx << i if head(f) == "function" }
-  if jobs <= 1 || idx.length < 2 || $unroll_limit || !Process.respond_to?(:fork)
-    return forms.map { |f| head(f) == "function" ? sroa_function_form(f) : f }
-  end
-  require "tmpdir"
-  jobs = idx.length if jobs > idx.length
-  load = Array.new(jobs, 0)
-  share = Array.new(jobs) { [] }
-  idx.map { |i| [form_weight(forms[i]), i] }.sort_by { |w, i| [-w, i] }.each do |w, i|
-    k = load.index(load.min)
-    share[k] << i
-    load[k] += w
-  end
-  paths = []
-  pids = share.each_with_index.map do |mine, k|
-    path = File.join(Dir.tmpdir, "pathb-ir-opt.#{Process.pid}.#{k}")
-    paths << path
-    fork do
-      code = 1
-      begin
-        texts = {}
-        mine.each { |i| texts[i] = show_to(+"", sroa_function_form(forms[i])) }
-        File.open(path, "wb") { |io| Marshal.dump(texts, io) }
-        code = 0
-      rescue Exception => e
-        $stderr.write("pathb-ir-opt: sroa worker: #{e.class}: #{e.message}\n")
-      end
-      $stderr.flush
-      exit!(code)
-    end
-  end
-  ok = pids.map { |pid| Process.wait2(pid)[1].success? }.all?
-  out = forms.dup
-  if ok
-    paths.each { |path| File.open(path, "rb") { |io| Marshal.load(io) }.each { |i, t| out[i] = t } }
-  end
-  paths.each { |path| File.delete(path) if File.exist?(path) }
-  raise BadIR, "a scalar-replacement worker failed" unless ok
-  out
+# The functions are independent, and the serial pass gives the reference texts. The forked workers this pass used to run
+# (--jobs=N) need Process, which the closed (script-world) build does not have, so the pass is serial; --jobs=N is still
+# accepted and changes nothing.
+def sroa_pass(forms, _jobs = 1)
+  forms.map { |f| head(f) == "function" ? sroa_function_form(f) : f }
 end
 
 # The number of atoms and forms in x: the size a worker's share is balanced by.
@@ -1691,12 +1651,8 @@ def prune_pass(forms, substr, report)
   out
 end
 
-# The workers of --sroa: NFCXX_IR_OPT_JOBS, or the processor count up to 8 (--jobs=N overrides; 1 is serial).
+# The workers of --sroa: the serial pass (see sroa_pass), so one.
 def default_jobs
-  return ENV["NFCXX_IR_OPT_JOBS"].to_i if ENV["NFCXX_IR_OPT_JOBS"] && ENV["NFCXX_IR_OPT_JOBS"].to_i > 0
-  require "etc"
-  [Etc.nprocessors, 8].min
-rescue StandardError, LoadError
   1
 end
 
