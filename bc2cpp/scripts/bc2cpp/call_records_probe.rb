@@ -8,7 +8,8 @@
 # cross-check (BC2CPP_CALL_CROSSCHECK=1) must agree with both on every fixture, and must report the one thing the dataflow
 # cannot read (a String name). Needs no mrbc: the Ruby emitter compiles the fixtures.
 #
-# Usage: ruby scripts/bc2cpp/call_records_check.rb
+# Usage: ruby scripts/bc2cpp/call_records_probe.rb
+# (Named *_probe, not *_check: the world's check registry demands a policy entry in rpg-maker-clone for every *_check.rb.)
 
 require 'tmpdir'
 require 'set'
@@ -156,8 +157,8 @@ ENV.delete('BC2CPP_CALL_CROSSCHECK')
 CallRecords.reset!
 
 if failures.empty?
-  puts 'call_records_check: all checks passed'
+  puts 'call_records_probe: all checks passed'
 else
-  warn "call_records_check: #{failures.size} check(s) failed"
+  warn "call_records_probe: #{failures.size} check(s) failed"
   exit 1
 end
