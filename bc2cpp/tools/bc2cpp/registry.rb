@@ -8,6 +8,7 @@ require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'alias_sites'
+require_relative 'call_records'
 require_relative 'loop_installers'
 
 # Step 6: the whole-program class/method registry.
@@ -242,10 +243,11 @@ def build_registry(ireps, root_label)
     end
 
     # A plain instance `def` (TDEF, or the unfused TCLASS+METHOD+DEF), with its module_function copy.
-    register_instance_def = lambda do |method_name, child_label|
+    register_instance_def = lambda do |method_name, child_label, def_insn = nil, def_idx = nil|
       owner = namespace || 'Object' # a top-level `def` lands on Object.
       registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
                                               visibility: resolve_def_visibility.call(method_name))
+      CallRecords.agree_def(irep, def_idx, def_insn, owner, resolve_def_visibility.call(method_name)) if def_insn
       next unless module_function_scope
 
       registry[method_name] << MethodDef.new(name: method_name, owner: "#{owner}.singleton", irep: nil,
@@ -327,7 +329,7 @@ def build_registry(ireps, root_label)
         # whatever mode is in effect: src/class.c's define_method path sets
         # MRB_METHOD_PRIVATE_FL for them unconditionally. default_visibility cannot
         # see that rule, and reporting them public would let the generated registration expose them.
-        register_instance_def.call(insn.sym, irep.reps[insn.block_index])
+        register_instance_def.call(insn.sym, irep.reps[insn.block_index], insn, idx)
       when :SDEF
         # "SDEF R1 :clamp I[5]": `def self.foo` / `def SomeConst.foo`. codegen_sdef
         # (mruby-compiler codegen.c) fuses SCLASS+METHOD+DEF into SDEF whenever the
@@ -438,18 +440,39 @@ def build_registry(ireps, root_label)
         next unless %w[private protected public attr_reader attr_writer attr_accessor
                        module_function].include?(name)
 
+        # CALL_RECORDS: the call as the emitter wrote it (nil: no annotations, read the bytecode below).
+        call = CallRecords.at(irep, insn)
+        written = call && CallRecords.positional_count(call)
         n = insn.argc.to_i
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
         packed = insn.positional_splat?
         if packed
           arr = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
           n = arr && arr.op == :ARRAY ? arr.uint_operand.to_i : -1
-          raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
+          # A record counts the arguments written, so a long literal list is known; a real splat is not.
+          raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0 && !written
+        end
+        if written
+          CallRecords.agree(:argc, irep, insn, written) { n if n.positive? || !packed }
+          n = written
         end
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
         # into consecutive registers right before the send; walk back to collect them.
-        collect_loadsym_names = lambda do
+        dataflow_names = lambda do
           irep.preceding_run(:LOADSYM, idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
+        end
+        # CALL_RECORDS: with a record whose arguments are all literal names, those are the names (a String too: Ruby takes
+        # `attr_reader "x"`, no LOADSYM spells it, so the dataflow drops it, which the cross-check reports). The dataflow
+        # answers when there is no record or it holds anything else (`private def x`, `attr_reader(*names)`).
+        collect_loadsym_names = lambda do
+          written = call && CallRecords.literal_names(call)
+          next dataflow_names.call unless written
+
+          CallRecords.agree(:names, irep, insn, written) do
+            found = dataflow_names.call
+            found if found.size == n || CallRecords.string_names?(call)
+          end
+          written
         end
 
         if %w[private protected public].include?(name)
