@@ -51,10 +51,24 @@ module MrbcRb
   #     GETCONST:        name:   (resolves against the irep's cref chain, then the ancestors of the innermost entry, then Object)
   #     GETMCNST:        name:, base: written base path text (nil when dynamic), base_rooted:
   #
+  #     SEND / SEND0 / SSEND / SSEND0 / SENDB / SSENDB of a CALL_NAMES method (the mixin and name-taking sends: include, extend,
+  #                      send, define_method, alias_method, attr_*, private ... ): call: { name:, recv: :implicit | :self |
+  #                      :const | :other, recv_text: String | nil (:const: the written path), safe_nav: true|false,
+  #                      block: :none | :literal | :pass, args: [ arg, ... ] } with arg = { kind: :sym|:str, value: String } |
+  #                      { kind: :const, text: written path, rooted: true|false } | { kind: :splat } | { kind: :keywords } |
+  #                      { kind: :other }. The list is the call as written; other sends carry no record.
+  #
+  # Versions: 1 = scope records; 2 = adds the `call` record of the sends above (additive: a version-1 table is still valid).
+  #
   # A table is only meaningful for the irep tree it was built with; Annotations.verify checks the pcs/ops against decoded code.
   module Annotations
-    VERSION = 1
-    TRACKED = %i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF ALIAS UNDEF SETCONST SETMCNST GETCONST GETMCNST].to_h { |o| [o, true] }.freeze
+    VERSION = 2
+    SEND_OPS = %i[SEND SEND0 SSEND SSEND0 SENDB SSENDB].to_h { |o| [o, true] }.freeze
+    TRACKED = (%i[CLASS MODULE SCLASS EXEC TDEF SDEF DEF ALIAS UNDEF SETCONST SETMCNST GETCONST GETMCNST] + SEND_OPS.keys).to_h { |o| [o, true] }.freeze
+    # The sends that get a `call` record (see above): mixins, name-taking sends and visibility/definition sends.
+    CALL_NAMES = %i[include prepend extend send __send__ public_send method instance_method define_method define_singleton_method
+                    alias_method attr attr_reader attr_writer attr_accessor respond_to? private public protected module_function
+                    private_class_method public_class_method private_constant].to_h { |n| [n, true] }.freeze
     VIS_CALLS = %i[private public protected module_function private_class_method public_class_method private_constant].freeze
 
     # Emitter-side state of one irep being compiled.
@@ -72,6 +86,29 @@ module MrbcRb
 
         base = static_path(node.parent)
         base && [base[0], base[1] + [node.name.to_s]]
+      end
+    end
+
+    # The `call` record of a send node (see the header): the call as written.
+    def call_facts(node)
+      recv = node.receiver && MrbcRb.unparen(node.receiver)
+      sp = recv && static_path(recv)
+      kind = if recv.nil? then :implicit elsif recv.is_a?(Prism::SelfNode) then :self else sp ? :const : :other end
+      block = if node.block.nil? then :none elsif node.block.is_a?(Prism::BlockArgumentNode) then :pass else :literal end
+      { name: node.name.to_s, recv: kind, recv_text: kind == :const ? path_text(sp) : nil, safe_nav: node.safe_navigation?,
+        block: block, args: (node.arguments&.arguments || []).map { |a| call_arg(a) } }
+    end
+
+    def call_arg(node)
+      node = MrbcRb.unparen(node)
+      case node
+      when Prism::SymbolNode then { kind: :sym, value: node.unescaped.to_s }
+      when Prism::StringNode then { kind: :str, value: node.unescaped.to_s }
+      when Prism::SplatNode then { kind: :splat }
+      when Prism::KeywordHashNode then { kind: :keywords }
+      else
+        sp = static_path(node)
+        sp ? { kind: :const, text: path_text(sp), rooted: sp[0] } : { kind: :other }
       end
     end
 
@@ -141,6 +178,7 @@ module MrbcRb
       # Hook of Compiler#emit: +start+ is the pc (the EXT prefix included), +operands+ the instruction's operands.
       def ann_emit(name, start, operands)
         return unless TRACKED.key?(name)
+        return ann_emit_send(name, start, operands) if SEND_OPS.key?(name)
 
         extra = nil
         if @ann_extra && @ann_extra[0].include?(name)
@@ -175,6 +213,27 @@ module MrbcRb
         when :GETMCNST then rec.merge!(name: @syms[operands[1]].to_s, base: extra && extra[:base], base_rooted: extra && extra[:base_rooted])
         end
         ann_ops[start] = rec
+      end
+
+      # Hook of Compiler#call around the whole call: +node+ is the CallNode being compiled. The send it ends with is the first SEND
+      # of its name emitted while it is the innermost open call (the calls in its arguments close before it).
+      def ann_call(node)
+        return yield unless CALL_NAMES.key?(node.name)
+
+        (@ann_calls ||= []) << [node, false]
+        begin
+          yield
+        ensure
+          @ann_calls.pop
+        end
+      end
+
+      def ann_emit_send(name, start, operands)
+        entry = @ann_calls&.last
+        return if entry.nil? || entry[1] || @syms[operands[1]].to_s != entry[0].name.to_s
+
+        entry[1] = true
+        ann_ops[start] = { op: name, line: @line, file: @filename, call: Annotations.call_facts(entry[0]) }
       end
 
       def ann_truncate(start)

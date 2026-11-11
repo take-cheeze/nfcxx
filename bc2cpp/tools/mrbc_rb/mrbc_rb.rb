@@ -3003,6 +3003,10 @@ module MrbcRb
     end
 
     def call(node, need: true)
+      ann_call(node) { call_inner(node, need: need) }
+    end
+
+    def call_inner(node, need:)
       leading_dot(node)
       return call_with_block(node, need: need) if node.block.is_a?(Prism::BlockNode)
 

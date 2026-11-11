@@ -10,6 +10,7 @@
 #   MRBC=<mrbc> bundle exec ruby bc2cpp/tools/mrbc_rb/annotations_test.rb
 require_relative '../bc2cpp/irep'
 require_relative '../bc2cpp/lexical_consts'
+require_relative '../bc2cpp/dynamic_names'
 
 # kind => why the dataflow cannot (or does not) give the annotation's answer.
 LIMITATIONS = {
@@ -150,6 +151,63 @@ inputs.each do |tag, build|
     end
   end
 end
+
+# ---- call records (annotations version 2): the send as written, for the mixin / name-taking / visibility sends --------------------
+# [name, recv, recv_text, args] per record in pc order; an arg is [:sym|:str, value], [:const, written path], or its bare kind.
+CALL_SYNTHETIC = {
+  'mixins and names' => ["class A\n  include B::C\n  include ::D\n  extend self\n  attr_accessor(:a, 'b', *c)\n  include(include(E))\n  def m(x)\n    x.include(F)\n    Foo.send(:bar, k: 1)\n    self.extend(G)\n    respond_to?(:z)\n  end\nend\n",
+                         [['include', :implicit, nil, [[:const, 'B::C']]], ['include', :implicit, nil, [[:const, '::D']]], ['extend', :implicit, nil, [:other]],
+                          ['attr_accessor', :implicit, nil, [[:sym, 'a'], [:str, 'b'], :splat]], ['include', :implicit, nil, [[:const, 'E']]],
+                          ['include', :implicit, nil, [:other]], ['include', :other, nil, [[:const, 'F']]], ['send', :const, 'Foo', [[:sym, 'bar'], :keywords]],
+                          ['extend', :self, nil, [[:const, 'G']]], ['respond_to?', :implicit, nil, [[:sym, 'z']]]]],
+  'past 14 arguments' => ["class B\n  attr_accessor(#{(1..16).map { |i| ":a#{i}" }.join(', ')})\nend\n",
+                          [['attr_accessor', :implicit, nil, (1..16).map { |i| [:sym, "a#{i}"] }]]]
+}.freeze
+CALL_SYNTHETIC.each do |name, (src, expected)|
+  r = MrbcRb.compile_result(src, "#{name}.rb")
+  got = r.annotations[:ireps].flat_map { |rec| rec[:ops].values }.filter_map { |o| o[:call] }.map do |c|
+    [c[:name], c[:recv], c[:recv_text], c[:args].map { |a| %i[sym str].include?(a[:kind]) ? [a[:kind], a[:value]] : a[:kind] == :const ? [:const, a[:text]] : a[:kind] }]
+  end
+  bugs << "call records #{name}: #{got.inspect} != #{expected.inspect}" unless got == expected && r.annotations[:version] == MrbcRb::Annotations::VERSION
+end
+
+# ---- what bc2cpp reads from them -------------------------------------------------------------------------------------------------
+# A source as bc2cpp's loader gets it, with the annotations (+annotated+) or without (the dataflow path of an mrbc image).
+load_source = lambda do |src, annotated|
+  r = MrbcRb.compile_result(src, 'model.rb')
+  ENV['BC2CPP_CLASS_SCOPE'] = '0' unless annotated
+  ireps, = load_ireps(RiteImage.new(r.image, rites_from_tree(r.tree), r.annotations), cache: nil)
+  ireps
+ensure
+  ENV.delete('BC2CPP_CLASS_SCOPE')
+end
+const_keys = lambda do |ireps, name|
+  keys = LexicalConsts.analyze(ireps, static: true)[:read_keys]
+  found = []
+  ireps.each_value { |irep| irep.each_with_op(:GETCONST) { |insn, _| found << keys[insn] if insn.const_name == name } }
+  found
+end
+# [source, constant read, resolved key with annotations, key without]: a mixin by constant path or a superclass by name no longer
+# makes every ancestor set unknown; an unmodelled form still does.
+MODEL_SYNTHETIC = [
+  ['mixin path', "module Outer\n  module Shared\n    LIMIT = 1\n  end\nend\nclass Base\n  include Outer::Shared\nend\nclass Kid < Base\n  def f = LIMIT\nend\n", 'LIMIT', 'Outer::Shared::LIMIT', nil],
+  ['rooted mixin and Object mixin', "module Shared\n  LIMIT = 1\nend\nclass Object\n  include ::Shared\nend\nclass Kid\n  def f = LIMIT\nend\n", 'LIMIT', 'Shared::LIMIT', nil],
+  ['superclass through a namespace', "module NS\n  class Base\n    LIMIT = 1\n  end\n  class Kid < Base\n    def f = LIMIT\n  end\nend\n", 'LIMIT', 'NS::Base::LIMIT', nil],
+  ['computed mixin', "module Shared\n  LIMIT = 1\nend\nclass Base\n  include(Shared.itself)\nend\nclass Kid < Base\n  def f = LIMIT\nend\n", 'LIMIT', nil, nil],
+  ['core superclass', "class Err < StandardError\n  LIMIT = 1\nend\nclass Kid < Err\n  def f = LIMIT\nend\n", 'LIMIT', nil, nil],
+  ['computed superclass', "class Base; LIMIT = 1; end\nclass Kid < Struct.new(:a)\n  def f = LIMIT\nend\n", 'LIMIT', nil, nil]
+].freeze
+MODEL_SYNTHETIC.each do |name, src, const, with, without|
+  got = const_keys.call(load_source.call(src, true), const)
+  bugs << "model #{name}: annotated #{got.inspect}, expected #{[with].inspect}" unless got.compact.uniq == [with].compact && got.size == 1
+  base = const_keys.call(load_source.call(src, false), const)
+  bugs << "model #{name}: dataflow #{base.inspect}, expected #{[without].inspect}" unless base.size == 1 && base.first == without
+end
+# A call past 14 arguments packs them into an Array: only the call record shows the first one is a literal Symbol.
+packed = "class B\n  attr_accessor(#{(1..16).map { |i| ":a#{i}" }.join(', ')})\nend\n"
+bugs << 'dynamic names: a packed literal attr_accessor is computed with the annotation' if DynamicNames.analyze(load_source.call(packed, true))[1]
+bugs << 'dynamic names: a packed literal attr_accessor stays computed without the annotation (the documented dataflow limit)' unless DynamicNames.analyze(load_source.call(packed, false))[1]
+bugs << 'dynamic names: send(name) must stay computed' unless DynamicNames.analyze(load_source.call("def f(n)\n  send(n)\nend\n", true))[1]
 
 puts "annotations: #{covered} of #{inputs.size} inputs covered by the emitter; #{counts[:ok]} annotation/dataflow answers agree"
 counts.each do |kind, n|

@@ -10,6 +10,10 @@
 # stale table and the cache key needs no annotation component.
 module ClassScope
   OPENERS = %i[CLASS MODULE SCLASS].freeze
+  # The newest annotation table version this reader knows (MrbcRb::Annotations::VERSION). Tables are additive across versions
+  # (2 added the `call` record), so an older one is read as it is: a record kind it lacks is simply absent. A newer one may
+  # change the meaning of what is here and is dropped whole.
+  MAX_VERSION = 2
 
   module_function
 
@@ -19,6 +23,7 @@ module ClassScope
   # true when attached; a table that does not match the decoded code (size, an op at a recorded pc) is dropped whole.
   def attach(ireps, root_label, annotations)
     return false unless annotations && enabled?
+    return reject('version', annotations[:version]) unless annotations[:version].is_a?(Integer) && annotations[:version].between?(1, MAX_VERSION)
 
     order = dfs_order(ireps, root_label)
     records = annotations[:ireps]
@@ -62,6 +67,13 @@ module ClassScope
   def op_at(irep, insn)
     scope = irep.class_scope
     scope && scope[:ops][insn.addr]
+  end
+
+  # The `call` record (the send as written: receiver kind, literal arguments) of +insn+, a send of the annotated names (see
+  # MrbcRb::Annotations CALL_NAMES); nil when the irep has no annotation, none for it, or the table predates version 2.
+  def call_at(irep, insn)
+    op = op_at(irep, insn)
+    op && op[:call]
   end
 
   # label of the body irep of annotation record +op+ of +irep+ (nil: none).
