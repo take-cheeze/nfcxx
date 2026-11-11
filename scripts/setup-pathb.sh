@@ -74,21 +74,26 @@ LOWER_VARIABLE_LENGTH_ARRAYS=1
 import <support/platform/linux/cpfe>
 import <support/build-type/release/cpfe>
 CFG
+# Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration) in every build. Without it EDG takes the
+# host's float128 (defines_linux.h), which Apple clang lacks on arm64, and on wasm32 keeps a target long double in the
+# host's binary128 (float_pt.c: fetch_host_fp_value). Berkeley SoftFloat 3e, pinned, with x86's NaN rules (8086-SSE),
+# built into build/softfloat with the host C compiler (emcc for the emscripten build).
+sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
+if [ "$emscripten" = 1 ]; then sf_cc=emcc; sf_ar=emar; else sf_cc=${CC:-cc}; sf_ar=${AR:-ar}; fi
+if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
+  command -v "$sf_cc" >/dev/null || { echo "setup-pathb: $sf_cc is not on PATH" >&2; exit 1; }
+  rm -rf "$sf"; git clone -q https://github.com/ucb-bar/berkeley-softfloat-3.git "$sf"
+  git -C "$sf" checkout -q $sf_commit
+  make -s -C "$sf/build/$sf_config" -j"${PATHB_JOBS:-4}" MAKELIB="$sf_ar crs \$@" \
+    COMPILE_C="$sf_cc -c -Werror-implicit-function-declaration -DSOFTFLOAT_FAST_INT64 \$(SOFTFLOAT_OPTS) \$(C_INCLUDES) -O2 -o \$@"
+fi
+export EDG_SOFTFLOAT_INCLUDE_PATH=$sf/source/include EDG_SOFTFLOAT_LIB_PATH=$sf/build/$sf_config/softfloat.a
+cat >> "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
+USE_SOFTFLOAT=1
+USE_FLOAT128_FOR_HOST_FP_VALUE=0
+USE_QUADMATH_LIBRARY=0
+CFG
 if [ "$emscripten" = 1 ]; then
-  # Floating point: SoftFloat (EDG's USE_SOFTFLOAT, as its Windows configuration), not the host's types. Without it EDG
-  # keeps a target long double (x86-64's 80-bit x87 format) in the host's long double, which on wasm32 is binary128
-  # (float_pt.c: fetch_host_fp_value, the comment in store_host_fp_value). Berkeley SoftFloat 3e, pinned, with x86's
-  # NaN rules (8086-SSE), built with emcc into build/softfloat.
-  # The SoftFloat configuration of the target (x86-64 NaN rules), not of the host: its build directory in the pinned checkout.
-  sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
-  if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
-    command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.sh, then source its env)" >&2; exit 1; }
-    rm -rf "$sf"; git clone -q https://github.com/ucb-bar/berkeley-softfloat-3.git "$sf"
-    git -C "$sf" checkout -q $sf_commit
-    make -s -C "$sf/build/$sf_config" -j"${PATHB_JOBS:-4}" MAKELIB='emar crs $@' \
-      COMPILE_C='emcc -c -Werror-implicit-function-declaration -DSOFTFLOAT_FAST_INT64 $(SOFTFLOAT_OPTS) $(C_INCLUDES) -O2 -o $@'
-  fi
-  export EDG_SOFTFLOAT_INCLUDE_PATH=$sf/source/include EDG_SOFTFLOAT_LIB_PATH=$sf/build/$sf_config/softfloat.a
   # The host integers EDG holds target sizes and offsets in (a_targ_size_t is a_host_large_unsigned) are the host's
   # ptrdiff_t and size_t, 32 bits on wasm32, too small for x86-64's size_t (SIZE_MAX became 2^32 - 1). targ_def.h allows
   # any large host integer there: the tree's copy (never the submodule's) takes the 64-bit ones.
@@ -101,11 +106,6 @@ if [ "$emscripten" = 1 ]; then
       "$src/src/targ_def.h" > "$tree/src/targ_def.h"
   [ "$(grep -c 'nfcxx' "$tree/src/targ_def.h")" = 2 ] && grep -q 'ULLONG_MAX$' "$tree/src/targ_def.h" \
     || { echo "setup-pathb: targ_def.h patch failed" >&2; exit 1; }
-  cat >> "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
-USE_SOFTFLOAT=1
-USE_FLOAT128_FOR_HOST_FP_VALUE=0
-USE_QUADMATH_LIBRARY=0
-CFG
   # ... and EDG takes its host's alignments from the target too (defines_linux.h, targ_def.h): these are wasm32's, which
   # the front end checks when it starts (il_alloc.c, check_host_alignment). They lay out its own memory only. A constant
   # is 8-aligned (its 64-bit host integers, below), a pointer 4.
