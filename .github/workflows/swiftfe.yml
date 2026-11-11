@@ -26,7 +26,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # setup-swift verifies the toolchain's signature against keys it refreshes from keyserver.ubuntu.com, and a failed
+      # refresh ends the step ("Failed to refresh keys from any server in the pool", twice on 2026-11-11, once after
+      # a connection timeout of 8 minutes). The action has no retry of its own: the first attempt may fail, and then one
+      # more is made after a pause. The signature check stays on.
       - name: Install Swift toolchain
+        id: swift_first
+        uses: swift-actions/setup-swift@v2
+        continue-on-error: true
+        with:
+          swift-version: "6.0"
+
+      - name: Wait before the second Swift attempt
+        if: steps.swift_first.outcome == 'failure'
+        run: sleep 60
+
+      - name: Install Swift toolchain (second attempt)
+        if: steps.swift_first.outcome == 'failure'
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0"
