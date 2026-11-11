@@ -42,7 +42,7 @@ rescue klass
 end
 
 lists = LISTS::Lists.new(open: Set['A#a'], closed: Set['A#a', 'B#b'], core_excluded: Set['Array#x'],
-                         core_left_out: Set['Array#y'], digest: 'd1')
+                         core_left_out: Set['Array#y'], engine_rom: Set['B#b'], digest: 'd1')
 suite.check('a dump parses back to the same lists', LISTS.parse(LISTS.dump(lists)).to_h == lists.to_h)
 suite.check('the closed build takes the closed set, any other build the open one',
             lists.for_build('closed') == lists.closed && lists.for_build('wio') == lists.open)
@@ -82,9 +82,9 @@ begin
   Dir.mktmpdir('static_dispatch_seed') do |dir|
     path = File.join(dir, 'static_dispatch_lists.json')
     stale = LISTS::Lists.new(open: Set.new, closed: Set['Old#unsafe'], core_excluded: Set.new,
-                            core_left_out: Set.new, digest: 'old-inputs')
+                            core_left_out: Set.new, engine_rom: Set.new, digest: 'old-inputs')
     proven = LISTS::Lists.new(open: Set.new, closed: Set.new, core_excluded: Set.new,
-                             core_left_out: Set.new, digest: 'current-inputs')
+                             core_left_out: Set.new, engine_rom: Set.new, digest: 'current-inputs')
     File.write(path, LISTS.dump(stale))
     seen = []
     sdr.define_singleton_method(:pass) do |_, _, input, _, _|
@@ -204,7 +204,7 @@ end
 Dir.mktmpdir('static_dispatch_lists') do |dir|
   path = File.join(dir, 'lists.json')
   File.write(path, LISTS.dump(LISTS::Lists.new(open: Set['VFix#pruned'], closed: Set['VFix#pruned', 'VFix#closed_only'],
-                                               core_excluded: Set['VFix#rom_only'], core_left_out: Set['VFix#core_only'], digest: 'x')))
+                                               core_excluded: Set['VFix#rom_only'], core_left_out: Set['VFix#core_only'], engine_rom: Set.new, digest: 'x')))
   suite.check("a compiled gem's OUT_SYMBOL with no lists stops the generation, naming the command",
               (begin
                  generate.call(out_symbol: 'rgss_compiled')
