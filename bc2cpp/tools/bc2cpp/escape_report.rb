@@ -90,17 +90,18 @@ module EscapeReport
 
   # `point` rows (BC2CPP_ESCAPE_POINTS=1): the registers that may hold the creation's value on entry to each
   # instruction of the site's method, a comma list (empty when none, `escaped` when the flow stopped early).
-  #   point  irep_label:site  instruction index  op  registers
+  #   point  irep_label:site  instruction index  op  registers  escape|-
+  # `escape` marks an instruction at which the value escapes (its verdict's escape_sites).
   def self.point_rows(rows, irep, site, verdict)
     site_id = "#{irep.label}:#{site}"
     prog = BytecodeIR.for(irep)
     unless verdict.holding
-      rows << ['point', site_id, '-', '-', 'escaped'].join("\t")
+      rows << ['point', site_id, '-', '-', 'escaped', '-'].join("\t")
       return
     end
     prog.each_source do |insn, j|
       regs = verdict.holding_at(j).map(&:to_i).sort.join(',')
-      rows << ['point', site_id, j, insn.op, regs].join("\t")
+      rows << ['point', site_id, j, insn.op, regs, verdict.escape_at?(j) ? 'escape' : '-'].join("\t")
     end
   end
 

@@ -66,10 +66,11 @@ module EscapeAnalysis
   Use = Struct.new(:index, :kind, :name, :reg, keyword_init: true)
   # reasons: [[symbol, instruction address]]; empty = the value does not escape. tracked: every register
   # of the analysed frame that may hold it. returned: a `returns` flow handed the value back as its result.
-  # holding: with points: true and no escape, holding[i] is the set of registers that may hold the value on entry to
-  # instruction i (an empty set when i is unreachable); nil when the flow did not run to completion, so the sets are
-  # not complete and holding_at answers nil.
-  Verdict = Struct.new(:reasons, :uses, :tracked, :returned, :holding, keyword_init: true) do
+  # holding: with points: true, holding[i] is a may-hold set on entry to instruction i (empty when unreachable).
+  # Under points the flow runs to completion past an escape (the escape handler keeps the value), so the sets are
+  # over-approximations: a register outside holding[i] never holds the value there. escape_sites lists [reason, index]
+  # for every escape. Both are nil when the flow stopped early (a failed flow, or no points).
+  Verdict = Struct.new(:reasons, :uses, :tracked, :returned, :holding, :escape_sites, keyword_init: true) do
     def escapes?
       !reasons.empty?
     end
@@ -82,6 +83,11 @@ module EscapeAnalysis
       return nil unless holding
 
       holding[index] || Set.new
+    end
+
+    # The registers that may hold the value on entry to +index+, as the escape instruction reads them.
+    def escape_at?(index)
+      !escape_sites.nil? && escape_sites.any? { |_why, at| at == index }
     end
   end
 
@@ -853,6 +859,8 @@ module EscapeAnalysis
     # +block_tracked+: the value is a method's block, so closures that BLKPUSH it from a nested level see it.
     def flow(irep, starts, created_at: nil, self_tracked: false, block_sources: [], block_tracked: false,
              value_class: nil, returns: false, self_klass: nil, block_given: false, points: false)
+      # points: run past escapes, so the verdict carries complete sets (see Verdict).
+
       prog = BytecodeIR.for(irep)
       return failed(:cfg_unresolved) unless prog.resolved?
       return failed(:handlers_unresolved) unless prog.handlers_resolved?
@@ -894,7 +902,7 @@ module EscapeAnalysis
         s = state[i]
         ever.merge(s)
         out = step(run, i, insns[i].source, s)
-        unless run.reasons.empty?
+        unless run.reasons.empty? || points
           return Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned)
         end
 
@@ -909,8 +917,16 @@ module EscapeAnalysis
 
       ever.merge(Array(starts.values.flat_map(&:keys)))
       read_by_closures(run, ever, block_tracked: block_tracked)
-      holding = points ? state.map { |regs| (regs || Set.new).dup.freeze } : nil
-      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned, holding: holding)
+      holding = nil
+      escape_sites = nil
+      if points
+        holding = state.map { |regs| (regs || Set.new).dup.freeze }
+        index_of = {}
+        insns.each_with_index { |insn, index| index_of[insn.source.addr] ||= index }
+        escape_sites = run.reasons.map { |why, addr| [why, index_of[addr]] }
+      end
+      Verdict.new(reasons: run.reasons, uses: run.uses.uniq, tracked: ever, returned: run.returned,
+                  holding: holding, escape_sites: escape_sites)
     end
 
     def failed(reason)
