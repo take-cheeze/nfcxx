@@ -35,7 +35,8 @@ module NativeClassResults
                                  0fec5fb83a27afe86cc94be51eeca8e93f652274cf1d5e2933c8694489b5ac9a
                                  ef08dd05d4af765093a318ee244170826638c69abcad905c9b8e25f4ade66037
                                  5b4c16217d5c03fcdc3f2e9049d4320c872a5e6bc648501c034537c850b942ac
-                                 0b06553c24e0e6de91f7dfaff11bd3c8831ae8d4a3e92a5bae03d10949dba16b]
+                                 0b06553c24e0e6de91f7dfaff11bd3c8831ae8d4a3e92a5bae03d10949dba16b
+                                 6bb287bb1047c2128e8b84519e45371c491eda88557e341e3b060a5cffc1a56e]
   }.freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {
