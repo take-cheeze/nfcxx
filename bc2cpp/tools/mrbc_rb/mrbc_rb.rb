@@ -5483,19 +5483,21 @@ module MrbcRb
       when Prism::IntegerNode, Prism::FloatNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode, Prism::ConstantReadNode
         [:value, node]
       when Prism::StringNode
-        raise Unsupported, 'pattern string' # the fork's lexer returns tSTRING_BEG for a string, never the tSTRING the grammar wants
-      when Prism::ConstantPathNode
+        # The fork's lexer returns tSTRING_BEG for a double-quoted string, never the tSTRING the grammar wants (a syntax error);
+        # a single-quoted one (and %q) is a tSTRING: a plain value.
+        raise Unsupported, 'pattern string' unless node.opening_loc && (node.opening_loc.slice == "'" || node.opening_loc.slice.start_with?('%q'))
+
+        [:value, node]      when Prism::ConstantPathNode
         raise Unsupported, 'pattern constant path' unless pat_const_path?(node)
 
         [:value, node]
       when Prism::SymbolNode
-        raise Unsupported, 'pattern symbol' unless node.opening_loc&.slice == ':' && node.closing_loc.nil?
+        raise Unsupported, 'pattern symbol' unless (node.opening_loc&.slice == ':' && node.closing_loc.nil?) || [':"', ":'"].include?(node.opening_loc&.slice)
 
         [:value, node]
       when Prism::LocalVariableTargetNode
-        raise Unsupported, 'pattern variable outside the current scope' unless node.depth.zero?
-
-        [:var, node.name]
+        # A variable of an enclosing scope is not a local of this one (lv_idx is 0): the fork binds nothing.
+        [:var, node.depth.zero? ? node.name : nil]
       when Prism::PinnedVariableNode
         v = node.variable
         raise Unsupported, 'pin of a non-local' unless v.is_a?(Prism::LocalVariableReadNode) && v.depth.zero?
@@ -5505,9 +5507,9 @@ module MrbcRb
         [:alt, pat_parse(node.left), pat_parse(node.right)]
       when Prism::CapturePatternNode
         t = node.target
-        raise Unsupported, 'capture target' unless t.is_a?(Prism::LocalVariableTargetNode) && t.depth.zero?
+        raise Unsupported, 'capture target' unless t.is_a?(Prism::LocalVariableTargetNode)
 
-        [:as, pat_parse(node.value), t.name]
+        [:as, pat_parse(node.value), t.depth.zero? ? t.name : nil]
       when Prism::ArrayPatternNode
         raise Unsupported, 'constant array pattern' if node.constant
 
@@ -5542,9 +5544,9 @@ module MrbcRb
       e = node.expression
       return :any unless e
 
-      raise Unsupported, 'pattern rest' unless e.is_a?(Prism::LocalVariableTargetNode) && e.depth.zero?
+      raise Unsupported, 'pattern rest' unless e.is_a?(Prism::LocalVariableTargetNode)
 
-      [:var, e.name]
+      [:var, e.depth.zero? ? e.name : nil]
     end
 
     def pat_hash_parse(node)
@@ -5554,7 +5556,7 @@ module MrbcRb
 
         k = a.key.unescaped.to_sym
         v = a.value
-        [k, v.is_a?(Prism::ImplicitNode) ? [:var, k] : pat_parse(v)]
+        [k, v.is_a?(Prism::ImplicitNode) ? pat_parse(v.value.is_a?(Prism::LocalVariableReadNode) ? Prism::LocalVariableTargetNode.new(v.source, -1, v.location, 0, v.value.name, v.value.depth) : v.value) : pat_parse(v)]
       end
       r = node.rest
       rest = case r
@@ -5563,7 +5565,7 @@ module MrbcRb
              when Prism::AssocSplatNode
                e = r.value
                if e.nil? then :any
-               elsif e.is_a?(Prism::LocalVariableTargetNode) && e.depth.zero? then [:var, e.name]
+               elsif e.is_a?(Prism::LocalVariableTargetNode) then [:var, e.depth.zero? ? e.name : nil]
                else raise Unsupported, 'hash pattern rest'
                end
              else raise Unsupported, 'hash pattern rest'
@@ -5579,7 +5581,7 @@ module MrbcRb
         pat_push
         pat_eqq(target, fails)
       when :var
-        pgm(local_register(pat[1]), target, true)
+        pgm(local_register(pat[1]), target, true) if pat[1]
       when :alt
         left_fail = []
         success = []
@@ -5596,7 +5598,7 @@ module MrbcRb
         success.each { |j| dispatch(j) }
       when :as
         pat_gen(pat[1], target, fails, known)
-        pgm(local_register(pat[2]), target, false)
+        pgm(local_register(pat[2]), target, false) if pat[2]
       when :pin
         pgm(@sp, local_register(pat[1]), false)
         pat_push
@@ -5632,7 +5634,7 @@ module MrbcRb
       pe(:RANGE_INC, @sp - 1)
       pat_pop; pat_pop
       pe(:SEND, @sp, sym_index(:[]), 1)
-      pgm(local_register(var[1]), @sp, true)
+      pgm(local_register(var[1]), @sp, true) if var[1]
     end
 
     # +known+ is the length of the array literal the subject is (codegen_case_match and NODE_MATCH_PAT know it): the target is
@@ -5756,7 +5758,7 @@ module MrbcRb
         pe(:RANGE_EXC, @sp - 1)
         pat_pop; pat_pop
         pe(:SEND, @sp, sym_index(:[]), 1)
-        pgm(local_register(pre[1]), @sp, true)
+        pgm(local_register(pre[1]), @sp, true) if pre[1]
       end
       if post.is_a?(Array)
         pgm(@sp, arr_reg, false)
@@ -5771,7 +5773,7 @@ module MrbcRb
         pe(:RANGE_INC, @sp - 1)
         pat_pop; pat_pop
         pe(:SEND, @sp, sym_index(:[]), 1)
-        pgm(local_register(post[1]), @sp, true)
+        pgm(local_register(post[1]), @sp, true) if post[1]
       end
       loop_end = emit_jump(:JMP)
       match_fail.each { |j| dispatch(j) }
@@ -5851,7 +5853,7 @@ module MrbcRb
         else
           pe(:SEND, recv, sym_index(:dup), 0)
         end
-        pgm(local_register(rest[1]), recv, true)
+        pgm(local_register(rest[1]), recv, true) if rest[1]
         pat_pop
       end
       pat_pop
@@ -5866,6 +5868,11 @@ module MrbcRb
       pat = pat_parse(node.pattern)
       check_multiline(value)
       head = temp
+      if pat[0] == :var && pat[1].nil?
+        # A variable that is not a local of this scope is a wildcard: only the value is evaluated, for its effects.
+        statement(value, last: false)
+        return pat_result(head, raise_on_fail, last)
+      end
       value_into(value, head)
       known = node.value.is_a?(Prism::ArrayNode) ? value.elements.size : nil # parentheses make a statement list: not known
       if pat[0] == :var
