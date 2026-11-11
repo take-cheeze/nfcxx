@@ -122,7 +122,8 @@ jobs:
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh
 
-  # mrbc-snapshot: the oracle-free verification. bc2cpp/tools/mrbc_rb/snapshot.txt records, per input (content hash of the file
+  # mrbc-snapshot: the oracle-free verification. bc2cpp/tools/mrbc_rb/snapshot.txt (and snapshot_world.txt for the inputs of the pinned
+  # world, with the world commit in its header: a pin bump fails once, 'run snapshot.rb --update') records, per input (content hash of the file
   # set), the hash of what the fork's mrbc -g wrote. This job is the one that has the oracle: it builds it once at the pinned
   # world, checks that every input the tests and the pinned world enumerate is in the table and still gives the recorded value
   # (drift of the fork or an incomplete table fails), then runs the emitter tests with NO mrbc, against the table. Jobs that

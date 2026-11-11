@@ -21,6 +21,10 @@ unless oracle && File.executable?(oracle)
   require 'open3'
   require_relative 'snapshot'
   cli = File.expand_path('bin/mrbc_rb', __dir__)
+  if (problem = MrbcRb::Snapshot.world_pin_problem)
+    puts problem
+    exit 1
+  end
   bad = ok = missing = 0
   MrbcRb::Snapshot.each_input.each do |label, sources|
     next if sources.any? { |_, p| !File.file?(p) } # snippets and groups are golden_test.rb's

@@ -3,7 +3,7 @@
 # Compares MrbcRb.compile with the fork's `mrbc -g`, byte for byte, on the snippets below.
 #   MRBC=<path to the fork's mrbc> bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
 # Without MRBC (or when it does not run) the emitter is checked against the snapshot of the oracle's output instead
-# (snapshot.txt, see snapshot.rb: every snippet, group, bc2cpp/ file and, with a world checkout, every gem set), so
+# (snapshot.txt and snapshot_world.txt, see snapshot.rb: every snippet, group, bc2cpp/ file and, with a world checkout, every gem set), so
 # no mrbc is needed; an input not in the snapshot fails.
 
 require 'tmpdir'
@@ -14,7 +14,7 @@ require_relative 'snapshot'
 
 oracle = ENV.fetch('MRBC', nil)
 unless oracle && File.executable?(oracle)
-  puts 'no MRBC: comparing with the snapshot of the oracle (snapshot.txt)'
+  puts 'no MRBC: comparing with the snapshot of the oracle (snapshot.txt, snapshot_world.txt)'
   exit MrbcRb::Snapshot.verify
 end
 
