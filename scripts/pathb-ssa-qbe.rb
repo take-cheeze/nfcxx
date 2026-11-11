@@ -444,6 +444,8 @@ module Qbe
     # The AbiInfo of an aggregate that is passed or returned by value: it must have an abi-type, and its class must be
     # one this emitter passes (not an empty class, not an unsupported one).
     def aggregate_info(tyform, what)
+      # A const or volatile struct is passed and returned as the struct: the qualifier does not change its layout.
+      tyform = unqual(tyform)
       raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
 
       info = @abi[Qbe.name_of(tyform[1])]

@@ -15,7 +15,7 @@ Path B is chosen when all of these hold:
 - not `--emit-c`, `--target=`, `-E`, `-M` or `-shared`;
 - the host is `Linux x86_64` (`scripts/pathb-cc` assembles x86-64 QBE output with `cc`).
 
-Anything else gets qbe, as before. `-fsanitize=undefined` and `-fsafe-pointers` still select Path B, as they did.
+Anything else gets qbe, as before (a fallback from Path B goes to gcc, below). `-fsanitize=undefined` and `-fsafe-pointers` still select Path B, as they did.
 
 ## CUDA (.cu inputs)
 
@@ -27,9 +27,10 @@ backend choice.
 
 ## Fallback
 
-A default-selected Path B build that fails on any `.cpp` file is rebuilt with qbe. The driver prints one line naming the
-file and the status, then runs itself again with `NFCXX_BACKEND=qbe`. Status 3 is a construct Path B refuses (the
-reason is on stderr from `scripts/pathb-cc`); other statuses are Path B faults. If qbe fails too, its error is what is
+A default-selected Path B build that fails on any `.cpp` file is rebuilt with the gcc backend. The driver prints one line naming
+the file and the status, then runs itself again with `NFCXX_BACKEND=gcc`. gcc compiles EDG's C with C semantics
+(`-fwrapv -fno-strict-aliasing`), so the message says so: a refused program does not get Path B's UB-freedom. Status 3 is a construct Path B refuses (the
+reason is on stderr from `scripts/pathb-cc`); other statuses are Path B faults. If gcc fails too, its error is what is
 shown. An explicit `--backend=pathb` or `NFCXX_PATH=b` keeps the hard errors.
 
 ## Why these exclusions
