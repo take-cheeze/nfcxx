@@ -228,10 +228,14 @@ jobs:
       # the fixtures compile generated programs (measured on 24 checks: 64 distinct inputs, none in the snapshot table). A dispatch with
       # mrbc_rb=record also writes the inputs of each check to a record file (uploaded below) for snapshot.rb --update --from-record.
       BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || 'verify' }}
-      BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-checks-{1}.txt', runner.temp, matrix.shard) || '' }}
     steps:
       - run: git config --global submodule.fetchJobs 4
       - uses: actions/checkout@v7
+
+      # The runner context is not available in a job-level env, so the record path is exported from a step.
+      - name: Snapshot record path
+        if: inputs.mrbc_rb == 'record'
+        run: echo "BC2CPP_MRBC_SNAPSHOT_RECORD=$RUNNER_TEMP/mrbc-record-checks-${{ matrix.shard }}.txt" >> "$GITHUB_ENV"
 
       - name: World checkout
         run: tests/bc2cpp/world.sh
