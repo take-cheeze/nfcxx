@@ -2680,7 +2680,15 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         return ir_lval(a0);
       }
       ir_note(0, k, 1);
-      return ir_load(ir_lval(a0));
+      {
+        /* `reinterpret_cast<unsigned&>(f)` (a float): the lvalue is the operand's, read as the adjusted type. */
+        ir_val base = ir_lval(a0);
+        if (base.bf_unit == 0 && e->type != NULL && base.t != NULL && !ir_is_memval(base.t) && !ir_is_memval(e->type) &&
+            strcmp(ir_valtext(base.t), ir_valtext(e->type)) != 0) {
+          base = ir_mk_addr(base.s, e->type, base.vol);
+        }
+        return ir_load(base);
+      }
     }
     case eok_class_rvalue_adjust:
       ir_note(0, k, 1);
