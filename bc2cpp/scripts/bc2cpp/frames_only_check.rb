@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # FRAMES_ONLY (docs/bc2cpp-vm-free-runtime-plan.md, Phase 5): the closed libmruby.a links tools/bc2cpp/runtime/vm_frames.cxx
-# in place of mruby's vm.c (tools/bc2cpp/native_vm_build.rb). It defines the 22 functions the link uses, and the ten that
+# in place of mruby's vm.c (tools/bc2cpp/native_vm_build.rb). It defines the 25 functions the link uses, and the ten that
 # nothing references (the interpreter entries among them) have no definition, so a new caller fails to link. Static.
 #
 #   ruby scripts/bc2cpp/frames_only_check.rb <closed-build-dir>   (the one holding lib/libmruby.a)
@@ -18,7 +18,7 @@ def run(*cmd)
   out
 end
 
-live = %w[mrb_ci_bidx mrb_ci_nregs mrb_env_unshare mrb_exec_irep mrb_f_public_send mrb_f_send mrb_funcall mrb_funcall_argv
+live = %w[mrb_call_direct mrb_ci_bidx mrb_ci_nregs mrb_direct_frame_needed mrb_direct_materialize mrb_env_unshare mrb_exec_irep mrb_f_public_send mrb_f_send mrb_funcall mrb_funcall_argv
           mrb_funcall_id mrb_funcall_send mrb_funcall_send_with_method mrb_funcall_with_block mrb_funcall_with_method mrb_mod_module_eval
           mrb_obj_instance_eval mrb_protect_error mrb_vm_ci_env mrb_vm_ci_env_clear mrb_vm_ci_target_class mrb_yield
           mrb_yield_argv mrb_yield_with_class]

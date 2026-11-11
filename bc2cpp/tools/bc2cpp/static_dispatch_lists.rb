@@ -10,6 +10,8 @@
 #   core_left_out  core run-time registrations the closed build removes (Owner#name)
 #   engine_rom     engine ROM method-table entries the closed build leaves out at compile time (Owner#name), a subset
 #                  of `closed`
+#   frame_free     the natives (Owner#name) the closed build calls without a frame (native_frame_use.rb); not a proof
+#                  about names, so it is no part of the fixed point and a file without it reads as empty
 #
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
@@ -19,11 +21,17 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out engine_rom].freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom frame_free].freeze
+  REQUIRED_KEYS = (KEYS - ['frame_free']).freeze
 
   class Missing < StandardError; end
 
-  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :digest, keyword_init: true) do
+  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :frame_free, :digest, keyword_init: true) do
+    def initialize(**kwargs)
+      super
+      self.frame_free ||= Set.new.freeze
+    end
+
     # Only the closed build drops the closed-only names.
     def for_build(build_name)
       build_name == 'closed' ? closed : open
@@ -31,16 +39,17 @@ module StaticDispatchLists
   end
 
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
-                    core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, digest: 'none').freeze
+                    core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, frame_free: Set.new.freeze,
+                    digest: 'none').freeze
 
   module_function
 
   def parse(text)
     data = JSON.parse(text)
-    missing = KEYS - data.keys
+    missing = REQUIRED_KEYS - data.keys
     raise Missing, "static dispatch lists lack #{missing.join(', ')}" unless missing.empty?
 
-    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key).to_set.freeze] }, digest: data['digest'].to_s).freeze
+    Lists.new(**KEYS.to_h { |key| [key.to_sym, data.fetch(key, []).to_set.freeze] }, digest: data['digest'].to_s).freeze
   end
 
   def dump(lists)

@@ -423,7 +423,7 @@ module SymbolCache
       bool cached = s.epoch == bc2cpp_nsc_epoch && s.state == M && (mrb_type(recv) == MRB_TT_CLASS || mrb_type(recv) == MRB_TT_MODULE) &&
                     s.recv == mrb_obj_ptr(recv);
       if (cached || bc2cpp_nsc_fill(M, s, recv, mid, argc)) {
-        return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
+        return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
       }
       if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2, caller_self);
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
@@ -445,7 +445,7 @@ module SymbolCache
         mrb_method_t m = bc2cpp_find_method(M, &c, mid);
         cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
       }
-      if (cached) return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
+      if (cached) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
       if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, false, mrb_nil_value());
       return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
     }
@@ -653,7 +653,7 @@ module SymbolCache
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       struct RClass* klass = mrb_class(M, recv);
     #ifdef BC2CPP_OWNER_ICACHE
-      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return mrb_funcall_with_method(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk);
+      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk);
     #endif
     #ifdef BC2CPP_OWNER_ICACHE_STATS
       ++bc2cpp_owner_icache_misses;
@@ -715,7 +715,7 @@ module SymbolCache
         s.hit_argc = argc;
       }
     #endif
-      return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, recv, mid, &m, c, argc, argv, blk); });
+      return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
     }
     static mrb_value bc2cpp_owner_call(mrb_state* M, mrb_value recv, int i, int level, bc2cpp_owner_set& s, mrb_value blk, mrb_int argc, ...) {
       mrb_value argv[16];
