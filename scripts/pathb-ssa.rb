@@ -971,7 +971,15 @@ class Machine
     params = fn.params[1..]
     raise Unsupported, "main takes #{params.size} arguments" unless params.size == args.size
 
-    params.zip(args).each { |p, a| @env[p[1]] = float_type?(p[3]) ? round_float(a, p[3]) : canon(a, p[3]) }
+    # An index loop, not zip: the zip of a compiled build walks its arguments with Enumerator#next, a Fiber a compiled
+    # build does not run.
+    pi = 0
+    while pi < params.size
+      p = params[pi]
+      a = args[pi]
+      @env[p[1]] = float_type?(p[3]) ? round_float(a, p[3]) : canon(a, p[3])
+      pi += 1
+    end
   end
 
   def run_structured(body)
