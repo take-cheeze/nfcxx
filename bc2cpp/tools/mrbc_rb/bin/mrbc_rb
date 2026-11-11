@@ -1,0 +1,185 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# A drop-in for the fork's `mrbc` command line, compiling with MrbcRb (the Ruby emitter) instead of the C compiler.
+#
+#   mrbc_rb [switches] programfile...
+#
+# Switches of mrbc.c and what this does with them:
+#   -o<outfile> | -o <outfile>   implemented ("-" is stdout; required for several inputs, else the input's name with .mrb/.c)
+#   -g                           implemented (debug info; the RITE binary the emitter makes)
+#   -B<symbol> | -B <symbol>     implemented: C byte array (mrb_dump_irep_cfunc)
+#   -S                           implemented with -B: the C struct dump (cdump.c); with -g only for one input file (see below)
+#   -s                           implemented (static, for -B)
+#   --remove-lv                  implemented (RITE binary without the LVAR section; cdump ignores it, as mrbc does)
+#   -e, -E                       implemented (mrbc only prints "no longer needed" to stderr)
+#   -c, -v, --verbose, --version, --copyright, -h, --no-ext-ops, --no-optimize, an input of "-" (stdin)
+#                                not implemented here (they print mrbc's own text, run its parser or its codegen options)
+# Anything not implemented, a construct the emitter does not cover (MrbcRb::Unsupported), a source Prism rejects (mrbc then
+# reports the syntax error itself) and an emitter crash is handed to the real mrbc named by MRBC_FALLBACK, executed with
+# the original arguments. Without MRBC_FALLBACK the command fails (exit 1) and says what was not covered.
+#
+# -g with -S: cdump.c writes the symbol id of each file name, the number the symbol had in the C mrbc's symbol table. For a
+# single input that is the presym count of the mrbc plus one (MRBC_RB_FILENAME_SYM_BASE, default 1472, the fork's; cli_test.rb
+# checks it; for another mrbc build it is MRB_PRESYM_MAX of that build's include/mruby/presym/id.h). With several inputs the
+# ids depend on what the parser interned between the files: not implemented, unless MRBC_RB_LOOSE_FILENAME_SYM=1 (placeholder
+# ids base+1, base+2, ...: not mrbc's bytes, but the generated *_init_syms sets the real ones at start-up, so the program is
+# the same; this is what mruby's own build can use as `build.mrbcfile`).
+#
+# Environment:
+#   MRBC_FALLBACK=<mrbc>   the real mrbc to exec for what is not covered
+#   MRBC_RB_FILENAME_SYM_BASE=<n>, MRBC_RB_LOOSE_FILENAME_SYM=1   -g -S, see above
+#   MRBC_RB_LOG=<file>     one line per run: "<emitter|fallback|error>\t<reason>\t<args>"
+
+require_relative '../mrbc_rb'
+require_relative '../rite_dump'
+
+class MrbcRbCli
+  class NotCovered < StandardError; end
+
+  def initialize(argv)
+    @argv = argv
+    @prog = 'mrbc_rb'
+    @outfile = nil
+    @initname = nil
+    @dump_struct = @static = @debug = @no_lv = false
+  end
+
+  def log(served, reason = '-')
+    path = ENV.fetch('MRBC_RB_LOG', '')
+    return if path.empty?
+
+    File.open(path, 'a') { |f| f.puts [served, reason.to_s.tr("\n\t", '  '), @argv.join(' ')].join("\t") }
+  end
+
+  def fallback(reason)
+    real = ENV.fetch('MRBC_FALLBACK', '')
+    if real.empty?
+      log('error', reason)
+      warn "#{@prog}: not handled by the Ruby emitter (#{reason}); set MRBC_FALLBACK=<mrbc> to run the real mrbc for it"
+      exit 1
+    end
+    log('fallback', reason)
+    exec(real, *@argv)
+  end
+
+  # mrbc.c parse_args. Returns the index of the first input.
+  def parse_args
+    argv = @argv
+    i = 0
+    while i < argv.size
+      arg = argv[i]
+      break unless arg.start_with?('-')
+      # "-" alone is an input (stdin); mrbc.c switches on arg[1], a NUL, and takes it as the default case.
+      raise NotCovered, 'input from stdin' if arg == '-'
+
+      case arg[1]
+      when 'o'
+        usage_error("an output file is already specified. (#{@outfile})") if @outfile
+        if arg.size == 2 && argv[i + 1]
+          i += 1
+          @outfile = argv[i]
+        else
+          @outfile = arg[2..]
+        end
+      when 'S' then @dump_struct = true
+      when 'B'
+        if arg.size == 2 && argv[i + 1]
+          i += 1
+          @initname = argv[i]
+        else
+          @initname = arg[2..]
+        end
+        usage_error('function name is not specified.') if @initname.empty?
+      when 'g' then @debug = true
+      when 's' then @static = true
+      when 'E', 'e' then warn "#{@prog}: -e/-E option no longer needed."
+      when 'c', 'v', 'h' then raise NotCovered, "option #{arg}"
+      when '-'
+        case arg
+        when '--remove-lv' then @no_lv = true
+        else raise NotCovered, "option #{arg}"
+        end
+      else
+        break # the default case of mrbc.c: the rest are inputs
+      end
+      i += 1
+    end
+    i
+  end
+
+  def usage_error(msg)
+    warn "#{@prog}: #{msg}"
+    exit 1
+  end
+
+  def run
+    first = begin
+      parse_args
+    rescue NotCovered => e
+      fallback(e.message)
+    end
+    # Errors mrbc reports with its own words are left to it.
+    fallback('no program file') if first >= @argv.size
+    inputs = @argv[first..]
+    fallback('-S without -B') if @dump_struct && !@initname
+    if @dump_struct && @debug && inputs.size > 1 && ENV['MRBC_RB_LOOSE_FILENAME_SYM'] != '1'
+      fallback('-g -S with several files (file name symbol ids)')
+    end
+    if @outfile.nil?
+      fallback('several inputs without -o') if inputs.size > 1
+      @outfile = outfile_name(inputs.first, @initname ? '.c' : '.mrb')
+    end
+    fallback('an input is not readable') unless inputs.all? { |f| File.file?(f) && File.readable?(f) }
+
+    image = begin
+      if inputs.size == 1
+        MrbcRb.compile(File.binread(inputs.first), inputs.first)
+      else
+        MrbcRb.compile_files(inputs.map { |f| [File.binread(f), f] })
+      end
+    rescue MrbcRb::Error => e
+      fallback("#{e.class.name.split('::').last}(#{e.message})")
+    rescue StandardError => e
+      fallback("Crash(#{e.class}: #{e.message[0, 100]})")
+    end
+
+    out = begin
+      render(image)
+    rescue MrbcRb::RiteDump::Unsupported, StandardError => e
+      fallback("dump(#{e.class}: #{e.message[0, 100]})")
+    end
+    write(out)
+    log('emitter')
+    exit 0
+  end
+
+  def render(image)
+    if @initname && @dump_struct
+      MrbcRb::RiteDump.cstruct(MrbcRb::RiteDump.strip(image, debug: @debug, lvar: true), @initname, static: @static)
+    else
+      bin = MrbcRb::RiteDump.strip(image, debug: @debug, lvar: !@no_lv)
+      @initname ? MrbcRb::RiteDump.cfunc(bin, @initname, static: @static) : bin
+    end
+  end
+
+  def write(out)
+    if @outfile == '-'
+      $stdout.binmode
+      $stdout.write(out)
+    else
+      File.binwrite(@outfile, out)
+    end
+  rescue SystemCallError
+    warn "#{@prog}: cannot open output file:(#{@outfile})"
+    exit 1
+  end
+
+  # get_outfilename: the input with its last '.' extension replaced (a dot in a directory name counts, as in the C).
+  def outfile_name(infile, ext)
+    dot = infile.rindex('.')
+    dot ? infile[0...dot] + ext : infile
+  end
+end
+
+MrbcRbCli.new(ARGV).run if $PROGRAM_NAME == __FILE__
