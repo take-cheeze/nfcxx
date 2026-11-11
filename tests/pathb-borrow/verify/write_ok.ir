@@ -1,0 +1,5 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "bump" (returns void) (nothrow) (noescape) (closed) (args (write int) (value int)))
+(function "bump" (ret void) (params (param %0 "p" (ptr int)) (param %1 "n" int))
+(decl %0 param) (let %2 int (load int %0)) (store int %0 (wadd int %2 %1)) (return)
+)

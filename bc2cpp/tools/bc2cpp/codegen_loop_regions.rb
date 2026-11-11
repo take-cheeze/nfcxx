@@ -1,0 +1,973 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+
+# CodeGen: recognizers of inlinable block-loop regions.
+
+require_relative 'bytecode_ir_regions'
+
+class CodeGen
+  # CORE_BLOCK_ELEMENT_HINT: an element hint (with_element_hint) that STRICT_HINTS
+  # never forces: compile_send unwraps `klass` and keeps the by-name else arm.
+  SoftElementHint = Struct.new(:klass)
+  # UNION_ELEMENT_HINT: a block parameter declared as a class and its subclasses (`IO | File`). klass is their common
+  # ancestor, which picks the candidate; members are the classes the guard accepts, each by an exact class test.
+  # A class, not Struct.new(...) do: a def inside a block would be taken for a method of CodeGen when bc2cpp compiles itself.
+  class AncestorElementHint < Struct.new(:klass, :members)
+    def to_s = klass
+  end
+
+  # Shared skeleton of every recognize_*_regions below: a block-carrying send
+  # linearly preceded by the instruction that fills its block register
+  # (`BLOCK`, or `LOADSYM` for `&:sym`). +layout+ maps the send to how many
+  # registers past its destination that block register sits, or nil when the
+  # send is not of interest. Yields the send, its index, the preceding
+  # instruction and the destination register.
+  def each_call_site(irep, prev_op:, send_ops:, layout:)
+    BytecodeIR.for(irep).adjacent_pairs(prev_op, send_ops) do |prev_insn, insn, idx|
+      offset = layout.call(insn)
+      next unless offset
+
+      dest_reg = insn.reg
+      prev_reg = prev_insn.reg
+      next unless dest_reg && prev_reg && prev_reg == dest_reg + offset
+
+      yield insn, idx, prev_insn, dest_reg
+    end
+  end
+
+  # each_call_site over `BLOCK I[k]`, also resolving the block's irep.
+  def each_block_site(irep, send_ops:, layout:)
+    each_call_site(irep, prev_op: :BLOCK, send_ops: send_ops, layout: layout) do |insn, idx, block_insn, dest_reg|
+      block_irep_idx = block_insn.block_index
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep
+
+      yield insn, idx, block_insn, dest_reg, block_irep
+    end
+  end
+
+  # Layout of a zero-argument `name` call whose block sits at dest+1. One per name: the recognizers ask per irep.
+  def named_layout(name)
+    (@named_layouts ||= {})[name] ||= ->(insn) { 1 if insn.sym == name && insn.argc_text == 'n=0' }
+  end
+
+  # Is the region's receiver provably a +klass+ ('Array' or 'Hash')? An SSENDB
+  # receiver is self, so it is admitted only when the owner is +klass+ itself.
+  # CHAINED_ACCESSOR_SUPPORT: passing @class_layout/@registry can only turn nil
+  # into 'Array'.
+  def region_receiver?(irep, idx, insn, dest_reg, klass, owner_name, mand, ivar_classes, arg_classes)
+    return owner_name == klass if insn.op == :SSENDB
+
+    # A complete flow set takes precedence over the older chained-return hints.
+    # In particular, reject can return Hash as well as Array.
+    mask = exact_flow_mask(irep, idx, dest_reg)
+    core_bits = RETURN_CORE_CLASS.keys.reduce(0, :|)
+    if mask.is_a?(Integer) && mask.positive? && (mask & ~core_bits).zero?
+      proven = RETURN_CORE_CLASS[mask]
+      return proven == klass if proven || !guarded_inline_sites?
+    end
+
+    traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                               class_layout: @class_layout, registry: @registry,
+                               container_constants: @container_constants)
+    traced = proven_array_source(irep, idx, dest_reg) if klass == 'Array' && traced != 'Array'
+    return true if traced == klass
+
+    # GUARDED_BLOCK_INLINE: an unproven receiver is asked at run time (guarded_inline_receiver?).
+    !traced && guarded_inline_receiver?(insn, klass)
+  end
+
+  # The recognizers' layouts read only the instruction, so each is built once.
+  TIMES_LAYOUT = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
+
+  # BLOCK_SUPPORT: inline `receiver.times { |i| BODY }` as a native
+  # `for` loop instead of building a Proc. mrb_proc_new would build a Proc with
+  # no captured environment, while blocks close over outer locals; inlined, the
+  # block body shares the method's `r0..rN`, so level-0 GETUPVAR/SETUPVAR are the
+  # same variables and RETURN_BLK is a plain C++ return.
+  # The loop counts in an mrb_int, so it is only Integer#times for a Fixnum receiver. A bignum runs Integer#times and
+  # anything else raises NoMethodError (or answers `times` itself), so an unproven receiver is not inlined bare
+  # a receiver FIXNUM_OPERAND_PROOF proves is the plain loop; any other is a GUARDED_BLOCK_INLINE site
+  # whose loop runs behind mrb_integer_p, the send with its BLOCK_CORE_DIRECT arms as the else; without the
+  # guarded pass (a rescue try body, a resumable method) the send stays as it is.
+  # Shape: `SENDB Ra :times n=0` right after `BLOCK R(a+1) I[k]` (the block
+  # argument goes in the register after the destination for n=0), with I[k]
+  # taking exactly one mandatory argument.
+  def recognize_times_regions(irep)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB], layout: TIMES_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      # TIMES_NO_PARAM_SUPPORT: `n.times { ... }` (no block parameter) is the same
+      # loop; only the counter binding is dropped (emit_times_inline).
+      next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
+
+      needs_blk = block_blk_needs(block_irep)
+      if needs_blk.nil? || (!needs_blk.empty? &&
+         (needs_blk != [1] || !pure_mandatory_arity?(irep) || !(block_irep.reps || []).empty? ||
+          !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?('times')))
+        next
+      end
+
+      fixnum = times_fixnum_receiver?(irep, idx, dest_reg)
+      next unless fixnum || guarded_inline_receiver?(insn, 'Integer')
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   block_irep: block_irep, needs_blk: needs_blk == [1],
+                   bind_counter: mandatory_arity(block_irep) == 1 }
+    end
+    regions
+  end
+
+  # Is the receiver of the `times` send at `idx` a Fixnum on every path (an Integer literal, or
+  # FIXNUM_OPERAND_PROOF for the method's own registers)?
+  def times_fixnum_receiver?(irep, idx, dest_reg)
+    return true if exact_literal(irep, idx, dest_reg)&.klass == :Integer
+
+    owner_def = @owner_of[irep.label]
+    !owner_def.nil? && proven_fixnum_operand?(irep, idx, dest_reg, owner_def)
+  end
+
+  # EACH_BLOCK_SUPPORT: inline `ary.each { |x| ... }`. Same BLOCK +
+  # `SENDB`/`SSENDB Ra :each n=0` adjacency as times. `#each` has bytecode
+  # definitions(Game::Actors, Game::Party, LCF::Array2D), so the receiver must
+  # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
+  # admitted only when the owner is Array itself. Anything unproven gives no
+  # region.
+  #
+  # EACH_SPREAD: a 2..EACH_SPREAD_MAX parameter block gets `spread: n`; OP_ENTER spreads
+  # an Array element over the parameters (vm.c). BC2CPP_EACH_SPREAD=0 keeps those blocks as calls.
+  EACH_SPREAD_MAX = 8
+
+  def each_spread_enabled?
+    ENV['BC2CPP_EACH_SPREAD'] != '0'
+  end
+
+  def recognize_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+      arity = mandatory_arity(block_irep)
+      next unless pure_mandatory_arity?(block_irep)
+      next unless arity == 1 || (arity.between?(2, EACH_SPREAD_MAX) && each_spread_enabled?)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == :SSENDB, spread: arity > 1 ? arity : nil,
+                   elem_class: arity == 1 ? region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                                 owner_name) : nil }
+    end
+    regions
+  end
+
+  # HASH_EACH_SUPPORT: inline `hash.each { |k, v| ... }`. Same adjacency and
+  # `:each` name as recognize_each_regions; the receiver gates ('Array' vs
+  # 'Hash') make them exclusive. Hash#each (mrblib/hash.rb) always yields key
+  # and value; the emitter assigns them directly to the block's R1/R2 (as the
+  # reduce/inject and each_with_index emitters do). No bytecode Hash#each
+  # override or Hash subclass exists here; the SSENDB/owner-is-Hash rule is
+  # kept for symmetry.
+  def recognize_hash_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 2 && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == :SSENDB,
+                   elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                        owner_name) }
+    end
+    regions
+  end
+
+  def recognize_hash_each_value_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_value')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == :SSENDB,
+                   elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                        owner_name) }
+    end
+    regions
+  end
+
+  # EACH_INDEX_SUPPORT: inline `ary.each_index { |i| ... }`. Array#each_index
+  # (mrblib/array.rb):
+  #
+  #   def each_index(&block)
+  #     return to_enum(:each_index) unless block
+  #     idx = 0
+  #     while idx < length
+  #       yield idx
+  #       idx += 1
+  #     end
+  #     self
+  #   end
+  #
+  # `length` is re-read every pass, the block gets the index, and the result is
+  # the receiver. Same adjacency and Array receiver gate as each. No bytecode
+  # override exists (the only Array reopens are array_include.rb and
+  # array_sort.rb, and LCF::Array1D/Array2D are not Array subclasses).
+  def recognize_each_index_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_index')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == :SSENDB }
+    end
+    regions
+  end
+
+  # EACH_KEY_SUPPORT: inline `hash.each_key { |k| ... }`. Hash#each_key
+  # (mrblib/hash.rb):
+  #
+  #   def each_key(&block)
+  #     return to_enum(:each_key) unless block
+  #     self.keys.each {|k| block.call(k)}
+  #     self
+  #   end
+  #
+  # It iterates a snapshot (`keys` is a fresh Array, mrb_hash_keys), yields the
+  # key, returns the receiver. Same adjacency and Hash receiver gate as
+  # recognize_hash_each_regions; no bytecode override exists.
+  def recognize_each_key_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: named_layout('each_key')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Hash', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == :SSENDB }
+    end
+    regions
+  end
+
+  # ELEMENT_CLASS_SUPPORT: element class of a region's receiver, or nil. SSENDB
+  # answers nil: its receiver is self (only admitted when the owner is Array),
+  # with no register to scan.
+  def region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    return nil if insn.op == :SSENDB
+
+    proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+  end
+
+  # HASH_ELEMENT_SUPPORT: region_element_class for Hash values.
+  def region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    return nil if insn.op == :SSENDB
+
+    proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+  end
+
+  # INTERP_UNLOCK / CORE_ARRAY_CHAIN: the chained-receiver rule lives at top
+  # level in proven_array_source_scan (ClassLayout.analyze needs it too; one copy
+  # of a soundness-critical rule). This wrapper adds the registry and the
+  # `-> Array` annotations.
+  # ARRAY_RETURN_PROOF: the return fixpoint is passed as the second oracle here
+  # but not from ClassLayout.analyze's call (it needs @class_layout, which
+  # ClassLayout is still building), so ClassLayout's facts are unaffected.
+  # SELF_ACCESSOR_RECEIVER: with `owner:` (the method's owner), a chained select/reject receiver is traced with
+  # that method's facts (block_fallback_receiver_class) instead of the registry alone.
+  def proven_array_source(irep, idx, dest_reg, owner: nil)
+    receiver_class = (->(pin_idx, pin) { block_fallback_receiver_class(irep, pin_idx, pin.reg, owner) } if owner)
+    # The two oracles read this CodeGen's facts when called, so one pair serves every scan.
+    @annotated_array_return_oracle ||= ->(n) { annotated_array_return(n) }
+    @array_return_proof_oracle ||= ->(n) { @array_return_names.include?(n) }
+    proven_array_source_scan(irep, idx, dest_reg, @registry, @annotated_array_return_oracle,
+                             @array_return_proof_oracle, receiver_class: receiver_class)
+  end
+
+  # GETIDX_STATIC_RECEIVER_SUPPORT: is this GETIDX/GETIDX0/SETIDX receiver
+  # provably Array or Hash, using the facts recognize_each_regions trusts
+  # (trace_new_target, plus proven_array_source for Arrays; there is no Hash
+  # literal scan yet, which only costs proofs)? Also returns an exact custom
+  # class with a compiled `[]`/`[]=` so compile_send's guarded TYPED lowering
+  # can be reused. Other callers match only Array/Hash.
+  # `idx.nil?` bails: the backward scan needs a position.
+  # BLOCK_BODY_INDEX_SUPPORT: inlined block bodies pass the real index in
+  # block_irep.instructions plus the register shift, and compile_insn maps `reg`
+  # back with unshift_proof_reg, so `irep`, `idx` and `reg` share one numbering.
+  def static_indexable_class(irep, idx, reg, owner_def)
+    return nil unless owner_def && idx
+
+    enter = irep.enter
+    mand = enter ? enter.enter_fields.first : 0
+    arg_classes = @class_annotations[irep.label]&.args
+    ivar_classes = @class_layout[owner_def.owner]
+    traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_def.owner,
+                               class_layout: @class_layout, registry: @registry,
+                               container_constants: @container_constants,
+                               element_annotations: @element_annotations,
+                               known_owners: @known_owners, capture_hints: @block_hash_capture_hints)
+    traced = resolve_owner_name(traced, { owner: owner_def.owner, known_owners: @known_owners }) if traced
+    return traced if %w[Array Hash].include?(traced)
+    return traced if traced && %w[[] []=].any? do |name|
+      @registry[name]&.any? { |md| md.owner == traced && md.irep }
+    end
+
+    lcf = lcf_exact_receiver(irep, idx, reg, owner_def, '[]')
+    return lcf.first if lcf
+
+    proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
+  end
+
+  # INDEX_SEND_DEVIRT: when GETIDX's dynamic `[]` fallback receiver has an exact
+  # compiled user class, reuse compile_send's guarded TYPED call. Only a TYPED
+  # result is accepted: MONO would drop GETIDX's container semantics for
+  # unproven receivers.
+  def compile_typed_index_send(irep, idx, owner_def, dest_reg, receiver_reg, index_expr, reg_offset, receiver_class,
+                               fallback_code)
+    return nil unless owner_def && idx && receiver_class
+    # A file class inherits `[]` from LCF::File (LCF_ROW_FLOW).
+    return nil unless @registry['[]']&.any? { |md| md.owner == receiver_class && md.irep } ||
+                      @lcf_rows&.file_bit(receiver_class)
+
+    saved_hint = @elem_class_hint
+    code = compile_send(Insn.synthetic(:SEND, "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
+                        trace_idx: idx, trace_reg_offset: reg_offset,
+                        trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
+    return code if code.include?('TYPED :[] ->') || code.include?('LCF_ROW_FLOW :[] ->')
+
+    @elem_class_hint = saved_hint
+    nil
+  end
+
+  def compile_typed_index_write(irep, idx, owner_def, receiver_reg, index_reg, value_reg, reg_offset, receiver_class,
+                                fallback_code)
+    return nil unless owner_def && idx && receiver_class
+    return nil unless @registry['[]=']&.any? { |md| md.owner == receiver_class && md.irep }
+
+    saved_hint = @elem_class_hint
+    code = compile_send(Insn.synthetic(:SEND, "R#{receiver_reg} :[]= n=2"), self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{receiver_reg}", call_arguments: ["r#{index_reg}", "r#{value_reg}"],
+                        trace_idx: idx, trace_reg_offset: reg_offset,
+                        trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
+    return code if code.include?('TYPED :[]= ->')
+
+    @elem_class_hint = saved_hint
+    nil
+  end
+
+  # MAP_BLOCK_SUPPORT: inline map/select/reject/find/filter_map (1-arg blocks),
+  # each_with_index (2-arg). Same BLOCK + `SENDB/SSENDB Ra :name
+  # n=0` adjacency and Array gate as recognize_each_regions. Only block arities
+  # matching the method are admitted (a mismatch would raise when interpreted),
+  # so the rest keep `#error`. Per-method semantics are in emit_collect_inline.
+  # filter_map is Enumerable#filter_map (mruby-enum-ext/mrblib/enum.rb, a
+  # dependency of the build):
+  #
+  #   def filter_map(&blk)
+  #     return to_enum(:filter_map) unless blk
+  #     ary = []
+  #     self.each do |*x|
+  #       x = blk.call(*x)
+  #       ary.push x if x
+  #     end
+  #     ary
+  #   end
+  #
+  # For an Array receiver the block gets one element; the block's RESULT is
+  # pushed when truthy. Not redefined anywhere here.
+  # Not derived from core_block_iterators: find and each_with_index are not RBS Array results, and the RBS's
+  # collect/find_all/partition/sort_by would widen it to names emit_collect_inline's case has no arm for.
+  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index filter_map].freeze
+
+  # ACCUM_BLOCK_SUPPORT: inline any?/all?/none?/count (1-arg blocks) and
+  # reduce/inject(init) (2-arg blocks, n=1). Semantics (emit_accum_inline):
+  #   - any?: false default, first truthy result exits with true;
+  #   - all?: true default, first falsy result exits with false;
+  #   - none?: true default, first truthy result exits with false;
+  #   - count: tally of truthy results;
+  #   - reduce/inject(init): init is in R(dest+1) (checked by register), the
+  #     accumulator goes through the block's two params;
+  #   - index: nil default, the first truthy result exits with its index. Array#index is native (array.c
+  #     mrb_ary_index_m, the same loop), so the site also needs array_native_refusal('index') to be nil.
+  # No-init `reduce` (n=0) stays out (empty-array/seeding semantics). Arity
+  # mismatches keep `#error`.
+  ACCUM_BLOCK_METHODS = %w[any? all? none? count index].freeze
+  ACCUM_FOLD_METHODS = %w[reduce inject].freeze
+
+  ACCUM_KIND = lambda do |insn|
+    n = insn.argc_text.to_s[/n=(\d+)/, 1]&.to_i
+    if n == 0 && ACCUM_BLOCK_METHODS.include?(insn.sym)
+      :pred
+    elsif n == 1 && ACCUM_FOLD_METHODS.include?(insn.sym)
+      :fold
+    end
+  end
+  # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
+  # `SENDB R2 :reduce n=1`).
+  ACCUM_BLOCK_OFFSETS = { pred: 1, fold: 2 }.freeze
+  ACCUM_LAYOUT = ->(insn) { ACCUM_BLOCK_OFFSETS[ACCUM_KIND.call(insn)] }
+
+  def recognize_accum_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: ACCUM_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      is_fold = ACCUM_KIND.call(insn) == :fold
+      want_arity = is_fold ? 2 : 1
+      next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+      next if is_fold && !fold_init_not_symbol?(irep, idx, dest_reg.to_i + 1)
+      next if insn.sym == 'index' && !array_native_index?
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: insn.sym, init_reg: is_fold ? (dest_reg + 1) : nil,
+                   ssendb: insn.op == :SSENDB,
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
+    end
+    regions
+  end
+
+  # Enumerable#inject takes a Symbol last argument as the operator and drops the block (`reduce(:+) { }` sums), so
+  # a fold is a loop only for an initial value proven not to be a Symbol.
+  def fold_init_not_symbol?(irep, idx, reg)
+    @exact_literal_types ||= {}.compare_by_identity
+    classes = (@exact_literal_types[irep] ||= BytecodeIR::Types.new(irep)).at(idx, reg)
+    !classes.nil? && !classes.empty? && !classes.include?(:Symbol)
+  end
+
+  def array_native_index?
+    @array_native_index = array_native_refusal('index').nil? if @array_native_index.nil?
+    @array_native_index
+  end
+
+  COLLECT_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && COLLECT_BLOCK_METHODS.include?(insn.sym) }
+
+  def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: COLLECT_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      meth = insn.sym
+      want_arity = meth == 'each_with_index' ? 2 : 1
+      next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: meth, ssendb: insn.op == :SSENDB,
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
+    end
+    regions
+  end
+
+  # EACH_BLOCK_SUPPORT: `ary.reject(&:dead?)` and friends: `LOADSYM R(a+1) :sym`
+  # then `SENDB`/`SSENDB Ra :name n=0`, no BLOCK. OP_SENDB turns regs[bidx] into
+  # a symbol proc (ensure_block), so there is nothing to inline or capture; each
+  # element gets one call (emit_sym_inline). Same Array gate as
+  # recognize_each_regions.
+  # Not derived from the RBS iterator tables: they declare 26 Enumerable names, emit_sym_inline handles only these
+  # nine, and each/any?/all?/none?/count are not declared in either table.
+  SYM_BLOCK_METHODS = %w[each map select reject find any? all? none? count].freeze
+
+  SYM_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && SYM_BLOCK_METHODS.include?(insn.sym) }
+
+  def recognize_sym_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    # No BLOCK check needed: OP_SENDB takes its block from regs[bidx] (dest+1 for
+    # n=0), which the LOADSYM just wrote (register match in each_call_site).
+    # A keyword call also LOADSYMs its key symbols into later registers, but it is
+    # always SEND/SSEND, never SENDB/SSENDB, so it cannot form a region here.
+    each_call_site(irep, prev_op: :LOADSYM, send_ops: %i[SENDB SSENDB], layout: SYM_LAYOUT) do |insn, idx, loadsym_insn, dest_reg|
+      sym_name = loadsym_insn.sym_token&.sub(/\A:/, '')
+      next unless sym_name && !sym_name.empty?
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { sym_addr: loadsym_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   method_name: insn.sym, sym_name: sym_name, ssendb: insn.op == :SSENDB }
+    end
+    regions
+  end
+
+  # INTERP_UNLOCK: inline `r.each { |id| ... }` for a receiver tracing to Range
+  # (a RANGE_INC/RANGE_EXC literal or `range(cmd)` below). Same adjacency and
+  # 1-arg gate as recognize_each_regions; zero-arg blocks are also admitted
+  # because Range#each yields the same counter to either form. No SSENDB: no
+  # game class is a Range.
+  def recognize_range_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
+
+      traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                 container_constants: @container_constants)
+      traced = range_return_call(irep, idx, dest_reg) if traced != 'Range'
+      next unless traced == 'Range'
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep }
+    end
+    regions
+  end
+
+  # RANGE_MAP_INLINE: inline `(a..b).map { |i| BODY }` (and `a...b`) as emit_range_map_inline's counter loop. The
+  # receiver's dominating writer must be a RANGE_INC/RANGE_EXC of two Integer literals inside RANGE_MAP_BOUND, so the
+  # loop's Integer header never refuses and the counter stays a Fixnum on every target; the block takes one plain
+  # parameter; and BLOCK_CORE_DIRECT's proof (block_core_target) must find that `map` on a Range is core
+  # Enumerable#collect and `each` core Range#each, the bodies the loop follows (`ary.push(block.call(i))` for each i
+  # of Range#each's Integer path). BC2CPP_RANGE_MAP_INLINE=0 keeps the send.
+  RANGE_MAP_BOUND = 0x4000_0000
+
+  def recognize_range_map_regions(irep)
+    return [] unless ENV['BC2CPP_RANGE_MAP_INLINE'] != '0' && range_map_core?
+
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB], layout: named_layout('map')) do |insn, idx, block_insn, dest_reg, block_irep|
+      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless integer_range_literal?(irep, idx, dest_reg)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: 'map', elem_class: 'Integer' }
+    end
+    regions
+  end
+
+  # RANGE_MAP_INLINE, in a BLOCK_FALLBACK body (emit_proc_fallback_fn_body): the inlined loops of `block_irep`,
+  # [[region, code]]. Level 0 of the inlined block is the host function's own frame, as in a method; level n is the
+  # host's level n - 1, one of the frames it captured (inline_host_upvar_name). A block that nests another block or
+  # lambda (whose own capture levels this does not shift) or returns (which must leave the method, not the host
+  # cfunc) stays a nested region.
+  def fallback_range_map_inlines(block_irep, upvar_regs, d)
+    regions = recognize_range_map_regions(block_irep).reject do |region|
+      program = BytecodeIR.for(region[:block_irep])
+      %i[BLOCK LAMBDA RETURN_BLK].any? { |op| program.op?(op) }
+    end
+    return [] if regions.empty?
+
+    saved = @inline_fallback_host_upvars
+    @inline_fallback_host_upvars = upvar_regs
+    regions.filter_map { |region| (code = emit_range_map_inline(region, block_irep, d)) && [region, code] }
+  ensure
+    @inline_fallback_host_upvars = saved
+  end
+
+  # The host function's parameter for a level-`level` upvar of a body inlined into a BLOCK_FALLBACK function, or nil
+  # (see fallback_range_map_inlines; compile_insn's GETUPVAR names the same parameter).
+  def inline_host_upvar_name(level, upvar_idx)
+    key = [level - 1, upvar_idx]
+    upvar_var_name(*key) if @inline_fallback_host_upvars&.include?(key)
+  end
+
+  # Cached once the world it reads is there: an analysis pass compiles before the closed world is attached.
+  # The question is block_core_direct_wrap's for a literal-block send, asked with the `&block` callee shapes
+  # compile_send admits (codegen_arg_shapes.rb).
+  def range_map_core?
+    return @range_map_core unless @range_map_core.nil?
+    return false unless block_core_direct_enabled? && block_core_world && @native_name_sources
+
+    saved = @extended_callee_shapes
+    @extended_callee_shapes = true
+    chain = BlockCoreDirectFallback::RECEIVERS.fetch('Range')[:chain]
+    core = lambda do |name, owner, def_name|
+      target = block_core_target('Range', chain, name, 0)
+      target && target.core && target.owner == owner && target.name == def_name
+    end
+    @range_map_core = !!(core.call('map', 'Enumerable', 'collect') && core.call('each', 'Range', 'each'))
+  ensure
+    @extended_callee_shapes = saved
+  end
+
+  # The register's dominating writer at `idx` builds a Range from two Integer literals within RANGE_MAP_BOUND.
+  def integer_range_literal?(irep, idx, reg)
+    found = irep.walk_dominating_writers(idx - 1, reg, use: idx) { |insn, index| [insn, index] }
+    return false unless found && %i[RANGE_INC RANGE_EXC].include?(found[0].op)
+
+    range_insn, at = found
+    [range_insn.reg, range_insn.reg + 1].all? do |bound|
+      exact = exact_literal(irep, at, bound)
+      exact&.klass == :Integer && exact.value.is_a?(Integer) && exact.value.abs < RANGE_MAP_BOUND
+    end
+  end
+
+  # INTERP_UNLOCK: Game::Interpreter#range returns a Range on every path (`a..b`
+  # or `1..0`). A single exact Owner#name list, so a
+  # `range` method elsewhere never matches and a non-Range change to #range
+  # must update this.
+  RANGE_RETURN_METHODS = Set['Game::Interpreter#range'].freeze
+
+  def range_return_call(irep, idx, dest_reg)
+    pin = irep.walk_dominating_writers(idx - 1, dest_reg, use: idx) { |insn| insn }
+    # Only a `range` call made FROM a Game::Interpreter method counts (checked via
+    # the irep's MethodDef owner), not just the name.
+    return nil unless pin && %i[SEND SSEND SEND0 SSEND0].include?(pin.op) && pin.sym == 'range'
+
+    RANGE_RETURN_METHODS.include?("#{@owner_of.fetch(irep.label).owner}#range") ? 'Range' : nil
+  end
+
+  # PROFILER_SECTION_SUPPORT: inline `RGSS::Profiler.section("name") { ... }`
+  # and `RGSS::Profiler.frame { ... }` as the same shape every other inline pass
+  # uses -- one BLOCK instruction immediately before a block-carrying send --
+  # but with NO receiver gate. Both names are the native profiling primitives in
+  # mruby-rgss/src/profiler.cxx (prof_section/prof_frame): they take a block,
+  # time it, and return the block's value, with an explicit `!g_enabled` fast
+  # path that is a bare yield.
+  #
+  # What the emitter actually does with them is NOT "time the body by hand":
+  # profiler_section_begin/profiler_section_end/profiler_frame_begin/
+  # profiler_frame_end (include/profiler.hxx) are public primitives that already
+  # encapsulate the enabled test, the clock read, the aggregation and the
+  # Chrome-trace write, and are documented no-ops when profiling is disabled
+  # (section_end returns immediately on a zero start stamp). So the emitted code
+  # calls the two primitives around the inlined body and the native
+  # `if (!g_enabled) return mrb_yield_argv(...)` branch collapses into them --
+  # which is the same trade the shipping code already makes in
+  # mruby-rgss/src/lib.cxx, where ProfilerScope times gfx.zorder/gfx.lvgl/
+  # gfx.invalidate in the same per-frame hot path.
+  #
+  # The receiver is matched structurally instead of through trace_new_target: a
+  # GETCONST/GETMCNST pair naming RGSS::Profiler, which is exactly what the real
+  # call sites compile to (`GETCONST R2 RGSS` + `GETMCNST R2 (R2)::Profiler`).
+  # A receiver that reaches these names by any other route -- a constant
+  # rebound to something else, a local alias, a subclass -- is simply not
+  # matched and keeps today's BLOCK_FALLBACK.
+  #
+  # The section NAME must be a String pool literal, because the C primitive
+  # takes `const char*` and only promises to copy it during the call
+  # (profiler_section_end stores it into a std::string map key immediately).
+  # Every real call site passes a literal ("map.render", "scene.update", ...),
+  # so a computed name is declined rather than approximated: materializing an
+  # arbitrary mrb_value name per call would add an allocation per frame for no
+  # benefit. `frame` takes no name, so it is admitted unconditionally.
+  #
+  # No BREAK: `break` out of an inlined region has no meaning here (the native
+  # path mrb_yield_argv's the block, so a `break` in it is already a LOCAL jump
+  # mruby's VM resolves against the sending frame's tag -- an enclosing loop of
+  # the Ruby method, not the section), and refusing it is what the other
+  # inlined-loop passes do too. `next` (a block return) and a method `return`
+  # (RETURN_BLK, already a plain C++ return in every inline body) are fine.
+  PROFILER_SECTION_NAMES = { 'section' => 1, 'frame' => 0 }.freeze
+
+  # The block proc register is the one AFTER the arguments (vm.c OP_SENDB):
+  # dest+1 for :frame (no arguments at all), dest+2 for :section, whose name
+  # is argument 0 and is written into dest+1 first.
+  PROFILER_SECTION_LAYOUT = lambda do |insn|
+    want_argc = PROFILER_SECTION_NAMES[insn.sym]
+    1 + want_argc if want_argc && insn.argc_text == "n=#{want_argc}"
+  end
+
+  def recognize_profiler_section_regions(irep)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB], layout: PROFILER_SECTION_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      meth = insn.sym
+      next unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
+      next if @closed_world && !profiler_native_lookup_safe?(meth)
+      # A standalone helper cannot return from the enclosing Ruby method.
+      next unless core_ruby_result_exits_safe?(block_irep)
+
+      # The receiver must be the literal constant path RGSS::Profiler (see
+      # profiler_section_receiver?), and a :section's name must be a String pool
+      # literal (see profiler_section_literal?). Everything else keeps today's
+      # BLOCK_FALLBACK.
+      next unless profiler_section_receiver?(irep, idx, dest_reg, meth)
+
+      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg + 1)) : nil
+      next if meth == 'section' && section_name.nil?
+
+      upvars = block_upvar_needs(block_irep)
+      # A block whose captures cannot be modelled, or which breaks out, stays on
+      # the fallback: `break` here has no inlined target, and the nested break
+      # scan needs the same available_upvars the emitter would supply.
+      next if upvars.nil?
+      nbrk = inline_nested_region_has_break?({ block_irep: block_irep, upvars: upvars }, upvars)
+      next if nbrk
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   block_irep: block_irep, method_name: meth, section_name: section_name }
+    end
+    regions
+  end
+
+  # The native the call reaches is profiler.cxx's own function, checked to return its block's value (BLOCK_RETURNS:
+  # the sig/bc2cpp declaration of RGSS::Profiler.section/frame, its source scan and the closed-world
+  # lookup conditions). The emitter replaces that function with profiler.cxx's primitives, so the one native source
+  # must be that file.
+  def profiler_native_lookup_safe?(meth)
+    entry = block_return_entry('RGSS::Profiler.singleton', meth)
+    return false unless entry && entry.native && entry.kind == :block_value && entry.args == PROFILER_SECTION_NAMES[meth]
+
+    paths = block_return_native_paths(meth)
+    paths.one? && paths.first.end_with?('/mruby-rgss/src/profiler.cxx') && block_return_native_lookup_safe?(entry)
+  end
+
+  # Is `reg` the literal constant path RGSS::Profiler at this call? `idx` is the
+  # SENDB's index, so the BLOCK is at idx-1. The pair
+  # `GETCONST R<r> RGSS` + `GETMCNST R<r> (R<r>)::Profiler` ends immediately
+  # before the BLOCK for :frame, and one STRING earlier for :section (whose
+  # name argument is written in between), so both positions are tried.
+  # Anything else -- a local alias, a rebased constant, a different receiver
+  # answering `section` -- is not matched and keeps today's BLOCK_FALLBACK.
+  def profiler_section_receiver?(irep, idx, reg, meth)
+    receiver_pair_before?(irep, idx - 1, reg) || (meth == 'section' && receiver_pair_before?(irep, idx - 2, reg))
+  end
+
+  # The two-instruction `GETCONST R<r> RGSS` / `GETMCNST R<r> (R<r>)::Profiler`
+  # occupying the two slots immediately before index `block_idx` (the BLOCK).
+  def receiver_pair_before?(irep, block_idx, reg)
+    mcnst = BytecodeIR.for(irep).source_at(block_idx - 1)
+    return false unless mcnst && mcnst.op == :GETMCNST
+    return false unless mcnst.reg == reg && mcnst.paren_reg == reg && mcnst.mcnst_name == 'Profiler'
+
+    const = BytecodeIR.for(irep).source_at(block_idx - 2)
+    const && const.op == :GETCONST && const.reg == reg && const.const_name == 'RGSS'
+  end
+
+  # The String pool literal for :section's name argument, or nil. The VM wrote
+  # that argument (register dest+1) with a `STRING R<n> L[k]` pool load placed
+  # between the receiver pair and the BLOCK. The search is bounded to exactly
+  # those two instructions, so a STRING left over from an earlier statement in
+  # the method can never be mistaken for this call's name.
+  def profiler_section_literal(irep, idx, reg)
+    insn = BytecodeIR.for(irep).source_at(idx - 2)
+    return nil unless insn && insn.op == :STRING && insn.reg == reg
+
+    pool_idx = insn.pool_index
+    return nil unless pool_idx
+
+    entry = irep.pool.fetch(pool_idx.to_i)
+    entry if entry.is_a?(String)
+  end
+
+  # SORT_BLOCK_SUPPORT: inline sort_by (1-arg key), with the proven_array_source
+  # gate. Semantics in emit_sort_inline. uniq is not admitted: a fused uniq would
+  # return key-sorted order and dedup by <=>, not the original order and hash/eql?.
+  # Not supported, with no block-form call sites in the closed world:
+  #   - sort_by!/uniq!: could replace the receiver via mrb_ary_replace after the
+  #     existing passes (as mruby's own sort_by!/uniq! do);
+  #   - max/min (2-arg comparator: a single fold, block not called for the first
+  #     element) and max_by/min_by (1-arg key, called for every element); ties
+  #     keep the first element, empty is nil.
+  # Arity mismatches keep `#error`.
+  # RBS states sort_by alone and has no "sort" category; a /\Asort/ name filter would widen silently if RBS gains one.
+  SORT_BLOCK_METHODS = %w[sort_by].freeze
+
+  SORT_LAYOUT = ->(insn) { 1 if insn.argc_text == 'n=0' && SORT_BLOCK_METHODS.include?(insn.sym) }
+
+  def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    each_block_site(irep, send_ops: %i[SENDB SSENDB], layout: SORT_LAYOUT) do |insn, idx, block_insn, dest_reg, block_irep|
+      meth = insn.sym
+      want_arity = meth == 'sort' ? 2 : 1
+      next unless mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+      next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: meth, ssendb: insn.op == :SSENDB,
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
+    end
+    regions
+  end
+  # compile_block_body_insn (below): translate one instruction of an INLINED
+  # block body. `offset` is added to every `R<N>` before delegating to
+  # compile_insn, keeping the block's registers apart from the method's.
+  # BLOCK_BODY_INDEX_SUPPORT: the delegation passes the instruction's real index
+  # in block_irep and the shift; unshift_proof_reg undoes the shift wherever a
+  # register reaches a proof. Addresses are unchanged. `owner_def` stays the
+  # enclosing method's (the block shares its self), and
+  # fixnum_proof_entry_arg?'s `owner_def.irep == irep.label` guard keeps the
+  # method's NATIVE_ARGS types off the block's parameters.
+  # Block-specific opcodes:
+  #   - RETURN/RETNIL/RETFALSE/RETTRUE: the block's yielded value (`next` is
+  #     RETNIL); for #times, a goto to this iteration's end label.
+  #   - RETURN_BLK: a real `return`; the block's frame is inlined into the
+  #     method's function, so it is a plain C++ return.
+  #   - GETUPVAR/SETUPVAR at level 0: the outer scope is this same function, so
+  #     `b` names `r<b>` directly, without the offset.
+  # INLINE_BLOCK_CAPTURE_HINTS: a block GETUPVAR keeps a Hash<Klass> hint only
+  # when the exact SENDB site captures an untouched mandatory Hash<Klass>
+  # argument; the generated index and typed call keep their runtime guards and
+  # fallbacks.
+  def inline_hash_capture_hints(host_irep, region)
+    block_irep = region[:block_irep]
+    return {} if BytecodeIR.for(block_irep).op?(:SETUPVAR, :BLOCK, :SENDB, :SSENDB)
+
+    call_idx = host_irep.index_of_addr(region[:sendb_addr])
+    return {} unless call_idx
+
+    enter = host_irep.enter
+    mandatory = enter ? enter.enter_fields.first : 0
+    elements = @element_annotations[host_irep.label]
+    return {} unless elements
+
+    captures = {}
+    host_ir = BytecodeIR.for(host_irep)
+    BytecodeIR.for(block_irep).instructions_with_op(:GETUPVAR).each do |insn|
+      upvar, level = insn.upvar_ref
+      next unless level.zero?
+
+      # Only the frame entry can be the host parameter at the call: a write on any reaching path, including a loop
+      # back-edge from after the call, refuses it.
+      defs = host_ir.reaching_definitions(call_idx, upvar, shared: true)
+      arg_pos = defs&.size == 1 && defs.first.entry? ? defs.first.reg.to_i : nil
+      next unless arg_pos && arg_pos.between?(1, mandatory)
+      next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'
+
+      element_class = elements.arg_elements&.[](arg_pos - 1)
+      next unless element_class
+
+      captures[insn.reg.to_i] = { container_class: 'Hash', element_class: element_class }
+    end
+    captures.empty? ? {} : { block_irep.label => captures }
+  end
+
+  def with_block_hash_capture_hints(hints)
+    previous = @block_hash_capture_hints
+    @block_hash_capture_hints = hints
+    yield
+  ensure
+    @block_hash_capture_hints = previous
+  end
+
+  # ELEMENT_CLASS_SUPPORT: publish "this instruction's receiver is the loop
+  # element, of class `elem_class`" for exactly one instruction. compile_send
+  # consumes the hint on read, so a nested compile (compiles_clean? on another
+  # body) never sees it, and the `ensure` clears it regardless. Only
+  # explicit-receiver sends qualify (SSEND receivers are self).
+  def with_element_hint(block_irep, insn, i, elem_reg, elem_class)
+    hint = nil
+    if elem_class && elem_reg && %i[SEND SEND0].include?(insn.op) &&
+       element_receiver?(block_irep, i, insn.reg, elem_reg)
+      hint = elem_class
+    end
+    prev = @elem_class_hint
+    @elem_class_hint = hint
+    yield
+  ensure
+    @elem_class_hint = prev
+  end
+
+  # CORE_BLOCK_ELEMENT_HINT: with_element_hint for a block with several element
+  # parameters ({ register => hint }, block_fallback_element_hints): the
+  # instruction's receiver gets the hint of the parameter it still holds.
+  def with_element_hints(block_irep, insn, i, hints, &block)
+    reg, hint = hints.find { |elem_reg, _| element_receiver?(block_irep, i, insn.reg, elem_reg) } if
+      !hints.empty? && %i[SEND SEND0].include?(insn.op)
+    with_element_hint(block_irep, insn, i, reg, hint, &block)
+  end
+
+  # ELEMENT_CLASS_SUPPORT: does `reg` still hold the loop element at `idx`? mrbc
+  # MOVEs a parameter into a scratch register before sending (`MOVE R10 R8`,
+  # `SEND R10 :dead?`), so follow MOVEs back to the element register with no
+  # other write in between; reassigning the parameter stops the scan.
+  # Straight-line and control-flow-insensitive, which is only a precision
+  # limit: the emitted code checks mrb_obj_class before the direct call.
+  def element_receiver?(block_irep, idx, reg, elem_reg)
+    root = BytecodeIR.for(block_irep).copy_root(idx - 1, reg)
+    !root.nil? && root.writer.nil? && root.reg == elem_reg
+  end
+
+  # INLINE_NESTED_BLOCK_SUPPORT: the shift-then-compile_insn step of
+  # compile_block_body_insn's `else` arm, named so the BLOCK/SENDB/SSENDB case
+  # can reuse it for an unclaimed nested region (one copy, no drift).
+  def compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
+    compile_insn(insn.shift_regs(offset), block_irep, owner_def, idx, offset)
+  end
+
+  def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                                break_dest: nil, break_label: nil, idx: nil)
+    case insn.op
+    # INLINE_NESTED_BLOCK_SUPPORT: a nested block-carrying call in this inlined
+    # body. `@inline_nested` holds the regions inline_nested_block_pass claimed
+    # for the body loop running now. A claimed region's BLOCK address carries the
+    # whole replacement (RProc construction and dispatch) and its SENDB address
+    # nothing, as in compile_method's and emit_proc_fallback_fn's passes.
+    # An unclaimed one falls through to compile_insn, which emits `#error`, so the
+    # driving emitter gives up and the loop falls back to BLOCK_FALLBACK as
+    # before.
+    when :BLOCK, :SENDB, :SSENDB
+      glue = @inline_nested&.glue&.[](insn.addr)
+      if glue
+        glue
+      elsif @inline_nested&.skip?(insn.addr)
+        # A claimed region's SENDB/SSENDB: already emitted at its BLOCK address.
+        ''
+      else
+        # Unclaimed: the plain shift-then-compile_insn, i.e. `#error`, which makes
+        # the driving emitter abandon the region.
+        compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
+      end
+    when :RETURN, :RETNIL, :RETFALSE, :RETTRUE
+      "  goto #{iter_end_label};\n"
+    when :RETURN_BLK
+      r = insn.no_operands? ? '0' : insn.reg
+      "  return r#{r.to_i + offset};\n"
+    when :BREAK
+      # EACH_BLOCK_SUPPORT: `break` (bare breaks carry a LOADNIL'd register) makes
+      # the value the whole SEND's result (vm.c OP_BREAK L_UNWINDING). Inlined:
+      # assign the SENDB destination and jump past the loop. Only the each/sym
+      # emitters pass break_dest/break_label; in #times a break keeps its `#error`.
+      if break_dest && break_label
+        r = insn.no_operands? ? '0' : insn.reg
+        "  r#{break_dest} = r#{r.to_i + offset};\n  goto #{break_label};\n"
+      else
+        "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
+      end
+    when :GETUPVAR
+      upvar_idx, level = insn.upvar_ref
+      if level.zero?
+        "  r#{insn.reg.to_i + offset} = r#{upvar_idx};\n"
+      elsif (vname = inline_host_upvar_name(level, upvar_idx))
+        "  r#{insn.reg.to_i + offset} = *#{vname};\n"
+      else
+        "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
+      end
+    when :SETUPVAR
+      upvar_idx, level = insn.upvar_ref
+      if level.zero?
+        "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
+      elsif (vname = inline_host_upvar_name(level, upvar_idx))
+        "  bc2cpp_keep_old(M, *#{vname});\n  *#{vname} = r#{insn.reg.to_i + offset};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg.to_i + offset});\n"
+      else
+        "  #error unhandled opcode SETUPVAR -- not in this prototype's supported subset\n"
+      end
+    # JMP/JMPNOT/JMPIF/JMPNIL are handled here, not by compile_insn, whose bare
+    # `goto L<target>;` would miss this body's `label_prefix`-qualified labels or
+    # collide with a same-numbered label of the enclosing method (goto labels have
+    # function scope). `.to_i`: disassembly zero-pads addresses ("016") but labels
+    # use the integer value.
+    when :JMP
+      "  goto #{label_prefix}#{insn.jmp_addr};\n"
+    when :JMPUW
+      # JMPUW_SUPPORT: as compile_insn's JMPUW case, but against `block_irep`'s own
+      # catch handlers and jump targets, and with prefixed labels (see JMP above).
+      if jmpuw_is_plain_jump?(block_irep)
+        "  goto #{label_prefix}#{insn.jmp_addr};\n"
+      else
+        "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
+      end
+    when :JMPNOT
+      # The insn is unshifted and idx is its position in block_irep, so the decision reads block_irep's own state with
+      # block_irep's own register numbers. Only the emitted name needs the offset (compile_shifted_body_insn, which does
+      # shift the insn, keeps the offset guard).
+      reg = insn.reg
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
+        "  if (!mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
+    when :JMPIF
+      reg = insn.reg
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
+        "  if (mrb_test(r#{reg.to_i + offset})) goto #{target};\n"
+    when :JMPNIL
+      reg = insn.reg
+      target = "#{label_prefix}#{insn.uint_operand.to_i}"
+      decided_branch_code(insn, decided_branch_outcome(insn, block_irep, owner_def, idx, 0), target) ||
+        "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{target};\n"
+    else
+      # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in
+      # block_irep.instructions (the emitters walk it in order, skipping only
+      # ENTER), and `offset` the register shift; with both, FIXNUM_OPERAND_PROOF and
+      # GETIDX_STATIC_RECEIVER_SUPPORT run against block_irep's own facts, via
+      # unshift_proof_reg.
+      compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
+    end
+  end
+end

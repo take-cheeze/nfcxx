@@ -1,0 +1,6 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))
+(call-effects "second" (returns (ptr int) (from-arg 0 4 shared)) (nothrow) (noescape) (closed) (args (read (struct "Pair"))))
+(function "second" (ret (ptr int)) (params (param %0 "p" (ptr (struct "Pair"))))
+(decl %0 param) (return (offset %0 0))
+)

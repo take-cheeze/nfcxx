@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Keeps GitHub Actions pins in .github/workflows and .github/actions current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # Minor and patch bumps arrive as one PR; major bumps stay separate so each can be reviewed.
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

@@ -1,0 +1,870 @@
+# frozen_string_literal: true
+
+require_relative 'core_hierarchy_sigs'
+
+# CodeGen: NUMERIC_SLOW_PATH. The else of a guarded numeric arm is one typed helper per
+# operator that runs the C function the Integer/Float method (or vm.c's inline pair) runs for the
+# operand tags, and dispatches by name only for a class it does not own. What it cannot match
+# exactly (zero divisor, MRB_INT_MIN count, Float#%) stays on the by-name call.
+class CodeGen
+  class << self
+    # CoreCompare::OPS the build's core sources still match; nil proves nothing.
+    attr_accessor :core_compare
+  end
+
+  NUMERIC_SLOW_PRELUDE = <<~CPP
+    // NUMERIC_SLOW_PATH (ADR 0292): mruby's bigint entry points are declared only in
+    // mruby/internal.h, which has no C linkage guard.
+    #ifdef MRB_USE_BIGINT
+    extern "C" mrb_value mrb_bint_div(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_bint_mod(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_bint_and(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_bint_or(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_bint_xor(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_bint_lshift(mrb_state*, mrb_value, mrb_int);
+    extern "C" mrb_value mrb_bint_rshift(mrb_state*, mrb_value, mrb_int);
+    extern "C" mrb_value mrb_bint_new_int(mrb_state*, mrb_int);
+    extern "C" mrb_value mrb_bint_add_ii(mrb_state*, mrb_int, mrb_int);
+    extern "C" mrb_value mrb_bint_sub_ii(mrb_state*, mrb_int, mrb_int);
+    extern "C" mrb_value mrb_bint_mul_ii(mrb_state*, mrb_int, mrb_int);
+    extern "C" mrb_value mrb_as_bint(mrb_state*, mrb_value);
+    #endif
+    // Whole bodies of Integer#% and Float#% (the pinned fork commit (mruby-expose-misc-bodies, docs/patch-fork-tracking.md), ADR 0367).
+    extern "C" mrb_value mrb_int_mod_impl(mrb_state*, mrb_value, mrb_value);
+    extern "C" mrb_value mrb_str_mod_impl(mrb_state*, mrb_value, mrb_value);
+    #ifndef MRB_NO_FLOAT
+    extern "C" mrb_value mrb_flo_mod_impl(mrb_state*, mrb_value, mrb_value);
+    #endif
+    // mrb_bigint_p and mrb_float_p are FALSE in a build without them.
+    static inline mrb_bool bc2cpp_slow_int_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
+    static inline mrb_bool bc2cpp_slow_num_p(mrb_value v) { return bc2cpp_slow_int_p(v) || mrb_float_p(v); }
+
+  CPP
+
+  # A result that may be a heap object is kept alive by one arena entry, what a by-name call
+  # leaves; the temporaries of the body are dropped, so a loop does not grow the arena.
+  NUMERIC_SLOW_DONE = 'return bc2cpp_arena_keep(M, ai, r);'
+
+  NUMERIC_SLOW_ARITH = { 'add' => ['+', 'mrb_num_add'], 'sub' => ['-', 'mrb_num_sub'],
+                         'mul' => ['*', 'mrb_num_mul'] }.freeze
+  NUMERIC_SLOW_TIME_IMPL = { 'add' => 'mrb_time_plus_impl', 'sub' => 'mrb_time_minus_impl' }.freeze
+  NUMERIC_SLOW_CMP = { 'lt' => '<', 'le' => '<=', 'gt' => '>', 'ge' => '>=' }.freeze
+  NUMERIC_SLOW_BITS = { 'and' => ['&', 'mrb_bint_and'], 'or' => ['|', 'mrb_bint_or'],
+                        'xor' => ['^', 'mrb_bint_xor'] }.freeze
+  NUMERIC_SLOW_KEYS = { '+' => 'add', '-' => 'sub', '*' => 'mul', '<' => 'lt', '<=' => 'le', '>' => 'gt',
+                        '>=' => 'ge', '/' => 'div', '%' => 'mod', '&' => 'and', '|' => 'or', '^' => 'xor',
+                        '<<' => 'lshift', '>>' => 'rshift', '-@' => 'neg', 'zero?' => 'zero',
+                        'round' => 'round' }.freeze
+
+  # The call that finishes arm `name`; `float` selects the variant that also takes Float receivers.
+  def numeric_slow_call(name, d, recv, argv, float: false)
+    key = NUMERIC_SLOW_KEYS.fetch(name)
+    "r#{d} = bc2cpp_slow_#{key}#{float ? '_f' : ''}(M, #{([recv] + argv).join(', ')});\n"
+  end
+
+  # Float#op may stay native while Integer's is Ruby (or the reverse): each receiver class is
+  # admitted on its own.
+  def numeric_slow_float_safe?(name, owners = %w[Integer Numeric])
+    builtin_class_send_safe?(name, owners + ['Float'])
+  end
+
+  # NUMERIC_SLOW_CLOSED: operators whose every definer in the build is on these classes,
+  # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
+  # run bodies that mruby keeps static, which the pinned fork commit (mruby-expose-collection-op-bodies, docs/patch-fork-tracking.md) exports; they also need
+  # numeric_slow_collection_ready?.
+  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String Time],
+                          '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],
+                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array Time],
+                          '&' => %w[Integer NilClass TrueClass FalseClass Array],
+                          '|' => %w[Integer NilClass TrueClass FalseClass Array],
+                          '<<' => %w[Integer Array String IO] }.freeze
+
+  # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
+  # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
+  # classes whose method the helper's arms run.
+  def numeric_slow_closed?(name)
+    owners = NUMERIC_SLOW_CLOSED[name]
+    return false unless owners && numeric_slow_closed_world? && numeric_slow_collection_ready?(name)
+
+    answers = call_facts_answers
+    definers = answers.definers(name)
+    return false if definers.nil? || definers[:singleton]
+    return false unless %i[foreign modules].all? { |kind| definers[kind].empty? }
+
+    ruby = numeric_slow_ruby_owners(name, definers[:ruby])
+    return false unless ruby
+
+    members = numeric_slow_members(answers, name)
+    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners + ruby) }
+  end
+
+  # NUMERIC_SLOW_RUBY_ARM: operators whose closed form carries a direct-call arm per Ruby definer.
+  NUMERIC_SLOW_RUBY_ARM_OPS = %w[<<].freeze
+
+  # The Ruby definers of `name` as extra candidate owners: [] for none, nil when one has no arm.
+  def numeric_slow_ruby_owners(name, ruby)
+    return [] if ruby.empty?
+    return nil unless NUMERIC_SLOW_RUBY_ARM_OPS.include?(name)
+
+    arms = numeric_slow_ruby_arms(name)
+    return nil unless arms
+
+    # CallFacts answers name classes by their simple name, the registry by the full one.
+    simple = arms.map { |arm| arm[:owner].split('::').last }
+    simple.sort == ruby.to_a.map { |owner| owner.split('::').last }.sort ? simple : nil
+  end
+
+  # { owner:, impl:, args: } per Ruby definition of `name`, or nil. Each must be the one public, clean, yield-free
+  # compiled definition on its owner (a direct call skips the entry's Fiber guard), and no owner may inherit another,
+  # so the order of the arms cannot pick a superclass body over a subclass override.
+  def numeric_slow_ruby_arms(name)
+    @numeric_slow_ruby_arms ||= {}
+    @numeric_slow_ruby_arms.fetch(name) { @numeric_slow_ruby_arms[name] = numeric_slow_ruby_arms_proof(name) }
+  end
+
+  def numeric_slow_ruby_arms_proof(name)
+    return nil unless @yield_reach && @closed_world.visibility_stable?(name)
+    return nil if devirt_blocked_name?(name) || symbol_installed_names.nil? || symbol_installed_names.include?(name)
+
+    # The `<native>` placeholder stands for the native definers, which the helper's own arms and the collection
+    # proof cover.
+    defs = (@registry[name] || []).reject { |d| d.owner == '<native>' }
+    owners = defs.map { |d| d.owner.split('::').last }
+    return nil if defs.empty? || owners.uniq.size != owners.size
+
+    answers = call_facts_answers
+    defs.map do |d|
+      return nil unless d.irep && d.visibility == :public && !d.owner.end_with?('.singleton')
+      return nil unless compiles_clean?(d.irep) && @yield_reach.yield_free?(d.irep)
+
+      own = d.owner.split('::').last
+      ancestors, unknown = answers.ancestors(own)
+      return nil if unknown || (ancestors & (owners - [own])).any?
+
+      impl = "#{cpp_name(d.owner, d.name)}_impl"
+      args, = direct_call_args(d, ['b'], impl)
+      return nil unless args
+
+      { owner: d.owner, impl: impl, args: args }
+    end
+  end
+
+  # `klass` is an owner, or a class whose whole lookup path is known and runs through an owner: with no Ruby, module
+  # or foreign definer of the name it resolves to the owner's native method, whose tag the helper switches on.
+  def numeric_slow_inherits_owner?(answers, klass, owners)
+    return true if owners.include?(klass)
+
+    ancestors, unknown = answers.ancestors(klass)
+    !unknown && ancestors.any? { |name| owners.include?(name) }
+  end
+
+  # `members` less Time and its subclasses when mruby-time is not in the build's gem list: the host scan reads
+  # every core gem's sources, and `Time#+` / `Time#-` are static in mruby-time (no mirror possible).
+  def numeric_slow_members(answers, name)
+    members = answers.members(name)
+    gems = CodeGen.build_gem_names
+    return members if members.nil? || gems.nil? || gems.include?('mruby-time')
+
+    timed = members.select { |k| answers.ancestors(k).first.include?('Time') }
+    return members if timed.any? { |k| @closed_world.class_declared?(k) }
+
+    members - timed
+  end
+
+  # NUMERIC_SLOW_CLOSED_CMP: `<` `<=` `>` `>=` are answered by the numeric natives, Comparable's Ruby
+  # body (String, Symbol and any Numeric that is not an Integer or Float, through the mixin) and the Hash subset
+  # tests. The helper mirrors the first two and keeps the by-name call for Hash; every other receiver is a proven
+  # NoMethodError.
+  NUMERIC_SLOW_CMP_OWNERS = %w[Integer Float Numeric String Symbol Hash].freeze
+  # Where `<=>` of a String, a Symbol or another Numeric is looked up; no Ruby may define it there, which keeps it
+  # an Integer or nil answer (`cmp < 0`), and String's and Symbol's are the natives mrb_cmp reads directly.
+  # The three receivers, then what they inherit (declarations.rbs#core_hierarchy).
+  NUMERIC_SLOW_CMP_LOOKUP = %w[String Symbol Numeric].then { |own| own | own.flat_map { |k| CoreHierarchySigs.ancestors(k) } }.freeze
+  NUMERIC_SLOW_SPACESHIP = { 'String' => 'mrb_str_cmp_m', 'Symbol' => 'sym_cmp' }.freeze
+
+  def numeric_slow_closed_cmp?(name)
+    return false unless NUMERIC_SLOW_CMP.value?(name) && numeric_slow_closed_world?
+
+    @numeric_slow_closed_cmp ||= {}
+    @numeric_slow_closed_cmp.fetch(name) { @numeric_slow_closed_cmp[name] = numeric_slow_cmp_proof(name) }
+  end
+
+  # The Comparable body this arm mirrors is the build's own, and nothing but the numeric natives, that body and
+  # Hash's Ruby answers `name` (members), so only String and Symbol reach it.
+  def numeric_slow_cmp_proof(name)
+    return false unless self.class.core_compare&.include?(name)
+
+    answers = call_facts_answers
+    definers = answers.definers(name)
+    return false if definers.nil? || definers[:singleton] || !definers[:ruby].empty? || !definers[:modules].empty?
+    return false unless definers[:foreign].subset?(%w[Comparable Hash].to_set)
+    return false unless definers[:native].subset?(%w[Integer Float Numeric].to_set)
+
+    members = answers.members(name)
+    !members.nil? && members.subset?(NUMERIC_SLOW_CMP_OWNERS.to_set) && numeric_slow_spaceship_core?(answers)
+  end
+
+  # Comparable's `self <=> other` is mrb_cmp: it calls mrb_str_cmp for a String and dispatches `<=>` otherwise, and
+  # `cmp < 0` needs an Integer or nil answer, so no Ruby `<=>` may sit on the receivers' lookup.
+  def numeric_slow_spaceship_core?(answers)
+    return false unless core_ancestry(*NUMERIC_SLOW_CMP_LOOKUP)
+    return false unless NUMERIC_SLOW_CMP_LOOKUP.all? { |owner| @closed_world.core_native_arm_safe?('<=>', owner) }
+
+    installed = symbol_installed_names
+    return false if installed.nil? || installed.include?('<=>') || devirt_blocked_name?('<=>')
+    return false if answers.opaque_owners.fetch('<=>', []).any? { |owner| owner.nil? || NUMERIC_SLOW_CMP_LOOKUP.include?(owner) }
+    return false if @registry.fetch('<=>', []).any? { |d| NUMERIC_SLOW_CMP_LOOKUP.include?(d.owner) }
+
+    natives = answers.registrations.fetch('<=>', []).group_by { |e| e[:owner]&.fetch(:class_name, nil) }
+    NUMERIC_SLOW_SPACESHIP.all? do |owner, function|
+      entries = natives.fetch(owner, [])
+      entries.size == 1 && entries.first[:function] == function && entries.first[:path].end_with?("/src/#{owner.downcase}.c")
+    end && !natives.key?(nil)
+  end
+
+  def numeric_slow_closed_world?
+    ENV['BC2CPP_NUMERIC_SLOW_CLOSED'] != '0' && @closed_world && @native_name_sources && @closed_world.global_refusal.nil? &&
+      @closed_world.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
+  end
+
+  # File-scope definitions of the helpers `codes` call; '' when none.
+  def emit_numeric_slow_helpers(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    used = texts.flat_map { |t| t.scan(/\bbc2cpp_slow_([a-z]+)(_f)?\(M,/) }.uniq
+    return '' if used.empty?
+
+    helper_owner_calls(NUMERIC_SLOW_PRELUDE + used.sort.map { |key, float| numeric_slow_source(key, float ? true : false) }.join)
+  end
+
+  # How many sites call each helper, for the stderr summary.
+  def numeric_slow_site_counts(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    counts = Hash.new(0)
+    texts.each { |t| t.scan(/= bc2cpp_slow_([a-z]+)(?:_f)?\(M,/) { |(key)| counts[key] += 1 } }
+    counts.sort.to_h
+  end
+
+  private
+
+  def numeric_slow_source(key, float)
+    head = numeric_slow_head(key, float)
+    closed = numeric_slow_closed_source(key, head)
+    return numeric_slow_open_source(key, head, float) unless closed
+
+    # A build that links the Complex or Rational gem has more definers (or receivers) than the world scan lists
+    # (`/`, `+ *`, `< <= > >=`, `round`), so it keeps the by-name body.
+    "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_open_source(key, head, float)}" \
+      "#else\n#{closed}#endif\n"
+  end
+
+  def numeric_slow_head(key, float)
+    "static mrb_value bc2cpp_slow_#{key}#{float ? '_f' : ''}(mrb_state* M, mrb_value a"
+  end
+
+  # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
+  # independent: `+ *`, `< <= > >=`, `/`, `^ >> round`, `- & | <<`,
+  # `zero?`, `%`. `-@` has no closed form and keeps the by-name body.
+  def numeric_slow_closed_source(key, head)
+    op = NUMERIC_SLOW_KEYS.key(key)
+    if NUMERIC_SLOW_ARITH.key?(key)
+      return nil unless numeric_slow_closed?(op)
+
+      numeric_slow_closed_arith_source(key, op, NUMERIC_SLOW_ARITH.fetch(key).last, head)
+    elsif NUMERIC_SLOW_CMP.key?(key)
+      numeric_slow_closed_cmp?(op) ? numeric_slow_closed_cmp_source(head, op) : nil
+    elsif key == 'zero'
+      zero = numeric_slow_zero
+      zero ? numeric_slow_closed_zero_source(head, zero) : nil
+    elsif key == 'mod'
+      numeric_slow_mod_direct? ? numeric_slow_closed_mod_source(head) : nil
+    elsif key == 'neg'
+      target = numeric_slow_neg_target
+      target ? numeric_slow_closed_neg_source(head, target) : nil
+    elsif numeric_slow_closed?(op)
+      case key
+      when 'div' then numeric_slow_closed_div_source(head)
+      when 'xor' then numeric_slow_closed_xor_source(head)
+      when 'rshift' then numeric_slow_closed_rshift_source(head)
+      when 'round' then numeric_slow_closed_round_source(head)
+      when 'and', 'or' then numeric_slow_closed_bits_source(key, head)
+      when 'lshift' then numeric_slow_closed_lshift_source(head)
+      else raise "no closed form for NUMERIC_SLOW_PATH helper #{key}"
+      end
+    end
+  end
+
+  def numeric_slow_open_source(key, head, float)
+    if NUMERIC_SLOW_ARITH.key?(key)
+      op, helper = NUMERIC_SLOW_ARITH.fetch(key)
+      numeric_slow_arith_source(key, op, helper, head, float)
+    elsif NUMERIC_SLOW_CMP.key?(key)
+      numeric_slow_cmp_source(head, NUMERIC_SLOW_CMP.fetch(key))
+    elsif key == 'div'
+      numeric_slow_div_source(head)
+    elsif key == 'mod'
+      # int_mod for two Integers; a Float operand needs flodivmod (static), a zero divisor
+      # the method's ZeroDivisionError.
+      <<~CPP
+        #{head}, mrb_value b) {
+          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return bc2cpp_funcall_keep(M, a, "%", 1, b);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r;
+        #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = mrb_bint_mod(M, a, b);
+          else if (mrb_bigint_p(b)) r = mrb_bint_mod(M, mrb_as_bint(M, a), b);
+          else
+        #endif
+          {
+            mrb_int x = mrb_integer(a), y = mrb_integer(b);
+            // int_mod: 0 % 0 raises like any zero divisor.
+            if (y == 0) return bc2cpp_funcall_keep(M, a, "%", 1, b);
+            if (x == MRB_INT_MIN && y == -1) return mrb_fixnum_value(0);
+            mrb_int mod = x % y;
+            if ((x < 0) != (y < 0) && mod != 0) mod += y;
+            r = mrb_int_value(M, mod);
+          }
+          #{NUMERIC_SLOW_DONE}
+        }
+
+      CPP
+    elsif NUMERIC_SLOW_BITS.key?(key)
+      op, bint = NUMERIC_SLOW_BITS.fetch(key)
+      # int_and/int_or/int_xor; a Float operand is the method's own (mis)read of the operand.
+      <<~CPP
+        #{head}, mrb_value b) {
+          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_int_p(b))) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r;
+        #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = #{bint}(M, a, b);
+          else if (mrb_bigint_p(b)) r = #{bint}(M, mrb_as_bint(M, a), b);
+          else
+        #endif
+          r = mrb_int_value(M, mrb_integer(a) #{op} mrb_integer(b));
+          #{NUMERIC_SLOW_DONE}
+        }
+
+      CPP
+    elsif %w[lshift rshift].include?(key)
+      numeric_slow_shift_source(key, head)
+    elsif key == 'neg'
+      numeric_slow_neg_source(head, float, "  return bc2cpp_funcall_keep(M, a, \"-@\", 0);\n")
+    elsif key == 'zero'
+      # Numeric#zero? is `self == 0`; a Float compares as the VM's inline (Float, Integer) pair.
+      <<~CPP
+        #{head}) {
+        #ifndef MRB_NO_FLOAT
+          if (mrb_float_p(a)) return mrb_bool_value(mrb_float(a) == 0);
+        #endif
+          return bc2cpp_funcall_keep(M, a, "zero?", 0);
+        }
+
+      CPP
+    elsif key == 'round'
+      # int_round with no digits returns self, a bigint included.
+      <<~CPP
+        #{head}) {
+          if (mrb_bigint_p(a)) return a;
+          return bc2cpp_funcall_keep(M, a, "round", 0);
+        }
+
+      CPP
+    else
+      raise "unknown NUMERIC_SLOW_PATH helper #{key}"
+    end
+  end
+
+  # The by-name form of `+ - *`.
+  def numeric_slow_arith_source(key, op, helper, head, float)
+    # Two Integers are vm.c OP_MATH: the overflow goes to mrb_bint_*_ii (Integer#op's mrb_bint_* path
+    # mishandles an MRB_INT_MIN operand on the 32-bit targets). Everything else the VM sends, so it is
+    # mrb_num_*, Integer#op's body for an Integer/bigint receiver and Float#op's for these operands
+    # (a Complex operand keeps the method).
+    float_arm = float ? ' || (mrb_float_p(a) && bc2cpp_slow_num_p(b))' : ''
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!((bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))#{float_arm})) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
+      #{numeric_slow_int_pair_source(key)}
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = #{helper}(M, a, b);
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # The two-Fixnum arm of `+ - *`, shared by the by-name and the closed forms: it always returns.
+  def numeric_slow_int_pair_source(key)
+    <<~CPP.chomp.gsub(/^(?=[^#\n])/, '  ')
+      if (mrb_integer_p(a) && mrb_integer_p(b)) {
+        mrb_int x = mrb_integer(a), y = mrb_integer(b), z;
+        if (!mrb_int_#{key}_overflow(x, y, &z)) return mrb_int_value(M, z);
+      #ifdef MRB_USE_BIGINT
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = mrb_bint_#{key}_ii(M, x, y);
+        return bc2cpp_arena_keep(M, ai, r);
+      #else
+        mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
+        mrb_raise(M, E_RANGE_ERROR, "integer overflow");
+      #endif
+      }
+    CPP
+  end
+
+  # NUMERIC_SLOW_CLOSED `+` and `*`: Integer, bigint and Float take mrb_num_*, Integer#op's and Float#op's
+  # body (a non-numeric operand is its TypeError); String and Array take the C++ of mrb_str_plus_m, mrb_str_times,
+  # mrb_ary_plus and mrb_ary_times, built from the public entry points they call; no other class answers.
+  def numeric_slow_closed_arith_source(key, op, helper, head)
+    arms = case key
+           when 'add' then numeric_slow_closed_plus_arms
+           when 'sub' then numeric_slow_closed_minus_arms
+           else numeric_slow_closed_times_arms
+           end
+    # `-` has no String arm (String#- does not exist), so that receiver falls to the proven NoMethodError.
+    string_arm = arms[:string] ? "\n  else if (mrb_string_p(a)) {\n#{arms[:string]}\n  }" : ''
+    extern = key == 'sub' ? numeric_slow_extern('mrb_ary_ext_sub_impl') : ''
+    # Time#+ and Time#- are the exported bodies of mruby-time (their wrappers call them after argument parsing), and
+    # a Time subclass inherits them, so one kind check covers every receiver that answers the operator.
+    time_impl = NUMERIC_SLOW_TIME_IMPL[key]
+    time_arm = time_impl ? "\n        else if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, \"Time\"))) {\n          r = #{time_impl}(M, a, b);\n        }" : ''
+    extern += numeric_slow_extern(time_impl) if time_impl
+    <<~CPP
+      #{extern}#{head}, mrb_value b) {
+      #{numeric_slow_int_pair_source(key)}
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) {
+          r = #{helper}(M, a, b);
+        }
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) {
+          r = #{helper}(M, a, b);
+        }
+      #endif#{string_arm}
+        else if (mrb_array_p(a)) {
+      #{arms.fetch(:array)}
+        }#{time_arm}
+        else {
+          return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  def numeric_slow_cmp_source(head, op)
+    <<~CPP
+      #{head}, mrb_value b) {
+        // num_lt & co. (cmpnum): a Float pair never gets here from an operator opcode, the inline
+        // OP_CMP pairs in compile_cmp take it, so NaN keeps the method's answer for an explicit send.
+        if (!bc2cpp_slow_num_p(a)) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_int c = mrb_cmp(M, a, b);
+        if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+        mrb_gc_arena_restore(M, ai);
+        return mrb_bool_value(c #{op} 0);
+      }
+
+    CPP
+  end
+
+  def numeric_slow_closed_plus_arms
+    {
+      string: '    r = mrb_str_plus(M, a, mrb_ensure_string_type(M, b));',
+      array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
+        mrb_ensure_array_type(M, b);
+        mrb_int total;
+        if (mrb_int_add_overflow(ary_size(a), ary_size(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+        r = mrb_ary_new_capa(M, total);
+        mrb_ary_concat(M, r, a);
+        mrb_ary_concat(M, r, b);
+      CPP
+    }
+  end
+
+  def numeric_slow_closed_times_arms
+    {
+      string: <<~'CPP'.chomp.gsub(/^(?=.)/, '    '),
+        mrb_int times = mrb_as_int(M, b), len;
+        if (times < 0) mrb_raise(M, E_ARGUMENT_ERROR, "negative argument");
+        if (mrb_int_mul_overflow(RSTRING_LEN(a), times, &len)) mrb_raise(M, E_ARGUMENT_ERROR, "argument too big");
+        r = mrb_str_new(M, NULL, len);
+        char* p = RSTRING_PTR(r);
+        if (len > 0) {
+          mrb_int n = RSTRING_LEN(a);
+          memcpy(p, RSTRING_PTR(a), n);
+          while (n <= len / 2) {
+            memcpy(p + n, p, n);
+            n *= 2;
+          }
+          memcpy(p + n, p, len - n);
+        }
+        p[len] = '\0';
+        RSTR_COPY_SINGLE_BYTE_FLAG(mrb_str_ptr(r), mrb_str_ptr(a));
+      CPP
+      array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
+        mrb_value sep = mrb_check_string_type(M, b);
+        if (!mrb_nil_p(sep)) {
+          r = mrb_ary_join(M, a, sep);
+        }
+        else {
+          mrb_int times = mrb_as_int(M, b), total;
+          if (times < 0) mrb_raise(M, E_ARGUMENT_ERROR, "negative argument");
+          if (times == 0) {
+            r = mrb_ary_new(M);
+          }
+          else {
+            if (mrb_int_mul_overflow(ary_size(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+            r = mrb_ary_new_capa(M, total);
+            if (total > 0) for (mrb_int i = 0; i < times; i++) mrb_ary_concat(M, r, a);
+          }
+        }
+      CPP
+    }
+  end
+
+  # CMP_CLOSED. Integer and Float are num_lt & co.; a String, a Symbol and any other Numeric are
+  # Comparable's body, whose `<=>` is mrb_cmp's (the message names `.class`, hence %T, not num_lt's %t); a Hash keeps
+  # the method, Ruby over `==` of its values; any other receiver answers `#{op}` nowhere.
+  def numeric_slow_closed_cmp_source(head, op)
+    <<~CPP
+      #{head}, mrb_value b) {
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_int c;
+        if (bc2cpp_slow_num_p(a)) {
+          c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+        } else if (mrb_string_p(a) || mrb_symbol_p(a) || mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
+          c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %T with %T failed", a, b);
+        } else if (mrb_type(a) == MRB_TT_HASH) {
+          #{numeric_slow_hash_cmp_arm(op)}
+        } else {
+          return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
+        }
+        mrb_gc_arena_restore(M, ai);
+        return mrb_bool_value(c #{op} 0);
+      }
+
+    CPP
+  end
+
+  # int_div; a Float receiver is the arm in front of this call.
+  def numeric_slow_div_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return bc2cpp_funcall_keep(M, a, "/", 1, b);
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifndef MRB_NO_FLOAT
+        if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
+        else
+      #endif
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
+        else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
+        else
+      #endif
+        r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_div and flo_div with no Complex or Rational operand (the caller selects this form only when those gems'
+  # macros are unset); any other receiver class answers `/` nowhere, which is what the dispatch raised.
+  # `%`: Integer#% and Float#% are the exported whole bodies, so the helper calls them for an Integer or a
+  # Float receiver. Sound when those two are the only `%` definers that reach Integer or Float: no Ruby, module or
+  # singleton definer, and the only foreign one is String#% (mruby-sprintf), which the helper never calls for a
+  # receiver it does not own. The C symbols are the patch's, so a tree without it fails to link, not silently.
+  def numeric_slow_mod_direct?
+    return @numeric_slow_mod_direct if defined?(@numeric_slow_mod_direct)
+
+    @numeric_slow_mod_direct = numeric_slow_mod_proof
+  end
+
+  def numeric_slow_mod_proof
+    return false unless numeric_slow_closed_world? && numeric_slow_collection_ready?('%')
+    return false unless %w[Integer Float].all? { |name| @closed_world.core_constant_plain?(name, global_only: true) }
+
+    definers = call_facts_answers.definers('%')
+    return false if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
+    return false unless definers[:ruby].empty? && definers[:modules].empty?
+    return false unless definers[:native].to_a.sort == %w[Float Integer String]
+
+    definers[:foreign].subset?(Set['String'])
+  end
+
+  # Every class that answers `%` inherits Integer, Float or String (the arms below), so any other receiver is a proven
+  # NoMethodError instead of a by-name call.
+  def numeric_slow_mod_fallback
+    answers = call_facts_answers
+    members = numeric_slow_members(answers, '%')
+    closed = !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Integer Float String]) }
+    closed ? 'return bc2cpp_nomethod_named(M, a, "%", 1, b);' : 'return bc2cpp_funcall_keep(M, a, "%", 1, b);'
+  end
+
+  def numeric_slow_closed_mod_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) r = mrb_int_mod_impl(M, a, b);
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) r = mrb_flo_mod_impl(M, a, b);
+      #endif
+        else if (mrb_string_p(a)) r = mrb_str_mod_impl(M, a, b);
+        else #{numeric_slow_mod_fallback}
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  def numeric_slow_closed_div_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) {
+          if (!bc2cpp_slow_num_p(b)) mrb_raisef(M, E_TYPE_ERROR, "can't convert %Y into Integer", b);
+      #ifndef MRB_NO_FLOAT
+          if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
+          else
+      #endif
+      #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
+          else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
+          else
+      #endif
+          r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
+        }
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) {
+          r = mrb_float_value(M, mrb_div_float(mrb_float(a), mrb_as_float(M, b)));
+        }
+      #endif
+        else {
+          return bc2cpp_nomethod_named(M, a, "/", 1, b);
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_xor, true_xor, false_xor (nil shares false's): an Integer operand is read as the method reads it, any
+  # other operand only through mrb_test; every other receiver class answers `^` nowhere.
+  def numeric_slow_closed_xor_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (bc2cpp_slow_int_p(a)) {
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r;
+      #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = mrb_bint_xor(M, a, b);
+          else if (mrb_bigint_p(b)) r = mrb_bint_xor(M, mrb_as_bint(M, a), b);
+          else
+      #endif
+          {
+            // int_and/int_or/int_xor refuse a non-Integer operand (mrb_int_noconv).
+            mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
+            if (!mrb_integer_p(b)) mrb_raisef(M, E_TYPE_ERROR, "can't convert %Y into Integer", b);
+            r = mrb_int_value(M, mrb_integer(a) ^ mrb_integer(b));
+          }
+          #{NUMERIC_SLOW_DONE}
+        }
+        if (mrb_nil_p(a) || mrb_false_p(a)) return mrb_bool_value(mrb_test(b));
+        if (mrb_true_p(a)) return mrb_bool_value(!mrb_test(b));
+        return bc2cpp_nomethod_named(M, a, "^", 1, b);
+      }
+
+    CPP
+  end
+
+  # int_rshift for any count the method accepts (mrb_as_int coerces it); Integer is the only receiver class.
+  def numeric_slow_closed_rshift_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!bc2cpp_slow_int_p(a)) return bc2cpp_nomethod_named(M, a, ">>", 1, b);
+        mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
+        mrb_int width = mrb_as_int(M, b);
+        if (width == 0) return a;
+        if (width == MRB_INT_MIN) mrb_raise(M, E_RANGE_ERROR, "integer overflow in bit shift");
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = mrb_bint_rshift(M, a, width);
+        else
+      #endif
+        {
+          mrb_int val = mrb_integer(a);
+          if (val == 0) return a;
+          if (mrb_num_shift(M, val, -width, &val)) {
+            r = mrb_int_value(M, val);
+          } else {
+      #ifdef MRB_USE_BIGINT
+            r = mrb_bint_rshift(M, mrb_bint_new_int(M, val), width);
+      #else
+            mrb_raise(M, E_RANGE_ERROR, "integer overflow in bit shift");
+      #endif
+          }
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_round and flo_round without digits; the Float body is flo_round's for ndigits == 0.
+  def numeric_slow_closed_round_source(head)
+    <<~CPP
+      #{head}) {
+        if (bc2cpp_slow_int_p(a)) return a;
+      #ifndef MRB_NO_FLOAT
+        if (mrb_float_p(a)) {
+          mrb_state* mrb = M;  // E_FLOATDOMAIN_ERROR names the state `mrb`
+          double number = mrb_float(a), d;
+          if (isinf(number)) mrb_raise(M, E_FLOATDOMAIN_ERROR, number < 0 ? "-Infinity" : "Infinity");
+          if (isnan(number)) mrb_raise(M, E_FLOATDOMAIN_ERROR, "NaN");
+          if (number > 0.0) {
+            d = floor(number);
+            number = d + (number - d >= 0.5);
+          } else if (number < 0.0) {
+            d = ceil(number);
+            number = d - (d - number >= 0.5);
+          }
+          if (!FIXABLE_FLOAT(number)) {
+            int ai = mrb_gc_arena_save(M);
+            mrb_value r = mrb_float_value(M, number);
+            #{NUMERIC_SLOW_DONE}
+          }
+          return mrb_int_value(M, (mrb_int)number);
+        }
+      #endif
+        return bc2cpp_nomethod_named(M, a, "round");
+      }
+
+    CPP
+  end
+
+  # Numeric#-@ is `0 - self`, evaluated by OP_SUB: an Integer overflows into mrb_bint_sub_ii (not
+  # Integer#-, whose MRB_INT_MIN operand is wrong in the bigint core), a bigint takes Integer#-, a
+  # Float the inline 0 - float (so -0.0 stays +0.0). `fallback` is the last arm for any other receiver.
+  def numeric_slow_neg_source(head, float, fallback)
+    float_arm = float ? "\n#ifndef MRB_NO_FLOAT\n  if (mrb_float_p(a)) {\n    int ai = mrb_gc_arena_save(M);\n    " \
+                        "mrb_value r = mrb_float_value(M, (mrb_float)0 - mrb_float(a));\n    " \
+                        "return bc2cpp_arena_keep(M, ai, r);\n  }\n#endif" : ''
+    <<~CPP
+      #{head}) {
+      #ifdef MRB_USE_BIGINT
+        if (mrb_integer_p(a)) {
+          mrb_int x = mrb_integer(a), z;
+          if (!mrb_int_sub_overflow(0, x, &z)) return mrb_int_value(M, z);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_bint_sub_ii(M, 0, x);
+          return bc2cpp_arena_keep(M, ai, r);
+        }
+        if (mrb_bigint_p(a)) {
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r = mrb_num_sub(M, mrb_fixnum_value(0), a);
+          return bc2cpp_arena_keep(M, ai, r);
+        }
+      #endif#{float_arm}
+      #{fallback}}
+
+    CPP
+  end
+
+  # Closed `-@`: an Integer or Float takes the inline arms above, a String String#-@'s exported body, and any other
+  # Numeric the compiled Numeric#-@ (see numeric_slow_neg_proof). Anything else is a proven NoMethodError.
+  def numeric_slow_closed_neg_source(head, target)
+    impl = "#{cpp_name(target.owner, target.name)}_impl"
+    fallback = <<~CPP.gsub(/^(?=.)/, '  ')
+      if (mrb_string_p(a)) return mrb_str_uminus_impl(M, a);
+      // CORE_COMPILED_NEG -- every other Numeric runs the compiled Numeric#-@ body, no by-name call
+      if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = #{impl}(M, a);
+        return bc2cpp_arena_keep(M, ai, r);
+      }
+      return bc2cpp_nomethod_named(M, a, "-@", 0);
+    CPP
+    numeric_slow_extern_unary('mrb_str_uminus_impl') + numeric_slow_neg_source(head, true, fallback)
+  end
+
+  # CORE_COMPILED_NEG: the compiled Numeric#-@ (`0 - self`) the closed helper calls, or nil.
+  def numeric_slow_neg_target
+    return @numeric_slow_neg_target if defined?(@numeric_slow_neg_target)
+
+    @numeric_slow_neg_target = numeric_slow_neg_proof
+  end
+
+  # As numeric_slow_zero_target: the one foreign definer is the compiled core body every Numeric's lookup reaches,
+  # and it is yield-free (a direct call skips the entry's Fiber guard). The only native definer is String#-@, whose
+  # export the collection proof checks, so the owners cover every member.
+  def numeric_slow_neg_proof
+    return nil unless numeric_slow_closed_world? && numeric_slow_collection_ready?('-@')
+    return nil unless @yield_reach && block_core_world && @native_name_sources
+
+    answers = call_facts_answers
+    definers = answers.definers('-@')
+    return nil if definers.nil? || definers[:singleton] || !definers[:class_native].empty?
+    return nil unless definers[:ruby].empty? && definers[:modules].empty? && definers[:foreign] == Set['Numeric']
+    return nil unless definers[:native].to_a == %w[String]
+
+    defs = core_compiled_definers('-@')
+    return nil unless defs.keys == ['Numeric'] && defs['Numeric'].one? && answers.foreign_definer?('-@', 'Numeric')
+
+    target = block_core_target('Integer', NUMERIC_SLOW_ZERO_CHAIN, '-@', 0, blockless: true)
+    return nil unless target && target.owner == 'Numeric' && @yield_reach.yield_free?(target.irep)
+
+    members = numeric_slow_members(answers, '-@')
+    return nil unless members&.all? { |klass| numeric_slow_inherits_owner?(answers, klass, %w[Numeric String]) }
+    return nil unless @closed_world.core_constant_plain?('Numeric', global_only: true)
+
+    target
+  end
+
+  # int_lshift / int_rshift for an Integer count; MRB_INT_MIN, a Float or bigint count keep the method.
+  def numeric_slow_shift_source(key, head)
+    left = key == 'lshift'
+    op = left ? '<<' : '>>'
+    bint = left ? 'mrb_bint_lshift' : 'mrb_bint_rshift'
+    shift = left ? 'width' : '-width'
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!(bc2cpp_slow_int_p(a) && mrb_integer_p(b) && mrb_integer(b) != MRB_INT_MIN)) return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
+        mrb_int width = mrb_integer(b);
+        if (width == 0) return a;
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = #{bint}(M, a, width);
+        else
+      #endif
+        {
+          mrb_int val = mrb_integer(a);
+          if (val == 0) return a;
+          if (mrb_num_shift(M, val, #{shift}, &val)) {
+            r = mrb_int_value(M, val);
+          } else {
+      #ifdef MRB_USE_BIGINT
+            r = #{bint}(M, mrb_bint_new_int(M, val), width);
+      #else
+            return bc2cpp_funcall_keep(M, a, "#{op}", 1, b);
+      #endif
+          }
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+end

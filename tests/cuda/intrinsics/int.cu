@@ -1,6 +1,7 @@
 // The integer intrinsics of llama.cpp's ggml-cuda, on one warp (32 lanes), against host references that follow
-// CUDA's definitions: __umulhi, __popc, __popcll, __byte_perm (selector nibbles 0..7), __vsub4, __vcmpne4 (per-byte
-// wrap subtraction and not-equal mask), __shfl_xor_sync and __shfl_down_sync (full warp, width 32).
+// CUDA's definitions: __umulhi, __popc, __popcll, __byte_perm (its selector with bit 3 of the nibbles and the bits
+// above 16 set, which CUDA ignores, as llama.cpp's q1_0 and FP4 lookups pass it), __vsub4, __vcmpne4 (per-byte wrap
+// subtraction and not-equal mask), __shfl_xor_sync and __shfl_down_sync (full warp, width 32).
 #include <cuda_runtime.h>
 #include <stdio.h>
 
@@ -10,7 +11,7 @@ __global__ void k(unsigned *o, const unsigned *a, const unsigned *b) {
   o[i * 8 + 0] = __umulhi(x, y);
   o[i * 8 + 1] = (unsigned)__popc(x);
   o[i * 8 + 2] = (unsigned)__popcll(((unsigned long long)x << 32) | y);
-  o[i * 8 + 3] = __byte_perm(x, y, 0x73625140u);
+  o[i * 8 + 3] = __byte_perm(x, y, 0x73625140u ^ x);
   o[i * 8 + 4] = __vsub4(x, y);
   o[i * 8 + 5] = __vcmpne4(x, y);
   o[i * 8 + 6] = (unsigned)__shfl_xor_sync(0xffffffffu, (int)i, 1);
@@ -68,7 +69,7 @@ int main() {
     ref[0] = (unsigned)(((unsigned long long)x * y) >> 32);
     ref[1] = (unsigned)__builtin_popcount(x);
     ref[2] = (unsigned)__builtin_popcountll(((unsigned long long)x << 32) | y);
-    ref[3] = byte_perm(x, y, 0x73625140u);
+    ref[3] = byte_perm(x, y, 0x73625140u ^ x);
     ref[4] = vsub4(x, y);
     ref[5] = vcmpne4(x, y);
     ref[6] = (unsigned)(i ^ 1u);

@@ -1,0 +1,1 @@
+missing_return.swift:1:1: error: missing return in global function expected to return 'Int'

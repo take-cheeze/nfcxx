@@ -1,0 +1,1 @@
+while_let_temp.swift:7:15: error: binding a temporary class value is not supported yet

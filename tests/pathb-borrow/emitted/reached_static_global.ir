@@ -1,0 +1,10 @@
+(ir-module "borrow-test" (layout (pointer 8) (int 4)))
+(global "table" (ptr (fn int ())) 8 8 (init
+    (addr 0 (ptr (fn int ())) &"callback" 0)))
+(function "callback" (ret int) (params ) (static)
+(slot "x" int 4 4)
+(decl $"x" val) (scope-end $"x") (let %0 int (load int $"x")) (return %0)
+)
+(function "test" (ret int) (params ) (static)
+(return (const int 0))
+)

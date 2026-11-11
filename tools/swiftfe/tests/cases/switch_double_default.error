@@ -1,0 +1,1 @@
+switch_double_default.swift:2:3: error: switch over Double must have a default case

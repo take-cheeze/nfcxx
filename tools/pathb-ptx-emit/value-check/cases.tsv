@@ -1,0 +1,35 @@
+0	(wadd int %1 %2)	int	int	int
+1	(wmul unsigned_int %1 %2)	unsigned_int	unsigned_int	unsigned_int
+2	(cdiv int %1 %2)	int	int	int
+3	(crem int %1 %2)	int	int	int
+4	(cdiv unsigned_long %1 %2)	unsigned_long	unsigned_long	unsigned_long
+5	(crem unsigned_int %1 %2)	unsigned_int	unsigned_int	unsigned_int
+6	(cshl int %1 %2)	int	int	int
+7	(cshr unsigned_int %1 %2)	unsigned_int	unsigned_int	unsigned_long
+8	(cshr int %1 %2)	int	int	int
+9	(and int %1 %2)	int	int	int
+10	(or int %1 %2)	int	int	int
+11	(xor unsigned_long %1 %2)	unsigned_long	unsigned_long	unsigned_long
+12	(not int %1)	int	int	-
+13	(wneg int %1)	int	int	-
+14	(wsub long %1 %2)	long	long	long
+15	(wmul long %1 %2)	long	long	long
+16	(iconv long %1)	long	int	-
+17	(iconv int %1)	int	unsigned_long	-
+18	(fadd float %1 %2)	float	float	float
+19	(fdiv double %1 %2)	double	double	double
+20	(fneg float %1)	float	float	-
+21	(fconv float %1)	float	double	-
+22	(cf2i int %1)	int	float	-
+23	(cf2i long %1)	long	double	-
+24	(i2f double %1)	double	int	-
+25	(u2f float %1)	float	unsigned_int	-
+26	(lt int %1 %2)	bool	int	int
+27	(lt.u unsigned_int %1 %2)	bool	unsigned_int	unsigned_int
+28	(ne float %1 %2)	bool	float	float
+29	(eq unsigned_long %1 %2)	bool	unsigned_long	unsigned_long
+30	(ge double %1 %2)	bool	double	double
+31	(i2f float %1)	float	long	-
+32	(fmul double %1 %2)	double	double	double
+33	(not long %1)	long	long	-
+34	(cshl long %1 %2)	long	long	int

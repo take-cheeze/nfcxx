@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
-# qbe-prep port check (docs/notes/mruby-scripting.md, stage 3): scripts/qbe-prep.rb must give the same
-# output C, the same assembly tail, the same stderr and the same exit status as the Python original
-# (tests/mruby/oracle/qbe-prep.py, the NFCXX_C_INPUT environment variable of which is the --c-input
-# argument of the port) on
+# qbe-prep port check (docs/notes/mruby-scripting.md, stage 3): scripts/qbe-prep (tools/qbe-prep, the C++ port of the
+# former scripts/qbe-prep.rb) must give the same
+# output C, the same assembly tail, the same stderr and the same exit status as the Python original, through its
+# oracle port tests/mruby/oracle/qbe-prep.rb (NFCXX_C_INPUT, which the original reads, is the --c-input argument of both) on
 #   1. every input scripts/qbe-cc really feeds it: the compiles of tests/cases, tests/c, tests/builtins and
-#      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with the interpreter wrapped
-#      by tests/mruby/qbe-prep-tap.sh, which saves each preprocessed C file and the C-input flag;
+#      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with qbe-prep replaced by
+#      tests/mruby/qbe-prep-tap.sh (NFCXX_QBE_PREP), which saves each preprocessed C file and the C-input flag;
 #   2. hand-written edge cases for each rewrite (aligned attributes, __bf16/_Float*, constructors,
 #      thread_local aliases, overflow builtins, volatile locals, alloca, atomics, float literals, tokenizer).
 # The comparison fails when it is vacuous: every corpus must have produced inputs, and every kind of rewrite must
-# occur in the Python output somewhere. Skipped without EDG/QBE (part 1) or python3 and an interpreter.
+# occur in the Python output somewhere. Skipped without EDG/QBE (part 1) or an interpreter.
 #   MRB (an existing mruby executable)   QBE_PREP_CORPUS=<dir> (also compare the captures in <dir>, as written by
-#   the tap, e.g. from a tests/realworld/run_mruby.sh run with MRB=tests/mruby/qbe-prep-tap.sh)
+#   the tap, e.g. from a tests/realworld/run_mruby.sh run with NFCXX_QBE_PREP=tests/mruby/qbe-prep-tap.sh)
 cd "$(dirname "$0")/../.."
-root=$PWD; oracle=$root/tests/mruby/oracle/qbe-prep.py
+root=$PWD; oracle=$root/tests/mruby/oracle/qbe-prep.rb
 real=${MRB:-$root/build/mruby-tool/bin/mruby}
-prep=$root/scripts/qbe-prep.rb
+prep=$root/scripts/qbe-prep
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; pass=0; total=0; changed=0; errors=0
 mkdir -p "$tmp/cmp" "$tmp/edge" "$tmp/tap" "$tmp/bin"; : >"$tmp/all.out"; : >"$tmp/all.tail"
 
-command -v python3 >/dev/null || { echo "SKIP qbe-prep: python3 not installed"; exit 0; }
 if [ ! -x "$real" ]; then
   command -v ruby >/dev/null || { echo "SKIP qbe-prep: ruby (needed to build mruby) not installed"; exit 0; }
   "$root/scripts/setup-mruby.sh" || { echo "FAIL qbe-prep: setup-mruby.sh failed"; exit 1; }
@@ -34,43 +33,43 @@ cmp_one() {
   local name=$1 src=$2 flag=$3 mode=${4:-exact} d
   d=$tmp/cmp/$name; mkdir -p "$d"; rm -f "$d"/*
   if [ -n "$flag" ]; then
-    NFCXX_C_INPUT=1 python3 -I "$oracle" "$src" "$d/py.out" "$d/py.tail" 2>"$d/py.err"; local prc=$?
-    mrb "$prep" --c-input "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
+    mrb "$oracle" --c-input "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
+    "$prep" --c-input "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   else
-    env -u NFCXX_C_INPUT python3 -I "$oracle" "$src" "$d/py.out" "$d/py.tail" 2>"$d/py.err"; local prc=$?
-    mrb "$prep" "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
+    mrb "$oracle" "$src" "$d/orc.out" "$d/orc.tail" 2>"$d/orc.err"; local prc=$?
+    "$prep" "$src" "$d/rb.out" "$d/rb.tail" 2>"$d/rb.err"; local rrc=$?
   fi
   total=$((total + 1))
   local why=""
   [ $prc -eq $rrc ] || why="exit status py=$prc rb=$rrc"
-  if [ -z "$why" ] && [ "$mode" != status-only ] && ! cmp -s "$d/py.err" "$d/rb.err"; then why="stderr differs"; fi
+  if [ -z "$why" ] && [ "$mode" != status-only ] && ! cmp -s "$d/orc.err" "$d/rb.err"; then why="stderr differs"; fi
   if [ -z "$why" ]; then
     for f in out tail; do
-      if [ -e "$d/py.$f" ] && [ ! -e "$d/rb.$f" ] || [ ! -e "$d/py.$f" ] && [ -e "$d/rb.$f" ]; then why="only one wrote $f"
-      elif [ -e "$d/py.$f" ] && ! cmp -s "$d/py.$f" "$d/rb.$f"; then why="$f differs"; fi
+      if [ -e "$d/orc.$f" ] && [ ! -e "$d/rb.$f" ] || [ ! -e "$d/orc.$f" ] && [ -e "$d/rb.$f" ]; then why="only one wrote $f"
+      elif [ -e "$d/orc.$f" ] && ! cmp -s "$d/orc.$f" "$d/rb.$f"; then why="$f differs"; fi
     done
   fi
   if [ -n "$why" ]; then
     echo "FAIL qbe-prep $name: $why"; fail=1
-    diff "$d/py.out" "$d/rb.out" 2>&1 | head -5; diff "$d/py.tail" "$d/rb.tail" 2>&1 | head -3
-    diff "$d/py.err" "$d/rb.err" 2>&1 | head -3
+    diff "$d/orc.out" "$d/rb.out" 2>&1 | head -5; diff "$d/orc.tail" "$d/rb.tail" 2>&1 | head -3
+    diff "$d/orc.err" "$d/rb.err" 2>&1 | head -3
     return
   fi
   pass=$((pass + 1))
   if [ $prc -ne 0 ]; then errors=$((errors + 1))
   else
-    cmp -s "$src" "$d/py.out" || changed=$((changed + 1))
-    cat "$d/py.out" >>"$tmp/all.out"; cat "$d/py.tail" >>"$tmp/all.tail"
+    cmp -s "$src" "$d/orc.out" || changed=$((changed + 1))
+    cat "$d/orc.out" >>"$tmp/all.out"; cat "$d/orc.tail" >>"$tmp/all.tail"
   fi
 }
 
 # expect NAME out|tail TEXT: the Python output of case NAME contains TEXT (the rewrite really happened).
 expect() {
-  if ! grep -qF -e "$3" "$tmp/cmp/$1/py.$2"; then echo "FAIL qbe-prep $1: expected '$3' in the $2"; fail=1; fi
+  if ! grep -qF -e "$3" "$tmp/cmp/$1/orc.$2"; then echo "FAIL qbe-prep $1: expected '$3' in the $2"; fail=1; fi
 }
 # refuse NAME STATUS-TEXT: the case ended with a nonzero status and the message contains TEXT.
 refuse() {
-  if ! grep -qF -e "$2" "$tmp/cmp/$1/py.err" || [ -e "$tmp/cmp/$1/py.out" ]; then
+  if ! grep -qF -e "$2" "$tmp/cmp/$1/orc.err" || [ -e "$tmp/cmp/$1/orc.out" ]; then
     echo "FAIL qbe-prep $1: expected a refusal containing '$2'"; fail=1; fi
 }
 # both NAME [status-only]: compare an edge file in the plain and the C-input mode
@@ -94,12 +93,14 @@ int pi1 __attribute__((aligned(64))) = 3, pi2 __attribute__((aligned(16)));
 int plain[4];
 char *ptrs[3] , other[2] __attribute__((__aligned__(4)));
 int tricky(int a[4] __attribute__((__aligned__(8))));
+struct CP { long x; } __attribute__((__aligned__(128),));
 EOF
 both aligned
 expect aligned out 'static char _Alignas(16) buf[40]'
 expect aligned out '_Alignas(16) char b[32];'
 expect aligned out '_Alignas(16) char b[0x20];'
 expect aligned out 'double _Alignas(32) m[2][3]'
+expect aligned out '_Alignas(128) long x;'
 expect aligned out 'struct S2 { _Alignas(16) char b[30]; }'
 expect aligned out 'struct S3 { _Alignas(16) int b[8]; }'
 expect aligned out 'struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));'
@@ -265,10 +266,11 @@ void f(char *a, char *b, unsigned long n, double x, unsigned long u, unsigned v,
 }
 EOF
 both builtins
-expect builtins out 'static int __nfcxx_popcountll('
-expect builtins out 'static int __nfcxx_ctz('
+# the bit-counting built-ins stay: cproc lowers and folds them
+expect builtins out '__builtin_popcountll(w)'
+expect builtins out '__builtin_ctz(v)'
 expect builtins out 'void *memmove(void *, const void *, unsigned long);'
-expect builtins out 'static int __nfcxx_clz('
+expect builtins out '__builtin_clzl(u)'
 cat >"$tmp/edge/atomics.c" <<'EOF'
 void f(void *p, int *e) {
   __atomic_load_1(p, 5); __atomic_load_2(p, 5); __atomic_load_4(p, 5); __atomic_load_8(p, 5); __atomic_load_16(p, 5);
@@ -330,7 +332,7 @@ expect volatile+c out '__nfcxx_keep(&inner);'
 expect volatile+c out '__nfcxx_keep(&blk2);'
 expect volatile+c out '__nfcxx_keep(&nested);'
 expect volatile+c out '__nfcxx_keep(&one);'
-expect volatile+c out 'static void __nfcxx_keep(void *p) { }'
+expect volatile+c out 'static __attribute__((noipa)) void __nfcxx_keep(void *p) { }'
 cat >"$tmp/edge/alloca.c" <<'EOF'
 extern void *alloca (unsigned long);
 void *alloca(unsigned long);
@@ -340,6 +342,64 @@ EOF
 both alloca
 expect alloca+c out 'char *p = __builtin_alloca(n);'
 expect alloca+c out '(__builtin_alloca (n + 1))'
+cat >"$tmp/edge/bare_return.c" <<'EOF'
+struct E { };
+typedef struct E ET;
+typedef void VT;
+typedef VT VT2;
+extern void exit(int);
+ET f(int x) { if (x == 2) { exit(1); { return; } } return (ET){}; }
+VT g(int x) { if (x) return; }
+VT2 h(int x) { if (x) return; }
+void *k(int x) { if (x) return; return 0; }
+EOF
+both bare_return
+expect bare_return+c out 'return (ET){};'
+expect bare_return+c out 'return (void *){};'
+# the fast paths of bare_return_edits / volatile_locals: several returns in one body, a body after a struct definition,
+# a `return ;` at file scope, a declaration with attributes, and unbalanced braces (the general path)
+cat >"$tmp/edge/bare_return2.c" <<'EOF'
+typedef void V;
+struct S { int a; } sv;
+unsigned long long int a(int x) { if (x) return ; if (x > 2) { return ; } return ; }
+static inline __attribute__((always_inline)) struct S b(void) { return ; }
+struct S c(void) { struct S { int z; } t; return ; }
+V d(void) { return ; }
+struct S e(void) { return ; } int fl; struct S f2(void) { { { return ; } } }
+int (*g(void))(void) { return ; }
+int ok;
+return ;
+EOF
+both bare_return2
+cat >"$tmp/edge/bare_return3.c" <<'EOF'
+int a(int x) { if (x) return ;
+int b(void) { return ; }
+EOF
+both bare_return3 status-only
+cat >"$tmp/edge/bare_return4.c" <<'EOF'
+int a(int x) { return ; } }
+int b(void) { return ; }
+EOF
+both bare_return4 status-only
+cat >"$tmp/edge/volatile2.c" <<'EOF'
+volatile int g;
+int a(void) { volatile int x = 1; return x; }
+int b(void) { for (;;) { volatile int y; } }
+int c(volatile int p) { return p; }
+int d(void) { int z = sizeof(volatile int); return z; }
+EOF
+both volatile2
+cat >"$tmp/edge/volatile3.c" <<'EOF'
+volatile int g;
+struct T { volatile int m; };
+int c(volatile int p) { return p; }
+int (*d)(volatile int);
+EOF
+both volatile3
+cat >"$tmp/edge/volatile4.c" <<'EOF'
+int a(void) { volatile int x = 1; return x; } }
+EOF
+both volatile4 status-only
 cat >"$tmp/edge/ldlits.c" <<'EOF'
 double a = ((double)2.2250738585072014e-308L);
 float b = ((float)1.5L);
@@ -463,15 +523,16 @@ par() { while [ "$(jobs -r | wc -l)" -ge "$jobs_max" ]; do wait -n; done; "$@" &
 build() { "$@" >/dev/null 2>&1 || true; }   # the compile may fail (documented limits); qbe-prep ran first
 
 if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ]; then
-  # NFCXX_PREP_ALWAYS: every input must reach qbe-prep.rb (through the tap), or the counts below are meaningless.
-  export QBE_PREP_REAL_MRB=$real MRB=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe NFCXX_PREP_ALWAYS=1
+  # NFCXX_PREP_ALWAYS: every input must reach qbe-prep (through the tap), or the counts below are meaningless.
+  export NFCXX_QBE_PREP=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe NFCXX_PREP_ALWAYS=1
   tap_dir cases; n=0
   for f in "$root"/tests/cases/*.cpp; do par build "$root/nfcxx" "$f" -o "$tmp/bin/case$n"; n=$((n + 1)); done; wait
   corpus cases "$n"
   tap_dir builtins; n=0
   for f in "$root"/tests/builtins/*.cpp; do
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
-    par build "$root/nfcxx" --gnu-version=130000 ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
+    gnuver=$(sed -n 's,^// GNU-VERSION: *\([0-9]*\).*,\1,p' "$f" | head -1)
+    par build "$root/nfcxx" --gnu-version=${gnuver:-130000} ${dialect:+--dialect=$dialect} "$f" -o "$tmp/bin/b$n"; n=$((n + 1))
   done; wait
   corpus builtins "$n"
   tap_dir lib; n=0
@@ -512,10 +573,42 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
   if [ -n "${QBE_PREP_CORPUS:-}" ] && [ -d "$QBE_PREP_CORPUS" ]; then
     mkdir -p "$tmp/tap"; ln -s "$(cd "$QBE_PREP_CORPUS" && pwd)" "$tmp/tap/extra"; corpus extra 1
   fi
-  unset MRB QBE_PREP_REAL_MRB QBE_PREP_TAP NFCXX_BACKEND
+  unset NFCXX_QBE_PREP QBE_PREP_TAP NFCXX_BACKEND
 else
   echo "skip qbe-prep corpus: needs EDG and QBE (scripts/setup-edg.sh, scripts/setup-qbe.sh); only the edge cases ran"
 fi
+
+# ---- 3. --dce: unused static functions ----------------------------------------------------------------------
+# No oracle (the option is new): the output keeps what is reachable and drops the rest, and without --dce nothing changes.
+cat >"$tmp/edge/dce.c" <<'EOF'
+typedef struct { int a; } S;
+static int proto_only(int);
+static int dead1(int x) { return x + 1; }
+static int dead2(int x) { return dead1(x) * 2; }
+static int rec(int n) { return n ? rec(n - 1) : 0; }
+static int live_leaf(int x) { return x; }
+static int live_mid(int x) { return live_leaf(x) + 1; }
+static int via_ptr(int x) { return x; }
+static int (*table[])(int) = { via_ptr };
+static S *mk(void) { static int main_like; return 0; }
+static int viaasm(void) { return 4; }
+static int usedattr(void) __attribute__((used));
+static int usedattr(void) { return 5; }
+void use_asm(void) { __asm__("call viaasm"); }
+static inline int ret_ptr_dead(int *p) { return *p; }
+int main(void) { static int local_static; return live_mid(1) + table[0](2) + (int)(long)mk(); }
+EOF
+dce() { "$prep" --c-input --dce "$tmp/edge/dce.c" "$tmp/dce.out" "$tmp/dce.tail" 2>"$tmp/dce.err"; }
+"$prep" --c-input "$tmp/edge/dce.c" "$tmp/dce0.out" "$tmp/dce0.tail" 2>/dev/null
+if dce; then
+  for kept in 'int live_leaf' 'int live_mid' 'int via_ptr' '*mk(void)' 'int viaasm' 'int usedattr(void) { return 5; }' 'int main(void)'; do
+    grep -qF -e "$kept" "$tmp/dce.out" || { echo "FAIL qbe-prep --dce: dropped '$kept'"; fail=1; }
+  done
+  for gone in 'int dead1' 'int dead2' 'int rec(' 'ret_ptr_dead'; do
+    grep -qF -e "$gone" "$tmp/dce.out" && { echo "FAIL qbe-prep --dce: kept '$gone'"; fail=1; }
+  done
+  grep -qF -e 'int dead1' "$tmp/dce0.out" || { echo "FAIL qbe-prep: dead1 missing without --dce"; fail=1; }
+else echo "FAIL qbe-prep --dce: $(head -2 "$tmp/dce.err")"; fail=1; fi
 
 # ---- non-vacuity ----------------------------------------------------------------------------------------
 if [ $changed -eq 0 ] || [ $total -lt 60 ]; then
@@ -523,8 +616,8 @@ if [ $changed -eq 0 ] || [ $total -lt 60 ]; then
 fi
 if [ $errors -lt 8 ]; then echo "FAIL qbe-prep: only $errors refusal cases compared"; fail=1; fi
 for m in 'struct __nfcxx_half16 {' 'struct __nfcxx_float128 {' '{ 0x' 'UL, 0x' '_Alignas(' '__attribute__((__aligned__(' \
-         '__nfcxx_int3();' '__nfcxx_mulov_ul(' '__nfcxx_ovx_' '__nfcxx_addov_' '__nfcxx_popcount' '__builtin_alloca(' \
-         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '__nfcxx_clzl' '1.5f;'; do
+         '__nfcxx_int3();' '__nfcxx_mulov_ul(' '__nfcxx_ovx_' '__nfcxx_addov_' '__builtin_alloca(' \
+         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '1.5f;'; do
   grep -qF -e "$m" "$tmp/all.out" || { echo "FAIL qbe-prep: no input produced '$m'"; fail=1; }
 done
 for m in '.init_array' '.set ' '.globl ' '.weak _ZTH' '__nfcxx_int3,@function' '.quad '; do

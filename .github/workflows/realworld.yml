@@ -1,8 +1,9 @@
 name: Real-world
 
 # The larger real-world builds of docs/notes/realworld.md: doctest (hosted C++, gcc backend), Lua 5.4 (C input mode
-# and its own makefile through nfcc) and mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
-# parser and VM run during the build). Each one clones its pinned upstream commit into build/realworld. tinyxml2 stays
+# and its own makefile through nfcc), mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
+# parser and VM run during the build), TinyCC (its own makefile through nfcc, then its tests2 suite), SDCC (its compiler built by nfcc, output compared), optcarrot, and the CoreCLR GC's compile on both backends. Each one clones its pinned
+# upstream commit into build/realworld. tinyxml2 stays
 # in the main CI job. Run only when a change can affect the compilers they exercise. Runs on demand too.
 on:
   push:
@@ -14,8 +15,10 @@ on:
       - "3rd/qbe"
       - "3rd/cproc"
       - "scripts/qbe-cc"
-      - "scripts/qbe-prep.rb"
-      - "scripts/weak-symbols.rb"
+      - "scripts/qbe-prep"
+      - "tools/qbe-prep/**"
+      - "scripts/weak-symbols"
+      - "tools/weak-symbols/**"
       - "scripts/mrb"
       - "scripts/setup-*.sh"
       - "scripts/cproc-*.patch"
@@ -30,8 +33,10 @@ on:
       - "3rd/qbe"
       - "3rd/cproc"
       - "scripts/qbe-cc"
-      - "scripts/qbe-prep.rb"
-      - "scripts/weak-symbols.rb"
+      - "scripts/qbe-prep"
+      - "tools/qbe-prep/**"
+      - "scripts/weak-symbols"
+      - "tools/weak-symbols/**"
       - "scripts/mrb"
       - "scripts/setup-*.sh"
       - "scripts/cproc-*.patch"
@@ -45,39 +50,55 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Three shards run in parallel, each on its own runner with its own checkout, so the wall time is the slowest shard
+# (SDCC alone, about 8 minutes) instead of the sum of all nine scripts (about 18). Shards share no build output: each
+# script clones its own upstream into build/realworld, and optcarrot builds its own mruby.
 jobs:
   realworld:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SDCC
+            packages: make ruby rake bison flex libboost-graph-dev
+            run: |
+              tests/realworld/run_sdcc.sh
+
+          - name: doctest, mruby, optcarrot
+            packages: make ruby rake
+            run: |
+              tests/realworld/run_doctest.sh
+              tests/realworld/run_mruby.sh
+              tests/realworld/run_optcarrot.sh
+
+          - name: Lua, TinyCC, CoreCLR GC, ASTro
+            packages: make ruby rake libgmp-dev
+            run: |
+              tests/realworld/run_lua.sh
+              tests/realworld/run_lua_make.sh
+              tests/realworld/run_tinycc.sh
+              tests/realworld/run_coreclr_gc.sh
+              tests/realworld/run_astro.sh
     env:
       SCCACHE_GHA_ENABLED: "true"
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
-      # ruby and rake: the mruby interpreter bootstrap (scripts/setup-mruby.sh) and run_mruby.sh's own rake build.
-      # make: Lua's makefile (run_lua_make.sh).
+      # Per shard: ruby and rake (the mruby bootstrap and build, ASTroGen), make (Lua's and TinyCC's makefiles, SDCC),
+      # bison, flex and libboost-graph-dev (SDCC's build), libgmp-dev (koruby_precise's real bignums; without it run_astro.sh
+      # builds BIGNUM=wrap).
       - uses: ./.github/actions/toolchain
         with:
-          packages: make ruby rake
+          packages: ${{ matrix.packages }}
 
-      - name: doctest (hosted C++, gcc backend; the qbe request is reported as a documented SKIP)
-        run: tests/realworld/run_doctest.sh
-
-      - name: Lua 5.4 as C inputs (both backends)
-        run: tests/realworld/run_lua.sh
-
-      - name: Lua 5.4 through its own makefile with nfcc (both backends)
-        run: tests/realworld/run_lua_make.sh
-
-      - name: mruby rake build with nfcc (both backends)
-        run: tests/realworld/run_mruby.sh
-
-      - name: optcarrot benchmark on an nfcc-built mruby (both backends, checksum 59662)
-        run: tests/realworld/run_optcarrot.sh
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
 
       - name: sccache stats
         if: always()

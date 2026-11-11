@@ -1,0 +1,1 @@
+bad_arg_label.swift:4:9: error: incorrect argument label (have 'y:', expected 'x:')

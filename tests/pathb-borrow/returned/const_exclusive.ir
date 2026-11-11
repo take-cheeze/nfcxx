@@ -1,0 +1,8 @@
+(ir-module "returned_const" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int))
+(call-effects "second" (returns (ptr (const int)) (from-arg 0 4 exclusive)) (nothrow) (noescape) (closed) (args (write (struct "Pair"))))
+(function "test" (ret int) (params)
+(slot "x" (struct "Pair") 8 4)
+(decl $"x" val) (store int $"x" (const int 1)) (store int (offset $"x" 4) (const int 7))
+(let %r (ptr (const int)) (call-borrow (ptr (const int)) "R" root &"second" $"x"))
+(let %v int (load int %r)) (loan-end "R") (return %v))

@@ -1,0 +1,26 @@
+request cuInit 2000 1
+cuInit 0
+request cuDeviceGetCount 2000 1
+cuDeviceGetCount 0 2
+request cuCtxCreate 3020 1
+cuCtxCreate 0
+request cuCtxCreate 12050 1
+cuCtxCreate_v4 0
+request cuDeviceGetUuid 9020 1
+request cuDeviceGetUuid 11040 1
+cuDeviceGetUuid 0 0
+request cuEventElapsedTime 2000 1
+request cuEventElapsedTime 12080 1
+cuEventElapsedTime 0 0
+request cuLaunchKernel 4000 1
+cuLaunchKernel 0 1082
+request cuMemAlloc 3020 1
+request cuGetErrorName 6000 1
+request cuGetErrorString 6000 1
+cuMemAlloc 801 CUDA_ERROR_NOT_SUPPORTED: the CUDA driver is too old for this function
+request cuModuleLoad 2000 1
+cuModuleLoad 500 CUDA_ERROR_NOT_FOUND
+cuModuleLoad again 500
+request cuStreamQuery 7000 2
+request cuMemcpy 7000 2
+per thread 0

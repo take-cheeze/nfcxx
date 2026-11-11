@@ -1,0 +1,931 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+
+# CodeGen: ensure and rescue regions.
+
+class CodeGen
+  # Is +irep+ the step being compiled, and does it carry its own handler table (STEP_HANDLERS)? A block function nested in
+  # it is another irep and keeps the ordinary rescue/ensure forms.
+  def step_with_handlers?(irep)
+    @resumable&.handlers && irep.label == @resumable.label ? true : false
+  end
+
+  # The instructions whose byte address lies in +range+, in program order. The IR has no address-range query;
+  # Irep#instructions_at selects the same way, so this is its IR-backed equivalent.
+  def insns_in_addr_range(irep, range)
+    BytecodeIR.for(irep).each_source.filter_map { |insn, _| insn if range.cover?(insn.addr) }
+  end
+
+  # JMPUW_SUPPORT: is every OP_JMPUW in this irep a plain OP_JMP?
+  # mrbc emits JMPUW for loop `break`/`next` (LOOP_NORMAL), `redo` and `retry`
+  # (codegen.c), with or without an ensure. vm.c's OP_JMPUW:
+  #
+  #     a = (uint32_t)((ci->pc - irep->iseq) + (int16_t)a);
+  #     CHECKPOINT_RESTORE(RBREAK_TAG_JUMP) { ...resume after ensure... }
+  #     CHECKPOINT_MAIN(RBREAK_TAG_JUMP) {
+  #       if (irep->clen > 0 &&
+  #           (ch = catch_handler_find(irep, ci->pc, MRB_CATCH_FILTER_ENSURE))) {
+  #         if (a < ...ch->begin || a > ...ch->end) {
+  #           THROW_TAGGED_BREAK(mrb, RBREAK_TAG_JUMP, mrb->c->ci, mrb_fixnum_value(a));
+  #         }
+  #       }
+  #     }
+  #     CHECKPOINT_END(RBREAK_TAG_JUMP);
+  #     mrb->exc = NULL;
+  #     ci->pc = irep->iseq + a;
+  #     JUMP;
+  #
+  # With `irep->clen == 0` it can never throw (and CHECKPOINT_RESTORE is only
+  # re-entered by its own throw), so it is exactly OP_JMP.
+  # The whole-irep clen == 0 test is used rather than the per-pc range check
+  # because: it is vm.c's own first condition (no half-open range subtleties);
+  # a real unsound case exists (a `break` inside `begin ... ensure` jumping out
+  # of the ensure range must run the ensure body, which a bare goto would skip);
+  # and it keeps JMPUW away from RESCUE_SUPPORT's extracted regions (a rescue
+  # region implies clen > 0).
+  def jmpuw_is_plain_jump?(irep)
+    !BytecodeIR.for(irep).handlers?
+  end
+
+  # JMPUW_RESCUE_SUPPORT: vm.c's OP_JMPUW only consults an ENSURE
+  # handler that covers it and whose range the target leaves; otherwise it is a
+  # plain jump. The rescue recognizers count JMPUW as a branch, so one leaving a
+  # try body still rejects that region.
+  def jmpuw_plain_jump_at?(irep, insn)
+    return true if jmpuw_is_plain_jump?(irep)
+
+    target = insn.jmp_addr
+    irep.catch_handlers.none? do |ch|
+      next false unless ch.type == :ensure
+      next false unless ch.begin_addr <= insn.addr && insn.addr < ch.end_addr
+
+      !(ch.begin_addr..ch.end_addr).cover?(target)
+    end
+  end
+
+  # ENSURE_DISPATCH_MERGE_SUPPORT: compile_method's per-irep remap of jumps onto
+  # an ensure handler address. nil outside compile_method (hence `&.`); keyed on
+  # the irep object so a nested irep's same numeric address is unaffected.
+  # JMPUW never consults it (it only compiles with no catch handlers).
+  def ensure_remapped_jump_target(irep, target)
+    return target unless target && @ensure_except_remaps
+
+    map = @ensure_except_remaps[irep]
+    map ? map.fetch(target, target) : target
+  end
+
+  # ENSURE_RAII_SUPPORT: recognize one `begin BODY ensure ENSURE_BODY end` and
+  # return {begin_addr:, except_addr:, raiseif_addr:, body_insns:,
+  # except_jump_srcs:}, or nil (keeps `#error unhandled opcode EXCEPT`).
+  # `except_jump_srcs` are jumps from inside the protected range onto the
+  # handler address (ENSURE_DISPATCH_MERGE_SUPPORT below).
+  # Shape (checked against mrbc -v):
+  #
+  #   catch type: ensure   begin: B   end: E   target: E
+  #     [B, E)   the protected computation
+  #     E        EXCEPT Rx      -- captures whatever is unwinding (a real
+  #                               exception OR an MRB_TT_BREAK break
+  #                               object) into Rx
+  #     (E, R)   the ensure body itself
+  #     R        RAISEIF Rx     -- re-raises/resumes unless Rx is nil
+  #     R+       the method continues (or RETURNs)
+  #
+  # Under RAII, EXCEPT and RAISEIF disappear: C++ unwinding carries the
+  # in-flight exception, and the guard's destructor runs the ensure body on
+  # every exit. A mruby unwind is carried in M->exc (saved and restored by
+  # bc2cpp_ensure_guard); this file's own C++ break/return exceptions run the
+  # destructor and continue to their catch sites.
+  # Everything below rejects unproven shapes.
+  def recognize_ensure_region(irep)
+    return nil if irep.catch_handlers.nil?
+    # STEP_HANDLERS: a step handles its own handler table (resumable_step_function); the RAII form cannot be jumped into.
+    return nil if step_with_handlers?(irep)
+    # One ensure handler. ENSURE_NESTED_RESCUE: at most one rescue besides it, nested in the ensure body
+    # (recognize_ensure_nested_rescue); any other mix is not modelled.
+    ensures, rescues = irep.catch_handlers.partition { |handler| handler.type == :ensure }
+    return nil unless ensures.size == 1 && rescues.size <= 1 && rescues.all? { |handler| handler.type == :rescue }
+    ch = ensures.first
+    # `end == target` is the only shape reasoned about.
+    return nil unless ch.end_addr == ch.target
+
+    program = BytecodeIR.for(irep)
+    b, t = ch.begin_addr, ch.target
+    return nil unless program.insn_at_addr(b)
+
+    exc = program.insn_at_addr(t)
+    return nil unless exc && exc.op == :EXCEPT
+    exc_reg = exc.regs.first
+    return nil unless exc_reg
+
+    # Find this handler's own terminating `RAISEIF Rx` (same register).
+    after = insns_in_addr_range(irep, (t + 1)..)
+    raiseif = after.find { |i| i.op == :RAISEIF && i.regs.first == exc_reg }
+    return nil unless raiseif
+
+    body = insns_in_addr_range(irep, (t + 1)...raiseif.addr)
+    nested = rescues.empty? ? nil : recognize_ensure_nested_rescue(irep, program, rescues.first, (t + 1)...raiseif.addr)
+    return nil if !rescues.empty? && nested.nil?
+
+    # The ensure body must only fall off its end: a RETURN would have to return
+    # from the method, not the destructor's lambda, and BREAK/BLOCK/SENDB/LAMBDA
+    # could throw a C++ exception out of a destructor that may already be running
+    # during unwinding (std::terminate). The nested rescue's own EXCEPT and RAISEIF are its handler.
+    handler_addrs = nested ? [nested[:except_addr], nested[:raise_addr]] : []
+    return nil if body.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) && !handler_addrs.include?(i.addr) }
+    # Branches inside the ensure body must stay inside it; its RAISEIF address is
+    # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
+    # becomes a label at the end of the lambda.
+    body_range = (t + 1)...raiseif.addr
+    return nil unless program.branches_escaping(body_range, (t + 1)..raiseif.addr).empty?
+    # No branch may cross into or out of the protected range: the guard is a C++
+    # scope, and jumping in would skip its initialization (ill-formed), jumping
+    # out would run the ensure where the bytecode does not.
+    # ENSURE_DISPATCH_MERGE_SUPPORT: except a jump from INSIDE the range to `t`
+    # (== ch.end_addr), mrbc's tail-merge of a trailing conditional onto the
+    # ensure region, e.g. optcarrot NES#run:
+    #
+    #   catch type: ensure   begin: 0004 end: 0122 target: 0122
+    #     ...
+    #     93 117 JMP              122    <- the merged branch exit
+    #     93 120 LOADNIL   R3      (nil) <- the branch's other (fall-in) arm
+    #     93 122 EXCEPT    R5
+    #     96 124 SSEND0    R6      :dispose
+    #     96 127 RAISEIF   R5
+    #     96 129 RETURN    R3
+    #
+    # On the VM that runs EXCEPT (nil on the normal path), the ensure body, and
+    # continues after RAISEIF; the RAII equivalent is leaving the guard scope and
+    # landing just after it, so these jumps are remapped to raiseif_addr by
+    # compile_method (which also emits that label). A jump from OUTSIDE onto `t`
+    # stays rejected: it would skip the body but run the ensure.
+    protected_range = (b...ch.end_addr)
+    # A jump onto `t` is only allowed from inside the range; the ensure body's own
+    # branches were checked above with a stricter rule.
+    onto_t = program.branches_onto(t, except_from: body_range)
+    return nil unless onto_t.all? { |edge| protected_range.cover?(edge.src) }
+
+    crossings = program.region_crossings(protected_range, except_from: body_range)
+    # ENSURE_ENTRY_LABEL: a jump from before the range onto its first instruction (`return io unless block` right
+    # before IO.open's `begin`) enters it the way falling in does; compile_method puts that label ahead of the
+    # guard's scope.
+    entries = crossings.select { |edge| edge.target == b && edge.src < b }
+    return nil unless (crossings - entries).all? { |edge| edge.target == t }
+
+    except_jump_srcs = onto_t.map(&:src)
+    # An optional-argument jump table is ordinary JMPs in this irep, so the
+    # crossing test already covered it.
+    { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body,
+      except_jump_srcs: except_jump_srcs, nested_rescue: nested, entry_label: !entries.empty? }
+  end
+
+  ENSURE_BODY_REFUSED_OPS = %i[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].freeze
+
+  # ENSURE_NESTED_RESCUE: `begin X rescue C ... end` inside an ensure body (mruby-io's IO.open closes its io that way).
+  # The rescue has the shape recognize_rescue_regions reads: [begin, end) protected, `JMP S` at end, `EXCEPT Rexc` at
+  # the target, a class-clause chain ending in `RAISEIF Rexc`. All of it lies inside the ensure body, no jump enters
+  # or leaves the protected range, and the protected range holds none of the ops the ensure body refuses.
+  def recognize_ensure_nested_rescue(irep, program, handler, body_range)
+    b, e, t = handler.begin_addr, handler.end_addr, handler.target
+    return nil unless [b, e, t].all? { |addr| body_range.cover?(addr) } && b < e && e < t
+
+    except_i = program.insn_at_addr(t)
+    return nil unless except_i&.op == :EXCEPT && except_i.reg
+
+    exc_reg = except_i.reg
+    clauses = recognize_rescue_class_handler(irep, program, except_i, exc_reg)
+    return nil unless clauses
+
+    raise_i = program.insn_at_addr(clauses[:raise_addr])
+    return nil unless raise_i&.op == :RAISEIF && raise_i.reg == exc_reg && body_range.cover?(raise_i.addr)
+    return nil unless program.insn_at_addr(e)&.op == :JMP && program.region_boundary_breaches(b...e, e).empty?
+
+    protected_insns = insns_in_addr_range(irep, b...e)
+    return nil if protected_insns.any? { |i| ENSURE_BODY_REFUSED_OPS.include?(i.op) }
+
+    { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, raise_addr: raise_i.addr,
+      protected_insns: protected_insns }
+  end
+
+  # The nested rescue inside the ensure lambda: the protected range as its own lambda under bc2cpp_protect (the
+  # guard's own protection is outside it), then on an error `$!` and Rexc as EXCEPT leaves them and a jump to the
+  # handler, whose RESCUE/JMPIF/RAISEIF compile as anywhere. An unmatched exception is raised again into the guard's
+  # bc2cpp_protect, which makes it supersede the one in flight. Returns [text, ok].
+  def emit_ensure_nested_rescue(nested, irep, d)
+    tag = nested[:except_addr]
+    targets = nested[:protected_insns].filter_map(&:branch_target).to_set
+    inner = String.new
+    ok = true
+    nested[:protected_insns].each do |insn|
+      inner << "      L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      code = compile_insn(insn, irep, d, irep.index_of_addr(insn.addr))
+      ok = false if code.include?('#error')
+      inner << code
+    end
+    inner << "      L#{nested[:end_addr]}:;\n" if targets.include?(nested[:end_addr])
+    fn = "bc2cpp_nested_try_#{tag}"
+    err = "bc2cpp_nested_err_#{tag}"
+    exc = "bc2cpp_nested_exc_#{tag}"
+    text = String.new
+    text << "    { // ENSURE_NESTED_RESCUE [#{nested[:begin_addr]}, #{nested[:end_addr]})\n"
+    text << "    auto #{fn} = [&]() {\n#{inner}    };\n"
+    text << "    mrb_bool #{err} = FALSE;\n"
+    text << "    mrb_value #{exc} = bc2cpp_protect_call(M, #{fn}, &#{err});\n"
+    text << "    if (#{err}) { bc2cpp_set_errinfo(M, #{exc}); r#{nested[:exc_reg]} = #{exc}; goto L#{tag}; }\n"
+    text << "    }\n"
+    [text, ok]
+  end
+
+  # ENSURE_RAII_SUPPORT: the opening half of an ensure region: `{`, the ensure
+  # body compiled into a by-reference lambda, and the guard whose destructor
+  # runs it. Returns [text, ok]; ok false (a body instruction failed) makes
+  # compile_method emit nothing, keeping `#error`.
+  # The lambda captures `[&]`, so it uses the function's own `rN` locals. Those
+  # are declared at the top, before the guard, so reverse destruction order
+  # keeps them alive when the guard runs.
+  def emit_ensure_guard(region, irep, d)
+    body = String.new
+    ok = true
+    # The ensure body's branches target the body or the RAISEIF; both become
+    # labels inside the lambda, so compile_insn's gotos need no rewriting.
+    body_targets = region[:body_insns].filter_map { |i| i.branch_target }.to_set
+    nested = region[:nested_rescue]
+    region[:body_insns].each do |insn|
+      if nested && insn.addr >= nested[:begin_addr] && insn.addr < nested[:end_addr]
+        next unless insn.addr == nested[:begin_addr]
+
+        body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        text, nested_ok = emit_ensure_nested_rescue(nested, irep, d)
+        ok &&= nested_ok
+        body << text
+        next
+      end
+      idx = irep.index_of_addr(insn.addr)
+      # The nested rescue's EXCEPT is its glue's jump target; the glue already did what EXCEPT does.
+      if nested && insn.addr == nested[:except_addr]
+        body << "    L#{insn.addr}:;\n"
+        next
+      end
+      body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      code = compile_insn(insn, irep, d, idx)
+      ok = false if code.include?('#error')
+      body << code
+    end
+    # mrbc's "skip the rest of the ensure body" target (RAISEIF) means "the
+    # lambda is done".
+    body << "    L#{region[:raiseif_addr]}:;\n" if body_targets.include?(region[:raiseif_addr])
+    text = String.new
+    text << "  { // ensure region [#{region[:begin_addr]}, #{region[:except_addr]})\n"
+    text << "  auto bc2cpp_ensure_fn = [&]() {\n"
+    text << body
+    text << "  };\n"
+    text << "  bc2cpp_ensure_guard<decltype(bc2cpp_ensure_fn)> " \
+            "bc2cpp_ensure_g{M, bc2cpp_ensure_fn};\n"
+    text << "  (void)bc2cpp_ensure_g;\n"
+    [text, ok]
+  end
+
+  # RESCUE_SUPPORT: recognize `begin BODY rescue C => e; HANDLER; end` (also a
+  # whole-method `rescue` and the `EXPR rescue FALLBACK` modifier: same
+  # EXCEPT/RESCUE/RAISEIF shape). Chained single-class clauses and namespaced
+  # classes are supported (recognize_rescue_class_handler), and proper nesting
+  # (NESTED_RESCUE_SUPPORT). Not supported: `retry`, `ensure`, a multi-class
+  # clause `rescue A, B`, partial overlap. Unrecognized shapes keep
+  # `#error unhandled opcode EXCEPT`: RESCUE/RAISEIF translate anywhere, but
+  # EXCEPT only means something inside this bc2cpp_protect wrapping.
+  #
+  # Shape behind a "catch type: rescue" entry (checked against mrbc -v):
+  #
+  #   [begin, end)   -- the protected computation itself (BODY above).
+  #   end            -- exactly one instruction, `JMP S` -- BODY's own
+  #                     normal (non-raising) exit, landing on address S,
+  #                     which every rescue-match path also converges on
+  #                     (a final RETURN/RETURN_BLK for a whole-method
+  #                     rescue, otherwise just the next instruction).
+  #   target         -- exactly `EXCEPT Rexc` (captures the raised
+  #                     exception -- mrb->exc -- into Rexc, clearing it).
+  #   target+1..    -- one or more chained rescue CLAUSE TESTS: a class
+  #                     chain (`GETCONST Rcls <Root>`, then zero or more
+  #                     `GETMCNST Rcls (Rcls)::<Seg>`), `RESCUE Rexc Rcls`,
+  #                     `JMPIF Rcls match`, `JMP next` (the next clause's
+  #                     test head, or `raise` for the last clause); see
+  #                     recognize_rescue_class_handler.
+  #   raise          -- exactly `RAISEIF Rexc` (re-raises unless nil).
+  #
+  # Rexc is also the register holding the construct's RESULT on every path:
+  # codegen_rescue compiles BODY at cursp(), takes `exc = cursp()` for
+  # OP_EXCEPT, and compiles each handler at the same cursp(). So the value
+  # flowing into S is always r<exc_reg>, whatever instruction S is.
+  # emit_rescue_glue's early return for a RETURN/RETURN_BLK S is only a
+  # shortcut; the goto-to-S path is correct for both.
+  # Every address in the chain is cross-checked.
+  #
+  # DEFINED_CONST_RESCUE_SUPPORT: a second shape, the compiler-generated
+  # `defined?` constant probe (a bare EXCEPT, no RESCUE); see
+  # recognize_defined_const_handler.
+  #
+  # Returns one Hash per non-nested handler:
+  # {begin_addr:, end_addr:, except_addr:, exc_reg:, cls_name:, match_addr:,
+  #  raise_addr:, shared_target:, connector_reg:, tail_return:, kind:}.
+  # `kind` is :rescue_class or :defined_const; the emitters read neither
+  # it nor cls_name/match_addr/raise_addr (nil for :defined_const).
+  def recognize_rescue_regions(irep)
+    return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
+    return [] if step_with_handlers?(irep)
+    return [] unless irep.catch_handlers.all? { |ch| ch.type == :rescue }
+
+    program = BytecodeIR.for(irep)
+
+    regions = []
+    irep.catch_handlers.each do |ch|
+      b, e, t = ch.begin_addr, ch.end_addr, ch.target
+      # NESTED_RESCUE_SUPPORT: proper nesting (one range inside another, e.g. a
+      # `(x rescue nil)` modifier inside a method-level rescue) is allowed. Only a
+      # partial overlap, which mrbc never produces, is rejected: it would mean the
+      # shape assumptions are wrong. compile_method and emit_rescue_try_body each
+      # claim only top-level regions of their scope (top_level_rescue_regions);
+      # nested ones become further-nested try-body functions.
+      next if program.handler_partially_overlaps?(ch)
+
+      except_i = program.insn_at_addr(t)
+      next unless except_i && except_i.op == :EXCEPT
+      exc_reg = except_i.reg
+      next unless exc_reg
+
+      # Two exclusive handler shapes, each with its own recognizer (nil means "not
+      # this shape"): the classic `rescue SomeClass` chain, and the `defined?`
+      # constant probe (see recognize_defined_const_handler).
+      handler = recognize_rescue_class_handler(irep, program, except_i, exc_reg) ||
+                recognize_defined_const_handler(irep, except_i, exc_reg, b, e)
+      next unless handler
+
+      cls_name = handler[:cls_name]
+      match_addr = handler[:match_addr]
+      raise_addr = handler[:raise_addr]
+
+      exit_i = program.insn_at_addr(e)
+      next unless exit_i && exit_i.op == :JMP
+      shared_target = exit_i.jmp_addr
+      # shared_target can never be this region's except_addr in mrbc output
+      # (OP_EXCEPT is emitted before the success JMP is patched); rejected anyway,
+      # since that address is suppressed and has no label.
+      next if shared_target == t
+      shared_i = program.insn_at_addr(shared_target)
+      next unless shared_i
+      # DEFINED_CONST_RESCUE_SUPPORT: the success path must land on `STRING
+      # R<exc_reg> L[n]` (codegen_defined_const's "constant" push,
+      # the pinned fork commit (mruby-defined-keyword, docs/patch-fork-tracking.md)), which overwrites r<exc_reg>. That makes
+      # the try body's result dead on success; anything else is unverified.
+      if handler[:kind] == :defined_const
+        next unless shared_i.op == :STRING && shared_i.reg == exc_reg
+        next unless handler[:join_addr] > shared_target
+      end
+      # connector_reg is always exc_reg (see the header). tail_return stays a
+      # checked distinction: emit_rescue_glue takes the early return only then, and
+      # verifies connector_reg against the RETURN operand.
+      # RESCUE_JOIN_RETURN_SUPPORT: a join `RETURN Rx` with Rx other than the
+      # connector is not a tail return of the result; it takes the `goto
+      # shared_target` path, correct for any join.
+      tail_return = %i[RETURN RETURN_BLK].include?(shared_i.op)
+      connector_reg = exc_reg
+      if tail_return
+        tail_reg = shared_i.no_operands? ? '0' : shared_i.reg
+        tail_return = false unless tail_reg == connector_reg
+      end
+
+      # Containment, checked by jump SOURCE address:
+      #   1. No jump from outside [b, e] may target inside it, except a jump from
+      #      strictly before `b` landing exactly on `b` (an `if ...; return; end`
+      #      guard or an optional-argument default dispatch entering the region).
+      #      A `retry` would jump back from the handler, after `e`, so it is still
+      #      rejected.
+      #   2. No jump from inside [b, e) may leave it; the only exits are `e`
+      #      (checked above) or a raise (bc2cpp_protect's job).
+      next unless program.region_boundary_breaches(b...e, e).empty?
+
+      regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
+                   match_addr: match_addr, raise_addr: raise_addr, shared_target: shared_target,
+                   connector_reg: connector_reg, tail_return: tail_return, kind: handler[:kind] }
+    end
+    regions
+  end
+
+  # RESCUE_LIVE_OUT: the try body is its own function, so locals it
+  # writes (any local for an unmodelled op) or that a block created outside the
+  # range touches are passed by reference, not copied. Temporaries stay copies:
+  # only the connector is live across the region. Returns register numbers.
+  def rescue_ref_regs(irep, region)
+    nlocals = irep.nlocals.to_i
+    b = region[:begin_addr]
+    e = region[:end_addr]
+    written = Set.new
+    touched = Set.new
+    BytecodeIR.for(irep).each_source do |i, _|
+      inside = (b..e).cover?(i.addr)
+      if inside
+        regs = rescue_insn_written_regs(i)
+        return (1...nlocals).to_a unless regs
+
+        written.merge(regs)
+        if BytecodeIR::Ops::CALLEE_FRAME.include?(i.op) && i.reg
+          written.merge((i.reg...irep.nregs.to_i).to_a)
+        end
+      end
+      next unless i.block_index && irep.reps
+
+      child = @ireps[irep.reps[i.block_index]]
+      next unless child
+
+      all, child_written = upvar_refs_into(child)
+      inside ? written.merge(child_written) : touched.merge(all)
+    end
+    (written | touched).map(&:to_i).select { |r| r.between?(1, nlocals - 1) && r.to_s != region[:connector_reg] }.sort
+  end
+
+  # Registers (digits) of +irep+'s parent that +irep+ and its nested blocks touch through GETUPVAR/SETUPVAR:
+  # [all, written] (BytecodeIR.each_nested_insn: a reference at level k in depth k names the parent).
+  def upvar_refs_into(irep)
+    all = Set.new
+    written = Set.new
+    BytecodeIR.each_nested_insn(irep, ->(label) { @ireps[label] }) do |insn, depth|
+      ref = insn.upvar_ref
+      next unless ref && ref.last == depth
+
+      all << ref.first
+      written << ref.first if insn.op == :SETUPVAR
+    end
+    [all, written]
+  end
+
+  # Registers (digits) an instruction can write, or nil for an op whose writes
+  # are not modelled. WRITES_LEADING_REG_OPS is the audited leading-operand set.
+  def rescue_insn_written_regs(insn)
+    op = insn.op
+    if BytecodeIR::Ops::READS_LEAD.include?(op) || op == :JMPUW
+      []
+    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
+      [insn.reg].compact
+    elsif op == :RESCUE
+      [insn.regs[1]].compact
+    elsif op == :EXCEPT
+      [insn.reg].compact
+    end
+  end
+
+  # RESCUE_ERRINFO: a function with a rescue or ensure handler owns the `$!` it
+  # sets. vm.c's cipop clears `$!` once the frame that set it returns, and a
+  # direct `_impl` call has no callinfo of its own to do that (Bc2cppErrinfoScope).
+  def errinfo_scope_line(irep)
+    return '' if irep.catch_handlers.nil? || irep.catch_handlers.empty?
+
+    "  Bc2cppErrinfoScope bc2cpp_errinfo_scope(M);\n"
+  end
+
+  # RESCUE_SUPPORT: the classic `rescue SomeClass` handler shape. Returns nil
+  # unless it matches completely.
+  #
+  # NAMESPACED_RESCUE_SUPPORT / MULTI_RESCUE_SUPPORT: a clause-chain walk.
+  # (a) A namespaced class (`rescue RGSS::Timeout`, RPG2k#start):
+  #
+  #       catch type: rescue   begin: 0004 end: 0011 target: 0014
+  #        004 BLOCK     R3  I[0]
+  #        007 SSENDB    R2  :loop  n=0
+  #        011 JMP       039           <- e, the non-raising exit
+  #        014 EXCEPT    R2            <- t
+  #        016 GETCONST  R3  RGSS      <- class chain ROOT
+  #        019 GETMCNST  R3  (R3)::Timeout   <- ...and its one segment
+  #        022 RESCUE    R2  R3
+  #        025 JMPIF     R3  032       <- match
+  #        029 JMP       037           <- no match: straight to RAISEIF
+  #        032 LOADNIL   R2  (nil)     <- the (empty) handler body
+  #        034 JMP       039
+  #        037 RAISEIF   R2
+  #        039 RETURN    R2            <- shared_target
+  #
+  # (b) Chained clauses (RGSS::Graphics.singleton#_transition_map):
+  #
+  #       catch type: rescue   begin: 0004 end: 0038 target: 0041
+  #        038 JMP       166           <- e; shared_target 166
+  #        041 EXCEPT    R4            <- t
+  #        043 GETCONST  R5  Bitmap              -- clause 1 test
+  #        046 GETMCNST  R5  (R5)::LoadError
+  #        049 RESCUE    R4  R5
+  #        052 JMPIF     R5  059       <- match -> body 1
+  #        056 JMP       105           <- NO match -> clause 2's GETCONST
+  #        059 ... body 1 ...
+  #        102 JMP       166           <- body 1 converges on shared_target
+  #        105 GETCONST  R5  StandardError      -- clause 2 test
+  #        108 RESCUE    R4  R5
+  #        111 JMPIF     R5  118       <- match -> body 2
+  #        115 JMP       164           <- NO match -> RAISEIF (last clause)
+  #        118 ... body 2 ...
+  #        161 JMP       166
+  #        164 RAISEIF   R4
+  #        166 RETURN    R4            <- shared_target
+  #
+  # Each clause's no-match JMP must land on the next clause's GETCONST or on
+  # `RAISEIF Rexc` (first-match-wins). vm.c OP_RESCUE is only `regs[b] =
+  # mrb_bool_value(mrb_obj_is_kind_of(mrb, exc, ec))` and OP_RAISEIF re-raises
+  # regs[a] unless nil.
+  # Soundness of chaining: the no-match path never enters a handler body (bodies
+  # clobber r<exc_reg> but are only reached via a matched JMPIF and exit to
+  # shared_target), and GETCONST/GETMCNST/RESCUE/JMPIF/JMP never write
+  # r<exc_reg> (`cls_reg != exc_reg` is checked), so the exception is intact at
+  # every later RESCUE.
+  # Nothing downstream changes: cls_name/match_addr/raise_addr are not read by
+  # any emitter; compile_method suppresses [begin_addr, end_addr] and
+  # except_addr only and compiles everything after through compile_insn, which
+  # translates each of these opcodes unconditionally. The protected range and
+  # its checks are untouched.
+  def recognize_rescue_class_handler(irep, program, except_i, exc_reg)
+    clause_idx = irep.index_of_addr(except_i.addr)
+    return nil unless clause_idx
+
+    clause_idx += 1
+    cls_names = []
+    first_match_addr = nil
+
+    loop do
+      # The class name: a GETCONST root then GETMCNST segments, all reading and
+      # writing the root's register; anything else is rejected.
+      getconst_i = BytecodeIR.for(irep).source_at(clause_idx)
+      return nil unless getconst_i && getconst_i.op == :GETCONST
+      cls_reg = getconst_i.reg
+      cls_name = getconst_i.const_name
+      return nil unless cls_reg && cls_name
+      # The class chain must not target the exception register (RESCUE/RAISEIF
+      # still need it); codegen_rescue puts it at cursp() above exc, checked here.
+      return nil if cls_reg == exc_reg
+
+      segments = program.run_of_op(clause_idx + 1, :GETMCNST)
+      segments.each do |seg_i|
+        return nil unless seg_i.reg == cls_reg && seg_i.paren_reg == cls_reg && seg_i.mcnst_name
+        cls_name = "#{cls_name}::#{seg_i.mcnst_name}"
+      end
+      seg_idx = clause_idx + 1 + segments.size
+
+      rescue_i, jmpif_i, jmp_i = Array.new(3) { |k| BytecodeIR.for(irep).source_at(seg_idx + k) }
+      return nil unless rescue_i && jmpif_i && jmp_i
+      return nil unless rescue_i.op == :RESCUE && rescue_i.regs == [exc_reg, cls_reg]
+      return nil unless jmpif_i.op == :JMPIF && jmpif_i.reg == cls_reg
+
+      match_addr = jmpif_i.uint_operand.to_i
+      return nil unless match_addr && match_addr > jmpif_i.addr
+      return nil unless jmp_i.op == :JMP
+      next_addr = jmp_i.jmp_addr
+      # Strictly forward: bounds the walk and excludes a backward `retry`.
+      return nil unless next_addr > jmp_i.addr
+
+      cls_names << cls_name
+      first_match_addr ||= match_addr
+
+      next_i = program.insn_at_addr(next_addr)
+      return nil unless next_i
+
+      # Last clause: the no-match path re-raises.
+      if next_i.op == :RAISEIF
+        return nil unless next_i.reg == exc_reg
+
+        return { kind: :rescue_class, cls_name: cls_names.join(', '),
+                 match_addr: first_match_addr, raise_addr: next_addr }
+      end
+
+      # Otherwise it must be the next clause's class-test head, never a handler
+      # body (the soundness property above).
+      return nil unless next_i.op == :GETCONST
+
+      clause_idx = irep.index_of_addr(next_i.addr)
+      return nil unless clause_idx
+    end
+  end
+
+  # DEFINED_CONST_RESCUE_SUPPORT: the other shape behind a "catch type: rescue"
+  # entry: this repo's `defined?(CONST)` / `defined?(A::B)` / `defined?(::B)`
+  # (the pinned fork commit (mruby-defined-keyword, docs/patch-fork-tracking.md); upstream codegen_defined returns nil).
+  # It has no RESCUE and no RAISEIF, e.g. RPG2k::Scene::Map#try_open_debug_menu:
+  #
+  #   catch type: rescue   begin: 0051 end: 0057 target: 0060
+  #    051 GETCONST  R2  Scene            <- b, the probe itself
+  #    054 GETMCNST  R2  (R2)::DebugMenu
+  #    057 JMP       067                  <- e, the non-raising exit
+  #    060 EXCEPT    R2                   <- t, a BARE EXCEPT
+  #    062 LOADNIL   R2  (nil)
+  #    064 JMP       070                  <- join, past the STRING
+  #    067 STRING    R2  L[0]  ; constant <- shared_target
+  #    070 JMPIF     R2  075
+  #
+  # Sound with the existing bc2cpp_protect machinery and no new emitter:
+  #  1. emit_rescue_glue's non-tail_return output is exactly right: on success
+  #     its assignment is overwritten by the STRING; on failure the exception
+  #     lands in r<exc_reg> and falls through to the LOADNIL, as EXCEPT would.
+  #  2. The handler is two ordinary instructions (LOADNIL, JMP), compiled
+  #     normally.
+  #  3. The protected range must have no live-in registers:
+  #     emit_rescue_try_body nil-initializes everything but self and mandatory
+  #     arguments, which is only valid at a region entered right after ENTER,
+  #     and a `defined?` probe can sit anywhere. `defined?(x.bar::Baz)` reads a
+  #     live local inside the range, so only these chains are accepted (all on
+  #     r<exc_reg>, codegen_defined_const's `r = cursp()`):
+  #     GETCONST Rd <Name>                                (`defined?(C)`)
+  #     GETCONST Rd <Base>  (GETMCNST Rd (Rd)::<Name>)+   (`defined?(A::B)`)
+  #     OCLASS   Rd         (GETMCNST Rd (Rd)::<Name>)+   (`defined?(::B)`)
+  #     Each writes r<exc_reg> before reading it and calls no Ruby method, so
+  #     the only live-in is `self` (for GETCONST's lexical lookup).
+  # codegen_defined_const is the only catch_handler_new the patch adds, so no
+  # other compiler-generated rescue region exists.
+  # Returns {kind:, cls_name:, match_addr:, raise_addr:, join_addr:}; the three
+  # classic fields are nil and unused by the emitters.
+  def recognize_defined_const_handler(irep, except_i, exc_reg, b, e)
+    idx = irep.index_of_addr(except_i.addr)
+    seq = [BytecodeIR.for(irep).source_at(idx + 1), BytecodeIR.for(irep).source_at(idx + 2)]
+    return nil unless seq.all?
+
+    loadnil_i, jmp_i = seq
+    return nil unless loadnil_i.op == :LOADNIL && loadnil_i.reg == exc_reg
+    return nil unless jmp_i.op == :JMP
+
+    join_addr = jmp_i.jmp_addr
+    # The handler only runs forward into the join.
+    return nil unless join_addr > jmp_i.addr
+
+    body = insns_in_addr_range(irep, b...e)
+    head, *rest = body
+    return nil unless head
+    case head.op
+    when :GETCONST
+      return nil unless head.reg == exc_reg && head.const_name
+    when :OCLASS
+      # `::Name` always has a GETMCNST after OCLASS; a lone OCLASS cannot raise and
+      # is never emitted by codegen_defined_const.
+      return nil unless head.reg == exc_reg && !rest.empty?
+    else
+      return nil
+    end
+    rest.each do |i|
+      return nil unless i.op == :GETMCNST
+      return nil unless i.reg == exc_reg && i.paren_reg == exc_reg && i.mcnst_name&.match?(/\A\w+\z/)
+    end
+
+    { kind: :defined_const, cls_name: nil, match_addr: nil, raise_addr: nil, join_addr: join_addr }
+  end
+
+  # NESTED_RESCUE_SUPPORT: the regions not contained in another region of the
+  # same list: what the current scope (compile_method, or emit_rescue_try_body
+  # for its own range) claims directly; nested ones are left to the child's
+  # recursive extraction.
+  def top_level_rescue_regions(regions)
+    regions.reject do |r|
+      regions.any? { |o| o != r && o[:begin_addr] <= r[:begin_addr] && r[:end_addr] <= o[:end_addr] }
+    end
+  end
+
+  # RESCUE_TRY_INLINE kill switch: BC2CPP_RESCUE_INLINE_BLOCKS=0 keeps block calls.
+  def rescue_inline_blocks_enabled?
+    ENV['BC2CPP_RESCUE_INLINE_BLOCKS'] != '0'
+  end
+
+  # RESCUE_TRY_INLINE: may a region the whole-method recognizers found be inlined into the
+  # try body of `range`? The receiver proof and arity gate are already the method's own; this
+  # checks where the region sits (anchor and SENDB inside, before the exit JMP that becomes the
+  # try function's return), that no RETURN_BLK (a C++ `return` would only leave the try function,
+  # whose result is the range's value) is in the block tree, and that the block does not forward
+  # the method's block (the try function has bc2cpp_blk only when the method declares it).
+  def rescue_try_inlinable?(region, anchor, range)
+    sendb = region[:sendb_addr]
+    return false unless anchor && sendb
+    return false unless range.cover?(anchor) && range.cover?(sendb) && anchor < range.end && sendb < range.end
+    return false if region[:needs_blk]
+
+    block_irep = region[:block_irep]
+    block_irep.nil? || !irep_tree_has_op?(block_irep, :RETURN_BLK)
+  end
+
+  def irep_tree_has_op?(irep, op)
+    return true if BytecodeIR.for(irep).op?(op)
+
+    (irep.reps || []).any? do |label|
+      child = @ireps[label]
+      child && irep_tree_has_op?(child, op)
+    end
+  end
+
+  # RESCUE_TRY_INLINE: a second layer behind rescue_try_inlinable?: refuse emitted glue that
+  # returns or jumps to a label outside the range. Strings and `//` comments are dropped first.
+  def rescue_try_glue_safe?(code, range)
+    text = code.gsub(%r{"(?:[^"\\]|\\.)*"|//[^\n]*}, '')
+    return false if text.match?(/\breturn\b/)
+
+    text.scan(/\bgoto L(\d+);/).all? { |(addr)| range.cover?(addr.to_i) }
+  end
+
+  # RESCUE_SUPPORT: the extracted try body for one region, a top-level static
+  # function (bc2cpp_protect takes a C function pointer; see
+  # emit_const_lookup_helper). It covers [begin_addr, end_addr] including the
+  # exit JMP, which becomes a C++ `return` of the value the JMP would pass on
+  # (the function's result is bc2cpp_protect's result on success). A
+  # by-value Ctx carries self and the mandatory arguments; bc2cpp_protect's
+  # `void*` is its address. Other registers are temporaries, declared and
+  # nil-initialized like `_impl`'s preamble; internal jumps use the usual labels.
+  # `extra_fields` ([{name:, c_type:}]) adds Ctx members restored into
+  # same-named locals: BLOCK_FALLBACK_RESCUE_SUPPORT passes captured upvar
+  # pointers (`bc2cpp_upvar_N`), so GETUPVAR/SETUPVAR (keyed by name) work
+  # unchanged.
+  # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` is the enclosing function's
+  # captured-pointer set (empty for a method-level rescue), threaded in by name
+  # via `extra_fields`, so nested block calls may forward them further.
+  # rescue_entry_saved_fields: self + raw arguments are the whole live-in state
+  # only when begin_addr directly follows ENTER. A region entered by a branch
+  # (an optional default like `def drive_battle(it = @interpreter)`, or an `if
+  # ...; return; end` guard) can have any register set, so the whole register
+  # file is captured by value, as for NESTED_RESCUE_SUPPORT.
+  def rescue_entry_saved_fields(irep, region)
+    refs = rescue_ref_regs(irep, region)
+    saved = if insns_in_addr_range(irep, 0...region[:begin_addr]).all? { |insn| insn.op == :ENTER }
+              []
+            else
+              (1...irep.nregs).reject { |i| refs.include?(i) }.map do |i|
+                { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' }
+              end
+            end
+    saved + rescue_ref_fields(refs)
+  end
+
+  # Ctx fields aliasing the outer function's registers (see rescue_ref_regs).
+  def rescue_ref_fields(regs)
+    regs.map { |i| { name: "bc2cpp_ref_r#{i}", c_type: 'mrb_value*', value: "&r#{i}" } }
+  end
+
+  # The C++ expression an extra Ctx field is initialised from at the glue.
+  def rescue_field_value(field)
+    field[:value] || field[:name].sub('bc2cpp_saved_', '')
+  end
+
+  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
+                           available_upvars: [], inline_mand: nil)
+    ctx_struct = "#{try_name}_Ctx"
+    ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
+                 extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
+    # RESCUE_BODY_BLOCK_SUPPORT: block-carrying calls inside the protected range
+    # (`RGSS::Profiler.section("...") { ... }` in RPG2k#start_new_game) go through
+    # emit_block_fallback_glue_pass like compile_method's top-level pass,
+    # restricted to [begin_addr, end_addr]. The top-level pass never claims them
+    # (this range is already in its `suppressed`). Local suppressed/glue_at: a
+    # separate C++ function. Emitted before this function's opening brace, since
+    # a cfunc cannot be defined inside another function.
+    range = (region[:begin_addr]..region[:end_addr])
+    local_suppressed = Set.new
+    local_glue_at = {}
+    # NESTED_RESCUE_SUPPORT: nested rescue ranges are claimed before the
+    # block-fallback pass, as compile_method does, so a block inside a nested
+    # region belongs to that region's recursive extraction. Claiming it here too
+    # would emit the same block function twice (`redefinition of ...`).
+    nested_rescue_regions = top_level_rescue_regions(
+      recognize_rescue_regions(irep).select do |r|
+        r != region && region[:begin_addr] <= r[:begin_addr] && r[:end_addr] <= region[:end_addr]
+      end
+    )
+    nested_rescue_regions.each do |nregion|
+      local_suppressed.merge((nregion[:begin_addr]..nregion[:end_addr]).to_a)
+      local_suppressed << nregion[:except_addr]
+    end
+    # RESCUE_TRY_INLINE: the named inliners run before the block-call fallback, as in
+    # compile_method. Only compile_method sets `inline_mand`: the inliners assume a method irep,
+    # not a block body's own rescue. A resumable method's loops belong to its step function.
+    out = String.new
+    if inline_mand && !@resumable && rescue_inline_blocks_enabled?
+      saved_inline_pre = @inline_nested_pre
+      @inline_nested_pre = String.new
+      begin
+        run_inline_loop_passes(irep, d, inline_mand, local_suppressed.dup, local_suppressed, local_glue_at,
+                               try_range: range)
+        out << @inline_nested_pre
+      ensure
+        @inline_nested_pre = saved_inline_pre
+      end
+    end
+    nested_block_regions = recognize_block_fallback_regions(irep, available_upvars: available_upvars)
+                           .select { |r| range.cover?(r[:block_addr]) }
+    nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
+    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
+
+    # NESTED_RESCUE_SUPPORT: each direct child region gets its own further-nested
+    # try body. Its begin_addr is reached after arbitrary code in this body, so
+    # its live-in state may be any register: the whole register file r1..nregs-1
+    # (all plain mrb_values) is captured by value via extra_fields/
+    # extra_field_values, the mechanism upvar pointers already use. This body's
+    # own extra_fields are inherited too. arg_names/arg_native_types are empty for
+    # the recursive call (no named argument locals exist here). The init loop
+    # below uses a `bc2cpp_saved_r<N>` field instead of nil when present.
+    # This body's own saved-register and alias fields are superseded by the fresh
+    # capture; a nested region aliases what it writes through this body's names
+    # (already aliases: the nested range lies inside this one).
+    inherited_fields = extra_fields.reject { |f| f[:name].start_with?('bc2cpp_saved_r', 'bc2cpp_ref_r') }
+    nested_rescue_regions.each_with_index do |nregion, ni|
+      # (Already claimed into local_suppressed above.)
+      nested_try_name = "#{try_name}_nested#{nested_rescue_regions.size > 1 ? "_#{ni}" : ''}"
+      nested_refs = rescue_ref_regs(irep, nregion)
+      nested_saved_fields = (1...irep.nregs).reject { |i| nested_refs.include?(i) }.map do |i|
+        { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' }
+      end
+      nested_extra_fields = inherited_fields + nested_saved_fields + rescue_ref_fields(nested_refs)
+      nested_extra_values = nested_extra_fields.map { |f| f[:value] || f[:name].sub('bc2cpp_saved_', '') }
+      out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
+                                                                            available_upvars: available_upvars,
+                                                                            inline_mand: inline_mand)
+      local_glue_at[nregion[:begin_addr]] =
+        emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
+    end
+
+    out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
+    out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
+    out << "  #{ctx_struct}* bc2cpp_ctx = (#{ctx_struct}*)ud;\n"
+    extra_fields.each do |f|
+      out << "  #{f[:c_type]} #{f[:name]} = bc2cpp_ctx->#{f[:name]};\n" unless f[:name].start_with?('bc2cpp_ref_r')
+    end
+    (0...irep.nregs).each do |i|
+      if i.zero?
+        # GETIV/SETIV codegen uses the bare identifier `self`; this function receives
+        # it through ctx, so alias it.
+        out << "  mrb_value self = bc2cpp_ctx->self;\n"
+        out << "  mrb_value r0 = self;\n"
+      elsif extra_fields.any? { |f| f[:name] == "bc2cpp_ref_r#{i}" }
+        # RESCUE_LIVE_OUT: an alias of the outer register, so a write here is the
+        # write the bytecode makes (see rescue_ref_regs).
+        out << "  mrb_value& r#{i} = *bc2cpp_ctx->bc2cpp_ref_r#{i};\n"
+      elsif (saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" })
+        # A saved-register capture is the register's value at begin_addr, so it wins
+        # over the raw argument (an optional default may have replaced it).
+        out << "  mrb_value r#{i} = #{saved[:name]};\n"
+      elsif i <= arg_names.size
+        a = arg_names[i - 1]
+        t = arg_native_types[i - 1]
+        out << if t
+                  "  mrb_value r#{i} = #{TYPE_OPS.fetch(t)[:box]}(bc2cpp_ctx->#{a});\n"
+                else
+                  "  mrb_value r#{i} = bc2cpp_ctx->#{a};\n"
+                end
+      else
+        out << "  mrb_value r#{i} = mrb_nil_value();\n"
+      end
+    end
+    body_targets = jump_targets(irep).select { |t| range.cover?(t) } -
+                   (local_suppressed.to_a - local_glue_at.keys)
+    saved_blk_param_name = @blk_param_name
+    @blk_param_name = 'bc2cpp_blk' if extra_fields.any? { |f| f[:name] == 'bc2cpp_blk' }
+    insns_in_addr_range(irep, range).each do |insn|
+      idx = irep.index_of_addr(insn.addr)
+      next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
+
+      out << "  L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      out << if insn.addr == region[:end_addr]
+                "  return r#{region[:connector_reg]};\n"
+              else
+                local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
+              end
+    end
+    @blk_param_name = saved_blk_param_name
+    out << fell_off_end(try_name)
+    out << "}\n\n"
+    # A block built inside the try body names the method's cells array (STEP_CLOSURES), which the try function does not
+    # receive: refuse it rather than emit a reference to an undeclared name. The method stays on the interpreter.
+    if !out.include?('bc2cpp_cells_ary = ') && out.include?('bc2cpp_cells_ary')
+      out << "#error rescue body builds a block over the method's cells array, which the try function does not capture\n"
+    end
+    # The nested try bodies above are in +out+ too, so a shared name is only ever kept.
+    @resumable ? out : drop_dead_statements(drop_unused_registers(out))
+  end
+
+  # RESCUE_SUPPORT: glue at begin_addr replacing [begin_addr, end_addr]: run the
+  # try body under bc2cpp_protect, which returns the body's result with
+  # err == FALSE, or the exception with err == TRUE, exception state cleared and
+  # the ci stack unwound to here. On failure assign the exception to r<exc_reg>
+  # and fall through into the clause tests (EXCEPT itself is suppressed).
+  # On success:
+  #   tail_return  -- a whole-method rescue: `return` the result directly.
+  #   otherwise    -- assign it to r<connector_reg> (== r<exc_reg>) and goto
+  #                   shared_target, which is a real jump target and so has a
+  #                   label.
+  # `extra_field_values`: C++ expressions for emit_rescue_try_body's
+  # `extra_fields`, appended in order to the aggregate `ctx{...}` initializer.
+  def emit_rescue_glue(try_name, region, arg_names, arg_native_types, extra_field_values: [])
+    ctx_struct = "#{try_name}_Ctx"
+    ctx_args = (['self'] + arg_names + extra_field_values).join(', ')
+    err_var = "#{try_name}_err"
+    result_var = "#{try_name}_result"
+    out = String.new
+    out << "  {\n"
+    out << "    #{ctx_struct} bc2cpp_ctx{#{ctx_args}};\n"
+    out << "    mrb_bool #{err_var} = FALSE;\n"
+    out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    out << if region[:tail_return]
+              "    if (!#{err_var}) { return #{result_var}; }\n"
+            else
+              "    if (!#{err_var}) { r#{region[:connector_reg]} = #{result_var}; goto L#{region[:shared_target]}; }\n"
+            end
+    out << "    bc2cpp_set_errinfo(M, #{result_var});\n"
+    out << "    r#{region[:exc_reg]} = #{result_var};\n"
+    out << "  }\n"
+    out
+  end
+end

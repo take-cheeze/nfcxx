@@ -1,0 +1,6 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "s" (struct "Pair") 8 4)
+(decl $"s" val) (zero-fill 8 $"s")
+(let %0 (ptr int) (offset $"s" 4)) (scope-end $"s") (let %1 int (load int %0))(return (const int 0))
+)

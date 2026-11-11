@@ -1,7 +1,7 @@
 // Block-level reversal through block-shared memory: each block of 128 threads loads its slice into the tile, waits at
 // the barrier, and writes the slice back reversed. The device compile has no CUDA headers, so the shared array is a
 // file-scope static (the emitter lowers a zero-initialized static array of the device unit as __shared__), and the
-// barrier is an intrinsic call (scripts/pathb-ptx-emit.rb: __nfcxx_syncthreads -> bar.sync 0).
+// barrier is an intrinsic call (tools/pathb-ptx-emit: __nfcxx_syncthreads -> bar.sync 0).
 extern "C" unsigned __nfcxx_tid_x(void);
 extern "C" unsigned __nfcxx_ctaid_x(void);
 extern "C" void __nfcxx_syncthreads(void);

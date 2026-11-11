@@ -1,4 +1,4 @@
-// __hmax on 16-bit half values (the device prelude's half is an unsigned short), against CUDA's host conversions
+// __hmax on 16-bit half values (given as bit patterns), against CUDA's host conversions
 // (cuda_fp16.h): the non-NaN operand wins, as fmax does; NaN with NaN stays NaN.
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -7,7 +7,7 @@
 
 __global__ void k(unsigned short *out, const unsigned short *a, const unsigned short *b, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) out[i] = __hmax(a[i], b[i]);
+  if (i < n) out[i] = __half_as_ushort(__hmax(__ushort_as_half(a[i]), __ushort_as_half(b[i])));
 }
 
 int main() {

@@ -1,0 +1,694 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+require_relative 'bytecode_ir_numeric'
+require_relative 'core_mixins'
+require_relative 'core_defs'
+require_relative 'define_method_sites'
+require_relative 'alias_sites'
+require_relative 'loop_installers'
+
+# Step 6: the whole-program class/method registry.
+
+# Implicit-self sends that take no block: SELF_SEND minus the block form.
+SSEND_NO_BLOCK_OPS = (BytecodeIR::Ops::SELF_SEND - BytecodeIR::Ops::BLOCK_SEND).freeze
+
+# The instructions that supply +reg+ to the read at +use+ on every path (BytecodeIR.reaching_definitions, MOVEs
+# followed), or nil when the IR cannot prove that set: a refused query, or a value from the frame's entry.
+def reaching_sources(irep, use, reg)
+  defs = BytecodeIR.reaching_definitions(irep, use, reg, shared: true)
+  return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+  defs.map { |d| BytecodeIR.for(irep).source_at(d.index) }
+end
+
+# The receiver instruction of a read at +use+ of +reg+: the one definition every reaching source shares (same op,
+# same constant), else nil. When the IR cannot prove the set, the textually nearest writer, as before, so a refused
+# query never recognizes less than the linear rule did.
+def receiver_source(irep, use, reg)
+  sources = reaching_sources(irep, use, reg)
+  if sources
+    first = sources.first
+    return first if sources.all? { |s| s.op == first.op && s.const_name == first.const_name }
+
+    return nil
+  end
+
+  irep.last_writer(use - 1, reg)
+end
+
+# Struct layout needs one agreed Symbol at each position; native accessors may
+# conservatively include several names for a position whose branch arms differ.
+def struct_new_receiver?(irep, idx, insn)
+  return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op) && insn.sym == 'new' && insn.reg
+
+  definitions = BytecodeIR.reaching_definitions(irep, idx, insn.reg, origin_transfers: true, through_handlers: true, shared: true)
+  definitions && !definitions.empty? && definitions.all? do |definition|
+    source = !definition.entry? && BytecodeIR.for(irep).source_at(definition.index)
+    source && source.op == :GETCONST && source.const_name == 'Struct'
+  end
+end
+
+def struct_new_member_sets(irep, idx, insn)
+  return nil unless insn.argc_operand && !insn.keyword_splat?
+
+  program = BytecodeIR.for(irep)
+  use = idx
+  if insn.positional_splat?
+    definitions = BytecodeIR.reaching_definitions(irep, idx, (insn.reg + 1),
+                                                 origin_transfers: true, through_handlers: true, shared: true)
+    return nil unless definitions&.size == 1 && !definitions.first.entry?
+
+    use = definitions.first.index
+    literal = program.container_literal(use)
+    return nil unless literal&.kind == :array && program.linear_corridor?(use, idx, include_handlers: true)
+    # A fresh packed array cannot escape or change between construction and use.
+    return nil unless (use + 1...idx).all? do |at|
+      op = program.source_at(at).op
+      %i[MOVE NOP LOADNIL LOADSYM LOADTRUE LOADFALSE BLOCK].include?(op) || BytecodeIR::Ops::LOADI_OPS.include?(op)
+    end
+
+    registers = literal.value_regs
+  else
+    registers = (1..insn.argc.to_i).map { |position| (insn.reg + position) }
+  end
+  return nil if registers.empty?
+
+  registers.map do |register|
+    definitions = BytecodeIR.reaching_definitions(irep, use, register, origin_transfers: true, through_handlers: true, shared: true)
+    return nil unless definitions && !definitions.empty?
+
+    names = definitions.map do |definition|
+      source = !definition.entry? && program.source_at(definition.index)
+      return nil unless source && source.op == :LOADSYM && source.sym
+
+      source.sym
+    end
+    names.to_set
+  end
+end
+
+# Alternate entries can store another constructor's result into the same constant.
+def struct_new_owner(irep, idx, insn, namespace)
+  program = BytecodeIR.for(irep)
+  assignment = program.source_at(idx + 1)
+  return nil unless assignment&.op == :SETCONST && assignment.reg_operand == insn.reg &&
+                    program.linear_corridor?(idx, idx + 1, include_handlers: true)
+
+  name = assignment.const_name
+  name && (namespace ? "#{namespace}::#{name}" : name)
+end
+
+def register_struct_member_defs(registry, owner, sets)
+  sets&.each do |names|
+    names.each do |member|
+      [member, "#{member}="].each do |name|
+        registry[name] << MethodDef.new(name: name, owner: owner, irep: nil, visibility: :public)
+      end
+    end
+  end
+end
+
+# STRUCT_MEMBERS_ANALYSIS: member i is storage index i, so a union of different
+# Symbols cannot define one layout. Anonymous owners retain dynamic indexing.
+def detect_struct_new_members(irep, idx, insn, namespace)
+  return nil unless struct_new_receiver?(irep, idx, insn)
+
+  owner = struct_new_owner(irep, idx, insn, namespace)
+  return nil unless owner
+
+  sets = struct_new_member_sets(irep, idx, insn)
+  return nil unless sets && sets.all? { |names| names.size == 1 }
+
+  [owner, sets.map(&:first)]
+end
+
+# ---------------------------------------------------------------------------
+# Step 6: whole-program class/method registry, walking the tree from the
+# root: CLASS/EXEC pairs define classes and recurse into their class-body
+# irep; TDEF (anywhere) defines one method, owned by the innermost class
+# being walked (or "Object" for a top-level TDEF).
+# ---------------------------------------------------------------------------
+def build_registry(ireps, root_label)
+  registry = Hash.new { |h, k| h[k] = [] }
+  # SUPER_SUPPORT: class name -> declared superclass name, :none (no explicit
+  # superclass; OP_SUPER searches from one level above the current class either
+  # way), or absent (unrecognized superclass expression, never guessed). Only
+  # CLASS populates it; modules have no superclass.
+  superclass_of = {}
+  pending_superclasses = []
+  # ANCESTOR_MIXINS_SUPPORT: class name -> modules its own body `include`s, in
+  # source order, plus the parallel `prepend` table. `super` soundness needs to
+  # know that no included module sits between the caller and its superclass
+  # (mruby's method search would hit the module's method first). Only the
+  # self-implicit `include M` / `prepend M` form (SSEND R(self) :include n=1
+  # after a GETCONST/GETMCNST) is recognized; anything else lands in
+  # `unknown_mixins` so `super` in that owner declines. Prepended modules sit
+  # above the class, so they never intervene and are not consulted by that check.
+  included_modules = {}
+  prepended_modules = {}
+  unknown_mixins = Set.new
+  module_names = Set.new
+  mixin_sites = []
+  # Constant value class hints ('Array'/'Hash'/'Range') from assignments whose
+  # every SETCONST site writes a proven literal_container_class value.
+  # Disagreeing or unknown sites poison the name; constructor-based hints are
+  # added later, after closed-world constant proofs become available.
+  container_constants = {}
+  # Value-constant type inference consumes these after class names and closed
+  # world facts are available. Keep the write site and lexical namespace here.
+  constant_assignment_sites = []
+  # STRUCT_MEMBERS_ANALYSIS result: qualified Struct owner -> member names in
+  # storage-index order. See detect_struct_new_members.
+  struct_member_lists = {}
+  # CLOSED_WORLD: every CLASS opcode's superclass ref (nil when unresolved) and
+  # whether its outer was implicit, plus every irep this walk visited.
+  class_decls = Hash.new { |h, k| h[k] = [] }
+  module_body_ivar_labels = Hash.new { |h, k| h[k] = [] }
+  walked = Set.new
+  # CORE_ALIASES: every `alias new old` of a class body, in walk order.
+  alias_sites = []
+  # LOOP_INSTALLERS: [irep label, index, namespace, visibility] of each container loop
+  # in a body whose block sends attr_*; settled once the walk has seen every definition.
+  loop_sites = []
+  # ALIAS_SITES: how many alias copies the walk made (names their ireps), and the def labels a
+  # branch can skip, computed on the first alias that asks.
+  alias_seq = 0
+  conditional_labels = nil
+  conditional = -> { conditional_labels ||= CoreDefs.conditional_def_labels(ireps) }
+  register_alias = lambda do |label, irep, idx, namespace|
+    next if namespace.nil? || namespace.start_with?('<') || CoreDefs.core_source?(irep.file)
+
+    found = AliasSites.site(irep, idx)
+    next unless found
+
+    prior = registry.fetch(found.old_name, []).select { |d| d.owner == namespace }
+    registry[found.new_name] << AliasSites.definition(found, namespace, prior, ireps, label, idx, conditional, alias_seq)
+    alias_seq += 1
+  end
+
+  walk = lambda do |label, namespace|
+    walked << label
+    irep = ireps.fetch(label)
+    # Body EXEC by opener index (BytecodeIR.class_bodies). Walked at the opener:
+    # the body EXEC is the next instruction, so nothing else in this irep runs
+    # between them. A nil name (unrecognized singleton receiver) is not walked.
+    bodies = BytecodeIR.class_bodies(irep, :CLASS, :MODULE, :SCLASS)
+    enter_body = lambda do |idx, body_name, ivar_owner|
+      child_label = bodies[idx]
+      next unless child_label && body_name
+
+      module_body_ivar_labels[ivar_owner] << child_label if ivar_owner
+      walk.call(child_label, body_name)
+    end
+    # `private`/`protected`/`public` tracking, scoped to this body. A bare call
+    # (n=0) switches the mode for later defs; a call with Symbol arguments marks
+    # already-defined methods without changing the mode. Getting visibility wrong
+    # would let the generated registration expose a private method.
+    default_visibility = :public
+    # A bare `module_function` (this mruby's MODFUNC scope bit, src/class.c): every later def in the body also gets a
+    # public singleton copy, and no later bare private/public clears it.
+    module_function_scope = false
+
+    # Resolve a singleton receiver's name by walking back from `before_idx` to
+    # `reg`'s last write. Only LOADSELF (the innermost namespace) and a GETCONST are
+    # trusted; anything else is unrecognized (a safe miss). Shared by the SCLASS
+    # body case and the unfused DEF case below.
+    resolve_singleton_receiver = lambda do |reg, before_idx|
+      prev = receiver_source(irep, before_idx, reg)
+      case prev&.op
+      when :LOADSELF
+        namespace || 'Object'
+      when :GETCONST
+        const_name = prev.const_name
+        next const_name unless namespace
+
+        # The constant is read by lexical lookup: `def Enumerator.produce` inside `class Enumerator` names ::Enumerator,
+        # not Enumerator::Enumerator. The innermost enclosing scope that already declares the name wins; a name no scope
+        # has declared yet keeps the innermost spelling.
+        parts = namespace.split('::')
+        scoped = parts.size.downto(0).map { |n| [*parts.first(n), const_name].join('::') }
+        scoped.find { |candidate| class_decls.key?(candidate) || module_names.include?(candidate) } || "#{namespace}::#{const_name}"
+      end
+    end
+
+    # Shared by TDEF and the unfused TCLASS+METHOD+DEF case: both need the builtin
+    # always-private names (see the TDEF case).
+    resolve_def_visibility = lambda do |method_name|
+      %w[initialize initialize_copy
+         respond_to_missing?].include?(method_name) ? :private : default_visibility
+    end
+
+    # A plain instance `def` (TDEF, or the unfused TCLASS+METHOD+DEF), with its module_function copy.
+    register_instance_def = lambda do |method_name, child_label|
+      owner = namespace || 'Object' # a top-level `def` lands on Object.
+      registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
+                                              visibility: resolve_def_visibility.call(method_name))
+      next unless module_function_scope
+
+      registry[method_name] << MethodDef.new(name: method_name, owner: "#{owner}.singleton", irep: nil,
+                                              visibility: :public, kind: :module_function, copy_irep: child_label,
+                                              copy_owner: owner, core: CoreDefs.core_source?(irep.file))
+    end
+
+    irep.each_with_op(:CLASS, :MODULE, :SCLASS, :SETCONST, :ALIAS, :TDEF, :SDEF, :DEF,
+                      *BytecodeIR::Ops::SEND) do |insn, idx|
+      case insn.op
+      when :CLASS, :MODULE
+        # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
+        reg = insn.reg
+        name = insn.sym
+        # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
+        # `class Outer::Name` / `module Outer::Name` (a compact definition)
+        # is named by its resolved outer constant, not by the lexical namespace.
+        outer_qualified = compact_outer_name(irep, idx, reg, namespace, module_names)
+        opener_name = if outer_qualified
+                        "#{outer_qualified}::#{name}"
+                      else
+                        namespace ? "#{namespace}::#{name}" : name
+                      end
+        module_names << opener_name if insn.op == :MODULE
+        opener_ivar_owner = insn.op == :MODULE ? "#{opener_name}.singleton" : nil
+        # SUPER_SUPPORT: OP_CLASS is `R[a] = newclass(R[a], Syms[b], R[a+1])`
+        # (mruby/ops.h, vm.c), and the superclass expression is evaluated right before
+        # it, so resolve_superclass_ref walks back from this CLASS.
+        if insn.op == :CLASS
+          superclass_reg = reg + 1
+          resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
+          outer_nil = resolve_superclass_ref(irep, idx, reg, nil) == :none
+          decl = { super: resolved, outer_nil: outer_nil, outer_qualified: !outer_qualified.nil? }
+          class_decls[opener_name] << decl
+          # A bare constant in a namespace names the innermost enclosing one that defines it, or the top level (Ruby's
+          # lexical lookup). Which one is known only once the walk has seen every definition, so it is settled after it.
+          raw = namespace && resolve_superclass_ref(irep, idx, superclass_reg, nil)
+          if raw.is_a?(String) && !raw.include?('::')
+            pending_superclasses << [opener_name, raw, namespace, decl]
+          elsif resolved
+            superclass_of[opener_name] = resolved
+          end
+        end
+        enter_body.call(idx, opener_name, opener_ivar_owner)
+      when :SCLASS
+        # "SCLASS R1": R[a] = R[a].singleton_class. A `class << self` / `class <<
+        # SomeConst` body holds ordinary TDEFs, so it is walked like a CLASS/MODULE body.
+        # Without this, defs inside it (e.g. RGSS::Bitmap.extensions) were unregistered.
+        # The receiver is resolved by resolve_singleton_receiver (LOADSELF or GETCONST
+        # only; anything else is a safe miss).
+        reg = insn.reg
+        recv = resolve_singleton_receiver.call(reg, idx)
+        # "X.singleton" is a pseudo-owner, never a real constant path, so ONLY_OWNERS
+        # can never select it. nil (unrecognized receiver) leaves the body unwalked.
+        enter_body.call(idx, recv ? "#{recv}.singleton" : nil, nil)
+      when :SETCONST
+        # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
+        # `namespace` is this body's lexical nesting. Only the literal (optionally
+        # frozen) shape is recognized; anything else is a safe miss (nil).
+        const_name = insn.const_name
+        src_reg = insn.regs.first
+        qualified = namespace ? "#{namespace}::#{const_name}" : const_name
+        constant_assignment_sites << { name: qualified, irep: irep.label, idx: idx, reg: src_reg, owner: namespace }
+        klass = literal_container_class(irep, idx, src_reg)
+        # Two disagreeing (or unresolvable) sites poison the name to nil; never
+        # guess which one wins.
+        if container_constants.key?(qualified)
+          container_constants[qualified] = nil if container_constants[qualified] != klass
+        else
+          container_constants[qualified] = klass
+        end
+      when :ALIAS
+        old_name = insn.first_of(:name)&.value
+        alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
+        register_alias.call(label, irep, idx, namespace)
+      when :TDEF
+        # "TDEF R1 :speak I[1]"
+        # #initialize, #initialize_copy and #respond_to_missing? are always private,
+        # whatever mode is in effect: src/class.c's define_method path sets
+        # MRB_METHOD_PRIVATE_FL for them unconditionally. default_visibility cannot
+        # see that rule, and reporting them public would let the generated registration expose them.
+        register_instance_def.call(insn.sym, irep.reps[insn.block_index])
+      when :SDEF
+        # "SDEF R1 :clamp I[5]": `def self.foo` / `def SomeConst.foo`. codegen_sdef
+        # (mruby-compiler codegen.c) fuses SCLASS+METHOD+DEF into SDEF whenever the
+        # child irep index fits a byte, installing Irep[c] on R[a]'s singleton class.
+        #
+        # It must be registered (under the "Owner.singleton" pseudo-owner) or a
+        # same-named instance method elsewhere looks MONO and call sites devirtualize
+        # into the wrong body (Game.clamp vs RPG2k::Scene::MapViewer#clamp). Adding a
+        # def can only turn an unsound MONO into POLY, never lose a sound one.
+        #
+        # I[c] is a real child irep, so it is recorded as `irep:`;
+        # with irep: nil the method could never become a compile target. That is safe
+        # for every `d.irep` reader: natively_exposed? only compares against instance
+        # owners from ivar_layout, never ".singleton" ones.
+        #
+        # The receiver is an arbitrary expression (codegen_sdef runs `codegen(s, recv,
+        # VAL)`, and vm.c's OP_SDEF uses mrb_singleton_class(regs[a])), so it is
+        # resolved with resolve_singleton_receiver rather than assuming `self`; that
+        # scan already skips interposed EXT lines. An unrecognized receiver is not
+        # registered rather than attributed to `namespace`.
+        sdef_name = insn.sym
+        sdef_child_label = irep.reps[insn.block_index]
+        recv = resolve_singleton_receiver.call(insn.reg, idx)
+        if recv
+          registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
+                                                irep: sdef_child_label, visibility: :public)
+        end
+      when :DEF
+        # "DEF R1 :toned? (R2)": codegen_def/codegen_sdef fuse into TDEF/SDEF only
+        # when the child irep index fits a byte; past 255 children (RPG2k::Scene::Map)
+        # they emit the unfused sequence instead:
+        #   TCLASS  R1            LOADSELF R1 / SCLASS R1   (for `def self.x`)
+        #   EXT2
+        #   METHOD  R2  I[380]
+        #   EXT2
+        #   DEF     R1  :toned?  (R2)
+        # previous_real_index steps over the interposed EXT lines.
+        reg = insn.reg
+        method_idx = irep.previous_real_index(idx - 1)
+        method_insn = method_idx >= 0 ? BytecodeIR.for(irep).source_at(method_idx) : nil
+        next unless method_insn && method_insn.op == :METHOD
+
+        method_reg = method_insn.reg
+        # Registers must line up as codegen emits them (opener at R<n>, METHOD at
+        # R<n+1>, DEF at R<n> referencing (R<n+1>)); adjacency alone is not trusted.
+        next unless insn.paren_reg == method_reg
+
+        opener_idx = irep.previous_real_index(method_idx - 1)
+        opener_insn = opener_idx >= 0 ? BytecodeIR.for(irep).source_at(opener_idx) : nil
+        next unless opener_insn && BytecodeIR::Ops::TARGET_CLASS.include?(opener_insn.op)
+
+        opener_reg = opener_insn.reg
+        next unless opener_reg == reg
+
+        child_label = irep.reps[method_insn.block_index]
+        def_name = insn.sym
+
+        if opener_insn.op == :TCLASS
+          # Unfused `def foo`: registered exactly like a TDEF, with a real irep.
+          register_instance_def.call(def_name, child_label)
+        else
+          # Unfused `def self.foo`: same "X.singleton" pseudo-owner and real irep as
+          # SDEF, receiver resolved by resolve_singleton_receiver (unrecognized: not
+          # registered). Visibility is always :public: singleton-method privacy is not
+          # modelled for either shape.
+          recv = resolve_singleton_receiver.call(opener_reg, opener_idx)
+          if recv
+            owner = "#{recv}.singleton"
+            registry[def_name] << MethodDef.new(name: def_name, owner: owner, irep: child_label,
+                                                 visibility: :public)
+          end
+        end
+      when :SEND0, :SEND, :SSEND0, :SSEND
+        # Same charset as compile_send's name extraction; keep the two in sync.
+        name = insn.sym
+        if name == 'new'
+          # STRUCT_MEMBERS_ANALYSIS for the block-less `Const = Struct.new(...)` shape.
+          # Additive only: returns nil for anything but a SETCONST-named Struct.new.
+          found = detect_struct_new_members(irep, idx, insn, namespace)
+          struct_member_lists[found[0]] = found[1] if found
+          if struct_new_receiver?(irep, idx, insn)
+            owner = struct_new_owner(irep, idx, insn, namespace) || "<struct:#{label}:#{idx}>"
+            register_struct_member_defs(registry, owner, struct_new_member_sets(irep, idx, insn))
+          end
+        end
+        register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == :SSEND
+        if name == 'alias_method' && insn.op == :SSEND && CoreDefs.core_source?(irep.file) && (found = AliasSites.site(irep, idx))
+          alias_sites << { owner: namespace || 'Object', new: found.new_name, old: found.old_name, irep: label }
+        end
+        if %w[include prepend].include?(name)
+          # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
+          # body (walk only recurses into CLASS/MODULE/SCLASS bodies, so `namespace` is
+          # the owner). mrbc emits `GETCONST R(a+1) M` right before `SSEND R(a) :include
+          # n=1`. An explicit receiver, several arguments or a non-constant module flags
+          # the owner in `unknown_mixins` so `super` there declines.
+          mixin_owner = namespace || 'Object'
+          self_reg = insn.reg
+          mixin_n = insn.argc
+          recognized = SSEND_NO_BLOCK_OPS.include?(insn.op) && mixin_n == 1 && self_reg
+          ref = recognized ? resolve_mixin_ref(irep, idx, self_reg + 1) : nil
+          if ref
+            mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
+          else
+            unknown_mixins << mixin_owner
+          end
+          next
+        end
+        next unless %w[private protected public attr_reader attr_writer attr_accessor
+                       module_function].include?(name)
+
+        n = insn.argc.to_i
+        # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
+        packed = insn.positional_splat?
+        if packed
+          arr = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
+          n = arr && arr.op == :ARRAY ? arr.uint_operand.to_i : -1
+          raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
+        end
+        # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
+        # into consecutive registers right before the send; walk back to collect them.
+        collect_loadsym_names = lambda do
+          irep.preceding_run(:LOADSYM, idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
+        end
+
+        if %w[private protected public].include?(name)
+          if n.zero?
+            default_visibility = name.to_sym
+          else
+            # `private :a, :b, ...` -- retroactively marks already-defined
+            # methods, without changing the mode for whatever comes after.
+            # `public def x` / `private def x` pass the Symbol the (T)DEF just before
+            # the send wrote into the argument register, not a LOADSYM.
+            prev = n == 1 && !packed && idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
+            names = if prev && %i[TDEF DEF].include?(prev.op) && prev.reg == insn.reg + 1
+                      [prev.sym]
+                    else
+                      collect_loadsym_names.call
+                    end
+            names.each do |mname|
+              def_ = registry[mname]&.find { |d| d.owner == namespace }
+              def_.visibility = name.to_sym if def_
+            end
+          end
+        elsif name == 'module_function' && n.zero?
+          module_function_scope = true
+          default_visibility = :private
+        elsif name == 'module_function'
+          # `module_function :a, :b` installs a public copy of each instance method on
+          # the module's singleton class. In mruby (src/class.c
+          # mrb_mod_module_function), unlike CRuby, the instance method stays as it was
+          # (the make-private call is commented out). Preserve the copy's source irep
+          # separately: it is not a second method body, and must not replace the
+          # instance method's owner when codegen builds its `_impl`.
+          collect_loadsym_names.call.each do |mname|
+            source_owner = namespace || 'Object'
+            source = registry[mname]&.reverse&.find { |d| d.owner == source_owner && d.irep }
+            registry[mname] << MethodDef.new(name: mname, owner: "#{namespace || 'Object'}.singleton",
+                                              irep: nil, visibility: :public, kind: :module_function,
+                                              copy_irep: source&.irep, copy_owner: source&.owner,
+                                              core: CoreDefs.core_source?(irep.file))
+          end
+        else
+          # attr_reader/attr_writer/attr_accessor are native, so their accessors get no
+          # TDEF. Each name is registered as a synthetic MethodDef (irep: nil) so a
+          # same-named bytecode def elsewhere is not MONO: Game::Battle#critical?'s
+          # `b.crit_chance` (b an Actor or an Enemy) otherwise devirtualized into
+          # Game::Actor#crit_chance and raised NoMethodError for enemies. This can only
+          # turn an unsound MONO into POLY.
+          getter_flag = %w[attr_reader attr_accessor].include?(name)
+          setter_flag = %w[attr_writer attr_accessor].include?(name)
+          collect_loadsym_names.call.each do |mname|
+            owner = namespace || 'Object'
+            # kind: :ivar_accessor (see MethodDef): src/class.c's attr_reader/attr_writer
+            # are exactly mrb_iv_get/mrb_iv_set on the bare `@name`; consumed by
+            # IVAR_ACCESSOR_DEVIRT.
+            if getter_flag
+              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public,
+                                                kind: :ivar_accessor, core: CoreDefs.core_source?(irep.file))
+            end
+            if setter_flag
+              registry["#{mname}="] << MethodDef.new(name: "#{mname}=", owner: owner, irep: nil,
+                                                       visibility: :public, kind: :ivar_accessor,
+                                                       core: CoreDefs.core_source?(irep.file))
+            end
+          end
+        end
+      when :SSENDB
+        # DEFINE_METHOD_SITES. Whether the program may trust the site is
+        # decided after the closed world exists (demote_define_method_defs); until then
+        # it is only a candidate that symbol_installed_names still counts as an installer.
+        site = DefineMethodSites.site(irep, idx, ireps)
+        if site && namespace && !namespace.include?('.singleton') && !namespace.start_with?('<') &&
+           default_visibility == :public && !CoreDefs.core_source?(irep.file)
+          registry[site.name] << MethodDef.new(name: site.name, owner: namespace, irep: site.child,
+                                                visibility: :public, installer: :define_method)
+        end
+      when :SENDB
+        loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)
+        # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.
+        found = detect_struct_new_members(irep, idx, insn, namespace)
+        struct_member_lists[found[0]] = found[1] if found
+
+        # `Const = Struct.new(:a, ...) do ... end`: no CLASS opcode opens the block,
+        # and the member accessors are native (struct.c), so both the block's defs and
+        # the member names are invisible to the plain walk. Without registering them,
+        # Game::Battle::Combatant#state? and #actor looked MONO and devirtualized into
+        # Game::Actor/RPG2k::Scene::EquipMenu bodies that read ivars a Struct does not
+        # have (Struct members are positional, not iv_tbl).
+        name = insn.sym
+        next unless name == 'new'
+
+        # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
+        # miss.
+        next unless struct_new_receiver?(irep, idx, insn)
+
+        # The block operand is the BLOCK right before the SENDB (codegen emits it
+        # there).
+        block_insn = BytecodeIR.for(irep).source_at(idx - 1)
+        next unless block_insn && block_insn.op == :BLOCK
+
+        block_idx = block_insn.block_index
+        next unless block_idx
+
+        block_label = irep.reps[block_idx.to_i]
+        next unless block_label
+
+        owner = struct_new_owner(irep, idx, insn, namespace) || "<struct:#{label}:#{idx}>"
+
+        register_struct_member_defs(registry, owner, struct_new_member_sets(irep, idx, insn))
+
+        # Walk the block body like a class body, so its defs get real ireps.
+        walk.call(block_label, owner)
+      end
+    end
+  end
+
+  walk.call(root_label, nil)
+  unless loop_sites.empty?
+    recognized, refused = LoopInstallers.install(registry, ireps, loop_sites)
+    warn "== loop installers (#{recognized} of #{loop_sites.size} registered as definitions) =="
+    refused.sort.each { |why, count| warn "  left dynamic: #{why}#{count > 1 ? " (x#{count})" : ''}" }
+  end
+  declared_modules = module_names.to_set
+  declared_types = declared_modules | class_decls.keys.to_set
+  mixin_sites.each do |site|
+    ref = site[:ref]
+    candidates = if ref[:absolute]
+                   [ref[:name]]
+                 else
+                   scopes = []
+                   scope = site[:namespace]
+                   while scope
+                     scopes << scope
+                     scope = scope.include?('::') ? scope.rpartition('::').first : nil
+                   end
+                   segments = ref[:name].split('::')
+                   tail = segments.drop(1).join('::')
+                   suffix = tail.empty? ? '' : "::#{tail}"
+                   scopes.map { |prefix| "#{prefix}::#{segments.first}#{suffix}" } + [ref[:name]]
+                 end
+    resolved = candidates.find { |candidate| declared_types.include?(candidate) }
+    if resolved && declared_modules.include?(resolved)
+      table = site[:kind] == 'include' ? included_modules : prepended_modules
+      (table[site[:owner]] ||= []) << resolved
+    elsif resolved.nil? && site[:kind] == 'include' && CoreMixins.core_mixin?(ref[:name])
+      # CORE_MIXINS: no closed-world module of that name is in scope,
+      # so the constant is mruby's own.
+      (included_modules[site[:owner]] ||= []) << ref[:name]
+    else
+      unknown_mixins << site[:owner]
+    end
+  end
+  # ALIAS_SITES: a prepended (or unresolved) module answers `old` before the owner's own definition, so the
+  # copy taken from that definition may not be what the alias copied; the alias keeps no body.
+  registry.each_value do |defs|
+    defs.each do |d|
+      next unless d.installer == :alias && d.irep
+      next unless prepended_modules.key?(d.owner) || unknown_mixins.include?(d.owner)
+
+      suffix = d.irep[/~al\d+\z/]
+      ireps.delete_if { |l, _| l.end_with?(suffix) }
+      d.irep = nil
+    end
+  end
+  settle_superclass_names(pending_superclasses, superclass_of, class_decls, module_names)
+  [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules,
+   alias_sites]
+end
+
+# The superclass of a class whose superclass is a bare constant written inside a namespace: the first of the
+# namespace's enclosing names (innermost first) that the program defines as a class or module, else the top-level name.
+# A name nothing defines keeps the top-level reading, which is what Ruby resolves it to when no nested definition exists.
+def settle_superclass_names(pending, superclass_of, class_decls, module_names)
+  defined = module_names | class_decls.keys.to_set | superclass_of.keys.to_set
+  pending.each do |opener, name, namespace, decl|
+    parts = namespace.split('::')
+    candidates = (parts.size.downto(1).map { |n| "#{parts.first(n).join('::')}::#{name}" } + [name])
+    settled = candidates.find { |c| defined.include?(c) } || name
+    superclass_of[opener] = settled
+    decl[:super] = settled
+  end
+end
+
+# SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back
+# from the CLASS instruction. Only a bare GETCONST (resolved against the real
+# lexical `namespace`, one level, like resolve_singleton_receiver), GETMCNST,
+# or a MOVE of one is recognized; anything else returns nil (absent from
+# superclass_of, never a wrong guess).
+def resolve_superclass_ref(irep, before_idx, reg, namespace)
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :nil
+    :none # no explicit superclass written -- real Ruby default is Object.
+  when :const
+    return namespace ? "#{namespace}::#{ref.name}" : ref.name if ref.segments.empty?
+
+    [ref.name, *ref.segments].join('::')
+  end
+end
+
+# The qualified name of a compact definition's outer constant, or nil.
+# `class Outer::Name` names its outer through a GETCONST (plus GETMCNST segments)
+# that is not the lexical self. A first segment at top level is taken as written.
+# Inside a namespace it resolves only to a module already walked in this file
+# (`Namespace::First` in +known_modules+); anything else -- a constant from another
+# file, a later module, an unrecognised register write -- is nil, so the caller
+# keeps the closed-world refusal rather than guessing a name.
+def compact_outer_name(irep, before_idx, reg, namespace, known_modules)
+  ref = irep.constant_path(before_idx - 1, reg)
+  return nil unless ref&.root == :const && ref.name && !ref.name.start_with?('::')
+
+  first =
+    if namespace.nil?
+      ref.name
+    else
+      candidate = "#{namespace}::#{ref.name}"
+      return nil unless known_modules.include?(candidate)
+
+      candidate
+    end
+  [first, *ref.segments].join('::')
+end
+
+# Resolve the constant operand of a statically shaped class-body include. Keep
+# whether the source used namespace qualification: an unqualified constant uses
+# Ruby's lexical nesting lookup, which is disambiguated after all module names
+# have been collected by build_registry.
+def resolve_mixin_ref(irep, before_idx, reg)
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :const
+    return nil unless ref.name
+
+    absolute = ref.name.start_with?('::')
+    name = ref.name.delete_prefix('::')
+    { name: ref.segments.empty? ? name : [name, *ref.segments].join('::'), qualified: ref.qualified,
+      absolute: absolute }
+  when :object
+    return nil if ref.segments.empty?
+
+    { name: ref.segments.join('::'), qualified: true, absolute: true }
+  end
+end

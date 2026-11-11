@@ -421,6 +421,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
         attrs.push_back(a);
       }
     }
+    if (!is_onnx_operator(n.op)) throw Error("onnx import: " + n.op + " is not an ONNX operator");
     int out = add_node_named(n.op, ins, attrs, n.out[0], n.name);
     local[n.out[0]] = out;
   }

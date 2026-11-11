@@ -1,0 +1,5 @@
+(ir-module "borrow-test" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4) 
+(decl $"x" val) (let %0 int (load int (const (ptr int) 1))) (return %0)
+)

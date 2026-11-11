@@ -1,0 +1,12 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "a" int 4 4)
+  (store int $"a" %0)
+  (block
+    (let %1 int (load int $"a"))
+    (let %2 int (wadd int (const int 0x10) (const int 0x20)))
+    (let %3 int (and int %1 (const int 0xff)))
+    (let %4 int (wadd int %3 %2))
+    (return %4)))

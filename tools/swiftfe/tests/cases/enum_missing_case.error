@@ -1,0 +1,1 @@
+enum_missing_case.swift:6:3: error: switch must be exhaustive

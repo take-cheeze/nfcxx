@@ -1,0 +1,1 @@
+(function "f" (ret double) (params) (return (cdiv double (const double 1.0) (const double 2.0))))

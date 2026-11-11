@@ -1,0 +1,3 @@
+(function "f" (ret int) (params)
+  (bounds (const double 1.0) 4)
+  (return (const int 0)))

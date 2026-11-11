@@ -54,6 +54,29 @@ void __nfcxx_i128_shl(void *d, const void *a, long n) { i128_check_count(n); i12
 void __nfcxx_i128_shr_s(void *d, const void *a, long n) { i128_check_count(n); i128_wr(d, (u128)((s128)i128_rd(a) >> n)); }
 void __nfcxx_i128_shr_u(void *d, const void *a, long n) { i128_check_count(n); i128_wr(d, i128_rd(a) >> n); }
 
+/* GCC's type-generic bit built-ins on a 128-bit value (__builtin_clzg and friends): clz and ctz give 128 for 0 (the
+   caller takes the fallback there), popcount and parity count the bits of both halves */
+int __nfcxx_i128_clz(const void *a)
+{
+  u128 v = i128_rd(a);
+  unsigned long hi = (unsigned long)(v >> 64), lo = (unsigned long)v;
+  if (hi) return __builtin_clzl(hi);
+  if (lo) return 64 + __builtin_clzl(lo);
+  return 128;
+}
+int __nfcxx_i128_ctz(const void *a)
+{
+  u128 v = i128_rd(a);
+  unsigned long hi = (unsigned long)(v >> 64), lo = (unsigned long)v;
+  if (lo) return __builtin_ctzl(lo);
+  if (hi) return 64 + __builtin_ctzl(hi);
+  return 128;
+}
+int __nfcxx_i128_popcount(const void *a)
+{
+  u128 v = i128_rd(a);
+  return __builtin_popcountl((unsigned long)(v >> 64)) + __builtin_popcountl((unsigned long)v);
+}
 /* the count of a shift given as a 128-bit value: -1 when it does not fit a long (the count check then aborts) */
 long __nfcxx_i128_count(const void *a)
 {
@@ -99,6 +122,72 @@ void __nfcxx_i128_bfset(unsigned char *base, unsigned long off, int width, const
     else base[b >> 3] &= (unsigned char)~m;
   }
 }
+
+#endif /* defined(__SIZEOF_INT128__) */
+
+#if defined(__SIZEOF_INT128__)
+/* Conversions between the 128-bit integers and the floating types, and copies: on every host with a 128-bit integer
+   type (x86-64, arm64 Linux, Apple arm64, where long double is a double). A long double is its host's own: the x87
+   extended value in the low 10 bytes of a 16-byte object on x86-64, else the whole long double. */
+#include <math.h>
+#include <string.h>
+typedef long double ld;
+#if defined(__x86_64__)
+#define NFCXX_LD_BYTES 10
+#else
+#define NFCXX_LD_BYTES sizeof(ld)
+#endif
+
+/* conversions to floating types: the libgcc ones (__floattidf, __floatuntidf, __floattixf, __floatuntixf, ...) */
+float __nfcxx_i128_to_f32_s(const void *a) { return (float)(s128)i128_rd(a); }
+float __nfcxx_i128_to_f32_u(const void *a) { return (float)i128_rd(a); }
+double __nfcxx_i128_to_f64_s(const void *a) { return (double)(s128)i128_rd(a); }
+double __nfcxx_i128_to_f64_u(const void *a) { return (double)i128_rd(a); }
+void __nfcxx_i128_to_ld_s(void *d, const void *a)
+{
+  ld v = (ld)(s128)i128_rd(a);
+  memset(d, 0, 16);
+  memcpy(d, &v, NFCXX_LD_BYTES);
+}
+void __nfcxx_i128_to_ld_u(void *d, const void *a)
+{
+  ld v = (ld)i128_rd(a);
+  memset(d, 0, 16);
+  memcpy(d, &v, NFCXX_LD_BYTES);
+}
+
+/* conversions from floating types, truncating toward zero; a NaN or a value outside the type aborts. The bounds are
+   the powers of two 2^127 (signed) and 2^128 (unsigned), exact in long double. */
+static void i128_from_ld(void *d, ld x, int sgn)
+{
+  ld t = truncl(x);
+  ld lim = ldexpl(1.0L, sgn ? 127 : 128);
+  if (sgn) {
+    if (!(t >= -lim && t < lim)) abort();
+    i128_wr(d, (u128)(s128)t);
+  } else {
+    if (!(t >= 0 && t < lim)) abort();
+    i128_wr(d, (u128)t);
+  }
+}
+void __nfcxx_i128_from_f32_s(void *d, float x) { i128_from_ld(d, (ld)x, 1); }
+void __nfcxx_i128_from_f32_u(void *d, float x) { i128_from_ld(d, (ld)x, 0); }
+void __nfcxx_i128_from_f64_s(void *d, double x) { i128_from_ld(d, (ld)x, 1); }
+void __nfcxx_i128_from_f64_u(void *d, double x) { i128_from_ld(d, (ld)x, 0); }
+void __nfcxx_i128_from_ld_s(void *d, const void *a)
+{
+  ld x = 0;
+  memcpy(&x, a, NFCXX_LD_BYTES);
+  i128_from_ld(d, x, 1);
+}
+void __nfcxx_i128_from_ld_u(void *d, const void *a)
+{
+  ld x = 0;
+  memcpy(&x, a, NFCXX_LD_BYTES);
+  i128_from_ld(d, x, 0);
+}
+
+void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 #endif /* defined(__SIZEOF_INT128__) */
 
@@ -196,55 +285,6 @@ void __nfcxx_ld_vaarg(ld *d, va_list ap) { PUT(d, va_arg(ap, ld)); }
 int __nfcxx_ld_fpclassify(const ld *a) { return fpclassify(*a); }
 int __nfcxx_ld_isnormal(const ld *a) { return isnormal(*a); }
 int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b); }
-
-/* conversions to floating types: the libgcc ones (__floattidf, __floatuntidf, __floattixf, __floatuntixf, ...) */
-float __nfcxx_i128_to_f32_s(const void *a) { return (float)(s128)i128_rd(a); }
-float __nfcxx_i128_to_f32_u(const void *a) { return (float)i128_rd(a); }
-double __nfcxx_i128_to_f64_s(const void *a) { return (double)(s128)i128_rd(a); }
-double __nfcxx_i128_to_f64_u(const void *a) { return (double)i128_rd(a); }
-void __nfcxx_i128_to_ld_s(void *d, const void *a)
-{
-  ld v = (ld)(s128)i128_rd(a);
-  memset(d, 0, 16);
-  memcpy(d, &v, 10);
-}
-void __nfcxx_i128_to_ld_u(void *d, const void *a)
-{
-  ld v = (ld)i128_rd(a);
-  memset(d, 0, 16);
-  memcpy(d, &v, 10);
-}
-
-/* conversions from floating types, truncating toward zero; a NaN or a value outside the type aborts. The bounds are
-   the powers of two 2^127 (signed) and 2^128 (unsigned), exact in long double. */
-static void i128_from_ld(void *d, ld x, int sgn)
-{
-  ld t = truncl(x);
-  ld lim = ldexpl(1.0L, sgn ? 127 : 128);
-  if (sgn) {
-    if (!(t >= -lim && t < lim)) abort();
-    i128_wr(d, (u128)(s128)t);
-  } else {
-    if (!(t >= 0 && t < lim)) abort();
-    i128_wr(d, (u128)t);
-  }
-}
-void __nfcxx_i128_from_f32_s(void *d, float x) { i128_from_ld(d, (ld)x, 1); }
-void __nfcxx_i128_from_f32_u(void *d, float x) { i128_from_ld(d, (ld)x, 0); }
-void __nfcxx_i128_from_f64_s(void *d, double x) { i128_from_ld(d, (ld)x, 1); }
-void __nfcxx_i128_from_f64_u(void *d, double x) { i128_from_ld(d, (ld)x, 0); }
-void __nfcxx_i128_from_ld_s(void *d, const void *a)
-{
-  ld x = 0;
-  memcpy(&x, a, 10);
-  i128_from_ld(d, x, 1);
-}
-void __nfcxx_i128_from_ld_u(void *d, const void *a)
-{
-  ld x = 0;
-  memcpy(&x, a, 10);
-  i128_from_ld(d, x, 0);
-}
 
 /* ---- _Float128 (docs/notes/pathb-float128.md) ----
 
@@ -375,7 +415,6 @@ void __nfcxx_i128_from_f128_u(void *d, const void *a)
 void __nfcxx_i128_to_f128_s(void *d, const void *a) { f128_wr(d, (f128)(s128)i128_rd(a)); }
 void __nfcxx_i128_to_f128_u(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
 /* a change of signedness: the same 128 bits */
-void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 /* __builtin_fpclassify, isnormal, isnan, ... on an object (the IR's classification built-ins) */
 int __nfcxx_f128_fpclassify(const void *a)
@@ -418,6 +457,8 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
 {
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
+
+#endif /* defined(__x86_64__): the _Float128 helpers above */
 
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
 
@@ -537,8 +578,8 @@ int __nfcxx_f16_le(unsigned a, unsigned b) { return f16_to_float(a) <= f16_to_fl
 int __nfcxx_f16_gt(unsigned a, unsigned b) { return f16_to_float(a) > f16_to_float(b); }
 int __nfcxx_f16_ge(unsigned a, unsigned b) { return f16_to_float(a) >= f16_to_float(b); }
 
-/* long double and __float128 to binary16, rounded once from the exact value (the object is read as in the other helpers
-   of this file: 10 x87 bytes, or the 16 bytes of binary128) */
+/* long double to binary16, rounded once from the exact value (x86-64: the 10 x87 bytes, as the other helpers of this file) */
+#if defined(__x86_64__)
 unsigned __nfcxx_f16_from_ld(const void *a)
 {
   unsigned long long m;
@@ -556,6 +597,19 @@ unsigned __nfcxx_f16_from_ld(const void *a)
   return f16_round(sign, m, (e ? (int)e : 1) - 16383 - 63);
 }
 
+#elif __LDBL_MANT_DIG__ == 53
+/* long double is a double (Apple arm64): the double conversion, which rounds the exact value once. A quad long double
+   (aarch64 Linux) would round twice through double, so it gets no definition here, as before. */
+unsigned __nfcxx_f16_from_ld(const void *a)
+{
+  long double v;
+  memcpy(&v, a, sizeof v);
+  return __nfcxx_f16_from_f64((double)v);
+}
+#endif
+
+#if defined(__x86_64__)
+/* __float128 to binary16: the binary128 bits (the x86-64 and gcc layout) */
 unsigned __nfcxx_f16_from_f128(const void *a)
 {
   unsigned long long lo, hi, frac, m;
@@ -611,3 +665,12 @@ void __nfcxx_ubsan_report(int kind, const char *file, int line)
   abort();
 }
 #endif /* defined(__x86_64__) */
+
+/* SSE2 _mm_pause (the spin-loop hint): the host header declares it inline (gnu_inline), so gcc inlines every call and
+   there is no external body; Path B does not inline, and its calls need this definition. */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__ELF__)
+void nfcxx_mm_pause(void) { __builtin_ia32_pause(); }
+void _mm_pause(void) { nfcxx_mm_pause(); }
+/* a C++ caller names the mangled symbol (the header's function is in the C++ namespace, _Z9_mm_pausev) */
+__asm__(".globl _Z9_mm_pausev\n.set _Z9_mm_pausev, nfcxx_mm_pause");
+#endif

@@ -1,0 +1,1115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nfcxx wasm explorer</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b675f; --line: #dcd8cf;
+    --accent: #2f6fdb; --ok: #1f7a3d; --bad: #b3261e; --code-bg: #f4f2ed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161513; --panel: #1f1e1b; --ink: #ece9e1; --muted: #9b968b; --line: #3a3833;
+      --accent: #7aa7ff; --ok: #6cc98a; --bad: #ff8a80; --code-bg: #12110f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .status { margin-left: auto; font-size: 13px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  .note {
+    margin: 0; padding: 8px 16px; font-size: 13px; color: var(--muted);
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .note[hidden] { display: none; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);   /* the panes are the height of main, and scroll inside */
+    height: calc(100vh - 88px); min-height: 560px;
+  }
+  @media (max-width: 800px) {
+    main { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
+    .pane { min-height: 70vh; }
+    .pane:first-child { height: 85vh; }
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: 0; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  select, button, input {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px;
+  }
+  /* the examples' titles are long: the select shares its row and shrinks rather than overflowing */
+  #examples { flex: 1 1 200px; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+  label.check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled, select:disabled { opacity: .55; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+  /* the editor takes the space the console leaves (a basis of 0: Monaco's own height must not size the pane) */
+  #editor { flex: 1 1 0; min-height: 160px; overflow: hidden; }
+  .pane:first-child { overflow: hidden; }
+  /* the console, under the editor: a bar (Run, the result, Clear) and the output of the last run */
+  .console {
+    flex: 0 0 34%; min-height: 140px; display: flex; flex-direction: column; background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .console-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .console-bar h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; font-weight: 600;
+  }
+  .console-bar .result { font-size: 15px; }
+  .console-bar #clear-console { margin-left: auto; padding: 3px 9px; font-size: 13px; }
+  .console-bar #run { padding: 3px 12px; }
+  #console {
+    flex: 1; margin: 0; border: 0; border-radius: 0; max-height: none; overflow: auto; padding: 8px 12px;
+    background: var(--code-bg);
+  }
+  textarea.src {
+    flex: 1 1 0; min-height: 160px; width: 100%; resize: none; border: 0; outline: none; padding: 14px 16px;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--panel); color: var(--ink); tab-size: 2; white-space: pre;
+  }
+  textarea.src[hidden] { display: none; }
+  .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .tabs button {
+    border: 0; border-radius: 0; background: transparent; padding: 9px 12px; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .view { flex: 1; overflow: auto; padding: 14px 16px; }
+  .view[hidden] { display: none; }
+  .card { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat .v { font-size: 20px; font-weight: 650; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  pre {
+    margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; overflow: auto; white-space: pre; max-height: 70vh;
+  }
+  .error {
+    border: 1px solid var(--bad); color: var(--bad); border-radius: 8px; padding: 10px 12px;
+    margin-bottom: 12px; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+  }
+  .error[hidden] { display: none; }
+  .result { font-size: 22px; font-weight: 650; }
+  .result.trap { color: var(--bad); }
+  /* how a run ended, after its output: the explanation of a trap and its stack, or a timeout */
+  .run-note { display: block; margin-top: 6px; color: var(--bad); }
+  .run-note .muted { color: var(--muted); }
+  .error .hint-line { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; }
+  .muted { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>nfcxx wasm explorer</h1>
+  <span class="sub">C++, C, Rust, Go, LLVM IR &rarr; mid-level IR &rarr; WebAssembly, run in this page</span>
+  <span class="status" id="status">checking server&hellip;</span>
+</header>
+<p class="note" id="static-note" hidden>
+  This is the static build: the examples are compiled ahead of time, and other code needs the local server
+  (<code>node tools/wasm-explorer/server.cjs</code>, see docs/notes/wasm-explorer.md).
+</p>
+<p class="note" id="inbrowser-note" hidden>
+  This page compiles C, C++, LLVM IR and the IR itself: EDG's front end and the wasm emitter run here, as wasm (about
+  5 MB to download, the first time something other than an unedited example is compiled). Rust and Go, and programs
+  that include the C or C++ library headers, need the local server (<code>node tools/wasm-explorer/server.cjs</code>).
+</p>
+
+<main>
+  <section class="pane" aria-label="Source">
+    <div class="toolbar">
+      <select id="language" aria-label="Language" title="Source language"></select>
+      <select id="examples" aria-label="Example"></select>
+      <select id="std" aria-label="Language standard" title="Language standard"></select>
+      <select id="mode" aria-label="Emitter mode" title="Data model and emitter mode"></select>
+      <label class="check" id="optimize-label" title="Run the SSA route's optimizations (escape analysis, the e-graph, the dispatch loop) on the C and C++ IR before the emitter. Needs the local server."><input type="checkbox" id="optimize"> optimize</label>
+      <button class="primary" id="compile">Compile</button>
+      <label class="check"><input type="checkbox" id="auto" checked> auto</label>
+      <button id="share" title="Copy a link that holds this source and these options">Copy link</button>
+      <span class="hint" id="hint">Ctrl+Enter compiles and runs</span>
+    </div>
+    <div id="editor" aria-label="Source"></div>
+    <textarea class="src" id="fallback" spellcheck="false" aria-label="Source" hidden></textarea>
+    <section class="console" aria-label="Console">
+      <div class="console-bar">
+        <h2>Console</h2>
+        <button id="run" disabled title="Run main() of the last module compiled">Run</button>
+        <span id="result" class="result" aria-live="polite"></span>
+        <button id="clear-console" title="Clear the console">Clear</button>
+      </div>
+      <pre id="console" aria-label="Console output"></pre>
+    </section>
+  </section>
+
+  <section class="pane" aria-label="Output">
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-module" aria-selected="true" aria-controls="view-module" data-tab="module">Module</button>
+      <button role="tab" id="tab-wat" aria-selected="false" aria-controls="view-wat" data-tab="wat">WAT</button>
+      <button role="tab" id="tab-ir" aria-selected="false" aria-controls="view-ir" data-tab="ir">IR</button>
+      <button role="tab" id="tab-hex" aria-selected="false" aria-controls="view-hex" data-tab="hex">Bytes</button>
+    </div>
+    <div class="view" id="view-module" role="tabpanel" aria-labelledby="tab-module">
+      <div id="error" class="error" hidden></div>
+      <div class="card">
+        <h2>Browser bindings</h2>
+        <p class="muted" style="margin:0 0 8px">Run (in the Console, under the editor) calls <code>main</code>. An import
+          named like one of the bindings below is connected to it; any other import is stubbed the way
+          <code>tests/wasm/host.cjs</code> stubs them: it returns its first argument plus one.</p>
+        <table><thead><tr><th>import (module env)</th><th>C declaration</th><th>browser feature</th></tr></thead>
+          <tbody id="bindings"></tbody></table>
+        <p class="muted" style="margin:8px 0 0;font-size:12px">A string is read from the module's exported memory at the
+          pointer given (LP64 pointers are 64-bit, so the page reads them as BigInt).</p>
+      </div>
+      <div class="card">
+        <h2>Module</h2>
+        <div class="stats">
+          <div class="stat"><div class="v" id="s-size">&ndash;</div><div class="k">bytes</div></div>
+          <div class="stat"><div class="v" id="s-exports">&ndash;</div><div class="k">exports</div></div>
+          <div class="stat"><div class="v" id="s-imports">&ndash;</div><div class="k">imports</div></div>
+          <div class="stat"><div class="v" id="s-ms">&ndash;</div><div class="k">ms, compile</div></div>
+        </div>
+        <p style="margin:12px 0 0">
+          <a id="download" href="#" download="prog.wasm" hidden>Download prog.wasm</a>
+          <a id="download-wat" href="#" download="prog.wat" hidden style="margin-left:14px">Download prog.wat</a>
+        </p>
+      </div>
+      <div class="card">
+        <h2>Exports</h2>
+        <table><thead><tr><th>name</th><th>kind</th></tr></thead><tbody id="exports"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Imports</h2>
+        <table><thead><tr><th>module</th><th>name</th><th>kind</th><th>provided by</th></tr></thead><tbody id="imports"></tbody></table>
+      </div>
+    </div>
+    <div class="view" id="view-wat" role="tabpanel" aria-labelledby="tab-wat" hidden>
+      <pre id="wat" aria-label="WebAssembly text"></pre>
+      <p class="muted" style="font-size:12px">Text format from <a href="https://github.com/WebAssembly/wabt" rel="noopener">wabt</a> 1.0.37,
+        loaded from jsdelivr when this tab is opened. The editor is <a href="https://microsoft.github.io/monaco-editor/" rel="noopener">Monaco</a> 0.52.2,
+        also from jsdelivr.</p>
+    </div>
+    <div class="view" id="view-ir" role="tabpanel" aria-labelledby="tab-ir" hidden>
+      <pre id="ir" aria-label="Mid-level IR"></pre>
+    </div>
+    <div class="view" id="view-hex" role="tabpanel" aria-labelledby="tab-hex" hidden>
+      <pre id="hex" aria-label="Module bytes"></pre>
+    </div>
+  </section>
+</main>
+
+<script src="bindings.js"></script>
+<script>
+(() => {
+  const B = window.nfcxxBindings;
+  "use strict";
+
+  // Outside resources, pinned. Monaco is the editor, wabt turns the module into WebAssembly text.
+  const MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
+  const WABT_URL = "https://cdn.jsdelivr.net/npm/wabt@1.0.37/index.js";
+  const AUTO_DELAY = 700;   // ms after the last edit before an automatic compile (live server only)
+  const RUN_TIMEOUT = 10000;   // ms a run may take before it is stopped (main runs in a worker, so the page stays up)
+  const MAX_OUTPUT = 1 << 20;  // characters of a run's output kept; the rest is dropped (a program printing forever)
+
+  // The source languages, as pipeline.cjs LANGUAGES names them: the standards the front end takes (Rust's are its
+  // editions), the modes (the languages that go through LLVM IR, and the IR text, are LP64), and the editor's language.
+  // Monaco has C, C++, Rust, Go and Scheme (the IR is s-expressions); LLVM IR gets the small tokenizer in registerLlvm.
+  const LANGUAGES = {
+    "c++": { title: "C++", editor: "cpp", standards: ["c++17", "c++20", "c++23"],
+      modes: ["lp64", "asan", "emscripten"] },
+    c: { title: "C", editor: "c", standards: ["c89", "c99", "c11", "c17", "c23"],
+      modes: ["lp64", "asan", "emscripten"] },
+    rust: { title: "Rust", editor: "rust", standards: ["2015", "2018", "2021", "2024"], modes: ["lp64", "asan"],
+      prefix: "edition " },
+    go: { title: "Go", editor: "go", standards: [], modes: ["lp64", "asan"] },
+    swift: { title: "Swift", editor: "swift", standards: [], modes: ["lp64", "asan"] },
+    llvm: { title: "LLVM IR", editor: "llvm", standards: [], modes: ["lp64", "asan"] },
+    ir: { title: "nfcxx IR", editor: "scheme", standards: [], modes: ["lp64", "asan"] },
+  };
+  // The modes' titles (pipeline.cjs MODES).
+  const MODE_TITLES = {
+    lp64: "LP64 (x86-64 data model)",
+    asan: "LP64 + AddressSanitizer shadow",
+    emscripten: "ILP32 (wasm32, Emscripten exports)",
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    live: false,         // the local server answers the compile API; false on a static host
+    inBrowser: false,    // static host only: the in-browser compiler is there (inbrowser/, compile-worker.js)
+    examples: [],        // [{id, title, file, language, expect}] from examples/index.json
+    builds: {},          // static only: id -> a promise of the prebuilt example (builds/<id>.json), fetched when needed
+    current: null,       // the last successful compile: { bytes, module, names, wat? }
+    run: null,           // the run in progress: { worker, timer }
+    seq: 0,              // compile requests in flight; a response for an older one is dropped
+    autoTimer: null,
+  };
+  const titleAtLoad = document.title;
+
+  let monaco = null;     // the monaco namespace, once loaded
+  let editor = null;     // the Monaco editor, once created; else the textarea #fallback is the editor
+
+  // ---- source, markers, status ------------------------------------------------------------------------------------
+
+  function source() {
+    return editor ? editor.getValue() : $("fallback").value;
+  }
+  function setSource(text) {
+    if (editor) editor.setValue(text);
+    $("fallback").value = text;
+  }
+  function setMarkers(diagnostics) {
+    if (!monaco || !editor) return;
+    const model = editor.getModel();
+    const markers = (diagnostics || []).filter((d) => d.line >= 1 && d.line <= model.getLineCount()).map((d) => ({
+      startLineNumber: d.line,
+      endLineNumber: d.line,
+      startColumn: 1,
+      endColumn: model.getLineMaxColumn(d.line),
+      severity: d.severity === "error" ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+      message: d.message,
+    }));
+    monaco.editor.setModelMarkers(model, "nfcxx", markers);
+  }
+  function setStatus(text, cls) {
+    const s = $("status");
+    s.textContent = text;
+    s.className = "status " + (cls || "");
+  }
+  function showError(stage, message) {
+    const box = $("error");
+    box.hidden = !message;
+    box.textContent = message ? `${stage}: ${message}` : "";
+    const hint = !message ? null
+      : stage !== "front-end" ? refusalHint(message)
+        : state.inBrowser && /cannot open source file/.test(message)
+          ? "The in-browser compiler has no C or C++ library headers: declare what the program uses (the Browser " +
+            "bindings card lists the functions the page provides), or compile it with the local server."
+          : null;
+    if (hint) {
+      const h = document.createElement("span");
+      h.className = "hint-line";
+      h.textContent = hint;
+      box.appendChild(h);
+    }
+  }
+
+  // What to do about a construct the wasm emitter (or llvm-to-pathb.rb) refuses: the first entry whose pattern the
+  // message matches. The emitter compiles a subset (docs/notes/pathb-wasm.md); these are the refusals met most.
+  const REFUSAL_HINTS = [
+    [/__curr_eh_stack_entry|__cxa_|typeinfo for|exception/, "C++ exceptions (throw, try) are not supported, and "
+      + "neither is the hosted C++ library that uses them (std::vector, std::string, iostream): use arrays and the "
+      + "browser bindings."],
+    [/variadic/, "printf and other variadic functions are not supported: print with puts, putchar or the log_* "
+      + "bindings (the Browser bindings card)."],
+    [/bitfield/, "this bit-field use is not lowered yet: an unsigned field with masks and shifts is."],
+    [/aggregate (argument|parameter|result|type)|value of the struct type/, "structs passed or returned by value are "
+      + "not supported here: pass a pointer to the struct instead."],
+    [/variable-length array|alloca under --asan|bounds with a run-time limit/, "an array whose size is known only at "
+      + "run time is not supported (in this mode): give it a constant size."],
+    [/jump out of the loop|goto|label "/, "this goto (into or out of a loop) is not lowered: use break, continue or "
+      + "a flag."],
+    [/switch fallthrough|before the first case label/, "a case that falls into the next one is not lowered: end each "
+      + "case with break (or return)."],
+    [/static object @"(stdout|stderr|stdin|errno)/, "the C library's globals (stdout, errno) do not exist in the "
+      + "module: use puts or the log_* bindings."],
+    [/takes the name of an export of --emscripten/, "the Emscripten mode exports this name itself: rename the "
+      + "function."],
+    [/wide string/, "wide strings (L\"...\") are not lowered: use a char string."],
+    [/float of|integer of|long double|x87/, "long double, __int128 and other types wider than 64 bits are not "
+      + "supported: use double and long long."],
+  ];
+  function refusalHint(message) {
+    const h = REFUSAL_HINTS.find(([re]) => re.test(message));
+    return h ? h[1] : null;
+  }
+
+  // ---- the module ---------------------------------------------------------------------------------------------------
+
+  function clearRun() {
+    $("result").textContent = "";
+    $("result").className = "result";
+  }
+  function hexDump(bytes, limit) {
+    const rows = [];
+    const n = Math.min(bytes.length, limit);
+    for (let off = 0; off < n; off += 16) {
+      const chunk = bytes.subarray(off, Math.min(off + 16, n));
+      const hex = Array.from(chunk, (b) => b.toString(16).padStart(2, "0")).join(" ");
+      const text = Array.from(chunk, (b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+      rows.push(off.toString(16).padStart(6, "0") + "  " + hex.padEnd(47, " ") + "  " + text);
+    }
+    if (bytes.length > limit) rows.push(`... ${bytes.length - limit} more bytes`);
+    return rows.join("\n");
+  }
+  function fillTable(id, rows) {
+    const body = $(id);
+    body.textContent = "";
+    for (const cells of rows) {
+      const tr = document.createElement("tr");
+      for (const c of cells) {
+        const td = document.createElement("td");
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  }
+  function blobLink(id, bytes, type) {
+    const a = $(id);
+    if (a.href.startsWith("blob:")) URL.revokeObjectURL(a.href);
+    a.href = URL.createObjectURL(new Blob([bytes], { type }));
+    a.hidden = false;
+  }
+  function clearModule() {
+    stopRun(null);
+    state.current = null;
+    $("run").disabled = true;
+    clearRun();
+    for (const id of ["s-size", "s-exports", "s-imports", "s-ms"]) $(id).textContent = "–";
+    fillTable("exports", []);
+    fillTable("imports", []);
+    $("hex").textContent = "";
+    $("wat").textContent = "";
+    $("ir").textContent = "";
+    $("download").hidden = true;
+    $("download-wat").hidden = true;
+  }
+  function describe(bytes, ms, names) {
+    const module = new WebAssembly.Module(bytes);   // throws on a malformed module: a bug, shown as an error
+    stopRun(null);
+    state.current = { bytes, module, names: names || {} };
+    const exports = WebAssembly.Module.exports(module);
+    const imports = WebAssembly.Module.imports(module);
+    $("s-size").textContent = String(bytes.length);
+    $("s-exports").textContent = String(exports.length);
+    $("s-imports").textContent = String(imports.length);
+    $("s-ms").textContent = ms.toFixed(0);
+    fillTable("exports", exports.map((e) => [e.name, e.kind]));
+    fillTable("imports", imports.map((i) => [i.module, i.name, i.kind, B.bindingFor(i.name, i.kind) ? "browser binding" : "stub"]));
+    $("hex").textContent = hexDump(bytes, 1024);
+    blobLink("download", bytes, "application/wasm");
+    $("download-wat").hidden = true;
+    const hasMain = exports.some((e) => e.name === "main" && e.kind === "function");
+    state.current.hasMain = hasMain;
+    $("run").disabled = !hasMain;
+    $("result").textContent = hasMain ? "" : "the module has no main export";
+  }
+
+  // main() runs in a worker, so that a program that never returns (an infinite loop) does not freeze the page: Run
+  // becomes Stop while it runs, and a run that takes over RUN_TIMEOUT is stopped. The worker loads bindings.js, runs
+  // main with nfcxxBindings.runMain, and posts the output, the title and how the run ended.
+  const WORKER_SOURCE = `
+    importScripts(BINDINGS_URL);
+    onmessage = (e) => {
+      const B = self.nfcxxBindings;
+      const bytes = e.data.bytes;
+      let buf = "", sent = 0, last = performance.now();
+      const post = () => {
+        if (buf) postMessage({ type: "write", text: buf });
+        buf = "";
+        last = performance.now();
+      };
+      const sink = {
+        write(text) {
+          if (sent >= MAX_OUTPUT) return;
+          if (sent + text.length > MAX_OUTPUT) text = text.slice(0, MAX_OUTPUT - sent) + "\\n(output truncated)\\n";
+          sent += text.length;
+          buf += text;
+          if (buf.length > 8192 || performance.now() - last > 50) post();
+        },
+        title(text) { postMessage({ type: "title", text }); },
+      };
+      let out;
+      try {
+        out = B.runMain(new WebAssembly.Module(bytes), bytes, sink);
+      } catch (err) {
+        out = { kind: "error", result: String((err && err.message) || err) };
+      }
+      post();
+      postMessage({ type: "done", out });
+    };`;
+  let workerUrl = null;
+  function makeWorker() {
+    if (!workerUrl) {
+      const bindingsUrl = new URL("bindings.js", location.href).href;
+      const text = `const BINDINGS_URL = ${JSON.stringify(bindingsUrl)}; const MAX_OUTPUT = ${MAX_OUTPUT};`
+        + WORKER_SOURCE;
+      workerUrl = URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+    }
+    return new Worker(workerUrl);
+  }
+
+  function consoleWrite(text) {
+    const c = $("console");
+    if (c.textContent.length < MAX_OUTPUT + 64) c.append(text);
+    c.scrollTop = c.scrollHeight;
+  }
+  // A note after the run's output: what ended it, and the wasm stack, demangled with the compile's names.
+  function consoleNote(lines) {
+    const note = document.createElement("span");
+    note.className = "run-note";
+    lines.forEach((l, i) => {
+      if (i) note.append("\n");
+      if (typeof l === "string") note.append(l);
+      else {
+        const m = document.createElement("span");
+        m.className = "muted";
+        m.textContent = l.muted;
+        note.append(m);
+      }
+    });
+    $("console").append(note);
+    $("console").scrollTop = $("console").scrollHeight;
+  }
+  function frameLines(frames, names) {
+    const shown = (frames || []).filter((f) => !/^(__asan_|__nfcxx_go_main$)/.test(f)).slice(0, 12);
+    return shown.map((f) => ({ muted: "  at " + (names[f] || f) }));
+  }
+
+  function setRunning(on) {
+    $("run").textContent = on ? "Stop" : "Run";
+    $("run").title = on ? "Stop the program" : "Run main() of the last module compiled";
+    $("run").disabled = !on && !(state.current && state.current.hasMain);
+  }
+  // Ends the run in progress, if any; reason (a string) is reported as its result, null ends it silently.
+  function stopRun(reason) {
+    const run = state.run;
+    if (!run) return;
+    state.run = null;
+    clearTimeout(run.timer);
+    run.worker.terminate();
+    document.title = titleAtLoad;
+    setRunning(false);
+    if (reason) finishRun(run, { kind: reason === "timeout" ? "timeout" : "stopped",
+      result: reason === "timeout" ? "timed out" : "stopped" });
+  }
+  function finishRun(run, out) {
+    const res = $("result");
+    res.textContent = out.result;
+    res.classList.toggle("trap", out.kind !== "value" && out.kind !== "exit");
+    const names = run.names;
+    if (out.kind === "trap") {
+      consoleNote([out.result + (out.explain ? ": " + out.explain : ""), ...frameLines(out.frames, names)]);
+    } else if (out.kind === "asan" || out.kind === "abort") {
+      consoleNote([out.kind === "abort" ? "abort() called" : "stopped at the bad access",
+        ...frameLines(out.frames, names)]);
+    } else if (out.kind === "timeout") {
+      consoleNote([`main() did not return in ${RUN_TIMEOUT / 1000} s, so it was stopped: an infinite loop, or a `
+        + "Rust panic handler that loops (call abort instead)?"]);
+    } else if (out.kind === "error") {
+      consoleNote([out.result]);
+    }
+    if (!$("console").textContent) $("console").textContent = "(no output)";
+  }
+
+  function runMain() {
+    if (state.run) return stopRun("stopped");   // the button is Stop while a run is in progress
+    const cur = state.current;
+    if (!cur) return;
+    clearRun();
+    $("console").textContent = "";
+    let worker;
+    try {
+      worker = makeWorker();
+    } catch (e) {
+      // no worker (a page opened from a file: URL in some browsers): run here, without the timeout
+      const out = B.runMain(cur.module, cur.bytes, { write: consoleWrite, title: (t) => { document.title = t; } });
+      document.title = titleAtLoad;
+      return finishRun({ names: cur.names }, out);
+    }
+    const run = { worker, names: cur.names, timer: setTimeout(() => stopRun("timeout"), RUN_TIMEOUT) };
+    state.run = run;
+    setRunning(true);
+    worker.onmessage = (e) => {
+      if (state.run !== run) return;
+      const m = e.data;
+      if (m.type === "write") consoleWrite(m.text);
+      else if (m.type === "title") document.title = m.text;
+      else if (m.type === "done") {
+        state.run = null;
+        clearTimeout(run.timer);
+        worker.terminate();
+        document.title = titleAtLoad;
+        setRunning(false);
+        finishRun(run, m.out);
+      }
+    };
+    worker.onerror = (e) => {
+      if (state.run !== run) return;
+      e.preventDefault();
+      state.run = null;
+      clearTimeout(run.timer);
+      worker.terminate();
+      setRunning(false);
+      finishRun(run, { kind: "error", result: "the run's worker failed: " + (e.message || "bindings.js did not load") });
+    };
+    worker.postMessage({ bytes: cur.bytes });
+  }
+
+  // ---- WAT, through wabt, loaded when first needed -------------------------------------------------------------------
+
+  let wabtPromise = null;
+  function ensureWabt() {
+    if (!wabtPromise) {
+      wabtPromise = new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = WABT_URL;
+        s.onload = () => {
+          if (typeof window.WabtModule !== "function") return reject(new Error("wabt did not define WabtModule"));
+          window.WabtModule().then(resolve, reject);
+        };
+        s.onerror = () => {
+          wabtPromise = null;
+          reject(new Error("wabt could not be loaded from the CDN"));
+        };
+        document.head.appendChild(s);
+      });
+    }
+    return wabtPromise;
+  }
+  async function renderWat() {
+    const cur = state.current;
+    if (!cur) return;
+    if (cur.wat !== undefined) {
+      $("wat").textContent = cur.wat;
+      return;
+    }
+    $("wat").textContent = "converting with wabt…";
+    try {
+      const wabt = await ensureWabt();
+      const m = wabt.readWasm(cur.bytes, { readDebugNames: true });
+      try {
+        cur.wat = m.toText({ foldExprs: false, inlineExport: false });
+      } finally {
+        m.destroy();
+      }
+    } catch (e) {
+      if (state.current === cur) $("wat").textContent = "could not produce WAT: " + ((e && e.message) || e);
+      return;
+    }
+    if (state.current === cur) {
+      $("wat").textContent = cur.wat;
+      blobLink("download-wat", new TextEncoder().encode(cur.wat), "text/plain");
+    }
+  }
+
+  // ---- options, compile, the link -----------------------------------------------------------------------------------
+
+  function options() {
+    return { language: $("language").value, mode: $("mode").value, std: $("std").value,
+      optimize: $("optimize").checked && !$("optimize").disabled };
+  }
+  // The optimize option is the local server's (the SSA route runs there), for C and C++ only.
+  function syncOptimize() {
+    const lang = $("language").value;
+    const box = $("optimize");
+    box.disabled = !state.live || (lang !== "c++" && lang !== "c");
+    $("optimize-label").style.opacity = box.disabled ? "0.5" : "";
+  }
+  const languageOf = (ex) => ex.language || "c++";
+
+  // A static host has no compiler: an example's source gets its prebuilt result, any other source gets a message.
+  // The prebuilt example (builds/<id>.json), fetched the first time it is needed: go-fmt's alone is about 2 MB.
+  function exampleBuild(id) {
+    if (!state.builds[id]) {
+      state.builds[id] = fetch(`builds/${id}.json`).then((r) => {
+        if (!r.ok) throw new Error(`builds/${id}.json: ${r.status}`);
+        return r.json();
+      });
+    }
+    return state.builds[id];
+  }
+  // The languages whose front end runs in the page (inbrowser.js); Rust and Go need their compilers.
+  const IN_BROWSER = ["c++", "c", "llvm", "ir"];
+  let compileWorker = null, workerJobId = 0;
+  const workerJobs = new Map();
+  // Compiles in the worker (compile-worker.js), which loads the front end and the emitter the first time.
+  function workerCompile(src, opts) {
+    if (!compileWorker) {
+      compileWorker = new Worker("compile-worker.js");
+      compileWorker.onmessage = (e) => {
+        const job = workerJobs.get(e.data.id);
+        if (!job) return;
+        if (e.data.progress) return job.progress(e.data.progress);
+        workerJobs.delete(e.data.id);
+        job.resolve(e.data.result);
+      };
+      compileWorker.onerror = (e) => {
+        e.preventDefault();
+        for (const job of workerJobs.values()) {
+          job.resolve({ ok: false, stage: "browser", diagnostics: [],
+            message: "the in-browser compiler did not load: " + (e.message || "compile-worker.js failed") });
+        }
+        workerJobs.clear();
+        compileWorker = null;
+      };
+    }
+    const id = ++workerJobId;
+    return new Promise((resolve) => {
+      workerJobs.set(id, { resolve, progress: (text) => setStatus(text, "") });
+      compileWorker.postMessage({ id, source: src, options: opts });
+    });
+  }
+
+  async function staticResult(src, opts) {
+    const entry = state.examples.find((ex) => exampleTexts[ex.id] === src && languageOf(ex) === opts.language);
+    const example = entry ? await exampleBuild(entry.id) : null;
+    if (!example || opts.std) {
+      // not an example as it is: the in-browser compiler, for the languages it has
+      if (state.inBrowser && IN_BROWSER.includes(opts.language)) return workerCompile(src, opts);
+      if (state.inBrowser) {
+        return { ok: false, stage: "static", diagnostics: [],
+          message: `${LANGUAGES[opts.language].title} needs its compiler, which runs on the local server only; ` +
+            "the examples are compiled ahead of time." };
+      }
+    }
+    if (!example) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: "this is the static build, so only the examples compile here. Other code needs the local server." };
+    }
+    if (opts.std) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: `the examples are built ahead of time in the default standard only; ${opts.std} needs the local server.` };
+    }
+    const build = example.builds[opts.mode];
+    if (!build) {
+      return { ok: false, stage: "static", diagnostics: [],
+        message: `${opts.mode} is not built for this example (the static build has ${Object.keys(example.builds).join(", ")}; ` +
+          "the other modes need the local server)." };
+    }
+    // a mode whose IR is another mode's stores it there (build-static.cjs, irFrom)
+    return Object.assign({ ok: true, prebuilt: true }, build,
+      { ir: build.irFrom ? example.builds[build.irFrom].ir : build.ir });
+  }
+
+  // Compiles the editor's source; with run (Ctrl+Enter, or Cmd+Enter on a Mac), runs main() when the compile
+  // succeeds and is still the latest one.
+  async function compile(run = false) {
+    run = run === true;   // an event handler passes its event
+    clearTimeout(state.autoTimer);   // this compile covers a pending automatic one (an example's text sets one off)
+    const seq = ++state.seq;
+    const src = source();
+    const opts = options();
+    setStatus(state.live || state.inBrowser ? "compiling…" : "static build", "");
+    const t0 = performance.now();
+    let data;
+    try {
+      if (state.live) {
+        const r = await fetch("api/compile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: src, options: opts }),
+        });
+        data = await r.json();
+      } else {
+        data = await staticResult(src, opts);
+      }
+    } catch (e) {
+      if (seq !== state.seq) return;
+      showError("browser", "the server did not answer: " + ((e && e.message) || e));
+      setStatus("failed", "bad");
+      return;
+    }
+    if (seq !== state.seq) return;
+    const ms = performance.now() - t0;
+    setMarkers(data.diagnostics);
+    if (!data.ok) {
+      clearModule();
+      $("ir").textContent = "";
+      showError(data.stage, data.message);
+      // exit status 3 is a refusal: of the emitter, or of llvm-to-pathb.rb (a construct outside its subset)
+      const refused = data.stage === "emit" || data.code === 3;
+      setStatus(refused ? "refused" : data.stage === "static" ? "static build" : "error", "bad");
+      if (data.stage === "front-end") showTab("module");
+      return;
+    }
+    showError("", "");
+    try {
+      const bytes = Uint8Array.from(atob(data.wasm), (c) => c.charCodeAt(0));
+      describe(bytes, ms, data.names);
+    } catch (e) {
+      clearModule();
+      showError("browser", "the module did not load: " + ((e && e.message) || e));
+      setStatus("failed", "bad");
+      return;
+    }
+    $("ir").textContent = data.ir || "";
+    setStatus(state.live ? `compiled in ${(ms / 1000).toFixed(1)} s`
+      : data.prebuilt ? "static build (prebuilt example)" : state.inBrowser ? `compiled in the browser in ${(ms / 1000).toFixed(1)} s`
+        : "static build", "ok");
+    if (state.live || state.inBrowser) writeHash();
+    if ($("tab-wat").getAttribute("aria-selected") === "true") renderWat();
+    if (run && !$("run").disabled) runMain();
+  }
+  const compileAndRun = () => compile(true);
+
+  function scheduleAuto() {
+    if (!(state.live || state.inBrowser) || !$("auto").checked) return;
+    clearTimeout(state.autoTimer);
+    state.autoTimer = setTimeout(compile, AUTO_DELAY);
+  }
+
+  // The link: #src=<base64url of the source>&lang=...&mode=...&std=...
+  function encodeSource(text) {
+    return btoa(unescape(encodeURIComponent(text))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function linkHash() {
+    const o = options();
+    return "src=" + encodeSource(source()) + "&lang=" + encodeURIComponent(o.language) + "&mode=" + o.mode
+      + (o.std ? "&std=" + o.std : "") + (o.optimize ? "&opt=1" : "");
+  }
+  function writeHash() {
+    history.replaceState(null, "", "#" + linkHash());
+  }
+  function readHash() {
+    const p = new URLSearchParams(location.hash.replace(/^#/, ""));
+    let src = null;
+    const enc = p.get("src");
+    if (enc) {
+      try {
+        src = decodeURIComponent(escape(atob(enc.replace(/-/g, "+").replace(/_/g, "/"))));
+      } catch (e) {
+        src = null;
+      }
+    }
+    return { src, lang: p.get("lang"), mode: p.get("mode"), std: p.get("std"), opt: p.get("opt") };
+  }
+
+  // ---- tabs --------------------------------------------------------------------------------------------------------
+
+  function showTab(name) {
+    for (const b of document.querySelectorAll(".tabs button")) {
+      b.setAttribute("aria-selected", String(b.dataset.tab === name));
+    }
+    for (const v of ["module", "wat", "ir", "hex"]) {
+      $("view-" + v).hidden = v !== name;
+    }
+    if (name === "wat") renderWat();
+  }
+
+  // ---- the editor: Monaco when its CDN loads, else the textarea ------------------------------------------------------
+
+  function loadMonaco() {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = MONACO_BASE + "/loader.js";
+      s.onerror = () => reject(new Error("the Monaco editor could not be loaded from the CDN"));
+      s.onload = () => {
+        window.require.config({ paths: { vs: MONACO_BASE } });
+        window.require(["vs/editor/editor.main"], () => resolve(window.monaco), reject);
+      };
+      document.head.appendChild(s);
+    });
+  }
+  // LLVM IR: comments, globals and locals, types, numbers, strings, and the instruction and keyword words.
+  function registerLlvm(m) {
+    m.languages.register({ id: "llvm" });
+    m.languages.setLanguageConfiguration("llvm", {
+      comments: { lineComment: ";" },
+      brackets: [["{", "}"], ["[", "]"], ["(", ")"]],
+    });
+    m.languages.setMonarchTokensProvider("llvm", {
+      types: ["void", "ptr", "half", "float", "double", "x86_fp80", "fp128", "label", "metadata", "token"],
+      tokenizer: {
+        root: [
+          [/;.*$/, "comment"],
+          [/[-a-zA-Z$._][-a-zA-Z$._0-9]*:/, "tag"],                 // a block label
+          [/[@%](?:[-a-zA-Z$._][-a-zA-Z$._0-9]*|\d+|"[^"]*")/, "variable"],
+          [/\bi\d+\b/, "type"],
+          [/c?"[^"]*"/, "string"],
+          [/-?\d+(?:\.\d+(?:e[-+]?\d+)?)?\b|0x[0-9a-fA-F]+/, "number"],
+          [/[a-z_][a-z_0-9.]*/, { cases: { "@types": "type", "@default": "keyword" } }],
+        ],
+      },
+    });
+  }
+  function setEditorLanguage() {
+    if (monaco && editor) monaco.editor.setModelLanguage(editor.getModel(), LANGUAGES[$("language").value].editor);
+  }
+  function createEditor(m) {
+    monaco = m;
+    registerLlvm(m);
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    editor = m.editor.create($("editor"), {
+      value: source(),
+      language: LANGUAGES[$("language").value].editor,
+      theme: dark ? "vs-dark" : "vs",
+      automaticLayout: true,
+      minimap: { enabled: false },
+      fontSize: 14,
+      tabSize: 2,
+      scrollBeyondLastLine: false,
+    });
+    // Ctrl+Enter, and Cmd+Enter on a Mac (CtrlCmd is Cmd there, WinCtrl is Ctrl), compile and run
+    editor.addCommand(m.KeyMod.CtrlCmd | m.KeyCode.Enter, compileAndRun);
+    editor.addCommand(m.KeyMod.WinCtrl | m.KeyCode.Enter, compileAndRun);
+    editor.onDidChangeModelContent(scheduleAuto);
+    $("fallback").hidden = true;
+  }
+  function showFallback() {
+    $("editor").hidden = true;
+    $("fallback").hidden = false;
+  }
+
+  // ---- startup -----------------------------------------------------------------------------------------------------
+
+  async function loadExamples() {
+    const r = await fetch("examples/index.json");
+    state.examples = await r.json();
+    const sel = $("examples");
+    sel.textContent = "";
+    // one group per language, in the order of LANGUAGES
+    for (const [lang, info] of Object.entries(LANGUAGES)) {
+      const group = document.createElement("optgroup");
+      group.label = info.title;
+      for (const ex of state.examples.filter((e) => languageOf(e) === lang)) {
+        const o = document.createElement("option");
+        o.value = ex.id;
+        o.textContent = ex.title;
+        group.appendChild(o);
+      }
+      if (group.children.length) sel.appendChild(group);
+    }
+  }
+  // The examples' sources (small): a static host matches the editor's text against them to find a prebuilt example.
+  function loadExampleSources() {
+    return Promise.all(state.examples.map(exampleSource));
+  }
+  function fillLanguages() {
+    const sel = $("language");
+    sel.textContent = "";
+    for (const [value, info] of Object.entries(LANGUAGES)) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = info.title;
+      sel.appendChild(o);
+    }
+  }
+  // The standards and modes of the selected language. A choice that the new language also has is kept.
+  function fillLanguageOptions() {
+    const lang = LANGUAGES[$("language").value];
+    const keepStd = $("std").value;
+    const keepMode = $("mode").value;
+    const std = $("std");
+    std.textContent = "";
+    for (const value of ["", ...lang.standards]) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = value ? (lang.prefix || "-std=") + value
+        : lang.standards.length ? (lang.prefix ? "default edition" : "default std") : "no standard";
+      std.appendChild(o);
+    }
+    std.value = lang.standards.includes(keepStd) ? keepStd : "";
+    std.disabled = !lang.standards.length;
+    const mode = $("mode");
+    mode.textContent = "";
+    for (const value of lang.modes) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = MODE_TITLES[value];
+      mode.appendChild(o);
+    }
+    mode.value = lang.modes.includes(keepMode) ? keepMode : lang.modes[0];
+    syncOptimize();
+  }
+  const exampleFetches = {};   // id -> a promise of the example's source, fetched once
+  const exampleTexts = {};     // id -> the example's source, once fetched
+  function exampleSource(ex) {
+    if (!exampleFetches[ex.id]) {
+      exampleFetches[ex.id] = fetch("examples/" + ex.file).then((r) => r.text()).then((text) => {
+        exampleTexts[ex.id] = text;
+        return text;
+      });
+    }
+    return exampleFetches[ex.id];
+  }
+
+  // A static host: the in-browser compiler is there when its manifest is (build-static.cjs writes it with the tools).
+  async function detectInBrowser() {
+    if (typeof Worker !== "function" || typeof WebAssembly !== "object") return false;
+    try {
+      const r = await fetch("inbrowser/manifest.json", { method: "HEAD" });
+      return r.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+  async function detectServer() {
+    try {
+      const r = await fetch("api/health");
+      if (!r.ok || !(r.headers.get("content-type") || "").includes("json")) return { live: false };
+      const d = await r.json();
+      return { live: !!d.live, ready: !!d.ready };
+    } catch (e) {
+      return { live: false };
+    }
+  }
+
+  function fillBindings() {
+    const body = $("bindings");
+    body.textContent = "";
+    for (const [name, b] of Object.entries(B.BINDINGS)) {
+      const tr = document.createElement("tr");
+      for (const text of [name, b.decl, b.feature]) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+  }
+
+  async function init() {
+    // the shortcut, as this platform writes it: Cmd on a Mac (Ctrl+Enter works there too)
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+    const keys = mac ? "\u2318+Enter" : "Ctrl+Enter";
+    $("hint").textContent = `${keys} compiles and runs`;
+    $("compile").title = `Compile (${keys} compiles and runs)`;
+    fillBindings();
+    const server = await detectServer();
+    state.live = !!server.live;
+    syncOptimize();
+    if (!state.live) {
+      state.inBrowser = await detectInBrowser();
+      $(state.inBrowser ? "inbrowser-note" : "static-note").hidden = false;
+      // auto: off at first on a static host (its first compile of an edited source downloads the compiler)
+      $("auto").checked = false;
+      $("auto").disabled = !state.inBrowser;
+    }
+    fillLanguages();
+    await loadExamples();
+    if (!state.live) await loadExampleSources();
+
+    // The options: the link's (a link without lang is C++, as links were before the languages), else the defaults.
+    const h = readHash();
+    if (h.src !== null || h.lang) $("language").value = LANGUAGES[h.lang] ? h.lang : "c++";
+    fillLanguageOptions();
+    if (h.mode && [...$("mode").options].some((o) => o.value === h.mode)) $("mode").value = h.mode;
+    if (h.std && [...$("std").options].some((o) => o.value === h.std)) $("std").value = h.std;
+    $("optimize").checked = h.opt === "1";
+
+    // The source: the link's, else the first example's (of the link's language, if it names one).
+    const first = state.examples.find((e) => languageOf(e) === $("language").value) || state.examples[0];
+    let initial = h.src;
+    if (initial === null && first) {
+      initial = await exampleSource(first);
+      $("examples").value = first.id;
+      $("language").value = languageOf(first);
+      fillLanguageOptions();
+    }
+    // Until Monaco is up, the textarea holds the source; createEditor starts from it.
+    $("fallback").value = initial || "";
+    await loadMonaco().then(createEditor, () => showFallback());
+
+    if (!state.live) {
+      setStatus(state.inBrowser ? "compiles in the browser" : "static build", "");
+    } else if (!server.ready) {
+      setStatus("server up, harness not built", "bad");
+      $("compile").disabled = true;
+      return;
+    } else {
+      setStatus("server ready", "ok");
+    }
+    if (initial) compile();
+  }
+
+  // ---- events ------------------------------------------------------------------------------------------------------
+
+  $("examples").addEventListener("change", async () => {
+    const ex = state.examples.find((e) => e.id === $("examples").value);
+    if (!ex) return;
+    const text = await exampleSource(ex);
+    if ($("language").value !== languageOf(ex)) {
+      $("language").value = languageOf(ex);
+      fillLanguageOptions();
+      setEditorLanguage();
+    }
+    setSource(text);
+    compile();
+  });
+  // A new language: its options and highlighting. A source that is an example (not edited) gives way to the language's
+  // first example; an edited source is kept, so switching between C and C++ compiles the same text.
+  $("language").addEventListener("change", async () => {
+    const lang = $("language").value;
+    fillLanguageOptions();
+    setEditorLanguage();
+    const src = source();
+    const unedited = !src.trim() || (await Promise.all(state.examples.map(exampleSource))).includes(src);
+    const ex = state.examples.find((e) => languageOf(e) === lang);
+    if (unedited && ex) {
+      setSource(await exampleSource(ex));
+      $("examples").value = ex.id;
+    }
+    compile();
+  });
+  $("std").addEventListener("change", compile);
+  $("mode").addEventListener("change", compile);
+  $("optimize").addEventListener("change", compile);
+  $("compile").addEventListener("click", compile);
+  $("run").addEventListener("click", runMain);
+  $("clear-console").addEventListener("click", () => {
+    $("console").textContent = "";
+  });
+  $("share").addEventListener("click", async () => {
+    const url = location.origin + location.pathname + "#" + linkHash();
+    try {
+      await navigator.clipboard.writeText(url);
+      setStatus("link copied", "ok");
+    } catch (e) {
+      writeHash();
+      setStatus("link is in the address bar", "ok");
+    }
+  });
+  for (const b of document.querySelectorAll(".tabs button")) {
+    b.addEventListener("click", () => showTab(b.dataset.tab));
+  }
+  // The textarea (no Monaco): Tab indents, Ctrl+Enter compiles and runs, and typing auto-compiles as in the editor.
+  $("fallback").addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const t = e.target;
+      t.value = t.value.slice(0, t.selectionStart) + "  " + t.value.slice(t.selectionEnd);
+      t.selectionStart = t.selectionEnd = t.selectionStart + 2;
+    }
+  });
+  $("fallback").addEventListener("input", scheduleAuto);
+  document.addEventListener("keydown", (e) => {
+    // outside Monaco (the textarea, the toolbar); Monaco's own command above stops the event before it gets here
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !e.defaultPrevented) { e.preventDefault(); compileAndRun(); }
+  });
+
+  init().catch((e) => {
+    showError("browser", "the page did not start: " + ((e && e.message) || e));
+    setStatus("failed", "bad");
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+(function "f" (ret long) (params) (return (pdiff (const long 8) (const long 0) 0)))

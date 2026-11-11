@@ -1,6 +1,6 @@
 # QBE amd64: a long `and` feeds the flags of a word `jnz` (struct with a 4-byte member and padding)
 
-Upstream-ready bug report for QBE (c9x.me/git/qbe.git), with the patch nfcxx applies (`scripts/qbe-wflag.patch`, applied by
+Upstream-ready bug report for QBE (c9x.me/git/qbe.git), with the patch nfcxx applies (`the fork commit 'nfcxx patch: wflag'`, applied by
 `scripts/setup-qbe.sh`). Regression test: `tests/cases/qbe_wflag_padding.cpp`.
 
 ## Symptom
@@ -86,7 +86,7 @@ static N f0(long long p0, long long p1) {
 ## Fix
 
 `amd64/isel.c`: use the flags of the instruction before a `jnz`/select only if it is a comparison or has class `w`; otherwise
-test the word explicitly (`cmpl $0`), as already done when no flag-setting instruction is there. See `scripts/qbe-wflag.patch`:
+test the word explicitly (`cmpl $0`), as already done when no flag-setting instruction is there. See `the fork commit 'nfcxx patch: wflag'`:
 
 ```c
 static int

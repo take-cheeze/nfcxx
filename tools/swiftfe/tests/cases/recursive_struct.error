@@ -1,0 +1,1 @@
+recursive_struct.swift:1:1: error: value type 'Node' has infinite size

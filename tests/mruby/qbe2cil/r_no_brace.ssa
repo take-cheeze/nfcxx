@@ -1,0 +1,4 @@
+# Refused: a function without its closing brace.
+function w $f(w %a) {
+@start
+	ret %a

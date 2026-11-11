@@ -1,0 +1,110 @@
+# frozen_string_literal: true
+
+require_relative '../bc2cpp/world_root'
+require 'fileutils'
+require 'shellwords'
+require_relative 'onig_aliases'
+require_relative 'class_body_hoist'
+
+module OptcarrotSealedBuild
+  def self.prepare(root, temp, compiled_gem)
+    mruby = File.join(root, '3rd/mruby')
+    excluded = BC2CPP_OPEN_WORLD_GEMS + %w[mruby-compiler mruby-bin-mrbc mruby-test mruby-sleep]
+    gems = Dir[File.join(mruby, 'mrbgems/mruby-*/mrbgem.rake')].sort.to_h do |path|
+      [File.basename(File.dirname(path)), File.dirname(path)]
+    end.reject { |name, _| excluded.include?(name) || name.start_with?('mruby-bin-') }
+    hal = RUBY_PLATFORM.match?(/mswin|mingw/) ? 'win' : 'posix'
+    %w[dir io socket task].each do |name|
+      gem_name = "hal-#{hal}-#{name}"
+      gems[gem_name] = File.join(mruby, 'mrbgems', gem_name)
+    end
+    gems['mruby-onig-regexp'] = OptcarrotOnigAliases.prepare(root, temp)
+    gems['optcarrot-compiled'] = compiled_gem
+    # CONST_RESOLVE: the bundle reads OptcarrotProbe, which register.cxx (written after the scan) defines. This stub
+    # names it to the scan as a native binding; emit_register overwrites it.
+    FileUtils.mkdir_p(File.join(compiled_gem, 'src'))
+    File.write(File.join(compiled_gem, 'src/register.cxx'), "// scan stub\nmrb_define_module(M, \"OptcarrotProbe\");\n")
+    # The mruby- prefix keeps the bundle's path gem-relative, so its predicates can be keyed in predicate_whitelist.txt.
+    benchmark = gems['optcarrot-benchmark'] = File.join(temp, 'mruby-optcarrot-benchmark')
+    FileUtils.mkdir_p([File.join(benchmark, 'mrblib'), File.join(benchmark, 'src')])
+    bundle = File.join(benchmark, 'mrblib/benchmark.rb')
+    system(RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
+    source = File.read(bundle)
+    tail = File.read(File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe/runner_tail.rb'))
+    raise 'benchmark tail changed' unless source.end_with?(tail)
+
+    source = source.delete_suffix(tail)
+    # CORE_PRELUDE_INSTALL: the compiled core methods go in right after the shims, before any optcarrot class body.
+    # Those bodies build their LUTs (PPU::TILE_LUT) with Range#each, Enumerable#collect and Array#transpose, which
+    # install! (at run) reaches too late; the shims come first because Integer#[] and friends are core-owner entries.
+    prelude = %w[shims.rb shim_integer_aref.rb].map do |name|
+      File.read(File.join(BC2CPP_TREE_ROOT, 'tools/optcarrot_probe', name))
+    end.join
+    raise 'benchmark prelude changed' unless source.start_with?(prelude)
+
+    program = source.delete_prefix(prelude)
+    # CLASS_BODY_HOIST (class_body_hoist.rb); OPTCARROT_CLASS_BODY_HOIST=0 keeps the initializers in their class
+    # bodies for a before/after measurement.
+    program, = ClassBodyHoist.rewrite(program) unless ENV['OPTCARROT_CLASS_BODY_HOIST'] == '0'
+    # On the prelude's last line, so the bundle's line numbers stay those of build_bundle.rb's output.
+    source = "#{prelude.chomp}; OptcarrotProbe.install_prelude!\n#{program}"
+    source << "\nmodule OptcarrotBenchmark\n  def self.run\n    OptcarrotProbe.install!\n"
+    source << tail.lines.map { |line| "    #{line}" }.join
+    source << "  end\nend\n"
+    File.write(bundle, source)
+    File.write(File.join(benchmark, 'mrbgem.rake'), <<~RUBY)
+      MRuby::Gem::Specification.new('optcarrot-benchmark') do |spec|
+        spec.license = 'MIT'
+        spec.authors = 'probe'
+        spec.add_dependency 'optcarrot-compiled'
+      end
+    RUBY
+    File.write(File.join(benchmark, 'src/main.cxx'), <<~CPP)
+      #include <mruby.h>
+      #include <mruby/array.h>
+      #include <mruby/string.h>
+      #include <mruby/variable.h>
+      #include <cstdio>
+      #include <cstdlib>
+      extern "C" void mrb_optcarrot_benchmark_gem_init(mrb_state*) {}
+      extern "C" void mrb_optcarrot_benchmark_gem_final(mrb_state*) {}
+      int main(int argc, char** argv) {
+        if (argc != 3) { std::fprintf(stderr, "usage: optcarrot ROM FRAMES\\n"); return 2; }
+        mrb_state* M = mrb_open();
+        if (!M) { std::fprintf(stderr, "cannot initialize mruby\\n"); return 1; }
+        if (M->exc) { mrb_print_error(M); mrb_close(M); return 1; }
+        // OPTCARROT_NO_GC=1: no collection at all, the bound on what the GC costs (tools/optcarrot_probe/README.md).
+        if (std::getenv("OPTCARROT_NO_GC")) M->gc.disabled = TRUE;
+        mrb_value args = mrb_ary_new_capa(M, 2);
+        mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[1]));
+        mrb_ary_push(M, args, mrb_str_new_cstr(M, argv[2]));
+        mrb_define_global_const(M, "ARGV", args);
+        mrb_funcall(M, mrb_obj_value(mrb_module_get(M, "OptcarrotBenchmark")), "run", 0);
+        int failed = M->exc != nullptr;
+        if (failed) { mrb_print_error(M); }
+        mrb_close(M);
+        return failed;
+      }
+    CPP
+    [bundle, gems]
+  end
+
+  # bc2cpp compiles closed-world programs only, so a probe of the benchmark compiles this sealed
+  # world too. Returns [sources, env]: the bundle and the closed-world inputs (the outside sources of the build).
+  def self.bc2cpp_world(root, temp)
+    bundle, gems = prepare(root, temp, File.join(temp, 'gem'))
+    native, ruby = bc2cpp_closed_world_outside_srcs('optcarrot-probe', gems, root)
+    [[bundle], environment(gems).merge('NATIVE_SRCS' => Shellwords.join(native), 'FOREIGN_RUBY_SRCS' => Shellwords.join(ruby),
+                                       'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '')]
+  end
+
+  # BC2CPP_ENUM_STEP=0: the enum-step driver is compiled by mrb_load_string, and this sealed world excludes
+  # mruby-compiler, so the generated code would not link (docs/bc2cpp-enum-step.md, Known limits).
+  def self.environment(gems)
+    {
+      'BC2CPP_BUILD_NAME' => 'optcarrot-probe',
+      'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }),
+      'BC2CPP_ENUM_STEP' => '0'
+    }
+  end
+end

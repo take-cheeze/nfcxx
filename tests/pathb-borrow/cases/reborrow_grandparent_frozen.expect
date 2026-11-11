@@ -1,0 +1,3 @@
+1
+test: loan-conflict: x (child)
+test: loan-conflict: x (grandchild)

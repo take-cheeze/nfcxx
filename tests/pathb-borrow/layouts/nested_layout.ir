@@ -1,0 +1,7 @@
+(ir-module "semantic" (layout (pointer 8) (int 4)))
+(borrow-layout (struct "Outer") 16 4 (field "tag" 0 int) (field "inner" 4 (struct "Pad")) (field "tail" 12 int))
+(borrow-layout (struct "Pad") 8 4 (field "a" 0 char) (field "b" 4 int))
+(function "test" (ret int) (params)
+(slot "s" (struct "Outer") 16 4)
+(decl $"s" val) (store int $"s" (const int 1))(store char (offset $"s" 4) (const char 2)) (store int (offset $"s" 8) (const int 5))(store int (offset $"s" 12) (const int 1))(let %0 (ptr (struct "Outer")) (borrow (ptr (struct "Outer")) "p" exclusive $"s"))(let %1 (ptr (struct "Pad")) (reborrow (ptr (struct "Pad")) "c" shared "p" (offset %0 4)))(loan-end "c") (loan-end "p")(return (const int 0))
+)

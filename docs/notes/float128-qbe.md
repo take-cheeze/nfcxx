@@ -41,14 +41,14 @@ Two more blockers, found by compiling past the typedef:
 
 ## Prototype (not committed)
 
-Two changes to `scripts/qbe-prep.rb` move the first error. Nothing else changes.
+Two changes to `scripts/qbe-prep` move the first error. Nothing else changes.
 
 1. `'__float128' => 'struct __nfcxx_float128'` in `FLOAT_TYPE`. The type becomes the same 16-byte, no-arithmetic struct as `_Float128`.
 2. A `HELPER_BUILTINS` entry for `__builtin_fabsf` (clears the sign bit through a union).
 
 Result: the first error moves from `4530:9` (typedef) to `5479` (`__builtin_fabsf`, fixed by change 2) and then to `5666:85`, `cast operand must have scalar type` (`(float)` on the struct). cproc rejects every float128 arithmetic, comparison and cast, so the mapping cannot compile wrongly. `float_pt` still does not compile.
 
-Tests with the prototype: `NFCXX_BACKEND=qbe bash tests/c/run.sh` gives 11 of 11. `NFCXX_BACKEND=qbe bash tests/run.sh` gives 20 ok and the same 14 eval-order failures as the committed `qbe-prep.rb`. Because the second suite does not pass, the prototype is not pushed.
+Tests with the prototype: `NFCXX_BACKEND=qbe bash tests/c/run.sh` gives 11 of 11. `NFCXX_BACKEND=qbe bash tests/run.sh` gives 20 ok and the same 14 eval-order failures as the committed `qbe-prep`. Because the second suite does not pass, the prototype is not pushed.
 
 ## Options
 

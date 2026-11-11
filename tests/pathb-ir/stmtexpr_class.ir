@@ -3,8 +3,8 @@
 (global "copies" int 4 4 (static) (init (zero 0 4)))
 (global "dtors" int 4 4 (static) (init (zero 0 4)))
 (global "ctors" int 4 4 (static) (init (zero 0 4)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "tmp" (array 9 (struct "__C2")) 144 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZN1CD1Ev" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))

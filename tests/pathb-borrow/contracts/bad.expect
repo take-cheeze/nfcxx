@@ -1,0 +1,7 @@
+1
+_Z9init_pairP4Pairi: write-through-shared-loan: *%0
+_Z3sumPK4Pair: uninitialized: *%0[0..4]
+_Z3sumPK4Pair: uninitialized: *%0[4..8]
+_Z3sumPK4Pair: contract-output-uninitialized: *%0
+_Z6secondP4Pair: contract-return-mismatch: *%0
+_Z4bumpPi: write-through-shared-loan: *%0

@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "wide" (returns long) (nothrow) (noescape) (closed) (args (read long)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+
+(decl $"x" val) (store int $"x" (const int 1)) (let %0 long (call long &"wide" $"x"))(return (const int 0))
+)

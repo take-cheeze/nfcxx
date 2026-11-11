@@ -1,0 +1,1 @@
+type_mismatch.swift:1:17: error: cannot convert value of type 'Bool' to expected type 'Int'

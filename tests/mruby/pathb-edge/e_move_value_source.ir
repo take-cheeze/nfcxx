@@ -1,0 +1,4 @@
+(ir-module "bad_move" (layout (pointer 8) (int 4)))
+(function "main" (ret int) (params)
+  (let %0 int (move-value int @"x"))
+  (return %0))

@@ -1,0 +1,154 @@
+name: wasm explorer (build)
+
+# Builds the wasm explorer's static site (tools/wasm-explorer/build-static.cjs) and uploads it as the artifact
+# github-pages. A reusable workflow: wasm-explorer-pages.yml deploys the site to GitHub Pages, and
+# wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
+# mruby tool are built as in ci.yml, and each example is compiled ahead of time in every mode of its language and
+# checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
+# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh), and the Swift examples need the Swift front end
+# (tools/swiftfe, built below). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
+# the same front end and emitter, built with Emscripten) is built and checked against the native one here too, and the
+# site carries it (inbrowser/), so the page compiles C, C++, LLVM IR and the IR without a server.
+#
+# This job runs the code it checks out (the compiler, the examples), so it has no secrets and reads the repository only.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to build (empty: the commit of the caller's event)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh), as in ci.yml
+      PATHB_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # the commit to build: the caller's (empty), or a pull request's head (wasm-explorer-preview.yml)
+          ref: ${{ inputs.ref }}
+          submodules: true
+
+      # The Swift toolchain (for the Swift examples, see below) is installed first: after the caches and the other
+      # toolchains below it has run the runner out of disk ("ENOSPC" while extracting it).
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
+      - name: Install the build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ruby rake
+
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+
+      - name: Build the mruby interpreter
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: scripts/setup-mruby.sh
+
+      # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
+      # pinned (the runner's rustup installs it), with llvm-tools for the llvm-dis of the module after LTO.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --component llvm-tools
+          echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
+
+      # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Restore TinyGo
+        id: tinygo
+        uses: actions/cache@v6
+        with:
+          path: build/tinygo
+          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.sh') }}
+
+      - name: Install TinyGo
+        if: steps.tinygo.outputs.cache-hit != 'true'
+        run: scripts/setup-tinygo.sh
+
+      # The in-browser compiler: Emscripten (pinned), the front end built with it (with SoftFloat) and mruby built with it.
+      - name: Restore Emscripten
+        id: emsdk
+        uses: actions/cache@v6
+        with:
+          path: build/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+
+      - name: Install Emscripten
+        if: steps.emsdk.outputs.cache-hit != 'true'
+        run: scripts/setup-emsdk.sh
+
+      - name: Restore the in-browser front end
+        id: pathbwasm
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/pathb-wasm
+            build/softfloat
+          key: pathb-wasm-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh', 'scripts/setup-emsdk.sh') }}
+
+      - name: Restore the in-browser mruby
+        id: mrubywasm
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-wasm
+          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
+
+      - name: Build the in-browser compiler
+        if: steps.pathbwasm.outputs.cache-hit != 'true' || steps.mrubywasm.outputs.cache-hit != 'true'
+        run: |
+          source build/emsdk/emsdk_env.sh
+          [ "${{ steps.pathbwasm.outputs.cache-hit }}" = true ] || PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh
+          [ "${{ steps.mrubywasm.outputs.cache-hit }}" = true ] || scripts/setup-mruby-wasm.sh
+
+      - name: Check the in-browser front end against the native one
+        run: tests/pathb-wasm-frontend/run.sh
+
+      - name: Check the in-browser compile against the server's (every example in every mode)
+        run: node tools/wasm-explorer/test-inbrowser.cjs
+
+      # The Swift examples: the Swift front end (tools/swiftfe, the swiftfe workflow's toolchain) emits the C that the
+      # explorer compiles, so it is built here; the build checks the examples against the stored output of swiftc.
+      # The toolchain is installed in "Install Swift" near the top of the job, while the runner still has its full disk.
+      - name: Build the Swift front end
+        run: swift build -c release
+        working-directory: tools/swiftfe
+
+      - name: Build the static site (compiles and checks every example in every mode)
+        run: node tools/wasm-explorer/build-static.cjs --out _site --require-inbrowser
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site

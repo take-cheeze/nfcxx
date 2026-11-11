@@ -1,0 +1,268 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# DECLARED_RETURN_GUARD: a `%a{bc2cpp:hint}` return declaration, and any plain declaration the return proofs do not
+# prove, is checked at run time by its compiled body and is then a fact; a declared parameter class is checked on
+# entry (DECLARED_PARAM_GUARD). Host only (no mrbc, no build), on a CodeGen with hand-set state:
+#
+# 1. the wrapped body: a hinted `-> Integer` and `-> C` (and `C?`) check every value the method returns (the exit
+#    wrapper), raise through bc2cpp_declared_return_violation, and keep no by-name fallback;
+# 2. the fact: the hinted names enter declared_return_facts (callers trust them with no guard), RBS_CHECKED_PARAMS
+#    takes a hinted `-> C` as a proof, and the closed-world preconditions still refuse (alias, core body);
+# 3. the plain declarations: guarded unless proven or BC2CPP_DECLARATION_GUARD=0; the parameter class check;
+# 4. the refusals: a hinted declaration on a native method, an undefined one or an unchecked kind is a TC1010 error;
+#    a run that compiles the owner without the guard fails (guard_failures);
+#
+# Usage: ruby scripts/bc2cpp/declared_return_guard_check.rb
+
+require_relative '../../tools/bc2cpp/world_root'
+require 'set'
+require 'tmpdir'
+require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/codegen'
+require_relative '../../tools/bc2cpp/codegen_send'
+require_relative '../../tools/bc2cpp/codegen_declared_returns'
+require_relative '../../tools/bc2cpp/codegen_block_returns'
+require_relative '../../tools/bc2cpp/rbs_signatures'
+require_relative '../../tools/bc2cpp/rbs_param_check'
+require_relative '../../tools/bc2cpp/review_scope'
+
+ROOT = BC2CPP_WORLD_ROOT
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
+end
+
+Loc = RbsSignatures::Loc
+entry = lambda do |owner, name, label, kind, cls, text, nilable: false|
+  DeclaredReturns::Entry.new(owner: owner, name: name, label: label, kind: kind, cls: cls, nilable: nilable,
+                             text: text, loc: Loc.new('sig/t.rbs', 3, 3), hint: true)
+end
+count_hint = entry.call('Foo', 'count', 'L1', :fixnum, 'Integer', 'Integer')
+pick_hint = entry.call('Foo', 'pick', 'L2', :class, 'Bar', 'Bar')
+find_hint = entry.call('Foo', 'find', 'L3', :class, 'Bar', 'Bar?', nilable: true)
+list_hint = entry.call('Foo', 'list', 'L4', :array, 'Array', 'Array[Bar]')
+hints = [count_hint, pick_hint, find_hint, list_hint]
+
+# CodeGen's own methods over hand-set state (no constructor run).
+class GuardHarness < CodeGen
+  attr_accessor :installed, :aliased
+
+  # CodeGen's class-level inputs, read through self.class.
+  def self.declared_returns = CodeGen.declared_returns
+  def self.declared_params = CodeGen.declared_params
+  def self.declared_return_hint_refusals = CodeGen.declared_return_hint_refusals
+  def self.declared_return_root = nil
+
+  def initialize(defs, ireps)
+    @ireps = ireps
+    @registry = defs.group_by(&:name)
+    @owner_of = defs.to_h { |d| [d.irep, d] }
+    @foreign_method_names = Set.new
+    @installed = Set.new
+    @aliased = Set.new
+  end
+
+  def symbol_installed_names = @installed
+  def numeric_aliased_names = @aliased
+  def return_table_definitions(name) = @registry.fetch(name, [])
+  def numeric_dynamically_named?(_name) = false
+end
+
+defs = %w[count pick find list].each_with_index.map do |name, i|
+  MethodDef.new(name: name, owner: 'Foo', irep: "L#{i + 1}")
+end
+ireps = defs.to_h { |d| [d.irep, Irep.new(label: d.irep, instructions: [], reps: [])] }
+CodeGen.declared_returns = hints
+gen = GuardHarness.new(defs, ireps)
+
+puts '-- the compiled body checks every return (host)'
+body = lambda do |impl|
+  "// Foo#m (compiled from irep L, 3 insns)\n" \
+    "mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_int n) {\n  mrb_value r1 = self;\n  if (n) return r1;\n" \
+    "  return mrb_nil_value();\n}\n\n" \
+    "static mrb_value Foo_m(mrb_state* M, mrb_value self) {\n" \
+    "  mrb_int n;\n  mrb_get_args(M, \"i\", &n);\n  return #{impl}(M, self, n);\n}\n\n"
+end
+fixnum_code = gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl'), 'Foo_count_impl')
+check.call('the hinted -> Integer body is renamed and called by a checking Foo_count_impl',
+           fixnum_code.include?('static inline mrb_value Foo_count_impl_unguarded(mrb_state* M, mrb_value self, mrb_int n) {') &&
+             fixnum_code.include?("mrb_value Foo_count_impl(mrb_state* M, mrb_value self, mrb_int n) {\n" \
+                                  '  mrb_value bc2cpp_declared_ret = Foo_count_impl_unguarded(M, self, n);'))
+check.call('-> Integer is checked Fixnum-exact (mrb_fixnum_p), with the method and type named',
+           fixnum_code.include?('if (mrb_unlikely(!(mrb_fixnum_p(bc2cpp_declared_ret)))) ' \
+                                'bc2cpp_declared_return_violation(M, bc2cpp_declared_ret, "Foo#count", "Integer");'))
+check.call('no by-name fallback in a guard', !fixnum_code.match?(/bc2cpp_send|mrb_funcall|bc2cpp_hint_violation\(/))
+class_code = gen.declared_return_guard_wrap('L2', body.call('Foo_pick_impl'), 'Foo_pick_impl')
+check.call('-> C is checked as exactly C (the class-equality test of the receiver guards)',
+           class_code.match?(/if \(mrb_unlikely\(!\(bc2cpp_class_is\(M, bc2cpp_declared_ret, bc2cpp_owner_class_\d+\(M\)\)\)\)\) /) &&
+             class_code.include?('"Foo#pick", "Bar")'))
+nil_code = gen.declared_return_guard_wrap('L3', body.call('Foo_find_impl'), 'Foo_find_impl')
+check.call('-> C? also takes nil', nil_code.include?('!(mrb_nil_p(bc2cpp_declared_ret) || bc2cpp_class_is(M, bc2cpp_declared_ret, '))
+list_code = gen.declared_return_guard_wrap('L4', body.call('Foo_list_impl'), 'Foo_list_impl')
+# The basic kinds and a native class: each is a guard test of its own (no proof analysis reads them).
+{ 'Hash' => ['L5', :hash, 'mrb_hash_p(bc2cpp_declared_ret)'],
+  'Symbol' => ['L6', :symbol, 'mrb_symbol_p(bc2cpp_declared_ret)'],
+  'Float' => ['L7', :float, 'mrb_float_p(bc2cpp_declared_ret)'] }.each do |text, (label, kind, test)|
+  kind_code = gen.declared_return_guard_statement(entry.call('Foo', 'list', label, kind, nil, text), 'bc2cpp_declared_ret')
+  check.call("-> #{text} is checked by #{test}", kind_code.include?("!(#{test})"))
+end
+enum_code = gen.declared_return_guard_statement(entry.call('Foo', 'items', 'L9', :module, 'Enumerable', 'Enumerable[Bar]'),
+                                                'bc2cpp_declared_ret')
+check.call('-> Enumerable is a kind-of test on the module (includers pass; no exact class)',
+           enum_code.include?('!(mrb_obj_is_kind_of(M, bc2cpp_declared_ret, mrb_module_get(M, "Enumerable")))'))
+union_code = gen.declared_return_guard_statement(entry.call('Foo', 'pick_either', 'L10', :union,
+                                                             [[:fixnum, 'Integer', false], [:nil, nil, false]], 'Integer | nil'),
+                                                  'bc2cpp_declared_ret')
+check.call('-> Integer | nil is one linear test per member (the Integer test or the nil test)',
+           union_code.include?('!((mrb_fixnum_p(bc2cpp_declared_ret)) || (mrb_nil_p(bc2cpp_declared_ret)))'))
+rect_code = gen.declared_return_guard_statement(entry.call('Foo', 'rect', 'L8', :class, 'RGSS::Rect', 'RGSS::Rect'),
+                                                'bc2cpp_declared_ret')
+check.call('-> RGSS::Rect is checked as exactly the native class (its class pointer, like a program class)',
+           rect_code.include?('bc2cpp_class_is(M, bc2cpp_declared_ret, bc2cpp_owner_class_'))
+check.call('-> Array[C] checks the Array (the element stays a guarded seed)',
+           list_code.include?('!(mrb_array_p(bc2cpp_declared_ret))') && list_code.include?('"Array[Bar]"'))
+check.call('a body with no runtime-checked declaration is unchanged',
+           gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl'), 'Foo_x_impl') == body.call('Foo_x_impl'))
+check.call('an `#error` stub is left alone (guard_failures refuses it)',
+           gen.declared_return_guard_wrap('L1', "#error x\n", 'Foo_count_impl') == "#error x\n")
+
+puts '-- the declaration is a fact (host)'
+check.call('a hinted -> Integer joins the Fixnum return facts', gen.declared_return_facts(:fixnum).include?('count'))
+check.call('a hinted -> Array joins the Array return facts', gen.declared_return_facts(:array).include?('list'))
+check.call('hinted -> C and -> C? join the class return facts',
+           gen.declared_return_facts(:class) == { 'pick' => 'Bar', 'find' => 'Bar' })
+gen.check_declared_returns
+check.call('the listing says runtime-checked, fact',
+           gen.declared_return_report.include?('  DECLARED_RET Foo#count -> Integer: runtime-checked (%a{bc2cpp:hint}), fact fixnum') &&
+             gen.declared_return_diagnostics.empty?)
+aliased = GuardHarness.new(defs, ireps)
+aliased.aliased << 'count'
+check.call('an aliased hinted name is refused (error) and carries no fact',
+           aliased.declared_return_refusal('count')&.first == 'error' && !aliased.declared_return_facts(:fixnum).include?('count'))
+core_defs = defs.map { |d| d.name == 'count' ? d.dup.tap { |c| c.core = true } : d }
+core = GuardHarness.new(core_defs, ireps)
+check.call('a hinted core method is refused (error): it may run interpreted',
+           core.declared_return_refusal('count')&.first == 'error')
+poly_defs = defs + [MethodDef.new(name: 'count', owner: 'Baz', irep: 'L5')]
+poly = GuardHarness.new(poly_defs, ireps.merge('L5' => Irep.new(label: 'L5', instructions: [], reps: [])))
+check.call('a POLY name declared on one definition only adds no fact (every definition must carry the check)',
+           poly.declared_return_refusal('count')&.first == 'info' && !poly.declared_return_facts(:fixnum).include?('count'))
+# A POLY name declared alike on every definition, first asked while a core body compiles (compile_method hides
+# @closed_world then and keeps the program's world in @core_program_world).
+World = Struct.new(:visible) do
+  def name_fully_visible?(_name) = visible
+end
+poly_ireps = ireps.merge('L5' => Irep.new(label: 'L5', instructions: [], reps: []))
+poly_entries = hints + [entry.call('Baz', 'count', 'L5', :fixnum, 'Integer', 'Integer')]
+in_core = GuardHarness.new(poly_defs, poly_ireps)
+in_core.instance_variable_set(:@declared_return_entries, poly_entries)
+in_core.instance_variable_set(:@core_program_world, World.new(true))
+check.call('a POLY name declared on every definition takes its fact from the program world inside a core compile',
+           in_core.declared_return_refusal('count').nil? && in_core.declared_return_facts(:fixnum).include?('count'))
+no_world = GuardHarness.new(poly_defs, poly_ireps)
+no_world.instance_variable_set(:@declared_return_entries, poly_entries)
+check.call('with no world at all the POLY name stays refused (info)',
+           no_world.declared_return_refusal('count')&.first == 'info')
+
+outside = GuardHarness.new(defs, ireps)
+outside.instance_variable_get(:@foreign_method_names) << 'count'
+check.call('a hint whose name an outside definition also defines needs no guard (no fact relies on it)',
+           outside.declared_return_refusal('count')&.first == 'info' &&
+           !outside.declared_return_hints.map(&:name).include?('count'))
+check.call('a hint with a fact still needs its guard',
+           GuardHarness.new(defs, ireps).declared_return_hints.map(&:name).include?('count'))
+
+puts '-- plain declarations and parameter classes (host)'
+plain = lambda do |e|
+  DeclaredReturns::Entry.new(**e.to_h, hint: false)
+end
+plain_entries = [plain.call(count_hint), plain.call(pick_hint)]
+plain_gen = GuardHarness.new(defs, ireps)
+plain_gen.instance_variable_set(:@declared_return_entries, plain_entries)
+check.call('a plain declaration that adds a fact is guarded',
+           plain_gen.declared_return_hints.map(&:name).sort == %w[count pick])
+ENV['BC2CPP_DECLARATION_GUARD'] = '0'
+off_gen = GuardHarness.new(defs, ireps)
+off_gen.instance_variable_set(:@declared_return_entries, plain_entries + [count_hint.dup.tap { |e| e.name = 'find'; e.label = 'L3' }])
+check.call('BC2CPP_DECLARATION_GUARD=0 leaves the plain ones unchecked and keeps the hinted one',
+           off_gen.declared_return_hints.map(&:name) == ['find'])
+ENV.delete('BC2CPP_DECLARATION_GUARD')
+proven_gen = GuardHarness.new(defs, ireps)
+proven_gen.instance_variable_set(:@declared_return_entries, plain_entries)
+proven_gen.instance_variable_set(:@declared_returns_final, true)
+proven_gen.define_singleton_method(:declared_return_proven?) { |e| e.name == 'count' }
+check.call('a plain declaration the return proofs prove needs no check, an unproven one still does',
+           proven_gen.declared_return_hints.map(&:name) == ['pick'])
+core_plain = GuardHarness.new(defs.map { |d| d.name == 'count' ? d.dup.tap { |c| c.core = true } : d }, ireps)
+core_plain.instance_variable_set(:@declared_return_entries, plain_entries)
+check.call('a plain core declaration is refused (error) like a hinted one: it may run interpreted',
+           core_plain.declared_return_refusal('count')&.first == 'error')
+CodeGen.declared_params = { 'L1' => [[0, 'Bar', 'Foo#count', 'Bar']] }
+param_code = plain_gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl'), 'Foo_count_impl')
+check.call('a declared parameter class is checked on entry, with the method, position and type named',
+           param_code.match?(/if \(mrb_unlikely\(!\(bc2cpp_class_is\(M, n, bc2cpp_owner_class_\d+\(M\)\)\)\)\) /) &&
+             param_code.include?('bc2cpp_declared_param_violation(M, n, "Foo#count", 1, "Bar");') &&
+             param_code.index('bc2cpp_declared_param_violation') < param_code.index('Foo_count_impl_unguarded(M, self, n)'))
+CodeGen.declared_params = { 'L9' => [[0, 'Bar', 'Foo#x', 'Bar']] }
+only_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl'), 'Foo_x_impl')
+check.call('a method with a parameter class and no return declaration is wrapped for the parameter only',
+           only_param.include?('Foo_x_impl_unguarded') && only_param.include?('bc2cpp_declared_param_violation(M, n, "Foo#x", 1, "Bar");') &&
+             !only_param.include?('bc2cpp_declared_return_violation'))
+CodeGen.declared_params = nil
+
+puts '-- refusals (host)'
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 't.rbs'), <<~RBS)
+    class Foo
+      %a{bc2cpp:hint}
+      def native_size: () -> Integer
+      %a{bc2cpp:hint}
+      def nowhere: () -> Integer
+      %a{bc2cpp:hint}
+      def name_text: () -> (Integer | Set[Integer])
+      %a{bc2cpp:hint}
+      def count: () -> Integer
+    end
+  RBS
+  loaded = RbsSignatures.load([dir], display_root: dir)
+  registry = { 'native_size' => [MethodDef.new(name: 'native_size', owner: 'Foo', irep: nil)],
+               'name_text' => [MethodDef.new(name: 'name_text', owner: 'Foo', irep: 'N1')],
+               'count' => [MethodDef.new(name: 'count', owner: 'Foo', irep: 'N2')] }
+  rireps = { 'N1' => Irep.new(label: 'N1', instructions: [], reps: []),
+             'N2' => Irep.new(label: 'N2', instructions: [], reps: []) }
+  refusals = DeclaredReturns.hint_refusals(loaded, rireps, registry).to_h { |r| [r[:key], r[:why]] }
+  check.call('a hinted declaration on a native method is refused',
+             refusals['Foo#native_size']&.include?('a native or accessor method'))
+  check.call('a hinted declaration on an undefined method is refused', refusals['Foo#nowhere']&.include?('defines no such'))
+  check.call('a hinted declaration of an unchecked kind is refused', refusals['Foo#name_text']&.include?('no checked kind'))
+  check.call('a hinted declaration on a compiled body is not refused (it is an entry)',
+             !refusals.key?('Foo#count') && DeclaredReturns.from_signatures(loaded, rireps, registry).map(&:key) == ['Foo#count'])
+  CodeGen.declared_return_hint_refusals = DeclaredReturns.hint_refusals(loaded, rireps, registry)
+  gen2 = GuardHarness.new(defs, ireps)
+  diags = gen2.check_declared_returns
+  check.call('each refusal is a located TC1010 error',
+             diags.count { |d| d[:severity] == 'error' && d[:code] == 'TC1010' && d[:file] == 't.rbs' } == 3)
+  CodeGen.declared_return_hint_refusals = nil
+end
+guarded = { label: 'L1', owner: 'Foo', name: 'count', code: fixnum_code }
+check.call('a run that compiles the guarded body passes', DeclaredReturns.guard_failures([count_hint], [guarded], nil, nil).empty?)
+check.call('a run that compiles the owner but not the body fails',
+           DeclaredReturns.guard_failures([count_hint], [], ['Foo'], nil).first&.include?('does not compile it'))
+check.call('a body left interpreted (#error) fails',
+           DeclaredReturns.guard_failures([count_hint], [guarded.merge(code: "#error x\n", unsupported: true)], nil, nil)
+                          .first&.include?('interpreted and unchecked'))
+check.call('a body compiled without its guard fails',
+           DeclaredReturns.guard_failures([count_hint], [guarded.merge(code: body.call('Foo_count_impl'))], nil, nil)
+                          .first&.include?('carries no guard'))
+check.call('an owner another gem compiles is that run\'s to check',
+           DeclaredReturns.guard_failures([count_hint], [], ['Other'], ['Foo']).empty?)
+check.call('an owner no gem compiles fails',
+           DeclaredReturns.guard_failures([count_hint], [], ['Other'], ['Else']).first&.include?('no compiled gem'))
+
+if failures.empty?
+  puts 'declared return guard check: ok'
+else
+  abort "declared return guard check: #{failures.size} failure(s)"
+end

@@ -1,0 +1,5 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params )
+(slot "s" (struct "Huge") 4097 8)
+(decl $"s" val)(return (const int 0))
+)

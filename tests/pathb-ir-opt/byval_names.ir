@@ -1,0 +1,12 @@
+(ir-module "byval.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "callee"
+  (ret void)
+  (params (param %0 "tmp" (ptr int)) (param %1 "tmp" (byval (struct "S") 8 8)) (param %2 "tmp" (byval (struct "T") 4 4)))
+  (return))
+(function "caller"
+  (ret void)
+  (params (param %0 "a" (ptr int)))
+  (slot "x" (struct "S") 8 8)
+  (slot "y" (struct "T") 4 4)
+  (eval (call void &"callee" %0 (byval (struct "S") $"x") (byval (struct "T") $"y")))
+  (return))

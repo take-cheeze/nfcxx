@@ -1,0 +1,61 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir_core'
+require_relative 'class_scope'
+
+# Class and module body discovery on the IR, shared by every walk that
+# descends into a CLASS/MODULE/SCLASS body.
+module BytecodeIR
+  # { opener index => body irep label } for each of +ops+ in +irep+ whose body
+  # EXEC is the literal next instruction on the opener's register. An empty
+  # body (`class Timeout < StandardError; end`) has no EXEC, so a later EXEC on
+  # that register is not its body.
+  def self.class_bodies(irep, *ops)
+    bodies = {}
+    program = self.for(irep)
+    irep.each_with_op(*ops) do |insn, idx|
+      # The emitter's annotation names the body exactly (no adjacency/register reasoning).
+      if irep.class_scope
+        op = ClassScope.op_at(irep, insn)
+        label = op && ClassScope.body_label(irep, op)
+        bodies[idx] = label if label
+        next
+      end
+
+      exec = program.source_at(idx + 1)
+      next unless exec&.op == :EXEC && exec.reg_token == insn.reg_token
+
+      bodies[idx] = irep.reps[exec.block_index]
+    end
+    bodies
+  end
+
+  # The qualified name of the CLASS/MODULE at +idx+ when its outer scope is
+  # agreed by every reaching definition in the IR: LOADNIL (the lexical +namespace+, nil at top level) or
+  # OCLASS (`class ::Name`). Nil otherwise; a constant-path outer is resolved
+  # by the caller.
+  def self.class_body_path(irep, idx, namespace)
+    program = self.for(irep)
+    insn = program.source_at(idx)
+    # With the emitter's annotation the answer is exact (compact and `::`-rooted paths included): the qualified path as written
+    # resolved against the lexical namespace, nil when that is dynamic or relative to an unknown namespace.
+    if irep.class_scope && (op = ClassScope.op_at(irep, insn))
+      # A constant-path outer (`class A::B`, `class ::A::B`) stays the caller's to resolve, as in the dataflow below: `A` may be an
+      # alias of another class, so the written path is not necessarily the class's name.
+      return nil if op[:outer] == :path || (op[:outer] == :root && op[:path]&.include?('::'))
+
+      return op[:path]
+    end
+
+    definitions = reaching_definitions(irep, idx, insn.reg, through_handlers: true, origin_transfers: true, shared: true)
+    return nil if definitions.nil? || definitions.empty? || definitions.any?(&:entry?)
+
+    paths = definitions.map do |definition|
+      case program.source_at(definition.index).op
+      when :LOADNIL then namespace ? "#{namespace}::#{insn.sym}" : insn.sym
+      when :OCLASS then insn.sym
+      end
+    end
+    paths.first if paths.first && paths.uniq.size == 1
+  end
+end

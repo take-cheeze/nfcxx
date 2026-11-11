@@ -1,0 +1,349 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# Opt-in Path B driver (docs/notes/pathb-ssa-build.md): a Path B IR file (the `NFCXX_PATHB_MODE=ir` text, see
+# docs/notes/pathb-stage2.md) through the SSA converter (scripts/pathb-ssa.rb), the e-graph pass
+# (scripts/pathb-egraph.rb) and the QBE emitter (scripts/pathb-ssa-qbe.rb), then QBE (build/qbe/qbe) to assembly.
+# Nothing calls this by default; the default Path B flow does not use it.
+#
+#   scripts/pathb-ssa-build [-o OUT.s] [--no-opt] FILE.ir
+#
+# Each function is emitted on its own. A function outside the emitter's subset (QbeUnsupported) is not emitted: its
+# name and reason go to stderr, the rest of the module is still written, and the status is 3. Callers of a function
+# that was not emitted get an undefined symbol at link time, so status 3 output is not a complete program.
+#
+# Exit status: 0 every function emitted; 1 error (conversion, optimization, or QBE failed); 2 usage;
+# 3 some functions not emitted (listed on stderr; the assembly has the others).
+#
+# NFCXX_QBE overrides the QBE binary (default build/qbe/qbe under the repository root).
+
+require "base64"
+require "open3"
+require "rbconfig"
+require "tmpdir"
+require_relative "pathb-egraph"
+require_relative "pathb-ssa-qbe"
+require_relative "pathb-x87-thunks"
+
+ROOT_DIR = File.expand_path("..", __dir__)
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_USAGE = 2
+EXIT_PARTIAL = 3
+
+def usage_exit
+  warn "usage: pathb-ssa-build [-o OUT.s] [--no-opt] [--safe | --asan] FILE.ir"
+  exit EXIT_USAGE
+end
+
+def error_exit(msg)
+  warn "pathb-ssa-build: #{msg}"
+  exit EXIT_ERROR
+end
+
+def qbe_binary
+  ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
+end
+
+# The helpers the emitter names in "# pathb-asm NAME" comments, appended to the assembly once each (the same text as
+# scripts/pathb-qbe-emit.rb's ASM_HELPERS, as weak functions). QBE has no fence, and a barrier is an empty call.
+ASM_HELPERS = {
+  "barrier" => ["\t.text", "\t.weak __pathb_barrier", "\t.type __pathb_barrier, @function", "__pathb_barrier:", "\tret",
+                "\t.size __pathb_barrier, .-__pathb_barrier"],
+  "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
+              "\t.size __pathb_fence, .-__pathb_fence"],
+  # An empty function whose argument (a slot's address) escapes: it keeps the slot in memory across a returns-twice call.
+  "escape" => ["\t.text", "\t.weak __pathb_escape", "\t.type __pathb_escape, @function", "__pathb_escape:", "\tret",
+               "\t.size __pathb_escape, .-__pathb_escape"],
+# `pathb_check(cond, code)` (the checked operations of the SSA route): an abort when cond is nonzero. It is weak, so a
+# test driver's own pathb_check overrides it.
+"check" => ["\t.text", "\t.weak pathb_check", "\t.type pathb_check, @function", "pathb_check:", "\ttestl %edi, %edi",
+            "\tje .Lpathb_check_ok", "\tsubq $8, %rsp", "\tcall abort", ".Lpathb_check_ok:", "\tret",
+            "\t.size pathb_check, .-pathb_check"],
+  "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
+              "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
+  # would then not advance past that argument; passing the value to this empty function keeps the read.
+  "vasink_w" => ["\t.text", "\t.weak __pathb_vasink_w", "\t.type __pathb_vasink_w, @function", "__pathb_vasink_w:", "\tret",
+                 "\t.size __pathb_vasink_w, .-__pathb_vasink_w"],
+  "vasink_l" => ["\t.text", "\t.weak __pathb_vasink_l", "\t.type __pathb_vasink_l, @function", "__pathb_vasink_l:", "\tret",
+                 "\t.size __pathb_vasink_l, .-__pathb_vasink_l"],
+  "vasink_s" => ["\t.text", "\t.weak __pathb_vasink_s", "\t.type __pathb_vasink_s, @function", "__pathb_vasink_s:", "\tret",
+                 "\t.size __pathb_vasink_s, .-__pathb_vasink_s"],
+  "vasink_d" => ["\t.text", "\t.weak __pathb_vasink_d", "\t.type __pathb_vasink_d, @function", "__pathb_vasink_d:", "\tret",
+                 "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
+}.freeze
+
+# The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
+# `# pathb-asm NAME` appends that helper.
+def marker_asm(il)
+  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.map { |sym| ".weak #{sym}" }
+  helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map do |h|
+    ASM_HELPERS.fetch(h) { error_exit("no assembly helper for #{h}") }
+  end
+  # `# pathb-alias KIND NAME TARGET [weak]` (one per IR alias form, from scripts/pathb-qbe-emit.rb's append_weak): a
+  # global symbol NAME that is TARGET, typed by KIND (function, object or ifunc). QBE has no aliases, so this is the .set.
+  aliases = il.scan(/^# pathb-alias (\S+) (\S+) (\S+)( weak)?$/).flat_map do |kind, name, target, weak|
+    type = { "function" => "@function", "ifunc" => "@gnu_indirect_function", "object" => "@object" }.fetch(kind) do
+      error_exit("no symbol type for alias kind #{kind}")
+    end
+    ["\t#{weak ? '.weak' : '.globl'} #{name}", "\t.type #{name}, #{type}", "\t.set #{name}, #{target}"]
+  end
+  # `# pathb-startup SECTION PRIO SYM`: a (constructor)/(destructor) function's pointer in .init_array/.fini_array, as
+  # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
+  startup = il.scan(/^# pathb-startup (\S+) (\d+) (\S+)$/).map do |sect, prio, sym|
+    sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
+    ["\t.section #{sect},\"aw\"", "\t.align 8", "\t.quad #{sym}"]
+  end
+  texts = il.scan(/^# pathb-text (\S+)$/).flatten.uniq.map { |b| Base64.strict_decode64(b) }
+  (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join + texts.join
+end
+
+# The SSA text of the file, from scripts/pathb-ssa.rb. Its own stderr is passed through, so a function it cannot convert
+# is reported there.
+def convert_file(file)
+  out, err, st = Open3.capture3(RbConfig.ruby, File.expand_path("pathb-ssa.rb", __dir__), file)
+  $stderr.write(err) unless err.empty?
+  error_exit("pathb-ssa.rb failed on #{file}") unless st.success?
+  out
+end
+
+# --long-double=trap (pathb-qbe-emit.rb's stub_long_double): a function whose IR mentions the scalar type long_double
+# becomes a stub that aborts when it runs (its linkage and start-up markers stay), and a global of that type is dropped.
+# The rule is applied to the IR before conversion, so a stub is converted like any other function.
+def mentions_long_double?(x)
+  return x.any? { |y| mentions_long_double?(y) } if x.is_a?(Array)
+
+  x.is_a?(String) && x == "long_double"
+end
+
+def stub_long_double(forms)
+  out = [forms[0]]
+  forms.drop(1).each do |f|
+    if head(f) == "function" && mentions_long_double?(f)
+      keep = f.drop(2).select { |p| %w[static weak constructor destructor].include?(head(p)) }
+      out << (["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
+    elsif head(f) == "global" && mentions_long_double?(f)
+      next
+    else
+      out << f
+    end
+  end
+  out
+end
+
+def convert(file, ld_trap)
+  return convert_file(file) unless ld_trap
+
+  Dir.mktmpdir("pathb-ssa-build-ld") do |dir|
+    stubbed = File.join(dir, "stubbed.ir")
+    File.write(stubbed, stub_long_double(read_forms(File.read(file))).map { |f| sx(f) }.join("\n") + "\n")
+    convert_file(stubbed)
+  end
+end
+
+# The names a module keeps (pathb-qbe-emit.rb's prune rule): a linked definition (not static, not weak, not an
+# extern declaration) or a constructor or destructor is a root, and everything a live definition refers to with
+# a global (@) or function (&) name is live too. A definition nothing reaches is left out.
+def live_names(forms)
+  defs = {}
+  forms.each do |f|
+    defs[f[1].raw.delete('"')] = f if %w[function global data].include?(head(f)) && f[1].is_a?(Str)
+  end
+  # An x87 entry thunk is the module's symbol for a long double function F, which is defined as __nfcxx_ldr_F: a
+  # reference to F keeps __nfcxx_ldr_F, and the thunk exists only when that function is kept (scripts/pathb-x87-thunks.rb).
+  x87_entries = {}
+  forms.each do |f|
+    next unless head(f) == "x87-thunk" && %w[entry entryc].include?(f[1].to_s)
+
+    entry = f[2].raw.delete('"')
+    x87_entries[entry] = ["x87-entry", Ref.new("@", "\"__nfcxx_ldr_#{entry}\"")]
+    defs[entry] = x87_entries[entry]
+  end
+  live = {}
+  work = []
+  defs.each do |name, f|
+    next if x87_entries.key?(name)
+    next unless linked_or_startup?(f)
+
+    live[name] = true
+    work << name
+  end
+  # An alias names a live symbol: its target (for an ifunc, the resolver) is kept, though nothing else refers to it.
+  forms.each do |f|
+    next unless head(f) == "alias"
+
+    target = (f[2].respond_to?(:raw) ? f[2].raw : f[2].to_s).delete('"')
+    next unless defs.key?(target) && !live.key?(target)
+
+    live[target] = true
+    work << target
+  end
+  until work.empty?
+    refs = {}
+    collect_symbol_refs(defs[work.pop], refs)
+    refs.each_key do |r|
+      next if live.key?(r) || !defs.key?(r)
+
+      live[r] = true
+      work << r
+    end
+  end
+  live
+end
+
+def linked_or_startup?(f)
+  f.drop(2).any? { |p| %w[constructor destructor].include?(head(p)) } ||
+    f.drop(2).none? { |p| head(p) == "static" || head(p) == "extern" || (head(p) == "weak" && p.length == 1) }
+end
+
+def collect_symbol_refs(x, out)
+  if x.is_a?(Ref)
+    out[x.raw.delete('"')] = true if x.sigil == "@" || x.sigil == "&"
+  elsif x.is_a?(Array)
+    x.each { |y| collect_symbol_refs(y, out) }
+  end
+end
+
+# The assembly of the QBE IL text, or nil with the QBE error text in `err`.
+def assemble(il)
+  Dir.mktmpdir("pathb-ssa-build") do |dir|
+    path = File.join(dir, "module.qbe")
+    File.write(path, il)
+    asm, err, st = Open3.capture3(qbe_binary, path)
+    return [nil, err] unless st.success?
+
+    [asm, nil]
+  end
+end
+
+output = nil
+no_opt = false
+no_prune = false
+ld_trap = false
+safe = false
+asan = false
+args = ARGV.dup
+usage_exit if args.empty?
+while args.first&.start_with?("-") && args.first != "-"
+  flag = args.shift
+  case flag
+  when "-o" then output = args.shift or usage_exit
+  when "--no-opt" then no_opt = true
+  when "--no-prune" then no_prune = true
+  when "--long-double=trap" then ld_trap = true
+  when "--safe" then safe = true
+  when "--asan" then asan = true
+  else usage_exit
+  end
+end
+usage_exit unless args.size == 1
+usage_exit if safe && output.nil?
+usage_exit if asan && safe   # both replace malloc and check accesses: one at a time
+Qbe.safe = safe
+Qbe.asan = asan
+
+file = args.first
+ssa = convert(file, ld_trap)
+# The x87 ABI thunks (`(x87-thunk ...)` forms: long double through the x87 helpers) are generated by scripts/
+# pathb-x87-thunks.rb for the symbols the IL uses. A reference to a thunk with no matching form is refused (see below).
+# Each input is parsed once: the IR file (the data, alias, x87 and live-name forms) and the SSA text (the globals and functions).
+ir_forms = read_forms(File.read(file))
+ssa_forms = read_forms(ssa)
+x87_forms = ir_forms.select { |f| head(f) == "x87-thunk" }
+skipped = []
+# A global the emitter refuses is reported and left out, so it does not stop the functions that do not use it.
+globals = ssa_forms.select { |g| head(g) == "global" }.filter_map do |g|
+  Qbe.module_il([g])
+  g
+rescue QbeUnsupported => e
+  skipped << [g[1].raw.delete('"'), "global: #{e.message}"]
+  nil
+end
+# The aggregate types (abi-type forms) every function and global is laid out and passed with.
+globals = ssa_forms.select { |f| head(f) == "abi-type" } + globals
+# The string literals: top-level data forms, which the SSA text does not carry.
+globals += ir_forms.select { |f| head(f) == "data" }
+# Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one).
+# It runs before the optimizer: optimize_module works on each function alone, so a function nothing reaches costs
+# optimization time for no output (the STL route timed out on it, docs/notes/library-suite-results.md).
+live = no_prune ? nil : live_names(ir_forms)
+kept = ->(f) { live.nil? || head(f) != "ssa-function" || live.key?(f[1].raw.delete('"')) }
+pruned_ssa = no_opt || live.nil? ? ssa : ssa_forms.select(&kept).map { |f| sx(f) }.join("\n")
+text = no_opt ? ssa : PathbEgraph.optimize_module(pruned_ssa).first
+fns = read_forms(text).select { |f| head(f) == "ssa-function" }
+unless no_prune
+  fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
+  # An abi-type is a layout every function may need, not a definition to prune: it is kept.
+  globals = globals.select { |g| head(g) == "abi-type" || live.key?(g[1].raw.delete('"')) }
+end
+
+# The globals' data, emitted once: the emitter writes data for a module's globals together with its functions.
+# The functions are passed too: the module's shared text (its volatile helpers) depends on what the functions do.
+ctx = Qbe.module_context(globals + fns)
+data_text = ctx[:data].join("\n\n").strip
+bodies = []
+fns.each do |fn|
+  name = fn[1].raw.delete('"')
+  bodies << Qbe.function_text(ctx, fn).strip
+rescue QbeUnsupported => e
+  skipped << [name, e.message]
+end
+
+# The module's alias forms (IR: (alias NAME TARGET KIND [weak])), kept whatever the pruning: a resolver may be live
+# only through its alias. Each becomes a `# pathb-alias` marker that marker_asm turns into the assembly directives.
+name_of = ->(x) { (x.respond_to?(:raw) ? x.raw : x.to_s).delete('"') }
+alias_markers = ir_forms.select { |f| head(f) == "alias" }.map do |a|
+  weak = a[4] == "weak" ? " weak" : ""
+  "# pathb-alias #{a[3]} #{Qbe.symbol(name_of.call(a[1]))} #{Qbe.symbol(name_of.call(a[2]))}#{weak}"
+end
+
+# The (constructor [PRIO]) and (destructor [PRIO]) functions of the module: their pointers go in the start-up tables.
+startup_markers = ssa_forms.select { |f| head(f) == "ssa-function" }.flat_map do |f|
+  name = Qbe.symbol(name_of.call(f[1]))
+  f.drop(2).select { |p| %w[constructor destructor].include?(head(p)) }.map do |p|
+    sect = head(p) == "constructor" ? ".init_array" : ".fini_array"
+    prio = p.length > 1 ? Qbe.int_lit(p[1]) : 0
+    "# pathb-startup #{sect} #{prio} #{name}"
+  end
+end
+
+# File-scope asm (the IR's (asm-decl HEX) forms, from be/nfcxx_ir.c): its text goes into the object as it is, as a
+# pathb-text marker. A .cu's device image is defined this way (pathb-ptx-emit --embed), as the qbe route does.
+# The text of an (asm-decl HEX) form: its hex digits as bytes, one line (a line ends with a newline for the assembler).
+def text_of_asm_decl(f)
+  text = [f[1].to_s].pack("H*")
+  text.end_with?("\n") ? text : text + "\n"
+end
+
+asm_decl_markers = ir_forms.select { |f| head(f) == "asm-decl" }.map do |f|
+  "# pathb-text #{Base64.strict_encode64(text_of_asm_decl(f))}"
+end
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + startup_markers + [asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
+x87_asm = x87_thunks_asm(x87_forms, il)
+thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
+missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }
+unless missing.empty?
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: calls an x87 thunk with no form in the module: #{missing.first}"
+  exit EXIT_PARTIAL
+end
+asm, qbe_err = assemble(il)
+error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
+asm += marker_asm(il)
+asm += x87_asm
+
+if output
+  File.write(output, asm)
+else
+  $stdout.write(asm)
+end
+# --safe (-fsafe-pointers, docs/notes/safe-pointers.md): the runtime is linked first, as scripts/pathb-cc does with
+# $(scripts/safeptr-rt). The driver does not link; it writes the object's path to OUT.link for the caller's link line.
+# Slice 1: the assembly is unchanged by --safe (the per-access checks come in a later slice).
+if safe
+  rt_out, rt_err, rt_st = Open3.capture3(File.join(ROOT_DIR, "scripts", "safeptr-rt"))
+  error_exit("safeptr-rt failed: #{rt_err.lines.first&.strip}") unless rt_st.success?
+  File.write("#{output}.link", rt_out.strip + "\n")
+end
+skipped.each { |name, why| warn "pathb-ssa-build: not emitted: #{name}: #{why}" }
+exit(skipped.empty? ? EXIT_OK : EXIT_PARTIAL)

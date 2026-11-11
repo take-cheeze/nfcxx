@@ -1,0 +1,26 @@
+(ir-module "loop.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_Z3sumPii"
+  (ret void)
+  (params (param %0 "p" (ptr int)) (param %1 "n" int))
+  (slot "p" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr int) $"p" %0)
+  (store int $"n" %1)
+  (let %2 int (const int 0))
+  (let %3 int (const int 0))
+  (loop
+    (body
+      (block
+        (let %4 bool (lt.s int %3 (load int $"n")))
+        (if %4
+          (then (block))
+          (else (block (break))))
+        (set %2 (wadd int %2 %3))))
+    (step
+      (block
+        (set %3 (wadd int %3 (const int 1))))))
+  (let %5 (ptr int) (load (ptr int) $"p"))
+  (let %6 (ptr int) (index %5 (const int 0) 4))
+  (store int %6 %2)
+  (return))

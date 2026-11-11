@@ -9,7 +9,7 @@ if ! command -v cmake >/dev/null || [ ! -x "$cuda/bin/nvcc" ] || [ ! -f "$cuda/i
   echo "SKIP: cuda cmake: needs cmake and the CUDA toolkit (CUDA_HOME)"; exit 0
 fi
 out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
-cmake -S . -B "$out/build" -DCMAKE_CUDA_COMPILER="$root/scripts/nfcxx-cuda" -DCUDAToolkit_ROOT="$cuda" \
+cmake -S . -B "$out/build" -G Ninja -DCMAKE_CUDA_COMPILER="$root/scripts/nfcxx-cuda" -DCUDAToolkit_ROOT="$cuda" \
   -DCMAKE_CUDA_COMPILER_TOOLKIT_ROOT="$cuda" > "$out/configure.log" 2>&1 \
   || { cat "$out/configure.log"; echo "cuda cmake: FAIL (configure)"; exit 1; }
 cmake --build "$out/build" -j4 > "$out/build.log" 2>&1 \

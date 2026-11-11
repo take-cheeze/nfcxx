@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "copy" (returns void) (nothrow) (noescape) (closed) (args (write int) (read int)))
+(function "test" (ret int) (params (param %0 "p" (ptr int)))
+(slot "x" int 4 4)
+(decl %0 param) (decl $"x" val) (store int $"x" (const int 7)) (scope-end $"x")
+(eval (call void &"copy" %0 $"x"))
+(return (const int 0)))

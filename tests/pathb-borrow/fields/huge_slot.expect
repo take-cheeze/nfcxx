@@ -1,0 +1,2 @@
+3
+refused: local byte-range analysis requires slot sizes from 1 to 4096

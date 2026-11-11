@@ -1,0 +1,20 @@
+(ir-module "sycl_kernel_function_name.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "fn1" (const (struct "_ZN4sycl3_V16detail11string_viewE")) 16 8 (static) (init
+    (addr 0 (ptr (const char)) @"const" 0)
+    (scalar 8 unsigned_long (const unsigned_long 0))))
+(data "const" (const (array 1 (const char))) (string "\000"))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 bool (ne int (const int 0) (const int 0)))
+  (if %0
+    (then
+      (block
+        (return (const int 1)))))
+  (let %1 bool (ne int (const int 0) (const int 0)))
+  (if %1
+    (then
+      (block
+        (return (const int 2)))))
+  (return (const int 0)))

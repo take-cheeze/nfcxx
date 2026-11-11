@@ -315,7 +315,9 @@ Value infer(const Graph& g, const Node& n) {
   };
   auto consts = [&](size_t k) { return g.const_ints(n.inputs[k]); };
 
-  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf", "Floor", "Ceil"};
+  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf", "Floor", "Ceil",
+                                                    "Acos", "Acosh", "Asin", "Asinh", "Atan", "Atanh", "Cosh", "Sinh", "Tan", "Round",
+                                                    "Log2", "Log10", "Expm1", "Log1p"};
   static const std::set<std::string> arith = {"Add", "Sub", "Mul", "Div", "Max", "Min"};
   static const std::set<std::string> logical = {"And", "Or", "Xor"};
   static const std::set<std::string> bitwise = {"BitwiseAnd", "BitwiseOr", "BitwiseXor"};
@@ -396,6 +398,14 @@ Value infer(const Graph& g, const Node& n) {
     DType to;
     if (!n.has_attr("to") || !dtype_from_onnx(n.attr_int("to", 0), to)) fail("attribute `to` must be FLOAT(1), INT32(6), INT64(7), BOOL(9) or DOUBLE(11)");
     return make_value("", to, D(0));
+  }
+  if (op == "Atan2" || op == "BitwiseLeftShift" || op == "BitwiseRightShift") {   // not ONNX (is_onnx_operator): floats, and integers for the shifts
+    want_inputs(2, 2);
+    same_dtype(V(0), V(1));
+    const DType d = V(0).dtype;
+    if (op == "Atan2" && !is_float(d)) fail("float inputs needed, got " + std::string(name(d)));
+    if (op != "Atan2" && !is_int(d)) fail("integer inputs needed, got " + std::string(name(d)));
+    return make_value("", d, bcast2(op, D(0), D(1)));
   }
   if (arith.count(op) || op == "Mod" || logical.count(op) || bitwise.count(op) || op == "Equal" || compare.count(op)) {
     want_inputs(2, 2);
@@ -866,6 +876,11 @@ PB value_info(const Value& v, PolyNames& poly, const std::set<std::string>& take
 
 }  // namespace
 
+bool is_onnx_operator(const std::string& op) {
+  static const std::set<std::string> not_onnx = {"Log2", "Log10", "Expm1", "Log1p", "Atan2", "BitwiseLeftShift", "BitwiseRightShift"};
+  return not_onnx.count(op) == 0;
+}
+
 std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& graph_name) const {
   if (outputs.empty()) throw Error("hir: to_onnx needs at least one output");
   std::set<int> need_values(outputs.begin(), outputs.end());
@@ -884,6 +899,7 @@ std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& g
   for (size_t k = 0; k < nodes_.size(); k++) {
     if (!need_node[k]) continue;
     const Node& n = nodes_[k];
+    if (!is_onnx_operator(n.op)) throw Error("hir: " + n.op + " has no ONNX operator, so the graph cannot be exported to ONNX");
     PB node;
     for (int in : n.inputs) node.bytes(1, in < 0 ? "" : values_[in].name);
     node.bytes(2, values_[n.output].name);

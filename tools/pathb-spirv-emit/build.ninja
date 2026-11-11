@@ -1,0 +1,25 @@
+# Builds build/pathb-spirv-emit (the C++ port of scripts/pathb-spirv-emit.rb). Run: ninja -C tools/pathb-spirv-emit.
+# CXX and CXXFLAGS come from the environment, as tools/pathb-ptx-emit/build.ninja has them.
+ninja_required_version = 1.7
+root = ../..
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -MMD -MF $out.d -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+  description = CXX $out
+
+rule link
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = LINK $out
+
+build $root/build/pathb-spirv-emit.o/ir.o: cxx ir.cpp
+build $root/build/pathb-spirv-emit.o/spv.o: cxx spv.cpp
+build $root/build/pathb-spirv-emit.o/forms.o: cxx forms.cpp
+build $root/build/pathb-spirv-emit.o/emit.o: cxx emit.cpp
+build $root/build/pathb-spirv-emit.o/main.o: cxx main.cpp
+
+build $root/build/pathb-spirv-emit: link $root/build/pathb-spirv-emit.o/ir.o $root/build/pathb-spirv-emit.o/spv.o $
+    $root/build/pathb-spirv-emit.o/forms.o $root/build/pathb-spirv-emit.o/emit.o $root/build/pathb-spirv-emit.o/main.o
+
+default $root/build/pathb-spirv-emit

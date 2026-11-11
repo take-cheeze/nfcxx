@@ -1,0 +1,16 @@
+(ir-module "strip_eh.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
+(function "fwd"
+  (ret (ptr int))
+  (params (param %0 "__t" (ptr int)))
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %2 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (block
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+    (let %3 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %3)
+    (return %0)))

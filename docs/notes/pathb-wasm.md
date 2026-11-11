@@ -10,6 +10,9 @@ scripts/mrb scripts/pathb-wasm-emit.rb prog.ir > prog.wasm
 node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "trap")
 ```
 
+`--names` adds the custom `name` section (function names: the imports, the IR's functions, and the `--asan` runtime's),
+so that an engine's stack trace names the functions (`at _Z4deepi (wasm://...)`); the wasm explorer uses it.
+
 `tests/wasm/run.sh` does this for each `tests/wasm/*.cpp`. Each test has its expected result in `// EXPECT: N`
 (the `g++ -O0` result, except `calls.cpp`, whose import is a stub), or `// TRAP` (main traps), or `// REFUSE: TEXT`
 (the emitter refuses with TEXT). The suite skips, rather than fails, without node. `NFCXX_WASM_ASAN=1` runs every
@@ -49,6 +52,11 @@ the same front end with EDG's `linux_riscv32` target; see "Emscripten" below.
 Division by zero, `INT_MIN / -1`, a float-to-integer conversion out of range or from NaN, `unreachable` and `trap` trap
 through wasm's own traps. A shift count not below the width of the left operand, a null `nonnull` pointer and an index
 outside `bounds` trap through an explicit `unreachable`.
+
+The checked arithmetic `cadd csub cmul cneg` (`NFCXX_IR_OVERFLOW=trap`, and `nsw` in `llvm-to-pathb.rb`) traps when the
+exact result does not fit the type, signed or unsigned. Below 64 bits the exact result is computed in i64 and its range
+is checked. At 64 bits the wrapped result is checked: `cadd` and `csub` by the signs of the operands and the result (or
+the carry, unsigned), `cmul` by dividing the result by the left operand (`INT64_MIN * -1` traps in that division).
 
 ## AddressSanitizer (`--asan`)
 
@@ -160,7 +168,9 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 - Use after scope: the emitter has no scope markers (`scope-end`), so a block's locals are not poisoned at its end.
 - Use after return once another call has reused the frame. There is no quarantine for frames.
 - Stack exhaustion: the stack growing into the heap or the static data is not detected.
-- The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked.
+- The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked, and
+  neither are the pages a host adds after it with `memory.grow` (the wasm explorer's `mmap` binding, TinyGo's heap): the
+  check returns at once for an address at or above the shadow's base.
 - The allocator's own code is not instrumented, and the header of a block is written without a check.
 - Uninitialized reads, leaks and the other checks of libasan.
 
@@ -187,15 +197,17 @@ from the ILP32 IR, and `NFCXX_WASM_EMSCRIPTEN=import` with `--emscripten-import-
 | `__data_end` | global, immutable i32 | the end of the static data (the first address after the last object) |
 | `__heap_base` | global, immutable i32 | the top of the memory, which is also the initial stack pointer |
 | `__wasm_call_ctors` | function, `() -> ()` | empty: runs no static constructors (see below) |
+| `stackSave`, `stackRestore`, `stackAlloc` | functions | the stack pointer: read, set, and moved down (aligned to 16) |
+| `emscripten_stack_init`, `emscripten_stack_get_base`, `_get_end`, `_get_free` | functions | the stack limits: init is empty, the base is the top, the end is `data_end` rounded up to 16, and free is the distance from the stack pointer to the end |
 
 With `--emscripten-import-memory` the module imports `env.memory` (no maximum, initial size the module's pages) and has
 no memory section or `memory` export. Growing it is the host's `memory.grow`; the module does not grow it.
 
-- **The table.** The emitter refuses indirect calls (`Fn#call`) and function addresses (`op_type`, and a static
-  initializer of `&"f"`), and it emits no `call_indirect`. So no module code calls through the table, and no function is
-  stored in it: the table has no element segment, and no call through it can trap. It is exported empty, with no
-  maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` grows it by one). Whether the Emscripten glue uses
-  the table at all is not checked (point 3 below).
+- **The table.** It is the module's function table ("What is handled", function pointers): empty when the module takes
+  no function's address, else slot 0 null and the functions from slot 1, which the module's `call_indirect` uses. It
+  is exported with no maximum, so the JS side can grow it (`tests/wasm/emscripten.cjs` checks the slots and grows it by
+  one). A function the glue adds (`addFunction`) goes to a slot the module's pointers never name. Whether the
+  Emscripten glue uses the table at all is not checked (point 3 below).
 - **Constructors.** The IR has no list of static constructors: a dynamically initialized global is refused (`(unsupported
   init ...)`, see "What is refused"), so there is nothing for `__wasm_call_ctors` to run. It is exported as an empty
   function that returns and leaves the stack pointer alone.
@@ -246,53 +258,161 @@ none is installed here, and the Emscripten sources were not reachable from this 
    name) could be verified. Emscripten's libc (`printf`, `malloc`, `memcpy`, ...) is linked into the module, so those
    names are not imports under Emscripten at all; a program that calls them, or `__cxa_*`, does not instantiate under an
    unmodified runtime and needs the import mapped or provided. The emitter does not claim otherwise.
-6. **Exports the glue calls: partly closed.** `__wasm_call_ctors` is exported (empty, point "Constructors"). Not exported,
-   on purpose: `malloc` and `free` (no allocator here, see point 7), and the `emscripten_stack_*` functions (they need
-   stack limits, point 8). `main` is there.
+6. **Exports the glue calls: closed for the emcc 3.1.6 glue.** The glue reads `__wasm_call_ctors`, `_main`, `memory`,
+   `__indirect_function_table`, `__errno_location`, `stackSave`, `stackRestore`, `stackAlloc` and
+   `emscripten_stack_init`, `emscripten_stack_get_base`, `_get_end` and `_get_free` (read from its source, `emcc -O0
+   -sMODULARIZE`). The module exports all of them but `__errno_location` (no errno here) and `dynCall_*` (no indirect calls).
+   `malloc` and `free` are not exported (no allocator here, see point 7).
 7. **Memory growth: open.** The module has no allocator and no call that grows the memory. An `emscripten_resize_heap`
    import would be unused (nothing in the module calls it), and an export under that name would be an interface the
    runtime does not define on that side, so neither is added. The memory grows only in the host (with the import). The
    heap that `__heap_base` marks is empty, so an `sbrk`-style allocator would need the memory grown first.
-8. **Stack limits: open.** `__set_stack_limits` is not exported. The module has no stack-overflow check and no place for
-   limits to be read from: a stored limit that nothing reads would be a fake, so the export is left out.
+8. **Stack limits: closed, for the glue's functions.** The stack is global 0, growing down from `stack_top` to the end, which
+   is `data_end` rounded up to 16 (the glue asserts a 4-byte-aligned end when it writes the stack cookie: found by running
+   the glue, `globals_string.cpp`). `emscripten_stack_get_base` is the top, `_get_end` the end, `_get_free` the distance
+   from the stack pointer to the end, `emscripten_stack_init` does nothing (nothing to set up), and `stackSave`,
+   `stackRestore` and `stackAlloc` read, set and move the stack pointer (`stackAlloc` aligns to 16). The module does not
+   check the limit (as before). `__set_stack_limits` is not exported: the 3.1.6 glue does not call it.
 
-**Unverified names.** The Emscripten runtime names above (`emscripten_resize_heap`, `__set_stack_limits`,
-`emscripten_stack_get_current`, the `__syscall_*` and `fd_write` imports, and the libc behavior in point 5) are not
-verified here: no `emcc` is installed, `emscripten.org` did not resolve, and the Emscripten source was not reachable
-(the raw GitHub path returned 404, and the GitHub API was not enabled for this session). None of them is added to the
-module or to `EMSCRIPTEN_IMPORT_NAMES`.
+**Verified against emcc 3.1.6** (Ubuntu's `emscripten` package, installed here; `emsdk` from GitHub is not reachable).
+The glue's imports for a non-standalone build are `env.emscripten_memcpy_big`, `env.emscripten_resize_heap`,
+`env.setTempRet0` and `wasi_snapshot_preview1.fd_write`; a `-sSTANDALONE_WASM` build imports only WASI. The names of
+point 5 are therefore checked, and none of them is added to `EMSCRIPTEN_IMPORT_NAMES`: the IR's libc names (`printf`,
+`malloc`, `memcpy`) still have no Emscripten implementation here. `emscripten_resize_heap` is not called by the module
+(it does not grow the memory).
+
+**The glue check (`NFCXX_WASM_EMSCRIPTEN=glue`).** `tests/wasm/run.sh` builds a `MODULARIZE` glue with emcc, instantiates
+each `--emscripten` module with it (`tests/wasm/emcc-glue.cjs`) and calls `_main`. That is the real glue, not the
+module's own host: 23 tests pass, and the rest are skipped because they import a function the glue does not provide
+(the glue's own imports are the list above). Without emcc the mode is skipped. Before the stack exports were added, the
+glue failed at `emscripten_stack_init`, and a data end that is not 4-byte aligned failed the stack cookie.
+
+## Memory64 (`--memory64`)
+
+`scripts/mrb scripts/pathb-wasm-emit.rb --memory64 prog.ir > prog.wasm` emits the LP64 module with a 64-bit linear memory
+(the memory64 proposal, which node 22 runs without a flag): the memory's limit has the memory64 flag (`0x04`, an i64
+minimum), the data segments' offsets are `i64.const`, and a memory access takes its address as the IR's i64 pointer
+value, with no `i32.wrap_i64`. The copy of `copy` takes i64 operands. The IR is the default one (`pathb-dump --ir`); the
+addresses are the same as in the default module, so only the top of the address range differs. The default output is
+byte-identical to the one before the mode existed (checked on the 84 test and asan inputs).
+
+- **The stack stays in i32.** The frame base and the stack pointer are i32 (the memory is far below 4 GB), and a slot's
+  address is extended to i64 where it is used as an address. So the prologue is unchanged. This is the stack-pointer
+  choice of "The stack pointer's type is i32" above, now made under memory64 as well. A 64-bit stack would need the
+  stack pointer i64 and a wrap-free prologue; no test needs it.
+- **What the mode shows.** A load from `2^32 + 8` traps (`tests/wasm/memory64_high_address.cpp`, `// MEMORY64-TRAP`).
+  The default module wraps that address to 8 and reads it, so the test runs under the mode only. A struct copy through
+  pointers to statics and the stack gives the g++ result (`memory64_copy.cpp`).
+- **Not combined** with `--asan` (its shadow and checks are i32 address arithmetic) or `--emscripten` (ILP32: the pointers
+  are i32 there). `--memory64` with either is refused by the driver.
+- **Not done:** an Emscripten `MEMORY64` runtime (the glue's i64 stack pointer, `__heap_base` as i64), and a memory above
+  4 GB: the memory is still the module's pages, two by default, and no test grows it.
+
+Checks: `NFCXX_WASM_MEMORY64=1 tests/wasm/run.sh` runs every test in the mode (25 passed, the ASan and Emscripten ones
+skipped); `tests/wasm/run.sh` (24 passed) and the ASan and Emscripten modes are unchanged.
 
 ## What is handled
 
 Scalars, pointers and their arithmetic (`offset`, `index`, `pdiff`), the integer and float operators, comparisons,
 conversions (`iconv`, `i2f`, `u2f`, `fconv`, `cf2i`, `p2i`, `i2p`, `bitcast`), `load`, `store`, `copy` (`memory.copy`),
-slots, direct calls, `if`, `loop` with `break` and `continue`, `return`, and the checks above.
+slots, `alloca` (dynamic stack, released at the return; refused under `--asan`), direct calls, calls through a function
+pointer, `if`, `loop` with `break` and `continue`, `return`, and the checks above. `copy` and `zero-fill` take a constant
+length or a run-time one (an `unsigned_long` register: `memory.copy` and `memory.fill` take it as it is; under `--asan`
+the range is checked with the run-time size). `bitcast` also reinterprets a float as an integer of its size and back
+(`i32.reinterpret_f32` and the like).
+
+Function pointers. The functions whose address the IR takes (`&"f"` anywhere but as a call's callee, also in a static
+initializer) get the slots of a function table from 1, in order of first use; the table and its element segment are in
+the module only when there is one (and under `--emscripten`, which exports the table, always). A function pointer's
+value is its slot, an i64 under LP64. Slot 0 stays empty, so a call through a null pointer traps. A call through a
+pointer is `call_indirect` with the type of the call's arguments and result, which the engine checks against the
+function in the slot (a mismatch traps). Taking the address of a function the module neither defines nor calls is
+refused (its signature is not known). `function_pointers.cpp` checks a call through a pointer, a table of pointers in a
+static initializer and a pointer passed as an argument. A `let` may take a bare operand (`llvm-to-pathb.rb` copies phi values so),
+and a parameter's register may be any `%N` (EDG numbers them from `%0`, `llvm-to-pathb.rb` from `%1`).
 
 Two forms of `goto` are handled because the front end produces them for `break` and `continue`: a jump to the label at
-the end of a loop body, and a jump to the label just after a loop or a switch. Any other `goto`, and any other label, is
-refused.
+the end of a loop body, and a jump to the label just after a loop or a switch.
+
+A body of labels and gotos with no `loop` or `switch` (the control flow graph `llvm-to-pathb.rb` writes, or a C or C++
+`goto`, see `goto_dispatch.cpp`) is lowered as a dispatch, when every label is at the top level of the body. The labels
+split the body into segments; a loop runs the segment that a local names, through a `br_table` into nested blocks
+(segment j starts at the end of block j), and control falls from one segment into the next as it falls past a label. A
+`goto` sets the local and branches to the loop. Any other `goto` and label is refused.
 
 `switch` (`docs/notes/pathb-stage2.md`, section 2). The markers `(case (const T V))` and `(default)` may sit in blocks of
 the body; the body's statements are split into arms at them. The selector is compared with each case value in order by
 a compare chain: `br_if` to the arm, else `br` to the default arm, or out of the switch when there is none. The arms are
-blocks nested so that arm k starts right after the end of its block, and an arm falls into the next one. An arm that is
-not empty must end in a jump (`break`, `continue`, `return`, `unreachable`, `trap` or `goto`, also inside a block or in
-both branches of an `if`), or be the last arm; otherwise the emitter refuses the fallthrough. `break` inside a switch
-leaves it (its label stack entry is the switch's), and `continue` goes to the enclosing loop's step.
+blocks nested so that arm k starts right after the end of its block, and an arm falls into the next one: an arm that does
+not end in a jump (`break`, `continue`, `return`, `unreachable`, `trap` or `goto`) continues with the statements of the arm
+after it, as C does. `break` inside a switch leaves it (its label stack entry is the switch's), and `continue` goes to the
+enclosing loop's step.
 
 ## What is refused (the next steps)
 
-Each refusal names the node on stderr and exits with status 3. None is dropped silently.
+Each refusal names the node on stderr and exits with status 3. None is dropped silently. A refusal inside a function
+names the function, and the source line of the statement when the IR has `(loc ...)` statements (`NFCXX_IR_LOC=1` of
+`pathb-dump`): `refused: variadic call (in _Z4showi, at prog.cpp:6)`. A global or a `data` form that is refused is
+refused only when the module uses it (an unused `std::float16_t` constant of a header does not stop the module). The
+top-level `abi-type` and `x87-thunk` forms describe the host ABI and are skipped.
 
-- General `goto` and labels: the jumps other than the ones above, and a switch whose arm falls into the next non-empty one.
-  The structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
+- General `goto` and labels in a body that also has a `loop` or a `switch`, or a label inside a nested statement. The
+  structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
 - A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
-  (`(unsupported init ...)`), of a thread-local one, or of a function's address in a static initializer (`addr` to `&"f"`).
+  (`(unsupported init ...)`), or of a thread-local one (without `--threads`; with it, see the threads section below). A
+  function's address in a static initializer (`addr` to `&"f"`) is its table slot, and is lowered. A thread-local's address
+  in a static initializer is refused under `--threads` (it differs per thread).
+
+## Variable-length arrays
+
+EDG lowers a VLA to `__vla_alloc(slot, bytes)` and `__vla_dealloc(slot)`, and the module lowers both inline, from the shadow
+stack, as `alloca` does: a 16-byte header holds the stack pointer before the allocation, and the block follows it. The
+slot receives the block. A dealloc of the block on top of the stack restores the stack pointer; otherwise the block lives
+until the function returns, which C's nested scopes do not produce. A block that would reach the static data traps. A
+`bounds` with a run-time limit is an unsigned compare with that limit. The EH cleanup `__vla_dealloc_eh` (its address is
+in static data for the unwinder) is a null slot: the module never throws, so the cleanup is never reached. Under `--asan`
+a VLA is refused (the asan runtime keeps its own records). `vla.cpp` and `vla_loop.cpp` cover one VLA and a loop of 4000
+that would not fit the stack without the release (`// ASAN-SKIP`).
+
+## The optimizations of the SSA route (`NFCXX_WASM_OPT=1`)
+
+The emitter reads flat IR, so by itself it gets none of the SSA route's optimizations. `scripts/pathb-flat-opt` makes them
+reach it: each function goes through the SSA conversion (`scripts/pathb-ssa.rb`), the e-graph (escape analysis, memory,
+the rewrite rules), and the dispatch loop (`PathbEgraph.dispatch_structurize`, then `flat_from_dispatch`), which is a loop
+around a switch: the structured flat IR the emitter takes. A function the SSA route refuses keeps its flat IR. The wasm
+suite runs in this mode too (`NFCXX_WASM_OPT=1 tests/wasm/run.sh`, also in CI), with the same expectations. The explorer
+does not use it yet.
+
+## Variadic functions (LP64)
+
+A function the module defines with an ellipsis takes one more parameter at the end: the address of a block in the caller's
+frame, where the caller stores the variadic arguments, one 8-byte slot each (the block has at least one slot). The
+`va_list` is the System V `__va_list_tag` with every argument in the overflow area: `vastart` writes gp_offset 48, fp_offset
+176, the block as overflow_arg_area and a null reg_save_area, and `vaarg` reads the slot at overflow_arg_area and moves it on
+by 8. So `va_copy` (a 24-byte copy) and `va_arg` need nothing else. Under ASan and under ILP32 (`--emscripten`) a variadic
+function is refused. A call of an import or through a pointer that is variadic stays refused: the host's ABI for those is not
+lowered. `tests/wasm/variadic_module.cpp` (`// LP64-ONLY`, skipped in the other modes) covers int, double, long and pointer
+arguments, a `va_copy`, and a variadic function that reads the arguments of another one's call.
+
+## Threads (`--threads`)
+
+With `--threads` the module is a thread of a shared memory: the memory is imported as `env.memory` (shared, its page count in
+the custom section `nfcxx.threads`, with the thread-local group's start and size), and these are exported: `__stack_pointer`
+(global 0) and `__tls_base` (global 1), which each thread's instance sets to its own stack and its own thread-local block,
+and `__nfcxx_init`, which applies the module's data once (the segments are passive). The atomic builtins (`__atomic_*` and
+`__sync_*`, 4 and 8 bytes) are wasm atomics, and a fence is `atomic.fence`. A thread-local object is in one contiguous group
+at the end of the static data; its address is `__tls_base` plus its offset in the group, and the main thread's block is the
+group itself. The host copies the group's initial image into each thread's block. The module can create threads: `pthread_create`
+and `pthread_join` are imports from `env`, which the host serves (a pool of threads, each a worker over the same memory with
+its own stack and block; a join waits on a shared word the thread sets when it returns). The module's own start routine is
+called through the exported table by `__nfcxx_thread_entry(slot, arg)`. Not yet: a thread-local's address in a static
+initializer, and a pool larger than 8 threads (the host's `POOL`). `tests/wasm-threads` runs manual workers and module-created
+threads.
   A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
-- Variadic calls, indirect calls and function addresses (a table would be needed).
-- Bit-fields (`bfload`, `bfstore`), inline assembly, VLAs and exceptions, and the 16-byte types.
-- `cf2i` to a type narrower than 32 bits: the range check for the narrow target is not lowered yet.
+- Variadic calls of anything but a function the module defines (an import such as `printf`: the host's ABI is not
+  lowered), and variadic functions in the asan and ILP32 modes.
+- Inline assembly, exceptions, and the 16-byte types.
 - A jump to the label after a loop from outside that loop (only the jumps from inside it are handled).
 
 The IR's own `(unsupported ...)` markers are refused the same way, with the marker's text. Those come from the front end,
@@ -310,14 +430,18 @@ no 32-bit libgcc is needed for these programs), and they agree with the LP64 one
 initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
 float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
 (`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
-switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
-two refusals. Node instantiates a module only after validating it, so a malformed
+switches on a long selector, and a return in each arm. `switch_fallthrough.cpp` checks an arm that falls into the next one, and `refuse_global.cpp` checks the
+two refusals, and `refuse_located.cpp` the function and line a refusal names (the suite dumps a `REFUSE` test with
+`NFCXX_IR_LOC=1`). `goto_dispatch.cpp` checks the dispatch lowering, `function_pointers.cpp` the function table, and `checked_arith.ir` (hand-written IR, emitted in the
+LP64 modes) checks the checked arithmetic at the edges of each width through `checked_arith.cjs`. Node instantiates a
+module only after validating it, so a malformed
 module fails the test. `tests/wasm/frames.cpp` makes 1000 calls with 256 bytes of locals each: the frames must be released
 for it to pass in 128 KB.
 
-Sweep over the 262 IR files in the repo (`tests/pathb-ir`, its borrow goldens, `tests/mruby/pathb-edge`): 46 emit, and
-every module validates; 168 are refused for the gaps above; 48 are malformed IR (the edge cases that test the parser,
-which exit with status 1 as the QBE emitter does). Before the statics and the switch were lowered, the sweep had 34 emit,
+Sweep over the 306 IR files in the repo (`tests/pathb-ir`, the borrow goldens of `tests/pathb-borrow`,
+`tests/mruby/pathb-edge`): 62 emit, and every module validates; 196 are refused for the gaps above; 48 are malformed IR
+(the edge cases that test the parser, which exit with status 1 as the QBE emitter does). Before the checked arithmetic,
+`alloca` and the goto dispatch the same files gave 54, 204 and 48, and before the function table 59, 199 and 48. Before the statics and the switch were lowered, the sweep had 34 emit,
 197 refused and 31 malformed: 17 of the malformed files are `e_*` edge cases that the refusal of `global` hid until now.
 
 Not done: a C library for the modules (a program that prints goes through an import), and an oracle in Python. The

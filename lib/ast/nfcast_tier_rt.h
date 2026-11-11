@@ -163,7 +163,7 @@ typedef union nfcr_W {  // one unboxed value: an integer, a float, or a boolean 
 // ---- a number whose kind is known only at run time (generated code) ---------------------------------------------------------------
 // A variable that holds an integer here and a float there (`local s = 0` ... `s = s + 0.5`) is an nfcr_N: the value and a flag that
 // says which. The operators do what the interpreter's do on a pair of numbers, with the same functions as above.
-// The flag is a 4-byte int with 4 bytes of tail padding. That needs scripts/qbe-wflag.patch (docs/notes/qbe-wflag.md): without it the
+// The flag is a 4-byte int with 4 bytes of tail padding. That needs the fork commit 'nfcxx patch: wflag' (docs/notes/qbe-wflag.md): without it the
 // QBE back end tests the padding half of the word when such a struct is copied by value (a float came back as its integer part);
 // re-run scripts/setup-qbe.sh after pulling the patch. Until then, `nfcr_i64 f;` is the workaround.
 typedef struct nfcr_N {

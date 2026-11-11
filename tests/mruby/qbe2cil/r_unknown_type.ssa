@@ -1,0 +1,6 @@
+# Refused: an aggregate call result whose type is not declared.
+function w $f(w %a) {
+@start
+	%x =:nosuch call $g(w 1)
+	ret 0
+}

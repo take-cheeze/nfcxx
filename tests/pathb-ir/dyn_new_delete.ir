@@ -4,7 +4,7 @@
 (global "live" int 4 4 (static) (init (zero 0 4)))
 (global "news" int 4 4 (static) (init (zero 0 4)))
 (global "deletes" int 4 4 (static) (init (zero 0 4)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
 (global "_ZTS4Base" (const (array 6 (const char))) 6 1 (weak) (init
     (bytes 0 6 @"const")))
@@ -28,10 +28,10 @@
     (addr 8 long @"_ZTI7Derived" 0)
     (addr 16 long &"_ZN7DerivedD1Ev" 0)
     (addr 24 long &"_ZN7DerivedD0Ev" 0)))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "_ZTIi" (const (struct "__fundamental_type_info")) 16 8 (extern))
-(global "__caught_object_address" (ptr void) 8 8 (extern))
-(global "__catch_clause_number" int 4 4 (extern))
+(global "__caught_object_address" (ptr void) 8 8 (thread) (extern))
+(global "__catch_clause_number" int 4 4 (thread) (extern))
 (global "tmp" (array 9 (struct "__C2")) 144 8 (static) (init
     (addr 0 (ptr (fn void ())) &"_ZdlPvm" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))

@@ -23,8 +23,9 @@
 #define NFCXX_SYCL_HPP
 
 // A device backend is in use: NFCXX_SYCL_GPU (WebGPU: -DNFCXX_SYCL_WEBGPU, rt_pipe.hpp; Vulkan: -DNFCXX_SYCL_VULKAN,
-// rt_vulkan.hpp). Both take the same SPIR-V or WGSL image pair from scripts/sycl-build.sh.
-#if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN)
+// rt_vulkan.hpp; OpenCL: -DNFCXX_SYCL_OPENCL, rt_opencl.hpp; Level Zero: -DNFCXX_SYCL_LEVEL_ZERO, rt_level_zero.hpp).
+// The SPIR-V or WGSL image comes from scripts/sycl-build.sh.
+#if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
 #define NFCXX_SYCL_GPU 1
 #endif
 
@@ -50,9 +51,19 @@ void *__nfcxx_sycl_closure(void);     // the closure object, copied by the host
 void *__nfcxx_sycl_local_base(void);  // the work-group memory (local_accessor storage)
 void *__nfcxx_sycl_scratch(void);     // 256 words of work-group memory kept for the group algorithms
 void __nfcxx_sycl_barrier(void);
+void __nfcxx_sycl_sg_barrier(void);   // the sub-group barrier: Subgroup scope in the OpenCL module (pathb-spirv-emit.rb)
+// memory fence (OpMemoryBarrier in the OpenCL module): order is a memory_order value and scope a memory_scope value, both
+// literals at the call (a non-literal is refused by the emitter)
+void __nfcxx_sycl_fence(int order, int scope);
+// sub-group shuffles (OpGroupNonUniformShuffle, ShuffleXor in the OpenCL module): the word of lane src, of lane (lane ^ mask)
+unsigned __nfcxx_sycl_sg_shuffle_u32(unsigned w, unsigned src);
+unsigned __nfcxx_sycl_sg_shuffle_xor_u32(unsigned w, unsigned mask);
+// the lanes of the caller's sub-group: 16, or the kernel's [[sycl::reqd_sub_group_size(N)]] (OpenCL SubgroupSize builtin)
+unsigned __nfcxx_sycl_sg_size(void);
 float __nfcxx_sycl_fn1(int op, float x);  // math builtins; op is a literal: see SYCL_MATH in scripts/pathb-wgsl-emit.rb
 float __nfcxx_sycl_fn2(int op, float x, float y);
 float __nfcxx_sycl_fn3(int op, float x, float y, float z);
+double __nfcxx_sycl_fn1_f64(int op, double x);  // the double form of __nfcxx_sycl_fn1 (erf, expm1, log1p: OpenCL.std on Float64)
 // 32-bit integer atomics on global or work-group memory; they return the old value
 int __nfcxx_sycl_atomic_add(void *p, int v);
 int __nfcxx_sycl_atomic_max(void *p, int v);
@@ -75,6 +86,7 @@ float __nfcxx_sycl_atomic_fmax(void *p, float v);
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -96,6 +108,12 @@ float __nfcxx_sycl_atomic_fmax(void *p, float v);
 #include <type_traits>
 #include <math.h>
 
+// clang's __builtin_assume(cond) is an optimizer hint ggml-sycl's flash-attention kernels use (fattn-vec.hpp, fattn-common.hpp).
+// The front end here has no such builtin; dropping the hint changes no value.
+#ifndef __builtin_assume
+#define __builtin_assume(cond) ((void) 0)
+#endif
+
 #define SYCL_LANGUAGE_VERSION 202011
 #define CL_SYCL_LANGUAGE_VERSION 202011
 #define SYCL_EXTERNAL
@@ -112,6 +130,9 @@ typedef float cl_float;
 typedef double cl_double;
 
 namespace sycl {
+enum class rounding_mode { automatic, rte, rtz, rtp, rtn };
+
+enum class backend { host, opencl, level_zero, cuda, hip, vulkan, webgpu, ext_oneapi_level_zero };
 
 using size_t = unsigned long;
 
@@ -180,6 +201,9 @@ template <int D> inline bool operator!=(const id<D> &a, const id<D> &b) { return
 template <int D> inline range<D> operator+(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] + b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - b[i]; return r; }
 template <int D> inline range<D> operator*(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] * b[i]; return r; }
+// dpct::dim3 converts to range<3> with its x, y, z in reverse index order (dim3 operator sycl::range<3>), so a non-template
+// overload accepts dim3 * range<3> and range<3> * dim3 through that conversion (a template cannot deduce from dim3).
+inline range<3> operator*(const range<3> &a, const range<3> &b) { return range<3>(a[0] * b[0], a[1] * b[1], a[2] * b[2]); }
 template <int D> inline range<D> operator/(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] / b[i]; return r; }
 template <int D> inline range<D> operator%(const range<D> &a, const range<D> &b) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] % b[i]; return r; }
 template <int D> inline range<D> operator-(const range<D> &a, size_t k) { range<D> r; for (int i = 0; i < D; i++) r[i] = a[i] - k; return r; }
@@ -215,6 +239,7 @@ template <int D = 1, bool WithOffset = true> class item : public detail::size_co
 
 template <int D = 1> class nd_range {
  public:
+  nd_range() {}
   nd_range(const range<D> &g, const range<D> &l) : g_(g), l_(l) {}
   range<D> get_global_range() const { return g_; }
   range<D> get_local_range() const { return l_; }
@@ -235,22 +260,64 @@ namespace detail {
 void barrier_on_host();
 }
 
+#ifdef __NFCXX_SYCL_DEVICE__
+// The work-item builtins by SYCL dimension: dimension d is the device's component 2 - d (see device_gid). On the device,
+// nd_item, group and sub_group hold nothing and each query reads these (an object in a frame slot costs a store per field
+// where it is made and a load per query, and its address keeps calls that take it from being inlined).
+namespace detail {
+inline size_t dev_gid(int d) { return d == 0 ? __nfcxx_sycl_gid_z() : d == 1 ? __nfcxx_sycl_gid_y() : __nfcxx_sycl_gid_x(); }
+inline size_t dev_lid(int d) { return d == 0 ? __nfcxx_sycl_lid_z() : d == 1 ? __nfcxx_sycl_lid_y() : __nfcxx_sycl_lid_x(); }
+inline size_t dev_group(int d) {
+  return d == 0 ? __nfcxx_sycl_group_z() : d == 1 ? __nfcxx_sycl_group_y() : __nfcxx_sycl_group_x();
+}
+inline size_t dev_grange(int d) {
+  return d == 0 ? __nfcxx_sycl_grange_z() : d == 1 ? __nfcxx_sycl_grange_y() : __nfcxx_sycl_grange_x();
+}
+inline size_t dev_lrange(int d) {
+  return d == 0 ? __nfcxx_sycl_lrange_z() : d == 1 ? __nfcxx_sycl_lrange_y() : __nfcxx_sycl_lrange_x();
+}
+// the work-item's local linear id and the work-group size over all three components (an unused dimension has range 1 and
+// id 0, so these are the kernel's whatever its dimension)
+inline size_t dev_local_linear() {
+  return ((size_t)__nfcxx_sycl_lid_z() * __nfcxx_sycl_lrange_y() + __nfcxx_sycl_lid_y()) * __nfcxx_sycl_lrange_x() +
+         __nfcxx_sycl_lid_x();
+}
+inline size_t dev_group_size() {
+  return (size_t)__nfcxx_sycl_lrange_x() * __nfcxx_sycl_lrange_y() * __nfcxx_sycl_lrange_z();
+}
+}  // namespace detail
+#endif
+
 template <int D = 1> class group {
  public:
   group() {}
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item's group (the only group a kernel can name): nothing is stored
+  group(const id<D> &, const range<D> &, const range<D> &) {}
+#else
   group(const id<D> &gid, const range<D> &lr, const range<D> &gr) : gid_(gid), lr_(lr), gr_(gr) {}
-  id<D> get_group_id() const { return gid_; }
-  size_t get_group_id(int d) const { return gid_[d]; }
-  size_t operator[](int d) const { return gid_[d]; }
-  range<D> get_local_range() const { return lr_; }
-  size_t get_local_range(int d) const { return lr_[d]; }
-  range<D> get_group_range() const { return gr_; }
-  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gid_[i]; return l; }
+#endif
+  id<D> get_group_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = gid(i); return r; }
+  size_t get_group_id(int d) const { return gid(d); }
+  size_t operator[](int d) const { return gid(d); }
+  range<D> get_local_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = lr(i); return r; }
+  size_t get_local_range(int d) const { return lr(d); }
+  range<D> get_group_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = gr(i); return r; }
+  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr(i) + gid(i); return l; }
   bool leader() const;
 
  private:
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t gid(int d) const { return detail::dev_group(d); }
+  size_t lr(int d) const { return detail::dev_lrange(d); }
+  size_t gr(int d) const { return detail::dev_grange(d) / detail::dev_lrange(d); }
+#else
+  size_t gid(int d) const { return gid_[d]; }
+  size_t lr(int d) const { return lr_[d]; }
+  size_t gr(int d) const { return gr_[d]; }
   id<D> gid_;
   range<D> lr_, gr_;
+#endif
 };
 
 // ------------------------------------------------------------------------------------------------ pointers
@@ -317,22 +384,69 @@ inline multi_ptr<T, AS, Dec> make_ptr(T *p) { return multi_ptr<T, AS, Dec>(p); }
 
 template <class T, int N> class vec;
 
-// A sub-group here is one work-item (the sub-group size is 1, which is what device::get_info<sub_group_sizes> reports), so
-// every sub-group algorithm is trivial and host and device agree.
+// A sub-group has n lanes, detail::sg_size(): 16 (detail::kSubGroupSize, the Intel default that ggml uses), or on the device
+// the N of the kernel's [[sycl::reqd_sub_group_size(N)]] (ggml-sycl's flash-attention tile kernels: 32). The work-groups of a
+// kernel that uses sub-groups are multiples of n. Lane k of sub-group j is the work-item with local linear id nj+k. The
+// exchanges are real: on the device they are the sub-group shuffles of the OpenCL module (scripts/pathb-spirv-emit.rb gives
+// such a kernel the SubgroupSize n execution mode); on the host (n = 16) the work-items of a group, which run as fibers, swap
+// the words through the group's scratch words, with a barrier before and after each swap.
+namespace detail {
+constexpr unsigned kSubGroupSize = 16;
+inline unsigned sg_size() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return __nfcxx_sycl_sg_size();
+#else
+  return kSubGroupSize;
+#endif
+}
+inline unsigned sg_shuffle32(unsigned w, unsigned src);       // the word of lane src (0..n-1) of the caller's sub-group
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask);  // the word of lane (lane ^ mask), mask 0..n-1
+// x of any trivially copyable type, moved word by word
+template <class T> inline T sg_shuffle(T x, unsigned src) {
+  constexpr size_t n = (sizeof(T) + 3) / 4;
+  unsigned w[n] = {};
+  std::memcpy(w, &x, sizeof(T));
+  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle32(w[i], src);
+  T r;
+  std::memcpy(&r, w, sizeof(T));
+  return r;
+}
+template <class T> inline T sg_shuffle_xor(T x, unsigned mask) {
+  constexpr size_t n = (sizeof(T) + 3) / 4;
+  unsigned w[n] = {};
+  std::memcpy(w, &x, sizeof(T));
+  for (size_t i = 0; i < n; i++) w[i] = sg_shuffle_xor32(w[i], mask);
+  T r;
+  std::memcpy(&r, w, sizeof(T));
+  return r;
+}
+}  // namespace detail
+
 class sub_group {
  public:
-  sub_group() : lin_(0), count_(1) {}
-  sub_group(size_t lin, size_t count) : lin_(lin), count_(count) {}
-  id<1> get_local_id() const { return id<1>(0); }
-  size_t get_local_linear_id() const { return 0; }
-  range<1> get_local_range() const { return range<1>(1); }
-  range<1> get_max_local_range() const { return range<1>(1); }
-  size_t get_local_linear_range() const { return 1; }
-  id<1> get_group_id() const { return id<1>(lin_); }
-  size_t get_group_linear_id() const { return lin_; }
-  range<1> get_group_range() const { return range<1>(count_); }
-  size_t get_group_linear_range() const { return count_; }
-  bool leader() const { return true; }
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item's sub-group: nothing is stored, the queries read the builtins (see detail::dev_gid)
+  sub_group() {}
+  sub_group(size_t, size_t) {}
+#else
+  sub_group() : lane_(0), sg_(0), nsg_(1), n_(detail::kSubGroupSize) {}
+  // lin: the work-item's local linear id, wg: the work-group size
+  sub_group(size_t lin, size_t wg) : n_(detail::sg_size()) {
+    lane_ = lin % n_;
+    sg_ = lin / n_;
+    nsg_ = (wg + n_ - 1) / n_;
+  }
+#endif
+  id<1> get_local_id() const { return id<1>(lane()); }
+  size_t get_local_linear_id() const { return lane(); }
+  range<1> get_local_range() const { return range<1>(nlanes()); }
+  range<1> get_max_local_range() const { return range<1>(nlanes()); }
+  size_t get_local_linear_range() const { return nlanes(); }
+  id<1> get_group_id() const { return id<1>(sgid()); }
+  size_t get_group_linear_id() const { return sgid(); }
+  range<1> get_group_range() const { return range<1>(nsg()); }
+  size_t get_group_linear_range() const { return nsg(); }
+  bool leader() const { return lane() == 0; }
   // block load and store: one element per work-item
   template <class T, access::address_space AS, access::decorated Dec> T load(multi_ptr<T, AS, Dec> p) const { return *p; }
   template <int N, class T, access::address_space AS, access::decorated Dec> vec<T, N> load(multi_ptr<T, AS, Dec> p) const {
@@ -348,32 +462,55 @@ class sub_group {
   template <class T> void store(T *p, const T &x) const { *p = x; }
 
  private:
-  size_t lin_, count_;
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t lane() const { return detail::dev_local_linear() % detail::sg_size(); }
+  size_t sgid() const { return detail::dev_local_linear() / detail::sg_size(); }
+  size_t nsg() const { size_t n = detail::sg_size(); return (detail::dev_group_size() + n - 1) / n; }
+  size_t nlanes() const { return detail::sg_size(); }
+#else
+  size_t lane() const { return lane_; }
+  size_t sgid() const { return sg_; }
+  size_t nsg() const { return nsg_; }
+  size_t nlanes() const { return n_; }
+  size_t lane_, sg_, nsg_, n_;
+#endif
 };
+
 template <int D = 1> class nd_item {
  public:
   nd_item() {}
+#ifdef __NFCXX_SYCL_DEVICE__
+  // the running work-item (the only nd_item a kernel sees): nothing is stored, the queries read the builtins
+  nd_item(const id<D> &, const id<D> &, const id<D> &, const range<D> &, const range<D> &) {}
+#else
   nd_item(const id<D> &gl, const id<D> &lo, const id<D> &grp, const range<D> &gr, const range<D> &lr)
       : gl_(gl), lo_(lo), grp_(grp), gr_(gr), lr_(lr) {}
-  id<D> get_global_id() const { return gl_; }
-  size_t get_global_id(int d) const { return gl_[d]; }
-  id<D> get_local_id() const { return lo_; }
-  size_t get_local_id(int d) const { return lo_[d]; }
+#endif
+  id<D> get_global_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = gl(i); return r; }
+  size_t get_global_id(int d) const { return gl(d); }
+  id<D> get_local_id() const { id<D> r; for (int i = 0; i < D; i++) r[i] = lo(i); return r; }
+  size_t get_local_id(int d) const { return lo(d); }
   group<D> get_group() const {
     range<D> n;
-    for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i];
-    return group<D>(grp_, lr_, n);
+    for (int i = 0; i < D; i++) n[i] = gr(i) / lr(i);
+    return group<D>(get_group_id_(), get_local_range(), n);
   }
-  size_t get_group(int d) const { return grp_[d]; }
-  range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr_[i] / lr_[i]; return n; }
-  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr_[i] / lr_[i]) + grp_[i]; return l; }
-  range<D> get_global_range() const { return gr_; }
-  size_t get_global_range(int d) const { return gr_[d]; }
-  range<D> get_local_range() const { return lr_; }
-  size_t get_local_range(int d) const { return lr_[d]; }
-  size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr_[i] + gl_[i]; return l; }
-  size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr_[i] + lo_[i]; return l; }
+  size_t get_group(int d) const { return grp(d); }
+  range<D> get_group_range() const { range<D> n; for (int i = 0; i < D; i++) n[i] = gr(i) / lr(i); return n; }
+  size_t get_group_range(int d) const { return gr(d) / lr(d); }
+  size_t get_group_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * (gr(i) / lr(i)) + grp(i); return l; }
+  range<D> get_global_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = gr(i); return r; }
+  size_t get_global_range(int d) const { return gr(d); }
+  range<D> get_local_range() const { range<D> r; for (int i = 0; i < D; i++) r[i] = lr(i); return r; }
+  size_t get_local_range(int d) const { return lr(d); }
+  size_t get_global_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * gr(i) + gl(i); return l; }
+  size_t get_local_linear_id() const { size_t l = 0; for (int i = 0; i < D; i++) l = l * lr(i) + lo(i); return l; }
+#ifdef __NFCXX_SYCL_DEVICE__
+  sub_group get_sub_group() const { return sub_group(); }
+  void device_fill() {}   // nothing to fill (the queries read the builtins)
+#else
   sub_group get_sub_group() const { return sub_group(get_local_linear_id(), lr_.size()); }
+#endif
   void barrier(access::fence_space = access::fence_space::global_and_local) const {
 #ifdef __NFCXX_SYCL_DEVICE__
     __nfcxx_sycl_barrier();
@@ -383,28 +520,92 @@ template <int D = 1> class nd_item {
   }
 
  private:
+  id<D> get_group_id_() const { id<D> r; for (int i = 0; i < D; i++) r[i] = grp(i); return r; }
+#ifdef __NFCXX_SYCL_DEVICE__
+  size_t gl(int d) const { return detail::dev_gid(d); }
+  size_t lo(int d) const { return detail::dev_lid(d); }
+  size_t grp(int d) const { return detail::dev_group(d); }
+  size_t gr(int d) const { return detail::dev_grange(d); }
+  size_t lr(int d) const { return detail::dev_lrange(d); }
+#else
+  size_t gl(int d) const { return gl_[d]; }
+  size_t lo(int d) const { return lo_[d]; }
+  size_t grp(int d) const { return grp_[d]; }
+  size_t gr(int d) const { return gr_[d]; }
+  size_t lr(int d) const { return lr_[d]; }
   id<D> gl_, lo_, grp_;
   range<D> gr_, lr_;
+#endif
 };
 
-template <class T> inline T select_from_group(sub_group, T x, id<1>) { return x; }
-template <class T> inline T group_broadcast(sub_group, T x) { return x; }
-template <class T> inline T group_broadcast(sub_group, T x, id<1>) { return x; }
-template <class T> inline T shift_group_left(sub_group, T x, unsigned = 1) { return x; }
-template <class T> inline T shift_group_right(sub_group, T x, unsigned = 1) { return x; }
-template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned) { return x; }
-template <class T, class Op> inline T reduce_over_group(sub_group, T x, Op) { return x; }
-template <class T, class Op> inline T inclusive_scan_over_group(sub_group, T x, Op) { return x; }
-inline bool any_of_group(sub_group, bool p) { return p; }
-inline bool all_of_group(sub_group, bool p) { return p; }
-inline bool none_of_group(sub_group, bool p) { return !p; }
-inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {}
+// the lanes of the caller's sub-group exchange values; every lane must reach each of these (the sub-group is collective)
+template <class T> inline T select_from_group(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)i[0]); }
+template <class T> inline T group_broadcast(sub_group, T x) { return detail::sg_shuffle(x, 0u); }
+template <class T> inline T group_broadcast(sub_group, T x, id<1> i) { return detail::sg_shuffle(x, (unsigned)i[0]); }
+// the value of lane lane + delta (or of the caller itself when that lane is past the end)
+template <class T> inline T shift_group_left(sub_group sg, T x, unsigned delta = 1) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  return detail::sg_shuffle(x, lane + delta < sg.get_local_linear_range() ? lane + delta : lane);
+}
+// the value of lane lane - delta (or of the caller itself when that lane is before the start)
+template <class T> inline T shift_group_right(sub_group sg, T x, unsigned delta = 1) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  return detail::sg_shuffle(x, lane >= delta ? lane - delta : lane);
+}
+template <class T> inline T permute_group_by_xor(sub_group, T x, unsigned mask) { return detail::sg_shuffle_xor(x, mask); }
+// butterfly over the n lanes: after the xor steps n/2, ..., 2, 1 every lane holds the whole sum (op commutative, as SYCL requires)
+// the butterfly over n lanes on scalars: no sub_group object (a struct copy per call on the device)
+template <class T, class Op> inline T reduce_lanes(unsigned n, T x, Op op) {
+  for (unsigned m = n / 2; m > 0; m >>= 1) x = op(x, detail::sg_shuffle_xor(x, m));
+  return x;
+}
+template <class T, class Op> inline T reduce_over_group(const sub_group &sg, T x, Op op) {
+  return reduce_lanes((unsigned)sg.get_local_linear_range(), x, op);
+}
+// Hillis-Steele: after the steps 1, 2, 4, ..., n/2 lane k holds the combination of lanes 0..k
+template <class T, class Op> inline T inclusive_scan_over_group(const sub_group &sg, T x, Op op) {
+  unsigned lane = (unsigned)sg.get_local_linear_id();
+  for (unsigned d = 1; d < sg.get_local_linear_range(); d <<= 1) {
+    T y = shift_group_right(sg, x, d);
+    if (lane >= d) x = op(y, x);
+  }
+  return x;
+}
+inline bool any_of_group(const sub_group &sg, bool p) {
+  unsigned r = p ? 1u : 0u;
+  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r |= detail::sg_shuffle_xor(r, m);
+  return r != 0;
+}
+inline bool all_of_group(const sub_group &sg, bool p) {
+  unsigned r = p ? 1u : 0u;
+  for (unsigned m = (unsigned)sg.get_local_linear_range() / 2; m > 0; m >>= 1) r &= detail::sg_shuffle_xor(r, m);
+  return r != 0;
+}
+inline bool none_of_group(const sub_group &sg, bool p) { return !any_of_group(sg, p); }
+inline void group_barrier(sub_group, memory_scope = memory_scope::sub_group) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_sg_barrier();
+#else
+  detail::barrier_on_host();
+#endif
+}
 
 template <int D> inline void group_barrier(const group<D> &, memory_scope = memory_scope::work_group) {
 #ifdef __NFCXX_SYCL_DEVICE__
   __nfcxx_sycl_barrier();
 #else
   detail::barrier_on_host();
+#endif
+}
+
+// atomic_fence: a fence at the given order and scope. On the device it is OpMemoryBarrier (the OpenCL memory model's
+// work-group or device fence). On the host it is a no-op, as barrier_on_host is.
+inline void atomic_fence(memory_order order, memory_scope scope) {
+#ifdef __NFCXX_SYCL_DEVICE__
+  __nfcxx_sycl_fence(static_cast<int>(order), static_cast<int>(scope));
+#else
+  (void) order;
+  (void) scope;
 #endif
 }
 
@@ -450,13 +651,20 @@ template <class P> struct is_init_identity { static constexpr bool value = false
 template <> struct is_init_identity<property::reduction::initialize_to_identity> { static constexpr bool value = true; };
 }  // namespace detail
 
-// Properties are accepted and, except no_init, have no effect.
+namespace detail {
+// a queue asked for profiling somewhere in the program: events then read the host clock (it can take microseconds, as
+// with an HPET clock source, so it is not read otherwise)
+inline bool &profiling_on() { static bool on = false; return on; }
+}  // namespace detail
+
+// Properties are accepted and, except no_init and enable_profiling, have no effect.
 class property_list {
  public:
   property_list() {}
   template <class... P> property_list(const P &...) {
     no_init_ = (false || ... || detail::is_no_init<P>::value);
     init_identity_ = (false || ... || detail::is_init_identity<P>::value);
+    if ((false || ... || std::is_same<P, property::queue::enable_profiling>::value)) detail::profiling_on() = true;
   }
   bool no_init() const { return no_init_; }
   bool init_identity() const { return init_identity_; }
@@ -503,6 +711,7 @@ using async_handler = std::function<void(exception_list)>;
 // ------------------------------------------------------------------------------------------------ backend interface
 
 class handler;
+namespace ext::oneapi::experimental { template <class... P> struct properties; }
 
 namespace detail {
 
@@ -535,6 +744,14 @@ void backend_memset(void *p, int v, unsigned long n);
 bool backend_is_usm(const void *);
 void backend_dispatch(const char *key, const void *closure, unsigned closure_bytes, const unsigned *global,
                       const unsigned *local, unsigned local_mem_bytes, buffer_use *uses, int nuses);
+// The launch triple reaches the runtimes reversed: the device's dimension 0 (the x of get_local_id(x), the one a sub-group
+// is formed along) is the last SYCL dimension, the one that varies fastest in SYCL's linear ids. Unused dimensions have
+// size 1, so reversing all three is exact for every D. The device-side ids are mapped to match (device_lid and friends).
+inline void gpu_dispatch(const char *key, const void *closure, unsigned closure_bytes, const unsigned *g, const unsigned *l,
+                         unsigned local_mem_bytes, buffer_use *uses, int nuses) {
+  const unsigned gr[3] = {g[2], g[1], g[0]}, lr[3] = {l[2], l[1], l[0]};
+  backend_dispatch(key, closure, closure_bytes, gr, lr, local_mem_bytes, uses, nuses);
+}
 void backend_wait();
 
 }  // namespace detail
@@ -543,6 +760,10 @@ void backend_wait();
 
 #if defined(NFCXX_SYCL_VULKAN) && !defined(__NFCXX_SYCL_DEVICE__)
 #include "rt_vulkan.hpp"
+#elif defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+#include "rt_opencl.hpp"
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+#include "rt_level_zero.hpp"
 #elif defined(NFCXX_SYCL_WEBGPU) && !defined(__NFCXX_SYCL_DEVICE__)
 #include "rt_pipe.hpp"
 #else
@@ -563,6 +784,14 @@ inline void backend_dispatch(const char *, const void *, unsigned, const unsigne
 inline void backend_wait() {}
 }  // namespace detail
 }  // namespace sycl
+#endif
+
+// The image of this TU (OpenCL and Level Zero): registered once per TU, from a TU-local static, so that every TU of a
+// program or a shared library brings its kernels (rt_image.hpp).
+#if (defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)) && defined(NFCXX_SYCL_IMAGE_PREFIX) && !defined(__NFCXX_SYCL_DEVICE__)
+namespace {
+[[maybe_unused]] const int nfcxx_sycl_image_registered = ::sycl::detail::register_image(NFCXX_SYCL_IMAGE_PREFIX);
+}
 #endif
 
 namespace sycl {
@@ -791,6 +1020,12 @@ class handler {
   template <class Name = void, int D, class F> void parallel_for(range<D> r, F f);
   template <class Name = void, class F> void parallel_for(size_t n, F f) { parallel_for<Name>(range<1>(n), f); }
   template <class Name = void, int D, class F> void parallel_for(nd_range<D> r, F f);
+  // with a kernel-property list (sycl_ext_oneapi_kernel_properties, ext/intel/experimental/grf_size_properties.hpp): the
+  // shim's properties change nothing, so the kernel runs as it would without them
+  template <class Name = void, int D, class... P, class F>
+  void parallel_for(range<D> r, ext::oneapi::experimental::properties<P...>, F f) { parallel_for<Name>(r, f); }
+  template <class Name = void, int D, class... P, class F>
+  void parallel_for(nd_range<D> r, ext::oneapi::experimental::properties<P...>, F f) { parallel_for<Name>(r, f); }
   template <class Name = void, class F> void single_task(F f);
   template <class Name = void, int D, class T, class Op, class F> void parallel_for(range<D> r, reduction_desc<T, Op> red, F f);
   template <class Name = void, int D, class T, class Op, class F> void parallel_for(nd_range<D> r, reduction_desc<T, Op> red, F f);
@@ -988,6 +1223,7 @@ template <class T, int D = 1> class local_accessor {
   size_t get_count() const { return r_.size(); }
   range<D> get_range() const { return r_; }
   T *get_pointer() const { return base(); }
+  template <access::decorated Dec = access::decorated::legacy> local_ptr<T, Dec> get_multi_ptr() const { return local_ptr<T, Dec>(base()); }
 
  private:
 #ifdef __NFCXX_SYCL_DEVICE__
@@ -1008,6 +1244,13 @@ template <class T, int D = 1> class local_accessor {
 #define NFCXX_SYCL_FIBER_STACK (96 * 1024)
 #endif
 namespace detail {
+// The item of a work-item on the host: its nd_item<dim> (set by the kernel's body while the fiber runs), and its local
+// linear id and group size, which get_sub_group() needs without the dimension.
+struct host_item {
+  const void *nd = nullptr;
+  int dim = 0;
+  size_t lin = 0, wg = 1;
+};
 struct host_group {
   int n = 0, cur = 0;
   ucontext_t sched;
@@ -1015,12 +1258,18 @@ struct host_group {
   std::vector<char *> stacks;
   std::vector<char> done;
   std::vector<unsigned long> scratch;   // one word per work-item, for the group algorithms
+  std::vector<host_item> items;         // one per work-item
   void (*run)(void *, int) = nullptr;
   void *arg = nullptr;
 };
 inline host_group *&current_group() {
   static host_group *g = nullptr;
   return g;
+}
+// The item of the work-item that is running: the scheduler points it at that fiber's slot before each switch into the fiber.
+inline host_item *&current_host_item() {
+  static thread_local host_item *p = nullptr;
+  return p;
 }
 inline void fiber_main() {
   host_group *g = current_group();
@@ -1034,7 +1283,15 @@ inline void barrier_on_host() {
 }
 // Runs body(i) for i < n as the n work-items of one group, with barriers working.
 template <class Body> inline void run_group_items(host_group &g, int n, Body &body) {
-  if (n == 1) { body(0); return; }
+  g.items.assign(n, host_item{});
+  for (int i = 0; i < n; i++) { g.items[i].lin = (size_t)i; g.items[i].wg = (size_t)n; }
+  host_item *saved_item = current_host_item();
+  if (n == 1) {
+    current_host_item() = &g.items[0];
+    body(0);
+    current_host_item() = saved_item;
+    return;
+  }
   g.run = [](void *a, int i) { (*(Body *)a)(i); };
   g.arg = &body;
   g.n = n;
@@ -1059,16 +1316,37 @@ template <class Body> inline void run_group_items(host_group &g, int n, Body &bo
     for (int i = 0; i < n; i++) {
       if (g.done[i]) continue;
       g.cur = i;
+      current_host_item() = &g.items[i];
       swapcontext(&g.sched, &g.ctx[i]);
       if (g.done[i]) left--;
     }
+  current_host_item() = saved_item;
   current_group() = saved;
 }
 inline void free_group(host_group &g) { for (char *s : g.stacks) std::free(s); g.stacks.clear(); }
+// sub-group exchanges on the host: each work-item writes its word, a barrier, reads its source's word, a barrier (so the next
+// write waits until every read is done). The lanes of a sub-group are the work-items 16j..16j+15 of the group (g->cur is the index).
+inline unsigned sg_shuffle32(unsigned w, unsigned src) {
+  host_group *g = current_group();
+  if (!g) return w;
+  int cur = g->cur, from = (cur & ~15) + (int)(src & 15);
+  g->scratch[cur] = w;
+  barrier_on_host();
+  unsigned r = from < g->n ? (unsigned)g->scratch[from] : w;
+  barrier_on_host();
+  return r;
+}
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) {
+  host_group *g = current_group();
+  if (!g) return w;
+  return sg_shuffle32(w, (unsigned)(g->cur & 15) ^ (mask & 15));
+}
 }  // namespace detail
 #else
 namespace detail {
 inline void barrier_on_host() {}   // never called on the device: nd_item::barrier lowers to __nfcxx_sycl_barrier
+inline unsigned sg_shuffle32(unsigned w, unsigned src) { return __nfcxx_sycl_sg_shuffle_u32(w, src & (sg_size() - 1)); }
+inline unsigned sg_shuffle_xor32(unsigned w, unsigned mask) { return __nfcxx_sycl_sg_shuffle_xor_u32(w, mask & (sg_size() - 1)); }
 }  // namespace detail
 #endif
 
@@ -1078,25 +1356,26 @@ namespace detail {
 
 #ifdef __NFCXX_SYCL_DEVICE__
 template <int D> inline range<D> device_global_range();
-template <> inline range<1> device_global_range<1>() { return range<1>(__nfcxx_sycl_grange_x()); }
-template <> inline range<2> device_global_range<2>() { return range<2>(__nfcxx_sycl_grange_x(), __nfcxx_sycl_grange_y()); }
-template <> inline range<3> device_global_range<3>() { return range<3>(__nfcxx_sycl_grange_x(), __nfcxx_sycl_grange_y(), __nfcxx_sycl_grange_z()); }
+// The device's x is the last SYCL dimension (see gpu_dispatch): SYCL dimension d is the device's component 2 - d.
+template <> inline range<1> device_global_range<1>() { return range<1>(__nfcxx_sycl_grange_z()); }
+template <> inline range<2> device_global_range<2>() { return range<2>(__nfcxx_sycl_grange_z(), __nfcxx_sycl_grange_y()); }
+template <> inline range<3> device_global_range<3>() { return range<3>(__nfcxx_sycl_grange_z(), __nfcxx_sycl_grange_y(), __nfcxx_sycl_grange_x()); }
 template <int D> inline range<D> device_local_range();
-template <> inline range<1> device_local_range<1>() { return range<1>(__nfcxx_sycl_lrange_x()); }
-template <> inline range<2> device_local_range<2>() { return range<2>(__nfcxx_sycl_lrange_x(), __nfcxx_sycl_lrange_y()); }
-template <> inline range<3> device_local_range<3>() { return range<3>(__nfcxx_sycl_lrange_x(), __nfcxx_sycl_lrange_y(), __nfcxx_sycl_lrange_z()); }
+template <> inline range<1> device_local_range<1>() { return range<1>(__nfcxx_sycl_lrange_z()); }
+template <> inline range<2> device_local_range<2>() { return range<2>(__nfcxx_sycl_lrange_z(), __nfcxx_sycl_lrange_y()); }
+template <> inline range<3> device_local_range<3>() { return range<3>(__nfcxx_sycl_lrange_z(), __nfcxx_sycl_lrange_y(), __nfcxx_sycl_lrange_x()); }
 template <int D> inline id<D> device_gid();
-template <> inline id<1> device_gid<1>() { return id<1>(__nfcxx_sycl_gid_x()); }
-template <> inline id<2> device_gid<2>() { return id<2>(__nfcxx_sycl_gid_x(), __nfcxx_sycl_gid_y()); }
-template <> inline id<3> device_gid<3>() { return id<3>(__nfcxx_sycl_gid_x(), __nfcxx_sycl_gid_y(), __nfcxx_sycl_gid_z()); }
+template <> inline id<1> device_gid<1>() { return id<1>(__nfcxx_sycl_gid_z()); }
+template <> inline id<2> device_gid<2>() { return id<2>(__nfcxx_sycl_gid_z(), __nfcxx_sycl_gid_y()); }
+template <> inline id<3> device_gid<3>() { return id<3>(__nfcxx_sycl_gid_z(), __nfcxx_sycl_gid_y(), __nfcxx_sycl_gid_x()); }
 template <int D> inline id<D> device_lid();
-template <> inline id<1> device_lid<1>() { return id<1>(__nfcxx_sycl_lid_x()); }
-template <> inline id<2> device_lid<2>() { return id<2>(__nfcxx_sycl_lid_x(), __nfcxx_sycl_lid_y()); }
-template <> inline id<3> device_lid<3>() { return id<3>(__nfcxx_sycl_lid_x(), __nfcxx_sycl_lid_y(), __nfcxx_sycl_lid_z()); }
+template <> inline id<1> device_lid<1>() { return id<1>(__nfcxx_sycl_lid_z()); }
+template <> inline id<2> device_lid<2>() { return id<2>(__nfcxx_sycl_lid_z(), __nfcxx_sycl_lid_y()); }
+template <> inline id<3> device_lid<3>() { return id<3>(__nfcxx_sycl_lid_z(), __nfcxx_sycl_lid_y(), __nfcxx_sycl_lid_x()); }
 template <int D> inline id<D> device_group();
-template <> inline id<1> device_group<1>() { return id<1>(__nfcxx_sycl_group_x()); }
-template <> inline id<2> device_group<2>() { return id<2>(__nfcxx_sycl_group_x(), __nfcxx_sycl_group_y()); }
-template <> inline id<3> device_group<3>() { return id<3>(__nfcxx_sycl_group_x(), __nfcxx_sycl_group_y(), __nfcxx_sycl_group_z()); }
+template <> inline id<1> device_group<1>() { return id<1>(__nfcxx_sycl_group_z()); }
+template <> inline id<2> device_group<2>() { return id<2>(__nfcxx_sycl_group_z(), __nfcxx_sycl_group_y()); }
+template <> inline id<3> device_group<3>() { return id<3>(__nfcxx_sycl_group_z(), __nfcxx_sycl_group_y(), __nfcxx_sycl_group_x()); }
 
 // Kernel entries. The WGSL emitter turns each function whose name contains __nfcxx_sycl_entry_ into a compute entry point.
 // The closure's type, found from the cast of __nfcxx_sycl_closure(), names the kernel for the host.
@@ -1110,7 +1389,9 @@ template <int D, class F> void __nfcxx_sycl_entry_range() {
 }
 template <int D, class F> void __nfcxx_sycl_entry_nd() {
   const F *f = (const F *)__nfcxx_sycl_closure();
-  (*f)(nd_item<D>(device_gid<D>(), device_lid<D>(), device_group<D>(), device_global_range<D>(), device_local_range<D>()));
+  nd_item<D> it;
+  it.device_fill();
+  (*f)(it);
 }
 template <class F> void __nfcxx_sycl_entry_single() {
   const F *f = (const F *)__nfcxx_sycl_closure();
@@ -1129,7 +1410,7 @@ template <class Name, int D, class F> void handler::parallel_for(range<D> r, F f
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r[d]; l[d] = detail::default_local<D>(d); }
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   range<D> rr = r;
   size_t n = rr.size();
@@ -1149,7 +1430,7 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
   for (int d = 0; d < D; d++) { g[d] = (unsigned)r.get_global_range()[d]; l[d] = (unsigned)r.get_local_range()[d]; }
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   // The groups run one after another; the work-items of a group are fibers, so barrier() and the group algorithms work.
   range<D> gr = r.get_global_range(), lr = r.get_local_range();
@@ -1165,7 +1446,12 @@ template <class Name, int D, class F> void handler::parallel_for(nd_range<D> r, 
         loc[d] = tl % lr[d]; tl /= lr[d];
         glo[d] = grp[d] * lr[d] + loc[d];
       }
-      f(nd_item<D>(glo, loc, grp, gr, lr));
+      nd_item<D> it(glo, loc, grp, gr, lr);
+      detail::host_item &hi = hg.items[ll];
+      hi.nd = &it;
+      hi.dim = D;
+      f(it);
+      hi.nd = nullptr;
     };
     detail::run_group_items(hg, (int)nlocal, body);
   }
@@ -1178,19 +1464,76 @@ template <class Name, class F> void handler::single_task(F f) {
   detail::__nfcxx_sycl_entry_single<F>();
 #elif defined(NFCXX_SYCL_GPU)
   unsigned g[3] = {1, 1, 1}, l[3] = {1, 1, 1};
-  detail::backend_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
+  detail::gpu_dispatch(typeid(F).name(), &f, (unsigned)sizeof(F), g, l, local_bytes_, uses_, nuses_);
 #else
   f();
 #endif
 }
+
+// ------------------------------------------------------------------------------------------------ this_work_item
+// The item of the work-item that is running. On the device it is built from the builtins the kernel's item comes from. On
+// the host it is the item of the running fiber (detail::current_host_item, set by the scheduler in run_group_items).
+namespace ext::oneapi::this_work_item {
+template <int D> inline nd_item<D> get_nd_item() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return nd_item<D>();   // the device's nd_item reads the builtins
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h || !h->nd || h->dim != D) {
+    std::fprintf(stderr, "this_work_item::get_nd_item<%d>: no nd_range work-item is running\n", D);
+    std::abort();
+  }
+  return *static_cast<const nd_item<D> *>(h->nd);
+#endif
+}
+inline sub_group get_sub_group() {
+#ifdef __NFCXX_SYCL_DEVICE__
+  return sub_group();   // the device's sub_group reads the builtins
+#else
+  const detail::host_item *h = detail::current_host_item();
+  if (!h) {
+    std::fprintf(stderr, "this_work_item::get_sub_group: no nd_range work-item is running\n");
+    std::abort();
+  }
+  return sub_group(h->lin, h->wg);
+#endif
+}
+}  // namespace ext::oneapi::this_work_item
 
 // ------------------------------------------------------------------------------------------------ device, platform, context
 
 enum class aspect {
   cpu, gpu, accelerator, custom, emulated, host_debuggable, fp16, fp64, atomic64, image, online_compiler, online_linker,
   queue_profiling, usm_device_allocations, usm_host_allocations, usm_atomic_host_allocations, usm_shared_allocations,
-  usm_atomic_shared_allocations, usm_system_allocations
+  usm_atomic_shared_allocations, usm_system_allocations,
+  // extension aspects ggml-sycl queries: none is supported here (no joint_matrix, no command graphs)
+  ext_intel_matrix, ext_oneapi_graph, ext_oneapi_limited_graph
 };
+
+// The extension names a device query needs before class device. architecture is completed (its values) in the ext block
+// at the end of this header; arch_category and peer_access are the sycl_ext_oneapi_device_architecture and
+// sycl_ext_oneapi_peer_access enums.
+namespace ext {
+namespace oneapi {
+enum class peer_access { access_supported, atomics_supported };
+namespace experimental {
+enum class architecture : uint64_t;
+enum class arch_category { intel_gpu, nvidia_gpu, amd_gpu };
+namespace info {
+namespace device {
+struct architecture {};
+}  // namespace device
+}  // namespace info
+}  // namespace experimental
+}  // namespace oneapi
+namespace intel {
+namespace info {
+namespace device {
+struct device_id {};
+}  // namespace device
+}  // namespace info
+}  // namespace intel
+}  // namespace ext
 
 namespace info {
 enum class device_type { cpu, gpu, accelerator, custom, automatic, host, all };
@@ -1205,6 +1548,8 @@ struct max_work_group_size {};
 struct max_work_item_dimensions {};
 struct max_compute_units {};
 struct global_mem_size {};
+struct global_mem_cache_size {};
+struct mem_base_addr_align {};
 struct local_mem_size {};
 struct max_mem_alloc_size {};
 struct sub_group_sizes {};
@@ -1274,6 +1619,7 @@ class device {
  public:
   device() {}
   template <class S> device(const S &) {}
+  backend get_backend() const { return is_gpu() ? backend::opencl : backend::host; }
   bool is_gpu() const {
 #ifdef NFCXX_SYCL_GPU
     return true;
@@ -1290,29 +1636,91 @@ class device {
       case aspect::fp64: return !is_gpu();
       case aspect::usm_device_allocations:
       case aspect::usm_host_allocations:
-      case aspect::usm_shared_allocations:
-      case aspect::fp16: return a != aspect::fp16;
+      case aspect::usm_shared_allocations: return true;
+      case aspect::fp16: return has_fp16();
       default: return false;
     }
   }
   platform get_platform() const;
+  // ext_oneapi_architecture_is: an Intel GPU, as the oneAPI runtime reports for the XPU (ggml-sycl then enables its reorder
+  // layouts, as in the icpx build). The exact architecture is not queried: get_info<architecture> reports unknown.
+  bool ext_oneapi_architecture_is(ext::oneapi::experimental::arch_category c) const {
+    return is_gpu() && c == ext::oneapi::experimental::arch_category::intel_gpu;
+  }
+  // one device in this subset: no peer to access
+  bool ext_oneapi_can_access_peer(const device &, ext::oneapi::peer_access = ext::oneapi::peer_access::access_supported) const {
+    return false;
+  }
+  void ext_oneapi_enable_peer_access(const device &) const {}
+  void ext_oneapi_disable_peer_access(const device &) const {}
   template <class P> std::vector<device> create_sub_devices(P) const { throw exception(errc::feature_not_supported, "sycl: devices cannot be partitioned"); }
   static std::vector<device> get_devices(info::device_type = info::device_type::all) { return std::vector<device>(1); }
   template <class P> auto get_info() const { return info_of(static_cast<P *>(nullptr)); }
 
  private:
-  std::string info_of(info::device::name *) const { return is_gpu() ? "nfcxx WebGPU" : "nfcxx host"; }
+  // fp16 is a property of the backend device: the host has it (emulated), a GPU has it when its runtime reports it
+  bool has_fp16() const {
+    if (!is_gpu()) return true;
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::cl_rt::get().has_fp16();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::ze_rt::get().has_fp16();
+#else
+    return false;  // WebGPU and Vulkan: no fp16 query in this subset
+#endif
+  }
+  std::string info_of(info::device::name *) const {
+    if (!is_gpu()) return "nfcxx host";
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::cl_rt::get().device_name();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::ze_rt::get().device_name();
+#elif defined(NFCXX_SYCL_VULKAN) && !defined(__NFCXX_SYCL_DEVICE__)
+    return detail::vk_rt::get().device_name();
+#else
+    return "nfcxx WebGPU";
+#endif
+  }
   std::string info_of(info::device::vendor *) const { return "nfcxx"; }
   std::string info_of(info::device::driver_version *) const { return "0"; }
   std::string info_of(info::device::version *) const { return "SYCL 2020 subset"; }
   info::device_type info_of(info::device::device_type *) const { return is_gpu() ? info::device_type::gpu : info::device_type::cpu; }
-  size_t info_of(info::device::max_work_group_size *) const { return is_gpu() ? 256 : 1024; }
+  // the GPU's largest work-group is the driver's (the host learns it from the runtime; a device-side pass has no host runtime)
+  size_t info_of(info::device::max_work_group_size *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().max_work_group();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().max_work_group();
+#endif
+    return is_gpu() ? 256 : 1024;
+  }
   unsigned info_of(info::device::max_work_item_dimensions *) const { return 3; }
-  unsigned info_of(info::device::max_compute_units *) const { return 1; }
-  unsigned long info_of(info::device::global_mem_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
+  // OpenCL and Level Zero: the device's count (the EUs of an Intel GPU, as DPC++ reports it; ggml-sycl divides it by 16
+  // for its Xe cores, so 1 would give it none). Elsewhere 1.
+  unsigned info_of(info::device::max_compute_units *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().compute_units();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().compute_units();
+#endif
+    return 1;
+  }
+  // the GPU's memory is the driver's total (OpenCL and Level Zero); the value the host learns from it decides how much
+  // llama.cpp fits (common_params_fit), so a placeholder here makes a large model "not fit" and the fit step throws
+  unsigned long info_of(info::device::global_mem_size *) const {
+#if defined(NFCXX_SYCL_OPENCL) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::cl_rt::get().global_mem();
+#elif defined(NFCXX_SYCL_LEVEL_ZERO) && !defined(__NFCXX_SYCL_DEVICE__)
+    if (is_gpu()) return detail::ze_rt::get().global_mem();
+#endif
+    return is_gpu() ? (1ul << 28) : (1ul << 32);
+  }
+  unsigned long info_of(info::device::global_mem_cache_size *) const { return 1ul << 20; }
+  unsigned info_of(info::device::mem_base_addr_align *) const { return 1024; }
+  friend bool operator==(const device &, const device &) { return true; }   // one device in this subset
   unsigned long info_of(info::device::local_mem_size *) const { return 16384; }
   unsigned long info_of(info::device::max_mem_alloc_size *) const { return is_gpu() ? (1ul << 28) : (1ul << 32); }
-  std::vector<size_t> info_of(info::device::sub_group_sizes *) const { return std::vector<size_t>(1, 1); }
+  std::vector<size_t> info_of(info::device::sub_group_sizes *) const { return std::vector<size_t>(1, detail::kSubGroupSize); }
   info::local_mem_type info_of(info::device::local_mem_type *) const { return info::local_mem_type::local; }
   template <int D> id<3> info_of(info::device::max_work_item_sizes<D> *) const { return id<3>(256, 256, 64); }
   std::string info_of(info::device::profile *) const { return "FULL_PROFILE"; }
@@ -1323,6 +1731,9 @@ class device {
   bool info_of(info::device::usm_host_allocations *) const { return true; }
   bool info_of(info::device::usm_shared_allocations *) const { return true; }
   bool info_of(info::device::usm_system_allocations *) const { return false; }
+  ext::oneapi::experimental::architecture info_of(ext::oneapi::experimental::info::device::architecture *) const {
+    return static_cast<ext::oneapi::experimental::architecture>(0x9900000000000000ull);   // unknown
+  }
   // the other descriptors: a number, 0 where the question has no meaning here
   template <class P> unsigned long info_of(P *) const { return 0; }
 };
@@ -1334,6 +1745,7 @@ class platform {
   static std::vector<platform> get_platforms() { return std::vector<platform>(1); }
   std::vector<device> get_devices(info::device_type = info::device_type::all) const { return std::vector<device>(1); }
   template <class P> std::string get_info() const { return "nfcxx"; }
+  backend get_backend() const { return device().get_backend(); }
 };
 inline platform device::get_platform() const { return platform(); }
 
@@ -1352,23 +1764,24 @@ inline unsigned long now_ns() {
 }  // namespace detail
 
 // Profiling times are host clock readings: the submission, the end of the host-side enqueue, and the moment the work was
-// known to be done (the first wait).
+// known to be done (the first wait). They are 0 unless a queue asked for profiling (detail::profiling_on).
 class event {
  public:
-  event() : t_submit_(detail::now_ns()), t_start_(t_submit_), t_end_(0) {}
+  event() : t_submit_(stamp()), t_start_(t_submit_), t_end_(0) {}
   void wait() const { detail::backend_wait(); finish(); }
   void wait_and_throw() const { wait(); }
   static void wait(const std::vector<event> &v) { detail::backend_wait(); for (const event &e : v) e.finish(); }
   static void wait_and_throw(const std::vector<event> &v) { wait(v); }
   template <class P> unsigned long get_profiling_info() const { return profiling_of(static_cast<P *>(nullptr)); }
-  void mark_started() { t_start_ = detail::now_ns(); }
+  void mark_started() { t_start_ = stamp(); }
   info::event_command_status get_info_status() const { return info::event_command_status::complete; }
 
  private:
   unsigned long profiling_of(info::event_profiling::command_submit *) const { return t_submit_; }
   unsigned long profiling_of(info::event_profiling::command_start *) const { return t_start_; }
   unsigned long profiling_of(info::event_profiling::command_end *) const { finish(); return t_end_; }
-  void finish() const { if (!t_end_) { detail::backend_wait(); t_end_ = detail::now_ns(); } }
+  void finish() const { if (!t_end_) { detail::backend_wait(); t_end_ = detail::profiling_on() ? detail::now_ns() : 1; } }
+  static unsigned long stamp() { return detail::profiling_on() ? detail::now_ns() : 0; }
   unsigned long t_submit_, t_start_;
   mutable unsigned long t_end_;
 };
@@ -1700,19 +2113,42 @@ template <class T, int D> inline T *scratch_slot(size_t lid) {
 }  // namespace detail
 
 template <int D> inline bool group<D>::leader() const { return detail::group_lid<D>() == 0; }
-template <class T, class Op> inline T exclusive_scan_over_group(sub_group, T, Op) { return detail::red_identity<detail::op_kind<Op>::value, T>(); }
-template <class T, class V, class Op> inline T exclusive_scan_over_group(sub_group, T, V init, Op) { return (T)init; }
+// lane k holds the combination of lanes 0..k-1 (lane 0 the identity)
+template <class T, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, Op op) {
+  T e = shift_group_right(sg, inclusive_scan_over_group(sg, x, op), 1);
+  return sg.get_local_linear_id() == 0 ? detail::red_identity<detail::op_kind<Op>::value, T>() : e;
+}
+template <class T, class V, class Op> inline T exclusive_scan_over_group(const sub_group &sg, T x, V init, Op op) {
+  return op((T)init, exclusive_scan_over_group(sg, x, op));
+}
 
-template <int D, class T, class Op> inline T reduce_over_group(group<D> g, T x, Op op) {
+// Two stages, as a GPU does it: the lanes of each sub-group reduce by butterfly (log2 of the sub-group size steps), the
+// first lane of each sub-group stores the partial, and every work-item combines the partials (one per sub-group, at most
+// the group size over the sub-group size). A group of 256 work-items does 16 partial reads per work-item, not 256.
+template <int D, class T, class Op> inline T reduce_over_group(const group<D> &g, T x, Op op) {
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
+#if !defined(__NFCXX_SYCL_DEVICE__) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
+  const size_t w = detail::sg_size();
+  T s = reduce_lanes((unsigned)w, x, op);   // the butterfly over the sub-group, on scalars: no sub_group object per call
+  const size_t nsg = (n + w - 1) / w;
+  if (lid % w == 0) *detail::scratch_slot<T, D>(lid / w) = s;
+  group_barrier(g);
+  T r = *detail::scratch_slot<T, D>(0);
+  for (size_t i = 1; i < nsg; i++) r = op(r, *detail::scratch_slot<T, D>(i));
+  group_barrier(g);
+  return r;
+#else
+  // the WebGPU and Vulkan device compilers refuse the sub-group exchanges in this function (sycl-build exit 3), so the device
+  // reads every work-item's slot; the host and the OpenCL and Level Zero devices keep the two stages above
   *detail::scratch_slot<T, D>(lid) = x;
   group_barrier(g);
   T r = *detail::scratch_slot<T, D>(0);
   for (size_t i = 1; i < n; i++) r = op(r, *detail::scratch_slot<T, D>(i));
   group_barrier(g);
   return r;
+#endif
 }
-template <int D, class T, class V, class Op> inline T reduce_over_group(group<D> g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
+template <int D, class T, class V, class Op> inline T reduce_over_group(const group<D> &g, T x, V init, Op op) { return op((T)init, reduce_over_group(g, x, op)); }
 template <int D, class T> inline T group_broadcast(group<D> g, T x, id<D> from) {
   size_t lid = detail::group_lid<D>();
   if (lid == detail::linear<D>(from, g.get_local_range())) *detail::scratch_slot<T, D>(0) = x;
@@ -1743,9 +2179,9 @@ template <int D, class T, class V, class Op> inline T exclusive_scan_over_group(
 template <int D, class T, class Op> inline T exclusive_scan_over_group(group<D> g, T x, Op op) {
   return exclusive_scan_over_group(g, x, detail::red_identity<detail::op_kind<Op>::value, T>(), op);
 }
-template <int D> inline bool any_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
-template <int D> inline bool all_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
-template <int D> inline bool none_of_group(group<D> g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
+template <int D> inline bool any_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) != 0; }
+template <int D> inline bool all_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, minimum<int>()) != 0; }
+template <int D> inline bool none_of_group(const group<D> &g, bool p) { return reduce_over_group(g, (int)p, maximum<int>()) == 0; }
 template <int D, class Ptr, class Op> inline auto joint_reduce(group<D> g, Ptr first, Ptr last, Op op) {
   using T = typename std::remove_cv<typename std::remove_reference<decltype(*first)>::type>::type;
   size_t lid = detail::group_lid<D>(), n = g.get_local_range().size();
@@ -1810,6 +2246,8 @@ class queue {
 
   event memcpy(void *dst, const void *src, size_t n) { detail::backend_memcpy(dst, src, n); return event(); }
   event memcpy(void *dst, const void *src, size_t n, const event &) { return memcpy(dst, src, n); }
+  event memcpy(void *dst, const void *src, size_t n, const std::vector<event> &) { return memcpy(dst, src, n); }
+  friend bool operator==(const queue &, const queue &) { return true; }   // one in-order queue in this subset
   event memset(void *p, int v, size_t n) { detail::backend_memset(p, v, n); return event(); }
   template <class T> event fill(void *p, const T &v, size_t count) {
     handler h;
@@ -1820,9 +2258,14 @@ class queue {
   event prefetch(const void *, size_t) { return event(); }
   event mem_advise(const void *, size_t, int) { return event(); }
 
+  // the queue is in order: a barrier orders nothing more than submission already does
+  event ext_oneapi_submit_barrier() { return event(); }
+  event ext_oneapi_submit_barrier(const std::vector<event> &) { return event(); }
+
   void wait() { detail::backend_wait(); }
   void wait_and_throw() { detail::backend_wait(); }
   void throw_asynchronous() {}
+  backend get_backend() const { return device().get_backend(); }
   device get_device() const { return device(); }
   context get_context() const { return context(); }
   bool is_in_order() const { return true; }
@@ -1835,7 +2278,11 @@ enum class alloc { host, device, shared, unknown };
 }
 
 namespace detail {
+// A USM allocation starts at a multiple of the device's mem_base_addr_align (1024 bits) at least, as DPC++'s do: ggml takes
+// the base of a buffer from malloc_device to be aligned to its buffer type's 128 bytes.
+constexpr size_t usm_align = 128;
 inline void *usm_malloc(size_t bytes, size_t align, int kind) {
+  if (align < usm_align) align = usm_align;
   void *p = backend_usm_alloc(bytes, (unsigned)align, kind);
   if (!p && bytes) throw exception(errc::memory_allocation, "sycl: USM allocation failed");
   return p;
@@ -1845,6 +2292,7 @@ inline int kind_of(usm::alloc k) { return k == usm::alloc::device ? 0 : (k == us
 
 template <class T> T *malloc_device(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 0); }
 template <class T> T *malloc_device(size_t count, const device &, const context &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 0); }
+inline void *malloc_device(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 0); }
 template <class T> T *malloc_shared(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 1); }
 template <class T> T *malloc_shared(size_t count, const device &, const context &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 1); }
 template <class T> T *malloc_host(size_t count, const queue &) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), 2); }
@@ -1855,7 +2303,9 @@ template <class T> T *aligned_alloc_host(size_t align, size_t count, const queue
 template <class T> T *malloc(size_t count, const queue &, usm::alloc k) { return (T *)detail::usm_malloc(count * sizeof(T), alignof(T), detail::kind_of(k)); }
 inline void *malloc_device(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 0); }
 inline void *malloc_shared(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 1); }
+inline void *malloc_shared(size_t bytes, const device &, const context &) { return detail::usm_malloc(bytes, 16, 1); }
 inline void *malloc_host(size_t bytes, const queue &) { return detail::usm_malloc(bytes, 16, 2); }
+inline void *malloc_host(size_t bytes, const queue &, const property_list &) { return detail::usm_malloc(bytes, 16, 2); }
 inline void *malloc(size_t bytes, const queue &, usm::alloc k) { return detail::usm_malloc(bytes, 16, detail::kind_of(k)); }
 inline void free(void *p, const queue &) { if (p) detail::backend_usm_free(p); }
 inline void free(void *p, const context &) { if (p) detail::backend_usm_free(p); }
@@ -1897,6 +2347,8 @@ template <class T, int N> class vec {
   }
   T &operator[](int i) { return v_[i]; }
   const T &operator[](int i) const { return v_[i]; }
+  // a one-element vector is usable as its element (SYCL 2020: vec<T,1> converts to T)
+  template <int M = N, class = detail::enable_if_t<(M == 1)>> operator T() const { return v_[0]; }
   static constexpr size_t size() { return N; }
   T &x() { return v_[0]; }
   T &y() { static_assert(N > 1, "y"); return v_[1]; }
@@ -1911,6 +2363,10 @@ template <class T, int N> class vec {
     for (int i = 0; i < N; i++) r[i] = (U)v_[i];
     return r;
   }
+  // as<U>(): the same bytes read as another vector or scalar type.
+  template <class U> U as() const { U u; std::memcpy(&u, v_, sizeof(U)); return u; }
+  // convert<U, rounding_mode>(): the rounding is the conversion's own (round to nearest), so the mode is accepted and ignored.
+  template <class U, rounding_mode> vec<U, N> convert() const { return convert<U>(); }
   friend vec operator+(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] + b.v_[i]; return r; }
   friend vec operator-(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] - b.v_[i]; return r; }
   friend vec operator*(const vec &a, const vec &b) { vec r; for (int i = 0; i < N; i++) r.v_[i] = a.v_[i] * b.v_[i]; return r; }
@@ -1925,8 +2381,21 @@ template <class T, int N> class vec {
   vec &operator-=(const vec &b) { for (int i = 0; i < N; i++) v_[i] -= b.v_[i]; return *this; }
   vec &operator*=(const vec &b) { for (int i = 0; i < N; i++) v_[i] *= b.v_[i]; return *this; }
   vec &operator/=(const vec &b) { for (int i = 0; i < N; i++) v_[i] /= b.v_[i]; return *this; }
-  friend bool operator==(const vec &a, const vec &b) { for (int i = 0; i < N; i++) if (!(a.v_[i] == b.v_[i])) return false; return true; }
-  friend bool operator!=(const vec &a, const vec &b) { return !(a == b); }
+  // SYCL 2020: a relational operator on vectors compares lane by lane and returns a vector of the signed integer type of
+  // the same width, -1 for a true lane and 0 for a false one (dpct's vectorized_binary relies on this shape).
+  using mask_elem = typename std::conditional<sizeof(T) == 1, int8_t,
+                    typename std::conditional<sizeof(T) == 2, int16_t,
+                    typename std::conditional<sizeof(T) == 4, int32_t, int64_t>::type>::type>::type;
+  friend vec<mask_elem, N> operator==(const vec &a, const vec &b) {
+    vec<mask_elem, N> r;
+    for (int i = 0; i < N; i++) r[i] = (a.v_[i] == b.v_[i]) ? (mask_elem)-1 : (mask_elem)0;
+    return r;
+  }
+  friend vec<mask_elem, N> operator!=(const vec &a, const vec &b) {
+    vec<mask_elem, N> r;
+    for (int i = 0; i < N; i++) r[i] = (a.v_[i] != b.v_[i]) ? (mask_elem)-1 : (mask_elem)0;
+    return r;
+  }
 
  private:
   static constexpr int storage = detail::vec_store<N>::n;
@@ -1955,6 +2424,7 @@ namespace detail {
 enum math_op {
   M_SQRT = 1, M_EXP, M_LOG, M_SIN, M_COS, M_TAN, M_FABS, M_FLOOR, M_CEIL, M_TRUNC, M_ROUND, M_RSQRT, M_EXP2, M_LOG2,
   M_ASIN, M_ACOS, M_ATAN, M_SINH, M_COSH, M_TANH,
+  M_ERF = 21, M_EXPM1, M_LOG1P,
   M_POW = 32, M_FMIN, M_FMAX, M_ATAN2, M_FMOD, M_COPYSIGN,
   M_FMA = 48, M_CLAMP, M_MIX
 };
@@ -1981,6 +2451,9 @@ inline float fn1(int op, float x) {
     case M_SINH: return ::sinhf(x);
     case M_COSH: return ::coshf(x);
     case M_TANH: return ::tanhf(x);
+    case M_ERF: return ::erff(x);
+    case M_EXPM1: return ::expm1f(x);
+    case M_LOG1P: return ::log1pf(x);
   }
   return 0.0f;
 }
@@ -2091,6 +2564,157 @@ template <class T> inline T clamp(T x, T lo, T hi) { return x < lo ? lo : (hi < 
 inline float clamp(float x, float lo, float hi) { return detail::m_clamp(x, lo, hi); }
 inline float abs(float x) { return NFCXX_SYCL_FN1(detail::M_FABS, x); }
 inline int abs(int x) { return x < 0 ? -x : x; }
+
+// classification of a binary32 value by arithmetic alone (no library call for the device to lower): x - x is 0 for a finite
+// x and NaN for an infinity. isnan is in lib/sycl-ggml/sycl/half_type.hpp.
+inline bool isinf(float x) { return x == x && (x - x) != 0.0f; }
+inline bool isfinite(float x) { return (x - x) == 0.0f; }
+// nan(n): a quiet binary32 NaN carrying the low 22 bits of n as its payload (ggml's pool.cpp fills empty windows with it).
+inline float nan(uint32_t n) {
+  uint32_t u = 0x7fc00000u | (n & 0x3fffffu);
+  float f;
+  std::memcpy(&f, &u, 4);
+  return f;
+}
+
+// add_sat and sub_sat (SYCL 2020 integer saturating arithmetic): the result clamped to the range of T. dpct's sub_sat functor
+// (dpct/helper.hpp) calls sycl::sub_sat on the lanes of a vectorized binary op, so every integer type reaches here.
+template <class T, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline T sub_sat(T x, T y) {
+  if constexpr (std::is_unsigned<T>::value) {
+    return x > y ? (T)(x - y) : (T)0;
+  } else {
+    if (y > 0 && x < std::numeric_limits<T>::min() + y) return std::numeric_limits<T>::min();
+    if (y < 0 && x > std::numeric_limits<T>::max() + y) return std::numeric_limits<T>::max();
+    return (T)(x - y);
+  }
+}
+// on vectors: lane by lane (dpct's vectorized_binary passes sycl::char4 and friends)
+template <class T, int N, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline vec<T, N> sub_sat(const vec<T, N> &x, const vec<T, N> &y) {
+  vec<T, N> r;
+  for (int i = 0; i < N; i++) r[i] = sub_sat(x[i], y[i]);
+  return r;
+}
+template <class T, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline T add_sat(T x, T y) {
+  if constexpr (std::is_unsigned<T>::value) {
+    return (T)(x + y) < x ? std::numeric_limits<T>::max() : (T)(x + y);
+  } else {
+    if (y > 0 && x > std::numeric_limits<T>::max() - y) return std::numeric_limits<T>::max();
+    if (y < 0 && x < std::numeric_limits<T>::min() - y) return std::numeric_limits<T>::min();
+    return (T)(x + y);
+  }
+}
+template <class T, int N, class = detail::enable_if_t<std::is_integral<T>::value && !std::is_same<T, bool>::value>>
+inline vec<T, N> add_sat(const vec<T, N> &x, const vec<T, N> &y) {
+  vec<T, N> r;
+  for (int i = 0; i < N; i++) r[i] = add_sat(x[i], y[i]);
+  return r;
+}
+
+// erf, expm1 and log1p (ggml's element_wise.cpp names them in op_erf, op_expm1, op_log1p). float runs as the device
+// builtins M_ERF, M_EXPM1, M_LOG1P (OpenCL.std erf, expm1, log1p; the SPIR-V emitter lowers them). double runs as the same
+// builtins on the double form __nfcxx_sycl_fn1_f64 (OpenCL.std on Float64). On the host these are the C library's.
+namespace detail {
+#ifdef __NFCXX_SYCL_DEVICE__
+inline float m_erf(float x) { return NFCXX_SYCL_FN1(detail::M_ERF, x); }
+inline float m_expm1(float x) { return NFCXX_SYCL_FN1(detail::M_EXPM1, x); }
+inline float m_log1p(float x) { return NFCXX_SYCL_FN1(detail::M_LOG1P, x); }
+inline double m_erf(double x) { return __nfcxx_sycl_fn1_f64(detail::M_ERF, x); }
+inline double m_expm1(double x) { return __nfcxx_sycl_fn1_f64(detail::M_EXPM1, x); }
+inline double m_log1p(double x) { return __nfcxx_sycl_fn1_f64(detail::M_LOG1P, x); }
+#else
+inline float m_erf(float x) { return ::erff(x); }
+inline float m_expm1(float x) { return ::expm1f(x); }
+inline float m_log1p(float x) { return ::log1pf(x); }
+inline double m_erf(double x) { return ::erf(x); }
+inline double m_expm1(double x) { return ::expm1(x); }
+inline double m_log1p(double x) { return ::log1p(x); }
+#endif
+}  // namespace detail
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type erf(T x) { return detail::m_erf((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type expm1(T x) { return detail::m_expm1((typename detail::fp<T>::type)x); }
+template <class T, detail::enable_arith<T> = 0> inline typename detail::fp<T>::type log1p(T x) { return detail::m_log1p((typename detail::fp<T>::type)x); }
+
+// sycl::native::exp (the fast-math exp; the compat library has one exp, so it is that one).
+namespace native {
+inline float exp(float x) { return sycl::exp(x); }
+}  // namespace native
+
+// sycl::ext::oneapi: the names element_wise.cpp spells out for its bfloat16 and work-item branches. bfloat16 is the bf16
+// storage (the upper 16 bits of a binary32, round-to-nearest-even on conversion from float); arithmetic and math go
+// through float and round the result back to bf16, as the device's bf16 math does.
+namespace ext {
+namespace oneapi {
+class bfloat16 {
+ public:
+  bfloat16() = default;
+  bfloat16(float f) : bits_(from_float(f)) {}
+  operator float() const { return to_float(bits_); }
+  uint16_t bits() const { return bits_; }
+  static bfloat16 from_bits(uint16_t b) { bfloat16 r; r.bits_ = b; return r; }
+
+ private:
+  uint16_t bits_ = 0;
+
+  static float to_float(uint16_t b) {
+    uint32_t u = (uint32_t)b << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  }
+  static uint16_t from_float(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    if ((u & 0x7fffffffu) > 0x7f800000u) return 0x7fc0;  // NaN stays NaN
+    u += 0x7fffu + ((u >> 16) & 1u);                      // round to nearest even
+    return (uint16_t)(u >> 16);
+  }
+};
+inline bfloat16 operator-(bfloat16 a) { return bfloat16(-static_cast<float>(a)); }
+inline bfloat16 operator+(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) + static_cast<float>(b)); }
+inline bfloat16 operator-(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) - static_cast<float>(b)); }
+inline bfloat16 operator*(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) * static_cast<float>(b)); }
+inline bfloat16 operator/(bfloat16 a, bfloat16 b) { return bfloat16(static_cast<float>(a) / static_cast<float>(b)); }
+namespace experimental {
+// The device architectures ggml-sycl names (gpu_arch in sycl_hw.hpp). The values are the ones the oneAPI runtime reports
+// (device_architecture.def), so an architecture read from the runtime compares equal to these. Only the Intel GPUs that the
+// backend mentions are listed.
+enum class architecture : uint64_t {
+  unknown = 0x9900000000000000,
+  intel_gpu_bdw = 0x0000000200000000, intel_gpu_skl = 0x0000000240000900, intel_gpu_kbl = 0x0000000240400900,
+  intel_gpu_cfl = 0x0000000240800900, intel_gpu_apl = 0x0000000240c00000, intel_gpu_glk = 0x0000000241000000,
+  intel_gpu_whl = 0x0000000241400000, intel_gpu_aml = 0x0000000241800000, intel_gpu_cml = 0x0000000241c00000,
+  intel_gpu_icllp = 0x00000002c0000000, intel_gpu_ehl = 0x00000002c0800000, intel_gpu_tgllp = 0x0000000300000000,
+  intel_gpu_rkl = 0x0000000300400000, intel_gpu_adl_s = 0x0000000300800000, intel_gpu_adl_p = 0x0000000300c00000,
+  intel_gpu_adl_n = 0x0000000301000000, intel_gpu_dg1 = 0x0000000302800000, intel_gpu_acm_g10 = 0x000000030dc00800,
+  intel_gpu_acm_g11 = 0x000000030e000500, intel_gpu_acm_g12 = 0x000000030e400000, intel_gpu_pvc = 0x000000030f000700,
+  intel_gpu_pvc_vg = 0x000000030f400700, intel_gpu_mtl_u = 0x0000000311800400, intel_gpu_mtl_h = 0x0000000311c00400,
+  intel_gpu_arl_h = 0x0000000312800400, intel_gpu_bmg_g21 = 0x0000000500400400, intel_gpu_bmg_g31 = 0x0000000500800000,
+  intel_gpu_lnl_m = 0x0000000501000400, intel_gpu_ptl_h = 0x0000000780000400, intel_gpu_ptl_u = 0x0000000780400100,
+  intel_gpu_wcl = 0x0000000780c00000,
+  // aliases of the entries above (device_architecture.def)
+  intel_gpu_dg2_g10 = intel_gpu_acm_g10, intel_gpu_dg2_g11 = intel_gpu_acm_g11, intel_gpu_dg2_g12 = intel_gpu_acm_g12,
+  intel_gpu_icl = intel_gpu_icllp, intel_gpu_tgl = intel_gpu_tgllp, intel_gpu_bxt = intel_gpu_apl,
+};
+
+// The bf16 math of the ops' bfloat16 arms: the float function of the rounded input, rounded back to bf16.
+#define NFCXX_SYCL_BF16_FN1(name) \
+  inline bfloat16 name(bfloat16 x) { return bfloat16(::sycl::name(static_cast<float>(x))); }
+#define NFCXX_SYCL_BF16_FN2(name) \
+  inline bfloat16 name(bfloat16 x, bfloat16 y) { return bfloat16(::sycl::name(static_cast<float>(x), static_cast<float>(y))); }
+NFCXX_SYCL_BF16_FN1(fabs) NFCXX_SYCL_BF16_FN1(exp) NFCXX_SYCL_BF16_FN1(exp2) NFCXX_SYCL_BF16_FN1(expm1)
+NFCXX_SYCL_BF16_FN1(log) NFCXX_SYCL_BF16_FN1(log2) NFCXX_SYCL_BF16_FN1(log1p) NFCXX_SYCL_BF16_FN1(sqrt)
+NFCXX_SYCL_BF16_FN1(sin) NFCXX_SYCL_BF16_FN1(cos) NFCXX_SYCL_BF16_FN1(tan) NFCXX_SYCL_BF16_FN1(tanh)
+NFCXX_SYCL_BF16_FN1(erf) NFCXX_SYCL_BF16_FN1(floor) NFCXX_SYCL_BF16_FN1(ceil) NFCXX_SYCL_BF16_FN1(trunc)
+NFCXX_SYCL_BF16_FN1(round)
+NFCXX_SYCL_BF16_FN2(fmax) NFCXX_SYCL_BF16_FN2(fmin)
+#undef NFCXX_SYCL_BF16_FN1
+#undef NFCXX_SYCL_BF16_FN2
+}  // namespace experimental
+}  // namespace oneapi
+}  // namespace ext
 
 }  // namespace sycl
 

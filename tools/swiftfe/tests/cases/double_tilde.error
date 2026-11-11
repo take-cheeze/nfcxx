@@ -1,0 +1,1 @@
+double_tilde.swift:1:7: error: unary operator '~' cannot be applied to an operand of type 'Double'

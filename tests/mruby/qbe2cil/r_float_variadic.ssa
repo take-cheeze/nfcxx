@@ -1,0 +1,6 @@
+# Refused: a variadic call returning a float.
+function w $f(w %a) {
+@start
+	%x =d call $printf(l $f, ..., w 1)
+	ret 0
+}

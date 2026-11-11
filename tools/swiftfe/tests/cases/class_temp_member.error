@@ -1,0 +1,1 @@
+class_temp_member.swift:4:7: error: member access on a temporary class value is not supported yet

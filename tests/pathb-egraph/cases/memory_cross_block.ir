@@ -1,0 +1,20 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "a" int) (param %1 "b" int))
+  (slot "x" int 4 4)
+  (eval (call void &"observe" (addr $"x")))
+  (block
+    (let %2 int (wadd int %0 %1))
+    (store int $"x" %2)
+    (let %3 bool (lt.s int %0 (const int 0)))
+    (if %3
+      (then
+        (let %4 int (load int $"x"))
+        (let %5 int (wadd int %4 (const int 1)))
+        (store int $"x" %5))
+      (else
+        (let %6 int (load int $"x"))
+        (store int $"x" (const int 7))))
+    (let %7 int (load int $"x"))
+    (return %7)))

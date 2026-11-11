@@ -1,0 +1,2307 @@
+// The function lowering and the module (scripts/pathb-spirv-emit.rb: class SpvModule, class SFn, emit_module). Each method
+// is the Ruby's method of the same name. The order of the ids is the Ruby's: an instruction's operands are evaluated left to
+// right (braced lists here: C++ evaluates their elements in order) before the instruction takes its result id.
+#include "emit.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <tuple>
+#include <unordered_set>
+
+#include "forms.hpp"
+#include "ir.hpp"
+#include "spv.hpp"
+
+namespace {
+
+enum : uint32_t { IADD = 128, ISUB = 130, IMUL = 132 };
+
+// GLSL.std.450 instruction numbers for the SYCL math operations (detail::math_op in sycl.hpp), the Ruby's GLSL_OF_MATH
+int glsl_of_math(int64_t k) {
+  static const std::map<int64_t, int> t = {
+      {1, 31},  {2, 27},  {3, 28},  {4, 13},  {5, 14},  {6, 15},  {7, 4},   {8, 8},   {9, 9},   {10, 3},
+      {11, 1},  {12, 32}, {13, 29}, {14, 30}, {15, 16}, {16, 17}, {17, 18}, {18, 19}, {19, 20}, {20, 21},
+      {32, 26}, {33, 37}, {34, 40}, {35, 25}, {48, 50}, {49, 43}, {50, 46}, {21, 1002}, {22, 1000}, {23, 1001}};
+  auto it = t.find(k);
+  return it == t.end() ? 0 : it->second;
+}
+
+// libm builtins that libstdc++ calls for float arguments (the Ruby's LIBM_GLSL)
+int libm_glsl(const std::string &n0) {
+  static const std::map<std::string, int> t = {
+      {"sqrtf", 31}, {"expf", 27},  {"logf", 28},   {"sinf", 13},  {"cosf", 14},  {"tanf", 15},  {"fabsf", 4},
+      {"floorf", 8}, {"ceilf", 9},  {"truncf", 3},  {"roundf", 1}, {"exp2f", 29}, {"log2f", 30}, {"asinf", 16},
+      {"acosf", 17}, {"atanf", 18}, {"sinhf", 19},  {"coshf", 20}, {"tanhf", 21}, {"powf", 26},  {"atan2f", 25},
+      {"fminf", 37}, {"fmaxf", 40}, {"fmaf", 50}};
+  std::string n = n0.compare(0, 10, "__builtin_") == 0 ? n0.substr(10) : n0;
+  auto it = t.find(n);
+  return it == t.end() ? 0 : it->second;
+}
+
+bool wide(const Ty &t) {
+  return t.k == Ty::Ptr || (t.k == Ty::Int && !t.boolean && t.size == 8) || (t.k == Ty::Float && t.size == 8);
+}
+
+bool is_reg(const Node &x) { return x.kind == Node::Atom && !x.text.empty() && x.text[0] == '%'; }
+
+const Node *find_head(const Node &s, size_t from, const char *h) {
+  for (size_t i = from; i < s.items.size(); i++)
+    if (head_is(s.items[i], h)) return &s.items[i];
+  return nullptr;
+}
+
+std::vector<const Node *> drop(const Node &x, size_t n) {
+  std::vector<const Node *> v;
+  for (size_t i = n; i < x.items.size(); i++) v.push_back(&x.items[i]);
+  return v;
+}
+
+struct SFn;
+
+// The module's shared state (the Ruby's class SpvModule).
+struct SpvModule {
+  Spv *spv;
+  bool kernel_cl;
+  uint32_t push = 0, gid, lid, wid, sp = 0, dead = 0;
+  uint32_t spec[3];
+  int64_t stack_bytes = 0;
+  std::unordered_map<std::string, SFn *> fns, fns_wgs;
+  Mod *irmod = nullptr;
+  bool subgroup_used = false;
+  bool has_wgs = false;   // the Ruby's smod.wgs (nil in the Vulkan module)
+  std::map<std::pair<std::string, std::string>, int64_t> wgs;
+  int64_t wgs_total = 0;
+  uint32_t wgs_var = 0;
+  uint32_t sg_size_var = 0;   // the SubgroupSize builtin input, once a function reads it
+  bool no_div_trap = false;   // --no-div-trap
+  bool no_checks = false;     // --no-checks: the IR's (nonnull P) and (bounds I N) checks emit nothing
+
+  SpvModule(Spv *s, bool kcl) : spv(s), kernel_cl(kcl) {
+    push = kcl ? 0 : s->push_var();
+    gid = s->builtin_input(BUILTIN_GLOBAL_INVOCATION_ID);
+    lid = s->builtin_input(BUILTIN_LOCAL_INVOCATION_ID);
+    wid = s->builtin_input(BUILTIN_WORKGROUP_ID);
+    sp = kcl ? 0 : s->private_var(s->t_int(64));
+    dead = kcl ? 0 : s->private_var(s->t_int(32));
+    spec[0] = s->spec_u32(0, 1);
+    spec[1] = s->spec_u32(1, 1);
+    spec[2] = s->spec_u32(2, 1);
+    if (!kcl) s->workgroup_size({spec[0], spec[1], spec[2]});
+  }
+  uint32_t push_struct_type() { return spv->t_push_struct(); }
+  uint32_t push_class() const { return kernel_cl ? SC_CROSSWG : SC_PUSH_CONSTANT; }
+};
+
+struct Reg {
+  bool var;
+  uint32_t id;
+  Ty ty;
+};
+
+struct Local {
+  uint32_t var = 0;
+  Ty ty;
+};
+
+struct Opnd {
+  uint32_t id;
+  Ty ty;
+};
+
+// One IR function (or a kernel's entry wrapper) in SPIR-V (the Ruby's class SFn).
+struct SFn {
+  Node *form;
+  uint32_t fid;
+  SpvModule *mod;
+  Spv *spv;
+  bool wgs_mode;
+  std::string name;
+  std::vector<Ty> ptypes;
+  std::optional<Ty> ret;
+  std::unordered_map<std::string, int64_t> slots;
+  std::unordered_map<std::string, int64_t> wgs;
+  OMap<Local> locals;
+  int64_t frame = 0;
+  std::vector<Node *> body;
+  std::vector<Inst> vars, code, param_lines;
+  std::unordered_map<std::string, Reg> regs;
+  // the registers that take more than one value (a set, or a let twice): they live in a Function variable; the others are SSA
+  std::unordered_set<std::string> mutable_regs;
+  bool term_ = false;
+  struct Loop {
+    uint32_t brk, cont;   // cont 0: a switch
+  };
+  std::vector<Loop> loops;
+  std::unordered_map<std::string, uint32_t> labels;
+  std::optional<std::string> pending_brk;
+  std::vector<uint32_t> param_ids;
+  std::vector<std::string> callees;
+  bool has_state = false;
+  uint32_t st_push = 0, st_sp = 0, st_dead = 0;
+  uint32_t ftype = 0, ret_t = 0, oldsp_var = 0, frame_var = 0;
+  std::vector<uint32_t> state_types, state_param_ids;
+  bool sg_used = false;
+  // compiled: compile() has run; traps: the function can leave with the invocation marked dead (it emits a trap, or a call
+  // whose callee can), so its callers check the dead flag after calling it. The functions compile callees first (the call
+  // order), and a call of a function not compiled yet is checked.
+  bool compiled = false, traps = false;
+  std::unordered_set<std::string> nn_regs;   // the registers that are never null (see never_null_regs)
+  // The private slots (see private_slots): name => its Function-storage word array (declared by compile); preg: register =>
+  // the private slot its pointer value points into (the value is the byte offset in the slot)
+  struct PSlot {
+    int64_t words = 0;
+    uint32_t var = 0;
+  };
+  OMap<PSlot> pslots;
+  std::unordered_map<std::string, std::string> preg;
+
+  SFn(Node *f, uint32_t id, SpvModule *m, bool wm = false) : form(f), fid(id), mod(m), spv(m->spv), wgs_mode(wm) {
+    name = f ? to_s(f->items.at(1)) : "wrapper";
+    if (f) setup();
+  }
+
+  uint32_t psb_sc() const { return mod->kernel_cl ? SC_CROSSWG : SC_PSB; }
+
+  enum State { S_PUSH, S_SP, S_DEAD };
+  uint32_t state(State s) const {
+    if (has_state) return s == S_PUSH ? st_push : s == S_SP ? st_sp : st_dead;
+    return s == S_PUSH ? mod->push : s == S_SP ? mod->sp : mod->dead;
+  }
+
+  // ---- the instruction stream
+
+  void ins(Inst i) {
+    if (term_) return;
+    code.push_back(std::move(i));
+  }
+  void term(Inst i) {
+    if (term_) return;
+    code.push_back(std::move(i));
+    term_ = true;
+  }
+  void label(uint32_t l) {
+    code.push_back({248, l});
+    term_ = false;
+  }
+  // res(opcode, {rtype, operands...}): the operands are evaluated (in order) before the result id is taken
+  uint32_t res(uint32_t op, std::initializer_list<uint32_t> l) { return res_v(op, std::vector<uint32_t>(l)); }
+  uint32_t res_v(uint32_t op, const std::vector<uint32_t> &l) {
+    uint32_t i = spv->id();
+    Inst v{op, l[0], i};
+    v.insert(v.end(), l.begin() + 1, l.end());
+    ins(std::move(v));
+    return i;
+  }
+  uint32_t new_label() { return spv->id(); }
+  void branch(uint32_t l) { term({249, l}); }
+  void cond_branch(uint32_t c, uint32_t t, uint32_t f) { term({250, c, t, f}); }
+  uint32_t var_decl(uint32_t t) {
+    uint32_t pt = spv->t_ptr(SC_FUNCTION, t);
+    uint32_t v = spv->id();
+    vars.push_back({59, pt, v, SC_FUNCTION});
+    return v;
+  }
+
+  uint32_t t32() { return spv->t_int(32); }
+  uint32_t t64() { return spv->t_int(64); }
+  uint32_t tbool() { return spv->t_bool(); }
+
+  // the zero of an IR type (0: void)
+  uint32_t zero_of(const Ty &t) {
+    if (t.k == Ty::Void) return 0;
+    sty(t);
+    if (t.k == Ty::Int && t.boolean) return spv->c_bool(false);
+    if (t.k == Ty::Float) return t.size == 4 ? spv->c_float(32, 0.0) : spv->c_float(64, 0.0);
+    return spv->c_int(t.k == Ty::Ptr ? 64 : (t.size * 8 > 32 ? 64 : 32), 0);
+  }
+
+  uint32_t sty(const Ty &t) {
+    switch (t.k) {
+      case Ty::Void: return spv->t_void();
+      case Ty::Ptr: return spv->t_int(64);
+      case Ty::Int:
+        if (t.boolean) return spv->t_bool();
+        return t.size == 8 ? spv->t_int(64) : spv->t_int(32);
+      case Ty::Float: return spv->t_float(t.size * 8);
+    }
+    throw Refused("value of type ?");
+  }
+
+  // ---- setup (the Ruby's setup)
+
+  void setup() {
+    std::vector<const Node *> slot_forms;
+    for (size_t i = 2; i < form->items.size(); i++) {
+      Node &f = form->items[i];
+      const std::string *h = head_of(f);
+      if (h && *h == "ret") {
+        Ty t = parse_type(f.items.at(1));
+        if (t.k == Ty::Void) ret.reset();
+        else ret = t;
+      } else if (h && *h == "params") {
+        for (size_t k = 1; k < f.items.size(); k++) {
+          const Node &p = f.items[k];
+          size_t idx = k - 1;
+          if (head_is(p, "ellipsis")) throw Refused("variadic function " + name);
+          std::string reg = "%" + std::to_string(idx);
+          if (head_is(p, "param")) {
+            if (!(p.items.size() > 1 && p.items[1].atom_is(reg.c_str()))) throw BadIR("parameter register must be " + reg);
+            ptypes.push_back(parse_type(p.items.at(3)));
+          } else if (head_is(p, "sret")) {
+            if (!(p.items.size() > 1 && p.items[1].atom_is(reg.c_str()))) throw BadIR("parameter register must be " + reg);
+            ptypes.push_back(ty_ptr());
+          } else {
+            throw Refused("parameter form " + form_text(p));
+          }
+        }
+      } else if (h && (*h == "static" || *h == "weak")) {
+      } else if (h && *h == "slot") {
+        slot_forms.push_back(&f);
+      } else {
+        body.push_back(&f);
+      }
+    }
+    fold_fnptr_slots(body, slot_forms);
+    std::unordered_map<std::string, std::vector<std::optional<Ty>>> direct;
+    std::unordered_set<std::string> escaped;
+    for (Node *s : body) scan_slots(*s, direct, escaped);
+    std::vector<std::tuple<std::string, int64_t, int64_t>> frame_slots;   // name, size, align
+    for (const Node *f : slot_forms) {
+      std::string sname = to_s(f->items.at(1));
+      if (mod->has_wgs) {
+        auto it = mod->wgs.find({name, sname});
+        if (it != mod->wgs.end()) {
+          wgs[sname] = it->second;
+          continue;
+        }
+      }
+      int64_t size = f->items.size() == 5 ? as_int(f->items[3]) : 4;
+      int64_t align = f->items.size() == 5 ? as_int(f->items[4]) : 4;
+      std::optional<Ty> ty;
+      if (scalar_form(f->items.at(2))) ty = parse_type(f->items[2]);
+      auto du = direct.find(sname);
+      bool all = true;
+      if (du != direct.end())
+        for (auto &u : du->second)
+          if (!(u && ty && *u == *ty)) all = false;
+      if (ty && ty->k != Ty::Void && !escaped.count(sname) && all) {
+        locals.set(sname, Local{0, *ty});   // the variable is declared when the function is compiled
+      } else {
+        frame_slots.emplace_back(sname, size, align);
+      }
+    }
+    private_slots(frame_slots);
+    int64_t off = 0;
+    for (auto &[sname, size, align0] : frame_slots) {
+      if (pslots.has(sname)) continue;
+      int64_t align = align0 < 8 ? 8 : align0;
+      off = (off + align - 1) / align * align;
+      slots[sname] = off;
+      off += size;
+    }
+    frame = (off + 15) / 16 * 16;
+    std::vector<std::string> calls;
+    collect_calls(*form, calls);
+    std::unordered_set<std::string> seen;
+    for (auto &c : calls)
+      if (mod->irmod->defs.has(c) && seen.insert(c).second) callees.push_back(c);
+  }
+
+  // ---- private slots
+
+  // The slots that live in a Function-storage array of words instead of the invocation's stack (memory), so that the device
+  // compiler can keep them in registers: a slot (of at most PSLOT_MAX bytes) whose address does not leave the function. A
+  // pointer into one is its byte offset in the slot (a u64, as an address is), which only these uses take: a load or store
+  // through it, a copy or a constant-size memcpy, memmove or memset to or from it, a null check, and a register made from it
+  // by bitcast, offset, index or a plain copy (a register whose definitions all point into the one slot, or are null). Any
+  // other use (stored to memory, passed to a call, converted to an integer, compared, returned, or a register that may also
+  // point elsewhere) keeps the slot in the stack. Pointers stored in a private slot are kept in the host form, as in memory.
+  static constexpr int64_t PSLOT_MAX = 512;
+
+  enum { PB_NONE, PB_SLOT, PB_OTHER };   // a register's pointer base: unknown (null only), one private slot, anything else
+
+  void private_slots(const std::vector<std::tuple<std::string, int64_t, int64_t>> &cands) {
+    std::unordered_set<std::string> cand, esc;
+    for (auto &[n, size, align] : cands)
+      if (size <= PSLOT_MAX) cand.insert(n);
+    if (cand.empty()) return;
+    std::vector<std::pair<std::string, const Node *>> defs;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) defs.emplace_back(to_s(x.items[1]), &x.items[3]);
+      else if (head_is(x, "set") && x.items.size() > 2) defs.emplace_back(to_s(x.items[1]), &x.items[2]);
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+    std::unordered_map<std::string, std::pair<int, std::string>> base;
+    // the base of an operand or a register's definition
+    std::function<std::pair<int, std::string>(const Node &)> val = [&](const Node &e) -> std::pair<int, std::string> {
+      if (is_reg(e)) {
+        auto it = base.find(e.text);
+        return it == base.end() ? std::make_pair((int)PB_NONE, std::string()) : it->second;
+      }
+      if (e.is_sym('$')) {
+        if (cand.count(e.text) && !esc.count(e.text)) return {PB_SLOT, e.text};
+        return {PB_OTHER, ""};
+      }
+      if (head_is(e, "null")) return {PB_NONE, ""};
+      if (head_is(e, "bitcast") && e.items.size() > 2) return val(e.items[2]);
+      if ((head_is(e, "offset") || head_is(e, "index")) && e.items.size() > 1) return val(e.items[1]);
+      if (head_is(e, "call") && mem_call(e) && e.items.size() > 3) return val(e.items[3]);   // memcpy and the like return d
+      return {PB_OTHER, ""};
+    };
+    auto pslot_in = [&](const Node &a) -> const std::string * {
+      if (a.is_sym('$')) return cand.count(a.text) && !esc.count(a.text) ? &a.text : nullptr;
+      if (!is_reg(a)) return nullptr;
+      auto it = base.find(a.text);
+      return it != base.end() && it->second.first == PB_SLOT ? &it->second.second : nullptr;
+    };
+    std::function<void(const Node &)> deep = [&](const Node &x) {   // every pointer in x escapes
+      if (const std::string *p = pslot_in(x)) esc.insert(*p);
+      if (x.kind == Node::List)
+        for (auto &y : x.items) deep(y);
+    };
+    auto call_uses = [&](const Node &c) {
+      if (mem_call(c)) {   // d and s are accesses; the sizes are constants
+        for (size_t i = 5; i < c.items.size(); i++) deep(c.items[i]);
+        return;
+      }
+      for (size_t i = 3; i < c.items.size(); i++) deep(c.items[i]);
+    };
+    auto rval_uses = [&](const Node &e) {
+      if (e.kind != Node::List) return;   // a plain copy into the register
+      const std::string *hp = head_of(e);
+      std::string h = hp ? *hp : std::string();
+      if (h == "bitcast" || h == "null" || h == "const") return;
+      if (h == "offset") return;
+      if (h == "index") {
+        for (size_t i = 2; i < e.items.size(); i++) deep(e.items[i]);
+        return;
+      }
+      if (h == "load" || h == "load.v") return;
+      if (h == "call") return call_uses(e);
+      deep(e);
+    };
+    std::function<void(const Node &)> uses = [&](const Node &s) {
+      if (s.kind != Node::List) return;
+      const std::string *hp = head_of(s);
+      std::string h = hp ? *hp : std::string();
+      if (h == "let") {
+        if (s.items.size() > 3) rval_uses(s.items[3]);
+      } else if (h == "set" || h == "nonnull" || h == "copy" || h == "label" || h == "break" || h == "continue" ||
+                 h == "goto" || h == "trap" || h == "unreachable" || h == "case" || h == "default") {
+      } else if (h == "store" || h == "store.v") {
+        for (size_t i = 3; i < s.items.size(); i++) deep(s.items[i]);
+      } else if (h == "eval") {
+        if (s.items.size() > 1 && head_is(s.items[1], "call")) call_uses(s.items[1]);
+        else deep(s);
+      } else if (h == "block" || h == "then" || h == "else" || h == "body" || h == "step" || h == "loop") {
+        for (size_t i = 1; i < s.items.size(); i++) uses(s.items[i]);
+      } else if (h == "if" || h == "switch") {
+        if (s.items.size() > 1) deep(s.items[1]);
+        for (size_t i = 2; i < s.items.size(); i++) uses(s.items[i]);
+      } else {
+        deep(s);
+      }
+    };
+    for (;;) {
+      size_t n0 = esc.size();
+      base.clear();
+      for (bool changed = true; changed;) {
+        changed = false;
+        for (auto &[r, e] : defs) {
+          auto v = val(*e);
+          if (v.first == PB_NONE) continue;
+          auto it = base.find(r);
+          if (it == base.end()) {
+            base[r] = v;
+            changed = true;
+          } else if (it->second != v) {
+            // a register that points into two slots, or into one and elsewhere: those slots stay in the stack
+            if (it->second.first == PB_SLOT) esc.insert(it->second.second);
+            if (v.first == PB_SLOT) esc.insert(v.second);
+            if (it->second.first != PB_OTHER) {
+              it->second = {PB_OTHER, ""};
+              changed = true;
+            }
+          }
+        }
+      }
+      for (Node *b : body) uses(*b);
+      if (esc.size() == n0) break;
+    }
+    for (auto &[n, size, align] : cands)
+      if (cand.count(n) && !esc.count(n)) pslots.set(n, PSlot{(size + 3) / 4 > 0 ? (size + 3) / 4 : 1, 0});
+    for (auto &[r, v] : base)
+      if (v.first == PB_SLOT && pslots.has(v.second)) preg[r] = v.second;
+  }
+
+  // memcpy, memmove (constant size) or memset (constant byte and size): the calls the emitter lowers inline (call_expr)
+  static bool mem_call(const Node &c) {
+    if (c.items.size() != 6 || !c.items[2].is_sym('&')) return false;
+    const std::string &nm = c.items[2].text;
+    if (nm == "memcpy" || nm == "memmove" || nm == "__builtin_memcpy" || nm == "__builtin_memmove") return head_is(c.items[5], "const");
+    if (nm == "memset" || nm == "__builtin_memset") return head_is(c.items[4], "const") && head_is(c.items[5], "const");
+    return false;
+  }
+
+  // the private slot an operand points into, or null
+  const std::string *pslot_of(const Node &a) {
+    if (a.is_sym('$')) return pslots.has(a.text) ? &a.text : nullptr;
+    if (!is_reg(a)) return nullptr;
+    auto it = preg.find(a.text);
+    return it == preg.end() ? nullptr : &it->second;
+  }
+
+  // the pointer to the word of private slot `name` that holds the byte at offset rel + 4 * word_off
+  uint32_t pslot_word(const std::string &name, uint32_t rel, int word_off) {
+    uint32_t r = word_off == 0 ? rel : res(IADD, {t64(), rel, spv->c_u64(4 * word_off)});
+    uint32_t widx = res(113, {t32(), res(194, {t64(), r, spv->c_u64(2)})});
+    return res(65, {spv->t_ptr(SC_FUNCTION, t32()), pslots.get(name)->var, widx});
+  }
+
+  uint32_t pslot_load(const std::string &name, uint32_t rel, const Ty &t) {
+    t32();
+    t64();
+    int n = wgs_bytes(t);
+    uint32_t v;
+    if (n == 8) {
+      uint32_t lo = res(113, {t64(), res(61, {t32(), pslot_word(name, rel, 0)})});
+      uint32_t hi = res(113, {t64(), res(61, {t32(), pslot_word(name, rel, 1)})});
+      v = res(197, {t64(), lo, res(196, {t64(), hi, spv->c_u64(32)})});
+      if (t.k == Ty::Float) v = res(124, {sty(t), v});
+    } else {
+      uint32_t w = res(61, {t32(), pslot_word(name, rel, 0)});
+      if (n == 4) {
+        v = t.k == Ty::Float ? res(124, {sty(t), w}) : w;
+      } else {
+        int bits = n * 8;
+        v = res(194, {t32(), w, byte_shift(rel)});
+        v = res(199, {t32(), v, spv->c_u32((1ll << bits) - 1)});
+        v = t.k == Ty::Int && t.boolean ? res(171, {tbool(), v, spv->c_u32(0)}) : canon(v, t);
+      }
+    }
+    return t.k == Ty::Ptr ? ptr_to_device(v) : v;
+  }
+
+  void pslot_store(const std::string &name, uint32_t rel, const Ty &t, uint32_t v0) {
+    t32();
+    t64();
+    uint32_t v = t.k == Ty::Ptr ? ptr_to_host(v0) : v0;
+    int n = wgs_bytes(t);
+    if (n == 8) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t64(), v}) : v;
+      ins({62, pslot_word(name, rel, 0), res(113, {t32(), u})});
+      ins({62, pslot_word(name, rel, 1), res(113, {t32(), res(194, {t64(), u, spv->c_u64(32)})})});
+      return;
+    }
+    if (n == 4) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t32(), v}) : v;
+      ins({62, pslot_word(name, rel, 0), u});
+      return;
+    }
+    // a sub-word store: the other bits of the word are kept
+    int bits = n * 8;
+    int64_t mask = (1ll << bits) - 1;
+    uint32_t vv = t.k == Ty::Int && t.boolean ? bool_to_u32(v) : u32_of(v, t);
+    vv = res(199, {t32(), vv, spv->c_u32(mask)});
+    uint32_t sh = byte_shift(rel);
+    uint32_t wp = pslot_word(name, rel, 0);
+    uint32_t clear = res(200, {t32(), res(196, {t32(), spv->c_u32(mask), sh})});
+    uint32_t w = res(61, {t32(), wp});
+    uint32_t nw = res(197, {t32(), res(199, {t32(), w, clear}), res(196, {t32(), vv, sh})});
+    ins({62, wp, nw});
+  }
+
+  // a load or store at an address that may be in a private slot (ps: the slot, or null for memory)
+  uint32_t any_load(const std::string *ps, uint32_t addr, const Ty &t) { return ps ? pslot_load(*ps, addr, t) : mem_load(addr, t); }
+  void any_store(const std::string *ps, uint32_t addr, const Ty &t, uint32_t v) {
+    if (ps) pslot_store(*ps, addr, t, v);
+    else mem_store(addr, t, v);
+  }
+
+  // copy_bytes when one side (or both) is a private slot: words (or bytes, for a size not a multiple of 4), unrolled up to
+  // 256 bytes
+  void copy_any(const std::string *dps, uint32_t d, const std::string *sps, uint32_t src, int64_t n) {
+    if (!dps && !sps) return copy_bytes(d, src, n);
+    const Ty t = n % 4 == 0 ? U32 : U8;
+    int64_t step = n % 4 == 0 ? 4 : 1;
+    if (n <= 256) {
+      for (int64_t off = 0; off < n; off += step) {
+        uint32_t v = any_load(sps, res(IADD, {t64(), src, spv->c_u64(off)}), t);
+        any_store(dps, res(IADD, {t64(), d, spv->c_u64(off)}), t, v);
+      }
+      return;
+    }
+    counted_loop(n, step, [&](uint32_t off) {
+      uint32_t v = any_load(sps, res(IADD, {t64(), src, off}), t);
+      any_store(dps, res(IADD, {t64(), d, off}), t, v);
+    });
+  }
+
+  // ---- operands
+
+  uint32_t sty_of_push(int member) { return PUSH_SIZES[member] == 8 ? spv->t_int(64) : spv->t_int(32); }
+
+  uint32_t push_load(int member) {
+    uint32_t pc = mod->push_class();
+    uint32_t pt = spv->t_ptr(pc, sty_of_push(member));
+    uint32_t p = res(65, {pt, state(S_PUSH), spv->c_u32(member)});
+    return res(61, {sty_of_push(member), p});
+  }
+
+  uint32_t ptr_to_device(uint32_t v) {
+    uint32_t hlo = push_load(P_HLO), hsize = push_load(P_HSIZE), dbase = push_load(P_DBASE);
+    uint32_t inside = res(176, {tbool(), res(ISUB, {t64(), v, hlo}), hsize});
+    uint32_t moved = res(IADD, {t64(), v, res(ISUB, {t64(), dbase, hlo})});
+    return res(169, {t64(), inside, moved, v});
+  }
+
+  uint32_t ptr_to_host(uint32_t v) {
+    uint32_t hlo = push_load(P_HLO), hsize = push_load(P_HSIZE), dbase = push_load(P_DBASE);
+    uint32_t inside = res(176, {tbool(), res(ISUB, {t64(), v, dbase}), hsize});
+    uint32_t moved = res(ISUB, {t64(), v, res(ISUB, {t64(), dbase, hlo})});
+    return res(169, {t64(), inside, moved, v});
+  }
+
+  uint32_t builtin_component(uint32_t var, uint32_t k) {
+    if (mod->kernel_cl) {
+      uint32_t v = res(61, {spv->builtin_vec_t(), var});
+      uint32_t c = res(81, {t64(), v, k});
+      return res(113, {t32(), c});
+    }
+    uint32_t v = res(61, {spv->t_vec3(), var});
+    return res(81, {t32(), v, k});
+  }
+
+  uint32_t global_comp(int k) {
+    uint32_t g = builtin_component(mod->gid, k);
+    uint32_t off = push_load(P_OX + k);
+    return res(IADD, {t32(), g, res(IMUL, {t32(), off, mod->spec[k]})});
+  }
+
+  uint32_t group_comp(int k) {
+    uint32_t w = builtin_component(mod->wid, k);
+    return res(IADD, {t32(), w, push_load(P_OX + k)});
+  }
+
+  Opnd operand(const Node &x) {
+    if (is_reg(x)) {
+      auto it = regs.find(x.text);
+      if (it == regs.end()) throw BadIR("register " + x.text + " is used before it is set");
+      Reg &r = it->second;
+      if (!r.var) return {r.id, r.ty};
+      Ty ty = r.ty;
+      uint32_t id = r.id;
+      return {res(61, {sty(ty), id}), ty};
+    }
+    const std::string *h = head_of(x);
+    if (h && *h == "const") {
+      Ty ty = parse_type(x.items.at(1));
+      if (ty.k == Ty::Float) {
+        std::string text = x.items.size() > 2 ? to_s(x.items[2]) : std::string();
+        return {float_const(ty.size * 8, text), ty};
+      }
+      if (ty.k == Ty::Int && ty.boolean) return {spv->c_bool(as_int(x.items.at(2)) != 0), ty};
+      int64_t v = as_int(x.items.at(2));
+      return {spv->c_int(wide(ty) ? 64 : 32, v), ty};
+    }
+    if (h && *h == "null") return {spv->c_u64(0), ty_ptr()};
+    if (h && (*h == "sret" || *h == "byval")) return operand(x.items.at(2));
+    if (x.is_sym('$')) {
+      auto w = wgs.find(x.text);
+      if (w != wgs.end()) {
+        // a work-group static: the group's region after the scratch tail (one object per group)
+        uint32_t lu = res(IADD, {t64(), local_base(), to_u64(push_load(P_LOCAL_USER), U32)});
+        return {res(IADD, {t64(), lu, spv->c_u64(1024 + w->second)}), ty_ptr()};
+      }
+      if (pslots.has(x.text)) return {spv->c_u64(0), ty_ptr()};   // a private slot: offset 0
+      auto s = slots.find(x.text);
+      if (s == slots.end() && locals.has(x.text)) throw Refused("address of the scalar slot " + x.text);
+      if (s == slots.end()) throw BadIR("slot " + x.text + " is not declared");
+      int64_t off = s->second;
+      return {res(IADD, {t64(), frame_base(), spv->c_u64(off)}), ty_ptr()};
+    }
+    if (x.is_sym('@')) {
+      int64_t off = mod->irmod->static_offset(x.text);
+      return {res(IADD, {t64(), push_load(P_STATICS), spv->c_u64(off)}), ty_ptr()};
+    }
+    if (x.is_sym('&')) throw Refused("address of function " + x.text);
+    throw Refused("operand " + form_text(x));
+  }
+
+  uint32_t float_const(int bits, const std::string &text) {
+    if (text == "+Infinity" || text == "Infinity") return spv->c_float_bits(bits, 0x7f800000);
+    if (text == "-Infinity") return spv->c_float_bits(bits, 0xff800000);
+    bool ok = text.find_first_of("0123456789") != std::string::npos;
+    for (char c : text)
+      if (!std::strchr("0123456789.eE+-", c) || c == 0) ok = false;
+    if (!ok) throw Refused("float constant " + text);
+    return spv->c_float(bits, ruby_to_f(text));
+  }
+
+  uint32_t frame_base() { return res(61, {t64(), frame_var}); }
+
+  // ---- integer helpers
+
+  uint32_t canon(uint32_t id, const Ty &t) {
+    if (!(t.k == Ty::Int && !t.boolean && t.size < 4)) return id;
+    uint32_t sh = 32 - t.size * 8;
+    uint32_t l = res(196, {t32(), id, spv->c_u32(sh)});
+    return res(t.sign ? 195 : 194, {t32(), l, spv->c_u32(sh)});
+  }
+
+  uint32_t bool_to_u32(uint32_t b) { return res(169, {t32(), b, spv->c_u32(1), spv->c_u32(0)}); }
+
+  uint32_t u32_of(uint32_t id, const Ty &ty) {
+    if (ty.k == Ty::Int && ty.boolean) return bool_to_u32(id);
+    if (!wide(ty)) return id;
+    return res(113, {t32(), id});
+  }
+
+  uint32_t to_u64(uint32_t id, const Ty &ty) {
+    if (wide(ty) || ty.k == Ty::Ptr) return id;
+    if (ty.k == Ty::Int && ty.boolean) return res(113, {t64(), bool_to_u32(id)});
+    if (ty.sign) return res(114, {t64(), id});
+    return res(113, {t64(), id});
+  }
+
+  uint32_t int_const_of(const Ty &t, int64_t v) { return spv->c_int(wide(t) ? 64 : 32, v); }
+
+  // the trap helper: set the flag to code, mark the invocation dead, return zero
+  void trap(uint32_t code_) {
+    traps = true;
+    uint32_t flag_ptr = res(120, {spv->t_ptr(psb_sc(), t32()), push_load(P_FLAG)});
+    ins({239, t32(), spv->id(), flag_ptr, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), spv->c_u32(code_)});
+    uint32_t d = state(S_DEAD);
+    uint32_t one = spv->c_u32(1);
+    t32();
+    ins({62, d, one});
+    emit_return(std::nullopt);
+  }
+
+  void emit_return(std::optional<uint32_t> val) {
+    if (frame > 0) {
+      uint32_t old = res(61, {t64(), oldsp_var});
+      ins({62, state(S_SP), old});
+    }
+    if (!ret) {
+      term({253});
+    } else {
+      uint32_t v = val ? *val : zero_of(*ret);
+      term({254, v});
+    }
+  }
+
+  void trap_if(uint32_t cond, uint32_t code_) {
+    uint32_t t = new_label();
+    uint32_t m = new_label();
+    ins({247, m, 0});
+    cond_branch(cond, t, m);
+    label(t);
+    trap(code_);
+    label(m);
+  }
+
+  void check_dead_after_call() {
+    traps = true;
+    uint32_t d = res(61, {t32(), state(S_DEAD)});
+    uint32_t c = res(171, {tbool(), d, spv->c_u32(0)});
+    uint32_t t = new_label();
+    uint32_t m = new_label();
+    ins({247, m, 0});
+    cond_branch(c, t, m);
+    label(t);
+    emit_return(std::nullopt);
+    label(m);
+  }
+
+  // ---- memory
+
+  uint32_t psb_ptr(const Ty &t) { return spv->t_ptr(psb_sc(), sty(t)); }
+  uint32_t addr_ptr(uint32_t addr, const Ty &t) { return res(120, {psb_ptr(t), addr}); }
+  uint32_t aligned_word_addr(uint32_t addr) {
+    uint32_t mask = spv->c_u64((int64_t)0xfffffffffffffffcull);
+    return res(199, {t64(), addr, mask});
+  }
+  uint32_t byte_shift(uint32_t addr) {
+    uint32_t low = res(199, {t64(), addr, spv->c_u64(3)});
+    uint32_t l32 = res(113, {t32(), low});
+    return res(132, {t32(), l32, spv->c_u32(8)});
+  }
+  uint32_t load_word(uint32_t addr) {
+    uint32_t wp = res(120, {spv->t_ptr(psb_sc(), t32()), aligned_word_addr(addr)});
+    return res(61, {t32(), wp, 2, 4});
+  }
+
+  uint32_t heap_load(uint32_t addr, const Ty &t) {
+    // The OpenCL module loads a byte or a halfword with its own width (a d8/d16 load), extended to the 32-bit register
+    if (mod->kernel_cl && t.k == Ty::Int && !t.boolean && (t.size == 1 || t.size == 2)) {
+      if (t.size == 1) spv->cap(39);   // Int8
+      else spv->cap(22);               // Int16
+      uint32_t et = spv->t_int(t.size * 8);
+      uint32_t p = res(120, {spv->t_ptr(psb_sc(), et), addr});
+      uint32_t v = res_load(p, et, (uint32_t)t.size);
+      return res(t.sign ? 114 : 113, {t32(), v});   // OpSConvert or OpUConvert: the canonical value
+    }
+    if (t.k == Ty::Int && (t.size <= 2 || t.boolean)) {
+      uint32_t w = load_word(addr);
+      uint32_t sh = byte_shift(addr);
+      int bits = t.boolean ? 8 : t.size * 8;
+      uint32_t v = res(194, {t32(), w, sh});
+      v = res(199, {t32(), v, spv->c_u32((1ll << bits) - 1)});
+      if (t.boolean) return res(171, {tbool(), v, spv->c_u32(0)});
+      return canon(v, t);
+    }
+    uint32_t p = addr_ptr(addr, t);
+    uint32_t align = t.k == Ty::Ptr ? 8 : t.size;
+    uint32_t rt = sty(t);
+    uint32_t v = res_load(p, rt, align);
+    return t.k == Ty::Ptr ? ptr_to_device(v) : v;
+  }
+
+  uint32_t res_load(uint32_t p, uint32_t rtype, uint32_t align) {
+    uint32_t i = spv->id();
+    ins({61, rtype, i, p, 2, align});
+    return i;
+  }
+
+  void no_wgs_var() {
+    if (!mod->wgs_var) throw Refused("a work-group static access in " + name + " without the Workgroup variable");
+  }
+
+  uint32_t mem_load(uint32_t addr, const Ty &t) {
+    if (!wgs_mode) return heap_load(addr, t);
+    no_wgs_var();
+    auto [rel, inside] = wgs_range(addr);
+    uint32_t b_in = new_label(), b_out = new_label(), merge = new_label();
+    ins({247, merge, 0});
+    cond_branch(inside, b_in, b_out);
+    label(b_in);
+    uint32_t vin = wgs_load_val(rel, t);
+    if (t.k == Ty::Ptr) vin = ptr_to_device(vin);
+    branch(merge);
+    label(b_out);
+    uint32_t vout = heap_load(addr, t);
+    branch(merge);
+    label(merge);
+    return res(245, {sty(t), vin, b_in, vout, b_out});
+  }
+
+  void mem_store(uint32_t addr, const Ty &t, uint32_t v) {
+    if (!wgs_mode) return heap_store(addr, t, v);
+    no_wgs_var();
+    auto [rel, inside] = wgs_range(addr);
+    uint32_t b_in = new_label(), b_out = new_label(), merge = new_label();
+    ins({247, merge, 0});
+    cond_branch(inside, b_in, b_out);
+    label(b_in);
+    uint32_t hv = t.k == Ty::Ptr ? ptr_to_host(v) : v;
+    wgs_store_val(rel, t, hv);
+    branch(merge);
+    label(b_out);
+    heap_store(addr, t, v);
+    branch(merge);
+    label(merge);
+  }
+
+  std::pair<uint32_t, uint32_t> wgs_range(uint32_t addr) {
+    t64();
+    uint32_t sbase = res(IADD, {t64(), local_base(), to_u64(push_load(P_LOCAL_USER), U32)});
+    sbase = res(IADD, {t64(), sbase, spv->c_u64(1024)});
+    uint32_t rel = res(ISUB, {t64(), addr, sbase});
+    uint32_t in = res(176, {tbool(), rel, spv->c_u64(mod->wgs_total)});
+    return {rel, in};
+  }
+
+  uint32_t wgs_word(uint32_t rel, int word_off = 0) {
+    t64();
+    uint32_t r = word_off == 0 ? rel : res(IADD, {t64(), rel, spv->c_u64(4 * word_off)});
+    uint32_t widx = res(113, {t32(), res(194, {t64(), r, spv->c_u64(2)})});
+    return res(65, {spv->t_ptr(SC_WORKGROUP, t32()), mod->wgs_var, widx});
+  }
+
+  static int wgs_bytes(const Ty &t) {
+    if (t.k == Ty::Ptr) return 8;
+    if (t.k == Ty::Int && t.boolean) return 1;
+    return t.size;
+  }
+
+  uint32_t wgs_load_val(uint32_t rel, const Ty &t) {
+    t32();
+    t64();
+    int n = wgs_bytes(t);
+    if (n == 8) {
+      uint32_t lo = res(113, {t64(), res(61, {t32(), wgs_word(rel, 0)})});
+      uint32_t hi = res(113, {t64(), res(61, {t32(), wgs_word(rel, 1)})});
+      uint32_t v = res(197, {t64(), lo, res(196, {t64(), hi, spv->c_u64(32)})});
+      return t.k == Ty::Float ? res(124, {sty(t), v}) : v;
+    }
+    uint32_t w = res(61, {t32(), wgs_word(rel)});
+    if (n == 4) return t.k == Ty::Float ? res(124, {sty(t), w}) : w;
+    int bits = n * 8;
+    uint32_t v = res(194, {t32(), w, byte_shift(rel)});
+    v = res(199, {t32(), v, spv->c_u32((1ll << bits) - 1)});
+    if (t.k == Ty::Int && t.boolean) return res(171, {tbool(), v, spv->c_u32(0)});
+    return canon(v, t);
+  }
+
+  void wgs_store_val(uint32_t rel, const Ty &t, uint32_t v) {
+    t32();
+    t64();
+    int n = wgs_bytes(t);
+    if (n == 8) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t64(), v}) : v;
+      ins({62, wgs_word(rel, 0), res(113, {t32(), u})});
+      ins({62, wgs_word(rel, 1), res(113, {t32(), res(194, {t64(), u, spv->c_u64(32)})})});
+      return;
+    }
+    if (n == 4) {
+      uint32_t u = t.k == Ty::Float ? res(124, {t32(), v}) : v;
+      ins({62, wgs_word(rel), u});
+      return;
+    }
+    int bits = n * 8;
+    int64_t mask = (1ll << bits) - 1;
+    uint32_t vv = t.k == Ty::Int && t.boolean ? bool_to_u32(v) : u32_of(v, t);
+    vv = res(199, {t32(), vv, spv->c_u32(mask)});
+    uint32_t sh = byte_shift(rel);
+    uint32_t wp = wgs_word(rel);
+    uint32_t clear = res(200, {t32(), res(196, {t32(), spv->c_u32(mask), sh})});
+    ins({240, t32(), spv->id(), wp, spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SEM_RELAXED), clear});
+    ins({241, t32(), spv->id(), wp, spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SEM_RELAXED), res(196, {t32(), vv, sh})});
+  }
+
+  void heap_store(uint32_t addr, const Ty &t, uint32_t v) {
+    // The OpenCL module stores a byte or a halfword with its own width: C++ makes neighbouring bytes separate memory
+    // locations, and the device orders its stores to them. The Vulkan module has no such store (it updates the word).
+    if (mod->kernel_cl && t.k == Ty::Int && !t.boolean && (t.size == 1 || t.size == 2)) {
+      if (t.size == 1) spv->cap(39);   // Int8
+      else spv->cap(22);               // Int16
+      uint32_t et = spv->t_int(t.size * 8);
+      uint32_t p = res(120, {spv->t_ptr(psb_sc(), et), addr});
+      uint32_t vv = res(113, {et, u32_of(v, t)});   // OpUConvert: the low bits
+      ins({62, p, vv, 2, t.size});
+      return;
+    }
+    if (t.k == Ty::Int && (t.size <= 2 || t.boolean)) {
+      int bits = t.boolean ? 8 : t.size * 8;
+      int64_t mask = (1ll << bits) - 1;
+      uint32_t vv = t.boolean ? bool_to_u32(v) : u32_of(v, t);
+      vv = res(199, {t32(), vv, spv->c_u32(mask)});
+      uint32_t sh = byte_shift(addr);
+      uint32_t wp = res(120, {spv->t_ptr(psb_sc(), t32()), aligned_word_addr(addr)});
+      uint32_t clear = res(196, {t32(), spv->c_u32(mask), sh});
+      clear = res(200, {t32(), clear});
+      ins({240, t32(), spv->id(), wp, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), clear});
+      uint32_t shifted = res(196, {t32(), vv, sh});
+      ins({241, t32(), spv->id(), wp, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), shifted});
+      return;
+    }
+    uint32_t p = addr_ptr(addr, t);
+    uint32_t align = t.k == Ty::Ptr ? 8 : t.size;
+    if (t.k == Ty::Ptr) v = ptr_to_host(v);
+    ins({62, p, v, 2, align});
+  }
+
+  void not_routed() {
+    if (wgs_mode) throw Refused("an atomic on memory in " + name + ", which may be a work-group static (not routed)");
+  }
+
+  // the compare-and-swap loop of a float atomic
+  void float_atomic(uint32_t p_addr, uint32_t v, int op) {
+    not_routed();
+    uint32_t expected = var_decl(t32());
+    uint32_t wp = res(120, {spv->t_ptr(psb_sc(), t32()), p_addr});
+    ins({62, expected, res(61, {t32(), wp, 2, 4})});
+    uint32_t hdr = new_label(), bodyl = new_label(), cont = new_label(), merge = new_label(), after = new_label(),
+             t1 = new_label();
+    branch(hdr);
+    label(hdr);
+    ins({246, merge, cont, 0});
+    branch(bodyl);
+    label(bodyl);
+    uint32_t old = res(61, {t32(), expected});
+    uint32_t f = res(124, {spv->t_float(32), old});
+    uint32_t nf;
+    if (op == 0) nf = res(129, {spv->t_float(32), f, v});
+    else nf = res(12, {spv->t_float(32), spv->glsl_id(), spv->ext_num(op == 1 ? 37 : 40), f, v});
+    uint32_t nb = res(124, {t32(), nf});
+    uint32_t r = res_cas(wp, expected, nb);
+    uint32_t ok = res(170, {tbool(), r, old});
+    ins({247, after, 0});
+    cond_branch(ok, merge, t1);
+    label(t1);
+    ins({62, expected, r});
+    branch(after);
+    label(after);
+    branch(cont);
+    label(cont);
+    branch(hdr);
+    label(merge);
+  }
+
+  uint32_t res_cas(uint32_t wp, uint32_t expected_var, uint32_t desired) {
+    uint32_t e = res(61, {t32(), expected_var});
+    return res(230, {t32(), wp, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), spv->c_u32(SEM_RELAXED), desired, e});
+  }
+
+  // ---- expressions
+
+  Opnd rval(const Node &x) {
+    const std::string *hp = head_of(x);
+    std::string h = hp ? *hp : std::string();
+    auto arg = [&](size_t i) -> const Node & { return x.items.at(i); };
+    if (h == "load" || h == "load.v") {
+      Ty ty = parse_type(arg(1));
+      if (arg(2).is_sym('$') && locals.has(arg(2).text)) {
+        uint32_t st = sty(ty);
+        return {res(61, {st, locals.get(arg(2).text)->var}), ty};
+      }
+      uint32_t a = operand(arg(2)).id;
+      if (ty.k == Ty::Void) throw Refused("load of void");
+      if (const std::string *ps = pslot_of(arg(2))) return {pslot_load(*ps, a, ty), ty};
+      return {mem_load(a, ty), ty};
+    }
+    if (h == "bitcast") {
+      Opnd v = operand(arg(2));
+      if (v.ty.k != Ty::Ptr) throw Refused(std::string("bitcast of a ") + v.ty.kind_name());
+      return {v.id, ty_ptr()};
+    }
+    if (h == "offset") {
+      uint32_t b = operand(arg(1)).id;
+      return {res(IADD, {t64(), b, spv->c_u64(as_int(arg(2)))}), ty_ptr()};
+    }
+    if (h == "index") {
+      uint32_t b = operand(arg(1)).id;
+      Opnd i = operand(arg(2));
+      uint32_t size = is_reg(arg(3)) ? operand(arg(3)).id : spv->c_u64(as_int(arg(3)));
+      uint32_t off = to_i64(i.id, i.ty);
+      return {res(IADD, {t64(), b, res(IMUL, {t64(), off, size})}), ty_ptr()};
+    }
+    if (h == "pdiff") {
+      uint32_t a = operand(arg(1)).id;
+      uint32_t b = operand(arg(2)).id;
+      uint32_t d = res(ISUB, {t64(), a, b});
+      return {res(135, {t64(), d, spv->c_u64(as_int(arg(3)))}), ty_int(8, true)};
+    }
+    if (h == "wadd" || h == "wsub" || h == "wmul") {
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      uint32_t b = operand(arg(3)).id;
+      uint32_t op = h == "wadd" ? IADD : h == "wsub" ? ISUB : IMUL;
+      return {canon(res(op, {sty(ty), a, b}), ty), ty};
+    }
+    if (h == "wneg") {
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      return {canon(res(ISUB, {sty(ty), zero_of(ty), a}), ty), ty};
+    }
+    if (h == "cdiv" || h == "crem") {
+      Ty ty = parse_type(arg(1));
+      return {checked_div(h, ty, arg(2), arg(3)), ty};
+    }
+    if (h == "cshl" || h == "cshr") {
+      Ty ty = parse_type(arg(1));
+      return {checked_shift(h, ty, arg(2), arg(3)), ty};
+    }
+    if (h == "and" || h == "or" || h == "xor") {
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      uint32_t b = operand(arg(3)).id;
+      if (ty.k == Ty::Int && ty.boolean) {
+        uint32_t op = h == "and" ? 167 : h == "or" ? 166 : 165;
+        return {res(op, {tbool(), a, b}), ty};
+      }
+      uint32_t op = h == "and" ? 199 : h == "or" ? 197 : 198;
+      return {res(op, {sty(ty), a, b}), ty};
+    }
+    if (h == "not") {
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      if (ty.k == Ty::Int && ty.boolean) return {res(168, {tbool(), a}), ty};
+      return {canon(res(200, {sty(ty), a}), ty), ty};
+    }
+    if (h == "fadd" || h == "fsub" || h == "fmul" || h == "fdiv") {
+      Ty ty = parse_type(arg(1));
+      if (ty.k != Ty::Float) throw Refused(h + " on " + ty.kind_name());
+      uint32_t a = operand(arg(2)).id;
+      uint32_t b = operand(arg(3)).id;
+      uint32_t op = h == "fadd" ? 129 : h == "fsub" ? 131 : h == "fmul" ? 133 : 136;
+      return {res(op, {sty(ty), a, b}), ty};
+    }
+    if (h == "fneg") {
+      Ty ty = parse_type(arg(1));
+      if (ty.k != Ty::Float) throw Refused(std::string("fneg on ") + ty.kind_name());
+      uint32_t a = operand(arg(2)).id;
+      return {res(127, {sty(ty), a}), ty};
+    }
+    if (h == "iconv") {
+      Ty ty = parse_type(arg(1));
+      Opnd a = operand(arg(2));
+      return {int_convert(ty, a.id, a.ty), ty};
+    }
+    if (h == "p2i") {
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      return {int_convert(ty, a, ty_ptr()), ty};
+    }
+    if (h == "i2p") {
+      Opnd a = operand(arg(2));
+      return {to_u64(a.id, a.ty), ty_ptr()};
+    }
+    if (h == "fconv") {
+      Ty ty = parse_type(arg(1));
+      Opnd a = operand(arg(2));
+      if (a.ty.k != Ty::Float) throw BadIR(std::string("fconv of a ") + a.ty.kind_name());
+      if (ty.size == a.ty.size) return {a.id, ty};
+      return {res(115, {sty(ty), a.id}), ty};
+    }
+    if (h == "i2f" || h == "u2f") {
+      Ty ty = parse_type(arg(1));
+      if (ty.k != Ty::Float) throw Refused(h + " to " + ty.kind_name());
+      Opnd a = operand(arg(2));
+      if (a.ty.k == Ty::Int && a.ty.boolean) {
+        a.id = bool_to_u32(a.id);
+        a.ty = U32;
+      }
+      uint32_t v = h == "i2f" && a.ty.k == Ty::Int && a.ty.sign ? res(111, {sty(ty), a.id}) : res(112, {sty(ty), a.id});
+      return {v, ty};
+    }
+    if (h == "cf2i") {
+      Ty ty = parse_type(arg(1));
+      Opnd a = operand(arg(2));
+      return {float_to_int(ty, a.id, a.ty), ty};
+    }
+    static const char *const cmps[] = {"lt",   "le",   "gt",   "ge",   "eq",   "ne",   "lt.s", "le.s",
+                                       "gt.s", "ge.s", "eq.s", "ne.s", "lt.u", "le.u", "gt.u", "ge.u",
+                                       "eq.u", "ne.u", "lt.f", "le.f", "gt.f", "ge.f", "eq.f", "ne.f"};
+    for (const char *c : cmps) {
+      if (h != c) continue;
+      std::string op = h.substr(0, 2);
+      Ty ty = parse_type(arg(1));
+      uint32_t a = operand(arg(2)).id;
+      uint32_t b = operand(arg(3)).id;
+      return {compare(op, ty, a, b), BOOL4};
+    }
+    if (h == "call") {
+      auto r = call_expr(x);
+      if (!r) throw Refused("value of a call of a void function");
+      return *r;
+    }
+    if (h == "const") {
+      parse_type(arg(1));
+      return operand(x);
+    }
+    if (h == "null") return operand(x);
+    if (!hp) return operand(x);   // a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return
+    throw Refused("expression " + h);
+  }
+
+  uint32_t to_i64(uint32_t id, const Ty &ty) {
+    if (ty.k == Ty::Ptr || (ty.k == Ty::Int && ty.size == 8)) return id;
+    return res(ty.sign ? 114 : 113, {t64(), id});
+  }
+
+  uint32_t compare(const std::string &op, const Ty &ty, uint32_t a, uint32_t b) {
+    if (ty.k == Ty::Int && ty.boolean) {
+      if (op != "eq" && op != "ne") throw Refused("bool comparison " + op);
+      return res(op == "eq" ? 164 : 165, {tbool(), a, b});
+    }
+    if (ty.k == Ty::Float) {
+      uint32_t code_ = op == "lt" ? 184 : op == "le" ? 188 : op == "gt" ? 186 : op == "ge" ? 190 : op == "eq" ? 180 : 183;
+      return res(code_, {tbool(), a, b});
+    }
+    bool s = ty.k == Ty::Int && ty.sign;
+    uint32_t code_ = op == "lt" ? (s ? 177 : 176) : op == "le" ? (s ? 179 : 178) : op == "gt" ? (s ? 173 : 172)
+                   : op == "ge" ? (s ? 175 : 174) : op == "eq" ? 170 : 171;
+    return res(code_, {tbool(), a, b});
+  }
+
+  uint32_t checked_div(const std::string &h, const Ty &ty, const Node &xa, const Node &xb) {
+    if (!int_ty(ty)) throw Refused(h + " on " + ty.kind_name());
+    uint32_t a = operand(xa).id;
+    uint32_t b = operand(xb).id;
+    uint32_t code_ = ty.sign ? (h == "cdiv" ? 135 : 138) : (h == "cdiv" ? 134 : 137);
+    // a constant divisor that is not 0 (nor -1 of a signed division) is always defined: no guard
+    if (head_is(xb, "const")) {
+      int64_t k = as_int(xb.items.at(2));
+      if (k != 0 && !(ty.sign && k == -1)) return canon(res(code_, {sty(ty), a, b}), ty);
+    }
+    uint32_t zero = int_const_of(ty, 0);
+    uint32_t c;
+    if (ty.sign) {
+      int64_t minv = ty.size == 8 ? INT64_MIN : -(1ll << (ty.size * 8 - 1));
+      uint32_t mn = int_const_of(ty, minv);
+      uint32_t m1 = int_const_of(ty, -1);
+      uint32_t c0 = res(170, {tbool(), b, zero});
+      uint32_t q1 = res(170, {tbool(), b, m1});
+      uint32_t q2 = res(170, {tbool(), a, mn});
+      uint32_t q = res(167, {tbool(), q1, q2});
+      c = res(166, {tbool(), c0, q});
+    } else {
+      c = res(170, {tbool(), b, zero});
+    }
+    if (mod->no_div_trap) {
+      // the divisor is 1 where the division is undefined: the result is defined and meaningless, as a GPU's is
+      uint32_t st = sty(ty);
+      b = res(169, {st, c, int_const_of(ty, 1), b});
+    } else {
+      trap_if(c, 1);
+    }
+    return canon(res(code_, {sty(ty), a, b}), ty);
+  }
+
+  uint32_t checked_shift(const std::string &h, const Ty &ty, const Node &xa, const Node &xb) {
+    if (!int_ty(ty)) throw Refused(h + " on " + ty.kind_name());
+    uint32_t a = operand(xa).id;
+    Opnd c = operand(xb);
+    if (!int_ty(c.ty)) throw Refused(std::string("shift count of type ") + c.ty.kind_name());
+    int width = ty.size == 8 ? 64 : ty.size * 8;
+    // a constant count below the width needs no check
+    bool in_range = head_is(xb, "const") && (uint64_t)as_int(xb.items.at(2)) < (uint64_t)width;
+    if (in_range) {
+    } else if (wide(c.ty)) trap_if(res(172, {tbool(), c.id, spv->c_u64(width)}), 2);
+    else trap_if(res(172, {tbool(), c.id, spv->c_u32(width)}), 2);
+    uint32_t cnt = c.id;
+    if (wide(ty) && !wide(c.ty)) cnt = res(113, {t64(), cnt});
+    else if (!wide(ty) && wide(c.ty)) cnt = res(113, {t32(), cnt});
+    if (h == "cshl") return canon(res(196, {sty(ty), a, cnt}), ty);
+    return canon(res(ty.sign ? 195 : 194, {sty(ty), a, cnt}), ty);
+  }
+
+  uint32_t int_convert(const Ty &ty, uint32_t a, const Ty &aty) {
+    if (ty.k == Ty::Int && ty.boolean) {
+      if (aty.k == Ty::Int && !aty.boolean) return res(170, {tbool(), a, zero_of(aty)});
+      throw Refused("bool conversion");
+    }
+    if (ty.k != Ty::Int && ty.k != Ty::Ptr) throw Refused(std::string("iconv to ") + ty.kind_name());
+    uint32_t src = aty.k == Ty::Int && aty.boolean ? bool_to_u32(a) : a;
+    int sw = aty.k == Ty::Int && aty.boolean ? 4 : (aty.k == Ty::Ptr ? 8 : aty.size);
+    bool sg = aty.k == Ty::Int && aty.sign && !aty.boolean;
+    int dw = ty.k == Ty::Ptr ? 8 : ty.size;
+    if (sw == 8 && dw == 8) return a;
+    if (sw < 8 && dw == 8) return res(sg ? 114 : 113, {t64(), src});
+    if (sw == 8 && dw < 8) {
+      uint32_t v = res(113, {t32(), a});
+      return canon(v, ty);
+    }
+    return canon(src, ty);
+  }
+
+  uint32_t float_to_int(const Ty &ty, uint32_t a, const Ty &aty) {
+    if (!int_ty(ty)) throw Refused(std::string("cf2i to ") + ty.kind_name());
+    if (aty.k != Ty::Float) throw BadIR(std::string("cf2i of a ") + aty.kind_name());
+    int bits = ty.size * 8;
+    int fbits = aty.size * 8;
+    uint32_t lo_op;
+    double lo_v, hi;
+    if (ty.sign) {
+      double lo = -std::ldexp(1.0, bits - 1);
+      hi = std::ldexp(1.0, bits - 1);
+      bool exact_below = (fbits == 64 && bits <= 53) || (fbits == 32 && bits <= 24);
+      if (exact_below) {
+        lo_op = 186;
+        lo_v = lo - 1.0;
+      } else {
+        lo_op = 190;
+        lo_v = lo;
+      }
+    } else {
+      lo_op = 186;
+      lo_v = -1.0;
+      hi = std::ldexp(1.0, bits);
+    }
+    uint32_t lo_c = aty.size == 4 ? spv->c_float(32, lo_v) : spv->c_float(64, lo_v);
+    uint32_t hi_c = aty.size == 4 ? spv->c_float(32, hi) : spv->c_float(64, hi);
+    uint32_t p1 = res(lo_op, {tbool(), a, lo_c});
+    uint32_t p2 = res(184, {tbool(), a, hi_c});
+    uint32_t ok = res(167, {tbool(), p1, p2});
+    trap_if(res(168, {tbool(), ok}), 6);
+    uint32_t v = ty.sign ? res(110, {sty(ty), a}) : res(109, {sty(ty), a});
+    return canon(v, ty);
+  }
+
+  // ---- calls and intrinsics
+
+  std::vector<uint32_t> operand_ids(const std::vector<const Node *> &args) {
+    std::vector<uint32_t> xs;
+    for (const Node *a : args) xs.push_back(operand(*a).id);
+    return xs;
+  }
+
+  std::optional<Opnd> call_expr(const Node &x) {
+    parse_type(x.items.at(1));
+    const Node &callee = x.items.at(2);
+    if (!callee.is_sym('&')) throw Refused("indirect call");
+    const std::string &nm = callee.text;
+    std::vector<const Node *> args = drop(x, 3);
+    auto xyz = [&](const std::string &n) { return (int)std::string("xyz").find(n.back()); };
+    auto starts = [&](const char *p) { return nm.compare(0, std::strlen(p), p) == 0; };
+    auto is3 = [&](const char *p) {
+      std::string s(p);
+      return nm == s + "x" || nm == s + "y" || nm == s + "z";
+    };
+    if (is3("__nfcxx_sycl_gid_")) return Opnd{global_comp(xyz(nm)), U32};
+    if (is3("__nfcxx_sycl_lid_")) return Opnd{builtin_component(mod->lid, xyz(nm)), U32};
+    if (is3("__nfcxx_sycl_group_")) return Opnd{group_comp(xyz(nm)), U32};
+    if (is3("__nfcxx_sycl_grange_")) return Opnd{push_load(P_GX + xyz(nm)), U32};
+    if (is3("__nfcxx_sycl_lrange_")) return Opnd{mod->spec[xyz(nm)], U32};
+    if (nm == "__nfcxx_sycl_closure") return Opnd{push_load(P_CLOSURE), ty_ptr()};
+    if (nm == "__nfcxx_sycl_local_base") return Opnd{local_base(), ty_ptr()};
+    if (nm == "__nfcxx_sycl_scratch") {
+      uint32_t lu = res(IADD, {t64(), local_base(), to_u64(push_load(P_LOCAL_USER), U32)});
+      return Opnd{lu, ty_ptr()};
+    }
+    if (nm == "__nfcxx_sycl_sg_shuffle_u32" || nm == "__nfcxx_sycl_sg_shuffle_xor_u32") {
+      if (!mod->kernel_cl) throw Refused(nm + ": sub-group shuffles need the OpenCL module (--kernel-cl)");
+      mod->subgroup_used = true;
+      sg_used = true;
+      spv->cap(5568);
+      spv->ext("SPV_INTEL_subgroups");
+      uint32_t v = u32_of(operand(*args.at(0)).id, U32);
+      uint32_t m = u32_of(operand(*args.at(1)).id, U32);
+      uint32_t op = nm == "__nfcxx_sycl_sg_shuffle_xor_u32" ? 5574 : 5571;
+      return Opnd{res(op, {t32(), v, m}), U32};
+    }
+    if (nm == "__nfcxx_sycl_sg_size") {
+      // the lanes of the caller's sub-group: the OpenCL SubgroupSize builtin (16, or the kernel's reqd_sub_group_size, see
+      // emit_module); the Vulkan module has no sub-group operations, so the shim's 16
+      if (!mod->kernel_cl) return Opnd{spv->c_u32(SUBGROUP_SIZE), U32};
+      if (!mod->sg_size_var) mod->sg_size_var = spv->builtin_input_u32(BUILTIN_SUBGROUP_SIZE);
+      return Opnd{res(61, {t32(), mod->sg_size_var}), U32};
+    }
+    if (nm == "__nfcxx_sycl_barrier") {
+      ins({224, spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SCOPE_WORKGROUP),
+           spv->c_u32(mod->kernel_cl ? SEM_BARRIER_KERNEL : SEM_BARRIER)});
+      return std::nullopt;
+    }
+    if (nm == "__nfcxx_sycl_sg_barrier") {
+      if (mod->kernel_cl)
+        ins({224, spv->c_u32(SCOPE_SUBGROUP), spv->c_u32(SCOPE_SUBGROUP), spv->c_u32(SEM_SG_BARRIER_KERNEL)});
+      else
+        ins({224, spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SCOPE_WORKGROUP), spv->c_u32(SEM_BARRIER)});
+      return std::nullopt;
+    }
+    if (nm == "__nfcxx_sycl_fence") {
+      uint32_t order = u32_of(operand(*args.at(0)).id, U32);
+      uint32_t scope = u32_of(operand(*args.at(1)).id, U32);
+      uint32_t spv_scope = res(130, {t32(), spv->c_u32(4), scope});
+      uint32_t sh = res(196, {t32(), spv->c_u32(1), order});
+      uint32_t is_relaxed = res(170, {tbool(), order, spv->c_u32(0)});
+      uint32_t ord_bits = res(169, {t32(), is_relaxed, spv->c_u32(0), sh});
+      uint32_t sem = res(197, {t32(), ord_bits, spv->c_u32(0x100 | 0x200)});
+      ins({225, spv_scope, sem});
+      return std::nullopt;
+    }
+    if (nm == "__nfcxx_sycl_fn1" || nm == "__nfcxx_sycl_fn1_f64" || nm == "__nfcxx_sycl_fn2" || nm == "__nfcxx_sycl_fn3") {
+      const Node &op = *args.at(0);
+      if (!head_is(op, "const")) throw Refused(nm + " with a non-constant operation");
+      int64_t k = as_int(op.items.at(2));
+      std::vector<Opnd> ops;
+      for (size_t i = 1; i < args.size(); i++) ops.push_back(operand(*args[i]));
+      std::vector<uint32_t> xs;
+      for (auto &o : ops) xs.push_back(o.id);
+      Ty fty = ops.at(0).ty;
+      if (fty.k != Ty::Float) throw Refused(nm + " on a " + fty.kind_name());
+      uint32_t ft = sty(fty);
+      int g = glsl_of_math(k);
+      if (k == 37) return Opnd{copysign_bits(xs.at(0), xs.at(1), fty), fty};
+      if (!g && k == 36) {
+        uint32_t q = res(136, {ft, xs.at(0), xs.at(1)});
+        uint32_t t = res(12, {ft, spv->glsl_id(), spv->ext_num(3), q});
+        return Opnd{res(131, {ft, xs[0], res(133, {ft, xs[1], t})}), fty};
+      }
+      if (!g) throw Refused(nm + " operation " + std::to_string(k));
+      return Opnd{glsl_op(g, xs, ft), fty};
+    }
+    if (nm == "abs" || nm == "labs" || nm == "llabs") {
+      Opnd a = operand(*args.at(0));
+      uint32_t neg = res(ISUB, {sty(a.ty), zero_of(a.ty), a.id});
+      uint32_t lt = res(177, {tbool(), a.id, zero_of(a.ty)});
+      return Opnd{res(169, {sty(a.ty), lt, neg, a.id}), a.ty};
+    }
+    if (nm == "__nfcxx_sycl_atomic_load") {
+      uint32_t p = atomic_ptr(*args.at(0));
+      return Opnd{res(227, {t32(), p, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED)}), U32};
+    }
+    if (nm == "__nfcxx_sycl_atomic_cas") {
+      uint32_t p = atomic_ptr(*args.at(0));
+      uint32_t e = u32_of(operand(*args.at(1)).id, U32);
+      uint32_t d = u32_of(operand(*args.at(2)).id, U32);
+      return Opnd{res(230, {t32(), p, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), spv->c_u32(SEM_RELAXED), d, e}),
+                  U32};
+    }
+    if (nm == "__nfcxx_sycl_atomic_fadd" || nm == "__nfcxx_sycl_atomic_fmin" || nm == "__nfcxx_sycl_atomic_fmax") {
+      uint32_t p_addr = operand(*args.at(0)).id;
+      uint32_t v = operand(*args.at(1)).id;
+      float_atomic(p_addr, v, nm.back() == 'd' ? 0 : nm == "__nfcxx_sycl_atomic_fmin" ? 1 : 2);
+      return Opnd{spv->c_float(32, 0.0), ty_float(4)};
+    }
+    static const std::map<std::string, uint32_t> atomic_codes = {{"add", 234}, {"max", 238}, {"min", 236},
+                                                                 {"umax", 239}, {"umin", 237}, {"and", 240},
+                                                                 {"or", 241},  {"xor", 242}, {"xchg", 229}};
+    if (starts("__nfcxx_sycl_atomic_") && atomic_codes.count(nm.substr(20))) {
+      uint32_t code_ = atomic_codes.at(nm.substr(20));
+      uint32_t p = atomic_ptr(*args.at(0));
+      uint32_t v = u32_of(operand(*args.at(1)).id, U32);
+      return Opnd{res(code_, {t32(), p, spv->c_u32(SCOPE_DEVICE), spv->c_u32(SEM_RELAXED), v}), U32};
+    }
+    if (nm == "__nfcxx_sycl_h2f" || nm == "__nfcxx_sycl_f2h") {
+      // binary16 bits (the low half of a 32-bit word) to float and back, in the hardware: the OpenCL module converts a half
+      // (Float16, Int16); the Vulkan module has no half type, so it unpacks or packs one with GLSL.std.450 UnpackHalf2x16 or
+      // PackHalf2x16 (the other half of the pair is 0)
+      uint32_t f32 = sty(ty_float(4));
+      if (mod->kernel_cl) {
+        spv->cap(9);
+        spv->cap(22);
+        uint32_t h16 = spv->t_float(16);
+        uint32_t i16 = spv->t_int(16);
+        if (nm == "__nfcxx_sycl_h2f") {
+          uint32_t b = res(113, {i16, u32_of(operand(*args.at(0)).id, U32)});
+          uint32_t h = res(124, {h16, b});
+          return Opnd{res(115, {f32, h}), ty_float(4)};
+        }
+        uint32_t h = res(115, {h16, operand(*args.at(0)).id});
+        uint32_t b = res(124, {i16, h});
+        return Opnd{res(113, {t32(), b}), U32};
+      }
+      uint32_t v2 = spv->t_vec(f32, 2);
+      if (nm == "__nfcxx_sycl_h2f") {
+        uint32_t w = u32_of(operand(*args.at(0)).id, U32);
+        uint32_t v = res(12, {v2, spv->glsl_id(), spv->ext_num(62), w});
+        return Opnd{res(81, {f32, v, 0}), ty_float(4)};
+      }
+      uint32_t x = operand(*args.at(0)).id;
+      uint32_t c = res(80, {v2, x, spv->c_float(32, 0.0)});
+      return Opnd{res(12, {t32(), spv->glsl_id(), spv->ext_num(58), c}), U32};
+    }
+    if (nm == "copysignf" || nm == "__builtin_copysignf") {
+      auto xs = operand_ids(args);
+      return Opnd{copysign_bits(xs.at(0), xs.at(1), ty_float(4)), ty_float(4)};
+    }
+    if (nm == "copysign" || nm == "__builtin_copysign") {
+      auto xs = operand_ids(args);
+      return Opnd{copysign_bits(xs.at(0), xs.at(1), ty_float(8)), ty_float(8)};
+    }
+    if (nm == "fmodf" || nm == "__builtin_fmodf") {
+      auto xs = operand_ids(args);
+      uint32_t ft = spv->t_float(32);
+      uint32_t q = res(136, {ft, xs.at(0), xs.at(1)});
+      uint32_t t = res(12, {ft, spv->glsl_id(), spv->ext_num(3), q});
+      return Opnd{res(131, {ft, xs[0], res(133, {ft, xs[1], t})}), ty_float(4)};
+    }
+    if ((nm == "memcpy" || nm == "memmove" || nm == "__builtin_memcpy" || nm == "__builtin_memmove") && args.size() == 3 &&
+        head_is(*args[2], "const")) {
+      uint32_t d = operand(*args[0]).id;
+      uint32_t sv = operand(*args[1]).id;
+      copy_any(pslot_of(*args[0]), d, pslot_of(*args[1]), sv, as_int(args[2]->items.at(2)));
+      return Opnd{d, ty_ptr()};
+    }
+    if ((nm == "memset" || nm == "__builtin_memset") && args.size() == 3 && head_is(*args[1], "const") &&
+        head_is(*args[2], "const")) {
+      uint32_t d = operand(*args[0]).id;
+      int64_t byte = as_int(args[1]->items.at(2)) & 255;
+      int64_t n = as_int(args[2]->items.at(2));
+      const std::string *ps = pslot_of(*args[0]);
+      if (ps && n % 4 == 0 && n <= 256) {   // a private slot: its words, unrolled
+        for (int64_t off = 0; off < n; off += 4) {
+          uint32_t a = res(IADD, {t64(), d, spv->c_u64(off)});
+          pslot_store(*ps, a, U32, spv->c_u32(byte * 0x01010101ll));
+        }
+        return Opnd{d, ty_ptr()};
+      }
+      counted_loop(n, 1, [&](uint32_t off) {
+        uint32_t a = res(IADD, {t64(), d, off});
+        uint32_t c = spv->c_u32(byte);
+        any_store(ps, a, U8, c);
+      });
+      return Opnd{d, ty_ptr()};
+    }
+    if (int g = libm_glsl(nm)) {
+      auto xs = operand_ids(args);
+      uint32_t ft = spv->t_float(32);
+      return Opnd{glsl_op(g, xs, ft), ty_float(4)};
+    }
+    if (nm == "__nfcxx_sycl_dp4a") return Opnd{dp4a(args), ty_int(4, true)};
+    if (starts("__nfcxx_")) throw Refused("unknown device intrinsic " + nm);
+    // libstdc++'s assertion failure is noreturn (the host aborts): the device traps, as for an unreachable path
+    if (nm == GLIBCXX_ASSERT_FAIL) {
+      trap(5);
+      check_dead_after_call();
+      return std::nullopt;
+    }
+    // dpct::dp4a(int, int, int) (llama.cpp's SYCL helper for the 8-bit dot product): c plus the dot product of the four signed
+    // bytes of a and b. The OpenCL module uses the packed integer dot product, which the Intel compiler also lowers to dp4a;
+    // the scalar body is four byte extracts, four multiplies and four adds.
+    if (nm == DP4A_INT && mod->kernel_cl) return Opnd{dp4a(args), ty_int(4, true)};
+    auto &table = wgs_mode ? mod->fns_wgs : mod->fns;
+    auto it = table.find(nm);
+    SFn *callee_fn = it == table.end() ? nullptr : it->second;
+    if (!callee_fn)
+      throw Refused("call of " + nm + ", which has no body in the device unit (a host function, or a declaration)");
+    if (args.size() != callee_fn->ptypes.size())
+      throw Refused("call of " + nm + " with " + std::to_string(args.size()) + " arguments, it takes " +
+                    std::to_string(callee_fn->ptypes.size()));
+    auto xs = operand_ids(args);
+    if (mod->kernel_cl) {
+      xs.push_back(state(S_PUSH));
+      xs.push_back(state(S_SP));
+      xs.push_back(state(S_DEAD));
+    }
+    uint32_t rt = callee_fn->ret ? sty(*callee_fn->ret) : spv->t_void();
+    if (!callee_fn->ret) {
+      Inst c{57, rt, spv->id(), callee_fn->fid};
+      c.insert(c.end(), xs.begin(), xs.end());
+      ins(std::move(c));
+      if (!callee_fn->compiled || callee_fn->traps) check_dead_after_call();
+      return std::nullopt;
+    }
+    std::vector<uint32_t> l{rt, callee_fn->fid};
+    l.insert(l.end(), xs.begin(), xs.end());
+    uint32_t r = res_v(57, l);
+    if (!callee_fn->compiled || callee_fn->traps) check_dead_after_call();
+    return Opnd{r, *callee_fn->ret};
+  }
+
+  // c + the dot product of the four signed bytes of a and b (dpct::dp4a(int, int, int), __nfcxx_sycl_dp4a): the OpenCL module
+  // uses the packed integer dot product (OpSDot, which the Intel compiler lowers to dp4a); the Vulkan module sums the four
+  // products of the sign-extended bytes (OpBitFieldSExtract). The products fit in 32 bits, so both wrap only at the add of c.
+  uint32_t dp4a(const std::vector<const Node *> &args) {
+    uint32_t a = operand(*args.at(0)).id, b = operand(*args.at(1)).id;
+    uint32_t dot;
+    if (mod->kernel_cl) {
+      spv->cap(6018);   // DotProductInput4x8BitPacked
+      spv->cap(6019);   // DotProduct
+      spv->ext("SPV_KHR_integer_dot_product");
+      dot = res(4450, {t32(), a, b, 0});   // OpSDot, PackedVectorFormat4x8Bit
+    } else {
+      dot = 0;
+      for (int k = 0; k < 4; k++) {
+        uint32_t ea = res(202, {t32(), a, spv->c_u32(8 * k), spv->c_u32(8)});
+        uint32_t eb = res(202, {t32(), b, spv->c_u32(8 * k), spv->c_u32(8)});
+        uint32_t p = res(IMUL, {t32(), ea, eb});
+        dot = k == 0 ? p : res(IADD, {t32(), dot, p});
+      }
+    }
+    uint32_t c = operand(*args.at(2)).id;
+    return res(IADD, {t32(), dot, c});
+  }
+
+  uint32_t atomic_ptr(const Node &x) {
+    not_routed();
+    uint32_t a = operand(x).id;
+    return res(120, {spv->t_ptr(psb_sc(), t32()), a});
+  }
+
+  uint32_t copysign_bits(uint32_t x, uint32_t y, const Ty &fty) {
+    if (fty.size == 4) {
+      uint32_t ut = t32();
+      uint32_t xb = res(124, {ut, x});
+      uint32_t yb = res(124, {ut, y});
+      uint32_t r = res(199, {ut, xb, spv->c_u32(0x7fffffff)});
+      uint32_t sg = res(199, {ut, yb, spv->c_u32(0x80000000ll)});
+      return res(124, {spv->t_float(32), res(197, {ut, r, sg})});
+    }
+    uint32_t ut = t64();
+    uint32_t xb = res(124, {ut, x});
+    uint32_t yb = res(124, {ut, y});
+    uint32_t r = res(199, {ut, xb, spv->c_u64(0x7fffffffffffffffll)});
+    uint32_t sg = res(199, {ut, yb, spv->c_u64((int64_t)0x8000000000000000ull)});
+    return res(124, {spv->t_float(64), res(197, {ut, r, sg})});
+  }
+
+  uint32_t glsl_op(int g, const std::vector<uint32_t> &xs, uint32_t ft) {
+    uint32_t i = spv->id();
+    Inst v{12, ft, i, spv->glsl_id(), spv->ext_num(g)};
+    v.insert(v.end(), xs.begin(), xs.end());
+    ins(std::move(v));
+    return i;
+  }
+
+  uint32_t local_base() {
+    uint32_t lx = push_load(P_NX);
+    uint32_t ly = push_load(P_NY);
+    uint32_t wx = group_comp(0);
+    uint32_t wy = group_comp(1);
+    uint32_t wz = group_comp(2);
+    t32();
+    uint32_t lin = res(IADD, {t32(), res(IMUL, {t32(), res(IADD, {t32(), res(IMUL, {t32(), wz, ly}), wy}), lx}), wx});
+    uint32_t stride = push_load(P_LOCAL_STRIDE);
+    uint32_t off = res(IMUL, {t64(), to_u64(lin, U32), to_u64(stride, U32)});
+    return res(IADD, {t64(), push_load(P_LOCAL), off});
+  }
+
+  // ---- statements
+
+  void stmts(const std::vector<const Node *> &list) {
+    for (size_t i = 0; i < list.size(); i++) {
+      const Node &s = *list[i];
+      const Node *nxt = i + 1 < list.size() ? list[i + 1] : nullptr;
+      if ((head_is(s, "loop") || head_is(s, "switch")) && nxt && head_is(*nxt, "label"))
+        pending_brk = to_s(nxt->items.at(1));
+      else
+        pending_brk.reset();
+      stmt(s);
+    }
+  }
+
+  std::optional<std::string> tail_label(const std::vector<const Node *> &list) {
+    if (list.empty()) return std::nullopt;
+    const Node &last = *list.back();
+    if (head_is(last, "label")) return to_s(last.items.at(1));
+    if (head_is(last, "block")) return tail_label(drop(last, 1));
+    return std::nullopt;
+  }
+
+  void stmt(const Node &s) {
+    if (s.kind != Node::List) throw BadIR("statement is not a form: " + form_text(s));
+    const std::string *hp = head_of(s);
+    std::string h = hp ? *hp : std::string();
+    auto arg = [&](size_t i) -> const Node & { return s.items.at(i); };
+    if (h == "block") {
+      stmts(drop(s, 1));
+    } else if (h == "let") {
+      Ty ty = parse_type(arg(2));
+      Opnd v = rval(arg(3));
+      std::string key = to_s(arg(1));
+      auto it = regs.find(key);
+      if (it == regs.end() && !mutable_regs.count(key)) {
+        regs[key] = Reg{false, v.id, ty};   // an SSA value: no variable for the device compiler to promote
+      } else {
+        uint32_t var;
+        if (it == regs.end()) {
+          uint32_t vv = var_decl(sty(ty));
+          regs[key] = Reg{true, vv, ty};
+          var = vv;
+        } else {
+          var = it->second.id;
+        }
+        ins({62, var, v.id});
+      }
+    } else if (h == "set") {
+      auto it = regs.find(to_s(arg(1)));
+      if (it == regs.end()) throw BadIR("set of " + to_s(arg(1)) + " before its let");
+      uint32_t var = it->second.id;
+      uint32_t v = operand(arg(2)).id;
+      ins({62, var, v});
+    } else if (h == "store" || h == "store.v") {
+      Ty ty = parse_type(arg(1));
+      uint32_t v = operand(arg(3)).id;
+      if (arg(2).is_sym('$') && locals.has(arg(2).text)) {
+        Local *lv = locals.get(arg(2).text);
+        if (!lv->var) lv->var = var_decl(sty(lv->ty));
+        ins({62, lv->var, v});
+      } else {
+        uint32_t a = operand(arg(2)).id;
+        any_store(pslot_of(arg(2)), a, ty, v);
+      }
+    } else if (h == "if") {
+      Opnd c = operand(arg(1));
+      if (!(c.ty.k == Ty::Int && c.ty.boolean)) throw BadIR("if condition is not a bool");
+      const Node *then_f = find_head(s, 2, "then");
+      const Node *else_f = find_head(s, 2, "else");
+      if (!then_f) throw BadIR("if without then");
+      uint32_t t = new_label(), e = new_label(), m = new_label();
+      ins({247, m, 0});
+      cond_branch(c.id, t, e);
+      label(t);
+      stmts(drop(*then_f, 1));
+      branch(m);
+      label(e);
+      if (else_f) stmts(drop(*else_f, 1));
+      branch(m);
+      label(m);
+    } else if (h == "loop") {
+      const Node *body_f = find_head(s, 1, "body");
+      const Node *step_f = find_head(s, 1, "step");
+      if (!body_f || !step_f) throw BadIR("loop without body and step");
+      uint32_t hdr = new_label(), bodyl = new_label(), cont = new_label(), merge = new_label();
+      auto brk = pending_brk;
+      pending_brk.reset();
+      if (brk) labels[*brk] = merge;
+      auto end_label = tail_label(drop(*body_f, 1));
+      if (end_label) labels[*end_label] = cont;
+      uint32_t first = var_decl(t32());
+      ins({62, first, spv->c_u32(1)});
+      branch(hdr);
+      label(hdr);
+      ins({246, merge, cont, 0});
+      branch(bodyl);
+      loops.push_back({merge, cont});
+      label(bodyl);
+      uint32_t f = res(61, {t32(), first});
+      uint32_t nf = res(170, {tbool(), f, spv->c_u32(0)});
+      uint32_t run = new_label(), after = new_label();
+      ins({247, after, 0});
+      cond_branch(nf, run, after);
+      label(run);
+      if (step_f->items.size() > 1) stmts(drop(*step_f, 1));
+      branch(after);
+      label(after);
+      ins({62, first, spv->c_u32(0)});
+      stmts(drop(*body_f, 1));
+      loops.pop_back();
+      branch(cont);
+      label(cont);
+      branch(hdr);
+      label(merge);
+    } else if (h == "switch") {
+      switch_stmt(s);
+    } else if (h == "break") {
+      if (loops.empty()) throw Refused("break outside a loop or switch");
+      branch(loops.back().brk);
+    } else if (h == "continue") {
+      const Loop *enc = nullptr;
+      for (auto it = loops.rbegin(); it != loops.rend(); ++it)
+        if (it->cont) {
+          enc = &*it;
+          break;
+        }
+      if (!enc) throw BadIR("continue outside a loop");
+      branch(enc->cont);
+    } else if (h == "goto") {
+      std::string l = s.items.size() > 1 ? to_s(s.items[1]) : std::string();
+      auto it = labels.find(l);
+      if (it == labels.end())
+        throw Refused("goto \"" + l + "\" (not the end of a loop body or the label after a loop or switch)");
+      branch(it->second);
+    } else if (h == "label") {
+    } else if (h == "trap" || h == "unreachable") {
+      trap(5);
+    } else if (h == "bounds" && (mod->no_checks || (head_is(arg(1), "const") && !is_reg(arg(2)) &&
+                                                     (uint64_t)as_int(arg(1).items.at(2)) < (uint64_t)as_int(arg(2))))) {
+      // no checks, or a constant index below a constant bound
+    } else if (h == "nonnull" && mod->no_checks) {
+    } else if (h == "bounds") {
+      Opnd v = operand(arg(1));
+      uint32_t n = is_reg(arg(2)) ? operand(arg(2)).id : int_const_of(v.ty, as_int(arg(2)));
+      uint32_t vi = wide(v.ty) ? v.id : u32_of(v.id, v.ty);
+      trap_if(res(172, {tbool(), vi, n}), 3);
+    } else if (h == "nonnull") {
+      // the address of a function is never null (the front end's check on a function pointer that is a template argument),
+      // nor that of a slot or a static, nor a register made from one (never_null_regs)
+      if (!never_null(arg(1))) {
+        uint32_t p = operand(arg(1)).id;
+        trap_if(res(170, {tbool(), p, spv->c_u64(0)}), 4);
+      }
+    } else if (h == "return") {
+      if (!ret) {
+        if (s.items.size() > 1) throw Refused("return with a value in a void function");
+        emit_return(std::nullopt);
+      } else {
+        if (s.items.size() != 2) throw Refused("return without a value in " + name);
+        uint32_t v = operand(arg(1)).id;
+        emit_return(v);
+      }
+    } else if (h == "eval") {
+      if (!(s.items.size() == 2 && head_is(s.items[1], "call")))
+        throw Refused("eval of " + (s.items.size() > 1 ? form_text(s.items[1]) : std::string()));
+      call_expr(s.items[1]);
+    } else if (h == "copy") {
+      int64_t n = as_int(arg(1));
+      uint32_t d = operand(arg(2)).id;
+      uint32_t src = operand(arg(3)).id;
+      copy_any(pslot_of(arg(2)), d, pslot_of(arg(3)), src, n);
+    } else {
+      throw Refused("statement " + (hp ? h : form_text(s)));
+    }
+  }
+
+  void counted_loop(int64_t n, int64_t step, const std::function<void(uint32_t)> &yield) {
+    uint32_t i = var_decl(t64());
+    ins({62, i, spv->c_u64(0)});
+    uint32_t hdr = new_label(), bodyl = new_label(), cont = new_label(), merge = new_label();
+    branch(hdr);
+    label(hdr);
+    uint32_t iv = res(61, {t64(), i});
+    uint32_t c = res(176, {tbool(), iv, spv->c_u64(n)});
+    ins({246, merge, cont, 0});
+    cond_branch(c, bodyl, merge);
+    label(bodyl);
+    yield(iv);
+    branch(cont);
+    label(cont);
+    uint32_t iv2 = res(61, {t64(), i});
+    uint32_t nx = res(IADD, {t64(), iv2, spv->c_u64(step)});
+    ins({62, i, nx});
+    branch(hdr);
+    label(merge);
+  }
+
+  void copy_bytes(uint32_t d, uint32_t src, int64_t n) {
+    if (!wgs_mode && n % 16 == 0 && n <= 256) {
+      // 16-byte blocks at constant offsets, one vector load and one store each: the words of a block were a send apiece
+      uint32_t vt = spv->t_vec(t32(), 4);
+      for (int64_t off = 0; off < n; off += 16) {
+        uint32_t sp = res(120, {spv->t_ptr(psb_sc(), vt), res(IADD, {t64(), src, spv->c_u64(off)})});
+        uint32_t v = res(61, {vt, sp, 2, 4});
+        uint32_t dp = res(120, {spv->t_ptr(psb_sc(), vt), res(IADD, {t64(), d, spv->c_u64(off)})});
+        ins({62, dp, v, 2, 4});
+      }
+      return;
+    }
+    const Ty t = n % 4 == 0 ? U32 : U8;
+    counted_loop(n, n % 4 == 0 ? 4 : 1, [&](uint32_t off) {
+      uint32_t v = mem_load(res(IADD, {t64(), src, off}), t);
+      mem_store(res(IADD, {t64(), d, off}), t, v);
+    });
+  }
+
+  static bool jump(const Node &s) {
+    const std::string *hp = head_of(s);
+    std::string h = hp ? *hp : std::string();
+    if (h == "break" || h == "continue" || h == "return" || h == "unreachable" || h == "trap" || h == "goto") return true;
+    if (h == "block") return s.items.size() > 1 && jump(s.items.back());
+    if (h == "if") {
+      const Node *t = find_head(s, 2, "then");
+      const Node *e = find_head(s, 2, "else");
+      return t && e && t->items.size() > 1 && e->items.size() > 1 && jump(t->items.back()) && jump(e->items.back());
+    }
+    return false;
+  }
+
+  void switch_stmt(const Node &s) {
+    auto brk = pending_brk;
+    pending_brk.reset();
+    const Node *body_f = find_head(s, 1, "body");
+    if (!body_f) throw BadIR("switch without body");
+    Opnd v = operand(s.items.at(1));
+    if (!int_ty(v.ty)) throw Refused(std::string("switch on a ") + v.ty.kind_name());
+    if (v.ty.size > 4) throw Refused("switch on a " + std::to_string(v.ty.size) + "-byte integer");
+    std::vector<const Node *> items;
+    std::function<void(const Node &)> expand = [&](const Node &f) {
+      if (head_is(f, "block")) {
+        for (size_t i = 1; i < f.items.size(); i++) expand(f.items[i]);
+      } else {
+        items.push_back(&f);
+      }
+    };
+    for (size_t i = 1; i < body_f->items.size(); i++) expand(body_f->items[i]);
+    struct Arm {
+      std::vector<int64_t> lits;
+      bool dflt = false;
+      std::vector<const Node *> body;
+      uint32_t label;
+    };
+    std::vector<Arm> arms;
+    Arm *cur = nullptr;
+    for (const Node *it : items) {
+      if (head_is(*it, "case") || head_is(*it, "default")) {
+        if (!cur || !cur->body.empty()) {
+          arms.push_back(Arm{{}, false, {}, new_label()});
+          cur = &arms.back();
+        }
+        if (head_is(*it, "case")) cur->lits.push_back(as_int(it->items.at(1).items.at(2)));
+        else cur->dflt = true;
+      } else {
+        if (!cur) throw Refused("statement before the first case of a switch");
+        cur->body.push_back(it);
+      }
+    }
+    for (size_t i = 0; i < arms.size(); i++) {
+      if (i == arms.size() - 1 || arms[i].body.empty()) continue;
+      if (!jump(*arms[i].body.back())) throw Refused("switch arm falls through into the next one");
+    }
+    uint32_t merge = new_label();
+    uint32_t dflt_label = merge;
+    for (auto &a : arms)
+      if (a.dflt) {
+        dflt_label = a.label;
+        break;
+      }
+    ins({247, merge, 0});
+    uint32_t sel = u32_of(v.id, v.ty);
+    Inst sw{251, sel, dflt_label};
+    // the Ruby's arm labels list keeps the case values and the default in their order; the pairs skip the default
+    for (auto &a : arms)
+      for (int64_t lit : a.lits) {
+        sw.push_back((uint32_t)(lit & 0xffffffff));
+        sw.push_back(a.label);
+      }
+    term(std::move(sw));
+    loops.push_back({merge, 0});
+    if (brk) labels[*brk] = merge;
+    for (size_t i = 0; i < arms.size(); i++) {
+      label(arms[i].label);
+      stmts(arms[i].body);
+      uint32_t nxt = i + 1 < arms.size() ? arms[i + 1].label : merge;
+      branch(nxt);
+    }
+    loops.pop_back();
+    label(merge);
+  }
+
+  // ---- the function
+
+  // An operand that is never null: the address of a slot, a static or a function, an offset or index of one, or a register
+  // whose every definition (let or set, anywhere in the function) is one of those.
+  bool never_null(const Node &x) {
+    if (pslot_of(x)) return true;   // a pointer into a private slot (or a null one, which no access reaches)
+    if (x.is_sym('$') || x.is_sym('@') || x.is_sym('&')) return true;
+    if (is_reg(x)) return nn_regs.count(x.text) > 0;
+    if (head_is(x, "bitcast")) return x.items.size() > 2 && never_null(x.items[2]);
+    if (head_is(x, "offset") || head_is(x, "index")) return x.items.size() > 1 && never_null(x.items[1]);
+    return false;
+  }
+
+  // the registers with more than one definition (see mutable_regs)
+  void collect_mutable_regs() {
+    std::unordered_map<std::string, int> lets;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) {
+        std::string k = to_s(x.items[1]);
+        if (++lets[k] > 1) mutable_regs.insert(k);
+      } else if (head_is(x, "set") && x.items.size() > 2) {
+        mutable_regs.insert(to_s(x.items[1]));
+      }
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+  }
+
+  // The never-null registers: the greatest set such that each definition of each of them is never null (a register set
+  // from itself plus an offset, in a loop, stays in it).
+  void never_null_regs() {
+    std::unordered_map<std::string, std::vector<const Node *>> defs;
+    std::function<void(const Node &)> walk = [&](const Node &x) {
+      if (x.kind != Node::List) return;
+      if (head_is(x, "let") && x.items.size() > 3) defs[to_s(x.items[1])].push_back(&x.items[3]);
+      else if (head_is(x, "set") && x.items.size() > 2) defs[to_s(x.items[1])].push_back(&x.items[2]);
+      for (auto &y : x.items) walk(y);
+    };
+    for (Node *b : body) walk(*b);
+    for (auto &kv : defs) nn_regs.insert(kv.first);
+    for (bool changed = true; changed;) {
+      changed = false;
+      for (auto &kv : defs) {
+        if (!nn_regs.count(kv.first)) continue;
+        for (const Node *d : kv.second)
+          if (!never_null(*d)) {
+            nn_regs.erase(kv.first);
+            changed = true;
+            break;
+          }
+      }
+    }
+  }
+
+  void compile() {
+    collect_mutable_regs();
+    never_null_regs();
+    uint32_t rt = ret ? sty(*ret) : spv->t_void();
+    for (size_t k = 0; k < ptypes.size(); k++) param_ids.push_back(spv->id());
+    for (size_t k = 0; k < ptypes.size(); k++) regs["%" + std::to_string(k)] = Reg{false, param_ids[k], ptypes[k]};
+    if (mod->kernel_cl) {
+      uint32_t a = spv->t_ptr(SC_CROSSWG, mod->push_struct_type());
+      uint32_t b = spv->t_ptr(SC_FUNCTION, t64());
+      uint32_t c = spv->t_ptr(SC_FUNCTION, t32());
+      state_types = {a, b, c};
+      for (int k = 0; k < 3; k++) state_param_ids.push_back(spv->id());
+      push_param_attrs(state_param_ids[0]);
+      has_state = true;
+      st_push = state_param_ids[0];
+      st_sp = state_param_ids[1];
+      st_dead = state_param_ids[2];
+    }
+    std::vector<uint32_t> ps;
+    for (auto &t : ptypes) ps.push_back(sty(t));
+    ps.insert(ps.end(), state_types.begin(), state_types.end());
+    ftype = spv->t_fn(rt, ps);
+    ret_t = rt;
+    if (frame > 0) {
+      oldsp_var = var_decl(t64());
+      frame_var = var_decl(t64());
+      uint32_t old = res(61, {t64(), state(S_SP)});
+      ins({62, oldsp_var, old});
+      uint32_t fr = res(IADD, {t64(), old, spv->c_u64(-frame)});
+      fr = res(199, {t64(), fr, spv->c_u64((int64_t)0xfffffffffffffff0ull)});
+      ins({62, frame_var, fr});
+      ins({62, state(S_SP), fr});
+    }
+    for (auto &k : locals.keys) {
+      Local *lv = locals.get(k);
+      if (!lv->var) lv->var = var_decl(sty(lv->ty));
+    }
+    for (auto &k : pslots.keys) {
+      PSlot *ps = pslots.get(k);
+      ps->var = var_decl(spv->t_array(t32(), (uint32_t)ps->words));
+    }
+    std::vector<const Node *> b(body.begin(), body.end());
+    stmts(b);
+    if (!term_) {
+      if (!ret) {
+        emit_return(std::nullopt);
+      } else {
+        uint32_t z = zero_of(*ret);
+        emit_return(z);
+      }
+    }
+    compiled = true;
+  }
+
+  std::vector<Inst> function_text() {
+    std::vector<Inst> out;
+    out.push_back({54, ret_t, fid, 0, ftype});
+    for (size_t k = 0; k < ptypes.size(); k++) out.push_back({55, sty(ptypes[k]), param_ids[k]});
+    for (size_t k = 0; k < state_types.size(); k++) out.push_back({55, state_types[k], state_param_ids[k]});
+    uint32_t lab = spv->id();
+    out.push_back({248, lab});
+    for (auto &v : vars) out.push_back(v);
+    for (auto &c : code) out.push_back(c);
+    out.push_back({56});
+    return out;
+  }
+
+  // The push block pointer (the OpenCL module's kernel argument, and the state parameter of every function): FuncParamAttr
+  // NoAlias and NoWrite. Nothing else addresses its bytes (rt_opencl.hpp, rt_level_zero.hpp: the control block's push block)
+  // and the device only reads it, so the device compiler may keep its loads across the stores of the function.
+  void push_param_attrs(uint32_t p) {
+    spv->ann({71, p, 38, 4});   // OpDecorate FuncParamAttr NoAlias
+    spv->ann({71, p, 38, 6});   // OpDecorate FuncParamAttr NoWrite
+  }
+
+  // The entry of a kernel: sets this invocation's stack and the dead flag, then calls the kernel's IR function.
+  void compile_wrapper(uint32_t ir_fn) {
+    if (mod->kernel_cl) {
+      uint32_t push_p = spv->id();
+      push_param_attrs(push_p);
+      uint32_t tv = spv->t_void();
+      uint32_t pp = spv->t_ptr(SC_CROSSWG, mod->push_struct_type());
+      ftype = spv->t_fn(tv, {pp});
+      uint32_t pp2 = spv->t_ptr(SC_CROSSWG, mod->push_struct_type());
+      param_lines.push_back({55, pp2, push_p});
+      uint32_t sp_v = var_decl(t64());
+      uint32_t dead_v = var_decl(t32());
+      has_state = true;
+      st_push = push_p;
+      st_sp = sp_v;
+      st_dead = dead_v;
+    } else {
+      uint32_t tv = spv->t_void();
+      ftype = spv->t_fn(tv, {});
+    }
+    ret_t = spv->t_void();
+    t32();
+    t64();
+    uint32_t wlin = res(IADD, {t32(), res(IMUL, {t32(), res(IADD, {t32(), res(IMUL, {t32(), group_comp(2), push_load(P_NY)}),
+                                                                    group_comp(1)}),
+                                                 push_load(P_NX)}),
+                                group_comp(0)});
+    uint32_t lsx = mod->spec[0];
+    uint32_t lsy = mod->spec[1];
+    uint32_t llin =
+        res(IADD, {t32(), res(IMUL, {t32(), res(IADD, {t32(), res(IMUL, {t32(), builtin_component(mod->lid, 2), lsy}),
+                                                        builtin_component(mod->lid, 1)}),
+                                     lsx}),
+                   builtin_component(mod->lid, 0)});
+    uint32_t inv = res(IMUL, {t32(), res(IMUL, {t32(), lsx, lsy}), mod->spec[2]});
+    uint32_t lin = res(IADD, {t32(), res(IMUL, {t32(), wlin, inv}), llin});
+    uint32_t sbytes = to_u64(push_load(P_STACK_BYTES), U32);
+    uint32_t base = push_load(P_STACK);
+    uint32_t off = res(IMUL, {t64(), to_u64(lin, U32), sbytes});
+    uint32_t top = res(IADD, {t64(), base, res(IADD, {t64(), off, sbytes})});
+    ins({62, state(S_DEAD), spv->c_u32(0)});
+    ins({62, state(S_SP), top});
+    Inst c{57, spv->t_void(), spv->id(), ir_fn};
+    if (has_state) {
+      c.push_back(state(S_PUSH));
+      c.push_back(state(S_SP));
+      c.push_back(state(S_DEAD));
+    }
+    ins(std::move(c));
+    term({253});
+  }
+};
+
+}  // namespace
+
+// ------------------------------------------------------------------ the module
+
+Emitted emit_module(const std::string &src, bool kernel_cl, bool no_div_trap, bool no_checks) {
+  std::vector<Node> forms = read_forms(src);
+  Mod mod;
+  std::unordered_map<std::string, int64_t> sizes;
+  // function name => the sub-group size its [[sycl::reqd_sub_group_size(N)]] asks for (be/nfcxx_ir.c)
+  std::unordered_map<std::string, int64_t> kernel_sg;
+  for (Node &f : forms) {
+    const std::string *h = head_of(f);
+    if (!h) continue;
+    if (*h == "sycl-kernel-attr") {
+      for (size_t i = 2; i < f.items.size(); i++)
+        if (head_is(f.items[i], "reqd-sub-group-size")) kernel_sg[to_s(f.items.at(1))] = as_int(f.items[i].items.at(1));
+    } else if (*h == "function") mod.defs.set(to_s(f.items.at(1)), &f);
+    else if (*h == "abi-type") {
+      sizes[to_s(f.items.at(1))] = as_int(f.items.at(2));
+      if (f.items.size() > 4 && head_is(f.items[4], "empty")) mod.empty_types.insert(to_s(f.items[1]));
+    } else if (*h == "global") mod.globals.set(to_s(f.items.at(1)), &f);
+    else if (*h == "data") mod.datas.set(to_s(f.items.at(1)), &f);
+  }
+  std::vector<std::string> entries;
+  for (auto &n : mod.defs.keys)
+    if (n.find("__nfcxx_sycl_entry_") != std::string::npos) entries.push_back(n);
+  Emitted out;
+  if (entries.empty()) return out;
+  // the array constructor calls of a reachable function are unrolled before its callees are taken
+  std::vector<std::string> order;
+  std::unordered_map<std::string, int> vstate;   // 1 open, 2 done
+  std::function<void(const std::string &)> visit = [&](const std::string &name) {
+    int &st = vstate[name];
+    if (st == 2) return;
+    if (st == 1) throw Refused("recursive call of " + name);
+    st = 1;
+    Node *f = *mod.defs.get(name);
+    expand_cxa_vec_ctor(*f);
+    std::vector<std::string> calls;
+    collect_calls(*f, calls);
+    std::unordered_set<std::string> seen;
+    for (auto &c : calls)
+      if (mod.defs.has(c) && seen.insert(c).second) visit(c);
+    vstate[name] = 2;
+    order.push_back(name);
+  };
+  for (auto &e : entries) visit(e);
+
+  Spv spv;
+  spv.kernel_cl = kernel_cl;
+  if (kernel_cl) {
+    spv.cap(4);
+    spv.cap(6);
+    spv.cap(11);
+  } else {
+    spv.cap(1);
+    spv.cap(11);
+    spv.cap(5347);
+    spv.cap(5345);
+    spv.cap(5346);
+    spv.ext("SPV_KHR_physical_storage_buffer");
+  }
+  spv.glsl_id();
+  SpvModule smod(&spv, kernel_cl);
+  smod.no_div_trap = no_div_trap;
+  smod.no_checks = no_checks;
+  smod.irmod = &mod;
+
+  // the reach of a function over a call relation (the calls, or every address of a function)
+  auto reach_by = [&](const std::string &root, bool refs, std::unordered_map<std::string, std::vector<std::string>> &edges) {
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> stack{root}, outv;
+    while (!stack.empty()) {
+      std::string n = stack.back();
+      stack.pop_back();
+      if (seen.count(n) || !mod.defs.has(n)) continue;
+      seen.insert(n);
+      outv.push_back(n);
+      auto it = edges.find(n);
+      if (it == edges.end()) {
+        std::vector<std::string> acc, sel;
+        if (refs) collect_fn_refs(**mod.defs.get(n), acc);
+        else collect_calls(**mod.defs.get(n), acc);
+        for (auto &c : acc)
+          if (mod.defs.has(c)) sel.push_back(c);
+        it = edges.emplace(n, std::move(sel)).first;
+      }
+      stack.insert(stack.end(), it->second.begin(), it->second.end());
+    }
+    return outv;
+  };
+  if (kernel_cl) {
+    // the layout runs before the functions' setup folds constexpr function-pointer slots into direct calls, so its reach
+    // follows every address of a function, not only the calls
+    std::unordered_map<std::string, std::vector<std::string>> ref_edges;
+    std::vector<std::unordered_set<std::string>> groups;
+    for (auto &e : entries) {
+      auto r = reach_by(e, true, ref_edges);
+      groups.emplace_back(r.begin(), r.end());
+    }
+    // wgs_layout: a function's statics start after those of the functions placed before it that a kernel reaches with it
+    OMap<std::vector<std::tuple<std::string, int64_t, int64_t>>> slots;
+    for (auto &fname : mod.defs.keys) {
+      Node *form = *mod.defs.get(fname);
+      for (Node &f : form->items) {
+        if (!(head_is(f, "slot") && f.items.size() == 5 && head_is(f.items[2], "struct") && mentions_wgs(f.items[2])))
+          continue;
+        std::vector<std::tuple<std::string, int64_t, int64_t>> *l = slots.get(fname);
+        if (!l) l = &slots.set(fname, {});
+        l->emplace_back(to_s(f.items[1]), as_int(f.items[3]), std::max<int64_t>(as_int(f.items[4]), 16));
+      }
+    }
+    std::unordered_map<std::string, int64_t> ends;
+    int64_t total = 0;
+    for (auto &fname : slots.keys) {
+      int64_t off = 0;
+      for (auto &g : groups) {
+        if (!g.count(fname)) continue;
+        for (auto &n : g) {
+          auto it = ends.find(n);
+          if (it != ends.end()) off = std::max(off, it->second);
+        }
+      }
+      for (auto &[sname, size, align] : *slots.get(fname)) {
+        off = (off + align - 1) / align * align;
+        smod.wgs[{fname, sname}] = off;
+        off += size;
+      }
+      ends[fname] = off;
+      total = std::max(total, off);
+    }
+    smod.has_wgs = true;
+    smod.wgs_total = (total + 15) / 16 * 16;
+    if (smod.wgs_total > 0) smod.wgs_var = spv.wgs_var((uint32_t)(smod.wgs_total / 4));
+  }
+  std::vector<std::unique_ptr<SFn>> owned;
+  std::unordered_map<std::string, SFn *> fns;
+  for (auto &n : order) {
+    uint32_t id = spv.id();
+    owned.push_back(std::make_unique<SFn>(*mod.defs.get(n), id, &smod));
+    fns[n] = owned.back().get();
+  }
+  smod.fns = fns;
+  // clones for the work-group-static kernels (each compiles from its own copy of the IR)
+  std::unordered_set<std::string> static_names;
+  for (auto &kv : smod.wgs) static_names.insert(kv.first.first);
+  std::unordered_map<std::string, std::vector<std::string>> call_edges;   // after the originals' setup
+  std::unordered_map<std::string, std::vector<std::string>> reach_of;
+  for (auto &e : entries) reach_of[e] = reach_by(e, false, call_edges);
+  std::vector<std::string> static_entries;
+  std::unordered_set<std::string> static_entry_set, clone_set;
+  for (auto &e : entries) {
+    bool any = false;
+    for (auto &n : reach_of[e])
+      if (static_names.count(n)) any = true;
+    if (any) {
+      static_entries.push_back(e);
+      static_entry_set.insert(e);
+      for (auto &n : reach_of[e]) clone_set.insert(n);
+    }
+  }
+  std::vector<std::string> clone_order;
+  for (auto &n : order)
+    if (clone_set.count(n)) clone_order.push_back(n);
+  std::vector<std::unique_ptr<Node>> copies;
+  for (auto &n : clone_order) {
+    copies.push_back(std::make_unique<Node>(copy_form(**mod.defs.get(n))));
+    uint32_t id = spv.id();
+    owned.push_back(std::make_unique<SFn>(copies.back().get(), id, &smod, true));
+    smod.fns_wgs[n] = owned.back().get();
+  }
+  // the stack: the deepest chain of frames from a kernel, with slack for alignment
+  std::unordered_map<std::string, int64_t> depth;
+  std::function<int64_t(const std::string &)> depth_of = [&](const std::string &name) -> int64_t {
+    auto it = depth.find(name);
+    if (it != depth.end()) return it->second;
+    auto f = fns.find(name);
+    if (f == fns.end()) throw std::runtime_error("undefined method `frame' for nil (" + name + ")");
+    int64_t m = 0;
+    bool any = false;
+    for (auto &c : f->second->callees) {
+      int64_t d = depth_of(c);
+      if (!any || d > m) m = d;
+      any = true;
+    }
+    int64_t d = f->second->frame + m;
+    depth[name] = d;
+    return d;
+  };
+  int64_t maxd = 0;
+  for (size_t i = 0; i < entries.size(); i++) {
+    int64_t d = depth_of(entries[i]);
+    if (i == 0 || d > maxd) maxd = d;
+  }
+  int64_t stack_bytes = (maxd + 16 + 15) / 16 * 16;
+  smod.stack_bytes = stack_bytes;
+  std::unordered_set<std::string> orig_needed;
+  for (auto &e : entries)
+    if (!static_entry_set.count(e))
+      for (auto &n : reach_of[e]) orig_needed.insert(n);
+  auto compile_in = [&](const std::string &n, SFn *fn) {
+    try {
+      fn->compile();
+    } catch (Refused &e) {
+      throw Refused(e.text + " (in " + n + ")");
+    }
+  };
+  for (auto &n : order)
+    if (orig_needed.count(n)) compile_in(n, fns[n]);
+  for (auto &n : clone_order) compile_in(n, smod.fns_wgs[n]);
+  for (auto &n : order) {
+    if (!orig_needed.count(n)) continue;
+    for (auto &inst : fns[n]->function_text()) spv.func(inst);
+  }
+  for (auto &n : clone_order)
+    for (auto &inst : smod.fns_wgs[n]->function_text()) spv.func(inst);
+  std::vector<uint32_t> iface = kernel_cl ? std::vector<uint32_t>{smod.gid, smod.lid, smod.wid}
+                                          : std::vector<uint32_t>{smod.gid, smod.lid, smod.wid, smod.sp, smod.dead, smod.push};
+  if (smod.sg_size_var) iface.push_back(smod.sg_size_var);
+  for (size_t k = 0; k < entries.size(); k++) {
+    const std::string &e = entries[k];
+    SFn *f = smod.fns_wgs.count(e) ? smod.fns_wgs[e] : fns[e];
+    if (!f->ptypes.empty()) throw Refused("kernel " + e + " takes parameters");
+    std::string key, strukt;
+    if (!kernel_key(**mod.defs.get(e), key, strukt))
+      throw Refused("kernel " + e + ": cannot find the closure type (no cast of __nfcxx_sycl_closure())");
+    uint32_t wid = spv.id();
+    SFn wr(nullptr, wid, &smod);
+    wr.compile_wrapper(f->fid);
+    spv.func({54, spv.t_void(), wr.fid, 0, wr.ftype});
+    for (auto &inst : wr.param_lines) spv.func(inst);
+    spv.func({248, spv.id()});
+    for (auto &inst : wr.vars) spv.func(inst);
+    for (auto &inst : wr.code) spv.func(inst);
+    spv.func({56});
+    spv.add_entry(kernel_cl ? 6 : 5, wr.fid, "k" + std::to_string(k), iface);
+    bool sg = false;
+    for (auto &n : reach_of[e]) {
+      auto &table = static_entry_set.count(e) ? smod.fns_wgs : fns;
+      auto it = table.find(n);
+      if (it != table.end() && it->second->sg_used) sg = true;
+    }
+    // the sub-group size: 16, or what the kernel's [[sycl::reqd_sub_group_size(N)]] asks for
+    std::vector<int64_t> asked;
+    for (auto &n : reach_of[e]) {
+      auto it = kernel_sg.find(n);
+      if (it != kernel_sg.end() && std::find(asked.begin(), asked.end(), it->second) == asked.end()) asked.push_back(it->second);
+    }
+    if (asked.size() > 1) {
+      std::string l;
+      for (size_t i = 0; i < asked.size(); i++) l += (i ? ", " : "") + std::to_string(asked[i]);
+      throw Refused("kernel " + e + ": its functions ask for different sub-group sizes (" + l + ")");
+    }
+    int64_t sgsz = asked.empty() ? (int64_t)SUBGROUP_SIZE : asked[0];
+    // ContractionOff (OpenCL only): the IR's fmul, fadd and fsub each round, and the driver must not fuse a multiply with the
+    // add or subtract that uses it into one fused multiply-add (it did so in some inlined shapes, one ulp off the IR)
+    if (kernel_cl) spv.entry_flag(wr.fid, 31);
+    if (sg) {
+      spv.cap(58);
+      spv.entry_mode(wr.fid, 35, (uint32_t)sgsz);
+    }
+    auto sz = sizes.find(strukt);
+    out.manifest.push_back("k" + std::to_string(k) + "\t" + key + "\t" + std::to_string(sz == sizes.end() ? 0 : sz->second) +
+                           (sg ? "\t" + std::to_string(sgsz) : std::string()));
+  }
+  if (mod.statics.size() > 0 || !mod.static_order.empty()) {
+    std::vector<uint8_t> bytes;
+    std::vector<std::pair<int64_t, int64_t>> relocs;
+    mod.static_image(bytes, relocs);
+    static const char hx[] = "0123456789abcdef";
+    std::string line = "S\t" + std::to_string(mod.static_size) + "\t";
+    line.reserve(line.size() + bytes.size() * 2);
+    for (uint8_t b : bytes) {
+      line += hx[b >> 4];
+      line += hx[b & 15];
+    }
+    out.manifest.push_back(line);
+    for (auto &[o, t] : relocs) out.manifest.push_back("R\t" + std::to_string(o) + "\t" + std::to_string(t));
+  }
+  if (smod.wgs_total > 0) out.manifest.push_back("L\t" + std::to_string(smod.wgs_total));
+  out.manifest.push_back("T\t" + std::to_string(stack_bytes));
+  out.words = spv.finish(kernel_cl ? 0x00010200 : 0x00010500);
+  out.has_module = true;
+  return out;
+}

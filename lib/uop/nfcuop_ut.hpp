@@ -88,6 +88,21 @@ class Tensor {
   Tensor cos() const;
   Tensor tanh() const;
   Tensor sigmoid() const;
+  // libm functions of a float tensor (an integer tensor is converted to float32 first, as for sin); each is one UOp
+  Tensor log2() const;
+  Tensor acos() const;
+  Tensor acosh() const;
+  Tensor asin() const;
+  Tensor asinh() const;
+  Tensor atan() const;
+  Tensor atanh() const;
+  Tensor cosh() const;
+  Tensor sinh() const;
+  Tensor tan() const;
+  Tensor expm1() const;
+  Tensor log1p() const;
+  Tensor log10() const;
+  Tensor round() const;  // ties to even; an integer tensor is returned unchanged, a bool tensor computes in float32
   Tensor relu() const;
   Tensor square() const;
   Tensor reciprocal() const;
@@ -142,11 +157,16 @@ class Session {
   bool optimize = true;
   // How eval runs a graph: the reference interpreter, or rendered C (nfcuop_cgen.hpp) compiled with `cc` (empty: $NFCUOP_CC or
   // cc) and cached by source text. Both give the same bits (except that an integer division by zero is 0 in C).
-  // Ort runs the hir graph with ONNX Runtime (nfcuop_ort.hpp); it needs the graph, so only np::Session evaluates with it.
-  enum class Backend { Interpreter, C, Ort };
+  // Ort and Tinygrad run the hir graph with ONNX Runtime (nfcuop_ort.hpp) or tinygrad (nfcuop_tinygrad.hpp); they need the graph,
+  // so only np::Session evaluates with them.
+  enum class Backend { Interpreter, C, Ort, Tinygrad };
   Backend backend = Backend::Interpreter;
   std::string cc;
   const CProgram* last_program() const { return has_program_ ? &last_program_ : nullptr; }  // the last C program run
+  // With NFCUOP_TRACE set in the environment, a C-backend run times its kernels (render_c with profile) and keeps one span
+  // for the run and one per kernel here, until clear_kernel_timings().
+  const std::vector<KernelTiming>& kernel_timings() const { return kernel_timings_; }
+  void clear_kernel_timings() { kernel_timings_.clear(); }
 
  private:
   Graph g_;
@@ -155,6 +175,8 @@ class Session {
   std::map<std::string, std::shared_ptr<CModule>> modules_;
   CProgram last_program_;
   bool has_program_ = false;
+  std::vector<KernelTiming> kernel_timings_;
+  int runs_ = 0;
 };
 
 // ---- functions ----
@@ -184,6 +206,12 @@ inline Tensor log(const Tensor& a) { return a.log(); }
 inline Tensor sqrt(const Tensor& a) { return a.sqrt(); }
 inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
+// atan2(y, x) of floats (the promoted dtype; integers compute in float32); the operands broadcast
+Tensor atan2(const Tensor& y, const Tensor& x);
+// a << b and a >> b (arithmetic) of integers, broadcast and promoted; a count below 0 or at least the width gives 0 (a right
+// shift of a negative value gives -1), as numpy does. Bool and floats are an error.
+Tensor shift_left(const Tensor& a, const Tensor& b);
+Tensor shift_right(const Tensor& a, const Tensor& b);
 
 Tensor operator+(const Tensor& a, const Tensor& b);
 Tensor operator-(const Tensor& a, const Tensor& b);

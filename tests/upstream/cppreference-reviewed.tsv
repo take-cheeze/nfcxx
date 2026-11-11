@@ -1,0 +1,11 @@
+id	standard	mode	review
+alignof-1	c++11	run	Layout-dependent output compared against the same host; no addresses.
+auto-1	c++17	run	Initialized values and references; deterministic output.
+constexpr-1	c++14	run	Factorials and literal strings; volatile local exercises runtime evaluation.
+decltype-1	c++17	run	Type assertions and lambda copies; deterministic output.
+enum-1	c++11	run	Scoped enumerator switch and explicit conversion.
+fold-1	c++20	run	Integer fold and byte swaps; fixed-width integer types.
+nullptr-1	c++11	run	Null pointer conversions and forwarding.
+parameter_pack-1	c++11	run	Matching format placeholders; deterministic output.
+reference-1	c++11	run	Initialized string aliases; deterministic output.
+structured_binding-1	c++20	run	Set insertion and initialized bit fields; deterministic output.

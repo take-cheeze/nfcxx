@@ -1,0 +1,3 @@
+1
+test: loan-already-active: child
+test: loan-conflict: x (child)

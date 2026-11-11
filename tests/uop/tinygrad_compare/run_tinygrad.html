@@ -1,0 +1,75 @@
+<!doctype html>
+<!-- Runs tinygrad's WGSL kernels (tg_case.js, written by case.py from tinygrad's own renderer) on WebGPU. Each kernel is
+     its own module, as tinygrad renders it; the INFINITY uniform is filled with +inf. Result line in #result. -->
+<html>
+<head><meta charset="utf-8"><title>tinygrad WGSL runner</title></head>
+<body>
+<pre id="result">pending</pre>
+<script src="case.js"></script>
+<script>
+(async () => {
+  const out = document.getElementById('result');
+  const fail = (msg) => { out.textContent = 'FAIL ' + msg; };
+  try {
+    const C = window.TG_CASE;
+    if (!navigator.gpu) return fail('no navigator.gpu');
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return fail('no WebGPU adapter');
+    const device = await adapter.requestDevice();
+    const errors = [];
+    device.addEventListener('uncapturederror', (e) => errors.push(e.error.message));
+    const U = GPUBufferUsage;
+    const bufs = {};
+    for (const [name, b] of Object.entries(C.buffers)) {
+      bufs[name] = device.createBuffer({ size: b.count * 4, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
+      if (b.input) device.queue.writeBuffer(bufs[name], 0, new Float32Array(C.inputs[name]));
+    }
+    const inf = device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST });
+    device.queue.writeBuffer(inf, 0, new Float32Array([Infinity, 0, 0, 0]));
+    const size = C.buffers[C.output].count * 4;
+    const readback = device.createBuffer({ size, usage: U.MAP_READ | U.COPY_DST });
+    device.pushErrorScope('validation');
+    const enc = device.createCommandEncoder();
+    const modules = [];
+    for (const k of C.kernels) {
+      const module = device.createShaderModule({ code: k.source });
+      const info = await module.getCompilationInfo();
+      const werr = info.messages.filter((m) => m.type === 'error').map((m) => m.message);
+      if (werr.length) return fail('WGSL ' + k.entry + ': ' + werr.join('; '));
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: k.entry } });
+      const entries = k.binds.map((b) => ({ binding: b.binding, resource: { buffer: b.uniform ? inf : bufs[b.buf] } }));
+      const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(k.dispatch[0], k.dispatch[1], k.dispatch[2]);
+      pass.end();
+    }
+    enc.copyBufferToBuffer(bufs[C.output], 0, readback, 0, size);
+    device.queue.submit([enc.finish()]);
+    const scopeErr = await device.popErrorScope();
+    if (scopeErr) return fail('validation: ' + scopeErr.message);
+    await readback.mapAsync(GPUMapMode.READ);
+    const got = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    if (errors.length) return fail('uncaptured: ' + errors.join('; '));
+    const want = C.expected.split(',').map((s) => Math.fround(parseFloat(s)));
+    if (got.length !== want.length) return fail('length ' + got.length + ' != ' + want.length);
+    let maxErr = 0, exact = 0, bad = [];
+    want.forEach((w, i) => {
+      const d = Math.abs(got[i] - w);
+      if (d === 0) exact++;
+      if (d > maxErr) maxErr = d;
+      if (!(d <= 1e-6 * Math.max(1, Math.abs(w)))) bad.push(i + ': got ' + got[i] + ' want ' + w);
+    });
+    const vals = Array.from(got).map((v) => v.toPrecision(9)).join(',');
+    if (bad.length) return fail('mismatch ' + bad.slice(0, 5).join('; ') + ' | got ' + vals);
+    out.textContent = 'PASS n=' + got.length + ' exact=' + exact + ' maxabs=' + maxErr.toExponential(3) +
+      ' kernels=' + C.kernels.length + ' got=' + vals + ' adapter=' + (adapter.info ? adapter.info.vendor + '/' + adapter.info.architecture : 'unknown');
+  } catch (e) {
+    fail(String(e && e.message ? e.message : e));
+  }
+})();
+</script>
+</body>
+</html>

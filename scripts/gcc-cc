@@ -15,16 +15,18 @@
 # 3. Weak symbols. EDG marks its COMDAT functions and data __attribute__((__weak__)) and GCC honours that, but a
 #    non-extern `__inline__` member is an external definition under gnu89, so each object carries a strong copy
 #    and the link fails with "multiple definition". The QBE path appends .weak directives for them
-#    (scripts/weak-symbols.rb, which also covers `extern __inline__` members). Here the compile stops at the
+#    (scripts/weak-symbols, which also covers `extern __inline__` members). Here the compile stops at the
 #    assembly, the directives are appended, and the assembly is assembled to the object.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cc=${NFCXX_GCC:-cc}
+CCBIN=("$cc"); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null; then CCBIN=(ccache "$cc"); fi
 # 4. clang (macOS cc) drops a static function that only an asm alias names (__tls_init below); gcc keeps it, so the
 #    definition is marked used (harmless for gcc, which keeps it anyway).
 clang=0; if "$cc" --version 2>/dev/null | grep -qi clang; then clang=1; fi
-# macOS: calls to the exported libc++ functions that return a class go through the thunks of scripts/darwin-sret.sh.
-darwin=0; sret_sed=/dev/null; if [ "$(uname -s)" = Darwin ]; then darwin=1; sret_sed=$("$root/scripts/darwin-sret.sh" >/dev/null && echo "$root/build/darwin-sret/rename.sed"); fi
+# macOS and Linux aarch64: calls to the exported library functions that return a class go through the thunks of scripts/sret.sh.
+sret_sed=/dev/null; sret_on=0; sret_file=$("$root/scripts/sret.sh") || sret_file=""
+[ -z "$sret_file" ] || { sret_on=1; sret_sed=$root/build/sret/rename.sed; }
 # On Mach-O every C symbol has one more leading underscore, so the asm alias of the TLS wrapper must name the underscored
 # symbols too (the wrapper's reference, _ZTH2tl, is __ZTH2tl there).
 tls_alias='s/__asm__("\(_ZTH[^ ]*\) = __tls_init")/__asm__("_\1 = ___tls_init")/'
@@ -37,7 +39,7 @@ for a in "$@"; do
     -c) compile=1; args+=("$a") ;;
     *.c)
       csrc=$a
-      if [ -f "$a" ] && { [ $darwin = 1 ] || grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || { [ $clang = 1 ] && grep -q 'static void __tls_init(void)' "$a"; } || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
+      if [ -f "$a" ] && { [ $sret_on = 1 ] || grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || { [ $clang = 1 ] && grep -q 'static void __tls_init(void)' "$a"; } || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
         n=$((n + 1)); f=$tmp/src$n.c
         grep -v '^[[:space:]]*#pragma GCC unroll' "$a" \
           | sed -e 's/static void __tls_init(void)/__attribute__((used)) static void __tls_init(void)/' \
@@ -52,6 +54,14 @@ for a in "$@"; do
     *) args+=("$a") ;;
   esac
 done
+# 5. EDG writes a file-scope `static __thread` object as a tentative definition, then again with its initializer. GCC 15
+#    (its default C23 mode) rejects that redefinition; gnu17, which the C of EDG's output is written for, takes it. The
+#    standard is set here unless the caller gave one.
+if [ $compile = 1 ]; then
+  has_std=0
+  for a in ${args[@]+"${args[@]}"}; do case $a in -std=*) has_std=1 ;; esac; done
+  [ $has_std = 1 ] || args=(-std=gnu17 ${args[@]+"${args[@]}"})
+fi
 # The output of a `-c ... -o FILE` compile is FILE; without -o, gcc writes the basename.o.
 prev=""
 for a in "$@"; do
@@ -61,18 +71,37 @@ done
 if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
   # Weak directives are for EDG's own output only (the original .c file names the directives' symbols).
   asmf=$tmp/out.s
+  # 6. gcc never inlines a function declared weak (another unit's copy could replace it at link time), and EDG marks
+  #    every COMDAT function weak, so each inline member and template instance stayed a call: shared_ptr's refcount
+  #    (__gnu_cxx::__exchange_and_add, one lock xadd), operator-> and get() were out-of-line in libggml-vulkan (3155 call
+  #    sites, none in g++'s build). The copies of a COMDAT group are the same function (the ODR), so inlining one is
+  #    what g++ does. gcc compiles a copy of the C without the COMDAT groups' __weak__, and weak-symbols reads the C with
+  #    it, so the object's symbols are as weak as before (the definitions, and the references a unit does not define).
+  #    Only functions are changed: a COMDAT data object (a variable template, an ASan odr-indicator's object) keeps its
+  #    weak, since removing it makes each unit's copy a strong definition (duplicate symbols in the link). On Mach-O the
+  #    weak attribute is what ld64 coalesces by, so the change is for Linux only. The weak declarations outside a COMDAT
+  #    group stay (the extern thread_local init function, which is tested for null). NFCXX_WEAK_INLINE=0 compiles the C
+  #    as EDG wrote it.
+  gsrc=$csrc
+  if [ "${NFCXX_WEAK_INLINE:-1}" != 0 ] && [ "$(uname -s)" = Linux ] && grep -q '__weak__)) /\* COMDAT group:' "$csrc"; then
+    # A function's COMDAT tag is followed, in the same declaration, by the group's name and "(" (the function's own name;
+    # EDG puts "# line" markers between the two, hence perl and not sed).
+    gsrc=$tmp/inline.c
+    perl -0777 -pe 's{__attribute__\(\(__weak__\)\) /\* COMDAT group: (\w+) \*/([^;{}]*?)(?<!\w)\1\(}{/* COMDAT group: $1 */$2$1(}g' "$csrc" > "$gsrc"
+  fi
   build=()
   skip=0
-  for a in "${args[@]}"; do
+  for a in ${args[@]+"${args[@]}"}; do
     if [ $skip = 1 ]; then skip=0; continue; fi
     case $a in
       -c) build+=(-S) ;;
       -o) build+=(-o "$asmf"); skip=1 ;;
+      "$csrc") build+=("$gsrc") ;;
       *) build+=("$a") ;;
     esac
   done
-  "$cc" "${build[@]}"
-  "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$csrc" "$asmf"
-  exec as -o "$obj" "$asmf"
+  ${CCBIN[@]+"${CCBIN[@]}"} ${build[@]+"${build[@]}"}
+  "$(dirname "$0")/weak-symbols" "$csrc" "$asmf"
+  exec "${NFCXX_AS:-as}" -o "$obj" "$asmf"
 fi
-exec "$cc" "${args[@]}"
+exec ${CCBIN[@]+"${CCBIN[@]}"} ${args[@]+"${args[@]}"}

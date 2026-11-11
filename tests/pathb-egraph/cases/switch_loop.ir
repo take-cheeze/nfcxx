@@ -1,0 +1,60 @@
+(ir-module "t.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int 4 4)
+  (slot "i" int 4 4)
+  (slot "s" int 4 4)
+  (store int $"n" %0)
+  (store int $"i" (const int 0))
+  (store int $"s" (const int 0))
+  (block
+    (loop
+      (body
+        (let %1 int (load int $"i"))
+        (let %2 int (load int $"n"))
+        (let %3 bool (lt.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (let %4 int (load int $"i"))
+        (let %5 int (wadd int %4 (const int 0)))
+        (switch %5
+          (body
+            (block
+              (case (const int 0))
+              (let %6 int (load int $"s"))
+              (store int $"s" (wadd int %6 (const int 1)))
+              (break)
+              (case (const int 1))
+              (continue)
+              (case (const int 2))
+              (let %7 int (load int $"s"))
+              (store int $"s" (wadd int %7 (const int 100)))
+              (break)
+              (default)
+              (let %8 int (load int $"s"))
+              (store int $"s" (wadd int %8 (const int 1000))))))
+        (let %9 int (load int $"s"))
+        (store int $"s" (wadd int %9 (const int 10000)))
+        (let %10 int (wmul int %4 (const int 0)))
+        (switch %10
+          (body
+            (block
+              (case (const int 0))
+              (let %11 int (load int $"s"))
+              (store int $"s" (wadd int %11 (const int 5)))
+              (break)
+              (case (const int 1))
+              (store int $"s" (const int -99)))))
+        (let %12 bool (eq int %10 (const int 0)))
+        (if %12
+          (then
+            (let %13 int (load int $"s"))
+            (store int $"s" (wadd int %13 (const int 2))))
+          (else
+            (store int $"s" (const int -99))))
+        )
+      (step
+        (let %14 int (load int $"i"))
+        (store int $"i" (wadd int %14 (const int 1))))))
+  (let %15 int (load int $"s"))
+  (return %15))

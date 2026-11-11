@@ -1,0 +1,34 @@
+# Builds build/pathb-ptx-emit (the C++ port of scripts/pathb-ptx-emit.rb; phase 1 is the reader). See ../cuda-rewrite.
+# Run: ninja -C tools/pathb-ptx-emit. CXX and CXXFLAGS come from the environment, with the defaults of the Makefile this
+# replaces. Each source is its own object, so a change rebuilds one file.
+ninja_required_version = 1.7
+root = ../..
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -MMD -MF $out.d -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+  description = CXX $out
+
+rule link
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = LINK $out
+
+build $root/build/pathb-ptx-emit.o/ir.o: cxx ir.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/main.o: cxx main.cpp | ir.hpp emit_fn.hpp emit_module.hpp
+build $root/build/pathb-ptx-emit.o/lower_types.o: cxx lower_types.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/eval_cases.o: cxx eval_cases.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/module_decls.o: cxx module_decls.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/lower_arith.o: cxx lower_arith.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/lower_mem.o: cxx lower_mem.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/lower_call.o: cxx lower_call.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/eval_arith.o: cxx eval_arith.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/module.o: cxx module.cpp | ir.hpp
+build $root/build/pathb-ptx-emit.o/emit_fn.o: cxx emit_fn.cpp | ir.hpp emit_fn.hpp
+build $root/build/pathb-ptx-emit.o/emit_module.o: cxx emit_module.cpp | ir.hpp emit_fn.hpp emit_module.hpp
+build $root/build/pathb-ptx-emit.o/embed.o: cxx embed.cpp | ir.hpp
+
+build $root/build/pathb-ptx-emit: link $root/build/pathb-ptx-emit.o/ir.o $root/build/pathb-ptx-emit.o/main.o $root/build/pathb-ptx-emit.o/lower_types.o $root/build/pathb-ptx-emit.o/eval_cases.o $root/build/pathb-ptx-emit.o/module_decls.o $root/build/pathb-ptx-emit.o/lower_arith.o $root/build/pathb-ptx-emit.o/lower_mem.o $root/build/pathb-ptx-emit.o/lower_call.o $root/build/pathb-ptx-emit.o/eval_arith.o $root/build/pathb-ptx-emit.o/module.o $root/build/pathb-ptx-emit.o/emit_fn.o $root/build/pathb-ptx-emit.o/emit_module.o $root/build/pathb-ptx-emit.o/embed.o
+
+build all: phony $root/build/pathb-ptx-emit
+default all

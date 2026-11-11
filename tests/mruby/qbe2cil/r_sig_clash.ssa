@@ -1,0 +1,7 @@
+# Refused: two calls to one function with different signatures.
+function w $f(w %a) {
+@start
+	%x =w call $g(w 1)
+	%y =l call $g(l 1)
+	ret %x
+}

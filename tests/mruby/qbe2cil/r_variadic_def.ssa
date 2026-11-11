@@ -1,0 +1,5 @@
+# Refused: a variadic definition (va_start), which the CIL backend does not support.
+function w $f(w %a, ...) {
+@start
+	ret %a
+}

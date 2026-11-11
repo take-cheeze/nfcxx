@@ -1,0 +1,6 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(function "get" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 int (load int %0)) (return %1))
+(function "main" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (let %0 int (call int &"get" $"x")) (scope-end $"x") (return %0))

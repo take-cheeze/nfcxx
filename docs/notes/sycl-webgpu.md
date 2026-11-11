@@ -13,8 +13,8 @@ scripts/sycl-build.sh --cpu prog.cpp -o prog  # host path only: kernels are C++ 
 
 ## Why this shape
 
-The repo already had one single-source GPU path: `.cu` files, `scripts/cuda-rewrite.rb` splitting host and device text, and
-`scripts/pathb-ptx-emit.rb` lowering the device IR to PTX (`docs/notes/gpu.md`). SYCL is easier on the front end and harder
+The repo already had one single-source GPU path: `.cu` files, `tools/cuda-rewrite` splitting host and device text, and
+`tools/pathb-ptx-emit` lowering the device IR to PTX (`docs/notes/gpu.md`). SYCL is easier on the front end and harder
 on the back end:
 
 - SYCL is plain C++. No new syntax, so no rewriter: the kernel is the `operator()` of a closure object, which the Path B IR
@@ -174,7 +174,7 @@ dispatch, and nfcxx is the default host compiler); `item` converting to both `id
 `item`); EDG not finding a conversion function *template* for `id == 5` (the conversion is now a mixin base); 1-D dispatches of
 more than 65535 groups (split into several, with a group offset uniform); heaps too small for the samples (256 MB to 768 MB);
 barriers rejected by WGSL's uniformity analysis (the closure moved to a uniform buffer, above); `std::sqrt(float)` and the other
-libstdc++ math wrappers calling `__builtin_sqrtf`, which the qbe back end could not compile (`scripts/qbe-prep.rb` maps the libm
+libstdc++ math wrappers calling `__builtin_sqrtf`, which the qbe back end could not compile (`scripts/qbe-prep` maps the libm
 builtins now, with its Python oracle); volatile accesses; user-defined reduction operators; atomic-mode accessors;
 `group::operator[]`, `sub_group::load`, event profiling.
 

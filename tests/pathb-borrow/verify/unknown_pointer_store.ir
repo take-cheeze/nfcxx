@@ -1,0 +1,5 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "fill" (returns void) (nothrow) (noescape) (closed) (args (init (ptr int))))
+(function "fill" (ret void) (params (param %0 "out" (ptr (ptr int))))
+(decl %0 param) (store (ptr int) %0 (const (ptr int) 0)) (return)
+)

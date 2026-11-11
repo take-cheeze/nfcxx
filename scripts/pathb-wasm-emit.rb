@@ -19,10 +19,16 @@
 # Usage with --emscripten (before the file): the module of the ILP32 IR (pathb-dump --target linux_riscv32) with the
 # exports that the Emscripten JS runtime reads:
 # __indirect_function_table (an empty funcref table), __stack_pointer, __data_end and __heap_base (immutable i32
-# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list). The layout and the code are
+# globals), and __wasm_call_ctors (an empty function: the IR has no constructor list), with the stack functions the glue
+# calls (stackSave, stackRestore, stackAlloc and emscripten_stack_*, see emscripten_stack_fns). The layout and the code are
 # unchanged. --emscripten-import-memory (with --emscripten) imports env.memory instead of exporting memory.
 # --asan and --emscripten are not combined. Without the arguments the module is byte-identical to the one before the
 # mode existed. docs/notes/pathb-wasm.md, "Emscripten".
+#
+# Usage with --memory64 (before the file): the LP64 module with the 64-bit linear memory of the memory64 proposal. The
+# memory is declared with an i64 limit, its data segments have i64 offsets, and a memory access takes its address as the
+# i64 pointer value, with no wrap to i32. The stack stays in the low 4 GB (its pointer is i32, as in the default module).
+# --asan and --emscripten are not combined with it. Without it the module is byte-identical to the one before the mode.
 #
 # Layout and representation. The IR's layout is LP64 (pointers 8 bytes) by default, and the emitter keeps it: a pointer
 # value is an i64, and each memory access wraps it to the i32 address of the 32-bit linear memory. Under --emscripten the
@@ -36,17 +42,20 @@
 #
 # Checked operations. Division by zero, INT_MIN / -1 and float-to-integer conversions out of range or from NaN trap
 # through wasm's own traps, which match the IR's checked forms. A shift whose count is not below the width of its left
-# operand traps through an explicit `unreachable`. `unreachable` and `trap` trap.
+# operand traps through an explicit `unreachable`. `unreachable` and `trap` trap. The checked arithmetic (cadd csub cmul
+# cneg) traps through an explicit `unreachable` when the result does not fit the type (checked_arith).
 #
 # Calls of functions that the module does not define become imports from the module "env" (the host supplies them).
 # An import's signature is the one of its first call.
 #
-# This milestone handles scalars, pointers, arithmetic, comparisons, conversions, loads and stores, slots, direct calls,
-# if, loop with break and continue, switch (arms that end in a jump, no fallthrough), return, copy, trap and unreachable,
-# and static data: the defined globals and string data, at fixed addresses in the memory, with their initializers.
-# Everything else is refused with the reason on stderr: general goto and labels, extern and dynamically initialized
-# globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, function pointers,
-# indirect calls, inline assembly, VLAs, exceptions and the 16-byte types. Those refusals are the next steps, not silent
+# This milestone handles scalars, pointers, arithmetic, comparisons, conversions, loads and stores, slots, alloca,
+# direct calls, if, loop with break and continue, switch (arms that end in a jump, no fallthrough), return, copy, trap
+# and unreachable, a body of labels and gotos without loops (dispatch_body), and static data: the defined globals and
+# string data, at fixed addresses in the memory, with their initializers.
+# Everything else is refused with the reason on stderr: other goto and labels, extern and dynamically initialized
+# globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, inline assembly,
+# VLAs, exceptions and the 16-byte types. Function pointers are slots of a function table (address_taken), and a call
+# through one is call_indirect. Those refusals are the next steps, not silent
 # drops.
 
 class Refused < StandardError; end   # a node this emitter does not handle (exit status 3)
@@ -367,8 +376,17 @@ class Module_
   attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
   attr_accessor :asan, :pages, :stack_top, :shadow_base, :check_type, :check_index   # the ASan mode (see emit_module)
   attr_accessor :emscripten, :import_memory, :ctors_type, :ctors_index   # the Emscripten mode (see encode_module)
+  attr_accessor :null_funcs   # the weak functions whose address is null (see weak_null_functions)
+  attr_accessor :threads   # --threads: a shared memory, imported as env.memory, with the stack pointer exported (see emit_module)
+  attr_accessor :init_type, :init_index   # --threads: __nfcxx_init, which applies the passive data once (see emit_module)
+  attr_accessor :entry_type, :entry_index, :call_type   # --threads: __nfcxx_thread_entry(slot, arg) calls through the table
+  attr_accessor :tls_start, :tls_size     # --threads: the thread-local group, [tls_start, tls_start + tls_size) (see build_statics)
+  attr_accessor :memory64   # the 64-bit memory (--memory64): memory addresses are i64 (see push_addr)
+  attr_accessor :stack_fns   # --emscripten: the stack functions [name, type index, body] (see emscripten_stack_fns)
   attr_accessor :heap_base, :heap_end   # asan: the heap region [heap_base, heap_end) (see asan_setup)
   attr_accessor :alloc_index, :alloc_type   # asan: the function index and the type of malloc and free (name => ...)
+  attr_accessor :table   # the functions whose address is taken: name => slot of the function table (from 1)
+  attr_accessor :indirect_calls   # a call_indirect is in the module (the table is then declared, empty if no address is taken)
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
@@ -378,6 +396,14 @@ class Module_
     @imports = []                # [name, type index]
     @import_index = {}           # name => function index
     @defined_index = {}          # name => function index (after the imports)
+    @table = {}
+    @null_funcs = []             # weak functions the module declares and neither defines nor calls (see weak_null_functions)
+  end
+
+  # The value of the function address &"name": its slot in the table (address_taken found every one).
+  def table_slot(name)
+    return 0 if @null_funcs.include?(name)   # a weak function that is not there: its address is null
+    @table.fetch(name) { raise BadIR, "function address &\"#{name}\" not in the table" }
   end
 
   def type_of(params, result)
@@ -400,6 +426,13 @@ class Module_
 
   def defines?(name)
     @defs.key?(name)
+  end
+
+  # Whether the module defines NAME with a variadic parameter list (its ellipsis; see setup and call).
+  def variadic?(name)
+    f = @defs[name]
+    return false unless f
+    f.any? { |p| head_of(p) == "params" && p.drop(1).any? { |q| head_of(q) == "ellipsis" } }
   end
 
   # The static objects of the module (defined globals and string data), by name. Each has its address (see
@@ -431,6 +464,8 @@ end
 class StaticObj
   # refusal: the reason a use of the object is refused (no storage here: an extern or dynamic global), or nil
   attr_accessor :name, :size, :align, :init, :data, :bytes, :addr, :refusal
+  attr_accessor :tls   # a thread-local object (its refusal is cleared under --threads: see build_statics)
+  attr_accessor :weak, :weak_null   # an extern (weak) object: weak_null when undefined here, its address is 0 (see build_statics)
 
   def initialize(name, size, align, init, data)
     @name = name
@@ -441,6 +476,7 @@ class StaticObj
     @bytes = nil
     @addr = nil
     @refusal = nil
+    @tls = false
   end
 end
 
@@ -465,6 +501,26 @@ ASAN_INVALID_FREE = 0x101
 ASAN_OUT_OF_MEMORY = 0x102   # malloc could not hold the request (its size is the report's address; see the host)
 HEAP_SIZE = 262144           # the heap: a fixed region of this many bytes, which malloc does not grow (no memory.grow)
 ALLOC_SIGS = { "malloc" => [[:i64], :i64], "free" => [[:i64], nil] }   # the allocator's signatures (params, result)
+# The atomic builtins (GCC's __atomic_* and __sync_*, with a 4- or 8-byte size suffix) and what each is: [kind, operation].
+# The read-modify-write operations' opcodes (the threads proposal, 0xfe prefix) are in ATOMIC_RMW: [i32, i64]. All of them
+# are sequentially consistent, so the memory order argument is not used.
+ATOMIC_BUILTINS = {
+  "__atomic_load_n" => [:load, nil], "__atomic_store_n" => [:store, nil],
+  "__atomic_exchange_n" => [:rmw, "xchg"], "__sync_lock_test_and_set" => [:rmw, "xchg"],
+  "__atomic_fetch_add" => [:rmw, "add"], "__sync_fetch_and_add" => [:rmw, "add"],
+  "__atomic_fetch_sub" => [:rmw, "sub"], "__sync_fetch_and_sub" => [:rmw, "sub"],
+  "__atomic_fetch_and" => [:rmw, "and"], "__sync_fetch_and_and" => [:rmw, "and"],
+  "__atomic_fetch_or" => [:rmw, "or"], "__sync_fetch_and_or" => [:rmw, "or"],
+  "__atomic_fetch_xor" => [:rmw, "xor"], "__sync_fetch_and_xor" => [:rmw, "xor"],
+  "__sync_val_compare_and_swap" => [:cas, nil],
+  # the sized forms GCC's front end lowers the builtins to: the value is returned, except compare_exchange, whose expected
+  # value is passed by address and set to the old value
+  "__atomic_load" => [:load, nil], "__atomic_store" => [:store, nil],
+  "__atomic_exchange" => [:rmw, "xchg"], "__atomic_compare_exchange" => [:cas_ptr, nil],
+}.freeze
+ATOMIC_FENCES = ["__atomic_thread_fence", "__sync_synchronize"].freeze
+ATOMIC_RMW = { "add" => [0x1e, 0x1f], "sub" => [0x25, 0x26], "and" => [0x2c, 0x2d], "or" => [0x33, 0x34],
+               "xor" => [0x3a, 0x3b], "xchg" => [0x41, 0x42] }.freeze
 
 # (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
 # the size and alignment come from BYTES and ALIGN. An extern declaration, a thread-local and a dynamic initializer are
@@ -477,6 +533,7 @@ def parse_global(f)
   align = as_int(f[4].to_s)
   raise BadIR, "global #{name}: alignment #{align} is not a power of two" unless align >= 1 && (align & (align - 1)) == 0
   rest = f.drop(5)
+  weak = rest.any? { |p| head_of(p) == "weak" }
   rest = rest.reject { |p| head_of(p) == "static" || head_of(p) == "weak" }
   thread = rest.any? { |p| head_of(p) == "thread" }
   rest = rest.reject { |p| head_of(p) == "thread" }
@@ -486,7 +543,10 @@ def parse_global(f)
   raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init" && h != "extern" && h != "unsupported"
   o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
   # no storage here: a use of the object is refused, and a declaration that nothing uses is not
-  if thread
+  o.tls = thread
+  o.weak = weak
+  if thread && h != "extern"
+    # a thread-local with an initializer: build_statics lowers it (one copy, or a block per thread under --threads)
     o.refusal = "thread-local global #{name} (not lowered)"
   elsif h == "extern"
     o.refusal = "extern global #{name} (declared here, defined elsewhere: no storage in this module)"
@@ -520,9 +580,18 @@ end
 # redzone is never shared with an object), so that the shadow of the data is whole granules.
 def layout_statics(objs, asan = false)
   pos = STATIC_BASE
+  # --threads: the thread-local objects are one group at the end, so that each thread's copy is a block of the same layout
+  # (build_statics finds the group's range in the layout)
+  objs = objs.reject(&:tls) + objs.select(&:tls)
+  seen_tls = false
   objs.each do |o|
-    next unless o.refusal.nil?             # no storage for those
+    next unless o.refusal.nil? && !o.weak_null   # no storage for those
     al = asan && o.align < 8 ? 8 : o.align
+    if o.tls && !seen_tls
+      # the group starts on a 16-byte boundary: a block of the same layout keeps every object's alignment
+      pos = (pos + 15) / 16 * 16
+      seen_tls = true
+    end
     pos += ASAN_RZ if asan
     pos = (pos + al - 1) / al * al
     o.addr = pos
@@ -594,10 +663,14 @@ def static_contents(mod, o)
       ty = parse_type(it[2])
       target = it[3]
       add = as_int(it[4].to_s)
-      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
+      # a pointer, or an integer as wide as one (a vtable's offset entries hold an address as a long)
+      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" unless ty[0] == "ptr" || (ty[0] == "int" && ty[1] == $ptr_bytes)
       raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
-      raise Refused, "address of the function #{target.name} in a static initializer (a function table is not lowered)" if target.sig == "&"
-      items << [off, $ptr_bytes, false, le_bytes(mod.static_addr(target.name) + add, $ptr_bytes)]
+      if target.sig != "&" && mod.static_obj(target.name).tls
+        raise Refused, "address of the thread-local #{target.name} in static data (not lowered)"
+      end
+      value = target.sig == "&" ? mod.table_slot(target.name) : mod.static_addr(target.name)
+      items << [off, $ptr_bytes, false, le_bytes(value + add, $ptr_bytes)]
     elsif h == "bytes"
       off = as_int(it[1].to_s)
       n = as_int(it[2].to_s)
@@ -663,11 +736,60 @@ def static_contents(mod, o)
 end
 
 # The static objects of the module, with their addresses and contents, in the order of the forms.
+# The EH runtime's thread-local symbols (see build_statics).
+EH_RUNTIME_TLS = %w[__curr_eh_stack_entry __eh_curr_region].freeze
+
 def build_statics(mod, objs, asan = false)
   mod.add_statics(objs)
-  end_addr = layout_statics(objs, asan)
+# A thread-local object has storage: under --threads it is the group of per-thread blocks (its copies); without it the
+  # module is one thread, so the object is an ordinary static (one copy, as the single thread's).
   objs.each do |o|
-    o.bytes = static_contents(mod, o) unless o.data || !o.refusal.nil?
+    next unless o.tls && o.refusal.to_s.start_with?("thread-local")
+    o.refusal = nil
+    o.tls = mod.threads
+  end
+  # The EH runtime's thread-locals (defined by the runtime, which this module does not link): without --threads they get
+  # zeroed storage, so the references to them lower. The module still refuses throw and catch, so the EH stack is never
+  # used by it; a module with a throw is refused where it throws.
+  objs.each do |o|
+    next unless !mod.threads && EH_RUNTIME_TLS.include?(o.name) && o.refusal.to_s.start_with?("extern global")
+    o.refusal = nil
+    o.init = ["init"]                      # no initializer items: all zero
+    o.tls = false
+  end
+  # An extern weak object that the module does not define is null: its address is 0 and it has no storage (a comparison
+  # of its address, as weak code does, is then a comparison with null).
+  objs.each do |o|
+    next unless o.weak && o.refusal.to_s.start_with?("extern global")
+    o.refusal = nil
+    o.weak_null = true
+    o.addr = 0
+    o.data = true
+    o.bytes = []
+  end
+  end_addr = layout_statics(objs, asan)
+  # An object whose contents this emitter cannot lower (a type it does not have, such as the std::float16_t constants
+  # of <numbers> that every C++ program declares) is refused where it is used, not here: most are never used. An object
+  # that points at a refused one is refused too, so the contents are made again until no new refusal appears.
+  loop do
+    refused = false
+    objs.each do |o|
+      next if o.data || !o.refusal.nil?
+      begin
+        o.bytes = static_contents(mod, o)
+      rescue Refused => e
+        o.refusal = "global #{o.name}: #{e.message}"
+        o.bytes = nil
+        refused = true
+      end
+    end
+    break unless refused
+  end
+  # the thread-local group: [tls_start, tls_start + tls_size), 16-aligned; the main thread's block is the group itself
+  tls = objs.select { |o| o.tls && o.refusal.nil? }
+  unless tls.empty?
+    mod.tls_start = tls.map(&:addr).min / 16 * 16
+    mod.tls_size = (tls.map { |o| o.addr + o.size }.max - mod.tls_start + 15) / 16 * 16
   end
   end_addr
 end
@@ -689,10 +811,14 @@ class Fn
     @mod = mod
     @form = form
     @code = []
-    @labels = []             # the open structured constructs, innermost last: [:brk] [:loop] [:cont] [:if]
+    @labels = []             # the open structured constructs, innermost last: [:brk] [:loop] [:cont] [:if] [:named NAME]
+    @loop_names = {}         # a named loop's name => its id (break NAME, continue NAME)
     @regs = {}               # "%N" => [wasm local index, wasm type, IR type]
     @slots = {}              # name => frame offset
+    @slot_sizes = {}         # name => size of the slot (a byval argument's copy is as big as its source)
+    @byval_tmp = {}          # the byval argument form (by identity) => frame offset of its copy in this frame
     @frame = 0
+    @va_block = {}                  # the frame offset of each variadic call's argument block (see byval_scan)
     @param_types = []        # wasm types of the parameters, in order
     @local_types = []        # wasm types of the locals after the parameters, in index order
     @result = nil            # wasm type of the result, nil for void
@@ -735,15 +861,45 @@ class Fn
         ret = parse_type(f[1])
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
-          raise Refused, "variadic function" if head_of(p) == "ellipsis"
+          if head_of(p) == "ellipsis"
+            # the variadic arguments are in a block of the caller's frame (see call): its address is the last parameter.
+            # The va_list is the System V one with every argument in the overflow area (see vastart, vaarg).
+            raise Refused, "variadic function in an asan module (not lowered)" if @asan
+            raise Refused, "variadic function in an ILP32 module (not lowered)" unless $ptr_bytes == 8
+            raise BadIR, "ellipsis is not the last parameter" unless k == f.length - 2
+            @variadic = true
+            params << [ptr_wtype, ["ptr", nil], "%va.block"]
+            next
+          end
+          if head_of(p) == "sret"
+            # (sret %N (struct ...)): the hidden pointer where the result is written; the function returns void
+            raise BadIR, "bad sret parameter #{form_text(p)}" unless p.length == 3
+            reg = p[1].to_s
+            raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
+            params << [ptr_wtype, ["ptr", nil], reg]
+            next
+          end
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param"
           raise BadIR, "bad parameter #{form_text(p)}" unless p.length == 4
-          raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
+          if head_of(p[3]) == "byval"
+            # (param %N "x" (byval (struct ...))): the address of the caller's copy (the caller makes it, see call)
+            raise Refused, "aggregate parameter in an asan module (not lowered)" if @asan
+            reg = p[1].to_s
+            raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
+            params << [ptr_wtype, ["ptr", nil], reg]
+            next
+          end
+          # the register is any %N (EDG numbers the parameters from %0, llvm-to-pathb.rb from %1); it is the
+          # parameter's wasm local, k
+          reg = p[1].to_s
+          raise BadIR, "bad parameter register #{reg}" unless reg.start_with?("%")
+          raise BadIR, "parameter register #{reg} twice" if params.any? { |q| q[2] == reg }
           ty = parse_type(p[3])
           raise Refused, "aggregate parameter #{form_text(p)}" if wtype(ty).nil? || !(ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float")
-          params << [wtype(ty), ty]
+          params << [wtype(ty), ty, reg]
         end
-      elsif h == "static"
+      elsif h == "static" || h == "weak"
+        # linkage: (static), and (weak) or (weak attr), which in a module of one translation unit is a definition
         nil
       elsif h == "slot"
         # (slot "x" TYPE [SIZE ALIGN]): the size and alignment are given for aggregates, and a scalar has its own
@@ -761,6 +917,7 @@ class Fn
         else
           @frame = (@frame + align - 1) / align * align
           @slots[f[1].to_s] = @frame
+          @slot_sizes[f[1].to_s] = size
           @frame += size
         end
       else
@@ -771,9 +928,11 @@ class Fn
     layout_asan_slots(slot_list) if @asan
     @ret = ret
     @result = wtype(ret)
+    byval_scan(@form) unless @asan
     @frame = (@frame + 15) / 16 * 16
     @param_types = params.map { |p| p[0] }
-    params.each_with_index { |p, k| @regs["%#{k}"] = [k, p[0], p[1]] }
+    @va_block_local = params.index { |p| p[2] == "%va.block" }   # the variadic arguments' block (see vastart)
+    params.each_with_index { |p, k| @regs[p[2]] = [k, p[0], p[1]] }
     # locals after the parameters: the stack pointer on entry, this frame's base and a 64-bit scratch, then one local per
     # register declared by a let
     @old_local = params.length
@@ -787,6 +946,39 @@ class Fn
       @local_types << :i32
       @next_local += 1
     end
+    if @mod.threads
+      # --threads: two i32 scratch locals for a compare-and-swap whose expected value is passed by address
+      @atom_a = @next_local
+      @atom_b = @next_local + 1
+      @local_types << :i32 << :i32
+      @next_local += 2
+    end
+    if uses_bitfield?(@form)
+      # an i32 scratch for the address of a bit-field's storage unit (see bfload, bfstore)
+      @bf_addr = @next_local
+      @local_types << :i32
+      @next_local += 1
+    end
+    if uses_va?(@form)
+      # two pointer-width scratch locals: the va_list's address and the overflow area's pointer (see vastart, vaarg)
+      @va_tmp = @next_local
+      @va_p = @next_local + 1
+      @local_types << ptr_wtype << ptr_wtype
+      @next_local += 2
+    end
+    if uses_vla?(@form)
+      # a pointer-width and an i32 scratch for __vla_alloc and __vla_dealloc (see vla_call)
+      @vla_p = @next_local
+      @vla_sp = @next_local + 1
+      @local_types << ptr_wtype << :i32
+      @next_local += 2
+    end
+    if uses_narrow_cf2i?(@form)
+      # an i32 scratch for the value of a float conversion to a 1- or 2-byte integer (see cf2i_narrow)
+      @cf2i_tmp = @next_local
+      @local_types << :i32
+      @next_local += 1
+    end
     @body = body_forms
     @body.each { |s| collect_lets(s) }
     @type_index = @mod.type_of(@param_types, @result)
@@ -796,7 +988,7 @@ class Fn
   def body_forms
     @form.drop(2).reject do |f|
       h = head_of(f)
-      h == "ret" || h == "params" || h == "static" || h == "slot"
+      h == "ret" || h == "params" || h == "static" || h == "weak" || h == "slot"
     end
   end
 
@@ -822,6 +1014,56 @@ class Fn
 
   def slot_offset(name)
     @slots.fetch(name) { raise Refused, "unknown slot $\"#{name}\"" }
+  end
+
+  # A byval argument is copied into a hidden slot of this frame (the callee owns the copy, so it may change it): each such
+  # argument of a call in the body gets its own slot, as big as its source slot, laid out with the others.
+  def byval_scan(x)
+    return unless x.is_a?(Array)
+    if head_of(x) == "call" && head_of(x[3]) == "variadic"
+      # the variadic arguments of a call: one 8-byte slot each (at least one, so the block is never empty)
+      nvar = x.length - 4 - as_int(x[3][1].to_s)
+      @frame = (@frame + 7) / 8 * 8
+      @va_block[x.object_id] = @frame
+      @frame += 8 * [nvar, 1].max
+    end
+    if head_of(x) == "call"
+      x.drop(3).each do |a|
+        next unless head_of(a) == "byval"
+        src = a[2]
+        raise Refused, "byval argument from something other than a slot (not lowered)" unless src.is_a?(IRSym) && src.sig == "$"
+        size = @slot_sizes.fetch(src.name) { raise Refused, "byval argument from an unknown slot #{src.name}" }
+        @frame = (@frame + 7) / 8 * 8
+        @byval_tmp[a.object_id] = @frame
+        @frame += size
+      end
+    end
+    x.each { |y| byval_scan(y) }
+  end
+
+  # An aggregate argument: sret passes the address where the result goes; byval copies the source into the call's hidden
+  # slot and passes that copy's address.
+  def push_aggregate_arg(a)
+    if head_of(a) == "sret"
+      push_op(a[2], ptr_wtype)
+      return
+    end
+    src = a[2]
+    off = @byval_tmp.fetch(a.object_id) { raise BadIR, "byval argument without its copy slot" }
+    size = @slot_sizes.fetch(src.name)
+    e(0x20); leb_u(@fp_local); e(0x41); leb_s(off); e(0x6a)   # memory.copy: destination (the copy)
+    push_addr(src)                                             # source
+    e(0x41); leb_s(size)                                       # length
+    e(0xfc, 0x0a, 0x00, 0x00)
+    push_slot_ptr(off)
+  end
+
+  # The pointer value of a frame offset (a pointer is an i64 under LP64, an i32 address otherwise).
+  def push_slot_ptr(off)
+    e(0x20); leb_u(@fp_local)
+    e(0x41); leb_s(off)
+    e(0x6a)                                # i32.add
+    e(0xad) if $ptr_bytes == 8             # i64.extend_i32_u
   end
 
   # asan: each slot is an object of its own, 8-byte aligned, with a redzone of ASAN_RZ bytes before it and after the last
@@ -858,7 +1100,6 @@ class Fn
       return reg_info(op)[2]
     end
     if op.is_a?(IRSym)
-      raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"    # checks that the object is defined here
       return ["ptr", nil]
     end
@@ -877,7 +1118,9 @@ class Fn
     if op.is_a?(String) && op[0] == "%"
       e(0x20); leb_u(reg_info(op)[0])
     elsif op.is_a?(IRSym) && op.sig == "@"
-      ptr_const(@mod.static_addr(op.name))   # the address of the static object
+      push_static_addr(op.name)            # the address of the static object
+    elsif op.is_a?(IRSym) && op.sig == "&"
+      ptr_const(@mod.table_slot(op.name))    # a function's address: its slot in the table
     elsif op.is_a?(IRSym)
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
@@ -891,10 +1134,22 @@ class Fn
     t
   end
 
+  # The address of a static object as a pointer. A thread-local object's address is its block's base (global 1, __tls_base,
+  # set per thread) plus its offset in the group: under --threads the main thread's base is the group itself.
+  def push_static_addr(name)
+    o = @mod.static_obj(name)
+    unless o.tls
+      ptr_const(o.addr)
+      return
+    end
+    e(0x23); leb_u(1)                      # global.get 1: __tls_base
+    e(0x41); leb_s(o.addr - @mod.tls_start); e(0x6a)   # i32.const offset; i32.add
+    e(0xad) if $ptr_bytes == 8             # i64.extend_i32_u (a pointer is an i64 under LP64)
+  end
+
   # The wasm type of an operand, without pushing it.
   def op_wtype(op)
     if op.is_a?(IRSym)
-      raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
       @mod.static_addr(op.name) if op.sig == "@"
       return ptr_wtype
     end
@@ -904,33 +1159,61 @@ class Fn
     raise Refused, "operand #{form_text(op)}"
   end
 
-  # Pushes an operand as the i32 address of memory.
-  def addr32(op)
+  # Pushes an operand as the address of memory: an i32 (the 32-bit linear memory), or under --memory64 an i64, which is
+  # the pointer value itself. A slot's address is computed as an i32 from the frame base (the stack is below 4 GB), and
+  # is extended to i64 under --memory64.
+  def push_addr(op)
     if op.is_a?(IRSym) && op.sig == "$"
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
       e(0x6a)
+      e(0xad) if @mod.memory64             # i64.extend_i32_u
     else
       push_op(op, ptr_wtype)
-      e(0xa7) if $ptr_bytes == 8           # i32.wrap_i64 (an i32 address needs no wrap)
+      e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # i32.wrap_i64 (an i32 address needs no wrap)
     end
   end
 
-  # The address of a memory access of size bytes, as an i32: in asan mode it is checked first (asan_addr).
+  # The address of a memory access of size bytes: in asan mode it is checked first (asan_addr).
   def mem_addr(op, size)
     if @asan
       asan_addr(op, size)
     else
-      addr32(op)
+      push_addr(op)
+    end
+  end
+
+  # An integer constant of the memory's address width: the length of memory.copy, i64 under --memory64, else i32.
+  def mem_const(n)
+    e(@mod.memory64 ? 0x42 : 0x41); leb_s(n)
+  end
+
+  def run_time_length?(x)
+    x.is_a?(String) && x[0] == "%"
+  end
+
+  # The length of memory.copy or memory.fill: the constant n, or the register x (an i64 under LP64) at the memory's
+  # address width.
+  def mem_length(x, n)
+    return mem_const(n) if n
+    w = push_op(x)
+    if @mod.memory64
+      e(0xad) if w == :i32                 # i64.extend_i32_u
+    elsif w == :i64
+      e(0xa7)                              # i32.wrap_i64
     end
   end
 
   # asan: pushes the address of an access of size bytes after a call of the check, which traps on a violation. The
   # address goes through the scratch local, since the check takes it as an argument and the access needs it again.
   def asan_addr(op, size)
-    addr32(op)
+    push_addr(op)
     e(0x22); leb_u(@tmp32)                 # local.tee
-    e(0x41); leb_s(size)
+    if size.is_a?(Integer)
+      e(0x41); leb_s(size)
+    else
+      e(0xa7) if push_op(size) == :i64     # a run-time size (a register), as the check's i32
+    end
     e(0x10); leb_u(@mod.check_index)       # call the check: (address, size)
     e(0x20); leb_u(@tmp32)                 # local.get: the address of the access
   end
@@ -1045,6 +1328,8 @@ class Fn
   # ---- rvalues: each leaves one value on the wasm stack and returns its wasm type
 
   def rval(x)
+    # a bare operand: a register, or the address of a static object, a slot or a function
+    return push_op(x) if (x.is_a?(String) && x[0] == "%") || x.is_a?(IRSym)
     h = head_of(x)
     case h
     when "load", "load.v"
@@ -1071,6 +1356,22 @@ class Fn
       e(w == :i32 ? 0x6b : 0x7d)           # sub
       normalize(ty)
       w
+    when "cadd", "csub", "cmul", "cneg"
+      checked_arith(h, x)
+    when "alloca"
+      # (alloca SIZE): SIZE bytes below the stack pointer, aligned to 16, live until the function returns (its return
+      # puts back the stack pointer of the entry, restore_sp)
+      raise Refused, "alloca under --asan (the shadow of a dynamic frame)" if @asan
+      e(0x23); leb_u(0)                    # global.get 0
+      push_i64(x[1], false)
+      e(0xa7)                              # i32.wrap_i64
+      e(0x41); leb_s(15); e(0x6a)          # + 15
+      e(0x41); leb_s(-16); e(0x71)         # & -16
+      e(0x6b)                              # i32.sub
+      e(0x24); leb_u(0)                    # global.set 0
+      e(0x23); leb_u(0)
+      e(0xad) if $ptr_bytes == 8           # i64.extend_i32_u
+      $ptr_bytes == 8 ? :i64 : :i32
     when "cdiv", "crem"
       ty = parse_type(x[1])
       raise Refused, "#{h} of a non-integer" unless ty[0] == "int"
@@ -1083,11 +1384,12 @@ class Fn
       end
       normalize(ty)
       w
-    when "cshl", "cshr"
+    when "cshl", "cshr", "wshl"
       ty = parse_type(x[1])
       raise Refused, "#{h} of a non-integer" unless ty[0] == "int"
       w = wtype(ty)
       bits = ty[1] * 8
+      left = h != "cshr"
       # the count, as an i64: a count at or above the width (a negative count reads as huge) traps
       push_i64(x[3], false)
       e(0x21); leb_u(@tmp64)
@@ -1099,9 +1401,9 @@ class Fn
       e(0x20); leb_u(@tmp64)
       e(0xa7) if w == :i32                 # the count as i32
       if w == :i32
-        e(h == "cshl" ? 0x74 : (ty[2] ? 0x75 : 0x76))
+        e(left ? 0x74 : (ty[2] ? 0x75 : 0x76))
       else
-        e(h == "cshl" ? 0x86 : (ty[2] ? 0x87 : 0x88))
+        e(left ? 0x86 : (ty[2] ? 0x87 : 0x88))
       end
       normalize(ty)
       w
@@ -1237,9 +1539,11 @@ class Fn
     when "cf2i"
       dst = parse_type(x[1])
       raise Refused, "cf2i to a non-integer" unless dst[0] == "int"
-      raise Refused, "cf2i to #{dst[1]} bytes (the range check is not lowered yet)" if dst[1] < 4
       src = op_type(x[2])
       raise Refused, "cf2i from a non-float" unless float_type?(src)
+      if dst[1] < 4
+        return cf2i_narrow(dst, src, x[2])
+      end
       push_op(x[2])
       w = wtype(dst)
       if src[1] == 4
@@ -1251,8 +1555,13 @@ class Fn
     when "bitcast"
       dst = parse_type(x[1])
       src = op_type(x[2])
-      raise Refused, "bitcast between #{src[0]} and #{dst[0]}" if wtype(dst) != wtype(src)
       push_op(x[2])
+      if wtype(dst) != wtype(src)
+        # the bits of a float as an integer of its size, or back (llvm-to-pathb.rb's bitcast i32 to float)
+        op = { [:f32, :i32] => 0xbc, [:f64, :i64] => 0xbd, [:i32, :f32] => 0xbe, [:i64, :f64] => 0xbf }[[wtype(src), wtype(dst)]]
+        raise Refused, "bitcast between #{src[0]} and #{dst[0]}" if op.nil? || (dst[0] == "int" && dst[1] < 4)
+        e(op)
+      end
       wtype(dst)
     when "const"
       push_const(parse_type(x[1]), x[2])
@@ -1283,6 +1592,10 @@ class Fn
       wtype($scalars["long"])
     when "call"
       call(x)
+    when "bfload", "bfload.v"
+      bfload(x)
+    when "vaarg"
+      vaarg(x)
     when "unsupported"
       raise Refused, unsupported_text(x)
     else
@@ -1328,15 +1641,70 @@ class Fn
   def call(x)
     ret = parse_type(x[1])
     callee = x[2]
-    raise Refused, "indirect call" unless callee.is_a?(IRSym) && callee.sig == "&"
     args = x.drop(3)
-    raise Refused, "variadic call" if head_of(args[0]) == "variadic"
-    args.each do |a|
-      h = head_of(a)
-      raise Refused, "aggregate argument (#{h})" if h == "byval" || h == "sret"
+    variadic = head_of(args[0]) == "variadic"
+    if variadic
+      # (variadic N): the first N arguments are the named ones; the rest go in the block (below)
+      nfixed = as_int(args[0][1].to_s)
+      vargs = args.drop(1 + nfixed)
+      args = args[1, nfixed]
     end
-    arg_types = args.map { |a| wtype(op_type(a)) }
-    args.each { |a| push_op(a) }
+    if callee.is_a?(IRSym) && callee.sig == "&" && @mod.null_funcs.include?(callee.name)
+      e(0x00)                              # unreachable: a weak function that is not there
+      return wtype(ret)
+    end
+    # aggregates (byval, sret) go by address between the module's own functions: the module's convention, not the host's
+    aggregate = args.any? { |a| %w[byval sret].include?(head_of(a)) }
+    if aggregate
+      raise Refused, "aggregate argument in an asan or memory64 module (not lowered)" if @asan || @mod.memory64
+      direct = callee.is_a?(IRSym) && callee.sig == "&"
+      raise Refused, "aggregate argument to #{callee.name} (an import: the host's ABI does not pass aggregates this way)" if direct && !@mod.defines?(callee.name)
+    end
+    if callee.is_a?(IRSym) && callee.sig == "&" && VLA_CALLS.include?(callee.name) && !@mod.defines?(callee.name)
+      return vla_call(callee.name, args)
+    end
+    if variadic
+      # a variadic call: the callee is a function the module defines with an ellipsis, and the arguments after the named
+      # ones are stored in the block of this frame (byval_scan reserved it); the block's address is the last argument
+      # (a call of an import or through a pointer stays refused: the host's ABI for variadic calls is not lowered)
+      raise Refused, "variadic call" unless callee.is_a?(IRSym) && callee.sig == "&" && @mod.defines?(callee.name) && @mod.variadic?(callee.name)
+      raise Refused, "variadic call in an asan or ILP32 module (not lowered)" if @asan || $ptr_bytes != 8
+      off = @va_block.fetch(x.object_id) { raise BadIR, "variadic call without its argument block" }
+      vargs.each_with_index do |a, i|
+        raise Refused, "variadic argument of aggregate type (not lowered)" if %w[byval sret].include?(head_of(a))
+        ty = op_type(a)
+        raise Refused, "variadic argument of #{ty[0]}" unless ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float"
+        raise Refused, "variadic argument of #{type_size(ty)} bytes (an argument is 8 bytes here)" if type_size(ty) > 8
+        e(0x20); leb_u(@fp_local); e(0x41); leb_s(off + 8 * i); e(0x6a)   # the slot's address, in the memory's form
+        e(0xad) if @mod.memory64                                          # i64.extend_i32_u
+        push_op(a)
+        store_op(ty)
+      end
+      args = args + [:va_block]
+    end
+    # --threads only: without a shared memory the atomics stay what they were (imports, as the Emscripten runtime may provide them)
+    if @mod.threads && callee.is_a?(IRSym) && callee.sig == "&" && !@mod.defines?(callee.name) && atomic_builtin(callee.name)
+      return atomic_call(callee.name, args)
+    end
+    arg_types = args.map { |a| a == :va_block || %w[byval sret].include?(head_of(a)) ? ptr_wtype : wtype(op_type(a)) }
+    args.each do |a|
+      if a == :va_block
+        push_slot_ptr(@va_block.fetch(x.object_id))
+      elsif %w[byval sret].include?(head_of(a))
+        push_aggregate_arg(a)
+      else
+        push_op(a)
+      end
+    end
+    unless callee.is_a?(IRSym) && callee.sig == "&"
+      # through a function pointer: its value is a slot of the table, and the call's types are the signature, which
+      # call_indirect checks (a mismatch, or the null slot 0, traps)
+      w = push_op(callee)
+      e(0xa7) if w == :i64                 # i32.wrap_i64: the table index
+      @mod.indirect_calls = true
+      e(0x11); leb_u(@mod.type_of(arg_types, wtype(ret))); e(0x00)
+      return wtype(ret)
+    end
     name = callee.name
     idx = if @mod.defines?(name)
             @mod.defined_index.fetch(name) { raise BadIR, "no index for #{name}" }
@@ -1353,6 +1721,245 @@ class Fn
           end
     e(0x10); leb_u(idx)
     wtype(ret)
+  end
+
+  # ---- variable-length arrays. EDG lowers a VLA to calls of __vla_alloc(slot, bytes), which stores the storage's address
+  # in the slot, and __vla_dealloc(slot) at the end of the scope. The storage is taken from the shadow stack, as alloca
+  # takes it: a header of 16 bytes holds the stack pointer before the allocation, and the block follows it. A dealloc of
+  # the block on top of the stack puts that pointer back; otherwise the block lives until the function returns (C's
+  # scopes nest, so the usual case is the top). A block that would reach the static data traps.
+  VLA_CALLS = %w[__vla_alloc __vla_dealloc].freeze
+
+  def uses_vla?(x)
+    return false unless x.is_a?(Array)
+    return true if head_of(x) == "call" && x[2].is_a?(IRSym) && VLA_CALLS.include?(x[2].name)
+    x.any? { |y| uses_vla?(y) }
+  end
+
+  def vla_call(name, args)
+    raise Refused, "variable-length array under --asan (the asan runtime keeps its own records)" if @asan
+    if name == "__vla_alloc"
+      raise Refused, "__vla_alloc with #{args.length} arguments" unless args.length == 2
+      # the slot's pointer, then the size (unsigned), which is kept in the 64-bit scratch
+      push_op(args[0], ptr_wtype); e(0x21); leb_u(@vla_p)
+      push_i64(args[1], false); e(0x21); leb_u(@tmp64)
+      # new := stack pointer - ((bytes + 31) & -16): the header and the block, aligned to 16
+      e(0x23); leb_u(0)
+      e(0x20); leb_u(@tmp64); e(0x42); leb_s(31); e(0x7c)      # i64.add
+      e(0x42); leb_s(-16); e(0x83)                             # i64.and
+      e(0xa7); e(0x6b)                                         # i32.wrap_i64, i32.sub
+      e(0x21); leb_u(@vla_sp)                                  # local.set the new stack pointer
+      # trap unless the block is above the static data and did not wrap below zero
+      e(0x20); leb_u(@vla_sp); e(0x41); leb_s(@mod.data_end); e(0x49)   # i32.lt_u
+      e(0x20); leb_u(@vla_sp); e(0x23); leb_u(0); e(0x4b)      # i32.gt_u: above the old pointer
+      e(0x72); e(0x04, 0x40); e(0x00); e(0x0b)                 # i32.or, if unreachable end
+      # the header holds the old stack pointer; the stack pointer moves to the header
+      e(0x20); leb_u(@vla_sp); e(0xad) if @mod.memory64
+      e(0x23); leb_u(0); e(0x36); memarg
+      e(0x20); leb_u(@vla_sp); e(0x24); leb_u(0)
+      # the slot receives the block, the new stack pointer plus the header
+      e(0x20); leb_u(@vla_p); e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # the address of the slot
+      e(0x20); leb_u(@vla_sp); e(0x41); leb_s(16); e(0x6a)                  # the block
+      e(0xad) if $ptr_bytes == 8                                            # i64.extend_i32_u: a pointer
+      e($ptr_bytes == 8 ? 0x37 : 0x36); memarg
+    else
+      raise Refused, "__vla_dealloc with #{args.length} arguments" unless args.length == 1
+      # the block is the slot's pointer; when it is the top of the stack, the stack pointer goes back to the old one
+      push_op(args[0], ptr_wtype); e(0x21); leb_u(@vla_p)
+      e(0x20); leb_u(@vla_p); e(0xa7) if $ptr_bytes == 8 && !@mod.memory64
+      e($ptr_bytes == 8 ? 0x29 : 0x28); memarg                              # the block's pointer
+      e(0xa7) if $ptr_bytes == 8                                            # i32.wrap_i64
+      e(0x41); leb_s(16); e(0x6b)                                           # the header
+      e(0x22); leb_u(@vla_sp)
+      e(0x23); leb_u(0); e(0x46)                                            # i32.eq the stack pointer
+      e(0x04, 0x40)
+      e(0x20); leb_u(@vla_sp); e(0xad) if @mod.memory64
+      e(0x28, 0x02, 0x00)                                                   # i32.load: the old stack pointer
+      e(0x24); leb_u(0)
+      e(0x0b)
+    end
+    nil
+  end
+
+  # ---- variadic functions. The va_list is the System V __va_list_tag (24 bytes): gp_offset (u32, at 0), fp_offset (u32,
+  # at 4), overflow_arg_area (a pointer, at 8) and reg_save_area (a pointer, at 16). A variadic function here takes its
+  # arguments only from the overflow area: vastart sets gp_offset and fp_offset to the end of the registers (48 and 176),
+  # so va_arg never reads a register save area. Each argument takes an 8-byte slot of the caller's block (see call).
+  def uses_va?(x)
+    return false unless x.is_a?(Array)
+    return true if %w[vastart vaarg].include?(head_of(x))
+    x.any? { |y| uses_va?(y) }
+  end
+
+  # The address of a field of the va_list (its address is in @va_tmp): an address in the memory's form (see push_addr).
+  def va_field(off)
+    e(0x20); leb_u(@va_tmp)
+    ptr_const(off); ptr_arith(:add) if off > 0
+    e(0xa7) if $ptr_bytes == 8 && !@mod.memory64   # i32.wrap_i64: the address form, as push_addr gives it
+  end
+
+  # (vastart ADDR): the va_list at ADDR starts reading the variadic arguments (the function has an ellipsis).
+  def vastart(s)
+    raise Refused, "va_start in a function without variable arguments" unless @variadic
+    push_op(s[1], ptr_wtype); e(0x21); leb_u(@va_tmp)
+    va_field(0); e(0x41); leb_s(48); e(0x36); memarg      # gp_offset: every register is used up
+    va_field(4); e(0x41); leb_s(176); e(0x36); memarg     # fp_offset: likewise
+    va_field(8); e(0x20); leb_u(@va_block_local); e($ptr_bytes == 8 ? 0x37 : 0x36); memarg   # overflow_arg_area: the block
+    va_field(16); ptr_const(0); e(0x37); memarg           # reg_save_area: none
+  end
+
+  # (vaarg T ADDR): the next argument of the va_list, read from the overflow area, which then moves on by 8 bytes.
+  def vaarg(x)
+    raise Refused, "va_arg without variable arguments" unless @variadic
+    ty = parse_type(x[1])
+    raise Refused, "va_arg of #{ty[0]}" unless ty[0] == "int" || ty[0] == "ptr" || ty[0] == "float"
+    raise Refused, "va_arg of #{type_size(ty)} bytes (an argument is 8 bytes here)" if type_size(ty) > 8
+    push_op(x[2], ptr_wtype); e(0x21); leb_u(@va_tmp)
+    va_field(8); e($ptr_bytes == 8 ? 0x29 : 0x28); memarg; e(0x21); leb_u(@va_p)   # p := the overflow area
+    e(0x20); leb_u(@va_p)
+    e(0xa7) if $ptr_bytes == 8 && !@mod.memory64
+    load_op(ty)                                            # the value, from the slot
+    va_field(8); e(0x20); leb_u(@va_p); ptr_const(8); ptr_arith(:add)
+    e($ptr_bytes == 8 ? 0x37 : 0x36); memarg              # the overflow area moves on: [value, address, p+8] -> [value]
+    wtype(ty)
+  end
+
+  # ---- bit-fields. A bit-field lives in a storage unit of 1, 2, 4 or 8 bytes at ADDR: bit BOFF of the unit, WIDTH bits. The
+  # arithmetic is on the unit as an i64: loaded zero-extended, masked, and stored back at its own size.
+  def uses_bitfield?(x)
+    return false unless x.is_a?(Array)
+    return true if %w[bfload bfload.v bfstore bfstore.v].include?(head_of(x))
+    x.any? { |y| uses_bitfield?(y) }
+  end
+
+  def load_u64_op(size)
+    { 1 => 0x31, 2 => 0x33, 4 => 0x35, 8 => 0x29 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  def store_u64_op(size)
+    { 1 => 0x3c, 2 => 0x3d, 4 => 0x3e, 8 => 0x37 }.fetch(size) { raise Refused, "bit-field unit of #{size} bytes" }
+  end
+
+  # (bfload T UNIT ADDR BOFF WIDTH): the bits, as T (sign-extended from WIDTH when T is signed)
+  def bfload(x)
+    ty = parse_type(x[1])
+    size = as_int(x[2].to_s)
+    addr, boff, width = x[3], as_int(x[4].to_s), as_int(x[5].to_s)
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(boff); e(0x88)                         # i64.shr_u
+    e(0x42); leb_s(signed64((1 << width) - 1)); e(0x83)   # i64.and the mask
+    if ty[2] && width < 64
+      e(0x42); leb_s(64 - width); e(0x86)                 # i64.shl
+      e(0x42); leb_s(64 - width); e(0x87)                 # i64.shr_s: sign-extend
+    end
+    e(0xa7) if wtype(ty) == :i32                         # i32.wrap_i64
+    wtype(ty)
+  end
+
+  # (bfstore T UNIT ADDR BOFF WIDTH VALUE): the unit with its WIDTH bits at BOFF replaced by VALUE's, stored back
+  def bfstore(s)
+    size = as_int(s[2].to_s)
+    addr, boff, width, val = s[3], as_int(s[4].to_s), as_int(s[5].to_s), s[6]
+    mask = (1 << width) - 1
+    push_addr(addr)
+    e(0x21); leb_u(@bf_addr)
+    e(0x20); leb_u(@bf_addr)                             # the address the unit is stored at
+    e(0x20); leb_u(@bf_addr); e(load_u64_op(size)); memarg
+    e(0x42); leb_s(signed64(~(mask << boff))); e(0x83)    # i64.and: the unit without the field
+    w = push_op(val)
+    e(0xad) if w == :i32                                 # i64.extend_i32_u
+    e(0x42); leb_s(signed64(mask)); e(0x83)               # i64.and: the field's value
+    e(0x42); leb_s(boff); e(0x86)                         # i64.shl
+    e(0x84)                                              # i64.or
+    e(store_u64_op(size)); memarg
+  end
+
+  # (cf2i T X) to a 1- or 2-byte integer: the float is truncated toward zero, and the result must be in the integer's
+  # range, else the module traps (the IR's rule for cf2i: a NaN or a value that does not fit). The truncation is to i32,
+  # which traps on a NaN too, and any value outside i32 is outside the narrow range as well; the range test is then on the
+  # i32. A value in the range is the same as the one the 4-byte conversion gives.
+  def cf2i_narrow(dst, src, operand)
+    push_op(operand)
+    e(0xbb) if src[1] == 4              # f64.promote_f32: the bounds are compared in double, as in the IR
+    e(0xaa)                              # i32.trunc_f64_s
+    e(0x21); leb_u(@cf2i_tmp)            # local.set (the value is read back below: exactly one value is left)
+    if dst[2]
+      lo, hi = -(1 << (dst[1] * 8 - 1)), (1 << (dst[1] * 8 - 1)) - 1
+    else
+      lo, hi = 0, (1 << (dst[1] * 8)) - 1
+    end
+    e(0x20); leb_u(@cf2i_tmp); e(0x41); leb_s(lo); e(0x48)     # the value < lo
+    e(0x20); leb_u(@cf2i_tmp); e(0x41); leb_s(hi); e(0x4a)     # the value > hi
+    e(0x72)                              # i32.or
+    e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+    e(0x20); leb_u(@cf2i_tmp)
+    :i32
+  end
+
+  # Whether the IR x has a float conversion to a 1- or 2-byte integer (its scratch local is then allocated).
+  def uses_narrow_cf2i?(x)
+    return false unless x.is_a?(Array)
+    if head_of(x) == "cf2i"
+      t = parse_type(x[1])
+      return true if t[0] == "int" && t[1] < 4
+    end
+    x.any? { |y| uses_narrow_cf2i?(y) }
+  end
+
+  # An atomic builtin: [kind, operation, size] for NAME (a fence has no size), or nil.
+  def atomic_builtin(name)
+    return [:fence, nil, 0] if ATOMIC_FENCES.include?(name)
+    m = name.match(/\A(.+)_(\d+)\z/) or return nil
+    kind = ATOMIC_BUILTINS[m[1]] or return nil
+    [kind[0], kind[1], m[2].to_i]
+  end
+
+  # The atomic builtin NAME called with ARGS: its wasm atomic instruction, with the address first. The threads proposal
+  # needs a shared memory (--threads); the memory's alignment is the natural one (the instruction checks it). A
+  # read-modify-write or a compare-and-swap yields the old value, and a load the value; a store and a fence yield none.
+  def atomic_call(name, args)
+    kind, op, size = atomic_builtin(name)
+    if kind == :fence
+      raise Refused, "atomic fence (needs --threads: the module has one memory, a fence orders nothing)" unless @mod.threads
+      e(0xfe, 0x03, 0x00)                # atomic.fence
+      return nil
+    end
+    raise Refused, "atomic #{name} (needs --threads: the memory must be shared)" unless @mod.threads
+    raise Refused, "atomic #{name} of #{size} bytes (only 4 and 8)" unless [4, 8].include?(size)
+    wty = size == 8 ? :i64 : :i32
+    align = size == 8 ? 3 : 2
+    if kind == :cas_ptr
+      # (ptr, &expected, desired): load the expected value, compare-and-swap, store the old value back to expected, and the
+      # result is whether the old value was the expected one. Two i32 scratch locals hold the expected and the old value.
+      raise Refused, "atomic #{name} of 8 bytes (only the 4-byte form)" unless size == 4
+      push_addr(args[1]); e(0x28, 0x02, 0x00); e(0x21); leb_u(@atom_a)           # expected := *&expected
+      push_addr(args[0]); e(0x20); leb_u(@atom_a); push_op(args[2], :i32)
+      e(0xfe, 0x48, 0x02, 0x00)                                                  # i32.atomic.rmw.cmpxchg: the old value
+      e(0x21); leb_u(@atom_b)
+      push_addr(args[1]); e(0x20); leb_u(@atom_b); e(0x36, 0x02, 0x00)           # *&expected := old
+      e(0x20); leb_u(@atom_b); e(0x20); leb_u(@atom_a); e(0x46)                  # old == expected
+      return :i32
+    end
+    push_addr(args[0])                   # the address: an i32 memory address
+    case kind
+    when :load
+      e(0xfe, size == 8 ? 0x11 : 0x10)
+    when :store
+      push_op(args[1], wty)
+      e(0xfe, size == 8 ? 0x18 : 0x17)
+      e(align, 0x00); return nil
+    when :rmw
+      push_op(args[1], wty)
+      e(0xfe, ATOMIC_RMW.fetch(op)[size == 8 ? 1 : 0])
+    when :cas
+      push_op(args[1], wty)
+      push_op(args[2], wty)
+      e(0xfe, size == 8 ? 0x49 : 0x48)
+    end
+    e(align, 0x00)                       # the memory argument: the natural alignment, offset 0
+    wty
   end
 
   # ---- statements
@@ -1381,7 +1988,16 @@ class Fn
     h = head_of(s)
     case h
     when "block"
-      stmt_list(s.drop(1))
+      if s[1].is_a?(String)
+        # a labelled block: (block NAME stmts...), left by a jump to NAME (break NAME) at its end
+        @labels << [:named, s[1]]
+        e(0x02, 0x40)
+        stmt_list(s.drop(2))
+        e(0x0b)
+        @labels.pop
+      else
+        stmt_list(s.drop(1))
+      end
     when "let"
       info = reg_info(s[1])
       v = rval(s[3])
@@ -1397,12 +2013,21 @@ class Fn
       mem_addr(s[2], type_size(ty))
       push_op(s[3], wtype(ty))
       store_op(ty)
+    when "vastart"
+      vastart(s)
     when "copy"
-      n = as_int(s[1])
-      mem_addr(s[2], n)
-      mem_addr(s[3], n)
-      e(0x41); leb_s(n)
+      # the length is a constant, or a register (an unsigned_long: llvm-to-pathb.rb's memcpy of a run-time length)
+      n = run_time_length?(s[1]) ? nil : as_int(s[1])
+      mem_addr(s[2], n || s[1])
+      mem_addr(s[3], n || s[1])
+      mem_length(s[1], n)
       e(0xfc, 0x0a, 0x00, 0x00)            # memory.copy: destination, source, length
+    when "zero-fill"
+      n = run_time_length?(s[1]) ? nil : as_int(s[1])
+      mem_addr(s[2], n || s[1])
+      e(0x41); leb_s(0)
+      mem_length(s[1], n)
+      e(0xfc, 0x0b, 0x00)                  # memory.fill: destination, value, length
     when "eval"
       inner = s[1]
       raise Refused, "eval of #{head_of(inner)}" unless head_of(inner) == "call"
@@ -1426,12 +2051,15 @@ class Fn
     when "switch"
       switch_stmt(s)
     when "loop"
-      body = s[1]
-      step = s[2]
+      # (loop NAME (body ...) (step ...)): the name is optional; break NAME and continue NAME name this loop
+      off = s[1].is_a?(String) ? 1 : 0
+      body = s[1 + off]
+      step = s[2 + off]
       raise BadIR, "loop without body" unless head_of(body) == "body"
       raise BadIR, "loop without step" unless head_of(step) == "step"
       id = @loop_n
       @loop_n += 1
+      @loop_names[s[1]] = id if off == 1
       @brk[@pending_brk] = id if @pending_brk
       @pending_brk = nil
       cont = tail_label(body)
@@ -1452,13 +2080,33 @@ class Fn
       e(0x0b)
       @labels.pop
     when "break"
-      e(0x0c); leb_u(label_depth(:brk, nil))
+      if s[1].is_a?(String)
+        # break NAME: out of the labelled block NAME, or out of the loop NAME
+        if @labels.any? { |l| l[0] == :named && l[1] == s[1] }
+          e(0x0c); leb_u(label_depth(:named, s[1]))
+        elsif @loop_names.key?(s[1])
+          e(0x0c); leb_u(label_depth(:brk, @loop_names[s[1]]))
+        else
+          raise Refused, "break to the unknown label #{s[1]}"
+        end
+      else
+        e(0x0c); leb_u(label_depth(:brk, nil))
+      end
     when "continue"
-      e(0x0c); leb_u(label_depth(:cont, nil))
+      if s[1].is_a?(String)
+        raise Refused, "continue to the unknown loop #{s[1]}" unless @loop_names.key?(s[1])
+        e(0x0c); leb_u(label_depth(:cont, @loop_names[s[1]]))
+      else
+        e(0x0c); leb_u(label_depth(:cont, nil))
+      end
     when "goto"
-      # the labels that end a loop body or follow a loop are the loop's continue and break; any other goto is refused
+      # the labels that end a loop body or follow a loop are the loop's continue and break; in a body of labels
+      # (dispatch_body) a goto sets the segment to run and goes back to the dispatch; any other goto is refused
       name = s[1].to_s
-      if @cont.key?(name)
+      if @dispatch && @dispatch.key?(name)
+        e(0x41); leb_s(@dispatch[name]); e(0x21); leb_u(@pc_local)
+        e(0x0c); leb_u(label_depth(:dispatch, nil))
+      elsif @cont.key?(name)
         e(0x0c); leb_u(label_depth(:cont, @cont[name]))
       elsif @brk.key?(name)
         e(0x0c); leb_u(label_depth(:brk, @brk[name]))
@@ -1477,8 +2125,18 @@ class Fn
       end
       restore_sp
       e(0x0f)
-    when "loc", "likely", "unlikely"
-      # source position and branch hints (docs/notes/ubsan.md): no code
+    when "loc"
+      # (loc "FILE" LINE): the source position of what follows (NFCXX_IR_LOC, NFCXX_IR_SANITIZE): no code, but a
+      # refusal names it (compile)
+      @loc = "#{s[1]}:#{s[2]}"
+    when "likely", "unlikely"
+      # branch hints (docs/notes/ubsan.md): no code
+    when "barrier"
+      # a compiler barrier: the statements keep their order, so there is no code to emit
+    when "fence"
+      # a memory fence: with --threads it is atomic.fence; in the single-thread module (one memory) it orders nothing
+      e(0xfe, 0x03, 0x00) if @mod.threads
+
     when "unreachable", "trap"
       e(0x00)
     when "nonnull"
@@ -1486,13 +2144,18 @@ class Fn
       push_op(s[1])
       e($ptr_bytes == 8 ? 0x50 : 0x45)     # i64.eqz (i32.eqz under ILP32)
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+    when "bfstore", "bfstore.v"
+      bfstore(s)
     when "bounds"
       # (bounds IDX N): traps unless 0 <= IDX < N. The index is compared as unsigned, so a negative one traps too.
-      raise Refused, "bounds with a run-time limit" if s[2].is_a?(String) && s[2][0] == "%"
       push_i64(s[1], false)
       e(0x21); leb_u(@tmp64)
       e(0x20); leb_u(@tmp64)
-      e(0x42); leb_s(signed64(as_int(s[2])))
+      if s[2].is_a?(String) && s[2][0] == "%"
+        push_i64(s[2], false)              # a run-time limit (a variable-length array's bound)
+      else
+        e(0x42); leb_s(signed64(as_int(s[2])))
+      end
       e(0x5a)                              # i64.ge_u
       e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
     when "unsupported"
@@ -1506,8 +2169,8 @@ class Fn
   # selector picks the arm of its marker, control falls through the arms that follow, and break leaves the switch.
   # The lowering: a block E for the exit (the break target), one block per arm, nested so that arm k starts right after
   # the end of its block L_k; a compare chain that branches to an arm (br_if L_k), or to the default arm, or to E.
-  # An arm that is not empty must end in a jump (break, continue, return, unreachable, trap, goto), or be the last one:
-  # falling into the next arm is refused, as docs/notes/pathb-stage2.md section 2 asks.
+  # An arm that does not end in a jump falls into the next arm: the arms are laid out in order, after their blocks, so the
+  # statements of arm k are followed by those of arm k+1 (C's fallthrough).
   def switch_stmt(s)
     brk_label = @pending_brk
     @pending_brk = nil
@@ -1529,12 +2192,6 @@ class Fn
       else
         raise Refused, "statement before the first case label of a switch (not lowered)" if cur.nil?
         cur[1] << st
-      end
-    end
-    arms.each_with_index do |arm, k|
-      next if k == arms.length - 1
-      unless ends_list?(arm[1])
-        raise Refused, "switch fallthrough: the case arm with #{form_text(arm[1].last)} falls into the next arm (not lowered)"
       end
     end
     default_arm = nil
@@ -1627,6 +2284,140 @@ class Fn
   end
 
   # The number of wasm blocks between here and the innermost entry of the kind (of the loop id, when given).
+  # A body of labels and gotos (the control flow graph that llvm-to-pathb.rb writes, or a C goto) has no structured
+  # form. It is lowered as a dispatch: the labels at the top level of the body split it into segments, and a loop runs
+  # the segment that a local (pc) names, through a br_table into nested blocks:
+  #   loop $D  block_{n-1} ... block_0  (br_table pc: 0 .. n-1)  end segment_0  end segment_1 ... end segment_{n-1}  end
+  # Control falls from one segment into the next, as it falls past a label. goto L sets pc to L's segment and branches
+  # to $D. The form applies when every label is at the top level and the body has no loop or switch, whose labels are
+  # the structured jumps (stmt, "goto").
+  def dispatch_body?(body)
+    return false unless body.any? { |st| head_of(st) == "label" }
+    body.all? { |st| head_of(st) == "label" || !nested_control?(st) }
+  end
+
+  def nested_control?(form)
+    return false unless form.is_a?(Array)
+    h = head_of(form)
+    return true if h == "loop" || h == "switch" || h == "label"
+    form.drop(1).any? { |c| nested_control?(c) }
+  end
+
+  def dispatch_body(body)
+    segs = [[]]
+    @dispatch = {}
+    body.each do |st|
+      if head_of(st) == "label"
+        name = st[1].to_s
+        raise BadIR, "label \"#{name}\" twice" if @dispatch.key?(name)
+        @dispatch[name] = segs.length
+        segs << []
+      else
+        segs.last << st
+      end
+    end
+    @pc_local = @next_local                # wasm locals start at zero: segment 0 runs first
+    @local_types << :i32
+    @next_local += 1
+    n = segs.length
+    @labels << [:dispatch]
+    e(0x03, 0x40)                          # loop $D
+    n.times do
+      @labels << [:seg]
+      e(0x02, 0x40)
+    end
+    get_local(@pc_local)
+    e(0x0e); leb_u(n)                      # br_table: segment j is depth j, the default is the last
+    n.times { |j| leb_u(j) }
+    leb_u(n - 1)
+    segs.each do |seg|
+      e(0x0b)
+      @labels.pop
+      stmt_list(seg)
+    end
+    e(0x0b)
+    @labels.pop
+  end
+
+  def get_local(l)
+    e(0x20); leb_u(l)
+  end
+
+  # A scratch i64 local of this function, the n-th (0, 1, ...), declared when first used.
+  def scratch64(n)
+    @scratch64 ||= []
+    while @scratch64.length <= n
+      @scratch64 << @next_local
+      @local_types << :i64
+      @next_local += 1
+    end
+    @scratch64[n]
+  end
+
+  # cadd csub cmul cneg: the operation, which traps when the exact result does not fit the type (signed or unsigned).
+  # Narrower than 64 bits, the exact result is computed in i64 and its range is checked. At 64 bits, the wrapped
+  # result is checked: add and sub by the signs (or, unsigned, by the carry), mul by dividing back (a division of
+  # INT64_MIN by -1 traps by itself, and that product overflows).
+  def checked_arith(h, x)
+    ty = parse_type(x[1])
+    raise Refused, "#{h} of a non-integer" unless ty[0] == "int" && !ty[3]
+    w = wtype(ty)
+    signed = ty[2]
+    a, b = h == "cneg" ? [["const", x[1], "0"], x[2]] : [x[2], x[3]]
+    op = { "cadd" => 0x7c, "csub" => 0x7d, "cmul" => 0x7e, "cneg" => 0x7d }[h]   # i64.add, sub, mul
+    if w == :i32
+      push_i64(a, signed); push_i64(b, signed)
+      e(op)
+      e(0x22); leb_u(@tmp64)               # local.tee
+      bits = ty[1] * 8
+      lo = signed ? -(1 << (bits - 1)) : 0
+      hi = signed ? (1 << (bits - 1)) - 1 : (1 << bits) - 1
+      e(0x42); leb_s(lo); e(0x53)          # i64.lt_s
+      e(0x20); leb_u(@tmp64)
+      e(0x42); leb_s(hi); e(0x55)          # i64.gt_s
+      e(0x72)                              # i32.or
+      e(0x04, 0x40); e(0x00); e(0x0b)      # if unreachable end
+      e(0x20); leb_u(@tmp64)
+      e(0xa7)                              # i32.wrap_i64: in range, so already in canonical form
+      return w
+    end
+    ra = scratch64(0)
+    rb = scratch64(1)
+    push_op(a, :i64); e(0x21); leb_u(ra)
+    push_op(b, :i64); e(0x21); leb_u(rb)
+    e(0x20); leb_u(ra); e(0x20); leb_u(rb); e(op)
+    e(0x21); leb_u(@tmp64)
+    if h == "cmul"
+      # a != 0 && r / a != b
+      get_local(ra); e(0x50); e(0x45)       # i64.eqz, i32.eqz
+      e(0x04, 0x40)
+      get_local(@tmp64); get_local(ra); e(signed ? 0x7f : 0x80)   # i64.div_s / div_u
+      get_local(rb); e(0x52)                # i64.ne
+      e(0x04, 0x40); e(0x00); e(0x0b)
+      e(0x0b)
+    elsif signed
+      if h == "cadd"
+        get_local(ra); get_local(@tmp64); e(0x85)   # a ^ r
+        get_local(rb); get_local(@tmp64); e(0x85)   # b ^ r
+      else
+        get_local(ra); get_local(rb); e(0x85)       # a ^ b
+        get_local(ra); get_local(@tmp64); e(0x85)   # a ^ r
+      end
+      e(0x83)                              # i64.and
+      e(0x42); leb_s(0); e(0x53)           # < 0: the sign changed the wrong way
+      e(0x04, 0x40); e(0x00); e(0x0b)
+    else
+      if h == "cadd"
+        get_local(@tmp64); get_local(ra); e(0x54)   # r <u a: a carry
+      else
+        get_local(ra); get_local(rb); e(0x54)       # a <u b: a borrow
+      end
+      e(0x04, 0x40); e(0x00); e(0x0b)
+    end
+    get_local(@tmp64)
+    w
+  end
+
   def label_depth(kind, id)
     depth = 0
     @labels.reverse_each do |l|
@@ -1646,7 +2437,15 @@ class Fn
 
   # ---- the whole function
 
+  # The function's code. A refusal names the function, and the source line of the last (loc ...) before it when the IR
+  # has them: "variadic call (in main, at prog.c:6)", which the wasm explorer puts on that line of the editor.
   def compile
+    compile_body
+  rescue Refused => e
+    raise Refused, "#{e.message} (in #{@form[1]}#{@loc ? ", at #{@loc}" : ''})"
+  end
+
+  def compile_body
     setup
     # prologue: the frame base lies below the stack pointer found on entry, aligned to 16
     e(0x23); leb_u(0)                      # global.get 0
@@ -1660,7 +2459,11 @@ class Fn
     e(0x20); leb_u(@fp_local)
     e(0x24); leb_u(0)                      # global.set 0
     asan_poison_frame if @asan && @frame > 0
-    stmt_list(@body)
+    if dispatch_body?(@body)
+      dispatch_body(@body)
+    else
+      stmt_list(@body)
+    end
     if @result.nil?
       restore_sp
     else
@@ -1687,7 +2490,8 @@ end
 # poison code of the granule, or for a partial granule (k in 1..7, which ends an object) the code of the next granule,
 # the redzone that follows the object. The function is the module's last one (after the defined functions).
 #
-#   if n == 0 return;  last = a + n - 1;  g = a >> 3
+#   if n == 0 return;  if a >= shadow_base return (the shadow, and the pages that memory.grow added after it: a host's
+#   mmap for TinyGo's heap, are not checked);  last = a + n - 1;  g = a >> 3
 #   loop:  s = shadow[g];  if s != 0:  end = min(last - 8g + 1, 8)
 #            if !(s < 8 && end <= s): report(a, n, s >= 0x80 ? s : shadow[g + 1]); unreachable
 #          g = g + 1; br_if loop while g <= last >> 3
@@ -1697,6 +2501,8 @@ def asan_check_body(mod)
   c = []
   c.concat([0x01, 0x04, VT[:i32]])                  # locals: last, g, s, end (after the parameters a and n)
   c.concat([0x20, 1, 0x45, 0x04, 0x40, 0x0f, 0x0b]) # if n == 0: return
+  c.concat([0x20, 0, 0x41]); sleb(sh, c)             # if a >= shadow_base: return (i32.ge_u)
+  c.concat([0x4f, 0x04, 0x40, 0x0f, 0x0b])
   c.concat([0x20, 0, 0x20, 1, 0x6a, 0x41, 1, 0x6b, 0x21, 2])   # last = a + n - 1
   c.concat([0x20, 0, 0x41, 3, 0x76, 0x21, 3])                  # g = a >> 3
   c.concat([0x03, 0x40])                                       # loop
@@ -1876,7 +2682,35 @@ end
 
 # --emscripten: the exports the mode adds (encode_module). A function of the module may not take one of these names.
 EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", "__data_end", "__heap_base",
-                      "__wasm_call_ctors"]
+                      "__wasm_call_ctors", "stackSave", "stackRestore", "stackAlloc", "emscripten_stack_init",
+                      "emscripten_stack_get_free", "emscripten_stack_get_base", "emscripten_stack_get_end"]
+
+# --emscripten: the stack functions of the glue (emcc 3.1.6 calls emscripten_stack_init at start, and stackSave,
+# stackRestore and stackAlloc through its wrappers). The stack is the shadow stack of global 0, growing down from
+# stack_top to the end: the base is the top, the end is the lowest address the stack may reach, data_end rounded up to 16
+# (the glue asserts a 4-byte-aligned end when it writes the stack cookie; the module does not check the limit, as before).
+# Each entry is [name, signature, body]: the signature is [params, result], nil for none.
+def emscripten_stack_fns(mod)
+  stack_end = (mod.data_end + 15) / 16 * 16
+  body = lambda do |locals, code|
+    b = []
+    locals.empty? ? b << 0x00 : (uleb(locals.length, b); locals.each { |c, t| uleb(c, b); b << VT[t] })
+    code.each { |x| b << x }
+    b << 0x0b
+  end
+  consts = lambda { |n| c = []; c << 0x41; sleb(n, c); c }   # i32.const n
+  [
+    ["stackSave", [[], :i32], body.call([], [0x23, 0x00])],                       # global.get 0
+    ["stackRestore", [[:i32], nil], body.call([], [0x20, 0x00, 0x24, 0x00])],     # global.set 0 (local.get 0)
+    ["stackAlloc", [[:i32], :i32],                                                 # sp = (sp - n) & -16; return sp
+     body.call([[1, :i32]], [0x23, 0x00, 0x20, 0x00, 0x6b, 0x41, 0x70, 0x71,     # global.get 0, local.get 0, i32.sub,
+                             0x22, 0x01, 0x24, 0x00, 0x20, 0x01])],              # i32.const -16, i32.and, local.tee 1, global.set 0, local.get 1
+    ["emscripten_stack_init", [[], nil], body.call([], [])],
+    ["emscripten_stack_get_base", [[], :i32], body.call([], consts.call(mod.stack_top))],
+    ["emscripten_stack_get_end", [[], :i32], body.call([], consts.call(stack_end))],
+    ["emscripten_stack_get_free", [[], :i32], body.call([], [0x23, 0x00] + consts.call(stack_end) + [0x6b])],
+  ].map { |name, (params, result), b| [name, mod.type_of(params, result), b] }
+end
 
 # --emscripten: the imports the IR calls under a libc or C++ name that Emscripten's runtime provides under another
 # name, as [IR name => Emscripten name]. Empty: no such pair is verified (docs/notes/pathb-wasm.md, "Emscripten",
@@ -1884,10 +2718,48 @@ EMSCRIPTEN_EXPORTS = ["memory", "__indirect_function_table", "__stack_pointer", 
 # is added only with a source that names both sides.
 EMSCRIPTEN_IMPORT_NAMES = {}
 
-USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [FILE.ir | -] > out.wasm\n"
+USAGE = "usage: pathb-wasm-emit.rb [--asan] [--emscripten [--emscripten-import-memory]] [--memory64] [--threads] [--names] [FILE.ir | -] > out.wasm\n"
 
-def emit_module(src, asan = false, emscripten = false, import_memory = false)
-  forms = parse_forms(tokenize(src))
+# --names: a "name" custom section that names the module's functions, so that an engine's stack trace (and a trap's)
+# names them rather than numbering them (the wasm explorer). Without it the module is the same as before.
+$names = false
+
+# (alias NAME TARGET KIND [weak]): a second name for a function or an object. The module refers to the target instead: every
+# reference to NAME (a call, an address, an access) is rewritten to TARGET, transitively, and the alias forms are dropped.
+def resolve_aliases(forms)
+  map = {}
+  forms.each do |f|
+    # an ifunc's value is what its resolver returns, not the resolver: not an alias, refused where it is used
+    next unless head_of(f) == "alias" && f[3].to_s != "ifunc"
+    map[f[1].to_s] = f[2].to_s
+  end
+  return forms if map.empty?
+  resolve = lambda do |nm|
+    seen = 0
+    while map.key?(nm)
+      nm = map[nm]
+      seen += 1
+      raise BadIR, "alias cycle through #{nm}" if seen > map.length
+    end
+    nm
+  end
+  rewrite = lambda do |x|
+    next unless x.is_a?(Array)
+    x.each_with_index do |y, i|
+      if y.is_a?(IRSym) && map.key?(y.name)
+        x[i] = IRSym.new(y.sig, resolve.call(y.name))
+      elsif y.is_a?(Array)
+        rewrite.call(y)
+      end
+    end
+  end
+  forms = forms.reject { |f| head_of(f) == "alias" && f[3].to_s != "ifunc" }
+  rewrite.call(forms)
+  forms
+end
+
+def emit_module(src, asan = false, emscripten = false, import_memory = false, memory64 = false, threads = false)
+  forms = resolve_aliases(parse_forms(tokenize(src)))
   # The data model comes from the header's (layout ...): LP64 by default, ILP32 only for --emscripten (and --emscripten
   # takes ILP32 only). The model is set before any type is read.
   sizes = {}
@@ -1924,7 +2796,24 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
     elsif h == "global"
       objs << parse_global(f)
     elsif h == "data"
-      objs << parse_data(f)
+      begin
+        objs << parse_data(f)
+      rescue Refused => e
+        # string data this emitter cannot lower (a wide string): refused where it is used, as an unusable global is
+        o = StaticObj.new(f[1].to_s, 0, 1, nil, true)
+        o.refusal = "data #{f[1]}: #{e.message}"
+        objs << o
+      end
+    elsif h == "alias"
+      raise Refused, "alias #{f[1]} of kind #{f[3]} (an ifunc's value is its resolver's result: not lowered)"
+    elsif h == "declare"
+      # (declare "name" (weak)): a declaration only; a call of a function the module does not define is an import
+      next
+    elsif h == "abi-type" || h == "x87-thunk" || h == "sycl-kernel-attr"
+      # for the QBE emitter only: the C ABI shape of an aggregate passed or returned by value, and the assembly thunks of
+      # long double calls. This emitter refuses such a parameter, result, argument or call where it is used (in the
+      # function, with its line), not here; sycl-kernel-attr is a SYCL kernel's attributes, for the SPIR-V emitter
+      next
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
@@ -1935,10 +2824,25 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
     end
   end
   mod = Module_.new(defs)
+  # A weak function the module declares, neither defines nor calls, is null: its address is 0 (weak code tests for it)
+  mod.null_funcs = weak_null_functions(forms, defs)
+  # The EH cleanup of a VLA (EDG's __vla_dealloc_eh) has its address in static data, for the unwinder. A module here
+  # never throws (the throw is refused), so the cleanup is never reached: its slot is null, and a call of it traps.
+  mod.null_funcs |= address_taken(forms).select { |nm| VLA_EH_CLEANUPS.include?(nm) && !defs.key?(nm) }
+  address_taken(forms).reject { |nm| mod.null_funcs.include?(nm) }.each_with_index { |nm, i| mod.table[nm] = i + 1 }
   mod.asan = asan
   mod.emscripten = emscripten
-  mod.import_memory = import_memory
+  mod.import_memory = import_memory || threads   # --threads: the shared memory is imported (every thread's instance gets it)
+  mod.threads = threads
+  mod.memory64 = memory64
   mod.ctors_type = mod.type_of([], nil) if emscripten   # __wasm_call_ctors: no params, no result
+  mod.init_type = mod.type_of([], nil) if threads       # __nfcxx_init: no params, no result
+  if threads
+    # __nfcxx_thread_entry(slot, arg): the start routine at table slot SLOT called with ARG (a void* -> void* routine)
+    mod.entry_type = mod.type_of([:i32, :i64], :i64)
+    mod.call_type = mod.type_of([:i64], :i64)
+    mod.indirect_calls = true                           # the table is declared and exported
+  end
   mod.data_end = build_statics(mod, objs, asan)
   # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
   mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
@@ -1959,12 +2863,53 @@ def emit_module(src, asan = false, emscripten = false, import_memory = false)
   mod.check_index = mod.imports.length + order.length if asan
   mod.alloc_index = { "malloc" => mod.check_index + 1, "free" => mod.check_index + 2 } if asan
   mod.ctors_index = mod.imports.length + order.length + (asan ? 3 : 0) if emscripten
+  mod.init_index = mod.imports.length + order.length if threads
+  mod.entry_index = mod.imports.length + order.length + 1 if threads
+  mod.stack_fns = emscripten_stack_fns(mod) if emscripten   # after the ctors (the index of each is in encode_module)
   bodies = order.map do |nm|
     fn = Fn.new(mod, defs[nm])
     fn.compile
     [nm, fn]
   end
   encode_module(mod, bodies)
+end
+
+# The functions whose address the IR takes (&"f" anywhere but as the callee of a call), in order of first use: the
+# slots of the function table. Slot 0 stays empty, so a call through a null function pointer traps.
+# The weak functions the module declares (declare with weak) and does not define: their address is null, and a call of one
+# traps (there is no definition to call; the C library's is not in a wasm module).
+# The EH cleanup of a variable-length array: referenced by the unwinder's tables only (see emit_module).
+VLA_EH_CLEANUPS = %w[__vla_dealloc_eh].freeze
+
+def weak_null_functions(forms, defs)
+  declared = forms.select { |f| head_of(f) == "declare" && f.drop(2).any? { |p| head_of(p) == "weak" } }.map { |f| f[1].to_s }
+  declared.reject { |nm| defs.key?(nm) }.uniq
+end
+
+def address_taken(forms)
+  names = []
+  forms.each { |f| collect_addresses(f, names) }
+  names
+end
+
+def collect_addresses(x, names)
+  return unless x.is_a?(Array)
+  x.each_with_index do |y, i|
+    next if i == 2 && head_of(x) == "call"   # the callee of a direct call
+    if y.is_a?(IRSym) && y.sig == "&"
+      names << y.name unless names.include?(y.name)
+    else
+      collect_addresses(y, names)
+    end
+  end
+end
+
+# The function index of a slot of the table: a defined function, or one that the module calls (an import). A function
+# that is neither has no index (its signature is not known), so taking its address is refused.
+def table_function(mod, name)
+  return mod.defined_index[name] if mod.defined_index.key?(name)
+  return mod.import_index[name] if mod.import_index.key?(name)
+  raise Refused, "address of the function #{name}, which the module neither defines nor calls"
 end
 
 def encode_module(mod, bodies)
@@ -2001,14 +2946,20 @@ def encode_module(mod, bodies)
       name_bytes("env", im)
       name_bytes("memory", im)
       im << 0x02                         # memory
-      im << 0x00                         # limits without a maximum: the host's memory may grow
-      uleb(mod.pages, im)                # the initial size: the pages the module's layout is built on
+      if mod.threads
+        im << 0x03                       # limits: shared, with a maximum (a shared memory has one)
+        uleb(mod.pages, im)              # minimum and maximum: the pages the layout is built on, fixed
+        uleb(mod.pages, im)
+      else
+        im << 0x00                       # limits without a maximum: the host's memory may grow
+        uleb(mod.pages, im)              # the initial size: the pages the module's layout is built on
+      end
     end
     section(2, im, out)
   end
   # functions (asan: the check, then malloc and free, are the last ones; emscripten: then __wasm_call_ctors)
   fsec = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), fsec)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 2 : 0), fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   if mod.asan
     uleb(mod.check_type, fsec)
@@ -2016,14 +2967,17 @@ def encode_module(mod, bodies)
     uleb(mod.alloc_type["free"], fsec)
   end
   uleb(mod.ctors_type, fsec) if mod.emscripten
+  mod.stack_fns.each { |_, ti, _| uleb(ti, fsec) } if mod.emscripten
+  uleb(mod.init_type, fsec) if mod.threads
+  uleb(mod.entry_type, fsec) if mod.threads
   section(3, fsec, out)
-  # emscripten: the function table, exported empty. The emitter has no indirect calls and no function values (both are
-  # refused, see Fn#call and op_type), so no element segment is needed. It is exported under the name the glue looks for.
-  if mod.emscripten
+  # the function table: slot 0 empty, then the functions whose address is taken (Module_#table). emscripten: it is
+  # exported under the name the glue looks for, empty when no address is taken.
+  if mod.emscripten || !mod.table.empty? || mod.indirect_calls
     tb = []
     uleb(1, tb)
     tb << 0x70 << 0x00                   # funcref, limits without a maximum
-    uleb(0, tb)                          # minimum 0 elements
+    uleb(mod.table.empty? ? 0 : mod.table.length + 1, tb)
     section(4, tb, out)
   end
   # memory: the pages were chosen with the static data (emit_module); in asan mode the top 1/8 is the shadow. With
@@ -2031,7 +2985,7 @@ def encode_module(mod, bodies)
   unless mod.import_memory
     mem = []
     uleb(1, mem)
-    mem << 0x00
+    mem << (mod.memory64 ? 0x04 : 0x00)  # limits: memory64 (an i64 minimum) without a maximum, or i32 without one
     uleb(mod.pages, mem)
     section(5, mem, out)
   end
@@ -2040,11 +2994,18 @@ def encode_module(mod, bodies)
   # static data) and global 2 is __heap_base (the top of the memory: the stack grows down from it, and a heap would
   # begin there and grow the memory with memory.grow), both immutable i32.
   gl = []
-  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : 1), gl)
+  uleb(mod.emscripten ? 3 : (mod.asan ? 2 : (mod.threads ? 2 : 1)), gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
   sleb(mod.stack_top, gl)
   gl << 0x0b
+  if mod.threads
+    # --threads: global 1, __tls_base, a mutable i32: the base of this thread's thread-local block (the main thread's is
+    # the group itself); each thread's instance sets it (see tests/wasm-threads)
+    gl << VT[:i32] << 0x01 << 0x41
+    sleb(mod.tls_start || 0, gl)
+    gl << 0x0b
+  end
   if mod.asan
     # asan: the allocator's state, a mutable i32 (see asan_malloc_body): the bump pointer starts at the heap's base
     [mod.heap_base].each do |init|
@@ -2066,8 +3027,30 @@ def encode_module(mod, bodies)
   # each function under its IR name
   ex = []
   nexp = (mod.import_memory ? 0 : 1) + bodies.length
-  nexp += 5 if mod.emscripten
+  nexp += 5 + mod.stack_fns.length if mod.emscripten
+  nexp += 5 if mod.threads
   uleb(nexp, ex)
+  if mod.threads
+    # --threads: each thread's instance sets its own stack pointer (global 0) and its thread-local base (global 1) before it
+    # runs (see tests/wasm-threads)
+    name_bytes("__stack_pointer", ex)
+    ex << 0x03
+    uleb(0, ex)
+    name_bytes("__tls_base", ex)
+    ex << 0x03
+    uleb(1, ex)
+    # and the host calls __nfcxx_init once, on the first instance, before any thread runs (the passive data is applied there)
+    name_bytes("__nfcxx_init", ex)
+    ex << 0x00
+    uleb(mod.init_index, ex)
+    # the table, for the host's thread start (call_indirect through it), and the entry that makes the call
+    name_bytes("__indirect_function_table", ex)
+    ex << 0x01
+    uleb(0, ex)
+    name_bytes("__nfcxx_thread_entry", ex)
+    ex << 0x00
+    uleb(mod.entry_index, ex)
+  end
   unless mod.import_memory
     name_bytes("memory", ex)
     ex << 0x02
@@ -2089,6 +3072,11 @@ def encode_module(mod, bodies)
     name_bytes("__wasm_call_ctors", ex)
     ex << 0x00
     uleb(mod.ctors_index, ex)
+    mod.stack_fns.each_with_index do |(name, _, _), i|
+      name_bytes(name, ex)
+      ex << 0x00
+      uleb(mod.ctors_index + 1 + i, ex)
+    end
   end
   bodies.each_with_index do |(nm, _), i|
     raise Refused, "function name #{nm.inspect} is not ASCII (an export name must be UTF-8)" if nm.bytes.any? { |b| b >= 0x80 }
@@ -2097,11 +3085,48 @@ def encode_module(mod, bodies)
     uleb(mod.imports.length + i, ex)
   end
   section(7, ex, out)
+  # elements: the table's slots from 1, an active segment of function indices
+  unless mod.table.empty?
+    el = []
+    uleb(1, el)
+    el << 0x00 << 0x41 << 0x01 << 0x0b   # table 0, offset i32.const 1
+    uleb(mod.table.length, el)
+    mod.table.keys.each { |nm| uleb(table_function(mod, nm), el) }
+    section(9, el, out)
+  end
+  # datacount (--threads: memory.init and data.drop in __nfcxx_init need it; the section comes before the code)
+  if mod.threads
+    dc = []
+    uleb(mod.segments.length, dc)
+    section(12, dc, out)
+  end
   # code
   code = []
-  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 : 0), code)
+  uleb(bodies.length + (mod.asan ? 3 : 0) + (mod.emscripten ? 1 + mod.stack_fns.length : 0) + (mod.threads ? 2 : 0), code)
   bodies.each do |nm, fn|
     b = fn.encode
+    uleb(b.length, code)
+    b.each { |x| code << x }
+  end
+  if mod.threads
+    # __nfcxx_init: memory.init of each passive segment at its address (once, by the host), then data.drop of each
+    b = [0x00]                           # no locals
+    mod.segments.each_with_index do |(addr, bytes), i|
+      b << 0x41; sleb(addr, b)           # destination
+      b << 0x41; sleb(0, b)              # source offset
+      b << 0x41; sleb(bytes.length, b)   # length
+      b << 0xfc << 0x08; uleb(i, b); b << 0x00   # memory.init i 0
+    end
+    mod.segments.each_index { |i| b << 0xfc << 0x09; uleb(i, b) }   # data.drop i
+    b << 0x0b
+    uleb(b.length, code)
+    b.each { |x| code << x }
+    # __nfcxx_thread_entry(slot, arg): call_indirect of type (i64) -> i64 through the table at SLOT, with ARG
+    b = [0x00]                           # no locals
+    b << 0x20; uleb(1, b)                # local.get 1: arg
+    b << 0x20; uleb(0, b)                # local.get 0: slot (the table index, an i32)
+    b << 0x11; uleb(mod.call_type, b); b << 0x00   # call_indirect (type) table 0
+    b << 0x0b
     uleb(b.length, code)
     b.each { |x| code << x }
   end
@@ -2115,6 +3140,10 @@ def encode_module(mod, bodies)
     b = [0x00, 0x0b]                     # no locals, end: __wasm_call_ctors does nothing (no constructor list in the IR)
     uleb(b.length, code)
     b.each { |x| code << x }
+    mod.stack_fns.each do |_, _, body|
+      uleb(body.length, code)
+      body.each { |x| code << x }
+    end
   end
   section(10, code, out)
   # data: the segments of the static objects, each at its address (an active segment in memory 0)
@@ -2122,14 +3151,49 @@ def encode_module(mod, bodies)
     dsec = []
     uleb(mod.segments.length, dsec)
     mod.segments.each do |addr, bytes|
-      dsec << 0x00 << 0x41                 # active, memory 0: the offset is an i32.const
-      sleb(addr, dsec)
-      dsec << 0x0b
+      if mod.threads
+        dsec << 0x01                     # passive (--threads): applied once, by __nfcxx_init, not by every thread's instance
+      else
+        dsec << 0x00 << (mod.memory64 ? 0x42 : 0x41)   # active, memory 0: the offset is an i64.const or an i32.const
+        sleb(addr, dsec)
+        dsec << 0x0b
+      end
       uleb(bytes.length, dsec)
       bytes.each { |b| dsec << b }
     end
     section(11, dsec, out)
   end
+  if mod.threads
+    # custom section "nfcxx.threads": the memory's page count, then the thread-local group's start and size (u32,
+    # little-endian). The host needs them to create the shared memory the module imports (a JS memory's limits are not
+    # readable from the module) and each thread's block of the group.
+    payload = name_bytes("nfcxx.threads", [])
+    [mod.pages, mod.tls_start || 0, mod.tls_size || 0].pack("V3").each_byte { |b| payload << b }
+    section(0, payload, out)
+  end
+  out.concat(name_section(mod, bodies)) if $names
+  out
+end
+
+# The custom section "name" with its function names subsection (1): the imports, the defined functions, and the
+# functions of the modes (asan's check and allocator).
+def name_section(mod, bodies)
+  names = []
+  mod.imports.each_with_index { |(nm, _), i| names << [i, nm] }
+  bodies.each_with_index { |(nm, _), i| names << [mod.imports.length + i, nm] }
+  if mod.asan
+    names << [mod.check_index, "__asan_check"] << [mod.alloc_index["malloc"], "malloc"] << [mod.alloc_index["free"], "free"]
+  end
+  sub = []
+  uleb(names.length, sub)
+  names.each { |i, nm| uleb(i, sub); name_bytes(nm, sub) }
+  body = []
+  name_bytes("name", body)
+  body << 1
+  uleb(sub.length, body)
+  body.concat(sub)
+  out = []
+  section(0, body, out)
   out
 end
 
@@ -2143,6 +3207,8 @@ def main(argv)
   asan = false
   emscripten = false
   import_memory = false
+  memory64 = false
+  threads = false
   while !args.empty? && args.first.start_with?("--")
     flag = args.shift
     if flag == "--asan"
@@ -2151,6 +3217,12 @@ def main(argv)
       emscripten = true
     elsif flag == "--emscripten-import-memory"
       import_memory = true
+    elsif flag == "--memory64"
+      memory64 = true
+    elsif flag == "--threads"
+      threads = true
+    elsif flag == "--names"
+      $names = true
     else
       $stderr.write(USAGE)
       return 1
@@ -2164,13 +3236,21 @@ def main(argv)
     $stderr.write("error: --asan and --emscripten are not combined (the shadow would sit where the heap begins)\n")
     return 1
   end
+  if memory64 && (asan || emscripten)
+    $stderr.write("error: --memory64 is not combined with --asan or --emscripten (their shadow and runtime are i32)\n")
+    return 1
+  end
   if import_memory && !emscripten
     $stderr.write("error: --emscripten-import-memory needs --emscripten\n")
     return 1
   end
+  if threads && (asan || emscripten || memory64)
+    $stderr.write("error: --threads is not combined with --asan, --emscripten or --memory64 (their runtime is single-threaded)\n")
+    return 1
+  end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    bytes = emit_module(src, asan, emscripten, import_memory)
+    bytes = emit_module(src, asan, emscripten, import_memory, memory64, threads)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

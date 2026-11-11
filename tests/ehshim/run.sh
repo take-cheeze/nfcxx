@@ -2,7 +2,7 @@
 # The EH shim (lib/ehshim, scripts/ehshim, docs/notes/eh-shim.md) on programs that the common runners cannot compile on
 # every backend (<future> and <regex> need std::atomic_flag and builtins that cproc and Path B lack).
 #
-# For each tests/ehshim/*.cpp: `// BACKENDS: gcc qbe pathb` lists the backends that build it (default: gcc); `// EXPECT: N`
+# For each tests/ehshim/*.cpp (foreign/ at the end): `// BACKENDS: gcc qbe pathb` lists the backends that build it (default: gcc); `// EXPECT: N`
 # is the exit code. Every backend must give that exit code and the standard output of the same program built by the host
 # g++ (its exceptions are the reference). `pathb` needs the Path B harness (PATHB_CPFE, PATHB_BASE) and is skipped
 # without it. Exit 1 on a failure.
@@ -36,4 +36,21 @@ for f in tests/ehshim/*.cpp; do
     else echo "ok   $f ($b)"; fi
   done
 done
+# foreign/: exceptions thrown with plain `throw` by a library built by g++ (lib.cpp), caught by main.cpp built by nfcxx
+# on both backends (and by g++ for the reference output); also with NFCXX_EH_UNWIND=1 on the gcc backend.
+d=tests/ehshim/foreign
+if "$cxx" -std=c++17 -O1 -shared -fPIC "$d/lib.cpp" -o "$tmp/libforeign.so" 2> "$tmp/foreign.err" &&
+   "$cxx" -std=c++17 -pthread -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.host" 2>> "$tmp/foreign.err"; then
+  "$tmp/foreign.host" > "$tmp/foreign.host.out"
+  for c in "gcc 0" "qbe 0" "gcc 1"; do
+    set -- $c; name="$d ($1$([ $2 = 1 ] && echo ', NFCXX_EH_UNWIND=1'))"
+    if ! NFCXX_BACKEND=$1 NFCXX_EH_UNWIND=$2 ./nfcxx -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.$1$2" 2> "$tmp/foreign.$1$2.err"; then
+      echo "FAIL $name: compile"; grep -v prelinker "$tmp/foreign.$1$2.err" | head -5; fail=1; continue
+    fi
+    if "$tmp/foreign.$1$2" > "$tmp/foreign.$1$2.out" 2>&1 && cmp -s "$tmp/foreign.host.out" "$tmp/foreign.$1$2.out"; then echo "ok   $name"
+    else echo "FAIL $name"; diff "$tmp/foreign.host.out" "$tmp/foreign.$1$2.out" | head -10; fail=1; fi
+  done
+else
+  echo "FAIL $d: host $cxx cannot build it"; head -3 "$tmp/foreign.err"; fail=1
+fi
 exit $fail

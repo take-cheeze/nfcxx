@@ -1,0 +1,3 @@
+(ir-module "interior" (layout (pointer 8) (int 4)))
+(interior-mutable (struct "UnsafeCell"))
+(function "test" (ret int) (params) (return (const int 0)))

@@ -1,6 +1,7 @@
 // Copied from onnxsim (onnxsim/sym_expr.h), licensed under the Apache License 2.0 (see the LICENSE of the onnxsim repository).
 // Source: onnxsim commit 94851843 (the last commit that changed this file; copied from onnxsim HEAD c823a3a8, identical content).
-// Changes from the original: this comment, and the include of the header (nfcuop_sym_expr.hpp). The code is otherwise unchanged.
+// Changes from the original: this comment, and the include of the header (nfcuop_sym_expr.hpp). The code is otherwise unchanged,
+// except for the operations added for the UOp layer (stage 7, docs/notes/uop.md), at the end of the file.
 #include "nfcuop_sym_expr.hpp"
 
 #include <sstream>
@@ -208,6 +209,80 @@ std::string SymRatio::str() const {
   const SymExpr d = divide_by(den_, cf);
   if (!d.is_symbolic() && d.to_int() == 1) return wrap(n);
   return wrap(n) + "/" + wrap(d);
+}
+
+}  // namespace onnxsim
+
+// ---- operations for the UOp layer (stage 7) ----
+
+namespace onnxsim {
+namespace {
+
+// a * b and a + b in int64, false when the result does not fit.
+bool mul_fits(std::int64_t a, std::int64_t b, std::int64_t* out) {
+  if (a == 0 || b == 0) {
+    *out = 0;
+    return true;
+  }
+  if (a == INT64_MIN || b == INT64_MIN) return false;
+  const std::int64_t x = a < 0 ? -a : a, y = b < 0 ? -b : b;
+  if (x > INT64_MAX / y) return false;
+  *out = a * b;
+  return true;
+}
+
+bool add_fits(std::int64_t a, std::int64_t b, std::int64_t* out) {
+  if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return false;
+  *out = a + b;
+  return true;
+}
+
+}  // namespace
+
+std::vector<std::string> SymExpr::symbols() const {
+  std::vector<std::string> out;
+  for (const auto& [mono, coeff] : terms_) {
+    (void)coeff;
+    for (const std::string& name : mono) out.push_back(name);
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+std::optional<std::string> SymExpr::single_symbol() const {
+  if (terms_.size() != 1) return std::nullopt;
+  const auto& [mono, coeff] = *terms_.begin();
+  if (coeff != 1 || mono.size() != 1) return std::nullopt;
+  return mono[0];
+}
+
+std::optional<std::int64_t> SymExpr::evaluate(const std::map<std::string, std::int64_t>& values) const {
+  std::int64_t sum = 0;
+  for (const auto& [mono, coeff] : terms_) {
+    std::int64_t t = coeff;
+    for (const std::string& name : mono) {
+      auto it = values.find(name);
+      if (it == values.end() || !mul_fits(t, it->second, &t)) return std::nullopt;
+    }
+    if (!add_fits(sum, t, &sum)) return std::nullopt;
+  }
+  return sum;
+}
+
+std::optional<std::int64_t> SymExpr::upper_bound(const std::map<std::string, std::int64_t>& bounds) const {
+  std::int64_t sum = 0;
+  for (const auto& [mono, coeff] : terms_) {
+    std::int64_t t = coeff;
+    if (coeff > 0) {
+      for (const std::string& name : mono) {
+        auto it = bounds.find(name);
+        if (it == bounds.end() || !mul_fits(t, it->second, &t)) return std::nullopt;
+      }
+    }
+    if (!add_fits(sum, t, &sum)) return std::nullopt;
+  }
+  return sum;
 }
 
 }  // namespace onnxsim

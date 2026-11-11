@@ -1,0 +1,8 @@
+(ir-module "copy" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params)
+(slot "a" (struct "P") 8 4) (slot "b" (struct "P") 8 4)
+(decl $"a" val) (decl $"b" val) (zero-fill 8 $"a") (zero-fill 8 $"b")
+(let %0 (ptr int) (borrow (ptr int) "r" shared $"b"))
+(copy 8 $"b" $"a")
+(let %1 int (load int %0)) (loan-end "r")
+(scope-end $"b") (scope-end $"a") (return %1))

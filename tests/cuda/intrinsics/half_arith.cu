@@ -1,4 +1,4 @@
-// __hadd, __hmul and __hfma on the device (the device unit's half type is an unsigned short), against the same
+// __hadd, __hmul and __hfma on the device (halves given as bit patterns), against the same
 // operations on the host with CUDA's conversions (cuda_fp16.h): the float result of the operands, rounded to half.
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -14,9 +14,9 @@ static __half __hfma(__half a, __half b, __half c) {
 __global__ void k(unsigned short *s, unsigned short *p, unsigned short *f, const unsigned short *a,
                   const unsigned short *b, const unsigned short *c) {
   unsigned i = threadIdx.x;
-  __half x = (__half)a[i];
-  __half y = (__half)b[i];
-  __half z = (__half)c[i];
+  __half x = __ushort_as_half(a[i]);
+  __half y = __ushort_as_half(b[i]);
+  __half z = __ushort_as_half(c[i]);
   __half sum = __hadd(x, y);
   __half prod = __hmul(x, y);
   __half fma = __hfma(x, y, z);

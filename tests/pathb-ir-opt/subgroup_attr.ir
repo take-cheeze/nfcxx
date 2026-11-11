@@ -1,0 +1,12 @@
+(ir-module "subgroup.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(sycl-kernel-attr "body" (reqd-sub-group-size 32))
+(function "body"
+  (ret void)
+  (params (param %0 "x" int))
+  (let %1 int (wadd int %0 (const int 1)))
+  (return))
+(function "entry"
+  (ret void)
+  (params)
+  (eval (call void &"body" (const int 3)))
+  (return))

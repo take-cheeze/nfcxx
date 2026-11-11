@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "both" (returns void) (nothrow) (noescape) (closed) (args (write int) (read int)))
+(function "test" (ret int) (params )
+(slot "s" (struct "Pair") 8 4)
+
+(decl $"s" val) (zero-fill 8 $"s") (eval (call void &"both" $"s" (offset $"s" 4)))(return (const int 0))
+)

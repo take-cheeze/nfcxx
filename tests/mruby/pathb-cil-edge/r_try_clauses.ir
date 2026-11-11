@@ -1,0 +1,5 @@
+(function "t" (ret int) (params)
+  (let %0 int (call int &"_setjmp" (const long 0)))
+  (let %1 bool (eq int %0 (const int 0)))
+  (if %1 (then (block)) (else (if (eq int %0 (const int 2)) (then (block)) (else (block)))))
+  (return (const int 0)))

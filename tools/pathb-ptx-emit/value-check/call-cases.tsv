@@ -1,0 +1,22 @@
+# id	kind	dest	mode	form: the instruction of one row. kind call (a call form, dest its result type) or asm (a statement).
+# mode r: the row's result (dest) is stored to the output; mode m: the statement writes memory only. Every row also has its
+# final scratch slot compared. Operands: %1 = B (int), %2 = A (int), %3 = A (float), %4 = the row's scratch slot, %5 = B (float).
+0	call	int	r	(call int &"__nfcxx_shfl_sync_i" (const unsigned_int 4294967295) %2 %1)
+1	call	float	r	(call float &"__nfcxx_shfl_sync_f" (const unsigned_int 4294967295) %3 %1)
+2	call	int	r	(call int &"__nfcxx_shfl_xor_sync_i" (const unsigned_int 4294967295) %2 %1)
+3	call	float	r	(call float &"__nfcxx_shfl_xor_sync_f" (const unsigned_int 4294967295) %3 %1)
+4	call	int	r	(call int &"__nfcxx_shfl_down_sync_i" (const unsigned_int 4294967295) %2 %1)
+5	call	float	r	(call float &"__nfcxx_shfl_down_sync_f" (const unsigned_int 4294967295) %3 %1)
+6	call	int	r	(call int &"__nfcxx_shfl_up_sync_i" (const unsigned_int 4294967295) %2 %1)
+7	call	float	r	(call float &"__nfcxx_shfl_up_sync_f" (const unsigned_int 4294967295) %3 %1)
+8	call	int	r	(call int &"__nfcxx_ballot_sync" (const unsigned_int 4294967295) %2)
+9	call	int	r	(call int &"__nfcxx_any_sync" (const unsigned_int 4294967295) %2)
+10	call	int	r	(call int &"__nfcxx_all_sync" (const unsigned_int 4294967295) %2)
+11	call	int	r	(call int &"__nfcxx_reduce_add_sync" (const unsigned_int 4294967295) %2)
+12	call	int	r	(call int &"__nfcxx_atomic_add_i" %4 %1)
+13	call	int	r	(call int &"__nfcxx_atomic_max_i" %4 %1)
+14	call	int	r	(call int &"__nfcxx_atomic_cas_i" %4 %2 %1)
+15	call	float	r	(call float &"__nfcxx_atomic_add_f" %4 %5)
+16	asm	-	m	(ptx-asm "add.s32 %0, %1, %2;" (opnd out %4 int) (opnd in %2 int) (opnd in %1 int))
+17	asm	-	m	(ptx-asm "add.s32 %0, %0, %1;" (opnd inout %4 int) (opnd in %1 int))
+18	asm	-	m	(ptx-asm "add.f32 %0, %1, %2;" (opnd out %4 float) (opnd in %3 float) (opnd in %5 float))

@@ -1,0 +1,16 @@
+(ir-module "sycl_kernel_param_size.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 bool (ne int (const int 0) (const int 0)))
+  (if %0
+    (then
+      (block
+        (return (const int 1)))))
+  (let %1 bool (ne int (const int 0) (const int 0)))
+  (if %1
+    (then
+      (block
+        (return (const int 2)))))
+  (return (const int 0)))

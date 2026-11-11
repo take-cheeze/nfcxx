@@ -1,0 +1,7 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(call-effects "get" (returns int) (nothrow) (noescape) (closed) (args (read int)))
+(function "get" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (store int %0 (const int 1)) (return (const int 0)))
+(function "main" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 3)) (let %0 int (call int &"get" $"x")) (scope-end $"x") (return %0))

@@ -1,0 +1,197 @@
+function l $ref(l %.1, l %.3) {
+@start.1
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.4 =l alloc8 8
+	storel %.3, %.4
+@body.2
+	%.5 =l loadl %.2
+	%.6 =l extsw 31
+	%.7 =l mul %.5, %.6
+	%.8 =l loadl %.4
+	%.9 =l add %.7, %.8
+	ret %.9
+}
+data $.Lstring.3 = align 1 { b "p\000", }
+type :.1 = { l, }
+data $.Lstring.4 = align 1 { b "q\000", }
+type :.2 = { l, w, }
+data $.Lstring.5 = align 1 { b "r\000", }
+type :.3 = { w, w, }
+data $.Lstring.6 = align 1 { b "iiiiqi\000", }
+data $.Lstring.7 = align 1 { b "iiiiipp\000", }
+data $.Lstring.8 = align 1 { b "lllllllqrpq\000", }
+export
+function w $main() {
+@start.3
+	%.1 =l alloc8 8
+	%.3 =l alloc8 16
+	%.7 =l alloc4 8
+	%.9 =l alloc8 8
+	%.29 =l alloc8 8
+	%.53 =l alloc8 8
+	%.55 =l alloc4 4
+	%.74 =l alloc8 8
+	%.76 =l alloc4 4
+@body.4
+	%.2 =l extsw 1000
+	storel %.2, %.1
+	%.4 =l extsw 20000
+	storel %.4, %.3
+	%.5 =l add %.3, 8
+	storew 3, %.5
+	%.6 =l add %.3, 12
+	storew 0, %.6
+	storew 4, %.7
+	%.8 =l add %.7, 4
+	storew 6, %.8
+	%.10 =l call extern $take(l $.Lstring.3, ..., :.1 %.1)
+	storel %.10, %.9
+	%.11 =l loadl %.9
+	%.12 =l extsw 7
+	%.13 =l extsw 1000
+	%.14 =l call $ref(l %.12, l %.13)
+	%.15 =w cnel %.11, %.14
+	jnz %.15, @if_true.5, @if_false.6
+@if_true.5
+	ret 1
+@if_false.6
+	%.16 =l call extern $take(l $.Lstring.4, ..., :.2 %.3)
+	storel %.16, %.9
+	%.17 =l loadl %.9
+	%.18 =l extsw 7
+	%.19 =l extsw 60003
+	%.20 =l call $ref(l %.18, l %.19)
+	%.21 =w cnel %.17, %.20
+	jnz %.21, @if_true.7, @if_false.8
+@if_true.7
+	ret 2
+@if_false.8
+	%.22 =l call extern $take(l $.Lstring.5, ..., :.3 %.7)
+	storel %.22, %.9
+	%.23 =l loadl %.9
+	%.24 =l extsw 7
+	%.25 =l extsw 26
+	%.26 =l call $ref(l %.24, l %.25)
+	%.27 =w cnel %.23, %.26
+	jnz %.27, @if_true.9, @if_false.10
+@if_true.9
+	ret 3
+@if_false.10
+	%.28 =l call extern $take(l $.Lstring.6, ..., w 1, w 2, w 3, w 4, :.2 %.3, w 5)
+	storel %.28, %.9
+	%.30 =l extsw 7
+	storel %.30, %.29
+	%.31 =l loadl %.29
+	%.32 =l extsw 1
+	%.33 =l call $ref(l %.31, l %.32)
+	storel %.33, %.29
+	%.34 =l loadl %.29
+	%.35 =l extsw 2
+	%.36 =l call $ref(l %.34, l %.35)
+	storel %.36, %.29
+	%.37 =l loadl %.29
+	%.38 =l extsw 3
+	%.39 =l call $ref(l %.37, l %.38)
+	storel %.39, %.29
+	%.40 =l loadl %.29
+	%.41 =l extsw 4
+	%.42 =l call $ref(l %.40, l %.41)
+	storel %.42, %.29
+	%.43 =l loadl %.29
+	%.44 =l extsw 60003
+	%.45 =l call $ref(l %.43, l %.44)
+	storel %.45, %.29
+	%.46 =l loadl %.29
+	%.47 =l extsw 5
+	%.48 =l call $ref(l %.46, l %.47)
+	storel %.48, %.29
+	%.49 =l loadl %.9
+	%.50 =l loadl %.29
+	%.51 =w cnel %.49, %.50
+	jnz %.51, @if_true.11, @if_false.12
+@if_true.11
+	ret 4
+@if_false.12
+	%.52 =l call extern $take(l $.Lstring.7, ..., w 1, w 2, w 3, w 4, w 5, :.1 %.1, :.1 %.1)
+	storel %.52, %.9
+	%.54 =l extsw 7
+	storel %.54, %.53
+	storew 1, %.55
+@for_cond.13
+	%.56 =w loadw %.55
+	%.57 =w cslew %.56, 5
+	jnz %.57, @for_body.14, @for_join.16
+@for_body.14
+	%.58 =l loadl %.53
+	%.59 =w loadw %.55
+	%.60 =l extsw %.59
+	%.61 =l call $ref(l %.58, l %.60)
+	storel %.61, %.53
+@for_cont.15
+	%.62 =w loadw %.55
+	%.63 =w add %.62, 1
+	storew %.63, %.55
+	jmp @for_cond.13
+@for_join.16
+	%.64 =l loadl %.53
+	%.65 =l extsw 1000
+	%.66 =l call $ref(l %.64, l %.65)
+	storel %.66, %.53
+	%.67 =l loadl %.53
+	%.68 =l extsw 1000
+	%.69 =l call $ref(l %.67, l %.68)
+	storel %.69, %.53
+	%.70 =l loadl %.9
+	%.71 =l loadl %.53
+	%.72 =w cnel %.70, %.71
+	jnz %.72, @if_true.17, @if_false.18
+@if_true.17
+	ret 5
+@if_false.18
+	%.73 =l call extern $take(l $.Lstring.8, ..., l 1, l 2, l 3, l 4, l 5, l 6, l 7, :.2 %.3, :.3 %.7, :.1 %.1, :.2 %.3)
+	storel %.73, %.9
+	%.75 =l extsw 7
+	storel %.75, %.74
+	storew 1, %.76
+@for_cond.19
+	%.77 =w loadw %.76
+	%.78 =w cslew %.77, 7
+	jnz %.78, @for_body.20, @for_join.22
+@for_body.20
+	%.79 =l loadl %.74
+	%.80 =w loadw %.76
+	%.81 =l extsw %.80
+	%.82 =l call $ref(l %.79, l %.81)
+	storel %.82, %.74
+@for_cont.21
+	%.83 =w loadw %.76
+	%.84 =w add %.83, 1
+	storew %.84, %.76
+	jmp @for_cond.19
+@for_join.22
+	%.85 =l loadl %.74
+	%.86 =l extsw 60003
+	%.87 =l call $ref(l %.85, l %.86)
+	storel %.87, %.74
+	%.88 =l loadl %.74
+	%.89 =l extsw 26
+	%.90 =l call $ref(l %.88, l %.89)
+	storel %.90, %.74
+	%.91 =l loadl %.74
+	%.92 =l extsw 1000
+	%.93 =l call $ref(l %.91, l %.92)
+	storel %.93, %.74
+	%.94 =l loadl %.74
+	%.95 =l extsw 60003
+	%.96 =l call $ref(l %.94, l %.95)
+	storel %.96, %.74
+	%.97 =l loadl %.9
+	%.98 =l loadl %.74
+	%.99 =w cnel %.97, %.98
+	jnz %.99, @if_true.23, @if_false.24
+@if_true.23
+	ret 6
+@if_false.24
+	ret 0
+}

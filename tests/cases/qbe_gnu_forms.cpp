@@ -1,5 +1,5 @@
 // EXPECT: 0
-// QBE path (scripts/qbe-prep.rb): GNU aligned on members and struct bodies, __bf16 and the _Float types of <numbers>,
+// QBE path (scripts/qbe-prep): GNU aligned on members and struct bodies, __bf16 and the _Float types of <numbers>,
 // and thread_local with dynamic initialization. cproc rejects each of these forms in EDG's C output (docs/notes/realworld.md).
 #include <cstdint>
 #include <numbers>  // std::numbers variables use _Float16/_Float32/_Float64/_Float128
@@ -26,4 +26,4 @@ int main() {
     if (!(std::numbers::pi_v<double> > 3.0)) return 5;
     return tl == 7 ? 0 : 4;
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY-LINUX: the qbe arm64 backend has no extern thread (TLS) support (gcc passes; the gate covers the whole file); macOS arm64 runs it

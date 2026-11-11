@@ -12,7 +12,7 @@ below, on the gcc backend.
 | `-std=gnu++NN` | as `-std=c++NN`; GNU and strict modes differ in the dialect, which `--dialect` selects |
 | `-W*`, `-w` | dropped: warnings do not change the object code (no `-Werror`) |
 | `-pipe` | dropped: the stages talk through pipes instead of temporary files; the output is the same (ninja's `configure.py` passes it) |
-| `-Wl,*` | passed to the host link as an EDG `--c_to_obj_option` (order-independent options such as `-Wl,-rpath,DIR`, `-Wl,-E`, `-Wl,--gc-sections`). The order-dependent ones (`--whole-archive`/`--no-whole-archive`, `--start-group`/`--end-group`, `--as-needed`/`--no-as-needed`, `-Bstatic`/`-Bdynamic`) are refused with exit 2 for C++ inputs: eccp puts its `--c_to_obj_option` items before every object and archive, so they would act on the wrong ones. Before this change every `-Wl,*` was rejected by eccp ("unknown option"). Test: `tests/cxx-driver/run.sh` |
+| `-Wl,*` | passed to the host link as an EDG `--c_to_obj_option` (order-independent options such as `-Wl,-rpath,DIR`, `-Wl,-E`, `-Wl,--gc-sections`). eccp puts its `--c_to_obj_option` items before every object and archive, so the order-dependent options cannot stay where they are. `--no-as-needed` (alone or as `-Wl,--no-as-needed,LIB,...`, find_package(Torch)'s form) becomes one `--no-as-needed` for the whole link, its items stay inputs in place, and the `-Wl,--as-needed` that closes such a span is dropped: every library is then kept in DT_NEEDED, which only adds entries; `-Wl,--as-needed` alone applies to the whole link. The others (`--whole-archive`/`--no-whole-archive`, `--start-group`/`--end-group`, `-Bstatic`/`-Bdynamic`, `-Wl,--as-needed,...`) are refused with exit 2 for C++ inputs. A file the link writes (`--dependency-file=`, CMake 4's relative `CMakeFiles/T.dir/link.d`; `-Map=`) is made absolute when its directory exists, since eccp links in a temporary directory. Before this change every `-Wl,*` was rejected by eccp ("unknown option"). Test: `tests/cxx-driver/run.sh` |
 | `-fexceptions`, `-fwrapv`, `-fno-strict-aliasing` | accepted: EDG always lowers exceptions; the C side already gets the other two |
 | `-fvisibility=*`, `-fvisibility-inlines-hidden` | ignored, as `nfcc` ignores them (`docs/notes/realworld.md`). They change the exports of a `-shared` object; that is the one place this could matter |
 | `-fPIC`, `-fPIE`, `-pie`, `-rdynamic` | passed to the C compile and the link |
@@ -23,6 +23,27 @@ below, on the gcc backend.
 | `-E` (with `-P`, `-o`, `-x c++`, and `-` for a source on stdin) | the host C++ compiler preprocesses, as `nfcc` does for C; mruby's presym step and CMake's GLES3 header probe run the compiler this way |
 | `-include FILE` | EDG's `--preinclude`: the header is found through the include paths and its macros are visible (Effekseer's `-include EGL/egl.h`) |
 | `-c` with `-MD`/`-MMD` and `-MF`/`-MT`/`-MQ`/`-MP` | the host preprocessor writes the dependency file (`-M`/`-MM`), as `nfcc` does; a dependency option without `-c` is refused |
+
+### Compile cache (`NFCXX_CACHE`)
+
+Opt-in: with `NFCXX_CACHE=DIR`, a `-c` compile of one C++ source with `-o OBJ` is kept under `DIR/objects/<key>`, and an identical
+compile later copies the object back with its `<stem>.ti` and `<stem>.ii` (the link reads those records beside the object). The key
+covers the command as given, the absolute output path (the prelinker records it in the `.ti`), the working directory, the source
+and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, the driver and `scripts/` (and `tools/weak-symbols`, `tools/qbe-prep`), the EDG and QBE binaries,
+and the host compilers' versions. Not cached: `.cu` (its device image is, below) and C inputs, `-E`, `-MD`, several sources in one command, and an `-o` without
+an extension. A header whose path has a space is not tracked, so its change would not invalidate the key. Test 15 of
+`tests/cxx-driver/run.sh` covers a hit that links, and a changed header.
+
+A `.cu` compile is not kept as an object, but its device image is: under `DIR/cu-device/<key>`, the device IR and the
+PTX modules with their cubins. The key covers the device unit the rewriter writes and its kernel list, the `-D`/`-U`
+options and the toolkit version macros, the SM, `NFCXX_CUDA_JIT` and the module budgets, the device front end
+(`cpfe`, `scripts/pathb-dump`, its base directory), `pathb-ptx-emit` and the ptxas version. A hit skips the device
+front end, the emitter and ptxas; the rewriter, the embed step and the host compile still run. On ggml-cuda (RTX 2060
+machine) mmvq.cu went from 249 s to 23 s (ptxas was 222 s of it), while binbcast.cu is almost all host compile: two of about
+350 s each (the second pass, for its kernel instances, runs with the cache off), and about 8 s of device stages. `NFCXX_CACHE_LOG` logs these lookups as `== F.cu device unit`. `tests/cuda/run.sh`
+covers a miss, a hit whose program runs, and a changed kernel.
+
+With `NFCXX_CACHE_LOG=FILE` set as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The log variable is left out of the key, so logging never causes a miss.
 
 Refused (eccp says `unknown option`): `-fno-rtti`, `-fno-exceptions`, and every other option not in the table, since
 each of them would change the meaning of the code or is not implemented.

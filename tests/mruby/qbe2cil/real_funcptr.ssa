@@ -1,0 +1,219 @@
+function w $__bswap_16(w %.1) {
+@start.1
+	%.2 =l alloc4 2
+	storeh %.1, %.2
+@body.2
+	%.3 =w loaduh %.2
+	%.4 =w extuh %.3
+	%.5 =w sar %.4, 8
+	%.6 =w and %.5, 255
+	%.7 =w loaduh %.2
+	%.8 =w extuh %.7
+	%.9 =w and %.8, 255
+	%.10 =w shl %.9, 8
+	%.11 =w or %.6, %.10
+	ret %.11
+}
+function w $__bswap_32(w %.1) {
+@start.3
+	%.2 =l alloc4 4
+	storew %.1, %.2
+@body.4
+	%.3 =w loadw %.2
+	%.4 =w and %.3, 4278190080
+	%.5 =w shr %.4, 24
+	%.6 =w loadw %.2
+	%.7 =w and %.6, 16711680
+	%.8 =w shr %.7, 8
+	%.9 =w or %.5, %.8
+	%.10 =w loadw %.2
+	%.11 =w and %.10, 65280
+	%.12 =w shl %.11, 8
+	%.13 =w or %.9, %.12
+	%.14 =w loadw %.2
+	%.15 =w and %.14, 255
+	%.16 =w shl %.15, 24
+	%.17 =w or %.13, %.16
+	ret %.17
+}
+function l $__bswap_64(l %.1) {
+@start.5
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.6
+	%.3 =l loadl %.2
+	%.4 =l and %.3, 18374686479671623680
+	%.5 =l shr %.4, 56
+	%.6 =l loadl %.2
+	%.7 =l and %.6, 71776119061217280
+	%.8 =l shr %.7, 40
+	%.9 =l or %.5, %.8
+	%.10 =l loadl %.2
+	%.11 =l and %.10, 280375465082880
+	%.12 =l shr %.11, 24
+	%.13 =l or %.9, %.12
+	%.14 =l loadl %.2
+	%.15 =l and %.14, 1095216660480
+	%.16 =l shr %.15, 8
+	%.17 =l or %.13, %.16
+	%.18 =l loadl %.2
+	%.19 =l and %.18, 4278190080
+	%.20 =l shl %.19, 8
+	%.21 =l or %.17, %.20
+	%.22 =l loadl %.2
+	%.23 =l and %.22, 16711680
+	%.24 =l shl %.23, 24
+	%.25 =l or %.21, %.24
+	%.26 =l loadl %.2
+	%.27 =l and %.26, 65280
+	%.28 =l shl %.27, 40
+	%.29 =l or %.25, %.28
+	%.30 =l loadl %.2
+	%.31 =l and %.30, 255
+	%.32 =l shl %.31, 56
+	%.33 =l or %.29, %.32
+	ret %.33
+}
+function w $__uint16_identity(w %.1) {
+@start.7
+	%.2 =l alloc4 2
+	storeh %.1, %.2
+@body.8
+	%.3 =w loaduh %.2
+	ret %.3
+}
+function w $__uint32_identity(w %.1) {
+@start.9
+	%.2 =l alloc4 4
+	storew %.1, %.2
+@body.10
+	%.3 =w loadw %.2
+	ret %.3
+}
+function l $__uint64_identity(l %.1) {
+@start.11
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.12
+	%.3 =l loadl %.2
+	ret %.3
+}
+function w $add(w %.1, w %.3) {
+@start.13
+	%.2 =l alloc4 4
+	storew %.1, %.2
+	%.4 =l alloc4 4
+	storew %.3, %.4
+@body.14
+	%.5 =w loadw %.2
+	%.6 =w loadw %.4
+	%.7 =w add %.5, %.6
+	ret %.7
+}
+function w $mul(w %.1, w %.3) {
+@start.15
+	%.2 =l alloc4 4
+	storew %.1, %.2
+	%.4 =l alloc4 4
+	storew %.3, %.4
+@body.16
+	%.5 =w loadw %.2
+	%.6 =w loadw %.4
+	%.7 =w mul %.5, %.6
+	ret %.7
+}
+function w $apply(l %.1, w %.3, w %.5) {
+@start.17
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.4 =l alloc4 4
+	storew %.3, %.4
+	%.6 =l alloc4 4
+	storew %.5, %.6
+@body.18
+	%.7 =w loadw %.4
+	%.8 =w loadw %.6
+	%.9 =l loadl %.2
+	%.10 =w call %.9(w %.7, w %.8)
+	ret %.10
+}
+function w $cmp(l %.1, l %.3) {
+@start.19
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.4 =l alloc8 8
+	storel %.3, %.4
+@body.20
+	%.5 =l loadl %.2
+	%.6 =w loadw %.5
+	%.7 =l loadl %.4
+	%.8 =w loadw %.7
+	%.9 =w sub %.6, %.8
+	ret %.9
+}
+export
+function w $main() {
+@start.21
+	%.1 =l alloc8 16
+	%.3 =l alloc4 4
+	%.15 =l alloc4 20
+	%.21 =l alloc8 8
+@body.22
+	storel $add, %.1
+	%.2 =l add %.1, 8
+	storel $mul, %.2
+	%.4 =l extsw 0
+	%.5 =l mul %.4, 8
+	%.6 =l add %.1, %.5
+	%.7 =l loadl %.6
+	%.8 =w call $apply(l %.7, w 3, w 4)
+	%.9 =l extsw 1
+	%.10 =l mul %.9, 8
+	%.11 =l add %.1, %.10
+	%.12 =l loadl %.11
+	%.13 =w call $apply(l %.12, w 3, w 4)
+	%.14 =w add %.8, %.13
+	storew %.14, %.3
+	storew 5, %.15
+	%.16 =l add %.15, 4
+	storew 3, %.16
+	%.17 =l add %.15, 8
+	storew 9, %.17
+	%.18 =l add %.15, 12
+	storew 1, %.18
+	%.19 =l add %.15, 16
+	storew 7, %.19
+	%.20 =l extsw 5
+	call extern $qsort(l %.15, l %.20, l 4, l $cmp)
+	%.22 =l extsw 1
+	%.23 =l mul %.22, 8
+	%.24 =l add %.1, %.23
+	storel %.24, %.21
+	%.25 =w loadw %.3
+	%.26 =l extsw 0
+	%.27 =l mul %.26, 4
+	%.28 =l add %.15, %.27
+	%.29 =w loadw %.28
+	%.30 =w mul %.29, 10
+	%.31 =w add %.25, %.30
+	%.32 =l extsw 4
+	%.33 =l mul %.32, 4
+	%.34 =l add %.15, %.33
+	%.35 =w loadw %.34
+	%.36 =w add %.31, %.35
+	%.37 =l loadl %.21
+	%.38 =l loadl %.37
+	%.39 =w call %.38(w 1, w 1)
+	%.40 =w add %.36, %.39
+	%.41 =l add %.15, 8
+	%.42 =w loadw %.41
+	%.43 =w ceqw %.42, 5
+	jnz %.43, @cond_true.23, @cond_false.24
+@cond_true.23
+	jmp @cond_join.25
+@cond_false.24
+@cond_join.25
+	%.44 =w phi @cond_true.23 0, @cond_false.24 100
+	%.45 =w add %.40, %.44
+	ret %.45
+}

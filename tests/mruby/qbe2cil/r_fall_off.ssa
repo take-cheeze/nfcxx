@@ -1,0 +1,5 @@
+# Refused: the last block falls off the end of the function.
+function w $f(w %a) {
+@start
+	%x =w copy 1
+}

@@ -38,13 +38,13 @@
 (x87-thunk icall "I2S0" 2 0)
 (x87-thunk entry "_ZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_" weak 4 0)
 (x87-thunk entry "_ZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_" weak 4 0)
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "_ZTVSt9exception" (const (array 5 (const long))) 40 8 (extern))
 (global "_ZTVSt9bad_alloc" (const (array 5 (const long))) 40 8 (extern))
-(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "__eh_curr_region" unsigned_short 2 2 (thread) (extern))
 (global "_ZTVSt20bad_array_new_length" (const (array 5 (const long))) 40 8 (extern))
 (global "program_invocation_name" (ptr char) 8 8 (extern))
 (global "program_invocation_short_name" (ptr char) 8 8 (extern))
@@ -3509,7 +3509,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -3526,7 +3526,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3536,7 +3536,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -3569,7 +3569,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3579,7 +3579,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long 8 8)
   (store long $"tmp" %0)
   (return (const bool 0x0)))
@@ -3587,7 +3587,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIlicJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long 8 8)
   (store long $"__val" %0)
   (let %2 long (load long $"__val"))
@@ -3604,7 +3604,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -3621,7 +3621,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3631,7 +3631,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -3664,7 +3664,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3674,7 +3674,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long 8 8)
   (store long $"tmp" %0)
   (return (const bool 0x0)))
@@ -3682,7 +3682,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long 8 8)
   (store long $"__val" %0)
   (let %2 long (load long $"__val"))
@@ -3699,7 +3699,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -3716,7 +3716,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3726,7 +3726,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -3759,7 +3759,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3769,7 +3769,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" unsigned_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" unsigned_long 8 8)
   (store unsigned_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -3777,7 +3777,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" unsigned_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" unsigned_long 8 8)
   (store unsigned_long $"__val" %0)
   (let %2 unsigned_long (load unsigned_long $"__val"))
@@ -3794,7 +3794,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -3811,7 +3811,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3821,7 +3821,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -3854,7 +3854,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3864,7 +3864,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long_long 8 8)
   (store long_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -3872,7 +3872,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxcJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long_long 8 8)
   (store long_long $"__val" %0)
   (let %2 long_long (load long_long $"__val"))
@@ -3889,7 +3889,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -3906,7 +3906,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3916,7 +3916,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -3949,7 +3949,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -3959,7 +3959,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" unsigned_long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" unsigned_long_long 8 8)
   (store unsigned_long_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -3967,7 +3967,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyycJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" unsigned_long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" unsigned_long_long 8 8)
   (store unsigned_long_long $"__val" %0)
   (let %2 unsigned_long_long (load unsigned_long_long $"__val"))
@@ -3984,7 +3984,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4001,7 +4001,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4011,7 +4011,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4044,7 +4044,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4054,7 +4054,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" float) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" float 4 4)
   (store float $"tmp" %0)
   (return (const bool 0x0)))
@@ -4062,7 +4062,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" float) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" float 4 4)
   (store float $"__val" %0)
   (let %2 float (load float $"__val"))
@@ -4079,7 +4079,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4096,7 +4096,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4106,7 +4106,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4139,7 +4139,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4149,7 +4149,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" double) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" double 8 8)
   (store double $"tmp" %0)
   (return (const bool 0x0)))
@@ -4157,7 +4157,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddcJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" double) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" double 8 8)
   (store double $"__val" %0)
   (let %2 double (load double $"__val"))
@@ -4174,7 +4174,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4191,7 +4191,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4201,7 +4201,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4234,7 +4234,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4244,13 +4244,13 @@
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" (byval (struct "__nfcxx_ld"))) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (return (const bool 0x0)))
 
 (function "_ZZN9__gnu_cxx6__stoaIeecJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" (byval (struct "__nfcxx_ld"))) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "tmp" (array 16 unsigned_char) 16 16)
   (slot "tmp.1" (array 16 unsigned_char) 16 16)
   (slot "tmp.2" (array 16 unsigned_char) 16 16)
@@ -4277,7 +4277,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4294,7 +4294,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4304,7 +4304,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4337,7 +4337,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4347,7 +4347,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long 8 8)
   (store long $"tmp" %0)
   (return (const bool 0x0)))
@@ -4355,7 +4355,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIliwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long 8 8)
   (store long $"__val" %0)
   (let %2 long (load long $"__val"))
@@ -4372,7 +4372,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4389,7 +4389,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4399,7 +4399,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4432,7 +4432,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4442,7 +4442,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long 8 8)
   (store long $"tmp" %0)
   (return (const bool 0x0)))
@@ -4450,7 +4450,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIllwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkElSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long 8 8)
   (store long $"__val" %0)
   (let %2 long (load long $"__val"))
@@ -4467,7 +4467,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4484,7 +4484,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4494,7 +4494,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4527,7 +4527,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4537,7 +4537,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" unsigned_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" unsigned_long 8 8)
   (store unsigned_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -4545,7 +4545,7 @@
 (function "_ZZN9__gnu_cxx6__stoaImmwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEmSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" unsigned_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" unsigned_long 8 8)
   (store unsigned_long $"__val" %0)
   (let %2 unsigned_long (load unsigned_long $"__val"))
@@ -4562,7 +4562,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4579,7 +4579,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4589,7 +4589,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4622,7 +4622,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4632,7 +4632,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" long_long 8 8)
   (store long_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -4640,7 +4640,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIxxwJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkExSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" long_long 8 8)
   (store long_long $"__val" %0)
   (let %2 long_long (load long_long $"__val"))
@@ -4657,7 +4657,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4674,7 +4674,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4684,7 +4684,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4717,7 +4717,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4727,7 +4727,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" unsigned_long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" unsigned_long_long 8 8)
   (store unsigned_long_long $"tmp" %0)
   (return (const bool 0x0)))
@@ -4735,7 +4735,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIyywJiEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEySt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" unsigned_long_long) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" unsigned_long_long 8 8)
   (store unsigned_long_long $"__val" %0)
   (let %2 unsigned_long_long (load unsigned_long_long $"__val"))
@@ -4752,7 +4752,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4769,7 +4769,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4779,7 +4779,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4812,7 +4812,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4822,7 +4822,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" float) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" float 4 4)
   (store float $"tmp" %0)
   (return (const bool 0x0)))
@@ -4830,7 +4830,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIffwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEfSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" float) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" float 4 4)
   (store float $"__val" %0)
   (let %2 float (load float $"__val"))
@@ -4847,7 +4847,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4864,7 +4864,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4874,7 +4874,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -4907,7 +4907,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4917,7 +4917,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" double) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (slot "tmp" double 8 8)
   (store double $"tmp" %0)
   (return (const bool 0x0)))
@@ -4925,7 +4925,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIddwJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEdSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" double) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "__val" double 8 8)
   (store double $"__val" %0)
   (let %2 double (load double $"__val"))
@@ -4942,7 +4942,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr int) (call (ptr int) &"__errno_location"))
@@ -4959,7 +4959,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -4969,7 +4969,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" int 4 4)
@@ -5002,7 +5002,7 @@
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN11_Save_errnoD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Save_errno")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Save_errno"))) 8 8)
   (store (ptr (struct "_Save_errno")) $"tmp" %0)
   (let %1 (ptr (struct "_Save_errno")) (load (ptr (struct "_Save_errno")) $"tmp"))
@@ -5012,13 +5012,13 @@
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb0EE"
   (ret bool)
   (params (param %0 "tmp" (byval (struct "__nfcxx_ld"))) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb0EE"))))
-  (static)
+  (weak)
   (return (const bool 0x0)))
 
 (function "_ZZN9__gnu_cxx6__stoaIeewJEEET0_PFT_PKT1_PPS3_DpT2_EPKcS5_PmS9_EN10_Range_chk6_S_chkEeSt17integral_constantIbLb1EE"
   (ret bool)
   (params (param %0 "__val" (byval (struct "__nfcxx_ld"))) (param %1 "tmp" (byval (struct "_ZSt17integral_constantIbLb1EE"))))
-  (static)
+  (weak)
   (slot "tmp" (array 16 unsigned_char) 16 16)
   (slot "tmp.1" (array 16 unsigned_char) 16 16)
   (slot "tmp.2" (array 16 unsigned_char) 16 16)
@@ -5045,7 +5045,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5059,7 +5059,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5072,7 +5072,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5100,7 +5100,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPcEEvT_S7_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5110,7 +5110,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5124,7 +5124,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5137,7 +5137,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5165,7 +5165,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPwEEvT_S7_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5175,7 +5175,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5189,7 +5189,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5202,7 +5202,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5230,7 +5230,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5240,7 +5240,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPKwEEvT_S8_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5254,7 +5254,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPKwEEvT_S8_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5267,7 +5267,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPKwEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5295,7 +5295,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE12_M_constructIPKwEEvT_S8_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5305,7 +5305,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_M_constructIPKDuEEvT_S8_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5319,7 +5319,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_M_constructIPKDuEEvT_S8_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5332,7 +5332,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_M_constructIPKDuEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5360,7 +5360,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEE12_M_constructIPKDuEEvT_S8_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5370,7 +5370,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_M_constructIPKDsEEvT_S8_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5384,7 +5384,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_M_constructIPKDsEEvT_S8_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5397,7 +5397,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_M_constructIPKDsEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5425,7 +5425,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEE12_M_constructIPKDsEEvT_S8_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))
@@ -5435,7 +5435,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_M_constructIPKDiEEvT_S8_St20forward_iterator_tagEN6_GuardC1EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "__s" (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5449,7 +5449,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_M_constructIPKDiEEvT_S8_St20forward_iterator_tagEN6_GuardC2EPS4_"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))) (param %1 "tmp" (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5462,7 +5462,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_M_constructIPKDiEEvT_S8_St20forward_iterator_tagEN6_GuardD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
@@ -5490,7 +5490,7 @@
 (function "_ZZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEE12_M_constructIPKDiEEvT_S8_St20forward_iterator_tagEN6_GuardD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Guard")))))
-  (static)
+  (weak)
   (slot "tmp" (const (ptr (struct "_Guard"))) 8 8)
   (store (ptr (struct "_Guard")) $"tmp" %0)
   (let %1 (ptr (struct "_Guard")) (load (ptr (struct "_Guard")) $"tmp"))

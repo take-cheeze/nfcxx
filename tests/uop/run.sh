@@ -6,7 +6,8 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, pow/floor/ceil/isnan/isinf, cumsum/prod, argmax/argmin, tile/take (with an ONNX
-#                               round trip for each), the graph, the ONNX export; it also writes models
+#                               round trip for each), the Array API functions (sort, searchsorted, einsum, tensordot, roll, tril, ... with values
+#                               worked out by hand), the graph, the ONNX export; it also writes models
 #   - tests/uop/test_nn.cpp     the forward operators Gemm, Gather, Erf, Conv, MaxPool, AveragePool, BatchNormalization, InstanceNormalization,
 #                               LayerNormalization (nfcuop_hir.cpp, nfcuop_lower.cpp): shape inference and refusals, values against direct
 #                               references, export/import round trips, the C backend's bits, and models for onnx_check.py
@@ -19,8 +20,15 @@
 #                               with dlopen from $NFCUOP_ORT_LIB (or libonnxruntime.so.1 and the other common names), against the
 #                               interpreter (floats to a relative 1e-5, integers exact); a symbolic batch run unbound and bound; the numpy
 #                               API with np.backend = Ort. Prints SKIP when the library cannot be loaded
+#   - tests/uop/test_tinygrad.cpp  the tinygrad back end (nfcuop_tinygrad.hpp): hir graphs exported with to_onnx, run by tinygrad (embedded
+#                               in this process, or in a Python process: scripts/tinygrad_run.py; the executable is $NFCUOP_TINYGRAD_PYTHON,
+#                               else python3) against the interpreter (floats to a relative 1e-5, integers exact): float64, int32, bool, a
+#                               symbolic batch unbound and bound, the numpy API with np.backend = Tinygrad, the failures of the helper, the
+#                               embedded path (repeated calls reuse tinygrad and the runner and are faster than a subprocess call; another
+#                               thread takes the subprocess path; an import failure gives the Python traceback). Prints SKIP when tinygrad
+#                               cannot be imported
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
-#                               float64, exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
+#                               float64 (also of the forward operators Gemm, Gather, Erf, Conv, pooling and the normalizations of hir), exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
 #                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
 #                               onnx_check.py. Needs onnxsim (build/onnxsim/libnfconnxsim.so from scripts/setup-onnxsim.sh, else python3
 #                               with onnx and onnxsim==0.8.1) and prints SKIP without it
@@ -28,36 +36,79 @@
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
-#   - tests/uop/np_compat.cpp/.py   121 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
-#                               with the 32-bit default dtypes (15 documented dtype differences) and once with float64/int64 (none)
+#   - tests/uop/onnx_cost.py    the same models through onnxsim's cost model (kernel traffic vs certified unfused bounds)
+#   - tests/uop/np_compat.cpp/.py   166 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
+#                               with the 32-bit default dtypes (22 documented dtype differences) and once with float64/int64 (none)
 #   - tests/uop/run_poly.sh     the API from scripts (lib/uop/nfcuop_poly.cpp, docs/notes/uop-poly.md): one model in Ruby, Lua, Python,
 #                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   UOP_JOBS=N              the library objects are compiled N at a time (default: the CPU count)
+#   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
+#                           the ONNX models and the Python checks run on the models the selected programs wrote, and the
+#                           poly languages (tests/uop/run_poly.sh) are skipped: CI runs them as their own job
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
-#                           where nfcxx is not built
+#                           where nfcxx is not built (CI does not use it)
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp)
-tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_shaping test_grad test_cgen np_compat)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp)
+tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen np_compat)
+[ -n "${UOP_ONLY:-}" ] && read -ra tests <<<"$UOP_ONLY"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# The library is compiled once per back end: each lib source becomes an object, and every test program of the back end links
+# those objects instead of compiling the same sources again. Compiled in parallel ($UOP_JOBS, default the CPU count), only
+# when a test has to be built. The prelinker records each object's path in its .ti template record, so when TEST_BIN_CACHE
+# is set the objects are built in a directory there named by a key of the back end, the command and the sources (lib,
+# scripts, nfcxx): a later run with the same sources finds them complete (the marker) and uses them where they are.
+# Sets objs (the object paths) and objs_state (ok or failed).
+lib_objects() {
+  local label=$1; shift
+  local dir logs=$tmp/$label/lib-logs key njobs=${UOP_JOBS:-$(nproc)} f b n=0
+  key=$({ printf '%s\n' "$label" "$@"; find lib scripts nfcxx -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-24)
+  if [ -n "${TEST_BIN_CACHE:-}" ] && [ -z "$UOP_HOST" ]; then
+    dir=$(mkdir -p "$TEST_BIN_CACHE" && cd "$TEST_BIN_CACHE" && pwd)/lib-$key
+    if [ -e "$dir/complete" ]; then
+      objs=("$dir"/*.o); objs_state=ok; echo "     $label: library objects from $dir"; return 0
+    fi
+    rm -rf "$dir"
+  else
+    dir=$tmp/$label/lib
+  fi
+  mkdir -p "$dir" "$logs"
+  for f in "${lib[@]}"; do
+    b=$(basename "$f" .cpp)
+    { "$@" -c -I lib/uop "$f" -o "$dir/$b.o" > "$logs/$b.log" 2>&1 || echo "$b" >> "$logs/failed"; } &
+    n=$((n + 1)); [ $((n % njobs)) -ne 0 ] || wait   # batches (wait -n needs bash 4.3, and macOS ships 3.2)
+  done
+  wait
+  if [ -e "$logs/failed" ]; then
+    for b in $(cat "$logs/failed"); do echo "FAIL $label uop/lib $b (build)"; head -30 "$logs/$b.log"; done
+    rm -rf "$dir"; objs_state=failed; return 1
+  fi
+  objs=("$dir"/*.o); objs_state=ok
+  case $dir in "$tmp"/*) ;; *) touch "$dir/complete" ;; esac   # the marker: only a finished build is kept in TEST_BIN_CACHE
+}
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
   label=$1; shift
+  objs=(); objs_state=
   mkdir -p "$tmp/$label/onnx" "$tmp/$label/import"
   command -v python3 >/dev/null && python3 tests/uop/onnx_import_gen.py "$tmp/$label/import" | sed "s/^/     $label /"
   for t in "${tests[@]}"; do
     ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
     [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
-    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")
+    cargs=(-I lib/uop tests/uop/$t.cpp "${lib[@]}" -ldl "${ldx[@]}")   # the cache key names the sources, not the objects
     cached=""; [ -n "$UOP_HOST" ] || cached=$(bin_cache_file "$t-$label" "NFCXX_BACKEND=${NFCXX_BACKEND:-}" "$@" "${cargs[@]}")
     if [ -n "$cached" ] && [ -x "$cached" ]; then
       cp -p "$cached" "$tmp/$label/$t"; echo "     $label uop/$t: compile skipped, program from $cached"
-    elif ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
-      echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     else
+      [ -n "$objs_state" ] || lib_objects "$label" "$@"
+      [ "$objs_state" = ok ] || { fail=1; continue; }
+      if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${objs[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
+        echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
+      fi
       [ -z "$cached" ] || bin_cache_store "$tmp/$label/$t" "$cached"
     fi
     case $t in
@@ -69,25 +120,33 @@ run_all() {
     if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"; grep '^SKIP' <<<"$res" | sed "s/^/     $label /"
     else echo "FAIL $label uop/$t"; head -30 <<<"$res"; fail=1; fi
   done
-  if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
-  else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
-  if [ -n "$CC_IS_NFCXX" ]; then   # the generated C through the nfcxx driver
+  if [ -x "$tmp/$label/np_compat" ]; then
+    if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
+    else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
+  fi
+  if [ -n "$CC_IS_NFCXX" ] && [ -x "$tmp/$label/test_cgen" ]; then   # the generated C through the nfcxx driver
     if res=$(NFCUOP_CC="$PWD/nfcxx" "$tmp/$label/test_cgen" quick 2>&1); then echo "ok   $label uop/test_cgen with nfcxx as the C compiler: $(tail -1 <<<"$res")"
     else echo "FAIL $label uop/test_cgen with nfcxx as the C compiler"; head -30 <<<"$res"; fail=1; fi
   fi
   if command -v python3 >/dev/null; then
-    python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }
+    ls "$tmp/$label/onnx"/*.onnx >/dev/null 2>&1 && { python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }; }
+    ls "$tmp/$label/onnx"/*.onnx >/dev/null 2>&1 && { python3 tests/uop/onnx_cost.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_cost"; fail=1; }; }
     [ -f "$tmp/$label/compat.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat.json" | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat"; fail=1; }; }
     [ -f "$tmp/$label/compat64.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat64.json" 64 | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat 64"; fail=1; }; }
   fi
 }
 if [ -n "$UOP_HOST" ]; then
-  run_all host g++ -std=c++17 -Wall -Wextra -O1 -fsanitize=address,undefined
+  # The embedded interpreter of the tinygrad back end is never finalized, so LeakSanitizer reports its live state (tests/uop/lsan.supp).
+  # The suppressions match frames of the allocation stack, which ASan records to 30 frames by default; CPython and numpy's imports
+  # are deeper than that, so the depth is raised to 255, the most ASan allows (then the stacks are complete and the suppressions match).
+  export ASAN_OPTIONS="malloc_context_size=255${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
+  export LSAN_OPTIONS="suppressions=$PWD/tests/uop/lsan.supp${LSAN_OPTIONS:+:$LSAN_OPTIONS}"
+  run_all host g++ -std=c++17 -Wall -Wextra -O1 -g -fsanitize=address,undefined
   tests/uop/run_poly.sh || fail=1
   exit $fail
 fi
 for be in $backends; do
   CC_IS_NFCXX=1 NFCXX_BACKEND=$be run_all "$be" ./nfcxx -O2
 done
-tests/uop/run_poly.sh || fail=1   # the same API from Ruby, Lua, Python, JavaScript and Go (nfcpoly)
+[ -n "${UOP_ONLY:-}" ] || tests/uop/run_poly.sh || fail=1   # the same API from Ruby, Lua, Python, JavaScript and Go (nfcpoly)
 exit $fail

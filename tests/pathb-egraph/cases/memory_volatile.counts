@@ -1,0 +1,4 @@
+load.v 2
+store.v 1
+load 1
+store 1

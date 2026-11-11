@@ -15,8 +15,12 @@ typedef unsigned long size_t;
 #define __host__
 #define __forceinline__
 #define __align__(n) __attribute__((aligned(n)))
+#define __builtin_align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
+extern "C" unsigned int __nfcxx_float_bits(float);
+extern "C" float __nfcxx_bits_float(unsigned int);
 extern "C" void *__nfcxx_dynshared_addr(void);
 // Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
 extern "C" int printf(const char *, ...);
@@ -112,3 +116,6 @@ int f0(int x) { return x + 0; }
 
 
 void k(int *o) { o[0] = f0(1) + f8(2); }
+
+                                                                                                                  
+void k2(int *o) { o[1] = f1(1) + f2(1) + f3(1) + f4(1) + f5(1) + f6(1) + f7(1); }

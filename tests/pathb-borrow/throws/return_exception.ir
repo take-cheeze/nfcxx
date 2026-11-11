@@ -1,0 +1,4 @@
+(ir-module "throws" (layout (pointer 8) (int 4)))
+(function "test" (ret (ptr void)) (params)
+(let %0 (ptr void) (load (ptr void) @"__caught_object_address"))
+(return %0))

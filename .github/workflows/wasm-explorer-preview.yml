@@ -1,0 +1,156 @@
+name: wasm explorer (preview)
+
+# A preview of a pull request's wasm explorer on Cloudflare Workers (static assets), started by a comment `/preview` on
+# the pull request from someone with write access (author association OWNER, MEMBER or COLLABORATOR). The site is built
+# from the pull request's head by wasm-explorer-build.yml, which has no secrets; only the deploy job below, which runs
+# no code of the pull request (it uploads the built static files), sees the Cloudflare token.
+#
+# The deploy uploads a version of the Worker (wrangler versions upload, an assets-only Worker) with the preview alias
+# pr-<number>, and does not deploy it: the Worker's own URL keeps what it serves, and the preview is the alias's URL,
+# https://pr-<number>-<worker>.<subdomain>.workers.dev (for the Worker nfcxx-preview of take-cheeze:
+# https://pr-542-nfcxx-preview.take-cheeze.workers.dev). A comment on the pull request (one, updated by each preview)
+# gives it.
+#
+# An issue_comment workflow runs from the default branch, so this one works once it is on main.
+#
+# One-time setup, in the repository's settings (Secrets and variables > Actions):
+#   secrets   CLOUDFLARE_API_TOKEN   (an API token with the permission Account > Workers Scripts > Edit)
+#             CLOUDFLARE_ACCOUNT_ID
+#   variable  CLOUDFLARE_WORKER_NAME (optional; default nfcxx-preview)
+# and on the Worker, workers.dev and its preview URLs enabled (Settings > Domains & Routes; both are on by default).
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+# A newer /preview on the same pull request supersedes the one in progress.
+concurrency:
+  group: wasm-explorer-preview-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # The request: a `/preview` comment (alone on its first line) on a pull request, by someone with write access. The
+  # comment gets an "eyes" reaction, and the job gives the head commit to build.
+  request:
+    if: >-
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/preview' || startsWith(github.event.comment.body, '/preview ') ||
+       startsWith(github.event.comment.body, format('/preview{0}', fromJSON('"\n"'))) ||
+       startsWith(github.event.comment.body, format('/preview{0}', fromJSON('"\r"')))) &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.issue.number }}
+    steps:
+      - name: Acknowledge the comment
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes > /dev/null
+
+      - name: The pull request's head
+        id: pr
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "pull request #$PR, head $sha"
+
+  build:
+    needs: request
+    uses: ./.github/workflows/wasm-explorer-build.yml
+    with:
+      ref: ${{ needs.request.outputs.sha }}
+    permissions:
+      contents: read
+
+  deploy:
+    needs: [request, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      issues: write
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER: ${{ vars.CLOUDFLARE_WORKER_NAME || 'nfcxx-preview' }}
+      PR: ${{ github.event.issue.number }}
+      SHA: ${{ needs.request.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+      WRANGLER: wrangler@4.148.0
+    steps:
+      - name: Download the site
+        uses: actions/download-artifact@v7
+        with:
+          name: github-pages
+          path: artifact
+
+      - name: Upload the preview to Cloudflare Workers
+        id: deploy
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::the secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are not set (see this workflow's header)"
+            exit 1
+          fi
+          mkdir site && tar -xf artifact/artifact.tar -C site
+          export WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/wrangler.json"
+          # a new version of the assets-only Worker, under the alias pr-<number>; not deployed (versions upload)
+          npx --yes "$WRANGLER" versions upload --name "$WORKER" --assets site --compatibility-date 2026-10-01 \
+            --preview-alias "pr-$PR" --message "PR #$PR at ${SHA:0:12}"
+          # the URLs, from wrangler's machine-readable output (one JSON object per line)
+          node -e '
+            const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+            const d = lines.map((l) => JSON.parse(l)).find((o) => o.type === "version-upload");
+            if (!d) { console.error("wrangler wrote no version"); process.exit(1); }
+            if (!d.preview_url && !d.preview_alias_url) {
+              console.error("no preview URL: enable workers.dev and preview URLs on the Worker " + d.worker_name);
+              process.exit(1);
+            }
+            const out = [`url=${d.preview_url || d.preview_alias_url}`, `alias=${d.preview_alias_url || d.preview_url}`]
+              .join("\n") + "\n";
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, out);
+            console.log(out);
+          ' "$WRANGLER_OUTPUT_FILE_PATH"
+
+      - name: Comment the preview URL
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          ALIAS: ${{ steps.deploy.outputs.alias }}
+        run: |
+          marker="<!-- wasm-explorer-preview -->"
+          body="$marker
+          **wasm explorer preview** (Cloudflare Workers): $ALIAS
+
+          Commit \`${SHA:0:7}\`: $URL. Comment \`/preview\` again to update it."
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body" > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=rocket > /dev/null
+
+  # A request whose build or deploy failed gets a "confused" reaction, so the commenter sees it without opening Actions.
+  failed:
+    needs: [request, build, deploy]
+    if: failure() && needs.request.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=confused > /dev/null

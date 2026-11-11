@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "init" (returns void) (nothrow) (noescape) (closed) (args (init int)))
+(function "test" (ret int) (params )
+(slot "x" int 4 4)
+
+(decl $"x" val) (store int $"x" (const int 7))(let %0 (ptr int) (borrow (ptr int) "a" shared $"x"))(eval (call void &"init" %0)) (loan-end "a")(return (const int 0))
+)

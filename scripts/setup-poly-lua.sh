@@ -54,7 +54,7 @@ compile() {   # compile FILE.c: C through nfcc, ldo.c as C++ through nfcxx
   fi
 }
 export -f compile; export root be src out
-if ! printf '%s\n' "${files[@]}" | xargs -P "$(nproc)" -I{} bash -c 'compile {}' >>"$log" 2>&1; then
+if ! printf '%s\n' "${files[@]}" | xargs -P "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" -I{} bash -c 'compile {}' >>"$log" 2>&1; then
   tail -30 "$log" >&2; echo "setup-poly-lua: build failed (full log: $log)" >&2; exit 1
 fi
 rm -f "$out/liblua.a"; ar rcs "$out/liblua.a" "$out"/*.o

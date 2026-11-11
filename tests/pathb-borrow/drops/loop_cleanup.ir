@@ -1,0 +1,7 @@
+(ir-module "drops" (layout (pointer 8) (int 4)))
+
+(function "test" (ret int) (params (param %9 "flag" bool))
+(slot "x" int 4 4)
+(drop-obligation "x" int $"x")
+(decl $"x" val)(loop (body (store int $"x" (const int 7))(drop-live "x")(drop-state-if-live "x")(if %9 (then (continue)) (else (break)))))(return (const int 0))
+)

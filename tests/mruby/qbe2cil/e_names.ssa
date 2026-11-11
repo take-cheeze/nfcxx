@@ -1,0 +1,29 @@
+# Hand-written QBE IL (not cproc output): exported and local names (the `export` line before a definition, and the
+# pending-export quirk of a data line), a name with UTF-8 bytes and a quote, and a call to an undefined external.
+export
+data $e_pending = { w 7 }
+function w $after_pending(w %a) {
+@start
+	ret %a
+}
+function w $local_fn(w %x) {
+@start
+	%r =w call $café_ext(w %x)
+	%s =w call $q"uo(w %r)
+	ret %s
+}
+export function w $main(w %argc) {
+@start
+	%.1 =w call $local_fn(w %argc)
+	%.2 =w call $after_pending(w %.1)
+	%.3 =w call $café_ext(w %.2)
+	ret %.3
+}
+function w $q"uo(w %v) {
+@start
+	ret %v
+}
+function w $tabx(w %x) {
+@start
+	ret %x
+}

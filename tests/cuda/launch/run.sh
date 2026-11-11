@@ -45,18 +45,44 @@ pass decl_macro.cu "decl macro: no error, 14"
 pass enum_extern_block.cu "enum extern block: no error, 0 mismatches"
 pass local_const.cu "local const: no error, 41 40"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
+pass host_cub_helper.cu "host cub helper: no error, 0 mismatches"
+# Device-wide CUB through the host shim (on the include path first, as for llama.cpp's build).
+if "$root/nfcxx" -c -I"$root/lib/cuda/host" -I"$cuda/include" cub_device.cu -o "$out/cubd.o" > "$out/cubd.log" 2>&1 \
+   && "$root/nfcxx" "$out/cubd.o" -L"$cuda/lib64" -lcudart -o "$out/cubd" >> "$out/cubd.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/cubd") && [[ "$run" == *"no error, 0 mismatches"* ]]; then
+  echo "pass cub_device: $run"
+else
+  echo "FAIL cub_device"; grep -m5 -E 'error|refused|undefined|mismatch' "$out/cubd.log"; fail=1
+fi
+pass fnptr_addr.cu "fnptr addr: 0 mismatches"
+pass init_list_range.cu "init list: no error, 0 mismatches"
+# Mutant: the flag compares against the wrong function, so the check must see a mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" fnptr_addr_mutant.cu -o "$out/fam.o" > "$out/fam.log" 2>&1 \
+   && "$root/nfcxx" "$out/fam.o" -L"$cuda/lib64" -lcudart -o "$out/fam" >> "$out/fam.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/fam" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant fnptr_addr_mutant: caught: $run"
+else
+  echo "FAIL fnptr_addr_mutant: the mutant was not caught"; fail=1
+fi
 pass linkage_block.cu "linkage block: no error, 0 mismatches"
 pass macro_launch.cu "macro launch: no error, value 3"
+pass comment_targs.cu "comment targs: no error, value 5"
 pass deduced_launch.cu "deduced launch: no error, value 3.0"
 pass member_launch.cu "member launch: no error, value 7.0"
-refuse refuse_deduce_expr.cu "cannot deduce a template argument from the argument"
+pass deduce_expr.cu "deduced launch: no error, value 3.0"
+pass deduce_cast.cu "deduce cast: no error, sum 38.0"
 refuse refuse_member_nocall.cu "depends on the template parameter Real of run"
 pass tmpl_explicit.cu "templates: no error, 0 mismatches"
 pass tmpl_dep.cu "template dependent: no error, 0 mismatches"
 pass dep_type.cu "dep type: no error, 0 mismatches"
 pass dep_value.cu "dep value: no error, 0 mismatches"
-refuse refuse_dep_nocall.cu "instances are not known"
+pass generic_lambda.cu "generic lambda: no error, 102 105 107"
+pass fold_pack.cu "fold pack: no error, 1 1 1 0 314"
+pass dep_uninstantiated.cu "dep uninstantiated: no error"
+pass index_seq.cu "index seq: 3 (expect 3)"
 refuse refuse_dep_cycle.cu "instantiates itself through its template arguments"
+refuse refuse_generic_lambda.cu "is called with an argument that is not a literal"
 pass deduce_single.cu "deduce single: no error, value 1"
 pass pack.cu "pack: no error, 0 mismatches"
 pass deduce.cu "deduce: no error, 0 mismatches"
@@ -66,4 +92,191 @@ pass local_targs.cu "local targs: no error, 43 43"
 pass macro_targs.cu "macro targs: no error, 64 64"
 pass using_namespace.cu "using namespace: no error, 28 28"
 pass shared_align.cu "shared align launch: no error, 0 mismatches"
+pass vec4_alignas.cu "vec4 alignas: no error, 0 mismatches"
+# Mutant: the sum drops its last element, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" vec4_alignas_mutant.cu -o "$out/vm.o" > "$out/vm.log" 2>&1 \
+   && "$root/nfcxx" "$out/vm.o" -L"$cuda/lib64" -lcudart -o "$out/vm" >> "$out/vm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/vm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant vec4_alignas: caught: $run"
+else
+  echo "FAIL vec4_alignas: the mutant was not caught"; fail=1
+fi
+pass grid_sync.cu "grid sync: no error, 0 mismatches"
+# Mutant: the same two-phase kernel without the grid barrier must read stale data, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" grid_sync_nobarrier.cu -o "$out/nb.o" > "$out/nb.log" 2>&1 \
+   && "$root/nfcxx" "$out/nb.o" -L"$cuda/lib64" -lcudart -o "$out/nb" >> "$out/nb.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/nb" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant grid_sync_nobarrier: caught: $run"
+else
+  echo "FAIL grid_sync_nobarrier: the mutant was not caught"; fail=1
+fi
+pass overload_pair.cu "overload pair: exact"
+pass fnptr_return.cu "fnptr return: exact"
+pass nested_fnptr.cu "nested fnptr: 0 mismatches"
+pass default_targs.cu "defaults: exact"
+# Mutant: the omitted bool default is true, so the launch's result must differ.
+if "$root/nfcxx" -c -I"$cuda/include" default_targs_mutant.cu -o "$out/dtm.o" > "$out/dtm.log" 2>&1 \
+   && "$root/nfcxx" "$out/dtm.o" -L"$cuda/lib64" -lcudart -o "$out/dtm" >> "$out/dtm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dtm" || true) \
+   && [[ "$run" == *"mismatch"* ]]; then
+  echo "mutant default_targs: caught: $run"
+else
+  echo "FAIL default_targs_mutant: the mutant was not caught"; fail=1
+fi
+# Mutant: the quantizer triples, so the check against the doubled values must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" nested_fnptr_mutant.cu -o "$out/nfm.o" > "$out/nfm.log" 2>&1 \
+   && "$root/nfcxx" "$out/nfm.o" -L"$cuda/lib64" -lcudart -o "$out/nfm" >> "$out/nfm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/nfm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant nested_fnptr_mutant: caught: $run"
+else
+  echo "FAIL nested_fnptr_mutant: the mutant was not caught"; fail=1
+fi
+pass bare_dim.cu "bare dim: exact"
+# Mutant: the kernel adds 8 where the host expects 7, so the check must see a mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" bare_dim_mutant.cu -o "$out/bdm.o" > "$out/bdm.log" 2>&1 \
+   && "$root/nfcxx" "$out/bdm.o" -L"$cuda/lib64" -lcudart -o "$out/bdm" >> "$out/bdm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/bdm" || true) \
+   && [[ "$run" == *"mismatch"* ]]; then
+  echo "mutant bare_dim: caught: $run"
+else
+  echo "FAIL bare_dim: the mutant was not caught"; fail=1
+fi
+pass pack_trailing.cu "pack trailing: no error, 0 mismatches"
+# Mutant: the kernel adds 1 to every output, so the check must see one mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" pack_trailing_mutant.cu -o "$out/pt.o" > "$out/pt.log" 2>&1 \
+   && "$root/nfcxx" "$out/pt.o" -L"$cuda/lib64" -lcudart -o "$out/pt" >> "$out/pt.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/pt" || true) \
+   && [[ "$run" == *"1 mismatches"* ]]; then
+  echo "mutant pack_trailing: caught: $run"
+else
+  echo "FAIL pack_trailing mutant: not caught"; fail=1
+fi
+pass alias_fnptr.cu "alias fnptr: no error, 0 mismatches"
+# Mutant: the kernel scales by 3 instead of 2, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" alias_fnptr_mutant.cu -o "$out/af.o" > "$out/af.log" 2>&1 \
+   && "$root/nfcxx" "$out/af.o" -L"$cuda/lib64" -lcudart -o "$out/af" >> "$out/af.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/af" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant alias_fnptr: caught: $run"
+else
+  echo "FAIL alias_fnptr mutant: not caught"; fail=1
+fi
+# Emitter lowerings: bool kernel parameter, bool device-function argument, bool to float, volatile store and load.
+pass emit_misc.cu "emit misc: no error, 0 mismatches"
+# Mutant: the device function's bool test is flipped, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" emit_misc_mutant.cu -o "$out/emm.o" > "$out/emm.log" 2>&1 \
+   && "$root/nfcxx" "$out/emm.o" -L"$cuda/lib64" -lcudart -o "$out/emm" >> "$out/emm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/emm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant emit_misc: caught: $run"
+else
+  echo "FAIL emit_misc mutant: not caught"; fail=1
+fi
+# Kernel instances whose addresses are taken (a ternary, and a dependent one in a template), launched by address.
+pass addr_taken.cu "addr taken: 0 mismatches"
+# Mutant: the ternary selects the same instance twice, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" addr_taken_mutant.cu -o "$out/atm.o" > "$out/atm.log" 2>&1 \
+   && "$root/nfcxx" "$out/atm.o" -L"$cuda/lib64" -lcudart -o "$out/atm" >> "$out/atm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/atm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant addr_taken: caught: $run"
+else
+  echo "FAIL addr_taken mutant: not caught"; fail=1
+fi
+# Address sites under `if constexpr (cond)`: a constexpr function of the unit decides each instance's site.
+pass constexpr_guard.cu "constexpr guard: 0 mismatches"
+# Mutant: the condition is negated, so the instances take the other sites, and the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" constexpr_guard_mutant.cu -o "$out/cgm.o" > "$out/cgm.log" 2>&1 \
+   && "$root/nfcxx" "$out/cgm.o" -L"$cuda/lib64" -lcudart -o "$out/cgm" >> "$out/cgm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/cgm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant constexpr_guard: caught: $run"
+else
+  echo "FAIL constexpr_guard mutant: not caught"; fail=1
+fi
+# half <-> float in device code (cast, initialization, return, generic cast, half arithmetic, half2 lanes): values, not bits.
+pass half_convert.cu "half convert: no error, 0 mismatches"
+# A dependent launch whose instance address is taken too (both host addresses find the device entry), and a launch
+# of a function with no device code (cudaGetLastError reports it once).
+pass stub_addr.cu "stub addr: no error, invalid device function, no error, 0 mismatches"
+# An array of class objects with a non-trivial default constructor (__cxa_vec_ctor) that zeroes first (memset).
+pass vec_ctor.cu "vec ctor: no error, 0 mismatches"
+# The lanes of nv_bfloat162 are bf16 values, and half2 / nv_bfloat162 are 4-byte aligned (an int read of one is aligned).
+pass pair_lanes.cu "pair lanes: no error, 0 mismatches"
+# The zero bytes of an aggregate initializer are stored no wider than the object's alignment.
+pass zero_tail.cu "zero tail: no error, 0 mismatches"
+# cudaOccupancyMaxActiveBlocksPerMultiprocessor and cudaFuncGetAttributes on a kernel's host address.
+pass func_query.cu "func query: no error, no error, 0 mismatches"
+# Kernel instances only the host compile knows (binbcast.cu): the driver builds twice, with the first object's symbols.
+pass host_instances.cu "host instances: no error, 0 mismatches"
+pass helper_launch.cu "helper launch: no error, 0 mismatches"
+# Mutant: the helper launches the wrong template instance, so every element must mismatch.
+if "$root/nfcxx" -c -I"$cuda/include" helper_launch_mutant.cu -o "$out/hlm.o" > "$out/hlm.log" 2>&1 \
+   && "$root/nfcxx" "$out/hlm.o" -L"$cuda/lib64" -lcudart -o "$out/hlm" >> "$out/hlm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/hlm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant helper_launch_mutant: caught: $run"
+else
+  echo "FAIL helper_launch_mutant: the mutant was not caught"; fail=1
+fi
+# Dynamic shared array as an operand of a multiplication (`s * meta[l].y`): not a pointer declaration.
+pass dynshared_operator.cu "dynshared operator: no error, 0 mismatches"
+if "$root/nfcxx" -c -I"$cuda/include" dynshared_operator_mutant.cu -o "$out/dom.o" > "$out/dom.log" 2>&1 \
+   && "$root/nfcxx" "$out/dom.o" -L"$cuda/lib64" -lcudart -o "$out/dom" >> "$out/dom.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dom" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant dynshared_operator: caught: $run"
+else
+  echo "FAIL dynshared_operator mutant: not caught"; fail=1
+fi
+pass dep_enumerate.cu "dep enumerate: no error, 0 mismatches"
+# Mutant: the same launch with the other instance (cols / 4) must miss the expected entries, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" dep_enumerate_mutant.cu -o "$out/dm.o" > "$out/dm.log" 2>&1 \
+   && "$root/nfcxx" "$out/dm.o" -L"$cuda/lib64" -lcudart -o "$out/dm" >> "$out/dm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant dep_enumerate: caught: $run"
+else
+  echo "FAIL dep_enumerate: the mutant was not caught"; fail=1
+fi
+# Mutant: one stride is wrong (w/8 for w/4), so the kernel's sums differ and the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" init_list_range_mutant.cu -o "$out/ilm.o" > "$out/ilm.log" 2>&1 \
+   && "$root/nfcxx" "$out/ilm.o" -L"$cuda/lib64" -lcudart -o "$out/ilm" >> "$out/ilm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ilm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant init_list_range_mutant: caught: $run"
+else
+  echo "FAIL init_list_range_mutant: the mutant was not caught"; fail=1
+fi
+# The emitter lowers only the functions the kernel reaches (`dead` is never called and is not lowered).
+pass reach_helper.cu "reach helper: 0 mismatches"
+if "$root/nfcxx" -c -I"$cuda/include" reach_helper_mutant.cu -o "$out/rhm.o" > "$out/rhm.log" 2>&1 \
+   && "$root/nfcxx" "$out/rhm.o" -L"$cuda/lib64" -lcudart -o "$out/rhm" >> "$out/rhm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/rhm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant reach_helper: caught: $run"
+else
+  echo "FAIL reach_helper: the mutant was not caught"; fail=1
+fi
+# A -D define that decides a device-only #if: the device pass must see it (the driver passes -D to the rewriter and the
+# device front end, as it does to the host compile).
+if "$root/nfcxx" -c -I"$cuda/include" -DFEATURE_X=1 device_define.cu -o "$out/dd.o" > "$out/dd.log" 2>&1 \
+   && "$root/nfcxx" "$out/dd.o" -L"$cuda/lib64" -lcudart -o "$out/dd" >> "$out/dd.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/dd") && [[ "$run" == *" 0 mismatches"* ]]; then
+  echo "pass device_define: $run"
+else
+  echo "FAIL device_define"; fail=1
+fi
+# Mutant: the same file without the define: the device unit takes the other branch, so the check must see mismatches.
+if "$root/nfcxx" -c -I"$cuda/include" device_define.cu -o "$out/ddm.o" > "$out/ddm.log" 2>&1 \
+   && "$root/nfcxx" "$out/ddm.o" -L"$cuda/lib64" -lcudart -o "$out/ddm" >> "$out/ddm.log" 2>&1 \
+   && run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/ddm" || true) \
+   && [[ "$run" == *"mismatches"* && "$run" != *" 0 mismatches"* ]]; then
+  echo "mutant device_define: caught: $run"
+else
+  echo "FAIL device_define mutant: not caught"; fail=1
+fi
 exit $fail

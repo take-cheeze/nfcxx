@@ -23,8 +23,9 @@ const char* name(DType d) {
 bool is_float(DType d) { return d == DType::Float32 || d == DType::Float64; }
 bool is_int(DType d) { return d == DType::Int32 || d == DType::Int64; }
 
-static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ADD", "SUB",
-                                       "MUL",   "IDIV", "FDIV", "MOD", "MAX", "CMPLT", "CMPNE", "AND", "OR",
+static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ACOS", "ACOSH", "ASIN",
+                                       "ASINH", "ATAN", "ATANH", "COSH", "SINH", "TAN", "EXPM1", "LOG1P", "LOG10", "ROUND",
+                                       "ADD", "SUB", "MUL",   "IDIV", "FDIV", "MOD", "MAX", "ATAN2", "SHL", "SHR", "CMPLT", "CMPNE", "AND", "OR",
                                        "XOR",   "WHERE", "CAST",  "RESHAPE", "PERMUTE", "EXPAND", "REDUCE_SUM", "REDUCE_MAX", "SHRINK", "PAD", "FLIP"};
 static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(Op::Count_), "op name table");
 const char* name(Op op) { return kOpNames[static_cast<int>(op)]; }
@@ -33,6 +34,8 @@ int arity(Op op) {
   switch (op) {
     case Op::Const: case Op::Var: return 0;
     case Op::Neg: case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: case Op::Cast:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round:
     case Op::Reshape: case Op::Permute: case Op::Expand: case Op::ReduceSum: case Op::ReduceMax:
     case Op::Shrink: case Op::Pad: case Op::Flip: return 1;
     case Op::Where: return 3;
@@ -140,13 +143,314 @@ std::string to_string(const Scalar& s) {
 Graph::Graph() {}
 Graph::~Graph() {}
 
+// ---- symbolic dimensions (stage 7) ----
+
+namespace {
+
+using SymTab = std::map<std::string, const Symbol*>;
+
+SymDim unknown_dim() { return SymDim::of(SymDim::Unknown); }
+
+// A dimension whose size is a symbol or a polynomial in symbols: its size changes with the sizes of the symbols.
+bool is_symbolic(const SymDim& d) { return d.kind == SymDim::Sym || d.kind == SymDim::Poly; }
+
+// A movement or a reduction of a shape with an Unknown dimension is Unknown as a whole: its dimensions cannot be told apart.
+SymShape all_unknown(const UOp* x) {
+  for (const SymDim& d : x->sym)
+    if (d.kind == SymDim::Unknown) return SymShape(x->sym.size(), unknown_dim());
+  return SymShape();
+}
+
+// The polynomial that a dimension of size `size` is, when it is an integer, a symbol or a polynomial; nullopt for Wild and Unknown.
+std::optional<Poly> poly_of(const SymDim& d, int64_t size) {
+  switch (d.kind) {
+    case SymDim::Int: return Poly(size);
+    case SymDim::Sym: return Poly::Symbol(d.sym->name);
+    case SymDim::Poly: return d.poly;
+    default: return std::nullopt;
+  }
+}
+
+// The element count of a node as a polynomial; nullopt when a dimension is Wild or Unknown.
+std::optional<Poly> numel_poly(const SymShape& sym, const Shape& shape) {
+  Poly n(1);
+  for (size_t k = 0; k < shape.size(); k++) {
+    std::optional<Poly> p = poly_of(sym[k], shape[k]);
+    if (!p) return std::nullopt;
+    n = n * *p;
+  }
+  return n;
+}
+
+// The Symbol of `name` in this graph; an Error when there is none.
+const Symbol* symbol_of(const SymTab& symtab, const std::string& name, const char* what) {
+  auto it = symtab.find(name);
+  if (it == symtab.end()) throw Error(std::string(what) + ": " + name + " is not a symbol of this graph (Graph::symbol makes one)");
+  return it->second;
+}
+
+// The dimension of size `size` that is the symbol `s`, checked against the bound of `s`.
+SymDim named_dim(const Symbol* s, int64_t size) {
+  if (s->bound != 0 && size > s->bound)
+    throw Error("symbol " + s->name + " has size " + std::to_string(size) + ", above its bound " + std::to_string(s->bound));
+  return SymDim::of(SymDim::Sym, s);
+}
+
+// The dimension of size `size` that is the polynomial `p`: an integer, the symbol itself, or a polynomial. A polynomial whose symbols
+// all have bounds is checked against the largest value it can take (Poly::upper_bound); the renderer checks the run-time sizes too.
+SymDim dim_of(const Poly& p, int64_t size, const SymTab& symtab, const char* what) {
+  if (!p.is_symbolic()) {
+    if (p.to_int() != size)
+      throw Error(std::string(what) + ": the integer " + std::to_string(p.to_int()) + " is not the dimension's size " + std::to_string(size));
+    return SymDim{};
+  }
+  if (std::optional<std::string> name = p.single_symbol()) return named_dim(symbol_of(symtab, *name, what), size);
+  std::map<std::string, int64_t> bounds;
+  for (const std::string& name : p.symbols()) {
+    const Symbol* s = symbol_of(symtab, name, what);
+    if (s->bound > 0) bounds[name] = s->bound;
+  }
+  if (std::optional<int64_t> ub = p.upper_bound(bounds))
+    if (size > *ub) throw Error(std::string(what) + ": the dimension " + p.str() + " is " + std::to_string(size) + ", above its bound " + std::to_string(*ub));
+  SymDim d;
+  d.kind = SymDim::Poly;
+  d.poly = p;
+  return d;
+}
+
+// The symbolic form of a shape with the polynomial `dims[k]` for dimension k (dims.size() equals the rank).
+SymShape dims_shape(const Shape& shape, const Dims& dims, const SymTab& symtab, const char* what) {
+  if (dims.size() != shape.size())
+    throw Error(std::string(what) + ": " + std::to_string(dims.size()) + " dimensions given for " + std::to_string(shape.size()));
+  SymShape out(shape.size());
+  for (size_t k = 0; k < shape.size(); k++) out[k] = dim_of(dims[k], shape[k], symtab, what);
+  return out;
+}
+
+// The polynomials of the Syms of a builder (syms[k] is dimension k's symbol, nullptr an integer; empty: all integers). A symbol must
+// be this graph's, so that its name is the one the polynomial carries.
+Dims dims_of_syms(const Shape& shape, const Syms& syms, const SymTab& symtab, const char* what) {
+  if (!syms.empty() && syms.size() != shape.size())
+    throw Error(std::string(what) + ": " + std::to_string(syms.size()) + " symbols for " + std::to_string(shape.size()) + " dimensions");
+  Dims out;
+  for (size_t k = 0; k < shape.size(); k++) {
+    if (k < syms.size() && syms[k]) {
+      if (symbol_of(symtab, syms[k]->name, what) != syms[k])
+        throw Error(std::string(what) + ": symbol " + syms[k]->name + " belongs to another graph");
+      out.push_back(Poly::Symbol(syms[k]->name));
+    } else {
+      out.push_back(Poly(shape[k]));
+    }
+  }
+  return out;
+}
+
+// A constant: a dimension of size 1 is an integer, any other is Wild (a consumer gives it the size it needs).
+SymShape constant_sym(const Shape& shape) {
+  SymShape out(shape.size());
+  for (size_t k = 0; k < shape.size(); k++) out[k] = SymDim::of(shape[k] == 1 ? SymDim::Int : SymDim::Wild);
+  return out;
+}
+
+// An ALU node: its sources have its shape. A symbolic dimension (a symbol or a polynomial) survives when the sources agree on it
+// (a size-1 dimension of an integer source and a constant do not conflict). An integer of size above 1 next to a symbolic dimension,
+// two different ones, or an Unknown source make it Unknown: the integer does not follow the symbol at other sizes.
+SymShape alu_sym(const std::vector<const UOp*>& src, const Shape& shape) {
+  SymShape out(shape.size());
+  for (size_t k = 0; k < shape.size(); k++) {
+    const SymDim* sym = nullptr;
+    bool unknown = false, integer = false;
+    for (const UOp* u : src) {
+      const SymDim& d = u->sym[k];
+      switch (d.kind) {
+        case SymDim::Unknown: unknown = true; break;
+        case SymDim::Wild: break;
+        case SymDim::Int: if (u->shape[k] != 1) integer = true; break;
+        case SymDim::Sym: case SymDim::Poly:
+          if (sym && !(*sym == d)) unknown = true;
+          sym = &d;
+          break;
+      }
+    }
+    if (unknown || (sym && integer)) out[k] = unknown_dim();
+    else if (sym) out[k] = *sym;
+    else if (integer || shape[k] == 1) out[k] = SymDim{};
+    else out[k] = SymDim::of(SymDim::Wild);   // only constants
+  }
+  return out;
+}
+
+// Expand to `target`, the symbolic form of the target shape (integers for the shape-only form). A dimension of x that is the target's
+// symbolic dimension stays; a size-1 dimension (or a constant) grows to it. A literal target dimension is an integer, so the broadcast
+// stays dynamic. Without symbols (`legacy`), a size-1 dimension that grows is Wild: its size is the consumer's, as it always was for the
+// shape-only form, which keeps the static graphs' planning. A symbolic x dimension that the target does not name, or a literal size for
+// it, is Unknown: no dynamic program can say what it is.
+SymShape expand_sym(const UOp* x, const Shape& shape, const SymShape& target, bool legacy) {
+  if (!all_unknown(x).empty()) return SymShape(shape.size(), unknown_dim());
+  SymShape out(shape.size());
+  for (size_t k = 0; k < shape.size(); k++) {
+    const SymDim& d = x->sym[k];
+    if (d.kind == SymDim::Unknown) out[k] = unknown_dim();
+    else if (is_symbolic(target[k])) {
+      if (d == target[k] || d.kind == SymDim::Wild || (d.kind == SymDim::Int && x->shape[k] == 1)) out[k] = target[k];
+      else out[k] = unknown_dim();
+    } else if (is_symbolic(d)) out[k] = unknown_dim();
+    else if (legacy && d.kind == SymDim::Int && x->shape[k] == 1 && shape[k] != 1) out[k] = SymDim::of(SymDim::Wild);
+    else out[k] = d;
+  }
+  return out;
+}
+
+// Reshape to `target`, the symbolic form of the target shape, when it has the element count of x as a polynomial (for every size of the
+// symbols): the target keeps its symbols. A symbol that both name a dimension must have the same size in both. nullopt when they do not
+// fit; a Wild or Unknown dimension of x makes the result Unknown.
+std::optional<SymShape> reshape_explicit(const UOp* x, const Shape& shape, const SymShape& target) {
+  for (const SymDim& d : x->sym)
+    if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) return SymShape(shape.size(), unknown_dim());
+  for (const SymDim& d : target)
+    if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) return SymShape(shape.size(), unknown_dim());
+  if (*numel_poly(x->sym, x->shape) != *numel_poly(target, shape)) return std::nullopt;
+  for (size_t k = 0; k < shape.size(); k++) {
+    if (target[k].kind != SymDim::Sym) continue;
+    for (size_t j = 0; j < x->sym.size(); j++)
+      if (x->sym[j].kind == SymDim::Sym && x->sym[j].sym == target[k].sym && x->shape[j] != shape[k]) return std::nullopt;
+  }
+  return target;
+}
+
+// Reshape, shape only: a symbolic x keeps its symbols up to the last symbolic dimension when the leading sizes are unchanged (the same
+// elements in the same places), and is Unknown otherwise.
+SymShape reshape_shape_only(const UOp* x, const Shape& shape) {
+  const size_t r = shape.size();
+  for (const SymDim& d : x->sym)
+    if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) return SymShape(r, unknown_dim());
+  int last = -1;
+  for (size_t k = 0; k < x->sym.size(); k++) if (is_symbolic(x->sym[k])) last = static_cast<int>(k);
+  if (last < 0) return SymShape(r);
+  bool same = shape.size() > static_cast<size_t>(last) && x->shape.size() > static_cast<size_t>(last);
+  for (int k = 0; same && k <= last; k++) same = shape[k] == x->shape[k];
+  if (!same) return SymShape(r, unknown_dim());
+  SymShape out(r);
+  for (int k = 0; k <= last; k++) out[k] = x->sym[k];
+  return out;
+}
+
+// Shrink to [starts, ends) with the end of each dimension as a polynomial, E[k] (an integer for a literal end). A literal end of a
+// dimension is an integer of the cut's size (the renderer needs the symbol to be at least the end then). A symbolic end that is the
+// whole of the dimension (start 0, E the dimension's own polynomial) keeps it; any other symbolic end gives E - start, and must be
+// within the dimension at run time. A Wild dimension (a constant) stays Wild only when it is kept whole, and is Unknown otherwise.
+SymShape shrink_sym(const UOp* x, const Shape& starts, const Shape& ends, const Dims& E, const SymTab& symtab) {
+  const size_t r = x->shape.size();
+  if (!all_unknown(x).empty()) return SymShape(r, unknown_dim());
+  SymShape out(r);
+  for (size_t k = 0; k < r; k++) {
+    const SymDim& d = x->sym[k];
+    const Poly& e = E[k];
+    const bool whole = starts[k] == 0 && ends[k] == x->shape[k];
+    if (!e.is_symbolic()) {
+      if (d.kind == SymDim::Unknown) out[k] = unknown_dim();
+      else if (d.kind == SymDim::Wild) out[k] = whole ? d : unknown_dim();
+      else out[k] = SymDim{};
+      continue;
+    }
+    if (d.kind == SymDim::Wild || d.kind == SymDim::Unknown) {
+      out[k] = unknown_dim();
+      continue;
+    }
+    if (whole && poly_of(d, x->shape[k]) == e) {   // the whole dimension keeps its form
+      out[k] = d;
+      continue;
+    }
+    // A symbolic end names the size of the input's symbol: its size is the input's, so the cut must end at that size.
+    if (std::optional<std::string> name = e.single_symbol())
+      if (d.kind == SymDim::Sym && d.sym->name == *name && x->shape[k] != ends[k])
+        throw Error("SHRINK: the end of dimension " + std::to_string(k) + " is " + *name + ", which is " + std::to_string(x->shape[k]) +
+                    " in the input, not " + std::to_string(ends[k]));
+    out[k] = dim_of(e - Poly(starts[k]), ends[k] - starts[k], symtab, "SHRINK");
+  }
+  return out;
+}
+
+// Pad: a dimension that is not padded keeps its form. A padded one of size s is the polynomial of the input's dimension plus before and
+// after (N + 1 for N, an integer for an integer); it is exact for every size of the symbols, so it is never Unknown. A Wild or Unknown
+// dimension that is padded is Unknown (its size is not a polynomial).
+SymShape pad_sym(const UOp* x, const Shape& before, const Shape& after, const SymTab& symtab) {
+  if (!all_unknown(x).empty()) return SymShape(x->shape.size(), unknown_dim());
+  SymShape out(x->shape.size());
+  for (size_t k = 0; k < out.size(); k++) {
+    if (before[k] == 0 && after[k] == 0) {
+      out[k] = x->sym[k];
+      continue;
+    }
+    std::optional<Poly> p = poly_of(x->sym[k], x->shape[k]);
+    if (!p) {
+      out[k] = unknown_dim();
+      continue;
+    }
+    out[k] = dim_of(*p + Poly(before[k] + after[k]), x->shape[k] + before[k] + after[k], symtab, "PAD");
+  }
+  return out;
+}
+
+// Permute: result dimension k is source dimension perm[k].
+SymShape permute_sym_of(const UOp* x, const Shape& perm) {
+  const bool unknown = !all_unknown(x).empty();
+  SymShape out;
+  for (int64_t p : perm) out.push_back(unknown ? unknown_dim() : x->sym[p]);
+  return out;
+}
+
+// Flip: the same dimensions.
+SymShape flip_sym_of(const UOp* x) { return all_unknown(x).empty() ? x->sym : SymShape(x->sym.size(), unknown_dim()); }
+
+// Reduce over `axes` (valid for x): the reduced axes are integers of size 1.
+SymShape reduce_sym_of(const UOp* x, const Shape& axes) {
+  SymShape sym = all_unknown(x).empty() ? x->sym : SymShape(x->sym.size(), unknown_dim());
+  for (int64_t a : axes)
+    if (sym[a].kind != SymDim::Unknown) sym[a] = SymDim{};
+  return sym;
+}
+
+}  // namespace
+
+Syms symbols_of(const UOp* u) {
+  Syms out(u->sym.size(), nullptr);
+  for (size_t k = 0; k < u->sym.size(); k++)
+    if (u->sym[k].kind == SymDim::Sym) out[k] = u->sym[k].sym;
+  return out;
+}
+
+Dims dims_of(const UOp* u) {
+  Dims out;
+  for (size_t k = 0; k < u->shape.size(); k++) {
+    const SymDim& d = u->sym[k];
+    if (d.kind == SymDim::Sym) out.push_back(Poly::Symbol(d.sym->name));
+    else if (d.kind == SymDim::Poly) out.push_back(d.poly);
+    else out.push_back(Poly(u->shape[k]));
+  }
+  return out;
+}
+
+// ---- the interning graph ----
+
 static size_t mix(size_t h, size_t v) { return h ^ (v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2)); }
+// A dimension's part of a node's hash: its kind and symbol, and for a polynomial its terms (the symbols' names and the coefficients).
+static size_t mix_dim(size_t h, const SymDim& d) {
+  h = mix(mix(h, static_cast<size_t>(d.kind)), reinterpret_cast<size_t>(d.sym));
+  if (d.kind == SymDim::Poly)
+    for (const auto& [mono, coeff] : d.poly.terms()) {
+      for (const std::string& name : mono) h = mix(h, std::hash<std::string>()(name));
+      h = mix(h, static_cast<size_t>(coeff) + 0x3c);
+    }
+  return h;
+}
 
 const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name,
-                         const Shape& shape, const Shape& arg) {
+                         const Shape& shape, const Shape& arg, const SymShape& sym) {
   size_t h = mix(static_cast<size_t>(op), static_cast<size_t>(dt));
   for (const UOp* s : src) h = mix(h, s->id);
   for (int64_t d : shape) h = mix(h, static_cast<size_t>(d) + 1);
+  for (const SymDim& d : sym) h = mix_dim(h, d);
   h = mix(h, 0x51ed);
   for (int64_t d : arg) h = mix(h, static_cast<size_t>(d) + 1);
   if (op == Op::Const) {
@@ -157,7 +461,7 @@ const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Sca
   if (op == Op::Var) h = mix(h, std::hash<std::string>()(name));
   std::vector<const UOp*>& bucket = table_[h];
   for (const UOp* c : bucket)
-    if (c->op == op && c->dtype == dt && c->src == src && c->name == name && c->shape == shape && c->arg == arg &&
+    if (c->op == op && c->dtype == dt && c->src == src && c->name == name && c->shape == shape && c->arg == arg && c->sym == sym &&
         (op != Op::Const || c->value == value))
       return c;
   UOp u;
@@ -168,19 +472,38 @@ const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Sca
   u.name = name;
   u.id = static_cast<uint32_t>(nodes_.size());
   u.shape = shape;
+  u.sym = sym;
   u.arg = arg;
   nodes_.push_back(std::move(u));
   bucket.push_back(&nodes_.back());
   return &nodes_.back();
 }
 
+const Symbol* Graph::symbol(const std::string& name, int64_t bound) {
+  if (name.empty()) throw Error("SYMBOL: the name is empty");
+  if (bound < 0) throw Error("SYMBOL " + name + ": the bound " + std::to_string(bound) + " is negative");
+  auto it = symtab_.find(name);
+  if (it != symtab_.end()) {
+    if (it->second->bound != bound)
+      throw Error("SYMBOL " + name + ": asked for bound " + std::to_string(bound) + ", but it has " + std::to_string(it->second->bound));
+    return it->second;
+  }
+  symbols_.push_back(Symbol{name, bound});
+  symtab_[name] = &symbols_.back();
+  return &symbols_.back();
+}
+
 const UOp* Graph::constant(const Scalar& s, const Shape& shape) {
   check_shape(shape, "CONST");
-  return intern(Op::Const, s.dtype, {}, s, "", shape, {});
+  return intern(Op::Const, s.dtype, {}, s, "", shape, {}, constant_sym(shape));
 }
-const UOp* Graph::var(const std::string& name, DType d, const Shape& shape) {
+const UOp* Graph::var(const std::string& name, DType d, const Shape& shape) { return var(name, d, shape, Syms{}); }
+const UOp* Graph::var(const std::string& name, DType d, const Shape& shape, const Syms& syms) {
+  return var_poly(name, d, shape, dims_of_syms(shape, syms, symtab_, "VAR"));
+}
+const UOp* Graph::var_poly(const std::string& name, DType d, const Shape& shape, const Dims& dims) {
   check_shape(shape, "VAR");
-  return intern(Op::Var, d, {}, Scalar{}, name, shape, {});
+  return intern(Op::Var, d, {}, Scalar{}, name, shape, {}, dims_shape(shape, dims, symtab_, "VAR"));
 }
 
 static DType infer(Op op, const std::vector<const UOp*>& src) {
@@ -191,7 +514,11 @@ static DType infer(Op op, const std::vector<const UOp*>& src) {
   DType d = src[0]->dtype;
   switch (op) {
     case Op::Neg: if (d == DType::Bool) bad("not defined for bool"); return d;
-    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: if (!is_float(d)) bad("float only"); return d;
+    case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin:
+    case Op::Acos: case Op::Acosh: case Op::Asin: case Op::Asinh: case Op::Atan: case Op::Atanh: case Op::Cosh: case Op::Sinh:
+    case Op::Tan: case Op::Expm1: case Op::Log1p: case Op::Log10: case Op::Round:
+      if (!is_float(d)) bad("float only");
+      return d;
     case Op::Where:
       if (d != DType::Bool) bad("the condition must be bool");
       if (src[1]->dtype != src[2]->dtype) bad("the arms differ in dtype");
@@ -201,8 +528,8 @@ static DType infer(Op op, const std::vector<const UOp*>& src) {
   if (src[1]->dtype != d) bad("sources differ in dtype");
   switch (op) {
     case Op::Add: case Op::Sub: case Op::Mul: case Op::Max: if (d == DType::Bool) bad("not defined for bool"); return d;
-    case Op::IDiv: case Op::Mod: if (!is_int(d)) bad("integers only"); return d;
-    case Op::FDiv: if (!is_float(d)) bad("floats only"); return d;
+    case Op::IDiv: case Op::Mod: case Op::Shl: case Op::Shr: if (!is_int(d)) bad("integers only"); return d;
+    case Op::FDiv: case Op::Atan2: if (!is_float(d)) bad("floats only"); return d;
     case Op::CmpLt: case Op::CmpNe: return DType::Bool;
     case Op::And: case Op::Or: case Op::Xor: if (is_float(d)) bad("not defined for floats"); return d;
     default: break;
@@ -216,7 +543,8 @@ const UOp* Graph::alu(Op op, std::vector<const UOp*> src) {
     if (s->shape != src[0]->shape)
       throw Error(std::string(name(op)) + ": sources differ in shape, " + to_string(src[0]->shape) + " and " + to_string(s->shape));
   Shape shape = src[0]->shape;
-  return intern(op, d, std::move(src), Scalar{}, "", shape, {});
+  SymShape sym = alu_sym(src, shape);
+  return intern(op, d, std::move(src), Scalar{}, "", shape, {}, sym);
 }
 
 static const UOp* need(const UOp* x, const char* what) {
@@ -226,7 +554,7 @@ static const UOp* need(const UOp* x, const char* what) {
 
 const UOp* Graph::cast(const UOp* x, DType to) {
   need(x, "CAST");
-  return intern(Op::Cast, to, {x}, Scalar{}, "", x->shape, {});
+  return intern(Op::Cast, to, {x}, Scalar{}, "", x->shape, {}, x->sym);
 }
 
 const UOp* Graph::reshape(const UOp* x, const Shape& shape) {
@@ -234,7 +562,21 @@ const UOp* Graph::reshape(const UOp* x, const Shape& shape) {
   check_shape(shape, "RESHAPE");
   if (numel(shape) != numel(x->shape))
     throw Error("RESHAPE: cannot reshape " + to_string(x->shape) + " into " + to_string(shape));
-  return intern(Op::Reshape, x->dtype, {x}, Scalar{}, "", shape, {});
+  return intern(Op::Reshape, x->dtype, {x}, Scalar{}, "", shape, {}, reshape_shape_only(x, shape));
+}
+const UOp* Graph::reshape(const UOp* x, const Shape& shape, const Syms& syms) {
+  return reshape_poly(x, shape, dims_of_syms(shape, syms, symtab_, "RESHAPE"));
+}
+const UOp* Graph::reshape_poly(const UOp* x, const Shape& shape, const Dims& dims) {
+  need(x, "RESHAPE");
+  check_shape(shape, "RESHAPE");
+  if (numel(shape) != numel(x->shape))
+    throw Error("RESHAPE: cannot reshape " + to_string(x->shape) + " into " + to_string(shape));
+  std::optional<SymShape> sym = reshape_explicit(x, shape, dims_shape(shape, dims, symtab_, "RESHAPE"));
+  if (!sym)
+    throw Error("RESHAPE: cannot reshape " + to_string(x->shape) + " into " + to_string(shape) +
+                " for every size of the symbols (the element counts differ, or a symbol has another size in the input)");
+  return intern(Op::Reshape, x->dtype, {x}, Scalar{}, "", shape, {}, *sym);
 }
 
 const UOp* Graph::permute(const UOp* x, const Shape& perm) {
@@ -248,7 +590,7 @@ const UOp* Graph::permute(const UOp* x, const Shape& perm) {
     seen[p] = true;
     out.push_back(x->shape[p]);
   }
-  return intern(Op::Permute, x->dtype, {x}, Scalar{}, "", out, perm);
+  return intern(Op::Permute, x->dtype, {x}, Scalar{}, "", out, perm, permute_sym_of(x, perm));
 }
 
 const UOp* Graph::expand(const UOp* x, const Shape& shape) {
@@ -257,7 +599,18 @@ const UOp* Graph::expand(const UOp* x, const Shape& shape) {
   bool ok = shape.size() == x->shape.size();
   for (size_t k = 0; ok && k < shape.size(); k++) ok = x->shape[k] == shape[k] || x->shape[k] == 1;
   if (!ok) throw Error("EXPAND: cannot expand " + to_string(x->shape) + " to " + to_string(shape));
-  return intern(Op::Expand, x->dtype, {x}, Scalar{}, "", shape, {});
+  return intern(Op::Expand, x->dtype, {x}, Scalar{}, "", shape, {}, expand_sym(x, shape, SymShape(shape.size()), true));
+}
+const UOp* Graph::expand(const UOp* x, const Shape& shape, const Syms& syms) {
+  return expand_poly(x, shape, dims_of_syms(shape, syms, symtab_, "EXPAND"));
+}
+const UOp* Graph::expand_poly(const UOp* x, const Shape& shape, const Dims& dims) {
+  need(x, "EXPAND");
+  check_shape(shape, "EXPAND");
+  bool ok = shape.size() == x->shape.size();
+  for (size_t k = 0; ok && k < shape.size(); k++) ok = x->shape[k] == shape[k] || x->shape[k] == 1;
+  if (!ok) throw Error("EXPAND: cannot expand " + to_string(x->shape) + " to " + to_string(shape));
+  return intern(Op::Expand, x->dtype, {x}, Scalar{}, "", shape, {}, expand_sym(x, shape, dims_shape(shape, dims, symtab_, "EXPAND"), false));
 }
 
 const UOp* Graph::reduce(Op op, const UOp* x, Shape axes) {
@@ -270,15 +623,24 @@ const UOp* Graph::reduce(Op op, const UOp* x, Shape axes) {
     out[axes[k]] = 1;
   }
   if (op == Op::ReduceSum && x->dtype == DType::Bool) throw Error("REDUCE_SUM: not defined for bool");
-  return intern(op, x->dtype, {x}, Scalar{}, "", out, axes);
+  return intern(op, x->dtype, {x}, Scalar{}, "", out, axes, reduce_sym_of(x, axes));
 }
 const UOp* Graph::reduce_sum(const UOp* x, const Shape& axes) { return reduce(Op::ReduceSum, x, axes); }
 const UOp* Graph::reduce_max(const UOp* x, const Shape& axes) { return reduce(Op::ReduceMax, x, axes); }
 
-const UOp* Graph::shrink(const UOp* x, const Shape& starts, const Shape& ends) {
+const UOp* Graph::shrink(const UOp* x, const Shape& starts, const Shape& ends) { return shrink(x, starts, ends, Syms{}); }
+const UOp* Graph::shrink(const UOp* x, const Shape& starts, const Shape& ends, const Syms& end_syms) {
+  need(x, "SHRINK");
+  if (starts.size() != x->shape.size() || ends.size() != x->shape.size())
+    throw Error("SHRINK: bounds for " + std::to_string(x->shape.size()) + " dimensions needed");
+  return shrink_poly(x, starts, ends, dims_of_syms(ends, end_syms, symtab_, "SHRINK"));
+}
+const UOp* Graph::shrink_poly(const UOp* x, const Shape& starts, const Shape& ends, const Dims& ends_poly) {
   need(x, "SHRINK");
   size_t r = x->shape.size();
   if (starts.size() != r || ends.size() != r) throw Error("SHRINK: bounds for " + std::to_string(r) + " dimensions needed");
+  if (!ends_poly.empty() && ends_poly.size() != r)
+    throw Error("SHRINK: " + std::to_string(ends_poly.size()) + " ends for " + std::to_string(r) + " dimensions");
   Shape out, arg = starts;
   arg.insert(arg.end(), ends.begin(), ends.end());
   for (size_t k = 0; k < r; k++) {
@@ -286,9 +648,13 @@ const UOp* Graph::shrink(const UOp* x, const Shape& starts, const Shape& ends) {
       throw Error("SHRINK: bounds " + to_string(starts) + ".." + to_string(ends) + " do not fit shape " + to_string(x->shape));
     out.push_back(ends[k] - starts[k]);
   }
-  return intern(Op::Shrink, x->dtype, {x}, Scalar{}, "", out, arg);
+  Dims E = ends_poly;
+  if (E.empty()) for (int64_t e : ends) E.push_back(Poly(e));
+  for (size_t k = 0; k < r; k++)
+    if (!E[k].is_symbolic() && E[k].to_int() != ends[k])
+      throw Error("SHRINK: the end of dimension " + std::to_string(k) + " is " + std::to_string(E[k].to_int()) + ", not " + std::to_string(ends[k]));
+  return intern(Op::Shrink, x->dtype, {x}, Scalar{}, "", out, arg, shrink_sym(x, starts, ends, E, symtab_));
 }
-
 const UOp* Graph::pad(const UOp* x, const Shape& before, const Shape& after) {
   need(x, "PAD");
   size_t r = x->shape.size();
@@ -300,7 +666,21 @@ const UOp* Graph::pad(const UOp* x, const Shape& before, const Shape& after) {
     out.push_back(x->shape[k] + before[k] + after[k]);
   }
   check_shape(out, "PAD");
-  return intern(Op::Pad, x->dtype, {x}, Scalar{}, "", out, arg);
+  return intern(Op::Pad, x->dtype, {x}, Scalar{}, "", out, arg, pad_sym(x, before, after, symtab_));
+}
+const UOp* Graph::pad_poly(const UOp* x, const Shape& before, const Shape& after, const Dims& dims) {
+  need(x, "PAD");
+  const size_t r = x->shape.size();
+  if (dims.size() != r) throw Error("PAD: " + std::to_string(dims.size()) + " dimensions given for " + std::to_string(r));
+  const UOp* out = pad(x, before, after);   // checks the amounts and the sizes; the symbolic form is the one derived
+  for (size_t k = 0; k < r; k++) {
+    std::optional<Poly> p = poly_of(x->sym[k], x->shape[k]);
+    if (!p) continue;   // a Wild or Unknown dimension: the result is Unknown there
+    const Poly want = *p + Poly(before[k] + after[k]);
+    if (!(dims[k] == want))
+      throw Error("PAD: dimension " + std::to_string(k) + " is " + want.str() + " for every size of the symbols, not " + dims[k].str());
+  }
+  return out;
 }
 
 const UOp* Graph::flip(const UOp* x, const Shape& axes_in) {
@@ -310,30 +690,45 @@ const UOp* Graph::flip(const UOp* x, const Shape& axes_in) {
   for (size_t k = 0; k < axes.size(); k++)
     if (axes[k] < 0 || axes[k] >= static_cast<int64_t>(x->shape.size()) || (k && axes[k] == axes[k - 1]))
       throw Error("FLIP: bad axes " + to_string(axes_in) + " for shape " + to_string(x->shape));
-  return intern(Op::Flip, x->dtype, {x}, Scalar{}, "", x->shape, axes);
+  return intern(Op::Flip, x->dtype, {x}, Scalar{}, "", x->shape, axes, flip_sym_of(x));
 }
 
+// The same node over another source: a rewrite replaces a source by one that may have other symbolic dimensions (a constant is
+// Wild, say), so the symbols of the node are computed again from the new source. The node keeps the symbols it names, where the
+// new source has them too; a dimension that does not fit is Unknown (integer loops), never an error.
 const UOp* Graph::rebuild(const UOp* u, std::vector<const UOp*> src) {
   if (u->op == Op::Const || u->op == Op::Var) return u;
   if (src.size() != 1 && arity(u->op) == 1) throw Error(std::string(name(u->op)) + ": wrong number of sources");
+  if (u->op == Op::Cast) return cast(src[0], u->dtype);
+  if (is_alu(u->op)) return alu(u->op, std::move(src));
+  const UOp* x = src[0];
+  bool legacy = true;   // a node without symbolic dimensions of its own is a shape-only one
+  for (const SymDim& d : u->sym) legacy = legacy && !is_symbolic(d);
   switch (u->op) {
-    case Op::Cast: return cast(src[0], u->dtype);
-    case Op::Reshape: return reshape(src[0], u->shape);
-    case Op::Permute: return permute(src[0], u->arg);
-    case Op::Expand: return expand(src[0], u->shape);
-    case Op::ReduceSum: return reduce_sum(src[0], u->arg);
-    case Op::ReduceMax: return reduce_max(src[0], u->arg);
+    case Op::Reshape: {   // the same polynomials when the element counts still agree over the new source; Unknown otherwise
+      if (numel(x->shape) != numel(u->shape)) throw Error("RESHAPE: rebuilt over " + to_string(x->shape) + " for " + to_string(u->shape));
+      std::optional<SymShape> sym = reshape_explicit(x, u->shape, u->sym);
+      return intern(Op::Reshape, x->dtype, {x}, Scalar{}, "", u->shape, {}, sym ? *sym : SymShape(u->shape.size(), unknown_dim()));
+    }
+    case Op::Expand: return legacy ? expand(x, u->shape) : expand_poly(x, u->shape, dims_of(u));
+    case Op::Permute: return permute(x, u->arg);
+    case Op::ReduceSum: return reduce_sum(x, u->arg);
+    case Op::ReduceMax: return reduce_max(x, u->arg);
     case Op::Shrink: {
-      size_t r = u->arg.size() / 2;
-      return shrink(src[0], Shape(u->arg.begin(), u->arg.begin() + r), Shape(u->arg.begin() + r, u->arg.end()));
+      const size_t r = u->arg.size() / 2;
+      Shape starts(u->arg.begin(), u->arg.begin() + r), ends(u->arg.begin() + r, u->arg.end());
+      Dims E(r);   // the end of each dimension: a symbolic one is its size plus the start (a whole dimension is its own polynomial)
+      for (size_t k = 0; k < r; k++) E[k] = is_symbolic(u->sym[k]) ? *poly_of(u->sym[k], u->shape[k]) + Poly(starts[k]) : Poly(ends[k]);
+      return shrink_poly(x, starts, ends, E);
     }
     case Op::Pad: {
-      size_t r = u->arg.size() / 2;
-      return pad(src[0], Shape(u->arg.begin(), u->arg.begin() + r), Shape(u->arg.begin() + r, u->arg.end()));
+      const size_t r = u->arg.size() / 2;
+      return pad(x, Shape(u->arg.begin(), u->arg.begin() + r), Shape(u->arg.begin() + r, u->arg.end()));
     }
-    case Op::Flip: return flip(src[0], u->arg);
-    default: return alu(u->op, std::move(src));
+    case Op::Flip: return flip(x, u->arg);
+    default: break;
   }
+  throw Error(std::string("rebuild: ") + name(u->op));
 }
 
 // ---- traversal ----
@@ -406,6 +801,28 @@ Scalar eval_op(Op op, DType out, const std::vector<Scalar>& a) {
     case Op::Exp2: return Scalar::from_double(out, std::exp2(a[0].f));
     case Op::Log2: return Scalar::from_double(out, std::log2(a[0].f));
     case Op::Sin: return Scalar::from_double(out, std::sin(a[0].f));
+    case Op::Acos: return Scalar::from_double(out, std::acos(a[0].f));
+    case Op::Acosh: return Scalar::from_double(out, std::acosh(a[0].f));
+    case Op::Asin: return Scalar::from_double(out, std::asin(a[0].f));
+    case Op::Asinh: return Scalar::from_double(out, std::asinh(a[0].f));
+    case Op::Atan: return Scalar::from_double(out, std::atan(a[0].f));
+    case Op::Atanh: return Scalar::from_double(out, std::atanh(a[0].f));
+    case Op::Cosh: return Scalar::from_double(out, std::cosh(a[0].f));
+    case Op::Sinh: return Scalar::from_double(out, std::sinh(a[0].f));
+    case Op::Tan: return Scalar::from_double(out, std::tan(a[0].f));
+    case Op::Expm1: return Scalar::from_double(out, std::expm1(a[0].f));
+    case Op::Log1p: return Scalar::from_double(out, std::log1p(a[0].f));
+    case Op::Log10: return Scalar::from_double(out, std::log10(a[0].f));
+    case Op::Round: return Scalar::from_double(out, std::nearbyint(a[0].f));   // ties to even under the default rounding mode
+    case Op::Atan2: return Scalar::from_double(out, std::atan2(a[0].f, a[1].f));
+    case Op::Shl: case Op::Shr: {
+      // numpy's rule: a count below 0 or at least the width gives 0 for a left shift, and for a right shift the sign fill (0 or -1).
+      // Shr is arithmetic: the values are sign extended, and C++20 defines >> on negative values as arithmetic.
+      const int64_t width = out == DType::Int32 ? 32 : 64, count = a[1].i;
+      if (op == Op::Shl)
+        return Scalar::from_int(out, count < 0 || count >= width ? 0 : static_cast<int64_t>(static_cast<uint64_t>(a[0].i) << count));
+      return Scalar::from_int(out, count < 0 || count >= width ? (a[0].i < 0 ? -1 : 0) : a[0].i >> count);
+    }
     case Op::Add: return fl ? Scalar::from_double(out, a[0].f + a[1].f) : Scalar::from_int(out, wrap_add(a[0].i, a[1].i));
     case Op::Sub: return fl ? Scalar::from_double(out, a[0].f - a[1].f) : Scalar::from_int(out, wrap_sub(a[0].i, a[1].i));
     case Op::Mul: return fl ? Scalar::from_double(out, a[0].f * a[1].f) : Scalar::from_int(out, wrap_mul(a[0].i, a[1].i));

@@ -1,4 +1,4 @@
-// Cooperative groups' warp tiles through the device prelude (COOP_DEF in scripts/cuda-rewrite.rb): tiled_partition<N>,
+// Cooperative groups' warp tiles through the device prelude (COOP_DEF in tools/cuda-rewrite): tiled_partition<N>,
 // cg::reduce with cg::plus over a tile, and the tile's shfl, shfl_down, shfl_up and shfl_xor, for N = 4, 8, 16 and 32,
 // on int and double, exactly against the host. A mutant (shfl_down by 2 instead of 1) must fail.
 #include <cuda_runtime.h>

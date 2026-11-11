@@ -94,7 +94,9 @@ int main()
     try { std::rethrow_exception(b); CHECK(false); }
     catch (const Counted &c) { CHECK(c.v == 11); }
     CHECK(Counted::live == live0 + 1);   // still held by b
-    std::exception_ptr m = std::move(b);
+    // Hand the reference over by copy and reset b: libc++'s exception_ptr has no move constructor, so std::move would copy.
+    std::exception_ptr m = b;
+    b = nullptr;
     CHECK(!b && m);
     m = nullptr;
     CHECK(Counted::live == live0);
@@ -278,4 +280,4 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY-LINUX: exits with SIGSEGV (139) on Linux aarch64 with both backends; macOS arm64 runs it

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # A newer push to the same branch or PR supersedes the run in progress.
 concurrency:
@@ -12,9 +13,11 @@ concurrency:
 
 jobs:
   # Builds the EDG front end and QBE/cproc once and saves them to the Actions cache (.github/actions/toolchain); the
-  # test jobs below, and the hexagon, pathb and realworld workflows, restore them instead of rebuilding.
+  # test jobs below, the Path B jobs and the hexagon and realworld workflows, restore them instead of rebuilding.
   # build/ holds absolute paths, so every job uses the same checkout path.
   build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
     runs-on: ubuntu-24.04
     env:
       # sccache stores compiler outputs in the GitHub Actions cache.
@@ -23,13 +26,22 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
       - uses: ./.github/actions/toolchain
         with:
           packages: python3 python3-dev ruby rake clang
+
+      # The upstream harness scripts and their offline self-test (tests/upstream): under a minute.
+      - name: Syntax of the upstream scripts and Python
+        run: |
+          for f in tests/upstream/*.sh; do bash -n "$f"; done
+          python3 -m py_compile tests/upstream/*.py
+
+      - name: Native upstream harness self-test
+        run: python3 tests/upstream/nightly-self-test.py
 
       - name: sccache stats
         if: always()
@@ -42,33 +54,63 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cases (QBE backend)
-            run: NFCXX_BACKEND=qbe tests/run.sh
-          - name: cases (gcc backend)
-            run: NFCXX_BACKEND=gcc tests/run.sh
-          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+          - name: cases (QBE and gcc backends)
+            run: |
+              NFCXX_BACKEND=qbe tests/run.sh
+              NFCXX_BACKEND=gcc tests/run.sh
+          - name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
+            run: |
+              tests/cpp-features/self-test.sh
+              tests/upstream/self-test.sh
+              FEATURE_ROUTES="qbe gcc" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/mruby/run.sh
+          - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
+            dotnet: true
+            run: |
+              scripts/setup-cil.sh
+              scripts/setup-pathb.sh
+              tests/cil/run.sh
+              tests/pathb-cil/run.sh
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
             run: |
               tests/lib/run.sh
+              tests/target/run.sh
               tests/builtins/run.sh
               tests/trace/run.sh
               tests/c/run.sh
               tests/c/cc-mode.sh
               tests/cxx-driver/run.sh
-          - name: determinism, float-to-integer
-            run: |
               tests/determinism/run.sh
               tests/float-to-int/run.sh
-          - name: real-world tinyxml2 and nlohmann/json
+          - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
+            env:
+              COSMOCC_SHA256: ${{ vars.COSMOCC_SHA256 }}
+            run: |
+              scripts/setup-cosmo.sh
+              tests/cosmo/run.sh
+          - name: real-world tinyxml2, nlohmann/json, and {fmt}
             run: |
               tests/realworld/run.sh
               tests/realworld/run_json.sh
-          - name: real-world {fmt}
-            run: tests/realworld/run_fmt.sh
-          - name: multi-TU, EH shim, nfceval
+              tests/realworld/run_fmt.sh
+          - name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
             run: |
               tests/multi-tu/run.sh
+              tests/modules/run.sh
               tests/ehshim/run.sh
+              tests/eh-unwind/run.sh
               tests/eval/run.sh
+              tests/ffi/run.sh
+              tests/bundle/run.sh
+              tests/call-abi/run.sh
+          # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
+          # landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
+          - name: EH unwinder (gcc and qbe backends, NFCXX_EH_UNWIND=1)
+            run: |
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
+              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
           # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
           # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
           - name: nfcpoly host (QBE backend)
@@ -90,35 +132,65 @@ jobs:
             run: NFCXX_BACKEND=qbe tests/ast/run.sh
           - name: nfcast engine and tier (gcc backend)
             run: NFCXX_BACKEND=gcc tests/ast/run.sh
-          - name: uop (QBE backend)
-            go: true
+          - name: uop core and numpy (QBE backend)
             onnx: true
-            interp: true
             suite: uop
+            group: core
             backend: qbe
-            run: NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop (gcc backend)
+            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop onnx and runtimes (QBE backend)
+            onnx: true
+            suite: uop
+            group: onnx
+            backend: qbe
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop poly languages (QBE backend)
             go: true
             onnx: true
             interp: true
             suite: uop
+            group: poly
+            backend: qbe
+            run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
+          - name: uop core and numpy (gcc backend)
+            onnx: true
+            suite: uop
+            group: core
             backend: gcc
-            run: NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: mruby scripts
-            run: tests/mruby/run.sh
-          - name: GPU kernel on the PTX interpreter
-            run: tests/gpu/run_interp.sh
+            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop onnx and runtimes (gcc backend)
+            onnx: true
+            suite: uop
+            group: onnx
+            backend: gcc
+            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: uop poly languages (gcc backend)
+            go: true
+            onnx: true
+            interp: true
+            suite: uop
+            group: poly
+            backend: gcc
+            run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
+          - name: C++ PTX emitter (build) and GPU kernel on the PTX interpreter
+            run: |
+              ninja -C tools/pathb-ptx-emit
+              tests/gpu/run_interp.sh
           - name: AddressSanitizer (gcc and qbe backends)
             run: |
               tests/asan/run.sh
               ASAN_BACKEND=qbe tests/asan/run.sh
+          # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
+          - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
+            pathb: true
+            run: tests/pathb-egraph/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
       CMAKE_C_COMPILER_LAUNCHER: sccache
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -129,7 +201,7 @@ jobs:
       # The interpreter of nfcpoly's Go backend (yaegi in a cgo library); without Go >= 1.24 tests/poly/run.sh skips Go.
       - name: Set up Go
         if: matrix.go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: lib/poly/go/go.mod
           cache-dependency-path: lib/poly/go/go.sum
@@ -147,7 +219,7 @@ jobs:
       # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
       # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
       - name: Restore the mruby tool
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/mruby-tool/bin/mruby
           key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
@@ -157,18 +229,18 @@ jobs:
       # driver adds) and the toolchain.
       - name: Restore the nfcpoly interpreters
         if: matrix.interp
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/poly/${{ matrix.backend }}
             build/poly-lua/${{ matrix.backend }}
             build/poly-js/${{ matrix.backend }}
-          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
+          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
 
       # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
         if: matrix.go
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/poly-go
           key: nfcpoly-go-${{ runner.os }}-${{ hashFiles('scripts/setup-poly-go.sh', 'lib/poly/go/**') }}-${{ steps.key.outputs.go }}-${{ steps.key.outputs.host }}
@@ -194,7 +266,7 @@ jobs:
       - name: Restore libnfconnxsim.so
         id: onnxsim
         if: matrix.onnx
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/onnxsim/libnfconnxsim.so
@@ -211,10 +283,34 @@ jobs:
       # driver links (lib/ehshim, lib/asan, lib/cuda), the scripts and the compiler, the back end and the toolchain.
       - name: Restore the test programs
         if: matrix.suite
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+
+      # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
+      - name: Path B harness cache key
+        if: matrix.pathb
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        if: matrix.pathb
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: matrix.pathb && steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
+        if: matrix.dotnet
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
 
       - name: ${{ matrix.name }}
         env:
@@ -225,19 +321,402 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
-  # the build and every test group passed. if: always() stops a skipped dependency from skipping this job.
+  # Linux arm64 (moved here from arm.yml so that build-and-test can depend on them; check names unchanged).
+  arm-build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
+    name: arm build
+    runs-on: ubuntu-24.04-arm
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  arm-test:
+    needs: arm-build
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cases (QBE and gcc backends)
+            run: |
+              NFCXX_BACKEND=qbe tests/run.sh
+              NFCXX_BACKEND=gcc tests/run.sh
+          # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism
+            run: |
+              tests/lib/run.sh
+              tests/target/run.sh
+              tests/builtins/run.sh
+              tests/trace/run.sh
+              tests/c/run.sh
+              tests/c/cc-mode.sh
+              tests/cxx-driver/run.sh
+              tests/determinism/run.sh
+    name: arm64 ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # macOS arm64, one job per back end (moved here from macos.yml; check names unchanged).
+  macos-suites:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
+    name: macOS arm64 (${{ matrix.backend }} backend)
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [gcc, qbe]
+    env:
+      NFCXX_BACKEND: ${{ matrix.backend }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Tools
+        run: brew install ccache ninja cmake
+
+      - name: Ruby and rake (mruby's bootstrap)
+        run: |
+          ruby --version
+          rake --version || gem install rake
+          rake --version
+
+      - name: ccache
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: ccache-macos-arm64-${{ hashFiles('scripts/setup-edg.sh', 'scripts/setup-qbe.sh', 'scripts/*.patch') }}-${{ github.run_id }}
+          restore-keys: ccache-macos-arm64-
+
+      - name: EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: QBE and cproc
+        if: matrix.backend == 'qbe'
+        run: scripts/setup-qbe.sh
+
+      - name: Test suites
+        run: |
+          tests/run.sh
+          tests/lib/run.sh
+          tests/target/run.sh
+          tests/builtins/run.sh
+          tests/trace/run.sh
+          tests/c/run.sh
+          tests/c/cc-mode.sh
+          tests/cxx-driver/run.sh
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s || true
+
+  # The mrustc suite (tests/mrustc/run.sh): Rust programs that mrustc compiles to C, with every crate they link compiled
+  # through nfcxx's C pipeline (cproc, QBE). A cache miss builds mrustc and its Rust 1.90 standard library
+  # (scripts/setup-mrustc.sh: minutes, and a download of the rustc source). Only mrustc's compiler and the library output
+  # are cached: the rest of build/mrustc/src is the rustc source tree and mrustc's intermediate objects, about 5 GB, which
+  # the suite does not read.
+  mrustc:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      # sccache stores compiler outputs in the GitHub Actions cache.
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      # fetch-depth 0: the change check below diffs against the PR's base commit, which a shallow clone does not have.
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # mrustc's build needs zlib (-dev), curl and pkg-config; its mruby tool (scripts/mrb) needs ruby and rake.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: ruby rake zlib1g-dev pkg-config patch curl
+
+      - name: Cache keys
+        id: key
+        run: echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/qbe-wflag.patch', 'scripts/qbe-empty-align.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
+
+      # The key holds the pin, which setup-mrustc.sh has: a new mrustc commit changes the script.
+      - name: Restore mrustc and its standard library
+        id: mrustc
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/mrustc/src/bin/mrustc
+            build/mrustc/src/bin/minicargo
+            build/mrustc/src/output-1.90.0
+          key: mrustc-v2-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh') }}
+
+      - name: Build mrustc and its standard library
+        if: steps.mrustc.outputs.cache-hit != 'true'
+        run: scripts/setup-mrustc.sh
+
+      # The crates compiled through the pipeline, cached per crate by mrustc-nfcc.sh. The key holds the scripts that rewrite
+      # and compile them, the mrustc pin and the QBE and cproc revisions.
+      - name: Restore the crates compiled through nfcxx
+        id: crates
+        uses: actions/cache@v6
+        with:
+          path: build/mrustc/nfcxx
+          key: mrustc-nfcxx-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh', 'scripts/mrustc-nfcc.sh', 'scripts/mrustc-prep.rb', 'scripts/qbe-prep', 'tools/qbe-prep/**', 'scripts/qbe-cc') }}-${{ steps.key.outputs.qbe }}
+
+      # mrustc-nfcc.sh rebuilds a crate whose C file is newer than its object. Restored files keep the mtimes they were saved
+      # with, so the objects are touched here (as the poly step does): their inputs are the ones the key holds.
+      - name: Mark the restored crates up to date
+        if: steps.crates.outputs.cache-hit == 'true'
+        run: find build/mrustc/nfcxx -type f -exec touch {} +
+
+      - name: The mrustc suite (every crate through nfcxx)
+        run: tests/mrustc/run.sh
+
+      # Rust programs borrow-checked through mrustc's MIR (scripts/mrustc-borrowck.sh), each case's verdict also
+      # checked against the runner image's rustc.
+      - name: Rust borrow checks through mrustc
+        run: tests/mrustc-borrow/run.sh
+
+      # The real-world cases that pass: clap, regex, serde-json, and batch (13 small crates, through the QBE large-block and large-alloc fixes).
+      # They run only when the change touches the Rust frontend path: the real-world cases, their runner, the mrustc scripts
+      # and the mrustc suite. A push to main compares with the commit before it.
+      - name: Did the change touch the Rust frontend
+        id: rust-changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(tests/realworld/mrustc/|tests/realworld/run_mrustc\.sh|tests/mrustc/|scripts/(mrustc-|setup-mrustc\.sh|qbe-cc|qbe-prep\.rb)|\.github/workflows/ci\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Real-world mrustc cases (clap, regex, serde-json, batch)
+        if: steps.rust-changes.outputs.changed == 'true'
+        run: tests/realworld/run_mrustc.sh clap regex serde-json batch
+
+  # Path B (docs/notes/pathb-stage1.md to pathb-stage3.md). Building the harness compiles the whole EDG front end a second
+  # time, so these jobs run only when a change can affect them (the list below), and on demand (workflow_dispatch). A build
+  # job makes the harness and the mruby tool, and the suites run in parallel from their caches. ruby and rake only
+  # bootstrap the mruby build.
+  #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
+  #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
+  #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
+  #   (tests/pathb-egraph/run.sh, the e-graph pass, is a matrix entry of the test job above)
+  #   tests/wasm/run.sh        the wasm emitter (scripts/pathb-wasm-emit.rb): IR -> wasm, run under node, against EXPECT
+  #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
+  #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
+  #   tests/safeptr/run.sh     -fsafe-pointers (lib/safeptr, docs/notes/safe-pointers.md), and the Path B probes under it
+  pathb-changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+      full_ci: ${{ steps.paths.outputs.full_ci }}
+    steps:
+      # fetch-depth 0: the change check diffs against the base commit, which a shallow clone does not have.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      # Only isolated bc2cpp/test/docs PRs omit the general compiler matrix.
+      # Main pushes and manual runs retain full coverage; failed selection blocks the gate.
+      - name: Check CI routing policy
+        run: ruby tests/ci/scope_check.rb
+
+      - name: Select CI coverage
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: ruby scripts/ci-scope.rb
+
+  pathb-build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh); the runner has 4 cores and 16 GB, and
+      # the harness links with -flto, so do not oversubscribe it.
+      PATHB_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
+
+      # The harness (build/pathb) depends on be/, on the script that assembles it and on the EDG revision. An
+      # exact hit skips the build; on a miss sccache still serves the unchanged EDG compiles.
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      - name: Restore the mruby tool
+        id: mruby
+        uses: actions/cache@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+
+      - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
+        if: steps.mruby.outputs.cache-hit != 'true'
+        run: scripts/setup-mruby.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # One suite per job, all restoring the pathb-build job's caches. The slowest suite sets the total time.
+  pathb-test:
+    # Skipped with pathb-build when the change does not touch Path B.
+    needs: pathb-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Path B stages 1-2, wasm and the mruby-ninja file tasks
+            run: |
+              tests/pathb/run.sh
+              tests/pathb-ir/run.sh
+              tests/pathb-borrow/run.sh
+              tests/wasm/run.sh
+              NFCXX_WASM_OPT=1 tests/wasm/run.sh
+              tests/mruby-ninja/run.sh
+          - name: Path B stage 3 (IR to QBE translation validation) and hosted Path B (NFCXX_PATH=b)
+            run: |
+              tests/pathb-qbe/run.sh
+              tests/pathb-qbe/hosted.sh
+          - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
+            run: |
+              FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+              tests/ehshim/run.sh
+          - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
+            run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
+          # Explicit --backend=pathb: the SSA emitter's __asan_load/store checks (docs/notes/asan.md, "Path B"). The default
+          # backend with -fsanitize=address is still qbe, which the test job's AddressSanitizer step covers.
+          - name: AddressSanitizer on Path B (heap checks; tests/asan/pathb-pending.txt lists the later milestones)
+            run: ASAN_BACKEND=pathb tests/asan/run.sh
+          - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
+            run: |
+              sudo apt-get install -y -q spirv-tools libvulkan-dev mesa-vulkan-drivers
+              npm install --prefix "$RUNNER_TEMP/pw" playwright
+              "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+              NFCXX_PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" tests/sycl/run.sh
+    name: ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
+
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        uses: actions/cache/restore@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Restore the mruby tool
+        uses: actions/cache/restore@v6
+        with:
+          path: build/mruby-tool
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          fail-on-cache-miss: true
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # Keep the required build-and-test check on every PR. Only an explicit successful
+  # selection can authorize skipped suites; every selected suite must succeed.
+  # if: always() also validates failed/cancelled selectors and dependencies.
   build-and-test:
     if: always()
-    needs: [build, test]
+    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
     runs-on: ubuntu-24.04
     steps:
-      - name: Require every build and test job to pass
-        run: |
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ]; then
-            echo "build=${{ needs.build.result }} test=${{ needs.test.result }}"
-            exit 1
-          fi
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Require every selected build and test job to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: ruby scripts/ci-scope.rb --gate
 
   # Probe: how far Path B gets on macOS arm64 (PRs 877 and 883). Not gating: build-and-test does not need it. Each step
   # runs on its own (if: always()), so the first failure does not hide the next. The default driver run records whether
@@ -246,7 +725,7 @@ jobs:
     name: macOS arm64 Path B probe
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 

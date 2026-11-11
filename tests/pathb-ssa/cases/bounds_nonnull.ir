@@ -1,0 +1,9 @@
+(ir-module "b.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "main"
+  (ret int)
+  (params (param %0 "i" int))
+  (slot "a" (array 4 int) 16 4)
+  (nonnull (addr $"a"))
+  (bounds %0 4)
+  (store int (index (addr $"a") %0 4) (wadd int %0 (const int 10)))
+  (return (load int (index (addr $"a") %0 4))))

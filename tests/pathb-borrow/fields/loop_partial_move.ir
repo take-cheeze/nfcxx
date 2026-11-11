@@ -1,0 +1,7 @@
+(ir-module "fields" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params (param %9 "flag" bool))
+(slot "s" (struct "Pair") 8 4)
+(decl $"s" val) (zero-fill 8 $"s")
+(loop (body (let %0 int (move-value int (offset $"s" 0)))
+(if %9 (then (continue)) (else (break)))))(return (const int 0))
+)

@@ -1,6 +1,7 @@
 # Path B stage 3: emit QBE IL from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md, sections 6 and 7).
 #
-# Usage: scripts/mrb scripts/pathb-qbe-emit.rb [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
+# Usage: scripts/mrb scripts/pathb-qbe-emit.rb [--safe] [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
+#          --safe: the checks of -fsafe-pointers (docs/notes/safe-pointers.md)
 #        scripts/mrb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s
 #                                                              append `.weak` lines for the IR (weak) definitions
 #
@@ -10,11 +11,11 @@
 #   1  error: malformed IR text, or an IR format older than this emitter (rebuild the harness)
 #
 # The emitter never guesses. Anything it does not know is a refusal, never silently dropped. Checked IR operations
-# (cdiv, crem, cshl, cshr, cf2i, cadd, csub, cmul, cneg, bounds, nonnull, unreachable) become a compare and a branch
+# (cdiv, crem, cshl, cshr, wshl, cf2i, cadd, csub, cmul, cneg, bounds, nonnull, unreachable) become a compare and a branch
 # to one shared abort block that calls abort(). Registers are stack slots; QBE's own promotion turns them back into
 # SSA temporaries. Scalar sizes assume LP64 (int 4, long 8, pointers 8), which is what the x86-64 Linux target uses.
 #
-# This is a line-by-line port of the Python original (tests/mruby/oracle/pathb-qbe-emit.py) to mruby; the output,
+# This is a line-by-line port of the Python original (tests/mruby/oracle/pathb-qbe-emit.py, deleted; the oracle port is tests/mruby/oracle/pathb-qbe-emit.rb) to mruby; the output,
 # the messages on stderr and the exit status are identical (tests/mruby/run.sh compares them). Notes on the port:
 #   - mruby has no Regexp: the three patterns of the original are character checks (as_int, reg?, qname?).
 #   - Integer constants go up to 2**64 - 1, so the interpreter needs mruby-bigint (scripts/mruby-tool-config.rb).
@@ -366,6 +367,11 @@ def octal?(c)
   c >= 48 && c <= 55
 end
 
+# Grammar delimiters are immutable and never appear in the parsed forms.
+# Share them between tokens and comparisons instead of allocating per use.
+IR_OPEN_PAREN = "(".freeze
+IR_CLOSE_PAREN = ")".freeze
+
 def tokenize(text)
   toks = []
   i = 0
@@ -375,7 +381,7 @@ def tokenize(text)
     if space_byte?(c)
       i += 1
     elsif c == 40 || c == 41
-      toks << c.chr
+      toks << (c == 40 ? IR_OPEN_PAREN : IR_CLOSE_PAREN)
       i += 1
     elsif c == 34
       s, i = read_string(text, i)
@@ -401,9 +407,9 @@ end
 def parse_forms(toks)
   stack = [[]]
   toks.each do |t|
-    if t.is_a?(String) && t == "("
+    if t.is_a?(String) && t == IR_OPEN_PAREN
       stack << []
-    elsif t.is_a?(String) && t == ")"
+    elsif t.is_a?(String) && t == IR_CLOSE_PAREN
       raise BadIR, "unbalanced ')' in IR" if stack.length == 1
       done = stack.pop
       stack[-1] << done
@@ -413,6 +419,201 @@ def parse_forms(toks)
   end
   raise BadIR, "unbalanced '(' in IR" if stack.length != 1
   stack[0]
+end
+
+# Semantic layouts are checker contracts, not ABI classification. Keep this
+# validator in sync in the standalone checker, QBE emitter, and emitter oracle.
+class BorrowLayouts
+  PRIMITIVES = {'bool'=>1, 'char'=>1, 'signed_char'=>1, 'unsigned_char'=>1,
+                'short'=>2, 'unsigned_short'=>2, 'int'=>4, 'unsigned_int'=>4,
+                'long'=>8, 'unsigned_long'=>8, 'long_long'=>8, 'unsigned_long_long'=>8,
+                'float'=>4, 'double'=>8}
+
+  def initialize(forms, bad, refused)
+    @bad = bad
+    @refused = refused
+    @raw = {}
+    @resolved = {}
+    forms.each do |f|
+      next unless head(f) == 'borrow-layout'
+      raise @bad, 'borrow-layout form' unless f.length >= 4
+      raise @refused, 'semantic layouts currently require struct types' unless head(f[1]) == 'struct'
+      k = key(f[1])
+      raise @bad, "duplicate semantic layout #{k[1]}" if @raw.key?(k)
+      @raw[k] = f
+    end
+    @raw.each_key { |k| resolve(k, []) }
+  end
+
+  def head(x)
+    x.is_a?(Array) ? x[0] : nil
+  end
+
+  def key(ty)
+    return nil unless head(ty) == 'struct'
+    raise @bad, 'semantic layout type form' unless ty.length == 2 && ty[1].is_a?(IRStr) && !ty[1].to_s.empty?
+    ['struct', ty[1].to_s]
+  end
+
+  def number(x)
+    unless x.is_a?(String) && !x.empty? && x.bytes.all? { |c| c >= 48 && c <= 57 }
+      raise @bad, 'semantic layout requires nonnegative integer constants'
+    end
+    x.to_i
+  end
+
+  def lookup(ty)
+    k = key(ty)
+    k ? @resolved[k] : nil
+  end
+
+  def field_type(ty, visiting)
+    if ty.is_a?(String) && PRIMITIVES.key?(ty)
+      n = PRIMITIVES[ty]
+      return {size: n, align: n, used: (0...n).to_a, objects: []}
+    end
+    if head(ty) == 'ptr'
+      raise @bad, 'semantic pointer field type' unless ty.length == 2
+      return {size: 8, align: 8, used: (0...8).to_a, objects: []}
+    end
+    if head(ty) == 'array'
+      raise @bad, 'semantic array field type' unless ty.length == 3
+      count = number(ty[1])
+      elem = field_type(ty[2], visiting)
+      n = elem[:size]
+      raise @refused, 'semantic arrays need 1 to 4096 bytes' unless count > 0 && count * n <= 4096
+      return {size: count * n, align: elem[:align],
+              used: (0...count).flat_map { |i| elem[:used].map { |b| i * n + b } },
+              objects: (0...count).flat_map { |i| elem[:objects].map { |o, t| [i * n + o, t] } }}
+    end
+    k = key(ty)
+    raise @refused, 'unsupported semantic field type' unless k
+    resolve(k, visiting)
+  end
+
+  def resolve(k, visiting)
+    raise @bad, "cyclic semantic layout #{k[1]}" if visiting.include?(k)
+    return @resolved[k] if @resolved.key?(k)
+    raise @bad, "unknown semantic layout #{k[1]}" unless @raw.key?(k)
+    f = @raw[k]
+    size = number(f[2])
+    align = number(f[3])
+    unless size > 0 && size <= 4096 && align > 0 && align <= 4096 && (align & (align - 1)) == 0 && size % align == 0
+      raise @bad, "invalid semantic size/alignment for #{k[1]}"
+    end
+    names = {}
+    ranges = []
+    used = []
+    objects = [[0, k]]
+    f.drop(4).each do |field|
+      unless head(field) == 'field' && field.length == 4 && field[1].is_a?(IRStr) && !field[1].to_s.empty?
+        raise @bad, 'semantic field form'
+      end
+      name = field[1].to_s
+      raise @bad, "duplicate semantic field #{name}" if names[name]
+      names[name] = true
+      off = number(field[2])
+      desc = field_type(field[3], visiting + [k])
+      n = desc[:size]
+      raise @bad, "semantic field #{name} exceeds its object" if off + n > size
+      raise @refused, 'unaligned semantic fields are unsupported' if off % desc[:align] != 0 || align < desc[:align]
+      if ranges.any? { |o, len| off < o + len && o < off + n }
+        raise @refused, 'overlapping semantic fields are unsupported'
+      end
+      ranges << [off, n]
+      used.concat(desc[:used].map { |i| off + i })
+      objects.concat(desc[:objects].map { |o, ty| [off + o, ty] })
+    end
+    @resolved[k] = {size: size, align: align, used: used.sort, objects: objects}
+  end
+end
+
+# Closed summaries are trusted contracts, not a verification of callee bodies.
+# Keep this validator synchronized across the three standalone IR tools.
+class BorrowCallEffects
+  def initialize(forms, layouts, bad, refused)
+    @entries = {}
+    forms.each do |f|
+      next unless f.is_a?(Array) && f[0] == 'call-effects'
+      unless f.length == 7 && f[1].is_a?(IRStr) && !f[1].to_s.empty? &&
+             f[2].is_a?(Array) && f[2][0] == 'returns' && f[2].length >= 2 &&
+             f[6].is_a?(Array) && f[6][0] == 'args'
+        raise bad, 'call-effects form'
+      end
+      name = f[1].to_s
+      raise bad, "duplicate call effects #{name}" if @entries.key?(name)
+      unless %w[nothrow may-throw].include?(f[3].is_a?(Array) ? f[3][0] : nil) && f[3].length == 1 && f[4] == ['noescape'] && f[5] == ['closed']
+        raise refused, 'call contracts require nothrow or may-throw, noescape, and closed effects'
+      end
+      result = f[2][1]
+      # One (from-arg ...) per source the returned pointer may borrow from.
+      alias_forms = f[2].drop(2)
+      alias_result = alias_forms[0]
+      unless alias_result || result == 'void' || (result.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(result))
+        raise refused, 'call effects support only void or scalar results'
+      end
+      args = f[6].drop(1)
+      args.each do |arg|
+        unless arg.is_a?(Array) && arg.length == 2 && %w[value read write init consume byval byval-deep].include?(arg[0])
+          raise bad, 'call argument effect form'
+        end
+        ty = arg[1]
+        if arg[0] == 'value'
+          unless ty.is_a?(String) && BorrowLayouts::PRIMITIVES.key?(ty)
+            raise refused, 'value effects require nonpointer scalar arguments'
+          end
+        elsif ty.is_a?(Array) && ty[0] == 'struct' && !layouts.lookup(ty)
+          raise refused, 'call aggregate effects require semantic layouts'
+        else
+          layouts.field_type(ty, [])
+        end
+      end
+      if alias_result
+        alias_result = alias_forms.map do |form|
+          unless result.is_a?(Array) && result[0] == 'ptr' && result.length == 2 &&
+                 form.is_a?(Array) && form.length == 4 && form[0] == 'from-arg' &&
+                 %w[shared exclusive].include?(form[3])
+            raise bad, 'returned alias contract form'
+          end
+          index = layouts.number(form[1])
+          offset = layouts.number(form[2])
+          source = args[index]
+          unless source && %w[read write].include?(source[0])
+            raise refused, 'returned aliases require a read or write source argument'
+          end
+          if form[3] == 'exclusive' && source[0] != 'write'
+            raise refused, 'exclusive returned aliases require a write source argument'
+          end
+          # A pointer to const grants no writes, so its alias is shared.
+          pointee = result[1]
+          pointee = pointee[1] while pointee.is_a?(Array) && pointee[0] == 'const' && pointee.length == 2
+          if !pointee.equal?(result[1]) && form[3] != 'shared'
+            raise refused, 'returned aliases of const pointees must be shared'
+          end
+          width = layouts.field_type(pointee, [])[:size]
+          if offset + width > layouts.field_type(source[1], [])[:size]
+            raise refused, 'returned alias range escapes its source argument'
+          end
+          {arg: index, offset: offset, kind: form[3], width: width}
+        end
+        # Sources in one argument must be disjoint ranges: a call takes a loan of each.
+        alias_result.each_with_index do |s, i|
+          alias_result.drop(i + 1).each do |t|
+            if s[:arg] == t[:arg] && s[:offset] < t[:offset] + t[:width] && t[:offset] < s[:offset] + s[:width]
+              raise refused, 'returned alias sources overlap'
+            end
+          end
+        end
+      elsif result.is_a?(Array)
+        raise refused, 'call effects support only void or scalar results'
+      end
+      @entries[name] = {result: result, args: args, alias: alias_result}
+    end
+  end
+
+  def lookup(name)
+    @entries[name]
+  end
 end
 
 # ------------------------------------------------------------------ types
@@ -636,7 +837,8 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles,
+                :gsizes, :sp_globals, :sp_funcs
 
   def initialize
     @globals = {}       # IR name -> type
@@ -653,6 +855,9 @@ class Module_
     @abi = {}           # struct name -> AbiType: the C calling convention shape of aggregates by value
     @asmhelpers = {}    # machine-level helpers ("fence", "rdtsc") that append_asm_helpers writes into the assembly
     @ubfiles = {}       # source file name -> index, for the failure reports of the checks (see Fn#abort_label)
+    @gsizes = {}        # IR name -> size in bytes of each global defined here (safe pointers: static offsets)
+    @sp_globals = []    # [QBE symbol, size] of the objects the safe-pointers constructor registers
+    @sp_funcs = []      # [QBE symbol, signature hash] of the functions it registers
   end
 end
 
@@ -746,7 +951,8 @@ UB_KIND = { trap: 0, overflow: 1, divzero: 2, shift: 3, bounds: 4, null: 5, unre
 # One function body. Statements are emitted into body; registers and slots into allocs.
 class Fn
   attr_accessor :mod, :name, :ret_ty, :body, :allocs, :inits, :returns_twice, :dead, :regs, :slots, :nslot,
-                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc
+                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc, :escaped, :slot_sizes,
+                :sp_safe, :cur_let, :sp_extra
 
   def initialize(mod, name, ret_ty)
     @mod = mod
@@ -771,6 +977,12 @@ class Fn
     @loc = nil              # [file, line] of the last (loc ...) statement: set only when the checks report themselves
     @ubsites = {}           # [kind, file, line] -> label of the block that reports that failure
     @sret_buf = nil         # a function returning an aggregate in the C convention: the buffer it returns the address of
+    @escaped = {}           # safe pointers: slots whose address is used other than as the address of a load or store
+    @slot_sizes = {}        # IR slot name -> size in bytes
+    @sp_safe = {}           # safe pointers: registers that are in-bounds offsets of a slot, used only for accesses in it
+    @cur_let = nil          # the register the (let ...) being emitted assigns
+    @sp_extra = []          # [QBE temporary, size]: frame storage that is not a slot (by-value parameters, the C sret buffer)
+    @no_escape = false
   end
 
   # ---- output
@@ -820,6 +1032,7 @@ class Fn
 
   def ret(v = nil)
     ensure_live
+    put(SP_LEAVE) if $safe   # replaced by the frame's __nfcxx_sp_leave call, or dropped (emit_function)
     put(v.nil? ? (@sret_buf.nil? ? "ret" : "ret #{@sret_buf}") : "ret #{v}")
     @dead = true
   end
@@ -909,7 +1122,19 @@ class Fn
   def slot_val(name)
     raise BadIR, "slot $\"#{name}\" not declared in #{@name}" unless @slots.key?(name)
     q, ty = @slots[name]
+    @escaped[name] = true unless @no_escape
     Val.new(q, "l", ["ptr", ty])
+  end
+
+  # The address operand of a load or store. A slot used only this way does not escape (safe pointers).
+  def addr_opnd(op)
+    @no_escape = true
+    begin
+      v = opnd(op, "l")
+    ensure
+      @no_escape = false
+    end
+    v
   end
 
   # ---- operands
@@ -981,6 +1206,7 @@ class Fn
       end
     end
     return const(op) if head_of(op) == "const"
+    return r_offset(self, op) if head_of(op) == "offset"
     if head_of(op) == "null"
       ty = parse_type(op[1])
       return Val.new("0", "l", ty)
@@ -1338,9 +1564,36 @@ def r_i2p(fn, x)
   fn.int_conv(v, src, ["ptr", nil])
 end
 
+# Explicit loans affect checking only; their runtime value is the original address.
+# Move/copy policy is checked before codegen; both transfer the stored value.
+def r_value_transfer(fn, x)
+  place = x[2]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  raise BadIR, "#{x[0]} form" unless x.length == 3 && place.is_a?(IRSym) && place.sig == "$"
+  r_load(fn, ["load", x[1], x[2]])
+end
+
+def r_borrow(fn, x)
+  raise BadIR, "borrow form" unless x.length == 5 && x[2].is_a?(IRStr) && ["shared", "exclusive", "two-phase"].include?(x[3])
+  pt = parse_type(x[1])
+  raise BadIR, "borrow requires pointer type" unless pt[0] == "ptr"
+  v = fn.opnd(x[4], "l")
+  raise BadIR, "borrow requires pointer operand" unless v.ty && v.ty[0] == "ptr"
+  Val.new(v.t, "l", pt)
+end
+
+def r_reborrow(fn, x)
+  raise BadIR, "reborrow form" unless x.length == 6 && x[2].is_a?(IRStr) && x[4].is_a?(IRStr) && ["shared", "exclusive"].include?(x[3])
+  pt = parse_type(x[1])
+  raise BadIR, "reborrow requires pointer type" unless pt[0] == "ptr"
+  v = fn.opnd(x[5], "l")
+  raise BadIR, "reborrow requires pointer operand" unless v.ty && v.ty[0] == "ptr"
+  Val.new(v.t, "l", pt)
+end
+
 def r_bitcast(fn, x)
   pt = parse_type(x[1])
-  v = fn.opnd(x[2], "l")
+  v = $safe && fn.sp_safe[fn.cur_let] ? fn.addr_opnd(x[2]) : fn.opnd(x[2], "l")
   Val.new(v.t, "l", pt)
 end
 
@@ -1419,10 +1672,16 @@ def cf2i_bounds(ty)
 end
 
 def r_offset(fn, x)
-  a = fn.opnd(x[1], "l")
+  raise BadIR, "offset form" unless x.length == 3
+  safe = $safe && fn.sp_safe[fn.cur_let]   # an access-only pointer into a slot (sp_safe_regs)
+  a = safe ? fn.addr_opnd(x[1]) : fn.opnd(x[1], "l")
   n = as_int(x[2])
   t = fn.tmp
   fn.emit("#{t} =l add #{a.t}, #{n}")
+  if $safe && !safe
+    sz = sp_static_size(fn, x[1])
+    t = sp_derive(fn, a.t, t) unless !sz.nil? && n >= 0 && n <= sz   # a member of a named object is in it
+  end
   Val.new(t, "l", ["ptr", nil])
 end
 
@@ -1455,6 +1714,7 @@ def r_index(fn, x)
   fn.emit("#{m} =l mul #{i64}, #{size}")
   t = fn.tmp
   fn.emit("#{t} =l add #{base.t}, #{m}")
+  t = sp_derive(fn, base.t, t) if $safe
   Val.new(t, "l", ["ptr", nil])
 end
 
@@ -1468,6 +1728,82 @@ def r_pdiff(fn, x)
   t = fn.tmp
   fn.emit("#{t} =l div #{d}, #{size}")
   Val.new(t, "l", ["int", 8, true, false])
+end
+
+# -fsafe-pointers (docs/notes/safe-pointers.md, the runtime is lib/safeptr/nfcxx_safeptr.c): every load and store
+# through a computed address is preceded by __nfcxx_sp_check(addr, size, file, line), and the result of pointer arithmetic
+# (offset, index) goes through __nfcxx_sp_derive(base, result, file, line), which fails when it leaves base's object.
+# Slots whose address escapes are registered with the runtime at function entry (__nfcxx_sp_frame) and released at each
+# return (__nfcxx_sp_leave), the defined globals and strings by a constructor of the module (__nfcxx_sp_globals). Each
+# registered object gets one byte of padding, so the address one past its end is never another object's start.
+$safe = false
+SP_LEAVE = "#sp-leave"
+
+# A load or store at a slot or a global needs no check: the address is the object's own, the type its own.
+def sp_static_addr?(op)
+  op.is_a?(IRSym) && (op.sig == "$" || op.sig == "@")
+end
+
+# The size of the object a static address names, or nil.
+def sp_static_size(fn, op)
+  return nil unless op.is_a?(IRSym)
+  return fn.slot_sizes[op.name] if op.sig == "$"
+  return nil if op.sig != "@" || fn.mod.thread.key?(op.name)
+  return fn.mod.gsizes[op.name] if fn.mod.gsizes.key?(op.name)
+  fn.mod.strings.key?(op.name) ? fn.mod.strings[op.name].length : nil
+end
+
+# The signature of a function or of a call through a pointer, as the hash the runtime compares (32-bit FNV-1a): the
+# QBE class of the result and of each parameter up to "...", an aggregate by value as its size and alignment (the QBE
+# type names are per module). Both sides are made from the QBE classes the emitter gives them, so a call that matches
+# its callee's ABI matches its hash; the C++ types themselves (int* against long*) are not compared.
+def sp_sig(mod, rcls, parts)
+  canon = lambda do |c|
+    next c unless c.start_with?(":")
+    a = mod.abi.values.find { |t| t.tn == c }
+    a.nil? ? c : "a#{a.size}.#{a.align}"
+  end
+  text = canon.call(rcls) + "("
+  parts.each do |p|
+    c = p.split(" ")[0]
+    text += canon.call(c) + ","
+    break if c == "..."
+  end
+  h = 0x811c9dc5
+  text.each_byte { |b| h = ((h ^ b) * 0x01000193) & 0xffffffff }
+  h
+end
+
+# The file and line arguments of a check: the last (loc ...), or none (the report says "?").
+def sp_where(fn)
+  return "l 0, w 0" if fn.loc.nil?
+  idx = (fn.mod.ubfiles[fn.loc[0]] ||= fn.mod.ubfiles.length)
+  "l $__nfcxx_ubf#{idx}, w #{fn.loc[1]}"
+end
+
+# The check of an access of n bytes at addr. The runtime's per-thread cache of the last two objects checks found
+# (struct sp_tcache, lib/safeptr/nfcxx_safeptr.c: lo0 hi0 lo1 hi1 gen, eight bytes each) is tested inline: the access is
+# good when it lies in one of them and the cache's generation is the runtime's (__nfcxx_sp_gen); only a miss calls
+# __nfcxx_sp_check, which also fills the cache. The miss branch is the first successor, so QBE puts the call out of line.
+def sp_check(fn, addr, n)
+  fn.emit("call $__nfcxx_sp_check(l #{addr}, l #{n}, #{sp_where(fn)})")
+end
+
+def sp_derive(fn, base, res)
+  r = fn.tmp
+  fn.emit("#{r} =l call $__nfcxx_sp_derive(l #{base}, l #{res}, #{sp_where(fn)})")
+  r
+end
+
+# The address of an access: a static one is not checked, any other gets a check of n bytes (n: a size, or a scalar type,
+# whose size is taken after the operand, so that an error in either is reported in the order of the unchecked emitter).
+def sp_access(fn, op, n)
+  return fn.opnd(op, "l") unless $safe
+  return fn.addr_opnd(op) if sp_static_addr?(op)
+  return fn.opnd(op, "l") if reg?(op) && fn.sp_safe[op.byteslice(1, op.bytesize - 1).to_i]
+  v = fn.opnd(op, "l")
+  sp_check(fn, v.t, n.is_a?(Array) ? ty_size(n) : n)
+  v
 end
 
 # Volatile accesses. QBE has no volatile: its load optimisation forwards a store to a later load of the same
@@ -1495,7 +1831,7 @@ def r_load(fn, x)
   vol = x[0] == "load.v"
   ty = parse_type(x[1])
   raise Refused, "load of an aggregate (aggregates are addresses)" if is_agg(ty)
-  addr = fn.opnd(x[2], "l")
+  addr = sp_access(fn, x[2], ty)
   op, cls = load_op(ty)
   t = fn.tmp
   if vol
@@ -1584,7 +1920,17 @@ def r_call(fn, x)
     end
   end
   parts << "..." if !nfixed.nil? && nfixed == args.length
+  if $safe && x[2].is_a?(IRSym) && x[2].sig == "&" && SP_MEMFN.key?(x[2].name) && args.length == 3 && !args.include?(nil)
+    # the library's block functions: both ranges are checked here, since the library itself is not
+    n = args[2][0]
+    SP_MEMFN[x[2].name].each { |i| sp_check(fn, args[i][0].t, n.t) } if n.cls == "l"
+  end
   target = callee.t
+  if $safe && !(x[2].is_a?(IRSym) && x[2].sig == "&")
+    # a call through a pointer: the callee must be a function with this signature (see sp_sig)
+    rcls = !sret.nil? ? (sret[0].shape == "empty" ? "" : sret[0].tn) : ret == VOID ? "" : qcls(ret)
+    fn.emit("call $__nfcxx_sp_call(l #{target}, l #{sp_sig(fn.mod, rcls, parts)}, #{sp_where(fn)})")
+  end
   if !sret.nil?
     info, dest = sret
     if info.shape == "empty"
@@ -1605,6 +1951,9 @@ def r_call(fn, x)
   fn.emit("#{t} =#{cls} call #{target}(#{parts.join(", ")})")
   Val.new(t, cls, ret)
 end
+
+# Library functions whose pointer arguments (by index) span the length in argument 2.
+SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }
 
 # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
 def r_vaarg(fn, x)
@@ -1645,7 +1994,7 @@ RVAL = {
   "cadd" => r_cadd_like("add"), "csub" => r_cadd_like("sub"), "cmul" => r_cadd_like("mul"),
   "cneg" => ->(fn, x) { r_cneg(fn, x) },
   "cdiv" => r_divrem("div"), "crem" => r_divrem("rem"),
-  "cshl" => r_shift(true), "cshr" => r_shift(false),
+  "cshl" => r_shift(true), "cshr" => r_shift(false), "wshl" => r_shift(true),
   "fadd" => r_fbin("add"), "fsub" => r_fbin("sub"), "fmul" => r_fbin("mul"), "fdiv" => r_fbin("div"),
   "fneg" => ->(fn, x) { r_fneg(fn, x) },
   "and" => r_bitop("and"), "or" => r_bitop("or"), "xor" => r_bitop("xor"),
@@ -1655,11 +2004,23 @@ RVAL = {
   "lt.f" => r_cmp("lt.f"), "le.f" => r_cmp("le.f"),
   "iconv" => ->(fn, x) { r_iconv(fn, x) }, "p2i" => ->(fn, x) { r_p2i(fn, x) },
   "i2p" => ->(fn, x) { r_i2p(fn, x) }, "bitcast" => ->(fn, x) { r_bitcast(fn, x) },
+  "borrow" => ->(fn, x) { r_borrow(fn, x) },
+  "move-value" => ->(fn, x) { r_value_transfer(fn, x) },
+  "copy-value" => ->(fn, x) { r_value_transfer(fn, x) },
+  "reborrow" => ->(fn, x) { r_reborrow(fn, x) },
   "i2f" => ->(fn, x) { r_i2f(fn, x) }, "u2f" => ->(fn, x) { r_i2f(fn, x) },
   "fconv" => ->(fn, x) { r_fconv(fn, x) }, "cf2i" => ->(fn, x) { r_cf2i(fn, x) },
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },
   "pdiff" => ->(fn, x) { r_pdiff(fn, x) },
   "bfload" => ->(fn, x) { r_bfload(fn, x) }, "bfload.v" => ->(fn, x) { r_bfload(fn, x) },
+  "call-borrow" => ->(fn, x) {
+    unless x.length >= 5 && head_of(x[1]) == 'ptr' && x[2].is_a?(IRStr) &&
+           (x[3] == 'root' || (head_of(x[3]) == 'parent' && x[3].length == 2 && x[3][1].is_a?(IRStr))) &&
+           x[4].is_a?(IRSym) && x[4].sig == '&'
+      raise BadIR, 'call-borrow form'
+    end
+    r_call(fn, ['call', x[1], x[4]] + x.drop(5))
+  },
   "call" => ->(fn, x) { r_call(fn, x) }, "rdtsc" => ->(fn, x) { r_rdtsc(fn, x) },
 }
 
@@ -1676,7 +2037,9 @@ def s_let(fn, x)
   ty = parse_type(x[2])
   raise Refused, "register of aggregate type" if is_agg(ty)
   fn.declare_reg(n, ty)
+  fn.cur_let = n
   v = fn.rval(x[3], ty)
+  fn.cur_let = nil
   raise BadIR, "void value assigned to a register" if v.nil?
   if v.cls != fn.regs[n][1]
     raise Refused, "let %#{n}: value class #{v.cls}, register class #{fn.regs[n][1]}"
@@ -1694,8 +2057,11 @@ def s_store(fn, x)
   vol = x[0] == "store.v"
   ty = parse_type(x[1])
   raise Refused, "store of an aggregate type" if is_agg(ty)
-  addr = fn.opnd(x[2], "l")
-  val = fn.opnd(x[3])
+  addr = sp_access(fn, x[2], ty)
+  # EDG's exception runtime (libC.a, not instrumented) links the frames' EH stack entries through this global; publishing
+  # a slot there is not an escape to instrumented code (safe pointers: the slot needs no registration).
+  eh = $safe && x[2].is_a?(IRSym) && x[2].sig == "@" && x[2].name == SP_EH_ENTRY && sp_static_addr?(x[3])
+  val = eh ? fn.addr_opnd(x[3]) : fn.opnd(x[3])
   if ty[0] == "ptr" || ty[0] == "fn" || (ty[0] == "int" && ty[1] == 8)
     op = "storel"
     cls = "l"
@@ -1741,7 +2107,7 @@ def r_bfload(fn, x)
   unit, boff, width = bf_args(x, 6)
   ty = parse_type(x[1])
   raise Refused, "bit-field of type #{tyrepr(ty)}" if ty[0] != "int"
-  addr = fn.opnd(x[3], "l")
+  addr = sp_access(fn, x[3], unit)
   ucls = unit == 8 ? "l" : "w"
   ubits = unit == 8 ? 64 : 32
   t = fn.tmp
@@ -1783,7 +2149,7 @@ def s_bfstore(fn, x)
   unit, boff, width = bf_args(x, 7)
   ty = parse_type(x[1])
   raise Refused, "bit-field of type #{tyrepr(ty)}" if ty[0] != "int"
-  addr = fn.opnd(x[3], "l")
+  addr = sp_access(fn, x[3], unit)
   val = fn.opnd(x[6])
   ucls = unit == 8 ? "l" : "w"
   ubits = unit == 8 ? 64 : 32
@@ -1883,18 +2249,24 @@ def s_vlaalloc(fn, x)
 end
 
 def s_copy(fn, x)
-  n = as_int(x[1])
+  # BYTES is a constant, or a register of type unsigned_long (a run-time length, from llvm-to-pathb.rb)
+  n = x[1].is_a?(String) && x[1][0] == "%" ? fn.opnd(x[1], "l").t : as_int(x[1])
   dst = fn.opnd(x[2], "l")
   src = fn.opnd(x[3], "l")
   return if n == 0
+  if $safe
+    sp_check(fn, dst.t, n)
+    sp_check(fn, src.t, n)
+  end
   fn.emit("call $memmove(l #{dst.t}, l #{src.t}, l #{n})")
 end
 
 # (zero-fill BYTES DST): clear an aggregate object (the part of a constant initializer that names no element).
 def s_zero_fill(fn, x)
-  n = as_int(x[1])
+  n = x[1].is_a?(String) && x[1][0] == "%" ? fn.opnd(x[1], "l").t : as_int(x[1])
   dst = fn.opnd(x[2], "l")
   return if n == 0
+  sp_check(fn, dst.t, n) if $safe
   fn.emit("call $memset(l #{dst.t}, w 0, l #{n})")
 end
 
@@ -1950,6 +2322,26 @@ end
 # Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
 # where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
 # the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+# Drop-state records describe checking policy only. Cleanup code must already
+# exist in the producer's IR; these forms do not call or synthesize a destructor. The type `object` is a C++ object
+# with a destructor, which takes its whole slot.
+def s_drop_obligation(fn, x)
+  place = x[3]
+  place = place[1] while head_of(place) == "offset" && place.length == 3
+  unless x.length == 4 && x[1].is_a?(IRStr) && !x[1].to_s.empty? && place.is_a?(IRSym) && place.sig == "$"
+    raise BadIR, "drop-obligation form"
+  end
+  parse_type(x[2]) unless x[2] == "object"
+end
+
+def s_drop_event(fn, x)
+  raise BadIR, "drop event form" unless x.length == 2 && x[1].is_a?(IRStr) && !x[1].to_s.empty?
+end
+
+def s_loan_end(fn, x)
+  raise BadIR, "loan-end form" unless x.length == 2 && x[1].is_a?(IRStr)
+end
+
 def s_decl(fn, x)
   raise BadIR, "decl form" if x.length != 3
 end
@@ -2193,6 +2585,11 @@ STMT = {
   "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
   "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
   "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
+  "loan-end" => ->(fn, x) { s_loan_end(fn, x) },
+  "drop-obligation" => ->(fn, x) { s_drop_obligation(fn, x) },
+  "drop-live" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state" => ->(fn, x) { s_drop_event(fn, x) },
+  "drop-state-if-live" => ->(fn, x) { s_drop_event(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions
@@ -2421,7 +2818,9 @@ def x87_entry_thunk(name, linkage, ints, stack, complex = false)
   mr = (m + 15) / 16 * 16
   frame = mr + (complex ? 40 : 24)
   global = linkage == "local" ? [] : [(linkage == "weak" ? ".weak #{name}" : ".globl #{name}")]
-  out = [".text", *global, ".type #{name}, @function", name + ":",
+  # Aligned as QBE aligns functions: the entry is the function's address, and the Itanium pointer-to-member ABI reads
+  # an odd one as a virtual function's vtable offset.
+  out = [".text", ".balign 16", *global, ".type #{name}, @function", name + ":",
          "\tsubq $#{frame}, %rsp"]
   out.concat(x87_copy_args(stack, frame))
   if ints < 6
@@ -2453,6 +2852,8 @@ ASM_HELPERS = {
 # GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
 # line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
 ALIAS_MARK = "# pathb-alias "
+# `# pathb-raw-asm HEX`: a file-scope asm block (an (asm-decl HEX) form), written to the assembly as it is.
+RAW_ASM_MARK = "# pathb-raw-asm "
 
 def append_weak(il_path, asm_path)
   names = []
@@ -2460,6 +2861,9 @@ def append_weak(il_path, asm_path)
   read_text(il_path).split("\n").each do |line|
     if line.start_with?(WEAK_MARK)
       names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip
+    elsif line.start_with?(RAW_ASM_MARK)
+      text = [line.byteslice(RAW_ASM_MARK.bytesize, line.bytesize - RAW_ASM_MARK.bytesize).strip].pack("H*")
+      extra << (text.end_with?("\n") ? text : text + "\n")
     elsif line.start_with?(ASM_MARK)
       lines = ASM_HELPERS[line.byteslice(ASM_MARK.bytesize, line.bytesize - ASM_MARK.bytesize).strip]
       extra << lines.join("\n") + "\n" unless lines.nil?
@@ -2524,6 +2928,10 @@ def emit_global(mod, g)
   raise Refused, "global #{name}: alignment #{align} (QBE data aligns to at most 64)" if align > 64
   items = global_items(mod, name, init)
   pieces = emit_data_items(mod, name, size, items)
+  if $safe && !thread
+    pieces << "z 1"   # padding: see the safe-pointers section
+    mod.sp_globals << [qsym(name), size]
+  end
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}data $#{qsym(name)} = align #{align} { #{pieces.join(", ")} }"
@@ -2543,11 +2951,125 @@ def emit_string(mod, d)
   raw = raw + [0] * (total - raw.length)
   mod.strings[name] = raw
   parts = raw.map { |c| "b #{c}" }
+  if $safe
+    parts << "z 1"
+    mod.sp_globals << [qsym(name), raw.length]
+  end
   if parts.empty?
     mod.out << "data $#{qsym(name)} = { z 0 }"
   else
     mod.out << "data $#{qsym(name)} = { #{parts.join(", ")} }"
   end
+end
+
+# Safe pointers: the registers of a function body that need no checks. A register qualifies when it is assigned once, by
+# (offset SLOT N), (offset R N) or (bitcast T R|SLOT) of a slot or of another such register, inside the slot, and every
+# use of it is the address of a load or store (or bit-field access) that fits in the slot from that offset. Such an
+# access is in bounds by construction, and the pointer goes nowhere else, so it does not make the slot escape either.
+# A register used in any other way (stored, passed, compared, assigned by set) disqualifies itself and the registers it
+# was derived from. The other root is a load of @"__curr_eh_stack_entry": the current frame's EH stack entry, a
+# structure of EDG's exception lowering that only compiler-generated code and the runtime touch (no bound is applied).
+SP_EH_ENTRY = "__curr_eh_stack_entry"
+
+def sp_safe_regs(fn, forms)
+  cand = {}     # register -> [offset, size of the object it points into]
+  parent = {}   # register -> the register it was derived from
+  bad = {}
+  acc = []      # [register, bytes] of each access through a candidate
+  regn = ->(op) { op.byteslice(1, op.bytesize - 1).to_i }
+  scan = nil
+  addr_use = lambda do |op, bytes|
+    if op.is_a?(String) && reg?(op)
+      acc << [regn.call(op), bytes]
+    else
+      scan.call(op)
+    end
+  end
+  derive = lambda do |n, base, off|
+    if base.is_a?(IRSym) && base.sig == "$" && fn.slot_sizes.key?(base.name)
+      cand[n] = [off, fn.slot_sizes[base.name]] if off >= 0 && off <= fn.slot_sizes[base.name]
+    elsif base.is_a?(String) && reg?(base) && cand.key?(regn.call(base))
+      b = regn.call(base)
+      o, size = cand[b]
+      if off >= 0 && o + off <= size
+        cand[n] = [o + off, size]
+        parent[n] = b
+      else
+        bad[b] = true
+      end
+    else
+      scan.call(base)
+    end
+  end
+  scan = lambda do |x|
+    if x.is_a?(String)
+      bad[regn.call(x)] = true if reg?(x)
+      return
+    end
+    return unless x.is_a?(Array)
+    h = head_of(x)
+    if h == "let" && x.length == 4 && reg?(x[1])
+      n = regn.call(x[1])
+      bad[n] = true if cand.key?(n) || parent.key?(n)   # assigned twice
+      rv = x[3]
+      rh = head_of(rv)
+      if rh == "offset" && rv.length == 3 && !as_int(rv[2]).nil?
+        derive.call(n, rv[1], as_int(rv[2]))
+      elsif rh == "bitcast" && rv.length == 3
+        derive.call(n, rv[2], 0)
+      elsif rh == "load" && rv.length == 3 && rv[2].is_a?(IRSym) && rv[2].sig == "@" && rv[2].name == SP_EH_ENTRY
+        cand[n] = [0, 1 << 40]
+      elsif (rh == "load" || rh == "load.v") && rv.length == 3
+        addr_use.call(rv[2], ty_size(parse_type(rv[1]))) rescue scan.call(rv)
+      elsif (rh == "bfload" || rh == "bfload.v") && rv.length == 6
+        addr_use.call(rv[3], as_int(rv[2]))
+      else
+        scan.call(rv)
+      end
+    elsif (h == "store" || h == "store.v") && x.length == 4
+      bytes = (ty_size(parse_type(x[1])) rescue nil)
+      bytes.nil? ? scan.call(x[2]) : addr_use.call(x[2], bytes)
+      scan.call(x[3])
+    elsif (h == "bfstore" || h == "bfstore.v") && x.length == 7
+      addr_use.call(x[3], as_int(x[2]))
+      scan.call(x[6])
+    elsif h == "set"
+      bad[regn.call(x[1])] = true if x[1].is_a?(String) && reg?(x[1])
+      scan.call(x[2])
+    else
+      x.each { |y| scan.call(y) }
+    end
+  end
+  forms.each { |f| scan.call(f) }
+  acc.each do |n, bytes|
+    next unless cand.key?(n)
+    o, size = cand[n]
+    bad[n] = true if bytes.nil? || o + bytes > size
+  end
+  changed = true
+  while changed   # a disqualified register's pointer escapes, and with it the one it came from
+    changed = false
+    parent.each { |n, b| (bad[b] = true; changed = true) if bad[n] && !bad[b] }
+  end
+  safe = {}
+  cand.each_key { |n| safe[n] = true unless bad[n] }
+  safe
+end
+
+# Safe pointers: register the escaping slots at entry, release them at each return (the SP_LEAVE lines of Fn#ret).
+# The storage QBE makes for a by-value aggregate parameter and the C sret buffer are not slots, but the function reaches
+# them through pointers (a by-value iterator's this), so they are registered with the slots. QBE lays them out with no
+# padding byte after them: their size goes with the top bit set (SP_NOPAD), and the runtime does not take the address
+# one past their end for theirs, since it may be the next object's start.
+SP_NOPAD = -(1 << 63)
+def sp_frame(fn, slot_pad)
+  esc = fn.slots.keys.select { |s| fn.escaped[s] }
+  objs = esc.map { |s| [fn.slots[s][0], fn.slot_sizes[s]] } + fn.sp_extra
+  leave = objs.empty? ? nil : "\tcall $__nfcxx_sp_leave(l #{objs[0][0]})"
+  fn.body = fn.body.map { |l| l == "\t" + SP_LEAVE ? leave : l }.compact
+  return if objs.empty?
+  esc.each { |s| i, padded = slot_pad[s]; fn.allocs[i] = padded }
+  fn.inits << "\tcall $__nfcxx_sp_frame(w #{objs.length}, ..., #{objs.map { |q, n| "l #{q}, l #{n}" }.join(", ")})"
 end
 
 def emit_function(mod, f)
@@ -2563,6 +3085,7 @@ def emit_function(mod, f)
   static = false
   weak = false
   startup = []
+  slot_pad = {}
   qparams = []
   param_stores = []
   body_forms = []
@@ -2590,6 +3113,10 @@ def emit_function(mod, f)
       salign = as_int(part[4])
       q = "%s#{fn.nslot}"
       fn.nslot += 1
+      fn.slot_sizes[sname] = ssize
+      # safe pointers: the alloc line of the slot and the same line with one byte of padding, for an escaping slot
+      slot_pad[sname] = [fn.allocs.length, salign > 16 ? "\t#{q}r =l alloc16 #{ssize + salign}" :
+                         "\t#{q} =l alloc#{salign >= 16 ? 16 : salign >= 8 ? 8 : 4} #{ssize + 1}"]
       if salign > 16
         # QBE stack slots are at most 16-aligned: over-allocate and round the address up. The extra lines
         # are address arithmetic on the start block's alloc, so the slot is a plain pointer for the rest.
@@ -2622,6 +3149,7 @@ def emit_function(mod, f)
         raise Refused, "aggregate #{pstr(parse_type(p[2])[2])} returned by value: #{info.why}" if info.shape == "unsupported"
         # The C convention: no hidden parameter; the function fills a buffer of its own and returns its address.
         fn.allocs << "\t%sretbuf =l alloc#{info.align >= 16 ? 16 : 8} #{[info.size, 1].max}"
+        fn.sp_extra << ["%sretbuf", info.size + SP_NOPAD] if $safe && info.size > 0
         fn.inits << "\tstorel %sretbuf, %r#{n}"
         if info.shape != "empty"
           fn.sret_buf = "%sretbuf"
@@ -2642,9 +3170,11 @@ def emit_function(mod, f)
           if info.shape == "empty"
             fn.allocs << "\t%ebuf#{pi} =l alloc8 8"
             fn.inits << "\tstorel %ebuf#{pi}, %r#{n}"
+            fn.sp_extra << ["%ebuf#{pi}", 8 + SP_NOPAD] if $safe   # an empty class's this (8: the whole buffer)
           else
             qparams << "#{info.tn} %p#{pi}"
             param_stores << ["l", pi, n]
+            fn.sp_extra << ["%p#{pi}", info.size + SP_NOPAD] if $safe
           end
         end
       else
@@ -2665,6 +3195,7 @@ def emit_function(mod, f)
   param_stores.each do |cls, idx, n|
     fn.put("#{MEM_STORE[cls]} %p#{idx}, %r#{n}")
   end
+  fn.sp_safe = sp_safe_regs(fn, body_forms) if $safe
   fn.stmts(body_forms)
   unless fn.dead
     if ret == VOID
@@ -2673,6 +3204,7 @@ def emit_function(mod, f)
       fn.jmp(fn.abort_label(:missing_return))
     end
   end
+  sp_frame(fn, slot_pad) if $safe
   fn.ub_blocks
   if fn.abort_used
     fn.body << "@abort"
@@ -2681,6 +3213,9 @@ def emit_function(mod, f)
   end
   rc = ret == VOID ? "" : qcls(ret) + " "
   rc = sret_tn + " " unless sret_tn.nil?
+  # safe pointers: the function and its signature, for the checks of calls through pointers (sp_sig). A long double
+  # function's address is its x87 entry thunk, not this definition, so it is not registered.
+  mod.sp_funcs << [qsym(name), sp_sig(mod, rc.strip, qparams)] if $safe && !name.start_with?("__nfcxx_ldr_")
   linkage = static ? "" : "export "
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}function #{rc}$#{qsym(name)}(#{qparams.join(", ")}) {"
@@ -2889,10 +3424,29 @@ def emit_x87_thunks(mod, forms)
   end
 end
 
+# Safe pointers: a constructor that registers the module's globals, strings and functions before other constructors run.
+def sp_globals_ctor(mod)
+  return if mod.sp_globals.empty? && mod.sp_funcs.empty?
+  [["gtab", mod.sp_globals], ["ftab", mod.sp_funcs]].each do |tab, rows|
+    next if rows.empty?
+    mod.out << "data $__nfcxx_sp_#{tab} = align 8 { #{rows.map { |q, n| "l $#{q}, l #{n}" }.join(", ")} }"
+  end
+  mod.out << "function $__nfcxx_sp_gctor() {"
+  mod.out << "@start"
+  mod.out << "\tcall $__nfcxx_sp_globals(l $__nfcxx_sp_gtab, l #{mod.sp_globals.length})" unless mod.sp_globals.empty?
+  mod.out << "\tcall $__nfcxx_sp_funcs(l $__nfcxx_sp_ftab, l #{mod.sp_funcs.length})" unless mod.sp_funcs.empty?
+  mod.out << "\tret"
+  mod.out << "}"
+  mod.out << ""
+  mod.startup << [".init_array", 101, "__nfcxx_sp_gctor"]
+end
+
 def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
   check_layout(forms[0])
+  semantic_layouts = BorrowLayouts.new(forms, BadIR, Refused)
+  BorrowCallEffects.new(forms, semantic_layouts, BadIR, Refused)
   forms = stub_long_double(forms) if ld_trap
   mod = Module_.new
   all_forms = forms
@@ -2903,6 +3457,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
   forms.drop(1).each do |f|   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
     next if head_of(f) != "global"
     mod.globals[pstr(f[1])] = parse_type(f[2])
+    mod.gsizes[pstr(f[1])] = as_int(f[3])
     if f.drop(5).any? { |p| head_of(p) == "weak" } && f.drop(5).any? { |p| head_of(p) == "extern" } &&
        !f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.weakdata[pstr(f[1])] = true
@@ -2922,14 +3477,18 @@ def emit_module(text, do_prune = true, ld_trap = false)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
+    elsif h == "asm-decl"
+      mod.out << "#{RAW_ASM_MARK}#{f[1].to_s}"
     elsif h == "alias"
       name, target, kind, weak = alias_parts(f)
       mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"
-    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk" && h != "borrow-layout" && h != "call-effects" &&
+          h != "sycl-kernel-attr"   # a SYCL kernel's attributes, for the SPIR-V emitter
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end
   emit_x87_thunks(mod, forms)
+  sp_globals_ctor(mod) if $safe
   emit_startup_tables(mod)
   mod.got.each { |name, cell| mod.out << "data $#{cell} = align 8 { l $#{qsym(name)} }" }
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink
@@ -2961,6 +3520,10 @@ def main(argv)
   end
   if !args.empty? && args[0] == "--long-double=trap"
     ld_trap = true
+    args = args.drop(1)
+  end
+  if !args.empty? && args[0] == "--safe"
+    $safe = true
     args = args.drop(1)
   end
   if args.length > 1

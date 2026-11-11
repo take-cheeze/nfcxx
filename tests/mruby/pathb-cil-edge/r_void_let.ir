@@ -1,0 +1,1 @@
+(function "f" (ret int) (params) (let %0 void (const void 0)) (return (const int 0)))

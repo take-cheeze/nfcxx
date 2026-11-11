@@ -1,0 +1,1439 @@
+# frozen_string_literal: true
+
+require 'set'
+require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+require_relative 'ir_block_operands'
+require_relative 'ir_symbol_flow'
+require_relative 'predicate_returns'
+require_relative 'send_names'
+require_relative 'dynamic_names'
+
+# YIELD_REACH: a whole-program, by-name "may this code suspend the current Fiber?"
+# analysis over the ireps of a closed world. A compiled frame that sits between a Fiber's entry
+# and a Fiber.yield breaks mruby's fiber switch, so a frame whose execution provably
+# cannot reach a yield above it is safe under any Fiber. Every question defaults to "may yield".
+#
+# Per node (method, block or class-body irep) it computes
+#   nb(n)  a yield can happen above n's frame, not counting the blocks n's method *received*: those
+#          are accounted where they were passed (a literal block is an edge of the passing node, a
+#          forwarded one marks the forwarder);
+#   own(n) nb(n), or n runs the block its method received and a block passed to that method may
+#          yield.
+# A call edge uses nb(callee), a literal-block edge nb(block), and only own() answers "can the frame
+# of n itself be crossed". Names are resolved the way the compiler resolves POLY sites: by name over
+# every definition, whatever the receiver.
+class YieldReach
+  # Sends whose first argument is the name to call.
+  DYNAMIC_SENDS = SendNames::FORWARDING_SENDS
+  # Run a block or a string as arbitrary code. With a literal block the block is the edge; without
+  # one the code is unknown.
+  CODE_EVAL = %w[eval instance_eval class_eval module_eval].freeze
+  BLOCK_EXEC = %w[instance_exec class_exec module_exec].freeze
+  # Calls that run a Proc value.
+  PROC_CALLS = %w[call () yield [] ===].freeze
+  # Calls that leave the receiver's other uses harmless (they neither run nor keep a Proc).
+  PROC_HARMLESS = %w[arity lambda? nil? == != ! block_given? is_a? kind_of? class frozen? object_id equal?
+                     respond_to? parameters].freeze
+  # A literal block given to these outlives the call: native code keeps it and runs it later from an
+  # unrelated site (Hash default procs, Enumerator generators, define_method bodies).
+  STORING_CALLS = %w[new define_method define_singleton_method proc lambda].freeze
+  # Native reads that run a stored block.
+  STORED_READS = %w[[] fetch dig default values_at fetch_values].freeze
+  # Core methods whose computed send names a method some Symbol was converted for.
+  CALLABLE_SEND_METHODS = %w[to_proc inject reduce].freeze
+  # A native's callback into Ruby is a C-boundary frame no yield crosses (see nb_cause). BC2CPP_YIELD_C_BOUNDARY=0
+  # counts native callbacks and stored-block reads as yield paths again.
+  C_BOUNDARY = ENV['BC2CPP_YIELD_C_BOUNDARY'] != '0'
+  SPELLED_SENDS = ENV['BC2CPP_YIELD_SPELLED_SENDS'] != '0'
+  # Symbol#to_proc and Method objects turn a method into a Proc value.
+  CALLABLE_MAKERS = %w[to_proc method instance_method singleton_method].freeze
+  # Blocks handed to these constants' `new` receive an Enumerator::Yielder as their first argument.
+  GENERATOR_CLASSES = %w[Enumerator Lazy Generator].freeze
+  # What Enumerator::Yielder answers.
+  YIELDER_MESSAGES = %w[<< yield call].freeze
+  # Names bytecode operators dispatch to.
+  OP_NAMES = {
+    :ADD => '+', :ADDI => '+', :ADDILV => '+', :SUB => '-', :SUBI => '-', :SUBILV => '-', :MUL => '*',
+    :DIV => '/', :EQ => '==', :LT => '<', :LE => '<=', :GT => '>', :GE => '>=', :AREF => '[]',
+    :ASET => '[]=', :GETIDX => '[]', :GETIDX0 => '[]', :SETIDX => '[]=', :STRCAT => 'to_s', :ARYCAT => 'to_a', :ARYSPLAT => 'to_a', :APOST => 'to_a',
+    :HASHCAT => 'to_hash', :RANGE_INC => '<=>', :RANGE_EXC => '<=>', :GETCONST => 'const_missing',
+    :GETMCNST => 'const_missing', :CLASS => 'inherited', :TDEF => 'singleton_method_added',
+    :DEF => 'method_added', :SDEF => 'singleton_method_added', :EXCEPT => 'exception'
+  }.freeze
+  # Punctuation names have no identifier for the outside-source scan to find.
+  OPERATOR_NAMES = %w[+ - * / % ** == != < <= > >= <=> === =~ !~ [] []= << >> ! & | ^ ~ +@ -@].freeze
+  # Ops that copy a value without keeping or running it, or read it only as a condition.
+  NEUTRAL_OPS = %i[MOVE GETUPVAR BLKPUSH BLKCALL JMPIF JMPNOT JMPNIL ENTER NOP STOP].freeze
+  # Ops that read their leading register and never define it. It is BytecodeIR::Ops::LEAD_READ_ONLY with two
+  # deliberate differences: MATCHERR is left out (writers_of counts it as a writer, the conservative answer),
+  # and the stores and in-place appends are added (they read R(a) and define nothing in it; LEAD_READ_ONLY
+  # is audited against the walk-over semantics, so it does not list them).
+  LEAD_READERS = (BytecodeIR::Ops::LEAD_READ_ONLY - [:MATCHERR] +
+                  %i[SETIV SETGV SETCV SETCONST SETMCNST SETSV SETIDX ASET ARYPUSH HASHADD]).freeze
+  NON_WRITERS = %i[JMP JMPUW STOP RETSELF].freeze
+
+  Node = Struct.new(:label, :irep, :kind, :name, :parent, :owner, :calls, :lit, :bodies, :seed, :native,
+                    :unknown_call, :proc_call, :unknown_block, :invokes, :stored_read, :fiber_body,
+                    :yield_unknown, :super_forward, :forwards, :captured, :fwd_any, :fwd_enum, :enum_lit,
+                    :any_lit, :enum_send, :klass, :generator, :yielder_calls, :yielder_leak, :callable_send, :fwd_callable,
+                    :dyn_other, keyword_init: true)
+
+  # Readers that run the analysis first, like every public query (see analyze!).
+  def nodes
+    analyze!
+    @nodes
+  end
+
+  def defs_by_name
+    analyze!
+    @defs_by_name
+  end
+
+  def fiber_roots_unknown
+    analyze!
+    @fiber_roots_unknown
+  end
+
+  def reasons
+    analyze!
+    @reasons
+  end
+
+  def enum_names
+    analyze!
+    @enum_names
+  end
+
+  # opaque_names: the names outside (native and foreign Ruby) code calls back into Ruby by, or nil
+  # when they were not scanned. native_names: names some outside source defines.
+  def initialize(ireps:, sound:, opaque_names:, native_names:)
+    @ireps = ireps
+    @sound = sound
+    @opaque_names = opaque_names
+    @native_names = native_names || Set.new
+    @reasons = Hash.new(0)
+    @nodes = {}
+    @defs_by_name = Hash.new { |h, k| h[k] = [] }
+    @passed = Hash.new { |h, k| h[k] = [] } # name => literal blocks passed at sites named so
+    @upass = Set.new # names given a block of unknown origin
+    @alias_of = Hash.new { |h, k| h[k] = Set.new }
+    @fiber_roots_unknown = false
+    @callable_names = Set.new
+    @callable_all = false
+    @enum_names = Set['each']
+    @enum_all = false
+    @storing_blocks = []
+    @isolated = Hash.new { |h, k| h[k] = [] }
+    @sealed = false
+    @analyzed = false
+  end
+
+  # The scan and the fixpoint run on the first query, not at construction: a fact the scan asks of the code generator
+  # (its argument types, see CodeGen#build_yield_reach) is only available once the generator is ready.
+  # Every public query starts with analyze!; a query made while the analysis runs (@analyzing) passes straight through. The
+  # calls are spelled out: a loop that wrapped the queries with define_method hid them from the compiler, which then
+  # replaced each wrapper with the unwrapped body.
+  def analyze!
+    return if @analyzed || @analyzing
+
+    @analyzing = true
+    begin
+      build_nodes
+      scan_all
+      solve
+      @analyzed = true
+    ensure
+      @analyzing = false
+    end
+  end
+
+  def sound? = @sound
+
+  # Nothing above this irep's frame can suspend the current Fiber.
+  def yield_free?(label)
+    analyze!
+    @sound && @own.key?(label) && !@own[label]
+  end
+
+  # The body of this method, given a block that is itself yield-free, cannot suspend the Fiber.
+  def body_yield_free?(label)
+    analyze!
+    @sound && @nb.key?(label) && !@nb[label]
+  end
+
+  # #builds_enumerator?: does this method hand a
+  # literal block to `Enumerator.new` / `Lazy.new` / `Generator.new`? Those blocks
+  # are generators -- mruby-enumerator runs them on a Fiber (CoreDefs.fiber_gem?)
+  # -- so the method cannot compile behind a hand-off from its own entry: the
+  # frame that matters is the BLOCK's, and it sits below a fiber entry by
+  # construction rather than by a caller. YieldReach marks only `Fiber.new`
+  # blocks as fiber bodies (scan_fiber_call), so `body_yield_free?` otherwise
+  # reads a generator builder as yield-free.
+  def builds_enumerator?(label)
+    analyze!
+    irep = @ireps[label]
+    return false unless irep
+
+    BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
+      next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
+
+      return true unless literal_block_child(irep, idx).nil?
+    end
+    false
+  end
+
+  # The raw answer, also for a world the proof does not cover (a closed world with a global refusal): the
+  # refusal of methods under a Fiber is best effort there, as it always was.
+  def may_yield_unsealed?(label)
+    analyze!
+    @own.fetch(label, true)
+  end
+
+  # Nodes whose frame can lie above a Fiber.new body's entry.
+  def fiber_crossable
+    analyze!
+    @fiber_crossable ||= compute_crossable
+  end
+
+  def method_labels
+    analyze!
+    @nodes.values.select { |n| n.kind == :method }.map(&:label)
+  end
+  def block_labels
+    analyze!
+    @nodes.values.select { |n| n.kind == :block }.map(&:label)
+  end
+  def fiber_body_labels
+    analyze!
+    @nodes.values.select(&:fiber_body).map(&:label)
+  end
+
+  def stats
+    analyze!
+    m = method_labels
+    b = block_labels
+    { methods: m.size, methods_free: m.count { |l| yield_free?(l) },
+      blocks: b.size, blocks_free: b.count { |l| yield_free?(l) },
+      bodies_nb_free: m.count { |l| body_yield_free?(l) }, fiber_bodies: fiber_body_labels.size,
+      sealed: @sealed ? true : @seal_reasons, escaping_blocks: @esc.size, enum_names: @enum_all ? :all : @enum_names.size, reasons: @reasons.dup }
+  end
+
+
+  # Why nb(label) holds, recorded when the fixpoint first set it (so the chain is acyclic).
+  def explain(label)
+    analyze!
+    @cause[label] || :none
+  end
+
+  # Root cause of nb(label): follows :call/:lit links down to a leaf.
+  def root_cause(label)
+    analyze!
+    e = explain(label)
+    return [:none, label] unless e.is_a?(Array)
+
+    case e.first
+    when :call, :native, :proc_call then e[2] ? root_cause(e[2]) : [e.first, label]
+    when :lit then root_cause(e[1])
+    else [e.first, label]
+    end
+  end
+
+  private
+
+  # -- nodes -----------------------------------------------------------------------------
+
+  def build_nodes
+    @ireps.each_value { |irep| @nodes[irep.label] ||= new_node(irep) }
+    @super_of = {}
+    @module_names = Set.new
+    @ireps.each_value do |irep|
+      BytecodeIR.for(irep).each_source do |insn, idx|
+        record_class_decl(irep, insn, idx) if BytecodeIR::Ops::CLASS_MODULE.include?(insn.op)
+        next unless insn.block_index
+
+        child = irep.reps[insn.block_index]
+        next unless child && @nodes[child]
+
+        node = @nodes[child]
+        node.parent = irep.label
+        case insn.op
+        when :TDEF, :DEF, :SDEF
+          node.kind = :method
+          node.name = insn.sym
+          @defs_by_name[insn.sym] << child
+        when :BLOCK, :LAMBDA, :METHOD
+          node.kind = :block
+        when :EXEC
+          node.kind = :body
+          node.klass = class_of_exec(irep, insn)
+        end
+      end
+    end
+    @nodes.each_value { |n| n.owner = owner_of(n) }
+    @nodes.each_value { |n| n.klass ||= enclosing_class(n) }
+  end
+
+  # CLASS R :Name has its superclass in R+1; a name declared twice with different supers is unknown.
+  def record_class_decl(irep, insn, idx)
+    if insn.op == :MODULE
+      @module_names << insn.sym
+      return
+    end
+    sup = superclass_operand(irep, idx, insn.reg.to_i + 1)
+    @super_of[insn.sym] = @super_of.key?(insn.sym) && @super_of[insn.sym] != sup ? :unknown : sup
+  end
+
+  # A superclass operand every reaching definition agrees on, else :unknown.
+  def superclass_operand(irep, idx, reg)
+    defs = IrBlockOperands.definitions(irep, idx, reg)
+    return :unknown unless defs
+    sups = defs.map do |df|
+      next :unknown if df.entry?
+
+      w = BytecodeIR.for(irep).source_at(df.index)
+      case w.op
+      when :LOADNIL then :object
+      when :GETCONST, :GETMCNST then w.const_name
+      else :unknown
+      end
+    end.uniq
+    sups.size == 1 ? sups.first : :unknown
+  end
+
+  # Name of the class or module an EXEC opens: the only writer of its register reaching the EXEC, when it is a
+  # CLASS/MODULE op. A join with another writer, or the method entry, leaves it unknown.
+  def class_of_exec(irep, exec)
+    program = BytecodeIR.for(irep)
+    idx = program.instructions.index { |i| i.source.equal?(exec) }
+    return nil unless idx
+
+    writers = BytecodeIR::reaching_writer_indices(irep, idx, exec.reg)
+    return nil unless writers&.size == 1
+
+    writer = program.source_at(writers.first)
+    return nil unless BytecodeIR::Ops::CLASS_MODULE.include?(writer.op) && writer.reg == exec.reg
+
+    writer.sym
+  end
+
+  def enclosing_class(node)
+    cur = node.parent && @nodes[node.parent]
+    cur = @nodes[cur.parent] while cur && cur.kind != :body && cur.parent
+    cur&.kind == :body ? cur.klass : nil
+  end
+
+  def new_node(irep)
+    Node.new(label: irep.label, irep: irep, kind: :body, calls: Set.new, lit: [], bodies: [], seed: false,
+             native: false, unknown_call: false, proc_call: false, unknown_block: false, invokes: false,
+             stored_read: false, fiber_body: false, yield_unknown: false, super_forward: false,
+             forwards: Set.new, captured: false, fwd_any: false, fwd_enum: false, enum_lit: [], any_lit: [],
+             enum_send: false, klass: nil, generator: false, yielder_calls: Set.new, yielder_leak: false,
+             callable_send: false, fwd_callable: false, dyn_other: false)
+  end
+
+  # The method whose block a `yield` in this node reaches: the nearest enclosing method.
+  def owner_of(node)
+    cur = node
+    while cur
+      return cur.label if cur.kind == :method
+      return nil if cur.kind == :body
+
+      cur = cur.parent && @nodes[cur.parent]
+    end
+    nil
+  end
+
+  # -- per-node facts -----------------------------------------------------------------------
+
+  def scan_all
+    mark_generators
+    fiber_sites = 0
+    fiber_classified = 0
+    @nodes.each_value do |node|
+      program = BytecodeIR.for(node.irep)
+      irep = node.irep
+      enter = irep.enter
+      node.invokes = true if enter && enter.enter_fields[6].to_i.positive?
+      program.each_source do |insn, idx|
+        op = insn.op
+        node.calls << OP_NAMES[op] if OP_NAMES[op] && !insn.block_index
+        case op
+        when :GETCONST, :GETMCNST
+          fiber_sites += 1 if op == :GETCONST && insn.const_name == 'Fiber'
+          @yielder_named_outside = true if %w[Yielder Generator].include?(insn.const_name) && !internal_file?(node)
+        when :BLKPUSH, :BLKCALL then node.invokes = true
+        when :SUPER
+          # The block this method received goes on to the super method.
+          node.calls << (@nodes[node.owner]&.name || '')
+          node.super_forward = true
+        when :LOADSYM then @fiber_roots_unknown = true if insn.sym == 'Fiber'
+        when :STRING, :SYMBOL
+          @fiber_roots_unknown = true if insn.pool_index && irep.pool[insn.pool_index] == 'Fiber'
+        when :ALIAS
+          new_name, old_name = insn.args.to_s.scan(/:?([^\s:]+)/).flatten
+          @alias_of[new_name] << old_name if new_name && old_name
+        when :BLOCK, :LAMBDA, :METHOD
+          child = irep.reps[insn.block_index]
+          node.lit << child if child
+          @storing_blocks << child if child && op == :LAMBDA
+        when :EXEC
+          child = irep.reps[insn.block_index]
+          node.bodies << child if child
+        end
+        note_index_read(node, program, insn, idx) if BytecodeIR::Ops::INDEX_READ.include?(op)
+        fiber_classified += scan_send(node, program, insn, idx) if BytecodeIR::Ops::SEND.include?(op)
+      end
+    end
+    @fiber_roots_unknown = true if fiber_sites > fiber_classified
+    @nodes.each_value { |n| seed_unknown_yield(n) } if @fiber_roots_unknown
+    @reasons[:fiber_const_escapes] += 1 if @fiber_roots_unknown
+    finish_scan
+    @nodes.each_value { |n| scan_captures(n) if n.invokes }
+  end
+
+  # Literal blocks given to Enumerator.new and its kin get a yielder as first argument.
+  def mark_generators
+    @nodes.each_value do |node|
+      irep = node.irep
+      BytecodeIR.for(irep).each_with_op(:SENDB) do |insn, idx|
+        next unless insn.sym == 'new'
+        next unless GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
+
+        child = literal_block_child(irep, idx)
+        @nodes[child].generator = true if child && @nodes[child]
+      end
+    end
+  end
+
+  # Values that are never a Proc, so `x[i]` on them does not run one.
+  NON_PROC_WRITERS = %i[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
+                        LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE INTERN
+                        SYMBOL RANGE_INC RANGE_EXC STRCAT].freeze
+
+  # `pr[1]` runs a Proc like `pr.call(1)`; the index ops do not say what the receiver (R(a)) is.
+  def note_index_read(node, program, insn, idx)
+    recv = insn.reg
+    non_proc = recv && non_proc_value?(node.irep, idx, recv)
+    node.proc_call = true unless non_proc
+  end
+
+  # Every reaching definition of +reg+ at +index+ produces a value that is never a Proc: a literal, the result of
+  # `Array#*` on an array literal (an Array or a String), or an instance variable whose every write is such a value
+  # (proc_free_ivar?). Proves the absence of a Proc, which is all a receiver check needs. A cycle is not proven.
+  def non_proc_value?(irep, index, reg, depth = 0)
+    return false if depth > 8
+
+    defs = IrBlockOperands.definitions(irep, index, reg)
+    return false unless defs
+    defs.all? do |df|
+      next false if df.entry?
+
+      src = BytecodeIR.for(irep).source_at(df.index)
+      NON_PROC_WRITERS.include?(src.op) ||
+        (src.op == :GETIV && proc_free_ivar?(src.ivar.to_s)) ||
+        ((src.op == :SEND || src.op == :MUL) && array_times?(irep, df.index, src))
+    end
+  end
+
+  # `[...] * x` on an array literal, where no Ruby method named `*` can replace Array#*. Its result is an Array or a
+  # String (Array#join), neither a Proc.
+  # OP_MUL (`*` on a non-numeric receiver) is a send of `*`, so it is judged as one.
+  def array_times?(irep, index, src)
+    times = src.op == :MUL || src.sym == '*'
+    times && @defs_by_name.fetch('*', []).empty? && non_proc_value_array?(irep, index, src.reg)
+  end
+
+  def non_proc_value_array?(irep, index, reg)
+    defs = IrBlockOperands.definitions(irep, index, reg)
+    return false unless defs
+    defs.all? do |df|
+      !df.entry? && BytecodeIR::Ops::ARRAY_ALLOC.include?(BytecodeIR.for(irep).source_at(df.index).op)
+    end
+  end
+
+  # An instance variable name whose every write in the program stores a value that is never a Proc. A write the
+  # program makes by name at run time (instance_variable_set) is outside the program's own writes, so it disables the
+  # fact for every name unless the site is listed in the reviewed whitelist (DYNAMIC_IVAR_WRITES_WHITELIST).
+  def proc_free_ivar?(name)
+    @proc_free_ivars ||= {}
+    return @proc_free_ivars[name] if @proc_free_ivars.key?(name)
+
+    @proc_free_ivars[name] = false # a cycle through this name is not proven
+    @proc_free_ivars[name] = compute_proc_free_ivar(name)
+  end
+
+  def compute_proc_free_ivar(name)
+    return false if @opaque_names.nil? || @opaque_names.include?(name) || @opaque_names.include?("@#{name}")
+    return false if dynamic_ivar_writes_unlisted?
+
+    @ireps.each_value.all? do |irep|
+      program = BytecodeIR.for(irep)
+      program.each_source.all? do |src, j|
+        next true unless src.op == :SETIV && src.ivar.to_s == name
+
+        non_proc_value?(irep, j, src.regs.first, 1)
+      end
+    end
+  end
+
+  def dynamic_ivar_writes_unlisted?
+    return @dynamic_ivar_writes_unlisted unless @dynamic_ivar_writes_unlisted.nil?
+
+    @dynamic_ivar_writes_unlisted = @nodes.each_value.any? do |n|
+      n.calls.include?('instance_variable_set') && !dynamic_ivar_whitelisted?(n)
+    end
+  end
+
+  # A site is listed by its gem-relative file and the name of the method that contains it (see
+  # scripts/bc2cpp/dynamic_ivar_writes_whitelist.txt).
+  def dynamic_ivar_whitelisted?(node)
+    method = node
+    method = @nodes[method.parent] while method && method.kind != :method && method.parent
+    return false unless method&.kind == :method
+
+    DYNAMIC_IVAR_WRITES_WHITELIST.include?("#{PredicateReturns.relative(node.irep.file.to_s)} #{method.name}")
+  end
+
+  DYNAMIC_IVAR_WRITES_WHITELIST = File.readlines(
+    File.expand_path('../../scripts/bc2cpp/dynamic_ivar_writes_whitelist.txt', __dir__), chomp: true
+  ).map { |line| line.sub(/\s*#.*\z/, '').strip }.reject(&:empty?).to_set.freeze
+
+  def seed_unknown_yield(node)
+    return unless node.yield_unknown
+
+    node.seed = true
+    @reasons[:yield_unknown_receiver] += 1
+  end
+
+  # Sets the facts of one send; returns 1 when it consumed a `Fiber` constant receiver.
+  def scan_send(node, program, insn, idx)
+    irep = node.irep
+    name = insn.sym
+    return 0 unless name
+
+    op = insn.op
+    dest = insn.reg
+    explicit = BytecodeIR::Ops::RECEIVER_SEND.include?(op)
+    recv_const = explicit && dest ? const_receiver(irep, idx, dest) : nil
+    fiber_recv = recv_const == 'Fiber'
+    has_block = BytecodeIR::Ops::BLOCK_SEND.include?(op)
+    lit_block, forward = classify_send_block(node, program, insn, idx) if has_block
+    consumed = fiber_recv ? scan_fiber_call(node, name, lit_block) : 0
+    if name == 'yield' && explicit && !fiber_recv
+      # An unknown receiver may be the Fiber class itself (seeded when the class escapes its literals).
+      node.yield_unknown = true if recv_const.nil?
+      node.calls << name
+    elsif name == 'transfer'
+      node.seed = true
+    end
+    targets = block_targets(name, recv_const)
+    targets.each { |t| @passed[t] << lit_block } if lit_block && !(fiber_recv && name == 'new')
+    @storing_blocks << lit_block if lit_block && targets.any? { |t| STORING_CALLS.include?(t) } && !fiber_recv
+    note_yielder_call(node, program, idx, dest, name, explicit)
+    resolved = name
+    if DYNAMIC_SENDS.include?(name)
+      resolved = scan_dynamic_send(node, program, insn, idx, dest, lit_block, forward) || name
+    else
+      node.forwards.merge(targets) if forward
+    end
+    scan_special_call(node, program, idx, dest, name, explicit, lit_block, recv_const, insn)
+    node.stored_read = true if STORED_READS.include?(name)
+    node.calls << resolved unless name == 'yield' && fiber_recv
+    node.calls << 'to_a' if insn.positional_splat?
+    node.calls << 'to_hash' if insn.keyword_splat?
+    consumed
+  end
+
+  # Where a block given to `name` goes. `Klass.new { }` of a class the world defines hands it to that
+  # class's initialize; only a native class (Hash's default proc, Proc, ...) keeps it itself, and a
+  # receiver that is not a constant may be either.
+  def block_targets(name, recv_const)
+    return [name] unless name == 'new'
+    return ["initialize@#{recv_const}"] if recv_const && world_class?(recv_const)
+
+    %w[new initialize]
+  end
+
+  def world_class?(const)
+    @world_classes ||= @nodes.values.select { |n| n.kind == :body }.filter_map(&:klass).to_set
+    @world_classes.include?(const)
+  end
+
+  # A send on the yielder parameter of a generator block (or of a block inside one).
+  def note_yielder_call(node, program, idx, dest, name, explicit)
+    return unless explicit && dest && yielder_scope?(node)
+    return unless classify_reg(node, program, idx, dest) == [:param, 1]
+
+    YIELDER_MESSAGES.include?(name) ? node.yielder_calls << name : node.yielder_leak = true
+  end
+
+  # Generator block, or a block nested in one.
+  def yielder_scope?(node)
+    cur = node
+    while cur
+      return true if cur.generator
+
+      cur = cur.parent && @nodes[cur.parent]
+      return false unless cur&.kind == :block
+    end
+    false
+  end
+
+  # Returns [literal block label or nil, forwards-the-received-block?] and records the other kinds.
+  def classify_send_block(node, program, insn, idx)
+    kind, ref = classify_block(node, program, insn, idx, block_register(insn))
+    case kind
+    when :lit then [ref, false]
+    when :sym
+      node.calls << ref
+      @callable_names << ref
+      [nil, false]
+    when :forward
+      node.invokes = true
+      [nil, true]
+    else
+      node.unknown_block = true
+      @upass << insn.sym
+      @reasons[:unknown_block] += 1
+      [nil, false]
+    end
+  end
+
+  def scan_fiber_call(node, name, lit_block)
+    case name
+    when 'new'
+      if lit_block
+        @nodes[lit_block].fiber_body = true
+      else
+        @fiber_roots_unknown = true
+      end
+    when 'current', 'alive?', 'resume' then nil
+    else
+      node.seed = true
+      @reasons[:fiber_yield] += 1 if name == 'yield'
+    end
+    1
+  end
+
+  # A send whose name is computed. Returns the literal name when there is one.
+  def scan_dynamic_send(node, program, insn, idx, dest, lit_block, forward)
+    kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 1, elem0: insn.positional_splat?) : [:unknown]
+    return ref if kind == :sym
+
+    file = node.irep.file.to_s
+    if kind == :ivar && ref == 'meth' && file.include?('mruby-enumerator')
+      # Enumerator dispatches to the method it was made for (to_enum, enum_for, Enumerator.new).
+      node.enum_send = true
+      node.fwd_enum = true if forward
+      node.enum_lit << lit_block if lit_block
+      @reasons[:enumerator_send] += 1
+      return nil
+    end
+    if CALLABLE_SEND_METHODS.include?(@nodes[node.owner]&.name) && file.match?(%r{/mrblib/(symbol|enum)\.rb\z})
+      # Symbol#to_proc and Enumerable#inject(:sym) call the method named by a Symbol: those given to them.
+      node.callable_send = true
+      node.fwd_callable = true if forward
+      @reasons[:callable_send] += 1
+      return nil
+    end
+    if (universe = dispatch_send_universe(node, idx, dest))
+      # `send(*TABLE[i])` of a constant table whose stored values are all literal (IrSymbolFlow): the send
+      # reaches exactly the names of that table.
+      universe.each { |name| node.calls << name }
+      @reasons[:dispatch_table] += 1
+      return nil
+    end
+    node.unknown_call = true
+    # A computed send on self dispatches within self's class chain (self_dispatch_may_yield?); any other receiver can
+    # be any object.
+    node.dyn_other = true unless BytecodeIR::Ops::SELF_SEND.include?(insn.op)
+    node.fwd_any = true if forward
+    node.any_lit << lit_block if lit_block
+    @reasons[:dynamic_send] += 1
+    nil
+  end
+
+  # The finite name set of a splat send built from a verified dispatch table, or nil.
+  def dispatch_send_universe(node, idx, dest)
+    return nil unless @sound && dest
+
+    table = IrSymbolFlow.splat_table(node.irep, idx, dest + 1)
+    table && dispatch_universes[table]
+  end
+
+  # { constant => names } for the program's dispatch tables whose premises IrSymbolFlow checks.
+  def dispatch_universes
+    @dispatch_universes ||= IrSymbolFlow.dispatch_universes(
+      @ireps, @nodes.values.select { |n| n.kind == :method }.to_h { |n| [n.label, n.name] }
+    )
+  end
+
+  def scan_special_call(node, program, idx, dest, name, explicit, lit_block, recv_const, insn)
+    if CODE_EVAL.include?(name)
+      return node.calls << name if lit_block
+
+      # Code built at run time is unknown; outside a closed world nothing about unknown code is claimed.
+      node.seed = true if @sound
+      @reasons[:eval] += 1
+    elsif BLOCK_EXEC.include?(name)
+      unless lit_block
+        node.unknown_call = true
+        node.dyn_other = true
+      end
+    elsif PROC_CALLS.include?(name) && !(name == 'yield' && recv_const == 'Fiber')
+      # `Fiber.yield` (the `yield` here) runs no Proc: scan_fiber_call already marked the suspension.
+      recv = explicit ? classify_reg(node, program, idx, dest) : [:unknown]
+      if recv.first == :forward
+        node.invokes = true
+      elsif recv.first != :lit || !literal_proc_receiver?(node, program, idx, dest)
+        # A literal Proc's body is already a node.lit edge; it cannot run an unrelated escaped Proc.
+        node.proc_call = true
+      end
+    end
+    note_callable(node, program, idx, dest, name)
+    note_enumerator(node, program, idx, dest, name, recv_const)
+  end
+
+  # Every definition reaching this read is a literal: a parameter can keep its incoming Proc on another path.
+  def literal_proc_receiver?(node, _program, idx, reg)
+    reg && IrBlockOperands.all_writers?(node.irep, idx, reg) { |w| BytecodeIR::Ops::LITERAL_PROC.include?(w.op) }
+  end
+
+  def note_callable(node, program, idx, dest, name)
+    note_inject_symbol(node, program, idx, dest, name) if %w[inject reduce].include?(name)
+    return unless CALLABLE_MAKERS.include?(name)
+
+    target = if name == 'to_proc'
+               kind, ref = dest ? classify_reg(node, program, idx, dest) : [:unknown]
+               kind == :sym ? ref : nil
+             else
+               literal_symbol_arg(node, program, idx, dest)
+             end
+    target ? @callable_names << target : @callable_all = true
+  end
+
+  # `inject(:sym)` / `inject(init, :sym)` name the method to call; a block form names none.
+  def note_inject_symbol(node, program, idx, dest, name)
+    insn = BytecodeIR.for(node.irep).source_at(idx)
+    return if BytecodeIR::Ops::BLOCK_SEND.include?(insn.op) || insn.argc == 0
+    return unless dest
+
+    n = insn.positional_splat? ? nil : insn.argc.to_i
+    kind, ref = n ? classify_reg(node, program, idx, dest.to_i + n) : [:unknown]
+    kind == :sym ? @callable_names << ref : @callable_all = true
+  end
+
+  # The method names an Enumerator can be made for: what to_enum/enum_for/Enumerator.new are given.
+  def note_enumerator(node, program, idx, dest, name, recv_const)
+    return if %w[to_enum enum_for].include?(node.name) && node.irep.file.to_s.include?('mruby-enumerator')
+
+    if %w[to_enum enum_for].include?(name)
+      lit = literal_symbol_arg(node, program, idx, dest)
+      lit ? @enum_names << lit : @enum_all = true
+    elsif name == 'new' && recv_const == 'Enumerator'
+      kind, ref = dest ? classify_reg(node, program, idx, dest.to_i + 2) : [:unknown]
+      @enum_names << ref if kind == :sym
+      @enum_all = true if kind != :sym && BytecodeIR.for(node.irep).source_at(idx).argc.to_i >= 2
+    end
+  end
+
+  def finish_scan
+    ruby_names = @defs_by_name.keys.to_set
+    @nodes.each_value do |node|
+      node.lit = node.lit.compact
+      node.native = node.calls.any? { |c| !ruby_names.include?(c) || @native_names.include?(c) }
+    end
+    # Class#new hands its block to initialize.
+    @alias_of.each do |new_name, olds|
+      olds.each do |o|
+        @defs_by_name[new_name].concat(@defs_by_name[o])
+        @passed[o].concat(@passed[new_name])
+      end
+    end
+  end
+
+  # -- register tracing ---------------------------------------------------------------------
+
+  # Register of the block argument of a SENDB/SSENDB.
+  def block_register(insn)
+    IrBlockOperands.block_register(insn)&.to_i
+  end
+
+  # Name of the constant every definition of a receiver register loads, or nil.
+  def const_receiver(irep, idx, reg)
+    reg && IrBlockOperands.constant_name(irep, idx, reg)
+  end
+
+  # The literal block a SENDB/SSENDB at +idx+ is given, or nil.
+  def literal_block_child(irep, idx)
+    IrBlockOperands.literal_block_label(irep, idx)
+  end
+
+  # Register that holds the block the method received (ENTER's block field).
+  def block_reg_of(irep)
+    enter = irep.enter
+    return nil unless enter
+
+    m, o, r, post, kw, kd, b = enter.enter_fields
+    return nil unless b.to_i.positive?
+
+    1 + m + o + (r.to_i.positive? ? 1 : 0) + post + (kw.to_i.positive? || kd.to_i.positive? ? 1 : 0)
+  end
+
+  # Indices of the instructions that write each register (by leading operand), per irep.
+  def writers_of(irep)
+    @writers ||= {}.compare_by_identity
+    @writers[irep] ||= begin
+      map = Array.new(irep.nregs.to_i) { [] }
+      BytecodeIR.for(irep).each_source do |i, n|
+        r = i.reg
+        map[r] << n if r && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
+      end
+      map.map(&:freeze).freeze
+    end
+  end
+
+  # What a register holds when instruction idx reads it, when every reaching definition agrees: [:lit, child_label],
+  # [:sym, name], [:forward] (the block the method received), [:param, 1] (a generator's yielder), [:const, name],
+  # [:ivar, name], else [:unknown]. +elem0+ asks for the first element of an argument array.
+  def classify_reg(node, _program, idx, reg, elem0: false)
+    kinds = classify_kinds(node, idx, reg, elem0: elem0)
+    kinds&.size == 1 ? kinds.first : [:unknown]
+  end
+
+  # The distinct classifications of the definitions of +reg+ reaching +idx+ (see classify_reg). A refused query is
+  # nil, or with +fallback+ every value the register can ever hold (stored_kinds). Unreachable code reads nothing.
+  def classify_kinds(node, idx, reg, elem0: false, fallback: false, depth: 0, seen: nil)
+    irep = node.irep
+    return [] unless IrBlockOperands.live?(irep, idx)
+
+    defs = depth < 32 && IrBlockOperands.definitions(irep, idx, reg, follow_moves: false)
+    return fallback ? stored_kinds(node, reg, seen || Set.new) : nil unless defs
+
+    kinds = defs.flat_map do |df|
+      found = classify_definition(node, df, elem0, fallback, depth, seen)
+      return nil unless found
+      found
+    end
+    kinds.uniq
+  end
+
+  def classify_definition(node, df, elem0, fallback, depth, seen = nil)
+    irep = node.irep
+    # The origin walk answers a slot ENTER stores (the block, R1) with ENTER itself.
+    if df.entry? || BytecodeIR.for(irep).source_at(df.index).op == :ENTER
+      return [[:forward]] if df.reg.to_i == block_reg_of(irep)
+      return [[:param, 1]] if df.reg == 1 && node.generator && irep.enter&.enter_fields&.first.to_i >= 1
+
+      return [[:unknown]]
+    end
+    w = BytecodeIR.for(irep).source_at(df.index)
+    case w.op
+    when :MOVE then classify_kinds(node, df.index, w.regs[1], elem0: elem0, fallback: fallback, depth: depth + 1, seen: seen)
+    when :BLOCK, :LAMBDA then [[:lit, irep.reps[w.block_index]]]
+    when :LOADSYM then [[:sym, w.sym]]
+    when :BLKPUSH then [[:forward]]
+    when :GETCONST then [[:const, w.const_name]]
+    when :GETIV then [[:ivar, w.ivar]]
+    when :GETUPVAR then [classify_upvar(node, w)]
+    when :ARRAY
+      # The first element of an argument array: R(a) before `ARRAY R(a) n`, R(b) of `ARRAY R(a) R(b) n`.
+      count = w.typed.find { |operand| operand.kind == :int }&.value.to_i
+      return [[:unknown]] unless elem0 && count.positive?
+
+      classify_kinds(node, df.index, w.regs.size >= 2 ? w.regs[1] : df.reg, fallback: fallback, depth: depth + 1, seen: seen)
+    when :ARYCAT, :ARYPUSH
+      # Appending keeps the first element of the array being appended to.
+      return [[:unknown]] unless elem0
+
+      classify_kinds(node, df.index, df.reg, elem0: true, fallback: fallback, depth: depth + 1, seen: seen)
+    else [[:unknown]]
+    end
+  end
+
+  # A GETUPVAR of an enclosing method's block parameter (or of the local its MOVE copies it to).
+  def classify_upvar(node, insn)
+    up = insn.upvar_ref
+    return [:unknown] unless up
+
+    index, level = up
+    cur = node
+    (level + 1).times { cur = cur&.parent && @nodes[cur.parent] }
+    return [:param, 1] if cur&.generator && index == 1 && !writes_reg?(cur, 1)
+    return [:unknown] unless cur && cur.kind == :method
+
+    bp = block_reg_of(cur.irep)
+    return [:unknown] unless bp
+
+    only_block_writes?(cur, index, bp) ? [:forward] : [:unknown]
+  end
+
+  # Does the node, or a block below it, assign register +index+ (by write or SETUPVAR)?
+  def writes_reg?(node, index)
+    return true unless (writers_of(node.irep)[index] || []).empty?
+    return true if BytecodeIR.for(node.irep).instructions_with_op(:SETUPVAR).any? { |i| i.upvar_ref&.first == index }
+
+    BytecodeIR.own_upvar_written_regs(node.irep).include?(index)
+  end
+
+  # Every write of register +index+ in the method (and every SETUPVAR of it below) is a MOVE of
+  # the block register, so the register always holds the block.
+  def only_block_writes?(method, index, bp)
+    writers = BytecodeIR.for(method.irep).each_source.filter_map do |i, _|
+      i if i.reg == index && !LEAD_READERS.include?(i.op) && !NON_WRITERS.include?(i.op)
+    end
+    if writers.empty?
+      return false unless index == bp
+    elsif !writers.all? { |i| i.op == :MOVE && i.regs[1] == bp }
+      return false
+    end
+
+    !BytecodeIR.own_upvar_written_regs(method.irep).include?(index)
+  end
+
+  def classify_block(node, program, _insn, idx, block_reg)
+    block_reg ? classify_reg(node, program, idx, block_reg) : [:unknown]
+  end
+
+  def literal_symbol_arg(node, program, idx, dest)
+    return nil unless dest
+
+    kind, ref = classify_reg(node, program, idx, dest.to_i + 1, elem0: BytecodeIR.for(node.irep).source_at(idx).positional_splat?)
+    kind == :sym ? ref : nil
+  end
+
+  # -- does the received block escape? ----------------------------------------------------------
+
+  # Marks node.captured when the block this method received is kept as a value (stored, returned,
+  # passed as an ordinary argument or receiver of anything but a call), not merely run or
+  # forwarded as the block of another call.
+  def scan_captures(node)
+    scan_keeps(node) { |r| r == [:forward] }.tap { |kept| node.captured = kept }
+  end
+
+  # Marks node.yielder_leak when the yielder parameter of a generator block is used other than as the
+  # receiver of a message Enumerator::Yielder answers.
+  def scan_yielder_leaks(node)
+    node.yielder_leak ||= scan_keeps(node) { |r| r == [:param, 1] }
+  end
+
+  # Does any instruction keep, pass on or return a register for which the block answers true?
+  def scan_keeps(node, &holds)
+    irep = node.irep
+    program = BytecodeIR.for(irep)
+    program.each_source do |insn, idx|
+      op = insn.op
+      next if NEUTRAL_OPS.include?(op)
+
+      if BytecodeIR::Ops::SEND.include?(op)
+        return true if send_keeps?(node, program, insn, idx, &holds)
+      elsif insn.regs.any? { |r| !written_here?(insn, r) && may_hold?(node, program, idx, r, &holds) }
+        return true
+      end
+    end
+    false
+  end
+
+  # An op that only defines its leading register does not read it.
+  def written_here?(insn, reg)
+    insn.regs.first == reg && !LEAD_READERS.include?(insn.op) && !BytecodeIR::Ops::SET_OPS.include?(insn.op)
+  end
+
+  def send_keeps?(node, program, insn, idx, &holds)
+    dest = insn.reg
+    return false unless dest
+    pos = insn.positional_splat? ? 1 : insn.argc.to_i
+    kw = !insn.keyword_arguments? ? 0 : (insn.keyword_splat? ? 1 : insn.keyword_argc.to_i * 2)
+    return true if (1..(pos + kw)).any? { |k| may_hold?(node, program, idx, dest.to_i + k, &holds) }
+    return false unless BytecodeIR::Ops::RECEIVER_SEND.include?(insn.op)
+
+    may_hold?(node, program, idx, dest, &holds) &&
+      !PROC_CALLS.include?(insn.sym) && !PROC_HARMLESS.include?(insn.sym) && !YIELDER_MESSAGES.include?(insn.sym)
+  end
+
+  # Can the register hold a value +holds+ answers for? An escape question: one matching definition is enough, and a
+  # register the IR cannot account for may hold anything.
+  def may_hold?(node, program, idx, reg, &holds)
+    kinds = classify_kinds(node, idx, reg, fallback: true)
+    kinds.nil? || kinds.any?(&holds)
+  end
+
+  # Every value +reg+ of +node+ can hold at any point: its entry value, each writer's, and each nested block's
+  # SETUPVAR into it. The fallback for a register a point query refuses; a register already being expanded adds
+  # nothing more (+seen+), and nil means a stored value is unaccountable.
+  def stored_kinds(node, reg, seen = Set.new)
+    return [] unless seen.add?([node.label, reg])
+
+    irep = node.irep
+    kinds = classify_definition(node, BytecodeIR::Definition.new(BytecodeIR::ENTRY, reg), false, false, 0)
+    (writers_of(irep)[reg.to_i] || []).each do |i|
+      w = BytecodeIR.for(irep).source_at(i)
+      found = if w.op == :MOVE
+                classify_kinds(node, i, w.regs[1], fallback: true, seen: seen)
+              else
+                classify_definition(node, BytecodeIR::Definition.new(i, reg), false, false, 0)
+              end
+      return nil unless found
+
+      kinds += found
+    end
+    upvar_stores(node, reg.to_i).each do |child, idx, src|
+      found = classify_kinds(child, idx, src, fallback: true, seen: seen)
+      return nil unless found
+
+      kinds += found
+    end
+    kinds.uniq
+  end
+
+  # [block node, index, value register] of every SETUPVAR a block nested in +node+ makes into its register +reg+.
+  def upvar_stores(node, reg, depth = 0, out = [])
+    node.lit.each do |label|
+      child = @nodes[label]
+      next unless child
+
+      BytecodeIR.for(child.irep).each_with_op(:SETUPVAR) do |insn, i|
+        out << [child, i, insn.reg] if insn.upvar_ref == [reg, depth]
+      end
+      upvar_stores(child, reg, depth + 1, out)
+    end
+    out
+  end
+
+  # -- fixpoints ------------------------------------------------------------------------------
+
+  def names_of(label)
+    node = @nodes[label]
+    names = Set[node.name]
+    changed = true
+    while changed
+      changed = false
+      @alias_of.each do |new_name, olds|
+        next if names.include?(new_name) || olds.none? { |o| names.include?(o) }
+
+        names << new_name
+        changed = true
+      end
+    end
+    names
+  end
+
+  # Per method: the union of the facts of the method and the blocks nested in it (they share its
+  # received block).
+  def aggregate_methods
+    @agg = {}
+    method_labels.each do |l|
+      agg = { captured: false, forwards: Set.new, fwd_any: false, fwd_enum: false, fwd_callable: false, super: false }
+      stack = [@nodes[l]]
+      until stack.empty?
+        n = stack.pop
+        agg[:captured] ||= n.captured
+        agg[:forwards].merge(n.forwards)
+        agg[:fwd_any] ||= n.fwd_any
+        agg[:fwd_enum] ||= n.fwd_enum
+        agg[:fwd_callable] ||= n.fwd_callable
+        agg[:super] ||= n.super_forward
+        n.lit.each { |c| stack << @nodes[c] unless @nodes[c].fiber_body }
+      end
+      @agg[l] = agg
+    end
+  end
+
+  def callable_defs
+    @callable_defs ||= @callable_all ? method_labels : @callable_names.flat_map { |c| @defs_by_name[c] }.uniq
+  end
+
+  def enum_defs
+    @enum_defs ||= @enum_all ? method_labels : @enum_names.flat_map { |n| @defs_by_name[n] + @isolated.fetch(n, []) }.uniq
+  end
+
+  # received(e): the blocks that can be handed to method e, by name, through forwarding (`&blk`,
+  # super), and through the dynamic sends.
+  def compute_received
+    aggregate_methods
+    @received = Hash.new { |h, k| h[k] = Set.new }
+    enum_lit = @nodes.values.flat_map(&:enum_lit)
+    any_lit = @nodes.values.flat_map(&:any_lit)
+    isolated = @isolated.values.flatten.to_set
+    method_labels.each do |l|
+      names_of(l).each { |nm| @received[l].merge(@passed[nm]) } unless isolated.include?(l)
+    end
+    seed_initialize_received
+    enum_defs.each { |d| @received[d].merge(enum_lit) }
+    method_labels.each { |d| @received[d].merge(any_lit) }
+    loop do
+      grown = false
+      @agg.each do |f, a|
+        src = @received[f]
+        next if src.empty?
+
+        forward_targets(f, a).each do |d|
+          before = @received[d].size
+          @received[d].merge(src)
+          grown ||= @received[d].size > before
+        end
+      end
+      break unless grown
+    end
+  end
+
+  # initialize receives the blocks of `Klass.new` for its own class, of `new` on an unknown receiver,
+  # and (its owner being unknown) of any class that defines none of its own.
+  def seed_initialize_received
+    @init_classes = @defs_by_name['initialize'].map { |d| @nodes[d].klass }.to_set
+    inherited = @passed.keys.grep(/\Ainitialize@/).map { |k| k.delete_prefix('initialize@') }.reject { |c| @init_classes.include?(c) }
+    @defs_by_name['initialize'].each do |d|
+      @received[d].merge(@passed["initialize@#{@nodes[d].klass}"])
+      inherited.each { |c| @received[d].merge(@passed["initialize@#{c}"]) }
+    end
+  end
+
+  def block_target_defs(name)
+    return @defs_by_name.fetch(name, []) unless name.start_with?('initialize@')
+
+    klass = name.delete_prefix('initialize@')
+    own = @defs_by_name['initialize'].select { |d| @nodes[d].klass == klass }
+    own.empty? ? @defs_by_name['initialize'] : own
+  end
+
+  # The definitions `super` in this method can reach: the same name in the superclass chain and in
+  # any module (mixins are not resolved), or every definition when the chain is not known.
+  def super_targets(label)
+    node = @nodes[label]
+    others = @defs_by_name[node.name] - [label]
+    chain = ancestors_of(node.klass)
+    return others unless chain
+
+    others.select { |d| chain.include?(@nodes[d].klass) || @module_names.include?(@nodes[d].klass) || @nodes[d].klass.nil? }
+  end
+
+  def ancestors_of(klass)
+    chain = []
+    cur = klass
+    while cur && cur != :object
+      return nil if cur == :unknown || chain.include?(cur)
+
+      chain << cur
+      cur = @super_of[cur]
+    end
+    chain - [klass]
+  end
+
+  def forward_targets(label, agg)
+    targets = agg[:forwards].flat_map { |m| callee_defs(@nodes[label], m) }
+    targets.concat(enum_defs) if agg[:fwd_enum]
+    targets.concat(method_labels) if agg[:fwd_any]
+    targets.concat(callable_defs) if agg[:fwd_callable]
+    targets.concat(super_targets(label)) if agg[:super]
+    targets
+  end
+
+  # Does the method itself keep the block it receives (as opposed to handing it on)?
+  def keeps_block?(label)
+    a = @agg[label]
+    a[:captured] || a[:forwards].any? { |m| STORING_CALLS.include?(m) }
+  end
+
+  # Blocks that can be kept as Proc values: literal blocks of storing calls, and blocks handed to a
+  # method that keeps its block.
+  def compute_escaping
+    esc = Set.new(@storing_blocks)
+    method_labels.each { |l| esc.merge(@received[l]) if keeps_block?(l) && !sealed_keeper?(l) }
+    esc
+  end
+
+  # What Generator and Yielder keep is run only by their own messages, which the sealed model treats
+  # as the yield of Enumerator#next; no other Proc call can reach it.
+  def sealed_keeper?(label)
+    n = @nodes[label]
+    @sealed && %w[Generator Yielder].include?(n.klass) && internal_file?(n)  end
+
+  # Blocks the analysis treats as invoked only by the Enumerator machinery: generator blocks (and
+  # what they contain) and the blocks inside the Fibers mruby-enumerator itself creates.
+  def sealed_candidates
+    @nodes.values.select { |n| n.kind == :block && (yielder_scope?(n) || internal_fiber_block?(n)) }.map(&:label)
+  end
+
+  def internal_file?(node) = node.irep.file.to_s.include?('mruby-enumerator/mrblib')
+
+  def internal_fiber_block?(node)
+    cur = node
+    while cur
+      return true if cur.fiber_body && internal_file?(cur)
+
+      cur = cur.parent && @nodes[cur.parent]
+    end
+    false
+  end
+
+  # The Enumerator machinery is modelled explicitly (a yielder is created by Generator#each and handed to
+  # a generator block; the block the Fiber-driven `next` supplies runs only through the yielder) when
+  # nothing lets a yielder or such a block go anywhere else.
+  def compute_sealing
+    @seal_reasons = []
+    yielder_defs = @nodes.values.select { |n| n.kind == :method && n.klass == 'Yielder' && internal_file?(n) }
+    @seal_reasons << :no_yielder if yielder_defs.empty?
+    @seal_reasons << :yielder_named_outside if @yielder_named_outside
+    @seal_reasons << :yielder_leak if @nodes.values.any? { |n| yielder_scope?(n) && n.yielder_leak }
+    @sealed_blocks = sealed_candidates.to_set
+    allowed = %w[Generator Yielder Enumerator]
+    leaks = method_labels.select do |l|
+      keeps_block?(l) && !allowed.include?(@nodes[l].klass) && @received[l].intersect?(@sealed_blocks)
+    end
+    @seal_reasons << :sealed_block_kept unless leaks.empty?
+    @sealed = @seal_reasons.empty?
+    return unless @sealed
+
+    isolate_enumerator_machinery(yielder_defs)
+    @sealed_blocks.each { |b| @esc.delete(b) }
+  end
+
+  # Generator and Yielder methods are reached only from mruby-enumerator's own code (an Enumerator's
+  # dispatch, other Enumerator methods) and from generator blocks, never by a plain call to the name
+  # (`each`, `<<`): the receivers of those are the objects the rest of the world creates. Yielder's
+  # answer to a message is a Fiber.yield when the Enumerator is driven by `next`.
+  def isolate_enumerator_machinery(yielder_defs)
+    @yielder_methods = yielder_defs.reject { |n| n.name == 'initialize' }
+    @yielder_methods.each { |n| n.seed = true }
+    isolated = @nodes.values.select do |n|
+      n.kind == :method && %w[Generator Yielder].include?(n.klass) && internal_file?(n) && n.name != 'initialize'
+    end
+    isolated.each do |n|
+      @isolated[n.name] << n.label
+      @defs_by_name[n.name].delete(n.label)
+    end
+    @enum_defs = nil
+    @received = nil
+    compute_received
+    @esc = compute_escaping
+  end
+
+  # The definitions a call of +name+ from +node+ can reach.
+  def callee_defs(node, name)
+    defs = block_target_defs(name)
+    node && internal_file?(node) && @isolated.key?(name) ? defs + @isolated[name] : defs
+  end
+
+  def solve
+    @nb = {}
+    @own = {}
+    @cause = {}
+    @nodes.each_key do |l|
+      @nb[l] = false
+      @own[l] = false
+    end
+    compute_received
+    @esc = compute_escaping
+    @nodes.each_value { |n| scan_yielder_leaks(n) if yielder_scope?(n) }
+    compute_sealing
+    opaque = opaque_defs
+    callable = callable_defs
+    loop do
+      changed = false
+      ctx = solve_context
+      @nodes.each_value do |n|
+        next if @nb[n.label]
+
+        cause = nb_cause(n, opaque, ctx, callable)
+        next unless cause
+
+        @nb[n.label] = true
+        @cause[n.label] = cause
+        changed = true
+      end
+      @nodes.each_value do |n|
+        next if @own[n.label]
+        next unless @nb[n.label] || (invokes_deep?(n) && passed_own?(n, ctx))
+
+        @own[n.label] = true
+        changed = true
+      end
+      break unless changed
+    end
+  end
+
+  # Facts of the current iteration that many nodes ask about.
+  def solve_context
+    {
+      any_code: @nodes.each_value.any? do |n|
+        @nb[n.label] && n.kind == :method && !@yielder_methods&.include?(n) && dynamic_target?(n.name)
+      end || @esc.any? { |b| @nb[b] },
+      # A block run by an unknown Proc call gets its own block from that call site, so only nb counts.
+      any_block: @esc.any? { |b| @nb[b] },
+      # Methods a computed send can name that may yield (dynamic_target?), for self_dispatch_may_yield?.
+      dynamic_nb: @nodes.values.select { |n| @nb[n.label] && n.kind == :method && dynamic_target?(n.name) }
+    }
+  end
+
+  # A computed send reaches only a name the program spells as a Symbol or String literal (DynamicNames). A name
+  # assembled from string pieces escapes this; if it reaches a yield across a compiled frame, mruby's C-boundary check
+  # raises FiberError rather than suspending (see docs/bc2cpp-yield-c-boundary.md). BC2CPP_YIELD_SPELLED_SENDS=0 lets a
+  # computed send reach every method again.
+  def dynamic_target?(name)
+    return true unless SPELLED_SENDS
+
+    @dynamic_universe ||= DynamicNames.universe(@ireps)
+    @dynamic_universe.include?(name)
+  end
+
+  # A computed send whose receiver is self reaches a method of self's class, its superclass chain, a module (mixins are
+  # not resolved) or an unknown owner, as super_targets does, or that chain's method_missing. An unknown chain is any.
+  def self_dispatch_may_yield?(n, ctx)
+    return ctx[:any_code] unless SPELLED_SENDS
+
+    chain = n.klass && ancestors_of(n.klass)
+    return ctx[:any_code] unless chain
+
+    reachable = lambda do |m|
+      m.klass.nil? || m.klass == n.klass || chain.include?(m.klass) || @module_names.include?(m.klass)
+    end
+    return true if ctx[:dynamic_nb].any?(&reachable)
+
+    @defs_by_name.fetch('method_missing', []).any? { |d| @nb[d] && reachable.call(@nodes[d]) }
+  end
+
+  def nb_cause(n, opaque, ctx, callable)
+    return [:seed] if n.seed
+    return [:yielder] if @sealed && !n.yielder_calls.empty?
+
+    n.calls.each do |c|
+      d = callee_defs(n, c).find { |x| @nb[x] }
+      return [:call, c, d] if d
+    end
+    b = n.lit.find { |x| !@nodes[x].fiber_body && @nb[x] && !(@sealed && @sealed_blocks.include?(x)) }
+    return [:lit, b] if b
+
+    x = n.bodies.find { |y| @nb[y] }
+    return [:lit, x] if x
+    return nil unless @sound # unknown code is only accounted for in a closed world
+
+    return [:unknown_call] if n.unknown_call && (n.dyn_other ? ctx[:any_code] : self_dispatch_may_yield?(n, ctx))
+
+    if n.callable_send
+      d = callable.find { |y| @nb[y] }
+      return [:call, nil, d] if d
+    end
+    if n.proc_call || n.unknown_block
+      return [:proc_call] if ctx[:any_block]
+
+      d = callable.find { |y| @nb[y] }
+      return [:proc_call, nil, d] if d
+    end
+    # A native that calls back into Ruby (mrb_funcall, mrb_yield, a stored block) enters it as a C-boundary frame, and
+    # mruby's Fiber.yield raises FiberError across one (fiber_check_cfunc), so no yield suspends through it. The natives
+    # that run Ruby inside the VM instead (send, Proc#call, Method#call, eval, instance_exec) are the dynamic send,
+    # proc call and eval seed above. See docs/bc2cpp-yield-c-boundary.md.
+    return nil if C_BOUNDARY
+
+    if n.native
+      d = opaque.find { |y| @nb[y] }
+      return [:native, nil, d] if d
+    end
+    return [:stored_read] if n.stored_read && ctx[:any_block]
+
+    nil
+  end
+
+  def invokes_deep?(node, seen = Set.new)
+    return false unless seen.add?(node.label)
+    return true if node.invokes
+    return true if node.super_forward && supers_invoke?(node, seen)
+
+    node.lit.any? { |b| !@nodes[b].fiber_body && invokes_deep?(@nodes[b], seen) }
+  end
+
+  def supers_invoke?(node, seen)
+    owner = node.owner && @nodes[node.owner]
+    return true unless owner&.name
+
+    @defs_by_name[owner.name].any? { |d| d != owner.label && invokes_deep?(@nodes[d], seen) }
+  end
+
+  # Could a block that yields have been passed to the method owning +node+?
+  def passed_own?(node, ctx)
+    owner = node.owner && @nodes[node.owner]
+    return ctx[:any_block] unless owner # no known method: the block is of unknown origin
+
+    return true if @received[owner.label].any? { |b| @own[b] }
+
+    ctx[:any_block] && names_of(owner.label).any? { |nm| @upass.include?(nm) }
+  end
+
+  def opaque_defs
+    return method_labels unless @opaque_names
+
+    (@opaque_names.to_a + OPERATOR_NAMES).flat_map { |nm| @defs_by_name.key?(nm) ? @defs_by_name[nm] : [] }.uniq
+  end
+
+  # -- reachability from Fiber.new bodies -------------------------------------------------------
+
+  def compute_crossable
+    roots = @fiber_roots_unknown ? @nodes.keys : fiber_body_labels
+    opaque = opaque_defs
+    seen = Set.new
+    queue = roots.dup
+    all_methods = method_labels
+    escaping = @esc.to_a + (@sealed ? @sealed_blocks.to_a : [])
+    until queue.empty?
+      l = queue.shift
+      next unless seen.add?(l)
+
+      n = @nodes[l]
+      n.calls.each { |c| queue.concat(callee_defs(n, c)) }
+      queue.concat(n.lit.reject { |b| @nodes[b].fiber_body })
+      queue.concat(n.bodies)
+      queue.concat(enum_defs) if n.enum_send
+      queue.concat(@yielder_methods.map(&:label)) if @sealed && !n.yielder_calls.empty?
+      next unless @sound
+
+      queue.concat(crossable_dynamic_targets(n, all_methods)) if n.unknown_call
+      queue.concat(callable_defs) if n.callable_send
+      # A native's callback (and a stored block a native runs) sits above that C frame: a Fiber.yield there raises
+      # before it suspends anything (see nb_cause), so no frame it reaches can be under a suspended Fiber.
+      queue.concat(escaping + callable_defs) if n.proc_call || n.unknown_block || (n.stored_read && !C_BOUNDARY)
+      queue.concat(opaque) if n.native && !C_BOUNDARY
+    end
+    seen
+  end
+
+  # What a computed send can call, by the rules nb_cause applies to it: a spelled name (dynamic_target?), and on self
+  # only within self's class chain (self_dispatch_may_yield?), plus any method_missing.
+  def crossable_dynamic_targets(n, all_methods)
+    return all_methods unless SPELLED_SENDS
+
+    @crossable_spelled ||= @nodes.values.select { |m| m.kind == :method && dynamic_target?(m.name) }
+    targets = @crossable_spelled
+    chain = !n.dyn_other && n.klass && ancestors_of(n.klass)
+    if chain
+      targets = targets.select do |m|
+        m.klass.nil? || m.klass == n.klass || chain.include?(m.klass) || @module_names.include?(m.klass)
+      end
+    end
+    targets.map(&:label) + @defs_by_name.fetch('method_missing', [])
+  end
+
+  public
+
+  # Methods a Fiber's frames can pass through and whose compiled code (or a block compiled into it)
+  # may then sit below a Fiber.yield.
+  def fiber_unsafe(labels)
+    analyze!
+    crossable = fiber_crossable
+    labels.select do |l|
+      node = @nodes[l]
+      node && ((crossable.include?(l) && may_yield_unsealed?(l)) || nested_crossable_yielder?(node, crossable))
+    end
+  end
+
+  private
+
+  def nested_crossable_yielder?(node, crossable)
+    node.lit.any? do |c|
+      b = @nodes[c]
+      !b.fiber_body && ((crossable.include?(c) && @own[c]) || nested_crossable_yielder?(b, crossable))
+    end
+  end
+
+end

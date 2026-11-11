@@ -1,4 +1,4 @@
-/* Runs the vecAdd device kernel (vecadd.cpp, lowered to PTX by scripts/pathb-ptx-emit.rb) on 50000 elements. */
+/* Runs the vecAdd device kernel (vecadd.cpp, lowered to PTX by tools/pathb-ptx-emit) on 50000 elements. */
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -12,7 +12,7 @@ C++ --EDG front end--+--> Path A: EDG C back end -> C -> host cc / cproc+QBE   (
                                                     -> C+HVX / SPIR-V,WGSL   (planned)
 ```
 
-Status per component, with the test that covers each claim: `docs/README.md`. Path A is what `./nfcxx` does today: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default),
+Status per component, with the test that covers each claim: `docs/README.md`. Path B is the default on x86-64 Linux (`docs/notes/pathb-default.md`). Path A is what `./nfcxx` does elsewhere and for ASan, freestanding, modules and cosmo: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default off x86-64 Linux),
 or through gcc with `--backend=gcc`. Path B is the long-term design: structured control flow,
 explicit address spaces, explicit safety checks inserted when lowering from EDG's IL.
 
@@ -51,8 +51,8 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
 - **Exceptions work** on the QBE backend (`tests/cases/exceptions.cpp`): EDG lowers them to plain C plus its EH runtime
   in `libC.a`, so cproc/QBE never see anything special.
 - **Not supported by cproc** (so not by the QBE backend of Path A): `long double` ("long double is not yet supported"),
-  `volatile` stores in EDG-generated C ("volatile store is not yet supported"; `qbe-prep.rb` drops `volatile` only for
-  hand-written `.c` inputs, see `tests/c/volatile_setjmp.c`), inline asm (only `__asm__ volatile("int $3")` is rewritten,
+  `volatile` stores in EDG-generated C are handled by `qbe-prep`, which drops the qualifier (the plain store is
+  x86-64 only; `docs/notes/coreclr-gc.md`), see `tests/c/volatile_setjmp.c` for the locals rule, inline asm (only `__asm__ volatile("int $3")` is rewritten,
   `tests/cases/qbe_int3_break.cpp`). All work with `--backend=gcc`. Path B handles volatile itself
   (`tests/pathb-qbe/cases/volatile.cpp`, `docs/notes/pathb-stage3.md`) and still refuses `long double` and inline asm
   with operands.

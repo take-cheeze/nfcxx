@@ -1,0 +1,5 @@
+(ir-module "bad_copy" (layout (pointer 8) (int 4)))
+(function "main" (ret int) (params)
+  (slot "x" int 4 4)
+  (let %0 int (copy-value int $"x" extra))
+  (return %0))

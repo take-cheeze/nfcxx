@@ -120,4 +120,6 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY-LINUX: an uncaught libstdc++ throw: exits 139 (qbe) and 134 (gcc) on Linux aarch64; macOS arm64 runs it
+// MACOS-XFAIL-gcc: the EH shim covers libstdc++'s std::__throw_*, not libc++'s (macOS links libc++)
+// MACOS-XFAIL-qbe: the EH shim is libstdc++-only; libc++'s throws inside libc++.1.dylib are not caught (the same as gcc)

@@ -1,7 +1,28 @@
 # Borrow checker for the Path B IR: design plan
 
-Status: plan only, no code. Written against `origin/main` at `265991b`. Every claim about the code cites a file
-and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
+Status: initial local lifetime checker implemented in `scripts/pathb-borrowck.rb`, using the existing
+`decl` and `scope-end` facts. See [pathb-borrowck.md](pathb-borrowck.md) for the implemented subset,
+commands, tests, and the Rust frontend boundary. Explicit shared/exclusive loans are also
+implemented, including parent/child reborrows and opt-in local last-use inference. Explicit
+scalar/pointer moves and copies are checked, including constant-offset partial moves and
+byte-range loan conflicts. Optional nested struct layouts make aggregate borrowing padding-aware;
+explicit local drop obligations and guarded consumption are tracked. Closed non-throwing call
+contracts model bounded reads, mutation, initialization, and owner consumption. Explicit returned
+loans can alias one bounded argument region with a declared parent and permission. Summaries of functions
+defined in the module are verified against their bodies, and opt-in summary inference finds
+summaries for the rest. The C++ frontend prints declaration facts, including temporaries, and
+struct layout records. Dynamic indices into local arrays are checked with weak updates. EDG's
+exception-handling frame stack is tracked as a value that each function must restore. Calls of
+`may-throw` callees are checked on their normal path: the unwind leaves the function, and every local
+dies with it, so it needs no separate edge (the destructors it runs are the ones the normal path
+already checks). Aggregates are passed and returned by value (results through a caller's buffer), and runtime helpers and scalar C library functions
+have trusted summaries (`--effects`). `try`, `catch`, and `throw` are checked through EDG's `_setjmp`
+protocol: a handler is entered from the throw points of its body, with the body's locals destroyed.
+Rust programs are checked too, through mrustc's monomorphised MIR ([mrustc-borrowck.md](mrustc-borrowck.md)).
+Section 3 ruled Rust out when the repository had no Rust frontend; the monomir route has since given it one.
+Still planned: pointer arithmetic on arguments, source-language ownership policy, and general lifetime
+signatures. The historical design below was written against `origin/main` at
+`265991b`. Every claim about the code cites a file and a line, or a probe in the appendix. Probes were run through a harness built from this tree (appendix A).
 
 ## 0. Summary
 
@@ -113,8 +134,8 @@ a pointer to it passed to a call), `move` (a `(rref-arg)`), `drop` (the destruct
 **Algorithm.** Forward "maybe uninitialized" and "maybe moved" analyses, meet by union, worklist to a fixed point, over
 the event sequence of each block. A read of a slot that is maybe-uninitialized on some path is an error, and so is a
 use of a maybe-moved slot, for a type marked as moved-from-is-dead (section 3). Field granularity applies only to
-direct member stores (`(offset $"s" N)`). An address that escapes (stored to memory, or passed to a function that
-takes a raw pointer) makes the slot "initialized by unknown code" from then on, so the analysis does not report it.
+direct member stores (`(offset $"s" N)`). An address that escapes to unknown code requires an
+effect/lifetime contract. Without one, the checker refuses the function; escape must never be treated as proof of initialization or safety.
 
 **Proves.** A read of a local that no path initializes is an error. A read of a local that some path leaves
 uninitialized is an error, which is stricter than C++ (C++ only says the read is undefined). A use of a moved-from

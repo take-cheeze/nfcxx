@@ -1,0 +1,1247 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+
+# CodeGen: receiver, owner and super-target facts.
+
+require_relative 'bytecode_ir_ops'
+require_relative 'bytecode_ir_returns'
+
+class CodeGen
+  # A rescue handler's exception register stays an Exception value until it is
+  # overwritten. Follow only MOVE aliases back to the recognized EXCEPT.
+  def rescued_exception_receiver?(irep, idx, dest_reg)
+    return false unless irep && !idx.nil?
+
+    addr = BytecodeIR.for(irep).source_at(idx)&.addr
+    return false unless addr
+
+    # RESCUE reads its first register and writes its second; the caught
+    # exception remains live in the input register for the handler.
+    rescue_write = ->(insn, cur) { insn.op == :RESCUE && insn.regs[1] == cur }
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: %i[RESCUE], barrier: rescue_write, barrier_result: false,
+                                              follow_moves: true) do |insn, _index, exc_reg|
+      next false unless insn.op == :EXCEPT
+
+      recognize_rescue_regions(irep).any? do |region|
+        region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
+          region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
+      end
+    end || false
+  end
+
+  # `Exception#message` and `#to_s` share exc_to_s in mruby. A rescue proves the
+  # receiver is an exception, but any Ruby instance override or runtime installer
+  # invalidates using that C body directly.
+  def rescued_exception_message_safe?
+    return @rescued_exception_message_safe if defined?(@rescued_exception_message_safe)
+
+    defs = @registry['message'] || []
+    @rescued_exception_message_safe = defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                      defs.all? { |d| d.owner == '<native>' || d.owner.end_with?('.singleton') } &&
+                                      !devirt_blocked_name?('message') &&
+                                      Array(@prepended_modules['Exception']).empty? &&
+                                      !@unknown_mixins.include?('Exception')
+  end
+
+  # INTERP_UNLOCK: does MONO method `name` carry a hand-placed `-> Array`
+  # annotation? Consumed by proven_array_source's chained rule. MONO-only (an
+  # annotation sits on one irep). No compiles_clean? requirement: the fact is
+  # about the return value only. Sound because the annotation is hand-placed
+  # AND every admitted site passes the emitter's mrb_array_p tripwire, which
+  # raises on a wrong claim. Unknown tokens resolve to nil.
+  def annotated_array_return(name)
+    defs = @registry[name]
+    return false unless defs && defs.size == 1 && defs.first.irep
+
+    label = defs.first.irep
+    # `Array<Klass>` also claims an Array result, so it opens the same gate;
+    # annotated_element_return supplies the element class.
+    @annotations[label]&.ret == :array || !@element_annotations[label]&.element.nil?
+  end
+
+  # ELEMENT_CLASS_SUPPORT: annotated_array_return's MONO-keyed lookup for the
+  # element dimension (see ElementAnnotations).
+  def annotated_element_return(name)
+    defs = @registry[name]
+    return nil unless defs && defs.size == 1 && defs.first.irep
+
+    @element_annotations[defs.first.irep]&.element
+  end
+
+  def annotated_ret_class(name)
+    defs = @registry[name]
+    return nil unless defs && defs.size == 1 && defs.first.irep
+
+    @element_annotations[defs.first.irep]&.ret_class
+  end
+
+  # ELEMENT_CLASS_SUPPORT: element class of a proven-Array block receiver, from
+  # the same scan ArrayElementLayout uses(so they cannot drift). nil (the usual
+  # answer) leaves per-element calls as POLY mrb_funcall.
+  def proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    array_element_source_scan(irep, idx, dest_reg, element_ctx(ivar_classes, mand, arg_classes, owner_name))
+  end
+
+  # Memoized: the registry is fixed after CodeGen.new.
+  def known_owner_set
+    @known_owner_set ||= Set.new(@registry.values.flatten.map(&:owner))
+  end
+
+  # Classes some other class inherits from (see self_receiver_class). Memoized;
+  # @superclass_of is fixed.
+  def subclassed_set
+    @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
+  end
+
+  # Prefer the whole-program hierarchy when it is available: the partial
+  # superclass map omits classes whose superclass expression did not resolve.
+  def exact_receiver_class?(owner)
+    return @closed_world.exact_class?(owner) if @closed_world
+
+    !subclassed_set.include?(owner)
+  end
+
+  # Exact only for a fresh `Klass.new` whose constant and constructor lookup are
+  # closed-world stable. ClassLayout and argument annotations remain guarded.
+  def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
+    return nil unless stable_standard_constructor_class?(expected_class)
+
+    # JOIN_DOMINANCE: unguarded, so the `new` must be the only value the register can hold.
+    irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, follow_moves: true) do |insn|
+      # The known-class trace already resolved this SEND's constant path;
+      # stability above proves that path still denotes the same class.
+      expected_class if %i[SEND SEND0].include?(insn.op) && insn.sym == 'new'
+    end
+  end
+
+  # PROVEN_MISS: [kind, class] when this send's receiver class is proven by an
+  # unguarded fact (never a ClassLayout, annotation or element hint), else nil.
+  def proven_receiver_class(irep, idx, reg, cw_site, exact_class, constant_owner, self_implicit)
+    return [:fresh_new, exact_class] if exact_class
+    return [:constant_object, constant_owner] if constant_owner
+
+    self_owner = cw_site && cw_site[:self_owner]
+    return [:lexical_self, self_owner] if self_owner.is_a?(String) && !self_owner.end_with?('.singleton')
+
+    # An implicit-self send has no receiver register to read: R[a] still holds an old value.
+    return nil if self_implicit
+
+    literal = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn|
+      { :ARRAY => 'Array', :ARRAY2 => 'Array', :HASH => 'Hash', :STRING => 'String' }[insn.op]
+    end
+    [:literal, literal] if literal
+  end
+
+  # The class of a receiver that is the dominating result of a literal `Klass.new`, or nil.
+  # The trace may start from a hint; exact_new_receiver_class keeps only the `new` proof.
+  def exact_new_class_at(irep, idx, reg, owner_def)
+    enter = irep.enter
+    known = trace_new_target(irep, idx, reg, owner_def && @class_layout[owner_def.owner],
+                             enter ? enter.enter_fields.first : 0, owner_def && @class_annotations[irep.label]&.args,
+                             owner: owner_def&.owner, class_layout: @class_layout, registry: @registry,
+                             container_constants: @container_constants, element_annotations: @element_annotations,
+                             known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+                             method_return_class: dispatch_return_class,
+                             guarded: true)
+    known && exact_new_receiver_class(irep, idx, reg, owner: owner_def&.owner, expected_class: known)
+  end
+
+  # Ireps whose exceptions an enclosing `rescue` may catch, a NoMethodError included: the
+  # irep with the handler and every block irep nested under it.
+  def rescue_covered_labels
+    @rescue_covered_labels ||= begin
+      covered = Set.new
+      mark = lambda do |label, inside|
+        irep = @ireps[label]
+        inside ||= !(irep.catch_handlers || []).empty?
+        covered << label if inside
+        (irep.reps || []).each { |child| mark.call(child, inside) }
+      end
+      @ireps.each_key { |label| mark.call(label, false) }
+      covered
+    end
+  end
+
+  # The marker line for a send that provably raises NoMethodError (whether it is emitted
+  # as dispatch or as a direct call into an unrelated owner), or ''. A `rescue` around the
+  # site, a respond_to?-style probe of the name and a method_missing class in the chain
+  # (ClosedWorld#proven_miss?) make the send guarded, so it is not a miss.
+  def proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                         trace_reg_offset, exact_class: nil)
+    site_idx = idx || trace_idx
+    return '' unless @closed_world && irep && site_idx && !rescue_covered_labels.include?(irep.label)
+
+    reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    exact_class ||= exact_new_class_at(irep, site_idx, reg, owner_def) unless self_implicit
+    constant_owner = nil
+    if !self_implicit && idx && %i[SEND0 SEND SSEND0 SSEND].include?(BytecodeIR.for(irep).source_at(idx).op)
+      constant_owner = constant_object_owner(irep, idx, reg, owner_def&.owner)
+    end
+    kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
+                                        exact_class, constant_owner, self_implicit)
+    return '' unless klass && @closed_world.proven_miss?(name, klass, proven_miss_answered_names, kind, label: irep.label)
+
+    site = "#{irep.file}:#{BytecodeIR.for(irep).source_at(idx || site_idx)&.lineno || 0}"
+    "  #{ProvenMiss.marker(name, kind, klass, site: site)}\n"
+  end
+
+  # symbol_installed_names, plus the names of core Ruby definitions the registry hid because a native
+  # method or operator shares them (bc2cpp.rb core_hidden_defs): mruby's own Array#sort_by is one. Those
+  # bodies still exist at run time, so a send of their name is not a miss. Only adds names, so it only
+  # withholds a miss claim. Nil stays nil (the scan did not run).
+  def proven_miss_answered_names
+    return @proven_miss_answered_names if defined?(@proven_miss_answered_names)
+
+    names = symbol_installed_names
+    @proven_miss_answered_names = names && (names | (self.class.core_hidden_defs || []).map(&:name))
+  end
+
+  # Diagnostic-only: identify the producers behind an unresolved receiver, following register copies without
+  # changing the type proof. Every producer that reaches the use is reported (`join:a.b` at a join), so a join is
+  # not named by the arm that happens to come last in the instruction order. A query the IR refuses (a guarded
+  # region such as a rescue body) is not a complete answer: its textual-walk label is prefixed `unproven.`.
+  def receiver_trace_origin(irep, idx, dest_reg)
+    return 'receiver_unavailable' unless irep && idx && dest_reg
+
+    defs = BytecodeIR.for(irep).reaching_definitions(idx, dest_reg, shared: true)
+    return "unproven.#{receiver_origin_by_walk(irep, idx, dest_reg)}" if defs.nil?
+    return receiver_origin_by_walk(irep, idx, dest_reg) if defs.empty?
+
+    labels = defs.map { |definition| receiver_definition_origin(irep, definition) }.uniq.sort
+    labels.size == 1 ? labels.first : "join:#{labels.join('.')}"
+  end
+
+  def receiver_definition_origin(irep, definition)
+    return (definition.reg == 0 ? 'self_register' : 'incoming_or_unwritten_register') if definition.entry?
+
+    receiver_producer_origin(BytecodeIR.for(irep).source_at(definition.index))
+  end
+
+  def receiver_origin_by_walk(irep, idx, dest_reg)
+    at_entry = ->(last) { last == 0 ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg, skip_ops: [:BLOCK, *BytecodeIR::Ops::LEAD_READ_ONLY], exhausted: at_entry) do |insn|
+      insn.op == :MOVE ? (insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source') : receiver_producer_origin(insn)
+    end
+  end
+
+  # The label of a non-copy writer; a MOVE is followed by the caller, never labelled here.
+  def receiver_producer_origin(insn)
+    case insn.op
+    when :GETIV then 'get_ivar'
+    when :GETIDX, :GETIDX0 then 'indexed_result'
+    when :GETUPVAR then 'captured_upvar'
+    when :GETCONST, :GETMCNST then 'constant_lookup'
+    when *BytecodeIR::Ops::SEND then 'send_result'
+    when :ARRAY, :ARRAY2, :HASH, :STRING, 'STR' then 'literal_container'
+    else "write_#{insn.op.to_s.downcase}"
+    end
+  end
+
+  # Resolve a constant expression used as a class/module object, not an
+  # instance. A branch edge that can bypass the constant write invalidates it.
+  def constant_object_owner(irep, idx, dest_reg, lexical_owner, through_handlers: false)
+    return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
+                      idx < BytecodeIR.for(irep).size && dest_reg
+
+    written = straight_line_constant_name(irep, idx, dest_reg) ||
+              irep.agreed_constant_name(idx, dest_reg, through_handlers: through_handlers)
+    owner = if written
+              resolve_class_constant_name(written, lexical_owner)
+            else
+              top_level_constant_name(irep, idx, dest_reg, through_handlers)
+            end
+    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
+    stable ? owner : nil
+  end
+
+  # `::Name` (OCLASS, then GETMCNST on it): the top-level constant, which lexical scope never shadows. nil unless
+  # that is the register's one definition and the name is a class the program knows.
+  def top_level_constant_name(irep, idx, reg, through_handlers)
+    program = BytecodeIR.for(irep)
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg, through_handlers: through_handlers, shared: true)
+    return nil unless defs&.size == 1 && !defs.first.entry?
+
+    insn = program.source_at(defs.first.index)
+    return nil unless insn.op == :GETMCNST && insn.paren_reg == insn.reg && insn.mcnst_name
+
+    scope = BytecodeIR.reaching_definitions(irep, defs.first.index, insn.reg, through_handlers: through_handlers, shared: true)
+    return nil unless scope&.size == 1 && !scope.first.entry? && program.source_at(scope.first.index).op == :OCLASS
+
+    ConstructClassNames.table.key?(insn.mcnst_name) ? insn.mcnst_name : nil
+  end
+
+  # GUARD_VIOLATION: the bare name of the stable class/module constant that
+  # every definition of `reg` at SEND `idx` reads, or nil. StableClassConstants makes
+  # the name denote one class object for the VM's life, so a guard that only tests
+  # "is this class/module (that class)" cannot fail. Closed world only: the open
+  # world keeps its fallbacks.
+  def stable_constant_register(irep, idx, reg, lexical_owner, through_handlers: false)
+    return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
+                      @call_block_expr.nil? && irep && idx && reg && idx < BytecodeIR.for(irep).size
+
+    name = irep.agreed_constant_name(idx, reg, through_handlers: through_handlers)
+    return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
+
+    # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
+    constant_object_owner(irep, idx, reg, lexical_owner, through_handlers: through_handlers)
+  end
+
+  # The explicit-receiver SEND at `idx` of `irep` when it is the call `name` being compiled,
+  # so its own receiver/argument registers can be asked about.
+  def proof_send_insn(irep, idx, name)
+    insn = irep && idx && BytecodeIR.for(irep).source_at(idx)
+    insn if insn && %i[SEND SEND0].include?(insn.op) && insn.sym == name
+  end
+
+  # GUARD_VIOLATION: `Klass.new`'s receiver is the stable constant naming `klass`, so the
+  # class-identity guard cannot fail.
+  def new_receiver_constant_proven?(irep, idx, name, klass, lexical_owner)
+    insn = klass && proof_send_insn(irep, idx, name)
+    constant = insn && stable_constant_register(irep, idx, insn.reg, lexical_owner)
+    # NEW_IDENTITY_HANDLERS: a `Klass.new` inside a begin/rescue body; the plain walk refuses a protected
+    # range, the handler-aware one follows its edges and still finds the one constant load.
+    constant ||= insn && stable_constant_register(irep, idx, insn.reg, lexical_owner, through_handlers: true)
+    !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
+  end
+
+  # GUARD_VIOLATION: the call's receiver is a stable class/module constant.
+  def constant_receiver_proven?(irep, idx, lexical_owner, name)
+    insn = proof_send_insn(irep, idx, name)
+    !insn.nil? && !stable_constant_register(irep, idx, insn.reg, lexical_owner).nil?
+  end
+
+  def guard_violation_enabled?
+    NomethodReviewed.guard_violation_enabled?
+  end
+
+  # The constant the straight-line walk finds when no branch can bypass its
+  # load; nil otherwise (agreed_constant_name then asks every reaching definition).
+  def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %i[JMP JMPIF JMPNOT JMPNIL JMPUW])
+    return nil unless branch_edges
+
+    barriers = skip_blocks ? %i[JMPUW ONERR RESCUE EXCEPT] : %i[JMPUW ONERR RESCUE EXCEPT BLOCK]
+    ref = irep.constant_path(idx - 1, dest_reg, skip_ops: BytecodeIR::Ops::LEAD_READ_ONLY, barrier: barriers)
+    return nil unless ref&.root == :const
+
+    # A forward edge from before this write into the send's block could
+    # bypass the receiver value; edges from later code already execute it.
+    return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
+    # A loop back-edge from after the send can carry a second write of dest_reg into it, which the backward walk
+    # cannot see; a single reaching definition (following back-edges) is the only write that can be the receiver.
+    # Handler edges are crossed: without through_handlers a send inside a rescue/ensure range is refused (:query_guarded).
+    defs = BytecodeIR.reaching_definitions(irep, idx, dest_reg, through_handlers: true, shared: true)
+    return nil unless defs&.size == 1 && !defs.first.entry?
+
+    ref.name && ([ref.name] + ref.segments).join('::')
+  end
+
+  def resolve_class_constant_name(written, lexical_owner)
+    return nil unless written && lexical_owner
+
+    lexical = lexical_owner.to_s.delete_suffix('.singleton').split('::')
+    candidates = lexical.length.downto(1).map { |n| "#{lexical.first(n).join('::')}::#{written}" }
+    candidates << written
+    hits = candidates.uniq.select { |name| ConstructClassNames.table.key?(name) }
+    # GETCONST follows Ruby's lexical nesting order: the innermost defined
+    # binding shadows outer bindings with the same name. Identity stability
+    # below proves the selected binding cannot be rebound at runtime.
+    return hits.first unless hits.empty?
+
+    # A bare native class/module may enter lookup through Object's included
+    # modules (for example Input resolving to RGSS::Input). Reuse the existing
+    # whole-program unique-name proof rather than guessing the alias path.
+    unique = UniqueClassNames.resolve(written, lexical_owner)
+    unique if unique && ConstructClassNames.table.key?(unique)
+  end
+
+  def constant_object_candidate_clean?(label)
+    return false if @constant_object_probe
+
+    @constant_object_probe = true
+    compiles_clean?(label)
+  ensure
+    @constant_object_probe = false
+  end
+
+  # A module_function copy shares its instance method's irep but runs with the
+  # module object as self (it already passes it for the body's own bare
+  # calls), so the instance-owner proof is reusable only when the body neither
+  # observes self nor ties itself to instance state: ivars, class variables,
+  # `super` or ARGARY, anywhere in its blocks too.
+  MODULE_FUNCTION_INSTANCE_OPS = %i[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
+
+  def module_function_copy_self_safe?(irep, owner)
+    return false unless irep
+    return false if embeds_storage?(owner)
+
+    [irep, *BytecodeIR.nested_bodies(irep)].none? do |body|
+      BytecodeIR.for(body).op?(*MODULE_FUNCTION_INSTANCE_OPS) ||
+        BytecodeIR.for(body).each_source.any? { |insn, _| insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
+    end
+  end
+
+  def stable_standard_constructor_class?(klass)
+    stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
+                                        @closed_world.stable_constant_identity?(klass))
+    stable_identity && @closed_world.standard_constructor_lookup? && exact_constructor_chain?(klass)
+  end
+
+  # Inside a class method, bare `new` has the class object as its receiver.
+  # The registry's `.singleton` owner is therefore class-name evidence, but only
+  # for classes the current closed-world build actually emits.
+  def implicit_singleton_self_class(owner_def)
+    owner = owner_def&.owner
+    return nil unless owner.is_a?(String) && owner.end_with?('.singleton')
+
+    klass = owner.delete_suffix('.singleton')
+    return nil if klass.empty? || !@known_owners&.include?(klass)
+
+    klass
+  end
+
+  # INHERITED_DIRECT_CONSTRUCT: the Ruby `initialize` MethodDef an instance of +klass+ runs, or nil.
+  # +klass+'s own single definition is the original direct-construct rule. Without one, the lookup walks the
+  # superclass chain and answers the first class's definition when, for every class it passes:
+  #   * the class is a declared class (not a module) with no unresolved mixin, and no included module defines
+  #     initialize and nothing is prepended (numeric_init_definition answers :unknown otherwise);
+  #   * no outside (native or foreign Ruby) source spells it, so no native registers an initialize on it;
+  # and no DEF the registry does not hold (define_method, a computed name) installs an initialize anywhere.
+  # A chain that reaches Object without a Ruby initialize answers nil: Object's and BasicObject's initialize is
+  # native, and a native body is not called directly (mrb_obj_new keeps that lookup).
+  def direct_construct_init_def(klass)
+    own = (@registry['initialize'] || []).select { |md| md.owner == klass }
+    return own.one? ? own.first : nil unless own.empty?
+    return nil unless @closed_world && !@closed_world.unknown_def?('initialize')
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      return nil unless @closed_world.class_declared?(klass) && !@unknown_mixins.include?(klass)
+      return nil if @closed_world.outside_spells_class?(klass)
+
+      definition = numeric_init_definition(klass)
+      return nil if definition == :unknown
+      return definition if definition
+
+      klass = @superclass_of[klass]
+    end
+    nil
+  end
+
+  def exact_constructor_chain?(klass)
+    # Every class object's singleton lookup reaches Class after its own
+    # singleton superclass chain. A module mixed into Class can replace new or
+    # allocate for every class object, so reject it even though it is not in
+    # `klass`'s ordinary superclass chain below.
+    return false if @unknown_mixins.include?('Class')
+    return false unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty?
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      # Instance includes/prepends do not affect the class object's singleton
+      # lookup. Only an unresolved mixin on the singleton owner can intercept
+      # Class#new or #allocate; known singleton mixins are checked below too.
+      return false if @unknown_mixins.include?(singleton)
+      return false unless Array(@included_modules[singleton]).empty? && Array(@prepended_modules[singleton]).empty?
+
+      %w[new allocate].each do |name|
+        return false if (@registry[name] || []).any? do |definition|
+          [klass, singleton, 'Class'].include?(definition.owner) && definition.owner != '<native>'
+        end
+      end
+      klass = @superclass_of[klass]
+    end
+    true
+  end
+
+  # The class whose instance `self` is while compiling `owner_def`'s code, or nil
+  # inside a runtime-def/EXEC body, whose self is whatever receiver mruby passes.
+  def self_class(owner_def)
+    @self_class_unknown ? nil : owner_def.owner
+  end
+
+  # LEXICAL_SELF_SUPPORT: compile_send's version of self_receiver_class (see it
+  # for the soundness argument: no subclass anywhere, and `.singleton` owners
+  # refused), using this CodeGen's memoized sets instead of a `ctx` hash.
+  def lexical_self_owner(owner_def)
+    return nil unless owner_def && self_class(owner_def)
+
+    owner = owner_def.owner
+    return nil if owner.nil? || owner.end_with?('.singleton')
+    return nil unless known_owner_set.include?(owner)
+    return nil unless exact_receiver_class?(owner)
+
+    owner
+  end
+
+  # MODULE_SINGLETON_SELF: ClosedWorld#exact_class? has no answer for
+  # a module (only classes are declared), so `def self.x` in a module M never
+  # reached SINGLETON_LEXICAL_SELF under a closed world. ClosedWorld#module_object_self?
+  # proves self is M; inherited_lookup_safe? covers outside reopening
+  # and by-name installers.
+  def module_singleton_self?(base, name)
+    return false unless name && @closed_world&.module_object_self?(base)
+
+    @closed_world.inherited_lookup_safe?(name, base)
+  end
+
+  # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
+  # subclassed class or a declared module that never has its singleton methods
+  # cloned, and X's own singleton def wins lookup.
+  def lexical_self_singleton_owner(owner_def, name: nil)
+    return nil unless owner_def && self_class(owner_def)
+
+    owner = owner_def.owner
+    return nil unless owner&.end_with?('.singleton')
+
+    base = owner.delete_suffix('.singleton')
+    # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
+    return nil if base == 'Object' || !(exact_receiver_class?(base) || module_singleton_self?(base, name))
+    return nil unless Array(@prepended_modules[owner]).empty?
+    return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
+
+    owner
+  end
+
+  # The one irep def (or `attr_*` accessor) `name` has on that singleton owner
+  # (module_function copies have no irep; a second def would make "which one is
+  # live" order-dependent).
+  def lexical_self_singleton_def(name, owner_def)
+    owner = lexical_self_singleton_owner(owner_def, name: name)
+    return nil unless owner
+
+    defs = (@registry[name] || []).select { |md| md.owner == owner }
+    defs.size == 1 && (defs.first.irep || defs.first.kind == :ivar_accessor) ? defs.first : nil
+  end
+
+  # A compiled module_function copy runs the source body with the module object
+  # as self. Resolve its bare self-calls against that same module's singleton
+  # copies, but only when both copies are emitted in this closed-world build.
+  def lexical_module_function_self_target(name, owner_def)
+    return nil unless owner_def && owner_def.owner.is_a?(String)
+
+    owner = owner_def.owner.delete_suffix('.singleton')
+    singleton_owner = "#{owner}.singleton"
+    return nil unless @closed_world&.stable_constant_identity?(owner)
+    return nil unless @only_owners&.include?(singleton_owner) || @other_owners&.include?(singleton_owner)
+    return nil if @unknown_mixins.include?(singleton_owner) ||
+                  !Array(@included_modules[singleton_owner]).empty? ||
+                  !Array(@prepended_modules[singleton_owner]).empty?
+
+    current_copy = (@registry[owner_def.name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.copy_irep == owner_def.irep
+    end
+    return nil unless current_copy.one?
+
+    copies = (@registry[name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.visibility == :public && definition.copy_irep
+    end
+    return nil unless copies.one?
+
+    copy = copies.first
+    target = (@registry[name] || []).find do |definition|
+      definition.owner == owner && definition.irep == copy.copy_irep
+    end
+    return nil unless target
+    return nil if devirt_blocked_name?(name)
+
+    target
+  end
+
+  # LEXICAL_SELF_KEYWORD_SUPPORT: monomorphic_target's role for
+  # compile_keyword_call, for a POLY name sent with no explicit receiver. `self`
+  # in a method of C is a C, and lexical_self_owner has proven no subclass of C
+  # exists, so dispatch can only reach C's definition (the same reasoning as
+  # super_target and compile_send's LEXICAL_SELF branch).
+  # Extra guard: devirt_blocked_name? up front (a name installed on a runtime
+  # singleton class can shadow even a known self's method); the LEXICAL_SELF
+  # marker is not in RUNTIME_DEF_DYNAMIC_MARKERS, so the text audit still
+  # applies. Arity/keyword-shape checks stay in compile_keyword_call.
+  # With a closed-world scan, exact_receiver_class? includes subclasses whose
+  # superclass expression the local resolver could not identify.
+  # nil for explicit-receiver sends.
+  def lexical_self_keyword_target(name, self_implicit:, owner_def:)
+    return nil unless self_implicit
+    return nil if devirt_blocked_name?(name)
+
+    lex_owner = lexical_self_owner(owner_def)
+    candidate = if lex_owner
+                  @registry[name]&.find { |md| md.owner == lex_owner }
+                else
+                  lexical_self_singleton_def(name, owner_def)
+                end
+    return nil unless candidate&.irep
+    return nil unless compiles_clean?(candidate.irep)
+
+    candidate
+  end
+
+  def element_ctx(ivar_classes, mand, arg_classes, owner_name)
+    { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
+      class_annotations: @class_annotations, element_annotations: @element_annotations,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
+      ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
+      elements: @element_layout,
+      annotated_element: ->(n) { annotated_element_return(n) },
+      annotated_ret_class: ->(n) { annotated_ret_class(n) },
+      self_accessor: ->(n) { self_accessor_owner?(n, owner_name) } }
+  end
+
+  # ELEMENT (generic step 2): the class mask of the elements a `map`/`collect` call with a literal block returns, read
+  # from the block's own returns (block_return_class). Nil unless no program definition has the name and the class
+  # already has a bit: allocating one here would renumber the masks.
+  # GENERIC step 3: the result class of a block iterator called with a literal block (a SENDB), read from the core
+  # bodies that answer the name (block_core_index: mruby's own mrblib, e.g. enum.rb's collect, reject, group_by) with
+  # block_given, so the list of iterators is not written here. The union over those definitions bounds the result for
+  # any receiver, Hash's own reject included. Gated on no program definition or installer of the name and on no C
+  # method spelling it; core's `alias map collect` is no install (collect_installed_names skips core mrblib).
+  def block_collection_result_mask(insn)
+    return nil unless insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless @closed_world&.exact_instances_singleton_free?
+    installed = symbol_installed_names
+    return nil if installed.nil? || installed.include?(insn.sym)
+    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+    return nil unless @closed_world.native_paths_spelling(insn.sym).empty?
+    return nil if self.class.core_result_opaque_defs&.any? { |_owner, method| method == insn.sym }
+
+    @block_iterator_results ||= {}
+    return @block_iterator_results[insn.sym] if @block_iterator_results.key?(insn.sym)
+
+    definitions = block_core_index.select { |(_owner, method), _defs| method == insn.sym }.values.flatten.uniq
+    @block_iterator_results[insn.sym] = block_iterator_body_mask(definitions, insn.sym)
+  end
+
+  def block_iterator_body_mask(definitions, name)
+    return nil if definitions.empty?
+
+    definitions.reduce(0) do |mask, definition|
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, true, call_name: name)
+      return nil unless result
+
+      mask | result
+    end
+  end
+
+  def block_element_class_mask(irep, index, insn)
+    return nil unless CoreBlockIteratorSigs.block_return_element?(insn.sym) && insn.plain_fixed_argc? && insn.argc.zero?
+    return nil unless @closed_world&.exact_instances_singleton_free?
+    return nil unless (@registry[insn.sym] || []).all? { |definition| definition.owner == '<native>' }
+
+    ctx = element_ctx({}, 0, nil, @owner_of[irep.label]&.owner)
+    block_irep = adjacent_block_irep(irep, index, insn.reg, ctx)
+    klass = block_irep && block_return_class(block_irep, ctx, 0)
+    klass && (@numeric_class_bits || {})[klass]
+  end
+
+  # HASH_ELEMENT_SUPPORT: proven_element_class for Hash values.
+  def proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    hash_element_source_scan(irep, idx, dest_reg, hash_element_ctx(ivar_classes, mand, arg_classes, owner_name))
+  end
+
+  def hash_element_ctx(ivar_classes, mand, arg_classes, owner_name)
+    { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
+      class_annotations: @class_annotations, element_annotations: @element_annotations,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
+      ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
+      elements: @element_layout, hash_elements: @hash_element_layout,
+      annotated_element: ->(n) { annotated_element_return(n) },
+      annotated_ret_class: ->(n) { annotated_ret_class(n) },
+      self_accessor: ->(n) { self_accessor_owner?(n, owner_name) } }
+  end
+
+  # SYM_DEVIRT: resolve a `&:sym` target inside emit_sym_inline. Returns
+  # [:mono, def], [:poly, defs] or nil, applying compile_send's MONO guards
+  # (pure-mandatory arity, arity 0 since recognize_sym_regions requires n=0,
+  # ONLY_OWNERS/OTHER_OWNERS). POLY needs a per-element exact-class guard for
+  # each direct or closed-world-proven inherited implementation and is capped
+  # at SYM_DEVIRT_CHAIN_CAP. Anything else keeps mrb_funcall.
+  SYM_DEVIRT_CHAIN_CAP = 4
+
+  def sym_call_target(sym)
+    defs = @registry[sym]
+    return nil unless defs
+
+    usable = defs.select do |d|
+      next false unless d.irep
+      next false unless pure_mandatory_arity?(@ireps.fetch(d.irep))
+      next false unless mandatory_arity(@ireps.fetch(d.irep)).zero?
+      next false unless compiles_clean?(d.irep)
+      next false if @only_owners && !@only_owners.include?(d.owner) && !(@other_owners&.include?(d.owner))
+
+      true
+    end
+    # All or nothing: skipping a def is unsound for MONO and would misroute
+    # elements in a partial POLY chain if the fallback were ever dropped.
+    return nil unless usable.size == defs.size && !usable.empty?
+
+    return [:mono, usable.first] if usable.size == 1
+    return nil if usable.size > SYM_DEVIRT_CHAIN_CAP
+
+    # Each inherited entry is keyed by the exact receiver class, not its
+    # ancestor implementation owner; emission therefore retains lookup's
+    # runtime-class check and shares the caller's closed-world hierarchy proof.
+    branches = usable.map { |definition| { guard_owner: definition.owner, definition: definition } }
+    if @closed_world
+      (@superclass_of.keys + known_owner_set.to_a).uniq.each do |receiver_class|
+        next if receiver_class.end_with?('.singleton') || branches.any? { |b| b[:guard_owner] == receiver_class }
+
+        target = closed_world_inherited_target(sym, receiver_class)
+        next unless target && usable.include?(target)
+
+        branches << { guard_owner: receiver_class, definition: target }
+      end
+    end
+    return [:poly, branches] if branches.size <= SYM_DEVIRT_CHAIN_CAP
+
+    nil
+  end
+
+  # ANCESTOR_MIXINS_SUPPORT: can `super` in owner_def provably reach the declared
+  # superclass, i.e. no included module in between (mruby searches [class,
+  # included modules newest-first, superclass, ...])?
+  # Declines whenever the owner has ANY plain `include`: a bare `include M` in a
+  # class body is resolved relative to the class ("Foo::M"), while
+  # build_registry names the module's methods by the module's own path ("M"),
+  # so matching module owners could wrongly prove a `super` safe. Only
+  # presence is consulted. Prepended modules sit above the class and are not
+  # consulted.
+  def super_reaches_superclass?(owner_def)
+    owner = owner_def.owner
+    return false if @unknown_mixins.include?(owner)
+
+    Array(@included_modules[owner]).empty?
+  end
+
+  # MODULE_SUPER_SUPPORT: the MethodDef that `super` in owner_def
+  # actually reaches when the owner includes modules -- mruby searches
+  # [class, included modules newest-first, superclass, ...], so the winner is
+  # the first ancestor in that order carrying the name. Returns nil when the
+  # winner is not a single statically known bytecode method, which keeps the
+  # `#error`.
+  #
+  # Soundness differs from super_target's direct call in one way that makes this stricter,
+  # not looser: OP_SUPER always forwards the current method's block, so the
+  # target is called WITH this frame's block (super_block_arg), never with the
+  # nil a compiled `_impl` has no way to invent. `super` with no block in
+  # flight therefore forwards nil, which is what the interpreter does too.
+  def module_super_target(owner_def)
+    return nil unless owner_def
+
+    name = owner_def.name
+    return nil if @unknown_mixins.include?(owner_def.owner)
+
+    seen = Set.new([owner_def.owner])
+    # mruby walks the included modules newest-first.
+    Array(@included_modules[owner_def.owner]).reverse_each do |mod|
+      next unless seen.add?(mod)
+
+      found = module_super_lookup(name, mod)
+      return nil if found == :ambiguous || (found && !found.irep)
+
+      return found if found&.irep && module_super_body_usable?(found.irep)
+    end
+    superclass = @superclass_of[owner_def.owner]
+    return nil unless superclass.is_a?(String) && seen.add?(superclass)
+
+    found = module_super_lookup(name, superclass)
+    return nil unless found&.irep && module_super_body_usable?(found.irep)
+
+    found
+  end
+
+  # block_core_clean? for a module-super target. A target still being probed is answered
+  # "not clean" here, and the probe that asked is then left unmemoized (@guard_cycles). Without
+  # that, a caller probed inside the target's own compile would memoize "unclean" for itself.
+  # The probe is run without its registrations (counters, symbol and slot tables), which the
+  # final compile must meet in its own order; only the answer and the cycle bump are kept.
+  def module_super_block_clean?(label)
+    if @probing.include?(label) && !@clean_cache.key?(label)
+      @guard_cycles += 1
+      return false
+    end
+    bumped = false
+    clean = without_probe_side_effects do
+      before = @guard_cycles
+      answer = block_core_clean?(label)
+      bumped = @guard_cycles != before
+      answer
+    end
+    @guard_cycles += 1 if bumped
+    clean
+  end
+
+  # MODULE_SUPER_SUPPORT: can `super` reach this body directly?
+  #
+  # compiles_clean? also refuses every CORE_BLOCK_GUARD body, which
+  # is right for the existing direct-call sites but too strict here: that guard
+  # lives in the method's ENTRY wrapper, and a `super` reaching the body is
+  # already inside a compiled frame. The extra condition is core_body_relaxable?
+  # -- the build's own yield-reach proof that the body, and every block nested in
+  # it, never yields. That is what the guard's `M->c != M->root_c` arm tests at
+  # run time (`bc2cpp_block_yield_free`), so a body passing it is not one whose
+  # Fiber safety depended on the guard.
+  #
+  # The guard's other arm, `!bc2cpp_core_each_is_builtin(M, self)`, is a
+  # receiver-side runtime fact about `each`. This path only fires when the super
+  # target is statically the module's own method on the receiver's own class, so
+  # reaching the body does not bypass that check for any other receiver.
+  def module_super_body_usable?(label)
+    return false if resumable_method?(label)
+    # The direct call names this body's `_impl`, which SKIP_UNSUPPORTED drops when the body has a #error:
+    # the caller then keeps its own #error (left interpreted) rather than calling a function not emitted.
+    return false unless module_super_block_clean?(label)
+    core_body_relaxable?(label)
+  end
+
+  # The definitions of `name` on `owner` across BOTH registries: the engine
+  # gems' @registry and mruby's own compiled core (block_core_index, which also
+  # resolves `alias to_a entries`). `Range` is a core class whose `super` lands
+  # in core `Enumerable#max`, and core owners never appear in @registry at
+  # codegen time, so a lookup consulting only @registry finds nothing there.
+  # :ambiguous when one owner has two live definitions -- mruby would use the
+  # last, and picking either by name alone would be a guess.
+  def module_super_lookup(name, owner)
+    defs = Array(@registry[name]).select { |d| d.owner == owner }
+    defs += Array(block_core_index[[owner, name]])
+    return nil if defs.empty?
+    return :ambiguous unless defs.one?
+
+    defs.first
+  end
+
+  # The C++ expression for the block this frame was entered with, or nil when
+  # the frame cannot hold one (no block parameter and no yield-only frame).
+  # OP_SUPER reads the caller's block out of the frame the same way a yield
+  # does, so a frame with neither has nothing to forward.
+  def super_block_arg(owner_def, irep)
+    return nil unless irep
+
+    return 'bc2cpp_blk' if takes_block_param?(irep) || yields_block_param?(irep)
+
+    nil
+  end
+
+  # MODULE_SUPER_SUPPORT: the C++ for `SUPER Rd n=N` when the target
+  # is reached THROUGH an included module -- `Range#max`'s `super` lands in
+  # `Enumerable#max`, which reads the block, so the call must carry this frame's
+  # block rather than the nil a bare `_impl` call passes.
+  #
+  # Returns nil (keeping the `#error`) unless every part holds:
+  #   - a plain fixed argument count (no splat, no keyword variant): the argument
+  #     registers are R(d+1)..R(d+N), which is what the emitted call passes;
+  #   - a statically known, clean bytecode target (module_super_target);
+  #   - the target's own `_impl` accepts this frame's block, or needs no block.
+  #     A target that takes a block parameter but is handed nil is exactly the
+  #     bug this avoids, so a mismatch keeps the `#error` rather than guessing.
+  #
+  # BC2CPP_MODULE_SUPER=0 restores the previous `#error` at these sites.
+  def module_super_call(owner_def, irep, d_reg, n)
+    return nil unless n
+    return nil unless ENV.fetch('BC2CPP_MODULE_SUPER', '1') == '1'
+
+    target = module_super_target(owner_def)
+    return nil unless target
+    # Both direct calls pass the positionals only; see super_target.
+    shape = enter_shape(@ireps.fetch(target.irep))
+    return nil if shape && shape[1].positive?
+
+    t_irep = @ireps.fetch(target.irep)
+    block = super_block_arg(owner_def, irep)
+    return nil if takes_block_param?(t_irep) && block.nil?
+    return nil if block.nil? && yields_block_param?(t_irep)
+
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    args << block if takes_block_param?(t_irep)
+    "  r#{d_reg} = #{cpp_name(target.owner, target.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+  end
+
+  # SUPER_LOOKUP: `SUPER Rd n=N` whose target no rule above calls directly (a C method such as
+  # Exception#initialize, or one found only at run time) is looked up as OP_SUPER does, from the
+  # superclass of the class the method is defined on (bc2cpp_super_call), and called with the arguments in
+  # R(d+1)..R(d+N). The block register must be the frame's own block, moved there just before (a literal
+  # `super(x) { }` builds another): passed on when the method takes one, else nil, which needs
+  # SUPER_NO_CALLER_BLOCK, as OP_SUPER would forward a caller's block the compiled body never sees.
+  # BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
+  # SUPER_SPLAT: `super(a, *rest)` and `super(*rest)` (`SUPER Rd n=*`). The compiler packs the arguments into one Array
+  # in R(d+1) (ARRAY/LOADNIL then ARYCAT), and the block into R(d+2) with a MOVE just before. The superclass method is
+  # called with those elements, as zsuper_lookup does, through bc2cpp_super_call. Only this packed shape is taken: the
+  # Array must be the single definition of R(d+1) and come from an ARYCAT. The block follows super_lookup_call's rule.
+  # BC2CPP_SUPER_SPLAT=0 keeps the `#error`.
+  def super_splat_call(owner_def, irep, idx, d_reg)
+    return nil unless owner_def && irep && idx && d_reg && ENV.fetch('BC2CPP_SUPER_SPLAT', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    program = BytecodeIR.for(irep)
+    insn = program.source_at(idx)
+    return nil unless insn&.op == :SUPER && insn.pure_splat? && insn.reg.to_i == d_reg.to_i
+    return nil unless idx.positive?
+
+    move = program.source_at(idx - 1)
+    return nil unless move&.op == :MOVE && move.regs.first == d_reg.to_i + 2
+
+    arr = d_reg.to_i + 1
+    defs = BytecodeIR.reaching_definitions(irep, idx, arr, through_handlers: true, origin_transfers: true, shared: true)
+    return nil unless defs && defs.size == 1 && !defs.first.entry?
+
+    writer = program.source_at(defs.first.index)
+    return nil unless writer&.op == :ARYCAT && writer.reg.to_i == arr
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    "  r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), RARRAY_LEN(r#{arr}), RARRAY_PTR(r#{arr}), #{block});\n"
+  end
+
+  def super_lookup_call(owner_def, irep, idx, d_reg, n)
+    return nil unless n && owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    mand, opt = enter_shape(irep)
+    move = idx.positive? && BytecodeIR.for(irep).source_at(idx - 1)
+    return nil unless mand && move && move.op == :MOVE &&
+                      move.regs.first(2) == [d_reg.to_i + n.to_i + 1, mand + opt + 1]
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    argv = args.empty? ? 'nullptr' : 'bc2cpp_super_argv'
+    "  {\n" \
+      "#{args.empty? ? '' : "    mrb_value bc2cpp_super_argv[] = {#{args.join(', ')}};\n"}" \
+      "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, #{block});\n" \
+      "  }\n"
+  end
+
+  # SUPER_BLOCK_REGISTER: `SUPER Rd n=N` with the block in R(d+N+1), which is where OP_SUPER reads it (it is sent as
+  # OP_SENDB sends). Any plain fixed-argument super that no rule above takes is looked up from the superclass of the class
+  # the method is defined on and called with exactly those registers (bc2cpp_super_call). BC2CPP_SUPER_BLOCK_REGISTER=0
+  # keeps the `#error`.
+  #
+  # The block register may be a MOVE of the frame's own block register (a bare `super` forwards the caller's block). A
+  # compiled body never sees that block, so it follows super_lookup_call's rule: the frame's block when the method takes
+  # one, else nil under SUPER_NO_CALLER_BLOCK, else the `#error`. Without it `with_fresh_method_state { }` in a module's
+  # method lost the block of its caller.
+  def super_block_register_call(owner_def, d_reg, n, irep = nil, idx = nil)
+    return nil unless n && owner_def && ENV.fetch('BC2CPP_SUPER_BLOCK_REGISTER', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton')
+
+    block = "r#{d_reg.to_i + n.to_i + 1}"
+    if irep && idx&.positive?
+      move = BytecodeIR.for(irep).source_at(idx - 1)
+      mand, opt = enter_shape(irep)
+      if mand && move&.op == :MOVE && move.regs.first(2) == [d_reg.to_i + n.to_i + 1, mand + opt + 1]
+        block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+        return nil unless block
+      end
+    end
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    argv = args.empty? ? 'nullptr' : 'bc2cpp_super_argv'
+    "  {\n" \
+      "#{args.empty? ? '' : "    mrb_value bc2cpp_super_argv[] = {#{args.join(', ')}};\n"}" \
+      "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(owner_def.owner)}, " \
+      "mrb_intern_lit(M, #{owner_def.name.inspect}), #{n}, #{argv}, #{block});\n" \
+      "  }\n"
+  end
+
+  # ZSUPER_LOOKUP: a bare `super` (`ARGARY R(a+1) m1:r:m2:kd (lv)` + `SUPER R(a) n=*`) no direct rule calls --
+  # a C method such as Kernel#respond_to_missing?, or one found only at run time -- is looked up and called as
+  # SUPER_LOOKUP does, with the arguments OP_ARGARY would pack: with lv=0 they are this frame's registers, r1..rm1,
+  # the rest Array's elements (r(m1+1), when it is one, as OP_ARGARY tests), then the m2 post arguments. Keyword
+  # arguments (kd) decline. The block is the frame's own (super_block_arg), else nil under SUPER_NO_CALLER_BLOCK.
+  # `idx` may name either half; both give the same answer, so the ARGARY arm and the SUPER arm cannot emit half a
+  # translation. BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
+  def zsuper_lookup_plan(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
+    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+
+    program = BytecodeIR.for(irep)
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = program.source_at(argary_idx)
+    super_insn = program.source_at(argary_idx + 1)
+    return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER && super_insn.pure_splat?
+    return nil unless argary.reg && super_insn.reg && argary.reg.to_i == super_insn.reg.to_i + 1
+
+    spec = argary.argary_spec
+    return nil unless spec && spec.size == 4 && argary.paren_int.to_i.zero?
+
+    m1, rest, m2, kd = spec
+    return nil unless kd.zero?
+
+    block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
+    return nil unless block
+
+    { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name }
+  end
+
+  # ZSUPER_LOOKUP: SUPER's half (`d_reg` is its destination), with the argument list built as OP_ARGARY builds it.
+  def compile_zsuper_lookup(plan, d_reg)
+    pre = (1..plan[:m1]).map { |i| "r#{i}" }
+    post = (1..plan[:m2]).map { |i| "r#{plan[:m1] + (plan[:rest] ? 1 : 0) + i}" }
+    out = +"  {\n"
+    out << "    mrb_value bc2cpp_zsuper_args = mrb_ary_new_capa(M, #{plan[:m1] + plan[:m2]});\n"
+    pre.each { |r| out << "    mrb_ary_push(M, bc2cpp_zsuper_args, #{r});\n" }
+    if plan[:rest]
+      rest = "r#{plan[:m1] + 1}"
+      out << "    if (mrb_array_p(#{rest})) mrb_ary_concat(M, bc2cpp_zsuper_args, #{rest});\n"
+    end
+    post.each { |r| out << "    mrb_ary_push(M, bc2cpp_zsuper_args, #{r});\n" }
+    out << "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
+           "mrb_intern_lit(M, #{plan[:name].inspect}), RARRAY_LEN(bc2cpp_zsuper_args), " \
+           "RARRAY_PTR(bc2cpp_zsuper_args), #{plan[:block]});\n"
+    out << "  }\n"
+  end
+
+  # ZSUPER_GENERAL_SUPPORT: a bare `super` forwarding the current
+  # method's arguments to a COMPILED superclass method. codegen_zsuper emits:
+  #
+  #   ARGARY R(a+1)  m1:0:0:0 (0)   # packs the CURRENT frame's regs[1..m1]
+  #   SUPER  R(a)    n=*            # superes ci->mid, reading that array
+  #
+  # OP_ARGARY with lv==0 copies regs + 1, so the forwarded arguments are r1..rm1
+  # and the call is `Super#name_impl(M, self, r1, ..., rm1)`. `idx` may name
+  # either half; both resolve to the same answer (as in zsuper_lookup_plan).
+  # Every fact is re-checked per site from the bytecode:
+  def zsuper_forward_plan(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx
+
+    program = BytecodeIR.for(irep)
+
+    # (1) The adjacent ARGARY + SUPER pair (`SUPER R(a)` + `ARGARY R(a+1)`). An
+    # interposed EXT declines.
+    argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = program.source_at(argary_idx)
+    super_insn = program.source_at(argary_idx + 1)
+    return nil unless argary && super_insn
+    return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
+
+    # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
+    # keyword `nk=` variant.
+    return nil unless super_insn.pure_splat?
+
+    # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
+    # registers). m1 is the forwarded count.
+    spec = argary.argary_spec
+    return nil unless spec && argary.reg && !argary.paren_int.nil?
+
+    argary_dest = argary.reg
+    m = spec[0]
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_int.to_i.zero?
+    return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
+
+    # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
+    super_dest = super_insn.reg
+    return nil unless argary_dest && super_dest
+    return nil unless argary_dest.to_i == super_dest.to_i + 1
+
+    # (5) ENTER is mandatory and optional parameters only, m of them in all (REQ:OPT:REST:POST:KEY:KDICT:BLOCK:
+    # NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument list, defaults already filled in, and there is
+    # no block parameter.
+    em = enter_shape(irep)
+    return nil unless em && em[0] + em[1] == m
+
+    # (6) The same-named method on the registered superclass exists, is bytecode
+    # and compiles clean. A clean `_impl` never yields, so a caller's block is
+    # unobservable (no caller scan needed, unlike SUPER_NO_CALLER_BLOCK).
+    # super_reaches_superclass? rules out an included module in between.
+    superclass = @superclass_of[owner_def.owner]
+    return nil unless superclass.is_a?(String)
+    return nil unless super_reaches_superclass?(owner_def)
+
+    target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
+    return nil unless target_def && target_def.irep && compiles_clean?(target_def.irep)
+
+    # (7) The target takes m arguments: as many mandatory ones or fewer, the rest optional.
+    tm, topt = enter_shape(@ireps.fetch(target_def.irep))
+    return nil unless tm && tm <= m && m <= tm + topt
+
+    { target_def: target_def, m: m, target_mand: tm, target_opt: topt }
+  end
+
+  # [mandatory, optional] when an irep's ENTER takes nothing else, else nil.
+  def enter_shape(irep)
+    em = irep.enter&.enter_fields
+    return nil unless em && em.length >= 7 && em[2..6].all?(&:zero?)
+
+    em[0, 2]
+  end
+
+  # ZSUPER_GENERAL_SUPPORT: a direct `_impl` call forwarding r1..m (what ARGARY would have packed). `d_reg` is
+  # SUPER's destination. A target with optionals is called as its entry wrapper calls it (OPTIONAL_ARG_SUPPORT):
+  # every optional slot, nil for those not passed, then how many were.
+  def compile_zsuper_forward(plan, d_reg)
+    args = (1..plan[:m]).map { |i| "r#{i}" }
+    if plan[:target_opt].positive?
+      args += Array.new(plan[:target_mand] + plan[:target_opt] - plan[:m], 'mrb_nil_value()')
+      args << (plan[:m] - plan[:target_mand]).to_s
+    end
+    "  r#{d_reg} = #{cpp_name(plan[:target_def].owner, plan[:target_def].name)}_impl(M, self#{args.map { |a| ", #{a}" }.join});\n"
+  end
+
+  # SUPER_NO_CALLER_BLOCK: may `super` here become a direct `_impl`
+  # call with NO block?
+  #
+  # A compiled `_impl` has no block parameter, so OP_SUPER's forwarded block
+  # would be dropped -- correct only when no caller ever passes one. It is derived: a block reaches a method
+  # only through a block-carrying send (SENDB/SSENDB, or `&expr` beside a plain
+  # one), so if NO instruction in the build sends `name` with a block to a
+  # receiver that can be an instance of this owner (or a subclass), none can
+  # arrive.
+  #
+  # The scan is over every compiled irep's instructions, so a caller added later
+  # is covered without touching a list. Anything it cannot read stays a refusal:
+  # a body compiled without the world, a dynamic send whose receiver class is unproven, or a name
+  # something installs at runtime all leave the question open, and an open
+  # question must keep the `#error` rather than assume the safe answer.
+  def super_direct_call_allowed?(owner_def)
+    return nil unless owner_def
+    return false if ENV['BC2CPP_SUPER_DIRECT'] == '0'
+
+    key = "#{owner_def.owner}##{owner_def.name}"
+    # A whole-program memo like block_carrying_callers_of's, stored only once call facts can answer.
+    return no_caller_passes_block?(owner_def) unless call_facts_enabled?
+
+    @super_no_caller_block ||= {}
+    return @super_no_caller_block[key] if @super_no_caller_block.key?(key)
+
+    @super_no_caller_block[key] = no_caller_passes_block?(owner_def)
+  end
+
+  # True only when the build shows no block-carrying call of `owner_def.name`
+  # that can reach this owner. See super_direct_call_allowed?.
+  def no_caller_passes_block?(owner_def)
+    name = owner_def.name
+    owner = owner_def.owner
+    subclasses = superclass_closure.call(owner)
+    callers = block_carrying_callers_of(name)
+    # A send whose receiver class is not proven cannot be excluded, and neither
+    # can one naming any class that could be this owner or a subclass of it.
+    return false if callers.nil?
+    return false if callers.any? { |recv| recv.nil? || (recv & subclasses).empty? }
+
+    true
+  end
+
+  # Every block-carrying send of `name` in the build, as the set of receiver
+  # class names it can provably hold. nil when some send's receiver class is
+  # unproven (the caller must treat the question as open).
+  #
+  # SUPER_NO_CALLER_BLOCK: a whole-program memo (every caller of a name is fixed once the ireps are), kept across
+  # method compiles. Only an answer with call facts enabled is stored: they turn on once the closed world is set.
+  def block_carrying_callers_of(name)
+    return nil unless call_facts_enabled?
+
+    @block_carrying_callers ||= {}
+    return @block_carrying_callers[name] if @block_carrying_callers.key?(name)
+
+    found = []
+    unknown = false
+    block_send_sites.fetch(name, []).each do |irep, idx, reg|
+      states = call_facts_states(irep)
+      next unless states
+
+      names = states[idx] && CallFacts::Flow.facts(states[idx], reg)
+      classes = names && call_facts_classes(names)
+      if classes.nil?
+        unknown = true
+      else
+        found << classes
+      end
+    end
+    @block_carrying_callers[name] = unknown ? nil : found
+  end
+
+  # { name => [[irep, index, receiver register]] } for every block-carrying send in the build.
+  def block_send_sites
+    @block_send_sites ||= @ireps.each_value.with_object(Hash.new { |h, k| h[k] = [] }) do |irep, sites|
+      BytecodeIR.for(irep).each_with_op(:SENDB, :SSENDB) { |insn, idx| sites[insn.sym] << [irep, idx, insn.reg.to_i] }
+    end
+  end
+
+  # The superclass closure: every class whose instances can be an instance of
+  # +owner+, i.e. owner plus its subclasses, so a call proved to hold a
+  # subclass still counts as a possible caller.
+  def superclass_closure
+    @superclass_closure ||= lambda do |owner|
+      set = Set.new([owner])
+      changed = true
+      while changed
+        changed = false
+        @superclass_of.each do |child, parent|
+          next unless parent.is_a?(String) && set.include?(parent) && set.add?(child)
+
+          changed = true
+        end
+      end
+      set
+    end
+  end
+
+  # SUPER_SUPPORT: the target of `super` in owner_def's method: the
+  # same-named MethodDef on the declared superclass. The block-forwarding fact
+  # (SUPER_NO_CALLER_BLOCK) is derived, not listed; see it. The no-include fact
+  # is re-derived by super_reaches_superclass?. Owner-relative, so a POLY name
+  # still resolves, as real `super` does.
+  def super_target(owner_def)
+    return super_target_refused(owner_def, 'a caller may pass a block') unless super_direct_call_allowed?(owner_def)
+
+    superclass = @superclass_of[owner_def.owner]
+    return super_target_refused(owner_def, 'no known superclass') unless superclass.is_a?(String)
+    # ANCESTOR_MIXINS_SUPPORT: re-derived every time; see
+    # super_reaches_superclass?.
+    return super_target_refused(owner_def, 'the superclass is not reached by the ancestry') unless super_reaches_superclass?(owner_def)
+
+    target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
+    return super_target_refused(owner_def, "no #{superclass}##{owner_def.name} definition with a body") unless target_def && target_def.irep
+    unless super_target_clean?(target_def.irep)
+      return super_target_refused(owner_def, "#{superclass}##{owner_def.name} does not compile clean#{unclean_note(target_def.irep)}")
+    end
+    target_def
+  end
+
+  # The target's body compiles. Inside a cleanliness probe of that same body (a mutual call that reaches the super),
+  # compiles_clean? answers false, so the body is compiled once more and its text checked for #error. A body already
+  # being checked that way is not clean (a recursion guard).
+  def super_target_clean?(label)
+    return compiles_clean?(label) unless @probing&.include?(label)
+
+    @text_checking ||= Set.new
+    return false if @text_checking.include?(label)
+
+    begin
+      @text_checking << label
+      text = compile_method(label)&.to_h&.dig(:code).to_s
+      !text.empty? && !text.match?(/^\s*#error/)
+    ensure
+      @text_checking.delete(label)
+    end
+  end
+
+  # BC2CPP_SUPER_LOG only: the first #error of the target's compiled text, or that it was still being probed.
+  def unclean_note(label)
+    return '' unless ENV['BC2CPP_SUPER_LOG'] && !ENV['BC2CPP_SUPER_LOG'].empty?
+    return ' (in a probe cycle)' if @probing&.include?(label)
+
+    error = compile_method(label)&.to_h&.dig(:code).to_s[/^\s*#error.*$/]
+    error ? " (#{error.strip})" : ' (no #error)'
+  end
+
+  # BC2CPP_SUPER_LOG: why a super falls back to the by-name lookup (the target is not direct).
+  def super_target_refused(owner_def, reason)
+    path = ENV['BC2CPP_SUPER_LOG']
+    File.write(path, "refused\t#{owner_def.owner}##{owner_def.name}\t#{reason}\n", mode: 'a') if path && !path.empty?
+    nil
+  end
+
+end

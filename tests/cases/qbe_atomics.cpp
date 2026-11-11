@@ -1,5 +1,5 @@
 // EXPECT: 0
-// QBE path (scripts/qbe-prep.rb and the -latomic link, docs/notes/realworld.md, blocker 3): libstdc++'s
+// QBE path (scripts/qbe-prep and the -latomic link, docs/notes/realworld.md, blocker 3): libstdc++'s
 // std::atomic calls GCC's sized __atomic_*_N builtins (N = 1, 2, 4, 8). cproc has no atomics, so the QBE output
 // declares them as the libatomic functions GCC 13 exports, and the link adds -latomic. Each check counts a failure.
 #include <atomic>
@@ -32,4 +32,3 @@ int main() {
 
     return fails;
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there

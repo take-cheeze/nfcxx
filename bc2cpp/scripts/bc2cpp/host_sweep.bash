@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# HOST_SWEEP: runs a closed bc2cpp build's headless host (trace_host.bash) over a copy of Nepheshel: the
+# scripted scenarios (New Game, a battle, the menu, saving and loading), then every map for 150 frames with
+# taps. Fails when any run exits non-zero or prints a proof failure, so a closed build whose registrations,
+# stubs or verify stubs break the game fails here rather than on a device.
+#
+# The host is built once (the first scenario, through trace_host.bash) and every later run calls it directly:
+# rebuilding it per map costs about 40 times what the 150-frame run does. Maps run JOBS at a time.
+#
+#
+# Usage: scripts/bc2cpp/host_sweep.bash BUILD_DIR [GAME_DIR] [LOG_DIR]
+#   GAME_DIR  default data/Nepheshel206beta/Nepheshel206Rbeta (scripts/download/nepheshel.bash); copied, since
+#             saving writes into it.
+#   JOBS      maps run at once (default nproc).
+#   SEND_COUNT_DIR  count by-name sends and method searches per call site: runs trace_host_counted (send_counter.bash
+#             builds it) and leaves one NAME.tsv per process in this directory (send_counter_report.rb reads them).
+set -uo pipefail
+
+# WORLD_ROOT (tools/bc2cpp/world_root.rb): bc2cpp's own tree, and the repository it compiles (the same unless BC2CPP_WORLD_ROOT).
+tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+root="${BC2CPP_WORLD_ROOT:-$tree}"
+build=$(cd "$1" && pwd)
+src=${2:-$root/data/Nepheshel206beta/Nepheshel206Rbeta}
+logs=${3:-$build/host-sweep}
+jobs=${JOBS:-$(nproc)}
+rm -rf "$logs"
+mkdir -p "$logs"
+game=$logs/game
+cp -r "$src" "$game"
+host=$build/trace-host/trace_host
+send_dir=${SEND_COUNT_DIR:-}
+if [ -n "$send_dir" ]; then
+  mkdir -p "$send_dir"
+  send_dir=$(cd "$send_dir" && pwd)
+  BC2CPP_GAME_DIR="$src" "$tree/scripts/bc2cpp/send_counter.bash" "$build" || exit 1
+  host=$build/trace-host/trace_host_counted
+fi
+# What a run must never print: a left-out entry reached (verify build), a violated proof or hint, a stubbed
+# body run, or a method lookup that failed.
+bad_re='UNREGISTERED_VERIFY|hint violation|proof violated|NoMethodError|ScriptError|guard violation|bytecode execution in a native-only|missing native continuation|bytecode interpreter is not built in'
+failed=0
+
+taps() { local out="" f; for ((f = $1; f <= $2; f += $3)); do out+="$f:C,"; done; echo "${out%,}"; }
+
+run() { # name, then env assignments
+  local name=$1 a frames=600
+  shift
+  for a in "$@"; do case $a in BC2CPP_HOST_FRAMES=*) frames=${a#*=} ;; esac; done
+  local survey=()
+  if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/$name.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/$name.vm.tsv"); fi
+  [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/$name.tsv")
+  if [ -x "$host" ] && [ -n "${built:-}" ] || [ -n "$send_dir" ]; then
+    env "${survey[@]}" "$@" BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" "$frames" > "$logs/$name.log" 2>&1
+  else
+    env "${survey[@]}" "$@" "$tree/scripts/bc2cpp/trace_host.bash" "$build" "$game" > "$logs/$name.log" 2>&1
+  fi
+  local rc=$?
+  built=1
+  local bad
+  bad=$(grep -c -E "$bad_re" "$logs/$name.log")
+  echo "$name rc=$rc bad=$bad $(grep -o 'scene=[A-Za-z:0-9]*' "$logs/$name.log" | sort -u | tr '\n' ' ')"
+  if [ "$rc" -ne 0 ] || [ "$bad" -ne 0 ]; then
+    failed=1
+    tail -20 "$logs/$name.log"
+  fi
+}
+
+run newgame BC2CPP_HOST_FRAMES=6000 BC2CPP_HOST_KEYS="$(taps 30 6000 12)"
+run battle BC2CPP_HOST_FRAMES=4000 BC2CPP_HOST_BATTLE_TROOP=1 BC2CPP_HOST_BATTLE_PLAY=1
+# The menu on map 1: open it (B), then each of the first commands, backing out each time.
+run menu BC2CPP_HOST_FRAMES=1400 BC2CPP_HOST_PREVIEW_MAP=1 BC2CPP_HOST_KEYS="60:B,100:C,160:B,200:DOWN,230:C,290:B,330:DOWN,360:C,420:B,460:DOWN,490:C,550:B,590:DOWN,620:C,680:B,720:DOWN,750:C,800:C,860:B,900:B"
+# Save on map 89 (saving allowed) through three menu positions, then load with Continue.
+for d in 3 4 5; do
+  k="60:B"
+  f=90
+  for ((i = 0; i < d; i++)); do
+    k+=",$f:DOWN"
+    f=$((f + 20))
+  done
+  k+=",$f:C,$((f + 60)):C,$((f + 120)):C,$((f + 180)):C"
+  run save$d BC2CPP_HOST_FRAMES=900 BC2CPP_HOST_PREVIEW_MAP=89 BC2CPP_HOST_KEYS="$k"
+done
+if ! ls "$game" | grep -qi '^save'; then
+  echo "no save written"
+  failed=1
+fi
+run load BC2CPP_HOST_FRAMES=900 BC2CPP_HOST_CONTINUE=1 BC2CPP_HOST_KEYS="$(taps 30 900 15)"
+
+
+map() {
+  local id=$1 log=$logs/map-$1.log
+  local survey=()
+  if [ "${LOOKUP_SURVEY:-0}" = 1 ]; then survey=("BC2CPP_HOST_LOOKUP_SURVEY=$logs/map-$id.lookups.tsv" "BC2CPP_VMCNT_OUT=$logs/map-$id.vm.tsv"); fi
+  [ -n "$send_dir" ] && survey+=("BC2CPP_SENDCNT_OUT=$send_dir/map-$id.tsv")
+  env "${survey[@]}" BC2CPP_HOST_FRAMES=150 BC2CPP_HOST_PREVIEW_MAP="$id" BC2CPP_HOST_KEYS="$MAP_TAPS" \
+    BC2CPP_TRACE_TYPES_OUT=/dev/null "$host" "$game" 150 > "$log" 2>&1
+  local rc=$?
+  if [ "$rc" -ne 0 ] || grep -q -E "$bad_re" "$log"; then
+    echo "$id rc=$rc"
+  fi
+}
+export -f map
+export host game logs bad_re LOOKUP_SURVEY send_dir
+MAP_TAPS=$(taps 20 150 12)
+export MAP_TAPS
+total=$(ls "$game"/Map*.lmu | wc -l)
+bad_maps=$(for lmu in "$game"/Map*.lmu; do
+  echo $((10#$(basename "$lmu" .lmu | sed 's/Map//')))
+done | xargs -P "$jobs" -I{} bash -c 'map {}')
+if [ -n "$bad_maps" ]; then
+  failed=1
+  echo "maps failed: $(echo "$bad_maps" | tr '\n' ' ')"
+  for id in $(echo "$bad_maps" | awk '{print $1}' | head -3); do tail -20 "$logs/map-$id.log"; done
+fi
+echo "maps: $((total - $(echo -n "$bad_maps" | grep -c '^'))) of $total ok"
+exit "$failed"

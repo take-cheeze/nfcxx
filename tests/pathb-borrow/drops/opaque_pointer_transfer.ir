@@ -1,0 +1,7 @@
+(ir-module "drops" (layout (pointer 8) (int 4)))
+
+(function "test" (ret int) (params (param %9 "input" (ptr (struct "Opaque"))))
+(slot "p" (ptr (struct "Opaque")) 8 8)
+(drop-obligation "p" (ptr (struct "Opaque")) $"p")
+(decl $"p" ref) (store (ptr (struct "Opaque")) $"p" %9) (drop-live "p")(let %0 (ptr (struct "Opaque")) (move-value (ptr (struct "Opaque")) $"p")) (drop-state-if-live "p")(return (const int 0))
+)

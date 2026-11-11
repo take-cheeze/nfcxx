@@ -1,0 +1,10 @@
+# Builds build/qbe-prep (the C++ port of scripts/qbe-prep.rb). Run: ninja -C tools/qbe-prep
+# CXX and CXXFLAGS come from the environment.
+ninja_required_version = 1.7
+root = ../..
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = CXX $out
+
+build $root/build/qbe-prep: cxx qbe_prep.cpp

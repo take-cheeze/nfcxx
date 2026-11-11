@@ -1,0 +1,6 @@
+# GitHub's official runner-images catalog now includes ubuntu-26.04:
+# https://github.com/actions/runner-images#available-images
+# actionlint 1.7.12 predates this label; allow it until its built-in list catches up.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

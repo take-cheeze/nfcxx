@@ -1,0 +1,6 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "leak" (returns void) (nothrow) (noescape) (closed) (args (init (ptr int))))
+(function "leak" (ret void) (params (param %0 "out" (ptr (ptr int))))
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 1)) (store (ptr int) %0 $"x") (scope-end $"x") (return)
+)

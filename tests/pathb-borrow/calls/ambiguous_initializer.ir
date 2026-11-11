@@ -1,0 +1,7 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "init" (returns void) (nothrow) (noescape) (closed) (args (init int)))
+(function "test" (ret int) (params (param %9 "flag" bool))
+(slot "x" int 4 4) (slot "y" int 4 4)
+
+(decl $"x" val) (store int $"x" (const int 7))(decl $"y" val) (store int $"y" (const int 8)) (if %9 (then (let %0 (ptr int) $"x")) (else (let %0 (ptr int) $"y")))(eval (call void &"init" %0))(return (const int 0))
+)

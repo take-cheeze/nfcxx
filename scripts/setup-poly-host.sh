@@ -49,7 +49,7 @@ ruby)
   tar xzf "$work/mruby.tgz" -C "$src" --strip-components=1 || fail
   # mruby's own rake build, with scripts/mruby-rt-config.rb (C++ exceptions) and the host compilers
   cp scripts/mruby-rt-config.rb "$work/build_config-host.rb"
-  if ! (cd "$src" && MRUBY_CC=gcc MRUBY_CXX=g++ MRUBY_CONFIG=$work/build_config-host.rb MRUBY_BUILD_DIR=$work/mruby-out "${rake[@]}" -j"$(nproc)" all) >>"$log" 2>&1; then fail; fi
+  if ! (cd "$src" && MRUBY_CC=gcc MRUBY_CXX=g++ MRUBY_CONFIG=$work/build_config-host.rb MRUBY_BUILD_DIR=$work/mruby-out "${rake[@]}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" all) >>"$log" 2>&1; then fail; fi
   lib=$work/mruby-out/host/lib/libmruby.a
   [ -f "$lib" ] || fail
   rm -rf "$dest"; mkdir -p "$dest/lib" "$dest/include"

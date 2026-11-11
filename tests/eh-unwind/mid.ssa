@@ -1,0 +1,9 @@
+# Middle frame: calls a throwing function while x and k stay live across the call (they live in callee-saved registers).
+export function w $mid(w %x) {
+@start
+	%k =w add %x, 7
+	%a =w add %x, 1
+	%b =w call $thrower(w %a)
+	%c =w add %b, %k
+	ret %c
+}

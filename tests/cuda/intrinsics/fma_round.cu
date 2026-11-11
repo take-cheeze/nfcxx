@@ -17,9 +17,9 @@ static __half __hfma(__half a, __half b, __half c) {
 __global__ void k(const unsigned short *a, const unsigned short *b, const unsigned short *c, unsigned short *r, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
-  __half x = (__half)a[i];
-  __half y = (__half)b[i];
-  __half z = (__half)c[i];
+  __half x = __ushort_as_half(a[i]);
+  __half y = __ushort_as_half(b[i]);
+  __half z = __ushort_as_half(c[i]);
   __half f = __hfma(x, y, z);
   r[i] = *(unsigned short *)&f;
 }

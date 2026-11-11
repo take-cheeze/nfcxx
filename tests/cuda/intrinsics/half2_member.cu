@@ -5,15 +5,15 @@
 #include <stdio.h>
 
 __global__ void khalf2(float *out, unsigned short a, unsigned short b, unsigned short c, unsigned short d) {
-  __half2 h = __halves2half2(a, b);
+  __half2 h = __halves2half2(__ushort_as_half(a), __ushort_as_half(b));
   float lo = __low2float(h), hi = __high2float(h);
   float2 f = __half22float2(h);
   out[0] = lo;
   out[1] = hi;
   out[2] = f.x;
   out[3] = f.y;
-  h.y = c;                 /* a member write */
-  h.x = d;
+  h.y = __ushort_as_half(c);   /* a member write */
+  h.x = __ushort_as_half(d);
   out[4] = __low2float(h);
   out[5] = __high2float(h);   /* the member write is seen through __high2float */
   __half2 g = __float22half2_rn(make_float2(1.0f, -2.0f));

@@ -796,6 +796,11 @@ static void check_backend(const Lang& lg) {
   // and back
   Value back = env.run(lg, sy.set_prop("np", "backend", q("interpreter")) + sy.result(sy.prop("np", "backend")));
   CHECK_EQ(back.as<std::string>(), std::string("interpreter"));
+  // the tinygrad back end is selected by name (it runs only when evaluated: this checks the setting)
+  Value tg = env.run(lg, sy.set_prop("np", "backend", q("tinygrad")) + sy.result(sy.prop("np", "backend")));
+  CHECK_EQ(tg.as<std::string>(), std::string("tinygrad"));
+  CHECK(env.s.backend == ut::Session::Backend::Tinygrad);
+  env.run(lg, sy.set_prop("np", "backend", q("interpreter")) + sy.result(sy.prop("np", "backend")));
   std::string bad = env.run(lg, sy.catch_message("", lg.l == L::Go ? "np.SetBackend(\"gpu\")" : "np.backend = \"gpu\"", false)).as<std::string>();
   CHECK(bad.find("backend is \"interpreter\" or \"c\"") != std::string::npos);
 }

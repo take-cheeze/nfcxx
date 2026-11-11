@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <time.h>
 #include <limits>
 
 namespace nfcuop {
@@ -206,6 +208,26 @@ void print(const Array& a, size_t dim, size_t& pos, std::string& out) {
 }
 
 }  // namespace
+
+Tensor atan2(const Tensor& y, const Tensor& x) {
+  DType dt = promote(y.dtype(), x.dtype());
+  if (!is_float(dt)) dt = DType::Float32;
+  Tensor a = y, b = x;
+  prepare(a, b, dt);
+  return wrap(a, G(a).atan2(a.uop(), b.uop()));
+}
+
+Tensor shift_left(const Tensor& x, const Tensor& n) {   // Graph::shl checks the dtype (integers only)
+  Tensor a = x, b = n;
+  prepare(a, b, promote(x.dtype(), n.dtype()));
+  return wrap(a, G(a).shl(a.uop(), b.uop()));
+}
+
+Tensor shift_right(const Tensor& x, const Tensor& n) {
+  Tensor a = x, b = n;
+  prepare(a, b, promote(x.dtype(), n.dtype()));
+  return wrap(a, G(a).shr(a.uop(), b.uop()));
+}
 
 namespace detail {
 Tensor lift(const Tensor& like, double v, bool integral) {
@@ -464,6 +486,24 @@ Tensor Tensor::sigmoid() const {
   Tensor x = to_float(*this);
   return cst_t(x, 1) / ((-x).exp() + cst_t(x, 1));
 }
+Tensor Tensor::log2() const { Tensor x = to_float(*this); return wrap(x, G(x).log2(x.uop())); }
+Tensor Tensor::acos() const { Tensor x = to_float(*this); return wrap(x, G(x).acos(x.uop())); }
+Tensor Tensor::acosh() const { Tensor x = to_float(*this); return wrap(x, G(x).acosh(x.uop())); }
+Tensor Tensor::asin() const { Tensor x = to_float(*this); return wrap(x, G(x).asin(x.uop())); }
+Tensor Tensor::asinh() const { Tensor x = to_float(*this); return wrap(x, G(x).asinh(x.uop())); }
+Tensor Tensor::atan() const { Tensor x = to_float(*this); return wrap(x, G(x).atan(x.uop())); }
+Tensor Tensor::atanh() const { Tensor x = to_float(*this); return wrap(x, G(x).atanh(x.uop())); }
+Tensor Tensor::cosh() const { Tensor x = to_float(*this); return wrap(x, G(x).cosh(x.uop())); }
+Tensor Tensor::sinh() const { Tensor x = to_float(*this); return wrap(x, G(x).sinh(x.uop())); }
+Tensor Tensor::tan() const { Tensor x = to_float(*this); return wrap(x, G(x).tan(x.uop())); }
+Tensor Tensor::expm1() const { Tensor x = to_float(*this); return wrap(x, G(x).expm1(x.uop())); }
+Tensor Tensor::log1p() const { Tensor x = to_float(*this); return wrap(x, G(x).log1p(x.uop())); }
+Tensor Tensor::log10() const { Tensor x = to_float(*this); return wrap(x, G(x).log10(x.uop())); }
+Tensor Tensor::round() const {
+  if (is_int(dtype())) return *this;
+  Tensor x = to_float(*this);
+  return wrap(x, G(x).round(x.uop()));
+}
 Tensor Tensor::relu() const {
   check(*this);
   return maximum(*this, cst_t(*this, 0));
@@ -607,10 +647,18 @@ Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d
   return Tensor(this, g_.var(name, d, shape));
 }
 
+// The clock of the generated kernels' timers (clock_gettime(CLOCK_MONOTONIC)), so run and kernel spans share one time line.
+static double monotonic_us() {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return static_cast<double>(t.tv_sec) * 1e6 + static_cast<double>(t.tv_nsec) / 1e3;
+}
+
 Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
 
 std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
   if (backend == Backend::Ort) throw Error("ut: the ort back end runs an hir graph; evaluate through np::Session");
+  if (backend == Backend::Tinygrad) throw Error("ut: the tinygrad back end runs an hir graph; evaluate through np::Session");
   if (ts.empty()) throw Error("np: eval_all needs at least one tensor");
   std::vector<const UOp*> roots;
   for (const Tensor& t : ts) {
@@ -632,13 +680,24 @@ std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::m
     for (const UOp* root : roots) out.push_back(evaluate_array(root, env));
     return out;
   }
-  CProgram prog = render_c(roots);
+  const char* trace_env = std::getenv("NFCUOP_TRACE");
+  const bool trace = trace_env && *trace_env;   // the kernels are timed only when asked (render_c profile)
+  CProgram prog = render_c(roots, trace);
   std::string key = cc + "\n" + prog.source;
   auto it = modules_.find(key);
   if (it == modules_.end()) it = modules_.emplace(key, CModule::compile(prog, cc)).first;
   last_program_ = prog;
   has_program_ = true;
-  return it->second->run(env);
+  if (!trace) return it->second->run(env);
+  const double t0 = monotonic_us();
+  std::vector<Array> res = it->second->run(env);
+  const double t1 = monotonic_us();
+  const int run = runs_++;
+  kernel_timings_.push_back({"run", run, t0, t1 - t0});
+  std::vector<double> kb, ke;
+  it->second->kernel_times(kb, ke);
+  for (size_t k = 0; k < kb.size(); k++) kernel_timings_.push_back({it->second->program().kernel_names[k], run, kb[k], ke[k] - kb[k]});
+  return res;
 }
 
 // ---- functions ----

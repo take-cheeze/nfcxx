@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- Times one WGSL case (case.js, written by tests/uop/perf/bench_np.cpp from the numpy-style graph) on WebGPU and checks the
+     result against the interpreter's. Warm-up runs, then the median of the timed runs; each timed run submits every kernel and
+     waits for the queue (onSubmittedWorkDone), so the GPU work is inside the clock. The inputs are uploaded before the clock
+     starts, and the result is read back once, after the timing. tests/uop/perf/run_webgpu.sh loads it in headless Chrome. -->
+<html>
+<head><meta charset="utf-8"><title>nfcuop WebGPU timing</title></head>
+<body>
+<pre id="result">pending</pre>
+<script src="case.js"></script>
+<script>
+(async () => {
+  const out = document.getElementById('result');
+  const fail = (msg) => { out.textContent = 'FAIL ' + msg; };
+  const WARM = 2, RUNS = 10;   // the timed runs, after the warm-up
+  try {
+    const C = window.CASE;
+    if (!navigator.gpu) return fail('no navigator.gpu');
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return fail('no WebGPU adapter');
+    const device = await adapter.requestDevice();
+    const errors = [];
+    device.addEventListener('uncapturederror', (e) => errors.push(e.error.message));
+
+    const module = device.createShaderModule({ code: C.source });
+    const info = await module.getCompilationInfo();
+    const wgslErrors = info.messages.filter((m) => m.type === 'error').map((m) => m.message);
+    if (wgslErrors.length) return fail('WGSL: ' + wgslErrors.join('; '));
+
+    const U = GPUBufferUsage;
+    const bufs = C.buffers.map((b) => device.createBuffer({ size: b.count * 4, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST }));
+    C.buffers.forEach((b, i) => {
+      if (b.input) device.queue.writeBuffer(bufs[i], 0, new Float32Array(C.inputs[b.name]));
+    });
+    // One pipeline and bind group per kernel, built once; the timed runs only encode and submit them.
+    const steps = C.kernels.map((k) => {
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: k.entry } });
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: k.bindings.map((i) => ({ binding: i, resource: { buffer: bufs[i] } })),
+      });
+      return { pipeline, bindGroup, count: k.count };
+    });
+    const size = C.buffers[C.output].count * 4;
+    const readback = device.createBuffer({ size, usage: U.MAP_READ | U.COPY_DST });
+    // The synchronisation: one element of the output is copied back and mapped, so the run ends when the GPU has finished
+    // (headless Chrome's virtual time does not resolve onSubmittedWorkDone, but it does resolve a mapAsync).
+    const probe = device.createBuffer({ size: 4, usage: U.MAP_READ | U.COPY_DST });
+
+    const runOnce = async () => {
+      const t0 = performance.now();
+      const enc = device.createCommandEncoder();
+      for (const s of steps) {
+        const pass = enc.beginComputePass();
+        pass.setPipeline(s.pipeline);
+        pass.setBindGroup(0, s.bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(s.count / 64));
+        pass.end();
+      }
+      enc.copyBufferToBuffer(bufs[C.output], 0, probe, 0, 4);
+      device.queue.submit([enc.finish()]);
+      await probe.mapAsync(GPUMapMode.READ);
+      probe.unmap();
+      return performance.now() - t0;
+    };
+    for (let w = 0; w < WARM; w++) await runOnce();
+    const ms = [];
+    for (let r = 0; r < RUNS; r++) ms.push(await runOnce());
+    ms.sort((a, b) => a - b);
+
+    // One checked run: read the output back and compare it with the interpreter's values.
+    device.pushErrorScope('validation');
+    const enc = device.createCommandEncoder();
+    for (const s of steps) {
+      const pass = enc.beginComputePass();
+      pass.setPipeline(s.pipeline);
+      pass.setBindGroup(0, s.bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(s.count / 64));
+      pass.end();
+    }
+    enc.copyBufferToBuffer(bufs[C.output], 0, readback, 0, size);
+    device.queue.submit([enc.finish()]);
+    const scopeErr = await device.popErrorScope();
+    if (scopeErr) return fail('validation: ' + scopeErr.message);
+    await readback.mapAsync(GPUMapMode.READ);
+    const got = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    if (errors.length) return fail('uncaptured: ' + errors.join('; '));
+    if (got.length !== C.expected.length) return fail('length ' + got.length + ' != ' + C.expected.length);
+
+    // Compared as run.html does: the interpreter's values are Float32, and WGSL may round sqrt and division differently.
+    let maxErr = 0, exact = 0, bad = 0;
+    C.expected.forEach((printed, i) => {
+      const want = Math.fround(printed);
+      const d = Math.abs(got[i] - want);
+      if (!(d <= 1e-6 * Math.max(1, Math.abs(want)))) bad++;
+      if (d === 0) exact++;
+      if (d > maxErr) maxErr = d;
+    });
+    const adapterName = adapter.info ? adapter.info.vendor + '/' + adapter.info.architecture : 'unknown';
+    const result = {
+      median_ms: +ms[ms.length >> 1].toFixed(4), min_ms: +ms[0].toFixed(4), runs: RUNS, n: got.length,
+      exact: exact, bad: bad, max_abs_err: maxErr, kernels: C.kernels.length, adapter: adapterName,
+    };
+    out.textContent = (bad ? 'FAIL ' : 'PASS ') + JSON.stringify(result);
+  } catch (e) {
+    fail(String(e && e.message ? e.message : e));
+  }
+})();
+</script>
+</body>
+</html>

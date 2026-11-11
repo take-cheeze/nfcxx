@@ -1,0 +1,3 @@
+(ir-module "bad_returned_range" (layout (pointer 8) (int 4)))
+(call-effects "get" (returns (ptr int) (from-arg 0 4 shared)) (nothrow) (noescape) (closed) (args (read int)))
+(function "main" (ret int) (params) (return (const int 0)))

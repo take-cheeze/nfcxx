@@ -1,0 +1,221 @@
+# frozen_string_literal: true
+
+require_relative 'bytecode_ir'
+require_relative 'bytecode_ir_containers'
+
+# Debug report for the shared escape analysis: with BC2CPP_ESCAPE_REPORT=<path>, every
+# creation site in the closed world (LAMBDA, BLOCK, ARRAY, HASH, STRING, `new`) and every `initialize`
+# gets one TSV row. It changes no generated code; scripts/bc2cpp/escape_report.rb aggregates it.
+#
+#   site  irep_label:index  owner#method  engine|core  op  kind  verdict  reason  uses  today
+#   self  irep_label        owner#method  engine|core  initialize  self  verdict  -  0  -
+#   ivars irep_label:index  owner#method  engine|core  op  object  confined  immediate|not_immediate  why  class  -
+#
+# An `ivars` row (confined `new` sites only) says whether every ivar store reaching the object is provably immediate
+# (escape_immediate_ivars.rb).
+#
+# `kind` is `lambda`, `block:<callee name>`, `array`, `hash`, `string` or `object`. `today` says what the
+# compiler does with the site without the analysis: `rproc` (a BLOCK_FALLBACK RProc is built),
+# `confined` (CONFINED_LAMBDA_CALL proof held), `lambda` (LAMBDA_FALLBACK without a proof), `-` (not
+# an RProc site, or no code is emitted for it).
+module EscapeReport
+  TODAY = {}
+  LAMBDA_REGIONS = {}
+
+  def initialize(*args, **options)
+    super
+    EscapeReport.codegen = self unless options[:analysis_only]
+  end
+
+  class << self
+    attr_accessor :codegen
+  end
+
+  def emit_block_fallback_glue(region, fn_name, **options)
+    TODAY[[region[:parent_irep].label, region[:block_addr]]] = 'rproc' if region[:parent_irep]
+    super
+  end
+
+  def recognize_lambda_fallback_regions(irep, **options)
+    regions = super
+    regions.each { |r| LAMBDA_REGIONS[[irep.label, r[:block_addr]]] = r[:upvars].empty? ? 'lambda' : 'confined' }
+    regions
+  end
+
+  def self.write(path)
+    analyzer = codegen&.escape_analyzer
+    return unless analyzer
+    world = analyzer.world
+    ireps = world.ireps
+    owner_of = owner_table(world)
+    rows = []
+    # BC2CPP_ESCAPE_POINTS=1 adds a `point` row per instruction of each creation site (see point_rows).
+    points = ENV['BC2CPP_ESCAPE_POINTS'] == '1'
+    ireps.each_value do |irep|
+      owner = owner_of[irep.label] || '?'
+      origin = CoreDefs.core_source?(irep.file) ? 'core' : 'engine'
+      BytecodeIR.for(irep).each_source do |insn, i|
+        kind = site_kind(irep, i, insn)
+        next unless kind
+        lexical = owner_of[irep.label]&.split('#', 2)&.first
+        klass = constructed_class(codegen, world, irep, i, insn, lexical)
+        verdict = analyzer.creation(irep, i, value_class: klass, points: points)
+        today = TODAY[[irep.label, insn.addr]] || LAMBDA_REGIONS[[irep.label, insn.addr]] || '-'
+        rows << ['site', "#{irep.label}:#{i}", owner, origin, insn.op, kind, verdict.escapes? ? 'escapes' : 'confined',
+                 verdict.escapes? ? verdict.reason : '-', verdict.uses.count { |u| u.kind == :call }, today,
+                 receiver_classes(analyzer, irep, i, insn), escape_detail(irep, verdict)].join("\t")
+        point_rows(rows, irep, i, verdict) if points
+        # Only a confined `new` gets an ivars row: creation refuses any `new` whose constructed class is unknown.
+        next unless kind == 'object' && !verdict.escapes?
+
+        immediate, detail = analyzer.object_ivar_stores(irep, i, klass)
+        rows << ['ivars', "#{irep.label}:#{i}", owner, origin, insn.op, kind, 'confined', immediate, detail, klass, '-'].join("\t")
+      end
+    end
+    world.reflective_sites.each { |label, idx| rows << ['reflective', "#{label}:#{idx}", owner_of[label] || '?', '', '', '', '', '', 0, ''].join("\t") }
+    world.dynamic_sites.each { |label, idx, what| rows << ['dynamic', "#{label}:#{idx}", owner_of[label] || '?', '', what, '', '', '', 0, ''].join("\t") }
+    callee_rows(analyzer, world, rows)
+    argdef_rows(analyzer, world, rows)
+    rows.filter_map { |r| r.split("\t").values_at(5, 10) if r.start_with?("site\t") }.uniq.each do |kind, classes|
+      next unless kind.start_with?('block:') && classes != '-'
+
+      list = world.defs_for(kind.sub('block:', ''), classes.split(','), true)
+      rows << ['calleefor', kind, classes, Array(list).map { |d| "#{d.owner}:#{analyzer.captures?(d, [:block])}" }.join(' '), '', '', '', '', 0, ''].join("\t")
+    end
+    initialize_defs(world).each do |mdef|
+      verdict = analyzer.captures?(mdef, [:self]) ? 'escapes' : 'confined'
+      rows << ['self', mdef.irep, "#{mdef.owner}##{mdef.name}", ireps[mdef.irep] && CoreDefs.core_source?(ireps[mdef.irep].file) ? 'core' : 'engine',
+               'initialize', 'self', verdict, '-', 0, '-'].join("\t")
+    end
+    File.write(path, "#{rows.join("\n")}\n")
+  end
+
+  # The instruction of the first escape, as `op:name` (the call's name for a send, else the op alone), `-` when the
+  # value does not escape. The twelfth column of a `site` row: it says which callee or store keeps the value.
+  def self.escape_detail(irep, verdict)
+    return '-' unless verdict.escapes?
+
+    addr = verdict.reasons.first[1]
+    found = nil
+    BytecodeIR.for(irep).each_source { |insn, _| found ||= insn if insn.addr == addr }
+    found ? [found.op, found.sym].compact.join(':') : '-'
+  end
+
+  # `point` rows (BC2CPP_ESCAPE_POINTS=1): the registers that may hold the creation's value on entry to each
+  # instruction of the site's method, a comma list (empty when none, `escaped` when the flow stopped early).
+  #   point  irep_label:site  instruction index  op  registers  escape|-
+  # `escape` marks an instruction at which the value escapes (its verdict's escape_sites).
+  def self.point_rows(rows, irep, site, verdict)
+    site_id = "#{irep.label}:#{site}"
+    prog = BytecodeIR.for(irep)
+    unless verdict.holding
+      rows << ['point', site_id, '-', '-', 'escaped', '-'].join("\t")
+      return
+    end
+    prog.each_source do |insn, j|
+      regs = verdict.holding_at(j).map(&:to_i).sort.join(',')
+      rows << ['point', site_id, j, insn.op, regs, verdict.escape_at?(j) ? 'escape' : '-'].join("\t")
+    end
+  end
+
+  # BC2CPP_ESCAPE_ARG_NAMES=name,name: one `argdef` row per definition of each name, saying whether it keeps argument 0
+  # (`captures`) or not, to find the definition that makes a literal passed to that name escape.
+  #   argdef  name  owner#method  kind  captures|keeps-nothing
+  def self.argdef_rows(analyzer, world, rows)
+    ENV.fetch('BC2CPP_ESCAPE_ARG_NAMES', '').split(',').each do |name|
+      list = world.defs_named(name)
+      rows << ['argdef', name, list ? list.size : 'dynamic', world.native_name?(name) ? 'native' : '-', '', '', '', '', 0, ''].join("\t")
+      Array(list).each do |d|
+        verdict = analyzer.captures?(d, [:arg, 0]) ? 'captures' : 'keeps-nothing'
+        rows << ['argdef', name, "#{d.owner}##{d.name}", d.irep ? 'bytecode' : (d.kind || 'opaque').to_s, verdict, '', '', '', 0, ''].join("\t")
+      end
+    end
+  end
+
+  # One row per definition of each callee name that receives a literal block: does its block position
+  # capture? (`opaque` = a native or other body the analysis cannot read.)
+  def self.callee_rows(analyzer, world, rows)
+    names = rows.filter_map { |r| r.split("\t")[5][/\Ablock:(.*)\z/, 1] if r.start_with?("site\t") }.uniq
+    names.each do |name|
+      list = world.defs_named(name)
+      native = world.native_name?(name)
+      rows << ['callee', name, list ? list.size : 'dynamic', native ? 'native' : '-', '', '', '', '', 0, ''].join("\t")
+      Array(list).each do |d|
+        verdict = analyzer.captures?(d, [:block]) ? 'captures' : 'keeps-nothing'
+        rows << ['calleedef', name, "#{d.owner}##{d.name}", d.irep ? 'bytecode' : (d.kind || 'opaque').to_s, d.installer.to_s,
+                 verdict, '', '', 0, ''].join("\t")
+      end
+    end
+  end
+
+  # label => "Owner#name" of the method whose body (or nested block) the irep is.
+  def self.owner_table(world)
+    table = {}
+    names = world.ireps.keys.to_h { |label| [label, nil] }
+    world.instance_variable_get(:@defs).each do |name, list|
+      list.each { |d| names[d.irep] = "#{d.owner}##{name}" if d.irep }
+    end
+    world.ireps.each_value do |irep|
+      irep.reps.each { |child| table[child] ||= irep.label }
+    end
+    resolve = lambda do |label|
+      names[label] || (table[label] && resolve.call(table[label]))
+    end
+    world.ireps.each_key.to_h { |label| [label, resolve.call(label)] }
+  end
+
+  def self.initialize_defs(world)
+    world.instance_variable_get(:@defs).fetch('initialize', []).select(&:irep)
+  end
+
+  # The class a `Const.new` constructs. Two sources, and they must agree:
+  #   - the bare written name, when the hierarchy tables declare that exact name (the original rule);
+  #   - the receiver the compiler proves to be one stable class constant (constant_object_owner, the proof
+  #     CONSTRUCTOR_EXACT_CONSTANT uses): it resolves the name lexically from +lexical+ and requires its binding
+  #     to be stable, so the constant denotes that class for the VM's life. This is what resolves a bare
+  #     `Rect.new` inside `class RPG2k::Window` to RGSS::Rect.
+  # A name the closed world binds more than once (`Outer::Reset = Rebound` after `class Reset`) is no fixed
+  # class, so the lookup refuses it whatever the declared table says. A name only one source gives is taken;
+  # when both give different classes it refuses too. A receiver neither proves (a variable, `self.class`) stays unknown.
+  def self.constructed_class(codegen, world, irep, index, insn, lexical)
+    return nil unless %i[SEND0 SEND SENDB].include?(insn.op) && insn.sym == 'new'
+
+    name = irep.agreed_constant_name(index, insn.reg)
+    closed = codegen&.instance_variable_get(:@closed_world)
+    bound = name && lexical && codegen.send(:resolve_class_constant_name, name, lexical)
+    return nil if bound && !closed&.stable_constant_identity?(bound)
+
+    named = name if name && world.class_known?(name)
+    proved = codegen && lexical && (codegen.send(:constant_object_owner, irep, index, insn.reg, lexical) ||
+                                    codegen.send(:constant_object_owner, irep, index, insn.reg, lexical, through_handlers: true))
+    proved = nil unless proved && world.class_known?(proved)
+    return named if proved.nil?
+    return proved if named.nil? || named == proved
+
+    nil
+  end
+
+  # The classes the class flow gives the receiver of the send a BLOCK is passed to ("-" when none).
+  def self.receiver_classes(analyzer, irep, index, insn)
+    call = BytecodeIR.for(irep).source_at(index + 1)
+    return '-' unless insn.op == :BLOCK && call && %i[SENDB SSENDB].include?(call.op) && call.op == :SENDB
+
+    Array(analyzer.receiver_classes.call(irep, index + 1, call.reg)).join(',').then { |s| s.empty? ? '-' : s }
+  end
+
+  def self.site_kind(irep, index, insn)
+    case insn.op
+    when :LAMBDA then 'lambda'
+    when :ARRAY then 'array'
+    when :HASH then 'hash'
+    when :STRING then 'string'
+    when :SEND0, :SEND, :SENDB then 'object' if insn.sym == 'new' && !insn.positional_splat?
+    when :BLOCK
+      call = BytecodeIR.for(irep).source_at(index + 1)
+      call && %i[SENDB SSENDB].include?(call.op) ? "block:#{call.sym}" : 'block:?'
+    end
+  end
+end
+
+CodeGen.prepend(EscapeReport)
+at_exit { EscapeReport.write(ENV.fetch('BC2CPP_ESCAPE_REPORT')) }

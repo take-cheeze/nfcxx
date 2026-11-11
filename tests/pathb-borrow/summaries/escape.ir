@@ -1,0 +1,7 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(function "link" (ret void) (params (param %0 "p" (ptr int)) (param %1 "out" (ptr (ptr int))))
+(decl %0 param) (store (ptr int) %1 %0) (return))
+(function "main" (ret int) (params)
+(slot "x" int 4 4) (slot "q" (ptr int) 8 8)
+(decl $"x" val) (decl $"q" val) (store int $"x" (const int 3)) (eval (call void &"link" $"x" $"q"))
+(scope-end $"q") (scope-end $"x") (return (const int 0)))

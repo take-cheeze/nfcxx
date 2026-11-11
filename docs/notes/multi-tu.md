@@ -14,7 +14,7 @@ and the back ends have to turn the tags into weak symbols:
 
 | entity in the generated C | gcc backend | qbe backend (cproc drops attributes) |
 |---|---|---|
-| inline functions, template instantiations: `__attribute__((__weak__))` | weak, merged | `.weak` by `scripts/weak-symbols.rb` (already) |
+| inline functions, template instantiations: `__attribute__((__weak__))` | weak, merged | `.weak` by `scripts/weak-symbols` (already) |
 | COMDAT **data**: variable templates, `__cmp_cat_id<>`, `std::numbers::pi_v<>`, static data members of templates, string literals and statics of inline functions: `__attribute__((__weak__))` on a data object | weak, merged | was strong: duplicate definitions (the script looked only for a function name) |
 | inline members of a class under `extern template` (`std::allocator<char>`): emitted as `extern __inline__` with a body and **no** weak tag | strong, because gcc's default C99 inline rules make an `extern inline` definition an external definition | strong, same reason (cproc is C11) |
 | a function returning a pointer to function (`void (**name(args))(void *)`, e.g. `std::get<1>` of a `unique_ptr` deleter) | weak | the script took the type `void` for the name, so the function stayed strong |
@@ -27,7 +27,7 @@ The third row is a GNU89 meaning: EDG expects `extern inline` to give an inlinab
 
 - gcc: the driver passes `-fgnu89-inline` to the C compiler step, so an `extern inline` definition is never emitted
   out of line and the call binds to the instantiating TU.
-- qbe: `scripts/weak-symbols.rb` (and its Python oracle `tests/mruby/oracle/weak-symbols.py`) marks, in addition to
+- qbe: `scripts/weak-symbols` (`tools/weak-symbols`; its oracle is `tests/mruby/oracle/weak-symbols.rb`) marks, in addition to
   `__weak__` functions, `__weak__` data objects (every identifier before the `=` is a candidate; only labels the
   assembly defines get `.weak`) and any function declared `extern` with `__inline__` (a weak copy per object is a
   superset of the GNU89 behaviour: it merges, and a strong definition elsewhere still wins). `.c` inputs
@@ -36,11 +36,50 @@ The third row is a GNU89 meaning: EDG expects `extern inline` to give an inlinab
 - driver: `.o` files are accepted as the only inputs (`nfcxx a.o b.o -o x` links with the C++ runtime of the
   selected backend); `-c` already worked.
 
+- qbe, weak references: a `__weak__` declaration that the assembly refers to but does not define gets `.weak` too
+  (a weak undefined symbol, null when nothing defines it), as gcc makes it. EDG declares the init function of an
+  `extern thread_local` that way (`extern __attribute__((__weak__)) void _ZTH<name>(void)`), and its wrapper calls it
+  only when the address is not null; the defining unit (nfcxx's or g++'s) has none when the variable needs no
+  dynamic initialization, so a strong reference failed to link ("undefined reference to `_ZTH...`", libtorch's
+  `c10::impl::raw_local_dispatch_key_set`). The `extern __inline__` names stay strong references: a weak one would not
+  make the link pull the definition from an archive or keep its library `--as-needed`. ELF only.
+
 Entities that must be unique stay strong: ordinary functions and variables, and `static` / anonymous-namespace
 objects (one per TU). `tests/multi-tu/main.cpp` checks one `next_id()` counter (a local static of an inline
 function), one inline variable, one `Stats<int>::count`, separate `per_tu` copies, a polymorphic class used from
 two TUs, `extern template` with a single explicit instantiation, and an exception thrown in one TU and caught in
 another. No linker option that ignores duplicate definitions is used.
+
+## thread_local across units
+
+`tls_def.cpp` defines `thread_local` objects without dynamic initialization (an `int`, a POD) and one with it (a
+`std::string` from a call), and `tls_use.cpp` uses them through `extern thread_local` on two threads; the run checks
+that each thread starts from the initial values. Built with both units from nfcxx, with the definitions from g++, and
+with the uses from g++ against nfcxx's object (with EDG's `libC.a`), on both backends. Two bugs were behind it:
+
+- qbe: the `_ZTH` reference was strong (the weak references above).
+- both backends: in a unit that only declares `extern thread_local std::string name;`, EDG named the wrapper and init
+  routines without the variable's implicit abi_tag (`_ZTW4name`, `_ZTH4name`), where the defining unit, EDG's or
+  g++'s, has `_ZTH4nameB5cxx11`. The weak reference resolved to nothing and the string read as empty. EDG computed the
+  implicit abi_tags only when it mangled the variable itself, and the routines' names are made from the variable's
+  name earlier (`get_mangled_variable_name`, EDG fork branch `nfcxx/tls-abi-tag`).
+
+`tls_def.cpp` also defines `folded`, a `std::string` from a literal.
+
+## thread_local initialization
+
+The address of a `thread_local` object is not a constant ([expr.const]): an initializer that stores it, like
+`std::string`'s pointer to its own buffer or a `constexpr` constructor that keeps `this`, is a dynamic
+initialization, per thread, and `constinit` rejects it. g++ does this. EDG folded such initializers into a static
+image with `&self`, which C rejects ("initializer element is not constant", both backends), because it marked the
+variable `is_thread_local` only at the end of the declaration, after the initializer was folded; it now marks it
+before (`mark_thread_local_before_initializer`, `src/decls.c`).
+
+A file-scope `static __thread` variable with an initializer (GNU's spelling) got a tentative declaration before its
+definition in the generated C, a redefinition in C23 (gcc 15's default) and for cproc. EDG already left that
+declaration out for `thread_local`; it now does so for `__thread` too (`is_put_out_as_thread_local`,
+`src/c_gen_be.c`). Both fixes are on the EDG fork branch `nfcxx/tls-init`. `tests/cases/thread_local_init.cpp`
+covers namespace-scope, `static`, static data member and block-scope variables on two threads.
 
 ## Known front end limitation seen on the way
 

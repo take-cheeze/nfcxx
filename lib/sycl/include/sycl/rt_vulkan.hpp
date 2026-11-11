@@ -9,7 +9,8 @@
 // and accessors work everywhere: they only need device addresses, which the runtime gets from the driver).
 //
 // Dispatch. Each dispatch is submitted and waited for before the next (an in-order queue, the simple way). The flag word at
-// the start of the heap holds the first failed check's code; it is read after every dispatch.
+// the start of the heap holds the first failed check's code; it is read after every dispatch. A dispatch whose stacks and
+// work-group memory do not fit the heap's largest free block runs as slabs, one dispatch each (see dispatch()).
 //
 // Environment: NFCXX_SYCL_IMAGE (the prefix; defaults to the NFCXX_SYCL_IMAGE_PREFIX macro of the build).
 #ifndef NFCXX_SYCL_RT_VULKAN_HPP
@@ -47,17 +48,20 @@ class vk_rt {
   }
 
   // ---- heap
-  uint64_t alloc(uint64_t bytes) {
+  // align: a power of two; the address (not only the offset) is a multiple of it. A block's skipped head stays free.
+  uint64_t alloc(uint64_t bytes, uint64_t align = 16) {
     bytes = bytes ? (bytes + 15) & ~uint64_t(15) : 16;
+    if (align < 16) align = 16;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
-      if (it->second >= bytes) {
-        uint64_t off = it->first;
-        uint64_t left = it->second - bytes;
-        free_.erase(it);
-        if (left) free_[off + bytes] = left;
-        used_[off] = bytes;
-        return dev_base_ + off;
-      }
+      const uint64_t start = it->first, size = it->second;
+      const uint64_t off = ((dev_base_ + start + align - 1) & ~(align - 1)) - dev_base_;
+      if (off - start + bytes > size) continue;
+      const uint64_t left = start + size - (off + bytes);
+      free_.erase(it);
+      if (off > start) free_[start] = off - start;
+      if (left) free_[off + bytes] = left;
+      used_[off] = bytes;
+      return dev_base_ + off;
     }
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
          "invocations times stack bytes)");
@@ -78,6 +82,23 @@ class vk_rt {
     if (it != free_.begin()) {
       auto pv = std::prev(it);
       if (pv->first + pv->second == it->first) { pv->second += it->second; free_.erase(it); }
+    }
+  }
+  uint64_t largest_free() const {
+    uint64_t m = 0;
+    for (const auto &f : free_) m = std::max(m, f.second);
+    return m;
+  }
+  // a check that failed in the kernel sets the flag: the program stops with the reason
+  void check_flag() {
+    uint32_t flag = 0;
+    std::memcpy(&flag, at(dev_base_), 4);
+    if (flag) {
+      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
+                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
+                                  "a write to the kernel's captured state"};
+      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
+      std::exit(71);
     }
   }
   uint8_t *at(uint64_t addr) const {
@@ -121,43 +142,78 @@ class vk_rt {
     uint32_t lim[3];
     for (int d = 0; d < 3; d++) lim[d] = limits_.maxComputeWorkGroupCount[d];
     uint64_t stride = (uint64_t(lmem) + 1024 + 15) & ~uint64_t(15);
-    uint64_t stack_total = invocations * stack_bytes_;
-    uint64_t region = alloc(stack_total + groups * stride);
+    // the stacks and the work-group memory of the grid: one slab when they fit the heap's largest free block, otherwise
+    // several launches. A slab is a run of groups along the outermost dimension with more than one group (sd), with
+    // every group below sd and one group of each dimension above it: consecutive groups in the linear group index (x
+    // fastest). The emitter numbers stacks and local memory over the whole grid, group by group (the offsets ox/oy/oz are in that index), so
+    // each slab's bases are biased by the slab's first index and the region holds just the slab. Inside a slab, the
+    // device's group-count limit still tiles the slab's range.
+    uint64_t room = largest_free();
+    int sd = 0;
+    for (int d = 2; d >= 0; d--) if (ng[d] > 1) { sd = d; break; }
+    uint64_t inv_group = (uint64_t)l[0] * l[1] * l[2];
+    uint64_t per_group = inv_group * stack_bytes_ + stride;
+    // the groups in the dimensions below d: one group along d takes them all
+    auto below = [&](int d) { uint64_t b = 1; for (int e = 0; e < d; e++) b *= ng[e]; return b; };
+    // when even one group along sd does not fit (with all the groups below it), the slab moves to the next dimension
+    // inward; the dimensions above it then run one group per slab
+    if (invocations * stack_bytes_ + groups * stride > room)
+      while (sd > 0 && below(sd) * per_group > room) sd--;
+    uint64_t inner = below(sd);
+    uint64_t outer = 1;   // the groups of the dimensions above sd, one per slab
+    for (int e = sd + 1; e < 3; e++) outer *= ng[e];
+    uint32_t per_slab = ng[sd];   // groups along sd in one slab
+    if (invocations * stack_bytes_ + groups * stride > room) {
+      uint64_t fit = room / (inner * per_group);
+      per_slab = fit >= 1 ? (uint32_t)std::min<uint64_t>(fit, ng[sd]) : 1;
+    }
+    const uint64_t chunks = (ng[sd] + per_slab - 1) / per_slab;   // slabs along sd for each group above it
     std::memset(at(dev_base_ + 0), 0, 4);   // the flag
     std::memcpy(at(closure_addr()), closure, closure_bytes);
-    vk_push p{};
-    p.closure = closure_addr();
-    p.statics = statics_;
-    p.stack = region;
-    p.local = region + stack_total;
-    p.flag = dev_base_;
-    p.hlo = (uint64_t)(uintptr_t)host_;
-    p.hsize = heap_size_;
-    p.dbase = dev_base_;
-    p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
-    p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
-    p.stack_bytes = stack_bytes_;
-    p.local_stride = (uint32_t)stride;
-    p.local_user = lmem;
     VkPipeline pipe = pipeline(it->second.entry, l);
-    for (uint32_t oz = 0; oz < ng[2]; oz += lim[2])
-      for (uint32_t oy = 0; oy < ng[1]; oy += lim[1])
-        for (uint32_t ox = 0; ox < ng[0]; ox += lim[0]) {
-          p.ox = ox;
-          p.oy = oy;
-          p.oz = oz;
-          uint32_t cnt[3] = {std::min(lim[0], ng[0] - ox), std::min(lim[1], ng[1] - oy), std::min(lim[2], ng[2] - oz)};
-          submit(pipe, &p, cnt);
-        }
-    release(region);
-    uint32_t flag = 0;
-    std::memcpy(&flag, at(dev_base_), 4);
-    if (flag) {
-      static const char *why[] = {"", "integer division by zero or INT_MIN / -1", "shift count out of range", "index out of bounds",
-                                  "null pointer dereference", "trap or unreachable", "float to integer conversion out of range",
-                                  "a write to the kernel's captured state"};
-      std::fprintf(stderr, "sycl: a kernel trapped: %s\n", flag < 8 ? why[flag] : "unknown");
-      std::exit(71);
+    for (uint64_t step = 0; step < outer * chunks; step++) {
+      // og: the group of each dimension above sd (the linear group index puts x fastest, as the emitter does)
+      const uint64_t above = step / chunks;
+      uint32_t og[3] = {0, 0, 0};
+      { uint64_t r = above; for (int e = sd + 1; e < 3; e++) { og[e] = (uint32_t)(r % ng[e]); r /= ng[e]; } }
+      uint32_t s0 = (uint32_t)(step % chunks) * per_slab;
+      uint32_t cnt = std::min(per_slab, ng[sd] - s0);
+      uint64_t first_group = (above * ng[sd] + s0) * inner;
+      uint64_t slab_groups = (uint64_t)cnt * inner;
+      uint64_t slab_stack = slab_groups * inv_group * stack_bytes_;
+      uint64_t region = alloc(slab_stack + slab_groups * stride);
+      vk_push p{};
+      p.closure = closure_addr();
+      p.statics = statics_;
+      p.stack = region - first_group * inv_group * stack_bytes_;   // biased: the slab's first invocation is at region
+      p.local = region + slab_stack - first_group * stride;
+      p.flag = dev_base_;
+      p.hlo = (uint64_t)(uintptr_t)host_;
+      p.hsize = heap_size_;
+      p.dbase = dev_base_;
+      p.gx = gs[0]; p.gy = gs[1]; p.gz = gs[2];
+      p.nx = ng[0]; p.ny = ng[1]; p.nz = ng[2];
+      p.stack_bytes = stack_bytes_;
+      p.local_stride = (uint32_t)stride;
+      p.local_user = lmem;
+      // the slab's range of groups: [lo, hi) per dimension
+      uint32_t lo[3] = {0, 0, 0}, hi[3] = {ng[0], ng[1], ng[2]};
+      lo[sd] = s0;
+      hi[sd] = s0 + cnt;
+      for (int e = sd + 1; e < 3; e++) { lo[e] = og[e]; hi[e] = og[e] + 1; }
+      // 64-bit counters: the device's limit can be 2^32 - 1 (RADV), and a 32-bit ox += lim wraps below the slab's first group
+      for (uint64_t oz = lo[2]; oz < hi[2]; oz += lim[2])
+        for (uint64_t oy = lo[1]; oy < hi[1]; oy += lim[1])
+          for (uint64_t ox = lo[0]; ox < hi[0]; ox += lim[0]) {
+            p.ox = (uint32_t)ox;
+            p.oy = (uint32_t)oy;
+            p.oz = (uint32_t)oz;
+            uint32_t tc[3] = {(uint32_t)std::min<uint64_t>(lim[0], hi[0] - ox), (uint32_t)std::min<uint64_t>(lim[1], hi[1] - oy),
+                              (uint32_t)std::min<uint64_t>(lim[2], hi[2] - oz)};
+            submit(pipe, &p, tc);
+          }
+      release(region);
+      check_flag();
     }
     for (int i = 0; i < nbufs; i++) if (modes[i] & 2) { bufs[i]->dev_valid = true; bufs[i]->host_valid = false; }
   }
@@ -209,10 +265,18 @@ class vk_rt {
   void read_manifest(const std::string &path) {
     FILE *f = std::fopen(path.c_str(), "rb");
     if (!f) fail("cannot read " + path);
-    char line[4096];
-    std::string hex;
-    while (std::fgets(line, sizeof line, f)) {
-      std::string s(line);
+    // a line of any length: the statics line (S) holds the whole static region in hex, often more than one buffer
+    auto next_line = [&](std::string &s) {
+      s.clear();
+      char buf[4096];
+      while (std::fgets(buf, sizeof buf, f)) {
+        s += buf;
+        if (s.back() == '\n') return true;
+      }
+      return !s.empty();
+    };
+    std::string hex, s;
+    while (next_line(s)) {
       while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
       if (s.size() >= 2 && s[0] == 'k' && s.find('\t') != std::string::npos) {
         size_t a = s.find('\t'), b = s.find('\t', a + 1);
@@ -339,6 +403,14 @@ class vk_rt {
     check(vkCreateCommandPool(dev_, &cpci, nullptr, &pool_), "vkCreateCommandPool");
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     check(vkCreateFence(dev_, &fci, nullptr, &fence_), "vkCreateFence");
+    // NFCXX_SYCL_VK_TIMING=1: each dispatch's GPU time (timestamp queries), summed and reported at exit
+    timing_ = std::getenv("NFCXX_SYCL_VK_TIMING") != nullptr && limits_.timestampPeriod > 0;
+    if (timing_) {
+      VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      qpci.queryCount = 2;
+      check(vkCreateQueryPool(dev_, &qpci, nullptr, &qpool_), "vkCreateQueryPool");
+    }
 
     // the statics: the constant tables and globals, relocated to device addresses
     if (static_size_) {
@@ -401,7 +473,12 @@ class vk_rt {
     vkBeginCommandBuffer(cb, &bbi);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdPushConstants(cb, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *p, p);
+    if (timing_) {   // two timestamps around the dispatch: the GPU's own time for it
+      vkCmdResetQueryPool(cb, qpool_, 0, 2);
+      vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool_, 0);
+    }
     vkCmdDispatch(cb, ng[0], ng[1], ng[2]);
+    if (timing_) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, 1);
     vkEndCommandBuffer(cb);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -409,10 +486,22 @@ class vk_rt {
     check(vkQueueSubmit(queue_, 1, &si, fence_), "vkQueueSubmit");
     check(vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     vkResetFences(dev_, 1, &fence_);
+    if (timing_) {
+      uint64_t t[2] = {0, 0};
+      check(vkGetQueryPoolResults(dev_, qpool_, 0, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+            "vkGetQueryPoolResults");
+      gpu_ns_ += (double)(t[1] - t[0]) * (double)limits_.timestampPeriod;
+      launches_++;
+    }
     vkFreeCommandBuffers(dev_, pool_, 1, &cb);
   }
 
  public:
+  ~vk_rt() {
+    if (timing_ && launches_)
+      std::fprintf(stderr, "nfcxx vulkan: %llu dispatches, GPU time %.4f ms per dispatch (NFCXX_SYCL_VK_TIMING)\n",
+                   (unsigned long long)launches_, gpu_ns_ / 1e6 / (double)launches_);
+  }
   std::string device_name() const { return device_name_; }
   bool identity_ = false;
 
@@ -428,6 +517,10 @@ class vk_rt {
   VkPipelineLayout layout_ = VK_NULL_HANDLE;
   VkCommandPool pool_ = VK_NULL_HANDLE;
   VkFence fence_ = VK_NULL_HANDLE;
+  VkQueryPool qpool_ = VK_NULL_HANDLE;
+  bool timing_ = false;
+  double gpu_ns_ = 0;
+  uint64_t launches_ = 0;
   VkPhysicalDeviceLimits limits_{};
   std::string device_name_;
   uint8_t *host_ = nullptr;
@@ -471,10 +564,9 @@ inline void backend_dispatch(const char *key, const void *closure, unsigned clos
 inline void backend_wait() {}
 // A USM pointer is the host address of its allocation; a kernel gets the device address (translated on load, see the emitter).
 inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
-  (void)align;
   (void)kind;
   vk_rt &r = vk_rt::get();
-  return (void *)r.at(r.alloc(bytes));
+  return (void *)r.at(r.alloc(bytes, align));
 }
 inline void backend_usm_free(void *p) {
   vk_rt &r = vk_rt::get();

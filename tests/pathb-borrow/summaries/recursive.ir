@@ -1,0 +1,8 @@
+(ir-module "summaries" (layout (pointer 8) (int 4)))
+(function "drain" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param) (let %1 int (load int %0))
+(if %1 (then (let %2 int (wsub int %1 (const int 1))) (store int %0 %2) (let %3 int (call int &"drain" %0)) (return %3)))
+(return (const int 0)))
+(function "main" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 3)) (let %0 int (call int &"drain" $"x")) (scope-end $"x") (return %0))

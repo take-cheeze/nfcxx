@@ -1,0 +1,3 @@
+(ir-module "bad_call_effects_shape" (layout (pointer 8) (int 4)))
+(call-effects "bad" (returns void) (nothrow) (noescape) (closed) (args (init)))
+(function "main" (ret int) (params) (return (const int 0)))

@@ -14,13 +14,16 @@ if [ "${NFCXX_LDRT_X86:-0}" = 1 ]; then
   out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt-x86}
   defines=-DNFCXX_FLOAT_TO_INT_X86
 fi
+# NFCXX_GCC names cosmocc with --cosmo: the archive is cosmo's own (build/pathb-ldrt-cosmo), built by that compiler.
+cc_bin=${NFCXX_GCC:-cc}
+case $cc_bin in *cosmocc*) out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt-cosmo} ;; esac
 src=$root/be/nfcxx_ldrt.c
 lib=$out/libnfcxxld.a
 if [ ! -f "$lib" ] || [ "$src" -nt "$lib" ]; then
   mkdir -p "$out"
   tmp=$(mktemp -d "$out/.tmp.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   # -ffunction-sections: one helper per archive member would be better, but one object keeps the link line trivial
-  cc -O2 -fno-strict-aliasing -fPIC $defines -c -o "$tmp/nfcxx_ldrt.o" "$src"
+  "$cc_bin" -O2 -fno-strict-aliasing -fPIC $defines -c -o "$tmp/nfcxx_ldrt.o" "$src"
   ar rcs "$tmp/libnfcxxld.a" "$tmp/nfcxx_ldrt.o"
   mv "$tmp/libnfcxxld.a" "$lib"
 fi

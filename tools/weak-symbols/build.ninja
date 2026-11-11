@@ -1,0 +1,10 @@
+# Builds build/weak-symbols (the C++ port of scripts/weak-symbols.rb). Run: ninja -C tools/weak-symbols
+# CXX and CXXFLAGS come from the environment.
+ninja_required_version = 1.7
+root = ../..
+
+rule cxx
+  command = $${CXX:-g++} $${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra} -o $out.tmp $in && mv -f $out.tmp $out
+  description = CXX $out
+
+build $root/build/weak-symbols: cxx weak_symbols.cpp

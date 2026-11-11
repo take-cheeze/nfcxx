@@ -1,0 +1,8 @@
+(ir-module "calls" (layout (pointer 8) (int 4)))
+(call-effects "write" (returns void) (nothrow) (noescape) (closed) (args (write int)))
+(call-effects "init" (returns void) (nothrow) (noescape) (closed) (args (init int)))
+(function "test" (ret int) (params (param %0 "p" (ptr int)))
+(decl %0 param)
+(eval (call void &"write" %0)) (eval (call void &"init" (offset %0 4))) (eval (call void &"write" @"g"))
+(let %1 (ptr int) (index @"g" (const int 2) 4)) (eval (call void &"init" %1))
+(return (const int 0)))

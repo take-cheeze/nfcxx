@@ -1,0 +1,130 @@
+export data $_ZTI1E = align 8 { l $_ZTVN10__cxxabiv117__class_type_infoE + 16, l $_ZTS1E, }
+export data $_ZTS1E = align 1 { b "1E\000", }
+export
+function w $_Z7throweri(w %.1) {
+@start.1
+	%.2 =l alloc4 4
+	storew %.1, %.2
+	%.5 =l alloc8 8
+@body.2
+	%.3 =w loadw %.2
+	%.4 =w csgtw %.3, 2
+	jnz %.4, @if_true.3, @if_false.4
+@if_true.3
+	%.6 =l call extern $__throw_setup(l extern $_ZTI1E, l 4, w 0)
+	storel %.6, %.5
+	%.7 =w loadw %.2
+	%.8 =l loadl %.5
+	%.9 =l add %.8, 0
+	storew %.7, %.9
+	call extern $__throw()
+@if_false.4
+	%.10 =w loadw %.2
+	ret %.10
+}
+data $.L__T2.3 = align 8 { l $_ZTI1E + 0, w 40, z 4, l 0, }
+data $.L__T3.4 = align 8 { l $__destroy_exception_object, h 0, h 65535, b 0, z 3 }
+export
+function w $main() {
+@start.5
+	%.1 =l alloc8 240
+	%.2 =l alloc4 4
+	%.3 =l alloc8 240
+	%.46 =l alloc4 4
+	%.47 =l alloc8 8
+@body.6
+	%.4 =l loadl extern $__curr_eh_stack_entry
+	%.5 =l add %.3, 0
+	storel %.4, %.5
+	storel %.3, extern $__curr_eh_stack_entry
+	%.6 =l add %.3, 8
+	storeb 1, %.6
+	%.7 =l add %.3, 16
+	%.8 =l add %.7, 0
+	%.9 =l add %.8, 0
+	storel $.L__T3.4, %.9
+	%.10 =w loaduh extern $__eh_curr_region
+	%.11 =l add %.3, 16
+	%.12 =l add %.11, 0
+	%.13 =l add %.12, 24
+	storeh %.10, %.13
+	storeh 65535, extern $__eh_curr_region
+	%.14 =l loadl extern $__curr_eh_stack_entry
+	%.15 =l add %.1, 0
+	storel %.14, %.15
+	storel %.1, extern $__curr_eh_stack_entry
+	%.16 =l add %.1, 8
+	storeb 5, %.16
+	%.17 =l add %.1, 16
+	%.18 =l add %.17, 0
+	%.19 =l add %.18, 200
+	storel $.L__T2.3, %.19
+	%.20 =l extsw 0
+	%.21 =l add %.1, 16
+	%.22 =l add %.21, 0
+	%.23 =l add %.22, 208
+	storel %.20, %.23
+	%.24 =w loaduh extern $__eh_curr_region
+	%.25 =l add %.1, 16
+	%.26 =l add %.25, 0
+	%.27 =l add %.26, 216
+	storeh %.24, %.27
+	%.28 =l add %.1, 16
+	%.29 =l add %.28, 0
+	%.30 =l add %.29, 0
+	%.31 =w call extern $_setjmp(l %.30)
+	jnz %.31, @if_false.8, @if_true.7
+@if_true.7
+	%.32 =w call extern $_Z7throweri(w 1)
+	%.33 =w call extern $_Z7throweri(w 5)
+	%.34 =w add %.32, %.33
+	storew %.34, %.2
+	%.35 =l add %.1, 0
+	%.36 =l loadl %.35
+	storel %.36, extern $__curr_eh_stack_entry
+	%.37 =l add %.3, 16
+	%.38 =l add %.37, 0
+	%.39 =l add %.38, 24
+	%.40 =w loaduh %.39
+	storeh %.40, extern $__eh_curr_region
+	%.41 =l add %.3, 0
+	%.42 =l loadl %.41
+	storel %.42, extern $__curr_eh_stack_entry
+	%.43 =w loadw %.2
+	ret %.43
+@if_false.8
+	%.44 =w loadw extern $__catch_clause_number
+	%.45 =w ceqw %.44, 1
+	jnz %.45, @if_true.10, @if_false.11
+@if_true.10
+	storeh 0, extern $__eh_curr_region
+	%.48 =l loadl extern $__caught_object_address
+	storel %.48, %.47
+	call extern $__exception_caught()
+	%.49 =l loadl %.47
+	%.50 =l add %.49, 0
+	%.51 =w loadw %.50
+	%.52 =w add %.51, 10
+	storew %.52, %.46
+	storeh 65535, extern $__eh_curr_region
+	call extern $__destroy_exception_object()
+	%.53 =l add %.1, 0
+	%.54 =l loadl %.53
+	storel %.54, extern $__curr_eh_stack_entry
+	%.55 =l add %.3, 16
+	%.56 =l add %.55, 0
+	%.57 =l add %.56, 24
+	%.58 =w loaduh %.57
+	storeh %.58, extern $__eh_curr_region
+	%.59 =l add %.3, 0
+	%.60 =l loadl %.59
+	storel %.60, extern $__curr_eh_stack_entry
+	%.61 =w loadw %.46
+	ret %.61
+@if_false.11
+@if_join.9
+	%.62 =l add %.1, 0
+	%.63 =l loadl %.62
+	storel %.63, extern $__curr_eh_stack_entry
+	ret 0
+}

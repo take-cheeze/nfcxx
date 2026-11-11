@@ -1,4 +1,4 @@
-/* Runs the three kernels of memory2.cpp (lowered to PTX by scripts/pathb-ptx-emit.rb) and checks every result.
+/* Runs the three kernels of memory2.cpp (lowered to PTX by tools/pathb-ptx-emit) and checks every result.
  * k_bool: 1000 elements, 8 blocks of 128; k_local_shared: 512 elements, 8 blocks of 64; k_global: one block of 256.
  * Each output has GUARD elements past its end, which must stay as they were written by the host. */
 #include <cuda_runtime.h>

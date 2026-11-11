@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- Runs one WGSL case (case.js, written by tests/uop/test_wgsl.cpp) on WebGPU and compares the result with the
+     interpreter's. tests/uop/wgsl/run.sh loads it in headless Chrome and reads the line in #result. -->
+<html>
+<head><meta charset="utf-8"><title>nfcuop WGSL runner</title></head>
+<body>
+<pre id="result">pending</pre>
+<script src="case.js"></script>
+<script>
+(async () => {
+  const out = document.getElementById('result');
+  const fail = (msg) => { out.textContent = 'FAIL ' + msg; };
+  try {
+    const C = window.CASE;
+    if (!navigator.gpu) return fail('no navigator.gpu');
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return fail('no WebGPU adapter');
+    const device = await adapter.requestDevice();
+    const errors = [];
+    device.addEventListener('uncapturederror', (e) => errors.push(e.error.message));
+
+    const module = device.createShaderModule({ code: C.source });
+    const info = await module.getCompilationInfo();
+    const wgslErrors = info.messages.filter((m) => m.type === 'error').map((m) => m.message);
+    if (wgslErrors.length) return fail('WGSL: ' + wgslErrors.join('; '));
+
+    const U = GPUBufferUsage;
+    const bufs = C.buffers.map((b) => device.createBuffer({ size: b.count * 4, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST }));
+    C.buffers.forEach((b, i) => {
+      if (b.input) device.queue.writeBuffer(bufs[i], 0, new Float32Array(C.inputs[b.name]));
+    });
+    const size = C.buffers[C.output].count * 4;
+    const readback = device.createBuffer({ size, usage: U.MAP_READ | U.COPY_DST });
+    device.pushErrorScope('validation');
+    const enc = device.createCommandEncoder();
+    // One pass per kernel, in order: a pass sees the writes of the passes before it. Each pipeline has its own layout
+    // (auto: the bindings its entry uses), and each kernel binds only its own buffers.
+    for (const k of C.kernels) {
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: k.entry } });
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: k.bindings.map((i) => ({ binding: i, resource: { buffer: bufs[i] } })),
+      });
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(k.count / 64));
+      pass.end();
+    }
+    enc.copyBufferToBuffer(bufs[C.output], 0, readback, 0, size);
+    device.queue.submit([enc.finish()]);
+    const scopeErr = await device.popErrorScope();
+    if (scopeErr) return fail('validation: ' + scopeErr.message);
+    await readback.mapAsync(GPUMapMode.READ);
+    const got = new Float32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    if (errors.length) return fail('uncaptured: ' + errors.join('; '));
+
+    // The interpreter's values are Float32, so a difference is the GPU's own rounding of sqrt and division.
+    let maxErr = 0, exact = 0, bad = [];
+    // The expected values are printed with 9 digits, which is enough to name a float32 but parses to a nearby double:
+    // compare with the float32 they name.
+    C.expected.forEach((printed, i) => {
+      const want = Math.fround(printed);
+      const d = Math.abs(got[i] - want);
+      const tol = 1e-6 * Math.max(1, Math.abs(want));
+      if (!(d <= tol)) bad.push(i + ': got ' + got[i] + ' want ' + want);
+      if (d === 0) exact++;
+      if (d > maxErr) maxErr = d;
+    });
+    if (got.length !== C.expected.length) return fail('length ' + got.length + ' != ' + C.expected.length);
+    if (bad.length) return fail('mismatch ' + bad.slice(0, 5).join('; '));
+    out.textContent = 'PASS n=' + got.length + ' exact=' + exact + ' maxabs=' + maxErr.toExponential(3) +
+      ' kernels=' + C.kernels.length + ' adapter=' + (adapter.info ? adapter.info.vendor + '/' + adapter.info.architecture : 'unknown');
+  } catch (e) {
+    fail(String(e && e.message ? e.message : e));
+  }
+})();
+</script>
+</body>
+</html>

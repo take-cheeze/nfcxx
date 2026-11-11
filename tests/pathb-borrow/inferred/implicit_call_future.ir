@@ -1,0 +1,7 @@
+(ir-module "implicit" (layout (pointer 8) (int 4)))
+(call-effects "pick" (returns (ptr int) (from-arg 0 0 exclusive)) (nothrow) (noescape) (closed) (args (write int)))
+(function "test" (ret int) (params)
+(slot "x" int 4 4)
+(decl $"x" val) (store int $"x" (const int 1))
+(let %0 (ptr int) (call (ptr int) &"pick" $"x")) (store int $"x" (const int 3))
+(let %1 int (load int %0)) (scope-end $"x") (return %1))

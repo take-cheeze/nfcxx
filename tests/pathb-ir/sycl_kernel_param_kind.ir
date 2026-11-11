@@ -1,0 +1,22 @@
+(ir-module "sycl_kernel_param_kind.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "k0" int 4 4)
+  (slot "k1" int 4 4)
+  (store int $"k0" (const int 1))
+  (store int $"k1" (const int 3))
+  (let %0 int (load int $"k0"))
+  (let %1 bool (ne int %0 (const int 1)))
+  (if %1
+    (then
+      (block
+        (return (const int 1)))))
+  (let %2 int (load int $"k1"))
+  (let %3 bool (ne int %2 (const int 3)))
+  (if %3
+    (then
+      (block
+        (return (const int 2)))))
+  (return (const int 0)))

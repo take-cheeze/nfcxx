@@ -1,0 +1,182 @@
+function w $__bswap_16(w %.1) {
+@start.1
+	%.2 =l alloc4 2
+	storeh %.1, %.2
+@body.2
+	%.3 =w loaduh %.2
+	%.4 =w extuh %.3
+	%.5 =w sar %.4, 8
+	%.6 =w and %.5, 255
+	%.7 =w loaduh %.2
+	%.8 =w extuh %.7
+	%.9 =w and %.8, 255
+	%.10 =w shl %.9, 8
+	%.11 =w or %.6, %.10
+	ret %.11
+}
+function w $__bswap_32(w %.1) {
+@start.3
+	%.2 =l alloc4 4
+	storew %.1, %.2
+@body.4
+	%.3 =w loadw %.2
+	%.4 =w and %.3, 4278190080
+	%.5 =w shr %.4, 24
+	%.6 =w loadw %.2
+	%.7 =w and %.6, 16711680
+	%.8 =w shr %.7, 8
+	%.9 =w or %.5, %.8
+	%.10 =w loadw %.2
+	%.11 =w and %.10, 65280
+	%.12 =w shl %.11, 8
+	%.13 =w or %.9, %.12
+	%.14 =w loadw %.2
+	%.15 =w and %.14, 255
+	%.16 =w shl %.15, 24
+	%.17 =w or %.13, %.16
+	ret %.17
+}
+function l $__bswap_64(l %.1) {
+@start.5
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.6
+	%.3 =l loadl %.2
+	%.4 =l and %.3, 18374686479671623680
+	%.5 =l shr %.4, 56
+	%.6 =l loadl %.2
+	%.7 =l and %.6, 71776119061217280
+	%.8 =l shr %.7, 40
+	%.9 =l or %.5, %.8
+	%.10 =l loadl %.2
+	%.11 =l and %.10, 280375465082880
+	%.12 =l shr %.11, 24
+	%.13 =l or %.9, %.12
+	%.14 =l loadl %.2
+	%.15 =l and %.14, 1095216660480
+	%.16 =l shr %.15, 8
+	%.17 =l or %.13, %.16
+	%.18 =l loadl %.2
+	%.19 =l and %.18, 4278190080
+	%.20 =l shl %.19, 8
+	%.21 =l or %.17, %.20
+	%.22 =l loadl %.2
+	%.23 =l and %.22, 16711680
+	%.24 =l shl %.23, 24
+	%.25 =l or %.21, %.24
+	%.26 =l loadl %.2
+	%.27 =l and %.26, 65280
+	%.28 =l shl %.27, 40
+	%.29 =l or %.25, %.28
+	%.30 =l loadl %.2
+	%.31 =l and %.30, 255
+	%.32 =l shl %.31, 56
+	%.33 =l or %.29, %.32
+	ret %.33
+}
+function w $__uint16_identity(w %.1) {
+@start.7
+	%.2 =l alloc4 2
+	storeh %.1, %.2
+@body.8
+	%.3 =w loaduh %.2
+	ret %.3
+}
+function w $__uint32_identity(w %.1) {
+@start.9
+	%.2 =l alloc4 4
+	storew %.1, %.2
+@body.10
+	%.3 =w loadw %.2
+	ret %.3
+}
+function l $__uint64_identity(l %.1) {
+@start.11
+	%.2 =l alloc8 8
+	storel %.1, %.2
+@body.12
+	%.3 =l loadl %.2
+	ret %.3
+}
+function w $count_char(l %.1, w %.3) {
+@start.13
+	%.2 =l alloc8 8
+	storel %.1, %.2
+	%.4 =l alloc4 1
+	storeb %.3, %.4
+	%.5 =l alloc4 4
+@body.14
+	storew 0, %.5
+@while_cond.15
+	%.6 =l loadl %.2
+	%.7 =w loadsb %.6
+	%.8 =w extsb %.7
+	jnz %.8, @while_body.16, @while_join.17
+@while_body.16
+	%.9 =l loadl %.2
+	%.10 =l add %.9, 1
+	storel %.10, %.2
+	%.11 =w loadsb %.9
+	%.12 =w extsb %.11
+	%.13 =w loadsb %.4
+	%.14 =w extsb %.13
+	%.15 =w ceqw %.12, %.14
+	jnz %.15, @if_true.18, @if_false.19
+@if_true.18
+	%.16 =w loadw %.5
+	%.17 =w add %.16, 1
+	storew %.17, %.5
+@if_false.19
+	jmp @while_cond.15
+@while_join.17
+	%.18 =w loadw %.5
+	ret %.18
+}
+data $.Lstring.9 = align 1 { b "the quick brown fox jumps over the lazy dog\000", }
+data $.Lstring.10 = align 1 { b "hello\000", }
+data $.Lstring.11 = align 1 { b ", world\000", }
+data $.Lstring.12 = align 1 { b "%s|%d|%d\012\000", }
+data $.Lstring.13 = align 1 { b "%d %s\012\000", }
+data $.Lstring.14 = align 1 { b "abc\000", }
+data $.Lstring.15 = align 1 { b "abd\000", }
+data $.Lstring.16 = align 1 { b "%05d-%x\000", }
+data $.Lstring.17 = align 1 { b "%s\012\000", }
+data $.Lstring.18 = align 1 { b "dup\000", }
+data $.Lstring.19 = align 1 { b "%s %d\012\000", }
+data $.Lstring.20 = align 1 { b "123\000", }
+data $.Lstring.21 = align 1 { b "-23\000", }
+export
+function w $main() {
+@start.20
+	%.1 =l alloc8 8
+	%.13 =l alloc4 32
+	%.16 =l alloc8 8
+@body.21
+	storel $.Lstring.9, %.1
+	%.2 =l call extern $strcpy(l $buf, l $.Lstring.10)
+	%.3 =l call extern $strcat(l $buf, l $.Lstring.11)
+	%.4 =l call extern $strlen(l $buf)
+	%.5 =l loadl %.1
+	%.6 =w call $count_char(l %.5, w 111)
+	%.7 =w call extern $printf(l $.Lstring.12, ..., l $buf, w %.4, w %.6)
+	%.8 =w call extern $strcmp(l $.Lstring.14, l $.Lstring.15)
+	%.9 =w csltw %.8, 0
+	%.10 =l loadl %.1
+	%.11 =l call extern $strchr(l %.10, w 113)
+	%.12 =w call extern $printf(l $.Lstring.13, ..., w %.9, l %.11)
+	%.14 =w call extern $snprintf(l %.13, l 32, l $.Lstring.16, ..., w 42, w 255)
+	%.15 =w call extern $printf(l $.Lstring.17, ..., l %.13)
+	%.17 =l call extern $strdup(l $.Lstring.18)
+	storel %.17, %.16
+	%.18 =l loadl %.16
+	%.19 =w call extern $atoi(l $.Lstring.20)
+	%.20 =w call extern $atoi(l $.Lstring.21)
+	%.21 =w add %.19, %.20
+	%.22 =w call extern $printf(l $.Lstring.19, ..., l %.18, w %.21)
+	%.23 =l loadl %.16
+	call extern $free(l %.23)
+	%.24 =l loadl %.1
+	%.25 =w call $count_char(l %.24, w 101)
+	ret %.25
+}
+data $buf = align 1 { z 64 }

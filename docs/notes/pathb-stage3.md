@@ -175,7 +175,7 @@ Type text keeps `(volatile T)` wrappers.
 What QBE does to a plain load or store (checked on a hand-written module, `qbe` from `build/qbe`): `load.c` merges two
 loads of one address into one (`twice(p)` becomes one `movl (%rdi)` and `addl %eax, %eax`); an unused load is deleted;
 a load in a spin loop is hoisted out of it (`while (!*p);` becomes a single load and an infinite loop); a slot that
-only loads and stores use is promoted to a register. cproc/`qbe-prep.rb` get away with dropping `volatile` for C input
+only loads and stores use is promoted to a register. cproc/`qbe-prep` get away with dropping `volatile` for C input
 only for escaped objects, plus the `__nfcxx_keep` call that makes volatile locals escape; that is not enough for
 Path B, because an access through a pointer or to a global can still be merged or removed by `load.c` and by the
 dead-load elimination.

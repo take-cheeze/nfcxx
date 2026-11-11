@@ -1,0 +1,5 @@
+(ir-module "eh" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params)
+(store int @"g" (const int 1))
+(let %1 int (load int @"g"))
+(return %1))

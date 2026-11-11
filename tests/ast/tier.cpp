@@ -928,6 +928,68 @@ int main() {
     }
   }
 
+  std::printf("-- Merkle hashes of the lowered form, and versions with one hash sharing a shared object (docs/notes/astro.md, \"lib/ast spike\")\n");
+  {
+    // The function a chunk returns.
+    auto fn = [](State& S, const std::string& code) {
+      std::string err;
+      nfcast::Closure* ch = S.load(code, "test", &err);
+      Rets out;
+      S.call(Value::function(ch), nullptr, 0, out);
+      return out.p[0];
+    };
+    State H;
+    H.open_libs();
+    tier_on(H, TierOptions::Sync, 1000000, temp_dir("mhash"));  // never hot: only the hashes are asked for
+    Value ai[2] = {Value::integer(7), Value::integer(3)};
+    Value af[2] = {Value::number(7.5), Value::number(3.0)};
+    std::vector<std::uint64_t> a = H.tier_merkle(fn(H, "return function(a, b) return (a + b) * (a - b) end"), ai, 2);
+    // other local names, other lines, a function in the middle of a bigger chunk: the same hash
+    std::vector<std::uint64_t> b = H.tier_merkle(fn(H, "local z = 1\n\n\nreturn function(x, y)\n  return (x + y) * (x - y)\nend"), ai, 2);
+    std::vector<std::uint64_t> c = H.tier_merkle(fn(H, "return function(a, b) return (a + b) * (a + b) end"), ai, 2);    // a different operator
+    std::vector<std::uint64_t> d = H.tier_merkle(fn(H, "return function(a, b) return (a + b) * (a - b + 0) end"), ai, 2); // a different tree
+    std::vector<std::uint64_t> e = H.tier_merkle(fn(H, "return function(a, b) return (a + b) * (a - b) end"), af, 2);     // other argument types
+    CHECK(!a.empty() && a.size() > 5);
+    CHECK(a == b);
+    CHECK(!c.empty() && c[0] != a[0]);
+    CHECK(!d.empty() && d[0] != a[0] && d[0] != c[0]);
+    CHECK(!e.empty() && e[0] != a[0]);
+    int common = 0;  // the subtree (a + b) is in both: below the root, equal hashes exist, and so do different ones
+    for (std::size_t i = 1; i < a.size(); ++i) {
+      bool in_c = false;
+      for (std::size_t j = 1; j < c.size(); ++j) in_c = in_c || a[i] == c[j];
+      common += in_c;
+    }
+    CHECK(common > 0 && common < static_cast<int>(a.size() - 1));
+
+    // three functions with the same hash and one with another; results with sharing off, on and checked, and in the interpreter
+    const char* prog =
+        "local function f(a, b) return (a + b) * (a - b) end\n"
+        "local function g(x, y)\n  return (x + y) * (x - y)\nend\n"
+        "local h = function(p, q) return (p + q) * (p - q) end\n"
+        "local function k(a, b) return (a + b) * (a - b) + 1 end\n"
+        "return f(7, 3), g(10, 1), h(5, 5), k(7, 3), f(2, 9), g(4, 4)";
+    std::string want = eval_plain(prog);
+    CHECK(want == "40,99,0,41,-77,0");
+    for (unsigned share = 0; share <= 2; ++share) {
+      State S;
+      S.open_libs();
+      TierOptions o;
+      o.mode = TierOptions::Sync;
+      o.threshold = o.loop_threshold = 1;
+      o.osr = false;
+      o.cache_dir = temp_dir("share");
+      o.share = share;
+      S.enable_tier(o);
+      CHECK(eval(S, prog) == want);
+      CHECK(S.stats.tier_compiled == 4 && S.stats.tier_failed == 0);
+      CHECK(S.stats.tier_compiles == 2);  // f, g and h are one object, k another (the disk cache alone finds this too: their source text is equal)
+      CHECK(S.stats.tier_share_hits == (share == 1 ? 2u : 0u));
+      CHECK(S.stats.tier_share_conflicts == 0);
+      CHECK(consistent(S));
+    }
+  }
+
   std::printf("-- environment\n");
   {
     State S;

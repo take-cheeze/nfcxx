@@ -14,7 +14,7 @@
 (x87-thunk call "fabsl" 0 16)
 (x87-thunk entry "_ZSt3abse" weak 0 16)
 (abi-type "__nfcxx_f128" 16 16 (memory))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))

@@ -107,6 +107,52 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   address, so the USM translation is exercised there for the first time: `usm` and `usm_ptr` are the ones to watch. To check:
   `tests/sycl/run.sh` on the B60 box with the Vulkan loader and ANV installed. Expect `double` to be slow (FP64 is emulated on
   some Arc parts).
-- **Level Zero / OpenCL** for Intel XPU: a Kernel-capability variant of the same module (physical addresses are the same
-  idea; the memory model and the built-ins differ). Not started.
+- **OpenCL for Intel XPU: done** (`--backend=opencl`). The Kernel-capability module (`pathb-spirv-emit.rb --kernel-cl`,
+  OpenCL 2.2, OpenCL.std for the math: Intel's compiler rejects GLSL.std.450 in a kernel) runs all 19 `tests/sycl`
+  programs on the Arc B60 through `rt_opencl.hpp` (the heap is shared USM with atomics: the B60's SVM is coarse-grained
+  with no atomics). The local size is set by specialization constants. `double` runs too (under a second, three runs; an
+  earlier run that looked hung did not reproduce).
+- **Level Zero for Intel XPU: done** (`--backend=level-zero`, `rt_level_zero.hpp`). The same Kernel-capability module as
+  OpenCL, through `ze_api.h` and `libze_loader.so.1`: the first Intel GPU, a module per local size (`ze_module_constants_t`
+  for ids 0, 1, 2), the heap in one `zeMemAllocShared` allocation (atomic access checked), one immediate command list.
+  `tests/gpu/level-zero/run.sh` runs the vecAdd kernel standalone on the B60 (50000 elements, a mutant is caught).
+- **Several TUs with kernels, OpenCL and Level Zero: done** (`rt_image.hpp`). `scripts/sycl-build.sh -c [-fPIC]` writes an
+  object and its image (`obj.o.cl.spv`, `obj.o.man`); the object registers the image from a TU-local static, and the runtime
+  loads every registered image (again on a kernel miss, for a library opened later). Each image keeps its own statics and
+  is built per local size on its own; a closure type found in two images runs from the first. `tests/sycl/multi_tu/run.sh`
+  links three TUs into one program and two of them into a `-shared` library, on both runtimes. Vulkan and WebGPU still
+  load one image per program.
 - Work-group sizes above 256 are fine here (lavapipe allows 1024); the WebGPU path keeps its 256 limit.
+
+## Performance against a GLSL reference (Radeon 8060S, RADV)
+
+`NFCXX_SYCL_VK_TIMING=1` makes the runtime time each dispatch with two timestamp queries and print the mean GPU time at exit
+(`nfcxx vulkan: N dispatches, GPU time X ms per dispatch`). Without it the runtime is unchanged.
+
+The same kernel, `c[i] = a[i] + b[i]`, on the same GPU through RADV: a GLSL reference (glslc, SPIR-V 1.0 target vulkan1.2, local
+size 128) with a plain Vulkan harness that uses the runtime's memory type and one synchronous submit per launch, against the
+SYCL program lowered by `scripts/pathb-spirv-emit.rb`:
+
+| N | reference, per launch | nfcxx, per launch (wall) | nfcxx GPU time per dispatch |
+| --- | --- | --- | --- |
+| 2^16 | 0.020 ms | 0.132 ms | - |
+| 2^20 | 0.040 ms | 2.2 ms | 2.06 ms |
+| 2^24 | 0.91 ms (batched 0.87) | 32 to 34 ms | 10.7 ms x 3 slabs |
+
+The GPU time is the cost, not the host side. The emitted kernel has 17 functions and 23 calls per invocation, 263 stores and
+339 loads, and each call manages a frame; the reference has one function with two loads, an add and a store. The frame is 96
+bytes (`T` line of the manifest): mostly the 72-byte `nd_item` the SYCL lambda receives by reference, plus the index. At 2^24
+that is 1.6 GB of stack, larger than the 1 GB default heap (`NFCXX_SYCL_HEAP_MB`), so the grid runs in three slabs.
+
+What would shrink it: inlining the SYCL helper functions at the call (the PTX emitter's `--inline=device` does this for device
+helpers, `tools/pathb-ptx-emit/emit_fn.cpp`) and scalarizing the aggregate temporaries, so that a helper's `nd_item` is not a
+frame copy. Neither exists in `scripts/pathb-spirv-emit.rb` yet.
+
+The IR inliner (`NFCXX_IR_OPT=inline`, docs/notes/pathb-ir-passes.md) removes 21 of the 23 calls of the vecadd kernel and
+brings RADV's instruction count from 779 to 582; the GPU time is the same, since the 96-byte frame of the `nd_item` argument
+remains. Scalar replacement of that struct is the next pass.
+
+Submit slicing (`dispatch()` in `rt_vulkan.hpp`): a grid that is split because a dimension has more groups than the device takes
+(`maxComputeWorkGroupCount`, 2^32 - 1 on RADV) walks its submits with 64-bit counters. With 32-bit counters `ox += lim` wrapped
+below the slab's first group on RADV, the next submit ran groups of the previous slab, their stack index went negative, and the
+GPU wrote below the heap (a page fault, a ring reset, then VK_ERROR_OUT_OF_DEVICE_MEMORY from the submit). `slab_wide` covers it.

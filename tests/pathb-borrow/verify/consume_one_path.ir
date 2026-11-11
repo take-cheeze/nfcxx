@@ -1,0 +1,5 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "finish" (returns void) (nothrow) (noescape) (closed) (args (consume int) (value int)))
+(function "finish" (ret void) (params (param %0 "p" (ptr int)) (param %1 "c" int))
+(decl %0 param) (if %1 (then (drop-state "*%0"))) (return)
+)

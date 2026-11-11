@@ -37,6 +37,8 @@ int main() {
   } catch (const std::logic_error& e) {
     check("exception across TUs", e.what(), "c: 15sst");
   }
+  check("aligned local static", std::to_string(aligned_tag_of_a() == aligned_tag()) +
+        std::to_string(reinterpret_cast<unsigned long>(aligned_tag()) % 16), "10");
   if (failures) return 1;
   std::puts("all checks passed");
   return 0;

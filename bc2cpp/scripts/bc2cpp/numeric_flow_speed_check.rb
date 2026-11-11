@@ -1,0 +1,726 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# NUMERIC_FLOW_SPEED: NumericFlow reads an irep's bytecode facts from its BytecodeIR::Program and
+# derives its Step table from them once (NumericFlow.table, kept in Program#numeric_flow_table); it caches nothing an
+# oracle answers. Host only, under a second:
+#   - the table is built once per Program and reused by every later run (the cache is hit), and there is no second
+#     irep-level cache;
+#   - the successor lists are the Program's own, with OP_ENTER's optional-argument table edges in them, and the
+#     raise and rescue-only targets come from the Program's handler edges;
+#   - it holds bytecode facts only: a run under another oracle (an input that changed) gets that oracle's answers,
+#     and every run asks every question again, in the same order;
+#   - a Program whose irep no longer has the instruction list it decoded raises instead of answering;
+#   - join_state hands back the old state itself when nothing grows (the identity the worklist tests), and
+#     reproduces `nil | nil` for a nil entry;
+#   - the Hash ctx of #transfer and #raise_state still works.
+#
+# Usage: ruby scripts/bc2cpp/numeric_flow_speed_check.rb
+
+require 'set'
+require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/bytecode_ir'
+require_relative '../../tools/bc2cpp/numeric_flow'
+
+failures = []
+check = lambda do |what, condition|
+  puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
+  failures << what unless condition
+end
+
+NF = NumericFlow
+INT = NF::INT
+FLT = NF::FLT
+NIL_ = NF::NIL
+OTHER = NF::OTHER
+
+def insn(addr, op, args)
+  Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
+end
+
+# Answers from a table, and logs every question but respond_to?.
+class LogOracle
+  attr_reader :log
+  attr_accessor :entry, :send_result
+
+  def initialize(entry, send_result)
+    @entry = entry
+    @send_result = send_result
+    @log = []
+  end
+
+  def note(*question) = (@log << question)
+  def entry_mask(_irep, reg) = note(:entry_mask, reg) && @entry.fetch(reg, OTHER)
+  def const_mask(_insn) = note(:const_mask) && OTHER
+  def ivar_slots(_irep) = note(:ivar_slots) && ['n']
+  def ivar_entry_mask(_irep, name) = note(:ivar_entry_mask, name) && INT
+  def ivar_fact_mask(_irep, name) = note(:ivar_fact_mask, name) && INT
+  def send_mask(_irep, index, _insn, state) = note(:send_mask, index, state.dup) && @send_result
+  def pool_mask(_irep, _insn) = note(:pool_mask) && FLT
+  def op_native?(sym) = note(:op_native?, sym) && true
+  def nil_raises?(sym) = note(:nil_raises?, sym) && true
+end
+
+# r2 = 0; while r1; r2 += r3; r4 = r2.f; end; return r2
+loop_body = [insn(0, :LOADI_0, "R2\t(0)"), insn(2, :JMPNOT, "R1\t15"), insn(6, :ADD, "R2\t(R3)"),
+             insn(8, :SEND0, "R4\t:f"), insn(11, :GETIV, "R5\t@n"), insn(13, :JMP, '2'), insn(15, :RETURN, 'R2')]
+irep = Irep.new(label: 'speed', nregs: 6, instructions: loop_body, catch_handlers: [], reps: [], pool: [])
+
+puts '-- scalar truthiness facts (host)'
+false_bit = 1 << 240
+[false, true].each do |known_false|
+  [nil, 0, INT, NIL_, false_bit, INT | NIL_ | false_bit, 1 << 250, -1].each do |mask|
+    [NF::B_IF, NF::B_NOT, NF::B_NIL].each do |branch|
+      [false, true].each do |taken|
+        calls = []
+        oracle = Object.new
+        oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit } if known_false
+        context = NF::Ctx.new(nil, oracle, Set.new, 1, [], {}, [], 1, nil)
+        input = [mask, 0].freeze
+        expected = input
+        unless mask.nil? || mask.zero?
+          narrowed = NF.narrow_branch(branch, taken, mask, known_false ? false_bit : 0,
+                                     known_false ? false_bit : NF::CLASS_BITS)
+          expected = narrowed.zero? ? nil : [narrowed, 0]
+        end
+        actual = NF.narrow_chain(input, 0, branch, taken, context, [])
+        check.call("truth narrowing and oracle calls match for #{[known_false, mask, branch, taken].inspect}",
+                   actual == expected && calls.size == (known_false && mask && !mask.zero? ? 1 : 0) && input == [mask, 0])
+      end
+    end
+  end
+end
+calls = []
+oracle = Object.new
+oracle.define_singleton_method(:false_class_bit) { calls << :false_class_bit; false_bit }
+context = NF::Ctx.new(nil, oracle, Set.new, 2, [], {}, [], 2, nil)
+input = [INT | NIL_ | false_bit, INT | NIL_ | false_bit, 2, 1].freeze
+check.call('cyclic provenance keeps one oracle query per visited register and preserves the input',
+           NF.narrow_chain(input, 0, NF::B_IF, true, context, []) == [INT, INT, 2, 1] &&
+           calls == [:false_class_bit, :false_class_bit] && input[0] == (INT | NIL_ | false_bit))
+
+puts '-- step table (host)'
+first = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
+states = NF.states(irep, first, Set.new)
+program = BytecodeIR.for(irep)
+plan = program.numeric_flow_table
+check.call('the first run derives the table once, on the Program', plan.is_a?(NF::Table) && plan.supported &&
+           plan.steps.size == loop_body.size)
+check.call('no second irep-level cache',
+           irep.instance_variables.sort == (Irep.new.instance_variables + [:@bytecode_ir]).sort)
+check.call('steps take op, branch kind and target from the BytecodeIR decode',
+           plan.steps[1].op == :JMPNOT && plan.steps[1].branch == BytecodeIR::COND_NOT && plan.steps[1].goto == 6 &&
+           program.decoded[1].goto == 6 && program.decoded[1].reg == 1 && program.decoded[5].goto == 1 &&
+           program.decoded[2].cond.nil? && program.decoded[2].goto.nil?)
+check.call('the flow answers as before: an Integer counter at the loop head', states[1][2] == INT && states[6][2] == INT)
+again = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
+states_again = NF.states(irep, again, Set.new)
+check.call('a second run reuses the table (cache hit)', BytecodeIR.for(irep).numeric_flow_table.equal?(plan))
+check.call('and asks the oracle every question again, in the same order', again.log == first.log && !first.log.empty?)
+check.call('equal answers give equal states', states_again == states)
+
+changed = LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT)
+states_changed = NF.states(irep, changed, Set.new)
+check.call('a changed entry answer reaches the result through the same plan', states_changed[1][2] == (INT | FLT))
+changed_send = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT)
+check.call('a changed send answer reaches the result', NF.states(irep, changed_send, Set.new)[5][4] == FLT)
+check.call('an opaque register is an input too', NF.states(irep, LogOracle.new({ 1 => INT, 3 => INT }, INT), Set[2])[1][2] == OTHER)
+writes = {}
+NF.states(irep, LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT), Set.new, writes)
+check.call('writes collect every store', writes[2] == INT && writes[4] == INT && writes[5] == INT)
+
+clone = irep.dup
+clone.label = 'speed~spec'
+check.call('a shallow copy of the irep (same instructions) shares the Program and its table',
+           NF.states(clone, LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT), Set.new) == states)
+
+stale = irep.dup
+stale.instructions = loop_body.dup
+raised = begin
+  NF.states(stale, LogOracle.new({}, INT), Set.new)
+  false
+rescue RuntimeError => e
+  e.message.include?('no longer matches')
+end
+check.call('a Program whose irep has another instruction list raises', raised)
+
+puts '-- shared bytecode facts (host)'
+# def f(a, b = 1, c = 2); r = 0; begin; r = a; rescue; r = 1; ensure; r = 2; end; r; end, flattened: ENTER with two
+# optional arguments jumps into a three-entry JMP table; one rescue and one ensure handler share a range.
+enter_body = [insn(0, :ENTER, "1:2:0:0:0:0:0:0\t(0x0)"), insn(4, :JMP, '13'), insn(7, :JMP, '10'),
+              insn(10, :LOADI_1, "R2\t(1)"), insn(13, :LOADI_2, "R3\t(2)"), insn(16, :MOVE, "R4\tR1"),
+              insn(19, :EXCEPT, 'R5'), insn(21, :LOADI_1, "R4\t(1)"), insn(23, :RETURN, 'R4')]
+handlers = [CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 19),
+            CatchHandler.new(type: :ensure, begin_addr: 16, end_addr: 19, target: 21)]
+enter_irep = Irep.new(label: 'enter', nregs: 6, instructions: enter_body, catch_handlers: handlers, reps: [], pool: [])
+ep = BytecodeIR.for(enter_irep)
+check.call('ENTER reaches every optional-argument table entry', ep.successor_lists[0] == [1, 2, 3])
+check.call('successor lists are the instructions\' own',
+           ep.successor_lists.each_with_index.all? { |s, k| s.equal?(ep.instruction_at(k).successors) })
+check.call('raise targets: per protected instruction, in handler order', ep.raise_targets == { 5 => [6, 7] })
+check.call('rescue-only: a rescue target that no ensure shares', ep.rescue_only_targets == Set[6])
+check.call('raise target cache and each target list are frozen',
+           ep.raise_targets.frozen? && ep.raise_targets.values.all?(&:frozen?))
+shared_handlers = [handlers[0], handlers[0],
+                   CatchHandler.new(type: :ensure, begin_addr: 16, end_addr: 19, target: 19),
+                   CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 21),
+                   CatchHandler.new(type: :rescue, begin_addr: 19, end_addr: 19, target: 23),
+                   CatchHandler.new(type: :rescue, begin_addr: 16, end_addr: 19, target: 999)]
+shared = BytecodeIR::Program.new(Irep.new(label: 'shared', instructions: enter_body, catch_handlers: shared_handlers))
+check.call('duplicate targets retain first-seen order and unresolved targets are omitted',
+           shared.raise_targets == { 5 => [6, 7] } && !shared.handlers_resolved?)
+check.call('ensure excludes a shared rescue target; empty ranges add no target',
+           shared.rescue_only_targets == Set[7] && shared.rescue_only_targets.frozen?)
+empty = BytecodeIR::Program.new(Irep.new(label: 'empty', instructions: enter_body, catch_handlers: []))
+check.call('no handlers produce empty frozen caches',
+           empty.raise_targets == {} && empty.raise_targets.frozen? &&
+           empty.rescue_only_targets == Set.new && empty.rescue_only_targets.frozen?)
+check.call('successors_of merges the raise targets', ep.successors_of(5, include_handlers: true) == [6, 7])
+NF.states(enter_irep, LogOracle.new({ 1 => INT }, INT), Set.new)
+check.call('the flow runs on the shared facts', ep.numeric_flow_table&.supported)
+
+puts '-- scalar DFS worklist ranks (host)'
+# Keep the pair-stack traversal as the ordering oracle: rank order controls later oracle calls.
+reference_rank = lambda do |n, succ, raises, context_edges|
+  order = []
+  seen = Array.new(n, false)
+  stack = [[0, false]]
+  until stack.empty?
+    node, finished = stack.pop
+    if finished
+      order << node
+      next
+    end
+    next if seen[node]
+
+    seen[node] = true
+    stack << [node, true]
+    outs = context_edges&.key?(node) ? context_edges.fetch(node) : succ[node]
+    handlers = raises[node]
+    (handlers ? outs + handlers : outs).reverse_each { |target| stack << [target, false] unless seen[target] }
+  end
+  rank = Array.new(n, n)
+  order.reverse_each.with_index { |node, r| rank[node] = r }
+  rank
+end
+random = Random.new(42)
+rank_cases = 512.times.map do |bits|
+  succ = Array.new(3) { |node| (0...3).select { |target| bits[3 * node + target] == 1 } }
+  [3, succ, {}, nil]
+end
+200.times do
+  n = random.rand(1..50)
+  edges = -> { Array.new(random.rand(0..4)) { random.rand(n) } }
+  succ = Array.new(n) { edges.call }
+  raises = (0...n).select { random.rand(3).zero? }.to_h { |node| [node, edges.call] }
+  contexts = (0...n).select { random.rand(3).zero? }.to_h { |node| [node, edges.call] }
+  rank_cases << [n, succ, raises, contexts]
+end
+chain_size = 2000
+rank_cases << [chain_size, Array.new(chain_size) { |node| node + 1 < chain_size ? [node + 1] : [] }, {}, nil]
+check.call('DFS ranks match pair-stack order on every three-node graph, random handler/context graphs and a deep chain',
+           rank_cases.all? { |args| NF.worklist_rank(*args) == reference_rank.call(*args) })
+check.call('instruction zero exit marker and unreachable ranks are distinct',
+           NF.worklist_rank(3, [[], [], []], {}, nil) == [0, 3, 3])
+
+puts '-- join_state (host)'
+old = [INT, FLT, 0, 3]
+check.call('no growth: the old state itself', NF.join_state(old, [INT, 0, 0, 3], 2).equal?(old))
+check.call('an equal state: the old state itself', NF.join_state(old, old.dup, 2).equal?(old))
+grown = NF.join_state(old, [FLT, FLT, 0, 3], 2)
+check.call('growth: a new state, the old one untouched', grown == [INT | FLT, FLT, 0, 3] && old == [INT, FLT, 0, 3])
+check.call('a provenance that disagrees is dropped', NF.join_state(old, [INT, FLT, 0, 4], 2) == [INT, FLT, 0, 0])
+check.call('nothing joined yet: a copy of the edge', NF.join_state(nil, old, 2) == old && !NF.join_state(nil, old, 2).equal?(old))
+check.call('a nil entry joins to false, as `nil | nil` does', NF.join_state([nil, 0], [nil, 0], 1) == [false, 0])
+
+# Distinct wide integers with equal values must not obscure another register's growth.
+wide = (1 << 200) | INT
+other_wide = wide.to_s.to_i
+wide_old = [wide, INT, 2]
+check.call('equal wide masks survive another mask growing',
+           !wide.equal?(other_wide) && NF.join_state(wide_old, [other_wide, FLT, 2], 2) == [wide, INT | FLT, 2])
+invalid_mask_raises = begin
+  NF.join_state([INT, INT], [INT.to_f, FLT], 2)
+  false
+rescue TypeError
+  true
+end
+check.call('an equal-valued Float still raises as an invalid mask', invalid_mask_raises)
+random = Random.new(467)
+join_matches = 2_000.times.all? do
+  masks = Array.new(6) { random.rand(-1 << 240...1 << 240) }
+  incoming = masks.map { |mask| random.rand(2).zero? ? mask.to_s.to_i : random.rand(-1 << 240...1 << 240) }
+  previous = masks + [random.rand(4), random.rand(4)]
+  incoming += [random.rand(4), random.rand(4)]
+  expected = previous.each_with_index.map { |mask, reg| reg < 6 ? mask | incoming[reg] : mask == incoming[reg] ? mask : 0 }
+  original = previous.dup
+  NF.join_state(previous, incoming, 6) == expected && previous == original
+end
+check.call('wide and negative masks retain union and provenance behavior across 2,000 joins', join_matches)
+
+puts '-- opaque registers (host)'
+[Set.new, Set[0, 2, 2, 8, 1]].each do |opaque|
+  context = NF::Ctx.new(nil, Object.new, opaque, 4, [], {}, [], 4, nil)
+  check.call("opaque register membership matches canonical integers: #{opaque.to_a.inspect}",
+             context.opq == Array.new(4) { |reg| opaque.include?(reg) } && context.opq.frozen?)
+end
+
+puts '-- Hash ctx (host)'
+FakeCall = Struct.new(:op, :reg)
+hash_oracle = Object.new
+hash_oracle.define_singleton_method(:send_mask) { |*_args| NF::STR }
+ctx = { oracle: hash_oracle, irep: nil, nregs: 4, slots: ['@value'], facts: [OTHER], slot_of: { '@value' => 4 },
+        prov_base: 5, opaque: Set.new, writes: nil }
+state = [OTHER, NF::STR, INT, OTHER, INT, 0, 0, 1, 0]
+after = NF.transfer(0, FakeCall.new(:SEND0, 1), state, ctx)
+check.call('transfer: the call result, the frame above it and the slot widened',
+           after[1] == NF::STR && after[2] == OTHER && after[4] == (INT | OTHER) && after[5, 4].all?(&:zero?))
+raised_state = NF.raise_state(FakeCall.new(:SEND0, 1), state, after, ctx)
+check.call('raise_state joins the widened state with the result', raised_state[1] == (NF::STR | OTHER))
+
+puts '-- scalar result states (host)'
+scalar_instructions = [insn(0, :GETCONST, "R1\t:Known"), insn(0, :GETUPVAR, "R1\t0\t1"),
+                       insn(0, :ARRAY, "R1\t0"), insn(0, :HASH, "R1\t0"), insn(0, :ARYPUSH, "R1\t1"),
+                       insn(0, :ADD, "R1\t(R2)"), insn(0, :ADDI, "R1\t1"), insn(0, :DIV, "R1\t(R2)"),
+                       insn(0, :GETIDX, "R1\t(R2)"), insn(0, :AREF, "R1\tR2\t0"), insn(0, :EXCEPT, 'R1'),
+                       insn(0, :KEY_P, "R1\t:flag"), insn(0, :KARG, "R1\t:flag"), insn(0, :LAMBDA, "R1\tI[0]")]
+scalar_random = Random.new(539)
+scalar_matches = scalar_instructions.all? do |instruction|
+  method = Irep.new(label: "scalar-#{instruction.op}", nregs: 3,
+                    instructions: [instruction, insn(4, :RETURN, 'R1')], catch_handlers: [], reps: [], pool: [])
+  40.times.all? do
+    input = Array.new(4) { [INT, FLT, OTHER, NF::ARR, 1 << 240, -1].sample(random: scalar_random) }
+    input += Array.new(3, NF::ELEM_UNKNOWN) + Array.new(3) { scalar_random.rand(3) }
+    input.freeze
+    outputs = [false, true].map do |share|
+      oracle = LogOracle.new({}, INT)
+      oracle.define_singleton_method(:upvar_mask) { |_irep, _insn| note(:upvar_mask) && INT }
+      written = {}
+      context = NF::Ctx.for_run(method, oracle, Set.new, written, Set.new)
+      context.elide_result_copies = share
+      output = NF.transfer(0, instruction, input, context)
+      [output, written, oracle.log]
+    end
+    outputs[0] == outputs[1]
+  end
+end
+check.call('scalar sharing preserves masks, metadata, writes and oracle order across 560 transfers', scalar_matches)
+constant_insn = scalar_instructions.first
+constant_method = Irep.new(label: 'constant-sharing', nregs: 3, instructions: [constant_insn, insn(4, :RETURN, 'R1')],
+                           catch_handlers: [], reps: [], pool: [])
+constant_oracle = LogOracle.new({}, INT)
+constant_context = NF::Ctx.for_run(constant_method, constant_oracle, Set.new, {}, Set.new)
+constant_context.elide_result_copies = true
+constant_state = ([OTHER, OTHER, OTHER, INT] + Array.new(3, NF::ELEM_UNKNOWN) + Array.new(3, 0)).freeze
+quiet_constant = constant_context
+quiet_constant.narrowing(10, [], {}, true)
+quiet_state = (constant_state + Array.new(3, 0)).freeze
+check.call('a quiet unchanged constant shares its frozen incoming state',
+           NF.transfer(0, constant_insn, quiet_state, quiet_constant).equal?(quiet_state))
+constant_context = NF::Ctx.for_run(constant_method, constant_oracle, Set.new, {}, Set.new)
+constant_context.elide_result_copies = true
+constant_state_with_alias = constant_state.dup
+constant_state_with_alias[8] = 1
+constant_state_with_alias.freeze
+constant_result = NF.transfer(0, constant_insn, constant_state_with_alias, constant_context)
+check.call('a silent const lookup copies before slot/provenance invalidation',
+           !constant_result.equal?(constant_state_with_alias) && constant_result[8].zero? && constant_state_with_alias[8] == 1)
+
+puts '-- slot widening fixed points (host)'
+saved_slot_unions = ENV['BC2CPP_NUMERIC_SLOT_UNIONS']
+begin
+  [1 << 240, (1 << 260) | FLT, -1].each do |fact|
+    results = %w[0 1].map do |mode|
+      ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] = mode
+      oracle = LogOracle.new({ 1 => INT | NIL_, 3 => INT }, INT)
+      oracle.define_singleton_method(:ivar_entry_mask) { |_irep, name| note(:ivar_entry_mask, name) && (1 << 200) }
+      oracle.define_singleton_method(:ivar_fact_mask) { |_irep, name| note(:ivar_fact_mask, name) && fact }
+      written = {}
+      [NF.states(irep, oracle, Set.new, written), written, oracle.log]
+    end
+    check.call("slot union reuse preserves states, writes and oracle order for #{fact}", results[0] == results[1])
+  end
+ensure
+  ENV['BC2CPP_NUMERIC_SLOT_UNIONS'] = saved_slot_unions
+end
+[nil, false, true, INT.to_f].each do |invalid|
+  answers = [nil, [nil]].map do |cache|
+    context = NF::Ctx.new(nil, Object.new, Set.new, 1, ['n'], { 'n' => 1 }, [INT], 2, nil)
+    context.widened_slots = cache
+    input = [OTHER, invalid, 0]
+    begin
+      NF.refresh_slots(input, context)
+      input
+    rescue TypeError, NoMethodError => error
+      error.class
+    end
+  end
+  check.call("slot union reuse preserves malformed #{invalid.inspect} behavior", answers[0] == answers[1])
+end
+slot_contexts = 2.times.map { NF::Ctx.new(nil, Object.new, Set.new, 2, ['n'], { 'n' => 2 }, [(1 << 220) | INT], 3, nil) }
+slot_contexts[1].widened_slots = [nil]
+slot_states = 2.times.map { [INT, FLT, 1 << 200, 1, 0] }
+slot_sequence = [nil, nil, FLT, nil, 0, nil, -1, nil, 1 << 260, nil, nil]
+slot_matches = slot_sequence.all? do |replacement|
+  slot_states.each_with_index do |input, mode|
+    input[2] = replacement unless replacement.nil?
+    input[3] = 1
+    NF.refresh_slots(input, slot_contexts[mode])
+  end
+  slot_states[0] == slot_states[1] && slot_states[1][3, 2] == [0, 0]
+end
+check.call('repeated widening after slot rewrites preserves masks and provenance invalidation', slot_matches)
+mutable_facts = [1 << 200]
+manual_slots = NF::Ctx.new(nil, Object.new, Set.new, 2, ['n'], { 'n' => 2 }, mutable_facts, 3, nil)
+slot_input = [INT, FLT, INT, 1, 0]
+NF.refresh_slots(slot_input, manual_slots)
+mutable_facts[0] = 1 << 250
+NF.refresh_slots(slot_input, manual_slots)
+check.call('standalone contexts still observe mutated slot facts',
+           manual_slots.widened_slots.nil? && slot_input[2] == (INT | (1 << 200) | (1 << 250)))
+
+puts '-- unchanged load writes (host)'
+load_context = lambda do |writes, opaque = Set.new|
+  context = NF::Ctx.new(nil, Object.new, opaque, 4, ['n'], { 'n' => 4 }, [INT], 9, writes)
+  context.elem_base = 5
+  context.narrowing(13, [[[3].freeze, Object.new]].freeze, {}, false)
+  context
+end
+clean_load = [OTHER, INT, OTHER, OTHER, INT] + Array.new(4, NF::ELEM_UNKNOWN) + Array.new(8, 0)
+clean_load.freeze
+load_writes = {}
+unchanged = NF.copy_reg_write(clean_load, 1, INT, load_context.call(load_writes))
+check.call('an unchanged load shares its frozen input and still records writes', unchanged.equal?(clean_load) && load_writes == { 1 => INT })
+[[1, FLT], [10, 1], [6, INT], [14, 1], [11, 3], [15, 1]].each do |slot, value|
+  input = clean_load.dup
+  input[slot] = value
+  input.freeze
+  actual_writes = {}
+  expected_writes = {}
+  expected = input.dup
+  NF.set_reg(expected, 1, INT, load_context.call(expected_writes))
+  actual = NF.copy_reg_write(input, 1, INT, load_context.call(actual_writes))
+  check.call("changed load metadata at #{slot} is copied and invalidated", !actual.equal?(input) && actual == expected && actual_writes == expected_writes)
+end
+opaque_input = clean_load.dup
+opaque_input[1] = OTHER
+opaque_input.freeze
+check.call('captured registers use the effective OTHER mask before deciding to share',
+           NF.copy_reg_write(opaque_input, 1, INT, load_context.call({}, Set[1])).equal?(opaque_input))
+manual_load = load_context.call({})
+load_instruction = insn(0, :LOADI_1, 'R1 (1)')
+manual_result = NF.transfer(0, load_instruction, clean_load, manual_load)
+check.call('standalone transfer contexts retain copied write results', !manual_result.equal?(clean_load) && manual_result == clean_load)
+hash_load = { irep: nil, oracle: Object.new, opaque: Set.new, nregs: 4, slots: ['n'],
+              slot_of: { 'n' => 4 }, facts: [INT], prov_base: 5, writes: {} }
+hash_input = ([OTHER, INT, OTHER, OTHER, INT] + Array.new(4, 0)).freeze
+hash_result = NF.transfer(0, load_instruction, hash_input, hash_load)
+check.call('legacy Hash transfer contexts retain copied write results', !hash_result.equal?(hash_input) && hash_result == hash_input)
+bottom_input = clean_load.dup
+bottom_input[1] = 0
+bottom_writes = {}
+check.call('an unchanged bottom write still creates its write-union entry',
+           NF.copy_reg_write(bottom_input.freeze, 1, 0, load_context.call(bottom_writes)).equal?(bottom_input) && bottom_writes == { 1 => 0 })
+load_random = Random.new(536)
+matches_loads = 1000.times.all? do
+  input = clean_load.dup
+  input[1] = [INT, FLT, OTHER, 1 << 250, -1].sample(random: load_random)
+  4.times do |register|
+    input[5 + register] = [INT, NF::ELEM_UNKNOWN].sample(random: load_random)
+    input[9 + register] = load_random.rand(7)
+    input[13 + register] = load_random.rand(2)
+  end
+  input.freeze
+  expected_writes, actual_writes = {}, {}
+  expected = input.dup
+  NF.set_reg(expected, 1, INT, load_context.call(expected_writes))
+  context = load_context.call(actual_writes)
+  context.load_readers = { 1 => (0...4).select { |register| input[9 + register] == 3 }.freeze }.freeze
+  actual = NF.copy_reg_write(input, 1, INT, context)
+  actual == expected && actual_writes == expected_writes
+end
+check.call('1,000 randomized load states preserve masks, elements, provenance, tests and writes', matches_loads)
+
+puts '-- shared incoming states (host)'
+# Freeze every input and output at the solver boundary; even a transient in-place write would fail here.
+module ReadonlyFlowInputs
+  def step_transfer(index, insn, step, state, ctx)
+    super(index, insn, step, state.freeze, ctx).freeze
+  end
+
+  def step_raise_state(step, before, after, ctx)
+    super(step, before.freeze, after.freeze, ctx).freeze
+  end
+
+  def step_refine_edge(step, index, target, state, ctx)
+    super(step, index, target, state.freeze, ctx)&.freeze
+  end
+
+  def join_state(old, incoming, prov_base, share_states = false)
+    super(old&.freeze, incoming.freeze, prov_base, share_states).freeze
+  end
+end
+NF.singleton_class.prepend(ReadonlyFlowInputs)
+
+class ClassLogOracle < LogOracle
+  Predicate = Struct.new(:mask) do
+    def narrow(value, truth) = truth ? value & mask : value & ~mask
+  end
+
+  def class_narrowing_active? = true
+  def class_test(_irep, _index, _insn, _state) = [0, Predicate.new(INT)]
+  def const_lookup_quiet? = true
+  def preserves_ivar_slots?(*_args) = true
+end
+
+class_body = [insn(0, :GETIV, "R1\t@n"), insn(3, :MOVE, "R2\tR1"), insn(6, :SEND0, "R2\t:is_a?"),
+              insn(9, :JMPNOT, "R2\t17"), insn(13, :GETIV, "R3\t@n"), insn(16, :RETURN, 'R3'),
+              insn(17, :LOADNIL, 'R3 (nil)'), insn(19, :RETURN, 'R3')]
+class_irep = Irep.new(label: 'shared-class', nregs: 6, instructions: class_body, catch_handlers: [], reps: [], pool: [])
+# Two targets receive exactly the same unrefined edge; rewriting either target must leave the other alone.
+split_body = [insn(0, :JMPNOT, "R1\t9"), insn(4, :LOADI_1, "R2\t(1)"), insn(6, :JMP, '12'),
+              insn(9, :LOADL, "R2\tL[0]"), insn(12, :RETURN, 'R2')]
+split_irep = Irep.new(label: 'shared-split', nregs: 6, instructions: split_body, catch_handlers: [], reps: [], pool: [])
+handler_body = [insn(0, :GETIV, "R1\t@n"), insn(3, :SEND0, "R2\t:f"), insn(6, :RETURN, 'R2'),
+                insn(8, :EXCEPT, 'R3'), insn(10, :RAISEIF, 'R3'), insn(12, :RETURN, 'R1')]
+handler_irep = Irep.new(label: 'shared-handler', nregs: 6, instructions: handler_body,
+                        catch_handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 6, target: 8)],
+                        reps: [], pool: [])
+class_factory = lambda do
+  oracle = ClassLogOracle.new({ 1 => INT | NIL_, 3 => INT }, OTHER)
+  oracle.define_singleton_method(:ivar_entry_mask) { |_irep, name| note(:ivar_entry_mask, name) && (INT | NIL_) }
+  oracle
+end
+element_body = [insn(0, :SENDB, "R2\t:map\tn=0"), insn(4, :MOVE, "R1\tR2"), insn(7, :RETURN, 'R1')]
+element_irep = Irep.new(label: 'shared-elements', nregs: 6, instructions: element_body, catch_handlers: [], reps: [], pool: [])
+element_factory = lambda do
+  oracle = LogOracle.new({}, INT)
+  oracle.define_singleton_method(:block_send_mask) { |*_args| NF::ARR }
+  oracle.define_singleton_method(:block_element_mask) { |*_args| INT }
+  oracle
+end
+context_factory = lambda do
+  oracle = LogOracle.new({ 1 => INT }, INT)
+  oracle.define_singleton_method(:context_enter_edges) { { 0 => [3] }.freeze }
+  oracle
+end
+loads_factory = lambda do
+  oracle = LogOracle.new({}, INT)
+  oracle.define_singleton_method(:loadself_mask) { note(:loadself_mask) && NF::ARR }
+  oracle.define_singleton_method(:literal_class_mask) { |instruction| note(:literal_class_mask, instruction.op) && (1 << 200) }
+  oracle
+end
+loads_body = Irep.new(label: 'repeated-loads', nregs: 4, catch_handlers: [], reps: [],
+                     pool: ['text', { type: :float, value: '1.5' }], instructions: [
+  insn(0, :LOADI_1, 'R1 (1)'), insn(1, :LOADI_1, 'R1 (1)'),
+  insn(2, :LOADSELF, 'R1 (R0)'), insn(3, :LOADSELF, 'R1 (R0)'),
+  insn(4, :LOADL, 'R1 L[1]'), insn(5, :LOADL, 'R1 L[1]'),
+  insn(6, :LOADSYM, 'R1 :value'), insn(7, :LOADSYM, 'R1 :value'),
+  insn(8, :STRING, 'R1 L[0]'), insn(9, :STRING, 'R1 L[0]'),
+  insn(10, :LOADNIL, 'R1 (nil)'), insn(11, :LOADNIL, 'R1 (nil)'), insn(12, :RETURN, 'R1')])
+alias_loads = Irep.new(label: 'load-alias-invalidation', nregs: 4, catch_handlers: [], reps: [], pool: [], instructions: [
+  insn(0, :LOADI_1, 'R1 (1)'), insn(1, :MOVE, 'R2 R1'), insn(2, :MOVE, 'R2 R1'),
+  insn(3, :LOADI_1, 'R1 (1)'), insn(4, :RETURN, 'R2')])
+alias_plan = NF.table(BytecodeIR.for(alias_loads))
+check.call('the immutable load-reader index records MOVE destinations without duplicates',
+           alias_plan.load_readers == { 1 => [2] } && alias_plan.load_readers.frozen? && alias_plan.load_readers[1].frozen?)
+cases = [
+  ['repeated loads and oracle order', loads_body, Set.new, loads_factory],
+  ['same-class rewrite invalidates register aliases', alias_loads, Set.new, loads_factory],
+  ['loop and ivar provenance', irep, Set.new, -> { LogOracle.new({ 1 => INT | NIL_, 3 => FLT }, INT) }],
+  ['captured registers', irep, Set[1, 2], -> { LogOracle.new({ 1 => INT | NIL_, 3 => INT }, FLT) }],
+  ['optional entry, rescue and ensure', enter_irep, Set.new, -> { LogOracle.new({ 1 => INT }, INT) }],
+  ['sibling branch isolation', split_irep, Set.new, -> { LogOracle.new({}, INT) }],
+  ['raising call, slots and EXCEPT/RAISEIF', handler_irep, Set.new, -> { LogOracle.new({}, FLT) }],
+  ['class-test slot narrowing', class_irep, Set.new, class_factory],
+  ['element block on block calls', element_irep, Set.new, element_factory],
+  ['context-specific ENTER edges', enter_irep, Set.new, context_factory]
+]
+footprint_body = Irep.new(label: 'delta-transfer-footprints', nregs: 64, catch_handlers: [], reps: [], pool: [], instructions: [
+  insn(0, :GETIV, "R1\t@n"), insn(1, :MOVE, "R2\tR1"), insn(2, :MOVE, "R3\tR2"),
+  insn(3, :SEND0, "R3\t:is_a?"), insn(4, :LOADNIL, 'R1 (nil)'), insn(5, :SETIV, "@n\tR1"),
+  insn(6, :GETCONST, "R4\t:Known"), insn(7, :RESCUE, "R4\tR5"), insn(8, :ADDILV, "R1\tR6\t1"),
+  insn(9, :SETIDX, "R2\t(R3)\t(R4)"), insn(10, :SENDB, "R4\t:map\tn=0"), insn(11, :RETURN, 'R1')])
+cases << ['wide frame with slot stores, silent calls, rescue and multi-register writes', footprint_body, Set[2], class_factory]
+cases.each do |name, body, opaque, factory|
+  shared_oracle = factory.call
+  copied_oracle = factory.call
+  shared_writes = {}
+  copied_writes = {}
+  previous_elision = ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION']
+  begin
+    ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = '1'
+    shared = NF.states(body, shared_oracle, opaque, shared_writes, share_states: true)
+    ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = '0'
+    copied = NF.states(body, copied_oracle, opaque, copied_writes, share_states: false)
+  ensure
+    previous_elision ? ENV['BC2CPP_NUMERIC_LOAD_COPY_ELISION'] = previous_elision : ENV.delete('BC2CPP_NUMERIC_LOAD_COPY_ELISION')
+  end
+  check.call("#{name}: frozen-state results, writes and oracle order match copied edges",
+             shared && shared == copied && shared_writes == copied_writes && shared_oracle.log == copied_oracle.log)
+  if body.equal?(class_irep)
+    check.call('the class-test fixture narrows the shared slot on its truthy edge', shared[4][6] == INT)
+  elsif body.equal?(element_irep)
+    check.call('the block-call fixture carries its element mask to the successor', shared[1][9] == INT)
+  end
+end
+noop_body = Irep.new(label: 'shared-noop', nregs: 2, instructions: [insn(0, :NOP, ''), insn(1, :RETURN, 'R1')],
+                     catch_handlers: [], reps: [], pool: [])
+shared_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: true)
+copied_noop = NF.states(noop_body, LogOracle.new({}, INT), Set.new, share_states: false)
+check.call('a read-only edge shares its first state only in sharing mode',
+           shared_noop[0].equal?(shared_noop[1]) && !copied_noop[0].equal?(copied_noop[1]))
+previous_sharing = ENV['BC2CPP_NUMERIC_SHARE_STATES']
+begin
+  ENV['BC2CPP_NUMERIC_SHARE_STATES'] = '0'
+  withdrawn = NF.states(noop_body, LogOracle.new({}, INT), Set.new)
+  check.call('the opt-out restores separate first-edge copies', !withdrawn[0].equal?(withdrawn[1]))
+ensure
+  previous_sharing ? ENV['BC2CPP_NUMERIC_SHARE_STATES'] = previous_sharing : ENV.delete('BC2CPP_NUMERIC_SHARE_STATES')
+end
+shared_edge = [INT, FLT, 0, 3].freeze
+check.call('explicit first-edge sharing retains the incoming state', NF.join_state(nil, shared_edge, 2, true).equal?(shared_edge))
+check.call('subsequent growth copies the shared edge without modifying it',
+           NF.join_state(shared_edge, [FLT, FLT, 0, 4], 2, true) == [INT | FLT, FLT, 0, 0] &&
+           shared_edge == [INT, FLT, 0, 3])
+
+puts '-- unchanged ivar and rescue reads (host)'
+read_ops = [insn(0, :GETIV, "R1\t@n"), insn(0, :GETIV, "R1\t@missing"), insn(0, :RESCUE, "R0\tR1")]
+read_ops.each do |instruction|
+  provenance = instruction.op == :GETIV && instruction.ivar == 'n' ? 1 : 0
+  input = clean_load.dup
+  input[1] = provenance == 1 ? INT : OTHER
+  input[10] = provenance
+  input.freeze
+  context = load_context.call(writes = {})
+  context.elide_read_copies = true
+  actual = NF.transfer(0, instruction, input, context)
+  check.call("#{instruction.args}: an unchanged read shares its frozen input and records writes",
+             actual.equal?(input) && writes == { 1 => input[1] })
+end
+read_step = NF.decode_step(read_ops.first)
+read_input = clean_load.dup
+read_input[10] = 1
+read_input.freeze
+read_allocations = [false, true].map do |share|
+  context = load_context.call({})
+  context.elide_read_copies = share
+  50.times { NF.step_transfer(0, read_ops.first, read_step, read_input, context) }
+  before_allocations = GC.stat(:total_allocated_objects)
+  1_000.times { NF.step_transfer(0, read_ops.first, read_step, read_input, context) }
+  GC.stat(:total_allocated_objects) - before_allocations
+end
+check.call('unchanged read sharing removes the per-transfer state Array allocation',
+           read_allocations[0] >= 1_000 && read_allocations[1] < 20)
+read_random = Random.new(20261031)
+read_matches = 1_000.times.all? do
+  instruction = read_ops.sample(random: read_random)
+  input = clean_load.dup
+  input[1] = [INT, FLT, OTHER, 1 << 250, -1].sample(random: read_random)
+  input[4] = [INT, FLT, OTHER, 1 << 250].sample(random: read_random)
+  4.times do |register|
+    input[5 + register] = [INT, NF::ELEM_UNKNOWN].sample(random: read_random)
+    input[9 + register] = read_random.rand(7)
+    input[13 + register] = read_random.rand(2)
+  end
+  input.freeze
+  opaque = read_random.rand(2).zero? ? Set.new : Set[1]
+  answers = [false, true].map do |share|
+    context = load_context.call(writes = {}, opaque)
+    context.elide_read_copies = share
+    [NF.transfer(0, instruction, input, context), writes]
+  end
+  answers[0] == answers[1]
+end
+check.call('1,000 read transfers preserve slot provenance, aliases, elements, class tests and captured writes', read_matches)
+previous_read_elision = ENV['BC2CPP_NUMERIC_READ_COPY_ELISION']
+begin
+  cases.each do |name, body, opaque, factory|
+    answers = %w[0 1].map do |mode|
+      ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] = mode
+      oracle = factory.call
+      writes = {}
+      [NF.states(body, oracle, opaque, writes), writes, oracle.log]
+    end
+    check.call("#{name}: read sharing preserves every state, write and oracle call", answers[0] == answers[1])
+  end
+ensure
+  previous_read_elision ? ENV['BC2CPP_NUMERIC_READ_COPY_ELISION'] = previous_read_elision : ENV.delete('BC2CPP_NUMERIC_READ_COPY_ELISION')
+end
+
+puts '-- state deltas (host)'
+delta_random = Random.new(20261110)
+delta_instructions = scalar_instructions + footprint_body.instructions + [insn(0, :EQ, "R1\t(R2)")]
+delta_matches = delta_instructions.all? do |instruction|
+  40.times.all? do
+    oracle = ClassLogOracle.new({}, INT)
+    oracle.define_singleton_method(:upvar_mask) { |*_args| INT }
+    context = NF::Ctx.for_run(footprint_body, oracle, Set[2], {}, Set.new)
+    context.test_id([[1, 3], ClassLogOracle::Predicate.new(INT)])
+    input = Array.new(context.nregs + context.nslots) { [INT, FLT, OTHER, NF::ARR, NF::NIL].sample(random: delta_random) }
+    input += Array.new(context.nregs) { [INT, NF::ELEM_UNKNOWN].sample(random: delta_random) }
+    input += Array.new(context.nregs) { delta_random.rand(context.nregs + context.nslots + 1) }
+    input += Array.new(context.nregs) { delta_random.rand(2) }
+    step = NF.decode_step(instruction)
+    out = NF.step_transfer(0, instruction, step, input.freeze, context)
+    log, positions = [], []
+    NF.record_delta(log, positions, 0, input, out, step, context)
+    NF.apply_delta(input.dup, log, positions[0]) == out
+  end
+end
+check.call('transfer deltas replay every changed mask, element, slot, alias and test across randomized states', delta_matches)
+# NUMERIC_STATE_DELTAS (docs/bc2cpp-numeric-flow-state.md): counts the delta paths the fixtures reach.
+module DeltaPaths
+  COUNTS = Hash.new(0)
+
+  def unvirtual(t, old, ins, outs, log, dpos)
+    COUNTS[:unvirtual] += 1 if ins[t + 1].equal?(NF::VIRTUAL)
+    super
+  end
+
+  def replay_into(dst, j, ins, log, dpos, known = nil)
+    COUNTS[known ? :built : :replayed] += 1
+    super
+  end
+end
+NF.singleton_class.prepend(DeltaPaths)
+check.call('a straight run chains every instruction after the first',
+           NF.table(BytecodeIR.for(alias_loads)).chain == [false, true, true, true, true])
+check.call('branch successors and join points are not chained',
+           NF.table(BytecodeIR.for(split_irep)).chain == [false, false, true, false, false])
+cases.each do |name, body, opaque, factory|
+  delta_oracle = factory.call
+  copy_oracle = factory.call
+  delta_writes = {}
+  copy_writes = {}
+  delta = NF.states(body, delta_oracle, opaque, delta_writes, deltas: true)
+  copied = NF.states(body, copy_oracle, opaque, copy_writes, deltas: false)
+  check.call("#{name}: delta states, writes and oracle order match the copying worklist",
+             delta.is_a?(NF::States) && copied.is_a?(Array) && delta == copied && copied == delta &&
+             delta.to_a == copied && delta.size == copied.size && delta_writes == copy_writes &&
+             delta_oracle.log == copy_oracle.log)
+end
+check.call('the fixtures rematerialize a revisited chain state, replay a missed cursor and build read states',
+           DeltaPaths::COUNTS[:unvirtual].positive? && DeltaPaths::COUNTS[:replayed].positive? &&
+           DeltaPaths::COUNTS[:built].positive?)
+loads = NF.states(loads_body, loads_factory.call, Set.new)
+virtual = (0...loads.size).select { |k| loads.instance_variable_get(:@ins)[k].equal?(NF::VIRTUAL) }
+check.call('written straight-line states are kept as deltas and built once on read',
+           !virtual.empty? && virtual.all? { |k| loads[k].is_a?(Array) && loads[k].equal?(loads[k]) })
+check.call('negative indices, each and out-of-range reads behave like the Array',
+           loads[-1] == loads.to_a[-1] && loads.each.to_a == loads.to_a && loads[loads.size].nil?)
+previous_deltas = ENV['BC2CPP_NUMERIC_STATE_DELTAS']
+begin
+  ENV['BC2CPP_NUMERIC_STATE_DELTAS'] = '0'
+  check.call('BC2CPP_NUMERIC_STATE_DELTAS=0 restores the copied Array of states',
+             NF.states(loads_body, loads_factory.call, Set.new).instance_of?(Array))
+ensure
+  previous_deltas ? ENV['BC2CPP_NUMERIC_STATE_DELTAS'] = previous_deltas : ENV.delete('BC2CPP_NUMERIC_STATE_DELTAS')
+end
+
+if failures.empty?
+  puts 'bc2cpp numeric flow speed check: PASS'
+else
+  puts "bc2cpp numeric flow speed check: FAIL (#{failures.size})"
+  exit 1
+end

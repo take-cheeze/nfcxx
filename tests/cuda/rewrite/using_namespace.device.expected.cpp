@@ -15,8 +15,12 @@ typedef unsigned long size_t;
 #define __host__
 #define __forceinline__
 #define __align__(n) __attribute__((aligned(n)))
+#define __builtin_align__(n) __attribute__((aligned(n)))
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_unroll(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
+extern "C" unsigned int __nfcxx_float_bits(float);
+extern "C" float __nfcxx_bits_float(unsigned int);
 extern "C" void *__nfcxx_dynshared_addr(void);
 // Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
 extern "C" int printf(const char *, ...);
@@ -62,3 +66,8 @@ void k(float *out) {
     typedef tile<16, 8, float> t;
     out[__nfcxx_tid_x()] = (float) t::rows + (float) N;
 }
+
+
+                                                                                                                
+void kuse(float *out) { out[__nfcxx_tid_x()] = (float) tile<16, 8, float>::cols; }
+extern "C" void __nfcxx_k_k_4(float *out) { k<4>(out); }

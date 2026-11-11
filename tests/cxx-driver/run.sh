@@ -50,6 +50,25 @@ if "$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--whole-archive -o "$tmp/wl_r
 else
   ok "-Wl,--whole-archive is refused"
 fi
+# find_package(Torch)'s form: -Wl,--no-as-needed,LIB -Wl,--as-needed keeps LIB in DT_NEEDED although the program does
+# not reference it (one --no-as-needed for the whole link; the library stays an input in place). ELF only.
+if [ "$(uname -s)" != Darwin ]; then
+  mkdir -p "$tmp/nan"
+  printf 'int unused_by_main(void) { return 1; }\n' > "$tmp/nan/u.c"
+  if cc -shared -fPIC "$tmp/nan/u.c" -o "$tmp/nan/libunused.so" &&
+     out=$("$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--no-as-needed,"$tmp/nan/libunused.so" -Wl,--as-needed \
+             -Wl,-rpath,"$tmp/nan" -o "$tmp/wl_nan" 2>&1); then
+    if readelf -dW "$tmp/wl_nan" | grep -q 'NEEDED.*libunused.so' && "$tmp/wl_nan"; then
+      ok "-Wl,--no-as-needed,LIB ... -Wl,--as-needed keeps LIB (find_package(Torch))"
+    else bad "-Wl,--no-as-needed,LIB keeps LIB" "$(readelf -dW "$tmp/wl_nan" | grep NEEDED | tr '\n' ' ')"; fi
+  else bad "-Wl,--no-as-needed,LIB (link)" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
+  # CMake 4's linker dependency file: a relative path the link writes (it does not exist yet), from the build directory.
+  mkdir -p "$tmp/depdir/CMakeFiles/t.dir"
+  if out=$(cd "$tmp/depdir" && "$nfcxx" -Wl,--dependency-file=CMakeFiles/t.dir/link.d "$tmp/src/wl.cpp" "$tmp/src/a.cpp" \
+             -o "$tmp/wl_dep" 2>&1) && [ -s "$tmp/depdir/CMakeFiles/t.dir/link.d" ]; then
+    ok "-Wl,--dependency-file=RELATIVE is written where CMake reads it"
+  else bad "-Wl,--dependency-file=RELATIVE" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
+fi
 if [ -x "$tmp/main" ]; then
   "$tmp/main"; got=$?
   [ "$got" -eq 42 ] && ok "-isystem header is used (exit 42)" || bad "-isystem header is used" "exit $got, want 42"
@@ -123,6 +142,98 @@ if [ -x "$tmp/quote_gxx" ] && "$nfcxx" -I "$tmp/quote/inc" "$tmp/quote/src/quote
 else
   bad "quoted include: nfcxx links and runs" "compile or link failed"
 fi
+
+# 12. Intermediates: a compile and link leaves no .ii, .ti or .o in its directory; NFCXX_KEEP_INTERMEDIATES=1 keeps the
+# records in the directory the driver names on stderr. The sources use a template, so the prelinker writes records (in
+# NFCXX_INSTANTIATE=auto, the prelinker's mode; the default instantiates in each unit and has no records).
+mkdir -p "$tmp/cwd" && printf 'template <class T> T twice(T x) { return x + x; }\n' > "$tmp/cwd/common.h"
+printf '#include "common.h"\nint fx(int v) { return twice(v); }\n' > "$tmp/cwd/x.cpp"
+printf 'int fx(int);\nint main() { return fx(2) == 4 ? 0 : 1; }\n' > "$tmp/cwd/main.cpp"
+(cd "$tmp/cwd" && "$nfcxx" -o prog x.cpp main.cpp >/dev/null 2>&1 && ./prog); got=$?
+if [ "$got" -eq 0 ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
+  ok "compile and link leave no .ii, .ti or .o in the directory"
+else
+  bad "compile and link leave no .ii, .ti or .o in the directory" "exit $got, $(ls -A "$tmp/cwd" | tr '\n' ' ')"
+fi
+keep_msg=$(cd "$tmp/cwd" && NFCXX_INSTANTIATE=auto NFCXX_KEEP_INTERMEDIATES=1 "$nfcxx" -o prog2 x.cpp main.cpp 2>&1 >/dev/null | grep 'intermediates kept in' | sed 's/.*kept in \([^ ]*\).*/\1/')
+if [ -n "$keep_msg" ] && [ -f "$keep_msg/x.ti" ] && [ -z "$(ls -A "$tmp/cwd" | grep -E '\.(ii|ti|o)$')" ]; then
+  ok "NFCXX_KEEP_INTERMEDIATES=1 keeps the records in the named directory"
+else
+  bad "NFCXX_KEEP_INTERMEDIATES=1 keeps the records" "named '$keep_msg'"
+fi
+[ -n "$keep_msg" ] && rm -rf "$keep_msg"
+
+# 13. -c recompile clears the records of the object it compiles. Link x.o alone (writes x.ii), compile y.o and link it
+# alone (writes y.ii), recompile x.o, then link both: the stale x.ii must not make an instance assigned to two objects.
+mkdir -p "$tmp/rec" && cp "$tmp/cwd/common.h" "$tmp/rec/"
+printf '#include "common.h"\nint fy(int v) { return twice(v); }\n' > "$tmp/rec/y.cpp"
+printf 'int fx(int);\nint main() { return fx(1) == 2 ? 0 : 1; }\n' > "$tmp/rec/mx.cpp"
+printf 'int fy(int);\nint main() { return fy(2) == 4 ? 0 : 1; }\n' > "$tmp/rec/my.cpp"
+cp "$tmp/cwd/x.cpp" "$tmp/cwd/main.cpp" "$tmp/rec/"
+(cd "$tmp/rec" && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p1 x.o mx.cpp \
+  && "$nfcxx" -c y.cpp -o y.o && "$nfcxx" -o p2 y.o my.cpp \
+  && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p3 x.o y.o main.cpp) >"$tmp/rec.log" 2>&1
+if [ $? -eq 0 ] && (cd "$tmp/rec" && ./p3); then
+  ok "-c recompile clears the object's records (no instance assigned to two objects)"
+else
+  bad "-c recompile clears the object's records" "$(grep -m2 'prelinker: error' "$tmp/rec.log")"
+fi
+
+# 14. A link leaves no records beside its objects. Link x.o alone and y.o alone (each assigns twice<int> to its object),
+# then link both without recompiling either: the earlier links' assignments must not make an instance assigned to two objects.
+mkdir -p "$tmp/rel" && cp "$tmp/rec/common.h" "$tmp/rec/y.cpp" "$tmp/rec/x.cpp" "$tmp/rec/mx.cpp" "$tmp/rec/my.cpp" "$tmp/rel/"
+printf 'int fx(int);\nint fy(int);\nint main() { return fx(2) == 4 && fy(2) == 4 ? 0 : 1; }\n' > "$tmp/rel/main.cpp"
+(cd "$tmp/rel" && "$nfcxx" -c x.cpp -o x.o && "$nfcxx" -o p1 x.o mx.cpp && ./p1 \
+  && "$nfcxx" -c y.cpp -o y.o && "$nfcxx" -o p2 y.o my.cpp && ./p2 \
+  && "$nfcxx" -o p3 x.o y.o main.cpp && ./p3) >"$tmp/rel.log" 2>&1
+if [ $? -eq 0 ]; then
+  ok "link of objects that earlier links used (no recompile) has no instance assigned to two objects"
+else
+  bad "link of objects that earlier links used (no recompile)" "$(grep -m2 'prelinker: error' "$tmp/rel.log")"
+  echo "--- test 14 log (tail of all three builds' stdout and stderr) ---"; tail -40 "$tmp/rel.log"; echo "---"
+  # the twice<int> symbol in each object of the final link (nm -m on Mach-O shows weak and strong marks too)
+  nm_cmd="nm"; [ "$(uname -s)" != Darwin ] || nm_cmd="nm -m"
+  for o in x.o y.o; do echo "--- test 14 $o:"; (cd "$tmp/rel" && $nm_cmd "$o" 2>&1 | grep -i twice); done
+  echo "--- test 14 files in $tmp/rel:"; ls -la "$tmp/rel"
+fi
+
+# 15. NFCXX_CACHE (docs/notes/cxx-driver.md): a -c compile is kept, and a later identical compile takes the copy. In
+# NFCXX_INSTANTIATE=auto the template instance comes from the prelinker's records, so the restored .ti must come back with the
+# object for the link to find it (the default mode has no records: its object holds the instance);
+# a changed header is compiled again, and reverting it takes the first copy.
+c15=$tmp/cache15; mkdir -p "$c15/o"
+printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+printf '#include "tpl.h"\nint run_tpl(void) { return twice(20) + BIAS; }\n' > "$c15/tpl.cpp"
+printf 'int run_tpl(void);\nint main(void) { return run_tpl() - 41; }\n' > "$c15/main.cpp"
+export NFCXX_CACHE=$c15/cache NFCXX_INSTANTIATE=auto
+c15_entries() { ls "$c15/cache/objects" 2>/dev/null | wc -l | tr -d ' '; }
+check "cache: a compile is stored" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+check "cache: a restored object links with its records" sh -c "
+  rm -f '$c15/o/tpl.o' '$c15/o/tpl.ti' '$c15/o/tpl.ii' &&
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && test -f '$c15/o/tpl.ti' &&
+  env -u NFCXX_CACHE '$nfcxx' -c '$c15/main.cpp' -o '$c15/o/main.o' &&'$nfcxx' '$c15/o/main.o' '$c15/o/tpl.o' -o '$c15/prog' && '$c15/prog'"
+[ "$(c15_entries)" = 1 ] && ok "cache: one entry for one compile" || bad "cache: one entry for one compile" "$(c15_entries) entries"
+printf '#define BIAS 2\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+check "cache: a changed header is compiled again" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+[ "$(c15_entries)" = 2 ] && ok "cache: changed header gives a second entry" || bad "cache: changed header gives a second entry" "$(c15_entries) entries"
+printf '#define BIAS 1\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+check "cache: reverting the header takes the first copy" "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/tpl.o"
+[ "$(c15_entries)" = 2 ] && ok "cache: reverted header adds no entry" || bad "cache: reverted header adds no entry" "$(c15_entries) entries"
+# NFCXX_CACHE_LOG: each lookup appends its key and hit or miss. The log is no part of the key, so a logged hit keeps its entry.
+export NFCXX_CACHE_LOG=$c15/log; : > "$c15/log"
+check "cache log: a hit is logged with its key" sh -c "
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -q '^key ' '$c15/log' && grep -qx hit '$c15/log' && ! grep -qx miss '$c15/log'"
+printf '#define BIAS 3\ntemplate <class T> T twice(T x) { return x + x; }\n' > "$c15/tpl.h"
+check "cache log: a changed header is logged as a miss" sh -c "
+  '$nfcxx' -c -I '$c15' '$c15/tpl.cpp' -o '$c15/o/tpl.o' && grep -qx miss '$c15/log'"
+# Parallel compiles share the log: each lookup is one whole block, so four lookups give four blocks, keys and states.
+rm -f "$c15/plog"
+for i in 1 2 3 4; do NFCXX_CACHE_LOG=$c15/plog "$nfcxx" -c -I "$c15" "$c15/tpl.cpp" -o "$c15/o/p$i.o" >/dev/null 2>&1 & done
+wait
+n=$(grep -c '^== ' "$c15/plog"); k=$(grep -c '^key ' "$c15/plog"); s=$(grep -cx -e hit -e miss "$c15/plog")
+[ "$n" = 4 ] && [ "$k" = 4 ] && [ "$s" = 4 ] && ok "cache log: parallel compiles keep whole blocks" \
+  || bad "cache log: parallel compiles keep whole blocks" "$n blocks, $k keys, $s states"
+unset NFCXX_CACHE_LOG NFCXX_CACHE NFCXX_INSTANTIATE
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]

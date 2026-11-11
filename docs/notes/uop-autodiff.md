@@ -104,7 +104,7 @@ The rule column is the rule map of onnxsim at the pin (`21f95fd1`, `Rules()` in 
 | `Abs Max Min Concat LogSoftmax ReduceMax ReduceMin` | yes | yes | yes for `abs`, `max-binary`, `min-binary`, `concat`, `log-softmax`, `reduce-max`, `reduce-min` in `test_grad`; the rule of `Pad` and `Where` is not exercised there |
 | `Cast` | yes, for the casts its rule accepts; others are refused ("Cast to N is not differentiated here") | yes | refusal checked; a cast used as a mask is refused |
 | `Sin Cos` | no | yes | no: `Error` "no gradient rule for op type '...'" |
-| `Erf Gemm Gather Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` | yes | yes | yes, but only checked once by finite differences (a float64 graph with all nine: 1.8e-9 and 4.6e-8 relative); not in `test_grad` yet |
+| `Erf Gemm Gather Conv MaxPool AveragePool BatchNormalization InstanceNormalization LayerNormalization` | yes; `Gather` only with a scalar or a rank-1 index (rank-2 indices are refused) | yes | yes: finite differences in float64 in `test_grad` (`hir_forward_fd`, the `wrt` inputs of each case listed there, `Gather` rank-2 indices refused and checked as a refusal) |
 | comparisons, `Not And Or Xor`, `Mod` | no | yes | no: a mask made from a `wrt` (`x * (x > 0)`, `where(x > 0, ...)`) is a path through `Greater` and `Cast`; the same masks off the path of every `wrt` are fine |
 
 Layer normalization written with `mean`/`sqrt`/`div` (as in `layernorm` of the tests), attention with `softmax(q k^T) v`, MLPs with
@@ -118,8 +118,8 @@ are exact.
 
 Honestly, a lot of operator coverage, in exchange for not owning the rules:
 
-* No gradient for `Sin`, `Cos`, comparisons used as masks, `Slice` with a non-positive step, casts the `Cast` rule refuses, and a 1-D
-  `MatMul` operand (`dot` of vectors, matrix-vector products). At the pin, onnxsim also has rules for `Where`, `Pad` and the others in the
+* No gradient for `Sin`, `Cos`, comparisons used as masks, `Slice` with a non-positive step, casts the `Cast` rule refuses, a 1-D
+  `MatMul` operand (`dot` of vectors, matrix-vector products), and `Gather` with rank-2 indices (onnxsim's rule takes a scalar or a rank-1 index). At the pin, onnxsim also has rules for `Where`, `Pad` and the others in the
   table, but only the ones listed there have finite-difference cases.
 * No second derivative of any of those (second derivatives of the supported operators work: `second-softmax-log`,
   `second-tanh-matmul` and others in `test_grad.cpp`).
@@ -153,8 +153,10 @@ reader, which validates dtypes, shapes, names and operators and throws `Error` o
 * `tests/uop/test_onnx.cpp` (no Python needed): round trips, merging, collisions, errors, `Pad`, and models made by the `onnx`
   package (`tests/uop/onnx_import_gen.py`: typed initializers, `Constant` nodes, attributes, float64/int32, slices) that are
   imported and evaluated against onnxruntime (those four skip with a SKIP line when python/onnx/onnxruntime are missing).
-* `tests/uop/test_grad.cpp`: 72 finite-difference cases in float64 (944 derivative elements, largest relative error 1.25e-9),
-  broadcasting in every binary operator, `MatMul` in six rank/batch combinations, reductions, layer norm, attention, two MLPs with
+* `tests/uop/test_grad.cpp`: 92 finite-difference cases in float64 (1872 derivative elements, largest relative error 2.55e-8): 72 on
+  the `np` API (944 elements, largest 1.25e-9) and 20 on `hir` for the nine forward operators (`Gemm Gather Erf Conv MaxPool
+  AveragePool BatchNormalization InstanceNormalization LayerNormalization`, `hir_forward_fd`), plus `Gather` with rank-2 indices
+  checked as a refusal; broadcasting in every binary operator, `MatMul` in six rank/batch combinations, reductions, layer norm, attention, two MLPs with
   softmax cross entropy, shared sub-expressions, second derivatives, hand-derived exact gradients, the operators that stay refused
   (`Sin`, `Cos`, `Greater` as a mask, `Cast`, `Slice` with a negative step, a 1-D `MatMul`) each with the library's message, argument errors, the gradient graph on the C backend equal to the interpreter bit for bit
   (16 arrays), and a child process for each "missing backend" message. It writes four gradient models

@@ -8,10 +8,10 @@
 __global__ void k(const unsigned short *a, unsigned short *o, int n) {
   int i = threadIdx.x;
   if (i < n) {
-    __half x = (__half)a[4 * i];
-    __half y = (__half)a[4 * i + 1];
-    __half z = (__half)a[4 * i + 2];
-    __half w = (__half)a[4 * i + 3];
+    __half x = __ushort_as_half(a[4 * i]);
+    __half y = __ushort_as_half(a[4 * i + 1]);
+    __half z = __ushort_as_half(a[4 * i + 2]);
+    __half w = __ushort_as_half(a[4 * i + 3]);
     __half2 h = __halves2half2(x, y);
     __half2 g = __halves2half2(z, w);
     __half2 hs = __hadd2(h, g);
@@ -19,18 +19,18 @@ __global__ void k(const unsigned short *a, unsigned short *o, int n) {
     __half2 bc = __half2half2(x);
     __half2 lo = __lows2half2(h, g);
     __half2 hi = __highs2half2(h, g);
-    o[12 * i + 0] = (unsigned short)__low2half(h);
-    o[12 * i + 1] = (unsigned short)__high2half(h);
-    o[12 * i + 2] = (unsigned short)__low2half(hs);
-    o[12 * i + 3] = (unsigned short)__high2half(hs);
-    o[12 * i + 4] = (unsigned short)__low2half(hm);
-    o[12 * i + 5] = (unsigned short)__high2half(hm);
-    o[12 * i + 6] = (unsigned short)__low2half(bc);
-    o[12 * i + 7] = (unsigned short)__high2half(bc);
-    o[12 * i + 8] = (unsigned short)__low2half(lo);
-    o[12 * i + 9] = (unsigned short)__high2half(lo);
-    o[12 * i + 10] = (unsigned short)__low2half(hi);
-    o[12 * i + 11] = (unsigned short)__high2half(hi);
+    o[12 * i + 0] = __half_as_ushort(__low2half(h));
+    o[12 * i + 1] = __half_as_ushort(__high2half(h));
+    o[12 * i + 2] = __half_as_ushort(__low2half(hs));
+    o[12 * i + 3] = __half_as_ushort(__high2half(hs));
+    o[12 * i + 4] = __half_as_ushort(__low2half(hm));
+    o[12 * i + 5] = __half_as_ushort(__high2half(hm));
+    o[12 * i + 6] = __half_as_ushort(__low2half(bc));
+    o[12 * i + 7] = __half_as_ushort(__high2half(bc));
+    o[12 * i + 8] = __half_as_ushort(__low2half(lo));
+    o[12 * i + 9] = __half_as_ushort(__high2half(lo));
+    o[12 * i + 10] = __half_as_ushort(__low2half(hi));
+    o[12 * i + 11] = __half_as_ushort(__high2half(hi));
   }
 }
 

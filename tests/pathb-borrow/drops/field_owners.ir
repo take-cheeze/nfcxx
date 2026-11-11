@@ -1,0 +1,7 @@
+(ir-module "drops" (layout (pointer 8) (int 4)))
+
+(function "test" (ret int) (params )
+(slot "s" (struct "Pair") 8 4)
+(drop-obligation "a" int (offset $"s" 0)) (drop-obligation "b" int (offset $"s" 4))
+(decl $"s" val) (store int $"s" (const int 1)) (drop-live "a") (store int (offset $"s" 4) (const int 2)) (drop-live "b")(let %0 int (move-value int (offset $"s" 0))) (drop-state-if-live "a") (drop-state "b")(return (const int 0))
+)

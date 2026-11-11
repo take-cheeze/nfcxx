@@ -1,0 +1,8 @@
+(ir-module "index" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params (param %0 "p" (ptr int)) (param %1 "i" int))
+(decl %0 param) (decl %1 param)
+(let %2 int (load int (offset %0 4)))
+(let %3 int (load int (index @"g" (const int 2) 4)))
+(let %4 (ptr int) (index %0 %1 4)) (store int %4 %2) (let %5 int (load int %4))
+(store (ptr int) (offset @"q" 8) %0)
+(return %3))

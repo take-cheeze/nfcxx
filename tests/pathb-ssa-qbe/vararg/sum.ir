@@ -1,0 +1,38 @@
+(ir-module "vararg.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "sum_ints"
+  (ret long)
+  (params (param %0 "n" int) (ellipsis))
+  (slot "n" int 4 4)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "s" long 8 8)
+  (slot "i" int 4 4)
+  (slot "tmp" long 8 8)
+  (store int $"n" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %1)
+  (store long $"s" (const long 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %2 int (load int $"i"))
+        (let %3 int (load int $"n"))
+        (let %4 bool (lt.s int %2 %3))
+        (if %4 (then) (else (break)))
+        (block
+          (let %5 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+          (let %6 int (vaarg int %5))
+          (let %7 long (iconv long %6))
+          (store long $"tmp" %7)
+          (let %8 long (load long $"tmp"))
+          (let %9 long (load long $"s"))
+          (let %10 long (wadd long %9 %8))
+          (store long $"s" %10)))
+      (step
+        (let %11 int (load int $"i"))
+        (let %12 int (wadd int %11 (const int 1)))
+        (store int $"i" %12))))
+  (let %13 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %14 long (load long $"s"))
+  (return %14))
+

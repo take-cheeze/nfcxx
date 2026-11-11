@@ -4,16 +4,17 @@
 # exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
 # system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. Go is yaegi in a cgo
 # shared library built by scripts/setup-poly-go.sh (one library for both back ends), skipped with a SKIP line when Go or the
-# module proxy is missing. See docs/notes/poly.md.
+# module proxy is missing. ASTro's luastro is built by scripts/setup-poly-astro.sh (ASTroGen is Ruby, the source comes from GitHub:
+# a SKIP line when either is missing). See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
-#   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
+#   POLY_LANGS="ruby lua python ast js go astro"   (default: all seven; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 #   TEST_BIN_CACHE=DIR             keep the compiled hosts in DIR and reuse one whose command line is the same (tests/bin-cache.sh; CI)
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled hosts are kept between CI runs (tests/bin-cache.sh)
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-langs=${POLY_LANGS:-"ruby lua python ast js go"}
+langs=${POLY_LANGS:-"ruby lua python ast js go astro"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   defs=(); incs=(-I lib/poly); srcs=(); libs=(); built=(); bad=0
@@ -37,6 +38,11 @@ for be in $backends; do
         fi ;;
       ast)
         defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp); built+=(ast) ;;
+      astro)
+        out=$(NFCXX_BACKEND=$be scripts/setup-poly-astro.sh 2>&1); rc=$?
+        if [ $rc = 3 ]; then echo "SKIP $be poly astro: $(tail -1 <<<"$out" | sed 's/^setup-poly-astro: //')"; continue
+        elif [ $rc != 0 ]; then echo "FAIL $be poly astro (luastro build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        defs+=(-DTEST_ASTRO); incs+=(-I build/poly-astro/$be/include); srcs+=(lib/poly/nfcpoly_astro.cpp); libs+=(build/poly-astro/$be/lib/libluastro.a -ldl -lm -lpthread); built+=(astro) ;;
       go)
         out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $be poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue

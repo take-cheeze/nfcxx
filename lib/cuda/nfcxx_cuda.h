@@ -3,13 +3,14 @@
 // the arguments into the kernel's parameter types and launches the kernel's device code. Link with -lcudart.
 //
 // The device code of a .cu file is built by the driver (scripts/cuda-rewrite.rb --device, scripts/pathb-ptx-emit.rb,
-// ptxas) and appended to the host copy as a registration tail (scripts/cuda-embed.rb): a static object whose
+// ptxas) and appended to the host copy as a registration tail (pathb-ptx-emit --embed): a static object whose
 // constructor loads the image with cudaLibraryLoadData and maps each kernel's host address to its cudaKernel_t.
 // The qualifiers are empty: a kernel is an ordinary function on the host side. Kernels must return void.
 #ifndef NFCXX_CUDA_H
 #define NFCXX_CUDA_H
 
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,10 @@ inline const dim3 gridDim{1, 1, 1};
 inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+// The optimizer hint __builtin_assume(x): the host compiler has none; the hint does not change the result.
+#ifndef __builtin_assume
+#define __builtin_assume(x) ((void)0)
+#endif
 // Scalar helpers, for the host copy (never run).
 inline unsigned int __float_as_uint(float f) { unsigned int u; __builtin_memcpy(&u, &f, sizeof u); return u; }
 inline int __float2int_rn(float f) { return (int)f; }
@@ -61,12 +66,16 @@ inline int __all_sync(unsigned int mask, int pred) { (void)mask; (void)pred; ret
 // The CUDA math overloads of min and max (unqualified calls in device code; the host copy never runs them).
 inline int min(int a, int b) { return a < b ? a : b; }
 inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }
+inline long min(long a, long b) { return a < b ? a : b; }
+inline unsigned long min(unsigned long a, unsigned long b) { return a < b ? a : b; }
 inline long long min(long long a, long long b) { return a < b ? a : b; }
 inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }
 inline float min(float a, float b) { return a < b ? a : b; }
 inline double min(double a, double b) { return a < b ? a : b; }
 inline int max(int a, int b) { return a > b ? a : b; }
 inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }
+inline long max(long a, long b) { return a > b ? a : b; }
+inline unsigned long max(unsigned long a, unsigned long b) { return a > b ? a : b; }
 inline long long max(long long a, long long b) { return a > b ? a : b; }
 inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }
 inline float max(float a, float b) { return a > b ? a : b; }
@@ -117,10 +126,27 @@ inline unsigned __vsub4(unsigned a, unsigned b) {
   for (int i = 0; i < 4; i++) r |= (((a >> (8 * i)) - (b >> (8 * i))) & 0xffu) << (8 * i);
   return r;
 }
+inline unsigned __vsubss4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) {
+    int x = (int)(signed char)((a >> (8 * i)) & 0xffu), y = (int)(signed char)((b >> (8 * i)) & 0xffu);
+    int d = x - y;
+    if (d > 127) d = 127;
+    if (d < -128) d = -128;
+    r |= ((unsigned)d & 0xffu) << (8 * i);
+  }
+  return r;
+}
 inline unsigned __vcmpne4(unsigned a, unsigned b) {
   unsigned r = 0;
   for (int i = 0; i < 4; i++)
     if (((a >> (8 * i)) & 0xffu) != ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
+  return r;
+}
+inline unsigned __vcmpeq4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++)
+    if (((a >> (8 * i)) & 0xffu) == ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
   return r;
 }
 inline int __shfl_xor_sync(unsigned, int v, int, int = 32) { return v; }
@@ -170,6 +196,40 @@ struct __nfcxx_module_init {
   }
 };
 
+// A launch of a host function with no device code (the rewriter did not put its instance in the device unit) fails
+// with cudaErrorInvalidDeviceFunction. The runtime never sees that launch, so its cudaGetLastError would report success
+// and the caller's check would pass: the error is kept here, and cudaGetLastError / cudaPeekAtLastError (macros below)
+// report it first. The first failure of each address is printed with its offset in its object (addr2line -f -C -e).
+inline thread_local cudaError_t __nfcxx_launch_error = cudaSuccess;
+
+inline cudaError_t __nfcxx_missing_kernel(const void *host) {
+  static std::vector<const void *> reported;
+  bool seen = false;
+  for (const void *p : reported) seen = seen || p == host;
+  if (!seen) {
+    reported.push_back(host);
+    Dl_info info{};
+    if (dladdr(host, &info) && info.dli_fname)
+      std::fprintf(stderr, "nfcxx: launch of a kernel with no device code: %s+0x%lx%s%s\n", info.dli_fname,
+                   (unsigned long)((const char *)host - (const char *)info.dli_fbase), info.dli_sname ? " " : "",
+                   info.dli_sname ? info.dli_sname : "");
+    else
+      std::fprintf(stderr, "nfcxx: launch of a kernel with no device code: %p\n", host);
+  }
+  __nfcxx_launch_error = cudaErrorInvalidDeviceFunction;
+  return cudaErrorInvalidDeviceFunction;
+}
+
+inline cudaError_t __nfcxx_get_last_error(bool clear) {
+  cudaError_t own = __nfcxx_launch_error;
+  cudaError_t rt = clear ? (cudaGetLastError)() : (cudaPeekAtLastError)();
+  if (own == cudaSuccess) return rt;
+  if (clear) __nfcxx_launch_error = cudaSuccess;
+  return own;
+}
+#define cudaGetLastError() __nfcxx_get_last_error(true)
+#define cudaPeekAtLastError() __nfcxx_get_last_error(false)
+
 inline cudaKernel_t __nfcxx_find_kernel(const void *host) {
   for (const auto &e : __nfcxx_registry()) {
     if (e.first == host) return e.second;
@@ -196,7 +256,7 @@ inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 blo
                                        cudaStream_t stream, A... args) {
   static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
   cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
-  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (device == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(kernel));
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
@@ -215,7 +275,7 @@ template <typename... P, typename... A>
 inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, void (*kernel)(P...), A &&...args) {
   static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
   cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
-  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (device == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(kernel));
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_launch_ex_impl(config, device, packed, std::index_sequence_for<P...>());
 }
@@ -229,7 +289,7 @@ inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, 
 template <typename F>
 inline cudaError_t __nfcxx_cuda_func_set_attribute(F func, cudaFuncAttribute attr, int value) {
   cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
-  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
   int device = 0;
   cudaError_t err = cudaGetDevice(&device);
   if (err != cudaSuccess) return err;
@@ -240,7 +300,7 @@ template <typename F>
 inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
                                            cudaStream_t stream) {
   cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
-  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = grid;
   cfg.blockDim = block;
@@ -249,9 +309,51 @@ inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void *
   return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
 }
 
-#define cudaFuncSetAttribute(func, attr, value) __nfcxx_cuda_func_set_attribute((func), (attr), (value))
-#define cudaLaunchKernel(func, grid, block, args, shmem, stream) \
-  __nfcxx_cuda_launch_raw((func), (grid), (block), (args), (shmem), (stream))
+// The queries llama.cpp makes on a kernel (launch_fattn's occupancy, common.cuh's PDL check): the runtime takes the
+// cudaKernel_t in place of the host address, as cudaLaunchKernelExC does.
+template <typename F>
+inline cudaError_t __nfcxx_cuda_occupancy(int *blocks, F func, int block_size, std::size_t shmem) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
+  return (cudaOccupancyMaxActiveBlocksPerMultiprocessor)(blocks, reinterpret_cast<const void *>(kernel), block_size,
+                                                         shmem);
+}
+
+template <typename F>
+inline cudaError_t __nfcxx_cuda_func_get_attributes(cudaFuncAttributes *attr, F func) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
+  return (cudaFuncGetAttributes)(attr, reinterpret_cast<const void *>(kernel));
+}
+
+// The macros take the whole argument list: a kernel's template-id in the first argument (gdn_single<C, V, B>) has commas
+// that a macro parameter would split, and the call is a function call in CUDA.
+#define cudaFuncSetAttribute(...) __nfcxx_cuda_func_set_attribute(__VA_ARGS__)
+#define cudaLaunchKernel(...) __nfcxx_cuda_launch_raw(__VA_ARGS__)
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor(...) __nfcxx_cuda_occupancy(__VA_ARGS__)
+#define cudaFuncGetAttributes(...) __nfcxx_cuda_func_get_attributes(__VA_ARGS__)
+
+// A cooperative launch: the driver checks that every block is resident (cudaErrorCooperativeLaunchTooLarge otherwise),
+// which the grid barrier of grid_group::sync (scripts/cuda-rewrite.rb's GRID_DEF in the device unit) relies on.
+template <typename F>
+inline cudaError_t __nfcxx_cuda_launch_cooperative(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
+                                                   cudaStream_t stream) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return __nfcxx_missing_kernel(reinterpret_cast<const void *>(func));
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = shmem;
+  cfg.stream = stream;
+  cudaLaunchAttribute attr = {};
+  attr.id = cudaLaunchAttributeCooperative;
+  attr.val.cooperative = 1;
+  cfg.attrs = &attr;
+  cfg.numAttrs = 1;
+  return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
+}
+#define cudaLaunchCooperativeKernel(func, grid, block, args, shmem, stream) \
+  __nfcxx_cuda_launch_cooperative((func), (grid), (block), (args), (shmem), (stream))
 
 // Cooperative groups, host copy: CUDA's own cooperative_groups.h needs its device barriers, which the host placeholders do
 // not provide, so the header is skipped (its guards are defined here) and this shim stands in for it. The host copy never
@@ -273,6 +375,11 @@ template <unsigned N> struct thread_block_tile {
   template <typename T> T shfl_xor(T v, unsigned) const { return v; }
 };
 template <unsigned N> thread_block_tile<N> tiled_partition(const thread_block &) { return thread_block_tile<N>(); }
+struct grid_group {
+  void sync(void) const {}
+  unsigned thread_rank(void) const { return 0u; }
+};
+inline grid_group this_grid(void) { return grid_group(); }
 template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
 template <typename T> struct less { T operator()(T a, T b) const { return b < a ? b : a; } };
 template <typename T> struct greater { T operator()(T a, T b) const { return a < b ? b : a; } };

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -278,12 +279,33 @@ static void export_symbols() {
   CHECK_ERR(other.merge_onnx(bytes), "name collision");
 }
 
+// The operations of SymExpr that the UOp layer uses for polynomial dimensions (stage 7, docs/notes/uop.md): equality, the symbols of an
+// expression, the single symbol, exact evaluation at sizes (refused when a symbol is missing or a value overflows) and the upper bound.
+static void sym_expr_ops() {
+  using onnxsim::SymExpr;
+  const SymExpr N = SymExpr::Symbol("N"), M = SymExpr::Symbol("M");
+  CHECK(N == SymExpr::Symbol("N") && N != M && N * 2 - SymExpr(1) == SymExpr(2) * N - SymExpr(1));
+  CHECK((N * M + N).symbols() == (std::vector<std::string>{"M", "N"}) && SymExpr(3).symbols().empty());
+  CHECK(N.single_symbol() == std::optional<std::string>("N") && !(N * 2).single_symbol() && !(N + SymExpr(1)).single_symbol() &&
+        !SymExpr(3).single_symbol() && !(N * N).single_symbol());
+  CHECK((N * 2 - SymExpr(1)).evaluate({{"N", 5}}) == std::optional<std::int64_t>(9));
+  CHECK((N * M).evaluate({{"N", 3}, {"M", 4}}) == std::optional<std::int64_t>(12) && SymExpr(7).evaluate({}) == std::optional<std::int64_t>(7));
+  CHECK(!(N * 2 - SymExpr(1)).evaluate({{"M", 5}}).has_value());                 // N is missing
+  CHECK(!(N * N * N).evaluate({{"N", 3000000}}).has_value());                    // 2.7e19 does not fit in int64
+  // the upper bound: 2N-1 is at most 15 with N at most 8; N*M-N has the bound 8*3 - 1 = 23 (its maximum is 16, so this is not exact)
+  CHECK((N * 2 - SymExpr(1)).upper_bound({{"N", 8}}) == std::optional<std::int64_t>(15));
+  CHECK((N * M - N).upper_bound({{"N", 8}, {"M", 3}}) == std::optional<std::int64_t>(23));
+  CHECK(!(N * M).upper_bound({{"N", 8}}).has_value());                          // M has no bound
+  CHECK((SymExpr(0) - N).upper_bound({{"N", 8}}) == std::optional<std::int64_t>(-1));   // a negative term only: its value is at most -1
+}
+
 int main(int argc, char** argv) {
   std::string dir = argc > 1 ? argv[1] : "";
   symbolic_mlp(dir);
   shape_inference();
   products();
   export_symbols();
+  sym_expr_ops();
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);
   return 0;

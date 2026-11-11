@@ -6,6 +6,7 @@
 # A "// GCC: a.c" line compiles a.c with the host gcc (not the backend under test) and links its object in: a test
 # of an ABI between nfcxx's C and gcc's C (float16_abi_gcc.c).
 # "// LONG-DOUBLE-16: reason" skips a test on Apple arm64, where long double is 8 bytes.
+# "// ELF-ONLY: reason" skips a test on macOS (Mach-O, where the gcc backend is Apple clang): GNU C of ELF targets.
 # "// X86-ONLY: reason" skips a test on every backend off x86-64; "// X86-ONLY-qbe: reason" only on that backend (the
 # x87 long double and __float128 helpers of be/nfcxx_ldrt.c are x86-64 only).
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
@@ -26,6 +27,8 @@ for b in $backends; do
     if [ "$(uname -s)" = Darwin ] && [ -z "$xf" ]; then xf=$(sed -n "s,^// MACOS-XFAIL-$b: *,,p" "$f" | head -1); fi
     x86only=$({ sed -n 's,^// X86-ONLY: *,,p' "$f"; sed -n "s,^// X86-ONLY-$b: *,,p" "$f"; } | head -1)
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b $n (x86-64 only: $x86only)"; continue; fi
+    elfonly=$(sed -n 's,^// ELF-ONLY: *,,p' "$f" | head -1)
+    if [ -n "$elfonly" ] && [ "$(uname -s)" = Darwin ]; then echo "skip $b $n (ELF only: $elfonly)"; continue; fi
     ld16=$(sed -n 's,^// LONG-DOUBLE-16: *,,p' "$f" | head -1)
     if [ -n "$ld16" ] && [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; then echo "skip $b $n (long double is 8 bytes here: $ld16)"; continue; fi
     files=(); for s in $srcs; do files+=("$dir/$s"); done

@@ -1,0 +1,20 @@
+local out = {}
+local function p(...) local t = {} for i = 1, select("#", ...) do t[i] = tostring((select(i, ...))) end out[#out+1] = table.concat(t, "\t") end
+p("string", string.format("%5.2f|%d|%s|%x", 3.14159, 42, "ok", 255))
+p("gsub", (string.gsub("hello world", "o", "0")))
+p("find", string.find("abcabc", "ca", 1, true))
+p("rep", string.rep("ab", 3, ","))
+p("byte", string.byte("A"), string.char(72, 105))
+local t = {5, 2, 9, 1}
+table.sort(t)
+p("sort", table.concat(t, " "))
+p("insert", (function() local q = {} table.insert(q, "x") table.insert(q, 1, "y") return table.concat(q, ",") end)())
+p("math", math.floor(2.7), math.sqrt(16), math.max(3, 9, 4), math.huge > 1e308)
+p("tointeger", math.tointeger(7.0), 7 // 2, 7 % 3, 2^10)
+p("pcall", select(2, pcall(error, "boom")))
+p("pcall-ok", pcall(function() return 1 end))
+local f = io.open("/tmp/lua-smoke-io.txt", "w") f:write("line1\n", "line2\n") f:close()
+local g = io.open("/tmp/lua-smoke-io.txt", "r") local a = g:read("l") local b = g:read("l") g:close()
+p("io", a, b, io.type(g))
+p("os", type(os.time()), type(os.clock()), os.date("%Y", 0) ~= nil, os.getenv("NO_SUCH_VAR_XYZ"))
+print(table.concat(out, "\n"))

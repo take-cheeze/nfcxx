@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for the uop host ASan run (UOP_HOST=1 tests/uop/run.sh, which sets LSAN_OPTIONS=suppressions=...).
+# The tinygrad back end starts an embedded CPython and never finalizes it (lib/uop/nfcuop_tinygrad.cpp, run_exit_callbacks): the
+# interpreter, the modules it imports and their static state stay live until exit. LeakSanitizer reports them because it cannot see
+# them reachable from the interpreter's arenas. The frames are the functions that start the interpreter (start), import numpy and
+# tinygrad (import_modules), import traceback (py_error) and import atexit (run_exit_callbacks), and numpy's extension module, whose
+# static tables (ufuncs, casting, dtypes) are kept until finalization. The owned references in our functions are dropped on every
+# path (Ref), so the allocations are the interpreter's, not ours.
+leak:start
+leak:import_modules
+leak:py_error
+leak:run_exit_callbacks
+leak:/numpy/

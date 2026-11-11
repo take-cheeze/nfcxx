@@ -1,6 +1,7 @@
 // Copied from onnxsim (onnxsim/sym_expr.h), licensed under the Apache License 2.0 (see the LICENSE of the onnxsim repository).
 // Source: onnxsim commit 94851843 (the last commit that changed this file; copied from onnxsim HEAD c823a3a8, identical content).
-// Changes from the original: this comment, and the include of the header (nfcuop_sym_expr.hpp). The code is otherwise unchanged.
+// Changes from the original: this comment, and the include of the header (nfcuop_sym_expr.hpp). The code is otherwise unchanged,
+// except for the operations added for the UOp layer (stage 7, docs/notes/uop.md): ==, symbols, single_symbol, evaluate and upper_bound.
 #pragma once
 
 #include <algorithm>
@@ -131,6 +132,24 @@ class SymExpr {
   // sympy.factor produced for these polynomials:
   //   512*batch*seq**2 + 5419008*batch  ->  512*batch*(seq**2 + 10584)
   std::string str_factored() const;
+
+  bool operator==(const SymExpr& o) const { return terms_ == o.terms_; }
+  bool operator!=(const SymExpr& o) const { return !(*this == o); }
+
+  // The names of the symbols that occur, sorted, each once.
+  std::vector<std::string> symbols() const;
+
+  // The name, when the expression is exactly one symbol (coefficient 1, no constant term); nullopt otherwise.
+  std::optional<std::string> single_symbol() const;
+
+  // The value with each symbol given its size in `values` (every symbol must be in it). nullopt when a symbol is missing or a
+  // product or sum does not fit in int64.
+  std::optional<std::int64_t> evaluate(const std::map<std::string, std::int64_t>& values) const;
+
+  // An upper bound on the value when every symbol with a bound lies in [1, bounds[name]] and every symbol is at least 1. A positive
+  // term is at most its coefficient times the product of the bounds; a negative term is at most its coefficient (the monomial is at
+  // least 1). nullopt when a positive term has a symbol that is not in `bounds`, or the sum does not fit in int64.
+  std::optional<std::int64_t> upper_bound(const std::map<std::string, std::int64_t>& bounds) const;
 
   const std::map<Monomial, std::int64_t>& terms() const { return terms_; }
 

@@ -1,0 +1,6 @@
+(ir-module "verify" (layout (pointer 8) (int 4)))
+(call-effects "pick" (returns (ptr int) (from-arg 0 0 shared) (from-arg 1 0 shared)) (nothrow) (noescape) (closed) (args (read int) (read int) (read int) (value int)))
+(function "pick" (ret (ptr int)) (params (param %0 "a" (ptr int)) (param %1 "b" (ptr int)) (param %4 "d" (ptr int)) (param %2 "c" int))
+(decl %0 param) (decl %1 param) (decl %4 param)
+(let %3 (ptr int) %0) (if %2 (then (set %3 %4)) (else)) (return %3)
+)

@@ -11,6 +11,8 @@
 //   std::string onnx = g.to_onnx({y});          // bytes of a ModelProto; write them to a .onnx file
 //
 // Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Erf Add Sub Mul Div Mod Max Min
+// Acos Acosh Asin Asinh Atan Atanh Cosh Sinh Tan Round (ONNX), and Log2 Log10 Expm1 Log1p Atan2 BitwiseLeftShift BitwiseRightShift,
+// which are not ONNX operators: they compute and lower, but to_onnx refuses a graph that needs one (is_onnx_operator).
 // And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Gemm
 // Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant)
 // Pow Floor Ceil IsNaN IsInf CumSum ReduceProd ArgMax ArgMin Tile Gather Conv MaxPool AveragePool BatchNormalization (inference)
@@ -101,6 +103,9 @@ std::string to_string(const Dims& d);  // "[N,4]": a symbol by its name
 
 // ONNX TensorProto.DataType of a dtype (FLOAT 1, INT32 6, INT64 7, BOOL 9, DOUBLE 11).
 int onnx_dtype(DType d);
+// Whether `op` is an operator of the ONNX standard (the operators the hir names with ONNX's names). False for the operators with no
+// ONNX counterpart: Log2 Log10 Expm1 Log1p Atan2 BitwiseLeftShift BitwiseRightShift. The reader refuses them, to_onnx refuses them.
+bool is_onnx_operator(const std::string& op);
 
 class Graph {
  public:

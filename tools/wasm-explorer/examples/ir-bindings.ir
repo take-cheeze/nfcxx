@@ -1,0 +1,23 @@
+; The nfcxx IR calling the browser bindings: a structured loop that logs the first squares with log_i32, and a
+; string from a data node printed with log_str (a call of a function the module does not define is an import of
+; module env). main() returns the sum of the squares 1 .. 5 = 55.
+(ir-module "bindings" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(data "greeting" (const (array 14 (const char))) (string "hello from IR"))
+(function "main"
+  (ret int)
+  (params )
+  (eval (call void &"log_str" @"greeting" (const long 13)))
+  (let %1 int (const int 1))
+  (let %2 int (const int 0))
+  (loop
+    (body
+      (let %3 bool (le.s int %1 (const int 5)))
+      (if %3 (then) (else (break)))
+      (let %4 int (cmul int %1 %1))
+      (eval (call void &"log_i32" %4))
+      (let %5 int (cadd int %2 %4))
+      (set %2 %5))
+    (step
+      (let %6 int (cadd int %1 (const int 1)))
+      (set %1 %6)))
+  (return %2))

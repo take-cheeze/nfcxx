@@ -1,0 +1,41 @@
+# frozen_string_literal: true
+
+require 'digest'
+
+class CodeGen
+  # ARRAY_SORT_CMP_DIRECT: array_native_refusal excludes Ruby/native replacements,
+  # installers and prepends. Pin the providing file so its body and binding cannot drift.
+  def sort_array_cmp_direct?
+    return false if ENV['BC2CPP_SORT_ARRAY_CMP'] == '0'
+    return @sort_array_cmp_direct unless @sort_array_cmp_direct.nil?
+
+    @sort_array_cmp_direct = array_native_refusal('<=>').nil? &&
+                             Array(self.class.native_source_paths).any? do |path|
+                               mruby_core_array_source?(path) && sort_array_cmp_source_matches?(File.binread(path))
+                             end
+  end
+
+  def sort_array_cmp_source_matches?(source)
+    %w[50974198d1a5b991d91371b29b60e2c2cc6aa231593162b1f5e735f14f5f66f5
+       227b0d17190eb8d440fb919ea47df4e1c77c6e34c170ad1381d39f1a2fd8b11d].include?(Digest::SHA256.hexdigest(source))
+  end
+
+  def emit_sort_array_cmp_helper(compiled)
+    return '' unless compiled.any? { |method| method[:code].include?('bc2cpp_sort_key_cmp(') }
+
+    <<~CPP
+      // ARRAY_SORT_CMP_DIRECT: the emitter proves the builtin Array#<=> body is unchanged.
+      static inline mrb_int bc2cpp_sort_key_cmp(mrb_state *M, mrb_value a, mrb_value b) {
+        if (mrb_class(M, a) != M->array_class || !mrb_array_p(b)) return mrb_cmp(M, a, b);
+        if (mrb_obj_equal(M, a, b)) return 0;
+        for (mrb_int i = 0; i < RARRAY_LEN(a) && i < RARRAY_LEN(b); ++i) {
+          mrb_int c = mrb_cmp(M, RARRAY_PTR(a)[i], RARRAY_PTR(b)[i]);
+          if (c != 0) return c;
+        }
+        mrb_int length = RARRAY_LEN(a) - RARRAY_LEN(b);
+        return length == 0 ? 0 : length > 0 ? 1 : -1;
+      }
+
+    CPP
+  end
+end

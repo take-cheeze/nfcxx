@@ -1,0 +1,8 @@
+(ir-module "eh" (layout (pointer 8) (int 4)))
+(function "test" (ret int) (params)
+(slot "f" (struct "F") 16 8) (decl $"f" temp)
+(let %1 (ptr (struct "F")) (load (ptr (struct "F")) @"__curr_eh_stack_entry"))
+(store (ptr (struct "F")) $"f" %1)
+(store (ptr (struct "F")) @"__curr_eh_stack_entry" $"f")
+(store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+(scope-end $"f") (return (const int 0)))

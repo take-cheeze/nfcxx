@@ -1,4 +1,4 @@
-# llama.cpp on the host side: ggml through nfcxx
+# llama.cpp: ggml through nfcxx (CPU and CUDA backends)
 
 `tests/llamacpp/run.sh` compiles llama.cpp's host-side ggml (ggml/src/*.c, *.cpp, and ggml-cpu/ with its tiled
 sources) through the nfcxx driver on the gcc backend, and links `tests/llamacpp/ggml_cpu_check.c` (a small
@@ -11,7 +11,81 @@ is `build/targets/llama.cpp` (`git clone --depth 1 https://github.com/ggml-org/l
   `ggml-opt.cpp`, `ggml-threading.cpp`) compile with the driver's C and C++ paths.
 - The CPU backend (`ggml-cpu/*.c`, `*.cpp`, `tiled/*.cpp`) compiles with `-DGGML_CPU_GENERIC` and without the SSE
   predefines (see below): 23 objects in all.
-- The link stops at one blocker (see the list): `XFAIL link` in `run.sh`. The check program does not run yet.
+- The check program links and runs (`ggml cpu check: ok`). The CUDA backend is in "CUDA backend" below.
+
+## CUDA backend
+
+`tests/llamacpp/cuda/build.sh` builds ggml with the CUDA backend (every `ggml-cuda/*.cu`, the template instances
+included, with the default FlashAttention types of llama.cpp's CMake: f16-f16 only) and links llama.cpp's
+`tests/test-backend-ops.cpp` against it, `-lcuda -lcublas -lcudart`: 214 objects, about 25 minutes at JOBS=2 under the
+8 GB cap (objects are kept in `build/llcu`, so a second run only links). `tests/llamacpp/cuda/run.sh` runs each op of
+`test-backend-ops test -b CUDA0` in its own process (a device fault aborts it) and checks it against its record. On the
+RTX 2060 (sm_75, CUDA 13.1): 110 ops pass every case, none fails, 19 have no cases.
+
+What it took (docs/notes/gpu.md, "Launch path", has the details):
+
+- f16 conversions: the device `half` was an `unsigned short`, so `(float)h` was the integer value of the bits. Every
+  f16 case of every op failed, and the quantized types too (their scales are f16). It is a struct now, as in cuda_fp16.h.
+- Device-wide CUB (`sum`, `mean`, `argsort`, `top_k`, `cumsum`): `lib/cuda/cub/device.cu`, linked with `-lcudart`.
+- `CUDART_VERSION` in the device pass: without it the host took CUB paths whose device code was the other branch
+  (`cumsum_cub_kernel` trapped with `NO_DEVICE_CODE`). With it, the device pass also needs what CUDA 11.8+ code uses on
+  sm_75: `movmatrix` asm (mma.cuh), `__nv_fp8_e4m3`, `__nv_cvt_e8m0_to_bf16raw` and `__nv_fp4x4_e2m1` (MXFP4).
+- A kernel launched through a dispatch stub and also passed to `cudaFuncSetAttribute` (softmax, mmid) had only one of
+  its two host addresses in the kernel table.
+- The emitter lowers `__cxa_vec_ctor` and `memset` (arrays of mma tiles, whose half2 members are now constructed).
+- A launch of a kernel with no device code was silent: the op left garbage and passed its CUDA_CHECK. It is reported
+  through `cudaGetLastError` now, with the kernel's address in the program.
+- binbcast.cu (ADD, SUB, MUL, DIV, REPEAT): `k_bin_bcast` is reached through `bin_bcast_cuda<op>::operator()` and
+  `launch_bin_bcast_pack<op, ...>(..., std::make_index_sequence<n_fuse>{})`, whose calls give the rewriter no instance.
+  The driver now builds such a unit twice: the host compile instantiates the kernels, and the second device rewrite
+  takes their instances from the object's symbols (`nm -C`: 228 of them). binbcast.cu takes about 19 minutes instead
+  of 6. The kernel's function parameter pack (`const src1_ptrs... src1s`) gives one entry parameter per element.
+- The zero bytes of an aggregate initializer were stored as if the object were 8-byte aligned: mmvq's
+  `float tmp[2][2] = {{0.0f}}` got an 8-byte store at 4 mod 8 (misaligned address, q4_0 MUL_MAT).
+- The lanes of `nv_bfloat162` are bf16 values (they converted as integers), and `half2`/`nv_bfloat162` are 4-byte
+  aligned (bf16 MUL_MAT, LIGHTNING_INDEXER).
+- `cudaOccupancyMaxActiveBlocksPerMultiprocessor` and `cudaFuncGetAttributes` on a kernel's host address look the
+  kernel up first, as `cudaFuncSetAttribute` does (FLASH_ATTN_EXT's launch_fattn: invalid resource handle).
+
+- MUL_MAT and MUL_MAT_ID: the mmq kernels' "unspecified launch failure" was quantize_mmq_q8_1's float-to-integer
+  trap, their illegal memory access the `ldmatrix` address (which also fixed CONV_2D and CONV_3D), mxfp4's
+  misaligned address its kvalues table (an int8_t array read as uint32_t), the q1_0, q2_0 and FP4 values
+  `__byte_perm`'s selector, and f16 with 8 columns mmvf's `half2 sumh2[8] = {{0.0f, 0.0f}}`, whose other elements
+  were not zeroed (docs/notes/gpu.md).
+
+- FLASH_ATTN_EXT: its "unspecified launch failure" was the emitter's divide-by-zero trap in flash_attn_ext_vec, which
+  computes `sequence % ne33` with ne33 == 0 when there is no mask (docs/notes/gpu.md, "Integer division"). All 4004
+  cases pass; the op takes about 20 minutes, so run.sh gives each op 40.
+
+The KNOWN list of `run.sh` is empty.
+
+End to end: `tests/llamacpp/cuda/e2e.sh MODEL.gguf [PROMPT]` links llama.cpp's examples/simple against these objects
+(libllama and simple.cpp by the host g++, which is not what is tested here; the link is nfcxx's) and runs it with every
+layer on the GPU (NGL, default 99). With Qwen2.5-0.5B-Instruct Q4_0 and "The capital of France is", greedy:
+
+| build | output | eval |
+| --- | --- | --- |
+| llama.cpp's CMake, gcc, CPU | Paris, and it is the capital of Europe. It is also the capital of the world. ... | 75 tok/s |
+| nfcxx, CPU (`-ngl 0`) | Paris, and it is the capital of Europe. It is the largest city in Europe, ... | 40 tok/s |
+| nfcxx, CUDA (`-ngl 99`) | Paris, and it is the largest city in Europe. It is located in the center of ... | 4.4 tok/s |
+
+The text is right and the runs part where the next token is a close call (different arithmetic on each path). Open:
+the CUDA path is slow (227 ms a token for a 0.5B model; an nvcc build is far faster), and the CPU run crashes at exit
+(EDG's exception-handling state, `__curr_eh_stack_entry`, is a plain global, and ggml's CPU worker threads run
+EDG-compiled code with destructors; libstdc++'s exit-time flush then calls EDG's `std::uncaught_exceptions` on a dead
+entry).
+
+## Vulkan backend
+
+`tests/llamacpp/vulkan/build.sh` builds ggml with the Vulkan backend (`ggml-vulkan*.cpp` and the core and CPU backend through
+the nfcxx driver, gcc backend). The shaders are GLSL, which glslc compiles to SPIR-V as in llama.cpp's own build. The shader
+generator `vulkan-shaders-gen` is built by nfcxx too, and the 155 generated sources (`mul_mm.comp.cpp` alone is 77 MB of SPIR-V
+byte arrays) compile as C++. The glslc extension probes are the ones of ggml-vulkan/CMakeLists.txt, judged by the message
+("extension not supported"), not the exit status. 182 objects, no driver change was needed.
+
+`tests/llamacpp/vulkan/run.sh` runs each op of `test-backend-ops` on Vulkan0 in its own process and checks it against the CPU.
+On the Radeon 8060S (RADV, gfx1151), 109 ops with cases pass every case: 12578 of 12578. 19 ops have no Vulkan cases (`0/0`).
+FLASH_ATTN_EXT (the largest) passes every case: 5332 of 5332. With that, every op with Vulkan cases passes all of them: 110 ops, 17910 cases.
 
 ## Flags
 
@@ -38,17 +112,50 @@ includes `immintrin.h`, which needs AVX10.2 builtins EDG does not know (below). 
    GCC 15's `immintrin.h` includes `avx10_2*intrin.h` unconditionally, and the `-512` variants share `immintrin.h`'s own
    include guard, so the driver cannot skip them. The fix is in EDG's builtin table, not the driver. Until then the
    x86 SIMD code of ggml-cpu (and any program using `immintrin.h`) does not compile.
-2. **Template instance across translation units.** `ggml-backend-reg.cpp.o` references
-   `_ZNSt12__shared_ptrINSt10filesystem7__cxx114_DirELN9__gnu_cxx12_Lock_policyE2EED1Ev`
-   (`std::__shared_ptr<std::filesystem::__cxx11::_Dir>::~__shared_ptr`), which no object defines. g++ defines it in
-   each TU that uses it (weak); EDG's prelinker does not emit it for this TU. The link stops with
-   `undefined reference to ...`.
-3. **`C++ prelinker: warning: an error occurred during name decoding`** for `std::__cxx11::basic_string` symbols (about
-   20 in the link). Harmless here, but it is a sign of the same name-decoding gap.
-4. **`--emit-c` takes no `-I`** (known, `docs/notes/realworld.md`): it cannot preprocess ggml's headers.
+2. **`C++ prelinker: warning: an error occurred during name decoding`** for `std::__cxx11::basic_string` symbols (about
+   20 in the link). Harmless here, but it is a sign of a name-decoding gap.
+3. **`--emit-c` takes no `-I`** (known, `docs/notes/realworld.md`): it cannot preprocess ggml's headers.
 
 ## Environment
 
 The qbe backend fails the same way on `origin/main` in this checkout (`tests/cases/eh_exception_ptr.cpp`,
 `eh_libstdcxx_throw.cpp`, `eval_order_calls.cpp`, `qbe_gnu_forms.cpp`, and five `tests/c` float128/float16/long double
 cases: cproc rejects the qbe-prep output). These are not caused by the driver changes above; the gcc backend passes.
+
+## Per-op performance against llama.cpp's nvcc build (RTX 5050, sm_120, 2026-11-07)
+
+Both binaries are `test-backend-ops` from the same llama.cpp tree (`~/dev/llama.cpp`, d59d455fd): nvcc (the CMake
+build, CUDA 13.4, sm_120) and nfcxx (`tests/llamacpp/cuda/build.sh` with `LLAMA=~/dev/llama.cpp NFCXX_SM=120`). The per-case
+times are the `us/run` of `test-backend-ops perf -o OP -p <case>`, one process per case.
+
+| op | cases | nfcxx ok | nfcxx / nvcc, geometric mean | median | worst |
+| --- | --- | --- | --- | --- | --- |
+| SOFT_MAX | 29 | 29 | 3.76x | 2.51x | 31.4x |
+| MUL_MAT | 184 | 169 | 12.6x | 12.0x | 72.2x |
+
+MUL_MAT by type (geometric mean): f32 1.6x, bf16 1.7x, f16 7.5x, q4_1 30x, q5_1 27x, q6_K 19x, iq4_xs 18x. The best cases are
+the f32 and bf16 ones, the worst the quantized mat-vec.
+
+Not run on nfcxx (process abort): the k-quant cases (q2_K to q6_K), and some f32, bf16, mxfp4 and nvfp4 cases. The k-quant
+aborts are the `unspecified launch failure` of the MMVQ table mismatch: the device pass takes `__CUDA_ARCH__` as 750
+(`tools/cuda-rewrite/cuda_rewrite.cpp`, DEVICE_PASS_MACROS), so ggml's device side selects the Turing MMVQ table while the
+host selects the generic one. Setting it from `NFCXX_SM` fixes the k-quant case, but then ggml's sm_120 code paths compile
+(inline PTX `asm`, `cvta.shared`, FP4) and 25 objects fail. Those paths are the open work.
+
+These numbers are not an emitter comparison alone: nfcxx builds with `__CUDA_ARCH__` = 750 and nvcc with sm_120, so the
+code paths differ (see above). FLASH_ATTN_EXT aborts on nfcxx after 4 cases (the same class of launch failure). RMS_NORM
+has no cases on either binary.
+
+### Update: sm_120a build (2026-11-07)
+
+The nfcxx build now targets `NFCXX_SM=120a` and compiles all 208 objects (the flash-attention MMA instances use
+cp.async and cvta.shared; the FP4 MMQ instances need the block-scale MMA of sm_120a). The k-quant MUL_MAT results were
+wrong before a struct-field fix in the emitter (commit a78c8e11), and they are correct now.
+
+Correctness against the CPU backend (`test-backend-ops test -b CUDA0`): SOFT_MAX 212/212, MUL_MAT 1187/1187.
+
+Per-case time, nfcxx / nvcc (geometric mean): SOFT_MAX 3.8x (29 cases), MUL_MAT 11.6x (184 cases, all run). Worst MUL_MAT
+case 72x. Quantized mat-vec remains the largest gap: q4_1 29x, q5_1 26x, q3_K 20x, q2_K 20x, iq4_xs 18x.
+
+Not run: the other test suites (tests/cuda, tests/pathb-ir), and the non-MUL_MAT ops. The struct-field change makes SRA
+more conservative, so generated PTX changes for other kernels.

@@ -1,5 +1,5 @@
 // EXPECT: 4
-// QBE path (scripts/qbe-prep.rb): `__asm__ volatile("int $3\n" : :)` is doctest's DOCTEST_BREAK_INTO_DEBUGGER.
+// QBE path (scripts/qbe-prep): `__asm__ volatile("int $3\n" : :)` is doctest's DOCTEST_BREAK_INTO_DEBUGGER.
 // cproc has no inline asm, so the statement becomes a call to a weak `int3; ret` stub in the assembly tail
 // (docs/notes/realworld.md). The SIGTRAP handler counts each break and returns, and execution resumes at the
 // stub's ret, so every break below is counted and the program keeps running. cproc rejects volatile stores,
@@ -22,4 +22,4 @@ int main() {
     __asm__("int $3\n" : :);  // the same statement without `volatile`
     return count();
 }
-// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
+// X86-ONLY: x86-64 inline asm (int3 break); not portable to other targets

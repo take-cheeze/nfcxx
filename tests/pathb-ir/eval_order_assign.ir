@@ -1,5 +1,5 @@
 (ir-module "eval_order_assign.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
-(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (thread) (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))

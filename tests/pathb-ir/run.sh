@@ -6,6 +6,11 @@
 # PATHB_CPFE (and PATHB_BASE) to a scratch build, or use build/pathb.
 cd "$(dirname "$0")/../.."
 update=0; [ "${1:-}" = --update ] && update=1
+# A byval parameter carries its size and alignment (be/nfcxx_ir.c): the goldens keep the form without them, as for copy.
+# The copy form ends with the aggregate's alignment (the IR's last item, be/nfcxx_ir.c ir_copy). The goldens keep the
+# form without it: the alignment is checked by the emitter (tests/gpu), and the goldens stay the text the CI front end
+# produces, so a golden does not depend on the local toolchain's headers beyond what the golden already records.
+ir_norm() { sed -E -e 's/\(copy ([0-9]+) ([^ ()]+) ([^ ()]+) [0-9]+\)/(copy \1 \2 \3)/g' -e 's/\(byval (\(struct "[^"]*"\)|[a-z_ ]+) [0-9]+ [0-9]+\)/(byval \1)/g' "$1"; }
 # No automatic build: a missing harness is an error, so a worktree never rebuilds the shared build/ directory.
 cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }
@@ -35,16 +40,16 @@ for f in tests/cases/*.cpp $probes; do
     echo "FAIL harness $cpfe has no IR back end (no (ir-module) output); build it with scripts/setup-pathb.sh"; exit 2
   fi
   g=$(grep -c '(unsupported' "$tmp/$n.ir" || true); gaps=$((gaps + g))
-  if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/$n.ir" "$tmp/$n.ir" > "$tmp/$n.diff"; then
+  if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then
     echo "ok   $f"
   else
     echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1
   fi
 done
 # Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering handled late (VLA, statement
-# expressions, bit-fields) next to one it still does not handle (inline asm). Its golden shows the (unsupported ...) marker; the count must match.
-gap_expected=1   # inline asm; VLAs, statement expressions and bit-fields are lowered
+# expressions, bit-fields, inline asm) and must lower all of them. Its golden has no (unsupported ...) marker; the count must match.
+gap_expected=0   # inline asm is an (asm-block ...) now; VLAs, statement expressions and bit-fields are lowered
 if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir tests/pathb-ir/gaps.cpp > "$tmp/gaps.ir" 2> "$tmp/gaps.err"; then
   echo "FAIL (front end) tests/pathb-ir/gaps.cpp"; fail=1
 else
@@ -59,40 +64,49 @@ else
 fi
 # Built-ins and va_arg lowered without a library call (va_arg of long double is a helper call), and the inline asm cases the emitter must refuse by name.
 # Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
-#   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown
+#   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown (the asm-block statement)
 mrb=scripts/mrb
-for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:asm-template \"cpuid\""; do
+for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:refused: statement (asm-block"; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
-  if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/$n.ir" "$tmp/$n.ir" > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
+  if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
   "$mrb" scripts/pathb-qbe-emit.rb "$tmp/$n.ir" > /dev/null 2> "$tmp/$n.emit"; rc=$?
   if [ "$rc" != "$want_rc" ]; then echo "FAIL $f: emitter exit $rc, expected $want_rc: $(head -1 "$tmp/$n.emit")"; fail=1
   elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
   else echo "ok   $f (emitter exit $rc${want_msg:+, refused with '$want_msg'})"; fi
 done
-# asm_refuse: three statements stay unsupported markers (cpuid, lock; incl, a register clobber); mfence is a (fence); pause, rep nop are lowered
+# asm_refuse: the register clobber stays an unsupported marker (asm-clobbers); cpuid and lock; incl are (asm-block ...); mfence is a (fence); pause, rep nop are lowered
 if [ $update = 0 ]; then
   g=$(grep -c '(unsupported stmt' "tests/pathb-ir/asm_refuse.ir" || true)
-  [ "$g" = 3 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 3"; fail=1; }
+  [ "$g" = 1 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm marker)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 1"; fail=1; }
 fi
 # Borrow facts (tier 0 of docs/notes/borrowck-plan.md, section 1.3): tests/pathb-ir/borrow/*.cpp are printed with
-# NFCXX_PATHB_BORROW=1 and compared with the golden of the same name. The flag only adds (decl ...), (scope-end ...) and
-# (rref-arg ...) forms, so with those removed the output must equal the default output (checked for each program).
+# NFCXX_PATHB_BORROW=1 and compared with the golden of the same name. The flag only adds (decl ...), (scope-end ...),
+# (rref-arg ...), (drop-obligation ...), (drop-live ...), (drop-state ...) forms and one top-level (borrow-layout ...) line
+# per struct, so with those removed the output must equal the default output (checked for each program).
 for f in tests/pathb-ir/borrow/*.cpp; do
   n=$(basename "$f" .cpp)
   if ! NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$f" > "$tmp/borrow_$n.ir" 2> "$tmp/borrow_$n.err"; then
     echo "FAIL (front end) $f"; head -5 "$tmp/borrow_$n.err"; fail=1; continue
   fi
-  if [ $update = 1 ]; then cp "$tmp/borrow_$n.ir" "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
-  if diff -u "tests/pathb-ir/borrow/$n.ir" "$tmp/borrow_$n.ir" > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
+  if [ $update = 1 ]; then ir_norm "$tmp/borrow_$n.ir" > "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
+  if diff -u <(ir_norm "tests/pathb-ir/borrow/$n.ir") <(ir_norm "$tmp/borrow_$n.ir") > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
   else echo "DIFF $f (NFCXX_PATHB_BORROW=1)"; head -40 "$tmp/borrow_$n.diff"; fail=1; fi
   scripts/pathb-dump --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
-  if perl -0pe 's/\s*\((decl|scope-end|rref-arg) [^()\n]*\)//g' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
+  if perl -0pe 's/\s*\((decl|scope-end|rref-arg|drop-obligation|drop-live|drop-state) [^()\n]*\)//g; s/^\(borrow-layout [^\n]*\n//mg' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
     echo "ok   $f (without the fact forms: the default output)"
   else echo "FAIL $f: the flag changes more than the fact forms"; fail=1; fi
 done
+# A failed write of the IR (a buffer that cannot grow under a memory cap, a full disk) is an error: the IR would be cut
+# short, and an exit status of 0 with a short IR only fails later, in its reader (llama.cpp's ggml-cuda.cu at 8 GB).
+if [ $update = 0 ] && [ -w /dev/full ]; then
+  if scripts/pathb-dump --ir tests/cases/constexpr_static.cpp > /dev/full 2> "$tmp/full.err"; then
+    echo "FAIL the IR written to /dev/full: exit status 0"; fail=1
+  elif grep -q 'writing the IR failed' "$tmp/full.err"; then echo "ok   the IR written to /dev/full is an error"
+  else echo "FAIL the IR written to /dev/full: not the write error"; head -3 "$tmp/full.err"; fail=1; fi
+fi
 # Coverage: sum the per-kind counts of tests/cases (the gap probe is reported above, not here). A kind with a nonzero unsupported count is a gap.
 for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac; cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '
   $1 == "ir-stat" && $2 != "total" {

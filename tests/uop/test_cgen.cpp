@@ -45,10 +45,8 @@ static bool same(const Array& a, const Array& b) {
 
 using Env = std::map<std::string, Array>;
 
-// The program for `roots`, compiled once, run on every env, compared with the interpreter.
-static void compare_run(const std::vector<const UOp*>& roots, const std::vector<Env>& envs, const char* label,
-                        const RenderOptions& options = RenderOptions()) {
-  CProgram p = render_c(roots, options);
+// The program `p` (for `roots`), compiled once, run on every env, compared with the interpreter on `roots`.
+static void compare_with(const std::vector<const UOp*>& roots, const CProgram& p, const std::vector<Env>& envs, const char* label) {
   std::shared_ptr<CModule> m = CModule::compile(p);
   int bad = 0;
   for (const Env& env : envs) {
@@ -62,6 +60,11 @@ static void compare_run(const std::vector<const UOp*>& roots, const std::vector<
       }
     }
   }
+}
+
+// The program for `roots`, compiled once, run on every env, compared with the interpreter.
+static void compare_run(const std::vector<const UOp*>& roots, const std::vector<Env>& envs, const char* label) {
+  compare_with(roots, render_c(roots), envs, label);
 }
 
 static void structure() {
@@ -131,7 +134,7 @@ static std::vector<const UOp*> halving_chain(Graph& g, const UOp* x, int steps) 
   const Shape s = x->shape;
   for (int k = 0; k < steps; k++) {
     const UOp* r = g.reduce_sum(a.back(), {1});   // [R, 1]
-    a.push_back(g.mul(g.add(a.back(), g.expand(r, s)), g.fconst(f32, 0.5, s)));
+    a.push_back(g.mul(g.add(a.back(), g.expand(r, s, symbols_of(x))), g.fconst(f32, 0.5, s)));
   }
   return a;
 }
@@ -210,68 +213,60 @@ static void arena() {
   compare_run({a[10], a[5]}, {env}, "arena chain with an intermediate output");
 
   // a symbol on the rows, with bounds: the arena is sized from the bound, and it is exact when the bound is the size
-  RenderOptions sym;
-  sym.input_symbols["x"] = {"N", ""};
-  sym.symbol_bounds["N"] = 32;
-  const CProgram ps = render_c({a[10]}, sym);
+  Graph gs;
+  const UOp* xsym = gs.var("x", f32, {32, 128}, {gs.symbol("N", 32), nullptr});
+  const CProgram ps = render_c({halving_chain(gs, xsym, 10).back()});
   CHECK(ps.arena_bytes == p.arena_bytes && ps.naive_bytes == p.naive_bytes && ps.unplanned == 0);
-  sym.symbol_bounds["N"] = 64;   // every intermediate has the symbol as its first dimension, so the arena doubles
-  const CProgram pb = render_c({a[10]}, sym);
+  compare_with({a[10]}, ps, {env}, "arena symbol 32");
+  Graph gb;   // every intermediate has the symbol as its first dimension, so the arena doubles
+  const UOp* xb = gb.var("x", f32, {32, 128}, {gb.symbol("N", 64), nullptr});
+  const CProgram pb = render_c({halving_chain(gb, xb, 10).back()});
   CHECK(pb.arena_bytes == 2 * p.arena_bytes && pb.naive_bytes == 2 * p.naive_bytes && pb.unplanned == 0);
-  compare_run({a[10]}, {env}, "arena bounded", sym);
-  sym.symbol_bounds["N"] = 16;   // x has 32 rows: the bound is below the input
-  CHECK_THROWS(render_c({a[10]}, sym));
-  sym.symbol_bounds["N"] = 0;
-  CHECK_THROWS(render_c({a[10]}, sym));
-  RenderOptions bad;
-  bad.input_symbols["x"] = {"N"};   // one entry for two dimensions
-  CHECK_THROWS(render_c({a[10]}, bad));
-  bad.input_symbols.clear();                // no input q
-  bad.input_symbols["q"] = {"N", ""};
-  CHECK_THROWS(render_c({a[10]}, bad));
+  compare_with({a[10]}, pb, {env}, "arena bounded");
+  Graph g16;   // x has 32 rows: the bound is below the input
+  CHECK_THROWS(g16.var("x", f32, {32, 128}, {g16.symbol("N", 16), nullptr}));
   // a symbol without a bound: each intermediate that depends on it keeps a malloc of its own, and the program is the same
-  RenderOptions unbound;
-  unbound.input_symbols["x"] = {"N", ""};
-  const CProgram pu = render_c({a[10]}, unbound);
+  Graph gu;
+  const UOp* xu = gu.var("x", f32, {32, 128}, {gu.symbol("N", 0), nullptr});
+  const CProgram pu = render_c({halving_chain(gu, xu, 10).back()});
   CHECK(pu.arena_bytes == 0 && pu.unplanned == pu.temporaries && pu.temporaries == 19);
-  compare_run({a[10]}, {env}, "arena unbounded", unbound);
+  compare_with({a[10]}, pu, {env}, "arena unbounded");
 
-  // A reshape that moves the symbol out of the leading dimension is not known, so its reduction keeps a malloc. The reduction
-  // over the symbol's axis after a permute has no symbol left (an integer [128, 1]), so it is planned: 512 bytes.
+  // A reshape with integer sizes that moves the symbol is not known, so its reduction keeps a malloc. The reduction over the
+  // symbol's axis after a permute has no symbol left (an integer [128, 1]), so it is planned: 512 bytes.
   Graph h;
-  const UOp* y = h.var("y", f32, {32, 128});
+  const UOp* y = h.var("y", f32, {32, 128}, {h.symbol("N", 32), nullptr});
   const UOp* rr = h.reduce_sum(h.reshape(y, {128, 32}), {1});   // [128, 1]: the reshape moves N, so the size is not known
   const UOp* pr = h.reduce_sum(h.permute(y, {1, 0}), {1});      // [128, 1]: the reduction takes N away
   const UOp* both = h.add(h.mul(rr, h.fconst(f32, 2.0, {128, 1})), h.mul(pr, h.fconst(f32, 3.0, {128, 1})));
-  RenderOptions ys;
-  ys.input_symbols["y"] = {"N", ""};
-  ys.symbol_bounds["N"] = 32;
-  const CProgram py = render_c({both}, ys);
+  const CProgram py = render_c({both});
   CHECK(py.unplanned == 1 && py.temporaries == 2 && py.arena_bytes == 512);
   Env yenv{{"y", Array::from_doubles(f32, {32, 128}, vals)}};
-  compare_run({both}, {yenv}, "arena reshape", ys);
+  compare_with({both}, py, {yenv}, "arena reshape");
 
   // two symbols on two axes: an intermediate's maximum is the product of the bounds. w = z * z is [N, M] (120 bytes, bounds
   // 5 and 7: 140, rounded to 144); r1 keeps N ([N, 1]: 32); r0 keeps M ([1, M]: 32). Live at once: all three at the last step.
   Graph k;
-  const UOp* z = k.var("z", f32, {2, 3});
+  const Symbol* kn = k.symbol("N", 5);
+  const Symbol* km = k.symbol("M", 7);
+  const UOp* z = k.var("z", f32, {2, 3}, {kn, km});
   const UOp* w = k.mul(z, z);                // used twice, so a buffer
-  const UOp* r1 = k.reduce_sum(w, {1});      // [2, 1]
-  const UOp* r0 = k.reduce_sum(w, {0});      // [1, 3]
-  const UOp* sum2 = k.add(k.expand(r1, {2, 3}), k.expand(r0, {2, 3}));
-  RenderOptions two;
-  two.input_symbols["z"] = {"N", "M"};
-  two.symbol_bounds["N"] = 5;
-  two.symbol_bounds["M"] = 7;
-  const CProgram pz = render_c({sum2}, two);
+  const UOp* r1 = k.reduce_sum(w, {1});      // [N, 1]
+  const UOp* r0 = k.reduce_sum(w, {0});      // [1, M]
+  const UOp* sum2 = k.add(k.expand(r1, {2, 3}, {kn, nullptr}), k.expand(r0, {2, 3}, {kn, km}));
+  const CProgram pz = render_c({sum2});
   CHECK(pz.temporaries == 3 && pz.unplanned == 0 && pz.naive_bytes == 144 + 32 + 32 && pz.arena_bytes == 208);
   Env zenv{{"z", Array::from_doubles(f32, {2, 3}, {1, -2, 3, 0.5, -0.25, 6})}};
-  compare_run({sum2}, {zenv}, "arena two symbols", two);
-  two.symbol_bounds["M"] = 2;                // z has 3 columns
-  CHECK_THROWS(render_c({sum2}, two));
-  two.symbol_bounds["M"] = 7;
-  two.symbol_bounds.erase("N");              // N unbound: w and r1 keep a malloc of their own, r0 is planned
-  const CProgram pm = render_c({sum2}, two);
+  compare_with({sum2}, pz, {zenv}, "arena two symbols");
+  Graph k2;
+  CHECK_THROWS(k2.var("z", f32, {2, 3}, {k2.symbol("N", 5), k2.symbol("M", 2)}));   // z has 3 columns
+  Graph k3;   // N unbound: w and r1 keep a malloc of their own, r0 is planned
+  const Symbol* k3n = k3.symbol("N", 0);
+  const Symbol* k3m = k3.symbol("M", 7);
+  const UOp* z3 = k3.var("z", f32, {2, 3}, {k3n, k3m});
+  const UOp* w3 = k3.mul(z3, z3);
+  const UOp* sum3 = k3.add(k3.expand(k3.reduce_sum(w3, {1}), {2, 3}, {k3n, nullptr}), k3.expand(k3.reduce_sum(w3, {0}), {2, 3}, {k3n, k3m}));
+  const CProgram pm = render_c({sum3});
   CHECK(pm.unplanned == 2 && pm.arena_bytes == 32);
 }
 
@@ -433,54 +428,417 @@ static void random_float_tensors() {
   compare_run(roots, envs, "random float tensors");
 }
 
-// Random chains of operators on an input whose first axis is the symbol N. The bound of N is the input's own size, so an
-// intermediate whose symbolic size is claimed wrongly would fail the render's check; the outputs must equal the interpreter's.
+// Random chains of operators on an input whose first axis is the symbol N (bound `bound`, 0: none). The input is `rows` x 6, and
+// the choices come from `rnd`, which does not depend on the number of rows, so the same chain is built at any size from the same
+// generator state. The symbolic forms keep N with its dimension: a cut that keeps the whole axis names its end, and the reshapes
+// name the symbols of their target (one that moves N included).
+static std::vector<const UOp*> random_chain(Graph& g, int64_t rows, Rng& rnd, int64_t bound) {
+  const UOp* x = g.var("x", f32, {rows, 6}, {g.symbol("N", bound), nullptr});
+  std::vector<const UOp*> pool{x};
+  const int steps = 3 + static_cast<int>(rnd(6));
+  for (int s = 0; s < steps; s++) {
+    const UOp* a = pool[rnd(static_cast<unsigned>(pool.size()))];
+    const int64_t rank = static_cast<int64_t>(a->shape.size());
+    const Syms as = symbols_of(a);
+    const Dims ds = dims_of(a);   // the polynomials too: a padded symbol is N+1, which symbols_of does not name
+    const UOp* out = nullptr;
+    switch (rnd(8)) {
+      case 0: out = g.add(a, g.mul(a, g.fconst(f32, 0.5, a->shape))); break;
+      case 1: out = g.reduce_sum(a, {static_cast<int64_t>(rnd(static_cast<unsigned>(rank)))}); break;
+      case 2:
+        if (rank == 2) out = g.permute(a, {1, 0});
+        break;
+      case 3:   // a cut of the last axis to a literal end: only an integer axis (a symbol's cut is not a symbol expression)
+        if (rank == 2 && a->shape[1] > 1 && !as[1]) out = g.shrink(a, {0, 0}, {a->shape[0], a->shape[1] - 1}, {as[0], nullptr});
+        break;
+      case 4:
+        if (rank == 2) out = g.pad(a, {0, 0}, {0, 1});
+        break;
+      case 5:
+        if (rank == 2) out = g.reshape_poly(a, {a->shape[0], 1, a->shape[1]}, {ds[0], Poly(1), ds[1]});   // keeps both polynomials
+        break;
+      case 6:
+        if (rank == 2) out = g.reshape_poly(a, {a->shape[1], a->shape[0]}, {ds[1], ds[0]});   // moves them
+        break;
+      default: out = g.flip(a, {rank - 1}); break;
+    }
+    if (out) pool.push_back(out);
+  }
+  return {pool.back(), pool[rnd(static_cast<unsigned>(pool.size()))]};
+}
+
 static void random_symbolic() {
   Rng rnd{777};
   for (int trial = 0; trial < 60; trial++) {
-    Graph g;
     const int64_t rows = 1 + rnd(4);
-    const UOp* x = g.var("x", f32, {rows, 6});
-    std::vector<const UOp*> pool{x};
-    const int steps = 3 + static_cast<int>(rnd(6));
-    for (int s = 0; s < steps; s++) {
-      const UOp* a = pool[rnd(static_cast<unsigned>(pool.size()))];
-      const int64_t rank = static_cast<int64_t>(a->shape.size());
-      const UOp* out = nullptr;
-      switch (rnd(8)) {
-        case 0: out = g.add(a, g.mul(a, g.fconst(f32, 0.5, a->shape))); break;
-        case 1: out = g.reduce_sum(a, {static_cast<int64_t>(rnd(static_cast<unsigned>(rank)))}); break;
-        case 2:
-          if (rank == 2) out = g.permute(a, {1, 0});
-          break;
-        case 3:
-          if (rank == 2 && a->shape[1] > 1) out = g.shrink(a, {0, 0}, {a->shape[0], a->shape[1] - 1});
-          break;
-        case 4:
-          if (rank == 2) out = g.pad(a, {0, 0}, {0, 1});
-          break;
-        case 5:
-          if (rank == 2) out = g.reshape(a, {a->shape[0], 1, a->shape[1]});   // keeps the leading axis
-          break;
-        case 6:
-          if (rank == 2) out = g.reshape(a, {a->shape[1], a->shape[0]});      // moves it: not known
-          break;
-        default: out = g.flip(a, {rank - 1}); break;
-      }
-      if (out) pool.push_back(out);
-    }
-    const std::vector<const UOp*> roots{pool.back(), pool[rnd(static_cast<unsigned>(pool.size()))]};
-    RenderOptions opts;
-    opts.input_symbols["x"] = {"N", ""};
-    opts.symbol_bounds["N"] = rows;
+    const Rng before = rnd;   // the generator state of the chain, to build it again with a bound above the size
+    Graph g;
+    const std::vector<const UOp*> roots = random_chain(g, rows, rnd, rows);
     std::vector<double> vals;
     for (int64_t i = 0; i < rows * 6; i++) vals.push_back(static_cast<double>((i * 7) % 11) - 5.0 + 0.125 * static_cast<double>(i % 3));
     const Env env{{"x", Array::from_doubles(f32, {rows, 6}, vals)}};
-    compare_run(roots, {env}, "random symbolic", opts);
-    // a bound above the size is fine as well: the arena is only larger
-    opts.symbol_bounds["N"] = rows + 3;
-    CHECK(render_c(roots, opts).arena_bytes >= 0);
+    compare_run(roots, {env}, "random symbolic");
+    // a bound above the size is fine as well: the same chain, the arena is only larger
+    Graph gb;
+    Rng rb = before;
+    CHECK(render_c(random_chain(gb, rows, rb, rows + 3)).arena_bytes >= render_c(roots).arena_bytes);
   }
+}
+
+// ---- symbolic loops (stage 7, step 2): one program at many sizes ----
+
+// The graph at the size n of the symbol N, whose bound is `bound` (0: none).
+using Build = std::function<std::vector<const UOp*>(Graph&, int64_t n, int64_t bound)>;
+
+// The program that `build` makes at the representative size `rep` (its input x is rep x cols, and the first axis of x is the
+// symbol N with the bound `bound`), run at each size of `sizes`. A dynamic program equals the interpreter on the graph built at
+// that size, for every size from its minimum up to the bound; a size above the bound, below 1 or below the minimum throws Error. A
+// program that is not dynamic runs at `rep` only, and throws at the other sizes.
+static CProgram compare_sizes(const char* label, const Build& build, int64_t rep, int64_t bound, const std::vector<int64_t>& sizes,
+                              int64_t cols, int64_t least = -1) {
+  Graph g0;
+  const CProgram p = render_c(build(g0, rep, bound));
+  std::shared_ptr<CModule> m = CModule::compile(p);
+  for (int64_t n : sizes) {
+    std::vector<double> vals;
+    for (int64_t i = 0; i < n * cols; i++) vals.push_back(static_cast<double>((i * 37) % 101 - 50) + 0.25 * static_cast<double>(i % 4));
+    const Env env{{"x", Array::from_doubles(f32, {n, cols}, vals)}};
+    const bool below = p.dynamic && n < (least >= 0 ? least : p.symbols[0].minimum);
+    if (n < 1 || (bound > 0 && n > bound) || below || (!p.dynamic && n != rep)) {
+      checks++;
+      bool threw = false;
+      try { (void)m->run(env); } catch (const Error&) { threw = true; }
+      if (!threw) { failed++; std::printf("FAIL %s: size %lld runs, it should throw\n", label, static_cast<long long>(n)); }
+      continue;
+    }
+    Graph g;
+    const std::vector<const UOp*> roots = build(g, n, bound);
+    const std::vector<Array> got = m->run(env);
+    for (size_t k = 0; k < roots.size(); k++) {
+      const Array want = evaluate_array(roots[k], env);
+      checks++;
+      if (!same(want, got[k])) {
+        failed++;
+        std::printf("FAIL %s: size %lld (rep %lld, %s), output %zu differs\n%s", label, static_cast<long long>(n), static_cast<long long>(rep),
+                    p.dynamic ? "dynamic" : "static", k, dump(roots[k]).c_str());
+      }
+    }
+  }
+  return p;
+}
+
+static void dynamic_sizes() {
+  // a batch chain: elementwise ops with a constant, a reduction over the non-batch axis, and an expand of that reduction
+  const Build batch = [](Graph& g, int64_t n, int64_t bound) {
+    const UOp* x = g.var("x", f32, {n, 4}, {g.symbol("N", bound), nullptr});
+    const UOp* h = g.add(g.mul(x, g.fconst(f32, 0.5, x->shape)), g.neg(x));   // [N, 4]
+    const UOp* s = g.reduce_sum(h, {1});                                    // [N, 1]
+    const UOp* o = g.mul(s, g.fconst(f32, 2.0, s->shape));                  // [N, 1]
+    return std::vector<const UOp*>{o, g.add(h, g.expand(o, x->shape, symbols_of(x)))};
+  };
+  const CProgram p = compare_sizes("batch chain", batch, 3, 8, {1, 2, 3, 5, 8, 9}, 4);   // 9 is above the bound: Error
+  CHECK(p.dynamic && p.symbols.size() == 1 && p.symbols[0].name == "N" && p.symbols[0].size == 3 && p.symbols[0].bound == 8);
+  CHECK(p.source.find("const int64_t* sizes) {") != std::string::npos && p.unplanned == 0);
+  // the same graph without a bound: its intermediates keep a malloc of their run-time size, and it runs at every size
+  const CProgram pu = compare_sizes("batch chain, no bound", batch, 3, 0, {1, 5, 40}, 4);
+  CHECK(pu.dynamic && pu.symbols.size() == 1 && pu.symbols[0].bound == 0 && pu.arena_bytes == 0 && pu.unplanned == pu.temporaries);
+  // a static graph keeps its shapes: another shape is an Error, and no symbol means no size argument
+  Graph gs;
+  const UOp* xs = gs.var("x", f32, {2, 3});
+  const CProgram ps = render_c({gs.neg(xs)});
+  CHECK(!ps.dynamic && ps.symbols.empty() && ps.source.find("const int64_t* sizes") == std::string::npos);
+  std::shared_ptr<CModule> ms = CModule::compile(ps);
+  CHECK_THROWS(ms->run({{"x", Array::from_doubles(f32, {3, 2}, {1, 2, 3, 4, 5, 6})}}));
+
+  // the arena of the static chain (the test above) at any size up to its bound: the same bytes, and the saving holds
+  const Build chain = [](Graph& g, int64_t r, int64_t bound) {
+    const UOp* x = g.var("x", f32, {r, 128}, {g.symbol("N", bound), nullptr});
+    return std::vector<const UOp*>{halving_chain(g, x, 10).back()};
+  };
+  const CProgram pc = compare_sizes("halving chain", chain, 32, 32, {1, 7, 32}, 128);
+  CHECK(pc.dynamic && pc.temporaries == 19 && pc.unplanned == 0 && pc.arena_bytes == 2 * 16384 + 128 && pc.arena_bytes * 4 < pc.naive_bytes);
+
+  // a reshape that moves the symbol with integer sizes: not known, so the program keeps integer loops and runs at its own size only
+  const Build moves = [](Graph& g, int64_t n, int64_t bound) {
+    const UOp* x = g.var("x", f32, {n, 4}, {g.symbol("N", bound), nullptr});
+    return std::vector<const UOp*>{g.reduce_sum(g.reshape(x, {4, n}), {1})};
+  };
+  const CProgram pm = compare_sizes("reshape moves the symbol", moves, 3, 8, {3, 2, 5}, 4);
+  CHECK(!pm.dynamic && pm.symbols.empty());
+  // the same reshape with the symbol named: it moves N, and the program stays dynamic
+  const Build moves_named = [](Graph& g, int64_t n, int64_t bound) {
+    const UOp* x = g.var("x", f32, {n, 4}, {g.symbol("N", bound), nullptr});
+    return std::vector<const UOp*>{g.reduce_sum(g.reshape(x, {4, n}, {nullptr, g.symbol("N", bound)}), {1})};
+  };
+  const CProgram pn = compare_sizes("reshape moves the symbol, named", moves_named, 3, 8, {3, 2, 5, 8}, 4);
+  CHECK(pn.dynamic && pn.symbols.size() == 1 && pn.unplanned == 0);
+
+  // no size contract: the representative size 3 of N is also a literal dimension of x, and the cut to 3 rows is a literal cut of
+  // N (it needs N at least 3, the renderer's minimum). Both are read as what the graph says, at any size.
+  const Build contract = [](Graph& g, int64_t n, int64_t bound) {
+    const UOp* x = g.var("x", f32, {n, 3}, {g.symbol("N", bound), nullptr});
+    return std::vector<const UOp*>{g.reduce_sum(x, {1}), g.shrink(x, {0, 0}, {3, 3})};
+  };
+  const CProgram pt = compare_sizes("no size contract", contract, 3, 8, {2, 3, 5, 8}, 3);   // 2 is below the minimum: Error
+  CHECK(pt.dynamic && pt.symbols.size() == 1 && pt.symbols[0].minimum == 3);
+
+  // two inputs that name one symbol: their sizes must agree, in the feeds too
+  Graph g2;
+  const Symbol* n2 = g2.symbol("N", 8);
+  const UOp* x2 = g2.var("x", f32, {3, 4}, {n2, nullptr});
+  const UOp* y2 = g2.var("y", f32, {3, 4}, {n2, nullptr});
+  const CProgram p2 = render_c({g2.add(x2, y2)});
+  CHECK(p2.dynamic && p2.symbols.size() == 1 && p2.inputs.size() == 2);
+  std::shared_ptr<CModule> m2 = CModule::compile(p2);
+  std::vector<double> xv, yv;
+  for (int i = 0; i < 5 * 4; i++) { xv.push_back(i * 0.5 - 3); yv.push_back(i % 7 - 2); }
+  Graph g5;
+  const UOp* x5 = g5.var("x", f32, {5, 4});
+  const UOp* y5 = g5.var("y", f32, {5, 4});
+  const Env env5{{"x", Array::from_doubles(f32, {5, 4}, xv)}, {"y", Array::from_doubles(f32, {5, 4}, yv)}};
+  const std::vector<Array> got5 = m2->run(env5);
+  checks++;
+  if (!same(evaluate_array(g5.add(x5, y5), env5), got5[0])) { failed++; std::printf("FAIL two inputs, one symbol\n"); }
+  CHECK_THROWS(m2->run({{"x", Array::from_doubles(f32, {5, 4}, xv)}, {"y", Array::from_doubles(f32, {2, 4}, {1, 2, 3, 4, 5, 6, 7, 8})}}));
+  Graph g6;
+  const UOp* x6 = g6.var("x", f32, {3, 4}, {g6.symbol("N", 0), nullptr});
+  const UOp* y6 = g6.var("y", f32, {4, 3}, {g6.symbol("N", 0), nullptr});   // N is 3 in x and 4 in y
+  CHECK_THROWS(render_c({g6.reduce_sum(x6, {0}), g6.reduce_sum(y6, {1})}));
+
+  // a symbol with bounds, and its arena: the bound sizes the arena, and a run above it is refused before any code runs
+  const CProgram pb = compare_sizes("batch chain, bound 3", batch, 3, 3, {1, 3}, 4);
+  CHECK(pb.dynamic && pb.unplanned == 0);
+  // a bound below the input's size is refused when the graph is built
+  Graph gb;
+  CHECK_THROWS(gb.var("x", f32, {3, 4}, {gb.symbol("N", 2), nullptr}));
+  CHECK_THROWS(gb.symbol("N", 3));   // the same name with another bound
+  // the explicit forms refuse what they cannot say: a reshape that does not carry the symbol with its size, a cut whose end is the
+  // symbol but is not the whole dimension, one entry for two dimensions
+  Graph ge;
+  const Symbol* ne = ge.symbol("N", 0);
+  const UOp* xe = ge.var("x", f32, {3, 4}, {ne, nullptr});
+  CHECK_THROWS(ge.reshape(xe, {4, 3}, {ne, nullptr}));           // N is 3 in x and 4 in the target
+  CHECK_THROWS(ge.reshape(xe, {3, 4}, {nullptr, nullptr}));      // N is named nowhere
+  CHECK_THROWS(ge.shrink(xe, {0, 0}, {2, 4}, {ne, nullptr}));    // the end of dimension 0 is 2, not N
+  CHECK_THROWS(ge.var("y", f32, {3, 4}, {ne}));                  // one entry for two dimensions
+  CHECK(ge.shrink(xe, {0, 0}, {3, 2}, {ne, nullptr})->sym[0] == xe->sym[0]);   // the whole of N keeps N
+}
+
+// ---- polynomial dimensions (stage 7, step 3): N-1 (a cut x[1:N]), 2*N (a reshape to [2N, 2]), chains and two symbols ----
+
+// The Build of a graph whose symbol N (bound `bound`) is the first axis of x: x is [n, 4] at the size n of the program.
+static void poly_sizes() {
+  // x[1:N] of [N, 4]: the dimension N-1 (at least 1, so N is at least 2); h is used twice, so it is a buffer with a polynomial size
+  const Build cut = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                 // [N, 4]
+    const UOp* c = g.shrink_poly(x, {1, 0}, {n, 4}, {N, Poly(4)});             // x[1:N]: [N-1, 4]
+    const UOp* h = g.add(g.mul(c, g.fconst(f32, 0.5, c->shape)), g.neg(c));  // [N-1, 4]
+    return std::vector<const UOp*>{g.reduce_sum(h, {1}), g.neg(h)};
+  };
+  const CProgram pc = compare_sizes("N-1: x[1:N]", cut, 3, 8, {1, 2, 3, 5, 8, 9}, 4, 2);   // 1 gives N-1 = 0, 9 is above the bound
+  CHECK(pc.dynamic && pc.source.find("(nfc_sz0 - 1)") != std::string::npos);
+  CHECK(pc.temporaries >= 1 && pc.unplanned == 0 && pc.arena_bytes > 0);   // bounded: the buffer of [N-1, 4] is in the arena
+  // the same without a bound: the buffer keeps a malloc of its run-time size, and the program runs at every size from 2
+  const CProgram pu = compare_sizes("N-1: x[1:N], no bound", cut, 3, 0, {2, 3, 5, 40}, 4, 2);
+  CHECK(pu.dynamic && pu.unplanned == pu.temporaries && pu.temporaries >= 1 && pu.arena_bytes == 0);
+
+  // reshape of [N, 4] to [2*N, 2]: the element count 4N is 2N*2 for every N, so the reshape is exact
+  const Build twice = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                        // [N, 4]
+    const UOp* r = g.reshape_poly(x, {2 * n, 2}, {Poly(2) * N, Poly(2)});             // [2N, 2]
+    return std::vector<const UOp*>{g.add(r, g.mul(r, g.fconst(f32, 0.5, r->shape))), g.reduce_sum(r, {1})};
+  };
+  const CProgram pt = compare_sizes("2*N: reshape to [2N, 2]", twice, 3, 8, {1, 2, 3, 5, 8}, 4);
+  CHECK(pt.dynamic && pt.source.find("(2 * nfc_sz0)") != std::string::npos && pt.unplanned == 0);
+
+  // a chain: x[1:N] reshaped to [2*(N-1), 2] (the element count (N-1)*4 is (2N-2)*2 for every N), reduced over its rows
+  const Build chain = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});
+    const UOp* c = g.shrink_poly(x, {1, 0}, {n, 4}, {N, Poly(4)});                    // [N-1, 4]
+    const UOp* r = g.reshape_poly(c, {2 * (n - 1), 2}, {Poly(2) * (N - Poly(1)), Poly(2)});   // [2N-2, 2]
+    return std::vector<const UOp*>{g.reduce_sum(r, {0}), g.neg(r)};
+  };
+  compare_sizes("chain: x[1:N] reshaped to [2N-2, 2]", chain, 3, 8, {1, 2, 3, 5, 8}, 4, 2);
+
+  // a symbol in the middle: [N, 6] is reshaped to [2, N, 3] (the strides of that target are polynomials, 3N) and then to [2N, 3]
+  // (whose source has the symbol in the middle), and the result is flipped
+  const Build middle = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 6}, {N, Poly(6)});                        // [N, 6]
+    const UOp* x3 = g.reshape_poly(x, {2, n, 3}, {Poly(2), N, Poly(3)});            // [2, N, 3]
+    const UOp* r = g.reshape_poly(x3, {2 * n, 3}, {Poly(2) * N, Poly(3)});          // [2N, 3]
+    return std::vector<const UOp*>{g.add(r, g.flip(r, {0})), g.reduce_sum(r, {0})};
+  };
+  const CProgram pmid = compare_sizes("reshape with a symbol in the middle", middle, 3, 8, {1, 2, 3, 5, 8}, 6);
+  CHECK(pmid.dynamic && pmid.unplanned == 0);
+
+  // two symbols in one dimension: x is [N, M] and reshaped to [N*M, 1]; every pair of sizes up to the bounds (N at most 4, M at most 3)
+  const auto two = [](Graph& g, int64_t n, int64_t m) {
+    g.symbol("N", 4);
+    g.symbol("M", 3);
+    const Poly N = Poly::Symbol("N"), M = Poly::Symbol("M");
+    const UOp* x = g.var_poly("x", f32, {n, m}, {N, M});
+    const UOp* r = g.reshape_poly(x, {n * m, 1}, {N * M, Poly(1)});
+    return std::vector<const UOp*>{g.mul(r, g.fconst(f32, 2.0, r->shape)), g.reduce_sum(x, {1})};
+  };
+  Graph g2;
+  const CProgram p2 = render_c(two(g2, 2, 3));
+  CHECK(p2.dynamic && p2.symbols.size() == 2 && p2.source.find("nfc_sz0 * nfc_sz1") != std::string::npos);
+  std::shared_ptr<CModule> m2 = CModule::compile(p2);
+  for (int64_t n = 1; n <= 4; n++)
+    for (int64_t m = 1; m <= 3; m++) {
+      std::vector<double> vals;
+      for (int64_t i = 0; i < n * m; i++) vals.push_back(static_cast<double>((i * 7 + n) % 11) - 4.5);
+      const Env env{{"x", Array::from_doubles(f32, {n, m}, vals)}};
+      Graph gw;
+      const std::vector<const UOp*> want = two(gw, n, m);
+      const std::vector<Array> got = m2->run(env);
+      for (size_t k = 0; k < want.size(); k++) {
+        checks++;
+        if (!same(evaluate_array(want[k], env), got[k])) { failed++; std::printf("FAIL two symbols at N=%lld M=%lld, output %zu\n", static_cast<long long>(n), static_cast<long long>(m), k); }
+      }
+    }
+  CHECK_THROWS(m2->run({{"x", Array::from_doubles(f32, {5, 3}, std::vector<double>(15, 1.0))}}));   // N is above its bound 4
+
+  // a polynomial input dimension is checked against the size its symbol gives: x is [N, 2] and y is [2*N, 2], so y has twice x's rows
+  Graph gy;
+  gy.symbol("N", 6);
+  const UOp* xa = gy.var_poly("x", f32, {3, 2}, {Poly::Symbol("N"), Poly(2)});
+  const UOp* ya = gy.var_poly("y", f32, {6, 2}, {Poly(2) * Poly::Symbol("N"), Poly(2)});
+  const CProgram py = render_c({gy.reduce_sum(xa, {1}), gy.reduce_sum(ya, {1})});
+  CHECK(py.dynamic && py.symbols.size() == 1 && py.inputs.size() == 2);
+  std::shared_ptr<CModule> my = CModule::compile(py);
+  {
+    std::vector<double> xv, yv;
+    for (int i = 0; i < 3 * 2; i++) xv.push_back(i - 2.5);
+    for (int i = 0; i < 6 * 2; i++) yv.push_back(i * 0.5 - 1);
+    const Env env{{"x", Array::from_doubles(f32, {3, 2}, xv)}, {"y", Array::from_doubles(f32, {6, 2}, yv)}};
+    const std::vector<Array> got = my->run(env);
+    checks++;
+    if (!same(evaluate_array(gy.reduce_sum(xa, {1}), env), got[0]) || !same(evaluate_array(gy.reduce_sum(ya, {1}), env), got[1])) {
+      failed++;
+      std::printf("FAIL polynomial input dimension\n");
+    }
+  }
+  CHECK_THROWS(my->run({{"x", Array::from_doubles(f32, {3, 2}, std::vector<double>(6, 1.0))}, {"y", Array::from_doubles(f32, {5, 2}, std::vector<double>(10, 1.0))}}));
+  CHECK_THROWS(my->run({{"x", Array::from_doubles(f32, {2, 2}, std::vector<double>(4, 1.0))}, {"y", Array::from_doubles(f32, {6, 2}, std::vector<double>(12, 1.0))}}));
+
+  // pad (stage 7, step 1 of the polynomial forms): padding N by 1 before the rows is N+1, explicitly (pad_poly) or derived (pad); the
+  // padded program is dynamic and runs at every size up to the bound, with no fallback
+  const Build padded = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                              // [N, 4]
+    const UOp* h = g.add(x, g.mul(x, g.fconst(f32, 0.5, x->shape)));                       // [N, 4], used by two pads
+    const UOp* p = g.pad_poly(h, {1, 0}, {0, 2}, {N + Poly(1), Poly(6)});                  // [N+1, 6]
+    const UOp* q = g.pad(h, {0, 1}, {1, 0});                                               // derived: [N+1, 5]
+    return std::vector<const UOp*>{g.mul(p, g.fconst(f32, 0.5, p->shape)), g.reduce_sum(q, {1}), g.neg(q)};
+  };
+  const CProgram pp = compare_sizes("pad: [N+1, 6] and [N+1, 5]", padded, 3, 8, {1, 2, 3, 5, 8}, 4);
+  CHECK(pp.dynamic && pp.source.find("(nfc_sz0 + 1)") != std::string::npos && pp.unplanned == 0);
+  CHECK(pp.temporaries >= 1 && pp.arena_bytes > 0);   // the padded intermediates are bounded: N+1 is at most 9
+
+  // a chain: x[1:N] (N-1 rows) padded by 2 before and 1 after is N+2 rows, reduced over them; N is at least 2 (N-1 >= 1)
+  const Build padcut = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const Poly N = Poly::Symbol("N");
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {N, Poly(4)});                              // [N, 4]
+    const UOp* c = g.shrink_poly(x, {1, 0}, {n, 4}, {N, Poly(4)});                          // [N-1, 4]
+    const UOp* p = g.pad(c, {2, 0}, {1, 0});                                               // [N+2, 4]
+    return std::vector<const UOp*>{g.reduce_sum(p, {0}), g.mul(p, g.fconst(f32, 2.0, p->shape))};
+  };
+  const CProgram ppc = compare_sizes("pad of a cut: x[1:N] padded to N+2", padcut, 3, 8, {1, 2, 3, 5, 8}, 4, 2);
+  CHECK(ppc.dynamic && ppc.source.find("(nfc_sz0 + 2)") != std::string::npos);
+
+  // what must still fall back: a pad of a constant's Wild dimension (its size is no polynomial). The graph runs at its representative size
+  // only, like any graph that falls back
+  const Build padwild = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {Poly::Symbol("N"), Poly(4)});
+    const UOp* c = g.fconst(f32, 1.5, {1, 4});                                              // [1, 4]: the second dimension is Wild
+    return std::vector<const UOp*>{g.pad(c, {0, 1}, {0, 0}), g.reduce_sum(x, {1})};         // [1, 5]
+  };
+  const CProgram ppw = compare_sizes("pad of a Wild dimension: falls back", padwild, 3, 8, {3, 2, 5}, 4);
+  CHECK(!ppw.dynamic && ppw.symbols.empty());
+
+  // what must still fall back: a shape-only reshape of a symbolic dimension (2N is not named, so it is Unknown), and a polynomial
+  // dimension whose symbol M names no input (M is never fed): both keep integer loops and run at their own sizes only
+  const Build shape_only = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {Poly::Symbol("N"), Poly(4)});
+    return std::vector<const UOp*>{g.reduce_sum(g.reshape(x, {2 * n, 2}), {1})};
+  };
+  const CProgram pf = compare_sizes("shape-only reshape of 2N: falls back", shape_only, 3, 8, {3, 2, 5}, 4);
+  CHECK(!pf.dynamic && pf.symbols.empty());
+  const Build unfed = [](Graph& g, int64_t n, int64_t bound) {
+    g.symbol("N", bound);
+    g.symbol("M", bound);
+    const UOp* x = g.var_poly("x", f32, {n, 4}, {Poly::Symbol("N"), Poly(4)});
+    const UOp* y = g.fconst(f32, 1.5, {1, 4});
+    const UOp* e = g.expand_poly(y, {2 * n, 4}, {Poly(2) * Poly::Symbol("M"), Poly(4)});   // 2M, and M names no input
+    return std::vector<const UOp*>{e, g.reduce_sum(x, {1})};
+  };
+  const CProgram pm = compare_sizes("2*M, M fed by no input: falls back", unfed, 3, 8, {3, 2, 5}, 4);
+  CHECK(!pm.dynamic && pm.symbols.empty());
+
+  // refusals: a reshape whose element counts differ for some size, a literal end that is not the integer given, a symbol that is not
+  // the graph's, a polynomial above its bound, and a cut of N whose end is not N's size in the input
+  Graph ge;
+  ge.symbol("N", 8);
+  const UOp* xe = ge.var_poly("x", f32, {3, 4}, {Poly::Symbol("N"), Poly(4)});
+  CHECK_THROWS(ge.reshape_poly(xe, {3, 4}, {Poly(3), Poly(4)}));            // 4N is not 12 for every N
+  CHECK_THROWS(ge.reshape_poly(xe, {2, 6}, {Poly(2), Poly(6)}));            // and not 2*6 either
+  CHECK_THROWS(ge.shrink_poly(xe, {0, 0}, {2, 4}, {Poly(3), Poly(4)}));      // the literal end 3 is not the end 2
+  CHECK_THROWS(ge.var_poly("q", f32, {3}, {Poly::Symbol("Q")}));              // Q is no symbol of this graph
+  CHECK_THROWS(ge.shrink_poly(xe, {1, 0}, {2, 4}, {Poly::Symbol("N"), Poly(4)}));   // N is 3 in x, so the end 2 is not N
+  Graph gbnd;
+  gbnd.symbol("N", 4);
+  CHECK_THROWS(gbnd.var_poly("z", f32, {9}, {Poly(2) * Poly::Symbol("N")}));        // 2N is at most 8 with N at most 4
+  CHECK(gbnd.var_poly("z", f32, {8}, {Poly(2) * Poly::Symbol("N")})->shape == (Shape{8}));
+  // pad: the explicit form takes the padded polynomial, which must be the input's plus the amounts, and the integers must agree
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N"), Poly(4)}));              // N is not N+1
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1), Poly(5)}));    // the second dimension is 4
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly(4), Poly(4)}));                        // an integer 4 is not N+1
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1)}));             // one polynomial for two dimensions
+  CHECK_THROWS(ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("Q") + Poly(1), Poly(4)}));    // Q+1 is not N+1 (and Q is no symbol)
+  const UOp* pe = ge.pad_poly(xe, {1, 0}, {0, 0}, {Poly::Symbol("N") + Poly(1), Poly(4)});
+  CHECK(pe->shape == (Shape{4, 4}) && pe->sym[0].kind == SymDim::Poly && pe->sym[0].poly == Poly::Symbol("N") + Poly(1));
+  CHECK(pe->sym[1].kind == SymDim::Int && dims_of(pe)[0] == Poly::Symbol("N") + Poly(1));
+  const UOp* pd = ge.pad(xe, {1, 0}, {0, 0});   // the shape-only form derives the same polynomial
+  CHECK(pd == pe);   // the same node: interning
+  CHECK(ge.pad(xe, {0, 0}, {0, 0})->sym[0].kind == SymDim::Sym);   // an unpadded symbol stays the symbol
+
+  // the polynomial the explicit forms keep (and that the shape-only forms do not)
+  const UOp* xs = ge.var_poly("x", f32, {3, 4}, {Poly::Symbol("N"), Poly(4)});
+  CHECK(dims_of(xs)[0] == Poly::Symbol("N") && dims_of(xs)[1] == Poly(4));
+  const UOp* rs = ge.reshape_poly(xs, {2 * 3, 2}, {Poly(2) * Poly::Symbol("N"), Poly(2)});
+  CHECK(rs->sym[0].kind == SymDim::Poly && rs->sym[0].poly == Poly(2) * Poly::Symbol("N") && rs->sym[1].kind == SymDim::Int);
+}
+
+// The random chains at more sizes: each chain is dynamic (then it runs at every size up to the bound) or it runs at its own size.
+// The representative sizes are 4 to 7: the input has 6 columns, so the size 6 is a literal dimension as well as a symbol. That is no
+// longer a contract, since the symbols are in the shapes.
+static void random_symbolic_sizes() {
+  Rng rnd{991};
+  int dynamic_count = 0;
+  for (int trial = 0; trial < 60; trial++) {
+    const int64_t rows = 4 + rnd(4);
+    const Rng chain_rng = rnd;   // the generator state the chain is built from, at any size
+    const Build build = [chain_rng](Graph& g, int64_t n, int64_t bound) {
+      Rng r = chain_rng;
+      return random_chain(g, n, r, bound);
+    };
+    dynamic_count += compare_sizes("random symbolic sizes", build, rows, rows + 3, {1, rows, rows + 3}, 6).dynamic ? 1 : 0;
+  }
+  std::printf("  %d of 60 random chains are dynamic\n", dynamic_count);
+  CHECK(dynamic_count > 0);
 }
 
 static void dtypes() {
@@ -589,17 +947,22 @@ int main(int argc, char** argv) {
   const bool quick = argc > 1 && std::string(argv[1]) == "quick";   // no random batches: for a slow C compiler
   auto timed = [](const char* what, void (*f)()) {
     auto t0 = std::chrono::steady_clock::now();
+    const int checks_before = checks;
     f();
     if (std::getenv("NFCUOP_TIMING"))
-      std::printf("  %-22s %.1f s\n", what, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+      std::printf("  %-22s %.1f s, %d checks\n", what, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                  checks - checks_before);
   };
   timed("structure", structure);
   timed("arena", arena);
+  timed("dynamic sizes", dynamic_sizes);
+  timed("polynomial dims", poly_sizes);
   if (!quick) {
     timed("random scalars", random_scalars);
     timed("random int tensors", random_int_tensors);
     timed("random float tensors", random_float_tensors);
     timed("random symbolic", random_symbolic);
+    timed("random symbolic sizes", random_symbolic_sizes);
   }
   timed("dtypes", dtypes);
   timed("numpy api", numpy_api);

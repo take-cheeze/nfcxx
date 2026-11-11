@@ -1,0 +1,2 @@
+; A function that may throw, as a runtime helper that unwinds does (test effects, for --effects).
+(call-effects "_Z3mayPi" (returns void) (may-throw) (noescape) (closed) (args (write int)))

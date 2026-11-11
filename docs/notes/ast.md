@@ -500,10 +500,10 @@ as fast as with `<math.h>` (0.22 s against 0.45 s on gcc, 0.24 s against 0.54 s 
 `Sync`: the call that makes a function hot waits for the compile and then runs the new code. `Async`: the engine starts the
 driver as a **child process** and goes on; the calls it serves afterwards look at the process now and then, and a call after it
 has ended picks the code up. At most `TierOptions::jobs` (2) run at once, the others wait. There is no compile thread, and the
-reason is not taste: EDG's exception runtime keeps one global stack of try blocks (`lib_src/throw.c` of the front end; the
+reason was not taste: EDG's exception runtime kept one global stack of try blocks (`lib_src/throw.c` of the front end; the
 interpreter pushes on it all the time, to run destructors when a script error unwinds), so a second thread running C++ code with
-destructors while the engine runs would corrupt it (`__curr_eh_stack_entry` is a plain global in `3rd/edg/lib_src/eh.h`; that is from reading
-the source: no thread was run to watch it fail). A State that is destroyed with compiles running kills them. A failed compile
+destructors while the engine ran would have corrupted it. On Linux that state is thread-local now (docs/notes/eh-shim.md, "Limits");
+a compile thread would be possible there, macOS still has the global. A State that is destroyed with compiles running kills them. A failed compile
 (no driver, the driver exits non-zero, a timeout, a bad `dlopen`) is `tier_failed` and nothing else: the function stays
 interpreted.
 
@@ -532,7 +532,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 - A toolchain finding, kept in `nfcast_tier_rt.h` as a comment: the QBE back end miscompiled a struct that has a 4-byte member next to
   padding and is copied by value, as the generated code copies an `nfcr_N`: the branch on the member tested the padding half of the
   word (a float came back as its integer part). It was found by comparing a small accumulator with real Lua. Root cause: amd64 isel
-  of QBE (fixed by `scripts/qbe-wflag.patch`, test `tests/cases/qbe_wflag_padding.cpp`, report `docs/notes/qbe-wflag.md`). With the
+  of QBE (fixed by `the fork commit 'nfcxx patch: wflag'`, test `tests/cases/qbe_wflag_padding.cpp`, report `docs/notes/qbe-wflag.md`). With the
   patch `nfcr_N`'s flag is a 32-bit `int` again; with a QBE built without it, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on
   qbe, so re-run `scripts/setup-qbe.sh` after pulling.
 - A kernel that fails often costs the failed run plus the interpreter's run until it is given up.
@@ -608,7 +608,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   program while a caller holds a rewritten site.
 - `tests/ast/fuzz.sh` (not in CI): random programs, a few hundred seeds of each kind: arithmetic, bitwise, comparison,
   concatenation and logic over integers, floats, strings and other values, calls of `find`, `match`, `gsub`, `gmatch` with
-  random patterns, and (`fuzz/gen_inl.py`) random small helper functions and methods of two classes called from random
+  random patterns, and (`fuzz/gen_inl.rb`) random small helper functions and methods of two classes called from random
   expressions, each expression run over ten tuples of argument values and three receivers so that the sites are hot when the
   types change; since the second inlining the helpers and methods also have loops (numeric, float, `while`, `repeat`, `break`,
   `return` from inside, `ipairs`), multiple assignment (swapped parameters, fields, an upvalue), assigned parameters, and some
@@ -706,7 +706,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   loops over captured locals (through the cell: the loop runs as native code, with the alias of an assigned cell the guard fails and
   the interpreter runs it), local functions as callees (also one that is a cell, one that is another function the next time, one
   assigned in the loop, a number, a native function).
-- `tests/ast/fuzz_tier.sh` (by hand): random numeric kernels (`fuzz/gen_kernel.py`: integer, float, boolean and "number of either kind" locals, parameters and results, every
+- `tests/ast/fuzz_tier.sh` (by hand): random numeric kernels (`fuzz/gen_kernel.rb`: integer, float, boolean and "number of either kind" locals, parameters and results, every
   operator, `if` / `while` / `repeat` / `for`, `break`, upvalues and globals that change type between calls, calls between functions,
   recursion, functions without a result, wrong and missing arguments) run by a real Lua 5.4.9 and by nfcast with every function
   compiled at its first call, output and error messages compared. On the final code: 24 seeds of 10 functions on the gcc back end (321 functions compiled, 1251 calls ran as native code) and 25 seeds on qbe (268 and 1224), no mismatch. It also found two differences between the engine and

@@ -1,0 +1,7 @@
+(ir-module "drops" (layout (pointer 8) (int 4)))
+
+(function "test" (ret int) (params (param %9 "input" (ptr int)))
+(slot "p" (ptr int) 8 8)
+(drop-obligation "p" (ptr int) $"p")
+(decl $"p" ref) (store (ptr int) $"p" %9) (drop-live "p")(drop-state "p")(return (const int 0))
+)

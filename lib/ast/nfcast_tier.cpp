@@ -219,6 +219,7 @@ struct Version {
   std::vector<char> in_cell, in_written;
   std::vector<Ty> out_ty;       //   their types when the loop has ended (a local that took both kinds of number is an N)
   TierState* T = nullptr;
+  std::uint64_t mkey = 0;  // TierOptions::share: the Merkle hash of the lowered form and the types (0: not shared)
   ~Version();
 };
 
@@ -262,6 +263,7 @@ struct TierState {
   std::vector<Version*> queued;   // compiles waiting for one of the TierOptions::jobs to end (Async)
   unsigned tick = 0;
   unsigned build_seq = 0;
+  std::map<std::uint64_t, std::string> shared;  // TierOptions::share: Merkle hash -> the shared object compiled for it
   bool debug = false;
   std::vector<nfcr_W> fvbuf;  // two words for each free variable of a unit: the value, and for an N its kind
   std::vector<Closure*> closbuf;
@@ -817,6 +819,97 @@ bool build_unit(State& S, Unit& U, Closure* cl, Fail& f, Node* osr_loop = nullpt
   }
   U.nfv = base;
   return true;
+}
+
+// ================================================================================================================================
+// Merkle hashes (docs/notes/astro.md, "lib/ast spike")
+// ================================================================================================================================
+// The hash of a node is the hash of its kind, its operands and the hashes of its children, as in ASTro's. What the generated code does
+// not depend on is left out: lines, expression ids, and names of locals (a variable is a number). So `function(a) return a + 1 end` on
+// line 3 and `function(zz) return zz + 1 end` on line 90 have one hash. Free variables and callees are numbered by first use and
+// hashed with their binding (kind, index, name), so a different global is a different hash.
+inline std::uint64_t mix(std::uint64_t h, std::uint64_t x) {
+  h = (h ^ x) * 1099511628211ULL;
+  h ^= h >> 29;
+  return h * 0x9e3779b97f4a7c15ULL;
+}
+
+std::uint64_t merkle_expr(const IExpr* e, std::vector<std::uint64_t>* all) {
+  std::size_t at = 0;
+  if (all) {
+    at = all->size();
+    all->push_back(0);
+  }
+  std::uint64_t h = mix(0x45, static_cast<std::uint64_t>(e->k));
+  h = mix(h, static_cast<std::uint64_t>(e->op));
+  h = mix(h, static_cast<std::uint64_t>(e->cty));
+  h = mix(h, static_cast<std::uint64_t>(e->ci));
+  std::uint64_t bits;
+  std::memcpy(&bits, &e->cd, sizeof bits);
+  h = mix(h, bits);
+  h = mix(h, static_cast<std::uint64_t>(e->var + 1));
+  h = mix(h, static_cast<std::uint64_t>(e->fv + 1));
+  h = mix(h, static_cast<std::uint64_t>(e->dep + 1));
+  h = mix(h, e->neg ? 1 : 0);
+  h = mix(h, e->kids.size());
+  for (const IExpr* k : e->kids) h = mix(h, merkle_expr(k, all));
+  if (all) (*all)[at] = h;
+  return h;
+}
+
+std::uint64_t merkle_stmt(const IStmt* s, std::vector<std::uint64_t>* all) {
+  std::size_t at = 0;
+  if (all) {
+    at = all->size();
+    all->push_back(0);
+  }
+  std::uint64_t h = mix(0x53, static_cast<std::uint64_t>(s->k));
+  h = mix(h, s->vars.size());
+  for (int v : s->vars) h = mix(h, static_cast<std::uint64_t>(v));
+  h = mix(h, (s->has_else ? 1 : 0) | (s->tail ? 2 : 0) | (static_cast<std::uint64_t>(s->osr) << 2));
+  h = mix(h, s->exprs.size());
+  for (const IExpr* e : s->exprs) h = mix(h, merkle_expr(e, all));
+  h = mix(h, s->blocks.size());
+  for (const IStmt* b : s->blocks) h = mix(h, merkle_stmt(b, all));
+  if (all) (*all)[at] = h;
+  return h;
+}
+
+std::uint64_t mix_str(std::uint64_t h, const std::string& s) {
+  for (unsigned char c : s) h = mix(h, c);
+  return mix(h, s.size());
+}
+
+// The hash of a unit and the types it is compiled for: the bodies, what they read from outside, whom they call.
+std::uint64_t merkle_unit(const Unit& U, const std::vector<Ty>& sig, const UnitMeta& m, Ty ret, std::vector<std::uint64_t>* all) {
+  std::uint64_t h = mix(0x55, sig.size());
+  for (Ty t : sig) h = mix(h, static_cast<std::uint64_t>(t));
+  h = mix(h, static_cast<std::uint64_t>(ret));
+  h = mix(h, static_cast<std::uint64_t>(m.nfv));
+  h = mix(h, static_cast<std::uint64_t>(m.max_nslots));
+  std::size_t at = 0;
+  if (all) {
+    at = all->size();
+    all->push_back(0);
+  }
+  for (std::size_t i = 0; i < U.protos.size(); ++i) {
+    const ProtoIR* p = U.protos[i].get();
+    h = mix(h, static_cast<std::uint64_t>(p->nparams));
+    h = mix(h, static_cast<std::uint64_t>(p->nslots));
+    h = mix(h, static_cast<std::uint64_t>(p->nvars));
+    for (int v : p->pvars) h = mix(h, static_cast<std::uint64_t>(v));
+    for (const MFree& f : m.protos[i].fvs) {
+      h = mix(mix(mix(h, static_cast<std::uint64_t>(f.kind)), static_cast<std::uint64_t>(f.idx)), static_cast<std::uint64_t>(f.ty));
+      h = mix(mix_str(h, f.name), static_cast<std::uint64_t>(f.sty) * 4 + (f.written ? 1 : 0));
+    }
+    for (const MDep& d : m.protos[i].deps) {
+      h = mix(mix(mix(h, static_cast<std::uint64_t>(d.kind)), static_cast<std::uint64_t>(d.idx)), static_cast<std::uint64_t>(d.callee) * 2 + (d.cell ? 1 : 0));
+      h = mix_str(h, d.name);
+    }
+    h = mix(h, p->body ? merkle_stmt(p->body, all) : 0);
+  }
+  if (all) (*all)[at] = h;
+  return h;
 }
 
 // ================================================================================================================================
@@ -1953,6 +2046,7 @@ bool install(State& S, Version* v, bool from_cache, std::string* err) {
   v->st = Version::Ready;
   ++S.stats.tier_compiled;
   if (from_cache) ++S.stats.tier_cache_hits;
+  if (v->mkey && S.tier->opt.share) S.tier->shared.emplace(v->mkey, v->so);
   note(S.tier, from_cache ? "loaded %s from the cache" : "compiled %s", v->so);
   return true;
 }
@@ -2038,6 +2132,10 @@ void start_build(State& S, Version* v, const std::string& src) {
   std::string key = bld::hash_hex(k);
   std::string base = T->cache + "/nfcast-tier-" + key;
   v->so = base + ".so";
+  if (v->mkey) {  // share == 2: the entry for this hash must be the code just generated
+    std::map<std::uint64_t, std::string>::iterator it = T->shared.find(v->mkey);
+    if (it != T->shared.end() && it->second != v->so) ++S.stats.tier_share_conflicts;
+  }
   if (bld::file_exists(v->so)) {
     std::string err;
     if (install(S, v, true, &err)) return;
@@ -2132,6 +2230,25 @@ void request(State& S, TierProto* tp, Closure* cl, const std::vector<Ty>& sig) {
   v->ret = in.insts[0].ret;
   v->meta = make_meta(U);
   set_storage_types(v->meta, U, in);
+  if (T->opt.share) {
+    v->mkey = merkle_unit(U, sig, v->meta, v->ret, nullptr);
+    std::map<std::uint64_t, std::string>::iterator it = T->shared.find(v->mkey);
+    if (T->opt.share == 1 && it != T->shared.end() && bld::file_exists(it->second)) {  // no code generation, no source hash
+      v->so = it->second;
+      std::string err;
+      Version* hit = v.get();
+      tp->vers.push_back(std::move(v));
+      if (install(S, hit, true, &err)) {
+        ++S.stats.tier_share_hits;
+        return;
+      }
+      hit->so.clear();
+      hit->st = Version::Building;
+      T->shared.erase(it);
+      start_build(S, hit, Gen(U, in).source(T->rt_text));
+      return;
+    }
+  }
   Gen g(U, in);
   std::string src = g.source(T->rt_text);
   Version* raw = v.get();
@@ -2621,6 +2738,7 @@ void tier_init_from_env(State& S) {
     if (v > 0) o.threshold = o.loop_threshold = static_cast<unsigned>(v);
   }
   if (const char* r = std::getenv("NFCAST_TIER_OSR")) o.osr = !(r[0] == '0' && !r[1]);
+  if (const char* sh = std::getenv("NFCAST_TIER_SHARE")) o.share = static_cast<unsigned>(std::atoi(sh));
   S.enable_tier(o);
 }
 
@@ -2656,6 +2774,23 @@ void State::tier_wait() {
     for (std::size_t i = 0; i < tier->pending.size(); ++i) bld::wait(tier->pending[i]->child, true, tier->opt.timeout);
     poll_pending(*this);
   }
+}
+
+std::vector<std::uint64_t> State::tier_merkle(const Value& fn, const Value* args, int n) {
+  std::vector<std::uint64_t> all;
+  if (!tier || !fn.is_closure()) return all;
+  std::vector<Ty> sig;
+  Closure* cl = fn.closure();
+  if (!signature(args, n, cl->proto->nparams, sig)) return all;
+  Unit U;
+  Fail f;
+  if (!build_unit(*this, U, cl, f)) return all;
+  Infer in(U);
+  if (!in.run(sig)) return all;
+  UnitMeta m = make_meta(U);
+  set_storage_types(m, U, in);
+  merkle_unit(U, sig, m, in.insts[0].ret, &all);
+  return all;
 }
 
 std::string State::tier_loops(const Value& fn) {

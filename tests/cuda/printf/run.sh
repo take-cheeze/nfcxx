@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Device printf through the driver (scripts/pathb-ptx-emit.rb lowers the call to vprintf; the runtime prints the lines
+# Device printf through the driver (tools/pathb-ptx-emit lowers the call to vprintf; the runtime prints the lines
 # when the kernel completes). Checks the exact output, a mutant (a changed format must change the output), and that a
 # printf whose format is not a string constant is refused with exit 3. Needs the CUDA toolkit and an NVIDIA GPU; skips
 # (exit 0) when missing.

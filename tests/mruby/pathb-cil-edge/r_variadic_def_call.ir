@@ -1,0 +1,2 @@
+(function "f" (ret int) (params (param %0 "a" int)) (return (const int 0)))
+(function "g" (ret int) (params) (return (call int &"f" (const int 1) (const int 2))))

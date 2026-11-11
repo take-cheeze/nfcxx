@@ -1,0 +1,1 @@
+let_property_assign.swift:8:1: error: cannot assign to 'let' property 'x'

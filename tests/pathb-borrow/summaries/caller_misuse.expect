@@ -1,0 +1,3 @@
+1
+inferred: (call-effects "get" (returns int) (nothrow) (noescape) (closed) (args (read int)))
+main: uninitialized: x

@@ -243,6 +243,8 @@ struct Stats {
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
   std::uint64_t tier_cache_hits = 0;  // versions loaded from the cache without running the driver
+  std::uint64_t tier_share_hits = 0;  // versions that took the shared object of an earlier one with the same Merkle hash (TierOptions::share)
+  std::uint64_t tier_share_conflicts = 0;  // share == 2: a hash hit whose generated code is not the code of the entry (must stay 0)
   std::uint64_t tier_ineligible = 0;  // functions that are not numeric kernels (counted once per function)
   std::uint64_t tier_failed = 0;      // versions whose compile failed (no driver, a compiler error, a timeout, a dlopen error)
   std::uint64_t tier_calls = 0;       // calls that ran as native code
@@ -272,6 +274,8 @@ struct TierOptions {
   std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
   unsigned timeout = 120;           // seconds one compile may take
   bool osr = true;                  // a hot loop is compiled and taken over in the middle of the call (NFCAST_TIER_OSR=0 turns it off)
+  unsigned share = 0;               // 1: versions with the same Merkle hash of their lowered form share one shared object (NFCAST_TIER_SHARE=1;
+                                    // docs/notes/astro.md, "lib/ast spike"); 2: the same, but every version is still generated and compared
 };
 
 struct TierState;
@@ -347,6 +351,9 @@ struct State {
   // ---- tiering (nfcast_tier.cpp) ----
   void enable_tier(const TierOptions& opt);  // TierOptions::Off turns it off again; versions already compiled stay usable
   std::string tier_state(const Value& fn);   // what the tier made of a script function: "cold", "compiled ...", "ineligible: why", ...
+  // The Merkle hashes of the lowered form of a script function called with arguments ARGS (their types are the signature): [0] is
+  // the whole function, then every expression and statement in pre-order. Empty when it is not a kernel for these arguments.
+  std::vector<std::uint64_t> tier_merkle(const Value& fn, const Value* args, int n);
   void tier_wait();                          // Async: waits for the compiles that are running and installs the results
   std::string tier_loops(const Value& fn);   // what the tier made of the loops of a script function ("line 3: compiled ii; line 9: ineligible: why")
   TierState* tier = nullptr;                 // null: tiering is off

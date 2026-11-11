@@ -1,0 +1,2 @@
+2
+error: interior-mutable struct needs a semantic layout

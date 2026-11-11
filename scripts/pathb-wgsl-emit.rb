@@ -155,6 +155,11 @@ def parse_forms(toks)
   stack[0]
 end
 
+# EDG's exception-handling state (lib_src/eh.h). A noexcept function (libstdc++'s std::array::operator[], for one) pushes
+# a kind-6 entry on __curr_eh_stack_entry and pops it on every exit; nothing on the device unwinds, so the cells are
+# ordinary static storage here, not an extern to refuse.
+EH_RUNTIME_STATE = %w[__curr_eh_stack_entry __eh_curr_region __catch_clause_number __caught_object_address].freeze
+
 def head_of(x)
   x.is_a?(Array) && !x.empty? && x[0].is_a?(String) ? x[0] : nil
 end
@@ -323,6 +328,7 @@ SYCL_VALUES = {
   "__nfcxx_sycl_grange_x" => "args.gsize.x", "__nfcxx_sycl_grange_y" => "args.gsize.y", "__nfcxx_sycl_grange_z" => "args.gsize.z",
   "__nfcxx_sycl_lrange_x" => "WGX", "__nfcxx_sycl_lrange_y" => "WGY", "__nfcxx_sycl_lrange_z" => "WGZ",
   "__nfcxx_sycl_closure" => "0xc0000000u", "__nfcxx_sycl_local_base" => "0x40000000u",
+  "__nfcxx_sycl_sg_size" => "16u",   # the lanes of a sub-group (WGSL has no sub-group operations here: the shim's 16)
   "__nfcxx_sycl_scratch" => "(0x40000000u + WG_WORDS * 4u)",
 }
 
@@ -348,6 +354,9 @@ LIBM_F32 = {
   "copysignf" => "bitcast<f32>((bitcast<u32>(X) & 0x7fffffffu) | (bitcast<u32>(Y) & 0x80000000u))",
 }
 LIBM_F32.keys.each { |k| LIBM_F32["__builtin_" + k] = LIBM_F32[k] }
+# binary16 bits (the low half of a u32) to f32 and back (lib/sycl-ggml/sycl/half_type.hpp on the device)
+LIBM_F32["__nfcxx_sycl_h2f"] = "unpack2x16float(X).x"
+LIBM_F32["__nfcxx_sycl_f2h"] = "pack2x16float(vec2<f32>(X, 0.0))"
 
 SYCL_ATOMICS = ["add", "max", "min", "umax", "umin", "and", "or", "xor", "xchg", "load", "fadd", "fmin", "fmax", "cas"]
 
@@ -375,6 +384,69 @@ def collect_calls(x, acc)
 end
 
 # Names of the slots a form takes the address of in a way other than the address of a load or a store.
+# A function-pointer local whose every store is the address of one function (a constexpr pointer, e.g. a template selector's
+# result: the front end stores it into a slot, then calls it through a load) is folded: the stores are dropped and each call
+# through a load of the slot calls that function directly (the same direct call the front end emits for a known callee).
+# Any other use of the slot (a load used as a value, a store of another address, the slot's address) leaves it alone.
+def fnptr_slot?(t)
+  t = t[1] if head_of(t) == "const"
+  head_of(t) == "ptr" && t.length > 1 && head_of(t[1]) == "fn"
+end
+
+def fnptr_scan(x, st)
+  if x.is_a?(IRSym)
+    st[:bad][x.name] = true if x.sig == "$" && st[:names][x.name]
+    return
+  end
+  return unless x.is_a?(Array)
+  h = head_of(x)
+  if h == "store" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    n = x[2].name
+    v = x[3]
+    if v.is_a?(IRSym) && v.sig == "&" && (st[:target][n].nil? || st[:target][n] == v.name)
+      st[:target][n] = v.name
+      st[:drop][x.object_id] = n
+    else
+      st[:bad][n] = true
+    end
+    return
+  end
+  if h == "call" && x[2].is_a?(Array) && head_of(x[2]) == "load" && x[2][2].is_a?(IRSym) && x[2][2].sig == "$" &&
+     st[:names][x[2][2].name]
+    st[:calls][x[2].object_id] = x[2][2].name
+    x.drop(3).each { |y| fnptr_scan(y, st) }
+    return
+  end
+  if h == "load" && x[2].is_a?(IRSym) && x[2].sig == "$" && st[:names][x[2].name]
+    st[:bad][x[2].name] = true
+    return
+  end
+  x.each { |y| fnptr_scan(y, st) }
+end
+
+def fnptr_rewrite(x, st)
+  return unless x.is_a?(Array)
+  x.reject! { |c| c.is_a?(Array) && st[:drop].key?(c.object_id) }
+  if head_of(x) == "call" && x[2].is_a?(Array) && st[:calls].key?(x[2].object_id)
+    x[2] = IRSym.new("&", st[:target][st[:calls][x[2].object_id]])
+  end
+  x.each { |c| fnptr_rewrite(c, st) }
+end
+
+def fold_fnptr_slots(body, slots)
+  st = { names: {}, target: {}, bad: {}, drop: {}, calls: {} }
+  slots.each { |f| st[:names][f[1].to_s] = true if fnptr_slot?(f[2]) }
+  return if st[:names].empty?
+  body.each { |s| fnptr_scan(s, st) }
+  ok = {}
+  st[:names].each_key { |n| ok[n] = true if st[:target][n] && !st[:bad][n] }
+  return if ok.empty?
+  st[:drop].delete_if { |_, n| !ok[n] }
+  st[:calls].delete_if { |_, n| !ok[n] }
+  body.reject! { |s| s.is_a?(Array) && st[:drop].key?(s.object_id) }
+  body.each { |s| fnptr_rewrite(s, st) }
+end
+
 def scan_slots(x, direct, escaped)
   if x.is_a?(IRSym)
     escaped[x.name] = true if x.sig == "$"
@@ -417,7 +489,7 @@ class Mod
       d = @datas[name]
       raise Refused, "static object @\"#{name}\" has no definition in the device unit" if f.nil? && d.nil?
       size, align = if f
-                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" }
+                      raise Refused, "static object @\"#{name}\" is extern" if f.drop(5).any? { |x| head_of(x) == "extern" } && !EH_RUNTIME_STATE.include?(name)
                       [as_int(f[3]), as_int(f[4])]
                     else
                       [static_bytes(d).length, 1]
@@ -567,6 +639,7 @@ class Fn
       end
     end
     @ptypes.each_with_index { |t, k| @regs["%#{k}"] = ["p#{k}", t] }
+    fold_fnptr_slots(@body, slots)
     direct = {}
     escaped = {}
     @body.each { |s| scan_slots(s, direct, escaped) }
@@ -631,6 +704,9 @@ class Fn
   def sp_of_rhs(x)
     case head_of(x)
     when "bitcast" then sp_of_operand(x[2])
+    # a null is the structurizer's placeholder for a variable that is assigned before any use (a later set): it says
+    # nothing about the space, so it does not make a register non-closure (it did, after inlining, for the kernel closure)
+    when "null" then :unset
     when "offset", "index" then sp_of_operand(x[1])
     when "load", "load.v"
       a = x[2]
@@ -824,7 +900,7 @@ class Fn
     when "cdiv", "crem"
       ty = parse_type(x[1])
       checked_div(h, ty, x[2], x[3])
-    when "cshl", "cshr"
+    when "cshl", "cshr", "wshl"
       ty = parse_type(x[1])
       checked_shift(h, ty, x[2], x[3])
     when "and", "or", "xor"
@@ -894,8 +970,14 @@ class Fn
       ty = parse_type(x[1])
       return float_lit(x[2].to_s) if ty[0] == "float"
       int_lit(ty, as_int(x[2]))
+    when "null"
+      a, _ = operand(x)   # a null pointer: the 0u offset
+      a
     else
-      raise Refused, "expression #{h || form_text(x)}"
+      # a bare operand as a value (RVALUE ::= OPERAND), e.g. (let %D T %K) from an inlined return or a copy
+      raise Refused, "expression #{h}" if h
+      a, _ = operand(x)
+      a
     end
   end
 
@@ -929,7 +1011,7 @@ class Fn
     trap(2)
     @ind -= 1
     emit("}")
-    canon("(#{a} #{h == 'cshl' ? '<<' : '>>'} #{cb})", ty)
+    canon("(#{a} #{h == 'cshr' ? '>>' : '<<'} #{cb})", ty)
   end
 
   # iconv: integer to integer, with sign- or zero-extension from the source and truncation to the target
@@ -979,7 +1061,7 @@ class Fn
     args = x.drop(3)
     if SYCL_VALUES.key?(name)
       return SYCL_VALUES[name]
-    elsif name == "__nfcxx_sycl_barrier"
+    elsif name == "__nfcxx_sycl_barrier" || name == "__nfcxx_sycl_sg_barrier"
       emit("workgroupBarrier();")
       return nil
     elsif name == "__nfcxx_sycl_fn1" || name == "__nfcxx_sycl_fn2" || name == "__nfcxx_sycl_fn3"
@@ -995,7 +1077,13 @@ class Fn
       need(:"atomic_#{kind}")
       xs = args.map { |a| operand(a)[0] }
       return "at_#{kind}(#{xs.join(', ')})"
-    elsif name.start_with?("__nfcxx_")
+    elsif name == "__nfcxx_sycl_dp4a"
+      # c + the dot product of the four signed bytes of a and b (lib/sycl-ggml/sycl/nfcxx_dpct_dp4a.hpp): extractBits of an
+      # i32 sign-extends; the products fit in 32 bits, so the sum wraps only at the add of c, as the device's
+      a, b, c = args.map { |e| operand(e)[0] }
+      prods = (0...4).map { |k| "extractBits(#{a}, #{8 * k}u, 8u) * extractBits(#{b}, #{8 * k}u, 8u)" }
+      return "(#{prods.join(' + ')} + #{c})"
+    elsif name.start_with?("__nfcxx_") && !LIBM_F32.key?(name)   # the half conversions are in LIBM_F32
       raise Refused, "unknown device intrinsic #{name}"
     end
     if LIBM_F32.key?(name)
@@ -1198,12 +1286,15 @@ class Fn
       @ind -= 1
       emit("}")
     when "nonnull"
-      p, _ = operand(s[1])
-      emit("if (#{p} == 0u) {")
-      @ind += 1
-      trap(4)
-      @ind -= 1
-      emit("}")
+      # the address of a function is never null (the front end's check on a function pointer that is a template argument)
+      unless s[1].is_a?(IRSym) && s[1].sig == "&"
+        p, _ = operand(s[1])
+        emit("if (#{p} == 0u) {")
+        @ind += 1
+        trap(4)
+        @ind -= 1
+        emit("}")
+      end
     when "return"
       if @ret.nil?
         emit("return;")

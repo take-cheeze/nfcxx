@@ -1,5 +1,5 @@
 // EXPECT: 0
-// __builtin_isfinite / __builtin_signbit on runtime values (cproc has no such builtin: scripts/qbe-prep.rb supplies a helper).
+// __builtin_isfinite / __builtin_signbit on runtime values (cproc has no such builtin: scripts/qbe-prep supplies a helper).
 __attribute__((noinline)) static double id(double x) { return x; }
 int main() {
   int bad = 0;

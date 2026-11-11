@@ -1,0 +1,3 @@
+1
+test: loan-conflict: s (a)
+test: use-after-move: s[4..8]
