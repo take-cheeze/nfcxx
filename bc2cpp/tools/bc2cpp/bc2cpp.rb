@@ -1652,10 +1652,28 @@ BC2CPP_MAIN = lambda do
     // The runtime's one arena root: every other root (the keeps below, a numeric slow path's result) goes through it.
     static inline void bc2cpp_root(mrb_state* M, mrb_value v) {
       if (mrb_immediate_p(v)) return;
+      // Persistent ROM objects need no arena entry (mrb_gc_protect's own
+      // fast path). Keep it inline for compiled constant-table reads.
+      #ifdef MRB_GC_RED
+      if (mrb_basic_ptr(v)->gc_color == MRB_GC_RED) return;
+      #endif
       // A consecutive keep needs no second slot. Read the current arena, so a
       // restore (including one in a nested call) cannot leave a stale hit.
       int ai = M->gc.arena_idx;
       if (ai > 0 && M->gc.arena[ai - 1] == mrb_basic_ptr(v)) return;
+      // The common case of mrb_gc_protect only appends to the arena. Leave
+      // growth and fixed-arena overflow handling to mruby's API.
+      #ifdef MRB_GC_RED
+      #ifdef MRB_GC_FIXED_ARENA
+      if (ai < MRB_GC_ARENA_SIZE) {
+      #else
+      if (ai < M->gc.arena_capa) {
+      #endif
+        M->gc.arena[ai] = mrb_basic_ptr(v);
+        M->gc.arena_idx = ai + 1;
+        return;
+      }
+      #endif
       mrb_gc_protect(M, v);
     }
     // Drop the arena entries a body made, then root its result: what the by-name call leaves.

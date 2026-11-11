@@ -242,6 +242,14 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
         int ai = mrb_gc_arena_save(M);
         mrb_value value = mrb_str_new_lit(M, "retained");
         mrb_gc_arena_restore(M, ai);
+        #ifdef MRB_GC_RED
+        // Exercise the ROM-object fast path without requiring a ROM fixture.
+        unsigned color = mrb_basic_ptr(value)->gc_color;
+        mrb_basic_ptr(value)->gc_color = MRB_GC_RED;
+        bc2cpp_root(M, value);
+        if (M->gc.arena_idx != ai) return 6;
+        mrb_basic_ptr(value)->gc_color = color;
+        #endif
         bc2cpp_root(M, value);
         if (M->gc.arena_idx != ai + 1) return 1;
         for (int n = 0; n < 1000; ++n) bc2cpp_root(M, value);
@@ -257,6 +265,26 @@ Dir.mktmpdir('bc2cpp-gc-root') do |dir|
         if (M->gc.arena_idx != ai + 1) return 4;
         mrb_full_gc(M);
         if (RSTRING_LEN(value) != 8 || memcmp(RSTRING_PTR(value), "retained", 8)) return 5;
+        #ifndef MRB_GC_FIXED_ARENA
+        // Fill the arena through the compiled helper, including its API
+        // fallback when the existing buffer runs out of room.
+        int count = M->gc.arena_capa + 16;
+        mrb_value values = mrb_ary_new_capa(M, count);
+        int keep = mrb_gc_arena_save(M);
+        for (int n = 0; n < count; ++n) {
+          mrb_ary_push(M, values, mrb_str_new_lit(M, "growth"));
+          mrb_gc_arena_restore(M, keep);
+        }
+        for (int n = 0; n < count; ++n)
+          bc2cpp_root(M, mrb_ary_entry(values, n));
+        mrb_ary_clear(M, values);
+        mrb_full_gc(M);
+        if (M->gc.arena_idx < keep + count) return 7;
+        for (int n = 0; n < count; ++n) {
+          mrb_value item = mrb_obj_value(M->gc.arena[keep + n]);
+          if (RSTRING_LEN(item) != 6 || memcmp(RSTRING_PTR(item), "growth", 6)) return 8;
+        }
+        #endif
         return 0;
       }
     CPP
