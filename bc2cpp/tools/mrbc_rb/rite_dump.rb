@@ -5,13 +5,9 @@
 #     mrb_dump_irep writes it for those flags (the sections are independent, so this is a cut of the -g image);
 #   * cfunc: `-B<symbol>` (mrb_dump_irep_cfunc: the binary as a C byte array);
 #   * cstruct: `-B<symbol> -S` (mrb_dump_irep_cstruct in cdump.c: the irep tree as C structs).
-# `-g` together with `-S`: cdump.c writes the symbol id of the file name, the number the symbol had in mrbc's own symbol table.
-# For one input file mrbc interns the file name first, so its id is the number of presyms of that mrbc plus one: FILENAME_SYM_BASE
-# (1472 for the fork this was written against; MRBC_RB_FILENAME_SYM_BASE overrides it, and cli_test.rb checks it against the
-# real mrbc). The base is that mrbc build's presym count (MRB_PRESYM_MAX in its include/mruby/presym/id.h). With several files the
-# ids depend on what the parser interned between the files: not covered (Unsupported), unless MRBC_RB_LOOSE_FILENAME_SYM=1, which
-# numbers the files base+1, base+2, ...: not the bytes of mrbc, but the value is only a placeholder (the generated
-# <name>_init_syms assigns filename_sym from the file name at start-up, so the program is the same).
+# `-g` together with `-S`: cdump.c writes the symbol id of the file name, the number the symbol had in mrbc's own symbol table;
+# file_syms.rb reproduces it from the sources (pass its result as file_syms:). Without file_syms: the first symbol after the
+# presyms (FILENAME_SYM_BASE, 1472 for the fork's host mrbc) is only right for one input file.
 
 module MrbcRb
   module RiteDump
@@ -326,15 +322,15 @@ module MrbcRb
     end
 
     # `-B name -S`: the irep tree of +image+ as C structs (with the debug tables when +image+ has the DBG section: -g).
-    def cstruct(image, name, static: false, sym_base: nil)
+    def cstruct(image, name, static: false, sym_base: nil, file_syms: nil)
       root = parse(image)
-      base = sym_base || Integer(ENV.fetch('MRBC_RB_FILENAME_SYM_BASE', FILENAME_SYM_BASE))
+      base = sym_base || FILENAME_SYM_BASE
       files = []
       each_irep(root) { |i| files.concat(i.debug.map { |f| f[1] }) if i.debug }
       files.uniq!
-      loose = ENV['MRBC_RB_LOOSE_FILENAME_SYM'] == '1'
-      raise Unsupported, 'file name symbol ids of several files (-g -S)' if files.size > 1 && !loose
-      file_syms = files.each_with_index.to_h { |f, i| [f, base + 1 + i] }
+      # file_syms: { file name => id } from FileSyms.ids; without it only one file is known (the first symbol after the presyms)
+      raise Unsupported, 'file name symbol ids of several files (-g -S)' if files.size > 1 && !file_syms
+      file_syms ||= files.each_with_index.to_h { |f, i| [f, base + 1 + i] }
       out = +"#include <mruby.h>\n#include <mruby/irep.h>\n#include <mruby/debug.h>\n#include <mruby/proc.h>\n\n"
       out << "#define mrb_BRACED(...) {__VA_ARGS__}\n"
       out << "#define mrb_DEFINE_SYMS_VAR(name, len, syms, qualifier) \\\n"
