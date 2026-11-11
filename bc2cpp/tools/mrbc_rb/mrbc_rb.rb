@@ -76,10 +76,10 @@ module MrbcRb
                           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
                           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode,
-                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode].freeze
+                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::RescueModifierNode, Prism::UndefNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
-  ENTERED = [Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
+  ENTERED = [Prism::UndefNode, Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
              Prism::NumberedReferenceReadNode, Prism::BackReferenceReadNode, Prism::DefinedNode,
              Prism::RationalNode, Prism::ImaginaryNode, Prism::InstanceVariableReadNode, Prism::NilNode, Prism::TrueNode, Prism::FalseNode,
              Prism::LocalVariableReadNode, Prism::StringNode, Prism::ConstantReadNode, Prism::GlobalVariableReadNode, Prism::SelfNode,
@@ -465,7 +465,7 @@ module MrbcRb
       end
       value_reg = if stmts.empty?
                     t = temp
-                    raise Unsupported, 'empty body after a continuation' if node.location.slice.match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+                    raise Unsupported, 'empty body after a continuation' if node.location.slice.gsub(/^[ \t]*#[^\n]*/, '').match?(/\\\n|;/) && node.location.start_line != node.location.end_line
                     check_empty_gap(node.rparen_loc || params&.location || node.name_loc, node.body ? node.body.location : node.end_keyword_loc)
                     @line = node.end_keyword_loc.start_line # the implicit nil is on the `end` line (verified)
                     emit(:LOADNIL, t)
@@ -500,7 +500,7 @@ module MrbcRb
       end
       value_reg = if stmts.empty?
                     t = temp
-                    raise Unsupported, 'empty body after a continuation' if node.location.slice.match?(/\\\n|;/) && node.location.start_line != node.location.end_line
+                    raise Unsupported, 'empty body after a continuation' if node.location.slice.gsub(/^[ \t]*#[^\n]*/, '').match?(/\\\n|;/) && node.location.start_line != node.location.end_line
                     check_empty_gap(node.parameters ? node.parameters.location : node.opening_loc, node.body ? node.body.location : node.closing_loc)
                     @line = node.closing_loc.start_line # the implicit nil is on the closing line (verified)
                     emit(:LOADNIL, t)
@@ -1402,9 +1402,8 @@ module MrbcRb
     # the last statement. A body with statements is a child irep that EXEC runs on the class in the result register.
     def class_body(node, t, val)
       body = node.body
-      raise Unsupported, 'class or module body' unless body.nil? || body.is_a?(Prism::StatementsNode)
 
-      stmts = body ? body.body : []
+      stmts = body_statements(body)
       if stmts.empty?
         emit(:LOADNIL, t)
       else
@@ -2781,12 +2780,16 @@ module MrbcRb
       return unary_call(node, recv, a, need) if recv && UNARY_OPS.include?(name) && args.empty?
 
       # `recv[index]` is GETIDX and `recv[]` a plain SEND0 (both verified); other index forms are not covered yet.
-      raise Unsupported, 'explicit []= call' if name == :[]= && node.call_operator_loc # `a.[]=(i, v)` is a plain send
-      if name == :[]= && recv && args.size == 2
+      # `a.[]=(i, v)` is a plain NODE_CALL of []=: SETIDX with the result in the receiver's register (the []= send's own value,
+      # not the assigned one); any other argument count is an ordinary send (milestone 14, verified with mrbc -v).
+      if name == :[]= && node.call_operator_loc
+        return explicit_setidx(node, recv, args) if recv && args.size == 2 && !node.safe_navigation?
+        raise Unsupported, 'explicit []= call' unless recv && !node.safe_navigation?
+      elsif name == :[]= && recv && args.size == 2
         return index_assign(recv, args[0], args[1], need: need)
       end
-      return index_assign_many(recv, args, need: need) if name == :[]= && recv && args.size != 2
-      raise Unsupported, 'index assignment' if name == :[]=
+      return index_assign_many(recv, args, need: need) if name == :[]= && recv && args.size != 2 && !node.call_operator_loc
+      raise Unsupported, 'index assignment' if name == :[]= && !node.call_operator_loc
 
       if recv && BINARY_OPS.key?(name) && args.size == 1
         operand_into(recv, a)
@@ -2841,6 +2844,20 @@ module MrbcRb
       @sp = a if a
     end
 
+    def explicit_setidx(node, recv, args)
+      a = @sp
+      @nregs = [@nregs, a + 1].max
+      enter(node)
+      operand_into(recv, a)
+      operand_into(args[0], a + 1)
+      operand_into(args[1], a + 2)
+      emit(:SETIDX, a)
+      @nregs = [@nregs, a + 4].max
+      a
+    ensure
+      @sp = a if a
+    end
+
     # `recv&.[]=(i, v)`: SETIDX behind the nil test of the receiver (verified with mrbc -v): the receiver at the result register a
     # (safe_jump's copy when the value is used), the index and the value after it, and SETIDX on a leaves its result there.
     def safe_index_assign(node, recv, args, need:)
@@ -2871,7 +2888,7 @@ module MrbcRb
       node = unparen(node)
       SIMPLE_VALUES.include?(node.class) || node.is_a?(Prism::CallNode) || node.is_a?(Prism::ItLocalVariableReadNode) || node.is_a?(Prism::YieldNode) || node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) || node.is_a?(Prism::ConstantPathNode) || node.is_a?(Prism::LambdaNode) || BUILT_VALUES.include?(node.class) ||
         node.is_a?(Prism::AndNode) || node.is_a?(Prism::OrNode) || node.is_a?(Prism::IfNode) || node.is_a?(Prism::UnlessNode) ||
-        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
+        node.is_a?(Prism::SingletonClassNode) || node.is_a?(Prism::ClassNode) || node.is_a?(Prism::ModuleNode) || node.is_a?(Prism::WhileNode) || node.is_a?(Prism::UntilNode) || node.is_a?(Prism::DefNode) || node.is_a?(Prism::ParenthesesNode) || node.is_a?(Prism::CaseNode) || node.is_a?(Prism::MatchRequiredNode) || node.is_a?(Prism::MatchPredicateNode) || node.is_a?(Prism::CaseMatchNode) || node.is_a?(Prism::BeginNode) || node.is_a?(Prism::RescueModifierNode) || VALUE_WRITES.include?(node.class) || (node.is_a?(Prism::RangeNode) && [node.left, node.right].all? { |e| e.nil? || operand?(e) }) ||
         (node.is_a?(Prism::ArrayNode) && (symbol_list?(node) || node.elements.all? { |e| operand?(e) || array_splat?(e) })) || node.is_a?(Prism::SourceEncodingNode)
     end
 
@@ -2995,8 +3012,9 @@ module MrbcRb
           @sp = saved
         end
         gen_move(dst, r, false)
-      when Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode, Prism::ForNode
+      when Prism::ClassNode, Prism::ModuleNode, Prism::SingletonClassNode, Prism::ForNode, Prism::WhileNode, Prism::UntilNode
         # A class, module or singleton class body as a value (milestone 12): built at the first temporary like a begin block.
+        @line = node.location.start_line if !@hold_line && !node.is_a?(Prism::ForNode) && !node.is_a?(Prism::WhileNode) && !node.is_a?(Prism::UntilNode) # a class node is entered at its keyword line (milestone 14)
         saved = @sp
         base = dst >= @nlocals ? dst : temp
         begin
@@ -3115,6 +3133,7 @@ module MrbcRb
           when Prism::EmbeddedStatementsNode
             body = part.statements&.body || []
             raise Unsupported, 'interpolation with several statements' if body.size > 1
+            raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
 
             parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
           else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
@@ -3123,6 +3142,14 @@ module MrbcRb
         parts
       else raise Unsupported, "string part #{node.class.name.split('::').last}"
       end
+    end
+
+    # A `<<A` heredoc with no body: the fork's parser gives it a nil value, not an empty string (the generated code differs).
+    def empty_heredoc?(node)
+      node = node && unparen(node)
+      return false unless (node.is_a?(Prism::StringNode) || node.is_a?(Prism::InterpolatedStringNode)) && node.opening_loc&.slice&.start_with?('<<')
+
+      node.is_a?(Prism::StringNode) ? node.content.empty? : node.parts.empty?
     end
 
     # A heredoc body, as the fork's parser splits it (heredoc_string_interp): one literal per source line, the text of a line
@@ -3171,6 +3198,8 @@ module MrbcRb
         when Prism::EmbeddedStatementsNode
           body = part.statements&.body || []
           raise Unsupported, 'interpolation with several statements' if body.size > 1
+          raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
+
           flush.call(true)
           parts << [:expr, body[0] && unparen(body[0])]
         else raise Unsupported, "interpolated part #{part.class.name.split('::').last}"
@@ -3417,7 +3446,14 @@ module MrbcRb
       emit(:SETUPVAR, 1, idx, lv)
       emit(:NOP)
       stmts = body_statements(node.statements)
-      raise Unsupported, 'empty for body' if stmts.empty?
+      if stmts.empty?
+        # An empty body is RETNIL on the line of the closing `end` (milestone 14, verified); a `;` before it is not covered.
+        check_empty_gap(node.do_keyword_loc || node.collection.location, node.end_keyword_loc)
+        @line = node.end_keyword_loc.start_line
+        @nregs = [@nregs, @sp + 1].max
+        emit(:RETNIL)
+        return self
+      end
 
       return_value(generate(stmts, val: true))
       self
@@ -3814,6 +3850,7 @@ module MrbcRb
           when Prism::EmbeddedStatementsNode
             body = part.statements&.body || []
             raise Unsupported, 'interpolation with several statements' if body.size > 1
+            raise Unsupported, 'empty heredoc interpolated' if empty_heredoc?(body[0])
 
             parts << [:expr, body[0] && unparen(body[0])] << [:lit, ''.b]
           else raise Unsupported, "symbol list part #{part.class.name.split('::').last}"
@@ -4639,6 +4676,7 @@ module MrbcRb
       return if from_loc.end_line == to_loc.start_line
 
       gap = from_loc.copy(start_offset: from_loc.end_offset, length: to_loc.start_offset - from_loc.end_offset).slice
+      gap = gap.gsub(/^=begin\b.*?^=end\b[^\n]*/m, '').gsub(/#[^\n]*/, '') # a `;` inside a comment is not a token
       raise Unsupported, 'empty body with a semicolon' if gap.include?(';')
     end
 
@@ -4821,6 +4859,9 @@ module MrbcRb
         array_splat_into(Struct.new(:elements, :opening_loc).new(args, nil), t)
       else
         raise Unsupported, 'return values of an unverified form' unless args.all? { |a| operand?(a) && !a.is_a?(Prism::SplatNode) }
+
+        # past the stack limits of codegen_array the values are flushed in chunks (ARRAY, then ARYPUSH): the same code as a literal
+        return array_splat_into(Struct.new(:elements, :opening_loc).new(args, nil), t) if args.size > 1 && t + args.size - 1 >= (t >= 64 ? 99 : 64)
 
         args.each_with_index { |e, i| operand_into(unparen(e), t + i) }
         @nregs = [@nregs, t + args.size].max
