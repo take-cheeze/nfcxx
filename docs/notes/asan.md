@@ -3,7 +3,7 @@
 `nfcxx -fsanitize=address x.cpp -o x` builds a program whose memory errors are reported by AddressSanitizer (libasan): heap, stack and global
 buffer overflows, use after free, use after scope, use after return, double free, `new[]`/`delete` mismatch, and
 (LeakSanitizer, on by default in libasan) leaks at exit. The checks are gcc's on the gcc backend and cproc's on qbe
-(the default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
+(the former default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
 from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
 
 ## qbe backend (default)
@@ -168,7 +168,7 @@ cproc's (above). The driver:
   and `qbe-cc` link libasan;
 - links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
   (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
-- on an explicit Path B (`NFCXX_PATH=b` or `--backend=pathb`; the default selection still goes to qbe) exports `NFCXX_PATHB_ASAN=1`:
+- on Path B (the default backend, `NFCXX_PATH=b` or `--backend=pathb`) exports `NFCXX_PATHB_ASAN=1`:
   the SSA emitter calls libasan's `__asan_load{1,2,4,8,16}`/`__asan_store{...}` (or `__asan_loadN`/`__asan_storeN` with a size)
   before each access through a computed address, and the link adds `-fsanitize=address` and the VLA runtime (section "Path B");
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
@@ -224,7 +224,7 @@ instrumented (`poly.md`, "Sanitizers and valgrind").
 and zero-fill through a computed address it emits `call $__asan_load4(l addr)` (or the store, or the `N` form with a size); a
 static address (a slot, a global, an address-of) is not checked. libasan is the runtime, so the report text is gcc's, and the
 call also keeps QBE from forwarding or merging the access. The link adds `-fsanitize=address` and the VLA runtime, for C-only
-programs as well. The default backend with the flag is still qbe; `tests/asan/run.sh` with `ASAN_BACKEND=pathb` is the gate.
+programs as well. The default backend with the flag is Path B (falling back to gcc); `tests/asan/run.sh` with `ASAN_BACKEND=pathb` is the gate.
 
 Stack redzones (milestone 2): a slot that stays in memory (an array, a struct, anything whose address is taken; the SSA pass promotes the
 others to registers) is allocated as `[32 bytes | object | 32 bytes]`, the object's size rounded up to the 8-byte shadow granule and its

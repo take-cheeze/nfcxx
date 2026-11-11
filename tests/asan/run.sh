@@ -70,7 +70,7 @@ fi
 "$nfcxx" -fsanitize=address -fno-sanitize=address --backend=$B tests/asan/cases/heap_overflow.cpp -o "$tmp/off" 2>/dev/null
 "$tmp/off" >/dev/null 2>"$tmp/rep"; if ! grep -q Sanitizer "$tmp/rep"; then ok "-fno-sanitize=address"; else bad "-fno-sanitize=address" "still instrumented"; fi
 
-# Backend selection: with no --backend the default (qbe) is instrumented too; a qbe run with --backend=qbe is the same.
+# Backend selection: with no --backend the default (Path B) is instrumented too.
 # An explicit Path B (--backend=pathb, NFCXX_PATH=b) is instrumented as well. Other sanitizers are refused.
 if env -u NFCXX_BACKEND "$nfcxx" -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/sw" 2>/dev/null \
    && ! "$tmp/sw" >/dev/null 2>"$tmp/rep" && grep -q AddressSanitizer "$tmp/rep"; then ok "default backend is instrumented"
