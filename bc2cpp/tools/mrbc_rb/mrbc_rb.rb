@@ -28,6 +28,7 @@
 # The opcode numbers are the positions of the OPCODE lines of the fork's ops.h. golden_test.rb checks them against it.
 
 require 'prism'
+require_relative '../bc2cpp/rite_binary' # the record structs of Result#ireps
 
 module MrbcRb
   class Error < StandardError; end
@@ -128,17 +129,26 @@ module MrbcRb
   INT32_MIN = -0x8000_0000
   INT32_MAX = 0x7fff_ffff
 
-  # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
-  def self.compile(source, filename)
+  # What compile(..., tree: true) returns: the RITE binary (the bytes to write to the .mrb) and the same program's irep tree,
+  # `ireps`: RiteBinary::RiteIrep records in depth-first pre-order, equal to RiteBinary.parse(image) (bc2cpp's loader takes
+  # them without parsing the image).
+  Result = Struct.new(:image, :ireps)
+
+  # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String, or with
+  # +tree+ a Result.
+  def self.compile(source, filename, tree: false)
     result = Prism.parse(source, filepath: filename)
     raise Error, "parse error: #{result.errors.map(&:message).join('; ')}" unless result.errors.empty?
 
     # `# frozen_string_literal: true` makes string literals frozen strings (FSTRING), as the fork's parser does.
     frozen = frozen_magic_comment?(source)
     compiler = Compiler.new(filename, frozen_strings: frozen)
-    return compiler.compile_empty(empty_program_line(source, result)) if result.value.statements.body.empty?
-
-    compiler.compile(result.value)
+    image = if result.value.statements.body.empty?
+              compiler.compile_empty(empty_program_line(source, result))
+            else
+              compiler.compile(result.value)
+            end
+    tree ? Result.new(image, compiler.rite_ireps) : image
   end
 
   # One file of a multi-file program: its name and its top-level statements.
@@ -160,9 +170,9 @@ module MrbcRb
   #   last statement, which ends the lookahead before the file ends.
   # * Codegen switches the file at the first node of the next file: the debug section gets one record per file, the ranges
   #   being the pcs between the switches.
-  def self.compile_files(files)
+  def self.compile_files(files, tree: false)
     raise Unsupported, 'no files' if files.empty?
-    return compile(*files.first) if files.size == 1
+    return compile(*files.first, tree: tree) if files.size == 1
     raise Unsupported, 'a file named twice' if files.map(&:last).uniq.size != files.size
 
     locals = []
@@ -193,7 +203,9 @@ module MrbcRb
     raise Unsupported, 'no statements' if units.all? { |u| u.stmts.empty? }
 
     units.reject! { |u| u.stmts.empty? } # a file without code never switches the file
-    Compiler.new(units.first.filename, frozen_strings: frozen).compile_units(units, locals, zero)
+    compiler = Compiler.new(units.first.filename, frozen_strings: frozen)
+    image = compiler.compile_units(units, locals, zero)
+    tree ? Result.new(image, compiler.rite_ireps) : image
   end
 
   def self.tokens?(source) = Prism.lex(source).value.any? { |t, _| !NON_TOKENS.include?(t.type) }
@@ -575,6 +587,37 @@ module MrbcRb
     def scopes
       [self] + @children.flat_map(&:scopes)
     end
+
+    # The ireps of this tree, depth first, as the records RiteBinary.parse (bc2cpp/tools/bc2cpp/rite_binary.rb) would read from
+    # the RITE binary: bc2cpp takes them directly (MrbcRb::Result#ireps) instead of parsing the image it was just serialized to.
+    # The pool, symbols, local names and debug info are what write_rite serializes, so this must stay in step with it.
+    def rite_ireps
+      scopes.map { |s| s.send(:rite_irep, scopes_have_locals) }
+    end
+
+    def scopes_have_locals = scopes.any? { |s| !s.lv_names.empty? }
+    private :scopes_have_locals
+
+    def rite_irep(with_lv)
+      pool = @pool.map do |entry|
+        case entry
+        in [:bigint, digits, base] then RiteBinary::PoolEntry.new(:bigint, [base & 0xff].pack('C') + digits.b)
+        in [:int, v] then RiteBinary::PoolEntry.new(v.between?(INT32_MIN, INT32_MAX) ? :int32 : :int64, v)
+        in [:float, bits] then RiteBinary::PoolEntry.new(:float, bits.unpack1('E'))
+        in [:str, bytes] then RiteBinary::PoolEntry.new(:str, bytes.b)
+        end
+      end
+      lv = with_lv ? (0...[@nlocals - 1, 0].max).map { |i| (name = lv_names[i]) ? name.to_s.b : nil } : nil
+      RiteBinary::RiteIrep.new(
+        nlocals: @nlocals, nregs: @nregs, rlen: @children.size, iseq: @code.pack('C*'),
+        catch_handlers: @catches.map { |type, from, to, target| RiteBinary::RawCatch.new(type: type, begin_addr: from, end_addr: to, target: target) },
+        pool: pool, syms: @syms.map { |s| s.to_s.b }, lv: lv,
+        debug_files: debug_files.map do |name, first, stop|
+          RiteBinary::DebugFile.new(first, name.b.force_encoding(Encoding::UTF_8), 2, packed_lines(first, stop))
+        end
+      )
+    end
+    private :rite_irep
 
     # The IREP record of this irep: its own block (the record size counts only that), then the records of its children.
     def irep_tree

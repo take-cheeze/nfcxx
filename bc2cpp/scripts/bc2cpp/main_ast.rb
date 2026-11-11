@@ -85,13 +85,14 @@ Dir.mktmpdir('bc2cpp-main-ast') do |dir|
         abort "target preprocessing failed: #{source}" unless status.success?
       end
     end
+    json = nil
     if producer == 'nfcxx'
       # The front end's own dump; -MD/-MF make scripts/nfcxx-ast-dump list the headers it read (the host preprocess above already wrote them).
       dump_flags = host_cxx ? flags : [*flags, '-MD', '-MF', depfile]
       out, err, status = NativeAstSource.dump(input, dump_flags, lang: :cxx, name: 'nfcxx')
       abort "AST compilation failed: #{source}: #{err.lines.find { |l| l =~ /error/ } || err.lines.first}" unless status.success?
 
-      File.write(astfile, out)
+      json = out # parsed below without the scratch file round trip
     else
       command = [clang, *flags, '-Werror=date-time', '-fsyntax-only', '-Xclang', '-ast-dump=json']
       command += host_cxx ? ["--target=#{target}", '-x', 'c++-cpp-output', input] : ['-MD', '-MF', depfile, source]
@@ -101,13 +102,13 @@ Dir.mktmpdir('bc2cpp-main-ast') do |dir|
         abort "AST compilation failed: #{source}" unless status.success?
       end
     end
-    unit = JSON.parse(File.read(astfile))
+    unit = JSON.parse(json || File.read(astfile))
     namespace_ids.call(unit, index)
     unit['bc2cpp_native_unit'] = true unless index.zero?
     ast['inner'] << unit
     deps |= File.read(depfile).sub(/\A[^:]*:/, '').gsub(/\\\n/, ' ')
                 .scan(/(?:\\.|[^\s])+/).map { |path| File.realpath(path.gsub(/\\(.)/, '\1')) }
-    File.unlink(astfile)
+    File.unlink(astfile) unless json
   end
   roots = MainRoots.analyze(ast, literal_roots: !lookup_names_only)
   tool_digests.each do |path, digest|
