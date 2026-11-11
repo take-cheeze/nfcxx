@@ -493,7 +493,8 @@ class Converter
   end
 
   def dominates?(a, b)
-    loop do
+    # A while, not loop: the returns leave a block that a native loop calls, which a compiled build cannot cross.
+    while true
       return true if a == b
       return false if b == 0
 
@@ -573,20 +574,38 @@ class Converter
     @promoted.key?(k) ? k : nil
   end
 
-  def rename(b)
-    pushed = []
-    @phis[b].each_value do |ph|
-      ph.name = fresh
-      push(ph.var, ph.name, pushed)
+  # The renaming walk over the dominator tree from b: a block's statements are renamed before its children, in order, and
+  # the names it pushed are popped after them. An explicit stack of [block, pushed names, next child] rather than a
+  # recursion, since the tree of a long straight-line function is hundreds of blocks deep, past the interpreter's call limit.
+  def rename(root)
+    work = [[root, nil, 0]]
+    until work.empty?
+      frame = work.last
+      b = frame[0]
+      if frame[1].nil?
+        pushed = []
+        @phis[b].each_value do |ph|
+          ph.name = fresh
+          push(ph.var, ph.name, pushed)
+        end
+        instrs = []
+        @cfg[b].instrs.each { |i| visit(i, instrs, pushed) }
+        term = terminator(@cfg[b].term)
+        @out ||= {}
+        @out[b] = { phis: @phis[b].values, instrs: instrs, term: term }
+        succs(term).each { |s| @phis[s].each_value { |ph| ph.inc[b] = cur(ph.var) } }
+        frame[1] = pushed
+      end
+      kids = @children[b]
+      if frame[2] < kids.size
+        child = kids[frame[2]]
+        frame[2] += 1
+        work << [child, nil, 0]
+      else
+        frame[1].each { |v| @stacks[v].pop }
+        work.pop
+      end
     end
-    instrs = []
-    @cfg[b].instrs.each { |i| visit(i, instrs, pushed) }
-    term = terminator(@cfg[b].term)
-    @out ||= {}
-    @out[b] = { phis: @phis[b].values, instrs: instrs, term: term }
-    succs(term).each { |s| @phis[s].each_value { |ph| ph.inc[b] = cur(ph.var) } }
-    @children[b].each { |c| rename(c) }
-    pushed.each { |v| @stacks[v].pop }
   end
 
   def visit(i, out, pushed)
@@ -846,7 +865,7 @@ def literal(v, type)
   if float_type?(v[1])
     # NaN is written as text that Float() cannot read (normalise_literals). Its value here is the positive quiet NaN, as
     # the QBE emitter spells it (Qbe.float_lit).
-    return Float::NAN if v[2].is_a?(String) && v[2].match?(/nan/i)
+    return Float::NAN if v[2].is_a?(String) && v[2].downcase.include?("nan")
 
     round_float(Float(v[2]), v[1])
   else
@@ -910,6 +929,20 @@ def install_module(forms)
   end
 end
 
+# A structured statement's way out of the statement list it ran in: break, continue or return. exec and exec_list hand one
+# back to their caller (nil when the statement falls through); a throw across the native each of a compiled build is an
+# error there, so the exits are values.
+class Flow
+  attr_reader :kind, :value
+
+  def initialize(kind, value = nil)
+    @kind = kind
+    @value = value
+  end
+end
+FLOW_BREAK = Flow.new(:break)
+FLOW_CONTINUE = Flow.new(:continue)
+
 class Machine
   class << self
     # Parses an ssa-function form into an object with blocks (pathb-egraph sets it).
@@ -942,10 +975,11 @@ class Machine
   end
 
   def run_structured(body)
-    catch(:ret) do
-      exec_list(body)
-      nil
-    end
+    r = exec_list(body)
+    return nil unless r
+    return r.value if r.kind == :ret
+
+    raise ArgumentError, "uncaught throw :#{r.kind == :break ? 'brk' : 'cont'}"
   end
 
   def run_ssa(out)
@@ -953,7 +987,9 @@ class Machine
     prev = nil
     steps = 0
     start = 0
-    loop do
+    # A while, not loop: the return and the next below leave a block that a native loop calls, which a compiled build
+    # cannot cross.
+    while true
       raise Unsupported, "step limit" if (steps += 1) > 1_000_000
 
       blk = out.fetch(b)
@@ -1002,7 +1038,19 @@ class Machine
   end
   private
 
-  def exec_list(stmts) = stmts.each { |s| exec(s) }
+  # Runs the statements in order; stops at the first one that exits (a Flow) and hands that exit back.
+  # A while loop, not each: a return from the block of a native each is a throw across a C function in a compiled build.
+  def exec_list(stmts)
+    i = 0
+    n = stmts.size
+    while i < n
+      r = exec(stmts[i])
+      return r if r.is_a?(Flow)
+
+      i += 1
+    end
+    nil
+  end
 
   # Counts one step of the run's budget (see initialize).
   def tick
@@ -1113,22 +1161,36 @@ end
     saved = [@hit, @entered]
     @hit = hit
     @entered = false
+    r = nil
     begin
-      catch(:brk) { exec_switch_body(stmts) }
+      r = exec_switch_body(stmts)
     ensure
       @hit, @entered = saved
     end
+    # `break` leaves the switch; a continue or a return goes on to the enclosing loop or function.
+    r.equal?(FLOW_BREAK) ? nil : r
   end
 
   # Statements before the entry marker are skipped; blocks are entered so that a marker inside one is reached.
   def exec_switch_body(stmts)
-    stmts.each do |st|
+    i = 0
+    n = stmts.size
+    while i < n
+      st = stmts[i]
+      i += 1
       case head(st)
       when "case", "default" then @entered ||= st.equal?(@hit)
-      when "block" then exec_switch_body(st[1..])
-      else exec(st) if @entered
+      when "block"
+        r = exec_switch_body(st[1..])
+        return r if r.is_a?(Flow)
+      else
+        if @entered
+          r = exec(st)
+          return r if r.is_a?(Flow)
+        end
       end
     end
+    nil
   end
 
   # Markers are interpreted only at block level in the switch body (inside nested blocks, not in if or loop).
@@ -1150,6 +1212,24 @@ end
     x.any? { |y| contains_marker?(y) }
   end
 
+  # A loop: the body, then the step, until a break. A continue in the body goes on to the step; a continue in the step, and
+  # a return anywhere, leave the loop for the enclosing one.
+  def exec_loop(s)
+    while true
+      r = exec_list(clause(s, "body"))
+      if r
+        return nil if r.equal?(FLOW_BREAK)
+        return r unless r.equal?(FLOW_CONTINUE)
+      end
+      r = exec_list(clause(s, "step"))
+      if r
+        return nil if r.equal?(FLOW_BREAK)
+
+        return r
+      end
+    end
+  end
+
   def exec(s)
     case head(s)
     when "let" then @env[s[1]] = val(s[3])
@@ -1164,16 +1244,10 @@ end
     when "block" then exec_list(s[1..])
     when "if" then exec_list(val(s[1]) != 0 ? clause(s, "then") : clause(s, "else"))
     when "switch" then exec_switch(s)
-    when "loop"
-      catch(:brk) do
-        loop do
-          catch(:cont) { exec_list(clause(s, "body")) }
-          exec_list(clause(s, "step"))
-        end
-      end
-    when "break" then throw :brk
-    when "continue" then throw :cont
-    when "return" then throw :ret, (s.size > 1 ? val(s[1]) : nil)
+    when "loop" then exec_loop(s)
+    when "break" then FLOW_BREAK
+    when "continue" then FLOW_CONTINUE
+    when "return" then Flow.new(:ret, s.size > 1 ? val(s[1]) : nil)
     when "eval" then call_fn(s[1])
     when "unreachable" then raise Trap, "unreachable"
     else raise Unsupported, "statement #{head(s) || sx(s)}"
