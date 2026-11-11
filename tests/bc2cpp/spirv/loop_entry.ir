@@ -1,0 +1,36 @@
+(ir-module "loop_entry.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "Kl" 8 8 (leaf 0 l))
+
+(function "__nfcxx_sycl_entry_k0"
+  (ret void)
+  (params)
+  (let %0 (ptr void) (call (ptr void) &"__nfcxx_sycl_closure"))
+  (let %1 (ptr (struct "Kl")) (bitcast (ptr (struct "Kl")) %0))
+  (let %2 (ptr int) (bitcast (ptr int) %1))
+  (let %3 int (call int &"__nfcxx_sycl_gid_x"))
+  (let %4 int (const int 0))
+  (let %5 int (const int 0))
+  (loop
+    (body
+      (block
+        (let %6 bool (lt.s int %5 (const int 10)))
+        (if %6
+          (then (block))
+          (else (block (break))))
+        (let %8 int (wadd int %3 (const int 1)))
+        (let %9 int (cdiv int %5 %8))
+        (let %10 int (wadd int %4 %9))
+        (set %4 %10)
+        (let %11 int (wadd int %3 (const int 3)))
+        (let %12 int (crem int %5 %11))
+        (let %13 int (wadd int %4 %12))
+        (set %4 %13)))
+    (step
+      (block
+        (let %14 int (wadd int %5 (const int 1)))
+        (set %5 %14))))
+  (bounds %3 64)
+  (nonnull %2)
+  (let %7 (ptr int) (index %2 %3 4))
+  (store int %7 %4)
+  (return))

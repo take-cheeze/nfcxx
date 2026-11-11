@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'bytecode_ir_ops'
+require_relative 'call_records'
 
 # DEFINE_METHOD_SITES: `define_method(:name) { |a, b| ... }` written
 # directly in a class or module body is an ordinary method definition to the registry,
@@ -40,16 +41,29 @@ module DefineMethodSites
     return nil unless insn.op == :SSENDB && insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
     return nil if idx < 2
 
-    name_insn = program.source_at(idx - 2)
     block_insn = program.source_at(idx - 1)
     base = insn.reg.to_i
-    return nil unless name_insn.op == :LOADSYM && name_insn.reg.to_i == base + 1 && name_insn.sym_token
+    # CALL_RECORDS: the name is the written Symbol argument of the record; a tree without one reads the LOADSYM before the block.
+    call = CallRecords.at(irep, insn)
+    name = loadsym_name(program, idx, base)
+    if call
+      written = CallRecords.names(call)
+      written = written.size == 1 ? written.first : nil
+      name = CallRecords.agree(:define_method_name, irep, insn, written) { name }
+    end
+    return nil unless name
     return nil unless block_insn.op == :BLOCK && block_insn.reg.to_i == base + 2 && block_insn.block_index
 
     child = irep.reps[block_insn.block_index]
     return nil unless child && ireps[child] && method_shaped?(ireps[child], ireps) && straight_line?(irep, insn)
 
-    Site.new(name: name_insn.sym_token, child: child)
+    Site.new(name: name, child: child)
+  end
+
+  # The Symbol the LOADSYM two instructions before the send (the name argument) loads, or nil.
+  def loadsym_name(program, idx, base)
+    name_insn = program.source_at(idx - 2)
+    name_insn.sym_token if name_insn.op == :LOADSYM && name_insn.reg.to_i == base + 1
   end
 
   # The block behaves as the body of a `def` with the same parameters: required

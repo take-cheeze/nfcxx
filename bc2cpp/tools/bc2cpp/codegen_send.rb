@@ -12,6 +12,11 @@ require_relative 'class_world_gate'
 require_relative 'strict_hints'
 
 class CodeGen
+  # InitializerTables::SITE: one marker per emitted copy of a construction site (`new`, an initialize's `super`).
+  def initializer_site_marker(irep, index)
+    "  // INITIALIZER_SITE #{irep.label}:#{index || '?'}\n"
+  end
+
   # SEND_OPTIONS_HASH: a site's options travel through the prepended compile_send layers as one positional Hash,
   # which callers still write as keywords. A `**kwargs` layer copies it into a new Hash on every call, so the
   # layers take it as `kwargs` and only read it; the keywords are checked once, here.
@@ -24,8 +29,14 @@ class CodeGen
   def compile_send_site(insn, self_implicit:, **kwargs)
     saved = @explicit_visibility_site
     @explicit_visibility_site = !self_implicit
-    compile_send_site_body(insn, self_implicit: self_implicit, **kwargs)
+    # A site re-entered while it compiles (an unrolled splat compiles its send again) is one copy, marked once.
+    site = insn.sym == 'new' && kwargs[:irep] ? [kwargs[:irep], kwargs[:idx] || kwargs[:trace_idx]] : nil
+    outermost = site && !(@initializer_sites_open ||= []).any? { |open| open[0].equal?(site[0]) && open[1] == site[1] }
+    @initializer_sites_open << site if outermost
+    code = compile_send_site_body(insn, self_implicit: self_implicit, **kwargs)
+    outermost && code.is_a?(String) ? initializer_site_marker(*site) + code : code
   ensure
+    @initializer_sites_open.pop if outermost
     @explicit_visibility_site = saved
   end
 
@@ -457,7 +468,17 @@ class CodeGen
         # compile_keyword_direct_construct, which matches keywords BY NAME and
         # pads positionals itself. Relaxing the arity test must not widen the
         # positional arm past the classes it can express.
-        arity_ok &&= !mandatory_optional_and_keyword_arity?(init_irep) if arity_ok
+        # KEYWORDLESS_CONSTRUCT: a call that passes no keyword to a keyword-declaring #initialize is the keyword
+        # construct with every keyword omitted (its (value, given) pairs take the defaults inside `_impl`).
+        if arity_ok && mandatory_optional_and_keyword_arity?(init_irep)
+          keywordless = listed_target && !@call_block_expr &&
+                        compile_keyword_direct_construct(irep: irep, idx: new_proof_idx, owner_def: owner_def,
+                                                         self_implicit: self_implicit, name: name, d: d, n: n,
+                                                         recv: recv, argv: argv, kw_names: [], kw_val_exprs: [])
+          return keywordless if keywordless
+
+          arity_ok = false
+        end
         # NATIVE_ARG_TYPES_STAY_BOXED: an #initialize with NATIVE_ARGS positions
         # has its `_impl` narrowed to mrb_int
         # parameters (compile_method's signature, via native_arg_types), and the
@@ -477,13 +498,10 @@ class CodeGen
         arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
-          owner_emitted = if listed_target
-                            !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
-                          else
-                            !@only_owners || @only_owners.include?(known)
-                          end
+          owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
           # An inherited initialize's `_impl` is emitted with its own owner.
-          owner_emitted &&= init_def.owner == known || !@only_owners || @only_owners.include?(init_def.owner)
+          owner_emitted &&= init_def.owner == known || !@only_owners || @only_owners.include?(init_def.owner) ||
+                            @other_owners&.include?(init_def.owner)
           if owner_emitted
             if listed_target
               accessor = direct_construct_class_expr(known)
@@ -523,16 +541,19 @@ class CodeGen
                       "reassigned or intercepted, so the class identity guard is omitted.\n" :
                       "  // The class identity guard preserves ordinary dispatch if the constant was rebound.\n")].join
             if stable_constructor
-              return "#{note}  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{init_def.owner}\n" \
+              return "#{note}  // INITIALIZER_DIRECT #{irep.label}:#{new_proof_idx} #{init_def.owner}\n" \
                      "  #{RegName[d]} = bc2cpp_direct_alloc(M, #{accessor});\n" \
                      "  #{init_impl}(M, #{(["#{RegName[d]}"] + call_args).join(', ')});\n"
             end
 
-            else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+            # INITIALIZER_DIRECT also holds when the else arm is a NEW_IDENTITY violation: it never dispatches.
+            proven_identity = new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+            else_arm = if proven_identity
                          guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')
                        else
                          dynamic_dispatch_line(d, recv, name, argv)
                        end
+            note += "  // INITIALIZER_DIRECT #{irep.label}:#{new_proof_idx} #{init_def.owner}\n" if proven_identity
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    #{RegName[d]} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \

@@ -25,6 +25,53 @@ require_relative "pathb-egraph"
 require_relative "pathb-ssa-qbe"
 require_relative "pathb-x87-thunks"
 
+# The reader of the IR and SSA text, for CRuby. scripts/pathb-ssa.rb tokenizes with a character loop, so that it runs in the
+# script worlds (tests/bc2cpp/run_pathb_ssa.sh: no Regexp); under CRuby that loop takes about 15 times as long as one
+# regex scan (Dev09_192736 of the Microsoft STL survey, 11.7 MB of IR: 42 s for the build, 11 s with this reader), and the
+# build reads a module's text three times. Same forms: TOKEN_RE is the regex that the character loop reproduces, and a
+# (const ...) form is normalised as its parenthesis closes, as normalise_literals does after the whole read.
+TOKEN_RE = /\(|\)|"(?:\\.|[^"\\])*"|[$@&]"(?:\\.|[^"\\])*"|[^\s()"]+/
+
+def normalise_const!(x)
+  type, val = x[1], x[2]
+  if float_type?(type)
+    x[2] = "1e999" if val == "+Infinity"
+    x[2] = "-1e999" if val == "-Infinity"
+  elsif hex_literal?(val) && INT_TYPES.key?(type)
+    x[2] = canon(Integer(val, 16), type).to_s
+  elsif hex_literal?(val) && type == "bool"
+    x[2] = canon(Integer(val, 16), type).to_s
+  end
+end
+
+def read_forms(text)
+  stack = []
+  cur = []
+  text.scan(TOKEN_RE) do |t|
+    c = t.getbyte(0)
+    if c == 40 # (
+      stack.push(cur)
+      cur = []
+    elsif c == 41 # )
+      raise Fail, "unbalanced parentheses" if stack.empty?
+
+      done = cur
+      cur = stack.pop
+      cur << done
+      normalise_const!(done) if done[0] == "const" && done.size >= 3 && done[1].is_a?(String) && done[2].is_a?(String)
+    elsif c == 34 # "
+      cur << Str.new(t)
+    elsif t.length > 1 && t.getbyte(1) == 34 && (c == 36 || c == 64 || c == 38)
+      cur << Ref.new(t[0], t[1..])
+    else
+      cur << t
+    end
+  end
+  raise Fail, "unbalanced parentheses" unless stack.empty?
+
+  cur
+end
+
 ROOT_DIR = File.expand_path("..", __dir__)
 EXIT_OK = 0
 EXIT_ERROR = 1

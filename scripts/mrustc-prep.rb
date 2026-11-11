@@ -29,9 +29,11 @@
 
 IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
 
+# A construct the rewrite does not handle (exit status 1, with the message on stderr).
+class PrepError < StandardError; end
+
 def fail_with(msg)
-  $stderr.puts "mrustc-prep: #{msg}"
-  exit 1
+  raise PrepError, msg
 end
 
 # mrustc's placeholder for an intrinsic it does not implement is a GNU statement expression that aborts when it runs:
@@ -608,8 +610,18 @@ end
 def main(argv)
   if argv.size != 4 && argv.size != 5
     $stderr.puts "usage: scripts/mrb scripts/mrustc-prep.rb in.c out.c tail.s weak.txt [asm.c]"
-    exit 2
+    return 2
   end
+  begin
+    prep(argv)
+  rescue PrepError => e
+    $stderr.puts "mrustc-prep: #{e.message}"
+    return 1
+  end
+  0
+end
+
+def prep(argv)
   src = File.open(argv[0], 'rb') { |f| f.read } || ''
   out = ASM_HELPER_DECLS.dup
   labels = []   # [declared name, asm label] pairs, in order
@@ -724,4 +736,5 @@ def main(argv)
   File.open(argv[2], 'wb') { |f| f.write(tail) }
 end
 
-main(ARGV)
+rc = main(ARGV)
+exit(rc) if rc != 0

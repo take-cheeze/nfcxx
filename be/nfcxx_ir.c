@@ -966,6 +966,7 @@ static void ir_tmp_note(const char *op);
 static int ir_fact_var(a_variable_ptr var);
 static int ir_fact_is_open(a_variable_ptr var);
 static void ir_fact_first_use(a_variable_ptr var, const char *op);
+static void ir_cl_use(a_variable_ptr var, const char *op);
 
 /* A fresh anonymous stack slot for an aggregate temporary. */
 static ir_val ir_temp(a_type_ptr t)
@@ -998,6 +999,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
   /* a temporary: made by the lowering, or an unnamed object of the front end's (a range-based for's range and iterators) */
   if ((var->lowering_generated || var->source_corresp.name == NULL) && ir_fact_var(var) && !ir_fact_is_open(var)) {
     ir_tmp_note(op);
+    if (var->lowering_generated) ir_cl_use(var, op);
   } else {
     ir_fact_first_use(var, op);
   }
@@ -1286,10 +1288,134 @@ static void ir_fact_first_use(a_variable_ptr var, const char *op)
   if (ir_decl_top != NULL && ir_decl_top->var == var) ir_decl_top->lazy = ir_labels_scanned;
 }
 
+/* AddressSanitizer's use after scope (NFCXX_IR_SCOPES=1 without the borrow facts): a compound literal, `(int[]){...}`, lives as long as
+   the block that holds it, as a local does. The front end lowers it to a compiler temporary: an unnamed lowering-generated variable
+   on the variable list of the scope of the block (the one a C back end declares it in, at the top of that block). Nothing a back end
+   can see tells it from the lowering's other temporaries, so each temporary of an aggregate type without a destructor whose scope
+   is a block being lowered is a candidate: (decl OP temp) where it is first used (not at the top of its block, which a jump into
+   the block, a case label, would skip), and (scope-end OP) where its block ends, or at a return. The facts are printed marked, as
+   \006OP\002FACT\002, and ir_cl_write keeps them at the end of the function only where they are safe (see there). A jump (break,
+   continue, goto) leaves the temporary open, like a lazily opened local: its scope end is the block's, so a pointer kept past
+   the jump is not reported. */
+typedef struct ir_cl_frame {
+  a_scope_ptr scope;
+  struct ir_cl_frame *prev;
+} ir_cl_frame;
+static ir_cl_frame *ir_cl_frames = NULL; /* the scopes of the blocks being lowered, innermost first */
+
+typedef struct ir_cl_rec {
+  a_variable_ptr var;
+  a_scope_ptr scope; /* its owner: the block whose end closes it */
+  char *op;
+  int open;
+  struct ir_cl_rec *next; /* every candidate seen in the function, most recent first */
+} ir_cl_rec;
+static ir_cl_rec *ir_cl_recs = NULL;
+
+static int ir_cl_candidate(a_variable_ptr var)
+{
+  a_type_ptr t = skip_typerefs(var->type);
+  int is_array = t->kind == tk_array;
+  if (!var->lowering_generated || !ir_fact_var(var) || var->source_corresp.name != NULL || ir_is_ref_type(var->type)) return 0;
+  while (t->kind == tk_array) t = skip_typerefs(t->variant.array.element_type);
+  if (t->kind == tk_struct || t->kind == tk_union || t->kind == tk_class) {
+    /* C has no destructors; for C++ the front end's query takes only a class of the program (it crashes on the structs the
+       lowering makes, the EH entry), so a C++ class is not a candidate */
+    return C_mode();
+  }
+  return is_array && (t->kind == tk_integer || t->kind == tk_float || t->kind == tk_pointer);
+}
+
+/* A block with a scope of its own is entered (a block without one, the wrapper of a statement the lowering gave code to, owns no
+   temporary). Returns the scope to pass to ir_cl_leave. */
+static a_scope_ptr ir_cl_enter(a_scope_ptr scope)
+{
+  ir_cl_frame *f;
+  if (!ir_scopes || ir_borrow || scope == NULL) return NULL;
+  f = (ir_cl_frame *)malloc(sizeof *f);
+  if (f == NULL) abort();
+  f->scope = scope;
+  f->prev = ir_cl_frames;
+  ir_cl_frames = f;
+  return scope;
+}
+
+static void ir_cl_end_line(int d, ir_cl_rec *r)
+{
+  ir_line(d, ir_fmt("\006%s\002(scope-end %s)\002", r->op, r->op));
+}
+
+/* The block of scope ends: its temporaries are out of scope (marked scope-end, unless emit is 0: the block ends in a return,
+   which ended them). */
+static void ir_cl_leave(a_scope_ptr scope, int d, int emit)
+{
+  ir_cl_rec *r;
+  ir_cl_frame *f;
+  if (scope == NULL) return;
+  for (r = ir_cl_recs; r != NULL; r = r->next) {
+    if (!r->open || r->scope != scope) continue;
+    if (emit) ir_cl_end_line(d, r);
+    r->open = 0;
+  }
+  f = ir_cl_frames;
+  if (f != NULL && f->scope == scope) {
+    ir_cl_frames = f->prev;
+    free(f);
+  }
+}
+
+/* A return leaves every block: the open temporaries end (they stay open: the code after the return is still lowered). */
+static void ir_cl_end_all(int d)
+{
+  ir_cl_rec *r;
+  for (r = ir_cl_recs; r != NULL; r = r->next)
+    if (r->open) ir_cl_end_line(d, r);
+}
+
+/* The temporary var, slot op, is used: the first time, it is opened if its scope is one of the blocks being lowered. */
+static void ir_cl_use(a_variable_ptr var, const char *op)
+{
+  ir_cl_rec *r;
+  ir_cl_frame *f;
+  a_variable_ptr v;
+  if (!ir_scopes || ir_borrow) return;
+  for (r = ir_cl_recs; r != NULL; r = r->next)
+    if (r->var == var) return;
+  r = (ir_cl_rec *)malloc(sizeof *r);
+  if (r == NULL) abort();
+  r->var = var;
+  r->scope = NULL;
+  r->op = ir_dup(op);
+  r->open = 0;
+  r->next = ir_cl_recs;
+  ir_cl_recs = r;
+  if (!ir_cl_candidate(var)) return;
+  for (f = ir_cl_frames; f != NULL && r->scope == NULL; f = f->prev)
+    for (v = f->scope->nonstatic_variables; v != NULL; v = v->next)
+      if (v == var) {
+        r->scope = f->scope;
+        break;
+      }
+  if (r->scope == NULL) return;
+  r->open = 1;
+  ir_line(ir_depth, ir_fmt("\006%s\002(decl %s temp)\002", op, op));
+}
+
 /* Forget the locals of the function (at its end). */
 static void ir_fact_forget(void)
 {
   ir_labels_scanned = 0;
+  while (ir_cl_recs != NULL) {
+    ir_cl_rec *r = ir_cl_recs;
+    ir_cl_recs = r->next;
+    free(r->op);
+    free(r);
+  }
+  while (ir_cl_frames != NULL) {
+    ir_cl_frame *f = ir_cl_frames;
+    ir_cl_frames = f->prev;
+    free(f);
+  }
   while (ir_decl_seen != NULL) {
     ir_decl_rec *r = ir_decl_seen;
     ir_decl_seen = r->prev;
@@ -1428,6 +1554,7 @@ static void ir_fact_close_all(int d)
   if (!IR_SCOPE_FACTS()) return;
   for (r = ir_decl_top; r != NULL; r = r->prev)
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+  ir_cl_end_all(d);
   if (ir_borrow) ir_tmp_mark(d, 0);
 }
 
@@ -1695,6 +1822,156 @@ static void ir_tmp_write(const char *data, size_t len, FILE *out)
   ir_tmp_uses_end = &ir_tmp_uses;
 }
 
+/* The function body with the marked temporary facts of ir_cl_use resolved (NFCXX_IR_SCOPES=1 without the borrow facts). A
+   temporary's facts are kept only when
+   - its slot is named on no line before its decl or after its last scope-end;
+   - the lines from its decl to its last use are straight-line code (a store, a load, a call, a block, the facts): no branch, loop,
+     label, jump or return between, so every path that reaches a use passed the decl (a decl that only some paths pass would leave
+     the slot poisoned on the others, after the block ran before);
+   - the function has no exception-handling frame (the front end's EH entry and its jump buffer are temporaries too, and the
+     runtime reads them while a callee unwinds).
+   Text after a dropped fact on its line (closing parentheses) is joined to the line before. */
+typedef struct ir_cl_op {
+  char *op;
+  size_t len;
+  long first, last, lastuse;
+  int bad;
+} ir_cl_op;
+
+static int ir_cl_straight(const char *l, size_t n)
+{
+  static const char *const ok[] = {"(let ", "(store ", "(copy ", "(zero-fill ", "(eval ", "(nonnull ", "(bounds ", "(loc ", "(block", "(decl ", "(scope-end ",
+                                   "(bfstore ", "(volatile-store ", "(volatile-copy "};
+  static const char *const branch[] = {"(and ", "(or ", "(if ", "(set ", "(call-indirect-eh", "(label", "(goto", "(loop", "(switch", "(return"};
+  size_t i, k;
+  int good = 0;
+  while (n > 0 && *l == ' ') {
+    l++;
+    n--;
+  }
+  if (n == 0) return 1;
+  if (*l == ')') return 1; /* only closing parentheses */
+  for (i = 0; i < sizeof ok / sizeof *ok; i++) {
+    size_t m = strlen(ok[i]);
+    if (n >= m && memcmp(l, ok[i], m) == 0) good = 1;
+  }
+  if (!good) return 0;
+  for (i = 0; i < sizeof branch / sizeof *branch; i++) {
+    size_t m = strlen(branch[i]);
+    for (k = 0; k + m <= n; k++)
+      if (memcmp(l + k, branch[i], m) == 0) return 0;
+  }
+  return 1;
+}
+
+static void ir_cl_write(const char *data, size_t len, FILE *out)
+{
+  ir_cl_op *ops = NULL;
+  size_t *ls = NULL;
+  long nlines = 0, line;
+  int nops = 0, capops = 0, i, eh = 0;
+  size_t p = 0, cap = 0;
+  if (len == 0 || memchr(data, '\006', len) == NULL) {
+    fwrite(data, 1, len, out);
+    return;
+  }
+  for (p = 0; p + 21 <= len; p++)
+    if (data[p] == '_' && memcmp(data + p, "__curr_eh_stack_entry", 21) == 0) {
+      eh = 1;
+      break;
+    }
+  /* the start of each line (a line ends at '\n'; the one after the last has no text) */
+  for (p = 0; p <= len;) {
+    size_t eol = p;
+    if ((size_t)nlines == cap) {
+      cap = cap == 0 ? 256 : cap * 2;
+      ls = (size_t *)realloc(ls, cap * sizeof *ls);
+      if (ls == NULL) abort();
+    }
+    ls[nlines++] = p;
+    while (eol < len && data[eol] != '\n') eol++;
+    p = eol + 1;
+  }
+#define IR_CL_EOL(L) ((size_t)(L) + 1 < (size_t)nlines ? ls[(L) + 1] - 1 : len)
+  /* the operands of the marked facts, and the lines they are on */
+  for (line = 0; line < nlines; line++) {
+    size_t q = ls[line], eol = IR_CL_EOL(line);
+    while (q < eol && data[q] == ' ') q++;
+    if (q < eol && data[q] == '\006') {
+      size_t e = q + 1;
+      while (e < eol && data[e] != '\002') e++;
+      for (i = 0; i < nops; i++)
+        if (ops[i].len == e - q - 1 && memcmp(ops[i].op, data + q + 1, e - q - 1) == 0) break;
+      if (i == nops) {
+        if (nops == capops) {
+          capops = capops == 0 ? 8 : capops * 2;
+          ops = (ir_cl_op *)realloc(ops, (size_t)capops * sizeof *ops);
+          if (ops == NULL) abort();
+        }
+        ops[nops].op = (char *)malloc(e - q);
+        if (ops[nops].op == NULL) abort();
+        memcpy(ops[nops].op, data + q + 1, e - q - 1);
+        ops[nops].len = e - q - 1;
+        ops[nops].first = line;
+        ops[nops].lastuse = -1;
+        ops[nops].bad = eh;
+        nops++;
+      }
+      ops[i].last = line;
+    }
+  }
+  /* the other lines that name the slot: inside the range, and the last of them */
+  for (line = 0; line < nlines; line++) {
+    size_t q = ls[line], eol = IR_CL_EOL(line), k;
+    while (q < eol && data[q] == ' ') q++;
+    if (q < eol && data[q] == '\006') continue;
+    for (i = 0; i < nops; i++) {
+      int hit = 0;
+      for (k = ls[line]; k + ops[i].len <= eol; k++)
+        if (memcmp(data + k, ops[i].op, ops[i].len) == 0) {
+          hit = 1;
+          break;
+        }
+      if (!hit) continue;
+      if (line < ops[i].first || line > ops[i].last) ops[i].bad = 1;
+      else if (line > ops[i].lastuse) ops[i].lastuse = line;
+    }
+  }
+  /* straight-line from the decl to the last use */
+  for (i = 0; i < nops; i++) {
+    for (line = ops[i].first + 1; !ops[i].bad && line < ops[i].lastuse; line++)
+      if (!ir_cl_straight(data + ls[line], IR_CL_EOL(line) - ls[line])) ops[i].bad = 1;
+  }
+  /* write */
+  for (line = 0; line < nlines; line++) {
+    size_t p0 = ls[line], eol = IR_CL_EOL(line), q = p0, rest, fact, end;
+    while (q < eol && data[q] == ' ') q++;
+    if (q < eol && data[q] == '\006') {
+      int keep = 0;
+      fact = q + 1;
+      while (fact < eol && data[fact] != '\002') fact++;
+      for (i = 0; i < nops; i++)
+        if (ops[i].len == fact - q - 1 && memcmp(ops[i].op, data + q + 1, fact - q - 1) == 0) keep = !ops[i].bad;
+      end = fact + 1;
+      while (end < eol && data[end] != '\002') end++;
+      if (keep) {
+        if (line > 0) fputc('\n', out);
+        fwrite(data + p0, 1, q - p0, out);
+        fwrite(data + fact + 1, 1, end - fact - 1, out);
+      }
+      rest = end + 1;
+      if (rest < eol) fwrite(data + rest, 1, eol - rest, out);
+    } else {
+      if (line > 0) fputc('\n', out);
+      fwrite(data + p0, 1, eol - p0, out);
+    }
+  }
+#undef IR_CL_EOL
+  for (i = 0; i < nops; i++) free(ops[i].op);
+  free(ops);
+  free(ls);
+}
+
 /* Marker for a node that is not lowered. The value of the marker has the type t (void: a statement). */
 static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 {
@@ -1933,6 +2210,7 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
   int d = ir_depth;
   ir_val v = ir_mk_void();
   ir_decl_rec *mark = ir_decl_top;
+  a_scope_ptr cl_scope = NULL;
   ir_note(2, enk_statement, 1);
   if (blk == NULL) return v;
   if (blk->kind != stmk_block) {
@@ -1940,6 +2218,7 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
     ir_depth = d;
     return v;
   }
+  if (blk->variant.block.extra_info != NULL) cl_scope = ir_cl_enter(blk->variant.block.extra_info->assoc_scope);
   /* The statement that produces the value: normally the last one. A class result that IL lowering copies out of the
      block with a copy constructor is a nested statement expression in an ordinary expression statement, followed by
      the destructor calls of the block's locals, so the value statement is then the last class-typed one. */
@@ -1959,6 +2238,7 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
     }
   }
   ir_fact_close_to(mark, d, !ir_ends_in_return(blk));
+  ir_cl_leave(cl_scope, d, !ir_ends_in_return(blk));
   ir_depth = d;
   if (v.s == NULL && !ir_is_void(e->type)) return ir_gap(e->type, "statement-expression-value", 2, (int)enk_statement);
   return v;
@@ -6305,10 +6585,12 @@ static void ir_stmt(a_statement_ptr s, int d)
     }
     case stmk_block: {
       ir_decl_rec *mark = ir_decl_top;
+      a_scope_ptr cl_scope = s->variant.block.extra_info != NULL ? ir_cl_enter(s->variant.block.extra_info->assoc_scope) : NULL;
       ir_note(1, stmk_block, 1);
       ir_line(d, "(block");
       ir_stmt_list(s->variant.block.statements, d + 1);
       ir_fact_close_to(mark, d + 1, !ir_ends_in_return(s));
+      ir_cl_leave(cl_scope, d + 1, !ir_ends_in_return(s));
       ir_close(1);
       return;
     }
@@ -6810,6 +7092,7 @@ static void ir_function(a_routine_ptr rout)
     ir_scan_labels(scope->assoc_block, &n);
     ir_labels_scanned = 1;
   }
+  (void)ir_cl_enter(scope);
   if (scope->assoc_block->kind == stmk_block) {
     ir_stmt_list(scope->assoc_block->variant.block.statements, 1);
   } else {
@@ -6817,6 +7100,7 @@ static void ir_function(a_routine_ptr rout)
   }
   /* The function's locals and parameters end here, unless the body ends in a return (which closed them). */
   ir_fact_close_to(NULL, 1, !ir_ends_in_return(scope->assoc_block));
+  ir_cl_leave(scope, 1, !ir_ends_in_return(scope->assoc_block));
   if (!ir_ends_in_return(scope->assoc_block)) ir_tmp_mark(1, 0);
   /* Falling off the end of a non-void routine is UB in C++; main returns 0. Both forms are explicit. */
   if (!ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block)) {
@@ -6867,6 +7151,8 @@ static void ir_function(a_routine_ptr rout)
     ir_tmp_write(body.data, body.len, nf_out);
     for (i = 0; i < ir_obl_n; i++) free(ir_obl[i]);
     ir_obl_n = 0;
+  } else if (ir_scopes) {
+    ir_cl_write(body.data, body.len, nf_out);
   } else {
     ir_buf_write(&body, nf_out);
   }

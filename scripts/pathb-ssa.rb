@@ -62,9 +62,56 @@ end
 
 # The same tokens as a character loop: a parenthesis, a string, a $ @ or & prefixed string, or a run of other characters
 # (which stops before a quote). One scan: the loop tested every character with a regex, which dominated the run time.
-TOKEN_RE = /\(|\)|"(?:\\.|[^"\\])*"|[$@&]"(?:\\.|[^"\\])*"|[^\s()"]+/
+TOKEN_WS = " \t\r\n\f\v"
+
+# The end (after the closing quote) of the string that starts at i, or nil: a backslash escapes the next character
+# except a newline, as `.` does not match one.
+def token_string_end(s, i)
+  j = i + 1
+  while j < s.size
+    if s[j] == "\\"
+      return nil unless j + 1 < s.size && s[j + 1] != "\n"
+
+      j += 2
+    elsif s[j] == '"'
+      return j + 1
+    else
+      j += 1
+    end
+  end
+  nil
+end
+
+def scan_tokens(s)
+  out = []
+  i = 0
+  n = s.size
+  while i < n
+    c = s[i]
+    if c == "(" || c == ")"
+      out << c
+      i += 1
+    elsif c == '"' && (e = token_string_end(s, i))
+      out << s[i...e]
+      i = e
+    elsif "$@&".include?(c) && i + 1 < n && s[i + 1] == '"' && (e = token_string_end(s, i + 1))
+      out << s[i...e]
+      i = e
+    elsif c != '"' && !TOKEN_WS.include?(c)
+      j = i + 1
+      j += 1 while j < n && !TOKEN_WS.include?(s[j]) && s[j] != "(" && s[j] != ")" && s[j] != '"'
+      out << s[i...j]
+      i = j
+    else
+      i += 1
+    end
+  end
+  out
+end
+
 def tokenize(s)
-  s.scan(TOKEN_RE).map do |t|
+  out = scan_tokens(s)
+  out.map do |t|
     if t.start_with?('"')
       Str.new(t)
     elsif t.length > 1 && t[1] == '"' && "$@&".include?(t[0])
@@ -77,58 +124,40 @@ end
 
 # A literal the IR writes in a form Integer() or Float() does not read: a hex integer (the value of its type, as canon
 # gives it) and an infinity (1e999 is read by Float as the same value). NaN is left as written: Float() cannot read it.
-# x is a (const TYPE VALUE ...) form, changed in place.
-def normalise_const!(x)
-  type, val = x[1], x[2]
-  if float_type?(type)
-    x[2] = "1e999" if val == "+Infinity"
-    x[2] = "-1e999" if val == "-Infinity"
-  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && INT_TYPES.key?(type)
-    x[2] = canon(Integer(val, 16), type).to_s
-  elsif val.match?(/\A[-+]?0[xX]\h+\z/) && type == "bool"
-    x[2] = canon(Integer(val, 16), type).to_s
-  end
-end
-
 def normalise_literals(x)
   return x unless x.is_a?(Array)
 
   x = x.map { |y| normalise_literals(y) }
-  normalise_const!(x) if head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
+  return x unless head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
+
+  type, val = x[1], x[2]
+  if float_type?(type)
+    x[2] = "1e999" if val == "+Infinity"
+    x[2] = "-1e999" if val == "-Infinity"
+  elsif hex_literal?(val) && INT_TYPES.key?(type)
+    x[2] = canon(Integer(val, 16), type).to_s
+  elsif hex_literal?(val) && type == "bool"
+    x[2] = canon(Integer(val, 16), type).to_s
+  end
   x
 end
 
-# One pass over the text, no token array in between and no second walk for the literals: a (const ...) form is
-# normalised as its parenthesis closes (tokenize and normalise_literals give the same forms).
 def read_forms(text)
-  stack = []
-  cur = []
-  text.scan(TOKEN_RE) do |t|
-    case t.getbyte(0)
-    when 40 # (
-      stack.push(cur)
-      cur = []
-    when 41 # )
-      raise Fail, "unbalanced parentheses" if stack.empty?
+  stack = [[]]
+  tokenize(text).each do |t|
+    case t
+    when "(" then stack.push([])
+    when ")"
+      raise Fail, "unbalanced parentheses" if stack.size < 2
 
-      done = cur
-      cur = stack.pop
-      cur << done
-      normalise_const!(done) if done[0] == "const" && done.size >= 3 && done[1].is_a?(String) && done[2].is_a?(String)
-    when 34 # "
-      cur << Str.new(t)
-    else
-      c = t.getbyte(0)
-      if t.length > 1 && t.getbyte(1) == 34 && (c == 36 || c == 64 || c == 38)
-        cur << Ref.new(t[0], t[1..])
-      else
-        cur << t
-      end
+      done = stack.pop
+      stack.last << done
+    else stack.last << t
     end
   end
-  raise Fail, "unbalanced parentheses" unless stack.empty?
+  raise Fail, "unbalanced parentheses" unless stack.size == 1
 
-  cur
+  normalise_literals(stack[0])
 end
 
 def sx(x)
@@ -288,7 +317,7 @@ class Cfg
   end
 
   def case_value(c)
-    raise Unsupported, "case label #{sx(c)}" unless head(c) == "const" && c[2].is_a?(String) && c[2] =~ /\A-?\d+\z/
+    raise Unsupported, "case label #{sx(c)}" unless head(c) == "const" && c[2].is_a?(String) && int_literal?(c[2])
 
     c[2].to_i
   end
@@ -466,7 +495,8 @@ class Converter
   end
 
   def dominates?(a, b)
-    loop do
+    # A while, not loop: the returns leave a block that a native loop calls, which a compiled build cannot cross.
+    while true
       return true if a == b
       return false if b == 0
 
@@ -546,20 +576,38 @@ class Converter
     @promoted.key?(k) ? k : nil
   end
 
-  def rename(b)
-    pushed = []
-    @phis[b].each_value do |ph|
-      ph.name = fresh
-      push(ph.var, ph.name, pushed)
+  # The renaming walk over the dominator tree from b: a block's statements are renamed before its children, in order, and
+  # the names it pushed are popped after them. An explicit stack of [block, pushed names, next child] rather than a
+  # recursion, since the tree of a long straight-line function is hundreds of blocks deep, past the interpreter's call limit.
+  def rename(root)
+    work = [[root, nil, 0]]
+    until work.empty?
+      frame = work.last
+      b = frame[0]
+      if frame[1].nil?
+        pushed = []
+        @phis[b].each_value do |ph|
+          ph.name = fresh
+          push(ph.var, ph.name, pushed)
+        end
+        instrs = []
+        @cfg[b].instrs.each { |i| visit(i, instrs, pushed) }
+        term = terminator(@cfg[b].term)
+        @out ||= {}
+        @out[b] = { phis: @phis[b].values, instrs: instrs, term: term }
+        succs(term).each { |s| @phis[s].each_value { |ph| ph.inc[b] = cur(ph.var) } }
+        frame[1] = pushed
+      end
+      kids = @children[b]
+      if frame[2] < kids.size
+        child = kids[frame[2]]
+        frame[2] += 1
+        work << [child, nil, 0]
+      else
+        frame[1].each { |v| @stacks[v].pop }
+        work.pop
+      end
     end
-    instrs = []
-    @cfg[b].instrs.each { |i| visit(i, instrs, pushed) }
-    term = terminator(@cfg[b].term)
-    @out ||= {}
-    @out[b] = { phis: @phis[b].values, instrs: instrs, term: term }
-    succs(term).each { |s| @phis[s].each_value { |ph| ph.inc[b] = cur(ph.var) } }
-    @children[b].each { |c| rename(c) }
-    pushed.each { |v| @stacks[v].pop }
   end
 
   def visit(i, out, pushed)
@@ -633,7 +681,7 @@ class Converter
   # Replaces phis whose arguments are all one value (or themselves), then drops phis nothing uses.
   def simplify
     repl = {}
-    loop do
+    while true
       changed = false
       @out.each_value do |blk|
         blk[:phis].reject! do |ph|
@@ -651,7 +699,7 @@ class Converter
       blk[:term] = map_atoms(blk[:term], repl)
       blk[:phis].each { |ph| ph.inc.transform_values! { |v| map_atoms(v, repl) } }
     end
-    loop do
+    while true
       uses = Hash.new(0)
       @out.each_value do |blk|
         blk[:instrs].each { |i| count_atoms(head(i) == "let" ? i[2..] : i[1..], uses) }
@@ -824,7 +872,7 @@ def literal(v, type)
   if float_type?(v[1])
     # NaN is written as text that Float() cannot read (normalise_literals). Its value here is the positive quiet NaN, as
     # the QBE emitter spells it (Qbe.float_lit).
-    return Float::NAN if v[2].is_a?(String) && v[2].match?(/nan/i)
+    return Float::NAN if v[2].is_a?(String) && v[2].downcase.include?("nan")
 
     round_float(Float(v[2]), v[1])
   else
@@ -888,6 +936,20 @@ def install_module(forms)
   end
 end
 
+# A structured statement's way out of the statement list it ran in: break, continue or return. exec and exec_list hand one
+# back to their caller (nil when the statement falls through); a throw across the native each of a compiled build is an
+# error there, so the exits are values.
+class Flow
+  attr_reader :kind, :value
+
+  def initialize(kind, value = nil)
+    @kind = kind
+    @value = value
+  end
+end
+FLOW_BREAK = Flow.new(:break)
+FLOW_CONTINUE = Flow.new(:continue)
+
 class Machine
   class << self
     # Parses an ssa-function form into an object with blocks (pathb-egraph sets it).
@@ -916,14 +978,23 @@ class Machine
     params = fn.params[1..]
     raise Unsupported, "main takes #{params.size} arguments" unless params.size == args.size
 
-    params.zip(args).each { |p, a| @env[p[1]] = float_type?(p[3]) ? round_float(a, p[3]) : canon(a, p[3]) }
+    # An index loop, not zip: the zip of a compiled build walks its arguments with Enumerator#next, a Fiber a compiled
+    # build does not run.
+    pi = 0
+    while pi < params.size
+      p = params[pi]
+      a = args[pi]
+      @env[p[1]] = float_type?(p[3]) ? round_float(a, p[3]) : canon(a, p[3])
+      pi += 1
+    end
   end
 
   def run_structured(body)
-    catch(:ret) do
-      exec_list(body)
-      nil
-    end
+    r = exec_list(body)
+    return nil unless r
+    return r.value if r.kind == :ret
+
+    raise ArgumentError, "uncaught throw :#{r.kind == :break ? 'brk' : 'cont'}"
   end
 
   def run_ssa(out)
@@ -931,7 +1002,9 @@ class Machine
     prev = nil
     steps = 0
     start = 0
-    loop do
+    # A while, not loop: the return and the next below leave a block that a native loop calls, which a compiled build
+    # cannot cross.
+    while true
       raise Unsupported, "step limit" if (steps += 1) > 1_000_000
 
       blk = out.fetch(b)
@@ -980,7 +1053,19 @@ class Machine
   end
   private
 
-  def exec_list(stmts) = stmts.each { |s| exec(s) }
+  # Runs the statements in order; stops at the first one that exits (a Flow) and hands that exit back.
+  # A while loop, not each: a return from the block of a native each is a throw across a C function in a compiled build.
+  def exec_list(stmts)
+    i = 0
+    n = stmts.size
+    while i < n
+      r = exec(stmts[i])
+      return r if r.is_a?(Flow)
+
+      i += 1
+    end
+    nil
+  end
 
   # Counts one step of the run's budget (see initialize).
   def tick
@@ -1091,22 +1176,36 @@ end
     saved = [@hit, @entered]
     @hit = hit
     @entered = false
+    r = nil
     begin
-      catch(:brk) { exec_switch_body(stmts) }
+      r = exec_switch_body(stmts)
     ensure
       @hit, @entered = saved
     end
+    # `break` leaves the switch; a continue or a return goes on to the enclosing loop or function.
+    r.equal?(FLOW_BREAK) ? nil : r
   end
 
   # Statements before the entry marker are skipped; blocks are entered so that a marker inside one is reached.
   def exec_switch_body(stmts)
-    stmts.each do |st|
+    i = 0
+    n = stmts.size
+    while i < n
+      st = stmts[i]
+      i += 1
       case head(st)
       when "case", "default" then @entered ||= st.equal?(@hit)
-      when "block" then exec_switch_body(st[1..])
-      else exec(st) if @entered
+      when "block"
+        r = exec_switch_body(st[1..])
+        return r if r.is_a?(Flow)
+      else
+        if @entered
+          r = exec(st)
+          return r if r.is_a?(Flow)
+        end
       end
     end
+    nil
   end
 
   # Markers are interpreted only at block level in the switch body (inside nested blocks, not in if or loop).
@@ -1128,6 +1227,24 @@ end
     x.any? { |y| contains_marker?(y) }
   end
 
+  # A loop: the body, then the step, until a break. A continue in the body goes on to the step; a continue in the step, and
+  # a return anywhere, leave the loop for the enclosing one.
+  def exec_loop(s)
+    while true
+      r = exec_list(clause(s, "body"))
+      if r
+        return nil if r.equal?(FLOW_BREAK)
+        return r unless r.equal?(FLOW_CONTINUE)
+      end
+      r = exec_list(clause(s, "step"))
+      if r
+        return nil if r.equal?(FLOW_BREAK)
+
+        return r
+      end
+    end
+  end
+
   def exec(s)
     case head(s)
     when "let" then @env[s[1]] = val(s[3])
@@ -1142,16 +1259,10 @@ end
     when "block" then exec_list(s[1..])
     when "if" then exec_list(val(s[1]) != 0 ? clause(s, "then") : clause(s, "else"))
     when "switch" then exec_switch(s)
-    when "loop"
-      catch(:brk) do
-        loop do
-          catch(:cont) { exec_list(clause(s, "body")) }
-          exec_list(clause(s, "step"))
-        end
-      end
-    when "break" then throw :brk
-    when "continue" then throw :cont
-    when "return" then throw :ret, (s.size > 1 ? val(s[1]) : nil)
+    when "loop" then exec_loop(s)
+    when "break" then FLOW_BREAK
+    when "continue" then FLOW_CONTINUE
+    when "return" then Flow.new(:ret, s.size > 1 ? val(s[1]) : nil)
     when "eval" then call_fn(s[1])
     when "unreachable" then raise Trap, "unreachable"
     else raise Unsupported, "statement #{head(s) || sx(s)}"
@@ -1166,11 +1277,11 @@ end
       case head(x)
       when "const"
         if float_type?(x[1])
-          raise Unsupported, "float constant #{sx(x)}" unless x[2] =~ /\A-?\d+(\.\d+)?([eE][-+]?\d+)?\z/
+          raise Unsupported, "float constant #{sx(x)}" unless float_literal?(x[2])
 
           return round_float(Float(x[2]), x[1])
         end
-        raise Unsupported, "constant #{sx(x)}" unless x[2] =~ /\A-?\d+\z/
+        raise Unsupported, "constant #{sx(x)}" unless int_literal?(x[2])
 
         canon(x[2].to_i, x[1])
       when "null" then 0
@@ -1230,11 +1341,50 @@ end
 
 # ---- driver ---------------------------------------------------------------------------------------------------------
 
-# A function whose structured form does not verify after conversion (its message went to stderr already).
-VerifyFailed = Class.new(StandardError)
+# Literal shapes the converter reads, as character scans (the script-world build has no Regexp). A non-string is not a
+# literal, as `=~` on it would not match.
+HEX_DIGITS = "0123456789abcdefABCDEF"
+
+def hex_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("+", "-") ? s[1..] : s
+  t.length >= 3 && t[0] == "0" && (t[1] == "x" || t[1] == "X") && t[2..].each_char.all? { |c| HEX_DIGITS.include?(c) }
+end
+
+def int_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("-") ? s[1..] : s
+  !t.empty? && t.each_char.all? { |c| c >= "0" && c <= "9" }
+end
+
+def float_literal?(s)
+  return false unless s.is_a?(String)
+
+  t = s.start_with?("-") ? s[1..] : s
+  n = t.length
+  digits = ->(j) { k = j; k += 1 while k < n && t[k] >= "0" && t[k] <= "9"; k }
+  j = digits.(0)
+  return false if j == 0
+  if j < n && t[j] == "."
+    k = digits.(j + 1)
+    return false if k == j + 1
+    j = k
+  end
+  if j < n && (t[j] == "e" || t[j] == "E")
+    j += 1
+    j += 1 if j < n && (t[j] == "+" || t[j] == "-")
+    k = digits.(j)
+    return false if k == j
+    j = k
+  end
+  j == n
+end
 
 # Converts the functions of a module (the forms of an IR file) to SSA: the printed forms in order (the other forms
-# unchanged), then the counts of functions seen, converted and promoted slots, and `main`'s structured and SSA forms.
+# unchanged), then the counts of functions seen, converted and promoted slots, and `main`'s structured and SSA forms; nil
+# when a converted function does not verify (the message is on stderr already).
 # live: a Hash of the names a caller keeps ({ "name" => true }): a function outside it is skipped, not converted (its
 # conversion would be dropped afterwards; scripts/pathb-ssa-build's prune). nil converts every function.
 def convert_module(forms, live = nil)
@@ -1245,7 +1395,10 @@ def convert_module(forms, live = nil)
   main_fn = nil
   main_out = nil
   output = []
-  forms.each do |form|
+  fi = 0
+  while fi < forms.size
+    form = forms[fi]
+    fi += 1
     unless head(form) == "function"
       output << sx(form)
       next
@@ -1257,12 +1410,12 @@ def convert_module(forms, live = nil)
     begin
       conv = Converter.new(fn).run
     rescue Unsupported => e
-      warn "pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted"
+      $stderr.write(("pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted") + "\n")
       output << sx(form)
       next
     rescue Fail => e
-      warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
-      raise VerifyFailed
+      $stderr.write(("pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}") + "\n")
+      return nil
     end
     converted += 1
     promoted_total += conv.promoted.size
@@ -1287,14 +1440,21 @@ def main(argv)
     run_args = argv[0..-2].map { |a| Integer(a, 10) }
     argv = argv[-1..]
   end
-  file = argv.last or abort "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
+  file = argv.last
+  unless file
+    $stderr.write(("usage: pathb-ssa.rb [--check | --run N...] FILE.ir") + "\n")
+    return 1
+  end
 
   forms = read_forms(File.read(file))
-  output, functions, converted, promoted_total, main_fn, main_out = convert_module(forms)
+  result = convert_module(forms)
+  return 1 if result.nil?
+
+  output, functions, converted, promoted_total, main_fn, main_out = result
 
   case mode
   when :check
-    warn "pathb-ssa: #{functions} functions, #{converted} converted, #{promoted_total} slots promoted"
+    $stderr.write(("pathb-ssa: #{functions} functions, #{converted} converted, #{promoted_total} slots promoted") + "\n")
   when :run
     raise Fail, "no main function" unless main_fn
 
@@ -1311,19 +1471,21 @@ def main(argv)
       "trap"
     end
     puts "structured=#{structured} ssa=#{ssa}"
-    exit 1 if structured != "unsupported" && structured != ssa
+    return 1 if structured != "unsupported" && structured != ssa
   else
     puts output
   end
   0
-rescue VerifyFailed
-  exit 1
 rescue Unsupported => e
-  warn "pathb-ssa: #{e.message}"
-  exit 2
+  $stderr.write(("pathb-ssa: #{e.message}") + "\n")
+  2
 rescue Fail => e
-  warn "pathb-ssa: #{e.message}"
-  exit 1
+  $stderr.write(("pathb-ssa: #{e.message}") + "\n")
+  1
 end
 
-exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
+# pathb-ssa-qbe.rb requires this file for its converter, so the command line runs only as the program.
+if $0 == __FILE__
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

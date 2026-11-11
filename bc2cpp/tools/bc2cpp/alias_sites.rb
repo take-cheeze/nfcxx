@@ -7,6 +7,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
 require_relative 'send_names'
+require_relative 'call_records'
 
 # ALIAS_SITES: `alias_method :new, :old` (or `alias new old`) written straight in a class
 # or module body of the engine, with literal names, runs once while the class is defined and copies the
@@ -52,19 +53,36 @@ module AliasSites
     found if found && DefineMethodSites.straight_line?(irep, insn)
   end
 
+  # CALL_RECORDS: with the emitter's record of the call, the names are its two literal Symbol arguments; the bytecode shape
+  # (the LOADSYMs right before the send) is the answer of a tree without one.
   def method_site(irep, idx, insn)
     return nil unless insn.sym == 'alias_method' && insn.plain_fixed_argc? && insn.argc == 2 && idx >= 2
 
+    call = CallRecords.at(irep, insn)
+    if call
+      names = CallRecords.symbols(call)
+      names = nil unless names&.size == 2
+      CallRecords.agree(:alias_names, irep, insn, names) { loadsym_names(irep, idx, insn) }
+    else
+      names = loadsym_names(irep, idx, insn)
+    end
+    return nil unless names
+
+    following = BytecodeIR.for(irep).source_at(idx + 1)
+    return nil if following && BytecodeIR::Ops::SEND.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
+
+    Site.new(new_name: names[0], old_name: names[1])
+  end
+
+  # [new, old] when the two arguments are LOADSYMs into the argument registers right before the send.
+  def loadsym_names(irep, idx, insn)
     base = insn.reg.to_i
     new_insn = BytecodeIR.for(irep).source_at(idx - 2)
     old_insn = BytecodeIR.for(irep).source_at(idx - 1)
     return nil unless new_insn.op == :LOADSYM && new_insn.reg.to_i == base + 1 && new_insn.sym_token
     return nil unless old_insn.op == :LOADSYM && old_insn.reg.to_i == base + 2 && old_insn.sym_token
 
-    following = BytecodeIR.for(irep).source_at(idx + 1)
-    return nil if following && BytecodeIR::Ops::SEND.include?(following.op) && VISIBILITY_SENDS.include?(following.sym)
-
-    Site.new(new_name: new_insn.sym_token, old_name: old_insn.sym_token)
+    [new_insn.sym_token, old_insn.sym_token]
   end
 
   # The MethodDef for `new` at a recognized site of +label+'s body, +idx+, defined on +owner+. +prior+ is
