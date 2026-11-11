@@ -16,6 +16,12 @@ on:
       - "Gemfile.lock"
       - "scripts/pathb-borrowck.rb"
       - "tests/pathb-borrow/**"
+      - "be/nfcxx_*.c"
+      - "scripts/nfcxx-*"
+      - "scripts/setup-libclang-edg.sh"
+      - "scripts/build-libclang-edg.sh"
+      - "scripts/setup-edg.sh"
+      - ".github/actions/toolchain/**"
       - ".github/workflows/bc2cpp.yml"
   pull_request:
     paths:
@@ -26,6 +32,12 @@ on:
       - "Gemfile.lock"
       - "scripts/pathb-borrowck.rb"
       - "tests/pathb-borrow/**"
+      - "be/nfcxx_*.c"
+      - "scripts/nfcxx-*"
+      - "scripts/setup-libclang-edg.sh"
+      - "scripts/build-libclang-edg.sh"
+      - "scripts/setup-edg.sh"
+      - ".github/actions/toolchain/**"
       - ".github/workflows/bc2cpp.yml"
   workflow_dispatch:
 
@@ -167,3 +179,57 @@ jobs:
           unset LD
           ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
           source "$RUNNER_TEMP/bc2cpp-checks.sh"
+
+  # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers and both preprocessors on the pinned world's
+  # mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
+  # toolchain action restores build/edg, build/qbe and build/cproc from the cache that ci.yml's build job saves (same keys,
+  # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
+  # configuration, cached below. The checkout takes only the submodules those need.
+  nfcxx-clang-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      NFCXX_PARITY_FIBER: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: EDG, QBE and cproc sources
+        run: git submodule update --init --depth 1 3rd/edg 3rd/qbe 3rd/cproc
+
+      # clang: the AST dump and preprocessor oracle. bison, gperf, autoconf, automake and libtool: the fork's mruby build
+      # (the Fiber check).
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: clang bison gperf autoconf automake libtool
+
+      # Ruby 4.0 ships the Prism 1.x and RBS 4.x that bc2cpp is written against (see the world job).
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      # build/libclang-edg, keyed as ci.yml keys the Path B harness: the EDG revision and what the build reads.
+      - name: AST front end cache key
+        id: libclang-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the AST front end
+        id: libclang-edg
+        uses: actions/cache@v6
+        with:
+          path: build/libclang-edg
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh') }}
+
+      - name: Build the AST front end
+        if: steps.libclang-edg.outputs.cache-hit != 'true'
+        run: LIBCLANG_EDG_IN_PROCESS=0 scripts/setup-libclang-edg.sh
+
+      - name: nfcxx against clang (AST producers, preprocessors, C++ Fiber)
+        run: tests/bc2cpp/run_nfcxx_parity.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
