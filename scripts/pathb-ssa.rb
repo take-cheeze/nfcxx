@@ -1303,7 +1303,7 @@ def main(argv)
   end
   file = argv.last
   unless file
-    warn "usage: pathb-ssa.rb [--check | --run N...] FILE.ir"
+    $stderr.write(("usage: pathb-ssa.rb [--check | --run N...] FILE.ir") + "\n")
     return 1
   end
 
@@ -1325,11 +1325,11 @@ def main(argv)
     begin
       conv = Converter.new(fn).run
     rescue Unsupported => e
-      warn "pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted"
+      $stderr.write(("pathb-ssa: #{sx(fn.name)}: #{e.message}; left unconverted") + "\n")
       output << sx(form)
       next
     rescue Fail => e
-      warn "pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}"
+      $stderr.write(("pathb-ssa: VERIFY FAILED in #{sx(fn.name)}: #{e.message}") + "\n")
       return 1
     end
     converted += 1
@@ -1343,7 +1343,7 @@ def main(argv)
 
   case mode
   when :check
-    warn "pathb-ssa: #{functions} functions, #{converted} converted, #{promoted_total} slots promoted"
+    $stderr.write(("pathb-ssa: #{functions} functions, #{converted} converted, #{promoted_total} slots promoted") + "\n")
   when :run
     raise Fail, "no main function" unless main_fn
 
@@ -1366,10 +1366,10 @@ def main(argv)
   end
   0
 rescue Unsupported => e
-  warn "pathb-ssa: #{e.message}"
+  $stderr.write(("pathb-ssa: #{e.message}") + "\n")
   2
 rescue Fail => e
-  warn "pathb-ssa: #{e.message}"
+  $stderr.write(("pathb-ssa: #{e.message}") + "\n")
   1
 end
 
