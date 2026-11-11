@@ -26,6 +26,7 @@ type_check_variants = TypeCheckVariants.parse_argv(ARGV) if $PROGRAM_NAME == __F
 TypeCheckVariants.arm_guard if type_check_variants
 require_relative 'compact_output'
 require_relative 'shard_output'
+require_relative 'runtime_header'
 require_relative 'shared_generation'
 require_relative 'core_c_facts'
 require_relative 'embed_init_guard'
@@ -1547,6 +1548,8 @@ BC2CPP_MAIN = lambda do
     shards = 1
   end
   ShardOutput.capture_stdout(symbol, out_dir, shards) if shards > 1
+  # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
+  RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated
 
   # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
@@ -1578,6 +1581,8 @@ BC2CPP_MAIN = lambda do
     RecvTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
   end
 
+  # RUNTIME_HEADER: from here to END_MARK the text depends on the build only, never on the unit's owners.
+  print RuntimeHeader::BEGIN_MARK
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <initializer_list>'
@@ -2740,6 +2745,7 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_block(M, self, mid, argc, argv, blk); });
     }
   CPP
+  print RuntimeHeader::END_MARK
   # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
   # profiling primitives directly (profiler_section_begin/_end, frame_begin/
   # _end) instead of building an RProc for RGSS::Profiler.section/frame and

@@ -771,7 +771,9 @@ def bc2cpp_compiled_gem_job(spec, gems_root)
     'BC2CPP_STATIC_DISPATCH_LISTS' => ENV['BC2CPP_STATIC_DISPATCH_LISTS'],
     # ROM_METHOD_TABLES (codegen_emit.rb): this build's presym scan reads the generated sources, so their method
     # names can be compile-time symbols in const tables.
-    'BC2CPP_ROM_METHOD_TABLES' => '1'
+    'BC2CPP_ROM_METHOD_TABLES' => '1',
+    # RUNTIME_HEADER (runtime_header.rb): one directory for every compiled gem, so they share one runtime header.
+    'BC2CPP_RUNTIME_HEADER_DIR' => "#{spec.build.build_dir}/mrbgems/bc2cpp-runtime"
   }.merge(bc2cpp_closed_world_env(spec, gems_root))
   mrbc = bc2cpp_optional_mrbc(spec)
   env['MRBC'] = mrbc if mrbc

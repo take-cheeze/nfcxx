@@ -23,6 +23,8 @@ REGISTRATION = /^(?:\[\[maybe_unused\]\] )?(?:static|inline) void bc2cpp_registe
 tables = 0
 sources.each do |path|
   src = File.read(path)
+  # RUNTIME_HEADER (tools/bc2cpp/runtime_header.rb): the fixed runtime part is in the header the file includes.
+  src.scan(/^#include "([^"]*bc2cpp_runtime_\h+\.hxx)"$/).flatten.uniq.each { |header| src += File.read(header) }
   name = File.basename(path)
   failures << "#{name}: no `#define BC2CPP_ROM_METHOD_TABLES 1`" unless src.include?("#define BC2CPP_ROM_METHOD_TABLES 1\n")
   defined = src.scan(/^(?:static|inline) const mrb_mt_entry (bc2cpp_mt_\w+)\[\] = \{$/).flatten.to_set
@@ -49,7 +51,8 @@ if (i = ARGV.index('--host'))
   summary = out[/^TRACE_HOST heap_method_tables .*$/]
   failures << 'no heap_method_tables summary' unless summary
   failures << "a heap entry duplicates a ROM entry: #{summary}" unless summary.to_s.include?(' rom_duplicates=0')
-  # The C functions of the generated code: every compiled gem's are in a bc2cpp_shard_ namespace.
+  # The C functions of the generated code: every compiled gem's are in a bc2cpp_shard_ namespace, the shared
+  # runtime's in bc2cpp_rt_ (RUNTIME_HEADER).
   symbols = Open3.capture2('nm', '-C', '--defined-only', host).first.lines.filter_map do |line|
     addr, type, name = line.chomp.split(' ', 3)
     [addr.to_i(16), name] if name && %w[t T w W].include?(type)
