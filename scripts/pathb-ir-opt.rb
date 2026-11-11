@@ -180,7 +180,21 @@ def copy_form(x)
 end
 
 # Why a function cannot be inlined, or nil when it can.
+# Caps on inlining (docs/notes/pathb-ir-passes.md). A callee of more than $inline_max_callee nodes is not inlined, and the
+# module is not inlined past $inline_max_growth times its size on entry (each inlined copy is a full copy of the callee, and
+# the callees grow with each round). 0 turns a cap off.
+$inline_max_callee = 400
+$inline_max_growth = 2.0
+
+def node_count(x)
+  return 0 unless x.is_a?(Array)
+  n = 1
+  x.each { |y| n += node_count(y) }
+  n
+end
+
 def refusal(fn, name)
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   params = fn.find { |f| head(f) == "params" }
   if params
@@ -465,11 +479,17 @@ def inline_pass(forms, max_depth, report)
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
   ids = {}.compare_by_identity
   calls = {}.compare_by_identity
+  total = node_count(forms)
+  budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
+      if budget && total > budget
+        refused["module over --max-growth"] = (refused["module over --max-growth"] || 0) + 1
+        next
+      end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
              ic: infos, attrs: attrs, attr_from: [] }
@@ -477,7 +497,9 @@ def inline_pass(forms, max_depth, report)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]
+      before = node_count(f)
       forms[i] = ["function", f[1]] + insert_slots(children, st[:hoist])
+      total += node_count(forms[i]) - before
       fns[name] = forms[i]
       reasons.delete(name)
       infos.delete(name)
@@ -1738,6 +1760,10 @@ def main(argv)
       $pass_fold_unit = false
     elsif a.start_with?("--max-depth=")
       max_depth = a[12..-1].to_i
+    elsif a.start_with?("--max-callee=")
+      $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--max-growth=")
+      $inline_max_growth = a[13..-1].to_f
     elsif a == "--report"
       report = true
     elsif a == "--forward"

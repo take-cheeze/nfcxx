@@ -26,6 +26,20 @@ The refusals of by-value structs matter most for SYCL: the kernel lambda takes i
 that 72-byte copy, and the GPU time per launch does not change with inlining alone. Removing it needs scalar replacement of
 aggregates (SROA), which is the next pass.
 
+## Caps (`--max-callee`, `--max-growth`)
+
+Each inlined copy is a full copy of the callee, and the callees grow with each round, so the output can grow by more than 30x
+at the default depth (an 8.9 MB unit of libstdc++-heavy code went to 300 MB in 79 s). Two caps bound it:
+
+- `--max-callee=N` (default 400 nodes): a callee bigger than N nodes is refused ("callee over --max-callee").
+- `--max-growth=F` (default 2.0): once the module has grown to F times its size on entry, no further function is rewritten
+  ("module over --max-growth").
+
+The same unit with both caps: 16 MB, 3740 calls inlined, 3.8 s. 0 turns a cap off. The defaults are not tuned.
+
+Known gap: after inlining, the SSA emitter (scripts/pathb-ssa-qbe.rb) refuses some functions of that unit ("let of $\"__j\""), so
+`pathb-cc` falls back to the unoptimized IR for it. The pass is therefore not on by default.
+
 ## Use
 
 `NFCXX_IR_OPT=inline` makes `scripts/sycl-build.sh` run the pass on the device IR before the SPIR-V emitter (any list of passes
