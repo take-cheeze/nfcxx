@@ -54,6 +54,7 @@
 #                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
 #                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
 #   --cache-log=FILE (NFCXX_CACHE_LOG=FILE): with --cache, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
+#   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.py), like sccache's GHA backend.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
 #                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
 #                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe selects
@@ -120,6 +121,11 @@ ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_op
 eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
 eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
 cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
+# NFCXX_CACHE_REMOTE=gha: each stored object is also kept in the GitHub Actions cache, and a local miss is looked up there
+# (scripts/nfcxx-cache-gha.py; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
+cache_remote=${NFCXX_CACHE_REMOTE:-}
+case $cache_remote in ""|gha) ;; *) echo "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '$cache_remote')" >&2; exit 2 ;; esac
+[ -n "$cache_dir" ] || [ -z "$cache_remote" ] || cache_dir=${TMPDIR:-/tmp}/nfcxx-cache-$(id -u)
 keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
 time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
 instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
@@ -155,6 +161,24 @@ cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG wh
   while ! mkdir "$cache_log_file.lock" 2>/dev/null; do sleep 0.05; done
   printf '%s\n' "$*" >> "$cache_log_file"
   rmdir "$cache_log_file.lock"
+}
+# The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
+# remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
+cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
+  local tmp=$2.remote.$$ rc=0
+  rm -rf "$tmp"
+  python3 -I "$root/scripts/nfcxx-cache-gha.py" get "$1" "$tmp" || rc=$?
+  if [ $rc = 0 ] && [ -f "$tmp/obj" ]; then
+    mkdir -p "$(dirname "$2")"; [ -e "$2" ] || mv "$tmp" "$2" 2>/dev/null || true
+  else rc=1; fi
+  rm -rf "$tmp"
+  return $rc
+}
+cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
+  local names=(obj) x
+  for x in ti ii; do [ ! -f "$2/$x" ] || names+=("$x"); done
+  python3 -I "$root/scripts/nfcxx-cache-gha.py" put "$1" "$2" "${names[@]}" \
+    || echo "nfcxx: remote cache: could not store $1 (the build continues)" >&2
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
@@ -1195,7 +1219,7 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
     printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
     # The logs and the trace are diagnostics: they must not change the key.
-    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
+    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
     cache_sha < "$root/nfcxx"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
@@ -1222,6 +1246,7 @@ if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 
    && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
   if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
     cache_entry=$cache_dir/objects/$key
+    [ -f "$cache_entry/obj" ] || [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
     if [ -f "$cache_entry/obj" ]; then
       rm -f "${out%.*}.ti" "${out%.*}.ii"
       cp "$cache_entry/obj" "$out"
@@ -1275,7 +1300,7 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
     t=$(trace_start)
     # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
     args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
+    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi
@@ -1285,6 +1310,7 @@ if [ -n "$cache_entry" ] && [ ! -f "$cache_entry/obj" ]; then   # a whole entry 
   for x in ti ii; do [ ! -f "${out%.*}.$x" ] || cp "${out%.*}.$x" "$ctmp/$x"; done
   [ -e "$cache_entry" ] || mv "$ctmp" "$cache_entry" 2>/dev/null
   rm -rf "$ctmp"
+  [ -z "$cache_remote" ] || [ ! -f "$cache_entry/obj" ] || cache_remote_put "${cache_entry##*/}" "$cache_entry"
 fi
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
