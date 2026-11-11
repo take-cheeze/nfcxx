@@ -14,6 +14,15 @@ abs_path() {
   if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
   else printf '%s\n' "$1"; fi
 }
+#   host_qbe_target     prints the QBE target of this host (QBE's default: arm64_apple, arm64, amd64_apple or amd64_sysv)
+host_qbe_target() {
+  local m s
+  m=$(uname -m); s=$(uname -s)
+  case $m in
+    arm64|aarch64) if [ "$s" = Darwin ]; then echo arm64_apple; else echo arm64; fi ;;
+    *) if [ "$s" = Darwin ]; then echo amd64_apple; else echo amd64_sysv; fi ;;
+  esac
+}
 host_dialect() {
   if "${NFCXX_CXX:-g++}" --version 2>/dev/null | head -1 | grep -qi clang; then echo clang; else echo g++; fi
 }

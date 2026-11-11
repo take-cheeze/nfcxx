@@ -2,7 +2,7 @@
 #
 # Usage: scripts/mrb scripts/pathb-qbe-emit.rb [--safe] [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
 #          --safe: the checks of -fsafe-pointers (docs/notes/safe-pointers.md)
-#        scripts/mrb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s
+#        scripts/mrb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s [TARGET]
 #                                                              append `.weak` lines for the IR (weak) definitions
 #
 # Exit status:
@@ -2848,6 +2848,44 @@ ASM_HELPERS = {
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
 }
+# The arm64 versions (QBE's arm64 and arm64_apple targets), with the same semantics: mfence is a full barrier (dmb ish), and
+# rdtsc reads the generic timer's virtual count (cntvct_el0; arm64 has no time stamp counter).
+ARM64_HELPER_BODY = {
+  "fence" => ["dmb ish", "ret"],
+  "rdtsc" => ["mrs x0, cntvct_el0", "ret"],
+}
+
+# The target is the QBE target the IL is assembled for (the host's default, or -t). Apple's assembler has no .weak, .type
+# or .size: a weak symbol there is .globl with .weak_definition, and the name has the underscore QBE puts on every symbol.
+# Only the arm64 targets take these forms here; the x86-64 output is unchanged.
+def arm64_target?(target)
+  target.start_with?("arm64")
+end
+
+def arm64_apple?(target)
+  arm64_target?(target) && target.end_with?("_apple")
+end
+
+# The directives that make the symbol SYM (as the IL names it) a weak definition.
+def weak_lines(sym, target)
+  return [".weak #{sym}"] unless arm64_apple?(target)
+  ["\t.globl _#{sym}", "\t.weak_definition _#{sym}"]
+end
+
+# The assembly lines of the machine-level helper NAME for TARGET (nil when there is none).
+def asm_helper(name, target)
+  return ASM_HELPERS[name] unless arm64_target?(target)
+  body = ARM64_HELPER_BODY[name]
+  return nil if body.nil?
+  sym = "__pathb_#{name}"
+  lines = body.map { |l| "\t#{l}" }
+  if arm64_apple?(target)
+    s = "_" + sym
+    ["\t.text", "\t.globl #{s}", "\t.weak_definition #{s}", "#{s}:"] + lines
+  else
+    ["\t.text", "\t.weak #{sym}", "\t.type #{sym}, %function", "#{sym}:"] + lines + ["\t.size #{sym}, .-#{sym}"]
+  end
+end
 
 # GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
 # line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
@@ -2855,7 +2893,7 @@ ALIAS_MARK = "# pathb-alias "
 # `# pathb-raw-asm HEX`: a file-scope asm block (an (asm-decl HEX) form), written to the assembly as it is.
 RAW_ASM_MARK = "# pathb-raw-asm "
 
-def append_weak(il_path, asm_path)
+def append_weak(il_path, asm_path, target)
   names = []
   extra = []
   read_text(il_path).split("\n").each do |line|
@@ -2865,7 +2903,7 @@ def append_weak(il_path, asm_path)
       text = [line.byteslice(RAW_ASM_MARK.bytesize, line.bytesize - RAW_ASM_MARK.bytesize).strip].pack("H*")
       extra << (text.end_with?("\n") ? text : text + "\n")
     elsif line.start_with?(ASM_MARK)
-      lines = ASM_HELPERS[line.byteslice(ASM_MARK.bytesize, line.bytesize - ASM_MARK.bytesize).strip]
+      lines = asm_helper(line.byteslice(ASM_MARK.bytesize, line.bytesize - ASM_MARK.bytesize).strip, target)
       extra << lines.join("\n") + "\n" unless lines.nil?
     elsif line.start_with?(X87_MARK)
       w = line.byteslice(X87_MARK.bytesize, line.bytesize - X87_MARK.bytesize).split(" ")
@@ -2886,7 +2924,7 @@ def append_weak(il_path, asm_path)
   end
   unless names.empty? && extra.empty?
     File.open(asm_path, "a") do |f|
-      f.write("\n" + names.map { |n| ".weak #{n}\n" }.join + extra.join)
+      f.write("\n" + names.map { |n| weak_lines(n, target).map { |l| l + "\n" }.join }.join + extra.join)
     end
   end
   0
@@ -3509,8 +3547,9 @@ end
 def main(argv)
   args = argv.dup
   if !args.empty? && args[0] == "--append-weak"
-    return die("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s\n", 1) if args.length != 3
-    return append_weak(args[1], args[2])
+    return die("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s [TARGET]\n", 1) unless args.length == 3 || args.length == 4
+    # TARGET: the QBE target the assembly was made for (arm64_apple, arm64, amd64_sysv, ...); amd64_sysv when absent.
+    return append_weak(args[1], args[2], args.length == 4 ? args[3] : "amd64_sysv")
   end
   do_prune = true
   ld_trap = false
