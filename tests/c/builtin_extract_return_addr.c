@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: __builtin_return_address and __builtin_extract_return_addr have no lowering (refused)
 // X86-ONLY-qbe: cproc takes __builtin_extract_return_addr only where it is the identity (x86-64)
 // __builtin_extract_return_addr of a return address (the kernel's vsprintf, %pS) is that address on x86-64
 static void *seen;

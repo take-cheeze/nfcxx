@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: a string initializer of a flexible array member (init string-size) is refused
 // GNU: a static initializer of a flexible array member (the kernel's init_mm.cpu_bitmap, init_struct_pid.numbers):
 // the array takes its initializers, and the object is sizeof the struct plus them, as gcc lays it out
 #include <string.h>
