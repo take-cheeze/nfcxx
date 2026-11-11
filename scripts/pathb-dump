@@ -88,6 +88,14 @@ if [ "$hosted" != 0 ]; then
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
 fi
 
+# Hosted on macOS: the SDK's libc++ and <cstdlib> need the Darwin feature-test macros (_DARWIN_C_SOURCE; at_quick_exit),
+# clang's feature macros (lib/pathb/clang_macros.h), and an empty features.h first on the include path so that libc++
+# does not take glibc's (lib/pathb/darwin-include). The driver passes the same options (nfcxx, hosted Path B on Darwin).
+posix_def=(-D_POSIX_SOURCE); darwin_opts=()
+if [ "$hosted" != 0 ] && [ "$(uname -s)" = Darwin ]; then
+  posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
+  darwin_opts=(--preinclude "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
+fi
 export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
 # The IR back end keeps the module's functions in a file in TMPDIR; the front end runs in the base dir, so make it absolute.
 [ -z "${TMPDIR:-}" ] || export TMPDIR="$(abs_path "$TMPDIR")"
@@ -102,7 +110,7 @@ for file in "${files[@]}"; do
   # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR. C has no templates.
   tused=(); [ $lang = c ] || tused=(-tused)
   # --cuda-device (the driver's device pass): the front end reads the unit as CUDA (cpfe --cuda)
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${cuda_device_opts[@]+"${cuda_device_opts[@]}"} ${eh_tls[@]+"${eh_tls[@]}"} --sys_include="$base/include" "$f") || status=$?
+  (cd "$base" && "$cpfe" ${posix_def[@]} ${darwin_opts[@]+"${darwin_opts[@]}"} -D__CHAR_BIT__=8 "$std" $dialect --wdir / ${gnu_opts[@]+"${gnu_opts[@]}"} ${tused[@]+"${tused[@]}"} ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} ${target_opts[@]+"${target_opts[@]}"} ${cuda_device_opts[@]+"${cuda_device_opts[@]}"} ${eh_tls[@]+"${eh_tls[@]}"} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status
