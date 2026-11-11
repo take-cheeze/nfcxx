@@ -21,6 +21,16 @@ on:
       - "scripts/setup-libclang-edg.sh"
       - "scripts/build-libclang-edg.sh"
       - "scripts/setup-edg.sh"
+      # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
+      # of EDG, QBE or cproc, or a change to their setup, must re-run the parity check.
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "3rd/cproc"
+      - "scripts/setup-qbe.sh"
+      - "scripts/qbe-*.patch"
+      - "scripts/cproc-*.patch"
+      - "scripts/pathb-ldrt"
+      - "be/nfcxx_*.h"
       - ".github/actions/toolchain/**"
       - ".github/workflows/bc2cpp.yml"
   pull_request:
@@ -37,6 +47,16 @@ on:
       - "scripts/setup-libclang-edg.sh"
       - "scripts/build-libclang-edg.sh"
       - "scripts/setup-edg.sh"
+      # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
+      # of EDG, QBE or cproc, or a change to their setup, must re-run the parity check.
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "3rd/cproc"
+      - "scripts/setup-qbe.sh"
+      - "scripts/qbe-*.patch"
+      - "scripts/cproc-*.patch"
+      - "scripts/pathb-ldrt"
+      - "be/nfcxx_*.h"
       - ".github/actions/toolchain/**"
       - ".github/workflows/bc2cpp.yml"
   workflow_dispatch:
@@ -82,7 +102,7 @@ jobs:
   # the tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
   mrbc-rb:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -189,7 +209,7 @@ jobs:
   # configuration, cached below. The checkout takes only the submodules those need.
   nfcxx-clang-parity:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       CMAKE_C_COMPILER_LAUNCHER: sccache
