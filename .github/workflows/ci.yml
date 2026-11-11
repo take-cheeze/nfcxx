@@ -583,10 +583,16 @@ jobs:
   # Keep the required build-and-test check on every PR. Only an explicit successful
   # selection can authorize skipped suites; every selected suite must succeed.
   # if: always() also validates failed/cancelled selectors and dependencies.
+  # The generated matrix of the test job (needs.pathb-changes.outputs.test_matrix, part of NEEDS_JSON) is checked here too:
+  # each leg it names must have run in this run and succeeded (the result of the test job alone would pass a matrix that had
+  # lost a leg). The run's jobs are listed first for that (JOBS_FILE); a run whose list is missing does not pass.
   build-and-test:
     if: always()
     needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
@@ -594,9 +600,18 @@ jobs:
         with:
           ruby-version: '3.3'
 
-      - name: Require every selected build and test job to pass
+      # filter=latest: a re-run's jobs, not the attempts before it. gh prints one {name, conclusion} per job, page after page.
+      - name: List the jobs of this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | {name, conclusion}' | jq -s . > "$RUNNER_TEMP/jobs.json"
+
+      - name: Require every selected build and test job, and every leg of the test matrix, to pass
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          JOBS_FILE: ${{ runner.temp }}/jobs.json
         run: ruby scripts/ci-scope.rb --gate
 
   # Probe: how far Path B gets on macOS arm64 (PRs 877 and 883). Not gating: build-and-test does not need it. Each step

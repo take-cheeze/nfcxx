@@ -123,16 +123,70 @@ ASM_HELPERS = {
                  "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
 }.freeze
 
-# The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
-# `# pathb-asm NAME` appends that helper.
-def marker_asm(il)
-  # Mach-O (macOS): QBE puts its leading underscore on each symbol, so the weak definition is _SYM, and Mach-O has
-  # .weak_definition rather than .weak.
-  macho = RbConfig::CONFIG["host_os"].match?(/darwin/)
-  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.map { |sym| macho ? ".weak_definition _#{sym}" : ".weak #{sym}" }
-  helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map do |h|
-    ASM_HELPERS.fetch(h) { error_exit("no assembly helper for #{h}") }
+# The arm64 versions of the helpers above, for the arm64 QBE targets (arm64, arm64_apple), with the same semantics: check
+# branches to abort when its argument is nonzero, fence is a full barrier (dmb ish), and rdtsc reads the generic timer's
+# virtual count (cntvct_el0: arm64 has no time stamp counter). Each entry is [symbol, body]; ABORT names abort (or _abort).
+ARM64_HELPERS = {
+  "barrier" => ["__pathb_barrier", ["ret"]],
+  "fence" => ["__pathb_fence", ["dmb ish", "ret"]],
+  "escape" => ["__pathb_escape", ["ret"]],
+  "check" => ["pathb_check", ["cbz w0, .Lpathb_check_ok", "b ABORT", ".Lpathb_check_ok:", "ret"]],
+  "rdtsc" => ["__pathb_rdtsc", ["mrs x0, cntvct_el0", "ret"]],
+  "vasink_w" => ["__pathb_vasink_w", ["ret"]],
+  "vasink_l" => ["__pathb_vasink_l", ["ret"]],
+  "vasink_s" => ["__pathb_vasink_s", ["ret"]],
+  "vasink_d" => ["__pathb_vasink_d", ["ret"]],
+}.freeze
+
+# The QBE target the IL is assembled for: PATHB_QBE_TARGET when set (and passed to QBE with -t), else the host's, which is
+# QBE's default for this host (the same as `uname`: Apple and Linux, arm64 and x86-64).
+def qbe_target
+  ENV.fetch("PATHB_QBE_TARGET") { host_qbe_target }
+end
+
+def host_qbe_target
+  apple = RbConfig::CONFIG["host_os"].include?("darwin")
+  if %w[arm64 aarch64].include?(RbConfig::CONFIG["host_cpu"])
+    apple ? "arm64_apple" : "arm64"
+  else
+    apple ? "amd64_apple" : "amd64_sysv"
   end
+end
+
+def arm64_target?(target)
+  target.start_with?("arm64")
+end
+
+def arm64_apple?(target)
+  arm64_target?(target) && target.end_with?("_apple")
+end
+
+# The directives that make the symbol SYM (as the IL names it) a weak definition in the target's assembler. Apple's has no
+# .weak: .globl and .weak_definition, on the name with the underscore QBE puts on every symbol there.
+def weak_lines(sym, target)
+  return [".weak #{sym}"] unless target.end_with?("_apple")
+  ["\t.globl _#{sym}", "\t.weak_definition _#{sym}"]
+end
+
+# The assembly lines of the helper NAME for TARGET: the x86-64 text of ASM_HELPERS, or the arm64 one (ELF, or Apple's form).
+def asm_helper(name, target)
+  return ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } unless arm64_target?(target)
+  sym, body = ARM64_HELPERS.fetch(name) { error_exit("no arm64 assembly helper for #{name}") }
+  apple = arm64_apple?(target)
+  s = apple ? "_" + sym : sym
+  lines = body.map { |l| "\t" + l.gsub("ABORT", apple ? "_abort" : "abort") }
+  if apple
+    ["\t.text", "\t.globl #{s}", "\t.weak_definition #{s}", "#{s}:"] + lines
+  else
+    ["\t.text", "\t.weak #{s}", "\t.type #{s}, %function", "#{s}:"] + lines + ["\t.size #{s}, .-#{s}"]
+  end
+end
+
+# The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
+# `# pathb-asm NAME` appends that helper. TARGET is the QBE target the assembly is for.
+def marker_asm(il, target)
+  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.flat_map { |sym| weak_lines(sym, target) }
+  helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map { |h| asm_helper(h, target) }
   # `# pathb-alias KIND NAME TARGET [weak]` (one per IR alias form, from scripts/pathb-qbe-emit.rb's append_weak): a
   # global symbol NAME that is TARGET, typed by KIND (function, object or ifunc). QBE has no aliases, so this is the .set.
   aliases = il.scan(/^# pathb-alias (\S+) (\S+) (\S+)( weak)?$/).flat_map do |kind, name, target, weak|
@@ -258,7 +312,8 @@ def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
     path = File.join(dir, "module.qbe")
     File.write(path, il)
-    asm, err, st = Open3.capture3(qbe_binary, path)
+    qbe_args = ENV.key?("PATHB_QBE_TARGET") ? ["-t", qbe_target] : []
+    asm, err, st = Open3.capture3(qbe_binary, *qbe_args, path)
     return [nil, err] unless st.success?
 
     [asm, nil]
@@ -390,7 +445,7 @@ unless missing.empty?
 end
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
-asm += marker_asm(il)
+asm += marker_asm(il, qbe_target)
 asm += x87_asm
 
 if output

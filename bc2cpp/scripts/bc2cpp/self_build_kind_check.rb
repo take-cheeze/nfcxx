@@ -29,7 +29,8 @@ end
 config = File.read(File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner/build_config.rb'))
 listed = config.scan(/conf\.gem core: '(mruby-[a-z0-9-]+)'/).flatten +
          config.scan(/%w\[([^\]]+)\]/m).flat_map { |(words)| words.split } +
-         config.scan(%r{conf\.gem File\.join\((?:BC2CPP_TREE_)?ROOT, '(?:[a-z0-9-]+/)(mruby-[a-z0-9-]+)'\)}).flatten
+         config.scan(%r{conf\.gem File\.join\((?:BC2CPP_TREE_)?ROOT, '(?:[a-z0-9-]+/)(mruby-[a-z0-9-]+)'\)}).flatten +
+         config.scan(%r{conf\.gem File\.expand_path\('\.\./(mruby-[a-z0-9-]+)', __dir__\)}).flatten
 runner_gems = (listed - %w[mruby-bin-mruby mruby-bin-mrbc mruby-compiler mruby-bc2cpp-runner]).uniq
 
 suite.check('the self kind is a closed-world build', BC2CPP_CLOSED_WORLD_BUILDS.include?(KIND))

@@ -14,3 +14,9 @@
 [submodule "3rd/mruby-json"]
 	path = 3rd/mruby-json
 	url = https://github.com/mattn/mruby-json
+[submodule "bc2cpp/3rd/prism"]
+	path = bc2cpp/3rd/prism
+	url = https://github.com/take-cheeze/prism
+[submodule "bc2cpp/3rd/rbs"]
+	path = bc2cpp/3rd/rbs
+	url = https://github.com/take-cheeze/rbs.git

@@ -67,6 +67,10 @@ on:
       mrbc_rb:
         description: "BC2CPP_MRBC_RB for every world/checks job: snapshot, verify, or record (= verify plus BC2CPP_MRBC_SNAPSHOT_RECORD; the record files are uploaded as artifacts for snapshot.rb --update --from-record)"
         default: ""
+      oracle_update:
+        description: "mrbc-snapshot: regenerate snapshot_world.txt with the upstream mruby oracle and upload it as an artifact"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -152,6 +156,8 @@ jobs:
   mrbc-snapshot:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -173,7 +179,31 @@ jobs:
             { tail -20 build/bc2cpp/snapshot-oracle.log; exit 1; }
           echo "BC2CPP_RPG_DIR=$bc2cpp_root" >> "$GITHUB_ENV"
           echo "ORACLE=$bc2cpp_root/3rd/mruby/bin/mrbc" >> "$GITHUB_ENV"
-          MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          if [ "${{ inputs.oracle_update }}" = true ]; then
+            MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update
+          else
+            MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          fi
+
+      # The regenerated table goes back to the branch it was built from, so the check on that branch can verify it.
+      # A push with GITHUB_TOKEN does not start another workflow run.
+      - name: Commit the regenerated snapshot to this branch
+        if: inputs.oracle_update == true && github.ref_type == 'branch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bc2cpp/tools/mrbc_rb/snapshot_world.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "mrbc: regenerate snapshot_world.txt with the fork oracle"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Upload the regenerated snapshot
+        if: inputs.oracle_update == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot_world
+          path: bc2cpp/tools/mrbc_rb/snapshot_world.txt
 
       - name: Golden and CLI tests against the snapshot (no mrbc in the environment)
         run: |

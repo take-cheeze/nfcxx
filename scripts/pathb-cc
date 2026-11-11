@@ -28,6 +28,10 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 qbe=${QBE:-$root/build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-cc: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
+# The QBE target (PATHB_QBE_TARGET, else the host's): the append step takes the helpers of that target (scripts/host-sys.sh).
+. "$root/scripts/host-sys.sh"
+qbe_t=(); [ -n "${PATHB_QBE_TARGET:-}" ] && qbe_t=(-t "$PATHB_QBE_TARGET")
+qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 
 # The settings (variables are the defaults, flags override)
 opts=(); src=""; out=""
@@ -126,9 +130,9 @@ if [ "$emitter" = mruby ]; then
     [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
     exit $rc
   fi
-  "$qbe" "$tmp/$n.ssa" > "$tmp/$n.s"
+  "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$tmp/$n.ssa" > "$tmp/$n.s"
   # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target"
 fi
 if [ -n "$keep" ]; then mkdir -p "$keep"; cp "$tmp/$n.ir" "$tmp/$n.s" "$keep/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$keep/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then

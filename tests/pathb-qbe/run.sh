@@ -45,6 +45,11 @@ root=$PWD
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "pathb-qbe: no harness at $cpfe; set PATHB_CPFE and PATHB_BASE (docs/notes/pathb-stage3.md)" >&2; exit 2; }
 qbe=${QBE:-build/qbe/qbe}
+# The QBE target: PATHB_QBE_TARGET (passed to QBE with -t), else the host's, which is QBE's default. The append step takes
+# the arm64 or x86-64 helpers and the Apple or ELF forms from it (scripts/pathb-qbe-emit.rb, asm_helper).
+. "$root/scripts/host-sys.sh"
+qbe_t=(); [ -n "${PATHB_QBE_TARGET:-}" ] && qbe_t=(-t "$PATHB_QBE_TARGET")
+qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 libdir=${EDG_LIB:-$root/build/edg/lib}
 # The EH shim (lib/ehshim; exceptions thrown by libstdc++.so, std::exception_ptr) is part of every hosted program the
@@ -72,23 +77,25 @@ flags_of() { sed -n 's,^// NFCXX-FLAGS: *,,p' "$1" | head -1; }
 # functions (docs/notes/pathb-stage3.md), so this shows that QBE kept every one of them (and, with N = 0 on the same
 # code without volatile, that the count means something). Prints the reason and fails when a count is wrong.
 check_asm() {
-  local src=$1 asm=$2 fnname prefix want got
+  local src=$1 asm=$2 fnname prefix want got u=""
+  # Apple's symbols have a leading underscore; an arm64 call is bl (a branch b), an x86-64 one callq or jmp.
+  case $qbe_target in *_apple) u=_ ;; esac
   while read -r fnname prefix want; do
-    got=$(awk -v f="$fnname" -v p="$prefix" '
+    got=$(awk -v f="$u$fnname" -v p="$prefix" -v u="$u" '
       $0 == f ":" { on = 1; next }
-      on && /^\.size / { on = 0 }
-      on && ($1 == "callq" || $1 == "jmp") && index($2, p) == 1 { n++ }
+      on && (/^\.size / || (u != "" && /^_[^\t]*:$/)) { on = 0 }
+      on && ($1 == "callq" || $1 == "jmp" || $1 == "bl" || $1 == "b") && (index($2, p) == 1 || (u != "" && index($2, u p) == 1)) { n++ }
       END { print n + 0 }' "$asm")
     if [ "$got" != "$want" ]; then echo "asm check: $fnname has $got calls to $prefix*, expected $want"; return 1; fi
   done < <(sed -n 's,^// ASM-COUNT: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([0-9]*\).*,\1 \2 \3,p' "$src")
   # `// ASM-ORDER: FUNCTION FIRST SECOND`: in the assembly of FUNCTION the first call of a function starting with FIRST comes
   # before the first call of one starting with SECOND (the layout that [[likely]] and [[unlikely]] ask for).
   while read -r fnname prefix want; do
-    got=$(awk -v f="$fnname" -v a="$prefix" -v b="$want" '
+    got=$(awk -v f="$u$fnname" -v a="$prefix" -v b="$want" -v u="$u" '
       $0 == f ":" { on = 1; next }
-      on && /^\.size / { on = 0 }
-      on && ($1 == "callq" || $1 == "jmp") && index($2, a) == 1 && !pa { pa = NR }
-      on && ($1 == "callq" || $1 == "jmp") && index($2, b) == 1 && !pb { pb = NR }
+      on && (/^\.size / || (u != "" && /^_[^\t]*:$/)) { on = 0 }
+      on && ($1 == "callq" || $1 == "jmp" || $1 == "bl" || $1 == "b") && (index($2, a) == 1 || (u != "" && index($2, u a) == 1)) && !pa { pa = NR }
+      on && ($1 == "callq" || $1 == "jmp" || $1 == "bl" || $1 == "b") && (index($2, b) == 1 || (u != "" && index($2, u b) == 1)) && !pb { pb = NR }
       END { print (pa && pb && pa < pb) ? "ok" : "no" }' "$asm")
     if [ "$got" != ok ]; then echo "asm check: in $fnname, a call of $prefix* does not come before a call of $want*"; return 1; fi
   done < <(sed -n 's,^// ASM-ORDER: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\).*,\1 \2 \3,p' "$src")
@@ -124,10 +131,10 @@ run_one() {
   if [ $rc != 0 ]; then
     failed=$((failed + 1)); lines+=("FAIL     $name: emitter: $(head -1 "$tmp/$n.emit")"); return
   fi
-  if ! "$qbe" "$ssa" > "$s" 2> "$tmp/$n.qbe"; then
+  if ! "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$ssa" > "$s" 2> "$tmp/$n.qbe"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$n.qbe")"); return
   fi
-  "$mrb" "$emit" --append-weak "$ssa" "$s"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
+  "$mrb" "$emit" --append-weak "$ssa" "$s" "$qbe_target"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
   if ! check_asm "$f" "$s" > "$tmp/$n.asmcheck"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: $(head -1 "$tmp/$n.asmcheck")"); return
   fi

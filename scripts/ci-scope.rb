@@ -56,7 +56,7 @@ module CiScope
     output.split("\0")
   end
 
-  def validate(needs)
+  def validate(needs, jobs = nil)
     selection = needs.fetch('pathb-changes', {})
     raise ArgumentError, 'CI selection did not succeed' unless selection['result'] == 'success'
 
@@ -76,13 +76,53 @@ module CiScope
         raise ArgumentError, "#{name}: expected #{expected}, got #{actual.inspect}" unless actual == expected
       end
     end
+    return unless full == 'true'
+
+    legs = expected_legs(outputs['test_matrix'])
+    validate_legs(legs, jobs) if jobs
+  end
+
+  # The legs of the `test` job that this run was to start: the names in the `test_matrix` output of the selection step (the entries
+  # of .github/ci-test-matrix.yml that apply to this ref; the job is named after each entry).
+  def expected_legs(text)
+    entries = JSON.parse(text.to_s)
+    names = entries.is_a?(Array) ? entries.map { |entry| entry.is_a?(Hash) ? entry['name'] : nil } : []
+    if names.empty? || names.any? { |name| !name.is_a?(String) || name.empty? } || names.uniq.length != names.length
+      raise ArgumentError, 'CI selection test_matrix is missing, empty, or has unnamed or repeated legs'
+    end
+
+    names
+  rescue JSON::ParserError
+    raise ArgumentError, 'CI selection test_matrix is not JSON'
+  end
+
+  # Every expected leg ran in this run and succeeded. The result of the `test` job alone would also pass a matrix that had lost a
+  # leg (a selection that left out an entry it should have kept); `jobs` is the run's job list, [{name, conclusion}, ...].
+  def validate_legs(names, jobs)
+    raise ArgumentError, 'the job list of this run is not a list' unless jobs.is_a?(Array)
+
+    names.each do |name|
+      runs = jobs.select { |job| job.is_a?(Hash) && job['name'] == name }
+      raise ArgumentError, "test leg #{name.inspect}: it did not run" if runs.empty?
+
+      bad = runs.find { |job| job['conclusion'] != 'success' }
+      raise ArgumentError, "test leg #{name.inspect}: expected success, got #{bad['conclusion'].inspect}" if bad
+    end
   end
 
   def main(args = ARGV, env = ENV)
     case args
     when ['--gate']
-      validate(JSON.parse(env.fetch('NEEDS_JSON')))
-      puts 'Every selected CI job passed; unselected jobs were skipped'
+      needs = JSON.parse(env.fetch('NEEDS_JSON'))
+      file = env.fetch('JOBS_FILE', '')
+      jobs = file.empty? ? nil : JSON.parse(File.read(file))
+      validate(needs, jobs)
+      # With general coverage selected the legs are checked, so a run without its job list cannot pass (it fails closed).
+      if jobs.nil? && needs.dig('pathb-changes', 'outputs', 'full_ci') == 'true'
+        raise ArgumentError, 'the job list of this run (JOBS_FILE) is missing'
+      end
+
+      puts 'Every selected CI job and test leg passed; unselected jobs were skipped'
     when []
       base = env.fetch('BASE', '')
       paths = base.empty? || base.match?(/\A0+\z/) ? [] : changed_paths(base)
