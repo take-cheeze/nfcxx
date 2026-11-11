@@ -16,6 +16,8 @@ jobs:
   # test jobs below, the Path B jobs and the hexagon and realworld workflows, restore them instead of rebuilding.
   # build/ holds absolute paths, so every job uses the same checkout path.
   build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
     runs-on: ubuntu-24.04
     env:
       # sccache stores compiler outputs in the GitHub Actions cache.
@@ -321,6 +323,8 @@ jobs:
 
   # Linux arm64 (moved here from arm.yml so that build-and-test can depend on them; check names unchanged).
   arm-build:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
     name: arm build
     runs-on: ubuntu-24.04-arm
     env:
@@ -385,6 +389,8 @@ jobs:
 
   # macOS arm64, one job per back end (moved here from macos.yml; check names unchanged).
   macos-suites:
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.full_ci == 'true'
     name: macOS arm64 (${{ matrix.backend }} backend)
     runs-on: macos-15
     strategy:
@@ -541,30 +547,27 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       changed: ${{ steps.paths.outputs.changed }}
+      full_ci: ${{ steps.paths.outputs.full_ci }}
     steps:
       # fetch-depth 0: the change check diffs against the base commit, which a shallow clone does not have.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # The paths that can affect Path B: the front end (be/, the EDG and QBE submodules and their setup scripts), the
-      # Path B and mruby scripts, the suites that run through them, and this workflow. A push to main compares with the
-      # commit before it; a manual run (no base) always runs the jobs.
-      - name: Did the change touch Path B
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      # Only isolated bc2cpp/test/docs PRs omit the general compiler matrix.
+      # Main pushes and manual runs retain full coverage; failed selection blocks the gate.
+      - name: Check CI routing policy
+        run: ruby tests/ci/scope_check.rb
+
+      - name: Select CI coverage
         id: paths
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # Since the default driver is Path B (docs/notes/pathb-default.md), the driver's helpers, the runtime library
-          # and the C compiler wrapper count too: scripts/, lib/, nfcc/, 3rd/cproc, tests/run.sh, tests/realworld/.
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(be/|3rd/edg$|3rd/qbe$|3rd/cproc$|scripts/|nfcc/|lib/|tests/run\.sh$|tests/realworld/|\.github/actions/|scripts/(setup-pathb\.sh|setup-edg\.sh|setup-qbe\.sh|host-sys\.sh|mrb|setup-mruby\.sh|mruby-tool-config\.rb|sycl-build\.sh|spirv-emit|qbe-prep|ehshim|safeptr-rt|cpp-feature-)|tests/(pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|lib/(sycl|ehshim|safeptr)/|tools/(pathb-spirv-emit|qbe-prep)/|^nfcxx$|tests/realworld/tinyxml2_main\.cpp$|\.github/workflows/ci\.yml$)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: ruby scripts/ci-scope.rb
 
   pathb-build:
     needs: pathb-changes
@@ -696,22 +699,21 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
-  # the build, every test group, the Linux arm64 tests, the macOS suites, the mrustc suite and, when the change touches
-  # Path B, the Path B jobs passed. if: always() stops a skipped dependency from skipping this job.
+  # Keep the required build-and-test check on every PR. Only an explicit successful
+  # selection can authorize skipped suites; every selected suite must succeed.
+  # if: always() also validates failed/cancelled selectors and dependencies.
   build-and-test:
     if: always()
-    needs: [build, test, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
+    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
     runs-on: ubuntu-24.04
     steps:
-      - name: Require every build and test job to pass
-        run: |
-          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.arm-test.result }}" != "success" ] || [ "${{ needs.macos-suites.result }}" != "success" ] || [ "${{ needs.mrustc.result }}" != "success" ] || [ "${{ needs.pathb-changes.result }}" != "success" ]; then
-            echo "build=${{ needs.build.result }} test=${{ needs.test.result }} arm-test=${{ needs.arm-test.result }} macos-suites=${{ needs.macos-suites.result }} mrustc=${{ needs.mrustc.result }} pathb-changes=${{ needs.pathb-changes.result }}"
-            exit 1
-          fi
-          # The Path B jobs are skipped (not failed) when the change does not touch Path B.
-          if [ "${{ needs.pathb-changes.outputs.changed }}" = "true" ] && { [ "${{ needs.pathb-build.result }}" != "success" ] || [ "${{ needs.pathb-test.result }}" != "success" ]; }; then
-            echo "pathb-build=${{ needs.pathb-build.result }} pathb-test=${{ needs.pathb-test.result }}"
-            exit 1
-          fi
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Require every selected build and test job to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: ruby scripts/ci-scope.rb --gate
