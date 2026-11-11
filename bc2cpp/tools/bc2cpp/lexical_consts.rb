@@ -83,6 +83,9 @@ module LexicalConsts
       @mixin_unknown = false
       @scoped_unknown = false
       @mixin_sites = []
+      @mixin_paths = []
+      @super_sites = []
+      @supers = {}
       assign_scopes
       collect_definitions
       resolve_mixins
@@ -185,7 +188,14 @@ module LexicalConsts
                        end
             next unless explicit
 
-            qname ? @explicit_super << qname : @mixin_unknown = true
+            if qname.nil?
+              @mixin_unknown = true
+            elsif ann && ann[:superclass][:kind] == :const
+              # The written superclass path, resolved once every definition is known (resolve_mixins).
+              @super_sites << [qname, scope, ann[:superclass][:text]]
+            else
+              @explicit_super << qname
+            end
           when :SETCONST
             define(scope, insn.const_name, value: true)
           when :SETMCNST
@@ -211,6 +221,9 @@ module LexicalConsts
     # with one world definition that the body's lexical chain reaches (or none, a core module);
     # anything else makes every ancestor set unknown.
     def collect_mixin(scope, irep, idx, insn)
+      call = irep.class_scope && ClassScope.call_at(irep, insn)
+      return collect_mixin_call(scope, call) if call
+
       recv = reg_number(insn)
       # SSEND is a send to self, so its receiver register is not read; a SEND needs every writer to be LOADSELF.
       on_self = SELF_SEND_FAMILY.include?(insn.op) || (recv && all_writers?(irep, idx, recv) { |_j, w| w.op == :LOADSELF })
@@ -227,7 +240,60 @@ module LexicalConsts
       end
     end
 
+    # The same decision from the emitter's record of the call as written (`include A`, `include A::B`, `include ::A::B`): the
+    # receiver is self or implicit, there is one constant-path argument and no block, else the ancestors stay unknown. A path
+    # (`File::Constants`) is resolved by resolve_path instead of the register dataflow, which sees only a bare GETCONST.
+    def collect_mixin_call(scope, call)
+      arg = call[:args].first
+      well_formed = scope != :unknown && %i[implicit self].include?(call[:recv]) && call[:block] == :none && !call[:safe_nav] &&
+                    call[:args].size == 1 && arg[:kind] == :const
+      if !well_formed
+        @mixin_unknown = true
+      elsif arg[:rooted] || arg[:text].include?('::')
+        @mixin_paths << [scope, arg[:text].delete_prefix('::').split('::'), arg[:rooted]]
+      else
+        @mixin_sites << [scope, arg[:text]]
+      end
+    end
+
+    # The qualified name a written constant path (a mixin's or a superclass's argument) names when the program's own
+    # definitions fix it: the first segment is a `::` one or the only definition of its name in the lexical chain, each next
+    # one a class/module defined in the previous. Nil otherwise (a core module, an ambiguous name, a constant that is not a
+    # class).
+    def resolve_path(scope, segments, rooted)
+      first = segments.first
+      return nil if @unknown.include?(first)
+
+      defs = @defs.fetch(first, EMPTY)
+      # The lexical chain is searched before any ancestor, so a definition outside it cannot matter; two inside it can (the
+      # inner one may not have run yet when the other is the one found).
+      in_chain = LexicalConsts.chain_of(scope).select { |s| defs.include?(s) }
+      hit = if rooted then LexicalConsts::TOP if defs.include?(LexicalConsts::TOP)
+            elsif in_chain.size == 1 then in_chain.first
+            end
+      return nil unless hit && class_definition?(first, hit)
+
+      base = LexicalConsts.qualify(hit, first)
+      segments.drop(1).each do |name|
+        return nil if @unknown.include?(name) || !class_definition?(name, base)
+
+        base = LexicalConsts.qualify(base, name)
+      end
+      base
+    end
+
     def resolve_mixins
+      @super_sites.each do |qname, scope, text|
+        sup = resolve_path(scope, text.delete_prefix('::').split('::'), text.start_with?('::'))
+        # Two spellings of one class's superclass (a reopening that names another) are not modelled.
+        if sup && (@supers[qname].nil? || @supers[qname] == sup) then @supers[qname] = sup
+        else @explicit_super << qname
+        end
+      end
+      @mixin_paths.each do |scope, segments, rooted|
+        qualified = resolve_path(scope, segments, rooted)
+        qualified ? @mixins[scope] << qualified : @mixin_unknown = true
+      end
       @mixin_sites.each do |scope, name|
         hits = @defs.fetch(name, EMPTY)
         if @unknown.include?(name) || hits.size > 1 || (hits.size == 1 && !LexicalConsts.chain_of(scope).include?(hits.first))
@@ -253,8 +319,10 @@ module LexicalConsts
         return nil if @explicit_super.include?(cls)
 
         result << cls
+        work << @supers[cls] if @supers.key?(cls)
         work.concat(@mixins.fetch(cls, []))
-        work << LexicalConsts::TOP
+        # The top level and `class Object` are one constant table (a mixin of Object is written in its body).
+        work << LexicalConsts::TOP << 'Object'
       end
       result
     end
@@ -275,11 +343,21 @@ module LexicalConsts
 
       chain = LexicalConsts.chain_of(scope)
       hit = chain.find { |s| @defs.fetch(name, EMPTY).include?(s) }
-      return nil unless hit
+      return inherited_hit(scope, name) unless hit
 
       reach = ancestors_of(scope)
       reach = (reach | chain) if reach
       hit if sole_definition?(name, hit, reach)
+    end
+
+    # A name no lexical scope defines is found on the ancestors of the innermost class (or of Object): when the world has
+    # one definition of it and that scope is among the modelled ancestors, that is the one read.
+    def inherited_hit(scope, name)
+      defs = @defs.fetch(name, EMPTY)
+      return nil unless defs.size == 1
+
+      reach = ancestors_of(scope)
+      defs.first if reach&.include?(defs.first)
     end
 
     def lexical_key(scope, name)
