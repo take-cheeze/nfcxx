@@ -62,7 +62,7 @@ without the checks, so this is a hardening mode, not Fil-C's guarantee (see "Lim
 
 ## How it works
 
-1. `nfcxx -fsafe-pointers` sets `backend=pathb` and exports `NFCXX_SAFE_POINTERS=1`. `scripts/pathb-cc` then runs the
+1. `nfcxx -fsafe-pointers` sets `backend=pathb` and passes `--safe-pointers` to `scripts/pathb-cc` (`NFCXX_SAFE_POINTERS=1` is the fallback for scripts that run it themselves). `scripts/pathb-cc` then runs the
    front end with `NFCXX_IR_LOC=1` (the IR carries `(loc "FILE" LINE)` statements, `ubsan.md`) and the emitter with
    `--safe`.
 2. The emitter (`scripts/pathb-qbe-emit.rb`, section "-fsafe-pointers"):

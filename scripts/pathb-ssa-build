@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# Opt-in Path B driver (docs/notes/pathb-ssa-build.md): a Path B IR file (the `NFCXX_PATHB_MODE=ir` text, see
+# Opt-in Path B driver (docs/notes/pathb-ssa-build.md): a Path B IR file (the `pathb-dump --ir` text, see
 # docs/notes/pathb-stage2.md) through the SSA converter (scripts/pathb-ssa.rb), the e-graph pass
 # (scripts/pathb-egraph.rb) and the QBE emitter (scripts/pathb-ssa-qbe.rb), then QBE (build/qbe/qbe) to assembly.
 # Nothing calls this by default; the default Path B flow does not use it.
@@ -15,7 +15,7 @@
 # Exit status: 0 every function emitted; 1 error (conversion, optimization, or QBE failed); 2 usage;
 # 3 some functions not emitted (listed on stderr; the assembly has the others).
 #
-# NFCXX_QBE overrides the QBE binary (default build/qbe/qbe under the repository root).
+# --qbe=PATH (or NFCXX_QBE) overrides the QBE binary (default build/qbe/qbe under the repository root); the flag wins.
 
 require "base64"
 require "open3"
@@ -32,7 +32,7 @@ EXIT_USAGE = 2
 EXIT_PARTIAL = 3
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--no-opt] [--safe | --asan] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--safe | --asan] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -41,8 +41,10 @@ def error_exit(msg)
   exit EXIT_ERROR
 end
 
+$qbe_path = nil
+
 def qbe_binary
-  ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
+  $qbe_path || ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
 end
 
 # The helpers the emitter names in "# pathb-asm NAME" comments, appended to the assembly once each (the same text as
@@ -234,6 +236,7 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--long-double=trap" then ld_trap = true
   when "--safe" then safe = true
   when "--asan" then asan = true
+  when /\A--qbe=(.+)\z/ then $qbe_path = $1
   else usage_exit
   end
 end

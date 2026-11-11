@@ -1945,25 +1945,16 @@ class CodeGen
   # is a proven fresh instance, so its own class method may be selected too.
   # accessor: true also answers an attr_reader (no irep), which only the result-class flow reads.
   # GENERIC_NEW_DIRECT: the statements of a construction whose object is `obj` (already allocated with
-  # bc2cpp_direct_alloc): initialize, dispatched as a closed-world owner call over the definers the owner list names,
-  # its result in bc2cpp_new_ini. nil when that list cannot be built or the arguments do not fit the owner call.
+  # bc2cpp_direct_alloc): the initialize Class#new runs on it. nil when the definers of initialize are not all known.
   def direct_initialize_line(obj, argv, dest)
     owners = generic_new_initialize_owners
     return nil unless owners
 
     @direct_alloc_used = true # the caller allocates with bc2cpp_direct_alloc, which is declared when this flag is set
-    line = if argv.size <= 16
-             outside_owner_call_line(dest, obj, 'initialize', argv, owners)
-           else
-             # The inline form takes 16 arguments; longer lists go through an array, as the argv form of the owner call.
-             decl = "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n"
-             call = "#{RegName[dest]} = bc2cpp_owner_call_argv_named(M, #{obj}, \"initialize\", 0, " \
-                    "BC2CPP_OWNERS(#{owner_call_owner_list(owners)}), #{@call_block_expr || 'mrb_nil_value()'}, " \
-                    "#{argv.size}, bc2cpp_new_args); /* CLOSED_WORLD owner-call: initialize */"
-             decl + call
-           end
-    line = line.sub(/\A#{Regexp.escape(RegName[dest])} = /, 'bc2cpp_new_ini = ')
-    "mrb_value bc2cpp_new_ini;\n#{line}\n"
+    # The initialize Class#new runs after its allocation (mrb_obj_init, class.c), constructor rows included.
+    args = argv.empty? ? '0, NULL' : "#{argv.size}, bc2cpp_new_args"
+    decl = argv.empty? ? '' : "mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n"
+    "#{decl}mrb_obj_init(M, #{obj}, #{args}, #{@call_block_expr || 'mrb_nil_value()'}); /* CLOSED_WORLD construct: initialize */\n"
   end
 
   # The classes whose instance method `initialize` may answer a construction: every Ruby definer in the registry, every

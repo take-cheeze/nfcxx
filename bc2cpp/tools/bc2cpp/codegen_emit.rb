@@ -322,7 +322,7 @@ class CodeGen
         left_out.merge(omitted)
         names.each do |name|
           ops << { name: name, key: rom && presym_key(name), fn: fn, entry: m[:entry], aspec: m[:aspec],
-                   private: m[:visibility] == :private }
+                   private: m[:visibility] == :private, ctor: ctor_row_keys.include?("#{owner}##{name}") }
         end
       end
       rows = ops.grep(Hash)
@@ -355,10 +355,17 @@ class CodeGen
     rows.each do |row|
       flags = row[:aspec].to_s
       flags = "(#{flags}) | MRB_MT_PRIVATE" if row[:private] || ROM_FORCED_PRIVATE.include?(row[:name])
-      tables << "  MRB_MT_ENTRY(#{row[:entry]}, #{row[:key]}, #{flags})\n"
+      # CTOR_ROWS: a row only the constructions find (MRB_MT_CTOR_ROW).
+      macro = row[:ctor] ? 'MRB_MT_ENTRY_CTOR_' : 'MRB_MT_ENTRY'
+      tables << "  #{macro}(#{row[:entry]}, #{row[:key]}, #{flags})\n"
     end
     tables << "};\n"
     "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
+  end
+
+  # CTOR_ROWS: the compiled entries this closed build keeps as constructor rows.
+  def ctor_row_keys
+    @ctor_row_keys ||= ENV['BC2CPP_BUILD_NAME'] == 'closed' ? (static_dispatch_lists.ctor_rows || Set.new) : Set.new
   end
 
   def presym_key(name)
@@ -468,7 +475,9 @@ class CodeGen
     gem = BC2CPP_COMPILED_GEMS.find { |_name, g| g[:out_symbol] == symbol }&.first
     return [] unless gem
 
-    static_dispatch_lists.engine_rom.map { |key| key.split('#', 2) }.select { |owner, _| bc2cpp_native_strip_gem(owner) == gem }.sort
+    # A constructor row stays in the table (CTOR_ROWS): nothing to remove for it.
+    static_dispatch_lists.engine_rom.map { |key| key.split('#', 2) }
+                         .select { |owner, name| bc2cpp_native_strip_gem(owner) == gem && !CoreNativeCandidates::CTOR_ROW_NAMES.include?(name) }.sort
   end
 
   # LEFT_OUT_ACCESSORS: [owner, name] of each listed attr_* accessor of this gem's owners (ONLY_OWNERS) with no

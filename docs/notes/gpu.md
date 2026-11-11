@@ -122,7 +122,7 @@ placeholders, and each device module is registered with the runtime.
   (`pathb-ptx-emit --int=gpu`, which the driver passes): plain `div`/`rem` (an unspecified value) and `shl`/`shr` (the
   count clamped to the width), as nvcc emits them, not the IR's checks that trap. llama.cpp's flash_attn_ext_vec takes
   `sequence % ne33` with ne33 == 0 when there is no mask and does not use the result (`intrinsics/int_gpu.cu`).
-- **Frame slots in registers** (`pathb-ptx-emit --promote=slots`, the default; `NFCXX_PROMOTE_SLOTS=0` turns it off): a
+- **Frame slots in registers** (`pathb-ptx-emit --promote=slots`, the default; `--promote-slots=off`, or `NFCXX_PROMOTE_SLOTS=0`, turns it off): a
   scalar local whose every use is a whole load or store of its type (a 4- or 8-byte integer, a pointer, a float) is a
   register, not a frame slot. llama.cpp's mul_mat_vec_q goes from 117 to 71 registers per thread and about 45% faster
   per launch, with its local loads and stores down 60-70%. Narrower integers and aggregates stay in the frame.

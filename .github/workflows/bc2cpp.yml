@@ -63,6 +63,10 @@ on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
+    inputs:
+      mrbc_rb:
+        description: "BC2CPP_MRBC_RB for every world/checks job: snapshot, verify, or record (= verify plus BC2CPP_MRBC_SNAPSHOT_RECORD; the record files are uploaded as artifacts for snapshot.rb --update --from-record)"
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -99,6 +103,14 @@ jobs:
           - pathb_egraph
           - pathb_structure
           - pathb_ssa_qbe
+        # Per-world policy (docs/notes/mrbc-rb-rpg-maker-clone.md, "Verification modes"): the pathb worlds compile inputs that are all in
+        # the snapshot table (measured: 0 missing), so they run without the oracle's cross-check; optcarrot compiles a generated
+        # benchmark.rb whose temporary path is part of its key (never in a table), so it stays on verify.
+        # Worlds not listed here keep the default mode.
+        include:
+          - { world: optcarrot, mrbc_rb: verify }
+          - { world: pathb_qbe_emit, mrbc_rb: snapshot }
+          - { world: pathb_borrowck, mrbc_rb: snapshot }
     steps:
       # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
       - uses: actions/checkout@v7
@@ -118,9 +130,20 @@ jobs:
       - name: bc2cpp world ${{ matrix.world }}
         env:
           OPTCARROT_COMPILED_FLAGS: -O2
-          # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference.
-          BC2CPP_MRBC_RB: verify
+          # The Ruby emitter is the default compiler. verify also runs the fork's mrbc and fails on any byte difference;
+          # snapshot compares with what that mrbc once wrote (bc2cpp/tools/mrbc_rb/snapshot*.txt) and aborts on an input that is not
+          # in the table (fix: dispatch this workflow with mrbc_rb=record, then snapshot.rb --update --from-record on the artifact).
+          BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || matrix.mrbc_rb }}
+          BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-{1}.txt', runner.temp, matrix.world) || '' }}
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
+
+      - name: Upload the snapshot record
+        if: always() && inputs.mrbc_rb == 'record'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrbc-record-${{ matrix.world }}
+          path: ${{ runner.temp }}/mrbc-record-${{ matrix.world }}.txt
+          if-no-files-found: ignore
 
   # mrbc_rb (bc2cpp/tools/mrbc_rb): the Ruby RITE emitter, compared byte for byte with the fork's mrbc -g built from the
   # pinned world, then the command line (bin/mrbc_rb: all output formats, on every gem's mrblib set and every bc2cpp
@@ -145,7 +168,7 @@ jobs:
         run: tests/bc2cpp/run_mrbc_rb.sh
 
   # mrbc-snapshot: the oracle-free verification. bc2cpp/tools/mrbc_rb/snapshot.txt (and snapshot_world.txt for the inputs of the pinned
-  # world, with the world commit in its header: a pin bump fails once, 'run snapshot.rb --update') records, per input (content hash of the file
+  # world; the world commit in its header is informational, a pin bump alone does not fail: keys are content hashes) records, per input (content hash of the file
   # set), the hash of what the fork's mrbc -g wrote. This job is the one that has the oracle: it builds it once at the pinned
   # world, checks that every input the tests and the pinned world enumerate is in the table and still gives the recorded value
   # (drift of the fork or an incomplete table fails), then runs the emitter tests with NO mrbc, against the table. Jobs that
@@ -185,6 +208,7 @@ jobs:
           # cli_test starts bin/mrbc_rb once per input (about 0.2 s each): every 10th input keeps the step to a few minutes.
           MRBC_RB_CLI_SAMPLE=10 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
           bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --verify
+          bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot_test.rb
 
   # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
   # bc2cpp-checks job. They run inside the pinned world (tests/bc2cpp/fetch.sh), whose bc2cpp paths reach this checkout
@@ -200,8 +224,11 @@ jobs:
     env:
       RUBY_YJIT_ENABLE: "1"
       BC2CPP_WORLD_FULL: "1"
-      # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference.
-      BC2CPP_MRBC_RB: verify
+      # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference. Stays on verify:
+      # the fixtures compile generated programs (measured on 24 checks: 64 distinct inputs, none in the snapshot table). A dispatch with
+      # mrbc_rb=record also writes the inputs of each check to a record file (uploaded below) for snapshot.rb --update --from-record.
+      BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || 'verify' }}
+      BC2CPP_MRBC_SNAPSHOT_RECORD: ${{ inputs.mrbc_rb == 'record' && format('{0}/mrbc-record-checks-{1}.txt', runner.temp, matrix.shard) || '' }}
     steps:
       - run: git config --global submodule.fetchJobs 4
       - uses: actions/checkout@v7
@@ -271,6 +298,14 @@ jobs:
           unset LD
           ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
           source "$RUNNER_TEMP/bc2cpp-checks.sh"
+
+      - name: Upload the snapshot record
+        if: always() && inputs.mrbc_rb == 'record'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrbc-record-checks-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mrbc-record-checks-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
 
   # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers (return kinds, and the host program's main_ast roots) and both
   # preprocessors (and the analysis headers' presym ids) on the pinned world's mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
