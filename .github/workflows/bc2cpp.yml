@@ -77,10 +77,12 @@ jobs:
         run: tests/bc2cpp/run_${{ matrix.world }}.sh
 
   # mrbc_rb (bc2cpp/tools/mrbc_rb): the Ruby RITE emitter, compared byte for byte with the fork's mrbc -g built from the
-  # pinned world (tests/bc2cpp/run_mrbc_rb.sh). Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
+  # pinned world, then the command line (bin/mrbc_rb: all output formats, on every gem's mrblib set and every bc2cpp
+  # source; ~2 min, so run in full rather than sampled) and bc2cpp's loader through it. tests/bc2cpp/run_mrbc_rb.sh runs
+  # the three tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
   mrbc-rb:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -92,7 +94,7 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
 
-      - name: Golden comparison with the fork's mrbc
+      - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh
 
   # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
