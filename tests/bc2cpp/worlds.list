@@ -1,0 +1,32 @@
+# The bc2cpp worlds (tests/bc2cpp/run_<world>.sh), one per line: <world> <weight> [<mrbc_rb mode>].
+#
+# The weight is roughly the minutes the world takes on a CI runner once the checkout, Ruby and the build tools are there (from
+# the per-world jobs this list replaced); run_worlds.rb uses it to balance the shards. A world not measured yet can carry a
+# guess: it only decides which shard runs it.
+#
+# The mode is BC2CPP_MRBC_RB for that world (docs/notes/mrbc-rb-rpg-maker-clone.md, "Verification modes"). The listed pathb
+# worlds compile inputs that are all in the snapshot table (measured: 0 missing), so they run without the oracle's cross-check
+# (snapshot); optcarrot compiles a generated benchmark.rb whose temporary path is part of its key (never in a table), so it
+# stays on verify. Without a mode the world runs in the default one. A workflow dispatch with mrbc_rb=... overrides every line.
+optcarrot                 3  verify
+pathb_qbe_emit            4  snapshot
+pathb_borrowck            5  snapshot
+pathb_wgsl_emit           2
+pathb_spirv_kernel_emit   2
+pathb_spirv_emit          2
+pathb_wasm_emit           3
+pathb_ir_opt              4
+pathb_ssa                 4
+pathb_ssa_structurize     3
+pathb_cil_emit            3
+qbe2cil                   3
+cil_link                  3
+llvm_to_pathb             2
+sycl_rewrite              2
+mrustc_prep               2
+cpp_feature_checklist     1
+cpp_feature_report        2
+strip_atomic              3
+pathb_egraph              5
+pathb_structure           3
+pathb_ssa_qbe             5
