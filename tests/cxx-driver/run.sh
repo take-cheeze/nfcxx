@@ -261,7 +261,13 @@ check "flags: --time-log writes one line per stage" sh -c "
   '$nfcxx' --time-log='$f16/tl' '$f16/m.cpp' -o '$f16/m2' && test -s '$f16/tl' && awk -F'\t' 'NF != 4 { bad = 1 } END { exit bad }' '$f16/tl'"
 check "flags: --promote-slots=bogus is refused" sh -c "! '$nfcxx' --promote-slots=bogus -c '$f16/m.cpp' -o '$f16/b.o' 2>/dev/null"
 check "flags: --unroll=off --struct-slots=off --promote-slots=off are accepted" "$nfcxx" --unroll=off --struct-slots=off --promote-slots=off -c "$f16/m.cpp" -o "$f16/c.o"
-check "flags: -fuse-ld=bfd links (the linker is named)" sh -c "'$nfcxx' -fuse-ld=bfd '$f16/m.cpp' -o '$f16/m3' && '$f16/m3'"
+# -fuse-ld=NAME is taken up only when ld.NAME is on PATH (macOS has none of them), so name one this host has.
+f16ld=""; for n in bfd lld gold mold; do command -v "ld.$n" >/dev/null 2>&1 && { f16ld=$n; break; }; done
+if [ -n "$f16ld" ]; then
+  check "flags: -fuse-ld=$f16ld links (the linker is named)" sh -c "'$nfcxx' -fuse-ld=$f16ld '$f16/m.cpp' -o '$f16/m3' && '$f16/m3'"
+else
+  echo "skip flags: -fuse-ld=NAME (no ld.bfd, ld.lld, ld.gold or ld.mold on PATH)"
+fi
 
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
