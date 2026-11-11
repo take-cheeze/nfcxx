@@ -356,7 +356,7 @@ module Qbe
   # One function. An SSA register %N is %vN, a parameter %k is %pk, and an object of a slot that was not promoted
   # is %o<i>, allocated on the stack at entry.
   class Fn
-    attr_reader :lines, :dbg_file
+    attr_reader :lines, :dbg_file, :asan_data
 
     # globals: the raw names of the module globals that are emitted (a reference to any other global raises).
     def initialize(form, globals = {}, abi = {}, link = {})
@@ -383,6 +383,8 @@ module Qbe
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
       @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
       @asan_alloca = false   # --asan: the function has an alloca, so it keeps the head of its chain in the slot %aah
+      @asan_data = []  # --asan: the data items of the fake frames' descriptions (function_text writes them before the function)
+      @asan_fakes = [] # --asan, use after return: [fake frame temporary, its size, its class] of each slot that has one
       @asan_osz = {}   # --asan: the slot's temporary (%oN) => its size rounded up to 8, for the scope facts
       @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
@@ -486,7 +488,7 @@ module Qbe
         align = s.size > 4 ? Qbe.int_lit(s[4]) : size
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
         if Qbe.asan
-          asan_slot(i, [size, 1].max, align)
+          asan_slot(i, [size, 1].max, align, s[1].raw)
           next
         end
         # --safe: a slot is registered, with one byte of padding after it (as the emitter pads an escaped slot).
@@ -517,7 +519,7 @@ end
     # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
     # the left redzone before it, so an object of up to 16 stays aligned; a larger alignment is rounded up inside a block
     # with that much spare). Its size is rounded up to 8, the shadow granule, so the right redzone starts on a granule.
-    def asan_slot(i, size, align)
+    def asan_slot(i, size, align, name = '""')
       rz = Qbe::ASAN_RZ
       osz = (size + 7) & ~7
       total = rz + osz + rz
@@ -527,7 +529,13 @@ end
         @lines << "  %o#{i} =l and %o#{i}q, #{-align}"
         @lines << "  %o#{i}l =l sub %o#{i}, #{rz}"
       else
-        @lines << "  %o#{i}l =l alloc16 #{total}"
+        frame = (total + 63) & ~63
+        cls = (0..10).find { |c| (64 << c) >= frame }
+        if cls
+          asan_fake_frame(i, size, total, frame, cls, name)
+        else
+          @lines << "  %o#{i}l =l alloc16 #{total}"
+        end
         @lines << "  %o#{i} =l add %o#{i}l, #{rz}"
       end
       @asan_objs << [i, "%o#{i}l", osz]
@@ -550,6 +558,31 @@ end
       @lines << "  call $__asan_#{entering ? 'unpoison' : 'poison'}_stack_memory(l #{tmp}, l #{osz})"
     end
 
+    # --asan, milestone 7 (use after return): the slot's frame is libasan's fake frame when it can give one (the runtime keeps a fake
+    # stack per thread; __asan_stack_malloc_N(frame) returns 0 when detect_stack_use_after_return is off or the class is full), else
+    # the real frame, which is always allocated too (qbe's asanalloc, docs/notes/asan.md): the base is picked branch-free,
+    # and gcc's header goes in front of the object (the magic, the description, the pc), as libasan reads it for the report.
+    # asan_leave gives the fake frame back, and libasan then poisons it as stack-use-after-return.
+    def asan_fake_frame(i, size, total, frame, cls, name)
+      nm = name.delete('"').gsub(/[^A-Za-z0-9_.]/, "_")
+      desc = "__asan_desc.#{@name}.#{i}"
+      @asan_data << "data $#{desc} = align 1 { b \"1 #{Qbe::ASAN_RZ} #{size} #{nm.length} #{nm}\", b 0 }"
+      @lines << "  %o#{i}rl =l alloc16 #{total}"
+      @lines << "  %o#{i}f =l call $__asan_stack_malloc_#{cls}(l #{frame})"
+      @lines << "  %o#{i}n =l sub 0, %o#{i}f"
+      @lines << "  %o#{i}m0 =l or %o#{i}f, %o#{i}n"
+      @lines << "  %o#{i}m =l sar %o#{i}m0, 63"
+      @lines << "  %o#{i}x0 =l xor %o#{i}rl, %o#{i}f"
+      @lines << "  %o#{i}x =l and %o#{i}x0, %o#{i}m"
+      @lines << "  %o#{i}l =l xor %o#{i}rl, %o#{i}x"
+      @lines << "  storel #{0x41B58AB3}, %o#{i}l"
+      @lines << "  %o#{i}h8 =l add %o#{i}l, 8"
+      @lines << "  storel $#{desc}, %o#{i}h8"
+      @lines << "  %o#{i}h16 =l add %o#{i}l, 16"
+      @lines << "  storel $#{@name}, %o#{i}h16"
+      @asan_fakes << ["%o#{i}f", frame, cls]
+    end
+
     # --asan: poison both redzones of every slot (after all the allocations, at the function's entry).
     def asan_poison
       @asan_objs.each do |i, left, osz|
@@ -568,6 +601,17 @@ end
       end
       @asan_objs.each do |_i, left, osz|
         @lines << "  call $__asan_unpoison_memory_region(l #{left}, l #{osz + 2 * Qbe::ASAN_RZ})"
+      end
+      # Each fake frame is given back on a branch (libasan's free reads the frame, so it is not called with 0).
+      @asan_fakes.each do |fake, frame, cls|
+        @temps += 1
+        fr = "afr#{@temps}"
+        nx = "afn#{@temps}"
+        @lines << "  jnz #{fake}, @#{fr}, @#{nx}"
+        @lines << "@#{fr}"
+        @lines << "  call $__asan_stack_free_#{cls}(l #{fake}, l #{frame})"
+        @lines << "@#{nx}"
+        @label = nx
       end
     end
 
@@ -2242,7 +2286,7 @@ data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
     fn = Fn.new(fn_form, ctx[:refs], ctx[:abi], ctx[:link]).emit
     helpers = fn.asm_helpers.map { |h| "# pathb-asm #{h}" }
     dbg = fn.dbg_file ? ["dbgfile #{fn.dbg_file.inspect}"] : []   # --asan: the function's source file (see Fn#asan_dbgloc)
-    (helpers + dbg + [fn.lines.join("\n")]).join("\n\n")
+    (helpers + fn.asan_data + dbg + [fn.lines.join("\n")]).join("\n\n")
   end
 end
 
