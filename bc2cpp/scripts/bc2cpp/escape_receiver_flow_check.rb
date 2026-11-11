@@ -325,6 +325,56 @@ ensure
   FileUtils.remove_entry(points_dir)
 end
 
+# A reflective send (eval, binding, local_variable_get ...) turns the analysis off for the whole world only when a native
+# definition of its name is registered: the closed-world build leaves out the gems that define them (mruby-eval,
+# mruby-binding), where the send is a plain NoMethodError that reads no frame. A Ruby method of that name reads nothing.
+REFL_SRC = <<~'RUBY'
+  class RF
+    def conf; a = [1, 2]; a.size; end
+    def run(s); eval(s); end
+  end
+RUBY
+REFL_NATIVE = <<~'CPP'
+  static mrb_value rf_eval(mrb_state* mrb, mrb_value self) { return mrb_nil_value(); }
+  void rf_init(mrb_state* mrb) { mrb_define_method(mrb, mrb->kernel_module, "eval", rf_eval, MRB_ARGS_ANY()); }
+CPP
+
+def refl_rows(src, native: [], drop_native: [])
+  dir = Dir.mktmpdir('bc2cpp-escape-refl')
+  tsv = File.join(dir, 'escape.tsv')
+  saved = ENV.fetch('BC2CPP_ESCAPE_REPORT', nil)
+  ENV['BC2CPP_ESCAPE_REPORT'] = tsv
+  begin
+    Bc2cppFixtureRuntime.generate(src, dir, core: true, only_owners: %w[RF], native: native, drop_native: drop_native)
+  ensure
+    saved.nil? ? ENV.delete('BC2CPP_ESCAPE_REPORT') : ENV['BC2CPP_ESCAPE_REPORT'] = saved
+  end
+  File.readlines(tsv, chomp: true).map { |line| line.split("\t", -1) }
+ensure
+  FileUtils.remove_entry(dir) if dir
+end
+
+puts '-- reflective sends (generation)'
+# The build without the gems that define eval and binding (BC2CPP_OPEN_WORLD_GEMS): the send is a NoMethodError.
+EVAL_GEMS = %w[mruby-eval mruby-binding mruby-proc-binding].freeze
+refl = lambda do |rows|
+  [rows.find { |r| r[0] == 'site' && r[2] == 'RF#conf' && r[5] == 'array' }, rows.any? { |r| r[0] == 'reflective' && r[2] == 'RF#run' }]
+end
+
+conf, reflective = refl.call(refl_rows(REFL_SRC, drop_native: EVAL_GEMS))
+check.call('without the eval gems: RF#run is not a reflective site', !reflective)
+check.call('without the eval gems: the array of RF#conf is confined', conf && conf[6] == 'confined')
+
+conf, reflective = refl.call(refl_rows(REFL_SRC))
+check.call('with the real mruby-eval source (MRB_SYM registration): RF#run is a reflective site', reflective)
+check.call('with the real mruby-eval source: the array of RF#conf escapes (reflection)',
+           conf && conf[6] == 'escapes' && conf[7] == 'reflection')
+
+conf, reflective = refl.call(refl_rows(REFL_SRC, native: [['rf_eval.c', REFL_NATIVE]], drop_native: EVAL_GEMS))
+check.call('a native eval registered by mrb_define_method: RF#run is a reflective site', reflective)
+check.call('a native eval registered by mrb_define_method: the array of RF#conf escapes (reflection)',
+           conf && conf[6] == 'escapes' && conf[7] == 'reflection')
+
 puts '-- behaviour (needs a full-core libmruby)'
 build = Bc2cppFixtureRuntime.full_or_build
 if build.nil?
