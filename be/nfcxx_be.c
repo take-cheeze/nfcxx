@@ -336,8 +336,8 @@ static void nf_put_expr(an_expr_node_ptr expr)
       fputc(')', nf_out);
       return;
     default:
-      if (nfcxx_enk_name(expr->kind) != NULL) {
-        fprintf(nf_out, "(unsupported %s)", nfcxx_enk_name(expr->kind));
+      if (nfcxx_enk_name((an_expr_node_kind)expr->kind) != NULL) {
+        fprintf(nf_out, "(unsupported %s)", nfcxx_enk_name((an_expr_node_kind)expr->kind));
       } else {
         fprintf(nf_out, "(unsupported enk-%d)", (int)expr->kind);
       }

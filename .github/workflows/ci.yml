@@ -238,3 +238,44 @@ jobs:
             echo "build=${{ needs.build.result }} test=${{ needs.test.result }}"
             exit 1
           fi
+
+  # Probe: how far Path B gets on macOS arm64 (PRs 877 and 883). Not gating: build-and-test does not need it. Each step
+  # runs on its own (if: always()), so the first failure does not hide the next. The default driver run records whether
+  # Path B built the hello program or the gcc fallback did.
+  macos-pathb-probe:
+    name: macOS arm64 Path B probe
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Tools
+        run: brew install ninja cmake
+
+      - name: EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: QBE
+        if: always()
+        run: scripts/setup-qbe.sh
+
+      - name: Path B harness
+        if: always()
+        run: scripts/setup-pathb.sh
+
+      - name: Hosted Path B hello (NFCXX_PATH=b)
+        if: always()
+        run: |
+          printf '#include <cstdio>\nint main(){std::printf("pathb macos ok\\n");return 0;}\n' > hello.cpp
+          NFCXX_PATH=b ./nfcxx hello.cpp -o hello && ./hello
+
+      - name: Default driver hello (Path B, else gcc fallback)
+        if: always()
+        run: |
+          printf '#include <cstdio>\nint main(){std::printf("default ok\\n");return 0;}\n' > hello_default.cpp
+          ./nfcxx hello_default.cpp -o hello_default && ./hello_default
+
+      - name: Path B probes (tests/pathb-qbe/run.sh subset)
+        if: always()
+        run: PATHB_QBE_ONLY='cases/(floats|gaps_float|gaps_sort)' tests/pathb-qbe/run.sh --trace off

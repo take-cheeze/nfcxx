@@ -1581,7 +1581,7 @@ static ir_val ir_rval(an_expr_node_ptr e)
     case enk_result_of_overriding_function:
       return ir_roof(e);
     default:
-      return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name(e->kind) != NULL ? nfcxx_enk_name(e->kind) : "?"),
+      return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name((an_expr_node_kind)e->kind) != NULL ? nfcxx_enk_name((an_expr_node_kind)e->kind) : "?"),
                     2, (int)e->kind);
   }
 }
