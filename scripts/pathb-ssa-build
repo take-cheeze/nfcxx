@@ -126,7 +126,10 @@ ASM_HELPERS = {
 # The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
 # `# pathb-asm NAME` appends that helper.
 def marker_asm(il)
-  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.map { |sym| ".weak #{sym}" }
+  # Mach-O (macOS): QBE puts its leading underscore on each symbol, so the weak definition is _SYM, and Mach-O has
+  # .weak_definition rather than .weak.
+  macho = RbConfig::CONFIG["host_os"].match?(/darwin/)
+  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.map { |sym| macho ? ".weak_definition _#{sym}" : ".weak #{sym}" }
   helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map do |h|
     ASM_HELPERS.fetch(h) { error_exit("no assembly helper for #{h}") }
   end
