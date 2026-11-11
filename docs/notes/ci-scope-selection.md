@@ -10,7 +10,7 @@ General CI starts 33–38 jobs in those samples, in addition to the separate
 bc2cpp workflow. This change reduces general CI's runner demand for changes
 whose execution is covered by the bc2cpp workflow, and for Markdown notes.
 
-`scripts/ci-scope.py` extends the existing `pathb-changes` job with a `full_ci`
+`scripts/ci-scope.rb` extends the existing `pathb-changes` job with a `full_ci`
 output. Its selection policy is deliberately narrow:
 
 | Change/event | General compiler suites | Path B suites |
@@ -39,7 +39,7 @@ missing outputs, inconsistent selection and unexpectedly skipped selected jobs
 fail the gate. The Path B selection agrees with the original regex on all
 5,011 paths tracked at the change's base revision.
 
-Validation: `python3 tests/ci/scope_test.py` covers isolated and mixed changes,
+Validation: `ruby tests/ci/scope_check.rb` covers isolated and mixed changes,
 ordinary and manual events, unknown paths, real git renames with unusual names,
 selector CLI output, gate CLI behavior, and missing/failed/cancelled jobs.
 The workflow is also checked with actionlint and for dependency cycles.

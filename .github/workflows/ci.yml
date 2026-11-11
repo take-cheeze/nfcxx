@@ -554,16 +554,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
       # Only isolated bc2cpp/test/docs PRs omit the general compiler matrix.
       # Main pushes and manual runs retain full coverage; failed selection blocks the gate.
       - name: Check CI routing policy
-        run: python3 tests/ci/scope_test.py
+        run: ruby tests/ci/scope_check.rb
 
       - name: Select CI coverage
         id: paths
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: python3 scripts/ci-scope.py
+        run: ruby scripts/ci-scope.rb
 
   pathb-build:
     needs: pathb-changes
@@ -705,7 +709,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
       - name: Require every selected build and test job to pass
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: python3 scripts/ci-scope.py --gate
+        run: ruby scripts/ci-scope.rb --gate
