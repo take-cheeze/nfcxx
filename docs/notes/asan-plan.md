@@ -1,7 +1,7 @@
 # AddressSanitizer for the other backends: plan
 
 Status: the gcc backend is done, the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
-use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 3 (heap checks, stack and global redzones: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
+use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 4 (heap checks, stack, global and alloca redzones: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
 This note plans the rest of Path B and the wasm emitter. Nothing of wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
@@ -76,7 +76,8 @@ Milestones:
    `use-after-poison`, as on qbe (`// ASAN-PATHB:` in the cases).
 3. Done: global redzones in the SSA route's `build_data` and `string_data`, poisoned by `asan_constructor` (`__asan_poison_memory_region`, as qbe does, not
    `__asan_register_globals`, whose descriptor ABI is libasan-version specific). `(bounds ...)` traps are dropped under the flag.
-4. setjmp/longjmp EH (EDG's ABI; libasan's longjmp interceptor unpoisons the stack), VLA (EDG lowers to `__vla_alloc` pool calls, seen as malloc blocks) and alloca. Test: copy of `tests/asan/cases/clean.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
+4. Done: alloca (`[32 | obj | 32]` blocks chained per frame and released before the `ret`, `lib/asan/nfcxx_vla_asan.c`), VLA (the ASan runtime makes each a malloc
+   block) and setjmp/longjmp EH (libasan's longjmp interceptor unpoisons the dead frame; `clean_throw_reuse.cpp`, `scope_*_clean`). Test: `clean_alloca_reuse.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
 5. Driver and tests: a `// ASAN-EXPECT:` runner next to `traps/` in `tests/pathb-qbe/`, compared with the gcc report.
 6. Use after scope needs `(scope-begin/end $slot)` IR forms from `ir.c`.
 7. Optional: redundant-check elimination within a block, own runtime.

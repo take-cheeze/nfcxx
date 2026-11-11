@@ -382,6 +382,7 @@ module Qbe
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
       @sp_objs = []    # --safe: [temporary, size] of the frame objects this function registers
+      @asan_alloca = false   # --asan: the function has an alloca, so it keeps the head of its chain in the slot %aah
       @asan_objs = []  # --asan: [index, temporary of the left redzone, size of the object rounded up to 8] of each slot in memory
     end
 
@@ -503,6 +504,11 @@ end
       unless @sp_objs.empty?
         @lines << "  call $__nfcxx_sp_frame(w #{@sp_objs.length}, ..., #{Qbe.sp_pairs(@sp_objs)})"
       end
+      if Qbe.asan && @blocks.any? { |b| b[2..].any? { |it| head(it) == "let" && it[3].is_a?(Array) && head(it[3]) == "alloca" } }
+        @asan_alloca = true
+        @lines << "  %aah =l alloc8 8"
+        @lines << "  storel 0, %aah"
+      end
       asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
     end
@@ -537,6 +543,11 @@ end
 
     # --asan: before a return, the whole of each slot's block is addressable again, for the next frame on this stack.
     def asan_leave
+      if @asan_alloca
+        h = fresh
+        @lines << "  #{h} =l loadl %aah"
+        @lines << "  call $__nfcxx_asan_alloca_release(l #{h})"
+      end
       @asan_objs.each do |_i, left, osz|
         @lines << "  call $__asan_unpoison_memory_region(l #{left}, l #{osz + 2 * Qbe::ASAN_RZ})"
       end
@@ -1126,6 +1137,21 @@ end
         wide = fresh
         @lines << "  #{wide} =l extuw #{size}"
         size = wide
+      end
+      if Qbe.asan
+        # --asan (milestone 4): [32 | object | 32], the object's size rounded up to 8, linked into the frame's chain
+        # (lib/asan/nfcxx_vla_asan.c) that asan_leave releases before the return.
+        up = fresh
+        osz = fresh
+        total = fresh
+        blk = fresh
+        @lines << "  #{up} =l add #{size}, 7"
+        @lines << "  #{osz} =l and #{up}, -8"
+        @lines << "  #{total} =l add #{osz}, #{2 * Qbe::ASAN_RZ}"
+        @lines << "  #{blk} =l alloc16 #{total}"
+        @lines << "  call $__nfcxx_asan_alloca_mark(l #{blk}, l #{osz}, l %aah)"
+        @lines << "  #{dst} =l add #{blk}, #{Qbe::ASAN_RZ}"
+        return
       end
       @lines << "  #{dst} =l alloc16 #{size}"
     end
