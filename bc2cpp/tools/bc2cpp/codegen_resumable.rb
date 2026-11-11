@@ -819,7 +819,8 @@ class CodeGen
     out = String.new
     out << "static mrb_value #{step_name}(mrb_state* M, mrb_value self, mrb_value bc2cpp_frame_value, mrb_value bc2cpp_resume) {\n"
     out << "  Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_frame_value, #{ctx.nregs}, #{ctx.slot_count});\n"
-    out << "  mrb_value bc2cpp_regs_ary = bc2cpp_resume_regs(M, bc2cpp_frame_value);\n"
+    # The constructor already validated the frame; its register Array is never replaced.
+    out << "  mrb_value bc2cpp_regs_ary = F->regs_ary;\n"
     out << "  mrb_value* R = F->regs;\n"
     (ctx.upvars || []).each_with_index do |(level, idx), i|
       out << "  [[maybe_unused]] mrb_value* #{upvar_var_name(level, idx)} = (mrb_value*)F->slots[#{i}];\n"
@@ -1049,7 +1050,7 @@ class CodeGen
     CPP
     fill = resumable_entry_fill(arg_names, ctx, blk, kw).map { |line| "  #{line}\n" }.join
     tail = <<~CPP.gsub(/^(?=.)/, '  ')
-      mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(bc2cpp_resume_regs(M, frame)));
+      mrb_write_barrier(M, (struct RBasic*)mrb_ary_ptr(F->regs_ary));
       if (bc2cpp_prologue_armed(M, #{owner_literal}, self)) {
         return bc2cpp_prologue_park(M, bc2cpp_method_frame_new(M, #{step_name}, self, frame));
       }
@@ -1754,10 +1755,6 @@ class CodeGen
     static bool bc2cpp_resume_frame_p(mrb_state* M, mrb_value v) {
       return mrb_data_p(v) && DATA_TYPE(v) == &bc2cpp_resume_frame_type;
     }
-    static mrb_value bc2cpp_resume_regs(mrb_state* M, mrb_value frame) {
-      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_data_check_get_ptr(M, frame, &bc2cpp_resume_frame_type);
-      return f ? f->regs_ary : mrb_iv_get(M, frame, bc2cpp_resume_regs_sym(M));
-    }
     [[noreturn]] static void bc2cpp_resume_bad_state(mrb_state* M) {
       mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")), "bc2cpp: resumable frame resumed in an unknown state");
     }
@@ -1814,7 +1811,7 @@ class CodeGen
         mrb_iv_set(M, *frame, bc2cpp_resume_regs_sym(M), regs);
         return f;
       }
-      Bc2cppResumeFrame* f = (Bc2cppResumeFrame*)mrb_data_check_get_ptr(M, *frame, &bc2cpp_resume_frame_type);
+      Bc2cppResumeFrame* f = bc2cpp_resume_frame_p(M, *frame) ? (Bc2cppResumeFrame*)DATA_PTR(*frame) : nullptr;
       if (!f || f->nregs != nregs) bc2cpp_resume_bad_state(M);
       return f;
     }

@@ -45,3 +45,31 @@ Preserve the baseline and changed sealed binaries and alternate direct runs of
 each binary with `3rd/optcarrot/examples/Lan_Master.nes 1800` and `180`. Use
 release binaries without `GPROF`. Local raw timings are in
 `build/bc2cpp/perf-fresh-runtime-ab.json`.
+
+## Resumable frame access
+
+The next optimization reuses the validated `Bc2cppResumeFrame*` when loading
+its register Array and applying the entry write barrier. Resuming an existing
+frame uses the same inline data-type test as the Fiber driver, preserving the
+null-pointer and register-count checks. The unused register lookup helper and
+its hidden-ivar fallback are removed: every generated caller already obtained
+the frame through `bc2cpp_resume_frame`.
+
+A separate series of five alternating release runs compares the arena-root
+change alone with both changes, on the same host and workload:
+
+| Median | Inline arena roots | Plus frame access |
+| --- | ---: | ---: |
+| 1800 frames, wall time including startup | 3.748 s | 3.688 s |
+| Hot-path frames per second | 487.5 | 494.7 |
+
+This adds about 1.5% FPS in this series. Do not compare absolute FPS between
+the two series or add the percentages: these are shared-host measurements.
+All 1800/180-frame runs produced `60838`/`59662` respectively. Raw timings
+are in `build/bc2cpp/perf-frame-runtime-ab.json`.
+
+`resumable_rest_check.rb` passes with ordinary and stress libraries, including
+the scalar-argument cases (zero versus nil, Array destructuring, multiple
+arguments, splats, interleaved fibers, full GC, calls from C and repeated
+`Frame#value` identity). `resumable_optional_check.rb` passes with the stress
+library, and the ordinary 180-frame comparative runner passes again.
