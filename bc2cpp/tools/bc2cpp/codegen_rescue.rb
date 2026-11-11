@@ -918,6 +918,11 @@ class CodeGen
     out << "    #{ctx_struct} bc2cpp_ctx{#{ctx_args}};\n"
     out << "    mrb_bool #{err_var} = FALSE;\n"
     out << "    mrb_value #{result_var} = bc2cpp_protect(M, #{try_name}, &bc2cpp_ctx, &#{err_var});\n"
+    # bc2cpp_protect restores the arena to where it was before the try body, so an object the body stored into an outer
+    # register (a `&rN` field) loses the arena slot that kept it alive: root it again here, or the next collection frees it.
+    extra_field_values.each do |v|
+      out << "    bc2cpp_root(M, #{Regexp.last_match(1)});\n" if v =~ /\A&(r\d+)\z/
+    end
     out << if region[:tail_return]
               "    if (!#{err_var}) { return #{result_var}; }\n"
             else

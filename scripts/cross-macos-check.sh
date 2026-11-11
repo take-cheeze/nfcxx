@@ -17,9 +17,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cpass=0; ctotal=0
 for f in "$root"/tests/c/*.c; do
   ctotal=$((ctotal + 1))
-  # NFCXX_C_INPUT=1: these are hand-written C files that include the standard headers. Without it, qbe-cc's -undef strips
+  # --c-input: these are hand-written C files that include the standard headers. Without it, qbe-cc's -undef strips
   # the target's __SIZE_TYPE__ and friends, and every file that includes stddef.h fails.
-  if NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -S "$f" -o "$tmp/c.s" >/dev/null 2>"$tmp/c.err"; then
+  if "$root/scripts/qbe-cc" --c-input -S "$f" -o "$tmp/c.s" >/dev/null 2>"$tmp/c.err"; then
     cpass=$((cpass + 1)); basename "$f" .c >> "$tmp/cpass.txt"
   else
     echo "C fail $(basename "$f"): $(grep -m1 -E 'error|assert|Error' "$tmp/c.err" || head -1 "$tmp/c.err")"
@@ -52,7 +52,7 @@ if [ "${1:-}" = "--link" ]; then
   lpass=0; ltotal=0
   while read -r b; do
     ltotal=$((ltotal + 1))
-    NFCXX_C_INPUT=1 "$root/scripts/qbe-cc" -S "$root/tests/c/$b.c" -o "$tmp/$b.s" >/dev/null 2>&1
+    "$root/scripts/qbe-cc" --c-input -S "$root/tests/c/$b.c" -o "$tmp/$b.s" >/dev/null 2>&1
     if ! llvm-mc -triple=arm64-apple-darwin -filetype=obj "$tmp/$b.s" -o "$tmp/$b.o" 2>"$tmp/l.err"; then
       echo "link fail $b: assembly: $(head -1 "$tmp/l.err")"; continue
     fi

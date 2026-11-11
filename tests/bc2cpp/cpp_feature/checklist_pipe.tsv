@@ -1,0 +1,8 @@
+key	standard	paper	page	feature	description	gcc	clang	intel	msvc
+cpp11-N2347-scoped_enum-forward	c++11	N2347	/lang/cpp11/scoped_enum.md#forward	N2347: [forward enum](/lang/cpp11/scoped_enum.md#forward)		4.6	3.1	partial	
+cpp11-N2347-scoped_enum	c++11	N2347	/lang/cpp11/scoped_enum.md	N2347: [scoped enum](/lang/cpp11/scoped_enum.md)		4.4	2.9		2012
+cpp11-N1653-paper	c++11	N1653	https://example.test/n1653.html	N1653: C99 preprocessor	explanation only	4.3	3.0	-	2010
+cpp14-N3323-contextually_converted	c++14	N3323	/lang/cpp14/contextually_converted.md	N3323: [contextual conversions](/lang/cpp14/contextually_converted.md)		4.9	3.4	15	2015
+cpp14-N3472-binary_literals	c++14	N3472	/lang/cpp14/binary_literals.md	N3472: [binary literals](/lang/cpp14/binary_literals.md)	with notes	4.9 | 5	2.9	14	2013
+cpp17-P0136R1-paper	c++17	P0136R1	https://example.test/p0136r1.html	P0136R1: [inheritance][P0136R1]		7	3.9	No	2017
+cpp23-P2718R0-lifetime	c++23	P2718R0	lang/cpp23/lifetime.md	P2718R0: [range for](lang/cpp23/lifetime.md)		15	20	-	-

@@ -21,6 +21,7 @@ module ScriptSealedBuild
       gem_name = "hal-posix-#{name}"
       gems[gem_name] = File.join(mruby, 'mrbgems', gem_name)
     end
+    gems['mruby-bc2cpp-core-ext'] = File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-core-ext')
     gems['script-compiled'] = compiled_gem
     gems
   end
@@ -53,6 +54,7 @@ module ScriptSealedBuild
         spec.license = 'MIT'
         spec.authors = 'script world'
         spec.add_dependency 'script-compiled'
+        spec.add_dependency 'mruby-bc2cpp-core-ext'
       end
     RUBY
     File.write(File.join(gem, 'src/main.cxx'), <<~CPP)
