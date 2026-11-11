@@ -66,7 +66,7 @@ TOKEN_WS = " \t\r\n\f\v"
 
 # The end (after the closing quote) of the string that starts at i, or nil: a backslash escapes the next character
 # except a newline, as `.` does not match one.
-def quoted_end(s, i)
+def token_string_end(s, i)
   j = i + 1
   while j < s.size
     if s[j] == "\\"
@@ -91,10 +91,10 @@ def scan_tokens(s)
     if c == "(" || c == ")"
       out << c
       i += 1
-    elsif c == '"' && (e = quoted_end(s, i))
+    elsif c == '"' && (e = token_string_end(s, i))
       out << s[i...e]
       i = e
-    elsif "$@&".include?(c) && i + 1 < n && s[i + 1] == '"' && (e = quoted_end(s, i + 1))
+    elsif "$@&".include?(c) && i + 1 < n && s[i + 1] == '"' && (e = token_string_end(s, i + 1))
       out << s[i...e]
       i = e
     elsif c != '"' && !TOKEN_WS.include?(c)
