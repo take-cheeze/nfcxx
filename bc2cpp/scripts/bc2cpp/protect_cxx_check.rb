@@ -5,7 +5,7 @@
 #
 #   generated code (needs a host mrbc)
 #     - the output has bc2cpp_protect sites and no mrb_protect_error call, and its GC arena roots all go through
-#       bc2cpp_root (one mrb_gc_protect), with the numeric slow paths on bc2cpp_arena_keep;
+#       bc2cpp_root (one mrb_gc_protect fallback, plus the error reporter's root), with the numeric slow paths on bc2cpp_arena_keep;
 #   behaviour (needs a full-core libmruby; run it on the GC-stress build too)
 #     - interpreted and compiled runs print the same for: clause matching by class (first match wins, an unmatched
 #       class passes through), `rescue => e` with `raise` re-raised and chained, retry, ensure order, `return`,
@@ -197,7 +197,8 @@ check.call('the fixture generates', !code.empty?)
 check.call('rescue and ensure boundaries are bc2cpp_protect sites', code.scan(/\bbc2cpp_protect(?:_call)?\(M, /).size >= 4)
 check.call('no boundary calls the VM protect function (the Fiber loop included)',
            !code.match?(/\bmrb_protect\w*\(/))
-check.call('every arena root goes through bc2cpp_root', code.scan(/\bmrb_gc_protect\b/).size <= 3)
+# Count call syntax, not prose describing the arena fast path.
+check.call('only the arena helper and error reporter call mrb_gc_protect', code.scan(/\bmrb_gc_protect\s*\(/).size == 2)
 check.call('the numeric slow paths use bc2cpp_arena_keep', code.include?('return bc2cpp_arena_keep(M, ai, r);'))
 METHODS.each do |name|
   body = body_of(code, "PcFx_#{name}_impl")
