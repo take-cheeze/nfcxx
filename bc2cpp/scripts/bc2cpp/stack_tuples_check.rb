@@ -383,6 +383,39 @@ CHR_APP_EXPECTED = {
 }.freeze
 OWNERS_CHR = %w[ChrSub ChrApp].freeze
 
+# ARRAY_DROP (codegen_array_drop.rb): `ary.drop(n)` on an exact Array copies the tail in one call instead of running
+# Enumerable#drop's block per element. The cases cover counts of 0, in range, equal to the length and past it, an empty
+# Array, a negative count (the ArgumentError), a Float count, a Range and a Hash receiver, an Array subclass that defines
+# its own each, a result that is independent of the original (shared elements, separate Array), and drop feeding any?.
+DROP_SRC = <<~RUBY5
+  class DropSub < Array
+    def each; yield 100; end
+  end
+
+  class ArrDrop
+    def tail(a, n); a.drop(n); end
+    def tail2(a); a.drop(2); end
+    def tail_any(f); f.drop(2).any? { |p| p == 3 }; end
+  end
+RUBY5
+DROP_EXPECTED = {
+  'ArrDrop.new.tail2([1, 2, 3, 4])' => '[3, 4]',
+  'ArrDrop.new.tail([1, 2, 3], 0)' => '[1, 2, 3]',
+  'ArrDrop.new.tail([1, 2, 3], 3)' => '[]',
+  'ArrDrop.new.tail([1, 2, 3], 10)' => '[]',
+  'ArrDrop.new.tail([], 1)' => '[]',
+  'begin; ArrDrop.new.tail([1, 2], -1); rescue ArgumentError => e; e.message; end' => '"attempt to drop negative size"',
+  'ArrDrop.new.tail([1, 2, 3], 1.5)' => '[2, 3]',
+  'ArrDrop.new.tail(1..5, 2)' => '[3, 4, 5]',
+  'ArrDrop.new.tail({ a: 1, b: 2 }, 1)' => '[[:b, 2]]',
+  'ArrDrop.new.tail(DropSub.new([1, 2, 3]), 0)' => '[100]',
+  'a = [1, 2, 3]; b = ArrDrop.new.tail(a, 1); b << 9; [a, b]' => '[[1, 2, 3], [2, 3, 9]]',
+  'a = [[1], [2]]; b = ArrDrop.new.tail(a, 1); b[0].equal?(a[1])' => 'true',
+  'ArrDrop.new.tail_any([0, 0, 1, 3])' => 'true',
+  'ArrDrop.new.tail_any([0, 0, 1])' => 'false',
+}.freeze
+OWNERS_DROP = %w[DropSub ArrDrop].freeze
+
 # The text of one method's C++ body, from its `// Owner#name (compiled from ...)` header to the next method's header.
 def method_chunk(code, owner, name)
   code.split(%r{^(?=// \S+#\S+ \(compiled from)}).find { |chunk| chunk.start_with?("// #{owner}##{name} (") } || ''
@@ -488,6 +521,19 @@ Dir.mktmpdir('stack-tuples') do |dir|
   saved_chr.nil? ? ENV.delete('BC2CPP_CHR_APPEND') : ENV['BC2CPP_CHR_APPEND'] = saved_chr
   check.call('kill switch: BC2CPP_CHR_APPEND=0 rewrites nothing', !chr_off_code.include?('CHR_APPEND'))
 
+  drop_dir = File.join(dir, 'drop')
+  Dir.mkdir(drop_dir)
+  drop_code, drop_err = runtime.generate(DROP_SRC, drop_dir, core: true, only_owners: OWNERS_DROP)
+  %w[tail tail2 tail_any].each do |name|
+    check.call("ArrDrop##{name} copies the tail without Enumerable#drop's block per element",
+               method_chunk(drop_code, 'ArrDrop', name).include?('ARRAY_DROP: r'))
+  end
+  saved_drop = ENV.fetch('BC2CPP_ARRAY_DROP', nil)
+  ENV['BC2CPP_ARRAY_DROP'] = '0'
+  drop_off_code = Dir.mktmpdir('array-drop-off') { |off| runtime.generate(DROP_SRC, off, core: true, only_owners: OWNERS_DROP).first }
+  saved_drop.nil? ? ENV.delete('BC2CPP_ARRAY_DROP') : ENV['BC2CPP_ARRAY_DROP'] = saved_drop
+  check.call('kill switch: BC2CPP_ARRAY_DROP=0 rewrites nothing', !drop_off_code.include?('ARRAY_DROP: r'))
+
   # 2. parity, interpreted against compiled
   build = runtime.full_or_build
   if build
@@ -495,7 +541,8 @@ Dir.mktmpdir('stack-tuples') do |dir|
      [OWNERS_NEG, neg_dir, neg_err, NEGATIVE_EXPECTED, 'negative'],
      [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined'],
      [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare'],
-     [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append']].each do |owners, sub, err, expected, label|
+     [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append'],
+     [OWNERS_DROP, drop_dir, drop_err, DROP_EXPECTED, 'array drop']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)
       check.call("#{label}: built and ran", built)

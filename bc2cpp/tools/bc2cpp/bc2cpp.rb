@@ -204,6 +204,7 @@ require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
+require_relative 'codegen_array_drop'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
@@ -1693,6 +1694,11 @@ BC2CPP_MAIN = lambda do
     #define bc2cpp_funcall_keep(M, ...) bc2cpp_keep_call(M, [&] { return mrb_funcall(M, __VA_ARGS__); })
     // STACK_TUPLES promotion: a placed array's buffer becomes a heap Array at the instruction where it escapes. Rooted
     // like any new object, since the escaping store or return holds it only in a C local until then.
+    // ARRAY_DROP: the tail of an Array from index n on, as a new Array (an empty one when n is past the end).
+    static inline mrb_value bc2cpp_ary_drop(mrb_state* M, mrb_value a, mrb_int n) {
+      mrb_int len = RARRAY_LEN(a);
+      return n >= len ? mrb_ary_new(M) : mrb_ary_new_from_values(M, len - n, RARRAY_PTR(a) + n);
+    }
     static inline mrb_value bc2cpp_promote_array(mrb_state* M, const mrb_value* v, mrb_int n) {
       mrb_value a = mrb_ary_new_from_values(M, n, v);
       bc2cpp_root(M, a);
