@@ -144,9 +144,11 @@ code = suite.generate(SRC, OWNERS)
 lookups = code.scan(/\bmrb_method_search_vm\(/).size
 suite.check("one method-table lookup call in the generated unit (the seam), found #{lookups}", lookups == 1)
 suite.check('the seam is used', code.include?('bc2cpp_find_method('))
-# A public def is still a direct call; a private one is not (the visibility check lives in the dispatch).
+# A public def is still bound statically, as a direct call or, when the callee is small, as CALL_INLINE's copy of its
+# body (codegen_call_inline.rb); a private one is not (the visibility check lives in the dispatch).
 pub_site = code[/^mrb_value Probe_via_pub_impl\(mrb_state\* M.*?^}/m]
-suite.check('a public single-owner call stays a direct _impl call', pub_site&.include?('Pub_shown_impl(M,'))
+suite.check('a public single-owner call stays a direct _impl call or an inlined body',
+            pub_site&.include?('Pub_shown_impl(M,') || pub_site&.include?('// CALL_INLINE Pub#shown ('))
 suite.check('a private single-owner call is not a direct _impl call',
             !code.match?(/Secret_(hidden|hid_arg|hid_opt)_impl\(M, r\d+/))
 
