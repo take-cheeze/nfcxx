@@ -1,7 +1,7 @@
 # AddressSanitizer for the other backends: plan
 
 Status: the gcc backend is done, the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
-use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 and 2 (heap checks and stack redzones: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
+use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 4 (heap checks, stack, global and alloca redzones: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
 This note plans the rest of Path B and the wasm emitter. Nothing of wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
@@ -74,9 +74,12 @@ Milestones:
 2. Done: slot redzones. Each slot that stays in memory (`allocs` in the SSA route) becomes `[32 | obj | 32]` (`asan_slot`), poisoned at the entry (`asan_poison`)
    and unpoisoned before the `ret` (`asan_leave`); the trap blocks end in `hlt`, which needs no unpoison. Promoted slots need none. The report is
    `use-after-poison`, as on qbe (`// ASAN-PATHB:` in the cases).
-3. Global redzones in `emit_global` (2426) with `__asan_register_globals` from a constructor.
-4. setjmp/longjmp EH (EDG's ABI; libasan's longjmp interceptor unpoisons the stack), VLA (EDG lowers to `__vla_alloc` pool calls, seen as malloc blocks) and alloca. Test: copy of `tests/asan/cases/clean.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
-5. Driver and tests: a `// ASAN-EXPECT:` runner next to `traps/` in `tests/pathb-qbe/`, compared with the gcc report.
+3. Done: global redzones in the SSA route's `build_data` and `string_data`, poisoned by `asan_constructor` (`__asan_poison_memory_region`, as qbe does, not
+   `__asan_register_globals`, whose descriptor ABI is libasan-version specific). `(bounds ...)` traps are dropped under the flag.
+4. Done: alloca (`[32 | obj | 32]` blocks chained per frame and released before the `ret`, `lib/asan/nfcxx_vla_asan.c`), VLA (the ASan runtime makes each a malloc
+   block) and setjmp/longjmp EH (libasan's longjmp interceptor unpoisons the dead frame; `clean_throw_reuse.cpp`, `scope_*_clean`). Test: `clean_alloca_reuse.cpp`. For the scope of a same-frame exit, the qbe design (poison at the setjmp return, the objects whose block is not open at the call) carries over if Path B's blocks are known at the call.
+5. Done: the driver and the runner are `tests/asan/run.sh` with `ASAN_BACKEND=pathb` (a CI entry in `pathb-test`), and the report has source lines:
+   `NFCXX_IR_LOC=1` under the flag, QBE `dbgfile` per function and `dbgloc` per `(loc ...)` (`asan_dbgloc`, `function_text`).
 6. Use after scope needs `(scope-begin/end $slot)` IR forms from `ir.c`.
 7. Optional: redundant-check elimination within a block, own runtime.
 Risks: slots passed to `__asan_*` escape and lose QBE promotion (slower code); bit-fields access whole units; libasan ABI version.

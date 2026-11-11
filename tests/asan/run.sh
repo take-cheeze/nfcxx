@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AddressSanitizer (nfcxx -fsanitize=address; docs/notes/asan.md, asan-plan.md). The backend is $ASAN_BACKEND (gcc, the
-# default; qbe: cproc's checks of every load and store; pathb: the SSA emitter's __asan_load/store calls and stack redzones, milestones 1 and 2 of the plan,
+# default; qbe: cproc's checks of every load and store; pathb: the SSA emitter's __asan_load/store calls and stack redzones, milestones 1 to 4 of the plan,
 # and tests/asan/pathb-pending.txt names the cases the later milestones add). Other sanitizers are refused.
 #
 #   tests/asan/cases/*.cpp  with a `// ASAN: text` line (`// ASAN-QBE: text` replaces it on qbe): the program must be killed by asan (exit 1 from the runtime's
@@ -52,6 +52,14 @@ if true; then
   "$nfcxx" --backend=gcc -fsanitize=address -g tests/asan/cases/heap_overflow.cpp -o "$tmp/h" 2>/dev/null
   "$tmp/h" 2>"$tmp/rep" >/dev/null
   if grep -q "heap_overflow.cpp:5" "$tmp/rep"; then ok "report has the C++ source line"; else bad "report has the C++ source line" "$(grep -m3 '#[0-9]' "$tmp/rep" | tr '\n' ' ')"; fi
+fi
+
+# Path B: the report names the source line too (the IR's (loc ...) lines become QBE dbgfile/dbgloc, so the object has a line table).
+# It does not depend on -g.
+if [ "$B" = pathb ]; then
+  "$nfcxx" --backend=pathb -fsanitize=address tests/asan/cases/heap_overflow.cpp -o "$tmp/pl" 2>/dev/null
+  "$tmp/pl" 2>"$tmp/rep" >/dev/null
+  if grep -q "in main .*heap_overflow.cpp:5" "$tmp/rep"; then ok "Path B report has the C++ source line"; else bad "Path B report has the C++ source line" "$(grep -m3 '#[0-9]' "$tmp/rep" | tr '\n' ' ')"; fi
 fi
 
 # Same program without the flag: nothing is reported (the read is of valid-looking heap memory)

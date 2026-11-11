@@ -127,3 +127,36 @@ void __vla_dealloc_eh(void *ptr) {
 long __vla_number_of_active_allocations(void) {
   return (long)last + 1;
 }
+
+/*
+alloca under -fsanitize=address on Path B (docs/notes/asan.md, "Path B", milestone 4): the emitter allocates a block of
+[32 | object | 32] bytes in the caller's frame (QBE's alloc16, with the size rounded up to 8) and calls
+__nfcxx_asan_alloca_mark, which links the block into the frame's chain (the head is a slot of the function) and poisons the
+redzones. The chain's record sits in the left redzone, so it costs no space: it is read and written here, never by
+instrumented code. Before the function returns, __nfcxx_asan_alloca_release unpoisons every block of the chain, so the stack the
+next call reuses has no stale redzone. A longjmp or throw out of the function skips the release; libasan's longjmp interceptor
+clears the dead frame.
+*/
+#include <sanitizer/asan_interface.h>
+
+typedef struct alloca_record {
+  struct alloca_record *prev;
+  size_t total;   /* the size of the whole block: both redzones and the object */
+} alloca_record;
+
+__attribute__((no_sanitize_address)) void __nfcxx_asan_alloca_mark(void *block, size_t size, void **head) {
+  alloca_record *r = (alloca_record *)block;
+  r->prev = (alloca_record *)*head;
+  r->total = size + 64;
+  *head = r;
+  ASAN_POISON_MEMORY_REGION(block, 32);
+  ASAN_POISON_MEMORY_REGION((char *)block + 32 + size, 32);
+}
+
+__attribute__((no_sanitize_address)) void __nfcxx_asan_alloca_release(void *head) {
+  for (alloca_record *r = (alloca_record *)head; r != NULL;) {
+    alloca_record *prev = r->prev;
+    ASAN_UNPOISON_MEMORY_REGION(r, r->total);
+    r = prev;
+  }
+}
