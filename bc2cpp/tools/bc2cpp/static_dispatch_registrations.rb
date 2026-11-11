@@ -961,28 +961,34 @@ module StaticDispatchRegistrations
   end
 
   # NATIVE_CANDIDATES (closed only): each native registration on a literal engine owner (NativeOwnerMap), which the
-  # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed. Not ROM method-table entries
-  # (MRB_MT_ENTRY), whose runtime removal adds a RAM tombstone. A key is left out when Ruby defines the name on that
-  # owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef names it there, when the
-  # owner has a computed-name registration, or when it is already a candidate. Pruning needs the registration's
-  # owner and name, not a statically named C function: lambda and template bodies still install a fixed key.
+  # owner's compiled gem (bc2cpp_native_strip_gem) removes when listed, and each engine ROM method-table entry
+  # (MRB_MT_ENTRY) the build can leave out at compile time (ENGINE_ROM, CoreNativeCandidates.engine_rom_keys), flagged
+  # `rom`: a ROM entry is never removed at run time, which only adds a RAM tombstone. A key is left out when Ruby
+  # defines the name on that owner too (bc2cpp_left_out would remove the Ruby method), when a native alias or undef
+  # names it there, when the owner has a computed-name registration, or when it is already a candidate. Pruning needs
+  # the registration's owner and name, not a statically named C function: lambda and template bodies still install a
+  # fixed key.
   def native_candidates(repo_root, registry, candidates)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     map = NativeOwnerMap.build(native)
     keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
-    map.registrations.filter_map do |owner, name, _fn|
+    rom_keys = CoreNativeCandidates.engine_rom_keys(CoreNativeCandidates.engine_entries(native), map.rom)
+    pick = lambda do |owner, name, rom|
       next unless owner.is_a?(String) && name && !map.computed.include?(owner)
 
       gem = bc2cpp_native_strip_gem(owner)
       key = "#{owner}##{name}"
       next unless gem && GEMS.include?(gem) && !blocked.include?(key)
+      next if rom && !rom_keys.include?(key)
       next if Array(registry[name]).any? { |d| d.owner == owner }
       next unless keys.add?(key)
 
-      { owner: owner, name: name, entry: nil, gem: gem, native: true }
+      { owner: owner, name: name, entry: nil, gem: gem, native: true, rom: rom }.compact
     end
+    map.registrations.filter_map { |owner, name, _fn| pick.call(owner, name, false) } +
+      map.rom.filter_map { |owner, name, _fn| pick.call(owner, name, true) }
   end
 
   # REGISTRATION_NAME_EXEMPTION (closed only): a native's own registration call (mrb_define_method and the other
@@ -1813,7 +1819,10 @@ module StaticDispatchRegistrations
 
     StaticDispatchLists::Lists.new(open: open_names.freeze, closed: closed_names.freeze,
                                    core_excluded: closed[:core_excluded][0].to_set.freeze,
-                                   core_left_out: closed[:core_excluded][1].to_set.freeze, digest: digest)
+                                   core_left_out: closed[:core_excluded][1].to_set.freeze,
+                                   engine_rom: eligible(closed).select { |m| m[:rom] }
+                                                               .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
+                                   digest: digest)
   end
 
   def read_lists(path)
@@ -1859,9 +1868,9 @@ module StaticDispatchRegistrations
       passes += 1
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       nxt = pass(repo_root, mrbc, lists, lists_path, digest)
-      log.puts format('static dispatch lists: pass %<n>d, open %<o>d closed %<c>d core ROM %<r>d core run-time %<t>d (%<s>.0fs)',
+      log.puts format('static dispatch lists: pass %<n>d, open %<o>d closed %<c>d core ROM %<r>d core run-time %<t>d engine ROM %<e>d (%<s>.0fs)',
                       n: passes, o: nxt.open.size, c: nxt.closed.size, r: nxt.core_excluded.size,
-                      t: nxt.core_left_out.size, s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
+                      t: nxt.core_left_out.size, e: nxt.engine_rom.size, s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started)
       if same_lists?(nxt, lists)
         File.write("#{out}.tmp", StaticDispatchLists.dump(nxt))
         File.rename("#{out}.tmp", out)
@@ -1894,7 +1903,7 @@ if $PROGRAM_NAME == __FILE__
   elsif emit_dir
     lists = StaticDispatchRegistrations.emit(repo_root, ENV['MRBC'] || 'mrbc', emit_dir)
     warn "open #{lists.open.size}, closed #{lists.closed.size}, core ROM #{lists.core_excluded.size}, " \
-         "core run-time #{lists.core_left_out.size}"
+         "core run-time #{lists.core_left_out.size}, engine ROM #{lists.engine_rom.size}"
   else
     abort "usage: [MRBC=<host mrbc>] ruby #{$PROGRAM_NAME} --emit DIR | --check DIR | --digest"
   end

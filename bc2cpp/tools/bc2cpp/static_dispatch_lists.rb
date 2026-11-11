@@ -8,6 +8,8 @@
 #   closed         the closed build's names, a superset of `open`
 #   core_excluded  core ROM method-table entries the closed build leaves out at compile time (MtClass#name)
 #   core_left_out  core run-time registrations the closed build removes (Owner#name)
+#   engine_rom     engine ROM method-table entries the closed build leaves out at compile time (Owner#name), a subset
+#                  of `closed`
 #
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
@@ -17,11 +19,11 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out].freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom].freeze
 
   class Missing < StandardError; end
 
-  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :digest, keyword_init: true) do
+  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :digest, keyword_init: true) do
     # Only the closed build drops the closed-only names.
     def for_build(build_name)
       build_name == 'closed' ? closed : open
@@ -29,7 +31,7 @@ module StaticDispatchLists
   end
 
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
-                    core_left_out: Set.new.freeze, digest: 'none').freeze
+                    core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, digest: 'none').freeze
 
   module_function
 

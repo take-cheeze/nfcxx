@@ -487,4 +487,50 @@ Dir.mktmpdir('hook-calls') do |dir|
               CoreNativeCandidates.reachable({}, [other], [], diagnostic_literals: true)[0].include?('inherited'))
 end
 
+# ENGINE_ROM: an engine gem's tables name their class by token; the proof's rows must agree with the tokens.
+suite.check('an engine owner spells a token and back',
+            CoreNativeCandidates.engine_token('Gfx::Sprite') == 'Gfx__Sprite' &&
+            CoreNativeCandidates.engine_token('Gfx.singleton') == 'Gfx_singleton' &&
+            CoreNativeCandidates.engine_token('Gfx::Sprite.singleton') == 'Gfx__Sprite_singleton' &&
+            CoreNativeCandidates.engine_owner('Gfx__Sprite_singleton') == 'Gfx::Sprite.singleton' &&
+            CoreNativeCandidates.engine_token('Gfx_x::Sprite').nil? && CoreNativeCandidates.engine_owner('Gfx_x').nil?)
+Dir.mktmpdir('engine-rom') do |dir|
+  path = File.join(dir, 'gfx.cxx')
+  File.write(path, <<~'CPP')
+    void define(mrb_state* M, RClass* m) {
+    #define MRB_MT_CLASS Gfx__Sprite
+      static const mrb_mt_entry sprite_methods[] = {
+          MRB_MT_ENTRY(sprite_x, MRB_SYM(x), MRB_ARGS_NONE())  //
+          MRB_MT_ENTRY(sprite_x_set, MRB_SYM_E(x), MRB_ARGS_REQ(1))  //
+          MRB_MT_ENTRY(sprite_add, MRB_OPSYM(add), MRB_ARGS_REQ(1))  //
+      };
+    #undef MRB_MT_CLASS
+      MRB_MT_INIT_ROM(M, spr, sprite_methods);
+    #define MRB_MT_CLASS Gfx_singleton
+      static const mrb_mt_entry gfx_functions[] = {
+          MRB_MT_ENTRY(
+              gfx_update, MRB_SYM(update), MRB_ARGS_NONE())  //
+      };
+    #undef MRB_MT_CLASS
+      MRB_MT_INIT_ROM(M, mrb_singleton_class_ptr(M, mrb_obj_value(gfx)), gfx_functions);
+    }
+  CPP
+  entries = CoreNativeCandidates.engine_entries([path])
+  suite.check('engine entries carry their owner, a wrapped entry included, and no operator',
+              entries.map { |e| "#{e[:owner]}##{e[:name]}" }.sort == %w[Gfx.singleton#update Gfx::Sprite#x Gfx::Sprite#x=])
+  rows = [['Gfx::Sprite', 'x', 'sprite_x'], ['Gfx::Sprite', 'x=', 'sprite_x_set'], ['Gfx.singleton', 'update', 'gfx_update']]
+  suite.check('rows that agree with the tokens make every key realisable',
+              CoreNativeCandidates.engine_rom_keys(entries, rows).to_a.sort == %w[Gfx.singleton#update Gfx::Sprite#x Gfx::Sprite#x=])
+  suite.check('a table also installed into another class is not realisable',
+              !CoreNativeCandidates.engine_rom_keys(entries, rows + [['Gfx::Plane', 'x', 'sprite_x']]).include?('Gfx::Sprite#x'))
+  suite.check('an installed entry without a token entry keeps its key',
+              !CoreNativeCandidates.engine_rom_keys(entries, rows + [['Gfx::Sprite', 'x', 'other_x']]).include?('Gfx::Sprite#x'))
+  suite.check('a token entry no table installs is not realisable',
+              !CoreNativeCandidates.engine_rom_keys(entries, rows.first(1)).include?('Gfx::Sprite#x='))
+  header = CoreNativeCandidates.header([], [], %w[Gfx::Sprite#x= Gfx.singleton#update], entries)
+  suite.check('the header drops exactly the listed engine entries',
+              header.lines.grep(/^#define/).sort == ["#define MRB_MT_EXCLUDE_Gfx__Sprite_SYM_E__x 1\n",
+                                                      "#define MRB_MT_EXCLUDE_Gfx_singleton_SYM__update 1\n"])
+end
+
 suite.finish!
