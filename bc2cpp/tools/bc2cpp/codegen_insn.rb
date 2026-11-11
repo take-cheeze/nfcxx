@@ -1048,18 +1048,21 @@ class CodeGen
        target_def = super_target(owner_def)
        d_reg = insn.reg
        n = insn.plain_fixed_argc? ? insn.argc : nil
+       site_marker = irep ? initializer_site_marker(irep, idx) : ''
        zsuper_plan = reg_offset.zero? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        zsuper_lookup = reg_offset.zero? && zsuper_plan.nil? ? zsuper_lookup_plan(owner_def, irep, idx) : nil
-       if target_def && d_reg && n && super_arity_ok?(target_def, n)
+       super_code = if target_def && d_reg && n && super_arity_ok?(target_def, n)
          note_super_site(:direct, owner_def, irep, idx)
          args = (1..n.to_i).map { |i| "#{RegName[d_reg.to_i + i]}" }
          # An optional target's `_impl` takes every optional and the given count (direct_call_args pads them).
          impl = "#{cpp_name(target_def.owner, target_def.name)}_impl"
          args, = direct_call_args(target_def, args, impl)
-         "  #{RegName[d_reg]} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
+         direct = target_def.name == 'initialize' && idx ? "  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{target_def.owner}\n" : ''
+         "#{direct}  #{RegName[d_reg]} = #{impl}(M, self#{args.map { |x| ", #{x}" }.join});\n"
        elsif zsuper_plan && d_reg
          note_super_site(:zsuper_forward, owner_def, irep, idx)
-         compile_zsuper_forward(zsuper_plan, d_reg)
+         direct = zsuper_plan[:target_def].name == 'initialize' && idx ? "  // INITIALIZER_DIRECT #{irep.label}:#{idx} #{zsuper_plan[:target_def].owner}\n" : ''
+         direct + compile_zsuper_forward(zsuper_plan, d_reg)
        elsif zsuper_lookup && d_reg
          note_super_site(:zsuper_lookup, owner_def, irep, idx)
          compile_zsuper_lookup(zsuper_lookup, d_reg)
@@ -1081,6 +1084,7 @@ class CodeGen
          note_super_site(:unhandled, owner_def, irep, idx)
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end
+       super_code.is_a?(String) ? site_marker + super_code : super_code
      when :ARGARY
       # The array this ARGARY builds is only read by the next `SUPER ... n=*` (both plans check the adjacency and
       # registers), and both translations use the original registers instead, so it is not built. OP_ARGARY has
