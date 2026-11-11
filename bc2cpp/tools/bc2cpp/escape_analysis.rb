@@ -9,6 +9,7 @@ require_relative 'bytecode_ir_regions'
 require_relative 'core_hierarchy_sigs'
 require_relative 'core_defs'
 require_relative 'send_names'
+require_relative 'call_records'
 
 # ESCAPE_ANALYSIS: one value-flow module for "does the value this instruction creates leave
 # the frame that made it?". Every claim is sound by construction. The default answer is "escapes", and a
@@ -553,7 +554,7 @@ module EscapeAnalysis
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && NAMING_SENDS.include?(insn.sym)
             scan_naming_send(irep, idx, insn, insn.sym, 1)
           elsif BytecodeIR::Ops::SEND.include?(insn.op) && FORWARDING_SENDS.include?(insn.sym)
-            named = insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg + 1))
+            named = forwarded_name(irep, idx, insn)
             scan_naming_send(irep, idx, insn, named, 2) if named && NAMING_SENDS.include?(named)
           end
         end
@@ -585,9 +586,7 @@ module EscapeAnalysis
 
     # +first+: argument slot of the first name (1, or 2 behind the method name of a forwarding send).
     def scan_naming_send(irep, idx, insn, sym, first)
-      count = insn.plain_fixed_argc? ? insn.argc.to_i : -1
-      last = count - first + 1
-      names = last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg + k)) } : []
+      names = naming_arguments(irep, idx, insn, first)
       literal = !names.empty? && names.none?(&:nil?)
       case sym
       when 'alias_method'
@@ -600,6 +599,33 @@ module EscapeAnalysis
         @defs[names[0]] << MethodDef.new(name: names[0], owner: '<define_method>', irep: nil, visibility: :public,
                                          installer: :define_method)
       end
+    end
+
+    # The method a forwarding send (`send(:alias_method, ...)`) names by its first argument, when that is a literal Symbol.
+    def forwarded_name(irep, idx, insn)
+      dataflow = -> { insn.plain_fixed_argc? && insn.argc.to_i.positive? && literal_symbol(irep, idx, (insn.reg + 1)) || nil }
+      call = CallRecords.at(irep, insn)
+      return dataflow.call unless call
+
+      CallRecords.agree(:forwarded_name, irep, insn, CallRecords.names(call).first, &dataflow)
+    end
+
+    # The literal Symbol (nil: not one) of each argument of the naming send from +first+ on (1-based). CALL_RECORDS: the emitter's
+    # record of the call, else the registers the dataflow reads.
+    def naming_arguments(irep, idx, insn, first)
+      dataflow = lambda do
+        count = insn.plain_fixed_argc? ? insn.argc.to_i : -1
+        last = count - first + 1
+        last.positive? ? (first..count).map { |k| literal_symbol(irep, idx, (insn.reg + k)) } : []
+      end
+      call = CallRecords.at(irep, insn)
+      return dataflow.call unless call
+
+      written = CallRecords.names(call, first - 1)
+      # Compared as "the literal list, or not one": the dataflow reads a splat or a long call as no arguments at all.
+      literal = ->(list) { list unless list.empty? || list.any?(&:nil?) }
+      CallRecords.agree(:naming_names, irep, insn, literal.call(written)) { literal.call(dataflow.call) }
+      written
     end
 
     # The Symbol every definition reaching +reg+ loads, or nil.

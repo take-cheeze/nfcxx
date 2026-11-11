@@ -28,7 +28,7 @@ require_relative 'fixture_runtime'
 
 TOOLS = ENV['BC2CPP_TOOL'] ? File.dirname(ENV['BC2CPP_TOOL']) : File.expand_path('../../tools/bc2cpp', __dir__)
 %w[irep bytecode_ir numeric_flow codegen dynamic_names codegen_numeric_proof codegen_numeric_args codegen_captured_locals
-   codegen_class_object_args].each { |file| require File.join(TOOLS, file) }
+   codegen_class_object_args codegen_fixnum_proof codegen_receiver_facts construct_class_names].each { |file| require File.join(TOOLS, file) }
 
 failures = []
 check = lambda do |what, condition|
