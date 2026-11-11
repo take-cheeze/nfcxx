@@ -126,6 +126,7 @@ ruby scripts/bc2cpp/type_check_iterate_check.rb
 ruby scripts/bc2cpp/explicit_receiver_override_contracts_check.rb
 ruby scripts/bc2cpp/module_includer_bound_check.rb
 ruby scripts/bc2cpp/alias_method_check.rb
+ruby scripts/bc2cpp/call_records_check.rb
 ruby scripts/bc2cpp/singleton_const_owner_check.rb
 ruby scripts/bc2cpp/enumerator_class_unit_check.rb
 ruby scripts/bc2cpp/frozen_hash_lookup_check.rb
