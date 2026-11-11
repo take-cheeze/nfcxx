@@ -23,6 +23,31 @@
 
 class BadIR < StandardError; end
 
+# A map keyed by object identity (what Hash#compare_by_identity gave): the key is its object_id, and the entry keeps the
+# key object, so its id cannot be reused while the map holds it. The pinned mruby has no compare_by_identity.
+class IdentityMap
+  def initialize
+    @h = {}
+  end
+
+  def [](k)
+    e = @h[k.object_id]
+    e && e[1]
+  end
+
+  def []=(k, v)
+    @h[k.object_id] = [k, v]
+    v
+  end
+
+  def fetch(k)
+    e = @h[k.object_id]
+    return e[1] if e
+    block_given? ? yield(k) : raise(KeyError, "key not found")
+  end
+end
+
+
 HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
@@ -463,8 +488,8 @@ def inline_pass(forms, max_depth, report)
   extra = []     # attr forms for callers, appended after the functions
   # Per function form (by identity, so a rewritten function starts afresh): its largest id, and whether it has a call statement
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
-  ids = {}.compare_by_identity
-  calls = {}.compare_by_identity
+  ids = IdentityMap.new
+  calls = IdentityMap.new
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
@@ -587,7 +612,7 @@ def promote_address_slots(children)
   promoted_count = [0]
   ptr_atom = {}
   ptr_slots.each_key { |n| ptr_atom["$\"#{n}\""] = true }
-  has_store = {}.compare_by_identity   # filled below, before the walk
+  has_store = IdentityMap.new   # filled below, before the walk
   promote_in_list = lambda do |list|
     i = 0
     orig = 0    # i in the list as it was when idx was built (each promotion deletes the statement at i)
@@ -1088,7 +1113,7 @@ end
 
 # An index that a bounds check has proved to be 0 (`(bounds I 1)` traps unless 0 <= I < 1): (index B I S) is the address B. The
 # check dominates the index in its statement list, or an enclosing one.
-def fold_unit_index(list, unit, sets = {}.compare_by_identity)
+def fold_unit_index(list, unit, sets = IdentityMap.new)
   unit = unit.dup
   list.each_with_index do |s, i|
     next unless s.is_a?(Array)
@@ -1180,7 +1205,7 @@ def cprop_function(children)
   # the slots a statement may store (anywhere inside it)
   # Memoized per form: the walk only replaces the right side of a let (a load by a constant), which holds no store, so a
   # form's stores do not change while the walk runs. Nested containers are then read once, not once per enclosing container.
-  stored_memo = {}.compare_by_identity
+  stored_memo = IdentityMap.new
   stored_in = lambda do |x|
     next [] unless x.is_a?(Array)
     stored_memo[x] ||= begin
