@@ -95,6 +95,19 @@ POSITIVE = <<~RUBY
       b = [3, 4]
       a[0] + b[1]
     end
+
+    # The array escapes once, at the return or the ivar store, and the escape materialises the buffer (see
+    # STACK_TUPLE_PROMOTE_OPS in codegen_stack_tuples.rb).
+    def promo_return
+      a = [1, 2]
+      a[0] = 9
+      a
+    end
+
+    def promo_store
+      @kept = [3, 4]
+      @kept[1]
+    end
   end
 RUBY
 
@@ -110,14 +123,16 @@ POSITIVE_EXPECTED = {
   'TupPos.new.big_fixnum' => '100002',
   'TupPos.new.loop_read' => '8',
   'TupPos.new.two_arrays' => '5',
+  'TupPos.new.promo_return' => '[9, 2]',
+  'TupPos.new.promo_store' => '4',
 }.freeze
 # The methods that place a buffer: every other POSITIVE method must keep its Array.
 POSITIVE_PLACED = %w[pair_sum set_read oob_read neg_read sized alias_store symbols store_value big_fixnum loop_read
-                     two_arrays].freeze
+                     two_arrays promo_return promo_store].freeze
 # The methods whose only ARRAY is the placed literal: their chunk has no mruby Array construction at all.
 POSITIVE_ONLY_LITERAL = %w[pair_sum set_read oob_read neg_read sized alias_store big_fixnum loop_read].freeze
 
-# Each method refuses (an escape, a loop-carried creation, an unknown or out-of-bounds index, a non-immediate element,
+# Each method refuses (an escape that is not a return or ivar store as the array's last use, a loop-carried creation, an unknown or out-of-bounds index, a non-immediate element,
 # a read the placement does not model). The values must still match the interpreter.
 NEGATIVE = <<~RUBY
   class TupSink
@@ -126,9 +141,17 @@ NEGATIVE = <<~RUBY
   end
 
   class TupNeg
-    def escapes
+    # The array is used after the store that escapes it, so the escape is not its last use: it keeps its Array.
+    def read_after
       a = [1, 2]
-      a
+      @k = a
+      a[0]
+    end
+
+    def branch_read(c)
+      a = [1, 2]
+      @k = a if c
+      a[0]
     end
 
     def kept
@@ -237,7 +260,8 @@ NEGATIVE = <<~RUBY
 RUBY
 
 NEGATIVE_EXPECTED = {
-  'TupNeg.new.escapes' => '[1, 2]',
+  'TupNeg.new.read_after' => '1',
+  'TupNeg.new.branch_read(true)' => '1',
   'TupNeg.new.kept' => '1',
   'TupNeg.new.loop_made' => '3',
   'TupNeg.new.unknown_index(1)' => '2',

@@ -315,8 +315,12 @@ begin
              at_return && at_return.size >= 2)
 
   site, points = points_site(rows, 'escapes')
-  check.call('escapes: the site is reported as escaped, with no complete sets',
-             site && !points.empty? && points.all? { |r| r[4] == 'escaped' })
+  escape_rows = points.select { |r| r[5] == 'escape' }
+  check.call('escapes: the site is reported escaping, at an instruction that holds only the value',
+             site && escape_rows.size == 1 && escape_rows.first[4].to_s.split(',').size == 1)
+  escape_index = escape_rows.first && escape_rows.first[2].to_i
+  check.call('escapes: the flow runs on past the escape, so later instructions have sets',
+             escape_index && points.any? { |r| r[2].to_i > escape_index && r[4].to_s != 'escaped' })
 ensure
   FileUtils.remove_entry(points_dir)
 end

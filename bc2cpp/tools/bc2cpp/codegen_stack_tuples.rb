@@ -10,7 +10,9 @@ require_relative 'escape_analysis'
 # the buffer is an ordinary local.
 #
 # A site is placed only when all of these hold (refusal is always the answer when unsure):
-#   escape        the ESCAPE_ANALYSIS verdict for the creation is non-escaping
+#   escape        the ESCAPE_ANALYSIS verdict for the creation is non-escaping, or its one escape is a return or an
+#                 ivar store of the array register that is its last use (PROMOTE: the buffer is materialised into a
+#                 heap Array there, see stack_tuple_promote_site)
 #   closures      the irep builds no BLOCK or LAMBDA, which could read the frame's register by pointer
 #   cycle         the creation is not on a cycle, so one frame holds one instance of it
 #   elements      every element register's reaching definitions are immediate loads
@@ -39,12 +41,15 @@ class CodeGen
   STACK_TUPLE_LIST_OPS = Set[:ARYCAT, :ARYSPLAT, :HASHCAT, :STRCAT, :RANGE_INC, :RANGE_EXC, :HASH,
                              :HASHADD].freeze
   STACK_TUPLE_SIZE_NAMES = Set['size', 'length'].freeze
+  # PROMOTE: the one instruction where a placed array may escape: a return or an ivar store of the array register.
+  STACK_TUPLE_PROMOTE_OPS = Set[:RETURN, :SETIV].freeze
   # The Array methods a placed instruction stands in for: a Ruby definition of any of them could answer instead.
   STACK_TUPLE_REDEFINABLE = %w[[] []= size length].freeze
 
   # One ARRAY the plan places. +elems+ are its element registers in order; +uses+ maps each instruction that reads the
   # array to its StackTupleUse.
-  StackTupleSite = Struct.new(:idx, :lead, :elems, :uses, keyword_init: true)
+  # +promote+ is the instruction index where the array escapes (nil when it does not), see stack_tuple_promote_site.
+  StackTupleSite = Struct.new(:idx, :lead, :elems, :uses, :promote, keyword_init: true)
   # One instruction reading the array. +kind+ is :get (index), :set (index and the value register) or :size; +dest+ is
   # the register the instruction writes.
   StackTupleUse = Struct.new(:site, :kind, :index, :value, :dest, keyword_init: true)
@@ -143,10 +148,28 @@ class CodeGen
       state[:bypassed] << idx
       return nil
     end
+    # A promotion is the escaping instruction's own text plus a prefix: stack_tuple_promote places it.
+    return nil if entry[0] == :promote
 
     state[:hooked] << idx
     kind, what = entry
     kind == :site ? stack_tuple_site_text(what) : stack_tuple_use_text(what)
+  end
+
+  # The text of the escaping instruction +idx+ of a promoted array: its register is materialised first, then the
+  # instruction compiles as usual (+compile+ returns that text). Called by StackTupleCompileInsn only.
+  def stack_tuple_promote(irep, idx, reg_offset)
+    state = @stack_tuple_state
+    entry = state && idx && irep && state[:label] == irep.label ? state[:map][idx] : nil
+    return yield unless entry && entry[0] == :promote
+    if reg_offset != 0 || @resumable
+      state[:bypassed] << idx
+      return yield
+    end
+
+    state[:hooked] << idx
+    site = entry[1]
+    "  r#{site.lead} = bc2cpp_promote_array(M, #{stack_tuple_name(site.idx)}, #{site.elems.size});\n" + yield
   end
 
   private
@@ -160,6 +183,7 @@ class CodeGen
     plan.each do |idx, site|
       map[idx] = [:site, site]
       site.uses.each { |j, use| map[j] = [:use, use] }
+      map[site.promote] = [:promote, site] if site.promote
     end
     map.freeze
   end
@@ -205,6 +229,44 @@ class CodeGen
     end
   end
 
+  # The one escape a placed array may have, as the escape report's point rows name it: a return or an ivar store of
+  # the array register, reached only by the creation (every path to it defines the register by the creation), where
+  # the array is the only register that holds it and the creation is not on a cycle. Returns its instruction index, or
+  # nil (refused). Each refused case gets a reason; the array then escapes as before.
+  def stack_tuple_promote_site(irep, prog, idx, verdict, lead)
+    sites = verdict.escape_sites
+    return refuse(:escape_unindexed) unless sites && sites.size == 1 && sites.first[1]
+
+    j = sites.first[1]
+    return refuse(:escape_op) unless STACK_TUPLE_PROMOTE_OPS.include?(prog.source_at(j).op)
+    return refuse(:escape_holds_more) unless verdict.holding_at(j).map { |reg| reg.to_i }.to_set == Set[lead]
+    return refuse(:escape_in_cycle) if stack_tuple_cycle?(prog, j)
+
+    prods = BytecodeIR.producers(irep, j, lead, through_handlers: true)
+    return refuse(:escape_not_creation) unless prods && !prods.empty? && prods.all? { |p| !p.entry? && p.index == idx }
+
+    j
+  end
+
+  # No instruction after the escape reads a register that may hold the array on entry to it (a call, a copy or an
+  # unmodelled op counts as a read), so nothing reads the buffer once the array is materialised. The per-point sets
+  # tell which registers hold it there; a register the value has since left is not a read of it.
+  def stack_tuple_quiet_after?(prog, promote, verdict, params)
+    seen = Set.new
+    work = prog.successors_of(promote, include_handlers: true).dup
+    until work.empty?
+      i = work.pop
+      next unless seen.add?(i)
+
+      reads = stack_tuple_reads(prog.source_at(i), params)
+      held = verdict.holding_at(i).map { |reg| reg.to_i }
+      return false if reads == :all || reads.any? { |reg| held.include?(reg) }
+
+      work.concat(prog.successors_of(i, include_handlers: true))
+    end
+    true
+  end
+
   def stack_tuple_site(irep, prog, idx, analyzer)
     lit = prog.container_literal(idx)
     return refuse(:not_literal_array) unless lit && lit.kind == :array && lit.count.between?(1, STACK_TUPLE_MAX)
@@ -216,15 +278,20 @@ class CodeGen
     return refuse(:element_not_immediate) unless elems.all? { |reg| stack_tuple_immediate_at?(irep, idx, reg) }
     return refuse(:in_cycle) if stack_tuple_cycle?(prog, idx)
 
-    verdict = analyzer.creation(irep, idx)
-    return refuse(verdict.reason || :escapes) if verdict.escapes?
+    verdict = analyzer.creation(irep, idx, points: true)
+    promote = nil
+    if verdict.escapes?
+      promote = stack_tuple_promote_site(irep, prog, idx, verdict, lead)
+      return nil unless promote
+    end
 
     tracked = verdict.tracked.map { |reg| reg.to_i }.to_set
     tracked.add(lead)
     params = stack_tuple_params(irep)
     return refuse(:parameter_register) if tracked.any? { |reg| reg.between?(1, params + 1) }
+    return refuse(:use_after_escape) if promote && !stack_tuple_quiet_after?(prog, promote, verdict, params)
 
-    site = StackTupleSite.new(idx: idx, lead: lead, elems: elems, uses: {})
+    site = StackTupleSite.new(idx: idx, lead: lead, elems: elems, uses: {}, promote: promote)
     uses = stack_tuple_uses(irep, prog, site, tracked, params)
     return refuse(:use_refused) unless uses
 
@@ -239,7 +306,8 @@ class CodeGen
     prog.instructions.each do |ins|
       j = ins.index
       insn = ins.source
-      next if j == site.idx || insn.op == :MOVE
+      # The escaping instruction reads the array through its materialised register, not the buffer.
+      next if j == site.idx || j == site.promote || insn.op == :MOVE
 
       reads = stack_tuple_reads(insn, params)
       candidates = reads == :all ? tracked : reads.select { |reg| tracked.include?(reg) }
@@ -405,7 +473,9 @@ end
 # Prepended to CodeGen, last: outermost compile_insn for the planned instructions.
 module StackTupleCompileInsn
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
-    stack_tuple_insn(irep, idx, reg_offset) || super
+    stack_tuple_insn(irep, idx, reg_offset) || stack_tuple_promote(irep, idx, reg_offset) do
+      super(insn, irep, owner_def, idx, reg_offset)
+    end
   end
 end
 

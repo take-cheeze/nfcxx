@@ -1671,6 +1671,13 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_arena_keep(M, ai, call());
     }
     #define bc2cpp_funcall_keep(M, ...) bc2cpp_keep_call(M, [&] { return mrb_funcall(M, __VA_ARGS__); })
+    // STACK_TUPLES promotion: a placed array's buffer becomes a heap Array at the instruction where it escapes. Rooted
+    // like any new object, since the escaping store or return holds it only in a C local until then.
+    static inline mrb_value bc2cpp_promote_array(mrb_state* M, const mrb_value* v, mrb_int n) {
+      mrb_value a = mrb_ary_new_from_values(M, n, v);
+      bc2cpp_root(M, a);
+      return a;
+    }
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
       bc2cpp_root(M, v);
       return v;
