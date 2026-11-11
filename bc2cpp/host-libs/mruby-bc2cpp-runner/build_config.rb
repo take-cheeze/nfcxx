@@ -31,18 +31,18 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
      mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
      mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy mruby-struct
      mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding].each { |g| conf.gem core: g }
-  conf.gem File.join(ROOT, 'host-libs/mruby-require')
+  conf.gem File.expand_path('../mruby-require', __dir__)
   # Marshal (the scan cache) depends on mruby-onig-regexp, which bundles Onigmo, as build_config.rb has it.
   conf.gem File.join(ROOT, '3rd/mruby-onig-regexp') do
     bundle_onigmo
   end
   conf.gem File.join(ROOT, '3rd/mruby-marshal')
   %w[mruby-shellwords mruby-json mruby-digest mruby-fileutils mruby-tmpdir mruby-tempfile mruby-dir-glob
-     mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib].each { |g| conf.gem File.join(ROOT, 'ruby-libs', g) }
+     mruby-strscan mruby-compare-by-identity mruby-yaml mruby-zlib].each { |g| conf.gem File.expand_path("../../ruby-libs/#{g}", __dir__) }
   conf.gem File.join(ROOT, '3rd/mruby-stringio')
-  conf.gem File.join(ROOT, 'host-libs/mruby-prism')
-  conf.gem File.join(ROOT, 'host-libs/mruby-rbs')
-  conf.gem File.join(ROOT, 'host-libs/mruby-process')
+  conf.gem File.expand_path('../mruby-prism', __dir__)
+  conf.gem File.expand_path('../mruby-rbs', __dir__)
+  conf.gem File.expand_path('../mruby-process', __dir__)
   conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-sources')
   conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner')
 end
