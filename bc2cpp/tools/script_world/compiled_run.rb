@@ -111,6 +111,10 @@ def mruby_config(temp, gems, flags)
     base = proc do
       toolchain
       gembox 'full-core'
+      # The interpreter's VM limits (MRB_STACK_MAX, 0x40000 slots, and MRB_CALL_LEVEL_MAX, 512 calls, by default) are ones the
+      # compiled build, which recurses on the C stack, does not share: a deep recursion that CRuby and the compiled build
+      # finish raises SystemStackError here.
+      cc.defines << 'MRB_STACK_MAX=0x400000' << 'MRB_CALL_LEVEL_MAX=16384'
       cc.defines << 'MRB_ARY_LENGTH_MAX=0' << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'
       cxx.defines << 'MRB_ARY_LENGTH_MAX=0' << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'
     end
