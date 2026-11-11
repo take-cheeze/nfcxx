@@ -176,7 +176,9 @@ Dir.mktmpdir do |dir|
   check.call('the world registers five aliases', err[SITES_LINE, 1] == '5' && err[SITES_LINE, 2] == '0')
   run = body_of.call(code, 'AlFx_run')
   check.call('run calls greet and both aliases of it directly',
-             %w[greet old_greet kw_greet].all? { |m| run.include?("AlFx_#{m}_impl(M, self") })
+             %w[greet old_greet kw_greet].all? do |m|
+               run.include?("AlFx_#{m}_impl(M, self") || run.include?("// CALL_INLINE AlFx##{m} (")
+             end)
   check.call('the aliases are compiled', %w[old_greet kw_greet _al_init].all? { |m| code.include?("AlFx_#{m}_impl(mrb_state* M") })
   check.call('a call to an alias without a body is an owner call, not a by-name send',
              body_of.call(code, 'AlFx_hello').include?('CLOSED_WORLD owner-call: old_hello'))

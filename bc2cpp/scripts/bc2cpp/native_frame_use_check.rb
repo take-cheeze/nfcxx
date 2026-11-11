@@ -10,6 +10,8 @@
 #            a function pointer that is a parameter, a pointer that is never assigned a function, a library function
 #            that reads the frame, a callee that does
 #   registrations  plain defines of a gem, attributed by the class variable or a core class field
+#   C++      a lambda read where it is written, a template's callable parameter, a class's constructor and destructor
+#            through a local of it, a callable member, global or `catch`; a lambda registered in place has no row
 #
 # Usage: ruby scripts/bc2cpp/native_frame_use_check.rb
 
@@ -217,11 +219,107 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   suite.check('a framed native has no row', rows.none? { |_o, _n, f| f == 'n_block' || f == 'n_table' })
   suite.check('a function the corpus does not define has no row', NativeFrameUse.rows([gem], []).empty?)
 
+  cxx = File.join(dir, 'gem.cxx')
+  File.write(cxx, <<~CXX)
+    #include <vector>
+    #define HELPER(x) do { if (x) { mrb_raise(M, E_RUNTIME_ERROR, "{"); } } while (0)
+    typedef void (*hook_fn)(const char*);
+    hook_fn g_log_hook;
+    void (*g_raw_hook)(int);
+    namespace {
+    struct Box {
+      int f;
+      Box() { mrb_full_gc(nullptr); }
+      ~Box() {}
+      int get() const { return f; }
+    };
+    struct CbBox {
+      int (*cb)(int);
+      int call_cb(int v) { return cb(v); }
+    };
+    struct Guard {
+      mrb_state* M;
+      ~Guard() { (void)M->c->ci; }
+    };
+    template <class F> int apply(F&& fn) { return fn(1); }
+    int helper_b_like(int) { return 0; }
+    mrb_value cx_args(mrb_state* M, mrb_value self) {
+      mrb_int n;
+      mrb_get_args(M, "i", &n);
+      std::vector<int> v;
+      v.push_back(1);
+      return mrb_int_value(M, v.size() + n);
+    }
+    mrb_value cx_lambda(mrb_state* M, mrb_value self) {
+      return mrb_int_value(M, apply([&](int x) { return x + 1; }));
+    }
+    mrb_value cx_lambda_block(mrb_state* M, mrb_value self) {
+      return mrb_int_value(M, apply([&](int x) { return mrb_block_given_p(M) ? x : 0; }));
+    }
+    mrb_value cx_box(mrb_state* M, mrb_value self) {
+      Box b;
+      return mrb_int_value(M, b.get());
+    }
+    mrb_value cx_guard(mrb_state* M, mrb_value self) {
+      Guard g{M};
+      return self;
+    }
+    mrb_value cx_member_cb(mrb_state* M, mrb_value self) {
+      CbBox b;
+      return mrb_int_value(M, b.cb(2));
+    }
+    mrb_value cx_global_hook(mrb_state* M, mrb_value self) {
+      if (g_log_hook) g_log_hook("x");
+      return self;
+    }
+    mrb_value cx_store_hook(mrb_state* M, mrb_value self) {
+      g_raw_hook = nullptr;
+      return self;
+    }
+    mrb_value cx_catch(mrb_state* M, mrb_value self) {
+      try { mrb_raise(M, E_RUNTIME_ERROR, "x"); } catch (...) {}
+      return self;
+    }
+    mrb_value cx_callback_value(mrb_state* M, mrb_value self) {
+      return mrb_int_value(M, apply(helper_b_like));
+    }
+    }  // namespace
+    extern "C" void mrb_cx_gem_init(mrb_state* M) {
+      RClass* k = mrb_define_class(M, "Cx", M->object_class);
+      mrb_define_method(M, k, "args", cx_args, MRB_ARGS_REQ(1));
+      mrb_define_method(M, k, "hook", cx_global_hook, MRB_ARGS_NONE());
+      mrb_define_method(M, k, "inline", [](mrb_state* M, mrb_value self) { return self; }, MRB_ARGS_NONE());
+    }
+  CXX
+  cxx_corpus = corpus + [cxx]
+  cxx_effects = NativeFrameUse.effects(NativeFrameUse.definitions(cxx_corpus), NativeFrameUse.callable_names(cxx_corpus))
+  cxx_free = ->(name) { cxx_effects.key?(name) && NativeFrameUse.frame_free?(cxx_effects.fetch(name)) }
+  kinds = ->(name) { cxx_effects.fetch(name, Set[:undefined]).to_a.sort.join(',') }
+  # A local of a class takes every member's effects (cpp_definitions): Box has no framed member, CbBox has call_cb.
+  %w[cx_args cx_lambda cx_box cx_store_hook cx_callback_value].each do |name|
+    suite.check("C++ #{name} is frame-free (#{kinds.call(name)})", cxx_free.call(name))
+  end
+  %w[cx_lambda_block cx_guard cx_member_cb cx_global_hook cx_catch].each do |name|
+    suite.check("C++ #{name} is framed (#{kinds.call(name)})", !cxx_free.call(name))
+  end
+  suite.check('a member function reading a plain field is frame-free (Box#get)', cxx_free.call('get'))
+  suite.check('a member function calling its own callable member is framed (CbBox#call_cb)', !cxx_free.call('call_cb'))
+  suite.check('a brace inside a macro or a string opens no scope (cx_args is found)', cxx_effects.key?('cx_args'))
+  cxx_rows = NativeFrameUse.rows([cxx], cxx_corpus)
+  suite.check('a C++ plain define is a row', cxx_rows.include?(%w[Cx args cx_args]))
+  suite.check('a native calling a global hook has no row', cxx_rows.none? { |_o, n, _f| n == 'hook' })
+  suite.check('a lambda registered in place names no function and has no row', cxx_rows.none? { |_o, n, _f| n == 'inline' })
+
   source = NativeFrameUse.cpp_source(Set['IO#getbyte', 'Thing.singleton#make'])
   suite.check('the helper lists each row and installs the frame-free hook mrb_funcall_with_method consults',
               source.include?('{ "IO", "getbyte" }') && source.include?('{ "Thing.singleton", "make" }') &&
               source.include?('M->frame_free_p = bc2cpp_frame_free_hook'))
   suite.check('the found call defers the decision to mrb_funcall_with_method', !source.include?('mrb_call_direct('))
+  owner, name, wrapper, = OwnerCallDirect::NATIVE_ROWS.first
+  handed = NativeFrameUse.wrappers_source(Set["#{owner}##{name}"])
+  suite.check('a frame-free row\'s owner-call wrapper is handed to the set', handed.include?("{ #{wrapper} }") &&
+              NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i])'))
+  suite.check('a framed row\'s wrapper is not', NativeFrameUse.wrappers_source(Set['IO#getbyte']).empty?)
   suite.check('without rows no hook is installed', !NativeFrameUse.cpp_source(Set.new).include?('frame_free_p'))
   ENV['BC2CPP_FRAMEFREE'] = '0'
   suite.check('BC2CPP_FRAMEFREE=0 turns the rewrite off', !NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('frame_free_p'))

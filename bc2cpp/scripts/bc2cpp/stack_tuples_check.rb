@@ -383,6 +383,56 @@ CHR_APP_EXPECTED = {
 }.freeze
 OWNERS_CHR = %w[ChrSub ChrApp].freeze
 
+# CALL_INLINE (codegen_call_inline.rb): a call the compiler already binds to one definition (here by the receiver being
+# exactly a fresh IcPoint) becomes the callee's instructions when the callee is a small register-only body. The cases cover
+# the Integer, Float, String and nil operands of the inlined arithmetic and compare (the slow arms), a branching callee, a
+# callee that is only a move, and a callee that sends (not inlined).
+CALL_INL = <<~RUBY5
+  class IcPoint
+    def initialize(x, y); @x = x; @y = y; end
+    def sq(a); a * a; end
+    def cmax(a, b); a > b ? a : b; end
+    def ident(a); a; end
+    def dec(a); a - 1; end
+    def flag(a); a.nil?; end
+    def sumxy; @x + @y; end
+    def bump(d); @x += d; end
+    def twice(a); sumxy + a; end
+    def me; self; end
+  end
+
+  class IcUse
+    def run(n); p = IcPoint.new(1, 2); p.sq(n) + p.cmax(n, 3) + p.ident(7); end
+    def square(x); IcPoint.new(0, 0).sq(x); end
+    def pick(a, b); IcPoint.new(0, 0).cmax(a, b); end
+    def down(a); IcPoint.new(0, 0).dec(a); end
+    def nosend(a); IcPoint.new(0, 0).flag(a); end
+    def twice(n); pt = IcPoint.new(0, 0); [pt.sq(n), pt.sq(n + 1)]; end
+    def state(n); pt = IcPoint.new(1, 2); pt.bump(n); [pt.sumxy, pt.twice(10)]; end
+    def same; pt = IcPoint.new(0, 0); pt.me.equal?(pt); end
+  end
+RUBY5
+CALL_INL_EXPECTED = {
+  'IcUse.new.run(5)' => '37',
+  'IcUse.new.run(2)' => '14',
+  'IcUse.new.square(1.5)' => '2.25',
+  'IcUse.new.square(70000)' => '4900000000',
+  'begin; IcUse.new.square(nil); rescue NoMethodError => e; e.class; end' => 'NoMethodError',
+  'IcUse.new.pick("a", "b")' => '"b"',
+  'IcUse.new.pick(3, 3)' => '3',
+  'IcUse.new.pick(4, 3)' => '4',
+  'IcUse.new.down(10)' => '9',
+  'IcUse.new.down(1.5)' => '0.5',
+  'IcUse.new.nosend(nil)' => 'true',
+  'IcUse.new.nosend(1)' => 'false',
+  'IcUse.new.twice(3)' => '[9, 16]',
+  'IcUse.new.state(5)' => '[8, 18]',
+  'IcUse.new.state(1.5)' => '[4.5, 14.5]',
+  'begin; IcUse.new.state(nil); rescue TypeError => e; e.class; end' => 'TypeError',
+  'IcUse.new.same' => 'true'
+}.freeze
+OWNERS_INL = %w[IcPoint IcUse].freeze
+
 # The text of one method's C++ body, from its `// Owner#name (compiled from ...)` header to the next method's header.
 def method_chunk(code, owner, name)
   code.split(%r{^(?=// \S+#\S+ \(compiled from)}).find { |chunk| chunk.start_with?("// #{owner}##{name} (") } || ''
@@ -488,6 +538,25 @@ Dir.mktmpdir('stack-tuples') do |dir|
   saved_chr.nil? ? ENV.delete('BC2CPP_CHR_APPEND') : ENV['BC2CPP_CHR_APPEND'] = saved_chr
   check.call('kill switch: BC2CPP_CHR_APPEND=0 rewrites nothing', !chr_off_code.include?('CHR_APPEND'))
 
+  inl_dir = File.join(dir, 'inl')
+  Dir.mkdir(inl_dir)
+  inl_code, inl_err = runtime.generate(CALL_INL, inl_dir, core: true, only_owners: OWNERS_INL)
+  { 'run' => ['IcPoint#sq', 'IcPoint#cmax', 'IcPoint#ident'], 'square' => ['IcPoint#sq'], 'pick' => ['IcPoint#cmax'],
+    'down' => ['IcPoint#dec'], 'state' => ['IcPoint#bump', 'IcPoint#sumxy'], 'same' => ['IcPoint#me'] }.each do |name, callees|
+    chunk = method_chunk(inl_code, 'IcUse', name)
+    callees.each { |c| check.call("IcUse##{name} inlines #{c}", chunk.include?("// CALL_INLINE #{c} (")) }
+  end
+  check.call('IcPoint#twice inlines its self call to IcPoint#sumxy (an SSEND bound to one definition)',
+             method_chunk(inl_code, 'IcPoint', 'twice').include?('// CALL_INLINE IcPoint#sumxy ('))
+  check.call('IcUse#nosend keeps the call to a callee that sends', !method_chunk(inl_code, 'IcUse', 'nosend').include?('CALL_INLINE'))
+  check.call('inlined bodies use their own register range, and the call line is gone',
+             !method_chunk(inl_code, 'IcUse', 'square').include?('IcPoint_sq_impl(M'))
+  saved_inl = ENV.fetch('BC2CPP_INLINE_CALLS', nil)
+  ENV['BC2CPP_INLINE_CALLS'] = '0'
+  inl_off_code = Dir.mktmpdir('call-inline-off') { |off| runtime.generate(CALL_INL, off, core: true, only_owners: OWNERS_INL).first }
+  saved_inl.nil? ? ENV.delete('BC2CPP_INLINE_CALLS') : ENV['BC2CPP_INLINE_CALLS'] = saved_inl
+  check.call('kill switch: BC2CPP_INLINE_CALLS=0 inlines nothing', !inl_off_code.include?('CALL_INLINE'))
+
   # 2. parity, interpreted against compiled
   build = runtime.full_or_build
   if build
@@ -495,7 +564,8 @@ Dir.mktmpdir('stack-tuples') do |dir|
      [OWNERS_NEG, neg_dir, neg_err, NEGATIVE_EXPECTED, 'negative'],
      [OWNERS_REDEF, redef_dir, redef_err, REDEFINED_EXPECTED, 'redefined'],
      [OWNERS_STR, str_dir, str_err, STR_EQ_EXPECTED, 'string literal compare'],
-     [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append']].each do |owners, sub, err, expected, label|
+     [OWNERS_CHR, chr_dir, chr_err, CHR_APP_EXPECTED, 'chr append'],
+     [OWNERS_INL, inl_dir, inl_err, CALL_INL_EXPECTED, 'call inline']].each do |owners, sub, err, expected, label|
       built, output = runtime.run(sub, err, owners, harness_rows.call(expected), build: build, full: true)
       sections = runtime.sections(output)
       check.call("#{label}: built and ran", built)

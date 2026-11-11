@@ -14,7 +14,8 @@ concurrency:
 # The gcc backend (EDG's C compiled by gcc) is the slow, redundant half of most suites: Path B and qbe are the backends a change
 # is judged on. Its runs happen on pushes to main only (GCC_BACKEND=1); a PR runs the same jobs without them, so every selected
 # job still reports success to the build-and-test gate. Steps that run gcc test `env.GCC_BACKEND`; the entries of the test
-# matrix that exist only for gcc carry gcc_only: true and skip their steps (not the job: a skipped job would fail the gate).
+# matrix that exist only for gcc (.github/ci-test-matrix.yml, gcc_only: true) are left out of the matrix by scripts/ci-scope.rb
+# off main, so those legs never start (a whole job skipped would fail the gate; a matrix with fewer legs does not).
 env:
   GCC_BACKEND: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
 
@@ -55,149 +56,13 @@ jobs:
         run: sccache --show-stats
 
   test:
-    needs: build
+    needs: [build, pathb-changes]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      # The entries are .github/ci-test-matrix.yml, filtered by scripts/ci-scope.rb (gcc-only entries only on main).
       matrix:
-        include:
-          - name: cases (QBE and gcc backends)
-            run: |
-              NFCXX_BACKEND=qbe tests/run.sh
-              if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
-          - name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
-            run: |
-              tests/cpp-features/self-test.sh
-              tests/upstream/self-test.sh
-              FEATURE_ROUTES="qbe$([ "$GCC_BACKEND" = 1 ] && echo " gcc")" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
-              tests/mruby/run.sh
-          - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
-            dotnet: true
-            run: |
-              scripts/setup-cil.sh
-              scripts/setup-pathb.sh
-              tests/cil/run.sh
-              tests/pathb-cil/run.sh
-          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
-            run: |
-              tests/lib/run.sh
-              tests/target/run.sh
-              tests/builtins/run.sh
-              tests/trace/run.sh
-              tests/c/run.sh
-              tests/c/cc-mode.sh
-              tests/cxx-driver/run.sh
-              tests/determinism/run.sh
-              tests/float-to-int/run.sh
-          - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
-            env:
-              COSMOCC_SHA256: ${{ vars.COSMOCC_SHA256 }}
-            run: |
-              scripts/setup-cosmo.sh
-              tests/cosmo/run.sh
-          - name: real-world tinyxml2, nlohmann/json, and {fmt}
-            run: |
-              tests/realworld/run.sh
-              tests/realworld/run_json.sh
-              tests/realworld/run_fmt.sh
-          - name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
-            run: |
-              tests/multi-tu/run.sh
-              tests/modules/run.sh
-              tests/ehshim/run.sh
-              tests/eh-unwind/run.sh
-              tests/eval/run.sh
-              tests/ffi/run.sh
-              tests/bundle/run.sh
-              tests/call-abi/run.sh
-          # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
-          # landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
-          - name: EH unwinder (gcc and qbe backends, NFCXX_EH_UNWIND=1)
-            run: |
-              if [ "$GCC_BACKEND" = 1 ]; then
-                NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
-                NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
-              fi
-              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
-              NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
-          # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
-          # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
-          - name: nfcpoly host (QBE backend)
-            go: true
-            interp: true
-            suite: poly
-            backend: qbe
-            run: NFCXX_BACKEND=qbe tests/poly/run.sh
-          - name: nfcpoly host (gcc backend)
-            gcc_only: true
-            go: true
-            interp: true
-            suite: poly
-            backend: gcc
-            run: NFCXX_BACKEND=gcc tests/poly/run.sh
-          - name: nfcpoly Go under AddressSanitizer
-            go: true
-            run: tests/poly/asan-go.sh
-          - name: nfcast engine and tier (QBE backend)
-            run: NFCXX_BACKEND=qbe tests/ast/run.sh
-          - name: nfcast engine and tier (gcc backend)
-            gcc_only: true
-            run: NFCXX_BACKEND=gcc tests/ast/run.sh
-          - name: uop core and numpy (QBE backend)
-            onnx: true
-            suite: uop
-            group: core
-            backend: qbe
-            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop onnx and runtimes (QBE backend)
-            onnx: true
-            suite: uop
-            group: onnx
-            backend: qbe
-            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
-          - name: uop poly languages (QBE backend)
-            go: true
-            onnx: true
-            interp: true
-            suite: uop
-            group: poly
-            backend: qbe
-            run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
-          - name: uop core and numpy (gcc backend)
-            gcc_only: true
-            onnx: true
-            suite: uop
-            group: core
-            backend: gcc
-            run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: uop onnx and runtimes (gcc backend)
-            gcc_only: true
-            onnx: true
-            suite: uop
-            group: onnx
-            backend: gcc
-            run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=gcc tests/uop/run.sh
-          - name: uop poly languages (gcc backend)
-            gcc_only: true
-            go: true
-            onnx: true
-            interp: true
-            suite: uop
-            group: poly
-            backend: gcc
-            run: NFCXX_BACKEND=gcc tests/uop/run_poly.sh
-          - name: C++ PTX emitter (build) and GPU kernel on the PTX interpreter
-            run: |
-              ninja -C tools/pathb-ptx-emit
-              tests/gpu/run_interp.sh
-          - name: AddressSanitizer (gcc and qbe backends)
-            run: |
-              if [ "$GCC_BACKEND" = 1 ]; then tests/asan/run.sh; fi
-              ASAN_BACKEND=qbe tests/asan/run.sh
-          # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
-          - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
-            pathb: true
-            run: tests/pathb-egraph/run.sh
+        include: ${{ fromJSON(needs.pathb-changes.outputs.test_matrix) }}
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -214,7 +79,7 @@ jobs:
 
       # The interpreter of nfcpoly's Go backend (yaegi in a cgo library); without Go >= 1.24 tests/poly/run.sh skips Go.
       - name: Set up Go
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.go)
+        if: matrix.go
         uses: actions/setup-go@v7
         with:
           go-version-file: lib/poly/go/go.mod
@@ -224,7 +89,6 @@ jobs:
       # built from (the sources the build script and the compiler read, and the toolchain), so a hit is the output this commit
       # would build. The test programs are cached in the same way; they still run on every run.
       - name: Cache keys for the rebuilt outputs
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1')
         id: key
         run: |
           echo "toolchain=$(git rev-parse HEAD:3rd/edg)-$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)" >> "$GITHUB_OUTPUT"
@@ -234,7 +98,6 @@ jobs:
       # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
       # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
       - name: Restore the mruby tool
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1')
         uses: actions/cache@v6
         with:
           path: build/mruby-tool/bin/mruby
@@ -244,7 +107,7 @@ jobs:
       # the scripts, the patches and the pins in them, the compiler (nfcxx, nfcc, be/, the runtime files of lib/ that the
       # driver adds) and the toolchain.
       - name: Restore the nfcpoly interpreters
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.interp)
+        if: matrix.interp
         uses: actions/cache@v6
         with:
           path: |
@@ -255,7 +118,7 @@ jobs:
 
       # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.go)
+        if: matrix.go
         uses: actions/cache@v6
         with:
           path: build/poly-go
@@ -265,7 +128,6 @@ jobs:
       # than the checkout just made, and the setup scripts rebuild an output that is not newer than its inputs. The key already
       # says the restored output is built from these inputs, so the restored files are touched to say so.
       - name: Mark the restored outputs as up to date
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1')
         run: |
           for d in build/poly/*/ build/poly-lua/*/ build/poly-js/*/ build/poly-go/; do
             if [ -d "$d" ]; then find "$d" -type f -exec touch {} +; fi
@@ -275,14 +137,14 @@ jobs:
       # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
       # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
       - name: Python test dependencies (onnx, onnxruntime, numpy, onnxsim)
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.onnx)
+        if: matrix.onnx
         run: |
           sudo apt-get install -y --no-install-recommends python3-pip protobuf-compiler libprotobuf-dev
           python3 -m pip install --break-system-packages onnx onnxruntime numpy onnxsim==0.8.1
 
       - name: Restore libnfconnxsim.so
         id: onnxsim
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.onnx)
+        if: matrix.onnx
         uses: actions/cache@v6
         with:
           path: |
@@ -291,7 +153,7 @@ jobs:
           key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
 
       - name: Build libnfconnxsim.so
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.onnx && steps.onnxsim.outputs.cache-hit != 'true')
+        if: matrix.onnx && steps.onnxsim.outputs.cache-hit != 'true'
         run: scripts/setup-onnxsim.sh
 
       # The nfcpoly and nfcuop test programs. tests/poly/run.sh and tests/uop/run.sh keep each program they compile in
@@ -299,7 +161,7 @@ jobs:
       # programs include (poly: lib/poly and lib/ast; uop: lib/uop and lib/poly; the suite's tests), the runtime files the
       # driver links (lib/ehshim, lib/asan, lib/cuda), the scripts and the compiler, the back end and the toolchain.
       - name: Restore the test programs
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.suite)
+        if: matrix.suite
         uses: actions/cache@v6
         with:
           path: build/test-bin
@@ -307,12 +169,12 @@ jobs:
 
       # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
       - name: Path B harness cache key
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.pathb)
+        if: matrix.pathb
         id: pathb-key
         run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
 
       - name: Restore the Path B harness
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.pathb)
+        if: matrix.pathb
         id: harness
         uses: actions/cache@v6
         with:
@@ -320,17 +182,16 @@ jobs:
           key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
 
       - name: Build the Path B harness
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.pathb && steps.harness.outputs.cache-hit != 'true')
+        if: matrix.pathb && steps.harness.outputs.cache-hit != 'true'
         run: scripts/setup-pathb.sh
 
       - name: .NET 8 SDK (the CIL backend's test programs run with dotnet)
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1') && (matrix.dotnet)
+        if: matrix.dotnet
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
       - name: ${{ matrix.name }}
-        if: (!matrix.gcc_only || env.GCC_BACKEND == '1')
         env:
           TEST_BIN_CACHE: ${{ matrix.suite && 'build/test-bin' || '' }}
         run: ${{ matrix.run }}
@@ -567,6 +428,7 @@ jobs:
     outputs:
       changed: ${{ steps.paths.outputs.changed }}
       full_ci: ${{ steps.paths.outputs.full_ci }}
+      test_matrix: ${{ steps.paths.outputs.test_matrix }}
     steps:
       # fetch-depth 0: the change check diffs against the base commit, which a shallow clone does not have.
       - uses: actions/checkout@v7

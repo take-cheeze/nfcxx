@@ -3,6 +3,7 @@
 
 require 'json'
 require 'open3'
+require 'yaml'
 
 # Select CI coverage and validate the required aggregate check.
 module CiScope
@@ -14,9 +15,14 @@ module CiScope
   PATHB = %r{\A(?:be/|3rd/(?:edg|qbe|cproc)\z|scripts/|nfcc/|lib/|tests/run\.sh\z|
     tests/realworld/|\.github/actions/|
     tests/(?:pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|
-    tools/(?:pathb-spirv-emit|qbe-prep)/|nfcxx\z|\.github/workflows/ci\.yml\z)}nx
+    tools/(?:pathb-spirv-emit|qbe-prep)/|nfcxx\z|\.github/workflows/ci\.yml\z|\.github/ci-test-matrix\.yml\z)}nx
   FULL_JOBS = %w[build test arm-build arm-test macos-suites mrustc].freeze
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
+
+  # The entries of the `test` job's matrix (ci.yml), one job each. An entry with `gcc_only: true` runs the gcc backend only, which
+  # is for pushes to main (GCC_BACKEND in ci.yml): without gcc it is left out, so that leg never starts. The flag itself is not
+  # passed on (the steps read the other keys as matrix.<key>).
+  TEST_MATRIX = File.expand_path('../.github/ci-test-matrix.yml', __dir__)
 
   class DiffError < StandardError; end
 
@@ -28,6 +34,16 @@ module CiScope
     end
     { 'full_ci' => full.to_s,
       'changed' => (paths.empty? || paths.any? { |path| PATHB.match?(path) }).to_s }
+  end
+
+  def test_matrix(entries, gcc)
+    entries.reject { |entry| entry['gcc_only'] && !gcc }.map { |entry| entry.reject { |key, _| key == 'gcc_only' } }
+  end
+
+  # The gcc backend runs on pushes to main (and manual runs of main); GITHUB_REF is set by Actions, and absent in a local run.
+  def gcc?(env)
+    ref = env['GITHUB_REF'].to_s
+    ref.empty? || ref == 'refs/heads/main'
   end
 
   def changed_paths(base)
@@ -70,7 +86,9 @@ module CiScope
     when []
       base = env.fetch('BASE', '')
       paths = base.empty? || base.match?(/\A0+\z/) ? [] : changed_paths(base)
-      text = select(env.fetch('GITHUB_EVENT_NAME', ''), paths).map { |key, value| "#{key}=#{value}\n" }.join
+      selected = select(env.fetch('GITHUB_EVENT_NAME', ''), paths)
+      selected['test_matrix'] = JSON.generate(test_matrix(YAML.safe_load_file(TEST_MATRIX), gcc?(env)))
+      text = selected.map { |key, value| "#{key}=#{value}\n" }.join
       print text
       File.open(env.fetch('GITHUB_OUTPUT'), 'a') { |output| output.write(text) }
     else

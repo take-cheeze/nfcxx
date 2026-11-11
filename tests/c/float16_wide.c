@@ -1,4 +1,5 @@
 // X86-ONLY: uses __float128 (not a GCC type on aarch64) and the x86-64 long double helpers of be/nfcxx_ldrt.c
+// XFAIL-pathb: _Float16 is not a type of the SSA route (refused)
 // EXPECT: 0
 /* _Float16 from long double and __float128 is rounded once, from the exact value: a value just above a tie must round
    up, where a rounding to double first (exact there) would make a tie and round it to even. Also run under gcc. */

@@ -313,11 +313,14 @@ module Qbe
     return n == 4 ? 0x7fc00000 : 0x7ff8000000000000 if Qbe.nan_text?(text)
 
     v = Float(text)
-    raise QbeUnsupported, "float literal #{text}" if v.nan? || v.infinite?
+    raise QbeUnsupported, "float literal #{text}" if v.nan?
+    # An infinity (the reader gives +Infinity as 1e999): `double d = INFINITY;`, numeric_limits<double>::infinity() as a
+    # static initializer. It was refused, and a unit with one fell back to gcc.
+    return v.positive? ? (n == 4 ? 0x7f800000 : 0x7ff00000 << 32) : (n == 4 ? 0xff800000 : 0xfff00000 << 32) if v.infinite?
 
     sig = Qbe.sig_digits(text)
     if n == 4
-      packed = [v].pack("e")
+      packed = [to_float32(v)].pack("e")   # FLT_MAX is the literal 3.4028235E38: pack("e") alone would make it an infinity
       back = packed.unpack1("e")
       bits = packed.unpack1("L<")
     else
@@ -389,6 +392,9 @@ module Qbe
   def build_data(g, by_name, state)
     flags = global_flags(g)
     return :extern if flags.include?("extern")
+    # (section "S"), from __attribute__((section("S"))): the data is not placed in a section here, and a table that the
+    # linker delimits with __start_S / __stop_S would be empty, so the global is refused, not put in .data.
+    raise QbeUnsupported, "section attribute #{sx(g.find { |x| head(x) == "section" })}" if flags.include?("section")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -1238,8 +1244,10 @@ end
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call"
+        if atomic_fetch?(rv)
+          atomic_fetch_lines(dst, c, rv)
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
-        if unqual(rv[1]) == "bool"
+        elsif unqual(rv[1]) == "bool"
           raw = fresh
           @lines << "  #{raw} =w #{call_text(rv)}"
           low = fresh
@@ -1310,8 +1318,9 @@ end
           @lines << "  #{dst} =#{c} #{Qbe.load_op(rv[1])} #{a}"
         end
       when "const", "null", nil
-        @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String)
-        raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String)
+        # A bare slot address (a Ref): the inliner's copies of an argument's slot (an SSA rewrite can leave one as a let's value).
+        @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
+        raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
       else raise QbeUnsupported, "operator #{head(rv) || sx(rv)}"
       end
     end
@@ -1907,6 +1916,43 @@ end
       end
     end
 
+    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a sequentially
+    # consistent call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
+    # (Plain string tests: the bundled script runs under mruby, which has no regular expressions.)
+    ATOMIC_FETCH_PREFIX = "__atomic_fetch_"
+
+    # [op, size] of a __atomic_fetch_{add,sub}_{4,8} call, or nil.
+    def atomic_fetch_kind(c)
+      f = c[2]
+      return nil if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+      name = f.raw.delete('"')
+      return nil unless name.start_with?(ATOMIC_FETCH_PREFIX)
+      rest = name[ATOMIC_FETCH_PREFIX.length..]
+      op = rest[0, 3]
+      size = rest[4..]
+      return nil unless rest[3] == "_" && (op == "add" || op == "sub") && (size == "4" || size == "8")
+      [op, size]
+    end
+
+    def atomic_fetch?(c)
+      return false unless atomic_fetch_kind(c)
+      order = c[5]
+      head(order) == "const" && order[2].to_s == "5"
+    end
+
+    def atomic_fetch_lines(dst, cls, c)
+      op, size = atomic_fetch_kind(c)
+      w = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      val = op(c[4])
+      if op == "sub"
+        neg = fresh
+        @lines << "  #{neg} =#{w} sub 0, #{val}"
+        val = neg
+      end
+      @lines << "  #{dst} =#{w} xadd #{addr}, #{val}"
+    end
+
     def call_text(c)
       sret, _dest, sym, args = call_parts(c)
       raise QbeUnsupported, "a call with an aggregate result used as a value" if sret
@@ -2344,14 +2390,19 @@ end
     end
 # The functions this module defines, and the external functions it takes the address of as a value (not a direct
 # call, which goes through the PLT): each gets one pointer cell, defined once here.
-funcs = forms.select { |f| head(f) == "ssa-function" }.map { |f| Qbe.symbol(f[1].raw) }
+funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a list was searched linearly
+forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
 cells = []
+cell_seen = {}
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
     if x.sigil == "&"
       sym = Qbe.symbol(x.raw)
-      cells << sym unless funcs.include?(sym) || cells.include?(sym)
+      unless funcs.key?(sym) || cell_seen.key?(sym)
+        cell_seen[sym] = true
+        cells << sym
+      end
     end
     next
   end

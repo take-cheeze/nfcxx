@@ -1,4 +1,5 @@
 // EXPECT: 42
+// XFAIL-pathb: extended asm with named operands (%[name]) is refused
 // X86-ONLY: x86-64 inline asm
 // Register operands of an asm that clobbers every caller-saved register (the kernel's call_on_stack(), which calls a
 // function from the asm): the operands go to callee-saved registers, which the thunk preserves -- the caller's values
