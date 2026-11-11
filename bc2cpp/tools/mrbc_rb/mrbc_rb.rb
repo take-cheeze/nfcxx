@@ -76,7 +76,9 @@ module MrbcRb
                           Prism::GlobalVariableAndWriteNode, Prism::ConstantAndWriteNode, Prism::MultiWriteNode,
                           Prism::IndexOperatorWriteNode, Prism::IndexOrWriteNode, Prism::IndexAndWriteNode,
                           Prism::CallOperatorWriteNode, Prism::CallOrWriteNode, Prism::CallAndWriteNode, Prism::LambdaNode,
-                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode, Prism::RescueModifierNode, Prism::UndefNode, Prism::ParenthesesNode, Prism::MatchRequiredNode, Prism::MatchPredicateNode].freeze
+                          Prism::RegularExpressionNode, Prism::InterpolatedRegularExpressionNode, Prism::MatchLastLineNode, Prism::InterpolatedMatchLastLineNode, Prism::RescueModifierNode, Prism::UndefNode, Prism::ParenthesesNode, Prism::MatchRequiredNode, Prism::MatchPredicateNode, Prism::SuperNode,
+                          Prism::ForwardingSuperNode, Prism::ClassVariableWriteNode, Prism::ClassVariableOrWriteNode,
+                          Prism::ClassVariableAndWriteNode, Prism::ClassVariableOperatorWriteNode].freeze
 
   # Nodes whose line `enter` sets: every node the fork's codegen enters (a leaf, a call, a write, an array or a hash).
   ENTERED = [Prism::UndefNode, Prism::XStringNode, Prism::InterpolatedXStringNode, Prism::InterpolatedSymbolNode, Prism::IntegerNode, Prism::FloatNode, Prism::SourceFileNode, Prism::SourceLineNode,
