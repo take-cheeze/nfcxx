@@ -36,7 +36,20 @@ The required `build-and-test` name remains present on every run. Its gate
 requires successful selection with explicit boolean outputs, success from all
 selected jobs, and `skipped` from every unselected job. Failures, cancellations,
 missing outputs, inconsistent selection and unexpectedly skipped selected jobs
-fail the gate. The Path B selection agrees with the original regex on all
+fail the gate.
+
+The gate also checks the legs of the `test` job. Its matrix is generated:
+`scripts/ci-scope.rb` writes the entries of `.github/ci-test-matrix.yml` that
+apply to the ref as the `test_matrix` output (the entries marked `gcc_only`
+only for main), and `test` runs one leg per entry, named after it. The result
+of `test` alone would pass a matrix that had lost a leg, so the gate takes the
+same output from `NEEDS_JSON`, lists the jobs of the run (`JOBS_FILE`, written by
+the step before it with `gh api .../actions/runs/$GITHUB_RUN_ID/jobs?filter=latest`;
+the job has `actions: read`) and requires every named leg to have run and
+concluded `success`. A `test_matrix` that is missing, not JSON, empty or has
+unnamed or repeated legs fails the gate, and so does a run without its job list:
+the check fails closed. With general coverage left out (`full_ci=false`) no
+legs are expected and the list is not needed. The Path B selection agrees with the original regex on all
 5,011 paths tracked at the change's base revision.
 
 Validation: `ruby tests/ci/scope_check.rb` covers isolated and mixed changes,
