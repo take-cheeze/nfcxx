@@ -367,6 +367,11 @@ def octal?(c)
   c >= 48 && c <= 55
 end
 
+# Grammar delimiters are immutable and never appear in the parsed forms.
+# Share them between tokens and comparisons instead of allocating per use.
+IR_OPEN_PAREN = "(".freeze
+IR_CLOSE_PAREN = ")".freeze
+
 def tokenize(text)
   toks = []
   i = 0
@@ -376,7 +381,7 @@ def tokenize(text)
     if space_byte?(c)
       i += 1
     elsif c == 40 || c == 41
-      toks << c.chr
+      toks << (c == 40 ? IR_OPEN_PAREN : IR_CLOSE_PAREN)
       i += 1
     elsif c == 34
       s, i = read_string(text, i)
@@ -402,9 +407,9 @@ end
 def parse_forms(toks)
   stack = [[]]
   toks.each do |t|
-    if t.is_a?(String) && t == "("
+    if t.is_a?(String) && t == IR_OPEN_PAREN
       stack << []
-    elsif t.is_a?(String) && t == ")"
+    elsif t.is_a?(String) && t == IR_CLOSE_PAREN
       raise BadIR, "unbalanced ')' in IR" if stack.length == 1
       done = stack.pop
       stack[-1] << done
