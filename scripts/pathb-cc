@@ -31,6 +31,7 @@ opts=(); src=""; out=""
 safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
 asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
 passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-8388608}   # the inliner by default; none or off turns the passes off
+passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
 ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
@@ -41,7 +42,7 @@ while [ $# -gt 0 ]; do
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
     --sanitize=*) dump_opts+=("$1") ;;
-    --ir-opt=*) passes=${1#--ir-opt=} ;;
+    --ir-opt=*) passes=${1#--ir-opt=}; passes_given=1 ;;
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
     --emitter=*) emitter=${1#--emitter=} ;;
     --long-double=trap) ld_trap=1 ;;
@@ -59,6 +60,9 @@ done
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 n=$(basename "${src%.*}")
+# The checks of --asan and --safe-pointers are made on the IR as the program wrote it (stack and heap objects keep their
+# scopes): the inliner is off with them unless --ir-opt asks for it.
+[ $passes_given = 1 ] || { [ $safe_on = 0 ] && [ $asan_on = 0 ]; } || passes=none
 safe=(); [ $safe_on = 0 ] || { safe=(--safe); dump_opts+=(--ir-loc); }
 # The IR's (loc ...) lines give the report its source lines, and its (decl)/(scope-end) facts the use after scope (--ir-scopes).
 asan=(); [ $asan_on = 0 ] || { asan=(--asan); dump_opts+=(--ir-loc --ir-scopes); }
@@ -70,7 +74,7 @@ else "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]
 # tests' input) is emitted as it is.
 raw=0
 if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${PATHB_IR:-}" ]; then
-  size=$(stat -c %s "$tmp/$n.ir")
+  size=$(wc -c < "$tmp/$n.ir" | tr -d " ")   # wc, not stat: BSD stat has no -c
   if [ "$size" -gt "$ir_opt_max" ]; then
     echo "pathb-cc: $src: IR is $size bytes, over --ir-opt-max: not optimized" >&2
   else
