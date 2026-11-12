@@ -50,6 +50,8 @@ while [ $# -gt 0 ]; do
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
     --sanitize=*) dump_opts+=("$1") ;;
+    --dialect=*) opts+=("$1") ;;   # the EDG front-end mode (g++ or clang), as nfcxx's --dialect
+    --diag_*) opts+=("$1") ;;   # EDG diagnostic options (nfcxx's -Wno-narrowing: --diag_warning=narrowing_conversion), for pathb-dump
     --gnu-version=*|--gnu_version=*) opts+=("$1") ;;   # the GNU version EDG emulates (nfcxx --freestanding passes 130000)
     --ir-opt=*) passes=${1#--ir-opt=}; passes_given=1 ;;
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;

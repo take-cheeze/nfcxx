@@ -932,6 +932,8 @@ fi
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
 # Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.
+pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-narrowing), for scripts/pathb-dump
+[ $backend != pathb ] || [ "$dialect" != clang ] || pb_flags+=(--dialect=clang)   # EDG's clang mode, as the qbe path (scripts/pathb-dump)
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 # The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
