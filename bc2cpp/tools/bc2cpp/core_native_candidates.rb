@@ -311,7 +311,8 @@ module CoreNativeCandidates
   # CoreEnumeratorFree's verdict, or a callable that makes it (asked only when a native has a ENUM_SYMBOL_CALL).
   # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil)
+                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil,
+                compiled_core: nil)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
@@ -352,7 +353,7 @@ module CoreNativeCandidates
     undef_only = undef_names.reject { |name| names.include?(name) || core_mentions?(core, name) }.to_set
     note.call('undef call (an existence check at init)')
     names.merge(undef_names)
-    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases)
+    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases, compiled: compiled_core)
     [names, fragments, undef_only]
   ensure
     CoreNativeCandidates.settled_sites = previous if previous
@@ -462,7 +463,9 @@ module CoreNativeCandidates
   # `Kernel_print_impl`), so `RGSS__ErrorReport__Tee_print_impl` calls Tee#print and `IO_singleton_open_impl` calls
   # IO.open, neither a lookup of `print` or `open` nor a call of Kernel's. A body whose owner the file does not give
   # (`owner_of`) is read by name alone, as without the flag.
-  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {})
+  # +compiled+ (CORE_ROWS_COMPILED): the "Owner#name" bodies the core gem's generation compiles, whose lookups +generated+
+  # holds (the core generation is one of its sources), so their ireps are not read again.
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {}, compiled: nil)
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
@@ -475,7 +478,10 @@ module CoreNativeCandidates
         up = parent[up] until up.nil? || file[:body_of].key?(up)
         own = up && file[:body_of][up]
         if own
-          pending[own] << [irep, file[:owner_of]&.dig(up)]
+          owner = file[:owner_of]&.dig(up)
+          next if compiled && owner && compiled.include?("#{owner}##{own}")
+
+          pending[own] << [irep, owner]
         else
           names.note("core root or class body #{File.basename(file[:path].to_s)}") if names.respond_to?(:note)
           lookup.call(irep, nil, names, fragments)
