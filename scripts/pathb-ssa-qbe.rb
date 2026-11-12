@@ -544,6 +544,7 @@ module Qbe
       @params = form.find { |x| head(x) == "params" }.drop(1)
       @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @tls_cache = {}  # a thread-local global (raw name) => the temporary that holds its address (hoist_tls)
       @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
@@ -702,6 +703,39 @@ end
       end
       asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+      hoist_tls
+    end
+
+    # Whether op() addresses x (a @ref) as a thread-local object: the thread pointer plus the object's offset.
+    def tls_global?(x)
+      info = @globals[x.raw]
+      return false unless info && info[:thread]
+      return false if info[:weak] && info[:extern]
+      return false if info[:extern] && Qbe.darwin
+
+      true
+    end
+
+    # A thread-local object's address is `mov %fs:0, r; add sym@gottpoff(%rip), r` at every reference, and QBE does not share
+    # them. The EH stack top and the current region (__curr_eh_stack_entry, __eh_curr_region) are read and written at every
+    # push and pop of every frame. A global the function names three times or more has its address computed once, in the entry block,
+    # and shared (as GCC does: a function runs on one thread, so the address does not change under it).
+    def hoist_tls
+      counts = {}
+      walk = lambda do |x|
+        if x.is_a?(Ref)
+          counts[x.raw] = (counts[x.raw] || 0) + 1 if x.sigil == "@" && tls_global?(x)
+        elsif x.is_a?(Array)
+          x.each { |y| walk.call(y) }
+        end
+      end
+      @blocks.each { |b| walk.call(b[2..]) }
+      counts.each do |raw, n|
+        next if n < 3
+        t = fresh
+        @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(raw)}"
+        @tls_cache[raw] = t
+      end
     end
 
     # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
@@ -1385,6 +1419,8 @@ end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]
+            return @tls_cache[x.raw] if @tls_cache.key?(x.raw)
+
             t = fresh
             @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
             return t
