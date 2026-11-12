@@ -1026,6 +1026,15 @@ end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
 
+    # The cell of a pointer constant that does not fit in 32 bits (module_context), else nil.
+    def wide_pointer_cell(v)
+      return nil unless v.is_a?(Array) && @link[:wides]
+      return @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2]), v[1])] if head(v) == "const" && head(v[1]) == "ptr" && v[2].is_a?(String)
+      return nil unless head(v) == "i2p" && head(v[2]) == "const" && v[2][2].is_a?(String)
+
+      @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2][2]), v[1])]
+    end
+
     # A phi operand that takes instructions: an expression, or the address of a function this module does not define
     # (loaded from its pointer cell, see op). QBE wants nothing but phis at the top of a block, and the operand must be
     # defined where its edge starts, so the predecessor computes it (pending_phi_operands).
@@ -1595,7 +1604,12 @@ end
         @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
       # An integer to pointer conversion widens the integer as an iconv to a 64-bit type does (pathb-qbe-emit.rb's i2p).
-      when "i2p" then conv_lines(dst, t, rv[2])
+      when "i2p"
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+        else
+          conv_lines(dst, t, rv[2])
+        end
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
@@ -1691,6 +1705,10 @@ end
         end
       when "const", "null", nil
         # A bare slot address (a Ref): the inliner's copies of an argument's slot (an SSA rewrite can leave one as a let's value).
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+          return
+        end
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
         raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
       else raise QbeUnsupported, "operator #{head(rv) || sx(rv)}"
@@ -3039,6 +3057,7 @@ funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a lis
 forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
 cells = []
 cell_seen = {}
+wides = {}   # wide pointer constant => the name of its cell
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
@@ -3051,7 +3070,15 @@ collect = lambda do |x|
     end
     next
   end
-  if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+  # (a `(const (ptr T))` with no value is a qualified type, not a constant)
+  if (head(x) == "const" && head(x[1]) == "ptr" && x[2].is_a?(String)) || (head(x) == "i2p" && head(x[2]) == "const" && x[2][2].is_a?(String))
+    # A pointer constant that does not fit in a 32-bit displacement: QBE propagates it through copies and phis into the
+    # displacement of the access that uses it, unchecked (Fn#wide_pointer_cell). It is loaded from a cell instead.
+    k = head(x) == "i2p" ? Qbe.wrap_lit(Qbe.int_lit(x[2][2]), x[1]) : Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1])
+    unless (-2**31...2**31).cover?(k) || wides.key?(k)
+      wides[k] = "pathb_wide#{wides.size}"
+    end
+  elsif head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
     x[3..].each { |a| collect.call(a) }
   else
     x.each { |y| collect.call(y) }
@@ -3059,7 +3086,8 @@ collect = lambda do |x|
 end
 forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
 data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
-{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, ubfiles: {} } }
+data += wides.map { |k, name| "data $#{name} = align 8 { l #{k} }" }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, wides: wides, ubfiles: {} } }
   end
 
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
