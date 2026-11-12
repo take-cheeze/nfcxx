@@ -1236,12 +1236,33 @@ module StaticDispatchRegistrations
     # name => the ancestor classes some such `super` may reach. Any other `super` makes the name dynamic as before.
     super_reach = {}
     super_unknown = Set.new
+    # SUPER_DIRECT (closed only): a site every copy of which calls its target's `_impl` looks nothing up. Identical
+    # bodies share a key, so it holds only when every site carrying it is in an engine method some run compiled.
+    super_direct = closed_only ? InitializerTables.super_direct(runs.values) : Set.new
+    unless super_direct.empty?
+      compiled_keys = runs.each_value.flat_map { |r| r[:entries].map { |e| "#{e[:owner]}##{e[:name]}" } }.to_set
+      engine_owner = owner_re(true)
+      ireps.each_value do |irep|
+        BytecodeIR.for(irep).each_source do |insn, index|
+          next unless insn.op == :SUPER
+
+          up = method_of[irep.label]
+          owner, name = up && body_of[up]
+          next if owner&.match?(engine_owner) && compiled_keys.include?("#{owner}##{name}")
+
+          super_direct.delete([irep.content_digest, index])
+        end
+      end
+    end
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
+      BytecodeIR.for(irep).each_source do |insn, index|
+        next unless insn.op == :SUPER
+
         up = method_of[irep.label]
         next unless up
 
         owner, name = body_of[up]
+        next if super_direct.include?([irep.content_digest, index])
         reach = closed_only && super_ancestors(owner, superclass_of)
         if reach
           (super_reach[name] ||= Set.new).merge(reach)

@@ -3585,6 +3585,15 @@ static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
   return 1;
 }
 
+/* The libm names of fpclassify and signbit on the argument's type. glibc has the bare names for a double (__fpclassify,
+   __signbit) and an f suffix for a float. Apple's libm exports the bare names only for x86_64; on arm64 it has the typed
+   __fpclassifyd/__fpclassifyf and __signbitd/__signbitf, so there the double name is suffixed too. */
+#ifdef __APPLE__
+#define IR_LIBM_TYPED(base, single) ((single) ? base "f" : base "d")
+#else
+#define IR_LIBM_TYPED(base, single) ((single) ? base "f" : base)
+#endif
+
 /* The floating-point classification and comparison built-ins (<cmath>'s isnan, isinf, isfinite, isnormal, signbit, fpclassify,
    isgreater ...): 1 when NAME is one and its lowering is in *out. x - x is 0 for a finite x and NaN for an infinity or a NaN,
    which tells them apart without bit tricks; the comparisons are the ordered ones QBE has (false when unordered), which is
@@ -3626,7 +3635,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
       /* libm's classification returns the FP_* values of the same <math.h> that supplied the five constants */
       ir_val x = ir_rval(xa);
       ir_note(0, eok_call, 1);
-      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, ir_size_of(xa->type) == 4 ? "__fpclassifyf" : "__fpclassify", x.s)), e->type);
+      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, IR_LIBM_TYPED("__fpclassify", ir_size_of(xa->type) == 4), x.s)), e->type);
       return 1;
     }
     return 0;
@@ -3640,7 +3649,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
     char *r;
     ir_note(0, eok_call, 1);
     if (strcmp(name, "signbit") == 0) {
-      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, single ? "__signbitf" : "__signbit", x.s)), e->type);
+      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, IR_LIBM_TYPED("__signbit", single), x.s)), e->type);
       return 1;
     }
     {

@@ -134,6 +134,7 @@ ruby scripts/bc2cpp/record_hash_update_check.rb
 ruby scripts/bc2cpp/record_nilable_read_check.rb
 ruby scripts/bc2cpp/constructor_optionals_check.rb
 ruby scripts/bc2cpp/initializer_sites_check.rb
+ruby scripts/bc2cpp/super_direct_check.rb
 ruby scripts/bc2cpp/native_args_check.rb
 ruby scripts/bc2cpp/operator_sends_check.rb
 ruby scripts/bc2cpp/setter_receiver_filter_check.rb

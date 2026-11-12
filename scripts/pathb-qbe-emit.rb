@@ -2866,9 +2866,12 @@ def arm64_apple?(target)
   arm64_target?(target) && target.end_with?("_apple")
 end
 
-# The directives that make the symbol SYM (as the IL names it) a weak definition.
-def weak_lines(sym, target)
+# The directives that make the symbol SYM (as the IL names it) a weak definition, or (defined false, the unit does not
+# define it) a weak reference: on Apple, .weak_reference, which ld64 resolves to null in an executable only with dynamic
+# lookup (tests/pathb-qbe/run.sh links with it when the assembly has one).
+def weak_lines(sym, target, defined = true)
   return [".weak #{sym}"] unless arm64_apple?(target)
+  return ["\t.weak_reference _#{sym}"] unless defined
   ["\t.globl _#{sym}", "\t.weak_definition _#{sym}"]
 end
 
@@ -2896,10 +2899,26 @@ RAW_ASM_MARK = "# pathb-raw-asm "
 def append_weak(il_path, asm_path, target)
   names = []
   extra = []
-  read_text(il_path).split("\n").each do |line|
+  il_lines = read_text(il_path).split("\n")
+  apple = arm64_apple?(target)
+  # Apple: a weak name the unit defines (a label of the assembly, or an alias) is .weak_definition, else .weak_reference.
+  defined = {}
+  refused = nil
+  if apple
+    read_text(asm_path).split("\n").each { |l| defined[l[0...-1]] = true if l.end_with?(":") && !l.start_with?("\t") }
+    il_lines.each do |line|
+      next unless line.start_with?(ALIAS_MARK)
+      p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
+      defined["_" + p[1]] = true if p.length >= 3
+    end
+  end
+  il_lines.each do |line|
     if line.start_with?(WEAK_MARK)
       names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip
     elsif line.start_with?(RAW_ASM_MARK)
+      # A file-scope asm block is ELF text (its sections and directives are the ELF ones): Apple's assembler has no form for it.
+      refused ||= "file-scope asm has ELF directives, no Mach-O form (refused)" if apple
+      next if apple
       text = [line.byteslice(RAW_ASM_MARK.bytesize, line.bytesize - RAW_ASM_MARK.bytesize).strip].pack("H*")
       extra << (text.end_with?("\n") ? text : text + "\n")
     elsif line.start_with?(ASM_MARK)
@@ -2917,14 +2936,24 @@ def append_weak(il_path, asm_path, target)
     elsif line.start_with?(ALIAS_MARK)
       p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
       next if p.length < 3
+      if apple
+        # Apple: the same .set on the underscore names; no .type (Apple's assembler has none), and no ifunc form.
+        refused ||= "ifunc #{p[1]}: Mach-O has no indirect function symbol (refused)" if p[0] == "ifunc"
+        next if p[0] == "ifunc"
+        extra << (["\t.globl _#{p[1]}", "\t.set _#{p[1]}, _#{p[2]}"] +
+                  (p.length > 3 && p[3] == "weak" ? ["\t.weak_definition _#{p[1]}"] : [])).join("\n") + "\n"
+        next
+      end
       extra << ["\t#{p.length > 3 && p[3] == "weak" ? ".weak" : ".globl"} #{p[1]}",
                 "\t.type #{p[1]}, #{p[0] == "function" ? "@function" : p[0] == "ifunc" ? "@gnu_indirect_function" : "@object"}",
                 "\t.set #{p[1]}, #{p[2]}"].join("\n") + "\n"
     end
   end
+  # A refused unit writes nothing: the caller reports status 3 and the driver builds it with gcc, as for other refusals.
+  return die("pathb-qbe-emit: #{refused}\n", 3) if refused
   unless names.empty? && extra.empty?
     File.open(asm_path, "a") do |f|
-      f.write("\n" + names.map { |n| weak_lines(n, target).map { |l| l + "\n" }.join }.join + extra.join)
+      f.write("\n" + names.map { |n| weak_lines(n, target, defined.key?("_" + n) || !apple).map { |l| l + "\n" }.join }.join + extra.join)
     end
   end
   0
@@ -3430,6 +3459,20 @@ def stub_long_double(forms)
   out
 end
 
+# The x87 thunks are x86-64 assembly (fstpt, fldt, the SysV argument registers). The target is the host's, or
+# PATHB_X87_TARGET (x86_64 or arm64) when set; on arm64 a module that needs a thunk is refused (status 3), and the driver
+# builds it with gcc (docs/notes/pathb-longdouble.md). A long double program that needs no thunk is emitted as before.
+def x87_target
+  t = `printenv PATHB_X87_TARGET`.strip
+  t = `uname -m`.strip if t.empty?
+  t
+end
+
+def x87_check!(what)
+  return if %w[x86_64 amd64].include?(x87_target)
+  raise Refused, "long double #{what}: the x87 ABI thunks are x86-64 assembly (target #{x87_target}); built with gcc instead"
+end
+
 # Marker comments for the x87 thunks (append_weak writes the assembly) that live code needs: a call thunk when some kept
 # function or global refers to __nfcxx_x87c_F, an entry thunk when __nfcxx_ldr_F was kept.
 def emit_x87_thunks(mod, forms)
@@ -3448,14 +3491,20 @@ def emit_x87_thunks(mod, forms)
     name = pstr(f[2])
     if kind == "call" || kind == "callc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?("__nfcxx_x87c_" + name)
+      next unless refs.key?("__nfcxx_x87c_" + name)
+      x87_check!("call of #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}"
     elsif kind == "icall" || kind == "icallc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
       sym = (kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + name
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?(sym)
+      next unless refs.key?(sym)
+      x87_check!("indirect call through #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}"
     elsif kind == "entry" || kind == "entryc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6 || !(f[3] == "weak" || f[3] == "global" || f[3] == "local")
-      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}" if kept.key?("__nfcxx_ldr_" + name)
+      next unless kept.key?("__nfcxx_ldr_" + name)
+      x87_check!("function #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}"
     else
       raise BadIR, "x87-thunk kind #{form_text(f)}"
     end
@@ -3499,6 +3548,9 @@ def emit_module(text, do_prune = true, ld_trap = false)
     if f.drop(5).any? { |p| head_of(p) == "weak" } && f.drop(5).any? { |p| head_of(p) == "extern" } &&
        !f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.weakdata[pstr(f[1])] = true
+    end
+    if $extern_got && f.drop(5).any? { |p| head_of(p) == "extern" } && !f.drop(5).any? { |p| head_of(p) == "thread" }
+      mod.weakdata[pstr(f[1])] = true   # the GOT route: the same form as a weak extern
     end
     if f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.thread[pstr(f[1])] = f.drop(5).any? { |p| head_of(p) == "extern" } ? "ext" : "def"
@@ -3559,6 +3611,12 @@ def main(argv)
   end
   if !args.empty? && args[0] == "--long-double=trap"
     ld_trap = true
+    args = args.drop(1)
+  end
+  if !args.empty? && args[0] == "--extern-data-got"
+    # Darwin (pathb-cc): an extern data object (not thread-local) is read through the GOT, `copy extern $x`, as clang does.
+    # An adrp/add pair to its @page is a relocation ld64 cannot resolve for a symbol in a dylib (libc++'s vtables).
+    $extern_got = true
     args = args.drop(1)
   end
   if !args.empty? && args[0] == "--safe"

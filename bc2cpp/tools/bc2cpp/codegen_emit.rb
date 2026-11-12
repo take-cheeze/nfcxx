@@ -308,15 +308,13 @@ class CodeGen
           ops << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
           next
         end
+        names = [m[:name]]
+        # CORE_ALIASES: the same entry under the names the bytecode aliased it to. A left-out source still registers
+        # the aliases the build keeps (SETTLED_ALIASES, core_native_candidates.rb).
+        names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
         if unregistered.include?("#{owner}##{m[:name]}")
           ops << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
-          ops << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(m[:name])}, #{singleton});\n"
-          left_out << m[:name]
-          next
         end
-        names = [m[:name]]
-        # CORE_ALIASES: the same entry under the names the bytecode aliased it to.
-        names += self.class.core_aliases&.dig([owner, m[:name]]) || [] if @owner_of[m[:label]]&.core
         omitted, names = names.partition { |name| unregistered.include?("#{owner}##{name}") }
         omitted.each { |name| ops << "  bc2cpp_left_out(M, #{var}, #{c_string_literal(name)}, #{singleton});\n" }
         left_out.merge(omitted)
