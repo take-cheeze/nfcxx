@@ -79,7 +79,7 @@ EXIT_USAGE = 2
 EXIT_PARTIAL = 3
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--safe | --asan] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--safe | --asan] [--pic] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -360,6 +360,7 @@ no_prune = false
 ld_trap = false
 safe = false
 asan = false
+pic = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -371,6 +372,7 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--long-double=trap" then ld_trap = true
   when "--safe" then safe = true
   when "--asan" then asan = true
+  when "--pic" then pic = true
   when /\A--qbe=(.+)\z/ then $qbe_path = $1
   else usage_exit
   end
@@ -380,6 +382,7 @@ usage_exit if safe && output.nil?
 usage_exit if asan && safe   # both replace malloc and check accesses: one at a time
 Qbe.safe = safe
 Qbe.asan = asan
+Qbe.pic = pic
 Qbe.darwin = RbConfig::CONFIG["host_os"].include?("darwin")
 # extern data through the GOT (copy extern): on Darwin (ld64 cannot bind a dylib symbol at a page offset) and on aarch64
 # Linux (a PIE adrp to a symbol in another object or a shared library is out of its range: R_AARCH64_ADR_PREL_PG_HI21)

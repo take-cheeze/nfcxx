@@ -6,7 +6,7 @@ cproc -> QBE), `cil` and `gcc`. `NFCXX_BACKEND=pathb` adds a fourth, **opt-in** 
 The default stays `qbe`.
 
 ```
-NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, -fPIC ... are accepted and do not change the object)
+NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, ... are accepted and do not change the object; -fPIC and -shared make the object fit a shared object, see below)
 NFCXX_BACKEND=pathb nfcc a.o b.c -lm -o prog   link: the host cc, with EDG's runtime (libC.a), the long double helpers, libatomic
 NFCXX_BACKEND=pathb nfcc -S a.c -o a.s         the assembly Path B hands to the assembler
 ```
@@ -27,7 +27,13 @@ cannot honour instead of dropping it:
 | `-isystem`, `-iquote`, `-idirafter`, `-imacros`, `-nostdinc`, `-undef`, `--sysroot=` | refused (`not supported by the pathb backend`) |
 | `-Wa,*` | refused (Path B assembles with the host cc) |
 | `-funsigned-char`, `-fshort-wchar`, `-ffreestanding`, `-fsanitize*`, `-fopenmp`, `-ffast-math`, `-m32`, other semantic `-f`/`-m` options, C++ | refused as on the qbe backend (no `NFCXX_GCC_PASSTHROUGH`/`NFCXX_QBE_KERNEL` on this backend) |
-| `-O*`, `-g*`, `-W*`, `-fPIC`, `-fwrapv`, `-fno-strict-aliasing`, `-m64`, `-mtune=`, `-march=` ... | accepted, no effect (as on qbe) |
+| `-O*`, `-g*`, `-W*`, `-fwrapv`, `-fno-strict-aliasing`, `-m64`, `-mtune=`, `-march=` ... | accepted, no effect (as on qbe) |
+
+`-fPIC`, `-fpic` and `-shared` pass `--pic` to `scripts/pathb-cc` (`nfcxx` does too for `-shared` and `-fPIC`): the object is meant for a
+shared object, so the address of an exported function is read from a pointer cell and the address of an exported or extern data
+object through the GOT, never as a PC-relative reference (`ld`: "relocation R_X86_64_PC32 ... can not be used when making a shared
+object"). The gnu dialects (gcc's default, `-std=gnuNN`) also get `-D_DEFAULT_SOURCE`, which glibc implies for gcc but EDG's C mode
+turns off with its `_POSIX_SOURCE`; a strict `-std=cNN` does not.
 
 A translation unit Path B itself refuses (an unsupported construct) exits with Path B's status, 3, and a
 `pathb-cc: FILE: SSA route: ...` line, so a build system sees a failed compile. There is no fallback to another

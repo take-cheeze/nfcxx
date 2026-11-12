@@ -11,8 +11,8 @@ A case that does not work on Path B stays on qbe and carries a `QBE-ONLY: <reaso
 | tests/realworld/run_lua.sh, run_lua_make.sh | gcc, Path B | none (computed goto: docs/notes/pathb-computed-goto.md) |
 | tests/realworld/run_mruby.sh, run_optcarrot.sh | qbe, gcc | Path B refuses mrbc.c (`parse_args: operator unsupported`) |
 | tests/realworld/run_tinycc.sh | qbe, gcc | QBE: invalid type for first operand in add (xadd) |
-| tests/realworld/run_astro.sh | qbe, gcc | calc code store, libprism link, koruby_precise front-end error |
-| tests/realworld/run_fmt.sh | gcc | Path B refuses `uint128_fallback::operator+=` |
+| tests/realworld/run_astro.sh | qbe, gcc, Path B | none (the Path B gaps are in docs/notes/astro.md, "Path B") |
+| tests/realworld/run_fmt.sh | gcc, Path B | none (`__builtin_ia32_addcarryx_u64`, used by `uint128_fallback::operator+=`, is lowered) |
 | tests/realworld/run_sdcc.sh | unchanged | not run on Path B (needs flex and boost in the session that did this) |
 | tests/sqlite/run.sh | qbe, gcc | QBE xadd issue on sqlite3.c |
 | tests/poly/run.sh (+ setup-poly*.sh) | qbe, gcc | C libraries (mruby, Lua, QuickJS) refused as above; `ops.cpp` aborts (double free) on Path B |

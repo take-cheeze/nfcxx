@@ -119,6 +119,7 @@ pp=()        # preprocessor options (-D -I -std ...), given to cc -E / cc -M and
 ld=()        # link options, in order
 inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
 picf=()
+pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc --pic)
 dts=()       # -MT / -MQ pairs
 dp=0
 asm=0        # -S
@@ -209,7 +210,8 @@ for ((i = 0; i < n; i++)); do
     -l|-L) need; ld+=("$a" "${args[++i]}") ;;
     -l?*|-L?*) ld+=("$a") ;;
     -Xlinker|-z|-u|-T) need; ld+=("$a" "${args[++i]}") ;;
-    -Wl,*|-shared|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
+    -shared) pathb_pic=1; ld+=("$a") ;;
+    -Wl,*|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
     -Wp,*) wp_option "$a" ;;
     -Wa,*) asf+=("$a") ;;
     -w|-W*) ;;
@@ -220,7 +222,8 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
-    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
+    -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
+    -fPIE|-fpie) ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
     -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
@@ -278,18 +281,19 @@ k=0
 # Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include and a C standard; it ignores other options. So
 # nothing else may reach it: the options it cannot honour are refused here, with their names, not dropped.
 pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
-  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0
+  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 gnu=1 keep rc=0
   shift 3
   [ ${#asf[@]} = 0 ] || die "-Wa,*: assembler options cannot be given to the pathb backend (it assembles with the host cc)"
+  [ $pathb_pic = 0 ] || pbo+=(--pic)
   while [ $k2 -lt ${#pp[@]} ]; do
     o=${pp[k2]}
     case $o in
       -D|-U|-I|-include) pbo+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
       -D?*|-U?*|-I?*) pbo+=("$o") ;;
-      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o ;;
-      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
-      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89 ;;
-      -std=iso9899:2011) std=-std=c11 ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o; gnu=0 ;;
+      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu}; gnu=1 ;;   # EDG's gcc mode takes the GNU extensions in every C standard
+      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89; gnu=0 ;;
+      -std=iso9899:2011) std=-std=c11; gnu=0 ;;
       -isystem|-iquote|-idirafter|-imacros|-isystem?*|-iquote?*|-idirafter?*|-imacros?*|-nostdinc|-undef|--sysroot=*)
         die "$o: not supported by the pathb backend (scripts/pathb-cc takes -I -D -U -include and -std only)" ;;
       *) die "$o: not supported by the pathb backend" ;;
@@ -297,6 +301,9 @@ pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
     k2=$((k2 + 1))
   done
   while [ $# -gt 0 ]; do pbo+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  # gcc's default and its -std=gnuNN: glibc's features.h then implies _DEFAULT_SOURCE (POSIX.1-2008, clock_gettime and CLOCK_*, ssize_t).
+  # EDG's C mode only has _POSIX_SOURCE (scripts/pathb-dump), which turns the implied default off. A strict -std=cNN keeps it.
+  [ $gnu = 0 ] || pbo=(-D_DEFAULT_SOURCE ${pbo[@]+"${pbo[@]}"})
   if [ "$what" = -S ]; then
     keep=$tmp/keep$k
     PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?

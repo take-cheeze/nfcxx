@@ -54,6 +54,71 @@ if [ "$(uname -m)" = x86_64 ]; then
   done
 fi
 
+# -fPIC / -shared: a shared object whose code takes the address of an exported function and of an exported and an extern
+# data object (PC-relative references to these are not allowed in a shared object: ld "can not be used when making a
+# shared object"). The code store of ASTro's calc is such an object (tests/realworld/run_astro.sh); here a dlopen'ed one.
+cat > "$tmp/so.c" <<'EOF2'
+extern int host_counter;
+int so_counter = 5;
+static int local_fn(int x) { return x + 1; }
+int exported_fn(int x) { return x * 2; }
+typedef int (*fn_t)(int);
+fn_t so_get_exported(void) { return exported_fn; }
+fn_t so_get_local(void) { return local_fn; }
+int *so_counter_addr(void) { return &so_counter; }
+int *host_counter_addr(void) { return &host_counter; }
+int so_bump(void) { host_counter += so_counter; return host_counter; }
+EOF2
+cat > "$tmp/somain.c" <<'EOF2'
+#include <dlfcn.h>
+#include <stdio.h>
+int host_counter = 10;
+int main(int argc, char **argv) {
+  void *h = dlopen(argv[1], RTLD_NOW);
+  if (!h) { puts(dlerror()); return 1; }
+  typedef int (*fn_t)(int);
+  fn_t (*ge)(void) = (fn_t (*)(void))dlsym(h, "so_get_exported");
+  fn_t (*gl)(void) = (fn_t (*)(void))dlsym(h, "so_get_local");
+  int *(*sc)(void) = (int *(*)(void))dlsym(h, "so_counter_addr");
+  int *(*hc)(void) = (int *(*)(void))dlsym(h, "host_counter_addr");
+  int (*bump)(void) = (int (*)(void))dlsym(h, "so_bump");
+  int r = ge()(4) * 100 + gl()(4) * 10 + (*sc() == 5) + 1000 * (hc() == &host_counter) + 10000 * (bump() == 15);
+  printf("%d\n", r);
+  return 0;
+}
+EOF2
+if check "shared object (-shared -fPIC)" pb -shared -fPIC "$tmp/so.c" -o "$tmp/so.so" && check "host for the shared object" pb "$tmp/somain.c" -rdynamic -ldl -o "$tmp/somain"; then
+  [ "$("$tmp/somain" "$tmp/so.so" 2>&1)" = 11851 ] && ok "dlopen: addresses of exported, static, extern data and a function read through the GOT" ||
+    bad "dlopen of the shared object" "$("$tmp/somain" "$tmp/so.so" 2>&1)"
+fi
+
+# gcc's default dialect is gnu17: glibc's _DEFAULT_SOURCE (clock_gettime and CLOCK_MONOTONIC, ssize_t from <stdint.h>-only
+# code, the POSIX.1-2008 declarations) is on without a -D. EDG's C mode defines _POSIX_SOURCE only, which turns the implied
+# default off; nfcc adds -D_DEFAULT_SOURCE for the gnu dialects (ASTro's runtime/precise_gc/gc.h needs both names).
+cat > "$tmp/posix.c" <<'EOF2'
+#include <time.h>
+#include <sys/types.h>
+ssize_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (ssize_t)t.tv_nsec; }
+EOF2
+check "default dialect: CLOCK_MONOTONIC and clock_gettime" pb -c "$tmp/posix.c" -o "$tmp/posix.o"
+check "-std=gnu11: the same" pb -std=gnu11 -c "$tmp/posix.c" -o "$tmp/posix.o"
+
+# A static function stays local to its object file: two translation units each define one of the same name (a recursive one
+# is not inlined away), and the link has no duplicate symbol.
+cat > "$tmp/st1.c" <<'EOF2'
+static int depth(int x) { return x ? depth(x - 1) + 1 : 0; }
+int one(int x) { return depth(x); }
+EOF2
+cat > "$tmp/st2.c" <<'EOF2'
+#include <stdio.h>
+static int depth(int x) { return x ? depth(x - 1) + 2 : 0; }
+int one(int);
+int main(void) { printf("%d\n", one(5) * 100 + depth(5)); return 0; }
+EOF2
+if check "two files with a static function of one name: link" pb "$tmp/st1.c" "$tmp/st2.c" -o "$tmp/st"; then
+  [ "$("$tmp/st" 2>&1)" = 510 ] && ok "each file calls its own static function" || bad "static functions of one name" "$("$tmp/st" 2>&1)"
+fi
+
 # Options Path B cannot honour are refused with a message and a non-zero status, not ignored
 refuses "-isystem refused" "isystem.*pathb backend" pb -c -isystem "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/x.o"
 refuses "-nostdinc refused" "nostdinc.*pathb backend" pb -c -nostdinc "$tmp/a.c" -o "$tmp/x.o"

@@ -172,8 +172,11 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
+    # pic: the object goes into a shared object (-fPIC): the address of an object or function that another object may
+    # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
+    # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -639,7 +642,10 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A static function is local to the object file (no `export`): two translation units may each define a `static` function
+      # of the same name (a header's `static inline` helper that the inliner did not take in, a file's own `static` function).
+      linkage = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" && p.length == 1 } ? "" : "export "
+      @lines << "#{linkage}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -1374,7 +1380,8 @@ end
           # On Darwin an extern object is usually in a dylib (libc++'s vtable or typeinfo for std::length_error): the
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
-          if info[:extern] && Qbe.got_extern
+          # -fPIC: an object that another object of the shared object's process may interpose goes through the GOT as well.
+          if (info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static] && !info[:thread])
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -2389,6 +2396,8 @@ end
         end
       end
       if nfixed
+        # (variadic N) counts the hidden result pointer of an (sret ...) argument, which QBE passes itself (not in args).
+        nfixed -= 1 if sret
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 
         args.insert(nfixed, "...")
@@ -3098,16 +3107,23 @@ end
     flags.each do |name, f|
       next unless state[name].is_a?(String) || state[name] == :extern
 
-      refs[name] = { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }
+      refs[name] = { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern"), static: f.include?("static") }
     end
     strs.each do |d|
       name = d[1].raw
-      refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
+      refs[name] = { thread: false, weak: false, extern: false, static: true } if state[name].is_a?(String)
     end
 # The functions this module defines, and the external functions it takes the address of as a value (not a direct
 # call, which goes through the PLT): each gets one pointer cell, defined once here.
 funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a list was searched linearly
-forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
+# With -fPIC only a static function (local to the object file) is addressed by its symbol: any other function is exported, so a
+# PC-relative reference to it is one to a preemptible symbol, which a shared object does not allow. Its address is read from a cell.
+forms.each do |f|
+  next unless head(f) == "ssa-function"
+  next if Qbe.pic && f.none? { |x| x.is_a?(Array) && head(x) == "static" && x.length == 1 }
+
+  funcs[Qbe.symbol(f[1].raw)] = true
+end
 cells = []
 cell_seen = {}
 wides = {}   # wide pointer constant => the name of its cell
