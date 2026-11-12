@@ -127,8 +127,8 @@ bool cpu_has_flags(std::initializer_list<const char*> flags) {
 }
 
 // The packed, register-blocked kernel (emit_gemm_rowsum_packed_c): C row-major, R the row sums, Bp the packing scratch.
-void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
-  std::string tag = "packed_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, int mr, std::mt19937& rng) {
+  std::string tag = "packed" + std::to_string(mr) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
   std::uniform_int_distribution<int> d(-4, 4);
   std::vector<float> A(M * K), B(K * N);
   for (auto& x : A) x = float(d(rng));
@@ -142,7 +142,7 @@ void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, st
       refR[m] += s;
     }
   KernelFn fn = nullptr;
-  void* h = load_kernel(dir, emit_gemm_rowsum_packed_c(M, N, K), tag, &fn);
+  void* h = load_kernel(dir, emit_gemm_rowsum_packed_c(M, N, K, mr), tag, &fn);
   if (!h) return;
   std::vector<float> C(M * N, -999.0f), R(M, -999.0f), Bp(K * N, -999.0f);
   fn(A.data(), B.data(), C.data(), R.data(), Bp.data());
@@ -195,8 +195,17 @@ int main() {
   expect_throw(GemmVariant::VecN, 8, 8, 0, "K = 0");
 
   // Packed, register-blocked kernel: M % 4 and N % 16, K values with no alignment requirement.
-  for (auto [M, N, K] : std::vector<std::array<int64_t, 3>>{{4, 16, 1}, {8, 32, 5}, {16, 48, 33}, {64, 64, 64}}) {
-    run_packed_case(dir, M, N, K, rng);
+  for (int mr : {4, 6}) {
+    for (auto [M, N, K] : std::vector<std::array<int64_t, 3>>{{mr, 16, 1}, {2 * mr, 32, 5}, {3 * mr, 48, 33}, {12 * mr, 64, 64}}) {
+      run_packed_case(dir, M, N, K, mr, rng);
+    }
+  }
+  try {
+    emit_gemm_rowsum_packed_c(12, 32, 4, 5);
+    std::fprintf(stderr, "FAIL packed with mr = 5: no exception\n");
+    ++failures;
+  } catch (const std::invalid_argument&) {
+    std::printf("ok   refused: packed with mr = 5\n");
   }
   try {
     emit_gemm_rowsum_packed_c(4, 24, 4);
