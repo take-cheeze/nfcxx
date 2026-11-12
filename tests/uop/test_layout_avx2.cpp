@@ -1,0 +1,141 @@
+// nfcuop layout, AVX2 emitter (lib/uop/nfcuop_layout_avx2.hpp, docs/notes/uop-layout.md): the two GEMM variants,
+// generated as C, compiled with $NFCUOP_CC (or cc) -O2 -mavx2 -mfma, loaded with dlopen and run against a reference.
+// The inputs are small integers, so every product and sum is exact in float and the comparison is exact.
+// Prints SKIP when the CPU has no AVX2 and FMA.
+#undef NDEBUG
+#include "nfcuop_layout_avx2.hpp"
+
+#include <dlfcn.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace nfcuop::layout;
+
+namespace {
+
+int failures = 0;
+
+using KernelFn = void (*)(const float*, const float*, float*, float*, float*);
+
+// Compile the source into a shared object in dir and load the kernel; returns nullptr (and prints why) on failure.
+void* load_kernel(const std::string& dir, const std::string& src, const std::string& tag, KernelFn* out) {
+  std::string c = dir + "/" + tag + ".c", so = dir + "/" + tag + ".so";
+  { std::ofstream f(c); f << src; }
+  const char* cc = std::getenv("NFCUOP_CC");
+  std::string cmd = std::string(cc && *cc ? cc : "cc") + " -O2 -mavx2 -mfma -shared -fPIC -o '" + so + "' '" + c + "' 2>'" + dir + "/" + tag + ".err'";
+  if (std::system(cmd.c_str()) != 0) {
+    std::fprintf(stderr, "FAIL %s: compile failed (%s)\n", tag.c_str(), cmd.c_str());
+    ++failures;
+    return nullptr;
+  }
+  void* h = dlopen(so.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!h) {
+    std::fprintf(stderr, "FAIL %s: dlopen: %s\n", tag.c_str(), dlerror());
+    ++failures;
+    return nullptr;
+  }
+  *out = reinterpret_cast<KernelFn>(dlsym(h, "nfc_gemm_rowsum"));
+  if (!*out) {
+    std::fprintf(stderr, "FAIL %s: nfc_gemm_rowsum not found\n", tag.c_str());
+    ++failures;
+    return nullptr;
+  }
+  return h;
+}
+
+void run_case(const std::string& dir, GemmVariant v, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  const char* name = v == GemmVariant::VecN ? "vec-n" : "vec-m";
+  std::string tag = std::string(name) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+  std::uniform_int_distribution<int> d(-4, 4);
+  std::vector<float> A(M * K), B(K * N);
+  for (auto& x : A) x = float(d(rng));
+  for (auto& x : B) x = float(d(rng));
+
+  // Reference: C in row-major (m, n), R[m] the sum over n.
+  std::vector<float> refC(M * N), refR(M, 0.0f);
+  for (int64_t m = 0; m < M; ++m)
+    for (int64_t n = 0; n < N; ++n) {
+      float s = 0;
+      for (int64_t k = 0; k < K; ++k) s += A[m * K + k] * B[k * N + n];
+      refC[m * N + n] = s;
+      refR[m] += s;
+    }
+
+  KernelFn fn = nullptr;
+  void* h = load_kernel(dir, emit_gemm_rowsum_c(v, M, N, K), tag, &fn);
+  if (!h) return;
+  std::vector<float> C(M * N, -999.0f), R(M, -999.0f), At(M * K, -999.0f);
+  fn(A.data(), B.data(), C.data(), R.data(), At.data());
+  dlclose(h);
+
+  int bad = 0;
+  for (int64_t m = 0; m < M; ++m) {
+    // VecN writes C row-major (C[m*N + n]), VecM column-major (C[n*M + m]).
+    for (int64_t n = 0; n < N; ++n) {
+      float got = v == GemmVariant::VecN ? C[m * N + n] : C[n * M + m];
+      if (got != refC[m * N + n]) ++bad;
+    }
+    if (R[m] != refR[m]) ++bad;
+  }
+  if (bad) {
+    std::fprintf(stderr, "FAIL %s: %d value(s) differ from the reference\n", tag.c_str(), bad);
+    ++failures;
+  } else {
+    std::printf("ok   %s\n", tag.c_str());
+  }
+}
+
+void expect_throw(GemmVariant v, int64_t M, int64_t N, int64_t K, const char* what) {
+  try {
+    emit_gemm_rowsum_c(v, M, N, K);
+    std::fprintf(stderr, "FAIL %s: no exception\n", what);
+    ++failures;
+  } catch (const std::invalid_argument&) {
+    std::printf("ok   refused: %s\n", what);
+  }
+}
+
+}  // namespace
+
+int main() {
+  __builtin_cpu_init();
+  if (!__builtin_cpu_supports("avx2") || !__builtin_cpu_supports("fma")) {
+    std::printf("SKIP test_layout_avx2: this CPU has no AVX2 and FMA\n");
+    return 0;
+  }
+  char tmpl[] = "/tmp/nfcuop-layout-avx2-XXXXXX";
+  if (!mkdtemp(tmpl)) {
+    std::fprintf(stderr, "FAIL: mkdtemp\n");
+    return 1;
+  }
+  std::string dir = tmpl;
+  std::mt19937 rng(20261112);
+
+  struct Case { GemmVariant v; int64_t M, N, K; };
+  const Case cases[] = {
+      {GemmVariant::VecN, 8, 8, 1},     {GemmVariant::VecN, 16, 24, 5},   {GemmVariant::VecN, 64, 64, 64},
+      {GemmVariant::VecM, 8, 8, 1},     {GemmVariant::VecM, 16, 24, 5},   {GemmVariant::VecM, 24, 40, 33},
+      {GemmVariant::VecM, 64, 64, 64},
+  };
+  for (const Case& c : cases) run_case(dir, c.v, c.M, c.N, c.K, rng);
+
+  expect_throw(GemmVariant::VecN, 8, 12, 4, "VecN with N = 12");
+  expect_throw(GemmVariant::VecM, 12, 8, 4, "VecM with M = 12");
+  expect_throw(GemmVariant::VecN, 8, 8, 0, "K = 0");
+
+  std::string rm = "rm -rf '" + dir + "'";
+  if (failures == 0 && std::system(rm.c_str()) != 0) std::fprintf(stderr, "note: could not remove %s\n", dir.c_str());
+  if (failures) {
+    std::fprintf(stderr, "test_layout_avx2: %d failure(s), files kept in %s\n", failures, dir.c_str());
+    return 1;
+  }
+  std::printf("test_layout_avx2: all checks passed\n");
+  return 0;
+}

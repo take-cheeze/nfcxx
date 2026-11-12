@@ -34,25 +34,70 @@ hand-computed totals at K = 8, 16 and 64, against a cheap-transpose target, and 
 
 ## What it is not
 
-- **A cost model, not a measurement.** The instruction counts are written in the target description (`Avx2F32`) and in
-  `gemm_rowsum`. Nothing here has been timed on hardware. The FMA term cancels in the comparison, so the decision
-  depends only on the repair and horizontal-sum counts.
-- **No code generation yet.** The solver picks a layout; no AVX2 kernel is emitted. The C renderer (`nfcuop_cgen`)
-  writes plain loops, which the C compiler may vectorize, so nothing here changes the generated code.
+- **A cost model.** The instruction counts are written in the target description (`Avx2F32`) and in `gemm_rowsum`.
+  The FMA term cancels in the comparison, so the decision depends only on the repair and horizontal-sum counts. The
+  timings below test its prediction on one host; they do not confirm it at small K.
+- **Code generation only for the GEMM pair.** `lib/uop/nfcuop_layout_avx2.*` emits the two GEMM variants with the
+  row-sum epilogue as AVX2 C (`emit_gemm_rowsum_c`). The solver does not drive it yet: the caller picks the variant.
+  The C renderer (`nfcuop_cgen`) is unchanged and still writes plain loops.
 - **Two dimensions, one target, one op pattern.** No 3-D or batched tensors, no AVX-512 (16 lanes), no Hexagon or
   GPU, no tensor-core fragments, and no ILP. The paper's global solver (SCIP over repair graphs) is not needed for a
   graph this small; it is the next step once there is more than one op with a free layout choice.
 - **The input layout is fixed** (A and B are row-major). Letting the solver also choose the layout of the inputs at a
   cost is a small change to the model but is not done.
 
+## The AVX2 emitter
+
+`emit_gemm_rowsum_c(GemmVariant, M, N, K)` returns C for `nfc_gemm_rowsum(A, B, C, R, At)`:
+
+- `VecN` (needs `N % 8 == 0`): lanes on N, A broadcast, the row sum is one horizontal sum per row.
+- `VecM` (needs `M % 8 == 0`): the kernel first transposes A into `At` (the repair the model charges), lanes on M, C
+  written column-major, the row sum added vertically.
+
+Its test (`tests/uop/test_layout_avx2.cpp`) compiles each kernel with `cc -O2 -mavx2 -mfma`, loads it with `dlopen` and
+compares C and R with a reference. The inputs are small integers, so the comparison is exact. It is not compared
+against the interpreter's `nfcuop` results, which use a different summation order. It also runs under
+`UOP_HOST=1` only so far: the nfcxx back ends have not run it.
+
+## Timing against the model (not a test)
+
+`M = N = 256`, `float`, one host with 4 shared cores, best of 7 timings of 20 calls each; the emitted kernels include
+the transpose for `VecM`. Two runs of the same benchmark (the second is shown):
+
+| K | vec-n (us) | vec-m (us) | vec-m / vec-n |
+| --- | --- | --- | --- |
+| 4 | 14.8 | 23.3 | 1.57 |
+| 8 | 45.2 | 24.5 | 0.54 |
+| 12 | 46.6 | 39.9 | 0.86 |
+| 16 | 56.3 | 54.4 | 0.97 |
+| 20 | 58.2 | 67.5 | 1.16 |
+| 32 | 104.3 | 119.2 | 1.14 |
+| 64 | 326.9 | 457.1 | 1.40 |
+| 128 | 899.4 | 1444.6 | 1.61 |
+| 256 | 1947.8 | 2981.4 | 1.53 |
+
+What this says about the model:
+
+- **K of 32 and up:** vec-n is faster by 1.14 to 1.61 times, in both runs. The model also says vec-n wins above K = 16,
+  so the direction matches.
+- **Below K = 16:** the runs disagree (K = 8 is 0.54 in the second run and 1.07 in the first), and at K = 4 vec-n
+  is faster in both. The model predicts vec-m wins below K = 16. That is not reproduced, so the model is wrong about
+  small K here, or the noise on this host is too large to tell. I have not separated those.
+- **Why the model is off at small K (a guess, not measured):** it prices the transpose at 3/8 instruction per element,
+  an idealized 8x8 SIMD transpose. The emitted transpose is a scalar loop the compiler does not vectorize, and the
+  per-(n) loops of `VecM` have short inner loops at small K. Neither is in the model.
+
 ## Next steps on this target
 
-1. An AVX2 emitter for the N-vectorized and M-vectorized GEMM, checked bit for bit against `nfcuop`'s interpreter (the
-   summation order of the vector kernel differs from the interpreter's row-major order, so the check needs a tolerance
-   or a matching order).
-2. Timing both kernels on the host (`AVX2` and `AVX-512` are present here) to check the crossover against real code.
-3. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
+1. Repeat the timing on a quieter machine or with more repetitions to settle small K, and check how much of the gap is
+   the transpose: time `VecM` with the transpose removed (a pre-transposed A) against `VecN`.
+2. Make the transpose a SIMD 8x8 kernel, so the repair costs what the model says, and see whether the small-K crossover
+   then appears.
+3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
+4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 
 ## Tests
 
-`tests/uop/test_layout.cpp`, run by `tests/uop/run.sh` (`UOP_ONLY=test_layout`). It needs no nfcxx build.
+`tests/uop/test_layout.cpp` (the model) and `tests/uop/test_layout_avx2.cpp` (the emitter), both run by
+`tests/uop/run.sh` (`UOP_ONLY="test_layout test_layout_avx2"`). Neither needs an nfcxx build; the emitter test needs a C
+compiler with AVX2 and FMA (it prints SKIP on a CPU without them).
