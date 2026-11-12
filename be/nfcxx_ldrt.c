@@ -14,6 +14,7 @@
 /* Only x86-64 has the x87 layout these helpers implement; elsewhere the archive is built empty (scripts/pathb-ldrt). */
 /* __int128 helpers that need no x87 layout: built on any host with a 128-bit integer type (clang on arm64 too). */
 #if defined(__SIZEOF_INT128__)
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -648,6 +649,9 @@ float __nfcxx_f128_to_f16(const void *a) { return f16_in_xmm(__nfcxx_f16_from_f1
 /* ---- undefined behavior sanitizer (docs/notes/ubsan.md) ---- */
 
 /* 1 when the signed 64-bit product a * b does not fit (the emitter's cmul on a 64-bit type; QBE has no wide product) */
+#endif /* defined(__x86_64__) */
+
+/* Helpers of every target (no x87 or _Float128 layout): the overflow test of -fsanitize=signed-integer-overflow and the * failed-check report. Outside the x86-64 block so that aarch64 links them too. */
 int __nfcxx_smul64_ovf(long a, long b)
 {
   long r;
@@ -676,7 +680,6 @@ void __nfcxx_ubsan_report(int kind, const char *file, int line)
   fprintf(stderr, "%s:%d: runtime error: %s\n", file, line, msg[kind]);
   abort();
 }
-#endif /* defined(__x86_64__) */
 
 /* SSE2 _mm_pause (the spin-loop hint): the host header declares it inline (gnu_inline), so gcc inlines every call and
    there is no external body; Path B does not inline, and its calls need this definition. */
