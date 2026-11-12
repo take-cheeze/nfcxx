@@ -209,6 +209,7 @@ require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
 require_relative 'codegen_call_inline'
+require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
@@ -2993,7 +2994,8 @@ BC2CPP_MAIN = lambda do
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
-  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free)
+  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
+                                       NativeFrameUse.reader_entries(compiled))
   print SymbolCache.emit(symbol_table)
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code

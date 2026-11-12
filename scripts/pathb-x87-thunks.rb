@@ -34,10 +34,13 @@ def x87_copy_args(stack, frame)
   out
 end
 
-def x87_call_thunk(name, ints, stack, complex = false)
+# vsse: the call of a variadic F (the "callv" thunk, __nfcxx_x87cv_F_I<ints>S<stack>V<vsse>): %al = the number of vector
+# registers the arguments use, which a variadic callee reads. The call site knows all its arguments, so INTS and STACK
+# count the variadic ones too.
+def x87_call_thunk(name, ints, stack, complex = false, vsse = nil)
   r = (stack + 15) / 16 * 16
   frame = r + 24
-  sym = "__nfcxx_x87c_" + name
+  sym = vsse.nil? ? "__nfcxx_x87c_" + name : "__nfcxx_x87cv_" + name + "_I" + ints.to_s + "S" + stack.to_s + "V" + vsse.to_s
   out = [".text", ".weak #{sym}", ".hidden #{sym}", ".type #{sym}, @function", sym + ":", "\tsubq $#{frame}, %rsp"]
   if ints < 6
     out << "\tmovq %#{X87_REGS[ints]}, #{r}(%rsp)"
@@ -46,6 +49,7 @@ def x87_call_thunk(name, ints, stack, complex = false)
     out << "\tmovq %r11, #{r}(%rsp)"
   end
   out.concat(x87_copy_args(stack, frame))
+  out << "\tmovl $#{vsse}, %eax" unless vsse.nil?
   out << "\tcall #{name}@PLT"
   out << "\tmovq #{r}(%rsp), %rdi"
   out << "\tfstpt (%rdi)"
@@ -156,6 +160,12 @@ def x87_thunks_asm(forms, il)
     when "call", "callc"
       sym = Qbe.symbol("__nfcxx_x87c_" + sname(f[2]))
       out << x87_call_thunk(name, Qbe.int_lit(f[3]), Qbe.int_lit(f[4]), kind == "callc") if il.include?("$#{sym}(")
+    when "callv", "callvc"
+      ints = Qbe.int_lit(f[3])
+      stack = Qbe.int_lit(f[4])
+      vsse = Qbe.int_lit(f[5])
+      sym = Qbe.symbol("__nfcxx_x87cv_" + sname(f[2]) + "_I" + ints.to_s + "S" + stack.to_s + "V" + vsse.to_s)
+      out << x87_call_thunk(name, ints, stack, kind == "callvc", vsse) if il.include?("$#{sym}(")
     when "icall", "icallc"
       key = Qbe.symbol(sname(f[2]))
       sym = Qbe.symbol((kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + sname(f[2]))

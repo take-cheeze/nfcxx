@@ -2747,10 +2747,13 @@ def x87_copy_args(stack, frame)
   out
 end
 
-def x87_call_thunk(name, ints, stack, complex = false)
+# vsse: the call of a variadic F (the "callv" thunk, __nfcxx_x87cv_F_I<ints>S<stack>V<vsse>): %al = the number of vector
+# registers the arguments use, which a variadic callee reads. The call site knows all its arguments, so INTS and STACK
+# count the variadic ones too.
+def x87_call_thunk(name, ints, stack, complex = false, vsse = nil)
   r = (stack + 15) / 16 * 16
   frame = r + 24
-  sym = "__nfcxx_x87c_" + name
+  sym = vsse.nil? ? "__nfcxx_x87c_" + name : "__nfcxx_x87cv_" + name + "_I" + ints.to_s + "S" + stack.to_s + "V" + vsse.to_s
   out = [".text", ".weak #{sym}", ".hidden #{sym}", ".type #{sym}, @function", sym + ":", "\tsubq $#{frame}, %rsp"]
   if ints < 6
     out << "\tmovq %#{X87_REGS[ints]}, #{r}(%rsp)"
@@ -2759,6 +2762,7 @@ def x87_call_thunk(name, ints, stack, complex = false)
     out << "\tmovq %r11, #{r}(%rsp)"
   end
   out.concat(x87_copy_args(stack, frame))
+  out << "\tmovl $#{vsse}, %eax" unless vsse.nil?
   out << "\tcall #{name}@PLT"
   out << "\tmovq #{r}(%rsp), %rdi"
   out << "\tfstpt (%rdi)"
@@ -2928,6 +2932,8 @@ def append_weak(il_path, asm_path, target)
       w = line.byteslice(X87_MARK.bytesize, line.bytesize - X87_MARK.bytesize).split(" ")
       if w[0] == "call" || w[0] == "callc"
         extra << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callc")
+      elsif w[0] == "callv" || w[0] == "callvc"
+        extra << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callvc", w[4].to_i)
       elsif w[0] == "icall" || w[0] == "icallc"
         extra << x87_icall_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "icallc")
       else
@@ -2980,6 +2986,14 @@ def emit_global(mod, g)
     thread = true
     rest = rest.drop(1)
   end
+  # (section "S" [ro]) from __attribute__((section("S"))), and (used): the data goes into that section, allocated and
+  # writable unless const (as scripts/pathb-ssa-qbe.rb); `used` needs nothing more here (no --gc-sections).
+  sec = nil
+  while !rest.empty? && (head_of(rest[0]) == "section" || head_of(rest[0]) == "used")
+    sec = rest[0] if head_of(rest[0]) == "section"
+    rest = rest.drop(1)
+  end
+  raise Refused, "section attribute on a thread-local global #{name}" if sec && thread
   raise BadIR, "global #{name}: expected one INIT" if rest.length != 1
   init = rest[0]
   h = head_of(init)
@@ -3000,6 +3014,10 @@ def emit_global(mod, g)
     mod.sp_globals << [qsym(name), size]
   end
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
+  if sec
+    sec_flags = pstr(sec[2]) == "ro" ? "a" : "aw"
+    linkage += "section \"#{pstr(sec[1]).delete('"')}\" \"#{sec_flags}\" "
+  end
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}data $#{qsym(name)} = align #{align} { #{pieces.join(", ")} }"
 end
@@ -3494,6 +3512,11 @@ def emit_x87_thunks(mod, forms)
       next unless refs.key?("__nfcxx_x87c_" + name)
       x87_check!("call of #{name}")
       mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}"
+    elsif kind == "callv" || kind == "callvc"
+      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6
+      next unless refs.key?("__nfcxx_x87cv_" + name + "_I" + as_int(f[3]).to_s + "S" + as_int(f[4]).to_s + "V" + as_int(f[5]).to_s)
+      x87_check!("call of #{name}")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])} #{as_int(f[5])}"
     elsif kind == "icall" || kind == "icallc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
       sym = (kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + name

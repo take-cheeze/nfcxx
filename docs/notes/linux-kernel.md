@@ -134,19 +134,66 @@ code has none. `arch/x86/realmode/rm` is not built in this configuration and is 
 
 ## Path B (`NFCXX_BACKEND=pathb`): how many C files it builds
 
-nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is opt-in and
-takes only `-I -D -U -include` and a C standard; the kernel's own options `-nostdinc`, `-isystem DIR`, `-funsigned-char`,
-`-fshort-wchar`, `-ffreestanding` and `-Wa,*` are refused there, so **a kernel build with `KCC=nfcc NFCXX_BACKEND=pathb`
-stops at the first file: 0 of 615**, on the first of those options in the command line. The follow-ups it names for
-Path B: a Path B front-end mode for `-funsigned-char` / `-fshort-wchar` (EDG has both), `-nostdinc` with `-isystem`
-(the harness's include path), and the kernel's `-mno-sse` check that `qbe-cc` does.
+nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is opt-in, and it
+takes the kernel's option set. `KCC=nfcc NFCXX_BACKEND=pathb` no longer stops at the first file (it did: `-nostdinc`,
+`-isystem DIR`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding` and the `-m*` options were refused, 0 of 615).
+Each option of the kernel's command line is in one of three classes:
 
-That refusal is derived from nfcc's option handling (and `tests/nfcc/run.sh`), not from a measured kernel run: in the
-session that wrote this note the kernel could not be built. The tarball (the Ubuntu archive) downloaded and unpacked, but
-the sandbox's permission policy denied running `make` on the downloaded tree (code from an external source), so
-`scripts/linux-qemu.sh` was not run and there is no per-file kernel table. The 615-file count and the refusal reasons
-of the kernel remain to be measured: run `KCC=nfcc NFCXX_BACKEND=pathb` after Path B accepts the kernel's options, or
-replay the compile commands of a gcc kernel build through `scripts/nfcc-pathb-measure.sh` (set `NFCC_MEASURE_FLAGS`).
+| class | options | what nfcc does |
+|---|---|---|
+| honoured by Path B | `-nostdinc`, `-isystem DIR`, `-idirafter DIR` (the include path of the front end: `-nostdinc` drops the host's directories, `-isystem $(gcc -print-file-name=include)` gives `<stdarg.h>`); `-funsigned-char` (EDG's `--unsigned_chars`; the IR's `char` is renamed `unsigned_char`); `-fshort-wchar` (the headers' `wchar_t` is `unsigned short`; EDG types `L"x"` as `int`, so a unit with a wide literal is gcc's); `-ffreestanding` (`__STDC_HOSTED__` is 0); `-fno-asynchronous-unwind-tables` (QBE `-U`) | passed to `scripts/pathb-cc` |
+| checked | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | QBE runs with `-n`; the unit's assembly is refused (status 5) if it names an SSE or x87 register or instruction, as `qbe-cc` does. Refused units go to gcc with `NFCXX_PATHB_FALLBACK=gcc` |
+| no effect on QBE's code | `-mno-red-zone`, `-mcmodel=kernel`, `-mpreferred-stack-boundary=`, `-mtune=`, `-mno-mmx`, `-mno-3dnow`, `-mno-avx`, `-mskip-rax-setup`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-strict-aliasing`, `-fwrapv`, `-fno-common`, `-fno-allow-store-data-races`, `-fno-optimize-sibling-calls`, `-fno-function-sections`, `-fconserve-stack`, `-fcf-protection=none`, `-fstrict-flex-arrays=`, `-falign-*` (the reasons of `NFCXX_QBE_KERNEL=1` above) | dropped on Path B |
+| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=zero`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*`, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
+
+`NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
+for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
+each option (include path, the signedness and `CHAR_MIN`, `wchar_t`, `__STDC_HOSTED__`, `.cfi`, the `-mno-sse` check, each
+gcc fallback, against gcc's own result).
+
+Two things this does not do. A kernel with `CONFIG_INIT_STACK_ALL_ZERO` passes `-ftrivial-auto-var-init=zero` to every
+file, and every file is then gcc's (Path B does not zero automatic variables; cproc did). And the kernel was not built in the
+session that made this change (the sandbox does not run `make` on a downloaded tree, and the task said not to): the
+option handling is measured on single files and on the kernel's option list, not on the 615 files. The next measurement is
+`KCC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=DIR/pathb.log scripts/linux-qemu.sh`, or
+the replay below with the real options in `NFCC_MEASURE_FLAGS`.
+
+### Measured: the compile commands of a gcc build, replayed on Path B
+
+Method: build the tinyconfig tree with gcc (`make O=out ARCH=x86_64 CC=logcc bzImage`, where `logcc` appends its
+directory and arguments to a log and runs gcc), then replay each `-c` line of the log with `NFCXX_BACKEND=pathb nfcc -c`:
+the `-I`/`-D`/`-U`/`-include` options kept, `-isystem DIR` as `-I DIR`, and `-nostdinc`, `-m*`, `-f*`, `-W*`, `-O*`, `-g*`
+dropped (so the numbers say what Path B builds, not that the objects would boot; this replay predates the option handling
+above, which honours or checks most of the dropped options). 615 translation units (616 counting the
+one that has no `.c` of its own).
+
+| state | builds | refused |
+|---|---|---|
+| before | 538 | 77 |
+| after the commits of this branch | 570 | 45 |
+
+The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (compared with gcc by its `run.sh`):
+
+- `rq_pin_lock`: a statement expression whose value is an empty struct reached the back end as an aggregate constant
+  (`stmt_expr_empty_struct.c`);
+- `simple_offset_add`, `resource_string`, `tty_default_fops`, `task_bp_pinned`, `*_pmu_init`, `ZSTD_create*`: a designated
+  compound literal keeps its `ck_designator` entries in the constant (`designated_compound_static.c`);
+- `__wake_q_add`, `mark_oom_victim`, `nested_table_alloc`, ...: a `null` asm operand was typed with the bare word `ptr`
+  (`asm_pointer_operand_null.c`);
+- `show_smap_vma_flags`, `inat_get_group_attribute`: a repeated string over the rows of a 2-D static array
+  (`static_range_string_rows.c`);
+- `univ8250_console_init`: two static objects that point at each other (`static_address_cycle.c`);
+- `unexpected phi instruction` (chip.c, mmap.c, io_apic.c, static_call.c): the pointer-cell load of an external function's
+  address emitted ahead of a phi (`phi_extern_function_address.c`);
+- `0xffff888000000000 out of range of signed 32bit displacement` (namei.c, realmode/init.c): QBE folds `add CONST, x` into
+  a displacement without a 32-bit check (`index_wide_constant_base.c`).
+
+- `drivers/video/console/vgacon.c`: QBE propagates a pointer constant through copies and phis into the displacement of the
+  access that uses it, unchecked (`phi_wide_pointer_constant.c`). A pointer constant that does not fit in 32 bits is loaded
+  from a one-word data cell (the cleaner fix is a 32-bit check in the QBE fork's `amd64/isel.c`, outside this repo).
+
+What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
+boot code (`arch/x86/boot`, `-m16`).
 
 What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
 uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with

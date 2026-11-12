@@ -4,11 +4,11 @@ Status, 2026-11-09: in progress.
 - Done: optcarrot under this repository's CI (`tests/bc2cpp/run_optcarrot.sh`).
 - Done: Phase 1's root split, rpg-maker-clone#3203.
 - Done: Phase 2's import. bc2cpp is in `bc2cpp/` with its history, and the optcarrot world now uses it.
-- Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
+- Done: the fixture checks run here: the `checks` job of `.github/workflows/ci.yml`, three shards of
   `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
 - Done: a second world, `scripts/pathb-qbe-emit.rb` (`tests/bc2cpp/run_pathb_qbe_emit.sh`, the `script-world` build kind).
 - Done: a third world, `scripts/pathb-borrowck.rb` (`tests/bc2cpp/run_pathb_borrowck.sh`). Its top level is `main(argv)`,
-  which returns the status, and its one regex literal is a character scan (the closed world has no `Regexp`). The interpreted
+  which returns the status, and its one regex literal is a character scan (the script needs no `Regexp`; the canonical closed world leaves out `mruby-onig-regexp`, see below). The interpreted
   script is unchanged: 3598 runs of `tests/pathb-borrow` in every mode give the same stdout, stderr and status before and after.
   Two bc2cpp defects surfaced on it:
   - **Fixed: by-name results were not GC-rooted.** mruby's funcall restores the arena before it returns, so the result of
@@ -94,7 +94,7 @@ check.
   a sealed mruby build whose Ruby bc2cpp compiled to C++.
 - The check is checksum 59662 on every runtime. The script prints each runtime's frames per second and the compiled
   build's hot-path speedup over the interpreter. `OPTCARROT_MIN_SPEEDUP=X` also fails below X; it is off by default.
-- `.github/workflows/bc2cpp.yml` runs every world, when `tests/bc2cpp/` changes or on demand, three worlds to a job
+- `.github/workflows/ci.yml` runs every world, when `tests/bc2cpp/` changes or on demand, three worlds to a job
   (`tests/bc2cpp/worlds.list`, balanced by weight by `tests/bc2cpp/run_worlds.rb`).
 
 At the first pin (rpg-maker-clone `df3ee7c52`, 32-core desktop, host gcc 15), 180 frames took:
@@ -119,17 +119,49 @@ outgrow their timeout.
 
 The second world is one of nfcxx's own mruby scripts ([mruby-scripting.md](mruby-scripting.md)):
 `scripts/pathb-qbe-emit.rb`, the largest (3.5K lines) and the one with the heaviest real input (the 3.4 MB IR of
-`tests/pathb-ir`). Its rules fit a closed world: no `Regexp`, byte strings, no `eval`.
+`tests/pathb-ir`). Its rules fit a closed world: it uses no `Regexp`, byte strings, no `eval`.
 - **Build kind.** `script-world` is a probe build like `optcarrot-probe` (`BC2CPP_PROBE_BUILDS` in `compiled_gems.rb`): the
   script is the mrblib of a gem, its closing statements (`rc = main(ARGV); exit(rc)`) become `ScriptWorld.run`, and a
   fixed C `main` passes `ARGV` and returns its status. It builds on the pinned world's mruby fork with the same sealed
-  gem set, without `Regexp`.
+  gem set, without `mruby-onig-regexp`.
 - **Runner.** `bc2cpp/tools/script_world/compiled_run.rb` takes the script, its tail, a file of cases and benchmark
   arguments. It checks that every case gives the same stdout, stderr and exit status compiled as interpreted (an
   uncaught exception compares without its backtrace: compiled code has no line table), then times the interpreter, the
   compiled build and CRuby.
 - **Another script** needs its own `tests/bc2cpp/run_<name>.sh` (the tail, the entry, the cases), nothing else, as long as
   the script's inputs are files given on the command line.
+
+### Regexp in a closed world
+
+`Regexp` is a build-profile choice, not a limit of the compiler. `mruby-onig-regexp` bundles Onigmo, the engine CRuby
+uses. The runner build already includes it (`host-libs/mruby-bc2cpp-runner/build_config.rb`), `mruby-prism` and
+`mruby-rbs` depend on it, and bc2cpp knows its owner class `OnigMatchData` (`tools/bc2cpp/index_closed_planner.rb`).
+The canonical closed world leaves it out on purpose (`tools/bc2cpp/compiled_gems.rb`, `BC2CPP_CANONICAL_CORE_GEMS`).
+
+To compile a world that uses `Regexp`:
+1. Put `mruby-onig-regexp` in that world's gem set instead of dropping it.
+2. Check that the closed-world scan and native-symbol analysis accept its sources (`scripts/bc2cpp/analysis_headers.rb`
+   already writes the Onigmo header overlay).
+3. Compare compiled and interpreted output on regex-heavy cases: `=~`, `match`, `scan`, `gsub` with a block, `$~`/`$1`,
+   named captures, encodings.
+
+Not yet done: no world compiles `Regexp` code, so step 3 has no evidence yet. The open frame-local block bug above
+(`all?` through `Array#each`) is the likeliest obstacle, since `scan`/`gsub` take blocks.
+
+## Scope: Rails and Discourse
+
+Not a target today. Rough assessment, not measured (no Discourse size count yet):
+- **Closed world vs. Rails.** Rails loads code at runtime (Zeitwerk autoload, `require` during boot) and relies on
+  `class_eval`, `define_method` and `method_missing`. bc2cpp's closed-world rules forbid `eval`, `define_method` and late
+  C installs (`docs/notes/bc2cpp-core-c.md`). Its codegen special-cases some of these; it does not remove them.
+- **Regexp.** Solvable with onig as above, and not a structural blocker.
+- **Native extensions.** Discourse depends on C extensions such as `pg` and `nokogiri`. bc2cpp has no path for them.
+- **Server runtime.** Threads, sockets, a PostgreSQL client and Redis are outside the closed-world model.
+- **Size.** The validated worlds (optcarrot, the RPG engine, the Path B script) are self-contained pure Ruby. A Rails
+  app plus gems is likely much larger; measure before planning (`cloc`, and a grep for `eval`, `define_method`, `Regexp`).
+
+A realistic first target is a pure-Ruby, eval-free leaf library with no native gems, built the optcarrot way: a pinned
+source, a world manifest, and a check against CRuby.
 
 ## Phases
 

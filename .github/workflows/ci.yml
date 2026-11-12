@@ -4,7 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The weekly run is the bc2cpp mrbc-snapshot job alone (see bc2cpp-changes and the schedule guards on the other jobs): the
+  # fork's mrbc moves with the pinned world, so drift must show without a change here.
+  schedule:
+    - cron: "23 4 * * 1"
   workflow_dispatch:
+    inputs:
+      self_aot:
+        description: Build and verify the bc2cpp self-AOT compiler
+        type: boolean
+        default: false
+      mrbc_rb:
+        description: "BC2CPP_MRBC_RB for every bc2cpp world/checks job: snapshot, verify, or record (= verify plus BC2CPP_MRBC_SNAPSHOT_RECORD; the record files are uploaded as artifacts for snapshot.rb --update --from-record)"
+        default: ""
+      oracle_update:
+        description: "bc2cpp mrbc-snapshot: regenerate snapshot_world.txt with the upstream mruby oracle and upload it as an artifact"
+        type: boolean
+        default: false
 
 # A newer push to the same branch or PR supersedes the run in progress.
 concurrency:
@@ -25,7 +41,7 @@ jobs:
   # build/ holds absolute paths, so every job uses the same checkout path.
   build:
     needs: pathb-changes
-    if: needs.pathb-changes.outputs.full_ci == 'true'
+    if: github.event_name != 'schedule' && needs.pathb-changes.outputs.full_ci == 'true'
     runs-on: ubuntu-24.04
     env:
       # sccache stores compiler outputs in the GitHub Actions cache.
@@ -56,6 +72,7 @@ jobs:
         run: sccache --show-stats
 
   test:
+    if: github.event_name != 'schedule'
     needs: [build, pathb-changes]
     runs-on: ubuntu-24.04
     strategy:
@@ -203,7 +220,7 @@ jobs:
   # Linux arm64 (moved here from arm.yml so that build-and-test can depend on them; check names unchanged).
   arm-build:
     needs: pathb-changes
-    if: needs.pathb-changes.outputs.full_ci == 'true'
+    if: github.event_name != 'schedule' && needs.pathb-changes.outputs.full_ci == 'true'
     name: arm build
     runs-on: ubuntu-24.04-arm
     env:
@@ -224,6 +241,7 @@ jobs:
         run: sccache --show-stats
 
   arm-test:
+    if: github.event_name != 'schedule'
     needs: arm-build
     runs-on: ubuntu-24.04-arm
     strategy:
@@ -269,7 +287,7 @@ jobs:
   # macOS arm64, one job per back end (moved here from macos.yml; check names unchanged).
   macos-suites:
     needs: pathb-changes
-    if: needs.pathb-changes.outputs.full_ci == 'true'
+    if: github.event_name != 'schedule' && needs.pathb-changes.outputs.full_ci == 'true'
     name: macOS arm64 (${{ matrix.backend }} backend)
     runs-on: macos-15
     strategy:
@@ -329,6 +347,7 @@ jobs:
   # are cached: the rest of build/mrustc/src is the rustc source tree and mrustc's intermediate objects, about 5 GB, which
   # the suite does not read.
   mrustc:
+    if: github.event_name != 'schedule'
     needs: build
     runs-on: ubuntu-24.04
     env:
@@ -424,6 +443,7 @@ jobs:
   #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
   #   tests/safeptr/run.sh     -fsafe-pointers (lib/safeptr, docs/notes/safe-pointers.md), and the Path B probes under it
   pathb-changes:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     outputs:
       changed: ${{ steps.paths.outputs.changed }}
@@ -452,7 +472,7 @@ jobs:
 
   pathb-build:
     needs: pathb-changes
-    if: needs.pathb-changes.outputs.changed == 'true'
+    if: github.event_name != 'schedule' && needs.pathb-changes.outputs.changed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -505,6 +525,7 @@ jobs:
 
   # One suite per job, all restoring the pathb-build job's caches. The slowest suite sets the total time.
   pathb-test:
+    if: github.event_name != 'schedule'
     # Skipped with pathb-build when the change does not touch Path B.
     needs: pathb-build
     runs-on: ubuntu-24.04
@@ -525,6 +546,7 @@ jobs:
             run: |
               tests/pathb-qbe/run.sh
               tests/pathb-qbe/hosted.sh
+              tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
             run: |
               FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
@@ -588,8 +610,9 @@ jobs:
   # each leg it names must have run in this run and succeeded (the result of the test job alone would pass a matrix that had
   # lost a leg). The run's jobs are listed first for that (JOBS_FILE); a run whose list is missing does not pass.
   build-and-test:
-    if: always()
-    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
+    if: always() && github.event_name != 'schedule'
+    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test,
+      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -622,7 +645,7 @@ jobs:
     name: macOS arm64 Path B probe
     # Runs only when the Path B selection (pathb-changes) sees a Path B path change. Not in build-and-test's needs: non-gating.
     needs: pathb-changes
-    if: needs.pathb-changes.outputs.changed == 'true'
+    if: github.event_name != 'schedule' && needs.pathb-changes.outputs.changed == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -660,3 +683,457 @@ jobs:
         # floats passes on macOS. gaps_float and gaps_sort need libc++'s type-trait builtins (__is_reference, ...), which
         # EDG does not provide yet: add them back when that lands.
         run: PATHB_QBE_ONLY='cases/floats' tests/pathb-qbe/run.sh --trace off
+
+  # The bc2cpp jobs below run when a path they build from changes, as the bc2cpp workflow's own path filter did, and on a manual
+  # run; the weekly run is mrbc-snapshot alone. `changed` is true on the schedule and dispatch events, and on a push or pull
+  # request that touches a path in the filter.
+  bc2cpp-changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.bc2cpp == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: paths
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        with:
+          filters: |
+            bc2cpp:
+            - "bc2cpp/**"
+            - "tests/bc2cpp/**"
+            - "scripts/pathb-qbe-emit.rb"
+            # The other Ruby scripts a world compiles (tests/bc2cpp/worlds.list): a change to one is a change to its world. Without
+            # these a change that the interpreter takes and the compiled build does not (a backtick, ENV, a regexp) reached main
+            # unchecked. tests/ci/scope_check.rb keeps this list in step with the run_*.sh scripts.
+            - "scripts/pathb-ssa.rb"
+            - "scripts/pathb-egraph.rb"
+            - "scripts/pathb-ssa-qbe.rb"
+            - "scripts/pathb-ir-opt.rb"
+            - "scripts/pathb-structure.rb"
+            - "scripts/pathb-ssa-structurize.rb"
+            - "scripts/pathb-cil-emit.rb"
+            - "scripts/qbe2cil.rb"
+            - "scripts/cil-link.rb"
+            - "scripts/pathb-wgsl-emit.rb"
+            - "scripts/pathb-spirv-emit.rb"
+            - "scripts/pathb-spirv-kernel-emit.rb"
+            - "scripts/pathb-wasm-emit.rb"
+            - "scripts/llvm-to-pathb.rb"
+            - "scripts/sycl-rewrite.rb"
+            - "scripts/strip-atomic.rb"
+            - "scripts/mrustc-prep.rb"
+            - "scripts/cpp-feature-checklist.rb"
+            - "scripts/cpp-feature-report.rb"
+            - "scripts/bc2cpp"
+            - "scripts/setup-bc2cpp.sh"
+            - "scripts/bc2cpp-self"
+            - "scripts/setup-bc2cpp-self.sh"
+            - "Gemfile"
+            - "Gemfile.lock"
+            - "scripts/pathb-borrowck.rb"
+            - "tests/pathb-borrow/**"
+            - "be/nfcxx_*.c"
+            - "scripts/nfcxx-*"
+            - "scripts/setup-libclang-edg.sh"
+            - "scripts/build-libclang-edg.sh"
+            - "scripts/setup-edg.sh"
+            # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
+            # of EDG, QBE or cproc, or a change to their setup, must re-run the parity check.
+            - "3rd/edg"
+            - "3rd/qbe"
+            - "3rd/cproc"
+            - "scripts/setup-qbe.sh"
+            - "scripts/qbe-*.patch"
+            - "scripts/cproc-*.patch"
+            - "scripts/pathb-ldrt"
+            - "be/nfcxx_*.h"
+            - ".github/actions/toolchain/**"
+            - ".github/workflows/ci.yml"
+
+  # bc2cpp (bc2cpp/, the mruby-to-C++ compiler moved from rpg-maker-clone, docs/notes/bc2cpp-migration.md) compiling the worlds
+  # under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own Ruby scripts, one world each,
+  # listed in tests/bc2cpp/worlds.list and run three to a job) against a pinned rpg-maker-clone checkout (tests/bc2cpp/fetch.sh).
+  # It needs only the host compiler and Ruby 4.0, not the EDG toolchain. They are in build-and-test's needs, so they gate
+  # whenever bc2cpp-changes reports a change (scripts/ci-scope.rb, BC2CPP_JOBS): a run that skipped them is refused.
+  # The worlds (tests/bc2cpp/worlds.list), three shards: a shard runs its worlds one after another in this job
+  # (tests/bc2cpp/run_worlds.rb balances them by the list's weights, runs every world even after one fails, and prints a
+  # per-world summary), so the checkout, Ruby, the build tools and the fetched world are paid for once per shard, not once per
+  # world. A new world goes in worlds.list; raise the shard count here and in --shard when the shards outgrow the timeout.
+  world:
+    needs: bc2cpp-changes
+    if: github.event_name != 'schedule' && needs.bc2cpp-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      # No submodules: the worlds build from the pinned rpg-maker-clone checkout, not from 3rd/.
+      - uses: actions/checkout@v7
+
+      # Ruby 4.0 ships the Prism 1.x and RBS 4.x that bc2cpp is written against; the runner image's Ruby is older.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+
+      # bison and gperf for the fork's mruby build, autoconf and automake for Onigmo (mruby-onig-regexp), gdb for a
+      # crash's backtrace (tests/bc2cpp/run_optcarrot.sh).
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool gdb
+
+      # The pinned world (tests/bc2cpp/fetch.sh) is the same for every job and shard that fetches it, and fetch.sh
+      # reuses a checkout at the same pin. The cache is keyed on fetch.sh, which holds the pin and the submodule list.
+      - name: Restore the pinned world
+        uses: actions/cache@v6
+        with:
+          path: build/bc2cpp/rpg-maker-clone
+          key: bc2cpp-world-${{ runner.os }}-default-${{ hashFiles('tests/bc2cpp/fetch.sh') }}
+
+      # -O2: the runner's Ubuntu g++ 13.3 miscompiles the -O3 build (SIGILL inside a call to bc2cpp_hint_violation that
+      # is never entered); Debian's 13.5 and -O2 both pass.
+      - name: bc2cpp worlds, shard ${{ matrix.shard }} of 3
+        env:
+          OPTCARROT_COMPILED_FLAGS: -O2
+          # The Ruby emitter is the default compiler. Every world runs verify (it also runs the fork's mrbc and fails on any
+          # byte difference) unless worlds.list names another mode or a dispatch's mrbc_rb input replaces it (snapshot compares
+          # with what that mrbc once wrote, bc2cpp/tools/mrbc_rb/snapshot*.txt, and aborts on an input that is not in the table:
+          # dispatch with mrbc_rb=record, then snapshot.rb --update --from-record on the artifact).
+          BC2CPP_MRBC_RB_OVERRIDE: ${{ inputs.mrbc_rb }}
+          BC2CPP_MRBC_RECORD_DIR: ${{ runner.temp }}
+        run: ruby tests/bc2cpp/run_worlds.rb --shard ${{ matrix.shard }}/3
+
+      - name: Upload the snapshot records
+        if: always() && inputs.mrbc_rb == 'record'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrbc-record-worlds-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mrbc-record-*.txt
+          if-no-files-found: ignore
+
+  # mrbc_rb (bc2cpp/tools/mrbc_rb): the Ruby RITE emitter, compared byte for byte with the fork's mrbc -g built from the
+  # pinned world, then the command line (bin/mrbc_rb: all output formats, on every gem's mrblib set and every bc2cpp
+  # source, and the `-v` listing; ~3 min together, so run in full rather than sampled) and bc2cpp's loader through it. tests/bc2cpp/run_mrbc_rb.sh runs
+  # the tests against one oracle build. Uses the root Gemfile's Prism 1.9.0 under Ruby 4.0.
+  mrbc-rb:
+    needs: bc2cpp-changes
+    if: github.event_name != 'schedule' && needs.bc2cpp-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+
+      - name: Baked runner source graph
+        run: bundle exec ruby tests/bc2cpp/source_baking.rb
+
+      - name: Self compilation artifacts and registration
+        run: bundle exec ruby tests/bc2cpp/self_compile.rb
+
+      - name: Golden, CLI and integration tests against the fork's mrbc
+        run: tests/bc2cpp/run_mrbc_rb.sh
+
+  # mrbc-snapshot: the oracle-free verification. bc2cpp/tools/mrbc_rb/snapshot.txt (and snapshot_world.txt for the inputs of the pinned
+  # world; the world commit in its header is informational, a pin bump alone does not fail: keys are content hashes) records, per input (content hash of the file
+  # set), the hash of what the fork's mrbc -g wrote. This job is the one that has the oracle: it builds it once at the pinned
+  # world, checks that every input the tests and the pinned world enumerate is in the table and still gives the recorded value
+  # (drift of the fork or an incomplete table fails), then runs the emitter tests with NO mrbc, against the table. Jobs that
+  # do not need to build mrbc can use BC2CPP_MRBC_RB=snapshot instead of verify. Scheduled too: the fork's mrbc moves with the
+  # pinned world (tests/bc2cpp/fetch.sh), and a stale table must show up without anyone touching bc2cpp.
+  mrbc-snapshot:
+    needs: bc2cpp-changes
+    if: needs.bc2cpp-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+
+      - name: Build the oracle once and check the snapshot against it
+        run: |
+          set -eu
+          root=$PWD
+          . tests/bc2cpp/fetch.sh
+          bc2cpp_fetch
+          (cd "$bc2cpp_root/3rd/mruby" && env -u LD BUNDLE_GEMFILE="$root/Gemfile" bundle exec rake -j"$(nproc)") > build/bc2cpp/snapshot-oracle.log 2>&1 ||
+            { tail -20 build/bc2cpp/snapshot-oracle.log; exit 1; }
+          echo "BC2CPP_RPG_DIR=$bc2cpp_root" >> "$GITHUB_ENV"
+          echo "ORACLE=$bc2cpp_root/3rd/mruby/bin/mrbc" >> "$GITHUB_ENV"
+          if [ "${{ inputs.oracle_update }}" = true ]; then
+            MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update
+          else
+            MRBC="$bc2cpp_root/3rd/mruby/bin/mrbc" BC2CPP_RPG_DIR="$bc2cpp_root" bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --check
+          fi
+
+      # The regenerated table goes back to the branch it was built from, so the check on that branch can verify it.
+      # A push with GITHUB_TOKEN does not start another workflow run.
+      - name: Commit the regenerated snapshot to this branch
+        if: inputs.oracle_update == true && github.ref_type == 'branch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bc2cpp/tools/mrbc_rb/snapshot_world.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "mrbc: regenerate snapshot_world.txt with the fork oracle"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Upload the regenerated snapshot
+        if: inputs.oracle_update == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot_world
+          path: bc2cpp/tools/mrbc_rb/snapshot_world.txt
+
+      - name: Golden and CLI tests against the snapshot (no mrbc in the environment)
+        run: |
+          unset MRBC
+          export BC2CPP_NO_MRBC=1
+          bundle exec ruby bc2cpp/tools/mrbc_rb/golden_test.rb
+          # cli_test starts bin/mrbc_rb once per input (about 0.2 s each): every 10th input keeps the step to a few minutes.
+          MRBC_RB_CLI_SAMPLE=10 bundle exec ruby bc2cpp/tools/mrbc_rb/cli_test.rb
+          bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --verify
+          bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot_test.rb
+
+  # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
+  # bc2cpp-checks job. They run inside the pinned world (tests/bc2cpp/fetch.sh), whose bc2cpp paths reach this checkout
+  # through its 3rd/nfcxx, with the world's own Nix dev shell, so the commands and their toolchain are unchanged.
+  checks:
+    needs: bc2cpp-changes
+    if: github.event_name != 'schedule' && needs.bc2cpp-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    env:
+      RUBY_YJIT_ENABLE: "1"
+      BC2CPP_WORLD_FULL: "1"
+      # The Ruby emitter is the default compiler; verify also runs the fork's mrbc and fails on any byte difference. Stays on verify:
+      # the fixtures compile generated programs (measured on 24 checks: 64 distinct inputs, none in the snapshot table). A dispatch with
+      # mrbc_rb=record also writes the inputs of each check to a record file (uploaded below) for snapshot.rb --update --from-record.
+      BC2CPP_MRBC_RB: ${{ (inputs.mrbc_rb == 'record' && 'verify') || inputs.mrbc_rb || 'verify' }}
+    steps:
+      - run: git config --global submodule.fetchJobs 4
+      - uses: actions/checkout@v7
+
+      # The runner context is not available in a job-level env, so the record path is exported from a step.
+      - name: Snapshot record path
+        if: inputs.mrbc_rb == 'record'
+        run: echo "BC2CPP_MRBC_SNAPSHOT_RECORD=$RUNNER_TEMP/mrbc-record-checks-${{ matrix.shard }}.txt" >> "$GITHUB_ENV"
+
+      # The pinned world (tests/bc2cpp/fetch.sh) is the same for every job and shard that fetches it, and fetch.sh
+      # reuses a checkout at the same pin. The cache is keyed on fetch.sh, which holds the pin and the submodule list.
+      - name: Restore the pinned world
+        uses: actions/cache@v6
+        with:
+          path: build/bc2cpp/rpg-maker-clone
+          key: bc2cpp-world-${{ runner.os }}-full-${{ hashFiles('tests/bc2cpp/fetch.sh') }}
+
+      - name: World checkout
+        run: tests/bc2cpp/world.sh
+
+      - uses: nixbuild/nix-quick-install-action@v35
+      - name: Restore and cache Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-bc2cpp-${{ runner.os }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}
+          restore-prefixes-first-match: nix-bc2cpp-${{ runner.os }}-
+
+      - name: Set up development environment
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: ./scripts/nix/develop-export-env.bash .#bc2cpp
+
+      - name: Verify host Ruby JIT
+        run: ruby -e 'abort "YJIT is unavailable or disabled" unless RubyVM::YJIT.enabled?; puts RUBY_DESCRIPTION'
+
+      # Keyed on content digests, so a stale restore is recomputed rather than trusted.
+      - name: Cache bc2cpp scan cache
+        uses: actions/cache@v6
+        with:
+          path: build/bc2cpp/rpg-maker-clone/build/bc2cpp-cache
+          key: bc2cpp-scan-cache-${{ hashFiles('bc2cpp/tools/bc2cpp/*.rb') }}
+          restore-keys: bc2cpp-scan-cache-
+
+      - name: Key for the fixture libmruby caches
+        id: lib-key
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          echo "mruby=$(git rev-parse HEAD:3rd/mruby)" >> "$GITHUB_OUTPUT"
+          echo "stringio=$(git rev-parse HEAD:3rd/mruby-stringio)" >> "$GITHUB_OUTPUT"
+      - name: Cache the full-core libmruby build
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bc2cpp-full
+          key: bc2cpp-full-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}-${{ steps.lib-key.outputs.mruby }}-${{ steps.lib-key.outputs.stringio }}-${{ hashFiles('bc2cpp/scripts/bc2cpp/fixture_runtime.rb', 'build/bc2cpp/rpg-maker-clone/scripts/mruby/**', 'bc2cpp/scripts/bc2cpp/*.bash', 'build/bc2cpp/rpg-maker-clone/patches/mruby*.patch') }}
+      # The same libmruby without mruby-fiber, for native_fiber_check (the C++ Fiber as the only Fiber).
+      - name: Cache the no-fiber libmruby build
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bc2cpp-nofiber
+          key: bc2cpp-nofiber-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/bc2cpp/rpg-maker-clone/flake.*') }}-${{ steps.lib-key.outputs.mruby }}-${{ hashFiles('bc2cpp/scripts/bc2cpp/fixture_runtime.rb', 'build/bc2cpp/rpg-maker-clone/scripts/mruby/**', 'build/bc2cpp/rpg-maker-clone/mruby-fiber-placeholder/**', 'bc2cpp/scripts/bc2cpp/*.bash', 'build/bc2cpp/rpg-maker-clone/patches/mruby*.patch') }}
+
+      - name: Prepare shared check libraries
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          env -u LD BC2CPP_FULL_BUILD_DIR="$RUNNER_TEMP/bc2cpp-full" ruby -r ./scripts/bc2cpp/fixture_runtime -e 'abort "full-core mruby unavailable" unless Bc2cppFixtureRuntime.full_or_build'
+          env -u LD BC2CPP_NOFIBER_BUILD_DIR="$RUNNER_TEMP/bc2cpp-nofiber" ruby -r ./scripts/bc2cpp/fixture_runtime -e 'abort "no-fiber mruby unavailable" unless Bc2cppFixtureRuntime.nofiber_or_build'
+          echo "MRBC=$RUNNER_TEMP/bc2cpp-full/host/bin/mrbc" >> "$GITHUB_ENV"
+          echo "BC2CPP_MRUBY_FULL=$RUNNER_TEMP/bc2cpp-full/host" >> "$GITHUB_ENV"
+          echo "BC2CPP_MRUBY_NOFIBER=$RUNNER_TEMP/bc2cpp-nofiber/host" >> "$GITHUB_ENV"
+          echo "BC2CPP_BUILD_INCLUDE=$RUNNER_TEMP/bc2cpp-full/host/include" >> "$GITHUB_ENV"
+
+      # The world's registry: every check in the policy is scheduled somewhere (checks.list included).
+      - name: Check bc2cpp registrations
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: ruby scripts/ci/check_registry.rb
+
+      - name: Run bc2cpp checks
+        timeout-minutes: 30
+        working-directory: build/bc2cpp/rpg-maker-clone
+        run: |
+          unset LD
+          ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
+          source "$RUNNER_TEMP/bc2cpp-checks.sh"
+
+      - name: Upload the snapshot record
+        if: always() && inputs.mrbc_rb == 'record'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mrbc-record-checks-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mrbc-record-checks-${{ matrix.shard }}.txt
+          if-no-files-found: ignore
+
+  # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers (return kinds, and the host program's main_ast roots) and both
+  # preprocessors (and the analysis headers' presym ids) on the pinned world's mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
+  # toolchain action restores build/edg, build/qbe and build/cproc from the cache that ci.yml's build job saves (same keys,
+  # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
+  # configuration, cached below. The checkout takes only the submodules those need.
+  nfcxx-clang-parity:
+    needs: bc2cpp-changes
+    if: github.event_name != 'schedule' && needs.bc2cpp-changes.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      NFCXX_PARITY_FIBER: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: EDG, QBE and cproc sources
+        run: git submodule update --init --depth 1 3rd/edg 3rd/qbe 3rd/cproc
+
+      # clang: the oracle of the parity checks (nfcxx is the default AST producer, preprocessor and host compiler wherever it is
+      # built; clang stays installed only here, and is the fallback elsewhere). bison, gperf, autoconf, automake and libtool: the fork's mruby build
+      # (the Fiber check).
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: clang bison gperf autoconf automake libtool
+
+      # Ruby 4.0 ships the Prism 1.x and RBS 4.x that bc2cpp is written against (see the world job).
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      # build/libclang-edg, keyed as ci.yml keys the Path B harness: the EDG revision and what the build reads.
+      - name: AST front end cache key
+        id: libclang-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the AST front end
+        id: libclang-edg
+        uses: actions/cache@v6
+        with:
+          path: build/libclang-edg
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
+
+      - name: Build the AST front end
+        if: steps.libclang-edg.outputs.cache-hit != 'true'
+        run: LIBCLANG_EDG_IN_PROCESS=0 scripts/setup-libclang-edg.sh
+
+      - name: nfcxx against clang (AST producers, main_ast, preprocessors, C++ Fiber)
+        run: tests/bc2cpp/run_nfcxx_parity.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # A full self build is intentionally requested through workflow_dispatch;
+  # the fast artifact checks above run on ordinary changes.
+  self-aot:
+    if: github.event_name == 'workflow_dispatch' && inputs.self_aot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NFCXX_BACKEND: gcc
+      RUBYOPT: --yjit
+      BC2CPP_SCCACHE: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - name: EDG sources
+        run: git submodule update --init --depth 1 3rd/edg
+      - uses: ./.github/actions/toolchain
+        with:
+          qbe: "false"
+          packages: clang bison gperf autoconf automake libtool
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      # The pinned world (tests/bc2cpp/fetch.sh) is the same for every job and shard that fetches it, and fetch.sh
+      # reuses a checkout at the same pin. The cache is keyed on fetch.sh, which holds the pin and the submodule list.
+      - name: Restore the pinned world
+        uses: actions/cache@v6
+        with:
+          path: build/bc2cpp/rpg-maker-clone
+          key: bc2cpp-world-${{ runner.os }}-full-${{ hashFiles('tests/bc2cpp/fetch.sh') }}
+
+      - name: Pinned fixture world
+        run: BC2CPP_WORLD_FULL=1 tests/bc2cpp/world.sh
+      - name: CRuby 4 + YJIT compiles bc2cpp; nfcxx builds its output
+        run: bundle exec scripts/setup-bc2cpp-self.sh > "$RUNNER_TEMP/bc2cpp-self-path"
+      - name: Translated entries, emitter parity and generated-code behavior
+        env:
+          BC2CPP_REQUIRE_SELF_AOT: "1"
+          BC2CPP_RUNNER_MRBC_MODE: verify
+        run: |
+          export BC2CPP_MRUBY_RUNNER=$(cat "$RUNNER_TEMP/bc2cpp-self-path")
+          export MRBC="$GITHUB_WORKSPACE/build/bc2cpp-self/bootstrap/bc2cpp-runner/bin/mrbc"
+          export CXX="$GITHUB_WORKSPACE/nfcxx"
+          bundle exec ruby --yjit tests/bc2cpp/runner_generation.rb
+      - name: Self-build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bc2cpp-self-build
+          path: |
+            build/bc2cpp-self/*.log
+            build/bc2cpp-self/generation/*.json
+            build/bc2cpp-self/generation/*.log
+          if-no-files-found: ignore

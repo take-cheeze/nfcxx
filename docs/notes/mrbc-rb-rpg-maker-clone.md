@@ -154,7 +154,7 @@ instead of N. `snapshot_test.rb` checks this on a fake world at another commit.
 
 Keeping the table complete: run the job in `verify` with `BC2CPP_MRBC_SNAPSHOT_RECORD`, then
 `MRBC=<fork mrbc> BC2CPP_RPG_DIR=<world> ruby bc2cpp/tools/mrbc_rb/snapshot.rb --update --from-record <record files>` (merges the
-records into `snapshot_world.txt`, refuses to write when the emitter differs from mrbc). In CI: dispatch `bc2cpp.yml` with
+records into `snapshot_world.txt`, refuses to write when the emitter differs from mrbc). In CI: dispatch `ci.yml` with
 `mrbc_rb=record`; the world and checks jobs run `verify` with a record file each and upload it (`mrbc-record-*` artifacts).
 
 Policy per job (measured on the pinned world, `bc2cpp.rb` compile stage of each job under `BC2CPP_NO_MRBC=1`):

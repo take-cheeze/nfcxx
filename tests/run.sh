@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile each tests/cases/*.cpp with nfcxx (backend: $NFCXX_BACKEND, default qbe) and compare the exit code with `// EXPECT: N`.
+# Compile each tests/cases/*.cpp with nfcxx (backend: $NFCXX_BACKEND, default qbe; CI passes pathb) and compare the exit code with `// EXPECT: N`.
 # Markers (first matching line of a test):
 #   // X86-ONLY: reason          depends on the x86-64 target; skipped on every other host.
 #   // X86-ONLY-LINUX: reason    depends on the x86-64 long double layout of the Linux front end; skipped on non-x86-64

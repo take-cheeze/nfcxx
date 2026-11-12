@@ -82,6 +82,10 @@ PLAIN = <<~'RUBY'
       s << "x"
       s
     end
+
+    def binary
+      "\0a\0\xff".bytes
+    end
   end
 RUBY
 
@@ -104,6 +108,7 @@ PLAIN_EXPECTED = {
   'Plain#word' => '"abc"',
   'Plain#word frozen?' => 'false',
   'Plain#mutate' => '"abcx"',
+  'Plain#binary' => '[0, 97, 0, 255]',
 }.freeze
 
 # The C++ driver: one probe per row, shown through the same show() the other harnesses use. It calls the methods
@@ -142,6 +147,7 @@ PLAIN_PROBE_BODY = <<~CPP
     send0(M, "Plain#word frozen?", w1, "frozen?");
     send0(M, "Plain#same", obj, "same");
     send0(M, "Plain#mutate", obj, "mutate");
+    send0(M, "Plain#binary", obj, "binary");
     return 0;
   }
 CPP

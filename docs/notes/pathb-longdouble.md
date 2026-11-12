@@ -174,17 +174,22 @@ Each is a refusal at compile or link time or a documented difference; none gives
   libstdc++ can call what Path B made, and Path B can call what they made. Two refusals remain, named in the IR:
   `(unsupported variadic function returning long double)` for the address of a variadic routine defined here (it has no
   C-convention entry), and `(unsupported call through a pointer to a variadic function returning long double)` (nothing can
-  follow `...` in the indirect call). A variadic routine defined elsewhere keeps its refusal at a direct call
-  (`call of a variadic function returning long double defined elsewhere`); its address is its C symbol.
+  follow `...` in the indirect call). A direct call of a variadic routine defined elsewhere goes through a thunk of the call's shape (next item); its
+  address is its C symbol.
   `tests/pathb-qbe/multi/ldr_ptr` (C calls Path B's pointers and the reverse) and `cases/ldr_ptr_ir.cpp`.
 - **Signatures the thunks cannot describe.** The thunks know integers, pointers, float, double, long double and structs
   larger than 16 bytes as parameters (`ir_x87_param`). A parameter that is a struct of at most 16 bytes (classified into
   registers by its members) makes a call of a long double function defined elsewhere an IR gap ("call of a function
   returning long double with a small aggregate argument") and a definition get no C-convention entry thunk, so only Path B
   code can call it.
-- **Variadic functions** returning long double: Path B can define and call them (result pointer first); one defined elsewhere
-  cannot be called (`call of a variadic function returning long double defined elsewhere`) and a Path B one has no
-  C-convention entry. Taking and passing long doubles through `...` is fully supported.
+- **Variadic functions** returning long double: Path B can define and call them (result pointer first); a Path B one has no
+  C-convention entry. One defined elsewhere (`g_sum(3, a, b, c)`, `tests/long-double-abi`) is called through
+  `(x87-thunk callv "F" INTS STACK SSE)`, which defines `__nfcxx_x87cv_F_I<INTS>S<STACK>V<SSE>(args..., dst)`: the "..."
+  arguments differ per call, so the thunk is made for the call's whole argument list (the same classification as the
+  other call thunks, `callvc` for `_Complex`), copies the stack arguments, sets `%al` to SSE, the number of vector
+  registers the arguments use, which a variadic callee reads, calls F and stores `st(0)`. The QBE call of the thunk is not
+  marked variadic. Taking and passing long doubles through `...` is fully supported (`va_arg` of a long double reads the
+  16-aligned overflow area). A call through a pointer to such a function is still refused.
 - **Structs of at most 16 bytes that contain a long double.** A struct (or class, nested) of 16 bytes whose only member is a
   long double is class X87: passed in memory, returned in `st(0)`. It is treated exactly as a long double (`ir_is_x87_agg`,
   `ir_x87_mem`): the `(byval (struct "__nfcxx_ld") ...)` argument, the trailing result pointer, the same thunks. gcc agrees on

@@ -2,7 +2,7 @@
 # Real-world check: build Lua 5.4 with ITS OWN makefile, `make CC=<repo>/nfcc`, the way a user would, and run it.
 # Same pinned upstream commit as run_lua.sh (cloned into build/realworld/lua, not vendored). The make runs in a
 # scratch copy of the sources, so the checkout stays clean.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb   (default: both)
 # Lua's repository ships only the developer's makefile. Its warning list, -march=native, -fno-stack-protector
 # and -fno-common all go through nfcc as they are; only MYCFLAGS/MYLIBS are overridden to drop -lreadline
 # (not installed here) and the -Wl,-E link flag is kept.
@@ -19,7 +19,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL lua-make: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   d=$tmp/$b; mkdir "$d"

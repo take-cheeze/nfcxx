@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SQLite as a build product (scripts/setup-sqlite.sh) and lib/sqlcache on top of it: tests/sqlite/cache_test.cpp built with
 # nfcxx against build/sqlite/<backend>/libsqlite3.a, once per backend, and run.
-#   NFCXX_BACKEND=qbe|gcc   (default: both)
+#   NFCXX_BACKEND=pathb|qbe|gcc   (default: pathb and gcc)
 cd "$(dirname "$0")/../.."
 root=$PWD
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 for be in $backends; do

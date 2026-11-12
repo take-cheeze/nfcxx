@@ -1,5 +1,5 @@
 # bc2cpp's check commands, run from the world's root (rpg-maker-clone, whose scripts/bc2cpp is this directory) by
-# scripts/ci/timed_checks.rb --shard N/3 in nfcxx's .github/workflows/bc2cpp.yml (the checks job). The world's
+# scripts/ci/timed_checks.rb --shard N/3 in nfcxx's .github/workflows/ci.yml (the checks job). The world's
 # scripts/ci/check_registry.rb reads this file as the bc2cpp-checks runner of scripts/ci/bc2cpp_check_policy.yml.
 # ci:parallel begin 4
 ruby scripts/bc2cpp/type_check.rb --no-sends
@@ -114,7 +114,9 @@ ruby scripts/bc2cpp/send_arg_facts_check.rb
 ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
+ruby scripts/bc2cpp/core_owner_arms_check.rb
 ruby scripts/bc2cpp/leaf_owner_else_check.rb
+ruby scripts/bc2cpp/respond_to_fold_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb
 ruby scripts/bc2cpp/owner_call_icache_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
@@ -137,6 +139,7 @@ ruby scripts/bc2cpp/record_nilable_read_check.rb
 ruby scripts/bc2cpp/constructor_optionals_check.rb
 ruby scripts/bc2cpp/initializer_sites_check.rb
 ruby scripts/bc2cpp/super_direct_check.rb
+ruby scripts/bc2cpp/core_super_direct_check.rb
 ruby scripts/bc2cpp/native_args_check.rb
 ruby scripts/bc2cpp/operator_sends_check.rb
 ruby scripts/bc2cpp/setter_receiver_filter_check.rb
@@ -158,6 +161,9 @@ ruby scripts/bc2cpp/self_new_leaf_check.rb
 ruby scripts/bc2cpp/class_object_new_check.rb
 ruby scripts/bc2cpp/ctor_rows_check.rb
 ruby scripts/bc2cpp/core_rows_check.rb
+ruby scripts/bc2cpp/core_rows_compiled_check.rb
+ruby scripts/bc2cpp/core_operator_rows_check.rb
+ruby scripts/bc2cpp/undef_left_out_check.rb
 ruby scripts/bc2cpp/sealed_int16_local_check.rb
 ruby scripts/bc2cpp/freeze_fold_check.rb
 ruby scripts/bc2cpp/direct_new_args_check.rb

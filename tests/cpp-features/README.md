@@ -33,7 +33,7 @@ or required diagnostics. For example, `alignas` checks a global's alignment,
 not the known Path A qbe limitation on aligned locals. The static-local test
 checks two callers and one construction; one run cannot prove thread safety.
 
-The default routes are `qbe gcc pathb`. `FEATURE_ROUTES="qbe gcc"` selects a
+The default routes are `qbe gcc pathb` (CI runs `pathb` and `gcc`). `FEATURE_ROUTES="pathb gcc"` selects a
 subset; `FEATURE_ROUTES=host HOST_CXX=g++` validates against a host compiler.
 `FEATURE_CXX` replaces the nfcxx executable, `FEATURE_TIMEOUT` sets the timeout
 in seconds (default 60), and `FEATURE_OUT` changes the results directory.

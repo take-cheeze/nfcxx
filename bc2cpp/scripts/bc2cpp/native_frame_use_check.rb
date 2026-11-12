@@ -320,6 +320,16 @@ Dir.mktmpdir('native_frame_use_check') do |dir|
   suite.check('a frame-free row\'s owner-call wrapper is handed to the set', handed.include?("{ #{wrapper} }") &&
               NativeFrameUse.cpp_source(Set["#{owner}##{name}"]).include?('bc2cpp_ff_add(bc2cpp_ff_wrapper_fns[i])'))
   suite.check('a framed row\'s wrapper is not', NativeFrameUse.wrappers_source(Set['IO#getbyte']).empty?)
+  compiled = [{ label: 'synth:Font#bold', entry: 'Font_bold', arity: 0 }, { label: 'synth:Font#bold=', entry: 'Font_bold_eq', arity: 1 },
+              { label: 'Font#size', entry: 'Font_size', arity: 0 }]
+  suite.check('FRAME_FREE_READERS: only a synthesized reader is handed over',
+              NativeFrameUse.reader_entries(compiled) == ['Font_bold'])
+  suite.check('FRAME_FREE_READERS: the readers go to the set with no frame-free wrapper row',
+              NativeFrameUse.wrappers_source(Set['IO#getbyte'], ['Font_bold']).include?('{ Font_bold }'))
+  chained = NativeFrameUse.cpp_source(Set['IO#getbyte'])
+  suite.check('each gem\'s hook keeps the one installed before it',
+              chained.include?('if (M->frame_free_p != bc2cpp_frame_free_hook) bc2cpp_ff_prev = M->frame_free_p;') &&
+              chained.include?('return bc2cpp_frame_free_p(M, f) || (bc2cpp_ff_prev && bc2cpp_ff_prev(M, f));'))
   suite.check('without rows no hook is installed', !NativeFrameUse.cpp_source(Set.new).include?('frame_free_p'))
   ENV['BC2CPP_FRAMEFREE'] = '0'
   suite.check('BC2CPP_FRAMEFREE=0 turns the rewrite off', !NativeFrameUse.cpp_source(Set['IO#getbyte']).include?('frame_free_p'))

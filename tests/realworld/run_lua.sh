@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real-world check: build the Lua 5.4 interpreter (MIT, pure C) at a pinned upstream release with nfcxx's
 # .c input mode and run it. The source is cloned into build/realworld, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb   (default: both)
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
@@ -22,7 +22,7 @@ for f in "$src"/*.c; do
   case $(basename "$f") in luac.c|ltests.c|onelua.c) ;; *) srcs+=("$f") ;; esac
 done
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   exe=$tmp/lua-$b

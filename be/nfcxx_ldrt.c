@@ -11,9 +11,10 @@
    float and double travel in xmm registers. None of this is visible to other code.
 
    Build: scripts/pathb-ldrt (gcc -O2 -c, archived as libnfcxxld.a, linked by every Path B link step). */
-/* Only x86-64 has the x87 layout these helpers implement; elsewhere the archive is built empty (scripts/pathb-ldrt). */
+/* The x87 layout is x86-64 only; the long double and _Float128 helpers below are guarded by their layout (x87 or binary128). */
 /* __int128 helpers that need no x87 layout: built on any host with a 128-bit integer type (clang on arm64 too). */
 #if defined(__SIZEOF_INT128__)
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -191,7 +192,11 @@ void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 #endif /* defined(__SIZEOF_INT128__) */
 
-#if defined(__x86_64__)
+/* ---- long double arithmetic, comparison and conversion (x87 or binary128 layout) ----
+   Built where long double is the x87 extended format (x86-64, NFCXX_LD_BYTES = 10) or IEEE binary128 (__LDBL_MANT_DIG__ ==
+   113, e.g. aarch64 Linux, NFCXX_LD_BYTES = 16). Was x86-64 only; the binary128 case is needed for the same helper names.
+   Not built where long double is a double (Apple arm64), so that archive is unchanged. */
+#if defined(__SIZEOF_INT128__) && (defined(__x86_64__) || __LDBL_MANT_DIG__ == 113)
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -200,9 +205,10 @@ void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 typedef long double ld;
 
+#if defined(__x86_64__)
 /* The x87 register of a long double result (SysV: class X87, returned in st(0)). Path A (cproc) calls the push helper
    before a return and the pop helper after a call of a function that returns a long double; nothing else touches the
-   x87 stack in between. x86-64 only, like the rest of the runtime's long double support. */
+   x87 stack in between. x86-64 only: there is no x87 stack on other targets. */
 __asm__(".text\n"
         ".globl __nfcxx_ld_push\n"
         "__nfcxx_ld_push:\n"
@@ -212,10 +218,11 @@ __asm__(".text\n"
         "__nfcxx_ld_pop:\n"
         "\tfstpt (%rdi)\n"
         "\tret\n");
+#endif
 
-/* the 10 x87 bytes are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops the memset of the
-   6 padding bytes and leaves them unwritten */
-#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, 10); } while (0)
+/* the NFCXX_LD_BYTES bytes of the value are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops
+   the memset of the padding bytes and leaves them unwritten. The bytes are the x87 ones (10) or the binary128 ones (16). */
+#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, NFCXX_LD_BYTES); } while (0)
 
 void __nfcxx_ld_add(ld *d, const ld *a, const ld *b) { PUT(d, *a + *b); }
 void __nfcxx_ld_sub(ld *d, const ld *a, const ld *b) { PUT(d, *a - *b); }
@@ -285,8 +292,11 @@ void __nfcxx_ld_vaarg(ld *d, va_list ap) { PUT(d, va_arg(ap, ld)); }
 int __nfcxx_ld_fpclassify(const ld *a) { return fpclassify(*a); }
 int __nfcxx_ld_isnormal(const ld *a) { return isnormal(*a); }
 int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b); }
+#endif /* long double helpers */
 
 /* ---- _Float128 (docs/notes/pathb-float128.md) ----
+   Built where long double is x87 (x86-64) or binary128 (__LDBL_MANT_DIG__ == 113, e.g. aarch64 Linux): the conversions
+   to and from a long double object use NFCXX_LD_BYTES. Moved out of the x86-64 block; only the C-ABI wrappers stay x86-64.
 
    The same scheme again: a _Float128 is a 16-byte object in memory, the IEEE binary128 bits that gcc and EDG use, and every
    operation on one is a call of a function here, compiled by gcc. gcc has no hardware quad precision on x86-64, so
@@ -295,6 +305,7 @@ int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b
    pointer (all 16 bytes), predicates return int, and the checked conversions abort on a NaN or a value that does not fit
    (the cf2i rule of the IR). The only C-ABI code is the wrappers at the end (__nfcxx_f128w_*), the one place a _Float128
    goes through an SSE register. */
+#if defined(__SIZEOF_INT128__) && (defined(__x86_64__) || (__LDBL_MANT_DIG__ == 113 && defined(__FLT128_MANT_DIG__)))
 typedef _Float128 f128;
 
 static f128 f128_rd(const void *p) { f128 v; memcpy(&v, p, sizeof v); return v; }
@@ -322,25 +333,26 @@ void __nfcxx_f128_from_s128(void *d, const void *a) { f128_wr(d, (f128)(s128)i12
 void __nfcxx_f128_from_u128(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
 void __nfcxx_f128_from_f32(void *d, float v) { f128_wr(d, (f128)v); }
 void __nfcxx_f128_from_f64(void *d, double v) { f128_wr(d, (f128)v); }
-/* from and to a long double object (16 bytes, x87 layout in the low 10): libgcc's __extendxftf2 and __trunctfxf2 */
+/* from and to a long double object (NFCXX_LD_BYTES of it: x87 layout in the low 10 on x86-64, else all 16): libgcc's
+   __extendxftf2 and __trunctfxf2 on x86-64, and the identity on a binary128 long double */
 void __nfcxx_f128_from_ld(void *d, const void *a)
 {
   ld x = 0;
-  memcpy(&x, a, 10);
+  memcpy(&x, a, NFCXX_LD_BYTES);
   f128_wr(d, (f128)x);
 }
 void __nfcxx_f128_to_ld(void *d, const void *a)
 {
   ld v = (ld)f128_rd(a);
   memset(d, 0, 16);
-  memcpy(d, &v, 10);
+  memcpy(d, &v, NFCXX_LD_BYTES);
 }
 /* from a _Float128 to a long double object (libgcc's __trunctfxf2): the conversion cproc emits between the two soft types */
 void __nfcxx_ld_from_f128(void *d, const void *a)
 {
   ld v = (ld)f128_rd(a);
   memset(d, 0, 16);
-  memcpy(d, &v, 10);
+  memcpy(d, &v, NFCXX_LD_BYTES);
 }
 float __nfcxx_f128_to_f32(const void *a) { return (float)f128_rd(a); }
 double __nfcxx_f128_to_f64(const void *a) { return (double)f128_rd(a); }
@@ -429,7 +441,9 @@ int __nfcxx_f128_isfinite(const void *a) { return __builtin_isfinite(f128_rd(a))
 int __nfcxx_f128_signbit(const void *a) { return __builtin_signbit(f128_rd(a)) != 0; }
 int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_isunordered(f128_rd(a), f128_rd(b)); }
 
+#if defined(__x86_64__)
 /* ---- C-ABI wrappers for _Float128 (docs/notes/pathb-float128.md, "Calls of C functions").
+   x86-64 only (kept as before): the SSE-register convention they work around is the x86-64 one.
 
    A _Float128 is passed in one SSE register and returned in xmm0 by the C convention, which QBE cannot express. A call from
    Path B of a routine defined elsewhere with a _Float128 in its signature goes to __nfcxx_f128w_ + the routine's linkage
@@ -458,7 +472,8 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
 
-#endif /* defined(__x86_64__): the _Float128 helpers above */
+#endif /* defined(__x86_64__): the C-ABI wrappers */
+#endif /* _Float128 helpers */
 
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
 
@@ -648,6 +663,9 @@ float __nfcxx_f128_to_f16(const void *a) { return f16_in_xmm(__nfcxx_f16_from_f1
 /* ---- undefined behavior sanitizer (docs/notes/ubsan.md) ---- */
 
 /* 1 when the signed 64-bit product a * b does not fit (the emitter's cmul on a 64-bit type; QBE has no wide product) */
+#endif /* defined(__x86_64__) */
+
+/* Helpers of every target (no x87 or _Float128 layout): the overflow test of -fsanitize=signed-integer-overflow and the * failed-check report. Outside the x86-64 block so that aarch64 links them too. */
 int __nfcxx_smul64_ovf(long a, long b)
 {
   long r;
@@ -676,7 +694,6 @@ void __nfcxx_ubsan_report(int kind, const char *file, int line)
   fprintf(stderr, "%s:%d: runtime error: %s\n", file, line, msg[kind]);
   abort();
 }
-#endif /* defined(__x86_64__) */
 
 /* SSE2 _mm_pause (the spin-loop hint): the host header declares it inline (gnu_inline), so gcc inlines every call and
    there is no external body; Path B does not inline, and its calls need this definition. */

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B CIL spike (docs/notes/pathb-cil.md): C++ files through scripts/pathb-cil, run with dotnet. `// EXPECT: N` is the
+# Path B CIL spike (docs/notes/pathb-cil.md): C++ and C files through scripts/pathb-cil, run with dotnet. `// EXPECT: N` is the
 # exit status; `// EXPECT-REFUSED: text` means the emitter must refuse the file with a message containing text.
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/pathb-cil
@@ -7,8 +7,8 @@ command -v dotnet >/dev/null || { echo "SKIP pathb-cil: dotnet is not installed"
 [ -x "$root/build/cil/ilasm" ] || { echo "SKIP pathb-cil: scripts/setup-cil.sh has not run"; exit 0; }
 [ -x "$root/build/pathb/cmake/bin/cpfe" ] || { echo "SKIP pathb-cil: scripts/setup-pathb.sh has not run"; exit 0; }
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-for f in "$here"/cases/*.cpp; do
-  n=$(basename "$f" .cpp)
+for f in "$here"/cases/*.cpp "$here"/cases/*.c; do   # a .c file is read as C (scripts/pathb-cil)
+  n=$(basename "$f"); n=${n%.*}
   want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
   refused=$(sed -n 's,^// EXPECT-REFUSED: *,,p' "$f" | head -1)
   if [ -n "$refused" ]; then
