@@ -1570,6 +1570,16 @@ end
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
           @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
+        elsif atomic_small_result?(rv)
+          # A 1- or 2-byte __atomic_* result is defined in its low bits only (the ABI): extend it to the object's type.
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          ext = if unqual(rv[1]).include?("unsigned") || unqual(rv[1]) == "bool"
+                  rv[2].raw.delete('"')[-1] == "1" ? "extub" : "extuh"
+                else
+                  rv[2].raw.delete('"')[-1] == "1" ? "extsb" : "extsh"
+                end
+          @lines << "  #{dst} =w #{ext} #{raw}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -2321,6 +2331,17 @@ end
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
       # (libstdc++'s shared_ptr counts use acq_rel, 4).
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+    end
+
+    # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
+    def atomic_small_result?(c)
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_") && (name.end_with?("_1") || name.end_with?("_2"))
+      return false if name.start_with?("__atomic_load_") || name.start_with?("__atomic_store_")
+
+      true
     end
 
     # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
