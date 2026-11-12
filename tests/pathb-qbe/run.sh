@@ -59,7 +59,7 @@ export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
 # Darwin: extern data through the GOT (pathb-cc does the same; pathb-qbe-emit.rb, --extern-data-got).
-emit_opts=(); [ "$(uname -s)" = Darwin ] && emit_opts=(--extern-data-got)
+emit_opts=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emit_opts=(--extern-data-got)
 mrb=$root/scripts/mrb
 ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
