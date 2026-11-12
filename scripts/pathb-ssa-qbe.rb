@@ -1093,23 +1093,6 @@ end
       [:bits, lo, ranges[j][1] - lo, tests]
     end
 
-    # The chain of equality tests, one per case, in source order.
-    def switch_chain_lines(operand, cls, cases, default)
-      labels = [@label] + (1...cases.size).map { |k| "#{block_label(@cur)}.s#{k}" }
-      cases.each_with_index do |(value, target), k|
-        cond = "%sw#{@cur}_#{k}"
-        @lines << "  #{cond} =w ceq#{cls} #{operand}, #{Qbe.int_lit(value)}"
-        @jumper[[target, @cur]] = labels[k]
-        if k + 1 < cases.size
-          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{labels[k + 1]}"
-          @lines << "@#{labels[k + 1]}"
-        else
-          @jumper[[default, @cur]] = labels[k]
-          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{block_label(default)}"
-        end
-      end
-    end
-
     # A balanced binary tree over the items. Each inner block splits its items at the lower bound of the middle one: a value
     # below it goes left. A range leaf tests its range (x == lo for one value, else x - lo <=u hi - lo) and jumps to its target,
     # or to the default. A bit-test leaf tests the window, then one bit per target, each failing on to the next. The tree
