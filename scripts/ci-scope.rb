@@ -18,6 +18,8 @@ module CiScope
     tools/(?:pathb-spirv-emit|qbe-prep)/|nfcxx\z|\.github/workflows/ci\.yml\z|\.github/ci-test-matrix\.yml\z)}nx
   FULL_JOBS = %w[build test arm-build arm-test macos-suites mrustc].freeze
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
+  # The bc2cpp jobs of ci.yml: required whenever bc2cpp-changes reports a change to one of their paths (or on a manual run).
+  BC2CPP_JOBS = %w[world mrbc-rb mrbc-snapshot checks nfcxx-clang-parity].freeze
 
   # The entries of the `test` job's matrix (ci.yml), one job each. An entry with `gcc_only: true` runs the gcc backend only, which
   # is for pushes to main (GCC_BACKEND in ci.yml): without gcc it is left out, so that leg never starts. The flag itself is not
@@ -69,7 +71,15 @@ module CiScope
       raise ArgumentError, 'Path B coverage cannot run without general compiler coverage'
     end
 
-    [[FULL_JOBS, full], [PATHB_JOBS, pathb]].each do |names, enabled|
+    bc2cpp = needs.fetch('bc2cpp-changes', {})
+    raise ArgumentError, 'bc2cpp selection did not succeed' unless bc2cpp['result'] == 'success'
+
+    bc2cpp_changed = bc2cpp.fetch('outputs', {})['changed']
+    unless %w[true false].include?(bc2cpp_changed)
+      raise ArgumentError, 'bc2cpp selection output is missing or invalid'
+    end
+
+    [[FULL_JOBS, full], [PATHB_JOBS, pathb], [BC2CPP_JOBS, bc2cpp_changed]].each do |names, enabled|
       expected = enabled == 'true' ? 'success' : 'skipped'
       names.each do |name|
         actual = needs.fetch(name, {})['result']

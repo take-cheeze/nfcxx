@@ -1713,16 +1713,128 @@ def strip_eh_pass(forms, report)
   forms
 end
 
-# ---- EH frames of leaf functions (--strip-leaf-eh) ------------------------------------------------------------------------
-# A function with no call has nothing that can throw, so the EH stack entry it pushes (a noexcept guard, kind 6, or a
-# cleanup frame) is never read: only a throw walks the stack. libstdc++'s accessors (shared_ptr::get, vector::size, ...) are
-# such functions, and each pushes and pops a 240-byte entry on thread-local state. The pass drops the entry's slot, its
-# initialisation, the push and the pop, and the writes of __eh_curr_region. It leaves a function unchanged when anything
-# else reads the entry (every register and slot it removes must be gone from what remains), so a leaf that does use its
-# frame, or that the front end shaped otherwise, is kept as it was. Run before --inline, the inliner copies the lean callee.
+# ---- EH frames of functions that cannot throw (--strip-leaf-eh) ----------------------------------------------------------
+# Only a throw walks the EH stack, so the entry a function pushes (a noexcept guard, kind 6, or a cleanup frame) is never read
+# when nothing the function calls can throw. libstdc++'s accessors and shared_ptr members are such functions, and each pushes and
+# pops a 240-byte entry on thread-local state (and each body inlined into a caller does the same). The pass drops the entry's
+# slot, its initialisation, the push and the pop, and the writes of __eh_curr_region, of every function whose calls all go to
+# functions that cannot let an exception out (throwing_functions below). It leaves a function unchanged when anything else
+# reads the entry (every register and slot it removes must be gone from what remains). Run before --inline the inliner copies
+# the lean callee, and after it the functions whose calls were all inlined lose the frames of the bodies copied into them.
 
-def leaf_eh_function(f)
-  return [f, 0] if count_heads(f, "call") > 0
+# Which functions can let an exception out (the nothrow analysis of --strip-leaf-eh). A function cannot when it is guarded (a
+# noexcept function or a destructor: its entry of kind 6 makes a throw through it terminate) or when every call it makes goes
+# to a function that cannot, to an atomic builtin (__atomic_fetch_add_4 ...: a locked instruction or a libatomic call) or to one
+# of the few libc routines that never throw. An indirect call, a call of a function the module does not define (operator new,
+# __cxa_throw ...) can. Computed as the least set of the functions that can, from those with such a call, through their
+# unguarded callers.
+# (a name that never returns, such as an assertion failure, lets no exception out either: it ends the process)
+NOTHROW_EXTERN = %w[memcpy memmove memset memcmp memchr strlen strcmp strncmp strchr strrchr strstr strcpy strncpy
+                    malloc calloc realloc free snprintf vsnprintf printf fprintf puts fputs fwrite fflush getenv
+                    pthread_mutex_lock pthread_mutex_unlock pthread_mutex_trylock pthread_self __errno_location
+                    clock_gettime _setjmp setjmp _mm_pause
+                    abort _exit __assert_fail __assert_perror_fail __stack_chk_fail _ZSt21__glibcxx_assert_failPKciS0_S0_ _ZSt9terminatev
+                    _ZdlPv _ZdlPvm _ZdaPv _ZdaPvm _ZdlPvSt11align_val_t _ZdlPvmSt11align_val_t _ZdaPvSt11align_val_t
+                    _ZdaPvmSt11align_val_t].freeze
+# --nothrow-extern=NAME,NAME: more functions the module does not define that let no exception out (a project's own abort).
+$nothrow_extra = []
+
+def nothrow_extern?(name)
+  return true if name.start_with?("__atomic_") || NOTHROW_EXTERN.include?(name) || $nothrow_extra.include?(name)
+  # a destructor (D0Ev, D1Ev, D2Ev) is noexcept unless declared otherwise, which is rare: an exception out of one terminates
+  name.start_with?("_Z") && (name.end_with?("D0Ev") || name.end_with?("D1Ev") || name.end_with?("D2Ev"))
+end
+
+def guarded_function?(f)
+  frame = f.find { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
+  return false unless frame
+  # the entry's kind byte is stored at offset 8: (let %r (ptr unsigned_char) (offset $"frame" 8)) (store unsigned_char %r (const unsigned_char 6))
+  regs = {}
+  f.each do |c|
+    next unless head(c) == "let" && head(c[3]) == "offset" && c[3][1] == "$" + frame[1] && c[3][2].to_s == "8"
+    regs[c[1]] = true
+  end
+  f.any? { |c| head(c) == "store" && regs[c[2]] && head(c[3]) == "const" && c[3][2].to_s == "6" }
+end
+
+def direct_callees(x, out, unknown)
+  return unless x.is_a?(Array)
+  if head(x) == "call"
+    callee = x[2]
+    if callee.is_a?(String) && callee.start_with?("&\"")
+      out << unq(callee)
+    else
+      unknown[0] = true
+    end
+  end
+  x.each { |y| direct_callees(y, out, unknown) }
+end
+
+def throwing_functions(forms)
+  defs = {}
+  forms.each { |f| defs[unq(f[1])] = f if head(f) == "function" }
+  bad = {}
+  callers = Hash.new { |h, k| h[k] = [] }
+  work = []
+  defs.each do |name, f|
+    next if guarded_function?(f)
+    callees = []
+    unknown = [false]
+    direct_callees(f, callees, unknown)
+    risky = unknown[0]
+    callees.uniq.each do |c|
+      if defs.key?(c)
+        callers[c] << name
+      elsif !nothrow_extern?(c)
+        risky = true
+      end
+    end
+    if risky
+      bad[name] = true
+      work << name
+    end
+  end
+  until work.empty?
+    c = work.pop
+    callers[c].each do |name|
+      next if bad[name]
+      bad[name] = true
+      work << name
+    end
+  end
+  bad
+end
+
+# The calls of x that can throw: those of functions in bad (throwing_functions), and any other not listed as safe.
+def throwing_calls(x, bad)
+  return 0 unless x.is_a?(Array)
+  n = 0
+  if head(x) == "call"
+    callee = x[2]
+    if !(callee.is_a?(String) && callee.start_with?("&\""))
+      n = 1
+    else
+      name = unq(callee)
+      safe = nothrow_extern?(name) || ($leaf_defs.key?(name) && !bad.key?(name))
+      n = 1 unless safe
+    end
+  end
+  x.each { |y| n += throwing_calls(y, bad) }
+  n
+end
+
+# Whether e (the value of a let) is computed from the address of one of the frames or from a register already removed: an
+# offset, bitcast or index of it, or a load through it.
+def derived_of_removed?(e, fnames, removed_regs)
+  base = case head(e)
+         when "offset", "index" then e[1]
+         when "bitcast", "load" then e[2]
+         end
+  base.is_a?(String) && (fnames.include?(base) || removed_regs.key?(base))
+end
+
+def leaf_eh_function(f, bad)
+  return [f, 0] if throwing_calls(f, bad) > 0
   frames = f.select { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
   return [f, 0] if frames.empty?
   fnames = frames.map { |c| "$" + c[1] }
@@ -1749,6 +1861,11 @@ def leaf_eh_function(f)
       elsif h == "let" && head(c[3]) == "offset" && fnames.include?(c[3][1])
         removed_regs[c[1]] = true
         drop = true
+      elsif h == "let" && derived_of_removed?(c[3], fnames, removed_regs)
+        # an address or a value read through the frame's address: the cleanup frame's fields (the region table, the objects'
+        # addresses, the saved region number) are set up and read back through chains of offsets
+        removed_regs[c[1]] = true
+        drop = true
       end
       if drop
         n += 1
@@ -1766,13 +1883,16 @@ end
 
 def strip_leaf_eh_pass(forms, report)
   total = 0
+  $leaf_defs = {}
+  forms.each { |f| $leaf_defs[unq(f[1])] = true if head(f) == "function" }
+  bad = throwing_functions(forms)
   forms = forms.map do |f|
     next f unless head(f) == "function"
-    g, n = leaf_eh_function(f)
+    g, n = leaf_eh_function(f, bad)
     total += n
     g
   end
-  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of leaf functions\n") if report
+  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of functions that cannot throw\n") if report
   forms
 end
 
@@ -1888,6 +2008,8 @@ def main(argv)
       strip_eh = true
     elsif a == "--strip-leaf-eh"
       strip_leaf = true
+    elsif a.start_with?("--nothrow-extern=")
+      $nothrow_extra.concat(a[17..-1].split(","))
     elsif a.start_with?("--jobs=")
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")
@@ -1920,6 +2042,8 @@ def main(argv)
     forms = strip_eh_pass(forms, report) if strip_eh
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
+    # a function whose calls were all inlined (or are atomics) is a leaf now: its frames, and those of the bodies copied into it
+    forms = strip_leaf_eh_pass(forms, report) if strip_leaf && inline
     # the callees that the inliner copied into every caller are not reached any more
     forms = prune_pass(forms, prune, report) if prune && inline
     forms = sroa_pass(forms, jobs) if sroa
