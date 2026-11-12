@@ -4953,12 +4953,12 @@ static ir_val ir_call(an_expr_node_ptr e)
     sret = ir_temp(e->type);
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
+  int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
 #if defined(__aarch64__)
   /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
      (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
      copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
      module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
-  int hid_dest = 0;
   a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
   if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
       hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
