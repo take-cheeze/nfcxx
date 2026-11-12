@@ -1118,6 +1118,12 @@ end
         end
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
 
+        # A fetch-and-add whose old value is discarded (a shared_ptr's count) is the same locked xadd, not a libatomic call.
+        if atomic_fetch?(item[1])
+          atomic_fetch_lines(fresh, nil, item[1])
+          return
+        end
+
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
           @lines << "  call #{sym}(#{args.join(', ')})"
@@ -1255,6 +1261,8 @@ end
       when "call"
         if atomic_fetch?(rv)
           atomic_fetch_lines(dst, c, rv)
+        elsif atomic_load?(rv)
+          @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -1925,8 +1933,7 @@ end
       end
     end
 
-    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a sequentially
-    # consistent call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
+    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
     # (Plain string tests: the bundled script runs under mruby, which has no regular expressions.)
     ATOMIC_FETCH_PREFIX = "__atomic_fetch_"
 
@@ -1952,7 +1959,21 @@ end
       return false unless ATOMIC_XADD
       return false unless atomic_fetch_kind(c)
       order = c[5]
-      head(order) == "const" && order[2].to_s == "5"
+      # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
+      # (libstdc++'s shared_ptr counts use acq_rel, 4).
+      head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+    end
+
+    # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
+    # locked stores and exchanges the lowering uses). Only without --safe.
+    ATOMIC_LOAD = /\A__atomic_load_[48]\z/
+
+    def atomic_load?(c)
+      f = c[2]
+      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
+      return false unless f.raw.delete('"') =~ ATOMIC_LOAD && c.length == 5
+
+      head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
 
     def atomic_fetch_lines(dst, cls, c)
