@@ -97,7 +97,7 @@
   (slot "x" int 4 4)
   (store int $"x" %0)
   (let %1 int (load int $"x"))
-  (asm-block "6370756964" (opnd in "a" 4 %1))
+  (asm-block "6370756964" (opnd in "a" 4 %1) (clobber "bx") (clobber "cx") (clobber "dx"))
   (let %2 int (load int $"x"))
   (return %2))
 

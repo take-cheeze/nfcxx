@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: a union passed by value is refused
 // GNU transparent_union (the kernel's release_pages_arg): an argument of any member's type, and the union itself, passed
 // as the first member, as gcc passes it
 struct page { int n; };

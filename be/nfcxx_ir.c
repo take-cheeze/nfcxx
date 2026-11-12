@@ -6283,36 +6283,232 @@ static int ir_asm_ptx(an_asm_entry_ptr ae, int d)
    or a digit (the operand tied to that one). SIZE is the operand's size in bytes (0 for mem). ARG is the value (in) or the
    address (out, inout, mem). The SSA route emits a helper for the template (scripts/pathb-ssa-qbe.rb, asm_block_helper).
    Returns 1 when it printed the statement, 0 when the statement is outside this form (the caller refuses it). */
-static int ir_asm_general_code(an_asm_operand_ptr op, char *code)
+/* What one operand's first alternative allows: IR_AO_* bits. */
+enum { IR_AO_REG = 1, IR_AO_MEM = 2, IR_AO_ADDR = 4, IR_AO_CC = 8, IR_AO_IMM_INT = 16, IR_AO_IMM_NUM = 32, IR_AO_IMM_SYM = 64,
+       IR_AO_I = 128, IR_AO_J = 256, IR_AO_M = 512, IR_AO_K = 1024, IR_AO_N = 2048, IR_AO_L = 4096, IR_AO_E = 8192, IR_AO_Z = 16384 };
+
+/* The constraints of the first alternative: *allow gets the IR_AO_* bits, *reg the register letter (0 for any), *tie the
+   tied operand's digit (or 0), *cond the condition of a flag output. Returns 0 for a constraint outside the form. */
+static int ir_asm_general_code(an_asm_operand_ptr op, int *allow, char *reg, char *tie, const char **cond)
 {
   an_asm_operand_constraint_ptr c;
-  char reg = 0, tie = 0;
-  int mem = 0;
+  *allow = 0; *reg = 0; *tie = 0; *cond = NULL;
   for (c = op->constraints; c != NULL; c = c->next) {
+    if (c->kind == aoc_end_of_constraint) break; /* the first alternative, as cproc does */
     switch (c->kind) {
-      case aoc_end_of_constraint: break;
-      case aoc_reg_a: reg = 'a'; break;
-      case aoc_reg_b: reg = 'b'; break;
-      case aoc_reg_sse: reg = 'x'; break;
-      case aoc_reg_c: reg = 'c'; break;
-      case aoc_reg_d: reg = 'd'; break;
-      case aoc_reg_si: reg = 'S'; break;
-      case aoc_reg_di: reg = 'D'; break;
-      case aoc_general: case aoc_any: case aoc_reg_integer: case aoc_reg_q: if (!reg) reg = 'r'; break;
+      case aoc_reg_a: *reg = 'a'; *allow |= IR_AO_REG; break;
+      case aoc_reg_b: *reg = 'b'; *allow |= IR_AO_REG; break;
+      case aoc_reg_sse: *reg = 'x'; *allow |= IR_AO_REG; break;
+      case aoc_reg_c: *reg = 'c'; *allow |= IR_AO_REG; break;
+      case aoc_reg_d: *reg = 'd'; *allow |= IR_AO_REG; break;
+      case aoc_reg_si: *reg = 'S'; *allow |= IR_AO_REG; break;
+      case aoc_reg_di: *reg = 'D'; *allow |= IR_AO_REG; break;
+      case aoc_general: case aoc_any: case aoc_reg_integer: case aoc_reg_q: case aoc_reg_Q:
+        if (!*reg) *reg = 'r';
+        *allow |= IR_AO_REG; break;
       case aoc_match_0: case aoc_match_1: case aoc_match_2: case aoc_match_3: case aoc_match_4:
       case aoc_match_5: case aoc_match_6: case aoc_match_7: case aoc_match_8: case aoc_match_9:
-        tie = (char)('0' + ((int)c->kind - (int)aoc_match_0)); break;
-      case aoc_mem_any: case aoc_mem_load: case aoc_mem_offset: case aoc_mem_nonoffset: case aoc_mem_autoinc:
-      case aoc_mem_autodec: mem = 1; break;
+        *tie = (char)('0' + ((int)c->kind - (int)aoc_match_0)); break;
+      case aoc_mem_any: case aoc_mem_offset: case aoc_mem_nonoffset: case aoc_mem_autoinc: case aoc_mem_autodec:
+        *allow |= IR_AO_MEM; break;
+      case aoc_mem_load: *allow |= IR_AO_ADDR; break; /* the `p` constraint: an address operand */
+      case aoc_imm_int: *allow |= IR_AO_IMM_INT; break;
+      case aoc_imm_number: *allow |= IR_AO_IMM_NUM; break;
+      case aoc_imm_symbol: *allow |= IR_AO_IMM_SYM; break;
+      case aoc_imm_short_shift: *allow |= IR_AO_I; break;
+      case aoc_imm_long_shift: *allow |= IR_AO_J; break;
+      case aoc_imm_lea_shift: *allow |= IR_AO_M; break;
+      case aoc_imm_signed8: *allow |= IR_AO_K; break;
+      case aoc_imm_unsigned8: *allow |= IR_AO_N; break;
+      case aoc_imm_and_zext: *allow |= IR_AO_L; break;
+      case aoc_imm_sext32: *allow |= IR_AO_E; break;
+      case aoc_imm_zext32: *allow |= IR_AO_Z; break;
+      case aoc_cc: *allow |= IR_AO_CC; *cond = c->cond_code; break;
       case aoc_mod_earlyclobber: case aoc_mod_commutative_ops: case aoc_mod_ignore: case aoc_mod_ignore_char:
       case aoc_mod_disparage_slightly: case aoc_mod_disparage_severely: break;
-      default: return 0; /* x87, flags, floating-point and immediate constraints are outside this form */
+      default: return 0; /* x87, floating-point and MMX constraints are outside this form */
     }
   }
-  if (tie) *code = tie;
-  else if (reg) *code = reg;
-  else if (mem) *code = 'm';
-  else return 0;
+  return 1;
+}
+
+/* The operand's value when it is an integer constant (an enk_constant ck_integer): 1, with *v set. */
+static int ir_asm_int_const(an_expr_node_ptr e, long long *v)
+{
+  const char *t;
+  char *end;
+  if (e == NULL || e->kind != enk_constant || e->variant.constant.ptr->kind != ck_integer) return 0;
+  if (!ir_is_integer(e->type) && !ir_is_pointer(e->type)) return 0;
+  t = ir_capture_constant(e->variant.constant.ptr);
+  *v = strtoll(t, &end, 10);
+  if (*end != '\0') *v = (long long)strtoull(t, &end, 10);
+  return *end == '\0';
+}
+
+static int ir_asm_sym_lval(an_expr_node_ptr e, const char **base, long long *off);
+
+/* The pointer expression e when it is the address of a static object or a function plus a constant offset: 1, with the
+   base's IR operand in *base and the offset in *off. EDG folds `&g`, `&g[2]` and `&g.m` only inside a constant expression,
+   so the shapes of an operand are followed here. */
+static int ir_asm_sym_const(an_expr_node_ptr e, const char **base, long long *off)
+{
+  a_constant_ptr c;
+  const char *why = NULL, *sym;
+  an_expr_node_ptr a0, a1;
+  long long n;
+  if (e == NULL) return 0;
+  if (e->kind == enk_routine) {
+    sym = ir_rout_addr(e->variant.routine.ptr, &why);
+    if (sym == NULL) return 0;
+    *base = ir_fmt("&\"%s\"", sym); *off = 0;
+    return 1;
+  }
+  if (e->kind == enk_constant && e->variant.constant.ptr->kind == ck_address) {
+    c = e->variant.constant.ptr;
+    *off = (long long)c->variant.address.offset;
+    if (c->variant.address.kind == abk_variable) { *base = ir_global_op(c->variant.address.variant.variable); return 1; }
+    if (c->variant.address.kind == abk_routine) {
+      sym = ir_rout_addr(c->variant.address.variant.routine, &why);
+      if (sym == NULL) return 0;
+      *base = ir_fmt("&\"%s\"", sym);
+      return 1;
+    }
+    return 0;
+  }
+  if (e->kind != enk_operation) return 0;
+  a0 = ir_operand(e, 0);
+  a1 = ir_operand(e, 1);
+  switch (e->variant.operation.kind) {
+    case eok_cast:
+      return a0 != NULL && a0->type != NULL && ir_is_pointer(a0->type) && ir_is_pointer(e->type) && ir_asm_sym_const(a0, base, off);
+    case eok_array_to_pointer:
+    case eok_address_of:
+      return a0 != NULL && ir_asm_sym_lval(a0, base, off);
+    case eok_padd:
+    case eok_psubtract:
+      if (a0 == NULL || !ir_is_pointer(e->type) || !ir_asm_sym_const(a0, base, off) || !ir_osz_const(a1, &n)) return 0;
+      n *= (long long)ir_size_of(skip_typerefs(e->type)->variant.pointer.type);
+      *off += e->variant.operation.kind == eok_padd ? n : -n;
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/* The lvalue e is a static object (or a part of one): its base and offset, as ir_asm_sym_const. */
+static int ir_asm_sym_lval(an_expr_node_ptr e, const char **base, long long *off)
+{
+  an_expr_node_ptr a0, a1;
+  long long n;
+  if (e == NULL) return 0;
+  if (e->kind == enk_variable) {
+    a_variable_ptr var = e->variant.variable.ptr;
+    if (!var_has_static_or_thread_storage_duration(var) || var->is_thread_local || ir_tab_find(&ir_slots, var) != NULL) return 0;
+    *base = ir_global_op(var); *off = 0;
+    return 1;
+  }
+  if (e->kind == enk_routine) return ir_asm_sym_const(e, base, off);
+  if (e->kind != enk_operation) return 0;
+  a0 = ir_operand(e, 0);
+  a1 = ir_operand(e, 1);
+  switch (e->variant.operation.kind) {
+    case eok_dot_field: {
+      a_field_ptr f;
+      if (a0 == NULL || a1 == NULL || a1->kind != enk_field) return 0;
+      f = a1->variant.field.ptr;
+      if (f->is_bit_field || !ir_asm_sym_lval(a0, base, off)) return 0;
+      *off += (long long)f->offset;
+      return 1;
+    }
+    case eok_subscript:
+      if (a0 == NULL || e->type == NULL || !ir_asm_sym_const(a0, base, off) || !ir_osz_const(a1, &n)) return 0;
+      *off += n * (long long)ir_size_of(e->type);
+      return 1;
+    case eok_indirect:
+      return ir_asm_sym_const(a0, base, off);
+    default:
+      return 0;
+  }
+}
+
+/* 1 when constant v meets one of the immediate constraints in allow. */
+static int ir_asm_imm_fits(int allow, long long v)
+{
+  if (allow & (IR_AO_IMM_INT | IR_AO_IMM_NUM)) return 1;
+  if ((allow & IR_AO_I) && v >= 0 && v < 32) return 1;
+  if ((allow & IR_AO_J) && v >= 0 && v < 64) return 1;
+  if ((allow & IR_AO_M) && v >= 0 && v < 4) return 1;
+  if ((allow & IR_AO_K) && v >= -128 && v <= 127) return 1;
+  if ((allow & IR_AO_N) && v >= 0 && v <= 255) return 1;
+  if ((allow & IR_AO_L) && (v == 0xff || v == 0xffff)) return 1;
+  if ((allow & IR_AO_E) && v >= -2147483648LL && v <= 2147483647LL) return 1;
+  if ((allow & IR_AO_Z) && v >= 0 && v <= 4294967295LL) return 1;
+  return 0;
+}
+
+/* 1 when e names an object (a memory operand's expression is an lvalue the front end may have marked as a value). */
+static an_expr_node_ptr ir_asm_strip_decay(an_expr_node_ptr e)
+{
+  while (e != NULL && e->kind == enk_operation && e->variant.operation.kind == eok_array_to_pointer) e = ir_operand(e, 0);
+  return e;
+}
+
+static int ir_asm_lvalue_shape(an_expr_node_ptr e)
+{
+  e = ir_asm_strip_decay(e);
+  if (e == NULL) return 0;
+  if (e->is_lvalue || e->kind == enk_variable) return 1;
+  if (e->kind != enk_operation) return 0;
+  switch (e->variant.operation.kind) {
+    case eok_indirect: case eok_subscript: case eok_dot_field: case eok_points_to_field: return 1;
+    default: return 0;
+  }
+}
+
+/* How one operand is passed: kind (in out inout mem flag imm sym), code and the argument. Returns 0 when the operand is
+   outside the form. ir_asm_plan only decides; the caller evaluates the expressions. */
+typedef struct { const char *kind; char code[16]; long long ival, off; const char *base; } ir_asm_plan;
+
+static int ir_asm_plan_op(an_asm_operand_ptr op, ir_asm_plan *pl)
+{
+  int allow, out = (op->modifiers & aom_output) != 0;
+  char reg, tie;
+  const char *cond;
+  an_expr_node_ptr e = op->expression;
+  a_type_ptr ot = e != NULL ? e->type : NULL;
+  long long v;
+  if (ot == NULL || !ir_asm_general_code(op, &allow, &reg, &tie, &cond)) return 0;
+  pl->code[0] = '\0'; pl->base = NULL; pl->ival = pl->off = 0;
+  if (allow & IR_AO_CC) {
+    /* =@cc<cond>: an output only; the condition is a setcc suffix */
+    size_t i;
+    if (!out || op->modifiers != aom_output || cond == NULL || cond[0] == '\0' || strlen(cond) > 4) return 0;
+    for (i = 0; cond[i] != '\0'; i++) if (cond[i] < 'a' || cond[i] > 'z') return 0;
+    if (!ir_is_integer(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 && ir_size_of(ot) != 4 && ir_size_of(ot) != 8)) return 0;
+    if (!e->is_lvalue) return 0;
+    pl->kind = "flag"; snprintf(pl->code, sizeof pl->code, "%s", cond);
+    return 1;
+  }
+  if (tie) {
+    pl->code[0] = tie; pl->code[1] = '\0';
+  } else if (!out && ir_asm_int_const(e, &v) && (allow & ~(IR_AO_REG | IR_AO_MEM | IR_AO_ADDR | IR_AO_IMM_SYM)) &&
+             ir_asm_imm_fits(allow, v)) {
+    pl->kind = "imm"; pl->code[0] = 'i'; pl->code[1] = '\0'; pl->ival = v;
+    return 1;
+  } else if (!out && (allow & (IR_AO_IMM_INT | IR_AO_IMM_SYM | IR_AO_ADDR)) && ir_asm_sym_const(e, &pl->base, &pl->off)) {
+    pl->kind = "sym"; pl->code[0] = 'i'; pl->code[1] = '\0';
+    return 1;
+  } else if (allow & (IR_AO_REG | IR_AO_ADDR)) {
+    pl->code[0] = (allow & IR_AO_REG) ? (reg ? reg : 'r') : 'r'; pl->code[1] = '\0';
+  } else if (allow & IR_AO_MEM) {
+    pl->code[0] = 'm'; pl->code[1] = '\0';
+  } else {
+    return 0;
+  }
+  if (pl->code[0] == 'm') { pl->kind = "mem"; return ir_asm_lvalue_shape(e); }
+  if (pl->code[0] != 'x' && pl->code[0] != 'r' && out && !e->is_lvalue) return 0;
+  if (out && !e->is_lvalue) return 0;
+  pl->kind = out ? (op->modifiers == aom_modify ? "inout" : "out") : "in";
   return 1;
 }
 
@@ -6329,68 +6525,152 @@ static void ir_sbuf_add(ir_sbuf *b, const char *s)
   b->len += n;
 }
 
+/* A register clobber's name for the helper ("ax", "r12"), or NULL when it cannot be honoured. *ignore is set for the clobbers
+   that need nothing (memory, flags, SSE registers the helper's call already clobbers). */
+static const char *ir_asm_clobber(a_named_register r, int *ignore)
+{
+  *ignore = 0;
+  if (r == anr_memory || r == anr_flags) { *ignore = 1; return NULL; }
+  if (r >= anr_f0 && r <= anr_f15) { *ignore = 1; return NULL; }
+  if (r == anr_a || r == anr_b || r == anr_c || r == anr_d || r == anr_si || r == anr_di || (r >= anr_r8 && r <= anr_r15))
+    return named_register_names[r];
+  return NULL;
+}
+
+static void ir_emit_goto(a_label_ptr lbl, int d);
+
 static int ir_asm_general(an_asm_entry_ptr ae, int d)
 {
   an_asm_operand_ptr op;
+  a_named_register_list_ptr cl;
   const char *tx;
   size_t n, k;
-  int nops = 0, ok = 1;
+  int nops = 0, ok = 1, i, nlabels = 0;
+  ir_val sel = ir_mk_void();
+  ir_asm_plan plans[IR_ASM_OPS_MAX];
   ir_sbuf b = { NULL, 0, 0 };
   char *hex;
-  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string || ae->is_asm_goto) return 0;
+  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) return 0;
   tx = ae->asm_string->variant.string.value;
   n = (size_t)ae->asm_string->variant.string.length;
   while (n > 0 && tx[n - 1] == '\0') n--; /* the length counts the terminator */
+  if (ae->is_asm_goto) {
+    a_label_list_ptr ll;
+    for (ll = ae->labels; ll != NULL; ll = ll->next) nlabels++;
+    if (nlabels == 0 || nlabels > 8) return 0;
+  }
   /* Validate every operand before anything is printed: a refusal must not leave statements behind. */
   for (op = ae->operands; op != NULL && ok; op = op->next, nops++) {
-    char code;
     a_type_ptr ot = op->expression != NULL ? op->expression->type : NULL;
-    int is_mem;
+    int is_mem, is_imm;
     if (nops >= IR_ASM_OPS_MAX || ot == NULL || op->expression == NULL) { ok = 0; break; }
-    if (!ir_asm_general_code(op, &code)) { ok = 0; break; }
-    is_mem = code == 'm';
-    if (!is_mem && ir_is_float(ot) != (code == 'x')) { ok = 0; break; }
-    if (!is_mem && ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
-    if (!is_mem && !ir_is_float(ot) && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
+    if (!ir_asm_plan_op(op, &plans[nops])) { ok = 0; break; }
+    is_mem = strcmp(plans[nops].kind, "mem") == 0;
+    is_imm = strcmp(plans[nops].kind, "imm") == 0 || strcmp(plans[nops].kind, "sym") == 0 || strcmp(plans[nops].kind, "flag") == 0;
+    if (is_mem || is_imm) continue;
+    if (ir_is_float(ot) != (plans[nops].code[0] == 'x')) { ok = 0; break; }
+    if (ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
+    if (!ir_is_float(ot) && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
                                                               ir_size_of(ot) != 4 && ir_size_of(ot) != 8))) { ok = 0; break; }
-    if (((op->modifiers & aom_output) != 0 || is_mem) && !op->expression->is_lvalue) { ok = 0; break; }
   }
   if (!ok) return 0;
-  hex = (char *)malloc(2 * n + 1);
-  for (k = 0; k < n; k++) sprintf(hex + 2 * k, "%02x", (unsigned char)tx[k]);
-  hex[2 * n] = '\0';
+  for (cl = ae->clobbers; cl != NULL; cl = cl->next) {
+    int ignore;
+    if (ir_asm_clobber(cl->reg, &ignore) == NULL && !ignore) return 0;
+  }
+  /* The template: a basic asm (no operands, no `%` processing) writes its `%` twice for the helper's parser. */
+  hex = (char *)malloc(4 * n + 1);
+  for (k = 0, i = 0; k < n; k++) {
+    sprintf(hex + 2 * i, "%02x", (unsigned char)tx[k]); i++;
+    if (!ae->gnu_asm_form && tx[k] == '%') { sprintf(hex + 2 * i, "%02x", (unsigned char)'%'); i++; }
+  }
+  hex[2 * i] = '\0';
   ir_sbuf_add(&b, "(asm-block \"");
   ir_sbuf_add(&b, hex);
   ir_sbuf_add(&b, "\"");
   free(hex);
   /* Evaluate the operands: their statements are printed before the (asm-block ...) form. */
-  for (op = ae->operands; op != NULL; op = op->next) {
-    char code, text[64];
-    int is_mem;
+  nops = 0;
+  for (op = ae->operands; op != NULL; op = op->next, nops++) {
+    char text[96];
     ir_val v;
-    const char *kind;
-    (void)ir_asm_general_code(op, &code);
-    is_mem = code == 'm';
+    const char *kind = plans[nops].kind;
+    int is_mem = strcmp(kind, "mem") == 0;
     if (is_mem) {
+      v = ir_lval(ir_asm_strip_decay(op->expression));
+    } else if (strcmp(kind, "imm") == 0) {
+      v = ir_mk_value(ir_fmt("(const long %lld)", plans[nops].ival), op->expression->type);
+    } else if (strcmp(kind, "sym") == 0) {
+      v = ir_mk_value((char *)plans[nops].base, op->expression->type);
+    } else if (strcmp(kind, "out") == 0 || strcmp(kind, "inout") == 0 || strcmp(kind, "flag") == 0) {
       v = ir_lval(op->expression);
-      kind = "mem";
-    } else if ((op->modifiers & aom_output) != 0) {
-      v = ir_lval(op->expression);
-      kind = op->modifiers == aom_modify ? "inout" : "out";
     } else {
       v = ir_rval(op->expression);
-      kind = "in";
     }
-    snprintf(text, sizeof text, " (opnd %s \"%c\" %d ", kind, code, is_mem ? 0 : (int)ir_size_of(op->expression->type));
+    snprintf(text, sizeof text, " (opnd %s \"%s\" %d ", kind, plans[nops].code, is_mem ? 0 : (int)ir_size_of(op->expression->type));
     ir_sbuf_add(&b, text);
     ir_sbuf_add(&b, v.s);
+    /* NAME (the operand's [name]) and, for a symbol, OFF follow only when there is something to say: the common form is unchanged */
+    if (strcmp(kind, "sym") == 0 || (op->name != NULL && op->name[0] != '\0')) {
+      ir_sbuf_add(&b, " \"");
+      ir_sbuf_add(&b, op->name != NULL ? op->name : "");
+      ir_sbuf_add(&b, "\"");
+    }
+    if (strcmp(kind, "sym") == 0) { snprintf(text, sizeof text, " %lld", plans[nops].off); ir_sbuf_add(&b, text); }
     ir_sbuf_add(&b, ")");
+  }
+  if (nlabels > 0) {
+    /* asm goto: the helper writes the number (from 1) of the label it left by into a cell, 0 when it falls through; the
+       statements after the block jump on it. The cell is the last operand and is not counted in the template's numbers. */
+    a_label_list_ptr ll;
+    sel = ir_temp(integer_type(ik_int));
+    ir_sbuf_add(&b, " (opnd gsel \"\" 4 ");
+    ir_sbuf_add(&b, sel.s);
+    ir_sbuf_add(&b, ")");
+    for (ll = ae->labels; ll != NULL; ll = ll->next) {
+      ir_sbuf_add(&b, " (label \"");
+      ir_sbuf_add(&b, ll->label->source_corresp.name != NULL ? ll->label->source_corresp.name : "");
+      ir_sbuf_add(&b, "\")");
+    }
+  }
+  for (cl = ae->clobbers; cl != NULL; cl = cl->next) {
+    int ignore;
+    const char *nm = ir_asm_clobber(cl->reg, &ignore);
+    if (nm != NULL) { ir_sbuf_add(&b, " (clobber \""); ir_sbuf_add(&b, nm); ir_sbuf_add(&b, "\")"); }
   }
   ir_sbuf_add(&b, ")");
   ir_note(1, stmk_asm, 1);
   ir_line(d, b.s);
   free(b.s);
+  if (nlabels > 0) {
+    a_label_list_ptr ll;
+    int num = 1;
+    for (ll = ae->labels; ll != NULL; ll = ll->next, num++) {
+      ir_line(d, ir_fmt("(if (eq int %s (const int %d))", ir_load(sel).s, num));
+      ir_line(d + 1, "(then");
+      ir_emit_goto(ll->label, d + 2);
+      ir_close(1);
+      ir_close(1);
+    }
+  }
   return 1;
+}
+
+/* (goto LABEL), or (continue) when the label ends the loop being lowered. */
+static void ir_emit_goto(a_label_ptr lbl, int d)
+{
+  if (ir_loop_n > 0 && ir_loop_cont[ir_loop_n - 1] == (void *)lbl) {
+    ir_fact_jump((void *)lbl, d);
+    ir_line(d, "(continue)");
+    return;
+  }
+  {
+    int i;
+    for (i = 0; i < ir_loop_n - 1; i++)
+      if (ir_loop_cont[i] == (void *)lbl) ir_loop_kept[i] = 1;
+  }
+  ir_fact_jump((void *)lbl, d);
+  ir_line(d, ir_fmt("(goto %s)", ir_tab_get(&ir_labels, lbl, ir_name_or(lbl->source_corresp.name, "label"), "")));
 }
 
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
@@ -6847,20 +7127,7 @@ static void ir_stmt(a_statement_ptr s, int d)
     }
     case stmk_goto:
       ir_note(1, stmk_goto, 1);
-      if (ir_loop_n > 0 && ir_loop_cont[ir_loop_n - 1] == (void *)s->variant.label.ptr) {
-        ir_fact_jump((void *)s->variant.label.ptr, d);
-        ir_line(d, "(continue)");
-        return;
-      }
-      {
-        int i;
-        for (i = 0; i < ir_loop_n - 1; i++)
-          if (ir_loop_cont[i] == (void *)s->variant.label.ptr) ir_loop_kept[i] = 1;
-      }
-      ir_fact_jump((void *)s->variant.label.ptr, d);
-      ir_line(d, ir_fmt("(goto %s)",
-                        ir_tab_get(&ir_labels, s->variant.label.ptr,
-                                   ir_name_or(s->variant.label.ptr->source_corresp.name, "label"), "")));
+      ir_emit_goto(s->variant.label.ptr, d);
       return;
     case stmk_label:
       ir_note(1, stmk_label, 1);
