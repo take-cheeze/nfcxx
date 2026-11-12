@@ -34,6 +34,8 @@ on:
       - "scripts/mrustc-prep.rb"
       - "scripts/cpp-feature-checklist.rb"
       - "scripts/cpp-feature-report.rb"
+      - "scripts/bc2cpp"
+      - "scripts/setup-bc2cpp.sh"
       - "Gemfile"
       - "Gemfile.lock"
       - "scripts/pathb-borrowck.rb"
@@ -82,6 +84,8 @@ on:
       - "scripts/mrustc-prep.rb"
       - "scripts/cpp-feature-checklist.rb"
       - "scripts/cpp-feature-report.rb"
+      - "scripts/bc2cpp"
+      - "scripts/setup-bc2cpp.sh"
       - "Gemfile"
       - "Gemfile.lock"
       - "scripts/pathb-borrowck.rb"
@@ -186,6 +190,9 @@ jobs:
 
       - name: Install build tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bison gperf autoconf automake libtool
+
+      - name: Baked runner source graph
+        run: bundle exec ruby tests/bc2cpp/source_baking.rb
 
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh
