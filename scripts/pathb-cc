@@ -58,6 +58,8 @@ while [ $# -gt 0 ]; do
     --keep=*) keep=${1#--keep=} ;;
     --timeout=*) timeout_s=${1#--timeout=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
+    --modules) opts+=(--modules) ;;
+    --modules_directory|--create_module_interface) opts+=("$1" "$2"); shift ;;   # C++ modules (docs/notes/modules.md)
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
     -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--eh-runtime|--cuda) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
@@ -80,6 +82,7 @@ asan=(); [ $asan_on = 0 ] || { asan=(--asan); dump_opts+=(--ir-loc --ir-scopes);
 tmo() { if [ "$timeout_s" != 0 ] && command -v timeout >/dev/null 2>&1; then timeout -k 5 "$timeout_s" "$@"; else "$@"; fi; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else
+  [ "$emitter" != ssa ] || dump_opts+=(--ir-noinline)   # the SSA route's inliner honours noinline
   frc=0; tmo "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir" || frc=$?
   [ $frc != 124 ] || echo "pathb-cc: $src: the front end ran over $timeout_s s (--timeout) and was stopped" >&2
   [ $frc = 0 ] || exit $frc

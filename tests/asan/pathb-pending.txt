@@ -2,3 +2,5 @@
 # with ASAN_BACKEND=pathb, and a case that starts to pass should be removed from this list). Milestones 1 (loads and stores
 # through a computed address, heap blocks), 2 (stack redzones) and 3 (global redzones) and 4 (alloca) and 6 (use after scope) are done, and use after return.
 vla_loop_return        n/a: it checks a stack VLA's redzones are addressable after the return; a Path B C VLA is a heap block (redzones stay poisoned)
+scope_throw_escape     setjmp return: a C++ throw that leaves a block to its try in the same frame (cproc poisoned the skipped objects at the setjmp's return; gcc reports nothing either)
+scope_longjmp_escape   setjmp return: a C longjmp that leaves a block (same; gcc reports nothing either)

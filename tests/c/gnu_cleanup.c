@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: the cleanup attribute: the front end leaves the call out of the IL and the back end does not run it (refused)
 // GNU C cleanup attribute (cproc -G for hand-written C and the kernel): the cleanup runs when the object leaves its
 // scope -- block end, return, break, continue, goto -- innermost first, in the order gcc runs them
 static int log[64], n;

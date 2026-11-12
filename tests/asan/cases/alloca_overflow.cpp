@@ -1,5 +1,4 @@
 // ASAN: stack-buffer-overflow
-// ASAN-QBE: use-after-poison   (alloca's block gets the redzones of a stack object, asandynalloc)
 // ASAN-PATHB: use-after-poison   (the same: alloca's block is [32 | object | 32], poisoned by __nfcxx_asan_alloca_mark)
 int sink(char *p, int i) { return p[i]; }
 int main(int argc, char **) {

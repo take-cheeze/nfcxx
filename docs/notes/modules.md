@@ -18,7 +18,11 @@ the module options and builds the program one source at a time. Test: `tests/mod
 - A source with no `export module` and no `import` takes the unchanged path, so `import` and `module` stay ordinary
   identifiers there (`tests/modules/plain.cpp`).
 
-The gcc backend is checked by `tests/modules/run.sh`. The qbe backend runs the same script in CI.
+`tests/modules/run.sh` runs the Path B, qbe and gcc backends. Path B is the default for a program with modules on
+x86-64 Linux (and a file it does not build falls back to gcc, as everywhere, docs/notes/pathb-default.md): the driver
+gives `scripts/pathb-cc` (and so `scripts/pathb-dump` and the harness front end) the same `--modules`,
+`--modules_directory` and `--create_module_interface` options it gives EDG's `eccp`, and the object comes from the
+usual IR route. cproc is not involved. Elsewhere the default stays qbe.
 
 ## Refused, with the reason in the message
 
@@ -26,7 +30,7 @@ The gcc backend is checked by `tests/modules/run.sh`. The qbe backend runs the s
   are the first step towards it.
 - Header units, `import <h>;` and `import "h";`.
 - Module partitions, `export module a:b;`.
-- Standards before C++20 (`-std=c++17` and older), `--emit-c`, and Path B (`NFCXX_PATH=b`, `--backend=pathb`).
+- Standards before C++20 (`-std=c++17` and older) and `--emit-c`.
 - Cyclic imports among interface units.
 
 ## Known gaps

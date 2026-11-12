@@ -2,16 +2,39 @@
 
 `nfcxx -fsanitize=address x.cpp -o x` builds a program whose memory errors are reported by AddressSanitizer (libasan): heap, stack and global
 buffer overflows, use after free, use after scope, use after return, double free, `new[]`/`delete` mismatch, and
-(LeakSanitizer, on by default in libasan) leaks at exit. The checks are gcc's on the gcc backend and cproc's on qbe
-(the former default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
-from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
+(LeakSanitizer, on by default in libasan) leaks at exit. The checks are gcc's on the gcc backend and libasan's `__asan_load*`/`__asan_store*` calls, emitted by the SSA emitter, on Path B (the default; section "Path B"). The qbe backend's own
+instrumentation (cproc's) is retired: `--backend=qbe -fsanitize=address` is an error (below). The report names the C++ source line: gcc's from the `#line`
+directives of EDG's generated C, Path B's from the IR's `(loc ...)` lines. `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
 
-## qbe backend (default)
+## qbe backend (retired)
 
-`nfcxx -fsanitize=address` takes Path B, the default backend on x86-64 Linux, which instruments the code itself (since PR #892; section "Path B"). A program Path B does not build is built again with the gcc backend, which instruments it too (`docs/notes/pathb-default.md`, "Fallback"); `--backend=gcc` or `--backend=qbe` selects the others for one command. With `--backend=qbe` the driver gives `qbe-cc` the `-fsanitize=address` option (the variable `NFCXX_ASAN=1` still works for scripts that run `qbe-cc` themselves). cproc, patched by
+`nfcxx -fsanitize=address --backend=qbe` (or `NFCXX_BACKEND=qbe`) exits 2 with `-fsanitize=address does not work with --backend=qbe; use the default,
+--backend=pathb or --backend=gcc`. When the default backend would be qbe (modules, `--emit-c`, a non-x86-64 host, ...), the flag makes it gcc, which instruments.
+`qbe-cc` no longer reads `-fsanitize=address` or `NFCXX_ASAN`. The cproc side (the `nfcxx-asan-combined` branch pin of `3rd/cproc`, its `asan*` code in `qbe.c`)
+stays in the submodule until cproc is deleted; nothing calls it. What follows in the next three sections describes that retired design (kept as the record the
+Path B emitter was written from, `asan-plan.md`); the tests of the qbe-only cases moved to Path B (or to `tests/asan/pathb-pending.txt`).
+
+What the cproc checks caught that Path B does not (`ASAN_BACKEND=qbe` and `ASAN_BACKEND=pathb tests/asan/run.sh` compared, 64 and 65 cases):
+
+- A same-frame exit that leaves a block, to a `setjmp` of the same function (`scope_throw_escape.cpp`, a C++ throw to its `try`; `scope_longjmp_escape.c`, a C
+  longjmp): cproc poisoned the skipped objects at the `setjmp` return and reported `stack-use-after-scope`. Path B does not, so the read after the landing is
+  silent. gcc does not report these either, so Path B matches the reference sanitizer; this is a false negative both of the default paths share. Listed in
+  `tests/asan/pathb-pending.txt` (the cases run as `ASAN-ONLY: pathb`, so they start to run when Path B detects them). The plan is in `asan-plan.md` (the setjmp
+  pad over the blocks Path B knows at the call); not cheap, so not done here.
+- A C variable-length array read after its block ends (`vla_scope_escape.c`): cproc said `stack-use-after-scope`; Path B (a C VLA is a heap block freed at the end
+  of its block) says `heap-use-after-free`, so the class is caught, with other wording (now a Path B case).
+- `vla_loop_return.c` (the redzones of a stack VLA are addressable after a return) is not applicable to a heap VLA (also in the pending list).
+- The wording differences that were `ASAN-QBE:` lines (`use-after-poison` for redzones) went with the qbe run; Path B poisons the same way (`ASAN-PATHB:`).
+
+Everything else of the 64 qbe cases (heap, stack, global, alloca, aligned, VLA overflow, use after free, use after scope, use after return, exceptions, C input,
+leaks) passes on Path B with the same report text or its `ASAN-PATHB:` text.
+
+## qbe backend (retired design)
+
+cproc, patched by
 the `nfcxx-asan-combined` branch of take-cheeze/cproc (commit a44a644, which `3rd/cproc` is pinned to), then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
-one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
+one chokepoint). `qbe-cc` links with `-fsanitize=address`. Was covered by `ASAN_BACKEND=qbe tests/asan/run.sh`:
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
 Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
 their redzones poisoned at the declaration and the whole object unpoisoned in `funcret`. The object is in a fake frame
@@ -28,7 +51,7 @@ yet supported"), so there is no store to check; volatile loads are checked. Bloc
 chunk as ordinary loads and stores, and so are the loads an aggregate `va_arg` makes from its `va_list`. The scalar `va_arg`
 instruction (`IVAARG`) is not checked: `asanaccess` has no case for it.
 
-## Use after scope (qbe)
+## Use after scope (qbe, retired)
 
 A block-scoped stack object (a local, a for-init declaration, a compound literal) is poisoned when its block is left and
 unpoisoned again when its declaration runs, so a loop that enters the block again is addressable each time. The poison is
@@ -94,7 +117,7 @@ expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `
 QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
 start token, so a multi-line expression may name a line inside it; `qbe-prep` skips the markers as comments.
 
-## Use after return (qbe)
+## Use after return (qbe, retired)
 
 A pointer to a local of a function, read after that function returned, is reported as `stack-use-after-return`, the gcc
 wording (`tests/asan/cases/use_after_return.cpp`, the same expected text on both backends). The object lives in a fake frame,
@@ -164,8 +187,7 @@ cproc's (above). The driver:
 
 - on the gcc backend, passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link
   (`--c_to_obj_option` for `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final
-  link agree. On qbe the same `-fsanitize=address` reaches `qbe-cc` (the driver no longer exports `NFCXX_ASAN`; the variable is the
-  fallback for a script that runs `qbe-cc` directly): it makes cproc instrument and `qbe-cc` link libasan;
+  link agree. `--backend=qbe` is refused with the flag (above);
 - links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
   (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
 - on Path B (the default backend, `--backend=pathb` or `NFCXX_PATH=b`) passes `--asan` to `scripts/pathb-cc` (the variable `NFCXX_PATHB_ASAN=1` is its fallback):
@@ -201,19 +223,18 @@ qbe: cproc checks every load and store, and stack and global objects get redzone
 
 ## Test
 
-`tests/asan/run.sh` (CI: `ci.yml`, once with the gcc backend and once with `ASAN_BACKEND=qbe`): one program per error class
+`tests/asan/run.sh` (CI: the matrix leg "AddressSanitizer (gcc and Path B backends)", `ASAN_BACKEND=pathb` and, on pushes to main, gcc): one program per error class
 with the expected report text, a clean program with exceptions and containers, the source line in the report, the flag-off
 cases, backend selection and refusals, `-c` then link, and a `.c` input in the same program. Use after return:
 `use_after_return.cpp` (a report, the same text on both backends), and the clean programs `clean_return_heap.cpp` (pointers
 to heap and static data returned), `clean_recursive.cpp` and `clean_callee_return.cpp` (a callee returns before the caller
 reads the local whose address it got).
 
-The two backends differ in the cases marked `ASAN-ONLY: qbe` (`scope_throw_escape.cpp`, `scope_longjmp_escape.c`,
-`vla_scope_escape.c`: skipped on gcc) and in the `ASAN-QBE:` spellings, which are `use-after-poison` on qbe
-(`stack_overflow.cpp`, `aligned_overflow.cpp`, `alloca_overflow.cpp`, `global_overflow.cpp`, `vla_overflow.c`). The other
-cases have the same expected text on both.
+The backends differ in the cases marked `ASAN-ONLY: pathb` (`scope_throw_escape.cpp`, `scope_longjmp_escape.c`, which Path B does not detect yet and
+`tests/asan/pathb-pending.txt` lists, and `vla_scope_escape.c`: skipped on gcc) and in the `ASAN-PATHB:` spellings (`vla_overflow.c`). The qbe run and its
+`ASAN-QBE:` spellings are gone; the run refuses `--backend=qbe -fsanitize=address` instead.
 
-A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
+A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on the gcc backend (Path B is opt-in with `NFCXX_BACKEND="gcc pathb"`; blocked: the host's `go_child_status` checks fail on Path B even without the flag) and links it
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
 instrumented (`poly.md`, "Sanitizers and valgrind").
 

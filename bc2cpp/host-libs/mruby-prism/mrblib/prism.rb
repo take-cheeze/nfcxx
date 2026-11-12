@@ -17,6 +17,10 @@ module Prism
     serialized = Native.parse_serialized(source).force_encoding(Encoding::BINARY)
     Serialize.load_parse(source, serialized, false)
   end
+
+  def self.parse_file(path, **options)
+    parse(File.binread(path), **options)
+  end
 end
 
 module Prism

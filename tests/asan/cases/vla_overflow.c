@@ -1,5 +1,4 @@
 // ASAN: dynamic-stack-buffer-overflow
-// ASAN-QBE: use-after-poison   (cproc's VLA: the redzones are poisoned at the declaration, asandynalloc)
 // ASAN-PATHB: heap-buffer-overflow   (EDG lowers a C VLA to __vla_alloc: a malloc block under lib/asan/nfcxx_vla_asan.c)
 // A variable-length array's element one past its end, in C input (C++ VLAs are EDG's runtime pool, see asan.md).
 int sink(int *p, int i) { return p[i]; }

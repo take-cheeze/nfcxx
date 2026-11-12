@@ -129,11 +129,12 @@ module OutsideOwnerCall
       "  #{line}"
   end
 
-  # HELPER_OWNER_CALL: a shared helper's last-resort `mrb_funcall(M, x, "name", n, args...)` (the numeric slow
-  # paths' else, `bc2cpp_eqq`'s default arm) is the same by-name send, so it becomes the owner call over the name's
-  # whole owner set when NAME_OWNER_SET names one. Level 0: mrb_funcall checks neither visibility nor arity, nor
-  # does the helper's operator site (CheckedSend never sees it).
-  HELPER_FUNCALL = /\bmrb_funcall\(M, (\w+), "([^"]+)", (\d+)((?:, \w+)*)\)/
+  # HELPER_OWNER_CALL: a shared helper's last-resort `mrb_funcall(M, x, "name", n, args...)` or its rooted form
+  # `bc2cpp_funcall_keep(...)` (the numeric slow paths' else, `bc2cpp_eqq`'s default arm) is the same by-name send,
+  # so it becomes the owner call over the name's whole owner set when NAME_OWNER_SET names one; the owner call roots
+  # its result too (bc2cpp_keep_call). Level 0: mrb_funcall checks neither visibility nor arity, nor does the
+  # helper's operator site (CheckedSend never sees it).
+  HELPER_FUNCALL = /\b(?:mrb_funcall|bc2cpp_funcall_keep)\(M, (\w+), "([^"]+)", (\d+)((?:, \w+)*)\)/
 
   def helper_owner_calls(code)
     code.gsub(HELPER_FUNCALL) do
