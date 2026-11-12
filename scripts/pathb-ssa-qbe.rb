@@ -1699,8 +1699,51 @@ end
         @lines << "  #{both} =w and #{lo}, #{minus_one}"
         check_call(both, 2)
       end
+      d = const_int_value(rv[3])
+      if signed && w == 32 && d && d >= 3 && (d & (d - 1)) != 0 && const_int_value(rv[2]).nil?
+        return magic_div32_lines(dst, head(rv) == "crem", a, d)
+      end
       name = head(rv) == "cdiv" ? (signed ? "div" : "udiv") : (signed ? "rem" : "urem")
       @lines << "  #{dst} =#{c} #{name} #{a}, #{b}"
+    end
+
+    # The value of an integer constant operand as a number, or nil (a register, or a constant that is not an integer literal).
+    def const_int_value(x)
+      return nil unless x.is_a?(Array) && head(x) == "const"
+
+      int_lit(x[2])
+    rescue QbeUnsupported
+      nil
+    end
+
+    # Signed 32-bit division or remainder by a constant d >= 3 that is not a power of two: no division instruction (Lemire,
+    # "Beating the compiler at signed 32-bit division", 2026, https://lemire.me/blog/2026/10/31/beating-the-compiler-at-signed-32-bit-division/).
+    # With s = 31 + ceil(log2 d) and c = floor(2^s / d) + 1 (c fits
+    # in 32 bits), the quotient is the low 32 bits of ((int64)x * c) >> s, plus 1 when x is negative (x >> 31 is -1). The
+    # 64-bit product is below 2^63 in magnitude, so it does not overflow; the whole sequence is exact for every int32 x.
+    # The remainder is x - q * d. tests/pathb-ssa-qbe/cases/div_const_signed32.ir checks it against the interpreter.
+    def magic_div32_lines(dst, rem, a, d)
+      s = 31 + (d - 1).bit_length
+      c = (1 << s) / d + 1
+      raise QbeUnsupported, "signed division by #{d}: multiplier #{c} is not 32 bits" if c >= (1 << 32)
+
+      wide = fresh
+      prod = fresh
+      hi64 = fresh
+      hi = fresh
+      sign = fresh
+      @lines << "  #{wide} =l extsw #{a}"
+      @lines << "  #{prod} =l mul #{wide}, #{c}"
+      @lines << "  #{hi64} =l sar #{prod}, #{s}"
+      @lines << "  #{hi} =w copy #{hi64}"
+      @lines << "  #{sign} =w sar #{a}, 31"
+      q = rem ? fresh : dst
+      @lines << "  #{q} =w sub #{hi}, #{sign}"
+      return unless rem
+
+      back = fresh
+      @lines << "  #{back} =w mul #{q}, #{d}"
+      @lines << "  #{dst} =w sub #{a}, #{back}"
     end
 
     # Checked signed add, sub, mul and negate: the exact result must fit the type, else the check traps (code 2, signed
