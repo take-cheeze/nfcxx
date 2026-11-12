@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -1243,7 +1243,7 @@ end
           # On Darwin an extern object is usually in a dylib (libc++'s vtable or typeinfo for std::length_error): the
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
-          if info[:extern] && Qbe.darwin
+          if info[:extern] && Qbe.got_extern
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
