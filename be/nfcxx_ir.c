@@ -4331,7 +4331,6 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(alloca %s)", ir_cv("unsigned_long", n.s))), e->type);
     return 1;
   }
-#if defined(__x86_64__)
   /* __builtin_return_address(0) and __builtin_frame_address(0) (the kernel's _RET_IP_): QBE has no such operation, but gives
      every function a frame pointer (push %rbp; mov %rsp, %rbp), so a helper the driver appends (scripts/pathb-ssa-build) reads
      the caller's %rbp, or the return address at 8(%rbp). The IR forms are (retaddr) and (frameaddr); the inliner leaves a
@@ -4352,7 +4351,6 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = a;
     return 1;
   }
-#endif
   if (ir_builtin_unlowerable(name)) {
     *out = ir_gap(e->type, ir_fmt("builtin %s (no lowering)", name), 0, (int)eok_call);
     return 1;
