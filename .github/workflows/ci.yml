@@ -912,7 +912,7 @@ jobs:
           bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot.rb --verify
           bundle exec ruby bc2cpp/tools/mrbc_rb/snapshot_test.rb
 
-  # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), five shards, moved from rpg-maker-clone's
+  # bc2cpp's fixture checks (bc2cpp/scripts/bc2cpp/checks.list), three shards, moved from rpg-maker-clone's
   # bc2cpp-checks job. They run inside the pinned world (tests/bc2cpp/fetch.sh), whose bc2cpp paths reach this checkout
   # through its 3rd/nfcxx, with the world's own Nix dev shell, so the commands and their toolchain are unchanged.
   checks:
@@ -923,7 +923,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2]
     env:
       RUBY_YJIT_ENABLE: "1"
       BC2CPP_WORLD_FULL: "1"
@@ -1011,7 +1011,7 @@ jobs:
         working-directory: build/bc2cpp/rpg-maker-clone
         run: |
           unset LD
-          ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/5 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
+          ruby scripts/ci/timed_checks.rb --shard ${{ matrix.shard }}/3 < scripts/bc2cpp/checks.list > "$RUNNER_TEMP/bc2cpp-checks.sh"
           source "$RUNNER_TEMP/bc2cpp-checks.sh"
 
       - name: Upload the snapshot record
