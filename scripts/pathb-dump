@@ -144,6 +144,8 @@ darwin_opts=()
 if [ "$hosted" != 0 ] && [ "$(uname -s)" = Darwin ]; then
   posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
   darwin_opts=(--preinclude "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
+  # Darwin arm64: the alternate libc++ string layout (the nfcxx driver's comment says why)
+  [ "$(uname -m)" = arm64 ] && darwin_opts+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
 fi
 # Hosted on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64 target)
 # does not have. lib/pathb/linux-aarch64-include/bits/math-vector.h replaces it with an empty one (no vector declarations, as
