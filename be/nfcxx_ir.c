@@ -2871,9 +2871,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       an_expr_node_ptr fe = a1;
       if (fe == NULL || fe->kind != enk_field) break;
       ir_note(0, k, 1);
-      ir_addr_only = addr_only;
       base = ir_lval(a0);
-      ir_addr_only = 0;
       /* a member of a volatile object is volatile, and so is a volatile member */
       vol = vol || base.vol || ir_is_volatile(fe->variant.field.ptr->type);
       if (fe->variant.field.ptr->is_bit_field) return ir_bf_lval(base.s, fe->variant.field.ptr, a0->type, e->type, vol);
@@ -2897,11 +2895,8 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       ir_val base, idx;
       if (a0 == NULL || a1 == NULL) break;
       ir_note(0, k, 1);
-      if (ir_is_aggregate(a0->type)) {
-        ir_addr_only = addr_only;
-        base = ir_lval(a0);
-        ir_addr_only = 0;
-      } else base = ir_rval(a0);
+      if (ir_is_aggregate(a0->type)) base = ir_lval(a0);
+      else base = ir_rval(a0);
       idx = ir_rval(a1);
       if (ir_is_i128(idx.t)) idx = ir_mk_value(ir_i128_count(idx), integer_type(ik_long));
       /* A subscript of array_to_pointer(array N) is checked against N. Pointers carry no length. */
@@ -3022,9 +3017,8 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_address_of: {
       ir_val a;
       if (a0->kind == enk_operation &&
-          (a0->variant.operation.kind == eok_points_to_field || a0->variant.operation.kind == eok_indirect ||
-           a0->variant.operation.kind == eok_subscript || a0->variant.operation.kind == eok_dot_field)) {
-        ir_addr_only = 1; /* a subscript or member of an object passes it on: &p->a[i], the offsetof idiom with an index */
+          (a0->variant.operation.kind == eok_points_to_field || a0->variant.operation.kind == eok_indirect)) {
+        ir_addr_only = 1;
       }
       a = ir_lval(a0);
       ir_addr_only = 0;
