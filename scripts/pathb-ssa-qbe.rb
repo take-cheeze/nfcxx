@@ -491,7 +491,10 @@ module Qbe
     end
     linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
     marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
-    linkage += "section #{sec[1].raw} \"#{sec[2] == "ro" ? "a" : "aw"}\" " if sec
+    if sec
+      sec_flags = sec[2] == "ro" ? "a" : "aw"
+      linkage += "section " + sec[1].raw + " " + '"' + sec_flags + '"' + " "
+    end
     "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
   end
 
