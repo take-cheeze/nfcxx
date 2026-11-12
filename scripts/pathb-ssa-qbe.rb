@@ -969,6 +969,17 @@ end
         operand = op(opnd)
       end
       cls = Qbe.cls(switch_operand_type(opnd))
+      ranges = switch_ranges(cases)
+      # Four or more ranges: a balanced tree of range tests (GCC's decision tree). Fewer: the chain, which is cheaper.
+      if ranges.size >= 4
+        switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), ranges, default)
+      else
+        switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # The chain of equality tests, one per case, in source order.
+    def switch_chain_lines(operand, cls, cases, default)
       labels = [@label] + (1...cases.size).map { |k| "#{block_label(@cur)}.s#{k}" }
       cases.each_with_index do |(value, target), k|
         cond = "%sw#{@cur}_#{k}"
@@ -982,6 +993,79 @@ end
           @lines << "  jnz #{cond}, @#{block_label(target)}, @#{block_label(default)}"
         end
       end
+    end
+
+    # GCC's clusters: the case values in order as [lo, hi, target], adjacent values with one target merged into one range.
+    def switch_ranges(cases)
+      out = []
+      pairs = cases.map { |value, target| [Qbe.int_lit(value), target] }
+      pairs = pairs.sort { |a, b| a[0] <=> b[0] }
+      pairs.each do |v, target|
+        last = out.last
+        if last && last[2] == target && last[1] + 1 == v
+          last[1] = v
+        else
+          out << [v, v, target]
+        end
+      end
+      out
+    end
+
+    # A balanced binary tree over the ranges. Each inner block splits its ranges at the lower bound of the middle one: a
+    # value below it goes left. A leaf tests its range (x == lo for one value, else x - lo <=u hi - lo) and jumps to its
+    # target, or to the default. The tree sends several jumps to the default, and to a target that is reached from
+    # several leaves: a phi of such a target names one predecessor, so the jumps go through one block that jumps on.
+    def switch_tree_lines(operand, cls, signed, ranges, default)
+      st = { uses: Hash.new(0), seq: 0, traps: {} }
+      ranges.each { |_lo, _hi, target| st[:uses][target] += 1 }
+      st[:uses][default] += ranges.size
+      switch_tree_node(st, operand, cls, signed, ranges, @label, true, default)
+      st[:traps].each do |target, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(target)}"
+      end
+    end
+
+    # The label a jump from block `from` to target goes to; records the jump for the phi of target.
+    def switch_tree_edge(st, target, from)
+      if @phi_blocks[target.to_s]
+        if st[:uses][target] > 1
+          st[:traps][target] ||= "#{block_label(@cur)}.j#{target}"
+          @jumper[[target, @cur]] = st[:traps][target]
+          return st[:traps][target]
+        end
+        @jumper[[target, @cur]] = from
+      end
+      block_label(target)
+    end
+
+    def switch_tree_node(st, operand, cls, signed, ranges, label, root, default)
+      @lines << "@#{label}" unless root
+      st[:seq] += 1
+      n = st[:seq]
+      if ranges.size == 1
+        lo, hi, target = ranges[0]
+        cond = "%swc#{@cur}_#{n}"
+        if lo == hi
+          @lines << "  #{cond} =w ceq#{cls} #{operand}, #{lo}"
+        else
+          shifted = "%swr#{@cur}_#{n}"
+          @lines << "  #{shifted} =#{cls} sub #{operand}, #{lo}"
+          @lines << "  #{cond} =w cule#{cls} #{shifted}, #{hi - lo}"
+        end
+        yes = switch_tree_edge(st, target, label)
+        no = switch_tree_edge(st, default, label)
+        @lines << "  jnz #{cond}, @#{yes}, @#{no}"
+        return
+      end
+      mid = ranges.size / 2
+      cond = "%swc#{@cur}_#{n}"
+      @lines << "  #{cond} =w c#{signed ? "slt" : "ult"}#{cls} #{operand}, #{ranges[mid][0]}"
+      left = "#{block_label(@cur)}.t#{n}l"
+      right = "#{block_label(@cur)}.t#{n}r"
+      @lines << "  jnz #{cond}, @#{left}, @#{right}"
+      switch_tree_node(st, operand, cls, signed, ranges[0, mid], left, false, default)
+      switch_tree_node(st, operand, cls, signed, ranges[mid, ranges.size - mid], right, false, default)
     end
 
     # An operand: a register, a parameter, an integer constant, null, or the address of an object.
