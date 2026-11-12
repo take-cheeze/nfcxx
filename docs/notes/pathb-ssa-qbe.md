@@ -25,6 +25,11 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   that uses them (a phi operand in its predecessor).
 - Checked operations (`cdiv`, `crem`, `cshl`, `cshr`, `cf2i`): each check is a call `pathb_check(cond, code)` placed before
   the operation; codes 1 division by zero, 2 signed overflow, 3 shift count out of range, 4 float to integer out of range.
+  A signed 32-bit `cdiv` or `crem` by a constant d >= 3 that is not a power of two has no division instruction: the quotient
+  is the high part of a 64-bit multiply by c = floor(2^s / d) + 1 (s = 31 + ceil(log2 d)), plus 1 for a negative dividend,
+  and the remainder is x - q * d (`magic_div32_lines`; Lemire, "Beating the compiler at signed 32-bit division", 2026).
+  QBE emits `idivl` for a constant `div`, so this is what removes it. Powers of two, negative and 64-bit divisors, and
+  variable divisors keep the division instruction.
   The checked add, subtract, multiply and negate (`cadd`, `csub`, `cmul`, `cneg`) check with code 2: a narrow type is
   computed in 64 bits and range-checked; an 8-byte add or subtract uses the sign-bit identities; an 8-byte multiply divides
   the product back by the operand (a divisor of 0 or -1 is replaced by 1, see `checked_arith_lines`), so it needs no runtime.
