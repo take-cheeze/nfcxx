@@ -147,3 +147,30 @@ Each of these raises a compile error rather than quietly producing wrong code:
 `"+a"` and `"=qm"`, `"rm"`/`"g"` alternatives, `"i"(&symbol)`, and `"m"` on arrays and large structs.
 They run on both backends: the gcc backend compiles the asm with the host GCC (a reference), the qbe backend exercises
 `funcasm`. They are marked `// X86-ONLY` since the instructions are x86.
+
+## Path B (x86-64 ELF)
+
+Path B uses the same thunk model, one level down. `be/nfcxx_ir.c` prints a statement it does not know as
+`(asm-block "HEX" (opnd KIND "CODE" SIZE ARG ["NAME" [OFF]])... (clobber "ax")... (label "l")...)`, the template in hex plus
+each operand in gcc's order. `scripts/pathb-ssa-qbe.rb` (`asm_block_lines`, `Qbe.asm_block`) emits a call of a weak helper
+`__pathb_asm_<digest>` with a block of eight bytes per operand, and the helper text reaches the assembly through the
+`# pathb-text` marker (`scripts/pathb-ssa-build`). Fences, barriers, `rdtsc` and the like keep their own classes and
+never reach the helper.
+
+- KIND: `in`, `out`, `inout` (`+`), `mem` (the cell holds the object's address; the template sees `(%reg)`), `flag`
+  (`=@cc<cond>`: `set<cond>` after the template), `imm` (an integer constant that one of `i n I J M K N L e Z` accepts; the
+  template gets `$N`, `%c`/`%P` the bare value, `%n` its negation), `sym` (the address of a static object or function plus an
+  offset, from `"i"` or `"p"`: `$sym+off`, `%c`/`%P` `sym+off`, `%a` `sym+off(%rip)`; the address is also stored in the
+  operand's cell so the reference keeps a static object that only the asm names alive) and `gsel` (asm goto, below).
+- Only the first alternative of a constraint is read. An immediate is taken when the operand is a suitable constant, else a
+  register when a register letter is present, else memory. `p` with a non-constant pointer is a register (`%a` is `(%reg)`).
+- `%[name]` is resolved in the helper from the operand names the IR carries; tied operands (`"0"`, `"[name]"`) share a register.
+- Register clobbers (`ax bx cx dx si di r8`-`r15`) leave the register out of the pool the helper allocates from; the helper
+  saves `rbx` and `r12`-`r15` anyway, so a clobbered callee-saved register is preserved. `memory`, `cc` and `xmm*` need
+  nothing (the call already clobbers them). The frame keeps `%rsp` 16-aligned for a `call` in the template.
+- asm goto: the IR adds a `gsel` operand (a 4-byte slot) and `(label "name")` items. `%l[name]` / `%lN` name a stub in the
+  helper that writes the label's number (from 1) into the cell and leaves by the normal exit; after the block the IR
+  compares the cell with each number and jumps to the C label (`(if (eq int SEL N) (then (goto L)))`).
+- Still refused, by name: SSE/x87/MMX constraints other than the existing `x` form, a wider-than-8-byte operand, a bit-field
+  or other non-lvalue memory operand, clobbers of `bp`, `sp`, x87 or MMX registers, more than 8 asm goto labels, and
+  `=@cc` with asm goto.

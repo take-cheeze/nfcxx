@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: extended asm templates beyond the fences and barriers are refused
 // X86-ONLY: x86 inline assembly (the "p" address constraint and the %a modifier in thunks; docs/notes/inline-asm.md)
 // The kernel's this_cpu_read_stable: "p"(&var.member) with %a (rip-relative) and %P (bare), and "p" on a pointer that is not constant
 struct hot { long pad; long cur; };
