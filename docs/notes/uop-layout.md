@@ -128,11 +128,47 @@ The timing driver and the generator used for this round are not in the repositor
 with the entry point renamed to `kernel` and a sixth argument `Bt`, and the strided kernel's `B[k * N + n]` broadcast
 replaced by `Bt[n * K + k]` for the packed variant.
 
+## Where the M-vectorized gap comes from (third round, quiet host)
+
+Three ablations of the M-vectorized kernel, all hand-written scratch kernels (not the emitter), each timed against the
+emitter's kernels, two runs per set, `M = N = 256`:
+
+- **Stores removed** (`nost`): the per-column stores of C are dropped; the row sum still uses the accumulator.
+- **Contiguous stores** (`stc`): the same stores, but each 8-row block of C lands contiguously instead of 1 KB apart.
+- **Transpose removed** (`noT`): the A transpose is left out of the kernel.
+- **Block layout** (`blk`): both A and C are blocked per 8 rows: `At[(m/8)*K*8 + k*8 + r]`, and the inner loop reads `At`
+  contiguously in k; C is stored blocked as in `stc`.
+
+| K | vec-n | vec-m | nost | stc | noT | blk |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 38 to 44 | 56 to 59 | 34 | 32 to 35 | 53 to 56 | 33 to 34 |
+| 12 | 61 to 89 | 54 to 59 | 53 to 57 | 54 to 59 | 53 to 57 | 62 |
+| 16 | 79 to 81 | 63 to 73 | 80 to 83 | 59 to 88 | 64 to 79 | 78 to 79 |
+| 24 | 81 to 97 | 94 to 107 | 110 to 113 | 90 to 103 | 105 to 107 | 84 |
+| 32 | 118 to 129 | 139 to 158 | 142 to 152 | 135 to 151 | 139 to 159 | 128 |
+| 64 | 340 to 449 | 507 to 628 | 484 to 605 | 494 to 623 | 501 to 616 | 360 to 362 |
+
+What this says:
+
+- **K = 8:** the gap is the 1 KB stride of the C stores. Contiguous stores or no stores bring vec-m to vec-n's level.
+  The transpose is not the cause (noT is no faster).
+- **K = 24 to 64:** the stores and the transpose are not the cause, and packing B did not help either. The block layout
+  for A closes the gap: the inner loop reads `At` contiguously in k instead of 1 KB apart, and blk matches vec-n at
+  K = 64 and beats it at K = 24.
+- **K = 16 is unexplained:** blk is slower than stc there (about 79 vs 58 µs). I have not found why.
+- **Consequence for the emitter:** a block layout for A (and for C) would remove the M-vectorized penalty at most K.
+  That changes the output layout of C that the model describes (column-major for lanes on M), so it is a decision for
+  the layout model, not just an optimisation. Not done.
+
+The scratch kernels and the driver are not in the repository.
+
 ## Next steps on this target
 
-1. Find out why vec-m is slower at K = 8 and K = 24 to 32 while faster at K = 12 to 16. Candidates: the inner k-loop
-   length against the unrolling the compiler picks, and the per-column stores of C in the M-vectorized kernel.
-2. Repeat the timing on more hosts before drawing a crossover from it.
+1. Decide whether the layout model should allow a blocked layout (lanes on M, 8 rows contiguous per block) for the
+   M-vectorized result and for A. That would remove the penalty found above, and it changes what the model calls the
+   output layout, so it is a decision for the model.
+2. Explain the K = 16 result: the block kernel is slower there than the contiguous-store kernel.
+3. Repeat the timing on more hosts before drawing a crossover from it.
 3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 
