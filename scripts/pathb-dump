@@ -15,6 +15,8 @@
 # them, and take precedence over a variable already in the environment (--ir only):
 #   --ir-loc          (NFCXX_IR_LOC=1)       (loc "FILE" LINE) lines: the source place of the statements after them
 #   --ir-scopes       (NFCXX_IR_SCOPES=1)    (decl ...) and (scope-end ...) facts for locals
+#   --ir-noinline     (NFCXX_IR_NOINLINE=1)  a (noinline) head on a function with __attribute__((noinline)), which scripts/pathb-ir-opt.rb's
+#                                            inliner respects (only the SSA route reads it; the other emitters refuse an unknown head)
 #   --borrow          (NFCXX_PATHB_BORROW=1) the facts the borrow checker reads (docs/notes/pathb-borrowck.md)
 #   --sanitize=LIST   (NFCXX_IR_SANITIZE)    the checks of -fsanitize=undefined or CHECK[,CHECK...] (docs/notes/ubsan.md)
 #   --overflow=trap   (NFCXX_IR_OVERFLOW=trap) signed overflow is a trap
@@ -43,6 +45,7 @@ while [ $i -lt ${#args[@]} ]; do
     --stats) export NFCXX_PATHB_STATS=1 ;;
     --ir-loc) export NFCXX_IR_LOC=1 ;;
     --ir-scopes) export NFCXX_IR_SCOPES=1 ;;
+    --ir-noinline) export NFCXX_IR_NOINLINE=1 ;;
     --borrow) export NFCXX_PATHB_BORROW=1 ;;
     --sanitize=*) export NFCXX_IR_SANITIZE=${arg#--sanitize=} ;;
     --overflow=*) export NFCXX_IR_OVERFLOW=${arg#--overflow=} ;;

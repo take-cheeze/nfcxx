@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: a case range of more than 1024 values is refused (smaller ranges: case_range_small.c)
 // GNU case ranges: next to single values, across zero in a signed switch, at the top of an unsigned one, on char and
 // long values; overlapping labels are an error (docs/notes/cproc-nfcxx.md)
 static int s(int x) {

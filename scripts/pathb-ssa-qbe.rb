@@ -393,9 +393,11 @@ module Qbe
   def build_data(g, by_name, state)
     flags = global_flags(g)
     return :extern if flags.include?("extern")
-    # (section "S"), from __attribute__((section("S"))): the data is not placed in a section here, and a table that the
-    # linker delimits with __start_S / __stop_S would be empty, so the global is refused, not put in .data.
-    raise QbeUnsupported, "section attribute #{sx(g.find { |x| head(x) == "section" })}" if flags.include?("section")
+    # (section "S" [ro]), from __attribute__((section("S"))): the data goes into that section (ELF: the linker delimits
+    # it with __start_S / __stop_S), allocated, and writable unless the object is const (gcc: "a", else "aw"). `used`
+    # needs nothing more: a static object is emitted whether or not anything refers to it (no --gc-sections here).
+    sec = g.find { |x| head(x) == "section" }
+    raise QbeUnsupported, "section attribute on a thread-local #{sx(sec)}" if sec && flags.include?("thread")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -489,6 +491,10 @@ module Qbe
     end
     linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
     marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
+    if sec
+      sec_flags = sec[2] == "ro" ? "a" : "aw"
+      linkage += "section " + sec[1].raw + " " + '"' + sec_flags + '"' + " "
+    end
     "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
   end
 
@@ -1523,6 +1529,15 @@ end
       when "rdtsc"
         asm_helpers << "rdtsc"
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
+      # `(retaddr)`, `(frameaddr)`: __builtin_return_address(0) and __builtin_frame_address(0). QBE gives each function a frame
+      # pointer, so the helper the driver appends reads this function's %rbp (x86-64 only: the helper has no arm64 form).
+      when "retaddr", "frameaddr"
+        # The empty call after it keeps QBE from turning `return __builtin_return_address(0);` into a tail call (`leave; jmp`),
+        # which would run the helper in the caller's frame.
+        asm_helpers << head(rv)
+        asm_helpers << "barrier" unless asm_helpers.include?("barrier")
+        @lines << "  #{dst} =l call $__pathb_#{head(rv)}()"
+        @lines << "  call $__pathb_barrier()"
       when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset"
