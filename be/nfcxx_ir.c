@@ -6024,7 +6024,10 @@ static void ir_gi_items(unsigned long long off, a_constant_ptr c, a_type_ptr t)
       if (ce->kind == ck_init_repeat) {
         a_constant_ptr rc = ce->variant.init_repeat.constant;
         unsigned long long cnt = (unsigned long long)ce->variant.init_repeat.count, j;
-        if (cnt == 0 || rc == NULL || skip_typerefs(elem)->kind == tk_array) {
+        /* A repeated string or aggregate that initializes a whole element of a multidimensional array (`char m[64][2] =
+           { [0 ... 63] = "??" }`): count elements. */
+        int whole = rc != NULL && skip_typerefs(elem)->kind == tk_array && (rc->kind == ck_string || rc->kind == ck_aggregate);
+        if (cnt == 0 || rc == NULL || (skip_typerefs(elem)->kind == tk_array && !whole)) {
           ir_gi_unsupported("repeat");
           return;
         }
