@@ -513,7 +513,7 @@ module NativeFrameUse
       CPP
     end
 
-    capacity = 1 << ((rows.size + wrapper_names(keys).size) * 2).bit_length
+    capacity = 1 << ((rows.size + wrapper_names(keys).size + READER_HEADROOM) * 2).bit_length
     table = rows.map { |owner, name| "  { #{c_string(owner)}, #{c_string(name)} }," }.join("\n")
     <<~CPP
       // FRAME_FREE (native_frame_use.rb): #{rows.size} natives mrb_call_direct may call without their frame.
@@ -590,12 +590,18 @@ module NativeFrameUse
         }
         return false;
       }
-      static mrb_bool bc2cpp_frame_free_hook(mrb_state* M, mrb_func_t f) { return bc2cpp_frame_free_p(M, f); }
+      // Every compiled gem installs its own hook; each keeps the one installed before it, so a function any unit
+      // handed over (its FRAME_FREE_READERS) is frame-free whichever gem installed last.
+      static decltype(mrb_state::frame_free_p) bc2cpp_ff_prev = nullptr;
+      static mrb_bool bc2cpp_frame_free_hook(mrb_state* M, mrb_func_t f) {
+        return bc2cpp_frame_free_p(M, f) || (bc2cpp_ff_prev && bc2cpp_ff_prev(M, f));
+      }
       // mrb_funcall_with_method makes the frame-free decision for every caller of a found method, C included
       // (mrb_obj_init's initialize): a native proven frame-free runs through mrb_call_direct, the rest keep their frame.
       // Installed at the end of each compiled gem's init, so the rows resolve against the classes defined so far.
       static inline void bc2cpp_frame_free_install(mrb_state* M) {
         bc2cpp_ff_state = nullptr;
+        if (M->frame_free_p != bc2cpp_frame_free_hook) bc2cpp_ff_prev = M->frame_free_p;
         M->frame_free_p = bc2cpp_frame_free_hook;
       }
       static inline mrb_value bc2cpp_call_found(mrb_state* M, mrb_value recv, mrb_sym mid, const mrb_method_t* m, struct RClass* c,
@@ -611,11 +617,20 @@ module NativeFrameUse
     OwnerCallDirect.native_entries.filter_map { |(owner, name), e| e[:entry] if keys.include?("#{owner}##{name}") }.uniq.sort
   end
 
+  # FRAME_FREE_READERS: a synthesized attr_reader's entry (CodeGen#emit_ivar_accessor_pair) only returns its embedded
+  # field, with no argument, frame or raise, so a C caller that found it (lib.cxx's attr_read over RGSS::Font) calls it
+  # without a frame too. Each unit hands over its own; READER_HEADROOM keeps the shared table's capacity above them.
+  READER_HEADROOM = 1024
+
+  def reader_entries(compiled)
+    compiled.filter_map { |m| m[:entry] if m[:label].to_s.start_with?('synth:') && m[:arity].to_i.zero? }.uniq.sort
+  end
+
   # The unit's hand-over of those wrappers, printed after OwnerCallDirect.native_prototypes: there, at global scope,
   # each name has its one declaration (the runtime text may sit in a namespace of its own, where a declaration
   # would name another function).
-  def wrappers_source(keys)
-    names = ENV['BC2CPP_FRAMEFREE'] == '0' ? [] : wrapper_names(keys)
+  def wrappers_source(keys, readers = [])
+    names = ENV['BC2CPP_FRAMEFREE'] == '0' ? [] : wrapper_names(keys) + readers.first(READER_HEADROOM)
     return '' if names.empty?
 
     <<~CPP

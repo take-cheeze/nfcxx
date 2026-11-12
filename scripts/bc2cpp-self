@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+runner=$("$root/scripts/setup-bc2cpp-self.sh")
+export BC2CPP_WORLD_ROOT=${BC2CPP_WORLD_ROOT:-${BC2CPP_RPG_DIR:-$root/build/bc2cpp/rpg-maker-clone}}
+export BC2CPP_TREE_ROOT=$root/bc2cpp
+export BC2CPP_RUBY=$root/bc2cpp/tools/bc2cpp/mruby-ruby BC2CPP_MRUBY=$runner
+build_root=${BC2CPP_SELF_BUILD_DIR:-$root/build/bc2cpp-self}
+export MRBC=${MRBC:-$build_root/bootstrap/bc2cpp-runner/bin/mrbc}
+exec "$runner" "$@"

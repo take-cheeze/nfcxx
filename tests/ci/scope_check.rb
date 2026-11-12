@@ -94,14 +94,13 @@ repo = File.expand_path('../..', __dir__)
 world_scripts = Dir[File.join(repo, 'tests/bc2cpp/run_*.sh')].flat_map do |file|
   File.read(file).scan(%r{(?<![\w/.-])scripts/([A-Za-z0-9_-]+\.rb)}).flatten
 end.uniq.select { |name| File.file?(File.join(repo, 'scripts', name)) }.sort
-bc2cpp = YAML.safe_load(File.read(File.join(repo, '.github/workflows/bc2cpp.yml')))
-bc2cpp_on = bc2cpp.fetch(true) { bc2cpp.fetch('on') } # YAML 1.1 reads the key `on` as true
+ci_workflow = YAML.safe_load(workflow)
+bc2cpp_filter = YAML.safe_load(ci_workflow.fetch('jobs').fetch('bc2cpp-changes').fetch('steps')
+                                          .map { |step| step.fetch('with', {})['filters'] }.compact.first)
+listed = bc2cpp_filter.fetch('bc2cpp').grep(%r{\Ascripts/[^*/]+\.rb\z}).map { |path| path.delete_prefix('scripts/') }
 check.call('bc2cpp worlds name scripts') { world_scripts.length > 10 }
-%w[push pull_request].each do |event|
-  listed = bc2cpp_on.fetch(event).fetch('paths').grep(%r{\Ascripts/[^*/]+\.rb\z}).map { |path| path.delete_prefix('scripts/') }
-  check.call("bc2cpp #{event} paths include every script a world compiles (#{(world_scripts - listed).join(' ')})") { (world_scripts - listed).empty? }
-  check.call("bc2cpp #{event} paths name only scripts a world compiles (#{(listed - world_scripts).join(' ')})") { (listed - world_scripts).empty? }
-end
+check.call("bc2cpp paths include every script a world compiles (#{(world_scripts - listed).join(' ')})") { (world_scripts - listed).empty? }
+check.call("bc2cpp paths name only scripts a world compiles (#{(listed - world_scripts).join(' ')})") { (listed - world_scripts).empty? }
 
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 

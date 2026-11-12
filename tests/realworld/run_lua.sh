@@ -2,6 +2,7 @@
 # Real-world check: build the Lua 5.4 interpreter (MIT, pure C) at a pinned upstream release with nfcxx's
 # .c input mode and run it. The source is cloned into build/realworld, not vendored.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+# QBE-ONLY: Path B refuses lvm.c ("luaV_execute: (unsupported stmt assigned_goto)": Lua's computed-goto dispatch); the suite stays on qbe.
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld

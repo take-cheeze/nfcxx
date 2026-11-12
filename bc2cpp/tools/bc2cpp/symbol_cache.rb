@@ -277,7 +277,9 @@ module SymbolCache
       #endif#{"\n#{BranchHints.prelude.chomp}" if BranchHints.on?}
       // A bytecode pool string's value. Its own helper, so the static dispatch proof can tell it from a folded
       // constant's value (static_dispatch_registrations.rb, POOL_STRING_VALUE).
-      static inline mrb_value bc2cpp_pool_str(mrb_state* M, const char* s) { return mrb_str_new_cstr(M, s); }
+      template<size_t N> static inline mrb_value bc2cpp_pool_str(mrb_state* M, const char (&s)[N]) {
+        return mrb_str_new(M, s, N - 1);
+      }
       // SYMBOL_CACHE -- see tools/bc2cpp/symbol_cache.rb.
       static mrb_state* bc2cpp_sym_state = nullptr;
       static mrb_sym bc2cpp_syms[#{[table.size, 1].max}] = {};
