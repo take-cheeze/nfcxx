@@ -99,7 +99,11 @@ if ! grep '(function' "$out/strip_eh.ir" | grep -q 'eh_' && grep -q '(let %1 (pt
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_leaf_eh.ir > "$out/strip_leaf_eh.ir" || fail=1
 if ! grep '^(function "_ZNK1A3getEv"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
    && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '(slot "tmp.1" (struct "__C8")'; then echo "strip leaf eh: ok"; else echo "strip leaf eh: FAIL"; fail=1; fi
-# Scalar replacement through a `this` slot: a pointer slot stored twice with one array's address reads as that address, a memcpy
+# A function whose calls all go to functions that cannot throw (here one that only makes an atomic call) loses its frame too;
+# the one that calls an unknown external function (withcall) keeps it.
+if ! grep '^(function "vialeaf"' "$out/strip_leaf_eh.ir" | grep -q '__C8' && ! grep '^(function "leafonly"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
+   && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '__C8'; then echo "strip nothrow callers: ok"; else echo "strip nothrow callers: FAIL"; fail=1; fi
+: a pointer slot stored twice with one array's address reads as that address, a memcpy
 # of a constant size is a copy, and the arrays become scalar slots.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --sroa sroa_this.ir > "$out/sroa_this.ir" || fail=1
 if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" int 4 4)' "$out/sroa_this.ir" && ! grep -q 'memcpy\|(store (ptr int) \$"self"' "$out/sroa_this.ir"; then
