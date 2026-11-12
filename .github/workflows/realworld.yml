@@ -1,6 +1,6 @@
 name: Real-world
 
-# The larger real-world builds of docs/notes/realworld.md: doctest (hosted C++, gcc backend), Lua 5.4 (C input mode
+# The larger real-world builds of docs/notes/realworld.md: doctest (hosted C++, gcc and Path B), Lua 5.4 (C input mode
 # and its own makefile through nfcc), mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
 # parser and VM run during the build), TinyCC (its own makefile through nfcc, then its tests2 suite), SDCC (its compiler built by nfcc, output compared), optcarrot, and the CoreCLR GC's compile on both backends. Each one clones its pinned
 # upstream commit into build/realworld. tinyxml2 stays
@@ -23,6 +23,8 @@ on:
       - "scripts/setup-*.sh"
       - "scripts/cproc-*.patch"
       - "scripts/mruby-tool-config.rb"
+      - "be/**"
+      - "scripts/pathb-*"
       - "tests/realworld/**"
       - ".github/workflows/realworld.yml"
   pull_request:
@@ -41,6 +43,8 @@ on:
       - "scripts/setup-*.sh"
       - "scripts/cproc-*.patch"
       - "scripts/mruby-tool-config.rb"
+      - "be/**"
+      - "scripts/pathb-*"
       - "tests/realworld/**"
       - ".github/workflows/realworld.yml"
   workflow_dispatch:
@@ -68,6 +72,7 @@ jobs:
 
           - name: doctest, mruby, optcarrot
             packages: make ruby rake
+            pathb: true   # run_doctest.sh builds with Path B
             run: |
               tests/realworld/run_doctest.sh
               tests/realworld/run_mruby.sh
@@ -75,6 +80,7 @@ jobs:
 
           - name: Lua, TinyCC, CoreCLR GC, ASTro
             packages: make ruby rake libgmp-dev
+            pathb: true   # run_coreclr_gc.sh builds with Path B
             run: |
               tests/realworld/run_lua.sh
               tests/realworld/run_lua_make.sh
@@ -96,6 +102,24 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           packages: ${{ matrix.packages }}
+
+      # The Path B harness (scripts/setup-pathb.sh), keyed and cached as ci.yml's test job keys it (the cache is shared).
+      - name: Path B harness cache key
+        if: matrix.pathb
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        if: matrix.pathb
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: matrix.pathb && steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}

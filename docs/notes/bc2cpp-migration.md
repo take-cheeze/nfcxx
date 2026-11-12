@@ -4,7 +4,7 @@ Status, 2026-11-09: in progress.
 - Done: optcarrot under this repository's CI (`tests/bc2cpp/run_optcarrot.sh`).
 - Done: Phase 1's root split, rpg-maker-clone#3203.
 - Done: Phase 2's import. bc2cpp is in `bc2cpp/` with its history, and the optcarrot world now uses it.
-- Done: the fixture checks run here: the `checks` job of `.github/workflows/bc2cpp.yml`, three shards of
+- Done: the fixture checks run here: the `checks` job of `.github/workflows/ci.yml`, three shards of
   `bc2cpp/scripts/bc2cpp/checks.list`, run inside the pinned world with its `3rd/nfcxx` pointed at this checkout.
 - Done: a second world, `scripts/pathb-qbe-emit.rb` (`tests/bc2cpp/run_pathb_qbe_emit.sh`, the `script-world` build kind).
 - Done: a third world, `scripts/pathb-borrowck.rb` (`tests/bc2cpp/run_pathb_borrowck.sh`). Its top level is `main(argv)`,
@@ -94,7 +94,7 @@ check.
   a sealed mruby build whose Ruby bc2cpp compiled to C++.
 - The check is checksum 59662 on every runtime. The script prints each runtime's frames per second and the compiled
   build's hot-path speedup over the interpreter. `OPTCARROT_MIN_SPEEDUP=X` also fails below X; it is off by default.
-- `.github/workflows/bc2cpp.yml` runs every world, when `tests/bc2cpp/` changes or on demand, three worlds to a job
+- `.github/workflows/ci.yml` runs every world, when `tests/bc2cpp/` changes or on demand, three worlds to a job
   (`tests/bc2cpp/worlds.list`, balanced by weight by `tests/bc2cpp/run_worlds.rb`).
 
 At the first pin (rpg-maker-clone `df3ee7c52`, 32-core desktop, host gcc 15), 180 frames took:

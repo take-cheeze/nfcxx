@@ -2,6 +2,8 @@
 # nfcxx as the C++ compiler of a build system: the compiler-driver options CMake, ninja and mruby's rake build pass
 # (-std=gnu++NN, -pthread, -fexceptions, -W*, -isystem DIR, -MD/-MF/-MT, -E -P). See docs/notes/cxx-driver.md.
 #   NFCXX_BACKEND=qbe|gcc   (default: gcc here; the option handling does not depend on the backend)
+# NOT YET on Path B: NFCXX_BACKEND=pathb fails 16 of 52 checks (-isystem DIR, -include FILE, dependency files, the -fno-rtti refusal,
+# --keep-intermediates, the object cache): the Path B route of nfcxx does not handle those options. Listed in docs/notes/cproc-removal-library-suites.md.
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcxx=$root/nfcxx
 export NFCXX_BACKEND=${NFCXX_BACKEND:-gcc}

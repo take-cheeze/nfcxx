@@ -136,6 +136,10 @@ ARM64_HELPERS = {
   "barrier" => ["__pathb_barrier", ["ret"]],
   "fence" => ["__pathb_fence", ["dmb ish", "ret"]],
   "escape" => ["__pathb_escape", ["ret"]],
+  # The frame record of AAPCS64 (x29 is the frame pointer, QBE always keeps one): [x29] the caller's x29, [x29 + 8] the return
+  # address. The helper runs without a frame of its own, so x29 is the function that called it (as %rbp is on x86-64).
+  "retaddr" => ["__pathb_retaddr", ["ldr x0, [x29, #8]", "ret"]],
+  "frameaddr" => ["__pathb_frameaddr", ["mov x0, x29", "ret"]],
   "check" => ["pathb_check", ["cbz w0, .Lpathb_check_ok", "b ABORT", ".Lpathb_check_ok:", "ret"]],
   "rdtsc" => ["__pathb_rdtsc", ["mrs x0, cntvct_el0", "ret"]],
   "vasink_w" => ["__pathb_vasink_w", ["ret"]],

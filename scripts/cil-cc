@@ -1,5 +1,38 @@
 #!/usr/bin/env bash
-# C compiler wrapper for nfcc's cil backend (NFCXX_BACKEND=cil): the qbe-cc pipeline (preprocess, qbe-prep, cproc),
-# then qbe2cil.rb instead of QBE, and cil-link.rb for the link. The object file is a JSON fragment (docs/notes/cil.md).
+# C compiler wrapper for nfcc's cil backend (NFCXX_BACKEND=cil). A `-c file.c` compile goes through Path B first
+# (scripts/pathb-cil -c: EDG's C front end -> typed IR -> pathb-cil-emit.rb, no cproc; docs/notes/pathb-cil.md) and writes the
+# JSON fragment (docs/notes/cil.md). When Path B refuses the file (a construct its CIL emitter does not have) or the
+# options are ones it does not take, the old route compiles it: the qbe-cc pipeline (preprocess, qbe-prep, cproc, qbe2cil.rb).
+# Fragments of both routes link together (cil-link.rb), so the choice is per file. The link step is qbe-cc's (cil-link.rb).
+# NFCXX_CIL_CPROC=1 uses the old route for every file; NFCXX_CIL_VERBOSE=1 says which file fell back, and why.
 export NFCXX_CIL=1
-exec "$(dirname "$0")/qbe-cc" "$@"
+here=$(dirname "$0")
+args=("$@")
+if [ -z "${NFCXX_CIL_CPROC:-}" ] && [ -x "$here/../build/pathb/cmake/bin/cpfe" ]; then
+  compile=0 out="" src="" nsrc=0 pass=()
+  ok=1
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    a=${args[i]}
+    case $a in
+      -c) compile=1 ;;
+      -o) out=${args[++i]} ;;
+      -D?*|-I?*|-U?*|-std=*) pass+=("$a") ;;
+      -D|-I|-U) pass+=("$a${args[++i]}") ;;
+      --c-input|--eh-unwind) ;;
+      -O*|-g*|-W*|-w|-fPIC|-fpic|-fno-PIC|-fno-pic|-fwrapv|-fno-strict-aliasing|-m64|-pipe|-fno-common|-fno-builtin|-fomit-frame-pointer) ;;
+      -*) ok=0 ;;
+      *.c) src=$a; nsrc=$((nsrc + 1)) ;;
+      *) ok=0 ;;
+    esac
+  done
+  if [ $ok = 1 ] && [ $compile = 1 ] && [ $nsrc = 1 ] && [ -n "$out" ]; then
+    err=$(mktemp); trap 'rm -f "$err"' EXIT
+    if "$here/pathb-cil" -c ${pass[@]+"${pass[@]}"} -o "$out" "$src" 2> "$err"; then
+      [ -z "${NFCXX_CIL_VERBOSE:-}" ] || echo "cil-cc: Path B: $src" >&2
+      exit 0
+    fi
+    [ -z "${NFCXX_CIL_VERBOSE:-}" ] || { echo "cil-cc: Path B refused $src, using cproc: $(head -c 300 "$err" | tr '\n' ' ')" >&2; }
+    rm -f "$out"
+  fi
+fi
+exec "$here/qbe-cc" "$@"

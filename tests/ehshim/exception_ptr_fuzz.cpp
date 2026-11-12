@@ -2,7 +2,7 @@
 // pointers, releases in any order, and throw_with_nested. The program prints a checksum of what the handlers saw; it must
 // equal the host g++'s (whose exceptions are the reference), and all exception objects must be destroyed at the end.
 // The exit code is 0 when the objects balance.
-// BACKENDS: gcc qbe pathb
+// BACKENDS: gcc pathb
 // EXPECT: 0
 #include <exception>
 #include <stdexcept>

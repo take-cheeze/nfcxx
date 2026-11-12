@@ -9,6 +9,7 @@ covers say so.
 
 | Note | One line |
 | --- | --- |
+| [panthera.md](notes/panthera.md) | Proposal: Ampere's open Panthera performance model as a measurement loop for an AArch64 codegen target (what it is, what nfcxx has, what is not built or measured). No test covers it. |
 | [build-self-hosting.md](notes/build-self-hosting.md) | What the build fetches, which host tools it needs for which step, and how to build offline from mirrored submodules. |
 | [asan.md](notes/asan.md) | `nfcxx -fsanitize=address`: AddressSanitizer on the qbe (default) and gcc backends; backend selection, limits. `tests/asan/run.sh`. |
 | [asan-plan.md](notes/asan-plan.md) | Plan for AddressSanitizer on Path B and wasm (the qbe milestones are done): emitter checks, libasan reuse, milestones. |

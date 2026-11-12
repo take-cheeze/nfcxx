@@ -7,7 +7,7 @@
 cd "$(dirname "$0")/../.."
 # Path B takes freestanding programs on x86-64 Linux (docs/notes/freestanding.md).
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then backends="qbe gcc pathb"; fi
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then backends="gcc pathb"; fi   # Path B is the product here; qbe stays for the other hosts
 # Path B needs its harness (scripts/setup-pathb.sh). Without it the column is skipped, and said so; NFCXX_BACKEND=pathb asks for it, so it fails.
 if [ -z "${NFCXX_BACKEND:-}" ] && [ ! -x "${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}" ]; then
   case $backends in *pathb*) backends=${backends% pathb}; echo "skip  pathb (no Path B harness: scripts/setup-pathb.sh)" ;; esac
