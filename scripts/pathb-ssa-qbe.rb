@@ -1570,7 +1570,7 @@ end
         asm_helpers << "rdtsc"
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
       # `(retaddr)`, `(frameaddr)`: __builtin_return_address(0) and __builtin_frame_address(0). QBE gives each function a frame
-      # pointer, so the helper the driver appends reads this function's %rbp (x86-64 only: the helper has no arm64 form).
+      # pointer, so the helper the driver appends reads this function's frame (%rbp on x86-64, x29 on arm64: the frame record).
       when "retaddr", "frameaddr"
         # The empty call after it keeps QBE from turning `return __builtin_return_address(0);` into a tail call (`leave; jmp`),
         # which would run the helper in the caller's frame.
