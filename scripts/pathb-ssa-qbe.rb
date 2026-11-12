@@ -970,7 +970,8 @@ end
       end
       cls = Qbe.cls(switch_operand_type(opnd))
       ranges = switch_ranges(cases)
-      # Four or more ranges: a balanced tree of range tests (GCC's decision tree). Fewer: the chain, which is cheaper.
+      # Four or more ranges: a balanced tree of range tests (GCC's decision tree; docs/notes/pathb-switch.md, which
+      # cites https://xoranth.net/gcc-switch/). Fewer: the chain, which is cheaper.
       if ranges.size >= 4
         switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), ranges, default)
       else
