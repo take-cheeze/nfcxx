@@ -6,7 +6,10 @@
 #      false for a class no definition reaches); an unknown receiver of a name only Ruby classes define folds to their
 #      membership test; a name nothing defines folds to false; a world with a respond_to_missing? folds nothing;
 #   2. run on a full-core mruby, compiled against interpreted: every answer is the same, for instances of the
-#      defining class, its subclass, another class, nil and an Integer.
+#      defining class, its subclass, another class, nil and an Integer;
+#   3. a class or module constant receiver (RESPOND_TO_FOLD_CONSTANT) folds from its singleton lookup: a `class << self`
+#      def, a module_function and a superclass's singleton def answer true; a name
+#      nothing defines and another module's singleton def answer false.
 #
 # Usage: MRBC=path/to/host/mrbc ruby scripts/bc2cpp/respond_to_fold_check.rb
 # The run needs a full-core libmruby built from this tree's patched 3rd/mruby (BC2CPP_MRUBY_FULL, or one built here).
@@ -37,7 +40,26 @@ SOURCE = <<~RUBY
   class Plain
     def initialize; @x = 0; end
   end
+  module Tunes
+    class << self
+      def tune_pos; 7; end
+    end
+  end
+  module Tools
+    module_function
+    def tool; 2; end
+  end
+  class Base
+    def self.made; 3; end
+  end
+  class Derived < Base
+  end
   class Probe
+    def mod_yes; Tunes.respond_to?(:tune_pos); end
+    def mod_no; Tunes.respond_to?(:rtf_absent_singleton); end
+    def mod_fn; Tools.respond_to?(:tool); end
+    def cls_inh; Derived.respond_to?(:made); end
+    def cls_no; Derived.respond_to?(:tune_pos); end
     def rev?(o); o.respond_to?(:revision); end
     def nope?(o); o.respond_to?(:rtf_nothing_defines_this); end
     def known; Rev.new.respond_to?(:revision); end
@@ -45,7 +67,7 @@ SOURCE = <<~RUBY
     def priv; Rev.new.respond_to?(:secret); end
   end
 RUBY
-OWNERS = %w[Rev Kid Plain Probe].freeze
+OWNERS = %w[Rev Kid Plain Tunes Tools Base Derived Probe].freeze
 
 # The same probe where a class answers through respond_to_missing?: no fold may stand.
 MISSING_SOURCE = <<~RUBY
@@ -97,6 +119,11 @@ SCENARIO = <<~'CPP'
     row(M, "known", "known", 0, mrb_nil_value());
     row(M, "known_no", "known_no", 0, mrb_nil_value());
     row(M, "private", "priv", 0, mrb_nil_value());
+    row(M, "mod_yes", "mod_yes", 0, mrb_nil_value());
+    row(M, "mod_no", "mod_no", 0, mrb_nil_value());
+    row(M, "mod_fn", "mod_fn", 0, mrb_nil_value());
+    row(M, "cls_inh", "cls_inh", 0, mrb_nil_value());
+    row(M, "cls_no", "cls_no", 0, mrb_nil_value());
     return 0;
   }
 CPP
@@ -135,13 +162,23 @@ Dir.mktmpdir('respond-to-fold') do |dir|
   rev = fold.call(body.call(code, 'rev?'))
   check.call('rev?: an unknown receiver folds to membership in Rev and Kid', rev.include?('bc2cpp_class_is') && rev.scan('bc2cpp_class_is').size == 2)
   check.call('nope?: a name nothing defines folds to false', fold.call(body.call(code, 'nope?')).end_with?('mrb_bool_value(false);'))
-  folded = %w[rev? nope? known known_no priv].all? { |m| !body.call(code, m).split('#else').last.to_s.split('#endif').first.to_s.include?('bc2cpp_owner_call') }
+  { 'mod_yes' => 'a module object: a `class << self` def', 'mod_fn' => 'a module object: a module_function',
+    'cls_inh' => "a class object: its superclass's singleton def" }.each do |m, what|
+    check.call("#{m}: #{what} folds to true", fold.call(body.call(code, m)).end_with?('mrb_bool_value(true);'))
+  end
+  { 'mod_no' => 'a module object: a name nothing defines', 'cls_no' => "a class object: another module's singleton def" }.each do |m, what|
+    check.call("#{m}: #{what} folds to false", fold.call(body.call(code, m)).end_with?('mrb_bool_value(false);'))
+  end
+  folded = %w[rev? nope? known known_no priv mod_yes mod_no mod_fn cls_inh cls_no].all? { |m| !body.call(code, m).split('#else').last.to_s.split('#endif').first.to_s.include?('bc2cpp_owner_call') }
   check.call('no folded site keeps a respond_to? call outside the verify branch', folded)
 
   unless ENV['CC_GENERATED_ONLY'] == '1'
     compiled = parity(runtime, dir, err, OWNERS, HARNESS + SCENARIO, check, failures, 'fold')
     unless compiled.empty?
       check.call('a subclass answers true', compiled.include?('kid.revision => true'))
+      check.call('class and module objects answer as interpreted mruby',
+                 %w[mod_yes mod_fn cls_inh].all? { |l| compiled.include?("#{l} => true") } &&
+                 %w[mod_no cls_no].all? { |l| compiled.include?("#{l} => false") })
       check.call('an unrelated class, nil and an Integer answer false',
                  %w[plain.revision nil.revision int.revision].all? { |l| compiled.include?("#{l} => false") })
     end
