@@ -51,11 +51,7 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   ok=0; bad=0
   for f in "${files[@]}"; do
-    fb=$b
-    # QBE-ONLY: Path B's QBE output for handletable.cpp is rejected ("pathb-ssa-build: QBE failed: unexpected phi instruction"), so
-    # that one unit is compiled by the qbe backend even when the suite runs Path B; the other 33 units are Path B's.
-    [ "$b" = pathb ] && [ "$f" = handletable ] && fb=qbe
-    if NFCXX_BACKEND=$fb "$root/nfcxx" -c "${flags[@]}" "$gc/$f.cpp" -o "$tmp/$b-$f.o" >"$tmp/$b-$f.log" 2>&1; then
+    if NFCXX_BACKEND=$b "$root/nfcxx" -c "${flags[@]}" "$gc/$f.cpp" -o "$tmp/$b-$f.o" >"$tmp/$b-$f.log" 2>&1; then
       ok=$((ok + 1))
     else
       bad=$((bad + 1)); echo "FAIL $b coreclr-gc $f"; grep -m3 "error" "$tmp/$b-$f.log"

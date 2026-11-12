@@ -44,8 +44,11 @@
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
-# QBE-ONLY: Path B refuses lib/uop/nfcuop_lower.cpp ("pathb-ssa-build: QBE failed: unexpected phi instruction"), so the suite
-# stays on qbe and gcc.
+# QBE-ONLY: Path B builds lib/uop (nfcuop_lower.cpp no longer fails in QBE) and runs test_ut, test_np, test_nn, test_onnx,
+# test_sym, test_shaping, test_grad, test_layout, test_cgen and np_compat, but two programs do not pass yet, so the suite stays on
+# qbe and gcc: test.cpp overflows the 8 MB stack in graph_rewrite's recursion (Rewriter::go has a 6 KB frame on Path B, the
+# emitter gives every local its own stack slot; it passes under `ulimit -s unlimited`), and test_layout_avx2.cpp is refused
+# ("pathb-ssa-build: not emitted: main: operator unsupported").
 #   UOP_JOBS=N              the library objects are compiled N at a time (default: the CPU count)
 #   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
 #                           the ONNX models and the Python checks run on the models the selected programs wrote, and the

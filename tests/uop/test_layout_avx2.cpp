@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -107,6 +108,24 @@ void expect_throw(GemmVariant v, int64_t M, int64_t N, int64_t K, const char* wh
 
 }  // namespace
 
+// True when /proc/cpuinfo lists every flag. The __builtin_cpu_* functions are not used: cproc (the qbe back end's C
+// compiler) does not implement them, so the test would not build under nfcxx --backend=qbe.
+bool cpu_has_flags(std::initializer_list<const char*> flags) {
+  std::ifstream f("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.compare(0, 5, "flags") != 0) continue;
+    for (const char* flag : flags) {
+      std::string needle = std::string(" ") + flag;
+      size_t at = line.find(needle);
+      bool whole = at != std::string::npos && (at + needle.size() == line.size() || line[at + needle.size()] == ' ');
+      if (!whole) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 // The packed, register-blocked kernel (emit_gemm_rowsum_packed_c): C row-major, R the row sums, Bp the packing scratch.
 void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, int mr, std::mt19937& rng) {
   std::string tag = "packed" + std::to_string(mr) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
@@ -140,8 +159,7 @@ void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, in
 }
 
 int main() {
-  __builtin_cpu_init();
-  if (!__builtin_cpu_supports("avx2") || !__builtin_cpu_supports("fma")) {
+  if (!cpu_has_flags({"avx2", "fma"})) {
     std::printf("SKIP test_layout_avx2: this CPU has no AVX2 and FMA\n");
     return 0;
   }
