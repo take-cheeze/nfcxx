@@ -188,7 +188,7 @@ def clause(s, name)
 end
 
 # Linkage markers and constructor/destructor attributes follow the parameters; they have no runtime meaning in the body.
-FN_ATTR_HEADS = %w[static weak constructor destructor].freeze
+FN_ATTR_HEADS = %w[static weak constructor destructor noinline].freeze
 
 def fn_of(form)
   Fn.new(form[1], form.find { |x| head(x) == "ret" }, form.find { |x| head(x) == "params" },

@@ -49,7 +49,7 @@ class IdentityMap
 end
 
 
-HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor"]
+HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
 def tokenize(text)
@@ -222,6 +222,7 @@ end
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
+  return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|
@@ -238,6 +239,7 @@ def refusal(fn, name)
   scan = lambda do |x|
     h = x[0]
     if h.is_a?(String)
+      facts[:frame] = true if h == "retaddr" || h == "frameaddr"   # the caller's frame is read: the body must stay in its own
       facts[:jumps] += 1 if h == "goto" || h == "label"
       facts[:rets] += 1 if h == "return"
     end
@@ -252,6 +254,7 @@ def refusal(fn, name)
     end
   end
   scan.call(body)
+  return "frame address" if facts[:frame]
   return "printf" if facts[:printf]
   return "recursion" if facts[:self]
   return "goto/label" if facts[:jumps] > 0
@@ -1683,7 +1686,7 @@ UNUSED_ROOTS = "\0unused"
 def external_root?(f)
   return false if head(f) == "data"
   attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
-  return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread")
+  return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
   return false if attrs.include?("weak") || attrs.include?("static")
   true   # a definition (or declaration) of external linkage
 end

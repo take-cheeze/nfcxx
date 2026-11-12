@@ -109,6 +109,12 @@ ASM_HELPERS = {
 "check" => ["\t.text", "\t.weak pathb_check", "\t.type pathb_check, @function", "pathb_check:", "\ttestl %edi, %edi",
             "\tje .Lpathb_check_ok", "\tsubq $8, %rsp", "\tcall abort", ".Lpathb_check_ok:", "\tret",
             "\t.size pathb_check, .-pathb_check"],
+  # `__pathb_retaddr()` / `__pathb_frameaddr()`: __builtin_return_address(0) and __builtin_frame_address(0), read from the %rbp that QBE
+  # sets up in the calling function (a call of the helper leaves it as it was). x86-64 only.
+  "retaddr" => ["\t.text", "\t.weak __pathb_retaddr", "\t.type __pathb_retaddr, @function", "__pathb_retaddr:", "\tmovq 8(%rbp), %rax", "\tret",
+                "\t.size __pathb_retaddr, .-__pathb_retaddr"],
+  "frameaddr" => ["\t.text", "\t.weak __pathb_frameaddr", "\t.type __pathb_frameaddr, @function", "__pathb_frameaddr:", "\tmovq %rbp, %rax", "\tret",
+                  "\t.size __pathb_frameaddr, .-__pathb_frameaddr"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
   # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
@@ -319,7 +325,7 @@ def live_names(forms)
 end
 
 def linked_or_startup?(f)
-  f.drop(2).any? { |p| %w[constructor destructor].include?(head(p)) } ||
+  f.drop(2).any? { |p| %w[constructor destructor used].include?(head(p)) } ||
     f.drop(2).none? { |p| head(p) == "static" || head(p) == "extern" || (head(p) == "weak" && p.length == 1) }
 end
 
