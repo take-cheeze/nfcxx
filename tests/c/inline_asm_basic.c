@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: extended asm templates beyond the fences and barriers are refused
 // X86-ONLY: x86 inline assembly (lowered to thunks on the qbe backend; docs/notes/inline-asm.md)
 static long add(long a, long b) { long r; __asm__("addq %2, %0" : "=r"(r) : "0"(a), "r"(b)); return r; }
 static int inc(int x) { __asm__ volatile("incl %0" : "+r"(x)); return x; }

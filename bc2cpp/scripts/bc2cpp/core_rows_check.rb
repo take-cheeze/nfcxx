@@ -8,7 +8,8 @@
 #     a variable, constant, keyword, Symbol value or comparison, table entry or diagnostic is none, and neither is the
 #     bare index an owner call or a native singleton call takes;
 #   - the engine reading: a send's or Symbol literal's operand looks nothing up, any other operand does, and an
-#     unresolved alias keeps every symbol; the dynamic and `super` names count;
+#     unresolved alias keeps every symbol; the dynamic and `super` names count, and a name only a native under 3rd/
+#     gives is none of the engine's (the core run reads that source itself);
 #   - the outputs: the header defines a row to 2, the lists read without the key as empty, and the runtime helpers a
 #     proven receiver calls through find rows (bc2cpp_find_proven).
 #
@@ -21,6 +22,9 @@ require_relative '../../tools/bc2cpp/core_rows'
 require_relative '../../tools/bc2cpp/core_native_candidates'
 require_relative '../../tools/bc2cpp/static_dispatch_lists'
 require_relative '../../tools/bc2cpp/symbol_cache'
+require_relative '../../tools/bc2cpp/static_dispatch_registrations'
+require 'fileutils'
+require 'tmpdir'
 
 suite = FixtureCheck.new('core_rows_check')
 
@@ -77,6 +81,26 @@ suite.check('another operand of the engine is a lookup', names.include?('undef_m
 suite.check('the dynamic and super names count', names.superset?(Set['dyn', 'sup']))
 ireps['c'] = irep.new('c', %i[hidden], [insn.new(:ALIAS, :x, nil)])
 suite.check('an unresolved alias keeps every symbol', CoreRows.engine_names(ireps, [], Set.new, Set.new).include?('hidden'))
+
+Dir.mktmpdir do |dir|
+  core_c = File.join(dir, '3rd/mruby/src/x.c')
+  engine_c = File.join(dir, 'src/y.c')
+  [core_c, engine_c].each { |p| FileUtils.mkdir_p(File.dirname(p)) }
+  File.write(core_c, 'mrb_funcall(M, v, "core_only", 0);')
+  File.write(engine_c, 'mrb_funcall(M, v, "engine_named", 0);')
+  sdr = StaticDispatchRegistrations
+  files = sdr.singleton_class.instance_method(:outside_world_files)
+  sdr.singleton_class.send(:define_method, :outside_world_files) { |*_a, **_k| [[], [core_c, engine_c]] }
+  begin
+    engine = Set.new
+    all = sdr.outside_world_tokens(dir, engine_tokens: engine)
+    suite.check('a native under 3rd/ names its tokens for the engine proof only',
+                all.include?('core_only') && !engine.include?('core_only'))
+    suite.check('a native outside 3rd/ names its tokens for the core rows too', engine.include?('engine_named'))
+  ensure
+    sdr.singleton_class.send(:define_method, :outside_world_files, files)
+  end
+end
 
 entries = [{ mt_class: 'Array', kind: 'SYM', cname: 'first', name: 'first' },
            { mt_class: 'Array', kind: 'SYM', cname: 'pack', name: 'pack' }]

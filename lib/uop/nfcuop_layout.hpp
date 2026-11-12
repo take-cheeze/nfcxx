@@ -1,5 +1,7 @@
 // nfcuop layout (stage 8, docs/notes/uop-layout.md): instruction-visible layout of 2-D f32 tensors on the AVX2 target.
 //
+// Layout model from Arknife (the paper's name for the system): Ma, Chen, Li, Luo, Xiao, Zheng, Li, Liang. "Retargetable Compilation for Tensor Kernels via a Unified Layout Abstraction". arXiv:2611.13741 [cs.PL], 2026. https://arxiv.org/abs/2611.13741
+//
 //   A tensor's layout is the logical axis that the vector lanes hold (8 consecutive elements of that axis per ymm).
 //   An op has variants (instruction sequences); a variant declares the lane axis each input must be in (absent = any,
 //   for example a broadcast operand) and the lane axis its output comes out in, plus its intrinsic instruction count.
