@@ -550,6 +550,7 @@ module Qbe
     end
 
     def emit
+      split_wide_phis
       header
       allocs
       escape_slots if returns_twice?(@blocks)
@@ -954,6 +955,58 @@ end
     end
 
     def block_label(num) = "b#{num}"
+
+    # QBE reads at most 63 predecessors in a phi ("too many arguments"). A block that has more (the join of the dispatch
+    # switches of a computed-goto interpreter: Lua's lvm.c has 83 `goto *` and a label every one of them reaches) gets
+    # its predecessors in groups of PHI_GROUP: each group jumps to a block of its own that merges the group's values with a
+    # phi and jumps on, and the phi of the block reads one value per group.
+    PHI_GROUP = 48
+
+    def split_wide_phis
+      extra = []
+      next_num = @blocks.map { |b| b[1].to_s.to_i }.max.to_i + 1
+      @blocks.each do |b|
+        phis = b[2..].select { |it| head(it) == "phi" }
+        next if phis.empty? || phis[0].size - 3 <= PHI_GROUP
+
+        preds = phis[0][3..].map { |pr, _| pr }
+        groups = []
+        preds.each_slice(PHI_GROUP) { |g| groups << g }
+        names = groups.each_index.map { |k| b[1].is_a?(Integer) ? next_num + k : (next_num + k).to_s }
+        next_num += groups.size
+        route = {}
+        groups.each_with_index { |g, k| g.each { |pr| route[pr.to_s] = names[k] } }
+        groups.each_with_index do |g, k|
+          merged = phis.map do |ph|
+            ["phi", "%wp#{ph[1][1..]}_#{k}", ph[2]] + ph[3..].select { |pr, _| route[pr.to_s] == names[k] }
+          end
+          extra << (["bb", names[k]] + merged + [["br", b[1]]])
+        end
+        target = b[1].to_s
+        @blocks.each do |pb|
+          next unless route.key?(pb[1].to_s)
+
+          term = pb[-1]
+          pb[-1] = retarget_term(term, target, route[pb[1].to_s]) if %w[br condbr switch].include?(head(term))
+        end
+        b.map! do |it|
+          next it unless head(it) == "phi"
+
+          ["phi", it[1], it[2]] + names.each_index.map { |k| [names[k], "%wp#{it[1][1..]}_#{k}"] }
+        end
+      end
+      @blocks.concat(extra)
+    end
+
+    def retarget_term(term, target, to)
+      return term unless to
+
+      case term[0]
+      when "br" then term[1].to_s == target ? ["br", to] : term
+      when "condbr" then ["condbr", term[1], term[2].to_s == target ? to : term[2], term[3].to_s == target ? to : term[3]]
+      else ["switch", term[1], term[2].map { |v, bl| [v, bl.to_s == target ? to : bl] }, term[3].to_s == target ? to : term[3]]
+      end
+    end
 
     # Checks that need no emission: a switch's targets may not repeat where a phi reads them, and a phi operand that is an
     # expression is computed at the end of its predecessor, so the phi reads a temporary.

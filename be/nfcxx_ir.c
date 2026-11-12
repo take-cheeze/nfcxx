@@ -2292,6 +2292,26 @@ static ir_val ir_x87_const(a_constant_ptr c, a_type_ptr t)
 }
 
 /* A scalar constant operand of type t. */
+/* GNU label addresses (docs/notes/pathb-computed-goto.md). `&&label` is not a code address: QBE has no label values, so the
+   address of a label is a small nonzero integer, its id, typed as the pointer. `goto *p` is then a switch over the ids of the
+   function's address-taken labels, each case a plain goto (ir_assigned_goto). Ids are module-wide and stable, so a static table
+   of `&&label` is data of integers, and an id survives being stored, copied and compared like any pointer. */
+static void **ir_lad_tab;
+static int ir_lad_n, ir_lad_cap;
+static int ir_label_id(void *lbl)
+{
+  int i;
+  for (i = 0; i < ir_lad_n; i++)
+    if (ir_lad_tab[i] == lbl) return i + 1;
+  if (ir_lad_n == ir_lad_cap) {
+    ir_lad_cap = ir_lad_cap == 0 ? 64 : ir_lad_cap * 2;
+    ir_lad_tab = (void **)realloc(ir_lad_tab, (size_t)ir_lad_cap * sizeof *ir_lad_tab);
+    if (ir_lad_tab == NULL) abort();
+  }
+  ir_lad_tab[ir_lad_n++] = lbl;
+  return ir_lad_n;
+}
+
 static ir_val ir_const_value(a_constant_ptr c, a_type_ptr t)
 {
   /* An integer constant of pointer type is a null pointer only when it is zero: (void *) 0x1000 is an address. */
@@ -2321,6 +2341,10 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
 {
   const char *base = NULL;
   unsigned long long off = (unsigned long long)c->variant.address.offset;
+  if (c->variant.address.kind == abk_label && off == 0) { /* &&label: its id (ir_label_id) */
+    ir_note(3, ck_address, 1);
+    return ir_mk_value(ir_fmt("(const %s %d)", ir_valtext(t), ir_label_id((void *)c->variant.address.variant.label)), t);
+  }
   switch (c->variant.address.kind) {
     case abk_routine: {
       /* The function's address, plus a byte offset when it has one (`(char *)f + 64`, a bound on a code address). */
@@ -2922,7 +2946,16 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
         if (arr != NULL && arr->type != NULL && skip_typerefs(arr->type)->kind == tk_array &&
             !skip_typerefs(arr->type)->variant.array.is_variable_size_array) {
           unsigned long long n = (unsigned long long)skip_typerefs(arr->type)->variant.array.variant.number_of_elements;
-          if (n != 0) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n)); /* [] and [0] (flexible array member): no bound */
+          /* [] and [0] (flexible array member): no bound. Nor does the last member of a struct that is `T m[1]`: the pre-C99
+             idiom for a flexible array member (Lua's TString.contents), which gcc takes as one by default
+             (-fstrict-flex-arrays=0). */
+          int old_fam = 0;
+          if (n == 1 && arr->kind == enk_operation &&
+              (arr->variant.operation.kind == eok_dot_field || arr->variant.operation.kind == eok_points_to_field)) {
+            an_expr_node_ptr mf = ir_operand(arr, 1);
+            old_fam = mf != NULL && mf->kind == enk_field && mf->variant.field.ptr->next == NULL;
+          }
+          if (n != 0 && !old_fam) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n));
         }
       } else if (ir_is_integer(a1->type)) {
         ir_vla_bounds(a0, e->type, idx);
@@ -5953,6 +5986,12 @@ static void ir_gi_scalar(unsigned long long off, a_constant_ptr c, a_type_ptr t)
   }
   if (c->kind == ck_string) {
     target = ir_string_data(c);
+  } else if (c->kind == ck_address && c->variant.address.kind == abk_label && c->variant.address.offset == 0) {
+    /* A static table of &&label: the label's id as a pointer-sized integer (ir_label_id). */
+    ir_note(3, ck_address, 1);
+    fprintf(nf_out, "\n    (scalar %llu %s (const %s %d))", off, ir_valtext(t), ir_valtext(t),
+            ir_label_id((void *)c->variant.address.variant.label));
+    return;
   } else if (c->kind == ck_address) {
     const char *addr_why = NULL; /* why the address has no symbol (ir_rout_addr), for the unsupported marker */
     add = (long long)c->variant.address.offset;
@@ -6997,6 +7036,69 @@ static void ir_emit_goto(a_label_ptr lbl, int d)
   ir_line(d, ir_fmt("(goto %s)", ir_tab_get(&ir_labels, lbl, ir_name_or(lbl->source_corresp.name, "label"), "")));
 }
 
+/* The address-taken labels of the function body (a GNU `goto *p` can reach only those). */
+static void ir_agl_scan(a_statement_ptr s, a_label_ptr *out, int *n, int max)
+{
+  a_statement_ptr t;
+  if (s == NULL) return;
+  switch (s->kind) {
+    case stmk_block:
+      for (t = s->variant.block.statements; t != NULL; t = t->next) ir_agl_scan(t, out, n, max);
+      return;
+    case stmk_label:
+      if (s->variant.label.ptr->address_taken && *n < max) out[(*n)++] = s->variant.label.ptr;
+      return;
+    case stmk_if:
+    case stmk_if_consteval:
+    case stmk_if_not_consteval:
+      ir_agl_scan(s->variant.if_stmt.then_statement, out, n, max);
+      ir_agl_scan(s->variant.if_stmt.else_statement, out, n, max);
+      return;
+    case stmk_while:
+    case stmk_end_test_while:
+      ir_agl_scan(s->variant.loop_statement, out, n, max);
+      return;
+    case stmk_for:
+      if (s->variant.for_loop.extra_info != NULL) ir_agl_scan(s->variant.for_loop.extra_info->initialization, out, n, max);
+      ir_agl_scan(s->variant.for_loop.statement, out, n, max);
+      return;
+    case stmk_switch:
+      ir_agl_scan(s->variant.switch_stmt.body_statement, out, n, max);
+      return;
+    default:
+      return;
+  }
+}
+
+#define IR_AGL_MAX 4096
+/* `goto *p`: a switch on the pointer's value over the ids of the address-taken labels, each case a goto. */
+static void ir_assigned_goto(a_statement_ptr s, int d)
+{
+  static a_label_ptr lbls[IR_AGL_MAX];
+  int n = 0, i;
+  ir_val v;
+  char *sel;
+  ir_tmp_scope tmps;
+  ir_note(1, stmk_assigned_goto, 1);
+  ir_depth = d;
+  ir_tmp_begin(&tmps);
+  v = ir_rval(s->expr);
+  ir_tmp_flush(&tmps, d);
+  ir_tmp_end(&tmps, d);
+  sel = ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", v.s));
+  if (ir_cur_scope != NULL) ir_agl_scan(ir_cur_scope->assoc_block, lbls, &n, IR_AGL_MAX);
+  ir_line(d, ir_fmt("(switch %s", sel));
+  ir_line(d + 1, "(body");
+  for (i = 0; i < n; i++) {
+    ir_line(d + 2, ir_fmt("(case (const unsigned_long %d))", ir_label_id((void *)lbls[i])));
+    ir_line(d + 2, ir_fmt("(goto %s)", ir_tab_get(&ir_labels, lbls[i], ir_name_or(lbls[i]->source_corresp.name, "label"), "")));
+  }
+  ir_line(d + 2, "(default)");
+  ir_line(d + 2, "(unreachable)");
+  ir_close(1);
+  ir_close(1);
+}
+
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
 {
   if (ir_asm_ptx(ae, d)) return;
@@ -7490,6 +7592,9 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_goto:
       ir_note(1, stmk_goto, 1);
       ir_emit_goto(s->variant.label.ptr, d);
+      return;
+    case stmk_assigned_goto:
+      ir_assigned_goto(s, d);
       return;
     case stmk_label:
       ir_note(1, stmk_label, 1);
