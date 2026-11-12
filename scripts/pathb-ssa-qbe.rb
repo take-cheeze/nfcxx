@@ -1026,7 +1026,7 @@ end
     # The type of an operand: a constant's or an expression's own type, or the declared type of a register.
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
-      return "ptr" if x.is_a?(Array) && head(x) == "null"
+      return(x[1].is_a?(Array) ? x[1] : ["ptr", "void"]) if x.is_a?(Array) && head(x) == "null"
       return Qbe.expr_type(x) if expression?(x)
 
       @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
