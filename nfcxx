@@ -847,6 +847,11 @@ done
 # mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
 # and its own feature checks.
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
+# Path B's front end is an x86-64 EDG target (no __aarch64__, no __clang__), so libc++ takes the x86-64 std::string layout on
+# an arm64 Mac, where the SDK's libc++ (clang's Apple arm64 config) uses the alternate layout: the size in byte 23, the
+# short-string flag in its top bit. Path B would read a string made by the library wrongly. Defining the layout macro is
+# the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
+[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
 # Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
 # target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump does the same).
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
