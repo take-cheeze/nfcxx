@@ -971,7 +971,8 @@ end
         operand = op(opnd)
       end
       cls = Qbe.cls(switch_operand_type(opnd))
-      # A bit test, or four or more items: a balanced tree (GCC's decision tree). Fewer: the chain, which is cheaper.
+      # A bit test, or four or more items: a balanced tree (GCC's decision tree; docs/notes/pathb-switch.md, which
+      # cites https://xoranth.net/gcc-switch/). Fewer: the chain, which is cheaper.
       # The tree's targets skip the blocks that only jump on (a case label that falls into the next one, or an empty arm),
       # so labels with one body share a target and can form a bit test.
       tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
