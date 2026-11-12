@@ -179,6 +179,14 @@ def build_registry(ireps, root_label)
   alias_seq = 0
   conditional_labels = nil
   conditional = -> { conditional_labels ||= CoreDefs.conditional_def_labels(ireps) }
+  # ALIAS_WALK_TIME: whether `old` had a definition on +owner+ when the walk reached an alias of it: a registry entry,
+  # or an earlier core alias that names it (`alias filter select` after `alias select find_all`). The registry is
+  # complete only after the walk, so core_defs.rb's alias_map needs this to tell an `old` that was live at the alias
+  # from a later definition of the same name (an alias of a native method, later redefined in Ruby, copies the native).
+  defined_before = lambda do |owner, name|
+    registry.fetch(name, []).any? { |d| d.owner == owner } ||
+      alias_sites.any? { |site| site[:owner] == owner && site[:new] == name }
+  end
   register_alias = lambda do |label, irep, idx, namespace|
     next if namespace.nil? || namespace.start_with?('<') || CoreDefs.core_source?(irep.file)
 
@@ -321,7 +329,8 @@ def build_registry(ireps, root_label)
         end
       when :ALIAS
         old_name = insn.first_of(:name)&.value
-        alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
+        alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label,
+                         defined: defined_before.call(namespace || 'Object', old_name) } if insn.sym && old_name
         register_alias.call(label, irep, idx, namespace)
       when :TDEF
         # "TDEF R1 :speak I[1]"
@@ -417,7 +426,8 @@ def build_registry(ireps, root_label)
         end
         register_alias.call(label, irep, idx, namespace) if name == 'alias_method' && insn.op == :SSEND
         if name == 'alias_method' && insn.op == :SSEND && CoreDefs.core_source?(irep.file) && (found = AliasSites.site(irep, idx))
-          alias_sites << { owner: namespace || 'Object', new: found.new_name, old: found.old_name, irep: label }
+          alias_sites << { owner: namespace || 'Object', new: found.new_name, old: found.old_name, irep: label,
+                           defined: defined_before.call(namespace || 'Object', found.old_name) }
         end
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M` in this
