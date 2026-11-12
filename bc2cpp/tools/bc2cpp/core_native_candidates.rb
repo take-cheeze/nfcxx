@@ -317,6 +317,7 @@ module CoreNativeCandidates
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
     fragments = Set.new
+    undef_names = Set.new
     sites, aliases = settled_aliases(core)
     previous = CoreNativeCandidates.settled_sites
     CoreNativeCandidates.settled_sites = sites
@@ -339,6 +340,7 @@ module CoreNativeCandidates
       text = strip_hook_calls(text, hook_names) if diagnostic_literals
       text = strip_enumerator_symbols(text, enumerator_free)
       text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
+      text = StaticDispatchRegistrations.blank_undef_names(text, undef_names)
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     note.call('generated code literal')
@@ -346,10 +348,21 @@ module CoreNativeCandidates
       src = strip_generated.call(src) if strip_generated
       src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) }
     end
+    # UNDEF_LEFT_OUT: an undef call's existence check is a lookup like any other for what it keeps; only the names
+    # nothing else reaches, and no core Ruby mentions, are reported (the third value).
+    undef_only = undef_names.reject { |name| names.include?(name) || core_mentions?(core, name) }.to_set
+    note.call('undef call (an existence check at init)')
+    names.merge(undef_names)
     live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases, compiled: compiled_core)
-    [names, fragments]
+    [names, fragments, undef_only]
   ensure
     CoreNativeCandidates.settled_sites = previous if previous
+  end
+
+  # Whether any core Ruby irep (each file's `ireps` holds every one of them by label) has `name` as a symbol: a body
+  # live_core may count would look it up (UNDEF_LEFT_OUT).
+  def core_mentions?(core, name)
+    core.any? { |file| Hash(file[:ireps]).each_value.any? { |irep| irep.syms.any? { |sym| sym.to_s == name } } }
   end
 
   # SETTLED_ALIASES: a core class body's `alias new old` or `alias_method :new, :old` whose source is the owner's one
@@ -563,6 +576,27 @@ module CoreNativeCandidates
       end
     end
     (definitions + aliases).uniq.sort
+  end
+
+  # UNDEF_LEFT_OUT: the core undef entries (mrb_undef_*, NativeOwnerMap#undefs), as "Owner#name" sorted, that the closed
+  # build removes after init. Removing one makes the inherited method visible on that owner, so a name qualifies only
+  # when nothing but undef calls looks it up (`undef_only`, from reachable), it is no dynamic name, and nothing lists
+  # methods (a listing would gain it). An undef call itself only checks that its name exists, which stays true.
+  LISTING_NAMES = %w[methods public_methods private_methods protected_methods singleton_methods instance_methods
+                     public_instance_methods private_instance_methods protected_instance_methods].freeze
+
+  def undef_candidates(map, names, fragments, undef_only)
+    return [] if LISTING_NAMES.any? { |name| names.include?(name) }
+
+    # `names` holds the undef calls' names too (they keep their definitions); the rest is what else looks names up.
+    others = names.to_set - undef_only
+    Array(map.undefs).filter_map do |owner, name|
+      next unless owner.is_a?(String) && name&.match?(NAME) && undef_only.include?(name)
+      next if owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE) || map.computed.include?(owner)
+      next if StaticDispatchRegistrations.dynamic_name?(name, others, fragments)
+
+      "#{owner}##{name}"
+    end.uniq.sort
   end
 
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,

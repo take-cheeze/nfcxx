@@ -1075,6 +1075,28 @@ module StaticDispatchRegistrations
     out || text
   end
 
+  # UNDEF_LEFT_OUT: the name argument of each mrb_undef_* call, blanked from `text` and added to `found` (a literal name;
+  # a computed one is left in place). The call looks its name up once, at init, to check that it is defined
+  # (mrb_undef_method_id), so the name still counts as a lookup; CoreNativeCandidates.reachable reports the names only
+  # these calls reach, which an undef entry's removal may count as unread.
+  UNDEF_CALL = /\bmrb_(undef_(?:class_)?method(?:_id)?)\s*\(/
+
+  def blank_undef_names(text, found)
+    out = nil
+    text.scan(UNDEF_CALL) do
+      spans = call_arg_spans(text, Regexp.last_match.end(0) - 1)
+      next unless spans && spans.size >= 3
+
+      from, to = spans[2]
+      name = NativeOwnerMap.name_of(text[from...to].strip)
+      next unless name
+
+      found << name
+      (out ||= text.dup)[from...to] = ' ' * (to - from)
+    end
+    out || text
+  end
+
   # [from, to) of each top-level argument of the call whose '(' is at `open`; nil when unbalanced.
   def call_arg_spans(text, open)
     depth = 0
@@ -1442,7 +1464,7 @@ module StaticDispatchRegistrations
     map = NativeOwnerMap.build(native)
     # One proof, made when first asked, for the name scan and the removal of the Enumerator methods.
     proof = -> { @enumerator_free_proof ||= enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root) }
-    names, fragments = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
+    names, fragments, undef_only = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
                                                       strip_generated: lambda { |src|
                                                         src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
                                                       },
@@ -1472,7 +1494,8 @@ module StaticDispatchRegistrations
                                                                 compiled_core: core_run&.dig(:compiled))
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven) - rom
     end
-    [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows]
+    [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
+     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only)]
   ensure
     @enumerator_free_proof = nil
   end
@@ -2020,6 +2043,7 @@ module StaticDispatchRegistrations
                                                                .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
                                    ctor_rows: closed[:ctor_rows].freeze,
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
+                                   core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
                                    frame_free: closed[:frame_free].freeze, digest: digest)
   end
 
