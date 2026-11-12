@@ -86,8 +86,9 @@ module NativeOwnerMap
   # `rom` is each ROM-table entry whose installing class is known, as [owner, name, function] (`owner` as in
   # `registrations`, `.singleton` suffixed for a class-object table). It is kept apart from `registrations`: a left-out
   # registration is removed at run time, which on a ROM entry only adds a RAM tombstone (NATIVE_CANDIDATES).
+  # `undefs` is each mrb_undef_* call with a known owner and a literal name, as [owner, name] (UNDEF_LEFT_OUT).
   Result = Struct.new(:by_name, :computed, :computed_unknown, :core_dynamic_unknown, :refusals, :calls, :registrations, :aliases,
-                      :instance, :mixins, :rom, keyword_init: true) do
+                      :instance, :mixins, :rom, :undefs, keyword_init: true) do
     # Every native definition with a known owner: what defines a name, as opposed to what a left-out removal can delete.
     def definitions
       registrations + rom
@@ -318,7 +319,8 @@ module NativeOwnerMap
 
   def new_result
     Result.new(by_name: Hash.new { |h, k| h[k] = Set.new }, computed: Set.new, registrations: [], aliases: [],
-               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0, instance: [], mixins: [], rom: [])
+               computed_unknown: false, core_dynamic_unknown: 0, refusals: Hash.new(0), calls: 0, instance: [], mixins: [], rom: [],
+               undefs: [])
   end
 
   # A file's Result is a function of the file and the sibling sources scan_file reads, so ScanCache stores it under
@@ -343,13 +345,15 @@ module NativeOwnerMap
     result.instance.concat(file.instance)
     result.mixins.concat(file.mixins)
     result.rom.concat(file.rom)
+    result.undefs.concat(file.undefs)
   end
 
   def to_plain(result)
     Result.new(by_name: result.by_name.transform_values(&:to_a), computed: result.computed.to_a,
                computed_unknown: result.computed_unknown, core_dynamic_unknown: result.core_dynamic_unknown,
                refusals: result.refusals.to_h, calls: result.calls, registrations: result.registrations,
-               aliases: result.aliases, instance: result.instance, mixins: result.mixins, rom: result.rom)
+               aliases: result.aliases, instance: result.instance, mixins: result.mixins, rom: result.rom,
+               undefs: result.undefs)
   end
 
   def from_plain(plain)
@@ -358,7 +362,8 @@ module NativeOwnerMap
     Result.new(by_name: by_name, computed: Set.new(plain.computed), registrations: plain.registrations,
                aliases: plain.aliases, computed_unknown: plain.computed_unknown,
                core_dynamic_unknown: plain.core_dynamic_unknown, refusals: Hash.new(0).merge(plain.refusals),
-               calls: plain.calls, instance: plain.instance, mixins: plain.mixins, rom: plain.rom)
+               calls: plain.calls, instance: plain.instance, mixins: plain.mixins, rom: plain.rom,
+               undefs: plain.undefs || [])
   end
 
   # One file's registrations, in the order its calls appear, as a Result of its own.
@@ -409,6 +414,7 @@ module NativeOwnerMap
         original = name_of(args.fetch(spec[:alias_of], ''))
         owners.each { |registered| result.aliases << [registered, name, original] } if original
       end
+      owners.each { |registered| result.undefs << [registered, name] } if family.start_with?('undef_') && name && !owners.include?(UNKNOWN)
       if spec[:fn] && name && !owners.include?(UNKNOWN)
         # `&f` is the address of the function `f`: the same body as `f` (mrb_define_method(..., &match_data_to_s, ...)).
         fn = args.fetch(spec[:fn], '').strip.delete_prefix('&').strip
