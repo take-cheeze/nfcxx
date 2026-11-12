@@ -5152,6 +5152,7 @@ struct ir_member {
   unsigned long long off;
   a_type_ptr t;
   a_field_ptr bf; /* the field when it is a bit-field (off is then its byte offset component), else NULL */
+  a_field_ptr fld; /* the data member (NULL for a base): what a field designator of the constant list names */
 };
 
 static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f)
@@ -5207,6 +5208,7 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
       out[n].off = (unsigned long long)b->offset;
       out[n].t = b->type;
       out[n].bf = NULL;
+      out[n].fld = NULL;
       n++;
     }
   }
@@ -5221,6 +5223,7 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
     out[n].off = (unsigned long long)f->offset;
     out[n].t = f->type;
     out[n].bf = f->is_bit_field ? f : NULL;
+    out[n].fld = f;
     n++;
   }
   return n;
@@ -5702,7 +5705,7 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
   if (c->kind == ck_aggregate && (s->kind == tk_class || s->kind == tk_struct)) {
     ir_member mem[IR_MAX_MEMBERS];
     int n = ir_class_members(t, mem, IR_MAX_MEMBERS);
-    int i = 0;
+    int i = 0, desig;
     a_constant_ptr ce;
     if (n < 0) {
       ir_note(4, dik_constant, 0);
@@ -5729,7 +5732,31 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
         zend = uoff + unit;
       }
     }
+    /* A designated list (`(struct xa_limit){ .max = M, .min = 2 }` kept as a constant of a static or a constant
+       initializer: lowering leaves a designator in front of the value of the member it names). The members it does not
+       name are zero, so the object is zeroed first, and each designator moves the current member. */
+    desig = c->variant.aggregate.first_constant != NULL && c->variant.aggregate.first_constant->kind == ck_designator;
+    if (desig && !ir_zero_bytes(dst.s, 0, ir_size_of(t), ir_align_of(t))) {
+      ir_note(4, dik_constant, 0);
+      ir_emit("(unsupported init zero-aggregate)");
+      return;
+    }
     for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      if (ce->kind == ck_designator) {
+        int j = -1, k;
+        if (ce->variant.designator.is_field_designator) {
+          for (k = 0; k < n; k++) {
+            if (mem[k].fld != NULL && mem[k].fld == ce->variant.designator.variant.field) j = k;
+          }
+        }
+        if (j < 0 || ce->next == NULL) {
+          ir_note(4, dik_constant, 0);
+          ir_emit("(unsupported init designator)");
+          return;
+        }
+        i = j;
+        ce = ce->next;
+      }
       if (mem[i].bf != NULL) {
         ir_val v = ir_constant(ce, mem[i].t);
         ir_store_lv(ir_bf_lval(dst.s, mem[i].bf, t, mem[i].t, 0), v.s);
@@ -5745,7 +5772,7 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
         }
       }
     }
-    for (; i < n; i++) {
+    for (; i < n && !desig; i++) {
       if (mem[i].bf != NULL) {
         /* the value first, then the bit-field (see ir_float_builtin) */
         const char *zv = ir_is_i128(mem[i].t) ? ir_i128_lit(mem[i].t, 0, 0).s : ir_zero(mem[i].t);
