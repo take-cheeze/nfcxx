@@ -159,7 +159,7 @@ one that has no `.c` of its own).
 | state | builds | refused |
 |---|---|---|
 | before | 538 | 77 |
-| after the commits of this branch | 567 | 48 |
+| after the commits of this branch | 570 | 45 |
 
 The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (compared with gcc by its `run.sh`):
 
@@ -177,11 +177,12 @@ The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (
 - `0xffff888000000000 out of range of signed 32bit displacement` (namei.c, realmode/init.c): QBE folds `add CONST, x` into
   a displacement without a 32-bit check (`index_wide_constant_base.c`).
 
-Still refused, apart from inline asm (`asm-template`, `asm-operands`) and the real-mode boot code (`arch/x86/boot`,
-`-m16`): `drivers/video/console/vgacon.c`. Its `VGA_MAP_MEM` base is a phi of two copies of the same wide constant, which
-QBE's copy propagation turns back into a constant displacement; the emitter would have to keep a wide pointer constant out
-of QBE's sight (a cell load) for it, which costs a load per use, and the cleaner fix is the 32-bit check in the QBE fork's
-`amd64/isel.c` (`addcon` in `amatch`).
+- `drivers/video/console/vgacon.c`: QBE propagates a pointer constant through copies and phis into the displacement of the
+  access that uses it, unchecked (`phi_wide_pointer_constant.c`). A pointer constant that does not fit in 32 bits is loaded
+  from a one-word data cell (the cleaner fix is a 32-bit check in the QBE fork's `amd64/isel.c`, outside this repo).
+
+What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
+boot code (`arch/x86/boot`, `-m16`).
 
 What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
 uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with
