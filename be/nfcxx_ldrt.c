@@ -633,6 +633,18 @@ unsigned __nfcxx_f16_from_f128(const void *a)
   return f16_round(sign, m, e2);
 }
 
+/* Path B (the SSA route, scripts/pathb-ssa-qbe.rb) calls these for a conversion to _Float16 and takes the result as the
+   _Float16 of the C convention (class SSE: the low 16 bits of xmm0, the rest ignored). A float return is that register, so
+   the binary16 pattern goes in its low bits and no _Float16 support of the C compiler is needed. */
+static float f16_in_xmm(unsigned h)
+{
+  union { float f; unsigned u; } x;
+  x.u = h;
+  return x.f;
+}
+float __nfcxx_ld_to_f16(const void *a) { return f16_in_xmm(__nfcxx_f16_from_ld(a)); }
+float __nfcxx_f128_to_f16(const void *a) { return f16_in_xmm(__nfcxx_f16_from_f128(a)); }
+
 /* ---- undefined behavior sanitizer (docs/notes/ubsan.md) ---- */
 
 /* 1 when the signed 64-bit product a * b does not fit (the emitter's cmul on a 64-bit type; QBE has no wide product) */

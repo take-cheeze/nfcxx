@@ -34,7 +34,7 @@ TOKEN_RE = /\(|\)|"(?:\\.|[^"\\])*"|[$@&]"(?:\\.|[^"\\])*"|[^\s()"]+/
 
 def normalise_const!(x)
   type, val = x[1], x[2]
-  if float_type?(type)
+  if float_type?(type) || type == "std::float16_t"
     x[2] = "1e999" if val == "+Infinity"
     x[2] = "-1e999" if val == "-Infinity"
   elsif hex_literal?(val) && INT_TYPES.key?(type)
