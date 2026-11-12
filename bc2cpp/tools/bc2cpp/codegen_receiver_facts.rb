@@ -808,7 +808,8 @@ class CodeGen
   # last, and picking either by name alone would be a guess.
   def module_super_lookup(name, owner)
     defs = Array(@registry[name]).select { |d| d.owner == owner }
-    defs += Array(block_core_index[[owner, name]])
+    # block_core_index also lists the core definitions the registry keeps: one definition, not two.
+    defs = (defs + Array(block_core_index[[owner, name]])).uniq
     return nil if defs.empty?
     return :ambiguous unless defs.one?
 
