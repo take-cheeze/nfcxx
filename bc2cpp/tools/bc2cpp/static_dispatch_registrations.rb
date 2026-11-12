@@ -1003,7 +1003,10 @@ module StaticDispatchRegistrations
     keys = candidates.to_set { |m| "#{m[:owner]}##{m[:name]}" }
     blocked = Set.new
     map.aliases.each { |owner, new_name, old_name| blocked << "#{owner}##{new_name}" << "#{owner}##{old_name}" }
-    rom_keys = CoreNativeCandidates.engine_rom_keys(CoreNativeCandidates.engine_entries(native), map.rom)
+    # Engine ROM entries are not candidates for now: leaving them out at compile time broke the maix game boot
+    # (rpg-maker-clone master, "game did not boot"), so no key is admitted and engine_rom stays empty. Restore
+    # the engine_rom_keys proof here once the boot path is shown to reach none of the keys it drops.
+    rom_keys = Set.new
     pick = lambda do |owner, name, rom|
       next unless owner.is_a?(String) && name && !map.computed.include?(owner)
 
