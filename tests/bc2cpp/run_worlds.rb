@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Runs bc2cpp worlds (tests/bc2cpp/run_<world>.sh) one after another in one process tree, so a CI job pays for the checkout, Ruby
-# and the build tools once for several worlds instead of once per world (.github/workflows/bc2cpp.yml shards the list).
+# and the build tools once for several worlds instead of once per world (.github/workflows/ci.yml shards the list).
 #
 #   ruby tests/bc2cpp/run_worlds.rb [--shard N/M] [--list FILE] [--print] [WORLD...]
 #     --shard N/M  run shard N of M (0-based): the worlds of tests/bc2cpp/worlds.list balanced by their weights (the heaviest
