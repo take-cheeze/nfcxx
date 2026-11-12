@@ -10,3 +10,6 @@ _site/
 # ninja state of the tools built by build.ninja
 tools/*/.ninja_log
 tools/*/.ninja_deps
+
+# bc2cpp check caches and generated output (written by the scripts, not sources)
+/bc2cpp/build/
