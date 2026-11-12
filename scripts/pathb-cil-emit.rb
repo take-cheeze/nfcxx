@@ -56,6 +56,7 @@ LDIND = { ['int32', 1, true] => 'i1', ['int32', 1, false] => 'u1', ['int32', 2, 
 STIND = { 'int32' => { 1 => 'i1', 2 => 'i2', 4 => 'i4' }, 'int64' => { 8 => 'i8' }, 'float32' => { 4 => 'r4' },
           'float64' => { 8 => 'r8' } }
 CMP = %w[eq ne lt.s lt.u gt.s gt.u le.s le.u ge.s ge.u]
+FBIN = { 'fadd' => 'add', 'fsub' => 'sub', 'fmul' => 'mul', 'fdiv' => 'div' }
 BIN = { 'wadd' => 'add', 'wsub' => 'sub', 'wmul' => 'mul', 'and' => 'and', 'or' => 'or', 'xor' => 'xor' }
 FUNCTION_HEADER = %w[ret params static weak constructor destructor]  # the function form's non-statements
 INT_ITEM = { 1 => 'int8', 2 => 'int16', 4 => 'int32', 8 => 'int64' }
@@ -674,21 +675,27 @@ end
 
 class Emitter
   attr_reader :fragment_calls, :addrs
+  attr_accessor :variadic
   attr_accessor :global_forms, :data_forms
 
+  attr_accessor :tu, :statics
+
   def initialize
+    @tu = 'pathb'
+    @statics = {}        # the names this unit keeps to itself: its static functions and globals, and its string literals
     @addrs = {}          # name -> true (the set of the linker's addr_ fields the code reads)
     @fragment_calls = {} # name -> signature
     @global_forms = {}
     @data_forms = {}
   end
 
+  # A name the unit keeps to itself is `name@TU` (as qbe2cil.rb names them), so two units may each have a static `n`.
   def gname(n)
-    n
+    @statics.key?(n) ? "#{n}@#{@tu}" : n
   end
 
   def fn_name(n)
-    n
+    gname(n)
   end
 
   # The bytes of the constant `ref`: a string literal (a data form) or a global with an initializer.
@@ -773,15 +780,22 @@ class Function
         pytail(part, 1).each do |p|
           if p.is_a?(Array) && truthy(p) && pyidx(p, 0) == 'ellipsis'
             # C-style variadic definitions read their arguments with va_start (a va_list): out of scope
-            refuse("#{pys(@name)}: variadic definitions (va_start) are not supported by the spike")
+            refuse("#{pys(@name)}: variadic definitions (va_start) are not supported by the CIL backend")
           end
           # (param %N "name" TYPE) or, unnamed, (param %N TYPE)
           unless p.is_a?(Array) && pylen(p) >= 3 && pyidx(p, 1).is_a?(Tmp)
             refuse("#{pys(@name)}: parameter form #{py_repr(p)} is not supported by the spike")
           end
           pty = pyidx(p, -1)
-          @param_ty[pyidx(p, 1).n] = pty
           pname = pylen(p) == 4 ? pyidx(p, 2) : nil
+          if pyidx(p, 0) == 'sret' || (pty.is_a?(Array) && truthy(pty) && pyidx(pty, 0) == 'byval')
+            # An aggregate parameter is the address of the caller's copy (the caller makes the copy, docs/notes/pathb-stage2.md);
+            # the sret pointer is the address of the result slot. Both are pointers here.
+            @param_ty[pyidx(p, 1).n] = ['ptr', 'char']
+            @params << [pyidx(p, 1).n, pname, 'int64']
+            next
+          end
+          @param_ty[pyidx(p, 1).n] = pty
           @params << [pyidx(p, 1).n, pname, @em.type_of(pty)[0]]
         end
       end
@@ -917,16 +931,70 @@ class Function
       emit('neg')
       return il
     end
+    if head == 'bfload' || head == 'bfload.v'
+      # (bfload T UNIT ADDR BOFF WIDTH): the UNIT-byte unit read as an int64, the field shifted to the top and back down
+      # (arithmetic when T is signed, logical otherwise), then converted to T's width.
+      il, _size, signed = @em.type_of(pyidx(e, 1))
+      refuse("#{pys(@name)}: bit-field of type #{py_repr(pyidx(e, 1))}") unless ['int32', 'int64'].include?(il)
+      unit, boff, width = pyidx(e, 2), pyidx(e, 4), pyidx(e, 5)
+      refuse("#{pys(@name)}: bit-field unit #{pys(unit)}") unless [1, 2, 4, 8].include?(unit)
+      coerce(expr(pyidx(e, 3)), 'int64')
+      emit('conv.u')
+      bf_read(unit, head == 'bfload.v')
+      emit("ldc.i4 #{64 - boff - width}", 'shl') if 64 - boff - width > 0
+      emit("ldc.i4 #{64 - width}", signed ? 'shr' : 'shr.un') if 64 - width > 0
+      emit('conv.i4') if il == 'int32'
+      return il
+    end
+    if head == 'alloca'
+      # (alloca SIZE): SIZE bytes of dynamic stack, 16-aligned, live until the function returns (localloc). It is over-allocated
+      # by 15 bytes and the address rounded up, because localloc only promises pointer alignment.
+      size_operand(pyidx(e, 1))
+      emit('ldc.i8 15', 'add', 'conv.u', 'localloc', 'conv.u8', 'ldc.i8 15', 'add', 'ldc.i8 -16', 'and')
+      return 'int64'
+    end
     if head == 'offset'
       expr(pyidx(e, 1))
       emit("ldc.i8 #{py_int(pyidx(e, 2))}", 'add')
       return 'int64'
     end
-    if head == 'bitcast' || head == 'iconv'
+    if head == 'bitcast'
       il = @em.type_of(pyidx(e, 1))[0]
       have = expr(pyidx(e, 2))
       coerce(have, il)
       return il
+    end
+    return int_conv(e) if head == 'iconv' || head == 'p2i' || head == 'i2p'
+    return float_conv(e, head) if head == 'i2f' || head == 'u2f' || head == 'fconv' || head == 'cf2i'
+    if FBIN.key?(head)
+      il = @em.type_of(pyidx(e, 1))[0]
+      refuse("#{pys(@name)}: #{head} of non-float type #{py_repr(pyidx(e, 1))}") unless ['float32', 'float64'].include?(il)
+      coerce(expr(pyidx(e, 2)), il)
+      coerce(expr(pyidx(e, 3)), il)
+      emit(FBIN[head])
+      return il
+    end
+    if head == 'not'
+      ty = pyidx(e, 1)
+      il, _size, _signed = @em.type_of(ty)
+      refuse("#{pys(@name)}: not of non-integer type #{py_repr(ty)}") unless ['int32', 'int64'].include?(il)
+      coerce(expr(pyidx(e, 2)), il)
+      if ty == 'bool'
+        emit('ldc.i4.1', 'xor')
+      else
+        emit('not')
+        narrow_small(ty)
+      end
+      return il
+    end
+    if head == 'lt.f' || head == 'le.f'
+      il = @em.type_of(pyidx(e, 1))[0]
+      refuse("#{pys(@name)}: #{head} on non-float type #{py_repr(pyidx(e, 1))}") unless ['float32', 'float64'].include?(il)
+      coerce(expr(pyidx(e, 2)), il)
+      coerce(expr(pyidx(e, 3)), il)
+      # ordered: a NaN operand gives false. le is `not (a > b or unordered)`: cgt.un is true for a NaN.
+      emit(*(head == 'lt.f' ? ['clt'] : ['cgt.un', 'ldc.i4.0', 'ceq']))
+      return 'int32'
     end
     if CMP.include?(head)
       il = @em.type_of(pyidx(e, 1))[0]
@@ -979,6 +1047,84 @@ class Function
     refuse("#{pys(@name)}: unsupported expression #{pys(head)}")
   end
 
+  # The UNIT-byte unit at the address on the stack, zero-extended to an int64.
+  def bf_read(unit, vol)
+    emit('volatile.') if vol
+    emit("ldind.#{{ 1 => 'u1', 2 => 'u2', 4 => 'u4', 8 => 'i8' }[unit]}")
+    emit('conv.u8') if unit < 8
+  end
+
+  # (iconv|p2i|i2p TYPE A): an integer or pointer conversion, as the QBE emitter's int_conv. The operand's IR type decides the
+  # extension of a 32-bit source widening to 64 bits (zero for unsigned, sign otherwise); a narrowing to a 1- or 2-byte
+  # type converts to it; a bool target is refused (the front end spells that as a comparison).
+  def int_conv(e)
+    ty = pyidx(e, 1)
+    il, _size, _signed = @em.type_of(ty)
+    refuse("#{pys(@name)}: #{pyidx(e, 0)} to #{py_repr(ty)}") unless ['int32', 'int64'].include?(il)
+    refuse("#{pys(@name)}: conversion to bool") if ty == 'bool'
+    src = pyidx(e, 2)
+    have = expr(src)
+    refuse("#{pys(@name)}: #{pyidx(e, 0)} from a #{pys(have)} value") unless ['int32', 'int64'].include?(have)
+    sty = ir_type(src)
+    if have == 'int32' && il == 'int64'
+      emit(sty && is_unsigned(sty) ? 'conv.u8' : 'conv.i8')
+    elsif have == 'int64' && il == 'int32'
+      emit('conv.i4')
+    end
+    narrow_small(ty)
+    il
+  end
+
+  # (i2f|u2f|fconv|cf2i TYPE A). cf2i is the checked float-to-int of the QBE emitter: NaN or a value out of the target's
+  # range aborts (the test is made in float64, where the bounds are exact).
+  def float_conv(e, head)
+    ty = pyidx(e, 1)
+    il, size, signed = @em.type_of(ty)
+    have = expr(pyidx(e, 2))
+    sty = ir_type(pyidx(e, 2))
+    if head == 'fconv'
+      refuse("#{pys(@name)}: fconv between non-float types") unless ['float32', 'float64'].include?(il) && ['float32', 'float64'].include?(have)
+      coerce(have, il)
+      return il
+    end
+    if head == 'i2f' || head == 'u2f'
+      refuse("#{pys(@name)}: #{head} to #{py_repr(ty)}") unless ['float32', 'float64'].include?(il)
+      refuse("#{pys(@name)}: #{head} from a #{pys(have)} value") unless ['int32', 'int64'].include?(have)
+      uns = head == 'u2f' || (sty && is_unsigned(sty))
+      if uns
+        emit(have == 'int32' ? 'conv.u8' : 'nop') if have == 'int32'
+        emit('conv.r.un')
+      end
+      emit(il == 'float32' ? 'conv.r4' : 'conv.r8')
+      return il
+    end
+    # cf2i
+    refuse("#{pys(@name)}: cf2i to #{py_repr(ty)}") unless ['int32', 'int64'].include?(il) && ty != 'bool'
+    refuse("#{pys(@name)}: cf2i from a #{pys(have)} value") unless ['float32', 'float64'].include?(have)
+    emit('conv.r8') if have == 'float32'
+    td = new_local('float64')
+    emit("stloc #{td}")
+    bits = size * 8
+    hi = 1.0  # 2**(bits - 1) for a signed type, 2**bits for an unsigned one: exact in float64
+    (signed ? bits - 1 : bits).times { hi *= 2.0 }
+    lo = signed ? (bits == 64 ? -hi : -hi - 1.0) : -1.0
+    ok = new_label('IL_ok')
+    bad = new_label('IL_bad')
+    # fits when d > lo (d >= lo for the signed 64-bit lower bound) and d < hi; NaN fails every compare.
+    emit("ldloc #{td}", "ldc.r8 (#{hex_bytes(pack_double(lo))})", (signed && bits == 64) ? "blt.un #{bad}" : "ble.un #{bad}")
+    emit("ldloc #{td}", "ldc.r8 (#{hex_bytes(pack_double(hi))})", "blt #{ok}")
+    emit("#{bad}:")
+    abort
+    emit("#{ok}:", "ldloc #{td}")
+    if il == 'int64'
+      emit(signed ? 'conv.i8' : 'conv.u8')
+    else
+      emit(signed ? 'conv.i4' : 'conv.u4')
+    end
+    narrow_small(ty)
+    il
+  end
+
   # Narrow the int32 value on the stack to the IR type ty when ty is a 1- or 2-byte integer, as the QBE emitter's
   # narrow does (its r_wbin, r_wneg, r_bitop, r_shift). bool is left alone, as QBE leaves it.
   def narrow_small(ty)
@@ -1012,7 +1158,8 @@ class Function
       return @tmp_ty[e.n]
     end
     if e.is_a?(Array) && truthy(e) && ['const', 'load', 'iconv', 'bitcast', 'call', 'wadd', 'wsub', 'wmul', 'and',
-                                       'or', 'xor', 'wneg'].include?(pyidx(e, 0)) && pylen(e) > 1
+                                       'or', 'xor', 'wneg', 'not', 'cdiv', 'crem', 'cshl', 'cshr', 'wshl', 'p2i', 'i2p', 'i2f', 'u2f', 'fconv', 'cf2i',
+                                       'fadd', 'fsub', 'fmul', 'fdiv', 'fneg'].include?(pyidx(e, 0)) && pylen(e) > 1
       return pyidx(e, 1)
     end
     nil
@@ -1110,6 +1257,50 @@ class Function
     il
   end
 
+  # A C variadic call (printf), as qbe2cil.rb's variadic_call: .NET cannot P/Invoke a variadic function, and the SysV ABI
+  # needs %al set, so the call goes through the linker's shim nfcxx_vcall(name, six integer slots, eight double slots,
+  # eight stack slots), which calls the function through a variadic prototype. The integer and the floating arguments keep
+  # their order within their class. Direct calls only; a result that is not an integer is refused.
+  def variadic_call(name, indirect, ret, args)
+    refuse("#{pys(@name)}: indirect variadic calls are not supported by the spike") if indirect
+    ints = []
+    flts = []
+    args.each do |a|
+      next if a.is_a?(Array) && truthy(a) && pyidx(a, 0) == 'variadic'
+      refuse("#{pys(@name)}: aggregate argument of the variadic call of #{pys(name)}") if a.is_a?(Array) && truthy(a) && ['sret', 'byval'].include?(pyidx(a, 0))
+      t = expr(a)
+      if t == 'float32' || t == 'float64'
+        coerce(t, 'float64')
+        flts << new_local('float64')
+        emit("stloc #{flts[-1]}")
+      elsif t == 'int32' || t == 'int64'
+        coerce(t, 'int64')
+        ints << new_local('int64')
+        emit("stloc #{ints[-1]}")
+      else
+        refuse("#{pys(@name)}: a #{pys(t)} argument of the variadic call of #{pys(name)}")
+      end
+    end
+    refuse("#{pys(@name)}: #{pys(name)}: more than 14 integer or 8 floating arguments to a variadic call") if ints.size > 14 || flts.size > 8
+    refuse("#{pys(@name)}: #{pys(name)}: a variadic call returning a #{pys(ret)} is not supported") unless ['int32', 'int64', 'void'].include?(ret)
+    gname = @em.fn_name(name)
+    @em.fragment_calls[gname] = { 'ret' => 'int64', 'params' => [], 'variadic' => true }
+    @em.variadic = true
+    emit("ldstr \"#{gname}\"")
+    6.times { |k| k < ints.size ? emit("ldloc #{ints[k]}") : emit('ldc.i8 0') }
+    8.times { |k| k < flts.size ? emit("ldloc #{flts[k]}") : emit('ldc.r8 (00 00 00 00 00 00 00 00)') }
+    8.times { |k| k + 6 < ints.size ? emit("ldloc #{ints[k + 6]}") : emit('ldc.i8 0') }
+    emit("call int64 Prog::'nfcxx_vcall'(string, int64, int64, int64, int64, int64, int64, float64, float64, " \
+         "float64, float64, float64, float64, float64, float64, int64, int64, int64, int64, int64, int64, " \
+         "int64, int64)")
+    if ret == 'void'
+      emit('pop')
+      return 'void'
+    end
+    emit('conv.i4') if ret == 'int32'
+    ret
+  end
+
   def call(e)
     callee = pyidx(e, 2)
     indirect = !(callee.is_a?(Ref) && callee.kind == 'fn')
@@ -1117,9 +1308,13 @@ class Function
     ret = @em.type_of(pyidx(e, 1))[0]
     args = pytail(e, 3)
     if args.any? { |a| a.is_a?(Array) && truthy(a) && pyidx(a, 0) == 'variadic' }
-      refuse("#{pys(@name)}: variadic calls (#{pys(name)}) are not supported by the spike")
+      return variadic_call(name, indirect, ret, args)
     end
+    refuse("#{pys(@name)}: #{pys(name)} is a helper of nfcxx's runtime (long double, __int128 or __float128), which the CIL backend does not link") if !indirect && name.start_with?('__nfcxx_')
     if name == '_setjmp'
+      unless eh_setjmp_arg(args[0])
+        refuse("#{pys(@name)}: setjmp is not supported by the CIL backend (only the setjmp of a lowered C++ try is)")
+      end
       args.each do |a|
         expr(a)
         emit('pop')
@@ -1129,8 +1324,11 @@ class Function
     end
     typed = []
     args.each do |a|
-      refuse("#{pys(@name)}: sret results are not supported by the spike") if a.is_a?(Array) && truthy(a) && pyidx(a, 0) == 'sret'
-      typed << expr(a)
+      if a.is_a?(Array) && truthy(a) && (pyidx(a, 0) == 'sret' || pyidx(a, 0) == 'byval')
+        typed << expr(pyidx(a, 2))  # (sret T ADDR) / (byval T ADDR): the address of the result slot / of the caller's copy
+      else
+        typed << expr(a)
+      end
     end
     if indirect
       # The callee is a function address (int64, as every pointer is): a calli on it. Its signature is the
@@ -1190,6 +1388,53 @@ class Function
       emit("stloc #{idx}")
       return
     end
+    if head == 'bfstore' || head == 'bfstore.v'
+      # (bfstore T UNIT ADDR BOFF WIDTH VALUE): unit' = (unit & ~(MASK << BOFF)) | ((VALUE & MASK) << BOFF), written back whole.
+      il, _size, _signed = @em.type_of(pyidx(s, 1))
+      refuse("#{pys(@name)}: bit-field of type #{py_repr(pyidx(s, 1))}") unless ['int32', 'int64'].include?(il)
+      unit, boff, width = pyidx(s, 2), pyidx(s, 4), pyidx(s, 5)
+      refuse("#{pys(@name)}: bit-field unit #{pys(unit)}") unless [1, 2, 4, 8].include?(unit)
+      vol = head == 'bfstore.v'
+      mask = width == 64 ? -1 : (1 << width) - 1
+      coerce(expr(pyidx(s, 3)), 'int64')
+      ta = new_local('int64')
+      emit("stloc #{ta}")
+      coerce(expr(pyidx(s, 6)), 'int64')
+      tv = new_local('int64')
+      emit("stloc #{tv}")
+      emit("ldloc #{ta}", 'conv.u')
+      bf_read(unit, vol)
+      emit("ldc.i8 #{mask}", "ldc.i4 #{boff}", 'shl', 'not', 'and')
+      emit("ldloc #{tv}", "ldc.i8 #{mask}", 'and', "ldc.i4 #{boff}", 'shl', 'or')
+      tn = new_local('int64')
+      emit("stloc #{tn}")
+      emit("ldloc #{ta}", 'conv.u', "ldloc #{tn}")
+      emit('conv.i4') if unit < 8
+      emit('volatile.') if vol
+      emit("stind.#{{ 1 => 'i1', 2 => 'i2', 4 => 'i4', 8 => 'i8' }[unit]}")
+      return
+    end
+    if head == 'copy' || head == 'zero-fill'
+      # (copy BYTES DST SRC [ALIGN]) / (zero-fill BYTES DST): cpblk / initblk. BYTES is a number or a register.
+      coerce(expr(pyidx(s, 2)), 'int64')
+      emit('conv.u')
+      if head == 'copy'
+        coerce(expr(pyidx(s, 3)), 'int64')
+        emit('conv.u')
+      else
+        emit('ldc.i4.0')
+      end
+      n = pyidx(s, 1)
+      if n.is_a?(Integer)
+        emit("ldc.i4 #{n}")
+      else
+        have = expr(n)
+        refuse("#{pys(@name)}: byte count of a #{pys(have)}") unless ['int32', 'int64'].include?(have)
+        emit('conv.u4')
+      end
+      emit(head == 'copy' ? 'cpblk' : 'initblk')
+      return
+    end
     if head == 'set'
       tmp, e = pyidx(s, 1), pyidx(s, 2)
       key = "%#{tmp.n}"
@@ -1200,7 +1445,7 @@ class Function
       emit("stloc #{idx}")
       return
     end
-    if head == 'store'
+    if head == 'store' || head == 'store.v'
       ty, addr, val = pyidx(s, 1), pyidx(s, 2), pyidx(s, 3)
       il, size, _signed = @em.type_of(ty)
       expr(addr)
@@ -1208,6 +1453,7 @@ class Function
       have = expr(val)
       coerce(have, il)
       refuse("#{pys(@name)}: store of #{pys(ty)}") unless STIND.key?(il) && STIND[il].key?(size)
+      emit('volatile.') if head == 'store.v'
       emit("stind.#{STIND[il][size]}")
       return
     end
@@ -1272,6 +1518,7 @@ class Function
     end
     return if_stmt(s) if head == 'if'
     return loop_stmt(s) if head == 'loop'
+    return switch_stmt(s) if head == 'switch'
     if head == 'label'
       emit("L_#{ir_label(pyidx(s, 1))}:")
       return
@@ -1282,8 +1529,10 @@ class Function
       return
     end
     if head == 'break' || head == 'continue'
-      refuse("#{pys(@name)}: #{head} outside a loop") if @loop_stack.empty?
-      brk, cont, depth = @loop_stack[-1]
+      # a switch is on the stack with no continue label: `continue` is the innermost loop's, `break` the innermost entry's
+      ent = head == 'break' ? @loop_stack[-1] : @loop_stack.reverse.find { |x| x[1] }
+      refuse("#{pys(@name)}: #{head} outside a loop") if ent.nil?
+      brk, cont, depth = ent
       target = head == 'break' ? brk : cont
       emit(@try_depth > depth ? "leave #{target}" : "br #{target}")
       return
@@ -1292,6 +1541,17 @@ class Function
   end
 
   # True if cond is the lowered try's `_setjmp(...) == 0` (the defining let is an eq against 0 of a _setjmp call).
+  # The jmp_buf of a lowered try is the `(union "__C...")` member at offset 16 of a compiler temporary (`tmp.N`), seen through a
+  # bitcast. _setjmp is 0 here, which is right only for that entry test; a program's own setjmp has another argument.
+  def eh_setjmp_arg(a)
+    return false unless a.is_a?(Tmp)
+    d = @defs[a.n]
+    d = @defs[pyidx(d, 2).n] if d.is_a?(Array) && truthy(d) && pyidx(d, 0) == 'bitcast' && pyidx(d, 2).is_a?(Tmp)
+    return false unless d.is_a?(Array) && truthy(d) && pyidx(d, 0) == 'offset'
+    base = pyidx(d, 1)
+    base.is_a?(Ref) && base.kind == 'slot' && base.name.start_with?('tmp')
+  end
+
   def cond_defined_by_setjmp(cond)
     return false unless cond.is_a?(Tmp)
     d = @defs[cond.n]
@@ -1356,6 +1616,75 @@ class Function
     emit("#{end_l}:")
   end
 
+  # (switch OPERAND (body STMT*)): a compare chain on the selector to the labels of the (case CONST) and (default) markers,
+  # which must be statements of the body itself (control falls through them); one nested in another statement is refused.
+  def switch_stmt(s)
+    body = pytail(s, 2).find { |part| part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'body' }
+    refuse("#{pys(@name)}: switch without a body") if body.nil?
+    items = flatten_blocks(pytail(body, 1))
+    items.each do |st|
+      next if st.is_a?(Array) && truthy(st) && ['case', 'default'].include?(pyidx(st, 0))
+      refuse("#{pys(@name)}: a case label inside a statement of a switch body") if contains_case(st)
+    end
+    sel = s[1]
+    have = expr(sel)
+    refuse("#{pys(@name)}: switch on a #{pys(have)} value") unless ['int32', 'int64'].include?(have)
+    tsel = new_local(have)
+    emit("stloc #{tsel}")
+    brk = new_label('IL_swbrk')
+    labels = {}
+    default_label = nil
+    items.each_with_index do |st, i|
+      next unless st.is_a?(Array) && truthy(st)
+      if pyidx(st, 0) == 'case'
+        c = pyidx(st, 1)
+        cil, _sz, _sg = @em.type_of(pyidx(c, 1))
+        lab = new_label('IL_case')
+        labels[i] = lab
+        emit("ldloc #{tsel}")
+        if cil == have
+          emit(have == 'int64' ? "ldc.i8 #{py_int(pyidx(c, 2))}" : "ldc.i4 #{py_int(pyidx(c, 2))}")
+        else
+          emit("ldc.i4 #{py_int(pyidx(c, 2))}", 'conv.i8')
+        end
+        emit("beq #{lab}")
+      elsif pyidx(st, 0) == 'default'
+        default_label = new_label('IL_default')
+        labels[i] = default_label
+      end
+    end
+    emit("br #{default_label || brk}")
+    @loop_stack << [brk, nil, @try_depth]
+    items.each_with_index do |st, i|
+      if labels.key?(i)
+        emit("#{labels[i]}:")
+      else
+        stmt(st)
+      end
+    end
+    @loop_stack.pop
+    emit("#{brk}:")
+  end
+
+  # A (block STMT*) only groups statements: splice it, so the case markers inside it are at the top of the switch body.
+  def flatten_blocks(lst)
+    out = []
+    lst.each do |st|
+      if st.is_a?(Array) && truthy(st) && pyidx(st, 0) == 'block'
+        out.concat(flatten_blocks(pytail(st, 1)))
+      else
+        out << st
+      end
+    end
+    out
+  end
+
+  def contains_case(node)
+    return false unless node.is_a?(Array)
+    return true if truthy(node) && ['case', 'default'].include?(pyidx(node, 0)) && !(pylen(node) > 1 && !node[1].is_a?(Array) && pyidx(node, 0) == 'case')
+    node.any? { |x| contains_case(x) }
+  end
+
   def loop_stmt(s)
     body = nil
     step = nil
@@ -1401,6 +1730,7 @@ class Function
     slots.each do |sl|
       size = py_int(pyidx(sl, 3))
       align = py_int(pyidx(sl, 4))
+      refuse("#{pys(@name)}: slot #{pys(pyidx(sl, 1))} is aligned to #{align} (the frame is 16-aligned)") if align > 16
       off = (off + align - 1) / align * align
       @slots[pyidx(sl, 1)] = off
       off += size
@@ -1417,7 +1747,7 @@ class Function
       emit('ldnull', 'throw')  # falling off a non-void function: undefined behaviour in C++
       emit("#{@ret_label}:", "ldloc #{@ret_local}", 'ret')
     end
-    lines = [".method static #{pys(@ret)} #{pys(@em.fn_name(@name))}(#{@params.map { |p| p[2] }.join(', ')}) cil managed {",
+    lines = [".method static #{pys(@ret)} '#{pys(@em.fn_name(@name))}'(#{@params.map { |p| p[2] }.join(', ')}) cil managed {",
              '  .maxstack 1024']
     unless @local_types.empty?
       lines << '  .locals init (' + @local_types.each_with_index.map { |t, i| "#{t} V#{i}" }.join(', ') + ')'
@@ -1440,7 +1770,15 @@ def global_data(f, em)
   size = py_int(pyidx(f, 3))
   align = py_int(pyidx(f, 4))
   init = nil
+  refuse("global #{pys(name)}: aligned to #{align} (data is calloc'd, 16-aligned)") if align > 16
   pytail(f, 5).each do |part|
+    # A COMDAT `(weak)` definition is an ordinary one here (C++); a weak attribute, a weak reference, a section and thread
+    # storage (except the EH runtime's globals, zero storage below) are not modelled, so they are refused, not dropped.
+    if part.is_a?(Array) && truthy(part) && !EH_GLOBALS.key?(name)
+      h = pyidx(part, 0)
+      weak_ref = h == 'weak' && (pylen(part) > 1 || pytail(f, 5).any? { |q| q == ['extern'] })
+      refuse("global #{pys(name)}: a #{pys(h)} global is not supported by the CIL backend") if weak_ref || h == 'thread' || h == 'section'
+    end
     init = pytail(part, 1) if part.is_a?(Array) && truthy(part) && pyidx(part, 0) == 'init'
     if part == ['extern']
       if EH_GLOBALS.key?(name)
@@ -1475,7 +1813,7 @@ def global_data(f, em)
     if kind == 'addr'
       ref = pyidx(it, 3)
       refuse("#{pys(name)}: address item of #{py_repr(ref)}") unless ref.is_a?(Ref)
-      items << ['addr', ref.name, py_int(pyidx(it, 4))]
+      items << ['addr', em.gname(ref.name), py_int(pyidx(it, 4))]
       pos += 8
     elsif kind == 'scalar'
       val = pyidx(it, 3)
@@ -1506,7 +1844,7 @@ def global_data(f, em)
     end
   end
   items << ['zero', size - pos] if pos < size
-  { 'name' => name, 'exported' => true, 'align' => align, 'size' => size, 'items' => items }
+  { 'name' => em.gname(name), 'exported' => !em.statics.key?(name), 'align' => align, 'size' => size, 'items' => items }
 end
 
 # `(data "NAME" TYPE (string "..."))`, a string literal: the bytes of its array, zero padded to the array's size, as
@@ -1545,6 +1883,12 @@ def convert(argv)
           end
   forms = Parser.new(tokenize(bytes.unpack('C*'))).forms
   em = Emitter.new
+  em.tu = argv[2] unless argv[2].nil?
+  forms.each do |f|
+    next unless f.is_a?(Array) && truthy(f)
+    em.statics[pyidx(f, 1)] = true if pyidx(f, 0) == 'data'
+    em.statics[pyidx(f, 1)] = true if ['global', 'function'].include?(pyidx(f, 0)) && f.any? { |x| x == ['static'] }
+  end
   functions = []
   data = []
   em.global_forms = {}
@@ -1557,6 +1901,13 @@ def convert(argv)
   end
   forms.each do |f|
     next unless f.is_a?(Array) && truthy(f)
+    # Nothing is dropped: a top-level form this emitter does not know is refused (a weak declaration, an alias, ...).
+    unless ['ir-module', 'abi-type', 'x87-thunk', 'global', 'data', 'function', 'declare'].include?(pyidx(f, 0))
+      refuse("top-level form #{pys(pyidx(f, 0))} is not supported by the CIL backend")
+    end
+    if pyidx(f, 0) == 'declare' && f.any? { |x| x.is_a?(Array) && truthy(x) && pyidx(x, 0) == 'weak' }
+      refuse("#{pys(pyidx(f, 1))}: a weak declaration is not supported by the CIL backend")
+    end
     if pyidx(f, 0) == 'global'
       d = global_data(f, em)
       data << d unless d.nil?
@@ -1564,22 +1915,29 @@ def convert(argv)
     end
     if pyidx(f, 0) == 'data'
       raw = string_bytes(f, em)
-      data << { 'name' => pyidx(f, 1), 'exported' => true, 'align' => 1, 'size' => raw.size,
+      data << { 'name' => em.gname(pyidx(f, 1)), 'exported' => false, 'align' => 1, 'size' => raw.size,
                 'items' => raw.map { |c| ['int8', c] } }
       next
     end
     next unless pyidx(f, 0) == 'function'
     name = pyidx(f, 1)
+    if f.any? { |p| p.is_a?(Array) && truthy(p) && ['constructor', 'destructor'].include?(pyidx(p, 0)) }
+      refuse("#{pys(name)}: constructor and destructor functions are not supported by the CIL backend")
+    end
+    if f.any? { |p| p.is_a?(Array) && truthy(p) && pyidx(p, 0) == 'weak' && pylen(p) > 1 && pyidx(p, 1) == 'attr' }
+      refuse("#{pys(name)}: a weak function is not supported by the CIL backend")
+    end
     if f.any? { |p| p.is_a?(Array) && truthy(p) && pyidx(p, 0) == 'variadic' }
       refuse("#{pys(name)}: variadic definitions are not supported by the spike")
     end
     fn = Function.new(em, f)
     il = fn.translate(f)
-    functions << { 'name' => name, 'ret' => fn.ret, 'params' => fn.params.map { |p| p[2] }, 'exported' => true,
+    functions << { 'name' => em.fn_name(name), 'ret' => fn.ret, 'params' => fn.params.map { |p| p[2] }, 'exported' => !em.statics.key?(name),
                    'il' => il }
   end
-  fragment = { 'tu' => 'pathb', 'functions' => functions, 'data' => data, 'calls' => em.fragment_calls,
+  fragment = { 'tu' => em.tu, 'functions' => functions, 'data' => data, 'calls' => em.fragment_calls,
                'addrs' => em.addrs.keys.sort, 'ctors' => [] }
+  fragment['variadic'] = true if em.variadic
   File.open(out_path, 'wb') { |fh| fh.write(json_val(fragment, 0)) }
 end
 

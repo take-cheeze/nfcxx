@@ -24,6 +24,7 @@
     scripts/setup-cil.sh
     scripts/setup-pathb.sh
     tests/cil/run.sh
+    NFCXX_CIL_CPROC=1 tests/cil/run.sh
     tests/pathb-cil/run.sh
 - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
   pathb: true   # tests/nfcc/run.sh needs the Path B harness
