@@ -21,6 +21,7 @@
 #   --eh-runtime      with --freestanding: the program links EDG's runtime (libC.a), so the exception handling state is declared as
 #                     that runtime has it (thread-local when scripts/setup-edg.sh built it that way); hosted mode always does
 #   --cuda-device     (NFCXX_PATHB_CUDA=1)   a .cu file's device unit: the front end reads it as CUDA, without exceptions
+#   --modules, --modules_directory DIR, --create_module_interface FILE   C++ modules: EDG's options, as nfcxx gives eccp
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
 # wasm32 (its plain char is unsigned in EDG's table, so --signed_chars is passed). It needs --freestanding: the host's C
@@ -56,6 +57,10 @@ while [ $i -lt ${#args[@]} ]; do
     -std=*) echo "pathb-dump: unknown standard ${arg#-std=}" >&2; exit 2 ;;
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
+    --modules) user_opts+=(--modules) ;;                     # C++ modules (docs/notes/modules.md): the options nfcxx gives eccp
+    --modules_directory|--create_module_interface)
+      i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: $arg needs a path" >&2; exit 2; }
+      user_opts+=("$arg" "$(abs_path "${args[$i]}")") ;;     # the front end runs in another directory
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
     -include) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: -include needs a file" >&2; exit 2; }
               user_opts+=(--preinclude "$(abs_path "${args[$i]}")") ;;   # as nfcxx: EDG's --preinclude (cosmo's c.inc)

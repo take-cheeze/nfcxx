@@ -742,7 +742,7 @@ if [ -z "$backend" ]; then
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
   # A freestanding program takes Path B on x86-64 Linux (the old harness with the lib/ headers, docs/notes/freestanding.md).
   fs_ok=1; [ $freestanding = 0 ] || { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } || fs_ok=0
-  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
+  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
@@ -923,7 +923,6 @@ fi
 # --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
 # build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
 [ $path_b = 0 ] || { backend=pathb; default_backend=0; }
-[ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
@@ -1061,7 +1060,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
