@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise)
+#   NFCXX_BACKEND=qbe|gcc|pathb   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
+#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md)
 #   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
 #
 #   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
@@ -45,8 +46,10 @@ case $backend in
        qcc=$root/scripts/qbe-cc ;;
   cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
        qcc=$root/scripts/cil-cc ;;
+  pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
+         [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;
   gcc) ;;
-  *) die "unknown NFCXX_BACKEND '$backend' (qbe, cil or gcc)" ;;
+  *) die "unknown NFCXX_BACKEND '$backend' (qbe, cil, gcc or pathb)" ;;
 esac
 
 # Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
@@ -272,6 +275,38 @@ if [ -n "$dfile" ] && [ -z "$depmode" ]; then die "-MF needs -MD or -MMD with -c
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 k=0
 
+# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include and a C standard; it ignores other options. So
+# nothing else may reach it: the options it cannot honour are refused here, with their names, not dropped.
+pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
+  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0
+  shift 3
+  [ ${#asf[@]} = 0 ] || die "-Wa,*: assembler options cannot be given to the pathb backend (it assembles with the host cc)"
+  while [ $k2 -lt ${#pp[@]} ]; do
+    o=${pp[k2]}
+    case $o in
+      -D|-U|-I|-include) pbo+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
+      -D?*|-U?*|-I?*) pbo+=("$o") ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o ;;
+      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
+      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89 ;;
+      -std=iso9899:2011) std=-std=c11 ;;
+      -isystem|-iquote|-idirafter|-imacros|-isystem?*|-iquote?*|-idirafter?*|-imacros?*|-nostdinc|-undef|--sysroot=*)
+        die "$o: not supported by the pathb backend (scripts/pathb-cc takes -I -D -U -include and -std only)" ;;
+      *) die "$o: not supported by the pathb backend" ;;
+    esac
+    k2=$((k2 + 1))
+  done
+  while [ $# -gt 0 ]; do pbo+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  if [ "$what" = -S ]; then
+    keep=$tmp/keep$k
+    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
+    [ $rc = 0 ] || exit $rc
+    cp "$keep/$(basename "${csrc%.*}").s" "$obj"
+  else
+    "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$obj" || exit $?
+  fi
+}
+
 # compile_one KIND SOURCE OBJECT
 compile_one() {
   local kind=$1 src=$2 obj=$3 base
@@ -313,7 +348,9 @@ compile_one() {
       die "dependency generation failed for $src"
   fi
   local what=-c; [ $asm = 0 ] || what=-S
-  if [ $backend = qbe ] || [ $backend = cil ]; then
+  if [ $backend = pathb ]; then
+    pathb_compile "$what" "$csrc" "$obj" "${extra[@]+"${extra[@]}"}"
+  elif [ $backend = qbe ] || [ $backend = cil ]; then
     "$qcc" --c-input $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
@@ -341,7 +378,10 @@ for e in "${inputs[@]}"; do
   esac
 done
 [ "$sawout" = 1 ] || out=a.out
-if [ $backend = qbe ] || [ $backend = cil ]; then
+if [ $backend = pathb ]; then
+  # Path B objects link with EDG's runtime (libC.a), the long double helpers and libatomic, as nfcxx links them
+  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lm -latomic
+elif [ $backend = qbe ] || [ $backend = cil ]; then
   # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
   # backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
