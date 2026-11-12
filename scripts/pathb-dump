@@ -43,7 +43,7 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
+std=""; user_gnu=(); fe_dialect=g++; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
 cuda_device=0; [ -z "${NFCXX_PATHB_CUDA:-}" ] || cuda_device=1
 nostdinc=0; isys=(); idafter=()
 args=("$@"); i=0
@@ -87,9 +87,11 @@ while [ $i -lt ${#args[@]} ]; do
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
     -include) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: -include needs a file" >&2; exit 2; }
               user_opts+=(--preinclude "$(abs_path "${args[$i]}")") ;;   # as nfcxx: EDG's --preinclude (cosmo's c.inc)
-    --gnu-version=*|--gnu_version=*) user_opts+=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
+    --gnu-version=*|--gnu_version=*) user_gnu=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
     -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
-    --dialect=*) ;;                                          # clang's dialect is not modelled: the harness is EDG's g++ mode
+    --dialect=g++) fe_dialect=g++ ;;
+    --dialect=clang) fe_dialect=clang ;;                     # EDG's clang mode (cpfe --clang --clang_version=N), as nfcxx's qbe path
+    --dialect=*) echo "pathb-dump: unknown dialect ${arg#--dialect=}" >&2; exit 2 ;;
     -W*) ;;                                                  # other warnings do not change the object code
     *) files+=("$arg") ;;
   esac
@@ -101,6 +103,12 @@ if [ -z "$std" ]; then
   case ${files[0]} in *.c) std=--c17 ;; *) std=--c++23 ;; esac
 fi
 case $std in --c++*) lang=c++; dialect=--g++ ;; *) lang=c; dialect=--gcc ;; esac
+# --dialect=clang (C++ only): EDG's clang mode, __make_integer_seq and __type_pack_element among its builtins. As nfcxx, the
+# front end gets --clang_version=N (the host clang's, capped at 20; host_clang_version) instead of the GNU version.
+clang_opts=()
+if [ "$fe_dialect" = clang ] && [ $lang = c++ ]; then
+  dialect=--clang; cv=$(host_clang_version); [ -z "$cv" ] || clang_opts=(--clang_version="$cv")
+fi
 target_opts=()
 if [ -n "$target" ]; then
   [ "$hosted" = 0 ] || { echo "pathb-dump: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
@@ -121,6 +129,8 @@ if [ "$hosted" != 0 ]; then
   fi
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
 fi
+# clang mode: the clang version replaces the host's GNU version (and --gnu-version, as nfcxx's qbe path has it)
+if [ ${#clang_opts[@]} -gt 0 ]; then gnu_opts=("${clang_opts[@]}"); elif [ ${#user_gnu[@]} -gt 0 ]; then user_opts+=("${user_gnu[@]}"); fi
 sys_inc+=(${idafter[@]+"${idafter[@]}"})
 
 # The feature-test macros of the host's C library, as the driver's --emit-c branch and the macOS EDG base set them: on

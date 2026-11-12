@@ -41,12 +41,11 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 
 1. Wave 2 PRs merge (#990, #993, #994 open); each leaves a `QBE-ONLY: <reason>` marker for what does not work on Path B, which is
    the exact list of what still needs cproc (`git grep QBE-ONLY`). So far, from the PR descriptions:
-   - `tests/builtins/bit_g.cpp`: Path B with `--gnu-version=140000` reports `__builtin_clzg` undefined; `integer_seq.cpp`: `--dialect=clang` is not
-     modelled by `pathb-dump` (#990).
+   - `tests/builtins/bit_g.cpp`: Path B with `--gnu-version=140000` reports `__builtin_clzg` undefined; `integer_seq.cpp` (#990) needed `--dialect=clang` on Path B: done, `scripts/pathb-dump` gives
+     EDG `--clang --clang_version=N` as the qbe path does, `nfcxx` and `scripts/pathb-cc` pass `--dialect=clang` on, and the QBE-ONLY marker is gone.
    - `tests/poly`: the mruby, Lua and QuickJS C builds are refused (with `POLY_LANGS="python ast"` host.cpp and ops.cpp pass on Path B; the
      `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
-     one-element trailing array checked against its bound); `tests/float-to-int/classify.c`: Path B ignores the class arguments of
-     `__builtin_fpclassify` (#994).
+     one-element trailing array checked against its bound).
    - `tests/ast`: engine.cpp and tier.cpp pass on Path B (the SIGABRT was a null check under the lvalue adjustment of a derived-to-base
      pointer conversion); the case `inline_loops` still overflows the 8 MB stack on Path B, whose frames are several times gcc's.
    - `tests/long-double-abi` runs on Path B and gcc (a variadic call with long double arguments and result goes through a
