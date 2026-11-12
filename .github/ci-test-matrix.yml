@@ -44,10 +44,13 @@
     tests/realworld/run.sh
     tests/realworld/run_json.sh
     tests/realworld/run_fmt.sh
-- name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
+- name: C++ modules (Path B, qbe and gcc backends)
+  pathb: true   # tests/modules/run.sh runs the Path B backend, which is the default for modules (docs/notes/modules.md)
+  run: |
+    tests/modules/run.sh
+- name: multi-TU, EH shim, nfceval, nfcffi, bundled libraries, call ABI
   run: |
     tests/multi-tu/run.sh
-    tests/modules/run.sh
     tests/ehshim/run.sh
     tests/eh-unwind/run.sh
     tests/eval/run.sh

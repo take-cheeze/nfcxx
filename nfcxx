@@ -8,7 +8,7 @@
 # NFCXX_K1OM_ROOT, NFCXX_MACOS_SYSROOT, and the CUDA tuning variables (NFCXX_SM, NFCXX_CUDA_*, docs/notes/gpu.md).
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
-#   pathb (default on x86-64 Linux, unless modules, cosmo, --emit-c, --target, -E, -M or -shared is
+#   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 Linux.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
 #   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
@@ -732,8 +732,8 @@ if [ $modules = 1 ]; then
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
-# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (modules,
-# cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on x86-64 Linux only). A program Path B does not build is built again with gcc, below
+# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does
+# (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on x86-64 Linux only). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
 if [ -z "$backend" ]; then
