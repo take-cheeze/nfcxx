@@ -878,6 +878,8 @@ end
     # expression is computed at the end of its predecessor, so the phi reads a temporary.
     def plan_phis
       @phi_blocks = {}
+      @block_by_num = {}
+      @blocks.each { |b| @block_by_num[b[1].to_s] = b }
       @blocks.each do |b|
         @phi_blocks[b[1].to_s] = true if b[2..].any? { |it| head(it) == "phi" }
       end
@@ -969,10 +971,14 @@ end
         operand = op(opnd)
       end
       cls = Qbe.cls(switch_operand_type(opnd))
-      ranges = switch_ranges(cases)
-      # Four or more ranges: a balanced tree of range tests (GCC's decision tree). Fewer: the chain, which is cheaper.
-      if ranges.size >= 4
-        switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), ranges, default)
+      # A bit test, or four or more items: a balanced tree (GCC's decision tree). Fewer: the chain, which is cheaper.
+      # The tree's targets skip the blocks that only jump on (a case label that falls into the next one, or an empty arm),
+      # so labels with one body share a target and can form a bit test.
+      tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
+      tree_default = switch_forward(default)
+      items = switch_items(switch_ranges(tree_cases), cls)
+      if items.any? { |it| it[0] == :bits } || items.size >= 4
+        switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), items, tree_default)
       else
         switch_chain_lines(operand, cls, cases, default)
       end
@@ -1011,15 +1017,115 @@ end
       out
     end
 
-    # A balanced binary tree over the ranges. Each inner block splits its ranges at the lower bound of the middle one: a
-    # value below it goes left. A leaf tests its range (x == lo for one value, else x - lo <=u hi - lo) and jumps to its
-    # target, or to the default. The tree sends several jumps to the default, and to a target that is reached from
-    # several leaves: a phi of such a target names one predecessor, so the jumps go through one block that jumps on.
-    def switch_tree_lines(operand, cls, signed, ranges, default)
+    # The block a jump to target reaches: target itself, or the block it forwards to while that block only jumps on (its one
+    # item is a br) and the block it jumps to has no phi (a phi would name the forwarding block as its predecessor).
+    def switch_forward(target)
+      t = target.to_s
+      seen = {}
+      while !seen[t] && @block_by_num[t] && @block_by_num[t].size == 3 && head(@block_by_num[t][2]) == "br"
+        seen[t] = true
+        nxt = @block_by_num[t][2][1].to_s
+        break if @phi_blocks[nxt]
+
+        t = nxt
+      end
+      t
+    end
+
+    # The items the tree is built over, in value order. A range is [:range, lo, hi, target]. A bit-test group is
+    # [:bits, lo, span, tests]: the values of ranges i..j, all within span <= 30 of lo, reaching at most three targets, with
+    # tests [[target, mask], ...] where bit v - lo of mask is set for each value v of that target (GCC's bit_test_cluster,
+    # gcc/tree-switch-conversion.cc: 3 case labels for one target, 5 for two, 6 for three). Only for 32-bit operands: a shift
+    # count is a 32-bit value in QBE.
+    def switch_items(ranges, cls)
+      return ranges.map { |lo, hi, t| [:range, lo, hi, t] } unless cls == "w"
+
+      items = []
+      i = 0
+      while i < ranges.size
+        j = i + 1
+        j += 1 while j < ranges.size && switch_fits?(ranges, i, j)
+        taken = nil
+        last = j - 1
+        while last > i
+          if switch_beneficial?(ranges, i, last)
+            taken = last
+            break
+          end
+          last -= 1
+        end
+        if taken
+          items << switch_bits_item(ranges, i, taken)
+          i = taken + 1
+        else
+          items << [:range, ranges[i][0], ranges[i][1], ranges[i][2]]
+          i += 1
+        end
+      end
+      items
+    end
+
+    def switch_fits?(ranges, i, j)
+      ranges[j][1] - ranges[i][0] <= 30 && switch_targets(ranges, i, j).size <= 3
+    end
+
+    def switch_targets(ranges, i, j)
+      out = []
+      (i..j).each { |k| out << ranges[k][2] unless out.include?(ranges[k][2]) }
+      out
+    end
+
+    def switch_beneficial?(ranges, i, j)
+      uniq = switch_targets(ranges, i, j).size
+      count = 0
+      (i..j).each { |k| count += ranges[k][1] - ranges[k][0] + 1 }
+      (uniq == 1 && count >= 3) || (uniq == 2 && count >= 5) || (uniq == 3 && count >= 6)
+    end
+
+    def switch_bits_item(ranges, i, j)
+      lo = ranges[i][0]
+      tests = switch_targets(ranges, i, j).map { |t| [t, 0] }
+      (i..j).each do |k|
+        slot = tests.find { |t, _| t == ranges[k][2] }
+        (ranges[k][0]..ranges[k][1]).each { |v| slot[1] |= 1 << (v - lo) }
+      end
+      [:bits, lo, ranges[j][1] - lo, tests]
+    end
+
+    # The chain of equality tests, one per case, in source order.
+    def switch_chain_lines(operand, cls, cases, default)
+      labels = [@label] + (1...cases.size).map { |k| "#{block_label(@cur)}.s#{k}" }
+      cases.each_with_index do |(value, target), k|
+        cond = "%sw#{@cur}_#{k}"
+        @lines << "  #{cond} =w ceq#{cls} #{operand}, #{Qbe.int_lit(value)}"
+        @jumper[[target, @cur]] = labels[k]
+        if k + 1 < cases.size
+          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{labels[k + 1]}"
+          @lines << "@#{labels[k + 1]}"
+        else
+          @jumper[[default, @cur]] = labels[k]
+          @lines << "  jnz #{cond}, @#{block_label(target)}, @#{block_label(default)}"
+        end
+      end
+    end
+
+    # A balanced binary tree over the items. Each inner block splits its items at the lower bound of the middle one: a value
+    # below it goes left. A range leaf tests its range (x == lo for one value, else x - lo <=u hi - lo) and jumps to its target,
+    # or to the default. A bit-test leaf tests the window, then one bit per target, each failing on to the next. The tree
+    # sends several jumps to the default, and to a target reached from several leaves: a phi of such a target names one
+    # predecessor, so those jumps go through one block that jumps on.
+    def switch_tree_lines(operand, cls, signed, items, default)
       st = { uses: Hash.new(0), seq: 0, traps: {} }
-      ranges.each { |_lo, _hi, target| st[:uses][target] += 1 }
-      st[:uses][default] += ranges.size
-      switch_tree_node(st, operand, cls, signed, ranges, @label, true, default)
+      items.each do |it|
+        if it[0] == :range
+          st[:uses][it[3]] += 1
+          st[:uses][default] += 1
+        else
+          it[3].each { |t, _| st[:uses][t] += 1 }
+          st[:uses][default] += 2
+        end
+      end
+      switch_tree_node(st, operand, cls, signed, items, @label, true, default)
       st[:traps].each do |target, label|
         @lines << "@#{label}"
         @lines << "  jmp @#{block_label(target)}"
@@ -1039,12 +1145,17 @@ end
       block_label(target)
     end
 
-    def switch_tree_node(st, operand, cls, signed, ranges, label, root, default)
+    def switch_tree_node(st, operand, cls, signed, items, label, root, default)
       @lines << "@#{label}" unless root
       st[:seq] += 1
       n = st[:seq]
-      if ranges.size == 1
-        lo, hi, target = ranges[0]
+      if items.size == 1
+        it = items[0]
+        if it[0] == :bits
+          switch_bits_leaf(st, operand, it, label, default, n)
+          return
+        end
+        _, lo, hi, target = it
         cond = "%swc#{@cur}_#{n}"
         if lo == hi
           @lines << "  #{cond} =w ceq#{cls} #{operand}, #{lo}"
@@ -1058,14 +1169,36 @@ end
         @lines << "  jnz #{cond}, @#{yes}, @#{no}"
         return
       end
-      mid = ranges.size / 2
+      mid = items.size / 2
       cond = "%swc#{@cur}_#{n}"
-      @lines << "  #{cond} =w c#{signed ? "slt" : "ult"}#{cls} #{operand}, #{ranges[mid][0]}"
+      @lines << "  #{cond} =w c#{signed ? "slt" : "ult"}#{cls} #{operand}, #{items[mid][1]}"
       left = "#{block_label(@cur)}.t#{n}l"
       right = "#{block_label(@cur)}.t#{n}r"
       @lines << "  jnz #{cond}, @#{left}, @#{right}"
-      switch_tree_node(st, operand, cls, signed, ranges[0, mid], left, false, default)
-      switch_tree_node(st, operand, cls, signed, ranges[mid, ranges.size - mid], right, false, default)
+      switch_tree_node(st, operand, cls, signed, items[0, mid], left, false, default)
+      switch_tree_node(st, operand, cls, signed, items[mid, items.size - mid], right, false, default)
+    end
+
+    # A bit-test leaf (32-bit operand): the window test, then for each target `(mask >> (x - lo)) & 1`. A test that fails
+    # goes on to the next; the last one fails to the default.
+    def switch_bits_leaf(st, operand, it, label, default, n)
+      _, lo, span, tests = it
+      shifted = "%swr#{@cur}_#{n}"
+      inside = "%swc#{@cur}_#{n}"
+      @lines << "  #{shifted} =w sub #{operand}, #{lo}"
+      @lines << "  #{inside} =w culew #{shifted}, #{span}"
+      first = "#{label}.b#{n}_0"
+      @lines << "  jnz #{inside}, @#{first}, @#{switch_tree_edge(st, default, label)}"
+      tests.each_with_index do |(target, mask), k|
+        block = "#{label}.b#{n}_#{k}"
+        @lines << "@#{block}"
+        bit = "%swb#{@cur}_#{n}_#{k}"
+        hit = "%swh#{@cur}_#{n}_#{k}"
+        @lines << "  #{bit} =w shr #{mask}, #{shifted}"
+        @lines << "  #{hit} =w and #{bit}, 1"
+        miss = k + 1 < tests.size ? "#{label}.b#{n}_#{k + 1}" : switch_tree_edge(st, default, block)
+        @lines << "  jnz #{hit}, @#{switch_tree_edge(st, target, block)}, @#{miss}"
+      end
     end
 
     # An operand: a register, a parameter, an integer constant, null, or the address of an object.
