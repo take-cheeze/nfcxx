@@ -21,7 +21,8 @@ The runner-specific compiler setting keeps nfcxx's bootstrap helpers on the host
 `CXX=nfcxx` can make those helpers recursively build themselves.
 
 This executable runs baked mruby bytecode. The experimental `bc2cpp-self` build, which translates bc2cpp's own
-Ruby methods to C++, is a separate build kind and is not enabled by this setup script.
+Ruby methods to C++, is built by `scripts/setup-bc2cpp-self.sh` and run by `scripts/bc2cpp-self`.
+See [the self-AOT build instructions](../../../docs/notes/bc2cpp-self-aot.md).
 
 The equivalent direct rake build, from the selected world's `3rd/mruby`, is:
 
@@ -55,4 +56,4 @@ gives `ENV`. `mruby-process` gives `Open3` (capture3, capture2, capture2e), `Pro
 `Kernel#system`, over a fork/exec primitive. The build adds Onigmo, Marshal (with C++ exception mode), StringIO, YAML,
 zlib and the core method/proc gems.
 
-Full RPG builds and the `bc2cpp-self` AOT build remain outside this fixture's coverage.
+Full RPG builds remain outside this fixture's coverage.

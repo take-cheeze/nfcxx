@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 # Path B CIL spike (docs/notes/pathb-cil.md): a C++ file -> Path B IR (pathb-dump --ir) -> pathb-cil-emit.rb (fragment) ->
-# cil-link.rb (CIL, ilasm) -> an executable launcher (dotnet). Usage: scripts/pathb-cil [-o OUT] file.cpp
+# cil-link.rb (CIL, ilasm) -> an executable launcher (dotnet).
+# -c writes the JSON fragment of the one file to OUT and does not link (the object file of scripts/cil-cc).
+# Usage: scripts/pathb-cil [-c] [-o OUT] [-std=STD] [-Idir] [-Dmacro] [-Umacro] file.cpp|file.c...
+# A .c file is read as C (-std=c11 and _DEFAULT_SOURCE, as gcc's default dialect defines it, unless -std is given), as nfcxx reads a C input; every file is one fragment of the link.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-out=a.out; files=()
+out=a.out; files=(); fl=(); only_c=0
 while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2; shift 2 ;;
+    -c) only_c=1; shift ;;
+    -std=*|-I?*|-D?*|-U?*) fl+=("$1"); shift ;;
     *) files+=("$1"); shift ;;
   esac
 done
-[ ${#files[@]} -eq 1 ] || { echo "usage: scripts/pathb-cil [-o OUT] file.cpp" >&2; exit 2; }
+[ ${#files[@]} -ge 1 ] || { echo "usage: scripts/pathb-cil [-o OUT] [-std=STD] [-Idir] [-Dmacro] file.cpp|file.c..." >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-"$root/scripts/pathb-dump" --ir "${files[0]}" > "$tmp/ir" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
-"$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/ir" "$tmp/frag.json"
+frags=(); i=0
+for f in "${files[@]}"; do
+  i=$((i + 1)); std=(); case $f in *.c) std=(-std=c11 -D_DEFAULT_SOURCE) ;; esac   # a -std given on the command line follows and wins
+  "$root/scripts/pathb-dump" --ir ${std[@]+"${std[@]}"} ${fl[@]+"${fl[@]}"} "$f" > "$tmp/ir$i" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
+  # The unit name of the fragment: the file's basename, as scripts/qbe-cc names it (a static name of the unit is name@UNIT).
+  tu=$(basename "$f"); tu=${tu%.*}; tu=$(printf %s "$tu" | tr -c 'A-Za-z0-9_.-' _); [ $only_c = 1 ] || tu=$tu.$i
+  "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/ir$i" "$tmp/frag$i.json" "$tu"
+  frags+=("$tmp/frag$i.json")
+done
+if [ $only_c = 1 ]; then
+  [ ${#files[@]} -eq 1 ] || { echo "pathb-cil: -c takes one file" >&2; exit 2; }
+  cp "${frags[0]}" "$out"; exit 0
+fi
 # The link takes its settings as arguments (the mruby interpreter has no environment): ILASM, CC and NFCXX_KEEP_IL.
 keep=(); [ -z "${NFCXX_KEEP_IL:-}" ] || keep=(--keep-il)
 "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "${ILASM:-$root/build/cil/ilasm}" --cc "${CC:-cc}" \
-  ${keep[@]+"${keep[@]}"} -o "$out" "$tmp/frag.json"
+  ${keep[@]+"${keep[@]}"} -o "$out" "${frags[@]}"

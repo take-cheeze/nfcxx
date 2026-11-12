@@ -12,6 +12,8 @@
 # (bare `module_function`, which mruby 4.0.0 still treats as a no-op). Of rpg-maker-clone's other mruby patches only
 # mruby-onig-regexp-no-chdir.patch (parallel rake) is used: the rest are for bc2cpp output, the PSP build or bugs
 # optcarrot does not hit (checked: checksum 59662 without them).
+# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) cannot build the mruby this script bootstraps: it
+# refuses mruby's tools/mrbc/mrbc.c ("SSA route: pathb-ssa-build: not emitted: parse_args: operator unsupported"); the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld; here=$root/tests/realworld/optcarrot
 mruby_pin=831da26b9021de0369d17b71b5667e2941a1a32d    # mruby/mruby tag 4.0.0, as run_mruby.sh

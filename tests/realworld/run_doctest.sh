@@ -2,9 +2,9 @@
 # Real-world check: build doctest (MIT, single header) at a pinned upstream release with nfcxx on the
 # hosted path (not --freestanding) and run a small driver (tests/realworld/doctest_main.cpp, whose header
 # says EXPECT exit code 2). The source is cloned into build/realworld, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: gcc)
-# Decision: doctest is checked on the gcc backend only. Its toString(long double) needs a type QBE cannot
-# represent (docs/notes/realworld.md), so asking for qbe reports a SKIP with that reason.
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
+# doctest is checked on gcc and Path B. Its toString(long double) needs a type QBE cannot represent
+# (docs/notes/realworld.md), so asking for qbe reports a SKIP with that reason.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=1da23a3e8119ec5cce4f9388e91b065e20bf06f5   # doctest/doctest tag v2.4.12, 2025-04-28
@@ -18,7 +18,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL doctest: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-gcc}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   if [ "$b" = qbe ]; then

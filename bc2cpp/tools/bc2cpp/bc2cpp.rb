@@ -2993,7 +2993,8 @@ BC2CPP_MAIN = lambda do
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
-  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free)
+  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
+                                       NativeFrameUse.reader_entries(compiled))
   print SymbolCache.emit(symbol_table)
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code
