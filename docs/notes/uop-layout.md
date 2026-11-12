@@ -94,12 +94,128 @@ What this says about the model:
 The SIMD transpose matters little here: the transpose costs MK work against MNK of GEMM, and with N = 256 that is a
 small share. It matters most in the scalar-versus-SIMD rows at K = 32, where the scalar loop was 2 times vec-n.
 
+## Packed-B test (second round, quiet host)
+
+Hypothesis from the first round: the M-vectorized kernel reads B column-wise (`B[k*N + n]`, stride N), and that cost
+explains the small-K gap. Test: the same kernel with B packed once into `Bt[n*K + k]`, so the broadcast of B reads
+contiguous memory. Packing is timed separately and is not in the kernel timing. The packed kernel gives the same bits as
+the strided one (same summation order), checked in the driver. `M = N = 256`, best of 15 timings of 50 calls each;
+two runs, the second agrees with the first within a few percent. Load average was under 1 during the runs.
+
+| K | vec-n (us) | vec-m (us) | vec-m packed B (us) | pack (us) | vec-m / vec-n | packed / vec-n |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | 28.6 | 29.9 | 30.2 | 2.1 | 1.04 | 1.05 |
+| 8 | 40.0 | 56.6 | 59.1 | 2.1 | 1.41 | 1.48 |
+| 12 | 61.9 | 57.4 | 58.1 | 2.7 | 0.93 | 0.94 |
+| 16 | 78.6 | 69.3 | 68.0 | 5.0 | 0.88 | 0.87 |
+| 24 | 92.9 | 104.1 | 121.5 | 3.7 | 1.12 | 1.31 |
+| 32 | 134.7 | 152.9 | 141.4 | 4.5 | 1.14 | 1.05 |
+| 64 | 434.9 | 513.2 | 372.9 | 8.2 | 1.18 | 0.86 |
+| 128 | 1279.1 | 1781.0 | 1374.3 | 39.4 | 1.39 | 1.07 |
+
+What this says:
+
+- **Packing B does not change the time at any K.** The column-wise reads of B are not the cause, so the hypothesis is
+  rejected.
+- **Correction to the first round.** The first round reported vec-n about 1.5 times faster at K = 4, and this round finds
+  parity (1.04). The earlier small-K numbers came from a busier host and are not reliable; the claim above is withdrawn.
+- **What holds on a quiet host:** vec-m is slower at K = 8 (about 1.4 times) and at K = 24 to 32 (about 1.1 to 1.14),
+  and faster at K = 12 to 16 (about 0.9). vec-n is faster at K = 64 and up (1.2 to 1.4 times, vec-m / vec-n).
+- **Against the model:** the model predicts vec-m wins below K = 16 and vec-n above it. This round supports the
+  prediction only at K = 12 to 16, and it contradicts it at K = 8. Above K = 24 it agrees.
+
+The timing driver and the generator used for this round are not in the repository. They wrap the emitter's output
+with the entry point renamed to `kernel` and a sixth argument `Bt`, and the strided kernel's `B[k * N + n]` broadcast
+replaced by `Bt[n * K + k]` for the packed variant.
+
+## Where the M-vectorized gap comes from (third round, quiet host)
+
+Three ablations of the M-vectorized kernel, all hand-written scratch kernels (not the emitter), each timed against the
+emitter's kernels, two runs per set, `M = N = 256`:
+
+- **Stores removed** (`nost`): the per-column stores of C are dropped; the row sum still uses the accumulator.
+- **Contiguous stores** (`stc`): the same stores, but each 8-row block of C lands contiguously instead of 1 KB apart.
+- **Transpose removed** (`noT`): the A transpose is left out of the kernel.
+- **Block layout** (`blk`): both A and C are blocked per 8 rows: `At[(m/8)*K*8 + k*8 + r]`, and the inner loop reads `At`
+  contiguously in k; C is stored blocked as in `stc`.
+
+| K | vec-n | vec-m | nost | stc | noT | blk |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 38 to 44 | 56 to 59 | 34 | 32 to 35 | 53 to 56 | 33 to 34 |
+| 12 | 61 to 89 | 54 to 59 | 53 to 57 | 54 to 59 | 53 to 57 | 62 |
+| 16 | 79 to 81 | 63 to 73 | 80 to 83 | 59 to 88 | 64 to 79 | 78 to 79 |
+| 24 | 81 to 97 | 94 to 107 | 110 to 113 | 90 to 103 | 105 to 107 | 84 |
+| 32 | 118 to 129 | 139 to 158 | 142 to 152 | 135 to 151 | 139 to 159 | 128 |
+| 64 | 340 to 449 | 507 to 628 | 484 to 605 | 494 to 623 | 501 to 616 | 360 to 362 |
+
+What this says:
+
+- **K = 8:** the gap is the 1 KB stride of the C stores. Contiguous stores or no stores bring vec-m to vec-n's level.
+  The transpose is not the cause (noT is no faster).
+- **K = 24 to 64:** the stores and the transpose are not the cause, and packing B did not help either. The block layout
+  for A closes the gap: the inner loop reads `At` contiguously in k instead of 1 KB apart, and blk matches vec-n at
+  K = 64 and beats it at K = 24.
+- **K = 16 is unexplained:** blk is slower than stc there (about 79 vs 58 µs). I have not found why.
+- **Decision (allow blocked):** the layout model allows a blocked storage for the lanes-on-M data: A's transpose and C
+  are kept in 8-row blocks (`Storage::Blocked8` in `nfcuop_layout_avx2.hpp`). It is an option of the emitter, and the
+  default stays strided. The cost model still does not price storage; see the timings below.
+
+## The emitter's blocked storage (fifth round)
+
+`emit_gemm_rowsum_c(VecM, M, N, K, simd_transpose, Storage::Blocked8)` stores A's transpose and C in 8-row blocks, so
+the inner loop reads `At` and writes C contiguously. The test (`tests/uop/test_layout_avx2.cpp`) checks both storages
+bit for bit against the reference. The timings are of the emitter's own kernels, `M = N = 256`, best of 15 timings of
+50 calls each, one run per flag set. The ratio is blocked / vec-n:
+
+| K | -O2 | -O3 |
+| --- | --- | --- |
+| 8 | 1.00 | 0.82 |
+| 16 | 0.98 | 0.77 |
+| 24 | 0.92 | 0.92 |
+| 32 | 1.16 | 1.03 |
+| 64 | 1.00 | 1.07 |
+
+What this says: blocked storage removes the M-vectorized penalty at K = 8 to 24 at both flags, and at K = 16 and
+K = 8 it is the faster kernel at -O3. At K = 32 and 64 it is at parity or slightly slower. The N-vectorized kernel
+is still the simpler choice where its speed is the same. The vec-n baseline at K = 8 varied from about 40 µs to 63 µs
+between sessions on this host, so the K = 8 ratio is the least certain entry.
+
+The scratch kernels and the driver are not in the repository.
+
+## Optimization level changes the small-K results (fourth round, quiet host)
+
+All timings above used `cc -O2`, the same flags as the emitter's test. Re-timing vec-n and vec-m at `-O3` (`M = N = 256`,
+best of 15 timings of 50 calls each, one run per flag set, both runs for `-O2` agree within a few percent):
+
+| K | vec-m / vec-n at -O2 | vec-m / vec-n at -O3 |
+| --- | --- | --- |
+| 4 | 1.03 | 2.43 |
+| 8 | 1.47 | 1.28 |
+| 12 | 0.85 | 0.94 |
+| 16 | 0.89 | 0.95 |
+| 24 | 1.12 | 1.12 |
+| 32 | 1.16 | 1.17 |
+| 64 | 1.46 | 1.47 |
+
+What this says:
+
+- **The K = 12 to 16 advantage for vec-m is small and only holds at -O2 (0.85 to 0.89) or at near-parity at -O3 (0.94
+  to 0.95).** At K = 16 the block-layout kernel is 79 µs at -O2 and 53 µs at -O3, so the unexplained K = 16 result above
+  is a code-generation effect of -O2 on the inner loop, not a layout effect.
+- **K = 4 is not stable:** 1.03 at -O2 and 2.43 at -O3. The earlier 1.5 and parity readings were both at -O2 on a
+  busier host. I do not have a reliable small-K number.
+- **Above K = 16, vec-n is faster at both flags** (1.12 to 1.47 times vec-m), which the model also predicts.
+- **Below K = 16, the model predicts vec-m wins.** The data do not show that: vec-m is slower at K = 8 at both flags.
+
+Consequence: on this AVX2 target, for this shape, the N-vectorized kernel is the faster default at almost every K. The
+M-vectorized kernel only competes with a blocked layout (see the block experiment above), which the layout model does
+not describe yet.
+
 ## Next steps on this target
 
-1. Test the B-access hypothesis for the small-K gap: pack B into column blocks before the vec-m loop (or time vec-m
-   with a transposed B), and see whether K = 4 moves toward vec-n.
-2. Repeat the timing with more hosts or repetitions before drawing a crossover from it; the noise at K = 24 and 32 is
-   about as large as the differences.
+1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
+   cannot yet tell blocked from strided.
+2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 

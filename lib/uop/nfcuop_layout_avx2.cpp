@@ -49,7 +49,7 @@ const char* kTranspose8 =
 
 }  // namespace
 
-std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose) {
+std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose, Storage storage) {
   if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_c: sizes must be positive");
   std::ostringstream o;
   o << kPrologue << kHsum;
@@ -72,29 +72,46 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
       << "  }\n";
   } else {
     if (M % 8 != 0) throw std::invalid_argument("emit_gemm_rowsum_c: VecM needs M % 8 == 0");
-    // The repair: A transposed into At (K x M), so that for fixed k the eight lanes are eight consecutive rows of A.
+    const bool blk = storage == Storage::Blocked8;
+    // Index of A^T (At) for column k and row m. Strided: k*M + m. Blocked8: the 8-row block starts at m - m%8,
+    // with its k-th group of 8 contiguous: (m - m%8)*K + k*8 + m%8.
+    auto at_index = [&](const std::string& k, const std::string& m) {
+      if (!blk) return "At[" + k + " * " + std::to_string(M) + " + " + m + "]";
+      return "At[(" + m + " - " + m + " % 8) * " + std::to_string(K) + " + " + k + " * 8 + " + m + " % 8]";
+    };
+    // The repair: A transposed into At, so that for fixed k the eight lanes are eight consecutive rows of A.
     if (simd_transpose) {
       // 8x8 blocks while k + 8 <= K, then the scalar columns K - K % 8 .. K - 1.
-      o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
-        << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
-        << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[k * " << M << " + m], " << M << ");\n"
-        << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
+      if (!blk) {
+        o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
+          << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
+          << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[k * " << M << " + m], " << M << ");\n";
+      } else {
+        // The 8x8 block of rows m..m+7, columns k..k+7 goes to the block at m*K: its row k+c is 8 contiguous floats.
+        o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
+          << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
+          << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[m * " << K << " + k * 8], 8);\n";
+      }
+      o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
         << "    for (int64_t k = " << (K - K % 8) << "; k < " << K << "; ++k)\n"
-        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+        << "      " << at_index("k", "m") << " = A[m * " << K << " + k];\n";
     } else {
       o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
         << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
-        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+        << "      " << at_index("k", "m") << " = A[m * " << K << " + k];\n";
     }
-      // Lanes on M: C is written column-major (C[n*M + m]), the row sum adds the N columns vertically.
-      o << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
+    // Lanes on M. Strided: C is written column-major (C[n*M + m]). Blocked8: the 8 rows of a block are contiguous
+    // for each n, the block at m*N (m a multiple of 8). The row sum adds the N columns vertically in both.
+    const std::string c_store = blk ? "&C[m * " + std::to_string(N) + " + n * 8]" : "&C[n * " + std::to_string(M) + " + m]";
+    const std::string at_load = blk ? "&At[m * " + std::to_string(K) + " + k * 8]" : "&At[k * " + std::to_string(M) + " + m]";
+    o << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
       << "    __m256 rs = _mm256_setzero_ps();\n"
       << "    for (int64_t n = 0; n < " << N << "; ++n) {\n"
       << "      __m256 acc = _mm256_setzero_ps();\n"
       << "      for (int64_t k = 0; k < " << K << "; ++k)\n"
-      << "        acc = _mm256_fmadd_ps(_mm256_loadu_ps(&At[k * " << M << " + m]),\n"
+      << "        acc = _mm256_fmadd_ps(_mm256_loadu_ps(" << at_load << "),\n"
       << "                              _mm256_broadcast_ss(&B[k * " << N << " + n]), acc);\n"
-      << "      _mm256_storeu_ps(&C[n * " << M << " + m], acc);\n"
+      << "      _mm256_storeu_ps(" << c_store << ", acc);\n"
       << "      rs = _mm256_add_ps(rs, acc);\n"
       << "    }\n"
       << "    _mm256_storeu_ps(&R[m], rs);\n"

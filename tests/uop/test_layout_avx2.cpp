@@ -50,8 +50,8 @@ void* load_kernel(const std::string& dir, const std::string& src, const std::str
   return h;
 }
 
-void run_case(const std::string& dir, GemmVariant v, bool simd, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
-  const char* name = v == GemmVariant::VecN ? "vec-n" : (simd ? "vec-m-simd" : "vec-m-scalar");
+void run_case(const std::string& dir, GemmVariant v, bool simd, Storage st, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  const char* name = v == GemmVariant::VecN ? "vec-n" : (st == Storage::Blocked8 ? (simd ? "vec-m-blocked-simd" : "vec-m-blocked-scalar") : (simd ? "vec-m-simd" : "vec-m-scalar"));
   std::string tag = std::string(name) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
   std::uniform_int_distribution<int> d(-4, 4);
   std::vector<float> A(M * K), B(K * N);
@@ -69,7 +69,7 @@ void run_case(const std::string& dir, GemmVariant v, bool simd, int64_t M, int64
     }
 
   KernelFn fn = nullptr;
-  void* h = load_kernel(dir, emit_gemm_rowsum_c(v, M, N, K, simd), tag, &fn);
+  void* h = load_kernel(dir, emit_gemm_rowsum_c(v, M, N, K, simd, st), tag, &fn);
   if (!h) return;
   std::vector<float> C(M * N, -999.0f), R(M, -999.0f), At(M * K, -999.0f);
   fn(A.data(), B.data(), C.data(), R.data(), At.data());
@@ -77,9 +77,11 @@ void run_case(const std::string& dir, GemmVariant v, bool simd, int64_t M, int64
 
   int bad = 0;
   for (int64_t m = 0; m < M; ++m) {
-    // VecN writes C row-major (C[m*N + n]), VecM column-major (C[n*M + m]).
+    // VecN writes C row-major (C[m*N + n]); VecM strided is column-major (C[n*M + m]); blocked is 8-row blocks.
     for (int64_t n = 0; n < N; ++n) {
-      float got = v == GemmVariant::VecN ? C[m * N + n] : C[n * M + m];
+      float got = v == GemmVariant::VecN ? C[m * N + n]
+                : st == Storage::Blocked8 ? C[(m - m % 8) * N + n * 8 + m % 8]
+                                          : C[n * M + m];
       if (got != refC[m * N + n]) ++bad;
     }
     if (R[m] != refR[m]) ++bad;
@@ -126,12 +128,14 @@ int main() {
   };
   for (const Case& c : cases) {
     if (c.v == GemmVariant::VecN) {
-      run_case(dir, c.v, false, c.M, c.N, c.K, rng);
+      run_case(dir, c.v, false, Storage::Strided, c.M, c.N, c.K, rng);
     } else {
       // Both transposes: the 8x8 kernel, and the scalar loop it replaces. K values that are not multiples of 8
-      // (5, 33, 13) also cover the scalar tail after the 8x8 blocks.
-      run_case(dir, c.v, true, c.M, c.N, c.K, rng);
-      run_case(dir, c.v, false, c.M, c.N, c.K, rng);
+      // (5, 33, 13) also cover the scalar tail after the 8x8 blocks. Both storages.
+      run_case(dir, c.v, true, Storage::Strided, c.M, c.N, c.K, rng);
+      run_case(dir, c.v, false, Storage::Strided, c.M, c.N, c.K, rng);
+      run_case(dir, c.v, true, Storage::Blocked8, c.M, c.N, c.K, rng);
+      run_case(dir, c.v, false, Storage::Blocked8, c.M, c.N, c.K, rng);
     }
   }
 
