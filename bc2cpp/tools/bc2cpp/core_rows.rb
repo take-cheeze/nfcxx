@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'bytecode_ir'
 require_relative 'diagnostics'
+require_relative 'native_names'
 
 # CORE_ROWS (closed only): core ROM entries the closed build keeps as rows (MRB_MT_CTOR_ROW, value 2 in the exclusion
 # header) instead of method-table entries. A row answers only a lookup made for a receiver the compiler proved
@@ -16,6 +17,7 @@ module CoreRows
   SYM_TABLE = /^[^\n]*bc2cpp_sym_names\[\d+\] = \{\n.*?^\};/m
   SYMREF = /bc2cpp_sym\(M, (\d+)\)/
   PRESYM = /MRB_(Q?SYM|SYM_[QBE])\(\s*([a-z_]\w*)\s*\)/
+  OPSYM = /MRB_OPSYM\(\s*(\w+)\s*\)/
   SUFFIX = { 'SYM_Q' => '?', 'SYM_B' => '!', 'SYM_E' => '=' }.freeze
   # The by-name send helper, whose third argument is a symbol table index.
   INDEX_SEND = /\bbc2cpp_send\(M, [^,]+, (\d+)/
@@ -47,7 +49,7 @@ module CoreRows
     names = Set.new(dynamic).merge(super_names)
     ireps.each_value do |irep|
       BytecodeIR.for(irep).each_source do |insn, _index|
-        names << IMPLICIT_DISPATCH_NAMES[insn.op] if IMPLICIT_DISPATCH_NAMES.key?(insn.op)
+        # An operator opcode is compiled like a send (OPERATOR_ROWS): its by-name fallback, if any, is in +generated+.
         names << insn.sym.to_s if insn.sym && !QUIET_OPS.include?(insn.op)
         # An unresolved alias source keeps every symbol, as lookup_names does.
         names.merge(irep.syms.map(&:to_s)) if insn.op == :ALIAS && insn.first_of(:name).nil?
@@ -68,6 +70,7 @@ module CoreRows
       refs = []
       line.scan(SYMREF) { |(i)| refs << table.fetch(i.to_i) }
       line.scan(PRESYM) { |kind, name| refs << name + SUFFIX.fetch(kind, '') }
+      line.scan(OPSYM) { |(c)| refs << OPSYM_TO_RUBY.fetch(c, c) }
       next if refs.empty?
       next if INERT_LINES.any? { |re| line.match?(re) }
       next if line.match?(CONST_NAME) && lines[k + 1].to_s.include?('mrb_const_get(')

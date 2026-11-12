@@ -1491,8 +1491,8 @@ module StaticDispatchRegistrations
                                                                 },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
                                                                 enumerator_free: -> { proof.call.holds }, engine_names: engine,
-                                                                compiled_core: core_run&.dig(:compiled))
-      rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven) - rom
+                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?)
+      rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
     end
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
      CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only)]
