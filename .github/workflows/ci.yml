@@ -610,7 +610,8 @@ jobs:
   # lost a leg). The run's jobs are listed first for that (JOBS_FILE); a run whose list is missing does not pass.
   build-and-test:
     if: always() && github.event_name != 'schedule'
-    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test]
+    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test,
+      bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -753,8 +754,8 @@ jobs:
   # bc2cpp (bc2cpp/, the mruby-to-C++ compiler moved from rpg-maker-clone, docs/notes/bc2cpp-migration.md) compiling the worlds
   # under tests/bc2cpp/ (one tests/bc2cpp/run_<world>.sh per world: optcarrot, then nfcxx's own Ruby scripts, one world each,
   # listed in tests/bc2cpp/worlds.list and run three to a job) against a pinned rpg-maker-clone checkout (tests/bc2cpp/fetch.sh).
-  # It needs only the host compiler and Ruby 4.0, not the EDG toolchain. These jobs are not in build-and-test's needs: they
-  # report, but do not gate.
+  # It needs only the host compiler and Ruby 4.0, not the EDG toolchain. They are in build-and-test's needs, so they gate
+  # whenever bc2cpp-changes reports a change (scripts/ci-scope.rb, BC2CPP_JOBS): a run that skipped them is refused.
   # The worlds (tests/bc2cpp/worlds.list), three shards: a shard runs its worlds one after another in this job
   # (tests/bc2cpp/run_worlds.rb balances them by the list's weights, runs every world even after one fails, and prints a
   # per-world summary), so the checkout, Ruby, the build tools and the fetched world are paid for once per shard, not once per
