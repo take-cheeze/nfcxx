@@ -2226,12 +2226,12 @@ end
 
     # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
     # locked stores and exchanges the lowering uses). Only without --safe.
-    ATOMIC_LOAD = /\A__atomic_load_[48]\z/
+    ATOMIC_LOAD = %w[__atomic_load_4 __atomic_load_8].freeze
 
     def atomic_load?(c)
       f = c[2]
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
-      return false unless f.raw.delete('"') =~ ATOMIC_LOAD && c.length == 5
+      return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
       head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
