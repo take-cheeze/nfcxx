@@ -3559,7 +3559,7 @@ static ir_val ir_bit_builtin(an_expr_node_ptr e, int kind, int bits)
 static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
 {
   static const struct { const char *name; int kind; } tab[] = {
-    { "clzg", 2 }, { "ctzg", 3 }, { "popcountg", 1 }, { "parityg", 5 },
+    { "clzg", 2 }, { "ctzg", 3 }, { "popcountg", 1 }, { "parityg", 5 }, { "ffsg", 4 }, { "clrsbg", 6 },
   };
   an_expr_node_ptr arg = ir_operand(e, 1), fb = ir_operand(e, 2);
   int kind = 0, bits, w, i;
@@ -3568,8 +3568,17 @@ static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
   char *x, *r;
   for (i = 0; i < (int)(sizeof tab / sizeof tab[0]); i++) if (strcmp(name, tab[i].name) == 0) kind = tab[i].kind;
   if (kind == 0) return 0;
+  /* EDG hands a narrow argument over after the integral promotion; the width that counts is the declared type's. */
+  while (arg != NULL && arg->kind == enk_operation && arg->variant.operation.kind == eok_cast && arg->compiler_generated &&
+         ir_operand(arg, 0) != NULL && ir_is_integer(ir_operand(arg, 0)->type) && !ir_is_i128(ir_operand(arg, 0)->type) &&
+         ir_size_of(ir_operand(arg, 0)->type) < ir_size_of(arg->type))
+    arg = ir_operand(arg, 0);
   if (arg == NULL || !ir_is_integer(arg->type)) {
     *out = ir_gap(e->type, "generic bit operation (argument)", 0, (int)eok_call);
+    return 1;
+  }
+  if (ir_is_i128(arg->type) && (kind == 4 || kind == 6)) {
+    *out = ir_gap(e->type, "generic bit operation (128-bit ffsg/clrsbg)", 0, (int)eok_call);
     return 1;
   }
   if (ir_is_i128(arg->type)) {
@@ -3603,6 +3612,25 @@ static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
     case 1: r = ir_bi_popcount(ut, w, x); break;
     case 5: r = ir_o2("and", ut, ir_bi_popcount(ut, w, x), ir_k(ut, 1)); break;
     case 2: r = ir_o2("wsub", ut, ir_bi_clz(ut, w, x), ir_k(ut, (unsigned long long)(w - bits))); break;
+    case 4: {
+      /* ffsg: as ffs, on the zero-extended value */
+      char *pc = ir_bi_popcount(ut, w, ir_o2("xor", ut, x, ir_o2("wsub", ut, x, ir_k(ut, 1))));
+      char *nz = ir_cv(ut, ir_let("bool", ir_fmt("(ne %s %s %s)", ut, x, ir_k(ut, 0))));
+      r = ir_o2("wmul", ut, pc, nz);
+      break;
+    }
+    case 6: {
+      /* clrsbg: as clrsb on the value sign-extended from its own width (an unsigned type is read as signed); the
+         extension adds w - bits redundant sign bits, which are taken off again */
+      const char *st = w == 64 ? "long" : "int";
+      char *sx = ir_cv(st, x);
+      char *sg, *y;
+      if (bits < w) sx = ir_sh(0, st, ir_sh(1, st, sx, w - bits), w - bits);
+      sg = ir_cv(ut, ir_sh(0, st, sx, w - 1));
+      y = ir_o2("xor", ut, ir_cv(ut, sx), sg);
+      r = ir_o2("wsub", ut, ir_bi_clz(ut, w, ir_o2("or", ut, ir_sh(1, ut, y, 1), ir_k(ut, 1))), ir_k(ut, (unsigned long long)(w - bits)));
+      break;
+    }
     default: r = ir_bi_ctz(ut, w, x); break;
   }
   if (fb != NULL && (kind == 2 || kind == 3)) {

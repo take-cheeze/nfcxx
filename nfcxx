@@ -575,7 +575,7 @@ while [ $# -gt 0 ]; do
     -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
     -fno-omit-frame-pointer|-fomit-frame-pointer) asanopts+=("$1") ;;   # asan's usual companions; they go to the C compile
     --dialect=*) dialect=${1#--dialect=} ;;
-    --gnu-version=*) gnu=${1#--gnu-version=} ;;
+    --gnu-version=*) gnu=${1#--gnu-version=}; gnu_user=$gnu ;;
     --freestanding) freestanding=1 ;;
     --cosmo) cosmo=1 ;;
     --target=*) target=${1#--target=} ;;
@@ -928,6 +928,8 @@ fi
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
+# Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.
+[ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 # The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
 qbecc_flags=()
