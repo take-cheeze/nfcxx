@@ -2455,6 +2455,15 @@ static int ir_addr_only;
 
 static char *ir_valist_addr(an_expr_node_ptr n);
 
+/* Is N a `p->field` or `*p` operation, possibly under lvalue adjustments (a qualifier change: the address is the operand's)?
+   Then the address of N reads no memory. */
+static int ir_is_ptr_member_lval(an_expr_node_ptr n)
+{
+  while (n != NULL && n->kind == enk_operation && n->variant.operation.kind == eok_lvalue_adjust) n = ir_operand(n, 0);
+  return n != NULL && n->kind == enk_operation &&
+         (n->variant.operation.kind == eok_points_to_field || n->variant.operation.kind == eok_indirect);
+}
+
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
 {
@@ -3021,6 +3030,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       /* Only the qualifiers of the lvalue change (a `const int c = f();` initializer writes through the adjusted
          lvalue of c), so the address is the operand's. */
       ir_note(0, k, 1);
+      if (addr_only && ir_is_ptr_member_lval(a0)) ir_addr_only = 1; /* `&(adjusted p->base)`: still no read */
       if (ir_is_aggregate(e->type)) return ir_lval(a0);
       {
         ir_val base = ir_lval(a0);
@@ -3090,10 +3100,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     }
     case eok_address_of: {
       ir_val a;
-      if (a0->kind == enk_operation &&
-          (a0->variant.operation.kind == eok_points_to_field || a0->variant.operation.kind == eok_indirect)) {
-        ir_addr_only = 1;
-      }
+      if (ir_is_ptr_member_lval(a0)) ir_addr_only = 1;
       a = ir_lval(a0);
       ir_addr_only = 0;
       ir_note(0, k, 1);
@@ -7505,6 +7512,61 @@ static void ir_decl_cleanup(a_statement_ptr s, int d)
     if (entry->entity.kind == iek_variable && ir_cu_is((a_variable_ptr)entry->entity.ptr)) ir_cu_push((a_variable_ptr)entry->entity.ptr);
 }
 
+/* The registration of a function-local static's destructor. EDG guards it with the variable's initialization guard,
+   but when the initializer is a constant (`static std::vector<int> v;`: a constexpr constructor) it makes the
+   initialization a static one and leaves no guard, since a back end that promotes local statics to file scope (the C
+   generator) has the registration in its own once-only code. Here the registration would run at every call and destroy
+   the object once per call at exit (a double free). ir_guard_depth counts the enclosing initialization guards (an `if`
+   EDG marked is_initialization_guard); a `__cxa_atexit` of a variable's address outside of one, in a function that is
+   not an initialization routine, gets a guard of its own: a once-only flag, set under __cxa_guard_acquire as EDG's. */
+static int ir_guard_depth;
+static int ir_atexit_guards;
+
+static int ir_is_unguarded_atexit(an_expr_node_ptr e)
+{
+  an_expr_node_ptr f, obj;
+  const char *name;
+  if (e == NULL || ir_guard_depth > 0 || ir_cur_rout == NULL || ir_cur_rout->is_initialization_routine) return 0;
+  name = ir_cur_rout->source_corresp.name;
+  if (name != NULL && strncmp(name, IL_LOWERING_INIT_ROUTINE_PREFIX, strlen(IL_LOWERING_INIT_ROUTINE_PREFIX)) == 0) return 0;
+  if (e->kind != enk_operation || e->variant.operation.kind != eok_call) return 0;
+  f = ir_operand(e, 0);
+  if (f == NULL || f->kind != enk_routine || f->variant.routine.ptr->source_corresp.name == NULL ||
+      strcmp(f->variant.routine.ptr->source_corresp.name, "__cxa_atexit") != 0)
+    return 0;
+  obj = ir_operand(e, 2);
+  return obj != NULL && obj->kind == enk_constant && obj->variant.constant.ptr->kind == ck_address &&
+         obj->variant.constant.ptr->variant.address.kind == abk_variable;
+}
+
+/* Lower the statement of e (such a call) under the guard:
+   if (*(char *)g == 0) if (__cxa_guard_acquire(&g)) { e; __cxa_guard_release(&g); } */
+static void ir_guarded_atexit(an_expr_node_ptr e, int d)
+{
+  char *g = ir_fmt("__nfcxx_atexit_guard.%d", ir_atexit_guards++);
+  char *b, *flag, *acq;
+  ir_tmp_scope tmps;
+  fprintf(ir_out_globals.f, "(global \"%s\" unsigned_long 8 8 (static) (init (zero 0 8)))\n", g);
+  ir_depth = d;
+  flag = ir_let("unsigned_char", ir_fmt("(load unsigned_char @\"%s\")", g));
+  b = ir_let("bool", ir_fmt("(eq unsigned_char %s (const unsigned_char 0))", flag));
+  ir_line(d, ir_fmt("(if %s", b));
+  ir_line(d + 1, "(then");
+  ir_depth = d + 2;
+  acq = ir_let("int", ir_fmt("(call int &\"__cxa_guard_acquire\" @\"%s\")", g));
+  b = ir_let("bool", ir_fmt("(ne int %s (const int 0))", acq));
+  ir_line(d + 2, ir_fmt("(if %s", b));
+  ir_line(d + 3, "(then");
+  ir_tmp_begin(&tmps);
+  ir_depth = d + 4;
+  (void)ir_rval(e);
+  ir_tmp_flush(&tmps, d + 4);
+  ir_tmp_end(&tmps, d + 4);
+  ir_depth = d + 4;
+  ir_emit(ir_fmt("(eval (call void &\"__cxa_guard_release\" @\"%s\"))", g));
+  ir_close(4); /* then, if (acquire), then, if (flag) */
+}
+
 static void ir_stmt(a_statement_ptr s, int d)
 {
   ir_depth = d;
@@ -7520,6 +7582,10 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_expr: {
       ir_tmp_scope tmps;
       ir_note(1, stmk_expr, 1);
+      if (ir_is_unguarded_atexit(s->expr)) {
+        ir_guarded_atexit(s->expr, d);
+        return;
+      }
       ir_tmp_begin(&tmps);
       (void)ir_rval(s->expr);
       ir_tmp_flush(&tmps, d);
@@ -7551,7 +7617,9 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_line(d, ir_fmt("(if %s", cb));
       ir_line(d + 1, "(then");
       ir_branch_hint(s->variant.if_stmt.then_statement, d + 2);
+      if (s->is_initialization_guard) ir_guard_depth++;
       ir_stmt(s->variant.if_stmt.then_statement, d + 2);
+      if (s->is_initialization_guard) ir_guard_depth--;
       ir_close(1);
       if (s->variant.if_stmt.else_statement != NULL) {
         ir_line(d + 1, "(else");
