@@ -1969,8 +1969,20 @@ end
     # object never set). QBE's slot promotion rejects a read before any store as "used undefined", so a local slot that
     # a bit-field access reaches is zeroed right after its alloc: a memset of the whole slot (its address escapes, so the
     # promotion leaves it in memory). Only the local slots (%oN); a slot that is already zeroed is not zeroed again.
+    # "%oN": a local slot of the function. Plain string tests: the bundled script runs under mruby, which has no regexps.
+    def local_slot_name?(addr)
+      return false unless addr.is_a?(String) && addr.length > 2 && addr[0, 2] == "%o"
+      i = 2
+      while i < addr.length
+        c = addr[i]
+        return false unless c >= "0" && c <= "9"
+        i += 1
+      end
+      true
+    end
+
     def zero_slot_once(addr)
-      return unless addr.is_a?(String) && addr =~ /\A%o\d+\z/
+      return unless local_slot_name?(addr)
       return if @zeroed[addr]
       @zeroed[addr] = true
       idx = @lines.index { |l| l.start_with?("  #{addr} =l alloc") }
