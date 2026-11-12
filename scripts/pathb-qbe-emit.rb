@@ -2980,6 +2980,14 @@ def emit_global(mod, g)
     thread = true
     rest = rest.drop(1)
   end
+  # (section "S" [ro]) from __attribute__((section("S"))), and (used): the data goes into that section, allocated and
+  # writable unless const (as scripts/pathb-ssa-qbe.rb); `used` needs nothing more here (no --gc-sections).
+  sec = nil
+  while !rest.empty? && (head_of(rest[0]) == "section" || head_of(rest[0]) == "used")
+    sec = rest[0] if head_of(rest[0]) == "section"
+    rest = rest.drop(1)
+  end
+  raise Refused, "section attribute on a thread-local global #{name}" if sec && thread
   raise BadIR, "global #{name}: expected one INIT" if rest.length != 1
   init = rest[0]
   h = head_of(init)
@@ -3000,6 +3008,10 @@ def emit_global(mod, g)
     mod.sp_globals << [qsym(name), size]
   end
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
+  if sec
+    sec_flags = pstr(sec[2]) == "ro" ? "a" : "aw"
+    linkage += "section \"#{pstr(sec[1]).delete('"')}\" \"#{sec_flags}\" "
+  end
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}data $#{qsym(name)} = align #{align} { #{pieces.join(", ")} }"
 end
