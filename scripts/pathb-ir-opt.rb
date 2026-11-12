@@ -1666,6 +1666,69 @@ def strip_eh_pass(forms, report)
   forms
 end
 
+# ---- EH frames of leaf functions (--strip-leaf-eh) ------------------------------------------------------------------------
+# A function with no call has nothing that can throw, so the EH stack entry it pushes (a noexcept guard, kind 6, or a
+# cleanup frame) is never read: only a throw walks the stack. libstdc++'s accessors (shared_ptr::get, vector::size, ...) are
+# such functions, and each pushes and pops a 240-byte entry on thread-local state. The pass drops the entry's slot, its
+# initialisation, the push and the pop, and the writes of __eh_curr_region. It leaves a function unchanged when anything
+# else reads the entry (every register and slot it removes must be gone from what remains), so a leaf that does use its
+# frame, or that the front end shaped otherwise, is kept as it was. Run before --inline, the inliner copies the lean callee.
+
+def leaf_eh_function(f)
+  return [f, 0] if count_heads(f, "call") > 0
+  frames = f.select { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
+  return [f, 0] if frames.empty?
+  fnames = frames.map { |c| "$" + c[1] }
+  removed_regs = {}
+  n = 0
+  walk = lambda do |list|
+    out = []
+    list.each do |c|
+      unless c.is_a?(Array)
+        out << c
+        next
+      end
+      h = head(c)
+      drop = false
+      if h == "slot" && fnames.include?("$" + c[1].to_s)
+        drop = true
+      elsif h == "store" && c[2].is_a?(String) && EH_GLOBALS.include?(c[2])
+        drop = true
+      elsif h == "store" && (fnames.include?(c[2]) || removed_regs.key?(c[2]))
+        drop = true
+      elsif h == "let" && head(c[3]) == "load" && (EH_GLOBALS.include?(c[3][2]) || fnames.include?(c[3][2]))
+        removed_regs[c[1]] = true
+        drop = true
+      elsif h == "let" && head(c[3]) == "offset" && fnames.include?(c[3][1])
+        removed_regs[c[1]] = true
+        drop = true
+      end
+      if drop
+        n += 1
+      else
+        out << walk.call(c)
+      end
+    end
+    out
+  end
+  g = walk.call(f)
+  gone = fnames.to_a + removed_regs.keys
+  return [f, 0] if atoms_of(g).any? { |a| gone.include?(a) }
+  [g, n]
+end
+
+def strip_leaf_eh_pass(forms, report)
+  total = 0
+  forms = forms.map do |f|
+    next f unless head(f) == "function"
+    g, n = leaf_eh_function(f)
+    total += n
+    g
+  end
+  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of leaf functions\n") if report
+  forms
+end
+
 # ---- unreachable functions (--prune-unreachable=SUBSTR) -------------------------------------------------------------------
 # Drops the functions and the global or data objects that no root reaches. The roots are the functions whose name contains
 # SUBSTR (the SYCL device build's entry kernels, __nfcxx_sycl_entry_). A reached function or object reaches each function or
@@ -1738,6 +1801,7 @@ def main(argv)
   report = false
   forward = false
   strip_eh = false
+  strip_leaf = false
   prune = nil
   jobs = default_jobs
   file = nil
@@ -1771,6 +1835,8 @@ def main(argv)
       forward = true
     elsif a == "--strip-eh"
       strip_eh = true
+    elsif a == "--strip-leaf-eh"
+      strip_leaf = true
     elsif a.start_with?("--jobs=")
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")
@@ -1787,7 +1853,7 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa || forward || strip_eh || prune
+  unless inline || sroa || forward || strip_eh || strip_leaf || prune
     $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
@@ -1801,6 +1867,7 @@ def main(argv)
     end
     forms = prune_pass(forms, prune, report) if prune
     forms = strip_eh_pass(forms, report) if strip_eh
+    forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
     # the callees that the inliner copied into every caller are not reached any more
     forms = prune_pass(forms, prune, report) if prune && inline
