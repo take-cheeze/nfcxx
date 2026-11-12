@@ -94,12 +94,45 @@ What this says about the model:
 The SIMD transpose matters little here: the transpose costs MK work against MNK of GEMM, and with N = 256 that is a
 small share. It matters most in the scalar-versus-SIMD rows at K = 32, where the scalar loop was 2 times vec-n.
 
+## Packed-B test (second round, quiet host)
+
+Hypothesis from the first round: the M-vectorized kernel reads B column-wise (`B[k*N + n]`, stride N), and that cost
+explains the small-K gap. Test: the same kernel with B packed once into `Bt[n*K + k]`, so the broadcast of B reads
+contiguous memory. Packing is timed separately and is not in the kernel timing. The packed kernel gives the same bits as
+the strided one (same summation order), checked in the driver. `M = N = 256`, best of 15 timings of 50 calls each;
+two runs, the second agrees with the first within a few percent. Load average was under 1 during the runs.
+
+| K | vec-n (us) | vec-m (us) | vec-m packed B (us) | pack (us) | vec-m / vec-n | packed / vec-n |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | 28.6 | 29.9 | 30.2 | 2.1 | 1.04 | 1.05 |
+| 8 | 40.0 | 56.6 | 59.1 | 2.1 | 1.41 | 1.48 |
+| 12 | 61.9 | 57.4 | 58.1 | 2.7 | 0.93 | 0.94 |
+| 16 | 78.6 | 69.3 | 68.0 | 5.0 | 0.88 | 0.87 |
+| 24 | 92.9 | 104.1 | 121.5 | 3.7 | 1.12 | 1.31 |
+| 32 | 134.7 | 152.9 | 141.4 | 4.5 | 1.14 | 1.05 |
+| 64 | 434.9 | 513.2 | 372.9 | 8.2 | 1.18 | 0.86 |
+| 128 | 1279.1 | 1781.0 | 1374.3 | 39.4 | 1.39 | 1.07 |
+
+What this says:
+
+- **Packing B does not change the time at any K.** The column-wise reads of B are not the cause, so the hypothesis is
+  rejected.
+- **Correction to the first round.** The first round reported vec-n about 1.5 times faster at K = 4, and this round finds
+  parity (1.04). The earlier small-K numbers came from a busier host and are not reliable; the claim above is withdrawn.
+- **What holds on a quiet host:** vec-m is slower at K = 8 (about 1.4 times) and at K = 24 to 32 (about 1.1 to 1.14),
+  and faster at K = 12 to 16 (about 0.9). vec-n is faster at K = 64 and up (1.2 to 1.4 times, vec-m / vec-n).
+- **Against the model:** the model predicts vec-m wins below K = 16 and vec-n above it. This round supports the
+  prediction only at K = 12 to 16, and it contradicts it at K = 8. Above K = 24 it agrees.
+
+The timing driver and the generator used for this round are not in the repository. They wrap the emitter's output
+with the entry point renamed to `kernel` and a sixth argument `Bt`, and the strided kernel's `B[k * N + n]` broadcast
+replaced by `Bt[n * K + k]` for the packed variant.
+
 ## Next steps on this target
 
-1. Test the B-access hypothesis for the small-K gap: pack B into column blocks before the vec-m loop (or time vec-m
-   with a transposed B), and see whether K = 4 moves toward vec-n.
-2. Repeat the timing with more hosts or repetitions before drawing a crossover from it; the noise at K = 24 and 32 is
-   about as large as the differences.
+1. Find out why vec-m is slower at K = 8 and K = 24 to 32 while faster at K = 12 to 16. Candidates: the inner k-loop
+   length against the unrolling the compiler picks, and the per-column stores of C in the M-vectorized kernel.
+2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 
