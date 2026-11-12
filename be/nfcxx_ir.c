@@ -3422,6 +3422,8 @@ static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
    the emitter refuses with the name instead of the program failing to link. docs/notes/pathb-hosted.md lists them. */
 
 /* Small helpers for the expansions: typed constants and two-operand lets on IR type names. */
+static int ir_osz_const(an_expr_node_ptr e, long long *v);
+
 static char *ir_k(const char *ty, unsigned long long v)
 {
   return ir_fmt("(const %s %llu)", ty, v);
@@ -3624,6 +3626,30 @@ static int ir_bit_generic(an_expr_node_ptr e, const char *name, ir_val *out)
 #define IR_LIBM_TYPED(base, single) ((single) ? base "f" : base)
 #endif
 
+/* The result of fpclassify: c holds the host libm's FP_* class. The five class arguments (nan, inf, normal, subnormal, zero)
+   are the program's own values, so when they are not the host's, each class maps to its argument. */
+static char *ir_fpclass_map(an_expr_node_ptr e, char *c)
+{
+#ifdef __APPLE__
+  static const long long host[5] = { 1, 2, 4, 5, 3 };
+#else
+  static const long long host[5] = { 0, 1, 4, 3, 2 };
+#endif
+  const char *it = "int";
+  long long cv;
+  int same = 1, ci;
+  char *sum;
+  for (ci = 0; ci < 5; ci++)
+    if (!ir_osz_const(ir_operand(e, ci + 1), &cv) || cv != host[ci]) same = 0;
+  if (same) return c;
+  sum = ir_k(it, 0);
+  for (ci = 0; ci < 5; ci++) {
+    char *eq = ir_cv(it, ir_let("bool", ir_fmt("(eq %s %s %s)", it, c, ir_k(it, (unsigned long long)host[ci]))));
+    sum = ir_o2("wadd", it, sum, ir_o2("wmul", it, eq, ir_rval(ir_operand(e, ci + 1)).s));
+  }
+  return sum;
+}
+
 /* The floating-point classification and comparison built-ins (<cmath>'s isnan, isinf, isfinite, isnormal, signbit, fpclassify,
    isgreater ...): 1 when NAME is one and its lowering is in *out. x - x is 0 for a finite x and NaN for an infinity or a NaN,
    which tells them apart without bit tricks; the comparisons are the ordered ones QBE has (false when unordered), which is
@@ -3666,7 +3692,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
       /* libm's classification returns the FP_* values of the same <math.h> that supplied the five constants */
       ir_val x = ir_rval(xa);
       ir_note(0, eok_call, 1);
-      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, IR_LIBM_TYPED("__fpclassify", ir_size_of(xa->type) == 4), x.s)), e->type);
+      *out = ir_mk_value(ir_fpclass_map(e, ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, IR_LIBM_TYPED("__fpclassify", ir_size_of(xa->type) == 4), x.s))), e->type);
       return 1;
     }
     return 0;
@@ -4255,7 +4281,10 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
         (strcmp(name, "fpclassify") == 0 || strcmp(name, "isnormal") == 0)) {
       ir_val x = ir_rval(last);
       ir_note(0, eok_call, 1);
-      *out = ir_mk_value(ir_fo_ret(last->type, "int", name[0] == 'f' ? "fpclassify" : "isnormal", x.s), e->type);
+      {
+        char *r = ir_fo_ret(last->type, "int", name[0] == 'f' ? "fpclassify" : "isnormal", x.s);
+        *out = ir_mk_value(name[0] == 'f' ? ir_fpclass_map(e, r) : r, e->type);
+      }
       return 1;
     }
     if (arg != NULL && arg->next != NULL && arg->type != NULL && ir_is_fobj(arg->type) && arg->next->type != NULL &&
