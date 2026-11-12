@@ -112,6 +112,12 @@ if [ "$hosted" != 0 ] && [ "$(uname -s)" = Darwin ]; then
   posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
   darwin_opts=(--preinclude "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
 fi
+# Hosted on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64 target)
+# does not have. lib/pathb/linux-aarch64-include/bits/math-vector.h replaces it with an empty one (no vector declarations, as
+# the x86-64 header has without -ffast-math).
+if [ "$hosted" != 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; }; then
+  darwin_opts+=(-I "$root/lib/pathb/linux-aarch64-include")
+fi
 export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
 # The IR back end keeps the module's functions in a file in TMPDIR; the front end runs in the base dir, so make it absolute.
 [ -z "${TMPDIR:-}" ] || export TMPDIR="$(abs_path "$TMPDIR")"
