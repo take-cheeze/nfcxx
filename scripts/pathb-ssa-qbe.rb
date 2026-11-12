@@ -1704,7 +1704,8 @@ end
     end
 
     # Signed 32-bit division or remainder by a constant d >= 3 that is not a power of two: no division instruction (Lemire,
-    # "Beating the compiler at signed 32-bit division", 2026). With s = 31 + ceil(log2 d) and c = floor(2^s / d) + 1 (c fits
+    # "Beating the compiler at signed 32-bit division", 2026, https://lemire.me/blog/2026/10/31/beating-the-compiler-at-signed-32-bit-division/).
+    # With s = 31 + ceil(log2 d) and c = floor(2^s / d) + 1 (c fits
     # in 32 bits), the quotient is the low 32 bits of ((int64)x * c) >> s, plus 1 when x is negative (x >> 31 is -1). The
     # 64-bit product is below 2^63 in magnitude, so it does not overflow; the whole sequence is exact for every int32 x.
     # The remainder is x - q * d. tests/pathb-ssa-qbe/cases/div_const_signed32.ir checks it against the interpreter.

@@ -27,7 +27,7 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   the operation; codes 1 division by zero, 2 signed overflow, 3 shift count out of range, 4 float to integer out of range.
   A signed 32-bit `cdiv` or `crem` by a constant d >= 3 that is not a power of two has no division instruction: the quotient
   is the high part of a 64-bit multiply by c = floor(2^s / d) + 1 (s = 31 + ceil(log2 d)), plus 1 for a negative dividend,
-  and the remainder is x - q * d (`magic_div32_lines`; Lemire, "Beating the compiler at signed 32-bit division", 2026).
+  and the remainder is x - q * d (`magic_div32_lines`; Lemire, "Beating the compiler at signed 32-bit division", 2026, https://lemire.me/blog/2026/10/31/beating-the-compiler-at-signed-32-bit-division/).
   QBE emits `idivl` for a constant `div`, so this is what removes it. Powers of two, negative and 64-bit divisors, and
   variable divisors keep the division instruction.
   The checked add, subtract, multiply and negate (`cadd`, `csub`, `cmul`, `cneg`) check with code 2: a narrow type is
