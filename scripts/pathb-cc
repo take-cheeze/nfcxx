@@ -108,7 +108,7 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
 fi
 ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
 # The mruby emitter only: on Darwin an extern data object is read through the GOT (see pathb-qbe-emit.rb, --extern-data-got).
-emitopt=(); [ "$(uname -s)" = Darwin ] && emitopt=(--extern-data-got)
+emitopt=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emitopt=(--extern-data-got)
 # And the target of the x87 thunks (x86-64 assembly; an arm64 module that needs one is refused): PATHB_X87_TARGET, else the host's.
 # pathb-qbe-emit.rb reads its options in a fixed order (--long-double=trap, --extern-data-got, --x87-target=, --safe): see the call below.
 emitopt+=(--x87-target="${PATHB_X87_TARGET:-$(uname -m)}")

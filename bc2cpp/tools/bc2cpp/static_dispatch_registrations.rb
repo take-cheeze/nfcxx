@@ -78,6 +78,9 @@ require_relative 'define_method_sites'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
+  # CORE_ROWS_COMPILED: the core gem is generated with the engine's, and only the core rows run reads it
+  # (core_excluded's +core_run+): the closed build is VM-free, so a compiled core body looks up what its code does.
+  CORE_GEM = 'mruby-core-compiled'
 
   # Ops::SEND plus LOADSYM, whose symbol operand is read as a method name.
   SEND_OPS = (BytecodeIR::Ops::SEND | %i[LOADSYM]).freeze
@@ -91,6 +94,11 @@ module StaticDispatchRegistrations
   # (the open static dispatch list) suddenly looked reachable.
   REGISTRATION_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
   # LEFT_OUT (codegen_emit.rb): what stands in for a left-out entry's registration, which looks nothing up.
+  # A compiled class body's registration on `self` (CORE_ROWS_COMPILED: the core gem's class bodies), as a statement.
+  SELF_REGISTRATION_STMT = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,[^;]*\);/
+  # GENERATED_COMMENTS: a whole-line comment of the generated code (the probe's annotations, `// POLY_DIAG ... name="x"`)
+  # looks nothing up, so its quoted names are no literals.
+  GENERATED_COMMENT = %r{^[ \t]*//[^\n]*$}
   LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
   # A Ruby identifier, and -- because a generated C++ symbol may contain the
   # mangling's `$<hex>` escapes -- a generated one. Kept lowercase-initial and
@@ -1177,7 +1185,7 @@ module StaticDispatchRegistrations
     # Every gem, from one shared analysis. The generation depends only on the lists, so the open and the closed
     # analysis of a pass share it.
     fresh = ((@fresh_generation ||= {})[StaticDispatchLists.dump(lists)] ||=
-               NeverCalledRegistrations.run_bc2cpp_full_many(GEMS, repo_root, mrbc, lists_path: lists_path))
+               NeverCalledRegistrations.run_bc2cpp_full_many(GEMS + [CORE_GEM], repo_root, mrbc, lists_path: lists_path))
     runs = GEMS.to_h do |gem|
       out, err = fresh.fetch(gem)
       [gem, { gen: out, err: err, entries: NeverCalledRegistrations.parse_compiled_entries(err) }]
@@ -1426,10 +1434,13 @@ module StaticDispatchRegistrations
       suffix_bases = text if built.empty?
     end
 
+    core_out, core_err = fresh.fetch(CORE_GEM)
+    core_run = { gen: NativeFrameUse.strip_rows(core_out),
+                 compiled: NeverCalledRegistrations.parse_compiled_entries(core_err).to_set { |m| "#{m[:owner]}##{m[:name]}" } }
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven,
                                                 engine_dynamic: symbol_lookups && rows_dynamic,
-                                                super_names: super_reach.keys.to_set | super_unknown) : nil
+                                                super_names: super_reach.keys.to_set | super_unknown, core_run: core_run) : nil
 
     { super_reach: super_reach, class_owners: class_owners,
       registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
@@ -1446,7 +1457,7 @@ module StaticDispatchRegistrations
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
   # The third list is CORE_ROWS (core_rows.rb): the ROM entries left only to proven-receiver lookups, kept as rows.
   def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups,
-                    proven = {}, engine_dynamic: nil, super_names: Set.new)
+                    proven = {}, engine_dynamic: nil, super_names: Set.new, core_run: nil)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
@@ -1454,7 +1465,9 @@ module StaticDispatchRegistrations
     # One proof, made when first asked, for the name scan and the removal of the Enumerator methods.
     proof = -> { @enumerator_free_proof ||= enumerator_free_proof(core, ireps, native, map, engine_tuple, symbol_lookups, repo_root) }
     names, fragments, undef_only = CoreNativeCandidates.reachable(ireps, native, generated, core: core, exact_impls: true,
-                                                      strip_generated: ->(src) { src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '') },
+                                                      strip_generated: lambda { |src|
+                                                        src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                      },
                                                       diagnostic_literals: !symbol_lookups.nil?,
                                                       enumerator_free: -> { proof.call.holds },
                                                       names: core_names || Set.new)
@@ -1467,13 +1480,19 @@ module StaticDispatchRegistrations
     rom = CoreNativeCandidates.candidates(entries, names, fragments, proven)
     rows = []
     if engine_dynamic
-      engine = CoreRows.engine_names(ireps, generated, engine_dynamic, super_names)
-      row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, generated.map { |src| CoreRows.strip_sym_table(src) },
+      # CORE_ROWS_COMPILED: the core gem's code counts like the engine's, and the bodies it compiles are not read again.
+      row_generated = core_run ? generated + [core_run[:gen]] : generated
+      engine = CoreRows.engine_names(ireps, row_generated, engine_dynamic, super_names)
+      row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, row_generated.map { |src| CoreRows.strip_sym_table(src) },
                                                                 core: core, exact_impls: true,
-                                                                strip_generated: ->(src) { src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '') },
+                                                                strip_generated: lambda { |src|
+                                                                  src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                                     .gsub(SELF_REGISTRATION_STMT, '')
+                                                                },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
-                                                                enumerator_free: -> { proof.call.holds }, engine_names: engine)
-      rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven) - rom
+                                                                enumerator_free: -> { proof.call.holds }, engine_names: engine,
+                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?)
+      rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
     end
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
      CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only)]

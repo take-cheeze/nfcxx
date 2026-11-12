@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -390,11 +390,26 @@ module Qbe
   def global_data(g, by_name, state)
     name = g[1].raw
     if state.key?(name)
-      return state[name] == :busy ? nil : state[name]
+      # A global that is being built is reached again through a cycle of addresses (serial8250_reg and univ8250_console
+      # point at each other): its address is a link-time symbol, so the reference stands, and is withdrawn below if the
+      # global turns out not to be emitted.
+      return state[name] == :busy ? true : state[name]
     end
 
     state[name] = :busy
     state[name] = build_data(g, by_name, state)
+    withdraw_users(name, state) if state[name].nil?
+    state[name]
+  end
+
+  # The globals whose data names the address of `name` (state[[:users, name]]) lose theirs when `name` is not emitted.
+  def withdraw_users(name, state)
+    (state.delete([:users, name]) || []).each do |user|
+      next if state[user].nil?
+
+      state[user] = nil
+      withdraw_users(user, state)
+    end
   end
 
   def global_flags(g) = g.map { |x| x.is_a?(Array) ? head(x) : x }
@@ -471,6 +486,7 @@ module Qbe
         # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
         return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
 
+        (state[[:users, target.raw]] ||= []) << g[1].raw unless target.raw == g[1].raw
         suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
         items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
       else return nil
@@ -551,6 +567,7 @@ module Qbe
     end
 
     def emit
+      split_wide_phis
       header
       allocs
       escape_slots if returns_twice?(@blocks)
@@ -989,6 +1006,58 @@ end
 
     def block_label(num) = "b#{num}"
 
+    # QBE reads at most 63 predecessors in a phi ("too many arguments"). A block that has more (the join of the dispatch
+    # switches of a computed-goto interpreter: Lua's lvm.c has 83 `goto *` and a label every one of them reaches) gets
+    # its predecessors in groups of PHI_GROUP: each group jumps to a block of its own that merges the group's values with a
+    # phi and jumps on, and the phi of the block reads one value per group.
+    PHI_GROUP = 48
+
+    def split_wide_phis
+      extra = []
+      next_num = @blocks.map { |b| b[1].to_s.to_i }.max.to_i + 1
+      @blocks.each do |b|
+        phis = b[2..].select { |it| head(it) == "phi" }
+        next if phis.empty? || phis[0].size - 3 <= PHI_GROUP
+
+        preds = phis[0][3..].map { |pr, _| pr }
+        groups = []
+        preds.each_slice(PHI_GROUP) { |g| groups << g }
+        names = groups.each_index.map { |k| b[1].is_a?(Integer) ? next_num + k : (next_num + k).to_s }
+        next_num += groups.size
+        route = {}
+        groups.each_with_index { |g, k| g.each { |pr| route[pr.to_s] = names[k] } }
+        groups.each_with_index do |g, k|
+          merged = phis.map do |ph|
+            ["phi", "%wp#{ph[1][1..]}_#{k}", ph[2]] + ph[3..].select { |pr, _| route[pr.to_s] == names[k] }
+          end
+          extra << (["bb", names[k]] + merged + [["br", b[1]]])
+        end
+        target = b[1].to_s
+        @blocks.each do |pb|
+          next unless route.key?(pb[1].to_s)
+
+          term = pb[-1]
+          pb[-1] = retarget_term(term, target, route[pb[1].to_s]) if %w[br condbr switch].include?(head(term))
+        end
+        b.map! do |it|
+          next it unless head(it) == "phi"
+
+          ["phi", it[1], it[2]] + names.each_index.map { |k| [names[k], "%wp#{it[1][1..]}_#{k}"] }
+        end
+      end
+      @blocks.concat(extra)
+    end
+
+    def retarget_term(term, target, to)
+      return term unless to
+
+      case term[0]
+      when "br" then term[1].to_s == target ? ["br", to] : term
+      when "condbr" then ["condbr", term[1], term[2].to_s == target ? to : term[2], term[3].to_s == target ? to : term[3]]
+      else ["switch", term[1], term[2].map { |v, bl| [v, bl.to_s == target ? to : bl] }, term[3].to_s == target ? to : term[3]]
+      end
+    end
+
     # Checks that need no emission: a switch's targets may not repeat where a phi reads them, and a phi operand that is an
     # expression is computed at the end of its predecessor, so the phi reads a temporary.
     def plan_phis
@@ -1014,7 +1083,7 @@ end
           next unless head(it) == "phi"
 
           it[3..].each do |pred, v|
-            next unless expression?(v)
+            next unless phi_computed?(v)
 
             name = "%pe#{it[1][1..]}_#{pred}"
             @pending[pred.to_s] << [name, v]
@@ -1044,8 +1113,31 @@ end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
 
+    # The cell of a pointer constant that does not fit in 32 bits (module_context), else nil.
+    def wide_pointer_cell(v)
+      return nil unless v.is_a?(Array) && @link[:wides]
+      return @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2]), v[1])] if head(v) == "const" && head(v[1]) == "ptr" && v[2].is_a?(String)
+      return nil unless head(v) == "i2p" && head(v[2]) == "const" && v[2][2].is_a?(String)
+
+      @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2][2]), v[1])]
+    end
+
+    # A phi operand that takes instructions: an expression, or the address of a function this module does not define
+    # (loaded from its pointer cell, see op). QBE wants nothing but phis at the top of a block, and the operand must be
+    # defined where its edge starts, so the predecessor computes it (pending_phi_operands).
+    def phi_computed?(v)
+      return true if expression?(v)
+
+      v.is_a?(Ref) && v.sigil == "&" && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+    end
+
     def pending_phi_operands(num)
       @pending.fetch(num, []).each do |name, v|
+        if v.is_a?(Ref)
+          @lines << "  #{reg(name)} =l copy #{op(v)}"
+          @types[name] = ["ptr", "void"]
+          next
+        end
         let_lines(name, v[1], v)
         @types[name] = v[1]
       end
@@ -1060,7 +1152,7 @@ end
     # The type of an operand: a constant's or an expression's own type, or the declared type of a register.
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
-      return "ptr" if x.is_a?(Array) && head(x) == "null"
+      return(x[1].is_a?(Array) ? x[1] : ["ptr", "void"]) if x.is_a?(Array) && head(x) == "null"
       return Qbe.expr_type(x) if expression?(x)
 
       @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
@@ -1316,7 +1408,7 @@ end
           # On Darwin an extern object is usually in a dylib (libc++'s vtable or typeinfo for std::length_error): the
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
-          if info[:extern] && Qbe.darwin
+          if info[:extern] && Qbe.got_extern
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -1378,7 +1470,7 @@ end
       case head(item)
       when "phi"
         pairs = item[3..].map do |pred, v|
-          text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
+          text = phi_computed?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
           "#{phi_placeholder(@cur, pred)} #{text}"
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
@@ -1440,6 +1532,10 @@ end
         # A fetch-and-add whose old value is discarded (a shared_ptr's count) is the same locked xadd, not a libatomic call.
         if atomic_fetch?(item[1])
           atomic_fetch_lines(fresh, nil, item[1])
+          return
+        end
+        if atomic_store?(item[1])
+          atomic_store_lines(item[1])
           return
         end
 
@@ -1557,7 +1653,16 @@ end
           @lines << "  #{raw} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
           canon_lines(dst, t, raw)
         else
-          @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+          a = op(rv[2])
+          b = op(rv[3])
+          # `x + CONST` of 64 bits whose constant does not fit in a displacement: see index_lines (`__va(x)` of the kernel).
+          if head(rv) == "wadd" && c == "l" && wide_literal?(b)
+            @lines << "  #{dst} =l sub #{a}, #{-b.to_i}"
+          elsif head(rv) == "wadd" && c == "l" && wide_literal?(a)
+            @lines << "  #{dst} =l sub #{b}, #{-a.to_i}"
+          else
+            @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{a}, #{b}"
+          end
         end
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
@@ -1588,7 +1693,12 @@ end
         @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
       # An integer to pointer conversion widens the integer as an iconv to a 64-bit type does (pathb-qbe-emit.rb's i2p).
-      when "i2p" then conv_lines(dst, t, rv[2])
+      when "i2p"
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+        else
+          conv_lines(dst, t, rv[2])
+        end
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
@@ -1601,7 +1711,7 @@ end
           @lines << "  #{raw} =s #{call_text(rv)}"
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
-          @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
+          @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -1684,6 +1794,10 @@ end
         end
       when "const", "null", nil
         # A bare slot address (a Ref): the inliner's copies of an argument's slot (an SSA rewrite can leave one as a let's value).
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+          return
+        end
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
         raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
       else raise QbeUnsupported, "operator #{head(rv) || sx(rv)}"
@@ -1845,9 +1959,25 @@ end
         sum = fresh
         @lines << "  #{sum} =l add #{base}, #{scaled}"
         @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
+      elsif wide_literal?(base)
+        # QBE folds `add CONST, x` into the displacement of the load or store that uses it, without checking that the
+        # constant fits in 32 bits (the assembler: "out of range of signed 32bit displacement", for the kernel's
+        # `((long *)0xffff888000000000)[i]`). `sub x, -CONST` is not folded; the constant goes to a register.
+        @lines << "  #{dst} =l sub #{scaled}, #{-base.to_i}"
       else
         @lines << "  #{dst} =l add #{base}, #{scaled}"
       end
+    end
+
+    # An integer literal operand that does not fit in a signed 32-bit displacement.
+    def wide_literal?(text)
+      return false unless text.is_a?(String)
+
+      digits = text.start_with?("-") ? text[1..] : text
+      return false if digits.nil? || digits.empty? || !digits.each_char.all? { |c| DIGITS.include?(c) }
+
+      v = text.to_i
+      v < -2**31 || v >= 2**31
     end
 
     # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
@@ -2341,10 +2471,10 @@ end
       [op, size]
     end
 
-    # Off: the amd64 xadd isel (3rd/qbe 9688fb7) leaves the old value in the register of the copy, not of the result, so
-    # an inlined fetch-add with order 5 reads a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp).
-    # Until that is fixed in the fork, the calls to libatomic are emitted as before.
-    ATOMIC_XADD = false
+    # On with the fork's xadd of 3rd/qbe a5fa6c2 or later: the old value is in the result's register (the isel), a load is not forwarded
+    # across the locked add (load.c), and the add is kept when its old value is unused (a shared_ptr's count). Before them the
+    # lowering read a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp), and was off.
+    ATOMIC_XADD = true
 
     def atomic_fetch?(c)
       return false unless ATOMIC_XADD
@@ -2355,9 +2485,10 @@ end
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
     end
 
-    # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
+    # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
     # locked stores and exchanges the lowering uses). Only without --safe.
-    ATOMIC_LOAD = %w[__atomic_load_4 __atomic_load_8].freeze
+    ATOMIC_LOAD = %w[__atomic_load_1 __atomic_load_2 __atomic_load_4 __atomic_load_8].freeze
+    ATOMIC_LOAD_OP = { "1" => "w loadub", "2" => "w loaduh", "4" => "w loadw", "8" => "l loadl" }.freeze
 
     def atomic_load?(c)
       f = c[2]
@@ -2365,6 +2496,43 @@ end
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
       head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+    end
+
+    # __atomic_store_N (N = 1, 2, 4, 8) with a constant order: a plain store, which on x86 is already a release store. A
+    # sequentially consistent store (order 5) needs a full barrier after it: a locked add of 0 (xadd) on the object, or for 1 and
+    # 2 bytes on the aligned 4-byte word that holds it (adding 0 changes no byte; the word is in the object's page).
+    ATOMIC_STORE_OP = { "1" => "storeb", "2" => "storeh", "4" => "storew", "8" => "storel" }.freeze
+
+    def atomic_store?(c)
+      f = c[2]
+      return false unless ATOMIC_XADD
+      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_store_") && ATOMIC_STORE_OP.key?(name[-1])
+
+      order = c[5]
+      return false unless head(order) == "const"
+
+      o = order[2].to_s
+      return true if o == "0" || o == "3"
+
+      o == "5"
+    end
+
+    def atomic_store_lines(c)
+      size = c[2].raw.delete('"')[-1]
+      addr = op(c[3])
+      @lines << "  #{ATOMIC_STORE_OP[size]} #{op(c[4])}, #{addr}"
+      return unless c[5][2].to_s == "5"
+
+      if size == "1" || size == "2"
+        word = fresh
+        @lines << "  #{word} =l and #{addr}, -4"
+        @lines << "  #{fresh} =w xadd #{word}, 0"
+      else
+        @lines << "  #{fresh} =#{size == "4" ? "w" : "l"} xadd #{addr}, 0"
+      end
     end
 
     def atomic_fetch_lines(dst, cls, c)
@@ -2978,6 +3146,7 @@ funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a lis
 forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
 cells = []
 cell_seen = {}
+wides = {}   # wide pointer constant => the name of its cell
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
@@ -2990,7 +3159,15 @@ collect = lambda do |x|
     end
     next
   end
-  if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+  # (a `(const (ptr T))` with no value is a qualified type, not a constant)
+  if (head(x) == "const" && head(x[1]) == "ptr" && x[2].is_a?(String)) || (head(x) == "i2p" && head(x[2]) == "const" && x[2][2].is_a?(String))
+    # A pointer constant that does not fit in a 32-bit displacement: QBE propagates it through copies and phis into the
+    # displacement of the access that uses it, unchecked (Fn#wide_pointer_cell). It is loaded from a cell instead.
+    k = head(x) == "i2p" ? Qbe.wrap_lit(Qbe.int_lit(x[2][2]), x[1]) : Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1])
+    unless (-2**31...2**31).cover?(k) || wides.key?(k)
+      wides[k] = "pathb_wide#{wides.size}"
+    end
+  elsif head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
     x[3..].each { |a| collect.call(a) }
   else
     x.each { |y| collect.call(y) }
@@ -2998,7 +3175,8 @@ collect = lambda do |x|
 end
 forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
 data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
-{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, ubfiles: {} } }
+data += wides.map { |k, name| "data $#{name} = align 8 { l #{k} }" }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, wides: wides, ubfiles: {} } }
   end
 
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's
