@@ -32,7 +32,7 @@ for f in "$root"/tests/cases/*.cpp; do
   if ! "$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/$n.c" "$f" 2>"$tmp/$n.edg"; then
     # The target configuration has no hosted C++ headers, so a case that includes <cstdint>, <map>,
     # etc. cannot be generated for it. That is a limit of this check, not a failure of the case.
-    if grep -q "cannot open source file" "$tmp/$n.edg"; then
+    if tr -s " \n" "  " < "$tmp/$n.edg" | grep -q "cannot open source file"; then   # EDG wraps the message after "cannot open"
       echo "skip $n: SKIP-headers: $target has no hosted C++ headers"; skip=$((skip+1)); continue
     fi
     echo "FAIL (edg) $n"; head -3 "$tmp/$n.edg"; fail=1; continue
