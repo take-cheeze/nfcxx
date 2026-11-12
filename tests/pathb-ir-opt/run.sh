@@ -16,6 +16,11 @@ if grep -q '(call int &"square"' "$out/helper_inline.ir"; then echo "inline help
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 weighted_cost.ir > "$out/wc_w.ir" || fail=1
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 --cost=nodes weighted_cost.ir > "$out/wc_n.ir" || fail=1
 if ! grep -q '(call int &"decls"' "$out/wc_w.ir" && grep -q '(call int &"decls"' "$out/wc_n.ir"; then echo "weighted cost: ok"; else echo "weighted cost: FAIL"; fail=1; fi
+# Past --max-growth only a tiny callee (--max-tiny, default 16) is still inlined: with a budget of half the module, the tiny
+# callee goes in and, with --max-tiny=0, it stays a call.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 weighted_cost.ir > "$out/tiny_on.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 --max-tiny=0 weighted_cost.ir > "$out/tiny_off.ir" || fail=1
+if ! grep -q '(call int &"decls"' "$out/tiny_on.ir" && grep -q '(call int &"decls"' "$out/tiny_off.ir"; then echo "tiny callee: ok"; else echo "tiny callee: FAIL"; fail=1; fi
 # The same file through the whole pipeline (inline, then scalar replacement with constant propagation and unrolling): the
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
