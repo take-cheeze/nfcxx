@@ -28,6 +28,8 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL fmt: checkout $pin failed"; exit 1; }
 
+# Path B (NFCXX_BACKEND=pathb) does not build fmt yet: the SSA route refuses fmt_main.cpp ("not emitted:
+# _ZN3fmt3v126detail7uint128pLEm: operator unsupported", detail::uint128_fallback::operator+=), so the default stays gcc.
 backends=${NFCXX_BACKEND:-gcc}
 modes=${FMT_MODES:-"header compiled"}
 main=$root/tests/realworld/fmt_main.cpp

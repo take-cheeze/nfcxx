@@ -150,7 +150,7 @@ run_one() {
   # Apple's ld64 cannot link a weak reference to a symbol nothing defines (the ELF link gives it address 0): on Darwin such a
   # reference is bound at load time instead (dynamic lookup: an absent symbol reads as null, as on ELF).
   wl=; if [ "$(uname -s)" = Darwin ] && grep -q '^[[:space:]]*\.weak_reference ' "$s"; then wl="-Wl,-undefined,dynamic_lookup"; fi
-  if ! cc -o "$exe" "$obj" $wl "$ldrt" $shim -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" $wl "$ldrt" $shim "$libdir/libC.a" $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -251,7 +251,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" $shim $rpath "$ldrt" -L"$libdir" -lC $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $shim $rpath "$ldrt" "$libdir/libC.a" $cxx_link_libs -lpthread -lm $atomic_link_lib 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))

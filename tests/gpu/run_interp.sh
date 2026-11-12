@@ -50,12 +50,12 @@ for m in mul3 nobounds; do
   echo "mutant $m caught (interpreter exit $status)"
 done
 
-# An instruction the interpreter does not model is refused before it runs (exit 3).
-# (the first load of the kernel, whatever its registers are: promotion changes the numbers)
-sed '0,/ld.s32 %r[0-9]*, \[%rd[0-9]*\];/s//&\n  bar.sync 0;/' "$out/mul2.ptx" > "$out/barrier.ptx"
+# An instruction the interpreter does not model is refused before it runs (exit 3). A fence is not modelled (bar.sync and
+# atom are, see run_sched.sh). (the first load of the kernel, whatever its registers are: promotion changes the numbers)
+sed '0,/ld.s32 %r[0-9]*, \[%rd[0-9]*\];/s//&\n  fence.sc.gpu;/' "$out/mul2.ptx" > "$out/fence.ptx"
 status=0
-"$out/ptxi" "$out/barrier.ptx" "${launch[@]}" > /dev/null 2>&1 || status=$?
-[ "$status" -eq 3 ] || { echo "barrier: expected exit 3, got $status" >&2; exit 1; }
+"$out/ptxi" "$out/fence.ptx" "${launch[@]}" > /dev/null 2>&1 || status=$?
+[ "$status" -eq 3 ] || { echo "fence: expected exit 3, got $status" >&2; exit 1; }
 echo "unsupported instruction refused (exit 3)"
 
 # A launch that runs past b (2000 elements against a 1064-element buffer) must fault (exit 4).
@@ -127,3 +127,6 @@ if [ "$status" -eq 0 ] && check_struct "$out/struct_int_mut.out"; then
   exit 1
 fi
 echo "struct mutant caught (interpreter exit $status)"
+
+# Scheduling and synchronization: every schedule of the paper's megakernel, barriers, deadlock, and the caps (ptx-interp/run_sched.sh).
+ptx-interp/run_sched.sh

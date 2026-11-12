@@ -1,5 +1,5 @@
 // EXPECT: 0
-// BACKENDS: gcc qbe pathb
+// BACKENDS: gcc pathb
 // Exception handling on several threads at once: each thread runs code with destructors and throws and catches in a
 // loop, while the others do the same. EDG's exception handling state (the stack of EH entries, __curr_eh_stack_entry,
 // and the throw in progress) is per thread (the runtime's RUNTIME_EH_TLS, the front end's --nfcxx_eh_thread_local).

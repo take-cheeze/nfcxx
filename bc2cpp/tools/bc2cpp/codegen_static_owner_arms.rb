@@ -77,9 +77,10 @@ module StaticOwnerArms
       arms = static_owner_arm_targets(m[:name], argv.size, m[:blk] != NO_BLOCK)
       seen = code[[m.begin(0) - 4000, 0].max...m.begin(0)]
       arms = arms.reject { |klass, _| static_owner_already_guarded?(seen, klass, m[:recv]) }
-      next if arms.empty?
+      core = m[:blk] == NO_BLOCK ? static_owner_core_arms(m[:name], argv.size) : []
+      next if arms.empty? && core.empty?
 
-      out << code[pos...m.begin(0)] << static_owner_arms_code(m, arms, argv)
+      out << code[pos...m.begin(0)] << static_owner_arms_code(m, arms, argv, core)
       pos = m.end(0)
     end
     return result if pos.zero?
@@ -88,9 +89,9 @@ module StaticOwnerArms
     result.merge(code: out)
   end
 
-  def static_owner_arms_code(m, arms, argv)
+  def static_owner_arms_code(m, arms, argv, core = [])
     ind = m[:indent]
-    note = arms.map(&:first).join(', ')
+    note = (arms.map(&:first) + core.map(&:first)).join(', ')
     @call_block_expr = m[:blk] == NO_BLOCK ? nil : m[:blk]
     # The lazy heap block of emit_block_fallback_glue sits next to its frame-local one (stack_block_glue).
     @call_block_stack_expr = (heap = m[:blk][/\Abc2cpp_blk_stack_(\d+)\.proc\(\)\z/, 1]) && "bc2cpp_blk_stack_#{heap}.value()"
@@ -100,9 +101,28 @@ module StaticOwnerArms
       "if (bc2cpp_soc == #{owner_class_ptr_expr(klass)}) {\n" \
         "#{ind}    #{m[:dest]} = #{impl}(M, #{([m[:recv]] + call_argv).join(', ')});\n#{ind}  } else "
     end
+    branches += core.map do |klass, t|
+      impl = "#{cpp_name(t.owner, t.name)}_impl"
+      call_argv, = direct_call_args(t, argv, impl)
+      guard = format(BlockCoreDirectFallback::RECEIVERS.fetch(klass)[:guard], r: m[:recv])
+      "if (#{guard}) {\n#{ind}    #{m[:dest]} = #{impl}(M, #{([m[:recv]] + call_argv).join(', ')});\n#{ind}  } else "
+    end
     "#{ind}// STATIC_OWNER_ARMS :#{m[:name]} -> #{note}: exact class, direct call; the owner call for any other " \
       "receiver\n#{ind}{ struct RClass* bc2cpp_soc = mrb_class(M, #{m[:recv]});\n" \
       "#{ind}  #{branches.join}{\n#{ind}    #{m[:dest]} = #{m[:call]}\n#{ind}  } }"
+  end
+
+  # CORE_OWNER_ARMS: the compiled mruby core bodies an owner call with no block reaches on an exact builtin receiver
+  # (BlockCoreDirectFallback::RECEIVERS: Array, Hash, Range, Integer), as [[class, definition]]. The core definitions
+  # are not in the engine registry, so the arms above never name them (`x.abs` on an Integer lands in Numeric#abs);
+  # core_exact_target is CORE_EXACT_DIRECT's proof that the exact class answers the name with that body and nothing else.
+  def static_owner_core_arms(name, argc)
+    return [] unless block_core_world && @native_name_sources && core_extend_enabled?
+
+    BlockCoreDirectFallback::RECEIVERS.filter_map do |klass, spec|
+      target = core_exact_target(klass, spec[:chain], name, argc)
+      [klass, target] if target
+    end
   end
 
   # An arm for K is dead when an enclosing guard already sent class K elsewhere (a TYPED / POLY / INHERITED arm

@@ -2,7 +2,7 @@
 # The EH shim (lib/ehshim, scripts/ehshim, docs/notes/eh-shim.md) on programs that the common runners cannot compile on
 # every backend (<future> and <regex> need std::atomic_flag and builtins that cproc and Path B lack).
 #
-# For each tests/ehshim/*.cpp (foreign/ at the end): `// BACKENDS: gcc qbe pathb` lists the backends that build it (default: gcc); `// EXPECT: N`
+# For each tests/ehshim/*.cpp (foreign/ at the end): `// BACKENDS: gcc pathb` lists the backends that build it (default: gcc); `// EXPECT: N`
 # is the exit code. Every backend must give that exit code and the standard output of the same program built by the host
 # g++ (its exceptions are the reference). `pathb` needs the Path B harness (PATHB_CPFE, PATHB_BASE) and is skipped
 # without it. Exit 1 on a failure.
@@ -21,7 +21,6 @@ for f in tests/ehshim/*.cpp; do
   for b in $backends; do
     case $b in
       gcc) flag_=(--backend=gcc) ;;
-      qbe) flag_=(--backend=qbe) ;;
       pathb)
         if [ ! -x "${PATHB_CPFE:-$PWD/build/pathb/cmake/bin/cpfe}" ]; then echo "skip $f ($b: no Path B harness)"; continue; fi
         flag_=(--backend=pathb) ;;
@@ -37,12 +36,12 @@ for f in tests/ehshim/*.cpp; do
   done
 done
 # foreign/: exceptions thrown with plain `throw` by a library built by g++ (lib.cpp), caught by main.cpp built by nfcxx
-# on both backends (and by g++ for the reference output); also with --eh-unwind on the gcc backend.
+# on gcc and Path B (and by g++ for the reference output); also with --eh-unwind on the gcc backend.
 d=tests/ehshim/foreign
 if "$cxx" -std=c++17 -O1 -shared -fPIC "$d/lib.cpp" -o "$tmp/libforeign.so" 2> "$tmp/foreign.err" &&
    "$cxx" -std=c++17 -pthread -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.host" 2>> "$tmp/foreign.err"; then
   "$tmp/foreign.host" > "$tmp/foreign.host.out"
-  for c in "gcc 0" "qbe 0" "gcc 1"; do
+  for c in "gcc 0" "pathb 0" "gcc 1"; do
     set -- $c; name="$d ($1$([ $2 = 1 ] && echo ', --eh-unwind'))"
     ehf=(); [ $2 = 0 ] || ehf=(--eh-unwind)
     if ! ./nfcxx --backend=$1 ${ehf[@]+"${ehf[@]}"} -I"$d" "$d/main.cpp" -L"$tmp" -lforeign -Wl,-rpath,"$tmp" -o "$tmp/foreign.$1$2" 2> "$tmp/foreign.$1$2.err"; then

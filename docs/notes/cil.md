@@ -6,6 +6,11 @@ not a managed language: C pointers stay raw addresses in unmanaged memory, and t
 
 ## Pipeline
 
+**Routes.** A `-c file.c` compile goes through Path B first (`scripts/pathb-cil -c`: EDG C front end -> typed IR -> `pathb-cil-emit.rb`,
+no cproc; docs/notes/pathb-cil.md) and falls back to the cproc route below when Path B refuses the file. Every program of
+`tests/cil` goes through Path B; the cproc route is kept for the files that still need it (`// QBE-ONLY` in tests/cil) and for
+`NFCXX_CIL_CPROC=1`. The pipeline below is that cproc route.
+
 ```
 C --cpp--> prep (qbe-prep) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) --cil-link.rb--> CIL text
    --ilasm--> x.dll  +  x.runtimeconfig.json  +  x (launcher: exec dotnet x.dll "$@")
