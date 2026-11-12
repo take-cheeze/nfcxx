@@ -21,6 +21,7 @@
     tests/cil/run.sh
     tests/pathb-cil/run.sh
 - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
+  pathb: true   # tests/nfcc/run.sh needs the Path B harness
   run: |
     tests/lib/run.sh
     tests/target/run.sh
