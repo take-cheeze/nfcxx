@@ -37,7 +37,7 @@ qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 opts=(); src=""; out=""
 safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
 asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
-passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-8388608}   # the inliner by default; none or off turns the passes off
+passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the inliner by default; none or off turns the passes off
 passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
 ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
@@ -50,6 +50,7 @@ while [ $# -gt 0 ]; do
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
     --sanitize=*) dump_opts+=("$1") ;;
+    --gnu-version=*|--gnu_version=*) opts+=("$1") ;;   # the GNU version EDG emulates (nfcxx --freestanding passes 130000)
     --ir-opt=*) passes=${1#--ir-opt=}; passes_given=1 ;;
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
     --emitter=*) emitter=${1#--emitter=} ;;
@@ -57,8 +58,10 @@ while [ $# -gt 0 ]; do
     --keep=*) keep=${1#--keep=} ;;
     --timeout=*) timeout_s=${1#--timeout=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
+    --modules) opts+=(--modules) ;;
+    --modules_directory|--create_module_interface) opts+=("$1" "$2"); shift ;;   # C++ modules (docs/notes/modules.md)
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
-    -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
+    -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--eh-runtime|--cuda) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
     *) src=$1 ;;
   esac
@@ -79,12 +82,14 @@ asan=(); [ $asan_on = 0 ] || { asan=(--asan); dump_opts+=(--ir-loc --ir-scopes);
 tmo() { if [ "$timeout_s" != 0 ] && command -v timeout >/dev/null 2>&1; then timeout -k 5 "$timeout_s" "$@"; else "$@"; fi; }
 if [ -n "${PATHB_IR:-}" ]; then cp "$PATHB_IR" "$tmp/$n.ir"   # a given IR file (tests run the emitters without the harness)
 else
+  [ "$emitter" != ssa ] || dump_opts+=(--ir-noinline)   # the SSA route's inliner honours noinline
   frc=0; tmo "$root/scripts/pathb-dump" --ir ${dump_opts[@]+"${dump_opts[@]}"} ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir" || frc=$?
   [ $frc != 124 ] || echo "pathb-cc: $src: the front end ran over $timeout_s s (--timeout) and was stopped" >&2
   [ $frc = 0 ] || exit $frc
 fi
 # The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md): inline by default; --ir-opt names others (a
-# comma-separated list), and none or off turns them off. IR over --ir-opt-max bytes (default 8 MiB) is not optimized. A given IR file (PATHB_IR, the
+# comma-separated list), and none or off turns them off. IR over --ir-opt-max bytes (default 256 MiB) is not optimized. The inliner runs on what an external definition reaches (--prune-unused: a
+# host TU of libstdc++ and vulkan.hpp is mostly unused template instances, 129 MB of IR for ggml-vulkan.cpp, 48 MB pruned). A given IR file (PATHB_IR, the
 # tests' input) is emitted as it is.
 raw=0
 if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${PATHB_IR:-}" ]; then
@@ -92,7 +97,7 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
   if [ "$size" -gt "$ir_opt_max" ]; then
     echo "pathb-cc: $src: IR is $size bytes, over --ir-opt-max: not optimized" >&2
   else
-    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); done
+    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); [ "$x" != inline ] || irpasses=(--prune-unused --strip-leaf-eh "${irpasses[@]}"); done
     cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
     if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
       mv "$tmp/$n.opt.ir" "$tmp/$n.ir"
@@ -102,6 +107,11 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
   fi
 fi
 ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
+# The mruby emitter only: on Darwin an extern data object is read through the GOT (see pathb-qbe-emit.rb, --extern-data-got).
+emitopt=(); [ "$(uname -s)" = Darwin ] && emitopt=(--extern-data-got)
+# And the target of the x87 thunks (x86-64 assembly; an arm64 module that needs one is refused): PATHB_X87_TARGET, else the host's.
+# pathb-qbe-emit.rb reads its options in a fixed order (--long-double=trap, --extern-data-got, --x87-target=, --safe): see the call below.
+emitopt+=(--x87-target="${PATHB_X87_TARGET:-$(uname -m)}")
 # The emitter. The SSA route (scripts/pathb-ssa-build) is the default, --safe included (its checks carry the (loc ...)
 # locations the reports print); --emitter=mruby selects the mruby pathb-qbe-emit.rb.
 case $emitter in ssa|mruby) ;; *) echo "pathb-cc: --emitter (NFCXX_PATHB_EMITTER) must be ssa or mruby, not '$emitter'" >&2; exit 2 ;; esac
@@ -124,7 +134,7 @@ if [ "$emitter" = ssa ]; then
   fi
 fi
 if [ "$emitter" = mruby ]; then
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${emitopt[@]+"${emitopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ]; then
     echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
     [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
@@ -132,7 +142,13 @@ if [ "$emitter" = mruby ]; then
   fi
   "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$tmp/$n.ssa" > "$tmp/$n.s"
   # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target"
+  # Status 3: the target's assembler has no form for something in the unit (an ifunc or file-scope asm on Apple): refused.
+  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target" 2> "$tmp/$n.aw" || rc=$?
+  if [ $rc != 0 ]; then
+    echo "pathb-cc: $src: $(head -1 "$tmp/$n.aw")" >&2
+    [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
+    exit $rc
+  fi
 fi
 if [ -n "$keep" ]; then mkdir -p "$keep"; cp "$tmp/$n.ir" "$tmp/$n.s" "$keep/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$keep/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then

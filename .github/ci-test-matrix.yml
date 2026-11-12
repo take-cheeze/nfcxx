@@ -21,6 +21,7 @@
     tests/cil/run.sh
     tests/pathb-cil/run.sh
 - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
+  pathb: true   # tests/nfcc/run.sh needs the Path B harness
   run: |
     tests/lib/run.sh
     tests/target/run.sh
@@ -29,6 +30,7 @@
     tests/c/run.sh
     tests/c/cc-mode.sh
     tests/cxx-driver/run.sh
+    tests/nfcc/run.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
 - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
@@ -42,10 +44,13 @@
     tests/realworld/run.sh
     tests/realworld/run_json.sh
     tests/realworld/run_fmt.sh
-- name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
+- name: C++ modules (Path B, qbe and gcc backends)
+  pathb: true   # tests/modules/run.sh runs the Path B backend, which is the default for modules (docs/notes/modules.md)
+  run: |
+    tests/modules/run.sh
+- name: multi-TU, EH shim, nfceval, nfcffi, bundled libraries, call ABI
   run: |
     tests/multi-tu/run.sh
-    tests/modules/run.sh
     tests/ehshim/run.sh
     tests/eh-unwind/run.sh
     tests/eval/run.sh
@@ -132,10 +137,11 @@
   run: |
     ninja -C tools/pathb-ptx-emit
     tests/gpu/run_interp.sh
-- name: AddressSanitizer (gcc and qbe backends)
+- name: AddressSanitizer (gcc and Path B backends)
+  pathb: true   # ASAN_BACKEND=pathb needs the Path B harness
   run: |
     if [ "$GCC_BACKEND" = 1 ]; then tests/asan/run.sh; fi
-    ASAN_BACKEND=qbe tests/asan/run.sh
+    ASAN_BACKEND=pathb tests/asan/run.sh
 # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
 - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
   pathb: true

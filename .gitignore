@@ -10,3 +10,7 @@ _site/
 # ninja state of the tools built by build.ninja
 tools/*/.ninja_log
 tools/*/.ninja_deps
+
+# bc2cpp check caches and generated output (written by the scripts, not sources)
+/bc2cpp/build/
+/bc2cpp/host-libs/mruby-bc2cpp-runner/build_config.rb.lock

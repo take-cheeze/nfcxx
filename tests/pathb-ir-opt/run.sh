@@ -71,6 +71,11 @@ while read -r inp _ want; do
   [ "$got" = "structured=$want ssa=$want" ] || un="FAIL (on $inp: $got, want $want)"
 done < unroll.args
 echo "unroll: $un"; [ "$un" = ok ] || fail=1
+# --prune-unused: the roots are what another object can see (external, constructor); a weak or static function stays only
+# when a root reaches it by name (helper: called, via_table: named by a reached table), the others go.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --prune-unused prune_unused.ir > "$out/prune_unused.ir" || fail=1
+if [ "$(grep -o '^(function "[^"]*"' "$out/prune_unused.ir" | tr '\n' ' ')" = '(function "via_table" (function "helper" (function "api" (function "ctor_fn" ' ] \
+   && grep -q '^(global "tab"' "$out/prune_unused.ir" && ! grep -q '^(global "dead_tab"' "$out/prune_unused.ir"; then echo "prune unused: ok"; else echo "prune unused: FAIL"; fail=1; fi
 # --prune-unreachable: the function no root reaches goes; one called by the entry, one whose address it takes, and one a named global's
 # initializer names stay.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --prune-unreachable=__nfcxx_sycl_entry_ prune.ir > "$out/prune.ir" || fail=1
@@ -80,6 +85,10 @@ if [ "$(grep -o '^(function "[^"]*"' "$out/prune.ir" | tr '\n' ' ')" = '(functio
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-eh strip_eh.ir > "$out/strip_eh.ir" || fail=1
 if ! grep '(function' "$out/strip_eh.ir" | grep -q 'eh_' && grep -q '(let %1 (ptr (struct "__C8")) (null (ptr (struct "__C8"))))' "$out/strip_eh.ir" \
    && grep -q '(let %2 unsigned_short (const unsigned_short 0))' "$out/strip_eh.ir"; then echo "strip eh: ok"; else echo "strip eh: FAIL"; fail=1; fi
+# A function with no call drops its EH stack entry (slot, push, pop); one with a call keeps it.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_leaf_eh.ir > "$out/strip_leaf_eh.ir" || fail=1
+if ! grep '^(function "_ZNK1A3getEv"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
+   && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '(slot "tmp.1" (struct "__C8")'; then echo "strip leaf eh: ok"; else echo "strip leaf eh: FAIL"; fail=1; fi
 # Scalar replacement through a `this` slot: a pointer slot stored twice with one array's address reads as that address, a memcpy
 # of a constant size is a copy, and the arrays become scalar slots.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --sroa sroa_this.ir > "$out/sroa_this.ir" || fail=1

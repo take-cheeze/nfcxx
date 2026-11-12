@@ -1,0 +1,34 @@
+(ir-module "prune_unused.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "tab" (const (array 1 (const long))) 8 8 (static) (init (addr 0 long &"via_table" 0)))
+(global "dead_tab" (const (array 1 (const long))) 8 8 (static) (init (addr 0 long &"dead_static" 0)))
+(function "via_table"
+  (ret int)
+  (params)
+  (weak)
+  (return (const int 1)))
+(function "dead_weak"
+  (ret int)
+  (params)
+  (weak)
+  (return (const int 2)))
+(function "dead_static"
+  (ret int)
+  (params)
+  (static)
+  (return (const int 3)))
+(function "helper"
+  (ret int)
+  (params)
+  (weak)
+  (return (const int 4)))
+(function "api"
+  (ret int)
+  (params)
+  (let %0 (ptr long) (bitcast (ptr long) &"tab"))
+  (let %1 int (call int &"helper"))
+  (return %1))
+(function "ctor_fn"
+  (ret void)
+  (params)
+  (constructor)
+  (return))

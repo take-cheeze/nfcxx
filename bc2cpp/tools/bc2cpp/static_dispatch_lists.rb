@@ -15,6 +15,9 @@
 #   ctor_rows      `initialize`/`initialize_copy` entries the closed build keeps as constructor rows (Owner#name; CTOR_ROWS
 #                  in static_dispatch_registrations.rb): the native ones are also in `engine_rom`, the compiled ones stay
 #                  registered as rows of their generated table
+#   core_rows      core ROM method-table entries the closed build keeps as rows only proven-receiver calls find
+#                  (MtClass#name; CORE_ROWS, core_rows.rb); none of them is in `core_excluded`. A file without it
+#                  reads as empty
 #
 # The file named by BC2CPP_STATIC_DISPATCH_LISTS is JSON. Its `digest` is the digest of the proof's inputs, which
 # verify_current! compares with the tree. 'none' stands for empty lists: the proof's own first pass, and fixtures
@@ -24,15 +27,18 @@ require 'set'
 
 module StaticDispatchLists
   PATH_ENV = 'BC2CPP_STATIC_DISPATCH_LISTS'
-  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows frame_free].freeze
-  REQUIRED_KEYS = (KEYS - ['frame_free']).freeze
+  KEYS = %w[open closed core_excluded core_left_out engine_rom ctor_rows core_rows frame_free].freeze
+  REQUIRED_KEYS = (KEYS - %w[frame_free core_rows]).freeze
 
   class Missing < StandardError; end
 
-  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :frame_free, :digest, keyword_init: true) do
-    def initialize(**kwargs)
-      super
+  Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free, :digest,
+                     keyword_init: true) do
+    # mruby's Struct.new forwards keyword-init values as a positional Hash.
+    def initialize(kwargs = {})
+      super(kwargs)
       self.frame_free ||= Set.new.freeze
+      self.core_rows ||= Set.new.freeze
     end
 
     # Only the closed build drops the closed-only names.
@@ -43,7 +49,7 @@ module StaticDispatchLists
 
   EMPTY = Lists.new(open: Set.new.freeze, closed: Set.new.freeze, core_excluded: Set.new.freeze,
                     core_left_out: Set.new.freeze, engine_rom: Set.new.freeze, ctor_rows: Set.new.freeze,
-                    frame_free: Set.new.freeze, digest: 'none').freeze
+                    core_rows: Set.new.freeze, frame_free: Set.new.freeze, digest: 'none').freeze
 
   module_function
 

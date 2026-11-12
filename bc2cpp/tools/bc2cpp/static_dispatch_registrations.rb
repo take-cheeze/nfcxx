@@ -67,6 +67,7 @@ require_relative 'core_private_ruby'
 require_relative 'core_enumerator_free'
 require_relative 'core_methods'
 require_relative 'core_native_candidates'
+require_relative 'core_rows'
 require_relative 'native_owner_map'
 require_relative 'native_frame_use'
 require_relative 'index_closed_planner'
@@ -639,13 +640,16 @@ module StaticDispatchRegistrations
   # `text`: a Set that also receives every token read as text (Ruby read as text, native naming-macro arguments),
   # the only tokens SUFFIX_BASES needs.
   # `enumerator_free`, `diagnostic_literals`: see strip_native_text.
-  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil, enumerator_free: nil, diagnostic_literals: false)
+  # +engine_tokens+ (CORE_ROWS) receives the tokens of every source but the core's own: core Ruby read as bytecode and
+  # the natives under 3rd/, which the CORE_ROWS core run reads again by its own rules.
+  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil, enumerator_free: nil, diagnostic_literals: false,
+                           engine_tokens: nil)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
+    third = "#{File.expand_path(repo_root)}/3rd/"
     tokens = Set.new
     text ||= Set.new
     naming = closed_only ? naming_macros(native) : []
     if closed_only && core
-      third = "#{File.expand_path(repo_root)}/3rd/"
       precise, ruby = ruby.partition { |p| p.end_with?('.rb') && p.start_with?(third) }
       unlinked = closed_unlinked_dirs(repo_root)
       precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
@@ -680,6 +684,7 @@ module StaticDispatchRegistrations
         end
       end
       tokens.merge(found)
+      engine_tokens&.merge(found) unless native.include?(path) && File.expand_path(path).start_with?(third)
       cite(found, "named in #{path.delete_prefix("#{File.expand_path(repo_root)}/")}")
     end
     tokens
@@ -1220,9 +1225,13 @@ module StaticDispatchRegistrations
     # a presym, a literal in generated code or a bytecode send). The open build keeps ALWAYS_DYNAMIC as its backstop.
     protocol = closed_only ? [] : ALWAYS_DYNAMIC
     dynamic = Set.new(protocol)
+    # CORE_ROWS: the dynamic names the engine itself gives, less what only core Ruby, the natives under 3rd/ and the
+    # generated code's literals give (the core run reads those again by its own rules; CoreRows.engine_names).
+    rows_dynamic = Set.new(protocol)
     cite(protocol, 'always dynamic (ALWAYS_DYNAMIC)')
     if symbol_lookups
       dynamic.merge(symbol_lookups)
+      rows_dynamic.merge(symbol_lookups)
       cite(symbol_lookups, 'a Symbol literal that may name a looked-up method (SYMBOL_USES)')
     end
     fragments = Set.new
@@ -1235,18 +1244,40 @@ module StaticDispatchRegistrations
     # name => the ancestor classes some such `super` may reach. Any other `super` makes the name dynamic as before.
     super_reach = {}
     super_unknown = Set.new
+    # SUPER_DIRECT (closed only): a site every copy of which calls its target's `_impl` looks nothing up. Identical
+    # bodies share a key, so it holds only when every site carrying it is in an engine method some run compiled.
+    super_direct = closed_only ? InitializerTables.super_direct(runs.values) : Set.new
+    unless super_direct.empty?
+      compiled_keys = runs.each_value.flat_map { |r| r[:entries].map { |e| "#{e[:owner]}##{e[:name]}" } }.to_set
+      engine_owner = owner_re(true)
+      ireps.each_value do |irep|
+        BytecodeIR.for(irep).each_source do |insn, index|
+          next unless insn.op == :SUPER
+
+          up = method_of[irep.label]
+          owner, name = up && body_of[up]
+          next if owner&.match?(engine_owner) && compiled_keys.include?("#{owner}##{name}")
+
+          super_direct.delete([irep.content_digest, index])
+        end
+      end
+    end
     ireps.each_value do |irep|
-      BytecodeIR.for(irep).instructions_with_op(:SUPER).each do
+      BytecodeIR.for(irep).each_source do |insn, index|
+        next unless insn.op == :SUPER
+
         up = method_of[irep.label]
         next unless up
 
         owner, name = body_of[up]
+        next if super_direct.include?([irep.content_digest, index])
         reach = closed_only && super_ancestors(owner, superclass_of)
         if reach
           (super_reach[name] ||= Set.new).merge(reach)
         else
           super_unknown << name
           dynamic << name
+          rows_dynamic << name
           cite([name], "super in #{owner}##{name}")
         end
       end
@@ -1264,7 +1295,7 @@ module StaticDispatchRegistrations
     @enumerator_free_proof = @core_files_memo = nil
     enumerator_free = closed_only ? -> { (@enumerator_free_proof ||= engine_enumerator_free(repo_root, mrbc, ireps, engine_tuple, symbol_lookups)).holds } : nil
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text, enumerator_free: enumerator_free,
-                                                diagnostic_literals: !symbol_lookups.nil?)
+                                                diagnostic_literals: !symbol_lookups.nil?, engine_tokens: rows_dynamic)
     dynamic.merge(outside)
     looked_up = literal_sites.keys.to_set
     looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
@@ -1272,6 +1303,7 @@ module StaticDispatchRegistrations
       next unless looked_up.include?(s)
 
       dynamic << s
+      rows_dynamic << s
       cite([s], "a string literal in #{irep_site(sites.first, method_of, body_of)}")
     end
     # POOL_STRING_VALUES (closed only): an identifier-shaped pool string whose uses were proven pure above. Its
@@ -1321,6 +1353,7 @@ module StaticDispatchRegistrations
           known.merge(reach)
           next
         end
+        rows_dynamic << name if into.equal?(dynamic)
         next unless into.add?(name)
 
         grew = true
@@ -1344,6 +1377,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
+    rows_dynamic.merge(load_names)
     cite(load_names, 'sent while mrblib loads')
     bytecode_blocks = runs.each_value.any? { |r| runnable_proc_text(r[:gen]).match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
@@ -1371,7 +1405,9 @@ module StaticDispatchRegistrations
     end
 
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
-                                                engine_tuple, symbol_lookups, proven) : nil
+                                                engine_tuple, symbol_lookups, proven,
+                                                engine_dynamic: symbol_lookups && rows_dynamic,
+                                                super_names: super_reach.keys.to_set | super_unknown) : nil
 
     { super_reach: super_reach, class_owners: class_owners,
       registered: candidates, dynamic: dynamic, fragments: fragments, load: load_names, load_bodies: load_bodies,
@@ -1386,8 +1422,9 @@ module StaticDispatchRegistrations
   # run-time registrations it removes]. Every Ruby
   # source the binary may load counts -- the core and external mrblib besides the engine's (`ireps`), whose method
   # bodies count while their names are reachable (LIVE_CORE) -- and every native source, with the generated code.
+  # The third list is CORE_ROWS (core_rows.rb): the ROM entries left only to proven-receiver lookups, kept as rows.
   def core_excluded(repo_root, mrbc, ireps, generated, engine_registry, engine_superclass_of, engine_tuple, symbol_lookups,
-                    proven = {})
+                    proven = {}, engine_dynamic: nil, super_names: Set.new)
     _ruby, native = outside_world_files(repo_root, closed_only: true)
     third = "#{File.expand_path(repo_root)}/3rd/"
     core = core_files(repo_root, mrbc)
@@ -1405,8 +1442,18 @@ module StaticDispatchRegistrations
                                            engine_tuple, symbol_lookups, repo_root)
     ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, entries, proven)
     self.core_state = [entries, names, fragments, proven] if core_names
-    [CoreNativeCandidates.candidates(entries, names, fragments, proven),
-     (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort]
+    rom = CoreNativeCandidates.candidates(entries, names, fragments, proven)
+    rows = []
+    if engine_dynamic
+      engine = CoreRows.engine_names(ireps, generated, engine_dynamic, super_names)
+      row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, generated.map { |src| CoreRows.strip_sym_table(src) },
+                                                                core: core, exact_impls: true,
+                                                                strip_generated: ->(src) { src.gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '') },
+                                                                diagnostic_literals: !symbol_lookups.nil?,
+                                                                enumerator_free: -> { proof.call.holds }, engine_names: engine)
+      rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven) - rom
+    end
+    [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows]
   ensure
     @enumerator_free_proof = nil
   end
@@ -1953,6 +2000,7 @@ module StaticDispatchRegistrations
                                    engine_rom: eligible(closed).select { |m| m[:rom] }
                                                                .to_set { |m| "#{m[:owner]}##{m[:name]}" }.freeze,
                                    ctor_rows: closed[:ctor_rows].freeze,
+                                   core_rows: closed[:core_excluded][2].to_set.freeze,
                                    frame_free: closed[:frame_free].freeze, digest: digest)
   end
 

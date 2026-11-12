@@ -18,12 +18,19 @@ require 'tmpdir'
 # fork shares nothing it could not have computed itself. Nothing is stored between processes, so nothing can go
 # stale.
 #
+# Emission-control variants use an earlier boundary before CodeGen inference, whose embedding probes can compile
+# methods. They share only immutable input setup. Their controls are guarded only when the plan varies them,
+# and every unit must specify each varied control (nil restores the default).
 # Soundness rests on one fact, which is enforced rather than assumed: before the fork, nothing reads a unit key
 # except the two reads at the top (OUT_SYMBOL and OUT_DIR, which only name the scratch .mrb file mrbc writes). A
 # read of any unit key between those and the fork raises (EnvGuard), and every run fails.
 module SharedGeneration
   FLAG = '--units'
   UNIT_KEYS = %w[OUT_SYMBOL OUT_DIR ONLY_OWNERS OTHER_OWNERS OTHER_DECLS_HEADER].freeze
+  # These switches are consumed by method emission, including embedding probes.
+  # Ordinary owner-only units retain their existing later fork boundary.
+  EMISSION_KEYS = %w[BC2CPP_OWNER_SET_DIRECT BC2CPP_CORE_INT_ARG_PROOF
+                     BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT].freeze
 
   class Error < RuntimeError; end
 
@@ -33,7 +40,7 @@ module SharedGeneration
   # Raises on a read of a unit key while the guard is armed.
   module EnvGuard
     class << self
-      attr_accessor :armed
+      attr_accessor :armed, :keys
     end
 
     def self.refuse(name, touched)
@@ -44,18 +51,18 @@ module SharedGeneration
     # The one-name reads are the analysis's hot path (a switch per send or per flow run, all while armed): they test
     # their String arguments directly, without the generic form's per-call splat, flat_map and set intersection.
     def [](name)
-      EnvGuard.refuse(:[], [name]) if EnvGuard.armed && UNIT_KEYS.include?(name)
+      EnvGuard.refuse(:[], [name]) if EnvGuard.armed && EnvGuard.keys.include?(name)
       super
     end
 
     def key?(name)
-      EnvGuard.refuse(:key?, [name]) if EnvGuard.armed && UNIT_KEYS.include?(name)
+      EnvGuard.refuse(:key?, [name]) if EnvGuard.armed && EnvGuard.keys.include?(name)
       super
     end
 
     def fetch(*args, &block)
-      if EnvGuard.armed && args.any? { |arg| UNIT_KEYS.include?(arg) }
-        EnvGuard.refuse(:fetch, args.grep(String) & UNIT_KEYS)
+      if EnvGuard.armed && args.any? { |arg| EnvGuard.keys.include?(arg) }
+        EnvGuard.refuse(:fetch, args.grep(String) & EnvGuard.keys)
       end
       super
     end
@@ -64,8 +71,8 @@ module SharedGeneration
        filter_map map keys values].each do |name|
       define_method(name) do |*args, **opts, &block|
         if EnvGuard.armed
-          touched = args.flat_map { |arg| Array(arg) }.grep(String) & UNIT_KEYS
-          touched = UNIT_KEYS if touched.empty? && args.empty?
+          touched = args.flat_map { |arg| Array(arg) }.grep(String) & EnvGuard.keys
+          touched = EnvGuard.keys if touched.empty? && args.empty?
           EnvGuard.refuse(name, touched) unless touched.empty?
         end
         super(*args, **opts, &block)
@@ -74,6 +81,10 @@ module SharedGeneration
   end
 
   module_function
+
+  def emission_variants?(units)
+    units.any? { |unit| unit.env.keys.any? { |key| EMISSION_KEYS.include?(key) } }
+  end
 
   # [units, rest of argv] when argv starts with FLAG PLAN, else [nil, argv].
   def parse_argv(argv)
@@ -87,12 +98,16 @@ module SharedGeneration
   def load_plan(path)
     units = JSON.parse(File.read(path)).map do |entry|
       env = entry.fetch('env')
-      stray = env.keys - UNIT_KEYS
+      stray = env.keys - UNIT_KEYS - EMISSION_KEYS
       raise Error, "bc2cpp: #{FLAG} plan #{path}: #{stray.join(', ')} may not differ between units" unless stray.empty?
 
       Unit.new(env: env, out: entry.fetch('out'), err: entry.fetch('err'))
     end
     raise Error, "bc2cpp: #{FLAG} plan #{path} has no units" if units.empty?
+    controls = units.flat_map { |unit| unit.env.keys } & EMISSION_KEYS
+    unless units.all? { |unit| (controls - unit.env.keys).empty? }
+      raise Error, "bc2cpp: every unit must specify each varied emission control (nil unsets it)"
+    end
 
     units
   end
@@ -121,8 +136,9 @@ module SharedGeneration
     [prefix, saved]
   end
 
-  def arm_guard
+  def arm_guard(keys = UNIT_KEYS)
     ENV.singleton_class.prepend(EnvGuard) unless ENV.singleton_class.include?(EnvGuard)
+    EnvGuard.keys = keys
     EnvGuard.armed = true
   end
 
@@ -192,10 +208,11 @@ module SharedGeneration
   end
 
   # The Ruby-level entry for callers that would otherwise run bc2cpp.rb once per unit: one process over `srcs` with
-  # `common_env`, one result per unit (`unit_envs`, each only UNIT_KEYS), as Open3.capture3 returns them:
+  # `common_env`, one result per unit (unit keys and registered emission controls), as Open3.capture3 returns them:
   # [stdout, stderr, status]. `status` is the shared process's exit status, the same for every unit.
   def run(tool:, srcs:, common_env:, unit_envs:, extra_args: [])
-    stray = common_env.keys & UNIT_KEYS
+    keys = UNIT_KEYS | unit_envs.flat_map(&:keys)
+    stray = common_env.keys & keys
     raise Error, "SharedGeneration.run: #{stray.join(', ')} belong in unit_envs" unless stray.empty?
 
     Dir.mktmpdir('bc2cpp-shared') do |dir|
@@ -204,7 +221,7 @@ module SharedGeneration
       end
       plan = File.join(dir, 'plan.json')
       File.write(plan, JSON.generate(units))
-      env = common_env.merge(UNIT_KEYS.to_h { |key| [key, nil] })
+      env = common_env.merge(keys.to_h { |key| [key, nil] })
       _out, err, status = Open3.capture3(env, RbConfig.ruby, tool, *extra_args, FLAG, plan, *srcs)
       enc = Encoding.default_external
       units.map do |unit|

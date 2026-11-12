@@ -8,23 +8,19 @@
 # Options of this wrapper (the nfcxx driver passes them; each has an environment variable as a fallback, and the option wins):
 #   --c-input        (NFCXX_C_INPUT=1)    the source is C written by hand, not EDG's generated C (docs/notes/realworld.md)
 #   --eh-unwind      (NFCXX_EH_UNWIND=1)  the program's unwinder flag is 1 (the link; docs/notes/eh-shim.md)
-#   -fsanitize=address (NFCXX_ASAN=1)     keep the line markers and link libasan (docs/notes/asan.md)
 set -euo pipefail
 # ccache when it is installed (NFCXX_CCACHE=0 turns it off): the C compiles of the same preprocessed C repeat across runs.
 CCBIN=(cc); if [ "${NFCXX_CCACHE:-1}" != 0 ] && command -v ccache >/dev/null; then CCBIN=(ccache cc); fi
-c_input=${NFCXX_C_INPUT:-}; eh_unwind=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind=1; asan_on=${NFCXX_ASAN:-}
+c_input=${NFCXX_C_INPUT:-}; eh_unwind=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind=1
 _args=()
 for _a in "$@"; do
   case $_a in
     --c-input) c_input=1 ;;
     --eh-unwind) eh_unwind=1 ;;
-    -fsanitize=address) asan_on=1; _args+=("$_a") ;;
     *) _args+=("$_a") ;;
   esac
 done
 set -- ${_args[@]+"${_args[@]}"}
-# cproc (3rd/cproc, not ours) reads NFCXX_ASAN itself to instrument the loads and stores: the one variable this script exports.
-[ -z "$asan_on" ] || export NFCXX_ASAN=1
 root=$(cd "$(dirname "$0")/.." && pwd)
 cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
@@ -94,8 +90,6 @@ if [ $compile = 0 ]; then
   # qbe-prep maps to fabs/fabsf (a C-only program does not pull libm in through libstdc++).
   # libnfcxxld.a (be/nfcxx_ldrt.c) is the runtime of the helper calls cproc emits for long double and __float128.
   # Its __float128 to_chars wrappers need libstdc++; the archive member is only pulled in when a program calls a helper.
-  # -fsanitize=address: the program links libasan, whose preinit runs before main (docs/notes/asan.md)
-  asan=(); [ -z "$asan_on" ] || asan=(-fsanitize=address)
   # macOS: libc++ instead of libstdc++, and no libatomic (the sized atomics come from clang's runtime).
   if [ "$(uname -s)" = Darwin ]; then libs=(-lc++ -lm); else libs=(-latomic -lstdc++ -lm); fi
   # --eh-unwind (nfcxx's gate, nfcxx): the program's unwinder flag is 1. The gcc backend gets it from its
@@ -107,7 +101,7 @@ if [ $compile = 0 ]; then
     ehflag=("$ehdir/flag.o")
   fi
   st=0
-  ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${ehflag[@]+"${ehflag[@]}"} ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"} || st=$?
+  ${CCBIN[@]+"${CCBIN[@]}"} "$@" ${ehflag[@]+"${ehflag[@]}"} "$("$(dirname "$0")/pathb-ldrt")" ${libs[@]+"${libs[@]}"} || st=$?
   [ -z "$ehdir" ] || rm -rf "$ehdir"
   exit $st
 fi
@@ -117,8 +111,7 @@ fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 t=$(trace_start)
-# -P drops the line markers, which -fsanitize=address needs for the source lines of its reports (-fsanitize=address keeps them)
-pflag=(-P); [ -z "$asan_on" ] || pflag=()
+pflag=(-P)   # drops the line markers
 # macOS: the SDK's headers declare nullability keywords (_Nullable, _Nonnull) that cproc does not know; cproc's own
 # configure defines them away only for its internal preprocessor, which this clang -E does not use.
 # NFCXX_MACOS_SYSROOT=DIR: a macOS arm64 compile check from any host. The C is preprocessed by clang for arm64-apple-darwin

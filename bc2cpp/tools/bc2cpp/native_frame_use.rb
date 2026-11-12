@@ -576,7 +576,7 @@ module NativeFrameUse
           struct RClass* start = bc2cpp_ff_class(M, r.owner);
           if (!start) continue;
           struct RClass* c = start;
-          mrb_method_t m = bc2cpp_find_method(M, &c, mrb_intern_cstr(M, r.name));
+          mrb_method_t m = bc2cpp_find_proven(M, &c, mrb_intern_cstr(M, r.name));
           if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_FUNC_P(m)) continue;
           if (c != start && !(c->tt == MRB_TT_ICLASS && c->c == start) && c != bc2cpp_ff_origin(start)) continue;
           bc2cpp_ff_add(MRB_METHOD_FUNC(m));

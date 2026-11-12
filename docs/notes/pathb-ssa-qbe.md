@@ -25,6 +25,11 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
   that uses them (a phi operand in its predecessor).
 - Checked operations (`cdiv`, `crem`, `cshl`, `cshr`, `cf2i`): each check is a call `pathb_check(cond, code)` placed before
   the operation; codes 1 division by zero, 2 signed overflow, 3 shift count out of range, 4 float to integer out of range.
+  A signed 32-bit `cdiv` or `crem` by a constant d >= 3 that is not a power of two has no division instruction: the quotient
+  is the high part of a 64-bit multiply by c = floor(2^s / d) + 1 (s = 31 + ceil(log2 d)), plus 1 for a negative dividend,
+  and the remainder is x - q * d (`magic_div32_lines`; Lemire, "Beating the compiler at signed 32-bit division", 2026, https://lemire.me/blog/2026/10/31/beating-the-compiler-at-signed-32-bit-division/).
+  QBE emits `idivl` for a constant `div`, so this is what removes it. Powers of two, negative and 64-bit divisors, and
+  variable divisors keep the division instruction.
   The checked add, subtract, multiply and negate (`cadd`, `csub`, `cmul`, `cneg`) check with code 2: a narrow type is
   computed in 64 bits and range-checked; an 8-byte add or subtract uses the sign-bit identities; an 8-byte multiply divides
   the product back by the operand (a divisor of 0 or -1 is replaced by 1, see `checked_arith_lines`), so it needs no runtime.
@@ -62,3 +67,24 @@ the optimizer, or the interpreter, and the runner reports which one by comparing
 
 1. Aggregates by value (copy) and volatile accesses.
 2. Decide the wiring into `bin/nfcxx` (behind an option, Path B only).
+
+## GNU C constructs of the kernel's shape (the cproc-removal work)
+
+- **`__builtin_return_address(0)`, `__builtin_frame_address(0)`** (x86-64): IR rvalues `(retaddr)` and `(frameaddr)`; QBE gives every
+  function a frame pointer, and a weak helper the driver appends (`# pathb-asm retaddr`, `frameaddr`; `ASM_HELPERS` in
+  `scripts/pathb-ssa-build`) reads the caller's `8(%rbp)` or `%rbp`. A call of the helper is followed by an empty call, so QBE does not
+  make `return __builtin_return_address(0);` a tail call (`leave; jmp`, which would run the helper in the caller's frame). The inliner
+  leaves a function that holds one of them alone. A level other than 0 is refused (`builtin return_address of a level other than 0`).
+  `__builtin_extract_return_addr` and `__builtin_frob_return_addr` are the identity. arm64 has no helper: the unit is refused there.
+- **`__attribute__((noinline))`**: the front end writes a `(noinline)` function head when `NFCXX_IR_NOINLINE=1` (`pathb-dump
+  --ir-noinline`, which `pathb-cc` passes for the SSA emitter only: the other emitters refuse an unknown head), and
+  `scripts/pathb-ir-opt.rb` does not inline such a callee.
+- **`__attribute__((cleanup(f)))`** (C and C++): `be/nfcxx_ir.c` keeps the stack of the function's variables with a cleanup and
+  writes `(eval (call void &"f" &var))` where their scope ends: at a block's end, at `return` (after the value is computed), and
+  at `goto`/`break`/`continue` for the variables above the target label's count (`ir_cu_*`).
+- **`section("S")`** on a global: `section "S" "aw"` (`"a"` for a const object) on its QBE data, as gcc does; `used` keeps a static
+  object that nothing refers to (`(used)` global flag: a root of both prunes). A thread-local with a section is refused.
+- **GNU case ranges** of more than 1024 values: a label (`__case_range_N`) in the switch body and, before the switch, one test
+  `(le.u (wsub (iconv unsigned_long x) LO) (HI - LO))` and a `goto` to it per range.
+- **A flexible array member** initialised by a string or by elements: the global's size is the struct plus them; no bounds check
+  is made on an array of size 0.

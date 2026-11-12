@@ -102,6 +102,10 @@ body = ->(code, name) { code[/^mrb_value Probe_#{name}_impl\(mrb_state\* M[^\n]*
 
 Dir.mktmpdir('owner-set-direct') do |dir|
   code, err = runtime.generate(SOURCE, dir, only_owners: OWNERS)
+  variants = %w[BC2CPP_OWNER_SET_DIRECT BC2CPP_CORE_INT_ARG_PROOF BC2CPP_KERNEL_CLASS_ARG_PROOF BC2CPP_SYMBOL_PROBE_DIRECT]
+             .map { |key| { key => '0' } }
+  off, int_off, class_off, disabled = runtime.generate(SOURCE, File.join(dir, 'emission-variants'),
+                                                     only_owners: OWNERS, emission_variants: variants).map(&:code)
   File.write(File.join(ENV['BC2CPP_KEEP_DIR'], 'owner_set_direct.cxx'), code) if ENV['BC2CPP_KEEP_DIR']
   %w[gb slice_one slice_two radix bad_radix].each do |name|
     text = body.call(code, name)
@@ -161,51 +165,23 @@ Dir.mktmpdir('owner-set-direct') do |dir|
   check.call('Integer#<=> arm only for a fixnum against a fixnum or Float',
              body.call(code, 'cmp').match?(/mrb_fixnum_p\(r\d+\) && \(mrb_fixnum_p\(r\d+\) \|\| mrb_float_p\(r\d+\)\)/))
 
-  off = begin
-    ENV['BC2CPP_OWNER_SET_DIRECT'] = '0'
-    Dir.mktmpdir('owner-set-direct-off') { |off_dir| runtime.generate(SOURCE, off_dir, only_owners: OWNERS).first }
-  ensure
-    ENV.delete('BC2CPP_OWNER_SET_DIRECT')
-  end
   check.call('BC2CPP_OWNER_SET_DIRECT=0 keeps the owner calls',
              !off.include?('OWNER_SET_DIRECT :') && !off.include?('OWNER_SET_NATIVE_ARMS :') &&
              body.call(off, 'nl').include?('bc2cpp_owner_call(M, '))
 
-  saved_core_int = ENV['BC2CPP_CORE_INT_ARG_PROOF']
-  begin
-    ENV['BC2CPP_CORE_INT_ARG_PROOF'] = '0'
-    int_off, = runtime.generate(SOURCE, File.join(dir, 'core-int-off'), only_owners: OWNERS)
-    check.call('core Integer argument switch restores the type guard and fallback',
-               body.call(int_off, 'gb').include?('mrb_integer_p(') && body.call(int_off, 'gb').include?('bc2cpp_owner_call('))
-  ensure
-    saved_core_int.nil? ? ENV.delete('BC2CPP_CORE_INT_ARG_PROOF') : ENV['BC2CPP_CORE_INT_ARG_PROOF'] = saved_core_int
-  end
-
-  saved_class_arg = ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF']
-  begin
-    ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] = '0'
-    class_off, = runtime.generate(SOURCE, File.join(dir, 'class-arg-off'), only_owners: OWNERS)
-    check.call('class-argument switch restores the type guard and fallback',
-               body.call(class_off, 'isa').include?('mrb_class_p(') && body.call(class_off, 'isa').include?('bc2cpp_owner_call('))
-  ensure
-    saved_class_arg.nil? ? ENV.delete('BC2CPP_KERNEL_CLASS_ARG_PROOF') : ENV['BC2CPP_KERNEL_CLASS_ARG_PROOF'] = saved_class_arg
-  end
+  check.call('core Integer argument switch restores the type guard and fallback',
+             body.call(int_off, 'gb').include?('mrb_integer_p(') && body.call(int_off, 'gb').include?('bc2cpp_owner_call('))
+  check.call('class-argument switch restores the type guard and fallback',
+             body.call(class_off, 'isa').include?('mrb_class_p(') && body.call(class_off, 'isa').include?('bc2cpp_owner_call('))
   rebound, = runtime.generate(SOURCE + "Bag = 7", File.join(dir, 'rebound-class'), only_owners: OWNERS)
   check.call('a reassigned class constant keeps the type guard and fallback',
              body.call(rebound, 'isa').include?('mrb_class_p(') && body.call(rebound, 'isa').include?('bc2cpp_owner_call('))
   replaced, = runtime.generate(SOURCE + "class Bag; def is_a?(k); false; end; end", File.join(dir, 'replaced-is-a'), only_owners: OWNERS)
   check.call('a Ruby is_a? override withdraws the Kernel direct body', !body.call(replaced, 'isa').include?('KERNEL_DIRECT :is_a?'))
 
-  saved_probe = ENV['BC2CPP_SYMBOL_PROBE_DIRECT']
-  begin
-    ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] = '0'
-    disabled, = runtime.generate(SOURCE, File.join(dir, 'symbol-probe-off'), only_owners: OWNERS)
-    check.call('symbol-probe switch restores the guarded owner call',
-               !body.call(disabled, 'rt_literal').include?('SYMBOL_PROBE_DIRECT') &&
-                 body.call(disabled, 'rt_literal').include?('bc2cpp_owner_call('))
-  ensure
-    saved_probe.nil? ? ENV.delete('BC2CPP_SYMBOL_PROBE_DIRECT') : ENV['BC2CPP_SYMBOL_PROBE_DIRECT'] = saved_probe
-  end
+  check.call('symbol-probe switch restores the guarded owner call',
+             !body.call(disabled, 'rt_literal').include?('SYMBOL_PROBE_DIRECT') &&
+               body.call(disabled, 'rt_literal').include?('bc2cpp_owner_call('))
   ["class Bag; def respond_to?(n); false; end; end",
    "class Bag; def respond_to_missing?(n, priv = false); true; end; end"].each_with_index do |override, i|
     withdrawn, = runtime.generate(SOURCE + override, File.join(dir, "override-#{i}"), only_owners: OWNERS)

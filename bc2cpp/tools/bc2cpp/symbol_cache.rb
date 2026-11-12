@@ -407,7 +407,7 @@ module SymbolCache
     [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
       if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
       struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
       if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) return false;
       return bc2cpp_nsc_accept(M, s, mrb_obj_ptr(recv), m, c, argc);
     }
@@ -442,7 +442,7 @@ module SymbolCache
       bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.state == M && s.recv == (struct RObject*)owner;
       if (!cached && owner) {
         struct RClass* c = owner;
-        mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+        mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
         cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
       }
       if (cached) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
@@ -509,6 +509,9 @@ module SymbolCache
       struct RClass* hit_c;
       mrb_method_t hit_m;
       mrb_int hit_argc;
+    #ifdef MRB_MT_ROWS
+      uint32_t hit_mt_epoch;
+    #endif
     };
     #ifdef BC2CPP_OWNER_ICACHE_STATS
     // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
@@ -526,12 +529,18 @@ module SymbolCache
       memcpy(&y, &b.as, sizeof y);
       return a.flags == b.flags && x == y;
     }
-    // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid).
+    // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid). A fork with rows
+    // (MRB_MT_ROWS) bumps mt_epoch wherever it clears that cache, and a row is never cached: the epoch decides there.
     static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
       if (s.hit_klass != klass || s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch || s.state != M) return false;
+    #ifdef MRB_MT_ROWS
+      (void)mid;
+      if (s.hit_mt_epoch != M->mt_epoch) return false;
+    #else
       int h = mrb_int_hash_func(M, ((intptr_t)klass) ^ mid) & (MRB_METHOD_CACHE_SIZE - 1);
       const struct mrb_cache_entry* mc = &M->cache[h];
       if (mc->c != klass || mc->mid != mid || mc->c0 != s.hit_c || !bc2cpp_method_eq(mc->m, s.hit_m)) return false;
+    #endif
     #ifdef BC2CPP_OWNER_ICACHE_STATS
       ++bc2cpp_owner_icache_hits;
     #endif
@@ -653,13 +662,13 @@ module SymbolCache
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       struct RClass* klass = mrb_class(M, recv);
     #ifdef BC2CPP_OWNER_ICACHE
-      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk);
+      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk); });
     #endif
     #ifdef BC2CPP_OWNER_ICACHE_STATS
       ++bc2cpp_owner_icache_misses;
     #endif
       struct RClass* c = klass;
-      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
       if (s.direct) bc2cpp_owner_direct_pick(M, *s.direct, klass, &m, &c);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);
@@ -713,6 +722,9 @@ module SymbolCache
         s.hit_c = c;
         s.hit_m = m;
         s.hit_argc = argc;
+    #ifdef MRB_MT_ROWS
+        s.hit_mt_epoch = M->mt_epoch;
+    #endif
       }
     #endif
       return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });

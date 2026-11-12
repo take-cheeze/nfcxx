@@ -86,6 +86,23 @@ check.call('ci.yml has no gcc_only gating (comments aside)') do
   workflow.lines.reject { |line| line.lstrip.start_with?('#') }.none? { |line| line.include?('gcc_only') }
 end
 
+# The Ruby scripts the bc2cpp worlds compile are triggers of the bc2cpp workflow: a change to one is a change to its world, and a
+# script that the interpreter takes but the compiled build does not (a backtick, ENV, a regexp) must not reach main unchecked.
+# Every scripts/NAME.rb that a tests/bc2cpp/run_*.sh names has to be in the push and pull_request paths, and every script in them
+# has to be one a run script names.
+repo = File.expand_path('../..', __dir__)
+world_scripts = Dir[File.join(repo, 'tests/bc2cpp/run_*.sh')].flat_map do |file|
+  File.read(file).scan(%r{(?<![\w/.-])scripts/([A-Za-z0-9_-]+\.rb)}).flatten
+end.uniq.select { |name| File.file?(File.join(repo, 'scripts', name)) }.sort
+bc2cpp = YAML.safe_load(File.read(File.join(repo, '.github/workflows/bc2cpp.yml')))
+bc2cpp_on = bc2cpp.fetch(true) { bc2cpp.fetch('on') } # YAML 1.1 reads the key `on` as true
+check.call('bc2cpp worlds name scripts') { world_scripts.length > 10 }
+%w[push pull_request].each do |event|
+  listed = bc2cpp_on.fetch(event).fetch('paths').grep(%r{\Ascripts/[^*/]+\.rb\z}).map { |path| path.delete_prefix('scripts/') }
+  check.call("bc2cpp #{event} paths include every script a world compiles (#{(world_scripts - listed).join(' ')})") { (world_scripts - listed).empty? }
+  check.call("bc2cpp #{event} paths name only scripts a world compiles (#{(listed - world_scripts).join(' ')})") { (listed - world_scripts).empty? }
+end
+
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 
 def outcomes(full, pathb)

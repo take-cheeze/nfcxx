@@ -15,6 +15,7 @@
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
+#   --prune-unused   drop the functions and objects that no definition of external linkage reaches (prune_pass, below)
 #   --prune-unreachable=SUBSTR   drop the functions and the global or data objects that no function whose name contains SUBSTR
 #                reaches, by name (prune_pass). With --inline or --sroa this is the default for a SYCL device module
 #                (__nfcxx_sycl_entry_ kernels); --no-prune keeps every function.
@@ -48,7 +49,7 @@ class IdentityMap
 end
 
 
-HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor"]
+HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
 def tokenize(text)
@@ -221,6 +222,7 @@ end
 def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
+  return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|
@@ -237,6 +239,7 @@ def refusal(fn, name)
   scan = lambda do |x|
     h = x[0]
     if h.is_a?(String)
+      facts[:frame] = true if h == "retaddr" || h == "frameaddr"   # the caller's frame is read: the body must stay in its own
       facts[:jumps] += 1 if h == "goto" || h == "label"
       facts[:rets] += 1 if h == "return"
     end
@@ -251,6 +254,7 @@ def refusal(fn, name)
     end
   end
   scan.call(body)
+  return "frame address" if facts[:frame]
   return "printf" if facts[:printf]
   return "recursion" if facts[:self]
   return "goto/label" if facts[:jumps] > 0
@@ -1665,12 +1669,90 @@ def strip_eh_pass(forms, report)
   forms
 end
 
+# ---- EH frames of leaf functions (--strip-leaf-eh) ------------------------------------------------------------------------
+# A function with no call has nothing that can throw, so the EH stack entry it pushes (a noexcept guard, kind 6, or a
+# cleanup frame) is never read: only a throw walks the stack. libstdc++'s accessors (shared_ptr::get, vector::size, ...) are
+# such functions, and each pushes and pops a 240-byte entry on thread-local state. The pass drops the entry's slot, its
+# initialisation, the push and the pop, and the writes of __eh_curr_region. It leaves a function unchanged when anything
+# else reads the entry (every register and slot it removes must be gone from what remains), so a leaf that does use its
+# frame, or that the front end shaped otherwise, is kept as it was. Run before --inline, the inliner copies the lean callee.
+
+def leaf_eh_function(f)
+  return [f, 0] if count_heads(f, "call") > 0
+  frames = f.select { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
+  return [f, 0] if frames.empty?
+  fnames = frames.map { |c| "$" + c[1] }
+  removed_regs = {}
+  n = 0
+  walk = lambda do |list|
+    out = []
+    list.each do |c|
+      unless c.is_a?(Array)
+        out << c
+        next
+      end
+      h = head(c)
+      drop = false
+      if h == "slot" && fnames.include?("$" + c[1].to_s)
+        drop = true
+      elsif h == "store" && c[2].is_a?(String) && EH_GLOBALS.include?(c[2])
+        drop = true
+      elsif h == "store" && (fnames.include?(c[2]) || removed_regs.key?(c[2]))
+        drop = true
+      elsif h == "let" && head(c[3]) == "load" && (EH_GLOBALS.include?(c[3][2]) || fnames.include?(c[3][2]))
+        removed_regs[c[1]] = true
+        drop = true
+      elsif h == "let" && head(c[3]) == "offset" && fnames.include?(c[3][1])
+        removed_regs[c[1]] = true
+        drop = true
+      end
+      if drop
+        n += 1
+      else
+        out << walk.call(c)
+      end
+    end
+    out
+  end
+  g = walk.call(f)
+  gone = fnames.to_a + removed_regs.keys
+  return [f, 0] if atoms_of(g).any? { |a| gone.include?(a) }
+  [g, n]
+end
+
+def strip_leaf_eh_pass(forms, report)
+  total = 0
+  forms = forms.map do |f|
+    next f unless head(f) == "function"
+    g, n = leaf_eh_function(f)
+    total += n
+    g
+  end
+  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of leaf functions\n") if report
+  forms
+end
+
 # ---- unreachable functions (--prune-unreachable=SUBSTR) -------------------------------------------------------------------
 # Drops the functions and the global or data objects that no root reaches. The roots are the functions whose name contains
 # SUBSTR (the SYCL device build's entry kernels, __nfcxx_sycl_entry_). A reached function or object reaches each function or
 # object whose name it holds (a &"f", $"x" or @"g" atom), called or not. The IR names every global and function, so a form that
 # no reached code names cannot be used by the device; the emitters take only what their kernels reach.
 SYCL_ENTRY = "__nfcxx_sycl_entry_"
+
+# --prune-unused: the roots are the definitions that another object can see (neither (static) nor (weak): a weak function or
+# object, a template or inline one, is emitted only where it is used), the (constructor) and (destructor) functions and the
+# thread-locals; the rest of the module is kept only when a root reaches it by name. A host TU of libstdc++ and vulkan.hpp
+# carries tens of thousands of unused instances (ggml-vulkan.cpp: 42720 functions and 129 MB of IR, 8248 and 48 MB after this),
+# which --inline would spend its time on.
+UNUSED_ROOTS = "\0unused"
+
+def external_root?(f)
+  return false if head(f) == "data"
+  attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
+  return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
+  return false if attrs.include?("weak") || attrs.include?("static")
+  true   # a definition (or declaration) of external linkage
+end
 
 # The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
 def quoted_names(x, out)
@@ -1689,7 +1771,11 @@ end
 def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
-  queue = nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
+  queue = if substr == UNUSED_ROOTS
+            nodes.keys.select { |n| external_root?(nodes[n]) }
+          else
+            nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
+          end
   seen = {}
   until queue.empty?
     n = queue.pop
@@ -1718,6 +1804,7 @@ def main(argv)
   report = false
   forward = false
   strip_eh = false
+  strip_leaf = false
   prune = nil
   jobs = default_jobs
   file = nil
@@ -1751,10 +1838,14 @@ def main(argv)
       forward = true
     elsif a == "--strip-eh"
       strip_eh = true
+    elsif a == "--strip-leaf-eh"
+      strip_leaf = true
     elsif a.start_with?("--jobs=")
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")
       prune = a[20..-1]
+    elsif a == "--prune-unused"
+      prune = UNUSED_ROOTS
     elsif a == "--no-prune"
       prune = false
     elsif a == "-" || !a.start_with?("--")
@@ -1765,7 +1856,7 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa || forward || strip_eh || prune
+  unless inline || sroa || forward || strip_eh || strip_leaf || prune
     $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
@@ -1779,6 +1870,7 @@ def main(argv)
     end
     forms = prune_pass(forms, prune, report) if prune
     forms = strip_eh_pass(forms, report) if strip_eh
+    forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
     # the callees that the inliner copied into every caller are not reached any more
     forms = prune_pass(forms, prune, report) if prune && inline

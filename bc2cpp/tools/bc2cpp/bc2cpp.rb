@@ -90,6 +90,7 @@ require_relative 'codegen_native_send'
 require_relative 'codegen_exact_receiver'
 require_relative 'codegen_outside_owner_call'
 require_relative 'codegen_static_owner_arms'
+require_relative 'codegen_leaf_owner_else'
 require_relative 'codegen_owner_set_direct'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
@@ -244,7 +245,7 @@ BC2CPP_MAIN = lambda do
   shared_prefix, shared_stderr = SharedGeneration.start(shared_units) if shared_units
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-  SharedGeneration.arm_guard if shared_units
+  SharedGeneration.arm_guard(SharedGeneration::UNIT_KEYS | shared_units.flat_map { |unit| unit.env.keys }) if shared_units
   profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   profile_last = profile_started
   profile_phase = lambda do |name|
@@ -824,6 +825,16 @@ BC2CPP_MAIN = lambda do
                        fixnum_nil_ivars)
   end
   profile_phase.call('initial ivar layout')
+
+  # Emission controls can also affect embedding probes in CodeGen.new. Give
+  # each variant its own inference state, sharing only the immutable input setup.
+  if shared_units && SharedGeneration.emission_variants?(shared_units)
+    SharedGeneration.fork_units(shared_units, shared_prefix, shared_stderr, [symbol, out_dir])
+    shared_units = nil
+    symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
+    out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
+    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   if type_check_variants
     TypeCheckVariants.fork_variants(type_check_variants)
@@ -1637,6 +1648,15 @@ BC2CPP_MAIN = lambda do
     #ifndef BC2CPP_FIND_METHOD
     #define BC2CPP_FIND_METHOD 1
     static inline mrb_method_t bc2cpp_find_method(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_vm(M, c, mid); }
+    #endif
+    #ifndef BC2CPP_FIND_PROVEN
+    #define BC2CPP_FIND_PROVEN 1
+    // CORE_ROWS: a call whose receiver the compiler proved also finds a row (MRB_MT_CTOR_ROW), where a full table would.
+    #ifdef MRB_MT_ROWS
+    static inline mrb_method_t bc2cpp_find_proven(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_rows(M, c, mid); }
+    #else
+    static inline mrb_method_t bc2cpp_find_proven(mrb_state* M, struct RClass** c, mrb_sym mid) { return bc2cpp_find_method(M, c, mid); }
+    #endif
     #endif
   CPP
   # mrb_range_new for RANGE_INC/RANGE_EXC.

@@ -529,10 +529,11 @@ jobs:
             run: |
               FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
               tests/ehshim/run.sh
+              NFCXX_BACKEND=pathb tests/lib/run.sh
           - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
             run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
           # Explicit --backend=pathb: the SSA emitter's __asan_load/store checks (docs/notes/asan.md, "Path B"). The default
-          # backend with -fsanitize=address is still qbe, which the test job's AddressSanitizer step covers.
+          # backend with -fsanitize=address is Path B too (and --backend=qbe with it is refused).
           - name: AddressSanitizer on Path B (heap checks; tests/asan/pathb-pending.txt lists the later milestones)
             run: ASAN_BACKEND=pathb tests/asan/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
@@ -619,6 +620,9 @@ jobs:
   # Path B built the hello program or the gcc fallback did.
   macos-pathb-probe:
     name: macOS arm64 Path B probe
+    # Runs only when the Path B selection (pathb-changes) sees a Path B path change. Not in build-and-test's needs: non-gating.
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.changed == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7

@@ -8,8 +8,8 @@
 # NFCXX_K1OM_ROOT, NFCXX_MACOS_SYSROOT, and the CUDA tuning variables (NFCXX_SM, NFCXX_CUDA_*, docs/notes/gpu.md).
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
-#   pathb (default on x86-64 Linux, unless ASan, freestanding, modules, cosmo, --emit-c, --target, -E, -M or -shared is
-#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
+#   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
+#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 Linux.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
 #   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
@@ -54,10 +54,11 @@
 #                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
 #                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
 #   --cache-log=FILE (NFCXX_CACHE_LOG=FILE): with --cache, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
+#   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.py), like sccache's GHA backend.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
 #                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
-#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe selects
-#                  cproc's instrumentation. docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
+#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe is refused.
+#                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
 #                  refused (-fsanitize=undefined and its checks are the UBSan option above).
 #   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
 #                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
@@ -120,6 +121,11 @@ ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_op
 eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-unwind
 eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
 cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
+# NFCXX_CACHE_REMOTE=gha: each stored object is also kept in the GitHub Actions cache, and a local miss is looked up there
+# (scripts/nfcxx-cache-gha.py; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
+cache_remote=${NFCXX_CACHE_REMOTE:-}
+case $cache_remote in ""|gha) ;; *) echo "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '$cache_remote')" >&2; exit 2 ;; esac
+[ -n "$cache_dir" ] || [ -z "$cache_remote" ] || cache_dir=${TMPDIR:-/tmp}/nfcxx-cache-$(id -u)
 keep_intermediates=0; [ "${NFCXX_KEEP_INTERMEDIATES:-}" != 1 ] || keep_intermediates=1   # --keep-intermediates
 time_log=${NFCXX_TIME_LOG:-}                                            # --time-log=FILE
 instantiate=${NFCXX_INSTANTIATE:-used}                                  # --instantiate=used|auto
@@ -155,6 +161,24 @@ cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG wh
   while ! mkdir "$cache_log_file.lock" 2>/dev/null; do sleep 0.05; done
   printf '%s\n' "$*" >> "$cache_log_file"
   rmdir "$cache_log_file.lock"
+}
+# The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
+# remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
+cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
+  local tmp=$2.remote.$$ rc=0
+  rm -rf "$tmp"
+  python3 -I "$root/scripts/nfcxx-cache-gha.py" get "$1" "$tmp" || rc=$?
+  if [ $rc = 0 ] && [ -f "$tmp/obj" ]; then
+    mkdir -p "$(dirname "$2")"; [ -e "$2" ] || mv "$tmp" "$2" 2>/dev/null || true
+  else rc=1; fi
+  rm -rf "$tmp"
+  return $rc
+}
+cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
+  local names=(obj) x
+  for x in ti ii; do [ ! -f "$2/$x" ] || names+=("$x"); done
+  python3 -I "$root/scripts/nfcxx-cache-gha.py" put "$1" "$2" "${names[@]}" \
+    || echo "nfcxx: remote cache: could not store $1 (the build continues)" >&2
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
@@ -708,28 +732,31 @@ if [ $modules = 1 ]; then
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
-# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does (freestanding,
-# modules, cosmo, --emit-c, --target, -E, -M, -shared). A program Path B does not build is built again with gcc, below
+# The default backend: Path B on x86-64 Linux, unless the request needs something only qbe or gcc does
+# (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on x86-64 Linux only). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
 if [ -z "$backend" ]; then
   backend=qbe
   # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  if [ $backend_explicit = 0 ] && [ $freestanding = 0 ] && [ $modules = 0 ] && [ $cosmo = 0 ] \
+  # A freestanding program takes Path B on x86-64 Linux (the old harness with the lib/ headers, docs/notes/freestanding.md).
+  fs_ok=1; [ $freestanding = 0 ] || { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } || fs_ok=0
+  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
+  # -fsanitize=address has no qbe instrumentation: what the default would send to qbe is built by gcc, which instruments it
+  [ $asan = 0 ] || [ $backend != qbe ] || backend=gcc
 fi
 
-# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
-# branch nfcxx-asan-combined, the pin of 3rd/cproc; qbe-cc reads the -fsanitize=address it is given). Both link libasan. Path B calls
+# -fsanitize=address: gcc's instrumentation on the gcc backend; --backend=qbe is refused. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
     gcc) ;;
-    qbe) ;;   # qbe-cc is given -fsanitize=address (asan_c below)
+    qbe) echo "nfcxx: -fsanitize=address does not work with --backend=qbe; use the default, --backend=pathb or --backend=gcc" >&2; exit 2 ;;
     pathb) ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
@@ -897,17 +924,19 @@ fi
 # --backend=pathb, or NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md). Asked for by name, so a file Path B cannot
 # build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
 [ $path_b = 0 ] || { backend=pathb; default_backend=0; }
-[ $modules = 0 ] || [ $backend != pathb ] || { echo "nfcxx: C++ modules do not work with Path B yet (docs/notes/modules.md)" >&2; exit 2; }
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
+# Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
+# EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
+[ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 # The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
 qbecc_flags=()
 if [ $backend = qbe ]; then
-  [ $asan = 0 ] || qbecc_flags+=(-fsanitize=address)
   [ $eh_unwind_on = 0 ] || qbecc_flags+=(--eh-unwind)
 fi
 case $backend in
-  pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (--backend=pathb) compiles hosted programs only" >&2; exit 2; }
+  pathb) [ $freestanding = 0 ] || { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } ||
+           { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 Linux only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc   # for the .c inputs
        # --pathb-c=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
@@ -1031,7 +1060,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -1070,6 +1099,7 @@ if [ $backend = pathb ]; then
   ldrt=$("$root/scripts/pathb-ldrt")
   # The C++ and atomic libraries of the host: macOS has libc++ (in libSystem's SDK) and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
+  [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }   # no hosted C++ runtime: the program links EDG's runtime and libc
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt")" -pthread)   # first: its malloc wins
   if [ $cosmo = 1 ]; then
     # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there
@@ -1195,7 +1225,7 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
     printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
     # The logs and the trace are diagnostics: they must not change the key.
-    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
+    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
     cache_sha < "$root/nfcxx"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
@@ -1222,6 +1252,7 @@ if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 
    && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
   if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
     cache_entry=$cache_dir/objects/$key
+    [ -f "$cache_entry/obj" ] || [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
     if [ -f "$cache_entry/obj" ]; then
       rm -f "${out%.*}.ti" "${out%.*}.ii"
       cp "$cache_entry/obj" "$out"
@@ -1275,7 +1306,7 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
     t=$(trace_start)
     # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
     args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
+    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi
@@ -1285,6 +1316,7 @@ if [ -n "$cache_entry" ] && [ ! -f "$cache_entry/obj" ]; then   # a whole entry 
   for x in ti ii; do [ ! -f "${out%.*}.$x" ] || cp "${out%.*}.$x" "$ctmp/$x"; done
   [ -e "$cache_entry" ] || mv "$ctmp" "$cache_entry" 2>/dev/null
   rm -rf "$ctmp"
+  [ -z "$cache_remote" ] || [ ! -f "$cache_entry/obj" ] || cache_remote_put "${cache_entry##*/}" "$cache_entry"
 fi
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.

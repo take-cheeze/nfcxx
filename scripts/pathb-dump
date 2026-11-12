@@ -15,10 +15,15 @@
 # them, and take precedence over a variable already in the environment (--ir only):
 #   --ir-loc          (NFCXX_IR_LOC=1)       (loc "FILE" LINE) lines: the source place of the statements after them
 #   --ir-scopes       (NFCXX_IR_SCOPES=1)    (decl ...) and (scope-end ...) facts for locals
+#   --ir-noinline     (NFCXX_IR_NOINLINE=1)  a (noinline) head on a function with __attribute__((noinline)), which scripts/pathb-ir-opt.rb's
+#                                            inliner respects (only the SSA route reads it; the other emitters refuse an unknown head)
 #   --borrow          (NFCXX_PATHB_BORROW=1) the facts the borrow checker reads (docs/notes/pathb-borrowck.md)
 #   --sanitize=LIST   (NFCXX_IR_SANITIZE)    the checks of -fsanitize=undefined or CHECK[,CHECK...] (docs/notes/ubsan.md)
 #   --overflow=trap   (NFCXX_IR_OVERFLOW=trap) signed overflow is a trap
+#   --eh-runtime      with --freestanding: the program links EDG's runtime (libC.a), so the exception handling state is declared as
+#                     that runtime has it (thread-local when scripts/setup-edg.sh built it that way); hosted mode always does
 #   --cuda-device     (NFCXX_PATHB_CUDA=1)   a .cu file's device unit: the front end reads it as CUDA, without exceptions
+#   --modules, --modules_directory DIR, --create_module_interface FILE   C++ modules: EDG's options, as nfcxx gives eccp
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
 # wasm32 (its plain char is unsigned in EDG's table, so --signed_chars is passed). It needs --freestanding: the host's C
@@ -30,7 +35,7 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""
+std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
 cuda_device=0; [ -z "${NFCXX_PATHB_CUDA:-}" ] || cuda_device=1
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -40,11 +45,13 @@ while [ $i -lt ${#args[@]} ]; do
     --stats) export NFCXX_PATHB_STATS=1 ;;
     --ir-loc) export NFCXX_IR_LOC=1 ;;
     --ir-scopes) export NFCXX_IR_SCOPES=1 ;;
+    --ir-noinline) export NFCXX_IR_NOINLINE=1 ;;
     --borrow) export NFCXX_PATHB_BORROW=1 ;;
     --sanitize=*) export NFCXX_IR_SANITIZE=${arg#--sanitize=} ;;
     --overflow=*) export NFCXX_IR_OVERFLOW=${arg#--overflow=} ;;
     --cuda-device) cuda_device=1 ;;
     --freestanding) hosted=0 ;;
+    --eh-runtime) eh_runtime=1 ;;
     --cuda) user_opts+=(--cuda) ;;   # a .cu host copy: the <<<...>>> launches are read (nfcxx's cuda_opts, as the EDG path)
     --target=*) target=${arg#--target=} ;;
     --target) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: --target needs a name" >&2; exit 2; }; target=${args[$i]} ;;
@@ -53,6 +60,10 @@ while [ $i -lt ${#args[@]} ]; do
     -std=*) echo "pathb-dump: unknown standard ${arg#-std=}" >&2; exit 2 ;;
     -I?*) user_opts+=("-I$(abs_path "${arg#-I}")") ;;   # the front end runs in another directory
     -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
+    --modules) user_opts+=(--modules) ;;                     # C++ modules (docs/notes/modules.md): the options nfcxx gives eccp
+    --modules_directory|--create_module_interface)
+      i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: $arg needs a path" >&2; exit 2; }
+      user_opts+=("$arg" "$(abs_path "${args[$i]}")") ;;     # the front end runs in another directory
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
     -include) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: -include needs a file" >&2; exit 2; }
               user_opts+=(--preinclude "$(abs_path "${args[$i]}")") ;;   # as nfcxx: EDG's --preinclude (cosmo's c.inc)
@@ -80,9 +91,10 @@ fi
 
 sys_inc=(); gnu_opts=()
 cuda_device_opts=(); [ $cuda_device = 0 ] || cuda_device_opts=(--cuda --no_exceptions)
-# Hosted: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
+# Hosted, or --eh-runtime: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
 # marker of scripts/setup-edg.sh), the EH variables of the IR are thread-local too, as the nfcxx driver has them.
-eh_tls=(); [ "$hosted" = 0 ] || [ ! -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
+eh_tls=()
+if { [ "$hosted" != 0 ] || [ "$eh_runtime" = 1 ]; } && [ -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ]; then eh_tls=(--nfcxx_eh_thread_local); fi
 if [ "$hosted" != 0 ]; then
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
