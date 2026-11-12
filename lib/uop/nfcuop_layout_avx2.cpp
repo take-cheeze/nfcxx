@@ -121,4 +121,40 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
   return o.str();
 }
 
+std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr) {
+  if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_packed_c: sizes must be positive");
+  if (mr != 4 && mr != 6) throw std::invalid_argument("emit_gemm_rowsum_packed_c: the row tile is 4 or 6");
+  if (M % mr != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs M % mr == 0");
+  if (N % 16 != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs N % 16 == 0");
+  std::ostringstream o;
+  o << kPrologue << kHsum;
+  o << "void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp) {\n"
+    << "  /* pack B: panel p (16 columns) holds K rows of 16 contiguous floats at Bp[p*K*16 + k*16 + j] */\n"
+    << "  for (int64_t p = 0; p < " << (N / 16) << "; ++p)\n"
+    << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
+    << "      for (int64_t j = 0; j < 16; ++j) Bp[p * " << K * 16 << " + k * 16 + j] = B[k * " << N << " + p * 16 + j];\n"
+    << "  for (int64_t i = 0; i < " << M << "; i += " << mr << ") {\n";
+  for (int r = 0; r < mr; ++r) o << "    __m256 rs" << r << " = _mm256_setzero_ps();\n";
+  o << "    for (int64_t n = 0; n < " << N << "; n += 16) {\n"
+    << "      const float* bn = Bp + (n / 16) * " << K * 16 << ";\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      __m256 c" << r << "0 = _mm256_setzero_ps(), c" << r << "1 = _mm256_setzero_ps();\n";
+  o << "      for (int64_t k = 0; k < " << K << "; ++k) {\n"
+    << "        __m256 b0 = _mm256_loadu_ps(bn + k * 16), b1 = _mm256_loadu_ps(bn + k * 16 + 8), x;\n";
+  for (int r = 0; r < mr; ++r)
+    o << "        x = _mm256_broadcast_ss(&A[(i + " << r << ") * " << K << " + k]); c" << r
+      << "0 = _mm256_fmadd_ps(x, b0, c" << r << "0); c" << r << "1 = _mm256_fmadd_ps(x, b1, c" << r << "1);\n";
+  o << "      }\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      _mm256_storeu_ps(&C[(i + " << r << ") * " << N << " + n], c" << r << "0); _mm256_storeu_ps(&C[(i + " << r
+      << ") * " << N << " + n + 8], c" << r << "1);\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      rs" << r << " = _mm256_add_ps(rs" << r << ", _mm256_add_ps(c" << r << "0, c" << r << "1));\n";
+  o << "    }\n";
+  for (int r = 0; r < mr; ++r) o << "    R[i + " << r << "] = nfc_hsum(rs" << r << ");\n";
+  o << "  }\n"
+    << "}\n";
+  return o.str();
+}
+
 }  // namespace nfcuop::layout

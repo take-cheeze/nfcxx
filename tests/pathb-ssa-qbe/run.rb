@@ -17,7 +17,7 @@ require_relative "../../scripts/pathb-egraph"
 require_relative "../../scripts/pathb-ssa-qbe"
 require_relative "../pathb-egraph/check"
 
-QBE = File.expand_path("../../build/qbe/qbe", __dir__)
+QBE = ENV["QBE"] || File.expand_path("../../build/qbe/qbe", __dir__)
 
 # The C side of the harness's external functions (see the header comment).
 HARNESS_C = <<~C

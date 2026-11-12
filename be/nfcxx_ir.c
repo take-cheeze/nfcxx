@@ -1513,6 +1513,15 @@ static int ir_is_cdtor_call(an_expr_node_ptr f, int dtor)
   return r->special_kind == (dtor ? sfk_destructor : sfk_constructor) && r->ctor_dtor_kind == cdk_complete;
 }
 
+#if defined(__aarch64__)
+/* 1 for a definition whose first parameter is the hidden result pointer (see ir_makes_first_arg for the calls). */
+static int ir_makes_first_arg_def(a_type_ptr fn_type)
+{
+  return fn_type->variant.routine.extra_info != NULL && fn_type->variant.routine.extra_info->value_returned_as_parameter &&
+         !fn_type->variant.routine.extra_info->return_value_parameter_follows_this;
+}
+#endif
+
 /* 1 for a call that makes the object its first argument addresses: a complete-object constructor, or a function
    that returns a class through a first parameter (the lowering's, for a class with a non-trivial destructor). */
 static int ir_makes_first_arg(an_expr_node_ptr f)
@@ -2375,6 +2384,7 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
 }
 
 static ir_val ir_i128_const(a_constant_ptr c, a_type_ptr t);
+static void ir_gi_items(unsigned long long off, a_constant_ptr c, a_type_ptr t);
 static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t);
 
 /* A constant of type t (an expression constant or an initializer element). */
@@ -2908,6 +2918,16 @@ static void ir_vla_bounds(an_expr_node_ptr base, a_type_ptr elem, ir_val idx)
 
 
 /* Lvalue-valued operators, as addresses. */
+/* e is a member access `s.f` or `p->f` of the last data member of its class (the field has no later sibling). */
+static int ir_is_last_member_access(an_expr_node_ptr e)
+{
+  an_expr_node_ptr fe;
+  if (e == NULL || e->kind != enk_operation) return 0;
+  if (e->variant.operation.kind != eok_dot_field && e->variant.operation.kind != eok_points_to_field) return 0;
+  fe = ir_operand(e, 1);
+  return fe != NULL && fe->kind == enk_field && fe->variant.field.ptr->next == NULL && !fe->variant.field.ptr->is_bit_field;
+}
+
 static ir_val ir_lval_op(an_expr_node_ptr e)
 {
   int addr_only = ir_addr_only;
@@ -2956,16 +2976,10 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
         if (arr != NULL && arr->type != NULL && skip_typerefs(arr->type)->kind == tk_array &&
             !skip_typerefs(arr->type)->variant.array.is_variable_size_array) {
           unsigned long long n = (unsigned long long)skip_typerefs(arr->type)->variant.array.variant.number_of_elements;
-          /* [] and [0] (flexible array member): no bound. Nor does the last member of a struct that is `T m[1]`: the pre-C99
-             idiom for a flexible array member (Lua's TString.contents), which gcc takes as one by default
-             (-fstrict-flex-arrays=0). */
-          int old_fam = 0;
-          if (n == 1 && arr->kind == enk_operation &&
-              (arr->variant.operation.kind == eok_dot_field || arr->variant.operation.kind == eok_points_to_field)) {
-            an_expr_node_ptr mf = ir_operand(arr, 1);
-            old_fam = mf != NULL && mf->kind == enk_field && mf->variant.field.ptr->next == NULL;
-          }
-          if (n != 0 && !old_fam) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n));
+          /* [] and [0] (flexible array member): no bound. Nor has `[1]` as the last member of a struct, the pre-C99 struct hack
+             (TinyCC's `char str[1]` of TokenSym, indexed by the name's length): gcc's default -fstrict-flex-arrays=0 and the
+             =1 level both take it as flexible. */
+          if (n != 0 && !(n == 1 && ir_is_last_member_access(arr))) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n));
         }
       } else if (ir_is_integer(a1->type)) {
         ir_vla_bounds(a0, e->type, idx);
@@ -3212,8 +3226,13 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       ir_val p = ir_rval(a0);
       ir_val i = ir_rval(a1);
       char *idx;
-      /* `int + pointer` (Onigmo's `o + uniname2ctype_pool`): the pointer is the second operand. Both were evaluated in order. */
-      if (k == eok_padd && !ir_is_pointer(p.t) && ir_is_pointer(i.t)) { ir_val t = p; p = i; i = t; }
+      /* `i + p` and `i[p]` (sqlite's `&((char *)p)[got]`): the integer is the first operand. (index BASE IDX SIZE) takes the pointer
+         first; with the two swapped the emitters added the int to a pointer (QBE: "invalid type for first operand in add"). */
+      if (k == eok_padd && p.t != NULL && i.t != NULL && !ir_is_pointer(p.t) && ir_is_pointer(i.t)) {
+        ir_val t = p;
+        p = i;
+        i = t;
+      }
       if (ir_is_i128(i.t)) i = ir_mk_value(ir_i128_count(i), integer_type(ik_long));
       idx = i.s;
       a_type_ptr elem = skip_typerefs(e->type)->variant.pointer.type;
@@ -4934,6 +4953,25 @@ static ir_val ir_call(an_expr_node_ptr e)
     sret = ir_temp(e->type);
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
+  int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
+#if defined(__aarch64__)
+  /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
+     (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
+     copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
+     module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
+  a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
+  if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
+      hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
+      !hid_ft->variant.routine.extra_info->return_value_parameter_follows_this &&
+      !ir_is_cdtor_call(f, 0) && !ir_is_cdtor_call(f, 1) && ir_operand(e, 1) != NULL) {
+    ir_val d = ir_rval(ir_operand(e, 1));
+    a_type_ptr dt = d.t != NULL ? skip_typerefs(d.t) : NULL;
+    if (dt != NULL && dt->kind == tk_pointer && ir_is_cabi_agg(dt->variant.pointer.type)) {
+      hid_dest = 1;
+      args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
+    }
+  }
+#endif
   {
     int ints = 0, sse = 0, shape_ok = 1;
     unsigned long long stack = 0;
@@ -4941,6 +4979,7 @@ static ir_val ir_call(an_expr_node_ptr e)
     int nrref = 0, k, idx, nargs = 0;
     if (ir_borrow) for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) nargs++;
     for (arg = ir_operand(e, 1), idx = 0; arg != NULL; arg = arg->next, idx++) {
+      if (hid_dest && idx == 0) continue; /* the destination: (sret ...) above */
       ir_val a = ir_rval(arg);
       if (ir_borrow && nrref < 32 && ir_is_rref_type(ir_arg_param_type(f, idx, nargs))) rref[nrref++] = a.s;
       if (ir_borrow && idx == 0 && !agg_ret && !x87_ret && a.s[0] == '$' && (obj_var = ir_obj_arg(arg)) != NULL) obj_op = a.s;
@@ -7958,6 +7997,11 @@ static void ir_function(a_routine_ptr rout)
     } else {
       fputc(' ', nf_out);
       nf_put_type(param->type);
+#if defined(__aarch64__)
+      /* the hidden result pointer of a class result EDG lowered into the first parameter: a call to this definition from
+         the module passes the destination as that argument (scripts/pathb-ssa-qbe.rb, hidden_defs) */
+      if (param == scope->variant.routine.parameters && ir_makes_first_arg_def(fn_type)) fputs(" (hidden-result)", nf_out);
+#endif
       fputc(')', nf_out);
       if (npending < 256) {
         pending[npending].var = param;
