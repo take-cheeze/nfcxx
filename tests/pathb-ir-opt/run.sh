@@ -93,7 +93,12 @@ if ! grep '^(function "_ZNK1A3getEv"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
 # the one that calls an unknown external function (withcall) keeps it.
 if ! grep '^(function "vialeaf"' "$out/strip_leaf_eh.ir" | grep -q '__C8' && ! grep '^(function "leafonly"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
    && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '__C8'; then echo "strip nothrow callers: ok"; else echo "strip nothrow callers: FAIL"; fail=1; fi
-: a pointer slot stored twice with one array's address reads as that address, a memcpy
+# A cleanup frame (kind 1) is set up and read back through chains of offsets of its address: those go with it. A destructor whose
+# only call is to a guarded (noexcept) function loses both of its frames; the guarded function, which calls an unknown one, keeps its own.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_kind1.ir > "$out/strip_kind1.ir" || fail=1
+if ! grep '^(function "dtor_like"' "$out/strip_kind1.ir" | grep -q '__C9\|__eh_curr_region' \
+   && grep '^(function "guarded_member"' "$out/strip_kind1.ir" | grep -q '(slot "tmp.1" (struct "__C9")'; then echo "strip kind 1 frame: ok"; else echo "strip kind 1 frame: FAIL"; fail=1; fi
+# Scalar replacement through a `this` slot: a pointer slot stored twice with one array's address reads as that address, a memcpy
 # of a constant size is a copy, and the arrays become scalar slots.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --sroa sroa_this.ir > "$out/sroa_this.ir" || fail=1
 if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" int 4 4)' "$out/sroa_this.ir" && ! grep -q 'memcpy\|(store (ptr int) \$"self"' "$out/sroa_this.ir"; then

@@ -1764,6 +1764,16 @@ def throwing_calls(x, bad)
   n
 end
 
+# Whether e (the value of a let) is computed from the address of one of the frames or from a register already removed: an
+# offset, bitcast or index of it, or a load through it.
+def derived_of_removed?(e, fnames, removed_regs)
+  base = case head(e)
+         when "offset", "index" then e[1]
+         when "bitcast", "load" then e[2]
+         end
+  base.is_a?(String) && (fnames.include?(base) || removed_regs.key?(base))
+end
+
 def leaf_eh_function(f, bad)
   return [f, 0] if throwing_calls(f, bad) > 0
   frames = f.select { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
@@ -1790,6 +1800,11 @@ def leaf_eh_function(f, bad)
         removed_regs[c[1]] = true
         drop = true
       elsif h == "let" && head(c[3]) == "offset" && fnames.include?(c[3][1])
+        removed_regs[c[1]] = true
+        drop = true
+      elsif h == "let" && derived_of_removed?(c[3], fnames, removed_regs)
+        # an address or a value read through the frame's address: the cleanup frame's fields (the region table, the objects'
+        # addresses, the saved region number) are set up and read back through chains of offsets
         removed_regs[c[1]] = true
         drop = true
       end
