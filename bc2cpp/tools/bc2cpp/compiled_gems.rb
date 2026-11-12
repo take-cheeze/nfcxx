@@ -161,6 +161,7 @@ require 'prism'
 require File.join(BC2CPP_WORLD_ROOT, 'tools/rgss_tts_config')
 require_relative 'gem_owners'
 require_relative 'compiled_gems_config'
+require_relative 'compiled_gem_sources'
 
 # GEM_OWNERS: a compiled gem's owners are every engine owner with a plain def in its base gem's mrblib (every
 # variant: a build that leaves a file out only has fewer defs), and the core classes the gem reopens.
@@ -511,24 +512,24 @@ def bc2cpp_rpg_maker_gem_lines(text, name, root)
   out
 end
 
+# A gem's mrbgem.rake text: the root copy, or for a bc2cpp-generated gem whose tree is not staged, the generated text
+# (compiled_gem_sources.rb). nil when neither exists.
+def bc2cpp_gem_rake_text(dir, root)
+  rake = File.join(dir, 'mrbgem.rake')
+  return File.read(rake, encoding: 'UTF-8') if File.file?(rake)
+
+  name = File.basename(dir)
+  CompiledGemSources.generated?(name, root) ? CompiledGemSources.rake_text(name, root) : nil
+end
+
 # The non-test add_dependency names of a mrbgem.rake. add_test_dependency is not built, so it is not followed.
 # A `Dir.exist?` modifier (mruby-marshal's metaprog) is evaluated, and an `unless %w[...].include?(build.name)`
 # modifier drops the gem for the closed build; any other modifier raises.
-# A bc2cpp-generated gem's mrbgem.rake, as the root copy or, when the tree was never staged (rpg-maker-clone keeps the
-# *-compiled gem trees out of git, see its compiled-gem-templates/stage.rb), the template it is copied from.
-def bc2cpp_gem_rakefile(dir, root)
-  rake = File.join(dir, 'mrbgem.rake')
-  return rake if File.file?(rake)
-
-  template = File.join(root, 'compiled-gem-templates', File.basename(dir), 'mrbgem.rake')
-  File.file?(template) ? template : rake
-end
-
 def bc2cpp_rake_dependencies(dir, root)
-  rake = bc2cpp_gem_rakefile(dir, root)
-  raise "bc2cpp: #{rake} is missing; the closed-world gem closure is derived from it" unless File.file?(rake)
+  text = bc2cpp_gem_rake_text(dir, root)
+  raise "bc2cpp: #{dir}/mrbgem.rake is missing; the closed-world gem closure is derived from it" unless text
 
-  File.read(rake, encoding: 'UTF-8').each_line.filter_map do |line|
+  text.each_line.filter_map do |line|
     match = line.match(/^\s*(?:spec\.)?add_dependency[ (]\s*['"](mruby-[\w-]+)['"]/)
     next unless match
     if (cond = line[/\bif\s+Dir\.exist\?\s+"\#\{MRUBY_ROOT\}\/mrbgems\/([\w-]+)"/, 1])
@@ -548,7 +549,7 @@ BC2CPP_GEM_STAND_INS = { 'mruby-fiber' => 'mruby-fiber-placeholder' }.freeze
 
 def bc2cpp_gem_dir(name, root)
   stand_in = BC2CPP_GEM_STAND_INS[name]
-  return File.join(root, stand_in) if stand_in && File.file?(bc2cpp_gem_rakefile(File.join(root, stand_in), root))
+  return File.join(root, stand_in) if stand_in && bc2cpp_gem_rake_text(File.join(root, stand_in), root)
 
   dirs = [File.join(root, '3rd/mruby/mrbgems', name), File.join(root, name), File.join(root, '3rd', name)]
   dirs.find { |d| File.file?(File.join(d, 'mrbgem.rake')) } ||
@@ -574,7 +575,8 @@ end
 # mruby-core-compiled names its deps in two loops, not literal add_dependency lines. Both loops must be present,
 # so a rewritten loop raises here rather than drifting from this mirror. Optional gems count only if the build has them.
 def bc2cpp_core_compiled_edges(root, build_names)
-  text = File.read(bc2cpp_gem_rakefile(File.join(root, 'mruby-core-compiled'), root), encoding: 'UTF-8')
+  text = bc2cpp_gem_rake_text(File.join(root, 'mruby-core-compiled'), root) or
+         raise 'bc2cpp: mruby-core-compiled has no mrbgem.rake'
   literal = text[/%w\[([^\]]+)\]\.each \{ \|gem_name\| add_dependency gem_name \}/, 1]
   raise 'bc2cpp: mruby-core-compiled/mrbgem.rake lost its add_dependency loop' unless literal
   unless text.include?('(BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS).each do |gem_name|') &&
