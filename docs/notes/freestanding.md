@@ -7,11 +7,12 @@ tested with `tests/lib/run.sh`.
 ## Enabling it
 
 ```
-./nfcxx --freestanding hello.cpp -o hello          # qbe (freestanding is not Path B)
+./nfcxx --freestanding hello.cpp -o hello          # Path B on x86-64 Linux, qbe elsewhere
+./nfcxx --freestanding --backend=qbe hello.cpp -o hello
 ./nfcxx --freestanding --backend=gcc hello.cpp -o hello
 ```
 
-Off by default; the default driver path is unchanged. `--freestanding` does three things:
+Off by default. `--freestanding` does three things:
 
 1. `--no_standard_includes -I<repo>/lib` to eccp: EDG's default include directories are not searched, so only
    `lib/` provides headers. A hosted header is rejected: `#include <cstdio>` gives "cannot open source file".
@@ -19,6 +20,9 @@ Off by default; the default driver path is unchanged. `--freestanding` does thre
    `__is_same` and `__builtin_bit_cast` in g++ mode (`docs/notes/builtins.md`).
 3. Nothing about linking: programs still link with the usual host libraries. "Freestanding" here means no hosted
    headers, not a no-libc link. The panic helper calls libc `write` and `abort` through the C ABI.
+   On Path B the link is EDG's runtime (`libC.a`), the long double helpers and libc/libm, without the host's libstdc++
+   or the EH shim; the front end is told with `scripts/pathb-dump --eh-runtime` that the exception handling state is
+   EDG's runtime's (thread-local when the runtime was built that way), as in hosted mode.
 
 `--dialect=clang` is also available; `NFCXX_DIALECT` sets the default.
 
