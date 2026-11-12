@@ -43,8 +43,12 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
    the exact list of what still needs cproc (`git grep QBE-ONLY`). So far, from the PR descriptions:
    - `tests/builtins/bit_g.cpp`: Path B with `--gnu-version=140000` reports `__builtin_clzg` undefined; `integer_seq.cpp`: `--dialect=clang` is not
      modelled by `pathb-dump` (#990).
-   - `tests/poly`: the mruby, Lua and QuickJS C builds are refused; `ops.cpp` aborts (double free) on Path B; `tests/float-to-int/classify.c`:
-     Path B ignores the class arguments of `__builtin_fpclassify` (#994).
+   - `tests/poly`: the mruby, Lua and QuickJS C builds are refused (with `POLY_LANGS="python ast"` host.cpp and ops.cpp pass on Path B; the
+     `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
+     one-element trailing array checked against its bound); `tests/float-to-int/classify.c`: Path B ignores the class arguments of
+     `__builtin_fpclassify` (#994).
+   - `tests/ast`: engine.cpp and tier.cpp pass on Path B (the SIGABRT was a null check under the lvalue adjustment of a derived-to-base
+     pointer conversion); the case `inline_loops` still overflows the 8 MB stack on Path B, whose frames are several times gcc's.
    - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
      unlowerable, 2 `_Float16`, 2 over-aligned and singles); every `tests/cil` program runs, one of them through the cproc fallback.
    - ASan (#992): Path B does not detect the two setjmp-return scope escapes (gcc does not either), so `tests/poly/asan-go.sh` is gcc-only.
