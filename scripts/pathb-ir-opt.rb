@@ -257,7 +257,7 @@ def refusal(fn, name)
   return "frame address" if facts[:frame]
   return "printf" if facts[:printf]
   return "recursion" if facts[:self]
-  return "goto/label" if facts[:jumps] > 0
+  # goto and label are inlined: expand_call gives each copy's labels a suffix of its own (subst)
   return "work-group static" if fn.any? { |f| head(f) == "slot" && contains_wgs?(f) }
   rets = facts[:rets]
   return nil if rets == 0 || (rets == 1 && head(splice_tail_blocks(body).last) == "return")
@@ -374,7 +374,7 @@ def expand_call(s, fns, st)
 
   st[:k] += 1
   k = st[:k]
-  map = {}
+  map = { label_k: k }
   # A byval parameter is the address of the callee's own copy of the argument object: a slot of the caller that holds the copy
   # (the size and alignment come from the parameter's form, be/nfcxx_ir.c), made by a copy from the argument's address.
   byval_pre = []
@@ -444,6 +444,13 @@ end
 # The callee's form with its parameters, slots and fresh ids substituted.
 def subst(x, map, st)
   if x.is_a?(Array)
+    # a label and the goto, asm goto label of it: the name gets the copy's suffix, so two copies (or the caller) never share one
+    if (x[0] == "label" || x[0] == "goto") && x.length == 2 && x[1].is_a?(String) && x[1][0] == "\"" && map.key?(:label_k)
+      return [x[0], "\"#{unq(x[1])}.i#{map[:label_k]}\""]
+    end
+    # the (label NAME) operands of an asm-block are the names its template uses (%l[NAME]): they keep their spelling, and the
+    # (goto) after the block is what jumps
+    return x.map { |y| x[0] == "asm-block" && y.is_a?(Array) && y[0] == "label" ? copy_form(y) : subst(y, map, st) } if x[0] == "asm-block"
     return x.map { |y| subst(y, map, st) }
   end
   return copy_form(map[x]) if map.key?(x)
