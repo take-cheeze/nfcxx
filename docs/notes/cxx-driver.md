@@ -73,6 +73,25 @@ covers a miss, a hit whose program runs, and a changed kernel.
 
 With `--cache-log=FILE` (or `NFCXX_CACHE_LOG=FILE`) as well, each lookup appends its key inputs (the bytes that are hashed, one block per compile headed by `== OUT (SRC)`), then `key KEY`, then `hit` or `miss`. Diff the input blocks of a miss against the last hit for the same output to see which input changed. The cache and log options (and `--time-log`, `--trace`) are left out of the key, so logging never causes a miss.
 
+#### Remote tier: the GitHub Actions cache (`NFCXX_CACHE_REMOTE=gha`)
+
+`NFCXX_CACHE_REMOTE=gha` keeps the same objects in the GitHub Actions cache, one entry per key, the way sccache's GHA
+backend does (not as one directory saved by `actions/cache`). A local miss is looked up remotely and a hit is copied to
+`DIR/objects/<key>`; a new local entry is stored remotely after it is written. `NFCXX_CACHE` is still the local side
+(without it, a temporary directory is used). The entry is a tar of `obj`, `ti` and `ii`, under the key `nfcxx-<key>`
+with the version the SHA-256 of `nfcxx-cache-v1` (a change to that namespace drops every entry).
+`scripts/nfcxx-cache-gha.py` (standard library only) makes the calls: CreateCacheEntry, PATCH to the signed upload URL
+with `Content-Range`, FinalizeCacheEntryUpload, GetCacheEntryDownloadURL and GET. It needs `ACTIONS_RESULTS_URL`,
+`ACTIONS_RUNTIME_TOKEN` and `ACTIONS_CACHE_SERVICE_V2` set, which a workflow step has when it runs with the cache
+enabled. A remote failure is a miss, or a store that did not happen, with a note on stderr: a build does not fail for its
+cache. `NFCXX_CACHE_REMOTE` is left out of the key, and the CUDA second pass runs with it off.
+
+Scope: only the object cache. A `.cu` device image (`DIR/cu-device`) stays local. The protocol is checked against a mock
+of the service in `tests/gha-cache/run.sh` (the requests, the answers, immutability, path safety, and the driver's two
+functions taken from `nfcxx`). The live service is not reachable from the development sandbox, so the first run in a
+workflow is the test of the real one. The GitHub Actions cache is 10 GB per repository and is shared with sccache and
+`actions/cache`; the workflows do not set `NFCXX_CACHE_REMOTE` yet.
+
 Refused (eccp says `unknown option`): `-fno-rtti`, `-fno-exceptions`, and every other option not in the table, since
 each of them would change the meaning of the code or is not implemented.
 
