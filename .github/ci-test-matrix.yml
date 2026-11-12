@@ -45,16 +45,19 @@
   run: |
     scripts/setup-cosmo.sh
     tests/cosmo/run.sh
-- name: real-world tinyxml2, nlohmann/json, and {fmt}
+- name: real-world tinyxml2, nlohmann/json, doctest (gcc and Path B), and {fmt}
+  pathb: true   # run.sh, run_json.sh and run_doctest.sh build with Path B
   run: |
     tests/realworld/run.sh
     tests/realworld/run_json.sh
+    tests/realworld/run_doctest.sh
     tests/realworld/run_fmt.sh
 - name: C++ modules (Path B, qbe and gcc backends)
   pathb: true   # tests/modules/run.sh runs the Path B backend, which is the default for modules (docs/notes/modules.md)
   run: |
     tests/modules/run.sh
 - name: multi-TU, EH shim, nfceval, nfcffi, bundled libraries, call ABI
+  pathb: true   # tests/ehshim/run.sh builds with Path B
   run: |
     tests/multi-tu/run.sh
     tests/ehshim/run.sh
@@ -64,14 +67,15 @@
     tests/bundle/run.sh
     tests/call-abi/run.sh
 # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
-# landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
-- name: EH unwinder (gcc and qbe backends, NFCXX_EH_UNWIND=1)
+# landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj), tests/c only: tests/ehshim runs on Path B.
+- name: EH unwinder (gcc, Path B and qbe backends, NFCXX_EH_UNWIND=1)
+  pathb: true   # tests/ehshim/run.sh builds with Path B
   run: |
     if [ "$GCC_BACKEND" = 1 ]; then
       NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
       NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
     fi
-    NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
+    NFCXX_EH_UNWIND=1 tests/ehshim/run.sh   # gcc and Path B per file (the BACKENDS: lines), foreign/ on both
     NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
 # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
 # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.

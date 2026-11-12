@@ -7,6 +7,11 @@
 # module proxy is missing. ASTro's luastro is built by scripts/setup-poly-astro.sh (ASTroGen is Ruby, the source comes from GitHub:
 # a SKIP line when either is missing). See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
+# QBE-ONLY: the suite stays on qbe, because Path B (NFCXX_BACKEND=pathb) does not pass it yet:
+#   - the language libraries are C built by nfcc, and Path B refuses them: mruby (mrbc.c, "parse_args: operator unsupported"),
+#     Lua (lvm.c, "luaV_execute: unsupported stmt assigned_goto"), QuickJS (cutils.h line 1618, front-end errors);
+#   - with POLY_LANGS="python ast" (nothing built) host.cpp passes on Path B (290 checks), but ops.cpp aborts with
+#     "double free or corruption" on Path B for the ast and the python host (gcc and qbe pass all 31 checks).
 #   POLY_LANGS="ruby lua python ast js go astro"   (default: all seven; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
