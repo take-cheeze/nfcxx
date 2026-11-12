@@ -65,8 +65,9 @@ module RbsSignatures
     value = ENV['BC2CPP_SIG_DIRS']
     return value.empty? ? [] : value.split(File::PATH_SEPARATOR) if value
 
-    default = File.join(root, 'sig')
-    File.directory?(default) ? [default] : []
+    # The core base stubs ship with nfcxx (bc2cpp/sig/base_core.rbs); the world's sig/ holds the rest.
+    default = [File.join(root, 'sig'), File.expand_path('../../sig', __dir__)]
+    default.select { |d| File.directory?(d) }
   end
 
   def files_in(dirs)
