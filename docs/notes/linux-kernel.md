@@ -148,6 +148,42 @@ the sandbox's permission policy denied running `make` on the downloaded tree (co
 of the kernel remain to be measured: run `KCC=nfcc NFCXX_BACKEND=pathb` after Path B accepts the kernel's options, or
 replay the compile commands of a gcc kernel build through `scripts/nfcc-pathb-measure.sh` (set `NFCC_MEASURE_FLAGS`).
 
+### Measured: the compile commands of a gcc build, replayed on Path B
+
+Method: build the tinyconfig tree with gcc (`make O=out ARCH=x86_64 CC=logcc bzImage`, where `logcc` appends its
+directory and arguments to a log and runs gcc), then replay each `-c` line of the log with `NFCXX_BACKEND=pathb nfcc -c`:
+the `-I`/`-D`/`-U`/`-include` options kept, `-isystem DIR` as `-I DIR`, and `-nostdinc`, `-m*`, `-f*`, `-W*`, `-O*`, `-g*`
+dropped (so the numbers say what Path B builds, not that the objects would boot). 615 translation units (616 counting the
+one that has no `.c` of its own).
+
+| state | builds | refused |
+|---|---|---|
+| before | 538 | 77 |
+| after the commits of this branch | 570 | 45 |
+
+The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (compared with gcc by its `run.sh`):
+
+- `rq_pin_lock`: a statement expression whose value is an empty struct reached the back end as an aggregate constant
+  (`stmt_expr_empty_struct.c`);
+- `simple_offset_add`, `resource_string`, `tty_default_fops`, `task_bp_pinned`, `*_pmu_init`, `ZSTD_create*`: a designated
+  compound literal keeps its `ck_designator` entries in the constant (`designated_compound_static.c`);
+- `__wake_q_add`, `mark_oom_victim`, `nested_table_alloc`, ...: a `null` asm operand was typed with the bare word `ptr`
+  (`asm_pointer_operand_null.c`);
+- `show_smap_vma_flags`, `inat_get_group_attribute`: a repeated string over the rows of a 2-D static array
+  (`static_range_string_rows.c`);
+- `univ8250_console_init`: two static objects that point at each other (`static_address_cycle.c`);
+- `unexpected phi instruction` (chip.c, mmap.c, io_apic.c, static_call.c): the pointer-cell load of an external function's
+  address emitted ahead of a phi (`phi_extern_function_address.c`);
+- `0xffff888000000000 out of range of signed 32bit displacement` (namei.c, realmode/init.c): QBE folds `add CONST, x` into
+  a displacement without a 32-bit check (`index_wide_constant_base.c`).
+
+- `drivers/video/console/vgacon.c`: QBE propagates a pointer constant through copies and phis into the displacement of the
+  access that uses it, unchecked (`phi_wide_pointer_constant.c`). A pointer constant that does not fit in 32 bits is loaded
+  from a one-word data cell (the cleaner fix is a 32-bit check in the QBE fork's `amd64/isel.c`, outside this repo).
+
+What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
+boot code (`arch/x86/boot`, `-m16`).
+
 What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
 uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with
 `scripts/nfcc-pathb-measure.sh tests/c/*.c`. `tests/realworld` holds no C sources of its own (its Lua and
