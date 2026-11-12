@@ -390,11 +390,26 @@ module Qbe
   def global_data(g, by_name, state)
     name = g[1].raw
     if state.key?(name)
-      return state[name] == :busy ? nil : state[name]
+      # A global that is being built is reached again through a cycle of addresses (serial8250_reg and univ8250_console
+      # point at each other): its address is a link-time symbol, so the reference stands, and is withdrawn below if the
+      # global turns out not to be emitted.
+      return state[name] == :busy ? true : state[name]
     end
 
     state[name] = :busy
     state[name] = build_data(g, by_name, state)
+    withdraw_users(name, state) if state[name].nil?
+    state[name]
+  end
+
+  # The globals whose data names the address of `name` (state[[:users, name]]) lose theirs when `name` is not emitted.
+  def withdraw_users(name, state)
+    (state.delete([:users, name]) || []).each do |user|
+      next if state[user].nil?
+
+      state[user] = nil
+      withdraw_users(user, state)
+    end
   end
 
   def global_flags(g) = g.map { |x| x.is_a?(Array) ? head(x) : x }
@@ -471,6 +486,7 @@ module Qbe
         # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
         return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
 
+        (state[[:users, target.raw]] ||= []) << g[1].raw unless target.raw == g[1].raw
         suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
         items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
       else return nil
