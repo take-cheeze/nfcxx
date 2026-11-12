@@ -1,5 +1,7 @@
 // nfcuop layout, AVX2 emitter (docs/notes/uop-layout.md): the two GEMM variants of the layout model as C source.
 //
+// Layout model from Arknife (the paper's name for the system): Ma, Chen, Li, Luo, Xiao, Zheng, Li, Liang. "Retargetable Compilation for Tensor Kernels via a Unified Layout Abstraction". arXiv:2611.13741 [cs.PL], 2026. https://arxiv.org/abs/2611.13741
+//
 //   std::string src = nfcuop::layout::emit_gemm_rowsum_c(GemmVariant::VecN, M, N, K);
 //   // src defines   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* At);
 //   // compile it with  cc -O2 -mavx2 -mfma -shared -fPIC

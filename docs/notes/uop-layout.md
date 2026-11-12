@@ -1,6 +1,6 @@
 # nfcuop layout: instruction-visible layout on the AVX2 target (`lib/uop/nfcuop_layout.*`)
 
-Started from the layout paper (arXiv 2611.13741, Arknife): a tensor's layout is a constraint that instructions impose,
+Started from the layout paper, Arknife (see [References](#references)): a tensor's layout is a constraint that instructions impose,
 and a global solver picks layouts that minimize repairs. This is the first slice, on the x86 AVX2 f32 target only.
 
 ## What it models
@@ -108,3 +108,7 @@ small share. It matters most in the scalar-versus-SIMD rows at K = 32, where the
 `tests/uop/test_layout.cpp` (the model) and `tests/uop/test_layout_avx2.cpp` (the emitter), both run by
 `tests/uop/run.sh` (`UOP_ONLY="test_layout test_layout_avx2"`). Neither needs an nfcxx build; the emitter test needs a C
 compiler with AVX2 and FMA (it prints SKIP on a CPU without them).
+
+## References
+
+- Ma, Chen, Li, Luo, Xiao, Zheng, Li, Liang. "Retargetable Compilation for Tensor Kernels via a Unified Layout Abstraction" (Arknife). arXiv:2611.13741 [cs.PL], 2026. https://arxiv.org/abs/2611.13741
