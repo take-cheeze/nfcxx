@@ -639,7 +639,10 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
+      # inline `read32le` each, TinyCC's, otherwise collide at link time).
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
