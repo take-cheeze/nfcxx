@@ -6722,6 +6722,13 @@ static int ir_asm_plan_op(an_asm_operand_ptr op, ir_asm_plan *pl)
   } else if (!out && (allow & (IR_AO_IMM_INT | IR_AO_IMM_SYM | IR_AO_ADDR)) && ir_asm_sym_const(e, &pl->base, &pl->off)) {
     pl->kind = "sym"; pl->code[0] = 'i'; pl->code[1] = '\0';
     return 1;
+  } else if (!out && !(allow & (IR_AO_REG | IR_AO_MEM | IR_AO_ADDR)) && (allow & (IR_AO_IMM_INT | IR_AO_IMM_SYM)) &&
+             (ir_is_integer(ot) || ir_is_pointer(ot)) && !ir_is_bool(ot)) {
+    /* An immediate that is a constant only after inlining and folding (the kernel's `"i"(1 << (bit & 7))` and
+       `"i"(&caps[bit >> 3])` of a parameter `bit`): the value is passed and the SSA route reads it as a constant
+       (scripts/pathb-ssa-qbe.rb, asm_block_lines), refusing the function when it is not one. */
+    pl->kind = ir_is_pointer(ot) ? "symv" : "immv"; pl->code[0] = 'i'; pl->code[1] = '\0';
+    return 1;
   } else if (allow & (IR_AO_REG | IR_AO_ADDR)) {
     pl->code[0] = (allow & IR_AO_REG) ? (reg ? reg : 'r') : 'r'; pl->code[1] = '\0';
   } else if (allow & IR_AO_MEM) {
@@ -6729,7 +6736,13 @@ static int ir_asm_plan_op(an_asm_operand_ptr op, ir_asm_plan *pl)
   } else {
     return 0;
   }
-  if (pl->code[0] == 'm') { pl->kind = "mem"; return ir_asm_lvalue_shape(e); }
+  if (pl->code[0] == 'm') {
+    pl->kind = "mem";
+    /* a const object with a constant initializer reaches here folded to its value (the kernel's `static const u16 ds` of
+       mds_clear_cpu_buffers): the operand is read from a stack copy of it */
+    if (!out && e->kind == enk_constant && ir_asm_scalar(ot) && !ir_is_bool(ot)) return 1;
+    return ir_asm_lvalue_shape(e);
+  }
   if (pl->code[0] != 'x' && pl->code[0] != 'r' && out && !e->is_lvalue) return 0;
   if (out && !e->is_lvalue) return 0;
   pl->kind = out ? (op->modifiers == aom_modify ? "inout" : "out") : "in";
@@ -6790,7 +6803,8 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     if (nops >= IR_ASM_OPS_MAX || ot == NULL || op->expression == NULL) { ok = 0; break; }
     if (!ir_asm_plan_op(op, &plans[nops])) { ok = 0; break; }
     is_mem = strcmp(plans[nops].kind, "mem") == 0;
-    is_imm = strcmp(plans[nops].kind, "imm") == 0 || strcmp(plans[nops].kind, "sym") == 0 || strcmp(plans[nops].kind, "flag") == 0;
+    is_imm = strcmp(plans[nops].kind, "imm") == 0 || strcmp(plans[nops].kind, "sym") == 0 || strcmp(plans[nops].kind, "flag") == 0 ||
+             strcmp(plans[nops].kind, "immv") == 0 || strcmp(plans[nops].kind, "symv") == 0;
     if (is_mem || is_imm) continue;
     if (ir_is_float(ot) != (plans[nops].code[0] == 'x')) { ok = 0; break; }
     if (ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
@@ -6820,7 +6834,11 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     ir_val v;
     const char *kind = plans[nops].kind;
     int is_mem = strcmp(kind, "mem") == 0;
-    if (is_mem) {
+    if (is_mem && ir_asm_strip_decay(op->expression)->kind == enk_constant) {
+      a_type_ptr ct = op->expression->type;
+      v = ir_temp(ct);
+      ir_store(ct, v.s, ir_rval(op->expression).s, 0);
+    } else if (is_mem) {
       v = ir_lval(ir_asm_strip_decay(op->expression));
     } else if (strcmp(kind, "imm") == 0) {
       v = ir_mk_value(ir_fmt("(const long %lld)", plans[nops].ival), op->expression->type);
@@ -6904,7 +6922,7 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
   if (ir_asm_ptx(ae, d)) return;
   /* A template no class knows: the general form (below). */
   if (ae != NULL && ae->asm_string != NULL && ae->asm_string->kind == ck_string &&
-      ir_asm_class(ae->asm_string, ae->gnu_asm_form) == IR_ASM_NONE && ir_asm_general(ae, d)) return;
+      (ir_asm_class(ae->asm_string, ae->gnu_asm_form) == IR_ASM_NONE || ae->is_asm_goto) && ir_asm_general(ae, d)) return;
   const char *why = NULL;
   int cls = IR_ASM_NONE, mem = 0, nout = 0, nin = 0, idx = 0, got_a = 0, got_d = 0;
   a_named_register_list_ptr cl;

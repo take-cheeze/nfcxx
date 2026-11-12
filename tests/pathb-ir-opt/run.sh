@@ -97,4 +97,9 @@ if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" 
 # Store-to-load forwarding: the load after the store takes the stored value; the load after the call does not.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward forward.ir > "$out/forward.ir" || fail=1
 if grep -q '(let %1 int %0)' "$out/forward.ir" && grep -q '(let %2 int (load int $"x"))' "$out/forward.ir"; then echo "forward: ok"; else echo "forward: FAIL"; fail=1; fi
+# A callee with a goto and a label is inlined, and each copy's labels get a suffix of their own: two calls of it leave no call
+# and two different label names (the asm goto of the kernel's static_cpu_has is such a callee).
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline goto_inline.ir > "$out/goto_inline.ir" || fail=1
+if ! grep -q '(call' "$out/goto_inline.ir" && [ "$(grep -o '(label "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ] \
+   && [ "$(grep -o '(goto "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ]; then echo "goto and label inline: ok"; else echo "goto and label inline: FAIL"; fail=1; fi
 exit $fail
