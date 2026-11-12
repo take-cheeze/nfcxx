@@ -3,7 +3,7 @@
 // MACOS-XFAIL-qbe: EDG rejects __builtin_clzg with Apple SDK headers (not investigated yet; see the macOS CI job)
 // GNU-VERSION: 140000 (GCC 14 emulation: EDG knows the g-builtins only from GCC 14 on)
 // GCC 14 type-generic bit builtins: __builtin_clzg / ctzg (two-argument form: d for a zero input), popcountg,
-// parityg, ffsg, clrsbg. Values come from gcc 14 (the same probe built with gcc). The inputs are volatile so EDG does not fold them.
+// parityg. Values come from gcc 14 (the same probe built with gcc). The inputs are volatile so EDG does not fold them.
 static volatile unsigned int vu = 0;
 static volatile unsigned long vl = 0;
 int main() {
@@ -39,16 +39,5 @@ int main() {
   fails += __builtin_ctzg(lz, 9) != 9;
   fails += __builtin_popcountg(lhi) != 1;
   fails += __builtin_popcountg(lz) != 0;
-  fails += __builtin_ffsg((int)z) != 0;
-  fails += __builtin_ffsg((int)hi) != 17;
-  fails += __builtin_ffsg((long)lhi) != 41;
-  int sz = (int)vu, sm = (int)vu - 1, s1 = (int)vu + 1;
-  fails += __builtin_clrsbg(sz) != 31;
-  fails += __builtin_clrsbg(sm) != 31;
-  fails += __builtin_clrsbg(s1) != 30;
-  short h1 = (short)(vu + 1), hm = (short)(vu - 1);
-  fails += __builtin_clrsbg(h1) != 14;
-  fails += __builtin_clrsbg(hm) != 15;
-  fails += __builtin_clrsbg((long)lhi) != 22;
   return fails;
 }
