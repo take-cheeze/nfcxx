@@ -209,8 +209,10 @@ end
 # Caps on inlining (docs/notes/pathb-ir-passes.md). A callee of more than $inline_max_callee nodes is not inlined, and the
 # module is not inlined past $inline_max_growth times its size on entry (each inlined copy is a full copy of the callee, and
 # the callees grow with each round). 0 turns a cap off.
-$inline_max_callee = 400
+$inline_max_callee = 150
 $inline_max_growth = 2.0
+$inline_cost = :weighted
+$inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
 
 def node_count(x)
   return 0 unless x.is_a?(Array)
@@ -219,8 +221,33 @@ def node_count(x)
   n
 end
 
+# The size of a form for the caps, weighted by what a node costs after code generation (--cost=weighted, the default; --cost=nodes
+# counts every node as 1). Declarations, constants, casts and address arithmetic cost nothing (a slot is a frame offset, an
+# offset or bitcast folds into an addressing mode); a call costs most (argument moves, the call, the result); a branch, loop
+# or switch more than a load or store; a load or store of a local slot costs nothing (promotion makes it a register); any other
+# node is 1. The caps stay in the same unit, so a callee that is mostly
+# declarations and address arithmetic (a wrapper around one call) counts for what it is.
+NODE_WEIGHT = Hash.new(1).merge(
+  "function" => 0, "slot" => 0, "params" => 0, "param" => 0, "ret" => 0, "weak" => 0, "const" => 0, "type" => 0,
+  "ptr" => 0, "volatile" => 0, "struct" => 0, "array" => 0, "union" => 0, "enum" => 0, "func" => 0,   # type forms
+  "block" => 0, "then" => 0, "else" => 0, "body" => 0, "step" => 0, "let" => 0, "addr" => 0, "offset" => 0, "bitcast" => 0,
+  "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
+).freeze
+
+def node_cost(x)
+  return 0 unless x.is_a?(Array)
+  return node_count(x) if $inline_cost == :nodes
+  n = NODE_WEIGHT[x[0]]
+  # A load or store of a local slot (an atom $"name") is a register after promotion: free.
+  # The EH stack top (@"__curr_eh_stack_entry") too: an inlined body shares its caller's frame.
+  n = 0 if (x[0] == "load" || x[0] == "store") && x[2].is_a?(String) && (x[2][0, 2] == "$\"" || x[2] == "@\"__curr_eh_stack_entry\"")
+  n = 6 if x[0] == "call" && !(x[2].is_a?(String) && x[2][0, 2] == "&\"")   # an indirect call
+  x.each { |y| n += node_cost(y) }
+  n
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
@@ -364,6 +391,11 @@ def expand_call(s, fns, st)
     st[:refused][reason] = (st[:refused][reason] || 0) + 1
     return nil
   end
+  # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny
+    st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
+    return nil
+  end
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
@@ -504,6 +536,7 @@ def inline_pass(forms, max_depth, report)
   inlined = 0
   counter = { k: 0 }
   reasons = {}   # callee name -> refusal reason (nil: inlinable); see expand_call
+  tiny_costs = IdentityMap.new   # callee form -> its node_cost, for the tiny test past the budget
   infos = {}     # callee name -> callee_info; dropped with the reason when the callee changes
   # A function's [[sycl::reqd_sub_group_size(N)]] is a top-level sycl-kernel-attr form that the emitter reads for the functions a
   # kernel reaches. A callee that carries one is inlined into its caller, so the caller gets the same attr (else the kernel
@@ -515,20 +548,21 @@ def inline_pass(forms, max_depth, report)
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
   ids = IdentityMap.new
   calls = IdentityMap.new
-  total = node_count(forms)
+  total = node_count(forms)   # the budget bounds the size of the IR (every node), the callee cap weighs the code
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
-      if budget && total > budget
+      over = budget && total > budget
+      if over && $inline_tiny <= 0
         refused["module over --max-growth"] = (refused["module over --max-growth"] || 0) + 1
         next
       end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [] }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -552,6 +586,9 @@ def inline_pass(forms, max_depth, report)
   if report
     $stderr.write("pathb-ir-opt: inlined #{inlined} calls\n")
     refused.keys.each { |r| $stderr.write("pathb-ir-opt: refused #{refused[r]} call(s): #{r}\n") }
+    if ENV["PATHB_IR_OPT_CALLEES"]
+      reasons.each { |n, r| $stderr.write("pathb-ir-opt: callee #{n}: #{r}\n") if r }
+    end
   end
   forms
 end
@@ -1837,6 +1874,10 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a.start_with?("--max-callee=")
       $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--max-tiny=")
+      $inline_tiny = a[11..-1].to_i
+    elsif a.start_with?("--cost=")
+      $inline_cost = a[7..-1] == "nodes" ? :nodes : :weighted
     elsif a.start_with?("--max-growth=")
       $inline_max_growth = a[13..-1].to_f
     elsif a == "--report"
