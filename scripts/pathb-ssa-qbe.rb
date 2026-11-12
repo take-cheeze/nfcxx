@@ -1187,11 +1187,48 @@ end
       # so labels with one body share a target and can form a bit test.
       tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
       tree_default = switch_forward(default)
-      items = switch_items(switch_ranges(tree_cases), cls)
+      ranges = switch_ranges(tree_cases)
+      # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
+      # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
+      span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
+      if cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+        switch_jtab_lines(operand, ranges, tree_default)
+        return
+      end
+      items = switch_items(ranges, cls)
       if items.any? { |it| it[0] == :bits } || items.size >= 4
         switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), items, tree_default)
       else
         switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # A jump table: the index x - lo below the span jumps to its slot (jtab), any other value to the default. Each slot is
+    # its own block (jtab's targets are distinct) and jumps to one shared block per target, so a target has one
+    # predecessor in the IL and a phi there names that block (the jumper, as the chain and the tree do). Holes go to the
+    # default. QBE checks the index against the count itself (amd64 emit).
+    def switch_jtab_lines(operand, ranges, default)
+      lo = ranges[0][0]
+      span = ranges[-1][1] - lo + 1
+      slot_target = Array.new(span, default)
+      ranges.each { |a, b, t| (a..b).each { |v| slot_target[v - lo] = t } }
+      shared = {}
+      shared_label = lambda do |t|
+        shared[t] = "#{block_label(@cur)}.S#{t}" unless shared[t]
+        shared[t]
+      end
+      idx = "%swi#{@cur}"
+      @lines << "  #{idx} =w sub #{operand}, #{lo}"
+      slots = (0...span).map { |k| "#{block_label(@cur)}.E#{k}" }
+      @lines << "  jtab #{idx}, @#{shared_label.call(default)}, " + slots.map { |l| "@#{l}" }.join(", ")
+      slots.each_with_index do |label, k|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{shared_label.call(slot_target[k])}"
+      end
+      shared.each do |t, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(t)}"
+        @jumper[[t, @cur]] = label if @phi_blocks[t.to_s]
       end
     end
 
