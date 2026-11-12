@@ -1042,7 +1042,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm -latomic
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
     elif [ $backend != gcc ]; then "$NFCXX_CC" ${qbecc_flags[@]+"${qbecc_flags[@]}"} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
