@@ -4,7 +4,7 @@ cproc (`3rd/cproc`, the C front end of the qbe backend: EDG's generated C -> cpr
 typed IR -> QBE IL, no generated C). QBE stays. This note is the checklist: what goes when cproc goes, who still uses it, what
 replaces each use and what is left. A consumer is moved when its tests run on Path B (or gcc), not when it is merely possible.
 
-State as of the PRs named below (#976, #977, #980-#983 and the QBE `xadd` fix #962 are merged).
+State as of the PRs named below (#976, #977, #980-#983, #989, #992 and the QBE `xadd` fix #962 are merged).
 
 ## What is deleted at the end
 
@@ -29,8 +29,8 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 | C that Path B refused: unions by value, `_Float16`, inline asm, return/frame address, `cleanup`, `section`, case ranges, flexible array initializers | Path B lowerings | #980, #981, #982, #983 merged. Left in `tests/c` (`XFAIL-pathb`): `asm goto` and any other marker still present |
 | `nfcc` (cc for make, CMake, autoconf, the kernel) | `NFCXX_BACKEND=pathb` | opt-in since #977. The default stays qbe until the kernel is measured |
 | Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **not measured**: running the kernel's `make` on the downloaded tree is denied by the session sandbox (twice). `scripts/nfcc-pathb-measure.sh` is the tool; the measurement needs the owner to run it or to allow it |
-| C++ modules (default backend is qbe) | Path B, or gcc | wave 2 (session A), no PR yet |
-| qbe-backend ASan (cproc's own checks, branch `nfcxx-asan-combined`) | Path B ASan (the default since #892) | wave 2 (session D), no PR yet |
+| C++ modules (default backend was qbe) | Path B (the `-c` compile passes the module options) | #989 merged; `--backend=qbe` with modules still uses cproc |
+| qbe-backend ASan (cproc's own checks, branch `nfcxx-asan-combined`) | Path B ASan (the default since #892) | #992 merged: `-fsanitize=address --backend=qbe` is an error; the cproc ASan code is dead and goes with cproc |
 | CIL (.NET) backend: `cil-cc` is `qbe-cc` | `scripts/pathb-cil` for C | #993 open |
 | Tests and CI legs pinned to qbe, C++ language suites | Path B and gcc | #990 open |
 | Tests and CI legs pinned to qbe, library, ABI and driver suites | Path B and gcc | #994 open |
@@ -39,8 +39,15 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 
 ## Order
 
-1. Wave 2 PRs merge; each leaves a `QBE-ONLY: <reason>` marker for what does not work on Path B, which is the exact list of what
-   still needs cproc.
+1. Wave 2 PRs merge (#990, #993, #994 open); each leaves a `QBE-ONLY: <reason>` marker for what does not work on Path B, which is
+   the exact list of what still needs cproc (`git grep QBE-ONLY`). So far, from the PR descriptions:
+   - `tests/builtins/bit_g.cpp`: Path B with `--gnu-version=140000` reports `__builtin_clzg` undefined; `integer_seq.cpp`: `--dialect=clang` is not
+     modelled by `pathb-dump` (#990).
+   - `tests/poly`: the mruby, Lua and QuickJS C builds are refused; `ops.cpp` aborts (double free) on Path B; `tests/float-to-int/classify.c`:
+     Path B ignores the class arguments of `__builtin_fpclassify` (#994).
+   - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
+     unlowerable, 2 `_Float16`, 2 over-aligned and singles); every `tests/cil` program runs, one of them through the cproc fallback.
+   - ASan (#992): Path B does not detect the two setjmp-return scope escapes (gcc does not either), so `tests/poly/asan-go.sh` is gcc-only.
 2. Measure the kernel on `nfcc` Path B. It decides the size of the remaining Path B gaps and whether `nfcc` can default to Path B
    (with gcc for a file Path B refuses).
 3. Flip `nfcc` and move the third-party C builds; remove their cproc workarounds.
