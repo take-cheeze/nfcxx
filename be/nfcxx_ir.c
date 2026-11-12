@@ -4588,6 +4588,27 @@ static void ir_x87_thunk(const char *sym, int entry, int kind, const char *linka
   ir_buf_end(&ir_out_types);
 }
 
+/* A call of a variadic routine defined elsewhere that returns long double: the thunk is specific to the call's shape, since
+   the "..." arguments differ from call to call. (x87-thunk callv "F" INTS STACK SSE) defines
+   __nfcxx_x87cv_F_I<INTS>S<STACK>V<SSE>(args..., dst) (callvc: _Complex long double): it copies the stack arguments, sets
+   %al to SSE (the number of vector registers the arguments use, which a variadic callee reads), calls F and stores st(0)
+   at dst. INTS, STACK and SSE count all the arguments, the variadic ones too. */
+static char *ir_x87_vthunk(const char *sym, int kind, int ints, unsigned long long stack, int sse)
+{
+  char *key = ir_fmt("%s_I%dS%lluV%d", sym, ints, stack, sse);
+  int i;
+  for (i = 0; i < ir_x87t_n; i++)
+    if (ir_x87t_tab[i].entry == 4 && strcmp(ir_x87t_tab[i].sym, key) == 0) return ir_fmt("__nfcxx_x87cv_%s", key);
+  if (ir_x87t_n >= IR_X87T_MAX) return ir_fmt("__nfcxx_x87cv_%s", key);
+  ir_x87t_tab[ir_x87t_n].sym = key;
+  ir_x87t_tab[ir_x87t_n].entry = 4;
+  ir_x87t_n++;
+  ir_buf_begin(&ir_out_types);
+  fprintf(nf_out, "(x87-thunk %s \"%s\" %d %llu %d)\n", kind == 2 ? "callvc" : "callv", sym, ints, stack, sse);
+  ir_buf_end(&ir_out_types);
+  return ir_fmt("__nfcxx_x87cv_%s", key);
+}
+
 /* System V classification of one parameter of type t: *ints integer registers used so far, *sse vector registers,
    *stack bytes of stack arguments. 0 for a shape the thunks do not know (an aggregate of at most 16 bytes). */
 static int ir_x87_param(a_type_ptr t, int *ints, int *sse, unsigned long long *stack)
@@ -4768,6 +4789,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   int agg_ret = (ir_is_cabi_agg(e->type) || ir_is_f128(e->type)) && xk == 0;
   int x87_ret = xk != 0;
   int x87_first = 0; /* variadic callee: the result pointer is the first argument */
+  int vthunk = 0;    /* variadic callee defined elsewhere: a call thunk made for the shape of this call */
   const char *thunk_sym = NULL; /* x87 result of a routine defined elsewhere: the C symbol the call thunk calls */
   char *indirect_fp = NULL;     /* a call through a function pointer: its value (the callee of the indirect call thunk) */
   ir_val sret = ir_mk_void();
@@ -4828,9 +4850,9 @@ static ir_val ir_call(an_expr_node_ptr e)
     if (ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
       /* variadic: the result pointer goes first, like (sret ...), since nothing can follow the "..." arguments; there is
          no C-convention entry for such a function, so one defined elsewhere cannot be called */
-      if (thunk_sym != NULL) return ir_gap(e->type, "call of a variadic function returning long double defined elsewhere", 0, (int)eok_call);
-      if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function returning long double", 0, (int)eok_call);
-      x87_first = 1;
+      if (thunk_sym != NULL) vthunk = 1; /* the call thunk of this call's shape (ir_x87_vthunk) takes the result pointer last */
+      else if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function returning long double", 0, (int)eok_call);
+      else x87_first = 1;
     }
     ldres = ir_temp(e->type);
     if (x87_first) args = ir_fmt("%s %s", args, ldres.s);
@@ -4864,7 +4886,8 @@ static ir_val ir_call(an_expr_node_ptr e)
     for (k = 0; k < nrref; k++) ir_emit(ir_fmt("(rref-arg %s)", rref[k]));
     if (thunk_sym != NULL) {
       if (!shape_ok) return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
-      ir_x87_thunk(thunk_sym, 0, xk, NULL, ints, stack);
+      if (vthunk) callee = ir_fmt("&\"%s\"", ir_x87_vthunk(thunk_sym, xk, ints, stack, sse));
+      else ir_x87_thunk(thunk_sym, 0, xk, NULL, ints, stack);
     }
   }
   if (x87_ret && !x87_first) args = ir_fmt("%s %s", args, ldres.s);
@@ -4881,7 +4904,7 @@ static ir_val ir_call(an_expr_node_ptr e)
      that match named parameters; the rest are the "..." arguments. */
   {
     a_type_ptr ft = ir_callee_fn_type(f);
-    if (ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+    if (!vthunk && ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
       a_param_type_ptr p;
       int named = (agg_ret || x87_first) ? 1 : 0;
       for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;

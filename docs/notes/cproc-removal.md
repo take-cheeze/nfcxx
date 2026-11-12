@@ -45,6 +45,8 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
      modelled by `pathb-dump` (#990).
    - `tests/poly`: the mruby, Lua and QuickJS C builds are refused; `ops.cpp` aborts (double free) on Path B; `tests/float-to-int/classify.c`:
      Path B ignores the class arguments of `__builtin_fpclassify` (#994).
+   - `tests/long-double-abi` runs on Path B and gcc (a variadic call with long double arguments and result goes through a
+     per-shape call thunk); `tests/cil/errors/variadic_def.c` is Path B's own refusal, `cil-cc` does not fall back to cproc for it.
    - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
      unlowerable, 2 `_Float16`, 2 over-aligned and singles); every `tests/cil` program runs, one of them through the cproc fallback.
    - ASan (#992): Path B does not detect the two setjmp-return scope escapes (gcc does not either), so `tests/poly/asan-go.sh` is gcc-only.
