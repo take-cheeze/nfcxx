@@ -201,6 +201,16 @@ The CPU interpreter (`tests/gpu/ptx-interp`) runs `.func` and `call` (no recursi
 (`.param .align A .b8 NAME_param_k[S]`), so the interpreter's byte-array parameters carry it; `tests/gpu/device/run_struct_abi.sh`
 checks it against an nvcc build on the GPU.
 
+The interpreter schedules threads (`tests/gpu/ptx-interp/ptxi.c`, header comment). Each thread is a resumable state
+machine, and the instructions that touch shared state (global memory, `atom`, `red`, `bar.sync`) are the scheduling points.
+The default run is the old order (each thread to its barrier or exit). `--random N` runs N seeded schedules, and
+`--explore` runs every schedule by depth-first search with replay, printing each distinct outcome of the `--dump` buffers.
+`tests/gpu/ptx-interp/run_sched.sh` checks the megakernel of arXiv:2611.04447 section 4.2 over all its schedules (only
+(x, y, counter) = (1, 2, 2)), its non-atomic mutant (which reaches `1 | 1 | 0`), a barrier exchange with and without
+`bar.sync`, an exit before a barrier, a deadlock, and the schedule and step caps. The schedules are sequentially consistent,
+which is stronger than the PTX memory model: an outcome missing here is not proof that the PTX model forbids it, and the
+search does not cover the weak outcomes the paper's model admits. The paper's oracle semantics for loads are not implemented.
+
 Not done: scalar returns still use `.func (.reg .bNN %rv)` where nvcc uses `.param func_retval0`, so calls across nvcc-compiled
 PTX do not match at the ABI level (struct returns follow nvcc). The emitter still refuses the constructs named above (exit 3),
 and the interpreter has no floating point. Plain `<<<>>>` launches are parsed by EDG (`--cuda`; see "Launch path").

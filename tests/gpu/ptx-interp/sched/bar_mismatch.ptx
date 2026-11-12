@@ -1,0 +1,16 @@
+// Thread 0 waits at barrier 0 and thread 1 at barrier 1. Neither barrier can complete, so every schedule deadlocks.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry bar_mismatch()
+{
+  .reg .b32 %r<2>;
+  .reg .pred %p<1>;
+
+  mov.u32 %r0, %tid.x;
+  setp.eq.u32 %p0, %r0, 0;
+  @%p0 bar.sync 0;
+  @!%p0 bar.sync 1;
+  ret;
+}
