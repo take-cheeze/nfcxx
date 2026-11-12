@@ -50,6 +50,7 @@ while [ $# -gt 0 ]; do
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
     --sanitize=*) dump_opts+=("$1") ;;
+    --gnu-version=*|--gnu_version=*) opts+=("$1") ;;   # the GNU version EDG emulates (nfcxx --freestanding passes 130000)
     --ir-opt=*) passes=${1#--ir-opt=}; passes_given=1 ;;
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
     --emitter=*) emitter=${1#--emitter=} ;;
@@ -58,7 +59,7 @@ while [ $# -gt 0 ]; do
     --timeout=*) timeout_s=${1#--timeout=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
     -include) opts+=(-include "$2"); shift ;;   # a forced include (cosmo's normalize.inc, docs/notes/cosmo.md)
-    -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--cuda) opts+=("$1") ;;
+    -I?*|-D?*|-U?*|-std=c++*|-std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23|--freestanding|--eh-runtime|--cuda) opts+=("$1") ;;
     -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
     *) src=$1 ;;
   esac

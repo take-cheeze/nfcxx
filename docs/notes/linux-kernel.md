@@ -131,3 +131,41 @@ runs that took the blockers below away, largest first; the ones that mattered be
 The real-mode files are built with `-mpreferred-stack-boundary=2`, which keeps 4-byte stack alignment; QBE's i386 target
 does not realign the stack, so a local with a larger alignment is only aligned when the caller keeps 16 bytes. The boot
 code has none. `arch/x86/realmode/rm` is not built in this configuration and is untested.
+
+## Path B (`NFCXX_BACKEND=pathb`): how many C files it builds
+
+nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is opt-in and
+takes only `-I -D -U -include` and a C standard; the kernel's own options `-nostdinc`, `-isystem DIR`, `-funsigned-char`,
+`-fshort-wchar`, `-ffreestanding` and `-Wa,*` are refused there, so **a kernel build with `KCC=nfcc NFCXX_BACKEND=pathb`
+stops at the first file: 0 of 615**, on the first of those options in the command line. The follow-ups it names for
+Path B: a Path B front-end mode for `-funsigned-char` / `-fshort-wchar` (EDG has both), `-nostdinc` with `-isystem`
+(the harness's include path), and the kernel's `-mno-sse` check that `qbe-cc` does.
+
+That refusal is derived from nfcc's option handling (and `tests/nfcc/run.sh`), not from a measured kernel run: in the
+session that wrote this note the kernel could not be built. The tarball (the Ubuntu archive) downloaded and unpacked, but
+the sandbox's permission policy denied running `make` on the downloaded tree (code from an external source), so
+`scripts/linux-qemu.sh` was not run and there is no per-file kernel table. The 615-file count and the refusal reasons
+of the kernel remain to be measured: run `KCC=nfcc NFCXX_BACKEND=pathb` after Path B accepts the kernel's options, or
+replay the compile commands of a gcc kernel build through `scripts/nfcc-pathb-measure.sh` (set `NFCC_MEASURE_FLAGS`).
+
+What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
+uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with
+`scripts/nfcc-pathb-measure.sh tests/c/*.c`. `tests/realworld` holds no C sources of its own (its Lua and
+mruby sources are downloaded by the run scripts), so nothing there was measured.
+
+**52 of 69 build; 17 are refused** (exactly the 17 `XFAIL-pathb` files of `tests/c/run.sh`):
+
+| count | status | reason (the SSA route's message) |
+|---|---|---|
+| 5 | 3 | `unsupported stmt asm-template` (inline asm templates the route cannot emit: `leaq %c1(%2)`, ...) |
+| 4 | 3 | type `std::floatN_t` (`_Float16`) |
+| 2 | 3 | operator unsupported (`_Float16` arithmetic) |
+| 2 | 3 | asm template: a `%` that is not an operand |
+| 1 | 3 | global (an initializer the route cannot emit) |
+| 1 | 3 | `unsupported stmt switch-case-range` (`case 1 ... 5:`) |
+| 1 | 3 | `unsupported stmt cleanup-attribute` (`__attribute__((cleanup))`; the kernel's `guard()`) |
+| 1 | 1 | front end: `_Float16` constant (`float16_golden.inc`: a value that does not fit, then an ArgumentError in the IR reader) |
+
+For the kernel, the groups that matter are inline asm (templates, `asm goto`, flags outputs: 7 of the 17 files), `cleanup`
+(`guard()`: used all over the kernel), and `case` ranges; `_Float16` the kernel does not use. These, plus the option
+handling above, are what decides the next Path B follow-ups for a kernel build.
