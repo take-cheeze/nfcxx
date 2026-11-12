@@ -407,7 +407,7 @@ module SymbolCache
     [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
       if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
       struct RClass* c = mrb_class(M, recv);
-      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
       if (!MRB_METHOD_UNDEF_P(m) && (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL))) return false;
       return bc2cpp_nsc_accept(M, s, mrb_obj_ptr(recv), m, c, argc);
     }
@@ -442,7 +442,7 @@ module SymbolCache
       bool cached = owner && s.epoch == bc2cpp_nsc_epoch && s.state == M && s.recv == (struct RObject*)owner;
       if (!cached && owner) {
         struct RClass* c = owner;
-        mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+        mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
         cached = bc2cpp_nsc_accept(M, s, (struct RObject*)owner, m, c, argc);
       }
       if (cached) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value()); });
@@ -659,7 +659,7 @@ module SymbolCache
       ++bc2cpp_owner_icache_misses;
     #endif
       struct RClass* c = klass;
-      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      mrb_method_t m = bc2cpp_find_proven(M, &c, mid);
       if (s.direct) bc2cpp_owner_direct_pick(M, *s.direct, klass, &m, &c);
       if (MRB_METHOD_UNDEF_P(m)) {
         if (mrb_nil_p(blk)) bc2cpp_funcall_argv(M, recv, mid, argc, argv);

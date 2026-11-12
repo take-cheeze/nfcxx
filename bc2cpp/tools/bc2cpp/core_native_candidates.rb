@@ -301,15 +301,20 @@ module CoreNativeCandidates
   # +exact_impls+ how live_core reads a direct `_impl` call. +diagnostic_literals+ requires the closed-world
   # literal-lookup proof, so an exception message cannot supply a computed method name. +enumerator_free+ is
   # CoreEnumeratorFree's verdict, or a callable that makes it (asked only when a native has a ENUM_SYMBOL_CALL).
+  # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new)
+                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
     fragments = Set.new
     ireps.each_value do |irep|
       note.call("engine irep #{irep.label}")
-      lookup.call(irep, nil, names, fragments)
+      lookup.call(irep, nil, engine_names ? Set.new : names, fragments)
+    end
+    if engine_names
+      note.call('engine lookup (CORE_ROWS)')
+      names.merge(engine_names)
     end
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     helpers = diagnostic_literals ? verified_label_helpers(native_paths, ireps, core, generated) : Set.new
@@ -522,13 +527,16 @@ module CoreNativeCandidates
     (registrations + aliases).uniq.sort
   end
 
-  # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h), and for `engine_keys` the
-  # engine ROM entries (engine_entries) among `engine`.
-  def header(keys, entries, engine_keys = [], engine = [])
+  # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h), for `engine_keys` the
+  # engine ROM entries (engine_entries) among `engine`, and for `rows` the core entries kept as rows (CORE_ROWS: 2).
+  def header(keys, entries, engine_keys = [], engine = [], rows: [])
     by_key = entries.group_by { |e| "#{e[:mt_class]}##{e[:name]}" }
     lines = keys.flat_map do |key|
       by_key.fetch(key).map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 1" }
     end
+    lines.concat(rows.flat_map do |key|
+      by_key.fetch(key).map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 2" }
+    end)
     wanted = engine_keys.to_set
     # A constructor name is listed only as a constructor row (CTOR_ROWS): 2 keeps it for the constructions alone.
     lines.concat(engine.select { |e| wanted.include?("#{e[:owner]}##{e[:name]}") }

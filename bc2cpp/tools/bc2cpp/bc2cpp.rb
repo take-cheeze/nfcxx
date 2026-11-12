@@ -1638,6 +1638,15 @@ BC2CPP_MAIN = lambda do
     #define BC2CPP_FIND_METHOD 1
     static inline mrb_method_t bc2cpp_find_method(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_vm(M, c, mid); }
     #endif
+    #ifndef BC2CPP_FIND_PROVEN
+    #define BC2CPP_FIND_PROVEN 1
+    // CORE_ROWS: a call whose receiver the compiler proved also finds a row (MRB_MT_CTOR_ROW), where a full table would.
+    #ifdef MRB_MT_ROWS
+    static inline mrb_method_t bc2cpp_find_proven(mrb_state* M, struct RClass** c, mrb_sym mid) { return mrb_method_search_rows(M, c, mid); }
+    #else
+    static inline mrb_method_t bc2cpp_find_proven(mrb_state* M, struct RClass** c, mrb_sym mid) { return bc2cpp_find_method(M, c, mid); }
+    #endif
+    #endif
   CPP
   # mrb_range_new for RANGE_INC/RANGE_EXC.
   puts '#include <mruby/range.h>'
