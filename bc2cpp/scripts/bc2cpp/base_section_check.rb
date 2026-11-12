@@ -42,7 +42,9 @@ abort 'base_section_check: --jobs must be positive' if jobs && !jobs.positive?
 
 closed = File.expand_path(ARGV[0])
 declarations = File.expand_path(ARGV[1] || File.join(ROOT, 'sig/bc2cpp/declarations.rbs'))
-committed = BaseSection.section_of(File.read(declarations))
+text = File.read(declarations)
+declared_section = BaseSection.section_of(text)
+committed = BaseSection.combined_section(declared_section)
 
 failures = []
 Dir.mktmpdir('base-section-check') do |temporary|
@@ -56,8 +58,13 @@ Dir.mktmpdir('base-section-check') do |temporary|
   abort "base_section_check: base_rbs_all.rb failed (#{status})" unless status.success?
 
   if write
-    File.write(declarations, BaseSection.regenerate(File.read(declarations), gen))
-    puts "base section check: rewrote the base section of #{declarations}"
+    bodies = BaseSection.native_bodies(gen)
+    by_tag = BaseSection.generated_ruby_by_tag(gen)
+    merged = BaseSection.regenerate_ruby_by_tag(BaseSection.regenerate_native_bodies(committed, bodies), by_tag)
+    core_text, rest_text = BaseSection.core_split(merged)
+    File.write(BaseSection::CORE_FILE, core_text)
+    File.write(declarations, rest_text + text[declared_section.length..])
+    puts "base section check: rewrote #{BaseSection::CORE_FILE} and the base section of #{declarations}"
     exit 0
   end
 
