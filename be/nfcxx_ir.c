@@ -2351,6 +2351,7 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
 }
 
 static ir_val ir_i128_const(a_constant_ptr c, a_type_ptr t);
+static void ir_gi_items(unsigned long long off, a_constant_ptr c, a_type_ptr t);
 
 /* A constant of type t (an expression constant or an initializer element). */
 static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
@@ -2377,6 +2378,29 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
     case ck_void: /* `(void)0` as a constant expression: no value */
       ir_note(3, ck_void, 1);
       return ir_mk_void();
+    case ck_aggregate:
+      /* A constant of struct, union or array type that the front end folded from a const object (sqlite's
+         `*pItem = zeroItem`): the value of an aggregate is its address, so it is a read-only global of its own. */
+      if (ir_is_aggregate(t)) {
+        int fresh = ir_tab_find(&ir_mod, c) == NULL;
+        const char *op = ir_tab_get(&ir_mod, c, "aggconst", "@");
+        if (fresh) {
+          ir_buf g;
+          ir_buf_open(&g);
+          ir_buf_begin(&g);
+          fprintf(nf_out, "(global %s ", op + 1);
+          nf_put_type(t);
+          fprintf(nf_out, " %llu %llu (static) (init", ir_size_of(t), ir_align_of(t));
+          ir_gi_items(0, c, t);
+          fputs("))\n", nf_out);
+          ir_buf_end(&g);
+          ir_buf_write(&g, ir_out_globals.f);
+          ir_buf_close(&g);
+        }
+        ir_note(3, ck_aggregate, 1);
+        return ir_mk_addr((char *)op, t, 0);
+      }
+      /* fall through */
     default:
       return ir_gap(t, ir_fmt("const %s", nfcxx_ck_name(c->kind) != NULL ? nfcxx_ck_name(c->kind) : "?"), 3,
                     (int)c->kind);
@@ -2874,6 +2898,16 @@ static void ir_vla_bounds(an_expr_node_ptr base, a_type_ptr elem, ir_val idx)
 
 
 /* Lvalue-valued operators, as addresses. */
+/* e is a member access `s.f` or `p->f` of the last data member of its class (the field has no later sibling). */
+static int ir_is_last_member_access(an_expr_node_ptr e)
+{
+  an_expr_node_ptr fe;
+  if (e == NULL || e->kind != enk_operation) return 0;
+  if (e->variant.operation.kind != eok_dot_field && e->variant.operation.kind != eok_points_to_field) return 0;
+  fe = ir_operand(e, 1);
+  return fe != NULL && fe->kind == enk_field && fe->variant.field.ptr->next == NULL && !fe->variant.field.ptr->is_bit_field;
+}
+
 static ir_val ir_lval_op(an_expr_node_ptr e)
 {
   int addr_only = ir_addr_only;
@@ -2922,7 +2956,10 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
         if (arr != NULL && arr->type != NULL && skip_typerefs(arr->type)->kind == tk_array &&
             !skip_typerefs(arr->type)->variant.array.is_variable_size_array) {
           unsigned long long n = (unsigned long long)skip_typerefs(arr->type)->variant.array.variant.number_of_elements;
-          if (n != 0) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n)); /* [] and [0] (flexible array member): no bound */
+          /* [] and [0] (flexible array member): no bound. Nor has `[1]` as the last member of a struct, the pre-C99 struct hack
+             (TinyCC's `char str[1]` of TokenSym, indexed by the name's length): gcc's default -fstrict-flex-arrays=0 and the
+             =1 level both take it as flexible. */
+          if (n != 0 && !(n == 1 && ir_is_last_member_access(arr))) ir_emit(ir_fmt("(bounds %s %llu)", idx.s, n));
         }
       } else if (ir_is_integer(a1->type)) {
         ir_vla_bounds(a0, e->type, idx);
@@ -3169,6 +3206,13 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       ir_val p = ir_rval(a0);
       ir_val i = ir_rval(a1);
       char *idx;
+      /* `i + p` and `i[p]` (sqlite's `&((char *)p)[got]`): the integer is the first operand. (index BASE IDX SIZE) takes the pointer
+         first; with the two swapped the emitters added the int to a pointer (QBE: "invalid type for first operand in add"). */
+      if (k == eok_padd && p.t != NULL && i.t != NULL && !ir_is_pointer(p.t) && ir_is_pointer(i.t)) {
+        ir_val t = p;
+        p = i;
+        i = t;
+      }
       if (ir_is_i128(i.t)) i = ir_mk_value(ir_i128_count(i), integer_type(ik_long));
       idx = i.s;
       a_type_ptr elem = skip_typerefs(e->type)->variant.pointer.type;

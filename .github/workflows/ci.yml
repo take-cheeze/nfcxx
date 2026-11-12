@@ -546,6 +546,7 @@ jobs:
             run: |
               tests/pathb-qbe/run.sh
               tests/pathb-qbe/hosted.sh
+              tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
             run: |
               FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh

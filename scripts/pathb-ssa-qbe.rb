@@ -530,7 +530,7 @@ module Qbe
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
       @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
-      @blocks = form.select { |x| head(x) == "bb" }
+      @blocks = split_wide_phis(form.select { |x| head(x) == "bb" })
       @lines = []
       @temps = 0
       @types = {}
@@ -574,6 +574,78 @@ module Qbe
     end
 
     private
+
+    # QBE's text parser takes at most 63 arguments in one instruction (NPred in 3rd/qbe/parse.c), so a phi with more
+    # predecessors is a parse error: sqlite3VdbeExec has a join of about a hundred `goto abort_due_to_error` edges. A block
+    # whose phis have more than PHI_LIMIT arguments gets forwarding blocks: the predecessors go in groups, each group jumps to
+    # a block of its own that holds a phi per phi of the join over its group and branches to the join, and the join's phis read
+    # those. Repeated until every phi fits (a join of more than PHI_LIMIT groups is split again).
+    PHI_LIMIT = 48
+
+    def split_wide_phis(blocks)
+      blocks = blocks.dup
+      next_num = blocks.map { |b| b[1].to_s.to_i }.max.to_i
+      next_reg = 0
+      while true
+        idx = blocks.index { |b| b[2..].any? { |it| head(it) == "phi" && it.size - 3 > PHI_LIMIT } }
+        break unless idx
+
+        join = blocks[idx]
+        jnum = join[1].to_s
+        phis = join[2..].select { |it| head(it) == "phi" }
+        preds = phis[0][3..].map { |pair| pair[0] }
+        group_of = {}
+        added = []
+        preds.each_slice(PHI_LIMIT).each do |group|
+          next_num += 1
+          num = join[1].is_a?(Integer) ? next_num : next_num.to_s
+          names = {}
+          fwd_phis = phis.map do |ph|
+            next_reg += 1
+            names[ph[1]] = "%pw#{next_reg}"
+            pairs = ph[3..].select { |pair| group.any? { |g| g.to_s == pair[0].to_s } }
+            ["phi", names[ph[1]], ph[2], *pairs]
+          end
+          added << ["bb", num, *fwd_phis, ["br", join[1]]]
+          group.each { |g| group_of[g.to_s] = num }
+        end
+        k = -1
+        blocks[idx] = join.map do |it|
+          next it unless head(it) == "phi"
+
+          k += 1
+          fwd = added.map { |a| [a[1], a[2 + k][1]] }
+          ["phi", it[1], it[2], *fwd]
+        end
+        blocks = blocks.map do |b|
+          g = group_of[b[1].to_s]
+          g ? retarget_block(b, jnum, g) : b
+        end
+        blocks.concat(added)
+      end
+      blocks
+    end
+
+    # The block with the jumps to target (a block number) in its terminator sent to to_num.
+    def retarget_block(b, target, to_num)
+      term = b.last
+      new_term =
+        case head(term)
+        when "br" then term[1].to_s == target ? ["br", to_num] : term
+        when "condbr"
+          ["condbr", term[1], term[2].to_s == target ? to_num : term[2], term[3].to_s == target ? to_num : term[3]]
+        when "switch"
+          term.map do |x|
+            if !x.is_a?(Array) then x
+            elsif head(x) == "case" then x[2].to_s == target ? [x[0], x[1], to_num] : x
+            elsif head(x) == "default" then x[1].to_s == target ? [x[0], to_num] : x
+            else x
+            end
+          end
+        else raise QbeUnsupported, "terminator #{head(term)} into a block with more than #{PHI_LIMIT} predecessors"
+        end
+      b[0...-1] + [new_term]
+    end
 
     def header
       sig = []
@@ -622,7 +694,10 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
+      # inline `read32le` each, TinyCC's, otherwise collide at link time).
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -941,7 +1016,7 @@ end
           next unless head(it) == "phi"
 
           it[3..].each do |pred, v|
-            next unless expression?(v)
+            next unless expression?(v) || got_function?(v)
 
             name = "%pe#{it[1][1..]}_#{pred}"
             @pending[pred.to_s] << [name, v]
@@ -971,8 +1046,19 @@ end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
 
+    # A function this module does not define, used as a value: op loads it from its pathb_got cell, a load that must not
+    # land in the phi block ahead of the phi, so a phi operand like that is loaded at the end of its predecessor too.
+    def got_function?(v)
+      v.is_a?(Ref) && v.sigil == "&" && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+    end
+
     def pending_phi_operands(num)
       @pending.fetch(num, []).each do |name, v|
+        if got_function?(v)
+          @lines << "  #{reg(name)} =l loadl $pathb_got.#{Qbe.symbol(v.raw)}"
+          @types[name] = "ptr"
+          next
+        end
         let_lines(name, v[1], v)
         @types[name] = v[1]
       end
@@ -1303,7 +1389,7 @@ end
       case head(item)
       when "phi"
         pairs = item[3..].map do |pred, v|
-          text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
+          text = expression?(v) || got_function?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
           "#{phi_placeholder(@cur, pred)} #{text}"
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"

@@ -7,17 +7,17 @@ A case that does not work on Path B stays on qbe and carries a `QBE-ONLY: <reaso
 | Suite | Now | Left on qbe (QBE-ONLY) |
 |---|---|---|
 | tests/realworld/run.sh (tinyxml2), run_json.sh, run_doctest.sh | gcc, Path B | none |
-| tests/realworld/run_coreclr_gc.sh | gcc, Path B | `handletable.cpp` (QBE rejects Path B's output: unexpected phi instruction), compiled by qbe |
+| tests/realworld/run_coreclr_gc.sh | gcc, Path B | none |
 | tests/realworld/run_lua.sh, run_lua_make.sh | qbe, gcc | Path B refuses lvm.c (`assigned_goto`, computed goto) |
 | tests/realworld/run_mruby.sh, run_optcarrot.sh | qbe, gcc | Path B refuses mrbc.c (`parse_args: operator unsupported`) |
-| tests/realworld/run_tinycc.sh | qbe, gcc | QBE: invalid type for first operand in add (xadd) |
+| tests/realworld/run_tinycc.sh | gcc, Path B | none |
 | tests/realworld/run_astro.sh | qbe, gcc | calc code store, libprism link, koruby_precise front-end error |
 | tests/realworld/run_fmt.sh | gcc | Path B refuses `uint128_fallback::operator+=` |
 | tests/realworld/run_sdcc.sh | unchanged | not run on Path B (needs flex and boost in the session that did this) |
-| tests/sqlite/run.sh | qbe, gcc | QBE xadd issue on sqlite3.c |
+| tests/sqlite/run.sh | gcc, Path B | none |
 | tests/poly/run.sh (+ setup-poly*.sh) | qbe, gcc | C libraries (mruby, Lua, QuickJS) refused as above; `ops.cpp` aborts (double free) on Path B |
 | tests/ast/run.sh | qbe, gcc | engine.cpp aborts in "inlining of small functions" on Path B |
-| tests/uop/run.sh, run_poly.sh | qbe, gcc | nfcuop_lower.cpp: unexpected phi instruction |
+| tests/uop/run.sh, run_poly.sh | qbe, gcc | lib/uop builds on Path B now (no more phi error); `test.cpp` overflows the stack (6 KB frames, no stack-slot sharing), `test_layout_avx2.cpp`: `main: operator unsupported` |
 | tests/int128, tests/sret, tests/determinism | Path B (+ gcc for sret) | none |
 | tests/float-to-int | Path B | `classify.c`: `__builtin_fpclassify` ignores its five class arguments |
 | tests/long-double-abi | qbe | both directions: Path B refuses a variadic call with a long double argument |
