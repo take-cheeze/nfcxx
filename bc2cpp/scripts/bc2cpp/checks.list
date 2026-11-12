@@ -114,6 +114,7 @@ ruby scripts/bc2cpp/send_arg_facts_check.rb
 ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
+ruby scripts/bc2cpp/leaf_owner_else_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb
 ruby scripts/bc2cpp/owner_call_icache_check.rb
 ruby scripts/bc2cpp/helper_owner_call_check.rb
