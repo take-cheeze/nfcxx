@@ -48,51 +48,58 @@ hand-computed totals at K = 8, 16 and 64, against a cheap-transpose target, and 
 
 ## The AVX2 emitter
 
-`emit_gemm_rowsum_c(GemmVariant, M, N, K)` returns C for `nfc_gemm_rowsum(A, B, C, R, At)`:
+`emit_gemm_rowsum_c(GemmVariant, M, N, K, simd_transpose = true)` returns C for `nfc_gemm_rowsum(A, B, C, R, At)`:
 
 - `VecN` (needs `N % 8 == 0`): lanes on N, A broadcast, the row sum is one horizontal sum per row.
 - `VecM` (needs `M % 8 == 0`): the kernel first transposes A into `At` (the repair the model charges), lanes on M, C
-  written column-major, the row sum added vertically.
+  written column-major, the row sum added vertically. The transpose is an 8x8 block kernel (8 unpacks, 8 shuffles,
+  8 permutes per 64 elements, the model's 24 instructions) for the 8-aligned part of K, and a scalar tail for the rest.
+  `simd_transpose = false` gives the scalar loop, kept so the two can be timed against each other.
 
 Its test (`tests/uop/test_layout_avx2.cpp`) compiles each kernel with `cc -O2 -mavx2 -mfma`, loads it with `dlopen` and
-compares C and R with a reference. The inputs are small integers, so the comparison is exact. It is not compared
+compares C and R with a reference. The inputs are small integers, so the comparison is exact. The VecM shapes run with
+both transposes, and K values that are not multiples of 8 cover the scalar tail. It is not compared
 against the interpreter's `nfcuop` results, which use a different summation order. It also runs under
 `UOP_HOST=1` only so far: the nfcxx back ends have not run it.
 
 ## Timing against the model (not a test)
 
-`M = N = 256`, `float`, one host with 4 shared cores, best of 7 timings of 20 calls each; the emitted kernels include
-the transpose for `VecM`. Two runs of the same benchmark (the second is shown):
+`M = N = 256`, `float`, one host with 4 shared cores, best of 15 timings of 50 calls each. Two runs of the same
+benchmark; the second is shown, the first agrees except where noted. `vec-m-simd` and `vec-m-scalar` differ only in the
+transpose of A.
 
-| K | vec-n (us) | vec-m (us) | vec-m / vec-n |
-| --- | --- | --- | --- |
-| 4 | 14.8 | 23.3 | 1.57 |
-| 8 | 45.2 | 24.5 | 0.54 |
-| 12 | 46.6 | 39.9 | 0.86 |
-| 16 | 56.3 | 54.4 | 0.97 |
-| 20 | 58.2 | 67.5 | 1.16 |
-| 32 | 104.3 | 119.2 | 1.14 |
-| 64 | 326.9 | 457.1 | 1.40 |
-| 128 | 899.4 | 1444.6 | 1.61 |
-| 256 | 1947.8 | 2981.4 | 1.53 |
+| K | vec-n (us) | vec-m-scalar (us) | vec-m-simd (us) | vec-m-simd / vec-n |
+| --- | --- | --- | --- | --- |
+| 4 | 14.6 | 21.3 | 21.9 | 1.50 |
+| 8 | 25.4 | 26.1 | 25.7 | 1.01 |
+| 12 | 49.2 | 35.9 | 34.7 | 0.71 |
+| 16 | 57.7 | 51.5 | 57.2 | 0.99 |
+| 24 | 65.0 | 75.6 | 117.7 | 1.81 (first run: 1.12) |
+| 32 | 91.0 | 111.8 | 104.5 | 1.15 (first run: 1.08) |
+| 64 | 269.9 | 384.5 | 336.8 | 1.25 |
+| 128 | 848.7 | 1361.9 | 1290.4 | 1.52 |
+| 256 | 1832.5 | 2757.5 | 2633.8 | 1.44 |
 
 What this says about the model:
 
-- **K of 32 and up:** vec-n is faster by 1.14 to 1.61 times, in both runs. The model also says vec-n wins above K = 16,
-  so the direction matches.
-- **Below K = 16:** the runs disagree (K = 8 is 0.54 in the second run and 1.07 in the first), and at K = 4 vec-n
-  is faster in both. The model predicts vec-m wins below K = 16. That is not reproduced, so the model is wrong about
-  small K here, or the noise on this host is too large to tell. I have not separated those.
-- **Why the model is off at small K (a guess, not measured):** it prices the transpose at 3/8 instruction per element,
-  an idealized 8x8 SIMD transpose. The emitted transpose is a scalar loop the compiler does not vectorize, and the
-  per-(n) loops of `VecM` have short inner loops at small K. Neither is in the model.
+- **K of 32 and up:** vec-n is faster, by 1.08 to 1.52 times in the runs. The model says vec-n wins above K = 16.
+- **K = 12:** vec-m is faster in both runs (0.67 to 0.73 times vec-n). The model says vec-m wins below K = 16.
+- **K = 8 and 16:** the two are within a few percent of each other, which is consistent with the model's tie at 16.
+- **K = 4:** vec-n is faster by 1.5 times in both runs. The model says vec-m wins here, so the model is wrong at K = 4.
+  The SIMD and scalar transposes take the same time at K = 4, so the transpose is not the cause (this disproves my
+  earlier guess). The likely cause is that vec-m reads B one column at a time (`B[k*N + n]`, stride N) while vec-n reads
+  it in contiguous vectors. That is an untested hypothesis; the model does not price it.
+- **The 24 and 32 rows are noisy:** the first run has 1.12 and 1.08 at K = 24 and 32, the second 1.81 and 1.15.
+
+The SIMD transpose matters little here: the transpose costs MK work against MNK of GEMM, and with N = 256 that is a
+small share. It matters most in the scalar-versus-SIMD rows at K = 32, where the scalar loop was 2 times vec-n.
 
 ## Next steps on this target
 
-1. Repeat the timing on a quieter machine or with more repetitions to settle small K, and check how much of the gap is
-   the transpose: time `VecM` with the transpose removed (a pre-transposed A) against `VecN`.
-2. Make the transpose a SIMD 8x8 kernel, so the repair costs what the model says, and see whether the small-K crossover
-   then appears.
+1. Test the B-access hypothesis for the small-K gap: pack B into column blocks before the vec-m loop (or time vec-m
+   with a transposed B), and see whether K = 4 moves toward vec-n.
+2. Repeat the timing with more hosts or repetitions before drawing a crossover from it; the noise at K = 24 and 32 is
+   about as large as the differences.
 3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 

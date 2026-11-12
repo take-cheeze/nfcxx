@@ -50,8 +50,8 @@ void* load_kernel(const std::string& dir, const std::string& src, const std::str
   return h;
 }
 
-void run_case(const std::string& dir, GemmVariant v, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
-  const char* name = v == GemmVariant::VecN ? "vec-n" : "vec-m";
+void run_case(const std::string& dir, GemmVariant v, bool simd, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  const char* name = v == GemmVariant::VecN ? "vec-n" : (simd ? "vec-m-simd" : "vec-m-scalar");
   std::string tag = std::string(name) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
   std::uniform_int_distribution<int> d(-4, 4);
   std::vector<float> A(M * K), B(K * N);
@@ -69,7 +69,7 @@ void run_case(const std::string& dir, GemmVariant v, int64_t M, int64_t N, int64
     }
 
   KernelFn fn = nullptr;
-  void* h = load_kernel(dir, emit_gemm_rowsum_c(v, M, N, K), tag, &fn);
+  void* h = load_kernel(dir, emit_gemm_rowsum_c(v, M, N, K, simd), tag, &fn);
   if (!h) return;
   std::vector<float> C(M * N, -999.0f), R(M, -999.0f), At(M * K, -999.0f);
   fn(A.data(), B.data(), C.data(), R.data(), At.data());
@@ -122,9 +122,18 @@ int main() {
   const Case cases[] = {
       {GemmVariant::VecN, 8, 8, 1},     {GemmVariant::VecN, 16, 24, 5},   {GemmVariant::VecN, 64, 64, 64},
       {GemmVariant::VecM, 8, 8, 1},     {GemmVariant::VecM, 16, 24, 5},   {GemmVariant::VecM, 24, 40, 33},
-      {GemmVariant::VecM, 64, 64, 64},
+      {GemmVariant::VecM, 64, 64, 64},  {GemmVariant::VecM, 16, 8, 8},    {GemmVariant::VecM, 32, 16, 13},
   };
-  for (const Case& c : cases) run_case(dir, c.v, c.M, c.N, c.K, rng);
+  for (const Case& c : cases) {
+    if (c.v == GemmVariant::VecN) {
+      run_case(dir, c.v, false, c.M, c.N, c.K, rng);
+    } else {
+      // Both transposes: the 8x8 kernel, and the scalar loop it replaces. K values that are not multiples of 8
+      // (5, 33, 13) also cover the scalar tail after the 8x8 blocks.
+      run_case(dir, c.v, true, c.M, c.N, c.K, rng);
+      run_case(dir, c.v, false, c.M, c.N, c.K, rng);
+    }
+  }
 
   expect_throw(GemmVariant::VecN, 8, 12, 4, "VecN with N = 12");
   expect_throw(GemmVariant::VecM, 12, 8, 4, "VecM with M = 12");

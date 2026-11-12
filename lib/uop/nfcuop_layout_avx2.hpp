@@ -14,6 +14,9 @@
 // Shapes: VecN needs N % 8 == 0, VecM needs M % 8 == 0 (the lanes are full ymm vectors). The row sum is the same
 // computation as the model's: VecN adds the N/8 vectors of a row, then one horizontal sum; VecM adds the N columns
 // vertically for each 8 rows.
+//
+// The VecM transpose is an 8x8 block kernel (24 shuffles per 64 elements, the cost the model charges) when
+// simd_transpose is true, and a scalar loop otherwise. The scalar form is kept so the two can be timed against each other.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -23,6 +26,6 @@ namespace nfcuop::layout {
 enum class GemmVariant : uint8_t { VecN, VecM };
 
 // The C source of nfc_gemm_rowsum for the given shape. Throws std::invalid_argument when the shape does not fit the variant.
-std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K);
+std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose = true);
 
 }  // namespace nfcuop::layout

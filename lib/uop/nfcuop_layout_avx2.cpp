@@ -21,12 +21,39 @@ const char* kHsum =
     "  return _mm_cvtss_f32(s);\n"
     "}\n";
 
+// 8x8 transpose of f32 in ymm registers: 8 unpacks, 8 shuffles and 8 permutes, 24 instructions per 64 elements.
+// Loads 8 rows of length 8 from src (row stride lda) and stores the transpose at dst (row stride ldd).
+const char* kTranspose8 =
+    "static inline void nfc_tr8(const float* src, int64_t lda, float* dst, int64_t ldd) {\n"
+    "  __m256 r0 = _mm256_loadu_ps(src + 0 * lda), r1 = _mm256_loadu_ps(src + 1 * lda);\n"
+    "  __m256 r2 = _mm256_loadu_ps(src + 2 * lda), r3 = _mm256_loadu_ps(src + 3 * lda);\n"
+    "  __m256 r4 = _mm256_loadu_ps(src + 4 * lda), r5 = _mm256_loadu_ps(src + 5 * lda);\n"
+    "  __m256 r6 = _mm256_loadu_ps(src + 6 * lda), r7 = _mm256_loadu_ps(src + 7 * lda);\n"
+    "  __m256 t0 = _mm256_unpacklo_ps(r0, r1), t1 = _mm256_unpackhi_ps(r0, r1);\n"
+    "  __m256 t2 = _mm256_unpacklo_ps(r2, r3), t3 = _mm256_unpackhi_ps(r2, r3);\n"
+    "  __m256 t4 = _mm256_unpacklo_ps(r4, r5), t5 = _mm256_unpackhi_ps(r4, r5);\n"
+    "  __m256 t6 = _mm256_unpacklo_ps(r6, r7), t7 = _mm256_unpackhi_ps(r6, r7);\n"
+    "  __m256 s0 = _mm256_shuffle_ps(t0, t2, 0x44), s1 = _mm256_shuffle_ps(t0, t2, 0xEE);\n"
+    "  __m256 s2 = _mm256_shuffle_ps(t1, t3, 0x44), s3 = _mm256_shuffle_ps(t1, t3, 0xEE);\n"
+    "  __m256 s4 = _mm256_shuffle_ps(t4, t6, 0x44), s5 = _mm256_shuffle_ps(t4, t6, 0xEE);\n"
+    "  __m256 s6 = _mm256_shuffle_ps(t5, t7, 0x44), s7 = _mm256_shuffle_ps(t5, t7, 0xEE);\n"
+    "  _mm256_storeu_ps(dst + 0 * ldd, _mm256_permute2f128_ps(s0, s4, 0x20));\n"
+    "  _mm256_storeu_ps(dst + 1 * ldd, _mm256_permute2f128_ps(s1, s5, 0x20));\n"
+    "  _mm256_storeu_ps(dst + 2 * ldd, _mm256_permute2f128_ps(s2, s6, 0x20));\n"
+    "  _mm256_storeu_ps(dst + 3 * ldd, _mm256_permute2f128_ps(s3, s7, 0x20));\n"
+    "  _mm256_storeu_ps(dst + 4 * ldd, _mm256_permute2f128_ps(s0, s4, 0x31));\n"
+    "  _mm256_storeu_ps(dst + 5 * ldd, _mm256_permute2f128_ps(s1, s5, 0x31));\n"
+    "  _mm256_storeu_ps(dst + 6 * ldd, _mm256_permute2f128_ps(s2, s6, 0x31));\n"
+    "  _mm256_storeu_ps(dst + 7 * ldd, _mm256_permute2f128_ps(s3, s7, 0x31));\n"
+    "}\n";
+
 }  // namespace
 
-std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K) {
+std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose) {
   if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_c: sizes must be positive");
   std::ostringstream o;
   o << kPrologue << kHsum;
+  if (v == GemmVariant::VecM && simd_transpose) o << kTranspose8;
   o << "void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* At) {\n";
   if (v == GemmVariant::VecN) {
     if (N % 8 != 0) throw std::invalid_argument("emit_gemm_rowsum_c: VecN needs N % 8 == 0");
@@ -46,11 +73,21 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K) {
   } else {
     if (M % 8 != 0) throw std::invalid_argument("emit_gemm_rowsum_c: VecM needs M % 8 == 0");
     // The repair: A transposed into At (K x M), so that for fixed k the eight lanes are eight consecutive rows of A.
-    o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
-      << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
-      << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n"
+    if (simd_transpose) {
+      // 8x8 blocks while k + 8 <= K, then the scalar columns K - K % 8 .. K - 1.
+      o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
+        << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
+        << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[k * " << M << " + m], " << M << ");\n"
+        << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
+        << "    for (int64_t k = " << (K - K % 8) << "; k < " << K << "; ++k)\n"
+        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+    } else {
+      o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
+        << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
+        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+    }
       // Lanes on M: C is written column-major (C[n*M + m]), the row sum adds the N columns vertically.
-      << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
+      o << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
       << "    __m256 rs = _mm256_setzero_ps();\n"
       << "    for (int64_t n = 0; n < " << N << "; ++n) {\n"
       << "      __m256 acc = _mm256_setzero_ps();\n"
