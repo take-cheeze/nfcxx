@@ -4,10 +4,13 @@
 //   reduce-vertical      M*N/8                   (lanes on M)
 //   reduce-horizontal    M*N/8 + 6*M             (lanes on N)
 //   repair (transpose)   numel * 3/8             (an 8x8 block is 24 shuffles)
+//   storage (Row lanes)  numel * 0.46 if Strided, 0 if Blocked8 (Avx2F32; the 0.46 is from the K = 8 timing)
 // The lane crossover is at K = 16: below it transposing A is cheaper, above it the horizontal sum is.
+// The first five checks keep their totals: under the default target the Row-lane tensors are Blocked8, which costs nothing.
 #undef NDEBUG  // keep the checks live in Release builds
 #include "nfcuop_layout.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -86,12 +89,71 @@ static void target_costs_are_used() {
   CHECK(s.repair_cost == 0.0);
 }
 
+static void k8_blocked_storage_wins() {
+  // M = N = 256, K = 8. vec-m: FMA 256*256*8/8 = 65536, transpose of A 256*8*3/8 = 768, reduce-vertical 256*256/8 = 8192:
+  // 74496. vec-n: 65536 + 8192 + 6*256 = 75264. The Row-lane tensors are A^T (2048 elements) and C (65536). Blocked costs
+  // 0 per element, so Blocked8 is chosen for both. A strided copy would add 0.46 * 67584 = 31089 (see the zero test below).
+  Solution s = solve(gemm_rowsum(256, 256, 8));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-vec-m");
+  CHECK(s.variant[1] == "reduce-vertical");
+  CHECK(s.cost == 74496.0);
+  CHECK(s.storage_cost == 0.0);
+  CHECK(s.storage.size() == 2);
+  CHECK(s.storage.at("A") == Storage::Blocked8);  // the transposed copy of A
+  CHECK(s.storage.at("C") == Storage::Blocked8);
+}
+
+static void k8_zero_penalty_keeps_strided() {
+  // The same problem with no strided penalty: Strided and Blocked8 cost the same, and the all-Strided choice comes first.
+  Avx2F32 free_strided;
+  free_strided.strided_instr_per_elem = 0.0;
+  Solution s = solve(gemm_rowsum(256, 256, 8, free_strided));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-vec-m");
+  CHECK(s.cost == 74496.0);
+  CHECK(s.storage_cost == 0.0);
+  CHECK(s.storage.at("A") == Storage::Strided);
+  CHECK(s.storage.at("C") == Storage::Strided);
+}
+
+static void k64_storage_does_not_change_choice() {
+  // M = N = 256, K = 64: vec-n is 524288 + 8192 + 1536 = 534016 with no Row-lane tensor. vec-m with blocked storage would
+  // be 524288 + 8192 + 6144 = 538624, so the choice stays vec-n, and no storage is reported.
+  Solution s = solve(gemm_rowsum(256, 256, 64));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-vec-n");
+  CHECK(s.variant[1] == "reduce-horizontal");
+  CHECK(s.cost == 534016.0);
+  CHECK(s.storage_cost == 0.0);
+  CHECK(s.storage.empty());
+}
+
+static void blocked_cost_keeps_strided() {
+  // M = N = 64, K = 8: vec-m is 4800 with no storage term, and vec-n is 4992. With a strided penalty of 0.01 per element
+  // and a blocked cost of 0.02, Strided costs 0.01 * (512 + 4096) = 46.08 and Blocked8 costs 92.16, so Strided is kept.
+  Avx2F32 t;
+  t.strided_instr_per_elem = 0.01;
+  t.blocked_instr_per_elem = 0.02;
+  Solution s = solve(gemm_rowsum(64, 64, 8, t));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-vec-m");
+  CHECK(std::fabs(s.storage_cost - 46.08) < 1e-9);
+  CHECK(std::fabs(s.cost - 4846.08) < 1e-9);
+  CHECK(s.storage.at("A") == Storage::Strided);
+  CHECK(s.storage.at("C") == Storage::Strided);
+}
+
 int main() {
   k8_transposes_a();
   k64_horizontal_sum();
   k16_tie_first_variant_wins();
   no_variant_is_infeasible();
   target_costs_are_used();
+  k8_blocked_storage_wins();
+  k8_zero_penalty_keeps_strided();
+  k64_storage_does_not_change_choice();
+  blocked_cost_keeps_strided();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
