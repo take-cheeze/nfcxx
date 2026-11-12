@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :sret_names, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -2479,7 +2479,12 @@ end
 
         args.insert(nfixed, "...")
       end
-      callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      # A library function that returns a class by value takes its result in x8 on AArch64, where EDG passes the result
+      # pointer as the first argument (x0): the call goes to the thunk scripts/sret.sh built for it (the C compilers rename
+      # their calls the same way, rename.sed). The destination is the first argument, which the thunk moves to x8.
+      name = f.is_a?(Ref) && f.sigil == "&" ? Qbe.symbol(f.raw) : nil
+      name = "__nfcxx_sret_#{name}" if name && Qbe.sret_names && Qbe.sret_names.include?(name)
+      callee = name ? "$#{name}" : op(f)
       sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
     end
