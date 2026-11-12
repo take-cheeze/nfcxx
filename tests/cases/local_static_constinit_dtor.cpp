@@ -2,15 +2,15 @@
 // A function-local static with a constant initializer (a constexpr constructor) and a non-trivial destructor: EDG makes its
 // initialization static and leaves no guard, and Path B registered the destructor with __cxa_atexit at every call of the
 // function, so the object was destroyed once per call at exit (tests/poly ops.cpp: double free in std::vector's destructor).
-// No library headers: the IR of a header-including version is several hundred KB, more than the script worlds take.
-extern "C" void _exit(int);
+// Only <stdlib.h> (for _Exit): the IR of a version that includes <vector> is several hundred KB, more than the script worlds take.
+#include <stdlib.h>
 
 static int destroyed;
 
 struct Counted {
   constexpr Counted() {}
   ~Counted() {
-    if (++destroyed > 1) _exit(3);  // a second destruction of the one object
+    if (++destroyed > 1) _Exit(3);  // a second destruction of the one object
   }
   int n = 0;
 };
