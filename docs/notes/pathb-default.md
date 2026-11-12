@@ -8,7 +8,8 @@ says what the default covers, what falls back, and how to get the old behaviour.
 Path B is chosen when all of these hold:
 
 - no `--backend=` and no `NFCXX_BACKEND` (both are used as given);
-- not `--freestanding` (Path B compiles hosted programs only);
+- `--freestanding` takes Path B on x86-64 Linux only: the front end reads `lib/` and no host headers (`scripts/pathb-dump --freestanding`,
+  GNU 13 emulation), the program links EDG's runtime and libc, not the host's libstdc++ (`docs/notes/freestanding.md`); on other hosts it keeps qbe;
 - no C++ modules (`docs/notes/modules.md`);
 - not `--cosmo` (cosmocc is a gcc-backend link);
 - not `--emit-c`, `--target=`, `-E`, `-M` or `-shared`;
@@ -43,7 +44,7 @@ shown. An explicit `--backend=pathb` (or `NFCXX_PATH=b`) keeps the hard errors.
 
 | Option | Under Path B | Default now |
 |---|---|---|
-| `--freestanding` | refused | qbe |
+| `--freestanding`, not x86-64 Linux | refused | qbe |
 | C++ modules | refused | qbe |
 | `--cosmo` | would run Path B silently | qbe (gcc) |
 | non-x86-64 host | `pathb-cc` assembles x86-64 code | qbe |
