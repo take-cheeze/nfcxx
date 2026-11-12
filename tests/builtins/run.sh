@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Builtin probes: compile each tests/builtins/*.cpp with nfcxx (--gnu-version=130000, see docs/notes/builtins.md)
-# and compare the exit code with `// EXPECT: N`. Runs both backends unless NFCXX_BACKEND is set.
+# and compare the exit code with `// EXPECT: N`. Runs the Path B and gcc backends unless NFCXX_BACKEND is set.
 # Header lines (first lines of a test):
 #   // DIALECT: clang           compile in the clang front-end mode (default g++).
 #   // GNU-VERSION: 140000      --gnu-version for the probe (default 130000); GCC 14 builtins (clzg) need 140000.
+#   // QBE-ONLY: <reason>       Path B (the default backend) does not build this probe yet: the pathb run uses the qbe backend
+#                               instead (cproc), so the list of these markers is what still needs cproc.
 #   // XFAIL-qbe: <reason>      known failure on the qbe backend; reported as xfail.
 #   // XFAIL-gcc: <reason>      same for the gcc backend. An XFAIL that passes is a failure (remove the marker).
 #   // X86-ONLY-<backend>: <reason>  skip that backend on hosts other than x86-64.
@@ -12,11 +14,16 @@ cd "$(dirname "$0")/../.."
 #   // GCC-DIALECT-ONLY: <reason>  skip the probe when the host C++ compiler is clang (Apple's g++; its builtins differ).
 cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
 host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-for be in $backends; do
+for route in $backends; do
   for f in tests/builtins/*.cpp; do
     name=$(basename "$f" .cpp)
+    be=$route
+    if [ "$route" = pathb ]; then
+      qbeonly=$(sed -n 's,^// QBE-ONLY: *\(.*\),\1,p' "$f" | head -1)
+      if [ -n "$qbeonly" ]; then be=qbe; echo "note  $name runs on qbe, not Path B: $qbeonly"; fi
+    fi
     want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
     dialect=$(sed -n 's,^// DIALECT: *\(.*\),\1,p' "$f" | head -1)
     xfail=$(sed -n "s,^// XFAIL-$be: *\(.*\),\1,p" "$f" | head -1)
