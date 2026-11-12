@@ -19,6 +19,17 @@
 
 extern char **environ;
 
+static mrb_value proc_executable(mrb_state *mrb, mrb_value self)
+{
+  const char *path;
+  mrb_get_args(mrb, "z", &path);
+#ifdef AT_EACCESS
+  return mrb_bool_value(faccessat(AT_FDCWD, path, X_OK, AT_EACCESS) == 0);
+#else
+  return mrb_bool_value(access(path, X_OK) == 0);
+#endif
+}
+
 static void close_pair(int fd[2])
 {
   if (fd[0] >= 0) close(fd[0]);
@@ -217,6 +228,7 @@ void mrb_mruby_process_gem_init(mrb_state *mrb)
 {
   struct RClass *prim = mrb_define_module(mrb, "BC2CPPProcess");
   mrb_define_module_function(mrb, prim, "run", proc_run, MRB_ARGS_REQ(3));
+  mrb_define_module_function(mrb, prim, "executable?", proc_executable, MRB_ARGS_REQ(1));
   mrb_define_module_function(mrb, prim, "pid", proc_pid, MRB_ARGS_NONE());
   mrb_define_module_function(mrb, prim, "monotonic", proc_monotonic, MRB_ARGS_NONE());
   mrb_define_module_function(mrb, prim, "fork", proc_fork, MRB_ARGS_NONE());

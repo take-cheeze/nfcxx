@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: a named data section is not modelled: the global with a section attribute is refused
 // ELF-ONLY: an ELF section name (Mach-O wants segment,section)
 // GNU section and used: two static entries nothing references are kept (used) in a named section, which the linker
 // delimits with __start_/__stop_ symbols -- the shape of the kernel's initcall tables (docs/notes/cproc-nfcxx.md)

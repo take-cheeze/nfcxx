@@ -613,7 +613,7 @@ None of these is covered by a test unless stated.
     with the number of declarations made so far (measured in a scratch test, not tested: 12000 evaluations of `x := fmt.Sprint(1)`
     took 5.6 s against 0.7 s for 12000 of `1 + 1`).
   - `fmt.Print*` and `println` write to the process's standard output; a script cannot capture or redirect them from the host side.
-  - Under AddressSanitizer the Go-only host is clean on both back ends (`tests/poly/asan-go.sh`); valgrind needs the suppression
+  - Under AddressSanitizer the Go-only host is clean on the gcc backend (Path B is blocked, see asan-go.sh) (`tests/poly/asan-go.sh`); valgrind needs the suppression
     file and is much weaker (below).
 - Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `pathb-ptx-emit --embed` does for GPU
   images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep` handles it for C inputs only, which is
@@ -722,7 +722,7 @@ copy of the library without the sweep passed the suite in most runs and failed i
 
 ### Sanitizers and valgrind
 
-AddressSanitizer works with the Go backend, on both back ends, and gives a clean run: `tests/poly/asan-go.sh` builds the Go-only host
+AddressSanitizer works with the Go backend, on the gcc backend (Path B: blocked, see asan-go.sh), and gives a clean run: `tests/poly/asan-go.sh` builds the Go-only host
 with `nfcxx -fsanitize=address` (gcc: gcc's instrumentation of the C that EDG generates; qbe: cproc's checks of every load and store,
 `asan.md`) and links the uninstrumented `libnfcgo.so`; it runs all the checks, and LeakSanitizer finds nothing at exit. (CI runs it
 after `tests/poly/run.sh`.) What this covers and what it does not:

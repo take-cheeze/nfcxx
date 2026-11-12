@@ -14,8 +14,7 @@ module TaggedFixnum
     #define BC2CPP_TAGGED_FIXNUM 0
     #if defined(MRB_WORD_BOXING) && defined(__GNUC__)
     // MRB_FIXNUM_SHIFT is 0 for a 64-bit word with MRB_INT32, where the word range is not the fixnum range.
-    #if MRB_FIXNUM_SHIFT == 1 && WORDBOX_FIXNUM_FLAG == 1 && WORDBOX_FIXNUM_MASK == 1 && MRB_INT_MAX == INTPTR_MAX && \
-        MRB_INT_MIN == INTPTR_MIN
+    #if MRB_FIXNUM_SHIFT == 1 && WORDBOX_FIXNUM_FLAG == 1 && WORDBOX_FIXNUM_MASK == 1 && MRB_INT_MAX == INTPTR_MAX && MRB_INT_MIN == INTPTR_MIN
     #undef BC2CPP_TAGGED_FIXNUM
     #define BC2CPP_TAGGED_FIXNUM 1
     #endif

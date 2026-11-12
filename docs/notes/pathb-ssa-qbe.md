@@ -67,3 +67,24 @@ the optimizer, or the interpreter, and the runner reports which one by comparing
 
 1. Aggregates by value (copy) and volatile accesses.
 2. Decide the wiring into `bin/nfcxx` (behind an option, Path B only).
+
+## GNU C constructs of the kernel's shape (the cproc-removal work)
+
+- **`__builtin_return_address(0)`, `__builtin_frame_address(0)`** (x86-64): IR rvalues `(retaddr)` and `(frameaddr)`; QBE gives every
+  function a frame pointer, and a weak helper the driver appends (`# pathb-asm retaddr`, `frameaddr`; `ASM_HELPERS` in
+  `scripts/pathb-ssa-build`) reads the caller's `8(%rbp)` or `%rbp`. A call of the helper is followed by an empty call, so QBE does not
+  make `return __builtin_return_address(0);` a tail call (`leave; jmp`, which would run the helper in the caller's frame). The inliner
+  leaves a function that holds one of them alone. A level other than 0 is refused (`builtin return_address of a level other than 0`).
+  `__builtin_extract_return_addr` and `__builtin_frob_return_addr` are the identity. arm64 has no helper: the unit is refused there.
+- **`__attribute__((noinline))`**: the front end writes a `(noinline)` function head when `NFCXX_IR_NOINLINE=1` (`pathb-dump
+  --ir-noinline`, which `pathb-cc` passes for the SSA emitter only: the other emitters refuse an unknown head), and
+  `scripts/pathb-ir-opt.rb` does not inline such a callee.
+- **`__attribute__((cleanup(f)))`** (C and C++): `be/nfcxx_ir.c` keeps the stack of the function's variables with a cleanup and
+  writes `(eval (call void &"f" &var))` where their scope ends: at a block's end, at `return` (after the value is computed), and
+  at `goto`/`break`/`continue` for the variables above the target label's count (`ir_cu_*`).
+- **`section("S")`** on a global: `section "S" "aw"` (`"a"` for a const object) on its QBE data, as gcc does; `used` keeps a static
+  object that nothing refers to (`(used)` global flag: a root of both prunes). A thread-local with a section is refused.
+- **GNU case ranges** of more than 1024 values: a label (`__case_range_N`) in the switch body and, before the switch, one test
+  `(le.u (wsub (iconv unsigned_long x) LO) (HI - LO))` and a `goto` to it per range.
+- **A flexible array member** initialised by a string or by elements: the global's size is the struct plus them; no bounds check
+  is made on an array of size 0.

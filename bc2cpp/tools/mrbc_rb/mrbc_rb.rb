@@ -141,14 +141,18 @@ module MrbcRb
   # Compiles +source+ as `mrbc -g` compiles a file named +filename+. Returns the RITE binary as a binary String.
   # Compiler switches of the command line (mrbc's `--no-ext-ops` and `--no-optimize`), per thread: +no_ext_ops+ makes a
   # wide operand (an OP_EXT prefix, which the fork's genop_1/genop_2 refuse then) Unsupported, so mrbc reports the error.
-  def self.options = Thread.current[:mrbc_rb_options] || {}
+  # The mruby runner has no Ruby threads; keep its options local to this process.
+  def self.options_store = defined?(Thread) ? Thread.current : (@options_store ||= {})
+
+  def self.options = options_store[:mrbc_rb_options] || {}
 
   def self.with_options(**opts)
-    saved = Thread.current[:mrbc_rb_options]
-    Thread.current[:mrbc_rb_options] = opts
+    store = options_store
+    saved = store[:mrbc_rb_options]
+    store[:mrbc_rb_options] = opts
     yield
   ensure
-    Thread.current[:mrbc_rb_options] = saved
+    store[:mrbc_rb_options] = saved
   end
 
   def self.compile(source, filename) = compile_result(source, filename).image
@@ -5748,11 +5752,13 @@ module MrbcRb
     def tree(with_lv)
       iseq = @code.pack('C*') + catch_table_block
       pool = @pool.map do |entry|
-        case entry
-        in [:bigint, digits, base] then [:bigint, [digits.bytesize, base & 0xff].pack('CC') + digits.b]
-        in [:int, v] then v.between?(INT32_MIN, INT32_MAX) ? [:i32, v] : [:i64, v]
-        in [:float, bits] then [:float, bits.unpack1('E')]
-        in [:str, bytes] then [:str, bytes.b]
+        tag, value, base = entry
+        case tag
+        when :bigint then [:bigint, [value.bytesize, base & 0xff].pack('CC') + value.b]
+        when :int then value.between?(INT32_MIN, INT32_MAX) ? [:i32, value] : [:i64, value]
+        when :float then [:float, value.unpack1('E')]
+        when :str then [:str, value.b]
+        else raise Error, "unknown pool entry: #{entry.inspect}"
         end
       end
       lv = nil
@@ -5787,17 +5793,19 @@ module MrbcRb
     # and its digits, with no terminating NUL (dump.c writes len + 2 bytes).
     def pool_block
       entries = @pool.map do |entry|
-        case entry
-        in [:bigint, digits, base]
-          [IREP_TT_BIGINT].pack('C') + [digits.bytesize, base & 0xff].pack('CC') + digits.b
-        in [:int, v]
+        tag, value, base = entry
+        case tag
+        when :bigint
+          [IREP_TT_BIGINT].pack('C') + [value.bytesize, base & 0xff].pack('CC') + value.b
+        when :int
           # new_lit_int: IREP_TT_INT64 when it does not fit in 32 bits, else IREP_TT_INT32
-          v.between?(INT32_MIN, INT32_MAX) ? [1, v & 0xffff_ffff].pack('CN') : [3, (v >> 32) & 0xffff_ffff, v & 0xffff_ffff].pack('CNN')
-        in [:float, bits]
-          [5].pack('C') + bits # IREP_TT_FLOAT: the double, little endian
-        in [:str, bytes]
+          value.between?(INT32_MIN, INT32_MAX) ? [1, value & 0xffff_ffff].pack('CN') : [3, (value >> 32) & 0xffff_ffff, value & 0xffff_ffff].pack('CNN')
+        when :float
+          [5].pack('C') + value # IREP_TT_FLOAT: the double, little endian
+        when :str
           # A string: tag 0, its length, its bytes and a NUL (dump.c's default case).
-          [0].pack('C') + [bytes.bytesize].pack('n') + bytes + "\0".b
+          [0].pack('C') + [value.bytesize].pack('n') + value + "\0".b
+        else raise Error, "unknown pool entry: #{entry.inspect}"
         end
       end
       [@pool.size].pack('n') + entries.join

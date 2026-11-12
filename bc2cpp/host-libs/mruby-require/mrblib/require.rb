@@ -25,6 +25,21 @@ end
 class Object
   def require(name)
     feature = name.to_s
+    # World helpers also require compiler files by absolute path. Resolve only
+    # names present in the baked graph; never evaluate a filesystem source.
+    if MRubyRequire.respond_to?(:baked?)
+      roots = []
+      roots << BC2CPP_TREE_ROOT if defined?(BC2CPP_TREE_ROOT)
+      roots << BC2CPP_WORLD_ROOT if defined?(BC2CPP_WORLD_ROOT)
+      roots.each do |root|
+        next unless feature.start_with?("#{root}/")
+        relative = feature[(root.size + 1)..-1].sub(/\.rb\z/, '')
+        if MRubyRequire.baked?(relative)
+          feature = relative
+          break
+        end
+      end
+    end
     return false if MRubyRequire::LOADED[feature]
 
     # A source compiled into the build (mruby-bc2cpp-sources) is run from its bytecode, with no eval.
