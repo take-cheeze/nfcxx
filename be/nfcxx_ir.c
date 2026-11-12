@@ -4932,6 +4932,25 @@ static ir_val ir_call(an_expr_node_ptr e)
     sret = ir_temp(e->type);
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
+#if defined(__aarch64__)
+  /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
+     (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
+     copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
+     module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
+  int hid_dest = 0;
+  a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
+  if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
+      hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
+      !hid_ft->variant.routine.extra_info->return_value_parameter_follows_this &&
+      !ir_is_cdtor_call(f, 0) && !ir_is_cdtor_call(f, 1) && ir_operand(e, 1) != NULL) {
+    ir_val d = ir_rval(ir_operand(e, 1));
+    a_type_ptr dt = d.t != NULL ? skip_typerefs(d.t) : NULL;
+    if (dt != NULL && dt->kind == tk_pointer && ir_is_cabi_agg(dt->variant.pointer.type)) {
+      hid_dest = 1;
+      args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
+    }
+  }
+#endif
   {
     int ints = 0, sse = 0, shape_ok = 1;
     unsigned long long stack = 0;
@@ -4939,6 +4958,7 @@ static ir_val ir_call(an_expr_node_ptr e)
     int nrref = 0, k, idx, nargs = 0;
     if (ir_borrow) for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) nargs++;
     for (arg = ir_operand(e, 1), idx = 0; arg != NULL; arg = arg->next, idx++) {
+      if (hid_dest && idx == 0) continue; /* the destination: (sret ...) above */
       ir_val a = ir_rval(arg);
       if (ir_borrow && nrref < 32 && ir_is_rref_type(ir_arg_param_type(f, idx, nargs))) rref[nrref++] = a.s;
       if (ir_borrow && idx == 0 && !agg_ret && !x87_ret && a.s[0] == '$' && (obj_var = ir_obj_arg(arg)) != NULL) obj_op = a.s;

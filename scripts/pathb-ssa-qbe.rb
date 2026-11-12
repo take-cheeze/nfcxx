@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -2394,6 +2394,11 @@ end
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      if sret && Qbe.aarch64 && f.is_a?(Ref) && f.sigil == "&" && Qbe.hidden_defs && Qbe.hidden_defs[Qbe.symbol(f.raw)]
+        args.unshift("l #{dest}")   # a defined function takes the result pointer as its first parameter
+        sret = nil
+        dest = nil
+      end
       sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
     end
@@ -3057,6 +3062,16 @@ end
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
+    # The defined functions whose first parameter is the hidden result pointer (EDG's lowered class result). A call to one
+    # of them passes the pointer as an argument (its definition takes it so); any other call of such a result is an
+    # aggregate return (x8 on AArch64, see call_parts).
+    self.hidden_defs = {}
+    forms.each do |f|
+      next unless head(f) == "ssa-function"
+      params = f.find { |x| head(x) == "params" }
+      next unless params && params.drop(1).any? { |p| head(p) == "sret" }
+      self.hidden_defs[symbol(f[1].raw)] = true
+    end
     self.sp_objects = []
     self.asan_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
