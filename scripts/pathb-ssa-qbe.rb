@@ -1406,6 +1406,10 @@ end
           atomic_fetch_lines(fresh, nil, item[1])
           return
         end
+        if atomic_store?(item[1])
+          atomic_store_lines(item[1])
+          return
+        end
 
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
@@ -1565,7 +1569,7 @@ end
           @lines << "  #{raw} =s #{call_text(rv)}"
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
-          @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
+          @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -2305,10 +2309,10 @@ end
       [op, size]
     end
 
-    # Off: the amd64 xadd isel (3rd/qbe 9688fb7) leaves the old value in the register of the copy, not of the result, so
-    # an inlined fetch-add with order 5 reads a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp).
-    # Until that is fixed in the fork, the calls to libatomic are emitted as before.
-    ATOMIC_XADD = false
+    # On with the fork's xadd of 3rd/qbe a5fa6c2 or later: the old value is in the result's register (the isel), a load is not forwarded
+    # across the locked add (load.c), and the add is kept when its old value is unused (a shared_ptr's count). Before them the
+    # lowering read a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp), and was off.
+    ATOMIC_XADD = true
 
     def atomic_fetch?(c)
       return false unless ATOMIC_XADD
@@ -2319,9 +2323,10 @@ end
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
     end
 
-    # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
+    # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
     # locked stores and exchanges the lowering uses). Only without --safe.
-    ATOMIC_LOAD = %w[__atomic_load_4 __atomic_load_8].freeze
+    ATOMIC_LOAD = %w[__atomic_load_1 __atomic_load_2 __atomic_load_4 __atomic_load_8].freeze
+    ATOMIC_LOAD_OP = { "1" => "w loadub", "2" => "w loaduh", "4" => "w loadw", "8" => "l loadl" }.freeze
 
     def atomic_load?(c)
       f = c[2]
@@ -2329,6 +2334,43 @@ end
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
       head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+    end
+
+    # __atomic_store_N (N = 1, 2, 4, 8) with a constant order: a plain store, which on x86 is already a release store. A
+    # sequentially consistent store (order 5) needs a full barrier after it: a locked add of 0 (xadd) on the object, or for 1 and
+    # 2 bytes on the aligned 4-byte word that holds it (adding 0 changes no byte; the word is in the object's page).
+    ATOMIC_STORE_OP = { "1" => "storeb", "2" => "storeh", "4" => "storew", "8" => "storel" }.freeze
+
+    def atomic_store?(c)
+      f = c[2]
+      return false unless ATOMIC_XADD
+      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_store_") && ATOMIC_STORE_OP.key?(name[-1])
+
+      order = c[5]
+      return false unless head(order) == "const"
+
+      o = order[2].to_s
+      return true if o == "0" || o == "3"
+
+      o == "5"
+    end
+
+    def atomic_store_lines(c)
+      size = c[2].raw.delete('"')[-1]
+      addr = op(c[3])
+      @lines << "  #{ATOMIC_STORE_OP[size]} #{op(c[4])}, #{addr}"
+      return unless c[5][2].to_s == "5"
+
+      if size == "1" || size == "2"
+        word = fresh
+        @lines << "  #{word} =l and #{addr}, -4"
+        @lines << "  #{fresh} =w xadd #{word}, 0"
+      else
+        @lines << "  #{fresh} =#{size == "4" ? "w" : "l"} xadd #{addr}, 0"
+      end
     end
 
     def atomic_fetch_lines(dst, cls, c)
