@@ -1513,6 +1513,15 @@ static int ir_is_cdtor_call(an_expr_node_ptr f, int dtor)
   return r->special_kind == (dtor ? sfk_destructor : sfk_constructor) && r->ctor_dtor_kind == cdk_complete;
 }
 
+#if defined(__aarch64__)
+/* 1 for a definition whose first parameter is the hidden result pointer (see ir_makes_first_arg for the calls). */
+static int ir_makes_first_arg_def(a_type_ptr fn_type)
+{
+  return fn_type->variant.routine.extra_info != NULL && fn_type->variant.routine.extra_info->value_returned_as_parameter &&
+         !fn_type->variant.routine.extra_info->return_value_parameter_follows_this;
+}
+#endif
+
 /* 1 for a call that makes the object its first argument addresses: a complete-object constructor, or a function
    that returns a class through a first parameter (the lowering's, for a class with a non-trivial destructor). */
 static int ir_makes_first_arg(an_expr_node_ptr f)
@@ -7938,6 +7947,11 @@ static void ir_function(a_routine_ptr rout)
     } else {
       fputc(' ', nf_out);
       nf_put_type(param->type);
+#if defined(__aarch64__)
+      /* the hidden result pointer of a class result EDG lowered into the first parameter: a call to this definition from
+         the module passes the destination as that argument (scripts/pathb-ssa-qbe.rb, hidden_defs) */
+      if (param == scope->variant.routine.parameters && ir_makes_first_arg_def(fn_type)) fputs(" (hidden-result)", nf_out);
+#endif
       fputc(')', nf_out);
       if (npending < 256) {
         pending[npending].var = param;

@@ -3062,14 +3062,14 @@ end
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
-    # The defined functions whose first parameter is the hidden result pointer (EDG's lowered class result). A call to one
-    # of them passes the pointer as an argument (its definition takes it so); any other call of such a result is an
-    # aggregate return (x8 on AArch64, see call_parts).
+    # The defined functions whose first parameter is the hidden result pointer (EDG's lowered class result, marked
+    # (hidden-result) by be/nfcxx_ir.c). A call to one of them passes the pointer as an argument (its definition takes it
+    # so); any other call of such a result is an aggregate return (x8 on AArch64, see call_parts).
     self.hidden_defs = {}
     forms.each do |f|
       next unless head(f) == "ssa-function"
       params = f.find { |x| head(x) == "params" }
-      next unless params && params.drop(1).any? { |p| head(p) == "sret" }
+      next unless params && params.drop(1).any? { |p| head(p) == "param" && p.drop(4).any? { |x| head(x) == "hidden-result" } }
       self.hidden_defs[symbol(f[1].raw)] = true
     end
     self.sp_objects = []
