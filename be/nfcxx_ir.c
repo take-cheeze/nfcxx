@@ -2351,6 +2351,7 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
 }
 
 static ir_val ir_i128_const(a_constant_ptr c, a_type_ptr t);
+static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t);
 
 /* A constant of type t (an expression constant or an initializer element). */
 static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
@@ -2377,6 +2378,15 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
     case ck_void: /* `(void)0` as a constant expression: no value */
       ir_note(3, ck_void, 1);
       return ir_mk_void();
+    case ck_aggregate:
+      /* An aggregate-valued constant (`({ struct E c = {}; c; })`, folded by the front end): an object of its type, set by
+         the same member-wise store as an initializer; the value is its address. */
+      if (ir_is_aggregate(t)) {
+        ir_val tmp = ir_temp(t);
+        ir_init_constant(tmp, c, t);
+        return tmp;
+      }
+      /* fall through */
     default:
       return ir_gap(t, ir_fmt("const %s", nfcxx_ck_name(c->kind) != NULL ? nfcxx_ck_name(c->kind) : "?"), 3,
                     (int)c->kind);
