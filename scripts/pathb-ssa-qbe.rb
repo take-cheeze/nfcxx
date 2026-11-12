@@ -1555,7 +1555,16 @@ end
           @lines << "  #{raw} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
           canon_lines(dst, t, raw)
         else
-          @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+          a = op(rv[2])
+          b = op(rv[3])
+          # `x + CONST` of 64 bits whose constant does not fit in a displacement: see index_lines (`__va(x)` of the kernel).
+          if head(rv) == "wadd" && c == "l" && wide_literal?(b)
+            @lines << "  #{dst} =l sub #{a}, #{-b.to_i}"
+          elsif head(rv) == "wadd" && c == "l" && wide_literal?(a)
+            @lines << "  #{dst} =l sub #{b}, #{-a.to_i}"
+          else
+            @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{a}, #{b}"
+          end
         end
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
