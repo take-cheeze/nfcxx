@@ -38,6 +38,22 @@ check "-E goes to the host preprocessor" pb -E -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c"
 grep -q 'return a + b + 30 + 1' "$tmp/a.i" && ok "-E output" || bad "-E output" "$(tail -2 "$tmp/a.i")"
 check "--version names the backend" bash -c "NFCXX_BACKEND=pathb '$nfcc' --version | grep -q pathb"
 
+# Kernel-style inline asm (x86-64 only): asm goto, "i" operands that are constants after inlining, a "m" operand of a const
+# object, alternatives sections. The exit code is gcc's (tests/c/inline_asm_kernel_alt.c: EXPECT 42; the plain qbe backend
+# cannot build it, its XFAIL-qbe marker says why); inline_asm_goto.c is the same asm goto family without inlining.
+if [ "$(uname -m)" = x86_64 ]; then
+  for t in inline_asm_kernel_alt inline_asm_goto; do
+    src=$root/tests/c/$t.c
+    cc -O2 -fwrapv "$src" -o "$tmp/$t.gcc" 2>/dev/null; "$tmp/$t.gcc" >/dev/null 2>&1; want=$?
+    if out=$(pb "$src" -o "$tmp/$t.pb" 2>&1); then
+      "$tmp/$t.pb" >/dev/null 2>&1; got=$?
+      [ "$got" = "$want" ] && ok "asm $t: exit $got as gcc's" || bad "asm $t" "want $want got $got"
+    else
+      bad "asm $t" "build: $(grep -m1 -E 'refused|not emitted|error' <<<"$out" | cut -c1-200)"
+    fi
+  done
+fi
+
 # Options Path B cannot honour are refused with a message and a non-zero status, not ignored
 refuses "-isystem refused" "isystem.*pathb backend" pb -c -isystem "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/x.o"
 refuses "-nostdinc refused" "nostdinc.*pathb backend" pb -c -nostdinc "$tmp/a.c" -o "$tmp/x.o"

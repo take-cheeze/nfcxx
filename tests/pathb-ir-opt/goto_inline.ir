@@ -1,0 +1,18 @@
+(ir-module "goto_inline.c" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "pick"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (block
+    (let %1 bool (ne int %0 (const int 0)))
+    (if %1 (then (block (goto "yes")))))
+  (return (const int 0))
+  (label "yes")
+  (return (const int 1)))
+(function "caller"
+  (ret int)
+  (params (param %0 "a" int) (param %1 "b" int))
+  (let %2 int (call int &"pick" %0))
+  (let %3 int (call int &"pick" %1))
+  (let %4 int (wadd int %2 %3))
+  (return %4))

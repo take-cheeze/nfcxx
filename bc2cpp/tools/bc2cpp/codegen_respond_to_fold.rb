@@ -54,12 +54,94 @@ module RespondToFold
     return respond_to_fold_miss(irep, idx, meth, 'not a Symbol literal') unless meth.is_a?(String)
     return respond_to_fold_miss(irep, idx, meth, respond_to_fold_unbounded(meth)) if respond_to_fold_unbounded(meth)
 
+    constant = respond_to_fold_constant(irep, idx, original.reg.to_i, meth)
+    return constant if constant
+
     recv = "r#{insn.reg}"
     mask = exact_flow_mask(irep, idx, original.reg.to_i)
     named = mask.is_a?(Integer) && mask.positive? ? respond_to_fold_named(mask, meth, recv) : nil
     named || respond_to_fold_members(meth, recv) ||
       respond_to_fold_miss(irep, idx, meth, "receiver #{mask.is_a?(Integer) ? class_mask_name(mask) : '-'}; " \
                                             "#{respond_to_fold_members_refusal(meth)}")
+  end
+
+  # RESPOND_TO_FOLD_CONSTANT: the receiver is a stable class/module constant (constant_object_owner), so its class is
+  # that object's singleton class. mruby's respond_to? ignores visibility: the answer is whether the singleton lookup
+  # (each singleton up the superclass chain with its extended modules, then Class/Module/Object/Kernel/BasicObject)
+  # reaches a definition. [expression, reason], or nil when the closed world does not say.
+  def respond_to_fold_constant(irep, idx, reg, meth)
+    return nil if ENV['BC2CPP_RESPOND_TO_FOLD_CONSTANT'] == '0'
+
+    owner = constant_object_owner(irep, idx, reg, numeric_owner_of(irep)&.owner)
+    return nil unless owner && !constant_object_name_rebound?(meth) && !@closed_world.method_removed?(meth)
+
+    return nil unless respond_to_fold_class_side_bounded?(meth)
+
+    found = respond_to_fold_singleton_owner(owner, meth)
+    return nil if found == :unknown
+    return ['true', "#{owner}'s singleton lookup reaches #{found}##{meth} (Ruby)"] if found
+
+    # false: a declared class or module, and no instance definer a class object inherits (Class, Module, Object,
+    # Kernel, BasicObject) defines the name.
+    return nil unless @closed_world.class_declared?(owner) || @closed_world.module_declared?(owner)
+
+    d = call_facts_answers.all_definers(meth)
+    return nil if (d[:ruby] | d[:native] | d[:foreign]).intersect?(CallFacts::CLASS_OR_MODULE | CallFacts::EVERYTHING)
+
+    ['false', "nothing on #{owner}'s singleton lookup defines it"]
+  end
+
+  # Only the registry's Ruby can put +meth+ on a singleton class: every native registration of it is readable and none
+  # is a class or module method (CallFacts::Answers#all_definers, class_registrations), and no outside Ruby spells it.
+  def respond_to_fold_class_side_bounded?(meth)
+    return false if @closed_world.unknown_def?(meth) || @closed_world.outside_ruby_name?(meth)
+
+    d = call_facts_answers.all_definers(meth)
+    !d.nil? && d[:class_native].empty?
+  end
+
+  # The registry owner whose Ruby definition of +meth+ the class object +owner+'s singleton lookup reaches first, nil
+  # when no singleton class or extended module on the way defines it, :unknown when part of the way is not known. A
+  # module object's singleton has no superclass; a class's continues to its superclasses' up to Object's.
+  def respond_to_fold_singleton_owner(owner, meth)
+    defined = ->(o) { @registry.fetch(meth, []).any? { |md| md.owner == o } }
+    klass = owner
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      return :unknown if @unknown_mixins.include?(singleton)
+
+      prepended = respond_to_fold_mixin_owner(Array(@prepended_modules[singleton]), defined)
+      return prepended if prepended
+      return singleton if defined.(singleton)
+
+      included = respond_to_fold_mixin_owner(Array(@included_modules[singleton]), defined)
+      return included if included
+      return nil if @closed_world.module_declared?(klass)
+      # The superclass chain is followed only through declared classes (respond_to_fold_class_side_bounded? already
+      # rules out a native or outside install on any singleton).
+      return :unknown unless @closed_world.stable_class_constant?(klass) && @closed_world.class_declared?(klass)
+
+      parent = @closed_world.class_parent(klass)
+      return :unknown if parent.nil?
+      return %w[Object.singleton BasicObject.singleton].find { |s| defined.(s) } if parent == :none
+
+      klass = parent
+    end
+    :unknown
+  end
+
+  # The first module of +mods+ (in lookup order, with the modules each includes) that defines the name, nil when
+  # none does, :unknown when one is not a declared module.
+  def respond_to_fold_mixin_owner(mods, defined)
+    mods.reverse_each do |mod|
+      return :unknown unless @closed_world.module_declared?(mod) && !@unknown_mixins.include?(mod)
+      return mod if defined.(mod)
+
+      inner = respond_to_fold_mixin_owner(Array(@included_modules[mod]), defined)
+      return inner if inner
+    end
+    nil
   end
 
   # BC2CPP_RESPOND_TO_FOLD_REPORT=<path>: one TSV row per respond_to? site left as a call (irep, index, name, why).

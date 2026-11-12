@@ -28,7 +28,7 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 | `--freestanding` on x86-64 Linux | Path B (`pathb-dump --freestanding --eh-runtime`) | #976 merged |
 | C that Path B refused: unions by value, `_Float16`, inline asm, return/frame address, `cleanup`, `section`, case ranges, flexible array initializers | Path B lowerings | #980, #981, #982, #983 merged. Left in `tests/c` (`XFAIL-pathb`): `asm goto` and any other marker still present |
 | `nfcc` (cc for make, CMake, autoconf, the kernel) | `NFCXX_BACKEND=pathb` | opt-in since #977. The default stays qbe until the kernel is measured |
-| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **not measured**: running the kernel's `make` on the downloaded tree is denied by the session sandbox (twice). `scripts/nfcc-pathb-measure.sh` is the tool; the measurement needs the owner to run it or to allow it |
+| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **570 of 615 build** (538 before the `claude/pathb-kernel-refusals` branch): docs/notes/linux-kernel.md, "Measured". The rest is inline asm and the real-mode boot code |
 | C++ modules (default backend was qbe) | Path B (the `-c` compile passes the module options) | #989 merged; `--backend=qbe` with modules still uses cproc |
 | qbe-backend ASan (cproc's own checks, branch `nfcxx-asan-combined`) | Path B ASan (the default since #892) | #992 merged: `-fsanitize=address --backend=qbe` is an error; the cproc ASan code is dead and goes with cproc |
 | CIL (.NET) backend: `cil-cc` is `qbe-cc` | `scripts/pathb-cil` for C | #993 open |
@@ -45,6 +45,8 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
      modelled by `pathb-dump` (#990).
    - `tests/poly`: the mruby, Lua and QuickJS C builds are refused; `ops.cpp` aborts (double free) on Path B; `tests/float-to-int/classify.c`:
      Path B ignores the class arguments of `__builtin_fpclassify` (#994).
+   - `tests/long-double-abi` runs on Path B and gcc (a variadic call with long double arguments and result goes through a
+     per-shape call thunk); `tests/cil/errors/variadic_def.c` is Path B's own refusal, `cil-cc` does not fall back to cproc for it.
    - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
      unlowerable, 2 `_Float16`, 2 over-aligned and singles); every `tests/cil` program runs, one of them through the cproc fallback.
    - ASan (#992): Path B does not detect the two setjmp-return scope escapes (gcc does not either), so `tests/poly/asan-go.sh` is gcc-only.

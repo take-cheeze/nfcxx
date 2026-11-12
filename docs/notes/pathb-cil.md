@@ -137,7 +137,7 @@ the stdout the test expects:
 | cases/arith, fib, fnptr, hello, loop, misc, strings, structs, switch | run, exit and stdout as expected | variadic calls, conversions, `cf2i`, `switch`, aggregates by value, bit-fields, `alloca`, quoting of `add` |
 | cases/conv, nan, f2i64 (new) | run | `conv`: widening, narrowing, float compares, `switch` with `continue`, volatile store, bit-fields, struct by value; `nan` and `f2i64`: see below |
 | multi/statics | run | `name@UNIT` for statics |
-| errors/variadic_def | refused (`variadic definitions (va_start) are not supported by the CIL backend`), and so is the cproc route | `QBE-ONLY` marker: it is the fallback path |
+| errors/variadic_def | refused by Path B (`variadic definitions (va_start) are not supported by the CIL backend`); `cil-cc` does not fall back to cproc for this refusal, which the cproc route makes too | no marker: the error comes from Path B |
 
 So no `tests/cil` program needs cproc to run. `tests/cil/run.sh` fails when a file without a `// QBE-ONLY: reason` marker is taken by
 cproc, and when a marked file is not. `cases/nan.c` and `cases/f2i64.c` are `// PATHB-ONLY`: `qbe2cil.rb` gets `nan < 1.0` wrong (true) and converts a double to a 64-bit integer through 32 bits; Path B follows C. (Those two bugs of the cproc route are not fixed here.)

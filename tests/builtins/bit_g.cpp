@@ -1,5 +1,4 @@
 // EXPECT: 0
-// QBE-ONLY: Path B (--backend=pathb, --gnu-version=140000) reports __builtin_clzg undefined; qbe builds it
 // HOST-GCC-MIN: 14
 // MACOS-XFAIL-qbe: EDG rejects __builtin_clzg with Apple SDK headers (not investigated yet; see the macOS CI job)
 // GNU-VERSION: 140000 (GCC 14 emulation: EDG knows the g-builtins only from GCC 14 on)

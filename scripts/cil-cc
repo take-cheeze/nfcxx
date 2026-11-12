@@ -31,6 +31,11 @@ if [ -z "${NFCXX_CIL_CPROC:-}" ] && [ -x "$here/../build/pathb/cmake/bin/cpfe" ]
       [ -z "${NFCXX_CIL_VERBOSE:-}" ] || echo "cil-cc: Path B: $src" >&2
       exit 0
     fi
+    # A defined variadic function (va_start) is out of scope of the CIL backend on every route: the refusal is the answer.
+    if grep -qF "variadic definitions (va_start) are not supported by the CIL backend" "$err"; then
+      echo "cil-cc: Path B: $src: $(head -c 300 "$err" | tr '\n' ' ')" >&2
+      rm -f "$out"; exit 1
+    fi
     [ -z "${NFCXX_CIL_VERBOSE:-}" ] || { echo "cil-cc: Path B refused $src, using cproc: $(head -c 300 "$err" | tr '\n' ' ')" >&2; }
     rm -f "$out"
   fi
