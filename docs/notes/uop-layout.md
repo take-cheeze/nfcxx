@@ -156,9 +156,29 @@ What this says:
   for A closes the gap: the inner loop reads `At` contiguously in k instead of 1 KB apart, and blk matches vec-n at
   K = 64 and beats it at K = 24.
 - **K = 16 is unexplained:** blk is slower than stc there (about 79 vs 58 µs). I have not found why.
-- **Consequence for the emitter:** a block layout for A (and for C) would remove the M-vectorized penalty at most K.
-  That changes the output layout of C that the model describes (column-major for lanes on M), so it is a decision for
-  the layout model, not just an optimisation. Not done.
+- **Decision (allow blocked):** the layout model allows a blocked storage for the lanes-on-M data: A's transpose and C
+  are kept in 8-row blocks (`Storage::Blocked8` in `nfcuop_layout_avx2.hpp`). It is an option of the emitter, and the
+  default stays strided. The cost model still does not price storage; see the timings below.
+
+## The emitter's blocked storage (fifth round)
+
+`emit_gemm_rowsum_c(VecM, M, N, K, simd_transpose, Storage::Blocked8)` stores A's transpose and C in 8-row blocks, so
+the inner loop reads `At` and writes C contiguously. The test (`tests/uop/test_layout_avx2.cpp`) checks both storages
+bit for bit against the reference. The timings are of the emitter's own kernels, `M = N = 256`, best of 15 timings of
+50 calls each, one run per flag set. The ratio is blocked / vec-n:
+
+| K | -O2 | -O3 |
+| --- | --- | --- |
+| 8 | 1.00 | 0.82 |
+| 16 | 0.98 | 0.77 |
+| 24 | 0.92 | 0.92 |
+| 32 | 1.16 | 1.03 |
+| 64 | 1.00 | 1.07 |
+
+What this says: blocked storage removes the M-vectorized penalty at K = 8 to 24 at both flags, and at K = 16 and
+K = 8 it is the faster kernel at -O3. At K = 32 and 64 it is at parity or slightly slower. The N-vectorized kernel
+is still the simpler choice where its speed is the same. The vec-n baseline at K = 8 varied from about 40 µs to 63 µs
+between sessions on this host, so the K = 8 ratio is the least certain entry.
 
 The scratch kernels and the driver are not in the repository.
 
@@ -193,11 +213,9 @@ not describe yet.
 
 ## Next steps on this target
 
-1. Decide whether the layout model should allow a blocked layout (lanes on M, 8 rows contiguous per block) for the
-   M-vectorized result and for A. That would remove the penalty found above, and it changes what the model calls the
-   output layout, so it is a decision for the model.
-2. Explain the K = 16 result: the block kernel is slower there than the contiguous-store kernel.
-3. Repeat the timing on more hosts before drawing a crossover from it.
+1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
+   cannot yet tell blocked from strided.
+2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 
