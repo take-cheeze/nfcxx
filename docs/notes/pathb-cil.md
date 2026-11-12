@@ -1,4 +1,4 @@
-# Path B to CIL: C++ exceptions as CLR exceptions (spike)
+# Path B to CIL: C++ exceptions as CLR exceptions (spike), and the C route of the CIL backend
 
 `scripts/pathb-cil file.cpp -o x` compiles a C++ file through Path B's IR and runs it as a .NET 8 assembly. It is the
 spike of the route chosen for C++ exceptions on CIL (see `docs/notes/cil.md`, "Not supported"): the exception handling
@@ -100,6 +100,57 @@ libc `abort` path already gives every other checked failure here.
 Unknown statements, and any unknown form at the top of a function, are refused. The emitter used to keep only a fixed
 list of statement heads at the top of a function and silently drop the rest (`asm_refuse.ir` translated without its
 `fence`); that is fixed, and it is why some files that translated before now refuse.
+
+## C inputs, and the route of `cil-cc` (cproc removal, workstream E)
+
+`scripts/pathb-cil` takes C as `./nfcxx` does: a `.c` file is read by EDG's C front end (`pathb-dump --ir -std=c11`, plus
+`-D_DEFAULT_SOURCE`, because gcc's default dialect defines it and a strict `-std=c11` leaves `strdup` undeclared, so an implicit `int`
+truncates its pointer), several files are several fragments of one link, and `-c` writes one fragment (the object of
+`scripts/cil-cc`). A static function, global or string literal is `name@UNIT`, as in `qbe2cil.rb`, so two files may each have a
+`static` of one name.
+
+`scripts/cil-cc` (nfcc's `NFCXX_BACKEND=cil`) compiles a `-c file.c` through this route first and falls back to the cproc route
+(`qbe-cc`: cproc -> QBE IL -> `qbe2cil.rb`) when Path B refuses the file or the options are not ones it takes (anything beyond
+`-c -o -I -D -U -std=` and the ignorable `-O -g -W -fPIC`...). The fragments of both routes link together, so the choice is per file.
+`NFCXX_CIL_CPROC=1` takes the cproc route for every file; `NFCXX_CIL_VERBOSE=1` says which route each file took.
+
+What the emitter learned for C: variadic calls (the `nfcxx_vcall` shim of `cil-link.rb`, as `qbe2cil.rb`), `iconv`/`p2i`/`i2p` with the
+operand's signedness, `i2f`/`u2f`/`fconv`/`cf2i` (checked), `fadd fsub fmul fdiv`, `lt.f`/`le.f`, `not`, `switch` (a compare chain; `case`
+labels must be statements of the body), `alloca`, bit-fields (`bfload`/`bfstore`), `copy`/`zero-fill` (`cpblk`/`initblk`), aggregates
+by value (`sret` and `byval` are pointers: the caller makes the copy), `store.v`, and method names that are IL keywords (`add`) quoted.
+
+**Nothing is dropped.** Things the IR carries that this route does not model are refused, so the fallback takes them (before, they
+were ignored and the program ran wrong): a top-level form other than module, `abi-type`, `x87-thunk`, `global`, `data`, `function`,
+`declare` (an `alias` is one); a weak attribute (a function or global), a weak declaration, `section` and `thread` globals;
+`constructor`/`destructor` functions; an object or frame slot aligned to more than 16; a call of an `__nfcxx_*` helper (long double,
+`__int128`, `__float128` need `be/nfcxx_ldrt.c`); a `setjmp` that is not the entry test of a lowered `try` (the emitter's `_setjmp` is 0).
+Five files of `tests/pathb-ir` that "translated" before (`alias_attr`, `alias_static`, `alias_weakref_ifunc`, `tls`, `weak_decl`) are
+therefore refused now, and 53 of the 84 translate (41 before).
+
+### Measured: the programs of `tests/cil`
+
+Every program built and run through Path B (`scripts/pathb-cil`, and through `nfcc` with the routing above), against the exit status and
+the stdout the test expects:
+
+| program | Path B | what it needed |
+|---|---|---|
+| cases/arith, fib, fnptr, hello, loop, misc, strings, structs, switch | run, exit and stdout as expected | variadic calls, conversions, `cf2i`, `switch`, aggregates by value, bit-fields, `alloca`, quoting of `add` |
+| cases/conv, nan, f2i64 (new) | run | `conv`: widening, narrowing, float compares, `switch` with `continue`, volatile store, bit-fields, struct by value; `nan` and `f2i64`: see below |
+| multi/statics | run | `name@UNIT` for statics |
+| errors/variadic_def | refused (`variadic definitions (va_start) are not supported by the CIL backend`), and so is the cproc route | `QBE-ONLY` marker: it is the fallback path |
+
+So no `tests/cil` program needs cproc to run. `tests/cil/run.sh` fails when a file without a `// QBE-ONLY: reason` marker is taken by
+cproc, and when a marked file is not. `cases/nan.c` and `cases/f2i64.c` are `// PATHB-ONLY`: `qbe2cil.rb` gets `nan < 1.0` wrong (true) and converts a double to a 64-bit integer through 32 bits; Path B follows C. (Those two bugs of the cproc route are not fixed here.)
+
+### Measured beyond `tests/cil`: the 63 single-file programs of `tests/c` (only measured, not routed by a test)
+
+36 build and give the expected exit status, and none runs wrong. 27 are refused: 10 `asm` blocks; 4 calls of `__nfcxx_*` runtime helpers
+(long double, `__int128`, `__float128`); 4 constructs the front end could not lower (`unsupported`); 2 `_Float16`; 2 over-aligned objects;
+and one each: a defined variadic function, a `setjmp`, a `section` global, a weak declaration, and a crash of the initializer reader on
+`gnu_fam_init` (a flexible array member's initializer; it exits non-zero, so the fallback takes it). The first measurement, before the
+refusals above, found 8 programs that built and ran wrong (the alias, section, alignment and runtime-helper ones, and `setjmp`);
+the cproc route did not compile those at all, so routing without the refusals would have turned a compile error into a wrong result.
+A file Path B refuses falls back to cproc.
 
 ## Limits of this spike (each a refusal or a known wrong result)
 
