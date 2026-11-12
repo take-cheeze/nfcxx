@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real-world check: build tinyxml2 (zlib license) at a pinned upstream commit with nfcxx and run a
 # small driver. The source is cloned into build/realworld, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
 # A backend failure is reported as a FAIL unless it matches a known gap listed in KNOWN below.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
@@ -16,13 +16,13 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL tinyxml2: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/tinyxml2_main.cpp" "$src/tinyxml2.cpp" \
              -o "$tmp/t-$b" 2>&1); then
     if [ "$b" = qbe ] && grep -q "no type in struct member" <<<"$out"; then
-      echo "xfail qbe tinyxml2: cproc rejects empty classes (docs/notes/freestanding.md)"; continue
+      echo "xfail qbe tinyxml2: cproc rejects empty classes (docs/notes/freestanding.md)"; continue   # QBE-ONLY: only reachable with NFCXX_BACKEND=qbe
     fi
     echo "FAIL $b tinyxml2 (build)"; head -5 <<<"$out"; fail=1; continue
   fi

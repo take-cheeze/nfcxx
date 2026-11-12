@@ -29,6 +29,8 @@ got_fold=$("$tmp/fold")
 if [ "$got_fold" = "$want_fold" ]; then echo "ok   folded out-of-range conversions match gcc"; else echo "FAIL folded conversions"; diff <(echo "$want_fold") <(echo "$got_fold"); fail=1; fi
 # The classification built-ins (__builtin_isnan, isinf, isfinite, isnormal, signbit, fpclassify, the comparisons) on
 # edge values of float, double, long double and __float128 (cproc, expr.c fpbuiltin): gcc's output.
+# QBE-ONLY: Path B lowers __builtin_fpclassify(nan, inf, normal, subnormal, zero, x) to glibc's __fpclassify and ignores the five
+# class arguments (it returns FP_NAN=0, FP_ZERO=2 ... where the program passes 1..5; be/nfcxx_ir.c, "fpclassify"). gcc and qbe agree.
 NFCXX_BACKEND=qbe ./nfcxx tests/float-to-int/classify.c -o "$tmp/classify" >/dev/null 2>&1 || { echo "FAIL build classify.c"; exit 1; }
 if "$tmp/classify" | diff -q - tests/float-to-int/classify.expected > /dev/null; then echo "ok   classification built-ins match gcc"; else echo "FAIL classification built-ins"; "$tmp/classify" | diff - tests/float-to-int/classify.expected | head -5; fail=1; fi
 echo "$fail failures"

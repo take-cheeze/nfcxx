@@ -7,6 +7,8 @@
 # Two build settings are not nfcxx's concern and are set here: the system include and library directories are
 # multiarch paths that tcc's defaults do not list, and the memory checker (lib/bcheck.c) is left out because it
 # uses __malloc_hook, which glibc 2.34 removed.
+# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) fails TinyCC's libtcc.c in QBE ("QBE failed: invalid type for
+# first operand %vs3 in add", the QBE xadd issue of Path B stage 3); the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=d348a9a51d32cece842b7885d27a411436d7887b   # TinyCC tag release_0_9_27

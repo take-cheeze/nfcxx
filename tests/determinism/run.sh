@@ -3,12 +3,13 @@
 # or the files given as arguments), and require every object to be byte-identical to the first.
 # EDG used to name temporaries "__T<heap address>", so objects differed between runs; the EDG fix
 # (nfcxx/temp-name-counter) numbers them per translation unit. Run with EDG_BUILD/EDG_BASE pointing
-# at an older EDG build to see the failure.
+# at an older EDG build to see the failure. Backend: NFCXX_BACKEND, default pathb on x86-64 Linux and qbe elsewhere.
 cd "$(dirname "$0")/../.."
 runs=${RUNS:-2}
 files=("$@")
 [ ${#files[@]} -eq 0 ] && files=(tests/cases/qbe_gnu_forms.cpp)
-export NFCXX_BACKEND=${NFCXX_BACKEND:-qbe}
+pb=pathb; { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } || pb=qbe   # Path B is the x86-64 Linux backend; other hosts stay on qbe
+export NFCXX_BACKEND=${NFCXX_BACKEND:-$pb}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for f in "${files[@]}"; do
   name=$(basename "$f" .cpp); same=1
