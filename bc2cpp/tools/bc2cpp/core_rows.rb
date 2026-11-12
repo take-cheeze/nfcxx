@@ -38,8 +38,9 @@ module CoreRows
   # Symbol literal's (SYMBOL_USES) and a definition's name.
   QUIET_OPS = (BytecodeIR::Ops::SEND | %i[LOADSYM DEF TDEF SDEF]).freeze
 
-  # What the engine may look up by name: the engine proof's dynamic names (Symbol literals that may name a method,
-  # identifier literals that may be looked up, sends that may run as bytecode, core sends to engine objects), the
+  # What the engine may look up by name: the engine proof's dynamic names of the engine's own giving (Symbol literals
+  # that may name a method, identifier literals that may be looked up, sends that may run as bytecode, names in a
+  # native source outside 3rd/; not the core Ruby, 3rd/ native and generated-literal ones this run reads itself), the
   # names a `super` reaches, every other symbol operand of an engine irep (an alias source, an undef, ...), and the
   # lookups left in the generated code.
   def engine_names(ireps, generated, dynamic, super_names)
