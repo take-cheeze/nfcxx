@@ -40,6 +40,34 @@ The same unit with both caps: 16 MB, 3740 calls inlined, 3.8 s. 0 turns a cap of
 Known gap: after inlining, the SSA emitter (scripts/pathb-ssa-qbe.rb) refuses some functions of that unit ("let of $\"__j\""), so
 `pathb-cc` falls back to the unoptimized IR for it. The pass is therefore not on by default.
 
+## EH frames of functions that cannot throw (`--strip-leaf-eh`)
+
+A function with something to unwind pushes a 240-byte entry on the thread-local EH stack (`docs/notes/pathb-stage3.md`, "C++
+exceptions"): kind 6 for a noexcept function or a destructor, kind 1 for one with locals to destroy (set up through a chain of
+offsets of the entry's address, with the region table and the saved `__eh_curr_region`), kind 5 for a try block. Only a throw
+reads the stack, so when nothing a function calls can let an exception out, the entries it pushes are dead: the pass drops the
+slots, the push and pop, the writes of `__eh_curr_region` and every address and load derived from the entry. It runs before the
+inliner (the callees copied in are lean) and after it (a function whose calls were all inlined loses the frames of the bodies
+copied into it). It leaves a function as it is when any removed register or slot is still read.
+
+What cannot let an exception out (`throwing_functions`): a guarded function (the kind-6 entry makes a throw through it terminate),
+a function made of such calls, an atomic builtin, a destructor or operator delete of a function the module does not define
+(noexcept unless declared otherwise), a function that never returns (`__assert_fail`, `std::__glibcxx_assert_fail`, `abort`) and a
+short list of libc routines (`NOTHROW_EXTERN`; `--nothrow-extern=NAME,NAME` adds a project's own, e.g. `ggml_abort`). An indirect
+call and a call of any other function the module does not define can: that is the safe side, and a C function that calls back
+into C++ (`qsort` with a comparator that throws) must stay on it (`tests/pathb-qbe/cases/eh_inlined_frames.cpp`, whose output
+changes when `qsort` is declared nothrow).
+
+ggml-vulkan.cpp, SmolLM2 decode build (optimised IR, `--prune-unused --strip-leaf-eh --inline`): references to the EH stack
+top 98k without the pass at function level only, 47k with calls to guarded functions counted as safe, 5.7k with the cleanup
+frames followed through their derived registers and the assertion, delete and destructor names; 113 -> 71 MB of IR; the hot
+`ggml_vk_dispatch_pipeline` went from 26 frames to 5. What is left guards real calls: the Vulkan dispatch (indirect),
+`operator new`, `__internal_rethrow`, and the try blocks themselves.
+
+Nested guards (an inlined noexcept body inside another noexcept function) are not merged: when the exception would reach the
+outer guard instead of the inner one, the runtime unwinds the entries between them first (pass 2 of `__throw`), and with a try
+block there it would be caught instead of terminating. Few functions have such a pair (about 10 of 1700 here), so it is left.
+
 ## Use
 
 **Path B host builds** (`scripts/pathb-cc`, the nfcxx driver's Path B route) run the inliner by default. `--ir-opt=none` turns the

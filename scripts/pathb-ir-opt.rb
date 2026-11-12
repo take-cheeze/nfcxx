@@ -1684,7 +1684,22 @@ end
 # of the few libc routines that never throw. An indirect call, a call of a function the module does not define (operator new,
 # __cxa_throw ...) can. Computed as the least set of the functions that can, from those with such a call, through their
 # unguarded callers.
-NOTHROW_EXTERN = %w[memcpy memmove memset memcmp strlen strcmp _mm_pause].freeze
+# (a name that never returns, such as an assertion failure, lets no exception out either: it ends the process)
+NOTHROW_EXTERN = %w[memcpy memmove memset memcmp memchr strlen strcmp strncmp strchr strrchr strstr strcpy strncpy
+                    malloc calloc realloc free snprintf vsnprintf printf fprintf puts fputs fwrite fflush getenv
+                    pthread_mutex_lock pthread_mutex_unlock pthread_mutex_trylock pthread_self __errno_location
+                    clock_gettime _setjmp setjmp _mm_pause
+                    abort _exit __assert_fail __assert_perror_fail __stack_chk_fail _ZSt21__glibcxx_assert_failPKciS0_S0_ _ZSt9terminatev
+                    _ZdlPv _ZdlPvm _ZdaPv _ZdaPvm _ZdlPvSt11align_val_t _ZdlPvmSt11align_val_t _ZdaPvSt11align_val_t
+                    _ZdaPvmSt11align_val_t].freeze
+# --nothrow-extern=NAME,NAME: more functions the module does not define that let no exception out (a project's own abort).
+$nothrow_extra = []
+
+def nothrow_extern?(name)
+  return true if name.start_with?("__atomic_") || NOTHROW_EXTERN.include?(name) || $nothrow_extra.include?(name)
+  # a destructor (D0Ev, D1Ev, D2Ev) is noexcept unless declared otherwise, which is rare: an exception out of one terminates
+  name.start_with?("_Z") && (name.end_with?("D0Ev") || name.end_with?("D1Ev") || name.end_with?("D2Ev"))
+end
 
 def guarded_function?(f)
   frame = f.find { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
@@ -1726,7 +1741,7 @@ def throwing_functions(forms)
     callees.uniq.each do |c|
       if defs.key?(c)
         callers[c] << name
-      elsif !(c.start_with?("__atomic_") || NOTHROW_EXTERN.include?(c))
+      elsif !nothrow_extern?(c)
         risky = true
       end
     end
@@ -1756,7 +1771,7 @@ def throwing_calls(x, bad)
       n = 1
     else
       name = unq(callee)
-      safe = name.start_with?("__atomic_") || NOTHROW_EXTERN.include?(name) || ($leaf_defs.key?(name) && !bad.key?(name))
+      safe = nothrow_extern?(name) || ($leaf_defs.key?(name) && !bad.key?(name))
       n = 1 unless safe
     end
   end
@@ -1945,6 +1960,8 @@ def main(argv)
       strip_eh = true
     elsif a == "--strip-leaf-eh"
       strip_leaf = true
+    elsif a.start_with?("--nothrow-extern=")
+      $nothrow_extra.concat(a[17..-1].split(","))
     elsif a.start_with?("--jobs=")
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")

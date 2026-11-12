@@ -98,6 +98,11 @@ if ! grep '^(function "vialeaf"' "$out/strip_leaf_eh.ir" | grep -q '__C8' && ! g
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_kind1.ir > "$out/strip_kind1.ir" || fail=1
 if ! grep '^(function "dtor_like"' "$out/strip_kind1.ir" | grep -q '__C9\|__eh_curr_region' \
    && grep '^(function "guarded_member"' "$out/strip_kind1.ir" | grep -q '(slot "tmp.1" (struct "__C9")'; then echo "strip kind 1 frame: ok"; else echo "strip kind 1 frame: FAIL"; fail=1; fi
+# A call of a function that never returns (an assertion failure) lets nothing out; an unknown project function does, unless
+# --nothrow-extern names it.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh --nothrow-extern=proj_abort strip_kind1.ir > "$out/strip_kind1b.ir" || fail=1
+if ! grep '^(function "asserter"' "$out/strip_kind1.ir" | grep -q '__C9' && grep '^(function "projabort"' "$out/strip_kind1.ir" | grep -q '__C9' \
+   && ! grep '^(function "projabort"' "$out/strip_kind1b.ir" | grep -q '__C9'; then echo "nothrow externs: ok"; else echo "nothrow externs: FAIL"; fail=1; fi
 # Scalar replacement through a `this` slot: a pointer slot stored twice with one array's address reads as that address, a memcpy
 # of a constant size is a copy, and the arrays become scalar slots.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --sroa sroa_this.ir > "$out/sroa_this.ir" || fail=1
