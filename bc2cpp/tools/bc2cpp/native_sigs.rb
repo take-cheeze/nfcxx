@@ -160,7 +160,7 @@ module NativeSigs
   # Only the node's own marker is cached: inherited membership depends on the caller's enclosing chain.
   # Hash snapshots String keys, so edits to mutable RBS comments cannot change or stale an existing entry.
   def own_table(node)
-    text = node.comment&.string
+    text = comment_of(node)&.string
     return nil unless text
 
     cache = (@own_tables ||= {})
@@ -253,7 +253,14 @@ module NativeSigs
 
   # The first line of a member's text: its comment when it has one, so the comment moves with the member.
   def span_start(node)
-    node.comment ? node.comment.location.start_line : node.location.start_line
+    comment = comment_of(node)
+    comment ? comment.location.start_line : node.location.start_line
+  end
+
+  # RBS members that have no comment accessor (`Members::Private`, rbs 4.0.0) have no comment: their text starts at
+  # their own line. Bc2cpp's own `private` lines come from TypeCheckRbs, so feeding them back must not fail.
+  def comment_of(node)
+    node.respond_to?(:comment) ? node.comment : nil
   end
 
   # Lines first..last of the file (1-based, inclusive), as text; '' when the range is empty.
