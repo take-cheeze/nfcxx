@@ -244,7 +244,7 @@ BC2CPP_MAIN = lambda do
   shared_prefix, shared_stderr = SharedGeneration.start(shared_units) if shared_units
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-  SharedGeneration.arm_guard if shared_units
+  SharedGeneration.arm_guard(SharedGeneration::UNIT_KEYS | shared_units.flat_map { |unit| unit.env.keys }) if shared_units
   profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   profile_last = profile_started
   profile_phase = lambda do |name|
@@ -824,6 +824,16 @@ BC2CPP_MAIN = lambda do
                        fixnum_nil_ivars)
   end
   profile_phase.call('initial ivar layout')
+
+  # Emission controls can also affect embedding probes in CodeGen.new. Give
+  # each variant its own inference state, sharing only the immutable input setup.
+  if shared_units && SharedGeneration.emission_variants?(shared_units)
+    SharedGeneration.fork_units(shared_units, shared_prefix, shared_stderr, [symbol, out_dir])
+    shared_units = nil
+    symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
+    out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
+    profile_started = profile_last = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
 
   if type_check_variants
     TypeCheckVariants.fork_variants(type_check_variants)

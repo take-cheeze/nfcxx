@@ -3,7 +3,7 @@
 
 # Check SHARED_GENERATION at fixture size, in seconds: `bc2cpp.rb
 # --units PLAN` runs one analysis and forks one generation per unit. Two units that differ only in
-# ONLY_OWNERS/OTHER_OWNERS/OUT_* must give exactly the stdout, stderr and decls header of two separate runs; a plan
+# owner/output selection and registered emission controls must give exactly the stdout, stderr, bytecode and decls header of two separate runs; a plan
 # whose units differ in any other key is refused; and the build helper (Bc2cppCompiledGemGeneration) shares an
 # analysis only between gems whose environment and sources are otherwise identical.
 #
@@ -77,6 +77,20 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
   check.call('while armed, other one-name reads answer as ENV does', plain)
   check.call('so is reading the whole environment before the fork', whole)
   check.call('other keys stay readable, and nothing is guarded after the fork', ENV.key?('PATH') && ENV['ONLY_OWNERS'].nil?)
+  SharedGeneration::EMISSION_KEYS.each do |key|
+    SharedGeneration.arm_guard(SharedGeneration::UNIT_KEYS + [key])
+    guarded_reads = raises.call(SharedGeneration::Error) { ENV[key] } &&
+                    raises.call(SharedGeneration::Error) { ENV.fetch(key, nil) } &&
+                    raises.call(SharedGeneration::Error) { ENV.key?(key) } &&
+                    raises.call(SharedGeneration::Error) { ENV.values_at(key) }
+    SharedGeneration::EnvGuard.armed = false
+    check.call("varied emission control #{key} cannot be read before the fork", guarded_reads)
+  end
+  key = SharedGeneration::EMISSION_KEYS.first
+  File.write(plan, JSON.generate([{ 'env' => { key => nil }, 'out' => 'o', 'err' => 'e' },
+                                  { 'env' => {}, 'out' => 'o2', 'err' => 'e2' }]))
+  check.call('a unit cannot inherit a missing emission control from the first variant',
+             raises.call(SharedGeneration::Error) { SharedGeneration.load_plan(plan) })
   check.call('a common environment that holds a unit key is refused',
              raises.call(SharedGeneration::Error) do
                SharedGeneration.run(tool: TOOL, srcs: [], common_env: { 'ONLY_OWNERS' => 'A' }, unit_envs: [{}])
@@ -105,27 +119,36 @@ Dir.mktmpdir('bc2cpp-shared') do |tmp|
       class Alpha
         def initialize(n); @n = n; end
         def n; @n + 1; end
+        def native_byte; 'abc'.getbyte(1); end
       end
       class Beta
         def twice(a); a.n * 2; end
         def make; Alpha.new(3); end
+        def predicate(o); o.nil?; end
+        def klass(o); o.is_a?(Alpha); end
+        def reply(o); o.respond_to?(:n); end
       end
     RUBY
     common = bc2cpp_closed_world_probe_env({ 'MRBC' => mrbc, 'BC2CPP_SELF_REGISTERING' => '1', 'BC2CPP_SIG_DIRS' => '' }, ROOT)
     units = [%w[Alpha Beta], %w[Beta Alpha]].map do |only, other|
       dir = FileUtils.mkdir_p(File.join(tmp, "unit-#{only}")).first
       { 'OUT_SYMBOL' => "u_#{only.downcase}", 'OUT_DIR' => dir, 'ONLY_OWNERS' => only, 'OTHER_OWNERS' => other }
+        .merge(SharedGeneration::EMISSION_KEYS.to_h { |key| [key, only == 'Alpha' ? nil : '0'] })
     end
     shared = SharedGeneration.run(tool: TOOL, srcs: [fixture], common_env: common, unit_envs: units)
+    raise "shared generation failed:\n#{shared.map { |result| result[1] }.join("\n")}" unless shared.all? { |result| result[2].success? }
     shared_decls = units.map { |u| File.read(File.join(u['OUT_DIR'], "#{u['OUT_SYMBOL']}_decls.h")) }
+    shared_bytecode = units.map { |u| File.binread(File.join(u['OUT_DIR'], "#{u['OUT_SYMBOL']}.mrb")) }
     separate = units.map { |u| Open3.capture3(common.merge(u), RbConfig.ruby, TOOL, fixture) }
     separate_decls = units.map { |u| File.read(File.join(u['OUT_DIR'], "#{u['OUT_SYMBOL']}_decls.h")) }
+    separate_bytecode = units.map { |u| File.binread(File.join(u['OUT_DIR'], "#{u['OUT_SYMBOL']}.mrb")) }
     check.call('every shared unit succeeds', shared.all? { |_, _, status| status.success? })
     check.call('each unit emits its own owners', shared[0][0].include?('Alpha_n_impl') && shared[1][0].include?('Beta_twice_impl') &&
                                                  shared[0][0] != shared[1][0])
     check.call('shared stdout equals the separate runs', shared.map(&:first) == separate.map(&:first))
     check.call('shared stderr equals the separate runs', shared.map { |r| r[1] } == separate.map { |r| r[1] })
     check.call('shared decls headers equal the separate runs', shared_decls == separate_decls)
+    check.call('shared bytecode equals the separate runs', shared_bytecode == separate_bytecode)
 
   end
 end

@@ -190,9 +190,12 @@ module Bc2cppFixtureRuntime
   # `skip_unsupported: false` drops SKIP_UNSUPPORTED, so a method the compiler
   # refuses keeps its `#error` in the output instead of being dropped whole --
   # what a check that asserts on a refusal needs.
+  # `emission_variants` shares immutable setup for registered emission controls;
+  # inference and generation continue in private children. Set BC2CPP_FIXTURE_SHARED_EMISSION=0
+  # to compare separate compiler invocations, also used without fork or with Ruby preloads.
   def generate(source, dir, only_owners: nil, path: 'fixture.rb', extra: [],
                native: [], foreign: [], build_gems: [], drop_gems: [], drop_native: [], core: false, core_gems: :canonical, skip_unsupported: true,
-               owner_variants: nil)
+               owner_variants: nil, emission_variants: nil)
     src = File.join(dir, path)
     FileUtils.mkdir_p(File.dirname(src))
     File.write(src, source)
@@ -221,17 +224,31 @@ module Bc2cppFixtureRuntime
     ), ROOT)
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
     core_srcs = core ? core_compiled_mrblib_srcs(ROOT, core_gems) : []
-    if owner_variants
-      raise ArgumentError, 'owner variants require their own owner selection' if only_owners
+    if owner_variants || emission_variants
+      raise ArgumentError, 'choose owner or emission variants' if owner_variants && emission_variants
+      raise ArgumentError, 'owner variants require their own owner selection' if owner_variants && only_owners
+      controls = emission_variants ? emission_variants.flat_map(&:keys).uniq : []
+      unless (controls - SharedGeneration::EMISSION_KEYS).empty?
+        raise ArgumentError, 'emission variants may vary only registered emission controls'
+      end
+      defaults = controls.to_h { |key| [key, ENV[key]] }
 
-      unit_envs = owner_variants.each_with_index.map do |owners, index|
+      unit_envs = (owner_variants || emission_variants).each_with_index.map do |variant, index|
         unit_dir = File.join(dir, "unit-#{index}")
         FileUtils.mkdir_p(unit_dir)
-        { 'OUT_DIR' => unit_dir, 'OUT_SYMBOL' => 'fixture', 'ONLY_OWNERS' => owners&.join(',') }
+        selected = owner_variants ? { 'ONLY_OWNERS' => variant&.join(',') } : defaults.merge(variant)
+        env.slice(*SharedGeneration::UNIT_KEYS).merge('OUT_DIR' => unit_dir, 'OUT_SYMBOL' => 'fixture').merge(selected)
       end
-      results = SharedGeneration.run(tool: BC2CPP, srcs: [*core_srcs, src, *extra_srcs],
-                                     common_env: env.reject { |key, _| SharedGeneration::UNIT_KEYS.include?(key) },
-                                     unit_envs: unit_envs, extra_args: ['--annotated'])
+      sources = [*core_srcs, src, *extra_srcs]
+      separate = emission_variants && (ENV['BC2CPP_FIXTURE_SHARED_EMISSION'] == '0' || !Process.respond_to?(:fork) ||
+                                       !ENV['RUBYOPT'].to_s.empty?)
+      results = if separate
+                  unit_envs.map { |unit| generator_run(env.merge(unit), sources) }
+                else
+                  SharedGeneration.run(tool: BC2CPP, srcs: sources,
+                                       common_env: env.reject { |key, _| SharedGeneration::UNIT_KEYS.include?(key) || controls.include?(key) },
+                                       unit_envs: unit_envs, extra_args: ['--annotated'])
+                end
       return results.zip(unit_envs).map do |(code, err, status), unit|
         raise "bc2cpp.rb failed:\n#{(err[-3000..] || err)}" unless status.success?
 
