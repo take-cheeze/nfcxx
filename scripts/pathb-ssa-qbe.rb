@@ -996,7 +996,7 @@ end
           next unless head(it) == "phi"
 
           it[3..].each do |pred, v|
-            next unless expression?(v)
+            next unless phi_computed?(v)
 
             name = "%pe#{it[1][1..]}_#{pred}"
             @pending[pred.to_s] << [name, v]
@@ -1026,8 +1026,22 @@ end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
 
+    # A phi operand that takes instructions: an expression, or the address of a function this module does not define
+    # (loaded from its pointer cell, see op). QBE wants nothing but phis at the top of a block, and the operand must be
+    # defined where its edge starts, so the predecessor computes it (pending_phi_operands).
+    def phi_computed?(v)
+      return true if expression?(v)
+
+      v.is_a?(Ref) && v.sigil == "&" && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+    end
+
     def pending_phi_operands(num)
       @pending.fetch(num, []).each do |name, v|
+        if v.is_a?(Ref)
+          @lines << "  #{reg(name)} =l copy #{op(v)}"
+          @types[name] = ["ptr", "void"]
+          next
+        end
         let_lines(name, v[1], v)
         @types[name] = v[1]
       end
@@ -1358,7 +1372,7 @@ end
       case head(item)
       when "phi"
         pairs = item[3..].map do |pred, v|
-          text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
+          text = phi_computed?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
           "#{phi_placeholder(@cur, pred)} #{text}"
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
