@@ -121,9 +121,10 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
   return o.str();
 }
 
-std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K) {
+std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr) {
   if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_packed_c: sizes must be positive");
-  if (M % 4 != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs M % 4 == 0");
+  if (mr != 4 && mr != 6) throw std::invalid_argument("emit_gemm_rowsum_packed_c: the row tile is 4 or 6");
+  if (M % mr != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs M % mr == 0");
   if (N % 16 != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs N % 16 == 0");
   std::ostringstream o;
   o << kPrologue << kHsum;
@@ -132,28 +133,26 @@ std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K) {
     << "  for (int64_t p = 0; p < " << (N / 16) << "; ++p)\n"
     << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
     << "      for (int64_t j = 0; j < 16; ++j) Bp[p * " << K * 16 << " + k * 16 + j] = B[k * " << N << " + p * 16 + j];\n"
-    << "  for (int64_t i = 0; i < " << M << "; i += 4) {\n"
-    << "    __m256 rs0 = _mm256_setzero_ps(), rs1 = rs0, rs2 = rs0, rs3 = rs0;\n"
-    << "    for (int64_t n = 0; n < " << N << "; n += 16) {\n"
-    << "      const float* bn = Bp + (n / 16) * " << K * 16 << ";\n"
-    << "      __m256 c00 = _mm256_setzero_ps(), c01 = c00, c10 = c00, c11 = c00;\n"
-    << "      __m256 c20 = c00, c21 = c00, c30 = c00, c31 = c00;\n"
-    << "      for (int64_t k = 0; k < " << K << "; ++k) {\n"
-    << "        __m256 b0 = _mm256_loadu_ps(bn + k * 16), b1 = _mm256_loadu_ps(bn + k * 16 + 8), x;\n"
-    << "        x = _mm256_broadcast_ss(&A[(i + 0) * " << K << " + k]); c00 = _mm256_fmadd_ps(x, b0, c00); c01 = _mm256_fmadd_ps(x, b1, c01);\n"
-    << "        x = _mm256_broadcast_ss(&A[(i + 1) * " << K << " + k]); c10 = _mm256_fmadd_ps(x, b0, c10); c11 = _mm256_fmadd_ps(x, b1, c11);\n"
-    << "        x = _mm256_broadcast_ss(&A[(i + 2) * " << K << " + k]); c20 = _mm256_fmadd_ps(x, b0, c20); c21 = _mm256_fmadd_ps(x, b1, c21);\n"
-    << "        x = _mm256_broadcast_ss(&A[(i + 3) * " << K << " + k]); c30 = _mm256_fmadd_ps(x, b0, c30); c31 = _mm256_fmadd_ps(x, b1, c31);\n"
-    << "      }\n"
-    << "      _mm256_storeu_ps(&C[(i + 0) * " << N << " + n], c00); _mm256_storeu_ps(&C[(i + 0) * " << N << " + n + 8], c01);\n"
-    << "      _mm256_storeu_ps(&C[(i + 1) * " << N << " + n], c10); _mm256_storeu_ps(&C[(i + 1) * " << N << " + n + 8], c11);\n"
-    << "      _mm256_storeu_ps(&C[(i + 2) * " << N << " + n], c20); _mm256_storeu_ps(&C[(i + 2) * " << N << " + n + 8], c21);\n"
-    << "      _mm256_storeu_ps(&C[(i + 3) * " << N << " + n], c30); _mm256_storeu_ps(&C[(i + 3) * " << N << " + n + 8], c31);\n"
-    << "      rs0 = _mm256_add_ps(rs0, _mm256_add_ps(c00, c01)); rs1 = _mm256_add_ps(rs1, _mm256_add_ps(c10, c11));\n"
-    << "      rs2 = _mm256_add_ps(rs2, _mm256_add_ps(c20, c21)); rs3 = _mm256_add_ps(rs3, _mm256_add_ps(c30, c31));\n"
-    << "    }\n"
-    << "    R[i + 0] = nfc_hsum(rs0); R[i + 1] = nfc_hsum(rs1); R[i + 2] = nfc_hsum(rs2); R[i + 3] = nfc_hsum(rs3);\n"
-    << "  }\n"
+    << "  for (int64_t i = 0; i < " << M << "; i += " << mr << ") {\n";
+  for (int r = 0; r < mr; ++r) o << "    __m256 rs" << r << " = _mm256_setzero_ps();\n";
+  o << "    for (int64_t n = 0; n < " << N << "; n += 16) {\n"
+    << "      const float* bn = Bp + (n / 16) * " << K * 16 << ";\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      __m256 c" << r << "0 = _mm256_setzero_ps(), c" << r << "1 = _mm256_setzero_ps();\n";
+  o << "      for (int64_t k = 0; k < " << K << "; ++k) {\n"
+    << "        __m256 b0 = _mm256_loadu_ps(bn + k * 16), b1 = _mm256_loadu_ps(bn + k * 16 + 8), x;\n";
+  for (int r = 0; r < mr; ++r)
+    o << "        x = _mm256_broadcast_ss(&A[(i + " << r << ") * " << K << " + k]); c" << r
+      << "0 = _mm256_fmadd_ps(x, b0, c" << r << "0); c" << r << "1 = _mm256_fmadd_ps(x, b1, c" << r << "1);\n";
+  o << "      }\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      _mm256_storeu_ps(&C[(i + " << r << ") * " << N << " + n], c" << r << "0); _mm256_storeu_ps(&C[(i + " << r
+      << ") * " << N << " + n + 8], c" << r << "1);\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      rs" << r << " = _mm256_add_ps(rs" << r << ", _mm256_add_ps(c" << r << "0, c" << r << "1));\n";
+  o << "    }\n";
+  for (int r = 0; r < mr; ++r) o << "    R[i + " << r << "] = nfc_hsum(rs" << r << ");\n";
+  o << "  }\n"
     << "}\n";
   return o.str();
 }

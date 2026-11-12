@@ -235,6 +235,26 @@ Four-thread OpenBLAS is outside what this kernel does; it is not a fair comparis
 Packing B is also the layout repair of the model: a transform of the data so that the inner loop's accesses are
 contiguous. The model does not price it yet.
 
+## Corrected comparison: AVX2 against AVX2 (sixth round)
+
+The earlier table compared an AVX2 kernel with OpenBLAS choosing its kernel itself. On this host (AVX-512 capable)
+OpenBLAS uses AVX-512 kernels by default, so that comparison was not like for like. Forcing OpenBLAS to its AVX2
+kernels (`OPENBLAS_CORETYPE=Haswell`, one thread, 504 x 512 x 512, float32):
+
+| kernel | us | vs OpenBLAS AVX2 |
+| --- | --- | --- |
+| emitter packed 4 x 16 (`emit_gemm_rowsum_packed_c`, mr = 4) | 3,786 | 1.16x slower |
+| emitter packed 6 x 16 (`emit_gemm_rowsum_packed_c`, mr = 6) | 3,305 | parity |
+| OpenBLAS, AVX2 kernels (Haswell) | 3,276 | 1x |
+| OpenBLAS, AVX-512 kernels (SkylakeX) | 1,825 | 1.8x faster |
+
+So the AVX2 path is at parity with OpenBLAS's AVX2 kernels on one thread. The gap that remains is to the AVX-512
+kernels, which use 16-lane vectors this path does not emit.
+
+K blocking (the packed panels kept in cache, with C accumulated across blocks in memory) did not help: 3,486 us with
+no blocking, 3,550 us at a block of 256, 3,507 us at 128. At these sizes the packed panel already stays in cache, and
+the extra loads and stores of C cost what the blocking saves.
+
 ## Next steps on this target
 
 1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
