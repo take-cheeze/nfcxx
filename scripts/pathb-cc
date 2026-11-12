@@ -94,7 +94,7 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
   if [ "$size" -gt "$ir_opt_max" ]; then
     echo "pathb-cc: $src: IR is $size bytes, over --ir-opt-max: not optimized" >&2
   else
-    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); [ "$x" != inline ] || irpasses=(--prune-unused "${irpasses[@]}"); done
+    irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); [ "$x" != inline ] || irpasses=(--prune-unused --strip-leaf-eh "${irpasses[@]}"); done
     cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
     if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
       mv "$tmp/$n.opt.ir" "$tmp/$n.ir"

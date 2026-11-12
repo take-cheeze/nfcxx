@@ -1,5 +1,4 @@
 // EXPECT: 42
-// XFAIL-pathb: extended asm with named operands (%[name]) is refused
 // X86-ONLY: x86 inline asm: an input tied to an output by name ("[sum]"), and basic asm (no operands), whose text is
 // not substituted (the kernel's io_delay: asm volatile("outb %al, $0x80"))
 static long add3(long a, long b) { long sum; __asm__("leaq (%[a],%[b]), %[sum]\n\taddq $3, %[sum]" : [sum] "=r"(sum) : "[sum]"(0L), [a] "r"(a), [b] "r"(b)); return sum; }
