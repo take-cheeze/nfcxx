@@ -1,4 +1,5 @@
 /* EXPECT: 0 */
+// XFAIL-qbe: cproc has no computed goto (label addresses, goto *p); Path B lowers it (docs/notes/pathb-computed-goto.md)
 /* GNU C computed goto: label addresses (&&label), `goto *ptr`, a static dispatch table of label addresses (Lua's lvm.c
    and the ljumptab.h pattern), a label address kept in a local, a table indexed at run time, and a pointer compare.
    Self-checking: every value is what gcc produces. */
