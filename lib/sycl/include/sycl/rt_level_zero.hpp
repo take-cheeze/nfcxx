@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -109,8 +110,12 @@ class ze_rt {
       used_[off] = bytes;
       return dev_base_ + off;
     }
+    uint64_t used = 0;
+    for (auto &u : used_) used += u.second;
     fail("out of device memory (the heap is " + std::to_string(heap_size_ >> 20) + " MB; the stacks of a dispatch take "
-         "invocations times stack bytes)");
+         "invocations times stack bytes): request " + std::to_string(bytes) + " bytes, largest free block " +
+         std::to_string(largest_free()) + " bytes, " + std::to_string(used) + " bytes in " + std::to_string(used_.size()) +
+         " blocks");
     return 0;
   }
   void release(uint64_t addr) {
@@ -192,10 +197,33 @@ class ze_rt {
     separate_[p] = bytes;
     return p;
   }
+  // A large device allocation (sycl::malloc_device) in device-heap mode gets its own device-only block: the 1 GB heap cannot hold
+  // the attention buffers of a long context (a flash-attention-off prompt with n_ctx 32768 needs several GB), and the heap is
+  // not the right place for them. The block is a plain zeMemAllocDevice; copies and fills reach it through the command list.
+  void *alloc_separate_device(uint64_t bytes) {
+    ze_device_mem_alloc_desc_t dmem = {};
+    dmem.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
+    void *p = nullptr;
+    if (zeMemAllocDevice(ctx_, &dmem, bytes, 64, dev_, &p) != ZE_RESULT_SUCCESS || !p) return nullptr;
+    separate_[p] = bytes;
+    separate_dev_[p] = true;
+    return p;
+  }
   bool is_separate(const void *p) const { return separate_.count(const_cast<void *>(p)) != 0; }
+  // the device-heap addresses and the device-only blocks: reached by kernels and by copies on the command list, never by the host
+  // (a pointer into a device-only block counts: a copy takes interior pointers, such as a row of a matrix)
+  bool device_only(const void *p) const {
+    if (!dheap_) return false;
+    if (in_heap(p)) return true;
+    auto it = separate_.upper_bound(const_cast<void *>(p));
+    if (it == separate_.begin()) return false;
+    --it;
+    return separate_dev_.count(it->first) != 0 && (const uint8_t *)p - (const uint8_t *)it->first < (std::ptrdiff_t)it->second;
+  }
   void free_separate(void *p) {
     flush();
     separate_.erase(p);
+    separate_dev_.erase(p);
     zeMemFree(ctx_, p);
   }
   static uint64_t separate_min() {
@@ -648,6 +676,7 @@ class ze_rt {
   uint8_t *host_ = nullptr;
   bool dheap_ = false;
   std::map<void *, uint64_t> separate_;
+  std::map<void *, bool> separate_dev_;   // the device-only ones among separate_ (alloc_separate_device)
   uint8_t *ctl_ = nullptr;   // the flag word (see Memory above)
   uint8_t *args_ = nullptr;   // the argument arena: each pending launch's captured state and push block (see Dispatch above)
   uint64_t args_used_ = 0;
@@ -699,6 +728,10 @@ inline void *backend_usm_alloc(unsigned long bytes, unsigned align, int kind) {
   if (r.device_heap() && kind != 0) {
     if (void *p = r.alloc_separate(bytes)) return p;
   }
+  // a large device allocation is a device-only block of its own (see alloc_separate_device)
+  if (r.device_heap() && kind == 0 && ze_rt::separate_min() > 0 && bytes >= ze_rt::separate_min()) {
+    if (void *p = r.alloc_separate_device(bytes)) return p;
+  }
   if (!r.device_heap() && bytes >= ze_rt::separate_min() && ze_rt::separate_min() > 0) {
     if (void *p = r.alloc_separate(bytes)) return p;
   }
@@ -712,12 +745,12 @@ inline void backend_usm_free(void *p) {
 }
 inline void backend_memcpy(void *dst, const void *src, unsigned long n) {
   ze_rt &r = ze_rt::get();
-  if (r.device_heap() && (r.in_heap(dst) || r.in_heap(src))) r.copy_mem(dst, src, n);
+  if (r.device_heap() && (r.device_only(dst) || r.device_only(src))) r.copy_mem(dst, src, n);
   else { r.flush(); std::memmove(dst, src, n); }
 }
 inline void backend_memset(void *p, int v, unsigned long n) {
   ze_rt &r = ze_rt::get();
-  if (r.device_heap() && r.in_heap(p)) r.fill_mem(p, (uint8_t)v, n);
+  if (r.device_heap() && r.device_only(p)) r.fill_mem(p, (uint8_t)v, n);
   else { r.flush(); std::memset(p, v, n); }
 }
 inline bool backend_is_usm(const void *p) { return ze_rt::get().in_heap(p) || ze_rt::get().is_separate(p); }
