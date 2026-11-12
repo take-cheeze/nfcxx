@@ -3459,13 +3459,13 @@ def stub_long_double(forms)
   out
 end
 
-# The x87 thunks are x86-64 assembly (fstpt, fldt, the SysV argument registers). The target is the host's, or
-# PATHB_X87_TARGET (x86_64 or arm64) when set; on arm64 a module that needs a thunk is refused (status 3), and the driver
-# builds it with gcc (docs/notes/pathb-longdouble.md). A long double program that needs no thunk is emitted as before.
+# The x87 thunks are x86-64 assembly (fstpt, fldt, the SysV argument registers). The target is --x87-target=NAME (pathb-cc passes
+# PATHB_X87_TARGET, or the host's `uname -m`), x86_64 when the option is absent; on arm64 a module that needs a thunk is refused
+# (status 3), and the driver builds it with gcc (docs/notes/pathb-longdouble.md). A long double program that needs no thunk is
+# emitted as before. The script reads no environment and runs no command: it is compiled as a closed world (bc2cpp), which has
+# neither ENV nor backticks.
 def x87_target
-  t = `printenv PATHB_X87_TARGET`.strip
-  t = `uname -m`.strip if t.empty?
-  t
+  $x87_target.nil? ? "x86_64" : $x87_target
 end
 
 def x87_check!(what)
@@ -3617,6 +3617,12 @@ def main(argv)
     # Darwin (pathb-cc): an extern data object (not thread-local) is read through the GOT, `copy extern $x`, as clang does.
     # An adrp/add pair to its @page is a relocation ld64 cannot resolve for a symbol in a dylib (libc++'s vtables).
     $extern_got = true
+    args = args.drop(1)
+  end
+  if !args.empty? && args[0].start_with?("--x87-target=")
+    # The target of the x87 thunks (x86_64 or arm64), after --extern-data-got and before --safe: arm64 refuses a module that
+    # needs one (x87_check!).
+    $x87_target = args[0][13, args[0].length - 13]
     args = args.drop(1)
   end
   if !args.empty? && args[0] == "--safe"
