@@ -36,6 +36,60 @@ module BaseSection
     'mruby-wolf' => 'base_wolf', 'mruby-require' => 'base_require'
   }.freeze
 
+  # The tags of mruby's own core gems (a gem directory under 3rd/mruby/mrbgems). Their base stubs live in
+  # bc2cpp/sig/base_core.rbs; the rest stay in sig/bc2cpp/declarations.rbs.
+  CORE_TAGS = %w[
+    base_mruby-core base_dir base_enumerator base_exit base_fiber base_io base_math base_array base_enum base_hash
+    base_range base_numeric base_kernel-ext base_string-ext base_compar base_random base_sprintf base_symbol base_time
+  ].freeze
+
+  # The core base stubs, in the nfcxx repository (bc2cpp/sig/base_core.rbs). The world's declarations.rbs keeps the rest.
+  CORE_FILE = File.expand_path('../../sig/base_core.rbs', __dir__).freeze
+
+  def self.core_file_text
+    File.file?(CORE_FILE) ? File.read(CORE_FILE) : +''
+  end
+
+  # The base section a check compares: the core stubs from CORE_FILE plus every other block of the world's file. A
+  # world file that still holds core blocks (not yet migrated) gives the same section as a migrated one.
+  def self.combined_section(declared_section)
+    core_file_text + core_split(declared_section)[1]
+  end
+
+  # Splits a base section into [core, rest]: a native block by its tag, a Ruby declaration by the marker above it. A
+  # declaration with no marker stays in rest. Comment lines inside a Ruby block are not kept by the split.
+  def self.core_split(section)
+    lines = section.lines
+    starts = lines.each_index.select { |i| lines[i].match?(HEADER) }
+    blocks = starts.each_with_index.map { |s, k| [s, starts[k + 1] || lines.size] }
+    core = +''
+    rest = +''
+    rest << lines[0...starts.first].join
+    blocks.each do |s, e|
+      block = lines[s...e]
+      if block.first.match?(NATIVE_HEADER)
+        tag = block.filter_map { |l| l[MARKER, 1] }.first
+        (CORE_TAGS.include?(tag) ? core : rest) << block.join
+      elsif block.first.match?(/\A# Base RBS/)
+        core_decls = []
+        rest_decls = []
+        block.join.scan(/(?:^# bc2cpp-native: (\S+)\n)?(^(?:class|module) .*?\n^end\n)/m) do |tag, decl|
+          (CORE_TAGS.include?(tag) ? core_decls : rest_decls) << [tag, decl]
+        end
+        unless core_decls.empty?
+          core << "# Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.\n"
+          core_decls.each { |tag, decl| core << "# bc2cpp-native: #{tag}\n#{decl}" }
+          core << "\n"
+        end
+        rest << block.first << rest_decls.map { |tag, decl| tag ? "# bc2cpp-native: #{tag}\n#{decl}" : decl }.join
+        rest << "\n" unless rest_decls.empty?
+      else
+        rest << block.join
+      end
+    end
+    [core, rest]
+  end
+
   def self.tag_of(gem)
     TAGS.fetch(gem) { raise "bc2cpp: #{gem} has no base section tag (add it to BaseSection::TAGS)" }
   end
