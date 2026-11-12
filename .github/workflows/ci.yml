@@ -619,6 +619,9 @@ jobs:
   # Path B built the hello program or the gcc fallback did.
   macos-pathb-probe:
     name: macOS arm64 Path B probe
+    # Runs only when the Path B selection (pathb-changes) sees a Path B path change. Not in build-and-test's needs: non-gating.
+    needs: pathb-changes
+    if: needs.pathb-changes.outputs.changed == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7

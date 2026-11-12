@@ -35,6 +35,8 @@ require_relative 'native_rom_owners'
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 require_relative 'diagnostics'
+require_relative 'alias_sites'
+require_relative 'core_defs'
 
 module CoreNativeCandidates
   # CTOR_ROWS (static_dispatch_registrations.rb): the names a constructor row may carry.
@@ -135,6 +137,12 @@ module CoreNativeCandidates
   # The Symbol of Array#index and #rindex's `to_enum(:name)` call when no block or argument is given.
   ENUM_SYMBOL_CALL = /\bmrb_funcall_id\s*\(\s*mrb\s*,\s*self\s*,\s*MRB_SYM\s*\(\s*to_enum\s*\)\s*,\s*1\s*,\s*
                       mrb_symbol_value\s*\(\s*(MRB_SYM\s*\(\s*\w+\s*\))\s*\)\s*\)/x
+
+  # SETTLED_ALIASES (see settled_aliases): the sites of the running scan, by irep, as [new, old] pairs.
+  @settled_sites = {}.compare_by_identity
+  class << self
+    attr_accessor :settled_sites
+  end
 
   module_function
 
@@ -301,15 +309,23 @@ module CoreNativeCandidates
   # +exact_impls+ how live_core reads a direct `_impl` call. +diagnostic_literals+ requires the closed-world
   # literal-lookup proof, so an exception message cannot supply a computed method name. +enumerator_free+ is
   # CoreEnumeratorFree's verdict, or a callable that makes it (asked only when a native has a ENUM_SYMBOL_CALL).
+  # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new)
+                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
     fragments = Set.new
+    sites, aliases = settled_aliases(core)
+    previous = CoreNativeCandidates.settled_sites
+    CoreNativeCandidates.settled_sites = sites
     ireps.each_value do |irep|
       note.call("engine irep #{irep.label}")
-      lookup.call(irep, nil, names, fragments)
+      lookup.call(irep, nil, engine_names ? Set.new : names, fragments)
+    end
+    if engine_names
+      note.call('engine lookup (CORE_ROWS)')
+      names.merge(engine_names)
     end
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     helpers = diagnostic_literals ? verified_label_helpers(native_paths, ireps, core, generated) : Set.new
@@ -329,8 +345,48 @@ module CoreNativeCandidates
       src = strip_generated.call(src) if strip_generated
       src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) }
     end
-    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls)
+    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases)
     [names, fragments]
+  ensure
+    CoreNativeCandidates.settled_sites = previous if previous
+  end
+
+  # SETTLED_ALIASES: a core class body's `alias new old` or `alias_method :new, :old` whose source is the owner's one
+  # core Ruby definition, with `new` defined nowhere else, is registered under `new` from that definition
+  # (CoreDefs.alias_map, CORE_ALIASES): running the body looks neither name up. That definition's body runs while
+  # either name is reachable (live_core). The rule must agree with CoreDefs.alias_map; the core gem refuses a left-out
+  # source of an alias it does not register (codegen_class_body.rb, omitted_alias?).
+  # Returns [{irep => Set[[new, old]]}, {[owner, old] => [new, ...]}].
+  def settled_aliases(core)
+    sites = {}.compare_by_identity
+    aliases = Hash.new { |h, k| h[k] = [] }
+    return [sites, aliases] if core.empty?
+
+    defs = Hash.new(0)
+    bodies = Hash.new(0)
+    core.each do |file|
+      Hash(file[:registry]).each do |name, list|
+        list.each do |d|
+          defs[[d.owner, name]] += 1
+          bodies[[d.owner, name]] += 1 if d.irep
+        end
+      end
+    end
+    all = core.flat_map { |file| Array(file[:tuple]&.[](12)).map { |site| [file, site] } }
+    news = Hash.new(0)
+    all.each { |_file, site| news[[site[:owner], site[:new]]] += 1 }
+    all.each do |file, site|
+      owner, new_name, old = site.values_at(:owner, :new, :old)
+      next unless owner.is_a?(String) && new_name && old && new_name != old
+      next unless defs[[owner, old]] == 1 && bodies[[owner, old]] == 1 && defs[[owner, new_name]].zero? && news[[owner, new_name]] == 1
+
+      irep = file[:ireps][site[:irep]]
+      next unless irep && CoreDefs.core_source?(irep.file)
+
+      (sites[irep] ||= Set.new) << [new_name.to_s, old.to_s]
+      aliases[[owner, old.to_s]] << new_name.to_s
+    end
+    [sites, aliases]
   end
 
   # DEF, TDEF and SDEF name the method they define; no lookup reads that operand.
@@ -345,10 +401,30 @@ module CoreNativeCandidates
     defined = Set.new
     used = Set.new
     aliased = false
-    BytecodeIR.for(irep).each_source do |insn, _index|
+    settled = CoreNativeCandidates.settled_sites[irep]
+    # A recognized `alias_method :new, :old` (AliasSites.site) defines `new`: its LOADSYM looks nothing up. A settled
+    # site (SETTLED_ALIASES) looks `old` up neither.
+    quiet = Set.new
+    BytecodeIR.for(irep).each_source do |insn, index|
+      next unless insn.op == :SSEND && insn.sym.to_s == 'alias_method'
+
+      site = AliasSites.site(irep, index)
+      next unless site && AliasSites.loadsym_names(irep, index, insn)
+
+      quiet << (index - 2)
+      quiet << (index - 1) if settled&.include?([site.new_name.to_s, site.old_name.to_s])
+    end
+    BytecodeIR.for(irep).each_source do |insn, index|
+      if quiet.include?(index)
+        defined << insn.sym_token.to_s
+        next
+      end
       if insn.op == :ALIAS
         original = insn.first_of(:name)&.value
-        if original then used << original.to_s else aliased = true end
+        if original.nil? then aliased = true
+        elsif settled&.include?([insn.sym.to_s, original.to_s]) then defined << original.to_s
+        else used << original.to_s
+        end
       end
       names << own if own && insn.op == :SUPER
       # An operator opcode sends its name without a symbol operand (a Ruby-defined `+` runs from ADD).
@@ -373,7 +449,7 @@ module CoreNativeCandidates
   # `Kernel_print_impl`), so `RGSS__ErrorReport__Tee_print_impl` calls Tee#print and `IO_singleton_open_impl` calls
   # IO.open, neither a lookup of `print` or `open` nor a call of Kernel's. A body whose owner the file does not give
   # (`owner_of`) is read by name alone, as without the flag.
-  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false)
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {})
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
@@ -413,14 +489,17 @@ module CoreNativeCandidates
     else
       names.merge(pending.keys.select(&by_name))
     end
+    # A settled alias (SETTLED_ALIASES) runs its source's body under the new name too.
+    reached = ->(own, owner) { names.include?(own) || Array(aliases[[owner, own]]).any? { |n| names.include?(n) } }
     loop do
       grew = false
       pending.each do |own, bodies|
-        next unless names.include?(own)
+        live, rest = bodies.partition { |_irep, owner| reached.call(own, owner) }
+        next if live.empty?
 
         names.note("live core method #{own}") if names.respond_to?(:note)
-        bodies.each { |irep, _owner| lookup.call(irep, own, names, fragments) }
-        pending.delete(own)
+        live.each { |irep, _owner| lookup.call(irep, own, names, fragments) }
+        rest.empty? ? pending.delete(own) : pending[own] = rest
         grew = true
       end
       break unless grew
@@ -522,13 +601,16 @@ module CoreNativeCandidates
     (registrations + aliases).uniq.sort
   end
 
-  # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h), and for `engine_keys` the
-  # engine ROM entries (engine_entries) among `engine`.
-  def header(keys, entries, engine_keys = [], engine = [])
+  # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h), for `engine_keys` the
+  # engine ROM entries (engine_entries) among `engine`, and for `rows` the core entries kept as rows (CORE_ROWS: 2).
+  def header(keys, entries, engine_keys = [], engine = [], rows: [])
     by_key = entries.group_by { |e| "#{e[:mt_class]}##{e[:name]}" }
     lines = keys.flat_map do |key|
       by_key.fetch(key).map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 1" }
     end
+    lines.concat(rows.flat_map do |key|
+      by_key.fetch(key).map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 2" }
+    end)
     wanted = engine_keys.to_set
     # A constructor name is listed only as a constructor row (CTOR_ROWS): 2 keeps it for the constructions alone.
     lines.concat(engine.select { |e| wanted.include?("#{e[:owner]}##{e[:name]}") }

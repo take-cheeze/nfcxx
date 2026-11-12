@@ -11,9 +11,28 @@ module InitializerTables
   # Every emitted copy of a construction site (`new` or an initialize's `super`), direct or not; `?` is a copy whose
   # instruction index is unknown, which refuses every site of its irep.
   SITE = %r{// INITIALIZER_SITE (\w+):(\d+|\?)}
+  SUPER_DIRECT = %r{// SUPER_DIRECT (\w+):(\d+)}
   BYTECODE_PROC = /\bmrb_(?:proc_new|closure_new)\s*\(/
 
   module_function
+
+  # SUPER_DIRECT: the `super` sites ([irep content digest, instruction index]) whose every emitted copy calls the
+  # target's `_impl` from a body that never runs as bytecode (the rule `direct` follows, see
+  # initializer_table_evidence). Such a site looks nothing up, so it keeps no table entry alive. A key any run refuses
+  # stays out; the set is empty unless every run left exactly one evidence row.
+  def super_direct(runs)
+    proven = Set.new
+    refused = Set.new
+    runs.each do |run|
+      rows = run.fetch(:err).lines.grep(/^#{PREFIX}/)
+      return Set.new unless rows.size == 1
+
+      row = JSON.parse(rows.first.delete_prefix(PREFIX))
+      row.fetch('super_direct', []).each { |key| proven << key }
+      row.fetch('super_refused', []).each { |key| refused << key }
+    end
+    proven - refused
+  end
 
   def proven(runs)
     evidence = runs.map do |run|
@@ -151,6 +170,7 @@ class CodeGen
     result = { candidates: plan[:candidates].select { |candidate| own.include?(candidate[:owner]) }, direct: [], refused: plan[:refused] }
     copies = Hash.new(0)
     direct = Hash.new(0)
+    super_direct = Hash.new(0)
     unattributed = Set.new
     compiled.each do |m|
       eligible = !(m[:guard] || m[:resumable]) && stub_keys.include?("#{m[:owner]}##{m[:name]}") &&
@@ -163,10 +183,29 @@ class CodeGen
       m[:code].scan(InitializerTables::DIRECT) do |label, index, owner|
         direct[[label, index.to_i, owner]] += 1 if enclosing_method_label(label) == m[:label]
       end
+      m[:code].scan(InitializerTables::SUPER_DIRECT) do |label, index|
+        super_direct[[label, index.to_i]] += 1 if enclosing_method_label(label) == m[:label]
+      end
     end
     direct.each do |(label, index, owner), count|
       result[:direct] << [label, index, owner] if !unattributed.include?(label) && copies[[label, index]] == count
     end
+    # Labels are per compile, so a site travels as its irep's content digest and index. Identical bodies share a
+    # digest: the key is proven only when every SUPER site carrying it that this run emits is direct, refused when
+    # any is not. A site this run does not emit is another run's to judge; the proof also requires every site of a
+    # key to sit in a compiled method (StaticDispatchRegistrations, SUPER_DIRECT).
+    by_key = Hash.new { |h, k| h[k] = [] }
+    @ireps.each do |label, irep|
+      BytecodeIR.for(irep).each_source do |insn, index|
+        next unless insn.op == :SUPER
+        next unless copies[[label, index]].positive? || unattributed.include?(label)
+
+        count = super_direct[[label, index]]
+        by_key[[irep.content_digest, index]] << (count.positive? && !unattributed.include?(label) && copies[[label, index]] == count)
+      end
+    end
+    result[:super_direct] = by_key.select { |_, proofs| proofs.all? }.keys
+    result[:super_refused] = by_key.reject { |_, proofs| proofs.all? }.keys
     result
   end
 

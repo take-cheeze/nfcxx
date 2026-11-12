@@ -163,9 +163,22 @@ end
 
 # The directives that make the symbol SYM (as the IL names it) a weak definition in the target's assembler. Apple's has no
 # .weak: .globl and .weak_definition, on the name with the underscore QBE puts on every symbol there.
-def weak_lines(sym, target)
+def weak_lines(sym, target, defined = true)
   return [".weak #{sym}"] unless target.end_with?("_apple")
+  return ["\t.weak_reference _#{sym}"] unless defined
   ["\t.globl _#{sym}", "\t.weak_definition _#{sym}"]
+end
+
+# Apple (arm64_apple) refusals: an ifunc alias (Mach-O has no indirect function symbol) and a file-scope asm block (its text is
+# ELF). The driver refuses the unit with status 3, as it refuses the constructs this route does not emit. nil when none.
+def apple_refusal(il, target)
+  return nil unless arm64_apple?(target)
+
+  ifunc = il.scan(/^# pathb-alias ifunc (\S+) /).flatten.first
+  return "ifunc #{ifunc}: Mach-O has no indirect function symbol" if ifunc
+  return "file-scope asm has ELF directives, no Mach-O form" if il.match?(/^# pathb-text /)
+
+  nil
 end
 
 # The assembly lines of the helper NAME for TARGET: the x86-64 text of ASM_HELPERS, or the arm64 one (ELF, or Apple's form).
@@ -184,16 +197,27 @@ end
 
 # The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
 # `# pathb-asm NAME` appends that helper. TARGET is the QBE target the assembly is for.
-def marker_asm(il, target)
-  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.flat_map { |sym| weak_lines(sym, target) }
+def marker_asm(il, target, qbe_asm)
+  # Apple: a weak name the unit defines (a label of the assembly, or an alias) is .weak_definition, else .weak_reference.
+  defined = {}
+  if arm64_apple?(target)
+    qbe_asm.each_line { |l| defined[l.chomp.chop] = true if l.end_with?(":\n") && !l.start_with?("\t") }
+    il.scan(/^# pathb-alias \S+ (\S+) /).flatten.each { |name| defined["_" + name] = true }
+  end
+  weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.flat_map { |sym| weak_lines(sym, target, defined.key?("_" + sym) || !arm64_apple?(target)) }
   helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map { |h| asm_helper(h, target) }
   # `# pathb-alias KIND NAME TARGET [weak]` (one per IR alias form, from scripts/pathb-qbe-emit.rb's append_weak): a
   # global symbol NAME that is TARGET, typed by KIND (function, object or ifunc). QBE has no aliases, so this is the .set.
-  aliases = il.scan(/^# pathb-alias (\S+) (\S+) (\S+)( weak)?$/).flat_map do |kind, name, target, weak|
+  # Apple: the same .set on the underscore names, no .type (an ifunc is refused by apple_refusal).
+  apple = arm64_apple?(target)
+  aliases = il.scan(/^# pathb-alias (\S+) (\S+) (\S+)( weak)?$/).flat_map do |kind, name, alias_target, weak|
+    if apple
+      next ["\t.globl _#{name}", "\t.set _#{name}, _#{alias_target}"] + (weak ? ["\t.weak_definition _#{name}"] : [])
+    end
     type = { "function" => "@function", "ifunc" => "@gnu_indirect_function", "object" => "@object" }.fetch(kind) do
       error_exit("no symbol type for alias kind #{kind}")
     end
-    ["\t#{weak ? '.weak' : '.globl'} #{name}", "\t.type #{name}, #{type}", "\t.set #{name}, #{target}"]
+    ["\t#{weak ? '.weak' : '.globl'} #{name}", "\t.type #{name}, #{type}", "\t.set #{name}, #{alias_target}"]
   end
   # `# pathb-startup SECTION PRIO SYM`: a (constructor)/(destructor) function's pointer in .init_array/.fini_array, as
   # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
@@ -443,9 +467,18 @@ unless missing.empty?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: calls an x87 thunk with no form in the module: #{missing.first}"
   exit EXIT_PARTIAL
 end
+# The thunks are x86-64 assembly: on arm64 a module that needs one is refused (docs/notes/pathb-longdouble.md).
+unless x87_asm.empty? || x87_target_x86_64?
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: long double ABI thunks (x87) are x86-64 assembly; target is #{x87_target_name}"
+  exit EXIT_PARTIAL
+end
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
-asm += marker_asm(il, qbe_target)
+if (why = apple_refusal(il, qbe_target))
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: #{why}"
+  exit EXIT_PARTIAL
+end
+asm += marker_asm(il, qbe_target, asm)
 asm += x87_asm
 
 if output

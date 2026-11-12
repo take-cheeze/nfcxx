@@ -32,6 +32,7 @@
 
 require 'set'
 require 'tmpdir'
+require 'fileutils'
 require_relative 'check_support'
 require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 require_relative '../../tools/bc2cpp/bc2cpp'
@@ -560,6 +561,65 @@ Dir.mktmpdir('engine-rom') do |dir|
   suite.check('the header drops exactly the listed engine entries',
               header.lines.grep(/^#define/).sort == ["#define MRB_MT_EXCLUDE_Gfx__Sprite_SYM_E__x 1\n",
                                                       "#define MRB_MT_EXCLUDE_Gfx_singleton_SYM__update 1\n"])
+end
+
+# SETTLED_ALIASES: a core class body's alias of the owner's one Ruby definition is registered under the new name from that
+# definition, so running the body looks neither name up; the source's body stays live while either name is reachable.
+SETTLED_CORE = <<~'RUBY'
+  class Settled
+    def src_old
+      old_body_send
+    end
+    alias src_new src_old
+
+    def kept_old
+      kept_body_send
+    end
+    alias kept_new kept_old
+
+    def m_old
+      m_body_send
+    end
+    alias_method :m_new, :m_old
+
+    def dead_old
+      dead_body_send
+    end
+    alias dead_new dead_old
+
+    def twice; end
+    def twice; end
+    alias twice_new twice
+    alias_method :twice_m, :twice
+  end
+RUBY
+
+Dir.mktmpdir('core-native-alias') do |dir|
+  lib = File.join(dir, '3rd/mruby/mrblib')
+  FileUtils.mkdir_p(lib)
+  path = File.join(lib, 'settled.rb')
+  File.write(path, SETTLED_CORE)
+  ireps, root = compile_ireps([path], 'settled_alias', dir, mrbc: suite.instance_variable_get(:@mrbc))
+  tuple = build_registry(ireps, root)
+  registry = tuple[0]
+  body_of = {}
+  owner_of = {}
+  registry.each { |name, defs| defs.each { |d| (body_of[d.irep] = name) && (owner_of[d.irep] = d.owner) if d.irep } }
+  core = [{ ireps: ireps, body_of: body_of, owner_of: owner_of, registry: registry, tuple: tuple, path: path }]
+  engine = suite.compile("def e(x)\n  x.src_new\n  x.kept_old\n  x.m_new\nend\n") { |e, _root| e }
+  names, fragments = CoreNativeCandidates.reachable(engine, [], [], core: core)
+  suite.check('a settled alias looks its source up neither at load nor later',
+              !names.include?('src_old') && !names.include?('m_old') && !names.include?('dead_old'))
+  suite.check("a settled alias's source body runs while the new name is reachable",
+              names.include?('old_body_send') && names.include?('m_body_send') && names.include?('kept_body_send') &&
+              !names.include?('dead_body_send'))
+  suite.check('a recognized alias_method defines its new name, which it does not look up',
+              !names.include?('twice_m') && !names.include?('dead_new'))
+  suite.check('an alias of a name defined twice still looks its source up', names.include?('twice'))
+  ruby = CoreNativeCandidates.ruby_candidates(core, names, fragments, [])
+  suite.check("a settled source and unreachable aliases are candidates (#{ruby.join(', ')})",
+              ruby == %w[Settled#dead_new Settled#dead_old Settled#kept_new Settled#m_old Settled#src_old Settled#twice_m
+                         Settled#twice_new])
 end
 
 suite.finish!

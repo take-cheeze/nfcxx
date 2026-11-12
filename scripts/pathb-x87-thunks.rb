@@ -135,6 +135,15 @@ def sname(x)
   (x.respond_to?(:raw) ? x.raw : x.to_s).delete('"')
 end
 
+# The target the thunks are for. PATHB_X87_TARGET (x86_64 or arm64) overrides the host, for checks on another machine.
+def x87_target_name
+  ENV.fetch("PATHB_X87_TARGET") { RbConfig::CONFIG["host_cpu"] }
+end
+
+def x87_target_x86_64?
+  %w[x86_64 amd64].include?(x87_target_name)
+end
+
 def x87_thunks_asm(forms, il)
   out = []
   # The function header lines of the IL, found once: an entry thunk asks whether one defines __nfcxx_ldr_F, and matching
