@@ -172,5 +172,4 @@ never reach the helper.
   helper that writes the label's number (from 1) into the cell and leaves by the normal exit; after the block the IR
   compares the cell with each number and jumps to the C label (`(if (eq int SEL N) (then (goto L)))`).
 - Still refused, by name: SSE/x87/MMX constraints other than the existing `x` form, a wider-than-8-byte operand, a bit-field
-  or other non-lvalue memory operand, clobbers of `bp`, `sp`, x87 or MMX registers, more than 8 asm goto labels, and
-  `=@cc` with asm goto.
+  or other non-lvalue memory operand, clobbers of `bp`, `sp`, x87 or MMX registers, and more than 8 asm goto labels.
