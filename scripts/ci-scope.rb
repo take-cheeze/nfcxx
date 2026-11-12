@@ -7,7 +7,7 @@ require 'yaml'
 
 # Select CI coverage and validate the required aggregate check.
 module CiScope
-  # These trees have their own bc2cpp workflow. Every unlisted path keeps
+  # These trees have their own bc2cpp jobs (ci.yml, bc2cpp-changes). Every unlisted path keeps
   # the general compiler suites enabled; Markdown under docs is isolated too.
   ISOLATED_PREFIXES = %w[bc2cpp/ tests/bc2cpp/].freeze
   # Preserve the Path B selection, including all scripts and runtime code.

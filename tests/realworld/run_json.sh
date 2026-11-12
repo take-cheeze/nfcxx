@@ -4,7 +4,7 @@
 # dumps with indentation, iterates, round-trips (text, CBOR, MessagePack), converts a user struct with
 # to_json/from_json, and provokes parse/type/out_of_range exceptions. Its whole output is compared byte for byte
 # with the host g++ build of the same program. The source is cloned into build/realworld, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=55f93686c01528224f448c19128836e7df245f72   # nlohmann/json tag v3.12.0
@@ -18,7 +18,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL json: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 inc=$src/single_include
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 host=${NFCXX_CXX:-g++}

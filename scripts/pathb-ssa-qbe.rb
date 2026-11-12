@@ -147,16 +147,16 @@ module Qbe
   LOAD = { "bool" => "loadub", "char" => "loadsb", "signed_char" => "loadsb", "unsigned_char" => "loadub",
            "short" => "loadsh", "unsigned_short" => "loaduh", "int" => "loadsw", "unsigned_int" => "loaduw",
            "long" => "loadl", "long_long" => "loadl", "unsigned_long" => "loadl", "unsigned_long_long" => "loadl",
-           "float" => "loads", "double" => "loadd" }.freeze
+           "float" => "loads", "double" => "loadd", "std::float16_t" => "loaduh" }.freeze
   STORE = { "bool" => "storeb", "char" => "storeb", "signed_char" => "storeb", "unsigned_char" => "storeb",
             "short" => "storeh", "unsigned_short" => "storeh", "int" => "storew", "unsigned_int" => "storew",
             "long" => "storel", "long_long" => "storel", "unsigned_long" => "storel", "unsigned_long_long" => "storel",
-            "float" => "stores", "double" => "stored" }.freeze
+            "float" => "stores", "double" => "stored", "std::float16_t" => "storeh" }.freeze
   # The std:: float typedefs whose objects are emitted as their bit patterns (storage only): the byte count of each.
   FLOAT_STORAGE = { "std::float16_t" => 2, "std::float32_t" => 4, "std::float64_t" => 8 }.freeze
   SIZE = { "bool" => 1, "char" => 1, "signed_char" => 1, "unsigned_char" => 1, "short" => 2, "unsigned_short" => 2,
            "int" => 4, "unsigned_int" => 4, "long" => 8, "long_long" => 8, "unsigned_long" => 8,
-           "unsigned_long_long" => 8, "float" => 4, "double" => 8 }.freeze
+           "unsigned_long_long" => 8, "float" => 4, "double" => 8, "std::float16_t" => 2 }.freeze
   EXT = { "char" => "sb", "signed_char" => "sb", "unsigned_char" => "ub", "short" => "sh", "unsigned_short" => "uh" }.freeze
   BIN = { "wadd" => "add", "wsub" => "sub", "wmul" => "mul", "and" => "and", "or" => "or", "xor" => "xor" }.freeze
   CMP = { "eq" => "ceq", "ne" => "cne", "lt.s" => "cslt", "lt.u" => "cult", "le.s" => "csle", "le.u" => "cule" }.freeze
@@ -195,6 +195,16 @@ module Qbe
 
   def float?(t) = FLOAT_TYPES.key?(unqual(t))
 
+  # _Float16 (std::float16_t): QBE has no half type. A value is its binary16 pattern, zero-extended, in a w register; every
+  # operation is a call of a __nfcxx_f16_* helper of be/nfcxx_ldrt.c (libnfcxxld.a), which rounds to half after each
+  # operation as gcc does. Only at a call, a parameter and a return does it become the C convention's: the low 16 bits of
+  # an SSE register (QBE's s class, by `cast`; see f16_to_sse and f16_from_sse in Fn).
+  F16 = "std::float16_t"
+  def f16?(t) = unqual(t) == F16
+
+  # The class of a value as it is passed or returned: s for a _Float16, else its own class.
+  def abi_cls(t) = f16?(t) ? "s" : cls(t)
+
   # The QBE class of a scalar type: w for 32-bit and narrower integers, l for 64-bit ones and pointers, s and d for
   # float and double.
   def cls(t)
@@ -204,6 +214,7 @@ module Qbe
     return "l" if INT_L.include?(t)
     return "s" if t == "float"
     return "d" if t == "double"
+    return "w" if t == F16
 
     raise QbeUnsupported, "type #{sx(t)}"
   end
@@ -270,10 +281,11 @@ module Qbe
   # within the last printed digit, else the literal is refused. Infinities and NaN are not literals of this emitter.
   def half_bits(lit)
     text = (lit.is_a?(Array) && head(lit) == "const" ? lit[2] : lit).to_s
-    raise QbeUnsupported, "float16 literal #{text}" if Qbe.nan_text?(text)
+    return 0x7e00 if Qbe.nan_text?(text) # the positive quiet NaN, as float_bits spells a NaN
 
     v = Float(text)
-    raise QbeUnsupported, "float16 literal #{text}" if v.nan? || v.infinite?
+    raise QbeUnsupported, "float16 literal #{text}" if v.nan?
+    return v.positive? ? 0x7c00 : 0xfc00 if v.infinite?
 
     sig = Qbe.sig_digits(text)
     sign = text.start_with?("-") ? 0x8000 : 0
@@ -393,9 +405,11 @@ module Qbe
   def build_data(g, by_name, state)
     flags = global_flags(g)
     return :extern if flags.include?("extern")
-    # (section "S"), from __attribute__((section("S"))): the data is not placed in a section here, and a table that the
-    # linker delimits with __start_S / __stop_S would be empty, so the global is refused, not put in .data.
-    raise QbeUnsupported, "section attribute #{sx(g.find { |x| head(x) == "section" })}" if flags.include?("section")
+    # (section "S" [ro]), from __attribute__((section("S"))): the data goes into that section (ELF: the linker delimits
+    # it with __start_S / __stop_S), allocated, and writable unless the object is const (gcc: "a", else "aw"). `used`
+    # needs nothing more: a static object is emitted whether or not anything refers to it (no --gc-sections here).
+    sec = g.find { |x| head(x) == "section" }
+    raise QbeUnsupported, "section attribute on a thread-local #{sx(sec)}" if sec && flags.include?("thread")
 
     init = g.find { |x| head(x) == "init" } or return nil
     size = int_lit(g[3])
@@ -489,6 +503,10 @@ module Qbe
     end
     linkage = (flags.include?("thread") ? "thread " : "") + (flags.include?("static") ? "" : "export ")
     marker = flags.include?("weak") ? "# pathb-weak #{symbol(g[1].raw)}\n" : ""
+    if sec
+      sec_flags = sec[2] == "ro" ? "a" : "aw"
+      linkage += "section " + sec[1].raw + " " + '"' + sec_flags + '"' + " "
+    end
     "#{marker}#{linkage}data $#{symbol(g[1].raw)} = align #{align} { #{parts.join(', ')} }"
   end
 
@@ -517,6 +535,7 @@ module Qbe
       @temps = 0
       @types = {}
       @params_set = {}
+      @f16_params = [] # the numbers of the _Float16 parameters (they arrive in an SSE register)
       @slot = {}
       @jumper = {}     # [target block, source block] => the emitted label whose jump reaches target
       @phi_expr = {}   # [block, pred, phi register] => the temporary of an expression phi operand
@@ -574,6 +593,12 @@ module Qbe
               @params_set[p[1]] = true
               @sp_objs << ["%p#{p[1][1..]}", info.size + Qbe::SP_NOPAD] if Qbe.safe
             end
+          elsif Qbe.f16?(p[3])
+            # A _Float16 arrives in the low 16 bits of an SSE register: its pattern is taken from there.
+            @types[p[1]] = p[3]
+            sig << "s %p#{p[1][1..]}"
+            @alias[p[1]] = "%h#{p[1][1..]}"
+            @f16_params << p[1][1..]
           else
             @types[p[1]] = p[3]
             sig << "#{Qbe.cls(p[3])} %p#{p[1][1..]}"
@@ -592,13 +617,14 @@ module Qbe
       end
       ret = if @sret && @sret.shape != "empty" then "#{@sret.tn} "
             elsif @sret || @ret[1] == "void" then ""
-            else "#{Qbe.cls(@ret[1])} "
+            else "#{Qbe.abi_cls(@ret[1])} "
             end
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
       @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
+      @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
 
     # The AbiInfo of an aggregate that is passed or returned by value: it must have an abi-type, and its class must be
@@ -606,7 +632,7 @@ module Qbe
     def aggregate_info(tyform, what)
       # A const or volatile struct is passed and returned as the struct: the qualifier does not change its layout.
       tyform = unqual(tyform)
-      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct" || head(tyform) == "union"
 
       info = @abi[Qbe.name_of(tyform[1])]
       raise QbeUnsupported, "#{what} aggregate #{sx(tyform)} has no abi-type" if info.nil?
@@ -795,12 +821,24 @@ end
     # bytes per operand: an input's value (zero-extended to 64 bits), a memory operand's address. The helper
     # (Qbe.asm_block) reads them, runs the template and writes the outputs back; they are stored to their addresses here.
     def asm_block_lines(item)
-      ops = item[2..].map do |o|
-        raise QbeUnsupported, "asm-block: an operand that is not opnd" unless head(o) == "opnd"
-
-        { kind: o[1].to_s, code: o[2].raw.delete('"'), size: Qbe.int_lit(o[3]), arg: o[4] }
+      ops = []
+      clobbers = []
+      labels = []
+      item[2..].each do |o|
+        if head(o) == "clobber"
+          clobbers << o[1].raw.delete('"')
+        elsif head(o) == "label"
+          labels << o[1].raw.delete('"')
+        elsif head(o) == "opnd"
+          ops << { kind: o[1].to_s, code: o[2].raw.delete('"'), size: Qbe.int_lit(o[3]), arg: o[4],
+                   name: o[5] ? o[5].raw.delete('"') : "", off: o[6] ? Qbe.int_lit(o[6]) : 0 }
+        else
+          raise QbeUnsupported, "asm-block: an operand that is not opnd"
+        end
       end
-      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops)
+      ops.each { |o| o[:sym] = Qbe.symbol(o[:arg].raw) if o[:kind] == "sym" }
+      ops.each { |o| o[:imm] = Qbe.int_lit(o[:arg][2]) if o[:kind] == "imm" }
+      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels)
       (@link[:asm_texts] ||= {})[name] ||= text
       blk = fresh
       @lines << "  #{blk} =l alloc8 #{8 * [ops.size, 1].max}"
@@ -808,7 +846,11 @@ end
       ops.each_with_index do |o, i|
         slot = fresh
         @lines << "  #{slot} =l add #{blk}, #{8 * i}"
-        if %w[in inout mem].include?(o[:kind])
+        if o[:kind] == "sym"
+          # The symbol's address goes into the cell although the template names the symbol: the reference keeps a static
+          # object that only the asm uses from being pruned.
+          @lines << "  storel #{op(o[:arg])}, #{slot}"
+        elsif %w[in inout mem].include?(o[:kind])
           v = op(o[:arg])
           val = v
           cls = nil
@@ -838,11 +880,11 @@ end
           end
           @lines << "  storel #{val}, #{slot}"
         end
-        addrs[i] = op(o[:arg]) if %w[out inout].include?(o[:kind])
+        addrs[i] = op(o[:arg]) if %w[out inout flag gsel].include?(o[:kind])
       end
       @lines << "  call $#{name}(l #{blk})"
       ops.each_with_index do |o, i|
-        next unless %w[out inout].include?(o[:kind])
+        next unless %w[out inout flag gsel].include?(o[:kind])
 
         slot = fresh
         @lines << "  #{slot} =l add #{blk}, #{8 * i}"
@@ -1237,6 +1279,7 @@ end
       when Array
         case head(x)
         when "const"
+          return Qbe.half_bits(x).to_s if Qbe.f16?(x[1])
           return Qbe.float_lit(x[1], x[2]) if float_type?(x[1])
 
           Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1]).to_s
@@ -1346,6 +1389,8 @@ end
         # A function with an sret parameter returns its result buffer (the C convention; the caller copies it out).
         if @sret
           @lines << (@sret.shape == "empty" ? "  ret" : "  ret %sretbuf")
+        elsif item.size > 1 && Qbe.f16?(@ret[1])
+          @lines << "  ret #{f16_to_sse(op(item[1]))[2..]}"
         else
           @lines << (item.size > 1 ? "  ret #{op(item[1])}" : "  ret")
         end
@@ -1445,12 +1490,24 @@ end
       when "cshl", "cshr", "wshl" then checked_shift_lines(dst, t, rv)
       when "cadd", "csub", "cmul", "cneg" then checked_arith_lines(dst, t, rv)
       when *Qbe::FBIN.keys
-        @lines << "  #{dst} =#{c} #{Qbe::FBIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
-      when "fneg" then @lines << "  #{dst} =#{c} neg #{op(rv[2])}"
+        if Qbe.f16?(t)
+          f16_call(dst, Qbe::FBIN[head(rv)], ["w #{op(rv[2])}", "w #{op(rv[3])}"])
+        else
+          @lines << "  #{dst} =#{c} #{Qbe::FBIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+        end
+      when "fneg" then @lines << (Qbe.f16?(t) ? "  #{dst} =w xor #{op(rv[2])}, 32768" : "  #{dst} =#{c} neg #{op(rv[2])}")
       when *Qbe::CMP.keys
+        if Qbe.f16?(rv[1])
+          f16_call(dst, head(rv), ["w #{op(rv[2])}", "w #{op(rv[3])}"])
+          return
+        end
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::CMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when *Qbe::FCMP.keys
+        if Qbe.f16?(rv[1])
+          f16_call(dst, head(rv)[0, 2], ["w #{op(rv[2])}", "w #{op(rv[3])}"])
+          return
+        end
         oc = Qbe.cls(rv[1])
         @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
@@ -1462,6 +1519,11 @@ end
       when "call"
         if atomic_fetch?(rv)
           atomic_fetch_lines(dst, c, rv)
+        elsif Qbe.f16?(rv[1])
+          # The result is the low 16 bits of xmm0.
+          raw = fresh
+          @lines << "  #{raw} =s #{call_text(rv)}"
+          f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
           @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
@@ -1476,7 +1538,7 @@ end
         end
       # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE reads w, l, s and d only.
       when "vaarg"
-        raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1]))
+        raise QbeUnsupported, "vaarg of #{sx(rv[1])}" unless %w[w l s d].include?(Qbe.cls(rv[1])) && !Qbe.f16?(rv[1])
 
         @lines << "  #{dst} =#{c} vaarg #{op(rv[2])}"
         # QBE drops a vaarg whose value is unused, and then the va_list does not advance: keep the read alive.
@@ -1507,6 +1569,15 @@ end
       when "rdtsc"
         asm_helpers << "rdtsc"
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
+      # `(retaddr)`, `(frameaddr)`: __builtin_return_address(0) and __builtin_frame_address(0). QBE gives each function a frame
+      # pointer, so the helper the driver appends reads this function's frame (%rbp on x86-64, x29 on arm64: the frame record).
+      when "retaddr", "frameaddr"
+        # The empty call after it keeps QBE from turning `return __builtin_return_address(0);` into a tail call (`leave; jmp`),
+        # which would run the helper in the caller's frame.
+        asm_helpers << head(rv)
+        asm_helpers << "barrier" unless asm_helpers.include?("barrier")
+        @lines << "  #{dst} =l call $__pathb_#{head(rv)}()"
+        @lines << "  call $__pathb_barrier()"
       when "bitcast" then bitcast_lines(dst, rv)
       when "bfload", "bfload.v" then bfload_lines(dst, rv)
       when "offset"
@@ -2144,7 +2215,7 @@ end
         when "variadic"
           # (variadic N): the first N arguments are named; QBE takes "..." after them (as pathb-qbe-emit.rb does).
           nfixed = Qbe.int_lit(a[1])
-        else args << "#{arg_cls(a)} #{op(a)}"
+        else args << (Qbe.f16?(arg_type(a)) ? f16_to_sse(op(a)) : "#{arg_cls(a)} #{op(a)}")
         end
       end
       if nfixed
@@ -2160,7 +2231,7 @@ end
     # --safe (pathb-qbe-emit.rb's call rules): a call through a pointer is checked against the function's signature
     # (__nfcxx_sp_call); a direct call of a block function (SP_MEMFN) checks its pointer arguments over the length.
     def sp_call_checks(c, f, sret, callee, args)
-      rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.cls(c[1]))
+      rcls = sret ? (sret.shape == "empty" ? "" : sret.tn) : (c[1] == "void" ? "" : Qbe.abi_cls(c[1]))
       classes = args.map { |a| a.split(" ", 2)[0] }
       sig = Qbe.sp_sig(@abi, rcls, classes)
       # A call through a pointer that the converter has turned into a direct call (a function address stored in a
@@ -2210,12 +2281,12 @@ end
 
     # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
     # locked stores and exchanges the lowering uses). Only without --safe.
-    ATOMIC_LOAD = /\A__atomic_load_[48]\z/
+    ATOMIC_LOAD = %w[__atomic_load_4 __atomic_load_8].freeze
 
     def atomic_load?(c)
       f = c[2]
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
-      return false unless f.raw.delete('"') =~ ATOMIC_LOAD && c.length == 5
+      return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
       head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
@@ -2238,6 +2309,39 @@ end
       raise QbeUnsupported, "a call with an aggregate result used as a value" if sret
 
       "call #{sym}(#{args.join(', ')})"
+    end
+
+    # The type of a call argument, or nil for an address.
+    def arg_type(a)
+      case a
+      when String then @types[a]
+      when Array
+        case head(a)
+        when "addr", "null" then nil
+        when "const" then a[1]
+        else Qbe.expr_type(a)
+        end
+      end
+    end
+
+    # A _Float16 pattern (w) as the SSE value of the C convention: `s TEMP`, the pattern in the low 16 bits.
+    def f16_to_sse(v)
+      t = fresh
+      @lines << "  #{t} =s cast #{v}"
+      "s #{t}"
+    end
+
+    # dst (w) := the _Float16 pattern in the low 16 bits of the SSE value src; the upper bits are not defined (a gcc callee
+    # or caller leaves what it likes there).
+    def f16_from_sse(dst, src)
+      raw = fresh
+      @lines << "  #{raw} =w cast #{src}"
+      @lines << "  #{dst} =w and #{raw}, 65535"
+    end
+
+    # A call of the helper __nfcxx_f16_NAME on the given typed operands (`w X`, `l X`, `d X`); the result is a w.
+    def f16_call(dst, name, args, rcls = "w")
+      @lines << "  #{dst} =#{rcls} call $__nfcxx_f16_#{name}(#{args.join(', ')})"
     end
 
     def arg_cls(a)
@@ -2268,6 +2372,18 @@ end
     # conversion of an integer up to 2**53 is). The conversion follows the signedness of the source type.
     def int_to_float_lines(dst, t, x)
       src = source_type(x)
+      if Qbe.f16?(t)
+        # Rounded once from the exact integer (from_s64 and from_u64 of be/nfcxx_ldrt.c): a narrow one is widened first.
+        signed = Qbe.signed?(src)
+        v = op(x)
+        if Qbe.cls(src) == "w"
+          wide = fresh
+          @lines << "  #{wide} =l #{signed ? 'extsw' : 'extuw'} #{v}"
+          v = wide
+        end
+        f16_call(dst, signed ? "from_s64" : "from_u64", ["l #{v}"])
+        return
+      end
       raise QbeUnsupported, "integer to float of a float" if float_type?(src)
 
       name = { ["w", true] => "swtof", ["w", false] => "uwtof", ["l", true] => "sltof", ["l", false] => "ultof" }
@@ -2279,8 +2395,30 @@ end
     def float_conv_lines(dst, t, x)
       src = unqual(source_type(x))
       t = unqual(t)
-      raise QbeUnsupported, "float conversion of an integer" unless float_type?(src)
+      raise QbeUnsupported, "float conversion of an integer" unless float_type?(src) || Qbe.f16?(src)
 
+      if Qbe.f16?(t) || Qbe.f16?(src)
+        v = op(x)
+        if Qbe.f16?(src) && Qbe.f16?(t)
+          @lines << "  #{dst} =w copy #{v}"
+        elsif Qbe.f16?(src) # exact in double, then to the target
+          if t == "float"
+            d = fresh
+            @lines << "  #{d} =d call $__nfcxx_f16_to_f64(w #{v})"
+            @lines << "  #{dst} =s truncd #{d}"
+          else
+            @lines << "  #{dst} =d call $__nfcxx_f16_to_f64(w #{v})"
+          end
+        else # to half from double (a float is widened first: exact)
+          if src == "float"
+            d = fresh
+            @lines << "  #{d} =d exts #{v}"
+            v = d
+          end
+          f16_call(dst, "from_f64", ["d #{v}"])
+        end
+        return
+      end
       if t == src
         @lines << "  #{dst} =#{Qbe.cls(t)} copy #{op(x)}"
       elsif t == "float"
@@ -2297,11 +2435,18 @@ end
     # operand is bad, so no block is split.
     def float_to_int_lines(dst, t, x)
       src = source_type(x)
-      raise QbeUnsupported, "float to integer of #{sx(src)}" unless float_type?(src)
+      raise QbeUnsupported, "float to integer of #{sx(src)}" unless float_type?(src) || Qbe.f16?(src)
       raise QbeUnsupported, "float to bool" if t == "bool"
 
       w, signed = int_info(t)
       xv = op(x)
+      if Qbe.f16?(src)
+        # Exact in double: the checks and the conversion are those of a double.
+        d = fresh
+        @lines << "  #{d} =d call $__nfcxx_f16_to_f64(w #{xv})"
+        xv = d
+        src = "double"
+      end
       if src == "float"
         widened = fresh
         @lines << "  #{widened} =d exts #{xv}"
@@ -2414,10 +2559,45 @@ end
   # A tied operand's code: a single digit (/\A\d\z/).
   def self.tied_code?(code) = code.size == 1 && DIGITS.include?(code)
 
-  def self.asm_block(hex, ops)
+  ASM_FLAG_CONDS = %w[a ae b be c e z g ge l le o p s na nae nb nbe nc ne ng nge nl nle no np ns nz pe po].freeze
+  ASM_NOREG = %w[imm sym].freeze
+
+  # An operand's text in the template: letter is the modifier (b w k q c P n a, or empty).
+  def self.asm_operand_text(o, reg, letter)
+    case o[:kind]
+    when "imm"
+      raise QbeUnsupported, "asm: modifier %#{letter} on an immediate" if letter == "a"
+
+      return (letter == "c" || letter == "P" ? o[:imm].to_s : letter == "n" ? (-o[:imm]).to_s : "$#{o[:imm]}")
+    when "sym"
+      txt = o[:off].zero? ? o[:sym] : "#{o[:sym]}#{o[:off] > 0 ? "+" : ""}#{o[:off]}"
+      return "#{txt}(%rip)" if letter == "a"
+      return txt if letter == "c" || letter == "P"
+
+      return "$#{txt}"
+    when "flag"
+      raise QbeUnsupported, "asm: a flag output named in the template"
+    end
+    return "(%#{reg})" if o[:code] == "m" || letter == "a"
+    return "%#{reg}" if o[:code] == "x"
+    raise QbeUnsupported, "asm: modifier %#{letter} on a register" if letter == "c" || letter == "P" || letter == "n"
+
+    size = { "b" => 1, "w" => 2, "k" => 4, "q" => 8 }.fetch(letter) { o[:size] }
+    slot = { 8 => 0, 4 => 1, 2 => 2, 1 => 3 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
+    "%#{ASM_REGS.fetch(reg)[slot]}"
+  end
+
+  def self.asm_block(hex, ops, clobbers = [], labels = [])
     tpl = [hex].pack("H*")
     regs = Array.new(ops.size)
     used = {}
+    clob = {}
+    clobbers.each do |c|
+      r = c == "ax" ? "rax" : c == "bx" ? "rbx" : c == "cx" ? "rcx" : c == "dx" ? "rdx" : c == "si" ? "rsi" : c == "di" ? "rdi" : c
+      raise QbeUnsupported, "asm: clobber of #{c}" unless r == "r11" || ASM_REGS.key?(r)
+
+      clob[r] = true
+    end
     ops.each_with_index do |o, i|
       next unless (r = ASM_FIXED[o[:code]])
 
@@ -2432,21 +2612,28 @@ end
 
       regs[i] = xfree.shift
     end
-    free = ASM_POOL.reject { |r| used[r] }
+    free = ASM_POOL.reject { |r| used[r] || clob[r] }
     ops.each_with_index do |o, i|
-      next if regs[i] || tied_code?(o[:code])
+      next if regs[i] || tied_code?(o[:code]) || ASM_NOREG.include?(o[:kind])
       raise QbeUnsupported, "asm: more operands than registers" if free.empty?
 
-      regs[i] = free.shift
+      regs[i] = o[:kind] == "flag" ? free.pop : free.shift
     end
     ops.each_with_index do |o, i|
       next unless tied_code?(o[:code])
 
       src = o[:code].to_i
       raise QbeUnsupported, "asm: a tied operand names operand #{src}" if src >= ops.size || src == i
+      raise QbeUnsupported, "asm: a tied operand names an operand with no register" if regs[src].nil?
 
       regs[i] = regs[src]
     end
+    ops.each do |o|
+      raise QbeUnsupported, "asm: flag condition #{o[:code]}" if o[:kind] == "flag" && !ASM_FLAG_CONDS.include?(o[:code])
+    end
+    # asm goto: the last operand (gsel) is the cell for the number of the label left by; it is not numbered in the template.
+    nreal = ops.count { |o| o[:kind] != "gsel" }
+    parts = []
     body = +""
     i = 0
     while i < tpl.size
@@ -2460,50 +2647,91 @@ end
         i += 2
         next
       end
-      # /\A%([bwkq]?)(\d+)/ at i: letter is the size override, digits the operand, used the characters it covers
+      if tpl[i + 1] == "="
+        body << "0"
+        i += 2
+        next
+      end
+      # %[MODIFIER](DIGITS | [NAME]) at i
       j = i + 1
-      letter = %w[b w k q].include?(tpl[j]) ? tpl[j] : ""
+      letter = %w[b w k q c P n a l].include?(tpl[j]) ? tpl[j] : ""
       j += letter.size
-      k = j
-      k += 1 while k < tpl.size && DIGITS.include?(tpl[k])
-      raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" if k == j
+      idx = nil
+      if tpl[j] == "["
+        close = j + 1
+        close += 1 while close < tpl.size && tpl[close] != "]"
+        raise QbeUnsupported, "asm template: an unterminated %[name]" if close >= tpl.size
 
-      m = [tpl[i...k], letter, tpl[j...k]]
-      idx = m[2].to_i
-      raise QbeUnsupported, "asm template: operand #{idx} of #{ops.size}" if idx >= ops.size
+        nm = tpl[j + 1...close]
+        if letter == "l"
+          idx = labels.index(nm)
+          raise QbeUnsupported, "asm template: no label named #{nm}" if idx.nil? || nm.empty?
 
-      o = ops[idx]
-      body << if o[:code] == "m"
-                "(%#{regs[idx]})"
-              elsif o[:code] == "x"
-                "%#{regs[idx]}"
-              else
-                size = { "b" => 1, "w" => 2, "k" => 4, "q" => 8 }.fetch(m[1]) { o[:size] }
-                slot = { 8 => 0, 4 => 1, 2 => 2, 1 => 3 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
-                "%#{ASM_REGS.fetch(regs[idx])[slot]}"
-              end
-      i += m[0].size
+          idx += nreal
+        else
+          idx = ops.index { |o| o[:name] == nm }
+          raise QbeUnsupported, "asm template: no operand named #{nm}" if idx.nil? || nm.empty?
+        end
+
+        k = close + 1
+      else
+        k = j
+        k += 1 while k < tpl.size && DIGITS.include?(tpl[k])
+        raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" if k == j
+
+        idx = tpl[j...k].to_i
+      end
+      if letter == "l"
+        raise QbeUnsupported, "asm template: label #{idx - nreal} of #{labels.size}" if idx < nreal || idx - nreal >= labels.size
+
+        parts << body << [idx - nreal + 1]
+        body = +""
+        i = k
+        next
+      end
+      raise QbeUnsupported, "asm template: operand #{idx} of #{nreal}" if idx >= nreal
+
+      body << asm_operand_text(ops[idx], regs[idx], letter)
+      i = k
     end
-    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}")[0, 12]
+    parts << body
+    flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
+    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
     sym = "__pathb_asm_#{digest}"
+    body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
     lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
     ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
-    lines << "\tsubq $16, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
+    # 6 pushes and the return address leave %rsp 8 mod 16: 24 more bytes make it 16-aligned for a call in the template.
+    lines << "\tsubq $24, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
     ops.each_with_index do |o, i|
       if %w[in inout mem].include?(o[:kind])
         lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} #{8 * i}(%r11), %#{regs[i]}" : "\tmovq #{8 * i}(%r11), %#{regs[i]}")
       end
     end
+    ops.each_with_index do |o, i|
+      lines << "\tmovl $0, %#{ASM_REGS.fetch(regs[i])[1]}" if o[:kind] == "gsel"
+    end
     lines << body.chomp
+    ops.each_with_index do |o, i|
+      next unless o[:kind] == "flag"
+
+      lines << "\tset#{o[:code]} %#{ASM_REGS.fetch(regs[i])[3]}" << "\tmovzbl %#{ASM_REGS.fetch(regs[i])[3]}, %#{ASM_REGS.fetch(regs[i])[1]}"
+    end
+    lines << ".L#{sym}_exit:" unless labels.empty?
     lines << "\tmovq -48(%rbp), %r11"
     ops.each_with_index do |o, i|
-      next unless %w[out inout].include?(o[:kind])
+      next unless %w[out inout flag gsel].include?(o[:kind])
 
       lines << (o[:code] == "x" ? "\t#{o[:size] == 4 ? "movss" : "movsd"} %#{regs[i]}, #{8 * i}(%r11)" : "\tmovq %#{regs[i]}, #{8 * i}(%r11)")
     end
     lines << "\tleaq -#{8 * ASM_SAVED.size}(%rbp), %rsp"
     lines.concat(ASM_SAVED.reverse.map { |r| "\tpopq %#{r}" })
-    lines << "\tpopq %rbp" << "\tret" << ".size #{sym}, .-#{sym}"
+    lines << "\tpopq %rbp" << "\tret"
+    gi = ops.index { |o| o[:kind] == "gsel" }
+    labels.each_with_index do |_, li|
+      lines << ".L#{sym}_#{li + 1}:" << "\tmovl $#{li + 1}, %#{ASM_REGS.fetch(regs[gi])[1]}" << "\tjmp .L#{sym}_exit"
+    end
+    lines << ".size #{sym}, .-#{sym}"
     [sym, lines.join("\n") + "\n"]
   end
 

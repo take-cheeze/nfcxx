@@ -4,6 +4,8 @@
 #   NFCXX_BACKEND=qbe|gcc   (default: both)
 cd "$(dirname "$0")/../.."
 root=$PWD
+# QBE-ONLY: Path B does not build sqlite3.c yet: QBE rejects the module ("invalid type for first operand %v18 in add", the QBE
+# xadd issue of Path B stage 3), so the suite stays on qbe and gcc (NFCXX_BACKEND=pathb: "FAIL pathb: setup-sqlite").
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX

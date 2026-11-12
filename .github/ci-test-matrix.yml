@@ -3,24 +3,31 @@
 # `gcc_only: true` exists only for the gcc backend, which runs on pushes to main only (GCC_BACKEND, top of ci.yml). Every
 # other key is read by the job's steps as matrix.<key> (go, interp, onnx, suite, group, backend, pathb, dotnet, run, name).
 # Mixed entries (qbe and gcc in one `run`) guard their gcc lines with `[ "$GCC_BACKEND" = 1 ]`.
-- name: cases (QBE and gcc backends)
+- name: cases (Path B and gcc backends)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   run: |
-    NFCXX_BACKEND=qbe tests/run.sh
+    NFCXX_BACKEND=pathb tests/run.sh
     if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
-- name: C++11 and C++14 language feature probes (qbe and gcc), mruby scripts
+- name: C++11 and C++14 language feature probes (Path B and gcc)
+  pathb: true   # FEATURE_ROUTES=pathb needs the Path B harness
   run: |
     tests/cpp-features/self-test.sh
     tests/upstream/self-test.sh
-    FEATURE_ROUTES="qbe$([ "$GCC_BACKEND" = 1 ] && echo " gcc")" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
-    tests/mruby/run.sh
+    FEATURE_ROUTES="pathb$([ "$GCC_BACKEND" = 1 ] && echo " gcc")" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
+- name: mruby scripts
+  # No Path B harness on purpose: with it, tests/mruby's pathb-qbe-emit oracle (tests/mruby/oracle) refuses file-scope asm
+  # (exit 3) that scripts/pathb-qbe-emit.rb accepts (exit 0).
+  run: tests/mruby/run.sh
 - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
   dotnet: true
   run: |
     scripts/setup-cil.sh
     scripts/setup-pathb.sh
     tests/cil/run.sh
+    NFCXX_CIL_CPROC=1 tests/cil/run.sh
     tests/pathb-cil/run.sh
 - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism, float-to-integer
+  pathb: true   # tests/nfcc/run.sh needs the Path B harness
   run: |
     tests/lib/run.sh
     tests/target/run.sh
@@ -29,6 +36,7 @@
     tests/c/run.sh
     tests/c/cc-mode.sh
     tests/cxx-driver/run.sh
+    tests/nfcc/run.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
 - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
@@ -37,15 +45,21 @@
   run: |
     scripts/setup-cosmo.sh
     tests/cosmo/run.sh
-- name: real-world tinyxml2, nlohmann/json, and {fmt}
+- name: real-world tinyxml2, nlohmann/json, doctest (gcc and Path B), and {fmt}
+  pathb: true   # run.sh, run_json.sh and run_doctest.sh build with Path B
   run: |
     tests/realworld/run.sh
     tests/realworld/run_json.sh
+    tests/realworld/run_doctest.sh
     tests/realworld/run_fmt.sh
-- name: multi-TU, modules, EH shim, nfceval, nfcffi, bundled libraries, call ABI
+- name: C++ modules (Path B, qbe and gcc backends)
+  pathb: true   # tests/modules/run.sh runs the Path B backend, which is the default for modules (docs/notes/modules.md)
+  run: |
+    tests/modules/run.sh
+- name: multi-TU, EH shim, nfceval, nfcffi, bundled libraries, call ABI
+  pathb: true   # tests/ehshim/run.sh builds with Path B
   run: |
     tests/multi-tu/run.sh
-    tests/modules/run.sh
     tests/ehshim/run.sh
     tests/eh-unwind/run.sh
     tests/eval/run.sh
@@ -53,14 +67,15 @@
     tests/bundle/run.sh
     tests/call-abi/run.sh
 # The system unwinder runs the cleanups of a throw (NFCXX_EH_UNWIND=1; tests/ehshim/unwind_members.cpp). gcc: gcc's
-# landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj).
-- name: EH unwinder (gcc and qbe backends, NFCXX_EH_UNWIND=1)
+# landing pads; qbe: cproc's cleanup lowering to landing pads (qbe.c, ehcleanupobj), tests/c only: tests/ehshim runs on Path B.
+- name: EH unwinder (gcc, Path B and qbe backends, NFCXX_EH_UNWIND=1)
+  pathb: true   # tests/ehshim/run.sh builds with Path B
   run: |
     if [ "$GCC_BACKEND" = 1 ]; then
       NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/ehshim/run.sh
       NFCXX_EH_UNWIND=1 NFCXX_BACKEND=gcc tests/c/run.sh
     fi
-    NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/ehshim/run.sh
+    NFCXX_EH_UNWIND=1 tests/ehshim/run.sh   # gcc and Path B per file (the BACKENDS: lines), foreign/ on both
     NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
 # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
 # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
@@ -132,10 +147,11 @@
   run: |
     ninja -C tools/pathb-ptx-emit
     tests/gpu/run_interp.sh
-- name: AddressSanitizer (gcc and qbe backends)
+- name: AddressSanitizer (gcc and Path B backends)
+  pathb: true   # ASAN_BACKEND=pathb needs the Path B harness
   run: |
     if [ "$GCC_BACKEND" = 1 ]; then tests/asan/run.sh; fi
-    ASAN_BACKEND=qbe tests/asan/run.sh
+    ASAN_BACKEND=pathb tests/asan/run.sh
 # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
 - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
   pathb: true

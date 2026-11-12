@@ -664,7 +664,7 @@ module SymbolCache
       if (mrb_nil_p(blk) && mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       struct RClass* klass = mrb_class(M, recv);
     #ifdef BC2CPP_OWNER_ICACHE
-      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk);
+      if (bc2cpp_owner_icache_hit(M, s, klass, mid, argc)) return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &s.hit_m, s.hit_c, argc, argv, blk); });
     #endif
     #ifdef BC2CPP_OWNER_ICACHE_STATS
       ++bc2cpp_owner_icache_misses;

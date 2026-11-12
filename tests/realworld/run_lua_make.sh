@@ -3,6 +3,8 @@
 # Same pinned upstream commit as run_lua.sh (cloned into build/realworld/lua, not vendored). The make runs in a
 # scratch copy of the sources, so the checkout stays clean.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+# QBE-ONLY: nfcc on Path B (NFCXX_BACKEND=pathb) refuses lvm.c ("luaV_execute: (unsupported stmt assigned_goto)", Lua's computed-goto
+# dispatch), so the build stops there; the suite stays on qbe.
 # Lua's repository ships only the developer's makefile. Its warning list, -march=native, -fno-stack-protector
 # and -fno-common all go through nfcc as they are; only MYCFLAGS/MYLIBS are overridden to drop -lreadline
 # (not installed here) and the -Wl,-E link flag is kept.

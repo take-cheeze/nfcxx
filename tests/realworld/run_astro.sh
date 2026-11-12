@@ -13,6 +13,8 @@
 #     thing on Ruby >= 2.7 (the host here may have 3.3);
 #   - lib/astrogen.rb emits "NODE *ALLOC_x(...);;" (an empty declaration at file scope, which ISO C forbids and gcc
 #     accepts); cproc rejects it. The patch joins the declarations with "\n".
+# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) does not pass the ASTro checks: calc's code store is not
+# produced, libprism does not link, and koruby_precise stops at a front-end error in runtime/precise_gc/gc.h:321; the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=68f15d81b8cc378053c78c2a087b691851bdc2ac   # ko1/astro main, 2026-10-24

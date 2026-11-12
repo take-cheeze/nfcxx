@@ -1,5 +1,5 @@
 // ASAN: stack-use-after-scope
-// ASAN-ONLY: qbe (gcc reports nothing here: its scope poison does not run on a longjmp; qbe poisons at the setjmp's return)
+// ASAN-ONLY: pathb   (gcc reports nothing here: its scope poison does not run on a longjmp; Path B does not poison at the setjmp return yet: tests/asan/pathb-pending.txt)
 /* A longjmp in the same function leaves the block of x for the setjmp: the pointer kept from x's block is read after the
    landing, when x's scope has ended. */
 #include <setjmp.h>

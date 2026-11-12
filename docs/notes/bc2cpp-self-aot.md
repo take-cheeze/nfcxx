@@ -54,7 +54,7 @@ MRBC=build/bc2cpp-self/bootstrap/bc2cpp-runner/bin/mrbc \
 `BC2CPP_SELF_STATS=1` enables optional entry counts. A bytecode-only runner cannot satisfy this check. The
 counter covers generated entry wrappers; direct calls between translated implementations need not increment it.
 
-The quick `ruby tests/bc2cpp/self_compile.rb` check runs in ordinary CI. A workflow dispatch of `bc2cpp.yml` with
+The quick `ruby tests/bc2cpp/self_compile.rb` check runs in ordinary CI. A workflow dispatch of `ci.yml` with
 `self_aot=true` runs the complete CRuby 4 + YJIT / nfcxx build and integration check and uploads its logs and metadata.
 
 ## Installation boundaries

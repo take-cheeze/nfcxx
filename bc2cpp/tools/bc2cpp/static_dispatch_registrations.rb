@@ -640,13 +640,16 @@ module StaticDispatchRegistrations
   # `text`: a Set that also receives every token read as text (Ruby read as text, native naming-macro arguments),
   # the only tokens SUFFIX_BASES needs.
   # `enumerator_free`, `diagnostic_literals`: see strip_native_text.
-  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil, enumerator_free: nil, diagnostic_literals: false)
+  # +engine_tokens+ (CORE_ROWS) receives the tokens of every source but the core's own: core Ruby read as bytecode and
+  # the natives under 3rd/, which the CORE_ROWS core run reads again by its own rules.
+  def outside_world_tokens(repo_root, closed_only: false, core: nil, text: nil, enumerator_free: nil, diagnostic_literals: false,
+                           engine_tokens: nil)
     ruby, native = outside_world_files(repo_root, closed_only: closed_only)
+    third = "#{File.expand_path(repo_root)}/3rd/"
     tokens = Set.new
     text ||= Set.new
     naming = closed_only ? naming_macros(native) : []
     if closed_only && core
-      third = "#{File.expand_path(repo_root)}/3rd/"
       precise, ruby = ruby.partition { |p| p.end_with?('.rb') && p.start_with?(third) }
       unlinked = closed_unlinked_dirs(repo_root)
       precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
@@ -681,6 +684,7 @@ module StaticDispatchRegistrations
         end
       end
       tokens.merge(found)
+      engine_tokens&.merge(found) unless native.include?(path) && File.expand_path(path).start_with?(third)
       cite(found, "named in #{path.delete_prefix("#{File.expand_path(repo_root)}/")}")
     end
     tokens
@@ -1221,9 +1225,13 @@ module StaticDispatchRegistrations
     # a presym, a literal in generated code or a bytecode send). The open build keeps ALWAYS_DYNAMIC as its backstop.
     protocol = closed_only ? [] : ALWAYS_DYNAMIC
     dynamic = Set.new(protocol)
+    # CORE_ROWS: the dynamic names the engine itself gives, less what only core Ruby, the natives under 3rd/ and the
+    # generated code's literals give (the core run reads those again by its own rules; CoreRows.engine_names).
+    rows_dynamic = Set.new(protocol)
     cite(protocol, 'always dynamic (ALWAYS_DYNAMIC)')
     if symbol_lookups
       dynamic.merge(symbol_lookups)
+      rows_dynamic.merge(symbol_lookups)
       cite(symbol_lookups, 'a Symbol literal that may name a looked-up method (SYMBOL_USES)')
     end
     fragments = Set.new
@@ -1269,6 +1277,7 @@ module StaticDispatchRegistrations
         else
           super_unknown << name
           dynamic << name
+          rows_dynamic << name
           cite([name], "super in #{owner}##{name}")
         end
       end
@@ -1286,7 +1295,7 @@ module StaticDispatchRegistrations
     @enumerator_free_proof = @core_files_memo = nil
     enumerator_free = closed_only ? -> { (@enumerator_free_proof ||= engine_enumerator_free(repo_root, mrbc, ireps, engine_tuple, symbol_lookups)).holds } : nil
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text, enumerator_free: enumerator_free,
-                                                diagnostic_literals: !symbol_lookups.nil?)
+                                                diagnostic_literals: !symbol_lookups.nil?, engine_tokens: rows_dynamic)
     dynamic.merge(outside)
     looked_up = literal_sites.keys.to_set
     looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
@@ -1294,6 +1303,7 @@ module StaticDispatchRegistrations
       next unless looked_up.include?(s)
 
       dynamic << s
+      rows_dynamic << s
       cite([s], "a string literal in #{irep_site(sites.first, method_of, body_of)}")
     end
     # POOL_STRING_VALUES (closed only): an identifier-shaped pool string whose uses were proven pure above. Its
@@ -1343,6 +1353,7 @@ module StaticDispatchRegistrations
           known.merge(reach)
           next
         end
+        rows_dynamic << name if into.equal?(dynamic)
         next unless into.add?(name)
 
         grew = true
@@ -1366,6 +1377,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
+    rows_dynamic.merge(load_names)
     cite(load_names, 'sent while mrblib loads')
     bytecode_blocks = runs.each_value.any? { |r| runnable_proc_text(r[:gen]).match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
@@ -1394,7 +1406,7 @@ module StaticDispatchRegistrations
 
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven,
-                                                engine_dynamic: symbol_lookups && dynamic,
+                                                engine_dynamic: symbol_lookups && rows_dynamic,
                                                 super_names: super_reach.keys.to_set | super_unknown) : nil
 
     { super_reach: super_reach, class_owners: class_owners,

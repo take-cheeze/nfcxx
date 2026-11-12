@@ -1,0 +1,22 @@
+// Thread 0 exits before the barrier. An exited thread does not hold the barrier back, so thread 1 passes it and
+// writes 7 in every schedule.
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry bar_exit(
+  .param .u64 out_param
+)
+{
+  .reg .b32 %r<2>;
+  .reg .b64 %rd<2>;
+  .reg .pred %p<1>;
+
+  ld.param.u64 %rd0, [out_param];
+  mov.u32 %r0, %tid.x;
+  setp.eq.u32 %p0, %r0, 0;
+  @%p0 ret;
+  bar.sync 0;
+  st.global.u32 [%rd0], 7;
+  ret;
+}

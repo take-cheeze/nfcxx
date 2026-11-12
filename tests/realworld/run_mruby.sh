@@ -6,6 +6,8 @@
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
 # Needs ruby and rake (apt-get install ruby). The QBE build needs a cproc built with
 # cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-asan-combined) (re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
+# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) refuses mruby's tools/mrbc/mrbc.c
+# ("SSA route: pathb-ssa-build: not emitted: parse_args: operator unsupported"), so the rake build stops in its first step; the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, 2026-04-20 (newest non-rc tag)

@@ -10,6 +10,8 @@
 #                            which calls run as native code depends on timing and the output must not. The collector runs at its
 #                            default; its forced-collection stress (NFCAST_GC_STRESS=1) is covered by engine.cpp and tier.cpp, not here
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
+# QBE-ONLY: Path B (NFCXX_BACKEND=pathb) builds and links all three programs, but engine.cpp aborts (SIGABRT, no message) in its
+# "inlining of small functions" section; gcc and qbe pass. The suite stays on qbe until that is fixed.
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
