@@ -17,12 +17,14 @@
 # constant table from growing into one oversized compilation unit.
 
 require_relative 'world_root'
-ROOT = BC2CPP_WORLD_ROOT
+require 'prism'
+ROOT = BC2CPP_TREE_ROOT
 CHUNK = 1000
-REQUIRE_RELATIVE = /\A(\s*)require_relative\s+(['"])([^'"]+)\2(.*)\n?\z/
 
 def baked_name(path)
-  path.delete_prefix("#{ROOT}/").delete_suffix('.rb')
+  root = [ROOT, BC2CPP_WORLD_ROOT].sort_by(&:length).reverse.find { |candidate| path.start_with?("#{candidate}/") }
+  abort "bake_sources: source outside tree and world: #{path}" unless root
+  path.delete_prefix("#{root}/").delete_suffix('.rb')
 end
 
 def resolve(from_path, name)
@@ -33,22 +35,38 @@ end
 
 def bake_file(path, sources, queue)
   name = baked_name(path)
-  lines = File.readlines(path, encoding: 'UTF-8').map do |line|
-    if (m = REQUIRE_RELATIVE.match(line))
-      target = resolve(path, m[3])
+  source = File.read(path, encoding: 'UTF-8')
+  parsed = Prism.parse(source)
+  abort "bake_sources: cannot parse #{path}" unless parsed.success?
+  pending = [parsed.value]
+  replacements = []
+  until pending.empty?
+    node = pending.pop
+    pending.concat(node.compact_child_nodes)
+    if node.is_a?(Prism::CallNode) && node.receiver.nil? && node.name == :require_relative &&
+       node.arguments&.arguments&.size == 1 && node.arguments.arguments.first.is_a?(Prism::StringNode)
+      target = resolve(path, node.arguments.arguments.first.unescaped)
       queue << target unless sources.key?(baked_name(target)) || queue.include?(target)
-      line = "#{m[1]}require '#{baked_name(target)}'#{m[4]}#{line.end_with?("\n") ? "\n" : ''}"
+      replacements << [node.location.start_offset, node.location.length, "require '#{baked_name(target)}'"]
+    elsif node.is_a?(Prism::SourceFileNode)
+      replacements << [node.location.start_offset, node.location.length, name.dump]
+    elsif node.is_a?(Prism::CallNode) && node.receiver.nil? && node.name == :__dir__ && node.arguments.nil?
+      replacements << [node.location.start_offset, node.location.length, File.dirname(path).dump]
     end
-    line
   end
-  # __dir__ is baked as the source's own directory, so a run from elsewhere resolves the same files.
-  body = lines.join.gsub(/__FILE__/, "'#{name}'").gsub(/\b__dir__\b/, "'#{File.dirname(path)}'")
+  # Only actual calls are rewritten: rake templates contain require_relative text in heredocs.
+  body = source.b
+  replacements.sort.reverse_each { |offset, length, replacement| body[offset, length] = replacement }
+  body.force_encoding(Encoding::UTF_8)
   sources[name] = body
 end
 
 def bake(*entries)
   sources = {}
-  queue = entries.map { |entry| File.expand_path(entry, ROOT) }
+  queue = entries.map do |entry|
+    path = File.expand_path(entry, ROOT)
+    File.file?(path) ? path : File.expand_path(entry, BC2CPP_WORLD_ROOT)
+  end
   until queue.empty?
     path = queue.shift
     next if sources.key?(baked_name(path))

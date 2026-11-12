@@ -1,5 +1,11 @@
 # Open3, Process and RbConfig over BC2CPPProcess (src/process.c). Commands run without a shell, as Open3 does with
 # more than one argument. A child's environment changes are given as a Hash; a nil value unsets the name.
+class File
+  def self.executable?(path)
+    BC2CPPProcess.executable?(path)
+  end unless respond_to?(:executable?)
+end
+
 module Process
   CLOCK_MONOTONIC = 1 unless const_defined?(:CLOCK_MONOTONIC)
 

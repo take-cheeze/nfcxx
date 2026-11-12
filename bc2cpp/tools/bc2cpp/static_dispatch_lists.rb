@@ -34,8 +34,9 @@ module StaticDispatchLists
 
   Lists = Struct.new(:open, :closed, :core_excluded, :core_left_out, :engine_rom, :ctor_rows, :core_rows, :frame_free, :digest,
                      keyword_init: true) do
-    def initialize(**kwargs)
-      super
+    # mruby's Struct.new forwards keyword-init values as a positional Hash.
+    def initialize(kwargs = {})
+      super(kwargs)
       self.frame_free ||= Set.new.freeze
       self.core_rows ||= Set.new.freeze
     end

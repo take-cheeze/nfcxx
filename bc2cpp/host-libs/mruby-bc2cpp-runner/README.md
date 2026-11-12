@@ -1,21 +1,51 @@
 # mruby-bc2cpp-runner
 
 The bc2cpp command as an mruby executable. `mruby-bc2cpp-sources` bakes the bc2cpp source graph for `require`;
-this gem names its entry (`BC2CPPRunner.run`), and `bc2cpp_main.rb` is the script the executable runs.
+this gem's C main calls its entry (`BC2CPPRunner.run`).
 
-Build (from the repository root):
+Build from nfcxx's repository root (requires the EDG toolchain from `scripts/setup-edg.sh`):
 
-    cd 3rd/mruby && MRUBY_CONFIG=../../host-libs/mruby-bc2cpp-runner/build_config.rb MRUBY_BUILD_DIR=<dir> rake
-    <dir>/bc2cpp-runner/bin/mruby ../../host-libs/mruby-bc2cpp-runner/bc2cpp_main.rb <bc2cpp args>
+```sh
+scripts/setup-bc2cpp.sh
+scripts/bc2cpp --annotated path/to/program.rb
+```
+
+The setup script fetches the pinned test world and the Prism/RBS submodules, then builds the optimized runner with
+nfcxx's gcc backend. `BC2CPP_WORLD_ROOT` or `BC2CPP_RPG_DIR` selects an existing world. The command still requires
+bc2cpp's closed-world inputs (`BC2CPP_BUILD_NAME`, `BC2CPP_BUILD_GEMS`, `NATIVE_SRCS`, `FOREIGN_RUBY_SRCS`), just as CRuby
+does. Existing build integrations can use the path printed by setup as `BC2CPP_MRUBY_RUNNER`.
+
+`BC2CPP_RUNNER_CXX` selects another C++ compiler; `NFCXX_BACKEND` selects nfcxx's backend (gcc by default).
+`BC2CPP_RUNNER_BUILD_DIR` selects the output directory. Use separate directories for different compilers or flags.
+The runner-specific compiler setting keeps nfcxx's bootstrap helpers on the host compiler; globally setting
+`CXX=nfcxx` can make those helpers recursively build themselves.
+
+This executable runs baked mruby bytecode. The experimental `bc2cpp-self` build, which translates bc2cpp's own
+Ruby methods to C++, is a separate build kind and is not enabled by this setup script.
+
+The equivalent direct rake build, from the selected world's `3rd/mruby`, is:
+
+    BC2CPP_WORLD_ROOT=<world> MRUBY_CONFIG=<nfcxx>/bc2cpp/host-libs/mruby-bc2cpp-runner/build_config.rb MRUBY_BUILD_DIR=<dir> rake
+    <dir>/bc2cpp-runner/bin/mruby <bc2cpp args>
 
 ## Status
 
-The executable loads bc2cpp's whole source graph, and its entry runs the way CRuby's does: with no arguments it prints the
-usage, and with a toy program it refuses (not a closed world, as CRuby also does). A real run needs the closed-world
-inputs (BC2CPP_BUILD_NAME=closed, its gem list, NATIVE_SRCS, FOREIGN_RUBY_SRCS) that the closed build's rake task sets.
-Those have not been run through this executable yet.
+The nfcxx/gcc build passes a closed-world fixture: generated C++ and bytecode match CRuby exactly, and nfcxx compiles
+and links that output against the runner's own runtime. Interpreted and compiled arithmetic, Unicode strings,
+division-by-zero exceptions and executable-file checks agree. The fixture defaults to native mrbc; set
+`BC2CPP_RUNNER_MRBC_MODE=verify` to require the Ruby emitter's bytes to match native mrbc too. Native, default and
+strict verification modes have all been checked.
 
-Set in the environment of a run: `BC2CPP_RUBY=<repo>/tools/bc2cpp/mruby-ruby` (the wrapper the tools start subprocesses
+Reproduce with a full pinned-world checkout selected by `BC2CPP_WORLD_ROOT`:
+
+```sh
+runner=$(scripts/setup-bc2cpp.sh)
+MRBC="$(dirname "$runner")/mrbc" BC2CPP_MRUBY_RUNNER="$runner" \
+  CXX="$PWD/nfcxx" NFCXX_BACKEND=gcc ruby tests/bc2cpp/runner_generation.rb
+ruby tests/bc2cpp/source_baking.rb
+```
+
+Set in the environment of a run: `BC2CPP_RUBY=<nfcxx>/bc2cpp/tools/bc2cpp/mruby-ruby` (the wrapper the tools start subprocesses
 with, RbConfig.ruby) and `BC2CPP_MRUBY=<dir>/bc2cpp-runner/bin/mruby` (the executable the wrapper runs).
 
 Fixed to get here: `mruby-prism` renders its generated headers when defined, and its `ascii_only?` no longer builds an
@@ -25,4 +55,4 @@ gives `ENV`. `mruby-process` gives `Open3` (capture3, capture2, capture2e), `Pro
 `Kernel#system`, over a fork/exec primitive. The build adds Onigmo, Marshal (with C++ exception mode), StringIO, YAML,
 zlib and the core method/proc gems.
 
-Open items: a closed-world run through this executable, and any gems the closed run needs beyond the set above.
+Full RPG builds and the `bc2cpp-self` AOT build remain outside this fixture's coverage.

@@ -8,7 +8,9 @@
 BC2CPP_SOURCES_ROOT = File.expand_path('../..', __dir__)
 BC2CPP_SOURCES_ENTRY = 'tools/bc2cpp/bc2cpp.rb'
 # Scripts the tools load by name rather than by require_relative: baked in with the entry, so that require finds them.
-BC2CPP_SOURCES_EXTRA = %w[scripts/rpg2k/closed_world_lint.rb].freeze
+BC2CPP_SOURCES_EXTRA = %w[scripts/rpg2k/closed_world_lint.rb
+                         3rd/mruby/lib/mruby/presym.rb tools/rgss_tts_config.rb].freeze
+BC2CPP_SOURCES_EXTRA_PATHS = BC2CPP_SOURCES_EXTRA.map { |f| File.join(BC2CPP_WORLD_ROOT, f) }.freeze
 
 MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   spec.license = 'MIT'
@@ -21,11 +23,11 @@ MRuby::Gem::Specification.new('mruby-bc2cpp-sources') do |spec|
   generator = File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/bake_sources.rb')
   baked_dir = "#{build_dir}/baked"
   stamp = "#{build_dir}/bc2cpp_sources.stamp"
-  inputs = Dir[File.join(BC2CPP_SOURCES_ROOT, 'tools/bc2cpp/**/*.rb')] + [generator] +
-           BC2CPP_SOURCES_EXTRA.map { |f| File.join(BC2CPP_SOURCES_ROOT, f) }
+  inputs = Dir[File.join(BC2CPP_SOURCES_ROOT, 'tools/**/*.rb')] + [generator, __FILE__] +
+           BC2CPP_SOURCES_EXTRA_PATHS
   unless File.exist?(stamp) && File.mtime(stamp) >= inputs.map { |f| File.mtime(f) }.max
     FileUtils.mkdir_p(build_dir)
-    ok = system(RbConfig.ruby, generator, '--dir', baked_dir, BC2CPP_SOURCES_ENTRY, stamp, *BC2CPP_SOURCES_EXTRA)
+    ok = system(RbConfig.ruby, generator, '--dir', baked_dir, BC2CPP_SOURCES_ENTRY, stamp, *BC2CPP_SOURCES_EXTRA_PATHS)
     raise 'mruby-bc2cpp-sources: tools/bc2cpp/bake_sources.rb failed' unless ok
   end
 
