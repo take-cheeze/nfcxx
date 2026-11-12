@@ -548,6 +548,7 @@ module Qbe
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
+      @zeroed = {}     # a local slot that a bit-field access reads before any store: zeroed (see zero_slot_once)
       @temps = 0
       @types = {}
       @params_set = {}
@@ -1964,10 +1965,25 @@ end
       raise QbeUnsupported, "bit-field of type #{sx(ty)}" unless Qbe::INT_W.include?(ty) || Qbe::INT_L.include?(ty)
     end
 
+    # A bit-field access reads its storage unit before the first store (a read-modify-write, or a read of a field that the
+    # object never set). QBE's slot promotion rejects a read before any store as "used undefined", so a local slot that
+    # a bit-field access reaches is zeroed right after its alloc: a memset of the whole slot (its address escapes, so the
+    # promotion leaves it in memory). Only the local slots (%oN); a slot that is already zeroed is not zeroed again.
+    def zero_slot_once(addr)
+      return unless addr.is_a?(String) && addr =~ /\A%o\d+\z/
+      return if @zeroed[addr]
+      @zeroed[addr] = true
+      idx = @lines.index { |l| l.start_with?("  #{addr} =l alloc") }
+      return unless idx
+      size = @lines[idx].split.last.to_i
+      @lines.insert(idx + 1, "  call $memset(l #{addr}, w 0, l #{size})")
+    end
+
     def bfload_lines(dst, rv)
       ty = rv[1]
       bf_type!(ty)
       unit, boff, width = bf_args(rv, 6)
+      zero_slot_once(op(rv[3]))
       uc = unit == 8 ? "l" : "w"
       # The field goes to the top of the register (32 or 64 bits), not of the storage unit: a 1- or 2-byte unit then
       # sign-extends from its own top bit.
@@ -2005,6 +2021,7 @@ end
       raise QbeUnsupported, "bit-field store of a value of another class" unless Qbe.cls(operand_type(x[6])) == tc
 
       addr = op(x[3])
+      zero_slot_once(addr)
       v = op(x[6])
       if tc != uc
         t2 = fresh
