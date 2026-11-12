@@ -8,9 +8,11 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -106,9 +108,58 @@ void expect_throw(GemmVariant v, int64_t M, int64_t N, int64_t K, const char* wh
 
 }  // namespace
 
+// True when /proc/cpuinfo lists every flag. The __builtin_cpu_* functions are not used: cproc (the qbe back end's C
+// compiler) does not implement them, so the test would not build under nfcxx --backend=qbe.
+bool cpu_has_flags(std::initializer_list<const char*> flags) {
+  std::ifstream f("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.compare(0, 5, "flags") != 0) continue;
+    for (const char* flag : flags) {
+      std::string needle = std::string(" ") + flag;
+      size_t at = line.find(needle);
+      bool whole = at != std::string::npos && (at + needle.size() == line.size() || line[at + needle.size()] == ' ');
+      if (!whole) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+// The packed, register-blocked kernel (emit_gemm_rowsum_packed_c): C row-major, R the row sums, Bp the packing scratch.
+void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  std::string tag = "packed_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+  std::uniform_int_distribution<int> d(-4, 4);
+  std::vector<float> A(M * K), B(K * N);
+  for (auto& x : A) x = float(d(rng));
+  for (auto& x : B) x = float(d(rng));
+  std::vector<float> refC(M * N), refR(M, 0.0f);
+  for (int64_t m = 0; m < M; ++m)
+    for (int64_t n = 0; n < N; ++n) {
+      float s = 0;
+      for (int64_t k = 0; k < K; ++k) s += A[m * K + k] * B[k * N + n];
+      refC[m * N + n] = s;
+      refR[m] += s;
+    }
+  KernelFn fn = nullptr;
+  void* h = load_kernel(dir, emit_gemm_rowsum_packed_c(M, N, K), tag, &fn);
+  if (!h) return;
+  std::vector<float> C(M * N, -999.0f), R(M, -999.0f), Bp(K * N, -999.0f);
+  fn(A.data(), B.data(), C.data(), R.data(), Bp.data());
+  dlclose(h);
+  int bad = 0;
+  for (int64_t i = 0; i < M * N; ++i) bad += C[i] != refC[i];
+  for (int64_t m = 0; m < M; ++m) bad += R[m] != refR[m];
+  if (bad) {
+    std::fprintf(stderr, "FAIL %s: %d value(s) differ from the reference\n", tag.c_str(), bad);
+    ++failures;
+  } else {
+    std::printf("ok   %s\n", tag.c_str());
+  }
+}
+
 int main() {
-  __builtin_cpu_init();
-  if (!__builtin_cpu_supports("avx2") || !__builtin_cpu_supports("fma")) {
+  if (!cpu_has_flags({"avx2", "fma"})) {
     std::printf("SKIP test_layout_avx2: this CPU has no AVX2 and FMA\n");
     return 0;
   }
@@ -142,6 +193,18 @@ int main() {
   expect_throw(GemmVariant::VecN, 8, 12, 4, "VecN with N = 12");
   expect_throw(GemmVariant::VecM, 12, 8, 4, "VecM with M = 12");
   expect_throw(GemmVariant::VecN, 8, 8, 0, "K = 0");
+
+  // Packed, register-blocked kernel: M % 4 and N % 16, K values with no alignment requirement.
+  for (auto [M, N, K] : std::vector<std::array<int64_t, 3>>{{4, 16, 1}, {8, 32, 5}, {16, 48, 33}, {64, 64, 64}}) {
+    run_packed_case(dir, M, N, K, rng);
+  }
+  try {
+    emit_gemm_rowsum_packed_c(4, 24, 4);
+    std::fprintf(stderr, "FAIL packed with N = 24: no exception\n");
+    ++failures;
+  } catch (const std::invalid_argument&) {
+    std::printf("ok   refused: packed with N = 24\n");
+  }
 
   std::string rm = "rm -rf '" + dir + "'";
   if (failures == 0 && std::system(rm.c_str()) != 0) std::fprintf(stderr, "note: could not remove %s\n", dir.c_str());

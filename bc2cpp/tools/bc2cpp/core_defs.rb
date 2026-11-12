@@ -74,6 +74,9 @@ module CoreDefs
       next unless core_source?(ireps.fetch(site[:irep]).file)
 
       old_key = [site[:owner], site[:old]]
+      # ALIAS_WALK_TIME: `old` had no definition when the alias ran (a native, or defined later in the source): the copy
+      # is the native, which no registry entry stands for, so a later Ruby definition of `old` must not be the copy.
+      next unless site[:defined]
       next if site[:new] == site[:old] || shadowed_pairs.include?(old_key)
 
       old_defs = defs[old_key]

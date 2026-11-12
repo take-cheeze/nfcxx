@@ -211,6 +211,30 @@ Consequence: on this AVX2 target, for this shape, the N-vectorized kernel is the
 M-vectorized kernel only competes with a blocked layout (see the block experiment above), which the layout model does
 not describe yet.
 
+## Against a vendor BLAS (AVX2, 512 x 512 x 512, float32)
+
+The comparison is with OpenBLAS through numpy, on this host. Timings are best of 10 to 30 calls; the host was quiet
+(load about 0.3). The packed kernel packs B inside the timed call.
+
+| kernel | us | vs OpenBLAS 1 thread | vs OpenBLAS 4 threads |
+| --- | --- | --- | --- |
+| emitter VecN (no blocking) | 23,100 | 12.6x slower | 44x slower |
+| emitter VecM, strided | 21,100 | 11.5x slower | 40x slower |
+| register-blocked 4 x 16 (hand written, unpacked B) | 4,900 to 6,900 | 2.7x to 3.7x | 9x to 13x |
+| emitter packed 4 x 16 (`emit_gemm_rowsum_packed_c`) | 4,000 | 2.2x | 7.6x |
+| OpenBLAS, 1 thread | 1,840 | 1x | |
+| OpenBLAS, 4 threads | 531 | | 1x |
+
+The OpenBLAS 1-thread time varied between sessions (1,880 to 3,010 us), so the ratios are rough.
+
+What the steps show: register blocking (one loop iteration updates a 4-row by 16-column tile) gives most of the gain.
+Packing B so the inner loop reads it contiguously gives about 20 percent more. The remaining gap to one thread is
+the tile size (6 x 16 uses more accumulators on AVX2), the lack of K blocking, and the packing pass.
+Four-thread OpenBLAS is outside what this kernel does; it is not a fair comparison for a single-threaded kernel.
+
+Packing B is also the layout repair of the model: a transform of the data so that the inner loop's accesses are
+contiguous. The model does not price it yet.
+
 ## Next steps on this target
 
 1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
