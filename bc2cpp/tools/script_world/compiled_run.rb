@@ -18,6 +18,8 @@
 #                --bench-status N is the exit status a timed run must give (default 0)
 #   The roots: BC2CPP_TREE_ROOT (this tree) and BC2CPP_WORLD_ROOT (the world with the mruby fork), as for the
 #   optcarrot probe. SCRIPT_WORLD_COMPILED_FLAGS adds compiler flags to the compiled build.
+#   BC2CPP_SCRIPT_WORLD_ONIG=1 adds mruby-onig-regexp (Regexp, from 3rd/mruby-onig-regexp next to 3rd/mruby) to both the
+#   interpreted and the sealed build; unset, the world has no Regexp and the builds are as before.
 require_relative '../bc2cpp/world_root'
 require 'etc'
 require 'fileutils'
@@ -107,6 +109,7 @@ end
 
 def mruby_config(temp, gems, flags)
   compiled_gems = gems.reject { |name, _| name.start_with?('script-') }.values.map { |dir| "gem #{dir.dump}" }
+  onig = ScriptSealedBuild.onig_gem(ROOT)
   config = File.join(temp, 'mruby_build_config.rb')
   File.write(config, <<~RUBY)
     base = proc do
@@ -120,7 +123,7 @@ def mruby_config(temp, gems, flags)
       cxx.defines << 'MRB_ARY_LENGTH_MAX=0' << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'
     end
     MRuby::Build.new('host') { toolchain }
-    MRuby::Build.new('scriptinterpreted') { instance_eval(&base) }
+    MRuby::Build.new('scriptinterpreted') { instance_eval(&base)#{onig ? "; gem #{onig.dump}" : ''} }
     MRuby::Build.new('scriptcompiled') do
       toolchain
       self.mrbcfile = #{File.expand_path(MRBC).dump}
