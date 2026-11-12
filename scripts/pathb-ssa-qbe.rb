@@ -1943,7 +1943,13 @@ end
       [op, size]
     end
 
+    # Off: the amd64 xadd isel (3rd/qbe 9688fb7) leaves the old value in the register of the copy, not of the result, so
+    # an inlined fetch-add with order 5 reads a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp).
+    # Until that is fixed in the fork, the calls to libatomic are emitted as before.
+    ATOMIC_XADD = false
+
     def atomic_fetch?(c)
+      return false unless ATOMIC_XADD
       return false unless atomic_fetch_kind(c)
       order = c[5]
       head(order) == "const" && order[2].to_s == "5"
