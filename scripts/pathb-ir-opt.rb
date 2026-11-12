@@ -211,6 +211,7 @@ end
 # the callees grow with each round). 0 turns a cap off.
 $inline_max_callee = 400
 $inline_max_growth = 2.0
+$inline_cost = :weighted
 
 def node_count(x)
   return 0 unless x.is_a?(Array)
@@ -219,8 +220,28 @@ def node_count(x)
   n
 end
 
+# The size of a form for the caps, weighted by what a node costs after code generation (--cost=weighted, the default; --cost=nodes
+# counts every node as 1). Declarations, constants, casts and address arithmetic cost nothing (a slot is a frame offset, an
+# offset or bitcast folds into an addressing mode); a call costs most (argument moves, the call, the result); a branch, loop
+# or switch more than a load or store; any other node is 1. The caps stay in the same unit, so a callee that is mostly
+# declarations and address arithmetic (a wrapper around one call) counts for what it is.
+NODE_WEIGHT = Hash.new(1).merge(
+  "function" => 0, "slot" => 0, "params" => 0, "param" => 0, "ret" => 0, "weak" => 0, "const" => 0, "type" => 0,
+  "block" => 0, "then" => 0, "else" => 0, "body" => 0, "step" => 0, "let" => 0, "addr" => 0, "offset" => 0, "bitcast" => 0,
+  "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
+).freeze
+
+def node_cost(x)
+  return 0 unless x.is_a?(Array)
+  return node_count(x) if $inline_cost == :nodes
+  n = NODE_WEIGHT[x[0]]
+  n = 6 if x[0] == "call" && !(x[2].is_a?(String) && x[2][0, 2] == "&\"")   # an indirect call
+  x.each { |y| n += node_cost(y) }
+  n
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
@@ -508,7 +529,7 @@ def inline_pass(forms, max_depth, report)
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
   ids = IdentityMap.new
   calls = IdentityMap.new
-  total = node_count(forms)
+  total = node_cost(forms)
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
   max_depth.times do
     round = 0
@@ -526,9 +547,9 @@ def inline_pass(forms, max_depth, report)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
       round += st[:inlined]
-      before = node_count(f)
+      before = node_cost(f)
       forms[i] = ["function", f[1]] + insert_slots(children, st[:hoist])
-      total += node_count(forms[i]) - before
+      total += node_cost(forms[i]) - before
       fns[name] = forms[i]
       reasons.delete(name)
       infos.delete(name)
@@ -1830,6 +1851,8 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a.start_with?("--max-callee=")
       $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--cost=")
+      $inline_cost = a[7..-1] == "nodes" ? :nodes : :weighted
     elsif a.start_with?("--max-growth=")
       $inline_max_growth = a[13..-1].to_f
     elsif a == "--report"
