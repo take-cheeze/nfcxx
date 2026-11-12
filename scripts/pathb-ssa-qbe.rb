@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :sret_names, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -544,6 +544,7 @@ module Qbe
       @params = form.find { |x| head(x) == "params" }.drop(1)
       @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @tls_cache = {}  # a thread-local global (raw name) => the temporary that holds its address (hoist_tls)
       @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
@@ -639,7 +640,10 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
+      # inline `read32le` each, TinyCC's, otherwise collide at link time).
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -699,6 +703,39 @@ end
       end
       asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+      hoist_tls
+    end
+
+    # Whether op() addresses x (a @ref) as a thread-local object: the thread pointer plus the object's offset.
+    def tls_global?(x)
+      info = @globals[x.raw]
+      return false unless info && info[:thread]
+      return false if info[:weak] && info[:extern]
+      return false if info[:extern] && Qbe.darwin
+
+      true
+    end
+
+    # A thread-local object's address is `mov %fs:0, r; add sym@gottpoff(%rip), r` at every reference, and QBE does not share
+    # them. The EH stack top and the current region (__curr_eh_stack_entry, __eh_curr_region) are read and written at every
+    # push and pop of every frame. A global the function names three times or more has its address computed once, in the entry block,
+    # and shared (as GCC does: a function runs on one thread, so the address does not change under it).
+    def hoist_tls
+      counts = {}
+      walk = lambda do |x|
+        if x.is_a?(Ref)
+          counts[x.raw] = (counts[x.raw] || 0) + 1 if x.sigil == "@" && tls_global?(x)
+        elsif x.is_a?(Array)
+          x.each { |y| walk.call(y) }
+        end
+      end
+      @blocks.each { |b| walk.call(b[2..]) }
+      counts.each do |raw, n|
+        next if n < 3
+        t = fresh
+        @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(raw)}"
+        @tls_cache[raw] = t
+      end
     end
 
     # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
@@ -1150,11 +1187,48 @@ end
       # so labels with one body share a target and can form a bit test.
       tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
       tree_default = switch_forward(default)
-      items = switch_items(switch_ranges(tree_cases), cls)
+      ranges = switch_ranges(tree_cases)
+      # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
+      # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
+      span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
+      if cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+        switch_jtab_lines(operand, ranges, tree_default)
+        return
+      end
+      items = switch_items(ranges, cls)
       if items.any? { |it| it[0] == :bits } || items.size >= 4
         switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), items, tree_default)
       else
         switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # A jump table: the index x - lo below the span jumps to its slot (jtab), any other value to the default. Each slot is
+    # its own block (jtab's targets are distinct) and jumps to one shared block per target, so a target has one
+    # predecessor in the IL and a phi there names that block (the jumper, as the chain and the tree do). Holes go to the
+    # default. QBE checks the index against the count itself (amd64 emit).
+    def switch_jtab_lines(operand, ranges, default)
+      lo = ranges[0][0]
+      span = ranges[-1][1] - lo + 1
+      slot_target = Array.new(span, default)
+      ranges.each { |a, b, t| (a..b).each { |v| slot_target[v - lo] = t } }
+      shared = {}
+      shared_label = lambda do |t|
+        shared[t] = "#{block_label(@cur)}.S#{t}" unless shared[t]
+        shared[t]
+      end
+      idx = "%swi#{@cur}"
+      @lines << "  #{idx} =w sub #{operand}, #{lo}"
+      slots = (0...span).map { |k| "#{block_label(@cur)}.E#{k}" }
+      @lines << "  jtab #{idx}, @#{shared_label.call(default)}, " + slots.map { |l| "@#{l}" }.join(", ")
+      slots.each_with_index do |label, k|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{shared_label.call(slot_target[k])}"
+      end
+      shared.each do |t, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(t)}"
+        @jumper[[t, @cur]] = label if @phi_blocks[t.to_s]
       end
     end
 
@@ -1382,6 +1456,8 @@ end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]
+            return @tls_cache[x.raw] if @tls_cache.key?(x.raw)
+
             t = fresh
             @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
             return t
@@ -1676,6 +1752,16 @@ end
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
           @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
+        elsif atomic_small_result?(rv)
+          # A 1- or 2-byte __atomic_* result is defined in its low bits only (the ABI): extend it to the object's type.
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          ext = if unqual(rv[1]).include?("unsigned") || unqual(rv[1]) == "bool"
+                  rv[2].raw.delete('"')[-1] == "1" ? "extub" : "extuh"
+                else
+                  rv[2].raw.delete('"')[-1] == "1" ? "extsb" : "extsh"
+                end
+          @lines << "  #{dst} =w #{ext} #{raw}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -2393,7 +2479,12 @@ end
 
         args.insert(nfixed, "...")
       end
-      callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      # A library function that returns a class by value takes its result in x8 on AArch64, where EDG passes the result
+      # pointer as the first argument (x0): the call goes to the thunk scripts/sret.sh built for it (the C compilers rename
+      # their calls the same way, rename.sed). The destination is the first argument, which the thunk moves to x8.
+      name = f.is_a?(Ref) && f.sigil == "&" ? Qbe.symbol(f.raw) : nil
+      name = "__nfcxx_sret_#{name}" if name && Qbe.sret_names && Qbe.sret_names.include?(name)
+      callee = name ? "$#{name}" : op(f)
       sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
     end
@@ -2447,6 +2538,17 @@ end
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
       # (libstdc++'s shared_ptr counts use acq_rel, 4).
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+    end
+
+    # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
+    def atomic_small_result?(c)
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_") && (name.end_with?("_1") || name.end_with?("_2"))
+      return false if name.start_with?("__atomic_load_") || name.start_with?("__atomic_store_")
+
+      true
     end
 
     # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
