@@ -1843,9 +1843,25 @@ end
         sum = fresh
         @lines << "  #{sum} =l add #{base}, #{scaled}"
         @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
+      elsif wide_literal?(base)
+        # QBE folds `add CONST, x` into the displacement of the load or store that uses it, without checking that the
+        # constant fits in 32 bits (the assembler: "out of range of signed 32bit displacement", for the kernel's
+        # `((long *)0xffff888000000000)[i]`). `sub x, -CONST` is not folded; the constant goes to a register.
+        @lines << "  #{dst} =l sub #{scaled}, #{-base.to_i}"
       else
         @lines << "  #{dst} =l add #{base}, #{scaled}"
       end
+    end
+
+    # An integer literal operand that does not fit in a signed 32-bit displacement.
+    def wide_literal?(text)
+      return false unless text.is_a?(String)
+
+      digits = text.start_with?("-") ? text[1..] : text
+      return false if digits.nil? || digits.empty? || !digits.each_char.all? { |c| DIGITS.include?(c) }
+
+      v = text.to_i
+      v < -2**31 || v >= 2**31
     end
 
     # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
