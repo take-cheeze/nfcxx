@@ -134,10 +134,11 @@
   run: |
     ninja -C tools/pathb-ptx-emit
     tests/gpu/run_interp.sh
-- name: AddressSanitizer (gcc and qbe backends)
+- name: AddressSanitizer (gcc and Path B backends)
+  pathb: true   # ASAN_BACKEND=pathb needs the Path B harness
   run: |
     if [ "$GCC_BACKEND" = 1 ]; then tests/asan/run.sh; fi
-    ASAN_BACKEND=qbe tests/asan/run.sh
+    ASAN_BACKEND=pathb tests/asan/run.sh
 # The Path B harness comes from the cache that the pathb-build job saves (same key), and is built here on a miss.
 - name: Path B e-graph (goldens, cases, CLI; scripts/pathb-egraph.rb)
   pathb: true

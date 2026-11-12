@@ -57,8 +57,8 @@
 #   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.py), like sccache's GHA backend.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
 #                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
-#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe selects
-#                  cproc's instrumentation. docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
+#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe is refused.
+#                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
 #                  refused (-fsanitize=undefined and its checks are the UBSan option above).
 #   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
 #                  stay in its object, loads and stores must be in a live object (heap, global, escaping local), and a
@@ -746,16 +746,17 @@ if [ -z "$backend" ]; then
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
+  # -fsanitize=address has no qbe instrumentation: what the default would send to qbe is built by gcc, which instruments it
+  [ $asan = 0 ] || [ $backend != qbe ] || backend=gcc
 fi
 
-# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
-# branch nfcxx-asan-combined, the pin of 3rd/cproc; qbe-cc reads the -fsanitize=address it is given). Both link libasan. Path B calls
+# -fsanitize=address: gcc's instrumentation on the gcc backend; --backend=qbe is refused. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
     gcc) ;;
-    qbe) ;;   # qbe-cc is given -fsanitize=address (asan_c below)
+    qbe) echo "nfcxx: -fsanitize=address does not work with --backend=qbe; use the default, --backend=pathb or --backend=gcc" >&2; exit 2 ;;
     pathb) ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
@@ -932,7 +933,6 @@ fi
 # The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
 qbecc_flags=()
 if [ $backend = qbe ]; then
-  [ $asan = 0 ] || qbecc_flags+=(-fsanitize=address)
   [ $eh_unwind_on = 0 ] || qbecc_flags+=(--eh-unwind)
 fi
 case $backend in
