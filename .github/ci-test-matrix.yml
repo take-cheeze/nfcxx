@@ -29,6 +29,7 @@
     tests/c/run.sh
     tests/c/cc-mode.sh
     tests/cxx-driver/run.sh
+    tests/nfcc/run.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
 - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
