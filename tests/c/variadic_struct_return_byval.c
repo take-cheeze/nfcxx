@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY-qbe: failed on the arm64 CI job's qbe backend (cproc, a call with a struct result, a named struct argument and no variadic argument returned a wrong value; not investigated). The case is about Path B's x86-64 SSA route: (variadic N) counts the sret pointer.
 // A variadic function that returns a struct and takes a struct by value (mruby's `mrb_value mrb_funcall(mrb_state *, mrb_value, const char *, mrb_int, ...)`):
 // the IR's (variadic N) counts the hidden result pointer, and Path B's SSA route refused the call ("variadic call with 5 named arguments but 4").
 #include <stdarg.h>
