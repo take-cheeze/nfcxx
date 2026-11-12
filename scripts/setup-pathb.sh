@@ -201,6 +201,14 @@ else
     || { tail -30 "$out/configure.log" >&2; exit 1; }
   target=bin/cpfe
 fi
+# glibc's aarch64 jmp_buf is 312 bytes (39 longs); the front end's cmake defines carry the x86-64 size (25 longs) for every
+# Linux target, so setjmp in the EH code it generates writes past the EH stack entry and throws abort (the same patch
+# as scripts/setup-edg.sh for the eccp build). Native Linux builds on aarch64 hosts only (macOS is unchanged).
+if [ "$emscripten" != 1 ] && [ "$(uname -s)" = Linux ]; then
+  case "$(uname -m)" in
+    aarch64|arm64) sed -i.bak 's/^#define TARG_JMP_BUF_NUM_ELEMENTS 25$/#define TARG_JMP_BUF_NUM_ELEMENTS 39/' "$out/cmake/src/includes/cmake_defines.h" && rm -f "$out/cmake/src/includes/cmake_defines.h.bak" ;;
+  esac
+fi
 cd "$out/cmake"
 ninja ${PATHB_JOBS:+-j$PATHB_JOBS} $target >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
 if [ "$emscripten" = 1 ]; then

@@ -129,6 +129,7 @@ module CoreNativeCandidates
 
   # An operator's table name is the operator, not the identifier: MRB_OPSYM(div) is `/`, and cdump's table row
   # OPERATOR_SYMBOL("/", "div") formats it. Neither looks up a method called `div`.
+  PRESYM_HEADER = %r{/include/mruby/presym(?:\.h|/)}
   OPERATOR_NAMES_TEXT = [
     /\bMRB_OPSYM\s*\(\s*\w+\s*\)/,
     /\bOPERATOR_SYMBOL\s*\(\s*"[^"\n]*"\s*,\s*"\w+"\s*\)/
@@ -293,7 +294,7 @@ module CoreNativeCandidates
         next unless mt_class
 
         line.scan(ENTRY) do |fn, kind, cname|
-          name = kind == 'OPSYM' ? (operator_names ? OPERATOR_NAMES[cname] : nil) : cname + SUFFIX.fetch(kind)
+          name = kind == 'OPSYM' ? (operator_names ? OPSYM_TO_RUBY[cname] : nil) : cname + SUFFIX.fetch(kind)
           out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
                    installed: own_table?(owners[table], mt_class) ? mt_class : nil }
         end
@@ -312,7 +313,7 @@ module CoreNativeCandidates
   # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
                 exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil,
-                compiled_core: nil)
+                compiled_core: nil, operators: false)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
@@ -336,6 +337,13 @@ module CoreNativeCandidates
       note.call("native #{path}")
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
+      # OPERATOR_ROWS: the rows run admits operators, so an operator a native names is a lookup of it.
+      # The presym headers define the macro for every operator, which looks nothing up (their macro definitions are
+      # blanked in the rows run, which admits operators).
+      if operators
+        text = text.gsub(/^[ \t]*#[ \t]*define\b(?:[^\n]*\\\n)*[^\n]*$/) { |m| m.gsub(/[^\n]/, ' ') } if path.match?(PRESYM_HEADER)
+        text.gsub(/^[ \t]*#[ \t]*define\b.*$/, '').scan(/\bMRB_OPSYM\s*\(\s*(\w+)\s*\)/) { |(c)| names << OPSYM_TO_RUBY.fetch(c, c) }
+      end
       text = strip_label_calls(strip_operator_names(text), helpers)
       text = strip_hook_calls(text, hook_names) if diagnostic_literals
       text = strip_enumerator_symbols(text, enumerator_free)
@@ -536,10 +544,14 @@ module CoreNativeCandidates
   end
 
   # The listed keys, "MtClass#name" sorted: every entry of the key a candidate, its name unreachable.
-  def candidates(entries, names, fragments, proven = {})
+  # +operators+ (OPERATOR_ROWS, the rows run only): an operator is a candidate once nothing reaches its name; no
+  # fragment builds one.
+  def candidates(entries, names, fragments, proven = {}, operators: false)
     entries.group_by { |e| [e[:mt_class], e[:name]] }.filter_map do |(mt_class, name), group|
-      next unless (name&.match?(NAME) || proven[name]) && group.all? { |e| e[:installed] }
-      next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      operator = operators && name && !name.match?(NAME) && OPSYM_TO_RUBY.value?(name)
+      next unless (name&.match?(NAME) || proven[name] || operator) && group.all? { |e| e[:installed] }
+      next if operator && names.include?(name)
+      next if !operator && !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       "#{mt_class}##{name}"
     end.sort
