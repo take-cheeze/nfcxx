@@ -131,7 +131,7 @@ def normalise_literals(x)
   return x unless head(x) == "const" && x.size >= 3 && x[1].is_a?(String) && x[2].is_a?(String)
 
   type, val = x[1], x[2]
-  if float_type?(type)
+  if float_type?(type) || type == "std::float16_t"
     x[2] = "1e999" if val == "+Infinity"
     x[2] = "-1e999" if val == "-Infinity"
   elsif hex_literal?(val) && INT_TYPES.key?(type)

@@ -226,6 +226,18 @@ static int ir_is_f128(a_type_ptr t)
   return s->kind == tk_float && (s->variant.float_kind == fk_float128 || s->variant.float_kind == fk_std_float128);
 }
 
+/* _Float16 and std::float16_t: QBE has no half type, so the SSA route's QBE emitter (scripts/pathb-ssa-qbe.rb) keeps one as its
+   binary16 pattern in a w register and calls the __nfcxx_f16_* helpers of be/nfcxx_ldrt.c for every operation. The IR carries it as the
+   floating type `std::float16_t` (ir_is_float holds): the places below that choose a helper by the size of the operand (4 float, else
+   double) convert through double first, which is exact for a half. */
+static int ir_is_f16(a_type_ptr t)
+{
+  a_type_ptr s;
+  if (t == NULL) return 0;
+  s = skip_typerefs(t);
+  return s->kind == tk_float && (s->variant.float_kind == fk_float16 || s->variant.float_kind == fk_std_float16);
+}
+
 /* A 16-byte floating object with its own helpers: long double or _Float128. */
 static int ir_is_fobj(a_type_ptr t)
 {
@@ -2595,6 +2607,7 @@ static ir_val ir_i128_conv(ir_val a, a_type_ptr dst)
     } else if (ir_is_float(a.t)) { /* the destination's signedness picks the range check */
       int dsg = ir_is_signed(dst);
       if (ir_size_of(a.t) == 4) ir_i128_call(dsg ? "from_f32_s" : "from_f32_u", ir_fmt("%s %s", d.s, a.s));
+      else if (ir_is_f16(a.t)) ir_i128_call(dsg ? "from_f64_s" : "from_f64_u", ir_fmt("%s %s", d.s, ir_let("double", ir_fmt("(fconv double %s)", a.s))));
       else ir_i128_call(dsg ? "from_f64_s" : "from_f64_u", ir_fmt("%s %s", d.s, a.s));
     } else if (ir_is_x87(a.t)) {
       ir_i128_call(ir_is_signed(dst) ? "from_ld_s" : "from_ld_u", ir_fmt("%s %s", d.s, a.s));
@@ -2625,6 +2638,10 @@ static ir_val ir_i128_conv(ir_val a, a_type_ptr dst)
     char *lo = ir_i128_ret("unsigned_long", "lo64", a.s);
     if (strcmp(ir_valtext(dst), "unsigned_long") == 0) return ir_mk_value(lo, dst);
     return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), lo)), dst);
+  }
+  if (ir_is_f16(dst)) { /* through double: a value that does not fit a double is beyond the half range, and one that does is exact there */
+    char *dv = ir_i128_ret("double", sg ? "to_f64_s" : "to_f64_u", a.s);
+    return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(fconv %s %s)", ir_valtext(dst), dv)), dst);
   }
   if (ir_is_float(dst)) {
     const char *nm = ir_size_of(dst) == 4 ? (sg ? "to_f32_s" : "to_f32_u") : (sg ? "to_f64_s" : "to_f64_u");
@@ -3201,6 +3218,8 @@ static ir_val ir_x87_conv(ir_val a, a_type_ptr dst)
         w = ir_let(sg ? "long" : "unsigned_long", ir_fmt("(iconv %s %s)", sg ? "long" : "unsigned_long", a.s));
       }
       ir_fo_call(dst, sg ? "from_s64" : "from_u64", ir_fmt("%s %s", d.s, w));
+    } else if (ir_is_f16(a.t)) { /* exact through double */
+      ir_fo_call(dst, "from_f64", ir_fmt("%s %s", d.s, ir_let("double", ir_fmt("(fconv double %s)", a.s))));
     } else if (ir_is_float(a.t)) {
       ir_fo_call(dst, ir_size_of(a.t) == 4 ? "from_f32" : "from_f64", ir_fmt("%s %s", d.s, a.s));
     } else if (ir_is_f128(dst) && ir_is_x87(a.t)) { /* long double to _Float128 */
@@ -3220,6 +3239,9 @@ static ir_val ir_x87_conv(ir_val a, a_type_ptr dst)
     char *r = ir_fo_ret(a.t, sg ? "long" : "unsigned_long", sg ? "to_s" : "to_u", ir_fmt("%s (const int %llu)", a.s, bits));
     if (ir_size_of(dst) == 8) return ir_mk_value(r, dst);
     return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), r)), dst);
+  }
+  if (ir_is_f16(dst)) { /* rounded once from the exact value; the helper returns the _Float16 of the C convention (SSE) */
+    return ir_mk_value(ir_fo_ret(a.t, ir_valtext(dst), "to_f16", a.s), dst);
   }
   if (ir_is_float(dst)) {
     return ir_mk_value(ir_fo_ret(a.t, ir_valtext(dst), ir_size_of(dst) == 4 ? "to_f32" : "to_f64", a.s), dst);
@@ -3631,6 +3653,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
   }
   if (strcmp(name, "fpclassify") == 0) {
     an_expr_node_ptr xa = ir_operand(e, 6);
+    if (xa != NULL && ir_is_f16(xa->type)) { *out = ir_gap(e->type, "op fpclassify (_Float16)", 0, (int)eok_call); return 1; }
     if (xa != NULL && ir_is_float(xa->type) && ir_size_of(xa->type) <= 8) {
       /* libm's classification returns the FP_* values of the same <math.h> that supplied the five constants */
       ir_val x = ir_rval(xa);
@@ -3648,6 +3671,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
     int single = ir_size_of(a1->type) == 4;
     char *r;
     ir_note(0, eok_call, 1);
+    if (ir_is_f16(a1->type) && strcmp(name, "signbit") == 0) { *out = ir_gap(e->type, "op signbit (_Float16)", 0, (int)eok_call); return 1; }
     if (strcmp(name, "signbit") == 0) {
       *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, IR_LIBM_TYPED("__signbit", single), x.s)), e->type);
       return 1;
@@ -3662,7 +3686,7 @@ static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
         r = finite;
       } else if (strcmp(name, "isnormal") == 0) {
         /* finite and |x| >= the smallest normal number */
-        const char *mn = single ? "1.17549435082228750797e-38" : "2.2250738585072013831e-308";
+        const char *mn = ir_is_f16(a1->type) ? "6.103515625e-05" : single ? "1.17549435082228750797e-38" : "2.2250738585072013831e-308";
         char *big = ir_cv(it, ir_let("bool", ir_fmt("(le.f %s (const %s %s) %s)", t, t, mn, x.s)));
         char *small = ir_cv(it, ir_let("bool", ir_fmt("(le.f %s %s (const %s -%s))", t, x.s, t, mn)));
         r = ir_o2("and", it, ir_o2("or", it, big, small), finite);
