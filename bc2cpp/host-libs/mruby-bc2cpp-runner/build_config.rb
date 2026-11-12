@@ -4,9 +4,10 @@
 #     MRUBY_BUILD_DIR=<dir> rake
 # Not wired into build_config.rb: this build is the bc2cpp runner alone. Its test status is in the runner's README.
 require_relative '../../tools/bc2cpp/world_root'
-ROOT = File.expand_path('../..', Dir.pwd) unless defined?(ROOT)
+ROOT = BC2CPP_WORLD_ROOT unless defined?(ROOT)
 
-MRuby::Build.new('bc2cpp-runner') do |conf|
+self_aot = ENV['BC2CPP_RUNNER_SELF'] == '1'
+MRuby::Build.new(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner') do |conf|
   toolchain :gcc
   # Keep the host CXX available to nfcxx's bootstrap helpers. Setting CXX=nfcxx
   # globally can recursively rebuild weak-symbols with the compiler it supports.
@@ -33,8 +34,12 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   # bc2cpp splits its 20 MB output into millions of lines; mruby's default array length limit is 131072.
   conf.cc.defines << 'MRB_ARY_LENGTH_MAX=0'
   conf.cxx.defines << 'MRB_ARY_LENGTH_MAX=0'
-  conf.gem core: 'mruby-bin-mrbc'
-  conf.gem core: 'mruby-compiler'
+  if self_aot
+    conf.mrbcfile = ENV.fetch('MRBC')
+  else
+    conf.gem core: 'mruby-bin-mrbc'
+    conf.gem core: 'mruby-compiler'
+  end
   %w[mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-io mruby-dir mruby-numeric-ext mruby-range-ext
      mruby-symbol-ext mruby-compar-ext mruby-fiber mruby-exit mruby-sprintf mruby-kernel-ext mruby-random
      mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy mruby-struct
@@ -54,4 +59,31 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
   conf.gem File.expand_path('../mruby-process', __dir__)
   conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-sources')
   conf.gem File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-runner')
+  conf.gem ENV.fetch('BC2CPP_RUNNER_SELF_GEM') if self_aot
+end
+
+# Export the configured runtime rather than reconstructing its gem dependencies.
+if (manifest = ENV['BC2CPP_RUNNER_MANIFEST'])
+  require 'json'
+  task :bc2cpp_runner_manifest do
+    build = MRuby.targets.fetch(self_aot ? 'bc2cpp-self' : 'bc2cpp-runner')
+    gems = build.gems.reject { |gem| gem.name == 'mruby-compiler' || gem.name.start_with?('mruby-bin-') }
+    native = Dir[File.join(MRUBY_ROOT, 'src/*.{c,cpp,cxx}')]
+    ruby = Dir[File.join(MRUBY_ROOT, 'mrblib/**/*.rb')]
+    gems.each do |gem|
+      ruby.concat(gem.rbfiles.flatten)
+      native.concat(Dir[File.join(gem.dir, '{src,core}/**/*.{c,cpp,cxx}')])
+      gem.objs.each do |obj|
+        next unless Rake::Task.task_defined?(obj)
+        native.concat(Rake::Task[obj].prerequisites.select do |path|
+          path.match?(/\.(c|cpp|cxx)\z/) && File.file?(path) && !path.end_with?('/gem_init.c')
+        end)
+      end
+    end
+    include_paths = (build.compilers + gems.flat_map(&:compilers)).flat_map(&:include_paths).flatten.uniq
+    headers = include_paths.flat_map { |path| Dir[File.join(path, '**/*.{h,hpp,hxx}')] }.uniq.sort
+    File.write(manifest, JSON.pretty_generate('gems' => gems.to_h { |gem| [gem.name, gem.dir] },
+                                             'native' => native.uniq.sort, 'ruby' => ruby.uniq.sort,
+                                             'headers' => headers, 'defines' => build.cc.defines.flatten))
+  end
 end

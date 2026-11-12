@@ -10,6 +10,10 @@ on:
     - cron: "23 4 * * 1"
   workflow_dispatch:
     inputs:
+      self_aot:
+        description: Build and verify the bc2cpp self-AOT compiler
+        type: boolean
+        default: false
       mrbc_rb:
         description: "BC2CPP_MRBC_RB for every bc2cpp world/checks job: snapshot, verify, or record (= verify plus BC2CPP_MRBC_SNAPSHOT_RECORD; the record files are uploaded as artifacts for snapshot.rb --update --from-record)"
         default: ""
@@ -722,6 +726,8 @@ jobs:
             - "scripts/cpp-feature-report.rb"
             - "scripts/bc2cpp"
             - "scripts/setup-bc2cpp.sh"
+            - "scripts/bc2cpp-self"
+            - "scripts/setup-bc2cpp-self.sh"
             - "Gemfile"
             - "Gemfile.lock"
             - "scripts/pathb-borrowck.rb"
@@ -819,6 +825,9 @@ jobs:
 
       - name: Baked runner source graph
         run: bundle exec ruby tests/bc2cpp/source_baking.rb
+
+      - name: Self compilation artifacts and registration
+        run: bundle exec ruby tests/bc2cpp/self_compile.rb
 
       - name: Golden, CLI and integration tests against the fork's mrbc
         run: tests/bc2cpp/run_mrbc_rb.sh
@@ -1052,3 +1061,52 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # A full self build is intentionally requested through workflow_dispatch;
+  # the fast artifact checks above run on ordinary changes.
+  self-aot:
+    if: github.event_name == 'workflow_dispatch' && inputs.self_aot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NFCXX_BACKEND: gcc
+      RUBYOPT: --yjit
+      BC2CPP_SCCACHE: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v7
+      - name: EDG sources
+        run: git submodule update --init --depth 1 3rd/edg
+      - uses: ./.github/actions/toolchain
+        with:
+          qbe: "false"
+          packages: clang bison gperf autoconf automake libtool
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+      - name: Pinned fixture world
+        run: BC2CPP_WORLD_FULL=1 tests/bc2cpp/world.sh
+      - name: CRuby 4 + YJIT compiles bc2cpp; nfcxx builds its output
+        run: bundle exec scripts/setup-bc2cpp-self.sh > "$RUNNER_TEMP/bc2cpp-self-path"
+      - name: Translated entries, emitter parity and generated-code behavior
+        env:
+          BC2CPP_REQUIRE_SELF_AOT: "1"
+          BC2CPP_RUNNER_MRBC_MODE: verify
+        run: |
+          export BC2CPP_MRUBY_RUNNER=$(cat "$RUNNER_TEMP/bc2cpp-self-path")
+          export MRBC="$GITHUB_WORKSPACE/build/bc2cpp-self/bootstrap/bc2cpp-runner/bin/mrbc"
+          export CXX="$GITHUB_WORKSPACE/nfcxx"
+          bundle exec ruby --yjit tests/bc2cpp/runner_generation.rb
+      - name: Self-build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bc2cpp-self-build
+          path: |
+            build/bc2cpp-self/*.log
+            build/bc2cpp-self/generation/*.json
+            build/bc2cpp-self/generation/*.log
+          if-no-files-found: ignore
