@@ -104,27 +104,30 @@ check.call("bc2cpp paths name only scripts a world compiles (#{(listed - world_s
 
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 
-def outcomes(full, pathb)
+def outcomes(full, pathb, bc2cpp = false)
   needs = { 'pathb-changes' => { 'result' => 'success', 'outputs' => {
     'full_ci' => full.to_s, 'changed' => pathb.to_s,
     'test_matrix' => JSON.generate(LEGS.map { |name| { 'name' => name, 'run' => 'true' } })
-  } } }
-  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb]].each do |names, enabled|
+  } },
+            'bc2cpp-changes' => { 'result' => 'success', 'outputs' => { 'changed' => bc2cpp.to_s } } }
+  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
   end
   needs
 end
 
-[[true, true], [true, false], [false, false]].each do |full, pathb|
-  original = outcomes(full, pathb)
-  check.call("valid gate #{full}/#{pathb}") { CiScope.validate(original); true }
+# The third value is bc2cpp-changes: false + true is a change to bc2cpp/ alone, where only the bc2cpp jobs are selected.
+[[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, false, true], [false, false, false]]
+  .each do |full, pathb, bc2cpp|
+  original = outcomes(full, pathb, bc2cpp)
+  check.call("valid gate #{full}/#{pathb}/#{bc2cpp}") { CiScope.validate(original); true }
   original.each_key do |name|
     ['failure', 'cancelled', 'skipped', 'success', nil].each do |status|
       next if status == original[name]['result']
 
       needs = Marshal.load(Marshal.dump(original))
       needs[name]['result'] = status
-      rejects.call("gate #{full}/#{pathb}: #{name} #{status.inspect}") { CiScope.validate(needs) }
+      rejects.call("gate #{full}/#{pathb}/#{bc2cpp}: #{name} #{status.inspect}") { CiScope.validate(needs) }
     end
     needs = Marshal.load(Marshal.dump(original))
     needs.delete(name)
@@ -138,6 +141,11 @@ end
     needs['pathb-changes']['outputs'][key] = value
     rejects.call("invalid #{key}=#{value.inspect}") { CiScope.validate(needs) }
   end
+end
+['', 'unknown', nil, true].each do |value|
+  needs = outcomes(true, true, true)
+  needs['bc2cpp-changes']['outputs']['changed'] = value
+  rejects.call("invalid bc2cpp changed=#{value.inspect}") { CiScope.validate(needs) }
 end
 rejects.call('inconsistent selection') { CiScope.validate(outcomes(false, true)) }
 
