@@ -8,6 +8,14 @@ ROOT = File.expand_path('../..', Dir.pwd) unless defined?(ROOT)
 
 MRuby::Build.new('bc2cpp-runner') do |conf|
   toolchain :gcc
+  # Keep the host CXX available to nfcxx's bootstrap helpers. Setting CXX=nfcxx
+  # globally can recursively rebuild weak-symbols with the compiler it supports.
+  if (compiler = ENV['BC2CPP_RUNNER_CXX']) && !compiler.empty?
+    conf.cxx.command = compiler
+    conf.linker.command = compiler
+    conf.cc.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+    conf.cxx.defines << 'MRB_USE_VM_SWITCH_DISPATCH'
+  end
   # BC2CPP_RUNNER_OPT=1: an optimised runner (-O2, no MRB_DEBUG), the build to time. Without it: -g3 -O0 with MRB_DEBUG.
   if ENV['BC2CPP_RUNNER_OPT'] == '1'
     conf.cc.flags << '-O2'
@@ -32,6 +40,7 @@ MRuby::Build.new('bc2cpp-runner') do |conf|
      mruby-math mruby-time mruby-bigint mruby-string-ext mruby-metaprog mruby-pack mruby-enumerator mruby-enum-lazy mruby-struct
      mruby-set mruby-method mruby-proc-ext mruby-errno mruby-error mruby-encoding].each { |g| conf.gem core: g }
   conf.gem File.expand_path('../mruby-require', __dir__)
+  conf.gem File.expand_path('../mruby-env', __dir__)
   # Marshal (the scan cache) depends on mruby-onig-regexp, which bundles Onigmo, as build_config.rb has it.
   conf.gem File.join(ROOT, '3rd/mruby-onig-regexp') do
     bundle_onigmo
