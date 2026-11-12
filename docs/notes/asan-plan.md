@@ -1,6 +1,6 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
+Status: the qbe backend's ASan is retired (`--backend=qbe -fsanitize=address` is refused; docs/notes/asan.md), kept below as the design record. The gcc backend is done, the qbe backend had milestones 1-7 below (loads and stores, redzones, use after scope,
 use after return; `asan.md`, `tests/asan/run.sh`), and Path B has its milestones 1 to 4 and 6 and use after return (heap checks, stack, global and alloca redzones, use after scope, fake frames: `NFCXX_PATHB_ASAN`, `asan.md` "Path B").
 This note plans the rest of Path B and the wasm emitter. Nothing of wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
