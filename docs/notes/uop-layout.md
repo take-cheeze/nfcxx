@@ -162,6 +162,35 @@ What this says:
 
 The scratch kernels and the driver are not in the repository.
 
+## Optimization level changes the small-K results (fourth round, quiet host)
+
+All timings above used `cc -O2`, the same flags as the emitter's test. Re-timing vec-n and vec-m at `-O3` (`M = N = 256`,
+best of 15 timings of 50 calls each, one run per flag set, both runs for `-O2` agree within a few percent):
+
+| K | vec-m / vec-n at -O2 | vec-m / vec-n at -O3 |
+| --- | --- | --- |
+| 4 | 1.03 | 2.43 |
+| 8 | 1.47 | 1.28 |
+| 12 | 0.85 | 0.94 |
+| 16 | 0.89 | 0.95 |
+| 24 | 1.12 | 1.12 |
+| 32 | 1.16 | 1.17 |
+| 64 | 1.46 | 1.47 |
+
+What this says:
+
+- **The K = 12 to 16 advantage for vec-m is small and only holds at -O2 (0.85 to 0.89) or at near-parity at -O3 (0.94
+  to 0.95).** At K = 16 the block-layout kernel is 79 µs at -O2 and 53 µs at -O3, so the unexplained K = 16 result above
+  is a code-generation effect of -O2 on the inner loop, not a layout effect.
+- **K = 4 is not stable:** 1.03 at -O2 and 2.43 at -O3. The earlier 1.5 and parity readings were both at -O2 on a
+  busier host. I do not have a reliable small-K number.
+- **Above K = 16, vec-n is faster at both flags** (1.12 to 1.47 times vec-m), which the model also predicts.
+- **Below K = 16, the model predicts vec-m wins.** The data do not show that: vec-m is slower at K = 8 at both flags.
+
+Consequence: on this AVX2 target, for this shape, the N-vectorized kernel is the faster default at almost every K. The
+M-vectorized kernel only competes with a blocked layout (see the block experiment above), which the layout model does
+not describe yet.
+
 ## Next steps on this target
 
 1. Decide whether the layout model should allow a blocked layout (lanes on M, 8 rows contiguous per block) for the
