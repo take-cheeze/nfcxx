@@ -209,6 +209,7 @@ require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
 require_relative 'codegen_call_inline'
+require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
