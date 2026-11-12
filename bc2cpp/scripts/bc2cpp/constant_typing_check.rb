@@ -2,8 +2,9 @@
 # frozen_string_literal: true
 
 # Constant typing: frozen containers, Hash merges, Array sums and integer arithmetic. Compatible positives share
-# one end-to-end type_check.rb run; Object#freeze withdrawal shares another. Other method redefinitions each stay
-# in their own closed world. Integer interval and operator predicates are also checked independently in process.
+# one end-to-end type_check.rb run; positive inference variants share input setup in private forks.
+# Object#freeze withdrawal shares another report. Other method redefinitions each stay in their own closed world.
+# Integer interval and operator predicates are also checked independently in process.
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/constant_typing_check.rb
 
@@ -24,13 +25,18 @@ check = lambda do |what, condition|
 end
 
 # Empty signatures make fixture diagnostics meaningful: engine-only declarations do not belong to these programs.
-typed_rows = lambda do |source, cli: false|
+typed_rows = lambda do |source, cli: false, variants: nil|
   Dir.mktmpdir('constant-typing') do |dir|
     rb = File.join(dir, 'fixture.rb')
     out = File.join(dir, 'facts.json')
     sig = File.join(dir, 'sig')
     Dir.mkdir(sig)
     File.write(rb, source)
+    if variants
+      next TypeCheckFixture.shared_reports(dir, files: [rb], variants: variants,
+                                          env: { 'BC2CPP_SIG_DIRS' => sig }, label: 'constant typing variants')
+                           .transform_values { |report| report.fetch('constants') }
+    end
     report = if cli
                TypeCheckFixture.report(dir, files: [rb], options: ['--sig', sig], out: out,
                                        label: 'constant typing')
@@ -122,9 +128,9 @@ puts '== shared end-to-end positives: containers and integer arithmetic'
 unknown_merge = "X_MERGE = $unproven.merge({ b: 2 })\n"
 positive_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true)
 # The integer-constant and interval proofs, without EXACT_ARITH's class pools answering first.
-ENV['BC2CPP_EXACT_ARITH'] = '0'
-integer_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true)
-ENV.delete('BC2CPP_EXACT_ARITH')
+controls = [{ 'BC2CPP_EXACT_ARITH' => '0' }, { 'BC2CPP_OPERATOR_SENDS' => '0' }]
+variant_rows = typed_rows.call(BASE + positive + frozen + unknown_merge, variants: controls)
+integer_rows = variant_rows.fetch(controls[0])
 
 puts '== positives: stock owners, a foreign Ruby freeze'
 rows = container_rows.call(positive_rows)
@@ -135,9 +141,7 @@ check.call('a Hash merge of a constant Hash is Hash', rows['CONST_MERGE']&.first
 # OPERATOR_SENDS types `Array + Array` in the class pools, which answer before the sum fact.
 check.call('an Array sum that is frozen is Array', rows['SUM']&.first(2) == ['Array', 'inferred:class-pool'])
 check.call('the sum over a frozen sum is Array', rows['KANA']&.first(2) == ['Array', 'inferred:class-pool'])
-ENV['BC2CPP_OPERATOR_SENDS'] = '0'
-sum_rows = container_rows.call(typed_rows.call(BASE + positive + frozen + unknown_merge, cli: true))
-ENV.delete('BC2CPP_OPERATOR_SENDS')
+sum_rows = container_rows.call(variant_rows.fetch(controls[1]))
 check.call('without OPERATOR_SENDS the sum fact types a frozen Array sum',
            sum_rows['SUM']&.first(2) == ['Array', 'inferred:array-sum'] &&
            sum_rows['KANA']&.first(2) == ['Array', 'inferred:array-sum'])
