@@ -255,6 +255,25 @@ K blocking (the packed panels kept in cache, with C accumulated across blocks in
 no blocking, 3,550 us at a block of 256, 3,507 us at 128. At these sizes the packed panel already stays in cache, and
 the extra loads and stores of C cost what the blocking saves.
 
+## AVX-512 packed kernel (seventh round)
+
+`emit_gemm_rowsum_packed512_c` (`lib/uop/nfcuop_layout_avx512.*`) is the packed kernel on 16-lane zmm vectors: a
+mr-row by 32-column tile over 32-column packed panels of B, mr = 4 or 6. The test (`tests/uop/test_layout_avx512.cpp`)
+checks it bit for bit against the reference and skips without AVX-512F.
+
+504 x 512 x 512, float32, one thread, the same host:
+
+| kernel | us | vs OpenBLAS AVX-512 (SkylakeX) |
+| --- | --- | --- |
+| emitter packed AVX-512, mr = 4 | 2,016 | 1.13x slower |
+| emitter packed AVX-512, mr = 6 | 2,163 | 1.22x slower |
+| OpenBLAS, AVX-512 kernels | 1,778 | 1x |
+| OpenBLAS, AVX2 kernels (Haswell) | 3,337 | 1.6x faster than the AVX-512 kernel |
+
+So the AVX-512 kernel is within about 15 to 20 percent of OpenBLAS's AVX-512 kernels on one thread, and it is the first
+path here that is not limited by the 256-bit vector width. Single-thread OpenBLAS measurements varied between sessions
+by about 30 percent, so treat the ratio as rough. Threading and tile shapes other than 4 and 6 rows are not done.
+
 ## Next steps on this target
 
 1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
