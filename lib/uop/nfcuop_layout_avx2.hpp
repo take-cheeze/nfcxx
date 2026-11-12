@@ -39,4 +39,11 @@ enum class Storage : uint8_t { Strided, Blocked8 };
 std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose = true,
                                Storage storage = Storage::Strided);
 
+// The register-blocked VecN kernel: a 4-row by 16-column tile with B packed into contiguous 16-column panels, so the
+// inner loop reads B with unit stride. C is row-major M x N and R the row sums, as for VecN. The kernel signature is
+//   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp);
+// where Bp is scratch of K * N floats (the packed B). mr is the row tile, 4 or 6: requires M % mr == 0, N % 16 == 0.
+// The packing is the layout repair of the model: the cost of the packing pass is M-independent and O(K*N).
+std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr = 4);
+
 }  // namespace nfcuop::layout

@@ -114,7 +114,7 @@ std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
-dialect=${NFCXX_DIALECT:-$(host_dialect)}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
+dialect=${NFCXX_DIALECT:-$(host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
 path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
 ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
@@ -574,7 +574,7 @@ while [ $# -gt 0 ]; do
     -fno-sanitize=address) asan=0 ;;
     -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
     -fno-omit-frame-pointer|-fomit-frame-pointer) asanopts+=("$1") ;;   # asan's usual companions; they go to the C compile
-    --dialect=*) dialect=${1#--dialect=} ;;
+    --dialect=*) dialect=${1#--dialect=}; dialect_asked=1 ;;
     --gnu-version=*) gnu=${1#--gnu-version=}; gnu_user=$gnu ;;
     --freestanding) freestanding=1 ;;
     --cosmo) cosmo=1 ;;
@@ -847,6 +847,11 @@ done
 # mode does not define (lib/pathb/clang_macros.h). Gated on Darwin, not on the dialect: a Linux clang host keeps libstdc++
 # and its own feature checks.
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && cflags+=(-include "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
+# Path B's front end is an x86-64 EDG target (no __aarch64__, no __clang__), so libc++ takes the x86-64 std::string layout on
+# an arm64 Mac, where the SDK's libc++ (clang's Apple arm64 config) uses the alternate layout: the size in byte 23, the
+# short-string flag in its top bit. Path B would read a string made by the library wrongly. Defining the layout macro is
+# the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
+[ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
 # Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
 # target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump does the same).
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
@@ -933,6 +938,10 @@ fi
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
 # Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.
+pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-narrowing), for scripts/pathb-dump
+# EDG's clang mode on Path B only when asked for (--dialect=clang, NFCXX_DIALECT), not for a clang host's default: Path B on macOS stays in g++ mode
+# with lib/pathb/clang_macros.h, since libc++ needs __BYTE_ORDER__, which the clang mode does not define.
+[ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 # The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.

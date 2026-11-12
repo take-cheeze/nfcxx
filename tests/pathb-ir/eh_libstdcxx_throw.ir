@@ -26390,7 +26390,6 @@
         (let %9 (ptr (fn bool ((ptr (union "_ZSt9_Any_data")) (ptr (const (union "_ZSt9_Any_data"))) int))) (load (ptr (fn bool ((ptr (union "_ZSt9_Any_data")) (ptr (const (union "_ZSt9_Any_data"))) int))) %8))
         (store (ptr (fn bool ((ptr (union "_ZSt9_Any_data")) (ptr (const (union "_ZSt9_Any_data"))) int))) $"tmp.2" %9)
         (let %10 (ptr (struct "_ZSt14_Function_base")) (load (ptr (struct "_ZSt14_Function_base")) $"tmp"))
-        (nonnull %10)
         (let %11 (ptr (const (union "_ZSt9_Any_data"))) (bitcast (ptr (const (union "_ZSt9_Any_data"))) %10))
         (store (ptr (const (union "_ZSt9_Any_data"))) $"tmp.3" %11)
         (let %12 (ptr (fn bool ((ptr (union "_ZSt9_Any_data")) (ptr (const (union "_ZSt9_Any_data"))) int))) (load (ptr (fn bool ((ptr (union "_ZSt9_Any_data")) (ptr (const (union "_ZSt9_Any_data"))) int))) $"tmp.2"))
@@ -29313,7 +29312,6 @@
   (store unsigned_char %2 (const unsigned_char 6))
   (block
     (let %3 (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) (load (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) $"tmp"))
-    (nonnull %3)
     (let %4 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %3))
     (store (ptr (struct "_ZSaIiE")) $"tmp.2" %4)
     (block
@@ -29337,7 +29335,6 @@
   (store unsigned_char %2 (const unsigned_char 6))
   (block
     (let %3 (ptr (const (struct "_ZSt12_Vector_baseIiSaIiEE"))) (load (ptr (const (struct "_ZSt12_Vector_baseIiSaIiEE"))) $"tmp"))
-    (nonnull %3)
     (let %4 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %3))
     (let %5 (ptr (const (struct "_ZSaIiE"))) (bitcast (ptr (const (struct "_ZSaIiE"))) %4))
     (store (ptr (const (struct "_ZSaIiE"))) $"tmp.2" %5)
@@ -29513,7 +29510,6 @@
   (if %3
     (then
       (let %5 (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) (load (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) $"tmp"))
-      (nonnull %5)
       (let %6 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %5))
       (store (ptr (struct "_ZSaIiE")) $"tmp.1" %6)
       (let %7 unsigned_long (load unsigned_long $"__n"))
@@ -29545,7 +29541,6 @@
     (then
       (block
         (let %5 (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) (load (ptr (struct "_ZSt12_Vector_baseIiSaIiEE")) $"tmp"))
-        (nonnull %5)
         (let %6 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %5))
         (store (ptr (struct "_ZSaIiE")) $"tmp.1" %6)
         (let %7 (ptr int) (load (ptr int) $"__p"))
@@ -31398,7 +31393,6 @@
   (store unsigned_char %2 (const unsigned_char 6))
   (block
     (let %3 (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) (load (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) $"tmp"))
-    (nonnull %3)
     (let %4 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %3))
     (store (ptr (struct "_ZSaIiE")) $"tmp.2" %4)
     (block
@@ -31422,7 +31416,6 @@
   (store unsigned_char %2 (const unsigned_char 6))
   (block
     (let %3 (ptr (const (struct "_ZSt11_Deque_baseIiSaIiEE"))) (load (ptr (const (struct "_ZSt11_Deque_baseIiSaIiEE"))) $"tmp"))
-    (nonnull %3)
     (let %4 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %3))
     (let %5 (ptr (const (struct "_ZSaIiE"))) (bitcast (ptr (const (struct "_ZSaIiE"))) %4))
     (store (ptr (const (struct "_ZSaIiE"))) $"tmp.2" %5)
@@ -31463,7 +31456,6 @@
   (slot "tmp" (const (ptr (struct "_ZSt11_Deque_baseIiSaIiEE"))) 8 8)
   (store (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) (load (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %1))
   (let %3 (ptr int) (call (ptr int) &"_ZNSt16allocator_traitsISaIiEE8allocateERS0_m" %2 (const unsigned_long 128)))
   (return %3))
@@ -31485,7 +31477,6 @@
   (let %3 (ptr unsigned_char) (offset $"tmp.1" 8))
   (store unsigned_char %3 (const unsigned_char 6))
   (let %4 (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) (load (ptr (struct "_ZSt11_Deque_baseIiSaIiEE")) $"tmp"))
-  (nonnull %4)
   (let %5 (ptr (struct "_ZSaIiE")) (bitcast (ptr (struct "_ZSaIiE")) %4))
   (store (ptr (struct "_ZSaIiE")) $"tmp.2" %5)
   (let %6 (ptr int) (load (ptr int) $"__p"))
@@ -33014,7 +33005,6 @@
   (store unsigned_char %2 (const unsigned_char 6))
   (block
     (let %3 (ptr (struct "_ZSt8_Rb_treeIiSt4pairIKiiESt10_Select1stIS2_ESt4lessIiESaIS2_EE")) (load (ptr (struct "_ZSt8_Rb_treeIiSt4pairIKiiESt10_Select1stIS2_ESt4lessIiESaIS2_EE")) $"tmp"))
-    (nonnull %3)
     (let %4 (ptr (struct "_ZSaISt13_Rb_tree_nodeISt4pairIKiiEEE")) (bitcast (ptr (struct "_ZSaISt13_Rb_tree_nodeISt4pairIKiiEEE")) %3))
     (store (ptr (struct "_ZSaISt13_Rb_tree_nodeISt4pairIKiiEEE")) $"tmp.2" %4)
     (block
@@ -34537,7 +34527,6 @@
   (block
     (let %3 (ptr (const (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE"))) (load (ptr (const (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE"))) $"tmp"))
     (let %4 (ptr (const (struct "_ZSt14_Optional_baseIiLb1ELb1EE"))) (bitcast (ptr (const (struct "_ZSt14_Optional_baseIiLb1ELb1EE"))) %3))
-    (nonnull %4)
     (let %5 (ptr (struct "_ZSt22_Optional_payload_baseIiE")) (bitcast (ptr (struct "_ZSt22_Optional_payload_baseIiE")) %4))
     (let %6 (ptr (const (struct "_ZSt22_Optional_payload_baseIiE"))) (bitcast (ptr (const (struct "_ZSt22_Optional_payload_baseIiE"))) %5))
     (nonnull %6)
@@ -34585,7 +34574,6 @@
   (block
     (let %10 (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) (load (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) $"tmp"))
     (let %11 (ptr (struct "_ZSt14_Optional_baseIiLb1ELb1EE")) (bitcast (ptr (struct "_ZSt14_Optional_baseIiLb1ELb1EE")) %10))
-    (nonnull %11)
     (let %12 (ptr (struct "_ZSt22_Optional_payload_baseIiE")) (bitcast (ptr (struct "_ZSt22_Optional_payload_baseIiE")) %11))
     (let %13 (ptr int) (call (ptr int) &"_ZNSt22_Optional_payload_baseIiE6_M_getEv" %12))
     (store (ptr int) $"tmp.2" %13)
@@ -34742,7 +34730,6 @@
   (slot "tmp" (const (ptr (struct "_ZSt8optionalIiE"))) 8 8)
   (store (ptr (struct "_ZSt8optionalIiE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZSt8optionalIiE")) (load (ptr (struct "_ZSt8optionalIiE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) (bitcast (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) %1))
   (let %3 (ptr (const (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE"))) (bitcast (ptr (const (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE"))) %2))
   (let %4 bool (call bool &"_ZNKSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE13_M_is_engagedEv" %3))
@@ -34750,7 +34737,6 @@
     (then
       (block
         (let %5 (ptr (struct "_ZSt8optionalIiE")) (load (ptr (struct "_ZSt8optionalIiE")) $"tmp"))
-        (nonnull %5)
         (let %6 (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) (bitcast (ptr (struct "_ZSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE")) %5))
         (let %7 (ptr int) (call (ptr int) &"_ZNSt19_Optional_base_implIiSt14_Optional_baseIiLb1ELb1EEE6_M_getEv" %6))
         (return %7))))
@@ -35491,7 +35477,6 @@
   (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))) 8 8)
   (store (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIcE")) (bitcast (ptr (struct "_ZSaIcE")) %1))
   (return %2))
 
@@ -35502,7 +35487,6 @@
   (slot "tmp" (const (ptr (const (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE")))) 8 8)
   (store (ptr (const (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))) (load (ptr (const (struct "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"))) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIcE")) (bitcast (ptr (struct "_ZSaIcE")) %1))
   (let %3 (ptr (const (struct "_ZSaIcE"))) (bitcast (ptr (const (struct "_ZSaIcE"))) %2))
   (return %3))
@@ -38361,7 +38345,6 @@
   (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))) 8 8)
   (store (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIwE")) (bitcast (ptr (struct "_ZSaIwE")) %1))
   (return %2))
 
@@ -38372,7 +38355,6 @@
   (slot "tmp" (const (ptr (const (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE")))) 8 8)
   (store (ptr (const (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))) (load (ptr (const (struct "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEEE"))) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIwE")) (bitcast (ptr (struct "_ZSaIwE")) %1))
   (let %3 (ptr (const (struct "_ZSaIwE"))) (bitcast (ptr (const (struct "_ZSaIwE"))) %2))
   (return %3))
@@ -39447,7 +39429,6 @@
   (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))) 8 8)
   (store (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDuE")) (bitcast (ptr (struct "_ZSaIDuE")) %1))
   (return %2))
 
@@ -39458,7 +39439,6 @@
   (slot "tmp" (const (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE")))) 8 8)
   (store (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))) (load (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDuSt11char_traitsIDuESaIDuEEE"))) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDuE")) (bitcast (ptr (struct "_ZSaIDuE")) %1))
   (let %3 (ptr (const (struct "_ZSaIDuE"))) (bitcast (ptr (const (struct "_ZSaIDuE"))) %2))
   (return %3))
@@ -40287,7 +40267,6 @@
   (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))) 8 8)
   (store (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDsE")) (bitcast (ptr (struct "_ZSaIDsE")) %1))
   (return %2))
 
@@ -40298,7 +40277,6 @@
   (slot "tmp" (const (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE")))) 8 8)
   (store (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))) (load (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDsSt11char_traitsIDsESaIDsEEE"))) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDsE")) (bitcast (ptr (struct "_ZSaIDsE")) %1))
   (let %3 (ptr (const (struct "_ZSaIDsE"))) (bitcast (ptr (const (struct "_ZSaIDsE"))) %2))
   (return %3))
@@ -41127,7 +41105,6 @@
   (slot "tmp" (const (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))) 8 8)
   (store (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")) $"tmp" %0)
   (let %1 (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")) (load (ptr (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDiE")) (bitcast (ptr (struct "_ZSaIDiE")) %1))
   (return %2))
 
@@ -41138,7 +41115,6 @@
   (slot "tmp" (const (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE")))) 8 8)
   (store (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))) $"tmp" %0)
   (let %1 (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))) (load (ptr (const (struct "_ZNSt7__cxx1112basic_stringIDiSt11char_traitsIDiESaIDiEEE"))) $"tmp"))
-  (nonnull %1)
   (let %2 (ptr (struct "_ZSaIDiE")) (bitcast (ptr (struct "_ZSaIDiE")) %1))
   (let %3 (ptr (const (struct "_ZSaIDiE"))) (bitcast (ptr (const (struct "_ZSaIDiE"))) %2))
   (return %3))
@@ -44839,7 +44815,6 @@
               (let %43 (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) (load (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) $"tmp"))
               (let %44 (ptr void) (bitcast (ptr void) %43))
               (let %45 (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) (load (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) $"tmp"))
-              (nonnull %45)
               (let %46 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (bitcast (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) %45))
               (eval (call void &"_ZNKSt6ranges8__detail15__max_size_typengEv" (sret (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.22") %46))
               (copy 32 $"tmp.23" $"tmp.22")
@@ -44870,7 +44845,6 @@
                     (let %57 (ptr void) (bitcast (ptr void) %56))
                     (let %58 (ptr void) (bitcast (ptr void) $"tmp.31"))
                     (let %59 (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) (load (ptr (struct "_ZNSt6ranges8__detail15__max_diff_typeE")) $"tmp"))
-                    (nonnull %59)
                     (let %60 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (bitcast (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) %59))
                     (eval (call void &"_ZNKSt6ranges8__detail15__max_size_typengEv" (sret (struct "_ZNSt6ranges8__detail15__max_size_typeE") $"tmp.32") %60))
                     (copy 32 $"tmp.33" $"tmp.32")

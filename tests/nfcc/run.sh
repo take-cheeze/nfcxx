@@ -119,13 +119,126 @@ if check "two files with a static function of one name: link" pb "$tmp/st1.c" "$
   [ "$("$tmp/st" 2>&1)" = 510 ] && ok "each file calls its own static function" || bad "static functions of one name" "$("$tmp/st" 2>&1)"
 fi
 
-# Options Path B cannot honour are refused with a message and a non-zero status, not ignored
-refuses "-isystem refused" "isystem.*pathb backend" pb -c -isystem "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/x.o"
-refuses "-nostdinc refused" "nostdinc.*pathb backend" pb -c -nostdinc "$tmp/a.c" -o "$tmp/x.o"
-refuses "-Wa,* refused" "Wa.*pathb backend" pb -c -Wa,--noexecstack "$tmp/a.c" -o "$tmp/x.o"
-refuses "-funsigned-char refused" "funsigned-char" pb -c -funsigned-char "$tmp/a.c" -o "$tmp/x.o"
+
+# The kernel's option set (docs/notes/linux-kernel.md). -nostdinc, -isystem and -idirafter are the include path of Path B's front end;
+# -funsigned-char, -fshort-wchar and -ffreestanding are honoured by it; -mno-sse is checked on the assembly; options with no effect on
+# QBE's code are dropped. An option that changes meaning and that Path B cannot honour sends the compile to gcc (never dropped).
+# NFCXX_PATHB_LOG says which one made a compile: "pathb SRC" or "gcc SRC: reason".
+export NFCXX_PATHB_LOG=$tmp/log
+used() { grep -F "/$2" "$tmp/log" | tail -1 | grep -q "^$1 "; }   # used pathb|gcc SRC: the last compile of SRC went to that one
+# pbrun NAME EXPECTED-EXIT SRC OPTION...: build SRC on Path B with OPTION... and run it; its exit status, and gcc's with the same options, is EXPECTED-EXIT
+pbrun() {
+  local n=$1 want=$2 src=$3 got gotg; shift 3
+  if ! out=$(pb "$@" "$src" -o "$tmp/run.pb" 2>&1); then bad "$n" "build: $(head -2 <<<"$out" | tr '\n' ' ')"; return; fi
+  "$tmp/run.pb" >/dev/null 2>&1; got=$?
+  if cc -O2 -fwrapv "$@" "$src" -o "$tmp/run.gcc" 2>/dev/null; then "$tmp/run.gcc" >/dev/null 2>&1; gotg=$?; else gotg=$want; fi
+  if [ "$got" = "$want" ] && [ "$gotg" = "$want" ]; then ok "$n"; else bad "$n" "pathb exit $got, gcc exit $gotg, want $want"; fi
+}
+gccinc=$(cc -print-file-name=include)
+mkdir -p "$tmp/sysinc" "$tmp/after"
+printf 'int fake_stdio_h = 5;\n' > "$tmp/sysinc/stdio.h"
+printf '#define FROM_AFTER 4\n' > "$tmp/after/after.h"
+printf '#include <stdio.h>\nint use(void) { return 1; }\n' > "$tmp/sys.c"
+printf '#include <h.h>\nint v = FROM_INC;\n' > "$tmp/isys.c"
+printf '#include <after.h>\nint v = FROM_AFTER;\n' > "$tmp/aft.c"
+printf '#include <stdarg.h>\nint f(int n, ...) { va_list ap; va_start(ap, n); int v = va_arg(ap, int); va_end(ap); return v; }\n' > "$tmp/va.c"
+refuses "-nostdinc: the host's system headers are gone" "stdio.h" pb -c -nostdinc "$tmp/sys.c" -o "$tmp/x.o"
+check "-nostdinc -isystem DIR: DIR is the system path" pb -c -nostdinc -isystem "$tmp/sysinc" "$tmp/sys.c" -o "$tmp/ns.o"
+nm "$tmp/ns.o" 2>/dev/null | grep -q fake_stdio_h && ok "-isystem's stdio.h is the one read" || bad "-isystem's stdio.h is the one read" "$(nm "$tmp/ns.o" 2>&1 | head -3)"
+check "-isystem DIR (without -nostdinc)" pb -c -isystem "$tmp/sysinc" "$tmp/sys.c" -o "$tmp/is.o"
+nm "$tmp/is.o" 2>/dev/null | grep -q fake_stdio_h && ok "-isystem DIR is searched before the host's <stdio.h>" || bad "-isystem DIR before the host's <stdio.h>" "fake_stdio_h is missing"
+check "-isystemDIR (joined)" pb -c -isystem"$tmp/inc" "$tmp/isys.c" -o "$tmp/is2.o"
+check "-idirafter DIR" pb -c -idirafter "$tmp/after" "$tmp/aft.c" -o "$tmp/af.o"
+check "-nostdinc -isystem gcc's include directory: <stdarg.h>" pb -c -nostdinc -isystem "$gccinc" "$tmp/va.c" -o "$tmp/va.o"
+used pathb va.c && ok "the -nostdinc compile is Path B's" || bad "the -nostdinc compile is Path B's" "$(tail -1 "$tmp/log")"
+
+# -funsigned-char / -fsigned-char: the signedness of plain char, in the code and in the macros
+cat > "$tmp/uc.c" <<'EOF2'
+#include <limits.h>
+char buf[2] = { (char)200, 0 };
+int main(void) {
+  int neg = buf[0] < 0;                    /* signed: 1 */
+  int wide = buf[0];                       /* signed: -56, unsigned: 200 */
+  int mn = CHAR_MIN;                       /* signed: -128 */
+#ifdef __CHAR_UNSIGNED__
+  int m = 1;
+#else
+  int m = 0;
+#endif
+  return neg * 1 + (wide == 200) * 2 + (mn == 0) * 4 + m * 8;
+}
+EOF2
+pbrun "default: char is signed" 1 "$tmp/uc.c"
+pbrun "-funsigned-char" 14 "$tmp/uc.c" -funsigned-char
+pbrun "-fno-signed-char" 14 "$tmp/uc.c" -fno-signed-char
+pbrun "-funsigned-char -fsigned-char: the last one wins" 1 "$tmp/uc.c" -funsigned-char -fsigned-char
+pb -c -funsigned-char "$tmp/uc.c" -o "$tmp/x.o" 2>/dev/null && used pathb uc.c && ok "-funsigned-char is compiled by Path B, not gcc" || bad "-funsigned-char is compiled by Path B" "$(tail -1 "$tmp/log")"
+
+# -fshort-wchar: the headers' wchar_t is unsigned short; a wide literal needs gcc (EDG types it as int)
+cat > "$tmp/ww.c" <<'EOF2'
+#include <stddef.h>
+#include <wchar.h>
+int main(void) { return (int)sizeof(wchar_t) * 10 + (WCHAR_MAX == 0xffff) + 2 * (WCHAR_MIN == 0); }
+EOF2
+printf '#include <stddef.h>\nint main(void) { return (int)sizeof(L"ab") * 10 + (int)sizeof(wchar_t); }\n' > "$tmp/wl.c"
+pbrun "default: wchar_t is int" 40 "$tmp/ww.c"
+pbrun "-fshort-wchar: wchar_t is 2 bytes, WCHAR_MAX is 0xffff" 23 "$tmp/ww.c" -fshort-wchar
+used pathb ww.c && ok "-fshort-wchar without a wide literal: Path B" || bad "-fshort-wchar without a wide literal: Path B" "$(tail -1 "$tmp/log")"
+pbrun "-fshort-wchar with a wide literal: gcc's result" 62 "$tmp/wl.c" -fshort-wchar
+used gcc wl.c && tail -1 "$tmp/log" | grep -q "wide" && ok "-fshort-wchar with a wide literal went to gcc, and the log says why" || bad "-fshort-wchar with a wide literal went to gcc" "$(tail -1 "$tmp/log")"
+
+# -ffreestanding: __STDC_HOSTED__ is 0
+printf 'int main(void) { return __STDC_HOSTED__; }\n' > "$tmp/fs.c"
+pbrun "hosted by default" 1 "$tmp/fs.c"
+pbrun "-ffreestanding: __STDC_HOSTED__ is 0" 0 "$tmp/fs.c" -ffreestanding
+
+# Options with no effect on QBE's code are dropped: Path B builds it
+check "the kernel's codegen options" pb -c -mno-red-zone -mcmodel=kernel -mno-mmx -mno-3dnow -mno-avx -mpreferred-stack-boundary=3 -mskip-rax-setup \
+  -mtune=generic -fno-PIE -fno-stack-protector -fno-jump-tables -fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing -fwrapv \
+  -fno-common -fno-allow-store-data-races -fno-optimize-sibling-calls -fno-function-sections -fno-data-sections -fconserve-stack \
+  -fno-stack-clash-protection -fcf-protection=none -fstrict-flex-arrays=3 -falign-functions=16 -fno-asynchronous-unwind-tables -Wall -O2 -g -pipe \
+  "$tmp/uc.c" -o "$tmp/k.o"
+used pathb uc.c && ok "the kernel's codegen options did not move the compile to gcc" || bad "the kernel's codegen options" "$(tail -1 "$tmp/log")"
+printf 'int g(int);\nint f(int a) { return g(a) + 1; }\n' > "$tmp/cf.c"
+pb -S "$tmp/cf.c" -o "$tmp/cf.s" 2>/dev/null; grep -q '\.cfi_' "$tmp/cf.s" && ok "default: .cfi directives" || bad "default: .cfi directives" "none"
+pb -S -fno-asynchronous-unwind-tables "$tmp/cf.c" -o "$tmp/cf2.s" 2>/dev/null
+[ -s "$tmp/cf2.s" ] && ! grep -q '\.cfi_' "$tmp/cf2.s" && ok "-fno-asynchronous-unwind-tables: no .cfi directives (qbe -U)" || bad "-fno-asynchronous-unwind-tables: no .cfi" "$(grep -m2 cfi "$tmp/cf2.s")"
+
+# -mno-sse: checked on the assembly (QBE has no switch): integer code passes, SSE code is refused
+printf 'long f(long a, long b) { return a * b + (a >> 3); }\nlong m(long *p, long *q) { long t = *p; *p = *q; *q = t; return t; }\n' > "$tmp/int.c"
+printf 'double d(double x) { return x * 2.0; }\n' > "$tmp/fp.c"
+check "-mno-sse: integer code builds" pb -c -mno-sse -mno-sse2 -mno-80387 "$tmp/int.c" -o "$tmp/nsse.o"
+objdump -d "$tmp/nsse.o" | grep -qE '%[xyz]mm|%st' && bad "-mno-sse: no SSE in the object" "found" || ok "-mno-sse: no SSE in the object"
+used pathb int.c && ok "-mno-sse: the integer code is Path B's" || bad "-mno-sse: Path B" "$(tail -1 "$tmp/log")"
+refuses "-mno-sse: SSE code is refused" "mno-sse" pb -c -mno-sse "$tmp/fp.c" -o "$tmp/x.o"
+refuses "-mno-80387: SSE code is refused too" "SSE or x87" pb -c -mno-80387 "$tmp/fp.c" -o "$tmp/x.o"
+check "the same code builds without -mno-sse" pb -c "$tmp/fp.c" -o "$tmp/x.o"
+
+# Options that change meaning and that Path B cannot honour: the compile is gcc's, with the option; nothing is dropped
+printf 'enum e { A, B };\nint main(void) { return (int)sizeof(enum e); }\n' > "$tmp/en.c"
+pbrun "-fshort-enums: the enum is 1 byte" 1 "$tmp/en.c" -fshort-enums
+used gcc en.c && ok "-fshort-enums went to gcc" || bad "-fshort-enums went to gcc" "$(tail -1 "$tmp/log")"
+pbrun "no option: the enum is 4 bytes, Path B" 4 "$tmp/en.c"
+used pathb en.c && ok "without -fshort-enums Path B builds it" || bad "without -fshort-enums Path B builds it" "$(tail -1 "$tmp/log")"
+check "-m16 compiles with gcc" pb -c -m16 "$tmp/int.c" -o "$tmp/m16.o"
+used gcc int.c && ok "-m16 went to gcc" || bad "-m16 went to gcc" "$(tail -1 "$tmp/log")"
+file -b "$tmp/m16.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is i386 (the option reached gcc)" || bad "-m16: the object is i386" "$(file -b "$tmp/m16.o")"
+check "-ftrivial-auto-var-init=zero compiles with gcc" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
+used gcc int.c && ok "-ftrivial-auto-var-init=zero went to gcc" || bad "-ftrivial-auto-var-init=zero went to gcc" "$(tail -1 "$tmp/log")"
+check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
+used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
+check "-Wa,* compiles with gcc" pb -c -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
+used gcc a.c && ok "-Wa,* went to gcc" || bad "-Wa,* went to gcc" "$(tail -1 "$tmp/log")"
+refuses "an option gcc does not know is gcc's error" "unrecognized\|unknown" pb -c -fno-such-option "$tmp/int.c" -o "$tmp/x.o"
+# a compile that Path B itself refuses moves to gcc only when asked (NFCXX_PATHB_FALLBACK=gcc)
+printf 'typedef int v4 __attribute__((vector_size(16)));\nv4 f(v4 a, v4 b) { return a + b; }\n' > "$tmp/vec.c"   # a vector type: Path B has none
+if ! pb -c "$tmp/vec.c" -o "$tmp/x.o" >/dev/null 2>&1; then
+  ok "a unit Path B refuses fails without NFCXX_PATHB_FALLBACK"
+  NFCXX_PATHB_FALLBACK=gcc pb -c "$tmp/vec.c" -o "$tmp/fb.o" >/dev/null 2>&1 && tail -1 "$tmp/log" | grep -q '^gcc .*Path B refused' &&
+    ok "NFCXX_PATHB_FALLBACK=gcc: gcc builds it, the log says why" || bad "NFCXX_PATHB_FALLBACK=gcc" "$(tail -1 "$tmp/log")"
+else bad "vec.c is refused by Path B (the fallback test's input)" "it builds now: use another unit"; fi
+# the instrumentation options stay refused: gcc would instrument, QBE's output would not
 refuses "-fsanitize refused" "fsanitize" pb -c -fsanitize=address "$tmp/a.c" -o "$tmp/x.o"
-refuses "-m32 refused" "m32" pb -c -m32 "$tmp/a.c" -o "$tmp/x.o"
 refuses "C++ refused" "C++" pb -c -x c++ "$tmp/a.c" -o "$tmp/x.o"
 refuses "unknown backend refused" "unknown NFCXX_BACKEND" env NFCXX_BACKEND=nope "$nfcc" -c "$tmp/a.c"
 

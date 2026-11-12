@@ -41,7 +41,7 @@ passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the
 passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
 pic=()
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
-ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
+nofp=0; nounwind=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
 timeout_s=${NFCXX_PATHB_TIMEOUT:-300}
 dump_opts=()
@@ -52,11 +52,20 @@ while [ $# -gt 0 ]; do
     --asan) asan_on=1 ;;
     --pic) pic=(--pic) ;;   # -fPIC: the objects go into a shared object (scripts/pathb-ssa-qbe.rb, Qbe.pic)
     --sanitize=*) dump_opts+=("$1") ;;
+    --dialect=*) opts+=("$1") ;;   # the EDG front-end mode (g++ or clang), as nfcxx's --dialect
+    --diag_*) opts+=("$1") ;;   # EDG diagnostic options (nfcxx's -Wno-narrowing: --diag_warning=narrowing_conversion), for pathb-dump
     --gnu-version=*|--gnu_version=*) opts+=("$1") ;;   # the GNU version EDG emulates (nfcxx --freestanding passes 130000)
     --ir-opt=*) passes=${1#--ir-opt=}; passes_given=1 ;;
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
     --emitter=*) emitter=${1#--emitter=} ;;
     --long-double=trap) ld_trap=1 ;;
+    --no-fp) nofp=1 ;;          # -mno-sse: qbe -n, and the assembly is refused when it uses SSE or x87 (status 5)
+    --no-unwind) nounwind=1 ;;  # -fno-asynchronous-unwind-tables: qbe -U, no .cfi directives
+    -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
+    -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
+    -nostdinc|-ffreestanding|-fshort-wchar) opts+=("$1") ;;
+    -isystem|-idirafter) opts+=("$1" "$2"); shift ;;
+    -isystem?*|-idirafter?*) opts+=("$1") ;;
     --keep=*) keep=${1#--keep=} ;;
     --timeout=*) timeout_s=${1#--timeout=} ;;
     -I|-D|-U) opts+=("$1$2"); shift ;;
@@ -89,6 +98,13 @@ else
   [ $frc != 124 ] || echo "pathb-cc: $src: the front end ran over $timeout_s s (--timeout) and was stopped" >&2
   [ $frc = 0 ] || exit $frc
 fi
+# -funsigned-char: the IR names plain char "char", which every pass and the emitters read as signed (a load is loadsb, a widening
+# sign-extends). EDG has folded the constants and chosen the signedness of the comparisons already; the type is renamed to unsigned_char
+# here, outside the quoted names and strings, where `char` is only ever the plain type.
+if [ $uchar = 1 ]; then
+  ${RUBY:-ruby} -e 'print STDIN.read.gsub(/"(?:[^"\\]|\\.)*"|(?<![\w:.$&%@])char(?!\w)/) { |m| m == "char" ? "unsigned_char" : m }' < "$tmp/$n.ir" > "$tmp/$n.uc.ir"
+  mv "$tmp/$n.uc.ir" "$tmp/$n.ir"
+fi
 # The IR-to-IR passes (scripts/pathb-ir-opt.rb, docs/notes/pathb-ir-passes.md): inline by default; --ir-opt names others (a
 # comma-separated list), and none or off turns them off. IR over --ir-opt-max bytes (default 256 MiB) is not optimized. The inliner runs on what an external definition reaches (--prune-unused: a
 # host TU of libstdc++ and vulkan.hpp is mostly unused template instances, 129 MB of IR for ggml-vulkan.cpp, 48 MB pruned). A given IR file (PATHB_IR, the
@@ -109,6 +125,11 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
   fi
 fi
 ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
+[ $nofp = 0 ] || ldopt+=(--no-fp)
+[ $nounwind = 0 ] || ldopt+=(--no-unwind)
+if [ $nofp = 1 ] || [ $nounwind = 1 ]; then
+  [ "$emitter" = ssa ] || { echo "pathb-cc: --no-fp and --no-unwind need the SSA emitter (--emitter=ssa)" >&2; exit 2; }
+fi
 # The mruby emitter only: on Darwin an extern data object is read through the GOT (see pathb-qbe-emit.rb, --extern-data-got).
 emitopt=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emitopt=(--extern-data-got)
 # And the target of the x87 thunks (x86-64 assembly; an arm64 module that needs one is refused): PATHB_X87_TARGET, else the host's.
@@ -121,7 +142,7 @@ rc=0
 [ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: --asan needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
   tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
-  if [ $rc != 0 ] && [ $rc != 124 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
+  if [ $rc != 0 ] && [ $rc != 124 ] && [ $rc != 5 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
     tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?

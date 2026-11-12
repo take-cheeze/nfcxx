@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build SQLite (the amalgamation, sqlite3.c) with the project's C compiler into build/sqlite/<backend>/libsqlite3.a,
-# with sqlite3.h beside it. nfcc compiles it: qbe (cproc -> QBE, the default) or gcc (NFCXX_BACKEND=gcc).
+# with sqlite3.h beside it. nfcc compiles it: qbe (cproc -> QBE, the default), pathb (NFCXX_BACKEND=pathb) or gcc (NFCXX_BACKEND=gcc).
 #
 # The amalgamation is SQLite 3.54.1, the release zip from sqlite.org. Its published SHA3-256 is
 # 92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30; the SHA-256 pins below are checked before use, and
