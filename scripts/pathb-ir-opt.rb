@@ -15,6 +15,7 @@
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
 #   --sroa       scalar replacement with unrolling and constant propagation (below); --jobs=N shares its functions out among
 #                N forked workers (default NFCXX_IR_OPT_JOBS, or the processor count up to 8).
+#   --prune-unused   drop the functions and objects that no definition of external linkage reaches (prune_pass, below)
 #   --prune-unreachable=SUBSTR   drop the functions and the global or data objects that no function whose name contains SUBSTR
 #                reaches, by name (prune_pass). With --inline or --sroa this is the default for a SYCL device module
 #                (__nfcxx_sycl_entry_ kernels); --no-prune keeps every function.
@@ -1672,6 +1673,21 @@ end
 # no reached code names cannot be used by the device; the emitters take only what their kernels reach.
 SYCL_ENTRY = "__nfcxx_sycl_entry_"
 
+# --prune-unused: the roots are the definitions that another object can see (neither (static) nor (weak): a weak function or
+# object, a template or inline one, is emitted only where it is used), the (constructor) and (destructor) functions and the
+# thread-locals; the rest of the module is kept only when a root reaches it by name. A host TU of libstdc++ and vulkan.hpp
+# carries tens of thousands of unused instances (ggml-vulkan.cpp: 42720 functions and 129 MB of IR, 8248 and 48 MB after this),
+# which --inline would spend its time on.
+UNUSED_ROOTS = "\0unused"
+
+def external_root?(f)
+  return false if head(f) == "data"
+  attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
+  return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread")
+  return false if attrs.include?("weak") || attrs.include?("static")
+  true   # a definition (or declaration) of external linkage
+end
+
 # The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
 def quoted_names(x, out)
   if x.is_a?(Array)
@@ -1689,7 +1705,11 @@ end
 def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
-  queue = nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
+  queue = if substr == UNUSED_ROOTS
+            nodes.keys.select { |n| external_root?(nodes[n]) }
+          else
+            nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
+          end
   seen = {}
   until queue.empty?
     n = queue.pop
@@ -1755,6 +1775,8 @@ def main(argv)
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")
       prune = a[20..-1]
+    elsif a == "--prune-unused"
+      prune = UNUSED_ROOTS
     elsif a == "--no-prune"
       prune = false
     elsif a == "-" || !a.start_with?("--")

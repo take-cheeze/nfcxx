@@ -43,8 +43,10 @@ Known gap: after inlining, the SSA emitter (scripts/pathb-ssa-qbe.rb) refuses so
 ## Use
 
 **Path B host builds** (`scripts/pathb-cc`, the nfcxx driver's Path B route) run the inliner by default. `--ir-opt=none` turns the
-passes off, `--ir-opt=LIST` names others, and `--ir-opt-max=BYTES` sets the largest IR they run on (default 8388608; larger units go
-unoptimized with a message). The environment variables `NFCXX_IR_OPT` and `NFCXX_IR_OPT_MAX` still work as fallbacks. The device
+passes off, `--ir-opt=LIST` names others, and `--ir-opt-max=BYTES` sets the largest IR they run on (default 268435456; larger units go
+unoptimized with a message). The inliner is preceded by `--prune-unused`: only what a definition of external linkage reaches
+is kept, as a host unit of libstdc++ and vulkan.hpp is mostly unused template instances (`ggml-vulkan.cpp`: 42720 functions and
+129 MB of IR, 8248 and 48 MB after; the inliner then takes about 30 s). The environment variables `NFCXX_IR_OPT` and `NFCXX_IR_OPT_MAX` still work as fallbacks. The device
 passes below still read `NFCXX_IR_OPT`.
 
 `NFCXX_IR_OPT=inline` makes `scripts/sycl-build.sh` run the pass on the device IR before the SPIR-V emitter (any list of passes

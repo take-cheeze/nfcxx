@@ -71,6 +71,11 @@ while read -r inp _ want; do
   [ "$got" = "structured=$want ssa=$want" ] || un="FAIL (on $inp: $got, want $want)"
 done < unroll.args
 echo "unroll: $un"; [ "$un" = ok ] || fail=1
+# --prune-unused: the roots are what another object can see (external, constructor); a weak or static function stays only
+# when a root reaches it by name (helper: called, via_table: named by a reached table), the others go.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --prune-unused prune_unused.ir > "$out/prune_unused.ir" || fail=1
+if [ "$(grep -o '^(function "[^"]*"' "$out/prune_unused.ir" | tr '\n' ' ')" = '(function "via_table" (function "helper" (function "api" (function "ctor_fn" ' ] \
+   && grep -q '^(global "tab"' "$out/prune_unused.ir" && ! grep -q '^(global "dead_tab"' "$out/prune_unused.ir"; then echo "prune unused: ok"; else echo "prune unused: FAIL"; fail=1; fi
 # --prune-unreachable: the function no root reaches goes; one called by the entry, one whose address it takes, and one a named global's
 # initializer names stay.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --prune-unreachable=__nfcxx_sycl_entry_ prune.ir > "$out/prune.ir" || fail=1
