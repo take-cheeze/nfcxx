@@ -20,6 +20,8 @@
 #   --borrow          (NFCXX_PATHB_BORROW=1) the facts the borrow checker reads (docs/notes/pathb-borrowck.md)
 #   --sanitize=LIST   (NFCXX_IR_SANITIZE)    the checks of -fsanitize=undefined or CHECK[,CHECK...] (docs/notes/ubsan.md)
 #   --overflow=trap   (NFCXX_IR_OVERFLOW=trap) signed overflow is a trap
+#   --eh-runtime      with --freestanding: the program links EDG's runtime (libC.a), so the exception handling state is declared as
+#                     that runtime has it (thread-local when scripts/setup-edg.sh built it that way); hosted mode always does
 #   --cuda-device     (NFCXX_PATHB_CUDA=1)   a .cu file's device unit: the front end reads it as CUDA, without exceptions
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
@@ -32,7 +34,7 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""
+std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
 cuda_device=0; [ -z "${NFCXX_PATHB_CUDA:-}" ] || cuda_device=1
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -48,6 +50,7 @@ while [ $i -lt ${#args[@]} ]; do
     --overflow=*) export NFCXX_IR_OVERFLOW=${arg#--overflow=} ;;
     --cuda-device) cuda_device=1 ;;
     --freestanding) hosted=0 ;;
+    --eh-runtime) eh_runtime=1 ;;
     --cuda) user_opts+=(--cuda) ;;   # a .cu host copy: the <<<...>>> launches are read (nfcxx's cuda_opts, as the EDG path)
     --target=*) target=${arg#--target=} ;;
     --target) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: --target needs a name" >&2; exit 2; }; target=${args[$i]} ;;
@@ -83,9 +86,10 @@ fi
 
 sys_inc=(); gnu_opts=()
 cuda_device_opts=(); [ $cuda_device = 0 ] || cuda_device_opts=(--cuda --no_exceptions)
-# Hosted: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
+# Hosted, or --eh-runtime: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
 # marker of scripts/setup-edg.sh), the EH variables of the IR are thread-local too, as the nfcxx driver has them.
-eh_tls=(); [ "$hosted" = 0 ] || [ ! -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
+eh_tls=()
+if { [ "$hosted" != 0 ] || [ "$eh_runtime" = 1 ]; } && [ -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ]; then eh_tls=(--nfcxx_eh_thread_local); fi
 if [ "$hosted" != 0 ]; then
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")

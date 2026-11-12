@@ -612,7 +612,7 @@ module Qbe
     def aggregate_info(tyform, what)
       # A const or volatile struct is passed and returned as the struct: the qualifier does not change its layout.
       tyform = unqual(tyform)
-      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct"
+      raise QbeUnsupported, "#{what} aggregate #{sx(tyform)}" unless head(tyform) == "struct" || head(tyform) == "union"
 
       info = @abi[Qbe.name_of(tyform[1])]
       raise QbeUnsupported, "#{what} aggregate #{sx(tyform)} has no abi-type" if info.nil?
