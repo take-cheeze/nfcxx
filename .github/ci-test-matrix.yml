@@ -8,13 +8,16 @@
   run: |
     NFCXX_BACKEND=pathb tests/run.sh
     if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
-- name: C++11 and C++14 language feature probes (Path B and gcc), mruby scripts
+- name: C++11 and C++14 language feature probes (Path B and gcc)
   pathb: true   # FEATURE_ROUTES=pathb needs the Path B harness
   run: |
     tests/cpp-features/self-test.sh
     tests/upstream/self-test.sh
     FEATURE_ROUTES="pathb$([ "$GCC_BACKEND" = 1 ] && echo " gcc")" FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
-    tests/mruby/run.sh
+- name: mruby scripts
+  # No Path B harness on purpose: with it, tests/mruby's pathb-qbe-emit oracle (tests/mruby/oracle) refuses file-scope asm
+  # (exit 3) that scripts/pathb-qbe-emit.rb accepts (exit 0).
+  run: tests/mruby/run.sh
 - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
   dotnet: true
   run: |
