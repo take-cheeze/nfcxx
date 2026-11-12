@@ -509,6 +509,9 @@ module SymbolCache
       struct RClass* hit_c;
       mrb_method_t hit_m;
       mrb_int hit_argc;
+    #ifdef MRB_MT_ROWS
+      uint32_t hit_mt_epoch;
+    #endif
     };
     #ifdef BC2CPP_OWNER_ICACHE_STATS
     // Hits and full lookups, for scripts/bc2cpp/owner_call_icache_check.rb; printed at exit.
@@ -526,12 +529,18 @@ module SymbolCache
       memcpy(&y, &b.as, sizeof y);
       return a.flags == b.flags && x == y;
     }
-    // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid).
+    // The site's kept call, while mruby's method cache still holds the same entry for (klass, mid). A fork with rows
+    // (MRB_MT_ROWS) bumps mt_epoch wherever it clears that cache, and a row is never cached: the epoch decides there.
     static inline bool bc2cpp_owner_icache_hit(mrb_state* M, const bc2cpp_owner_set& s, struct RClass* klass, mrb_sym mid, mrb_int argc) {
       if (s.hit_klass != klass || s.hit_argc != argc || s.epoch != bc2cpp_owner_epoch || s.state != M) return false;
+    #ifdef MRB_MT_ROWS
+      (void)mid;
+      if (s.hit_mt_epoch != M->mt_epoch) return false;
+    #else
       int h = mrb_int_hash_func(M, ((intptr_t)klass) ^ mid) & (MRB_METHOD_CACHE_SIZE - 1);
       const struct mrb_cache_entry* mc = &M->cache[h];
       if (mc->c != klass || mc->mid != mid || mc->c0 != s.hit_c || !bc2cpp_method_eq(mc->m, s.hit_m)) return false;
+    #endif
     #ifdef BC2CPP_OWNER_ICACHE_STATS
       ++bc2cpp_owner_icache_hits;
     #endif
@@ -713,6 +722,9 @@ module SymbolCache
         s.hit_c = c;
         s.hit_m = m;
         s.hit_argc = argc;
+    #ifdef MRB_MT_ROWS
+        s.hit_mt_epoch = M->mt_epoch;
+    #endif
       }
     #endif
       return bc2cpp_keep_call(M, [&] { return bc2cpp_call_found(M, recv, mid, &m, c, argc, argv, blk); });
