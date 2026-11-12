@@ -212,6 +212,7 @@ end
 $inline_max_callee = 150
 $inline_max_growth = 2.0
 $inline_cost = :weighted
+$inline_tiers = [16, 40]   # --tiers=A,B: callee cost caps of the first rounds; the last round takes --max-callee (empty: one round set)
 $inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
 
 def node_count(x)
@@ -396,6 +397,8 @@ def expand_call(s, fns, st)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end
+  # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
+  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
@@ -550,6 +553,8 @@ def inline_pass(forms, max_depth, report)
   calls = IdentityMap.new
   total = node_count(forms)   # the budget bounds the size of the IR (every node), the callee cap weighs the code
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
+  caps = $inline_tiers.select { |c| c > 0 && ($inline_max_callee <= 0 || c < $inline_max_callee) } + [nil]
+  caps.each do |cap|
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
@@ -562,7 +567,7 @@ def inline_pass(forms, max_depth, report)
       end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -581,6 +586,7 @@ def inline_pass(forms, max_depth, report)
     end
     inlined += round
     break if round == 0
+  end
   end
   forms.concat(extra)
   if report
@@ -1994,6 +2000,8 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a.start_with?("--max-callee=")
       $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--tiers=")
+      $inline_tiers = a[8..-1].split(",").map(&:to_i)
     elsif a.start_with?("--max-tiny=")
       $inline_tiny = a[11..-1].to_i
     elsif a.start_with?("--cost=")
