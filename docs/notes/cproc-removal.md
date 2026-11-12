@@ -34,7 +34,7 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 | CIL (.NET) backend: `cil-cc` is `qbe-cc` | `scripts/pathb-cil` for C | #993 open |
 | Tests and CI legs pinned to qbe, C++ language suites | Path B and gcc | #990 open |
 | Tests and CI legs pinned to qbe, library, ABI and driver suites | Path B and gcc | #994 open |
-| Third-party C built through nfcc's qbe route: Lua, QuickJS, SQLite, mruby, mrustc, ggml | nfcc on Path B or gcc, then drop the cproc workarounds | not started; follows the `nfcc` default |
+| Third-party C built through nfcc's qbe route: Lua, QuickJS, SQLite, mruby, mrustc, ggml | nfcc on Path B or gcc, then drop the cproc workarounds | not started; follows the `nfcc` default. mruby (`tests/realworld/run_mruby.sh`) and optcarrot's mruby (`run_optcarrot.sh`) now default to gcc and Path B: the "parse_args: operator unsupported" refusal no longer reproduces, and the gaps behind the failed builds were: static functions exported (a link error across units), the tail padding of a struct constant (mruby's `RVALUE_zero` copy left garbage in the GC), `(variadic N)` counting the result pointer, `int + pointer` operand order, and `_DEFAULT_SOURCE` in nfcc's gnu modes |
 | macOS arm64 and every non-x86-64 host (default backend is qbe there; cproc `-t aarch64-apple` and the `cproc-apple-*` patches) | Path B on those hosts | another session; no CI job runs the default driver under Path B on arm64 or macOS |
 
 ## Order

@@ -36,6 +36,33 @@ check "-MD -MF with -c" pb -c -I"$tmp/inc" -DEXTRA=1 -MD -MF "$tmp/a.d" "$tmp/a.
 grep -q 'inc/h.h' "$tmp/a.d" 2>/dev/null && ok "dependency file lists the header" || bad "dependency file" "$(cat "$tmp/a.d" 2>&1)"
 check "-E goes to the host preprocessor" pb -E -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/a.i"
 grep -q 'return a + b + 30 + 1' "$tmp/a.i" && ok "-E output" || bad "-E output" "$(tail -2 "$tmp/a.i")"
+# gnu modes (the default, -std=gnu99): glibc's POSIX names are visible as with gcc (EDG's gcc mode defines __STRICT_ANSI__, which hides
+# struct stat's st_atim); -std=c99 hides them, as gcc's does (mruby's hal-posix-io reads st_atim in its gnu99 build).
+cat > "$tmp/st.c" <<'EOF2'
+#include <sys/stat.h>
+long f(const struct stat *s) { return (long)s->st_atim.tv_sec; }
+EOF2
+check "gnu99 sees st_atim" pb -std=gnu99 -c "$tmp/st.c" -o "$tmp/st.o"
+check "default mode sees st_atim" pb -c "$tmp/st.c" -o "$tmp/st2.o"
+refuses "-std=c99 hides st_atim (as gcc)" "st_atim" pb -std=c99 -c "$tmp/st.c" -o "$tmp/st3.o"
+# A static function has internal linkage: two objects define `helper`, and the link finds one symbol each (mruby's libmruby has a static
+# inline mrb_type in every unit).
+printf 'static int helper(int x) { return x + 1; }\nint a_val(void) { return helper(1); }\n' > "$tmp/s1.c"
+printf 'static int helper(int x) { return x + 10; }\nint a_val(void);\nint main(void) { return a_val() == 2 && helper(1) == 11 ? 0 : 1; }\n' > "$tmp/s2.c"
+check "two objects with the same static function" pb -c "$tmp/s1.c" -o "$tmp/s1.o"
+check "second object" pb -c "$tmp/s2.c" -o "$tmp/s2.o"
+check "link them (no multiple definition)" pb "$tmp/s1.o" "$tmp/s2.o" -o "$tmp/s12"
+"$tmp/s12" && ok "static helpers stay apart" || bad "static helpers stay apart" "rc=$?"
+# Path B only (no gcc fallback in nfcc): shapes the SSA route refused or got wrong are built here and run, and the exit code is gcc's.
+for t in int_plus_pointer variadic_struct_return_byval static_const_struct_padding; do
+  src=$root/tests/c/$t.c
+  if out=$(pb "$src" -o "$tmp/$t.pb" 2>&1); then
+    "$tmp/$t.pb" >/dev/null 2>&1; got=$?
+    [ "$got" = 0 ] && ok "$t: exit 0 as gcc's" || bad "$t" "want 0 got $got"
+  else
+    bad "$t" "build: $(grep -m1 -E 'refused|not emitted|error|invalid' <<<"$out" | cut -c1-200)"
+  fi
+done
 check "--version names the backend" bash -c "NFCXX_BACKEND=pathb '$nfcc' --version | grep -q pathb"
 
 # Kernel-style inline asm (x86-64 only): asm goto, "i" operands that are constants after inlining, a "m" operand of a const

@@ -639,7 +639,9 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A (static) function has internal linkage: QBE leaves a function without `export` local to the object.
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -2389,6 +2391,8 @@ end
         end
       end
       if nfixed
+        # (variadic N) counts the hidden result pointer among the leading arguments (be/nfcxx_ir.c); `args` does not hold it.
+        nfixed -= 1 if sret
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 
         args.insert(nfixed, "...")

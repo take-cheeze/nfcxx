@@ -278,7 +278,7 @@ k=0
 # Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include and a C standard; it ignores other options. So
 # nothing else may reach it: the options it cannot honour are refused here, with their names, not dropped.
 pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
-  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0
+  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0 gnu=1
   shift 3
   [ ${#asf[@]} = 0 ] || die "-Wa,*: assembler options cannot be given to the pathb backend (it assembles with the host cc)"
   while [ $k2 -lt ${#pp[@]} ]; do
@@ -286,10 +286,10 @@ pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
     case $o in
       -D|-U|-I|-include) pbo+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
       -D?*|-U?*|-I?*) pbo+=("$o") ;;
-      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o ;;
-      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
-      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89 ;;
-      -std=iso9899:2011) std=-std=c11 ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o; gnu=0 ;;
+      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu}; gnu=1 ;;   # EDG's gcc mode takes the GNU extensions in every C standard
+      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89; gnu=0 ;;
+      -std=iso9899:2011) std=-std=c11; gnu=0 ;;
       -isystem|-iquote|-idirafter|-imacros|-isystem?*|-iquote?*|-idirafter?*|-imacros?*|-nostdinc|-undef|--sysroot=*)
         die "$o: not supported by the pathb backend (scripts/pathb-cc takes -I -D -U -include and -std only)" ;;
       *) die "$o: not supported by the pathb backend" ;;
@@ -297,6 +297,9 @@ pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
     k2=$((k2 + 1))
   done
   while [ $# -gt 0 ]; do pbo+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  # EDG's gcc mode defines __STRICT_ANSI__ in every C standard, which makes glibc hide POSIX (struct stat's st_atim, ...). gcc's
+  # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
+  [ $gnu = 0 ] || pbo=(-D_DEFAULT_SOURCE "${pbo[@]+"${pbo[@]}"}")
   if [ "$what" = -S ]; then
     keep=$tmp/keep$k
     PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
