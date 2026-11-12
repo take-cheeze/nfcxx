@@ -299,13 +299,19 @@ module NativeOwnerMap
     passed.select { |_, owners| owners.uniq.size == 1 && owners.first != UNKNOWN }.transform_values(&:first)
   end
 
-  # The body of the brace block whose '{' is at index `open`, or nil when unbalanced.
+  # The body of the brace block whose '{' is at index `open`, or nil when unbalanced. Scans bytes: '{' and '}' are ASCII, so
+  # their byte offsets are exact, and no copy of the text is made (per-character indexing was the hot path of the fixture
+  # checks).
   def brace_body(text, open)
+    byte_open = text.ascii_only? ? open : text[0, open].bytesize
     depth = 0
-    (open...text.length).each do |i|
-      depth += 1 if text[i] == '{'
-      depth -= 1 if text[i] == '}'
-      return text[(open + 1)...i] if depth.zero?
+    i = byte_open
+    while (i = text.byteindex(/[{}]/, i))
+      depth += text.getbyte(i) == 0x7b ? 1 : -1
+      if depth.zero?
+        return text.byteslice(byte_open + 1, i - byte_open - 1).force_encoding(text.encoding)
+      end
+      i += 1
     end
     nil
   end
