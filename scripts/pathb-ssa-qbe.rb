@@ -820,6 +820,28 @@ end
     # (asm-block "HEX" (opnd KIND "CODE" SIZE ARG)...): a general x86 template (be/nfcxx_ir.c). The operand block holds eight
     # bytes per operand: an input's value (zero-extended to 64 bits), a memory operand's address. The helper
     # (Qbe.asm_block) reads them, runs the template and writes the outputs back; they are stored to their addresses here.
+    # The symbol and constant offset an address register stands for ([Ref, offset]), through the (bitcast), (offset) and
+    # (index) lets that built it from an object's address; nil when it is anything else.
+    def asm_symbol_of(x, depth = 0)
+      return [x, 0] if x.is_a?(Ref) && x.sigil == "@"
+      return nil unless x.is_a?(String) && depth < 16
+
+      rv = @ptr_defs && @ptr_defs[x]
+      return nil if rv.nil?
+
+      case head(rv)
+      when "bitcast"
+        asm_symbol_of(rv[2], depth + 1)
+      when "offset", "index"
+        return nil unless head(rv[2]) == "const"
+
+        base, off = asm_symbol_of(rv[1], depth + 1)
+        return nil if base.nil?
+
+        [base, off + Qbe.int_lit(rv[2][2]) * (head(rv) == "index" ? Qbe.int_lit(rv[3]) : 1)]
+      end
+    end
+
     def asm_block_lines(item)
       ops = []
       clobbers = []
@@ -834,6 +856,23 @@ end
                    name: o[5] ? o[5].raw.delete('"') : "", off: o[6] ? Qbe.int_lit(o[6]) : 0 }
         else
           raise QbeUnsupported, "asm-block: an operand that is not opnd"
+        end
+      end
+      # immv / symv: an immediate that the front end could not fold ("i"(1 << (bit & 7)) of an inlined parameter): the
+      # operand's value, after the folding of the e-graph, must be an integer constant or a symbol plus a constant offset.
+      ops.each do |o|
+        if o[:kind] == "immv"
+          raise QbeUnsupported, "asm: an immediate operand that is not a constant" unless head(o[:arg]) == "const"
+
+          o[:kind] = "imm"
+          o[:arg] = ["const", "long", Qbe.int_lit(o[:arg][2]).to_s]
+        elsif o[:kind] == "symv"
+          base, off = asm_symbol_of(o[:arg])
+          raise QbeUnsupported, "asm: an address operand that is not a symbol and a constant offset" if base.nil?
+
+          o[:kind] = "sym"
+          o[:arg] = base
+          o[:off] = off
         end
       end
       ops.each { |o| o[:sym] = Qbe.symbol(o[:arg].raw) if o[:kind] == "sym" }
@@ -1468,6 +1507,7 @@ end
 
     def let_lines(r, t, rv)
       dst = reg(r)
+      (@ptr_defs ||= {})[r] = rv if %w[offset bitcast index].include?(head(rv))
       if Qbe.asan && %w[offset bitcast].include?(head(rv)) && (k = asan_slot_addr(rv))
         @asan_known[r] = k
       end

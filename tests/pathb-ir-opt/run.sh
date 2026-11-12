@@ -11,6 +11,16 @@ fail=0
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline helper.ir > "$out/helper_inline.ir" || fail=1
 if diff -u helper_inline.golden.ir "$out/helper_inline.ir"; then echo "inline helper: ok"; else echo "inline helper: FAIL"; fail=1; fi
 if grep -q '(call int &"square"' "$out/helper_inline.ir"; then echo "inline helper: FAIL (square still called)"; fail=1; fi
+# The caps count weighted nodes (--cost=weighted, the default): slots and other declarations are free, so a callee that is mostly
+# declarations is inlined under a small --max-callee, and the plain node count (--cost=nodes) refuses it.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 weighted_cost.ir > "$out/wc_w.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 --cost=nodes weighted_cost.ir > "$out/wc_n.ir" || fail=1
+if ! grep -q '(call int &"decls"' "$out/wc_w.ir" && grep -q '(call int &"decls"' "$out/wc_n.ir"; then echo "weighted cost: ok"; else echo "weighted cost: FAIL"; fail=1; fi
+# Past --max-growth only a tiny callee (--max-tiny, default 16) is still inlined: with a budget of half the module, the tiny
+# callee goes in and, with --max-tiny=0, it stays a call.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 weighted_cost.ir > "$out/tiny_on.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 --max-tiny=0 weighted_cost.ir > "$out/tiny_off.ir" || fail=1
+if ! grep -q '(call int &"decls"' "$out/tiny_on.ir" && grep -q '(call int &"decls"' "$out/tiny_off.ir"; then echo "tiny callee: ok"; else echo "tiny callee: FAIL"; fail=1; fi
 # The same file through the whole pipeline (inline, then scalar replacement with constant propagation and unrolling): the
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
@@ -97,4 +107,9 @@ if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" 
 # Store-to-load forwarding: the load after the store takes the stored value; the load after the call does not.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward forward.ir > "$out/forward.ir" || fail=1
 if grep -q '(let %1 int %0)' "$out/forward.ir" && grep -q '(let %2 int (load int $"x"))' "$out/forward.ir"; then echo "forward: ok"; else echo "forward: FAIL"; fail=1; fi
+# A callee with a goto and a label is inlined, and each copy's labels get a suffix of their own: two calls of it leave no call
+# and two different label names (the asm goto of the kernel's static_cpu_has is such a callee).
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline goto_inline.ir > "$out/goto_inline.ir" || fail=1
+if ! grep -q '(call' "$out/goto_inline.ir" && [ "$(grep -o '(label "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ] \
+   && [ "$(grep -o '(goto "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ]; then echo "goto and label inline: ok"; else echo "goto and label inline: FAIL"; fail=1; fi
 exit $fail

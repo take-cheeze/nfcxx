@@ -173,3 +173,20 @@ never reach the helper.
   compares the cell with each number and jumps to the C label (`(if (eq int SEL N) (then (goto L)))`).
 - Still refused, by name: SSE/x87/MMX constraints other than the existing `x` form, a wider-than-8-byte operand, a bit-field
   or other non-lvalue memory operand, clobbers of `bp`, `sp`, x87 or MMX registers, and more than 8 asm goto labels.
+
+## Path B: asm goto, constant immediates and `static_cpu_has`
+
+Path B (`NFCXX_BACKEND=pathb`, be/nfcxx_ir.c `ir_asm_general`) lowers asm to `(asm-block ...)` helpers. The kernel's
+`_static_cpu_has` and `alternative_msr_write` / `mds_clear_cpu_buffers` needed three more pieces
+(tests/c/inline_asm_kernel_alt.c, built by tests/nfcc/run.sh):
+
+- An `"i"` operand that is not a constant in the front end (`"i"(1 << (bit & 7))`, `"i"(&caps[bit >> 3])` with a parameter
+  `bit`) is printed as `(opnd immv ...)` / `(opnd symv ...)` with the value. The IR inliner (scripts/pathb-ir-opt.rb) now
+  inlines callees that hold `goto` and `label` (each copy's labels get an `.iN` suffix; the label names inside an
+  `asm-block` keep their spelling, they are what `%l[name]` of the template names), so the argument is a constant in the
+  caller, the e-graph folds the expression, and scripts/pathb-ssa-qbe.rb turns the operand into an immediate or a symbol
+  plus offset (`asm_symbol_of`). An operand that is still not constant refuses the function, as before.
+- An `asm goto` whose template is empty or a nop takes the general lowering (it was refused as `asm-goto`).
+- A `"m"` operand that EDG folded to a constant (a `static const u16 ds = 0x18`) is read from a stack copy.
+
+The plain qbe backend (cproc) does not inline, so the same file stays an `XFAIL-qbe` there.
