@@ -972,6 +972,18 @@ end
         operand = op(opnd)
       end
       cls = Qbe.cls(switch_operand_type(opnd))
+      ranges = switch_ranges(cases)
+      # Four or more ranges: a balanced tree of range tests (GCC's decision tree; docs/notes/pathb-switch.md, which
+      # cites https://xoranth.net/gcc-switch/). Fewer: the chain, which is cheaper.
+      if ranges.size >= 4
+        switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), ranges, default)
+      else
+        switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # The chain of equality tests, one per case, in source order.
+    def switch_chain_lines(operand, cls, cases, default)
       labels = [@label] + (1...cases.size).map { |k| "#{block_label(@cur)}.s#{k}" }
       cases.each_with_index do |(value, target), k|
         cond = "%sw#{@cur}_#{k}"
@@ -985,6 +997,79 @@ end
           @lines << "  jnz #{cond}, @#{block_label(target)}, @#{block_label(default)}"
         end
       end
+    end
+
+    # GCC's clusters: the case values in order as [lo, hi, target], adjacent values with one target merged into one range.
+    def switch_ranges(cases)
+      out = []
+      pairs = cases.map { |value, target| [Qbe.int_lit(value), target] }
+      pairs = pairs.sort { |a, b| a[0] <=> b[0] }
+      pairs.each do |v, target|
+        last = out.last
+        if last && last[2] == target && last[1] + 1 == v
+          last[1] = v
+        else
+          out << [v, v, target]
+        end
+      end
+      out
+    end
+
+    # A balanced binary tree over the ranges. Each inner block splits its ranges at the lower bound of the middle one: a
+    # value below it goes left. A leaf tests its range (x == lo for one value, else x - lo <=u hi - lo) and jumps to its
+    # target, or to the default. The tree sends several jumps to the default, and to a target that is reached from
+    # several leaves: a phi of such a target names one predecessor, so the jumps go through one block that jumps on.
+    def switch_tree_lines(operand, cls, signed, ranges, default)
+      st = { uses: Hash.new(0), seq: 0, traps: {} }
+      ranges.each { |_lo, _hi, target| st[:uses][target] += 1 }
+      st[:uses][default] += ranges.size
+      switch_tree_node(st, operand, cls, signed, ranges, @label, true, default)
+      st[:traps].each do |target, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(target)}"
+      end
+    end
+
+    # The label a jump from block `from` to target goes to; records the jump for the phi of target.
+    def switch_tree_edge(st, target, from)
+      if @phi_blocks[target.to_s]
+        if st[:uses][target] > 1
+          st[:traps][target] ||= "#{block_label(@cur)}.j#{target}"
+          @jumper[[target, @cur]] = st[:traps][target]
+          return st[:traps][target]
+        end
+        @jumper[[target, @cur]] = from
+      end
+      block_label(target)
+    end
+
+    def switch_tree_node(st, operand, cls, signed, ranges, label, root, default)
+      @lines << "@#{label}" unless root
+      st[:seq] += 1
+      n = st[:seq]
+      if ranges.size == 1
+        lo, hi, target = ranges[0]
+        cond = "%swc#{@cur}_#{n}"
+        if lo == hi
+          @lines << "  #{cond} =w ceq#{cls} #{operand}, #{lo}"
+        else
+          shifted = "%swr#{@cur}_#{n}"
+          @lines << "  #{shifted} =#{cls} sub #{operand}, #{lo}"
+          @lines << "  #{cond} =w cule#{cls} #{shifted}, #{hi - lo}"
+        end
+        yes = switch_tree_edge(st, target, label)
+        no = switch_tree_edge(st, default, label)
+        @lines << "  jnz #{cond}, @#{yes}, @#{no}"
+        return
+      end
+      mid = ranges.size / 2
+      cond = "%swc#{@cur}_#{n}"
+      @lines << "  #{cond} =w c#{signed ? "slt" : "ult"}#{cls} #{operand}, #{ranges[mid][0]}"
+      left = "#{block_label(@cur)}.t#{n}l"
+      right = "#{block_label(@cur)}.t#{n}r"
+      @lines << "  jnz #{cond}, @#{left}, @#{right}"
+      switch_tree_node(st, operand, cls, signed, ranges[0, mid], left, false, default)
+      switch_tree_node(st, operand, cls, signed, ranges[mid, ranges.size - mid], right, false, default)
     end
 
     # An operand: a register, a parameter, an integer constant, null, or the address of an object.
@@ -1120,6 +1205,12 @@ end
           return
         end
         raise QbeUnsupported, "statement #{sx(item)}" unless head(item[1]) == "call"
+
+        # A fetch-and-add whose old value is discarded (a shared_ptr's count) is the same locked xadd, not a libatomic call.
+        if atomic_fetch?(item[1])
+          atomic_fetch_lines(fresh, nil, item[1])
+          return
+        end
 
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
@@ -1258,6 +1349,8 @@ end
       when "call"
         if atomic_fetch?(rv)
           atomic_fetch_lines(dst, c, rv)
+        elsif atomic_load?(rv)
+          @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -1980,8 +2073,7 @@ end
       end
     end
 
-    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a sequentially
-    # consistent call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
+    # __atomic_fetch_add_N and __atomic_fetch_sub_N (N = 4 or 8, be/nfcxx_ir.c lowers every atomic to a call): a locked xadd (QBE's xadd op, amd64 lock xadd). Only without --safe, which checks the calls.
     # (Plain string tests: the bundled script runs under mruby, which has no regular expressions.)
     ATOMIC_FETCH_PREFIX = "__atomic_fetch_"
 
@@ -2007,7 +2099,21 @@ end
       return false unless ATOMIC_XADD
       return false unless atomic_fetch_kind(c)
       order = c[5]
-      head(order) == "const" && order[2].to_s == "5"
+      # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
+      # (libstdc++'s shared_ptr counts use acq_rel, 4).
+      head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+    end
+
+    # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
+    # locked stores and exchanges the lowering uses). Only without --safe.
+    ATOMIC_LOAD = /\A__atomic_load_[48]\z/
+
+    def atomic_load?(c)
+      f = c[2]
+      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
+      return false unless f.raw.delete('"') =~ ATOMIC_LOAD && c.length == 5
+
+      head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
 
     def atomic_fetch_lines(dst, cls, c)
