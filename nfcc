@@ -357,7 +357,9 @@ pathb_compile() {
   if [ "$what" = -S ]; then
     keep=$tmp/keep$k
     PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
-    [ $rc != 0 ] || cp "$keep/$(basename "${csrc%.*}").s" "$obj"
+    if [ $rc = 0 ]; then
+      if [ "$obj" = - ]; then cat "$keep/$(basename "${csrc%.*}").s"; else cp "$keep/$(basename "${csrc%.*}").s" "$obj"; fi   # -S -o -: stdout, as gcc
+    fi
   else
     "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$obj" || rc=$?
   fi
@@ -416,8 +418,9 @@ compile_one() {
       pb_reason="Path B refused it (status $rc)"
     fi
     pathb_log "gcc $src: $pb_reason"
+    # gcc's own error is printed first; the nfcc line says which option sent the unit to gcc (the cc-mode checks match it)
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
-        "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
+        "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj" || die "$src: gcc, the Path B fallback for $pb_reason, failed"
   elif [ $backend = qbe ] || [ $backend = cil ]; then
     "$qcc" --c-input $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
