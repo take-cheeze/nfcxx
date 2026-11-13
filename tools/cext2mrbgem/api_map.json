@@ -246,6 +246,215 @@
     "rb_ext_ractor_safe": {
       "kind": "drop",
       "reason": "ractor declaration; mruby has no ractors, so the declaration has no effect"
+    },
+    "rb_intern": {
+      "kind": "call",
+      "mruby": "mrb_intern_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_intern_const": {
+      "kind": "call",
+      "mruby": "mrb_intern_lit",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "argument must be a string literal (mrb_intern_lit is a macro over mrb_intern_static); a char pointer does not compile"
+    },
+    "rb_funcall": {
+      "kind": "call",
+      "mruby": "mrb_funcall_id",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_funcallv": {
+      "kind": "call",
+      "mruby": "mrb_funcall_argv",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_funcall2": {
+      "kind": "call",
+      "mruby": "mrb_funcall_argv",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_new": {
+      "kind": "call",
+      "mruby": "mrb_hash_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_aset": {
+      "kind": "call",
+      "mruby": "mrb_hash_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available"
+    },
+    "rb_hash_aref": {
+      "kind": "call",
+      "mruby": "mrb_hash_get",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new": {
+      "kind": "call",
+      "mruby": "mrb_ary_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_push": {
+      "kind": "call",
+      "mruby": "mrb_ary_push",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the array) is not available"
+    },
+    "rb_ary_entry": {
+      "kind": "call",
+      "mruby": "mrb_ary_entry",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "RARRAY_AREF": {
+      "kind": "call",
+      "mruby": "mrb_ary_entry",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby reads the element pointer without a bounds check; mruby returns nil out of range and accepts negative offsets"
+    },
+    "RARRAY_LEN": {
+      "kind": "macro",
+      "mruby": "RARRAY_LEN"
+    },
+    "rb_utf8_str_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
+    },
+    "rb_obj_class": {
+      "kind": "call",
+      "mruby": "mrb_obj_class",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns struct RClass *, not mrb_value: wrap with mrb_obj_value() where a VALUE is needed"
+    },
+    "rb_respond_to": {
+      "kind": "call",
+      "mruby": "mrb_respond_to",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+    },
+    "rb_float_new": {
+      "kind": "call",
+      "mruby": "mrb_float_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ivar_get": {
+      "kind": "call",
+      "mruby": "mrb_iv_get",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ivar_set": {
+      "kind": "call",
+      "mruby": "mrb_iv_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the value) is not available"
+    },
+    "ID2SYM": {
+      "kind": "call",
+      "mruby": "mrb_symbol_value",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "INT2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no range check: the mruby fixnum range depends on the value boxing"
+    },
+    "LONG2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no range check: the mruby fixnum range depends on the value boxing"
+    },
+    "FIX2INT": {
+      "kind": "call",
+      "mruby": "mrb_fixnum",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a fixnum; the result is mrb_int, not int"
+    },
+    "FIX2LONG": {
+      "kind": "call",
+      "mruby": "mrb_fixnum",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a fixnum; the result is mrb_int"
+    },
+    "FIXNUM_P": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "rb_type": {
+      "kind": "call",
+      "mruby": "mrb_type",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "returns enum mrb_vtype: compare only with MRB_TT_* values. nil and false both report MRB_TT_FALSE (mruby/boxing_nan.h), so T_NIL and T_FALSE are not mapped"
+    },
+    "Qundef": {
+      "kind": "expr",
+      "mruby": "mrb_undef_value()",
+      "caveat": "mrb_value is a struct: test with mrb_undef_p(), not with =="
+    },
+    "T_STRING": {
+      "kind": "expr",
+      "mruby": "MRB_TT_STRING"
+    },
+    "T_ARRAY": {
+      "kind": "expr",
+      "mruby": "MRB_TT_ARRAY"
+    },
+    "T_HASH": {
+      "kind": "expr",
+      "mruby": "MRB_TT_HASH"
+    },
+    "T_OBJECT": {
+      "kind": "expr",
+      "mruby": "MRB_TT_OBJECT"
+    },
+    "T_CLASS": {
+      "kind": "expr",
+      "mruby": "MRB_TT_CLASS"
+    },
+    "T_MODULE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_MODULE"
+    },
+    "T_FLOAT": {
+      "kind": "expr",
+      "mruby": "MRB_TT_FLOAT"
+    },
+    "T_SYMBOL": {
+      "kind": "expr",
+      "mruby": "MRB_TT_SYMBOL"
+    },
+    "T_DATA": {
+      "kind": "expr",
+      "mruby": "MRB_TT_CDATA",
+      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
     }
   },
   "special_arg_positions_class_only": {
