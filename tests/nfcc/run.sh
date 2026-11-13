@@ -374,6 +374,396 @@ refuses "-fsanitize refused" "fsanitize" pb -c -fsanitize=address "$tmp/a.c" -o 
 refuses "C++ refused" "C++" pb -c -x c++ "$tmp/a.c" -o "$tmp/x.o"
 refuses "unknown backend refused" "unknown NFCXX_BACKEND" env NFCXX_BACKEND=nope "$nfcc" -c "$tmp/a.c"
 
+# A global register variable bound to rsp (the kernel's current_stack_pointer, ASM_CALL_CONSTRAINT) is the register: no symbol is
+# defined or referenced (the kernel's link would have an undefined reference), reads are rsp, and the "+r" operand is dropped.
+cat > "$tmp/rsp.c" <<'EOF2'
+register unsigned long current_stack_pointer asm("rsp");
+extern void ext(void);
+unsigned long f(void) { ext(); asm volatile("" : "+r"(current_stack_pointer) : : "memory"); return 1; }
+unsigned long g(void) { return current_stack_pointer & ~0xfffUL; }
+EOF2
+check "a global register variable on rsp builds" pb -c -mno-sse -mno-red-zone "$tmp/rsp.c" -o "$tmp/rsp.o"
+used pathb rsp.c && ok "the rsp register variable compile is Path B's" || bad "the rsp register variable compile is Path B's" "$(tail -1 "$tmp/log")"
+nm "$tmp/rsp.o" | grep -q current_stack_pointer && bad "the rsp register variable has no symbol" "$(nm "$tmp/rsp.o" | grep current_stack_pointer)" || ok "the rsp register variable has no symbol (not defined, not undefined)"
+cp "$root/tests/c/global_register_sp.c" "$tmp/gr.c"
+check "the rsp register variable program links with no current_stack_pointer" pb "$tmp/gr.c" -o "$tmp/gr"
+"$tmp/gr"; [ $? = 42 ] && ok "the rsp register variable program runs (reads and asm operands)" || bad "the rsp register variable program runs" "exit $?"
+
+# A unit with no hosted libc (-ffreestanding, -nostdinc, -mno-sse: the kernel) must not reference abort: a failed check (division
+# by zero, a shift out of range) is the trap instruction. A hosted unit keeps the abort call (SIGABRT).
+printf 'int d(int a, int b) { return a / b; }\nint sh(int a, int b) { return a << b; }\n' > "$tmp/chk.c"
+check "a checked division and shift build" pb -c "$tmp/chk.c" -o "$tmp/chk.o"
+nm "$tmp/chk.o" | grep -q ' U abort' && ok "hosted: a failed check calls abort" || bad "hosted: a failed check calls abort" "$(nm "$tmp/chk.o" | tr '\n' ' ')"
+for o in -ffreestanding -mno-sse -nostdinc; do
+  check "$o: the checks build" pb -c $o "$tmp/chk.c" -o "$tmp/chkf.o"
+  nm "$tmp/chkf.o" | grep -qE '\babort\b|pathb_check' && bad "$o: no abort and no pathb_check" "$(nm "$tmp/chkf.o" | tr '\n' ' ')" || ok "$o: no abort and no pathb_check"
+  objdump -d "$tmp/chkf.o" | grep -q ud2 && ok "$o: a failed check is ud2" || bad "$o: a failed check is ud2" "no ud2"
+done
+
+# __attribute__((used)) on a static function keeps it though nothing refers to it (the kernel's asm-offsets.c: `static void __used
+# common(void)`, whose asm statements kbuild reads from the assembly), and a weak definition is weak in the object, is kept though
+# unreferenced, and is not inlined (another object's strong definition overrides it: the kernel's `__weak sched_clock`).
+cat > "$tmp/uw.c" <<'EOF2'
+static void __attribute__((used)) common(void) { asm volatile("\n.ascii \"->MARK %0\"" : : "i"(5)); }
+static int __attribute__((unused)) dropped(void) { return 3; }
+int __attribute__((weak)) wf(void) { return 1; }
+int __attribute__((weak)) wv = 3;
+int caller(void) { return wf() + 1; }
+EOF2
+check "a static used function and weak definitions build" pb -c "$tmp/uw.c" -o "$tmp/uw.o"
+nm "$tmp/uw.o" | grep -q ' t common$' && ok "the static used function is kept" || bad "the static used function is kept" "$(nm "$tmp/uw.o" | tr '\n' ' ')"
+nm "$tmp/uw.o" | grep -q ' t dropped$' && bad "an unused static function without used is dropped" "kept" || ok "an unused static function without used is dropped"
+nm "$tmp/uw.o" | grep -q ' W wf$' && ok "the weak function is weak in the object" || bad "the weak function is weak in the object" "$(nm "$tmp/uw.o" | tr '\n' ' ')"
+nm "$tmp/uw.o" | grep -q ' V wv$' && ok "the weak variable is weak in the object" || bad "the weak variable is weak in the object" "$(nm "$tmp/uw.o" | tr '\n' ' ')"
+objdump -dr "$tmp/uw.o" | grep -A8 '<caller>:' | grep -q 'wf' && ok "the weak function is called, not inlined" || bad "the weak function is called, not inlined" "no call of wf in caller"
+
+# __attribute__((always_inline)) is inlined whatever the callee's size (the inliner's --max-callee does not apply to it), so no
+# out-of-line copy remains (the kernel's `static __always_inline __init` helpers: a copy in .text would read .init.rodata).
+{
+  echo 'extern int ext(int);'
+  echo 'static inline __attribute__((always_inline)) int big(int i) {'
+  echo '  int s = 0;'
+  echo '  s += ext(i + 0) * 2 + ext(s ^ 0);'
+  echo '  s += ext(i + 1) * 3 + ext(s ^ 1);'
+  echo '  s += ext(i + 2) * 4 + ext(s ^ 2);'
+  echo '  s += ext(i + 3) * 5 + ext(s ^ 3);'
+  echo '  s += ext(i + 4) * 6 + ext(s ^ 4);'
+  echo '  s += ext(i + 5) * 7 + ext(s ^ 5);'
+  echo '  s += ext(i + 6) * 8 + ext(s ^ 6);'
+  echo '  s += ext(i + 7) * 9 + ext(s ^ 7);'
+  echo '  s += ext(i + 8) * 10 + ext(s ^ 8);'
+  echo '  s += ext(i + 9) * 11 + ext(s ^ 9);'
+  echo '  s += ext(i + 10) * 12 + ext(s ^ 10);'
+  echo '  s += ext(i + 11) * 13 + ext(s ^ 11);'
+  echo '  s += ext(i + 12) * 14 + ext(s ^ 12);'
+  echo '  s += ext(i + 13) * 15 + ext(s ^ 13);'
+  echo '  s += ext(i + 14) * 16 + ext(s ^ 14);'
+  echo '  s += ext(i + 15) * 17 + ext(s ^ 15);'
+  echo '  s += ext(i + 16) * 18 + ext(s ^ 16);'
+  echo '  s += ext(i + 17) * 19 + ext(s ^ 17);'
+  echo '  s += ext(i + 18) * 20 + ext(s ^ 18);'
+  echo '  s += ext(i + 19) * 21 + ext(s ^ 19);'
+  echo '  s += ext(i + 20) * 22 + ext(s ^ 20);'
+  echo '  s += ext(i + 21) * 23 + ext(s ^ 21);'
+  echo '  s += ext(i + 22) * 24 + ext(s ^ 22);'
+  echo '  s += ext(i + 23) * 25 + ext(s ^ 23);'
+  echo '  s += ext(i + 24) * 26 + ext(s ^ 24);'
+  echo '  s += ext(i + 25) * 27 + ext(s ^ 25);'
+  echo '  s += ext(i + 26) * 28 + ext(s ^ 26);'
+  echo '  s += ext(i + 27) * 29 + ext(s ^ 27);'
+  echo '  s += ext(i + 28) * 30 + ext(s ^ 28);'
+  echo '  s += ext(i + 29) * 31 + ext(s ^ 29);'
+  echo '  s += ext(i + 30) * 32 + ext(s ^ 30);'
+  echo '  s += ext(i + 31) * 33 + ext(s ^ 31);'
+  echo '  s += ext(i + 32) * 34 + ext(s ^ 32);'
+  echo '  s += ext(i + 33) * 35 + ext(s ^ 33);'
+  echo '  s += ext(i + 34) * 36 + ext(s ^ 34);'
+  echo '  s += ext(i + 35) * 37 + ext(s ^ 35);'
+  echo '  s += ext(i + 36) * 38 + ext(s ^ 36);'
+  echo '  s += ext(i + 37) * 39 + ext(s ^ 37);'
+  echo '  s += ext(i + 38) * 40 + ext(s ^ 38);'
+  echo '  s += ext(i + 39) * 41 + ext(s ^ 39);'
+  echo '  s += ext(i + 40) * 42 + ext(s ^ 40);'
+  echo '  s += ext(i + 41) * 43 + ext(s ^ 41);'
+  echo '  s += ext(i + 42) * 44 + ext(s ^ 42);'
+  echo '  s += ext(i + 43) * 45 + ext(s ^ 43);'
+  echo '  s += ext(i + 44) * 46 + ext(s ^ 44);'
+  echo '  s += ext(i + 45) * 47 + ext(s ^ 45);'
+  echo '  s += ext(i + 46) * 48 + ext(s ^ 46);'
+  echo '  s += ext(i + 47) * 49 + ext(s ^ 47);'
+  echo '  s += ext(i + 48) * 50 + ext(s ^ 48);'
+  echo '  s += ext(i + 49) * 51 + ext(s ^ 49);'
+  echo '  s += ext(i + 50) * 52 + ext(s ^ 50);'
+  echo '  s += ext(i + 51) * 53 + ext(s ^ 51);'
+  echo '  s += ext(i + 52) * 54 + ext(s ^ 52);'
+  echo '  s += ext(i + 53) * 55 + ext(s ^ 53);'
+  echo '  s += ext(i + 54) * 56 + ext(s ^ 54);'
+  echo '  s += ext(i + 55) * 57 + ext(s ^ 55);'
+  echo '  s += ext(i + 56) * 58 + ext(s ^ 56);'
+  echo '  s += ext(i + 57) * 59 + ext(s ^ 57);'
+  echo '  s += ext(i + 58) * 60 + ext(s ^ 58);'
+  echo '  s += ext(i + 59) * 61 + ext(s ^ 59);'
+  echo '  return s;'
+  echo '}'
+  echo 'static inline int big2(int i) {'
+  echo '  int s = 0;'
+  echo '  s += ext(i + 0) * 2 + ext(s ^ 0);'
+  echo '  s += ext(i + 1) * 3 + ext(s ^ 1);'
+  echo '  s += ext(i + 2) * 4 + ext(s ^ 2);'
+  echo '  s += ext(i + 3) * 5 + ext(s ^ 3);'
+  echo '  s += ext(i + 4) * 6 + ext(s ^ 4);'
+  echo '  s += ext(i + 5) * 7 + ext(s ^ 5);'
+  echo '  s += ext(i + 6) * 8 + ext(s ^ 6);'
+  echo '  s += ext(i + 7) * 9 + ext(s ^ 7);'
+  echo '  s += ext(i + 8) * 10 + ext(s ^ 8);'
+  echo '  s += ext(i + 9) * 11 + ext(s ^ 9);'
+  echo '  s += ext(i + 10) * 12 + ext(s ^ 10);'
+  echo '  s += ext(i + 11) * 13 + ext(s ^ 11);'
+  echo '  s += ext(i + 12) * 14 + ext(s ^ 12);'
+  echo '  s += ext(i + 13) * 15 + ext(s ^ 13);'
+  echo '  s += ext(i + 14) * 16 + ext(s ^ 14);'
+  echo '  s += ext(i + 15) * 17 + ext(s ^ 15);'
+  echo '  s += ext(i + 16) * 18 + ext(s ^ 16);'
+  echo '  s += ext(i + 17) * 19 + ext(s ^ 17);'
+  echo '  s += ext(i + 18) * 20 + ext(s ^ 18);'
+  echo '  s += ext(i + 19) * 21 + ext(s ^ 19);'
+  echo '  s += ext(i + 20) * 22 + ext(s ^ 20);'
+  echo '  s += ext(i + 21) * 23 + ext(s ^ 21);'
+  echo '  s += ext(i + 22) * 24 + ext(s ^ 22);'
+  echo '  s += ext(i + 23) * 25 + ext(s ^ 23);'
+  echo '  s += ext(i + 24) * 26 + ext(s ^ 24);'
+  echo '  s += ext(i + 25) * 27 + ext(s ^ 25);'
+  echo '  s += ext(i + 26) * 28 + ext(s ^ 26);'
+  echo '  s += ext(i + 27) * 29 + ext(s ^ 27);'
+  echo '  s += ext(i + 28) * 30 + ext(s ^ 28);'
+  echo '  s += ext(i + 29) * 31 + ext(s ^ 29);'
+  echo '  s += ext(i + 30) * 32 + ext(s ^ 30);'
+  echo '  s += ext(i + 31) * 33 + ext(s ^ 31);'
+  echo '  s += ext(i + 32) * 34 + ext(s ^ 32);'
+  echo '  s += ext(i + 33) * 35 + ext(s ^ 33);'
+  echo '  s += ext(i + 34) * 36 + ext(s ^ 34);'
+  echo '  s += ext(i + 35) * 37 + ext(s ^ 35);'
+  echo '  s += ext(i + 36) * 38 + ext(s ^ 36);'
+  echo '  s += ext(i + 37) * 39 + ext(s ^ 37);'
+  echo '  s += ext(i + 38) * 40 + ext(s ^ 38);'
+  echo '  s += ext(i + 39) * 41 + ext(s ^ 39);'
+  echo '  s += ext(i + 40) * 42 + ext(s ^ 40);'
+  echo '  s += ext(i + 41) * 43 + ext(s ^ 41);'
+  echo '  s += ext(i + 42) * 44 + ext(s ^ 42);'
+  echo '  s += ext(i + 43) * 45 + ext(s ^ 43);'
+  echo '  s += ext(i + 44) * 46 + ext(s ^ 44);'
+  echo '  s += ext(i + 45) * 47 + ext(s ^ 45);'
+  echo '  s += ext(i + 46) * 48 + ext(s ^ 46);'
+  echo '  s += ext(i + 47) * 49 + ext(s ^ 47);'
+  echo '  s += ext(i + 48) * 50 + ext(s ^ 48);'
+  echo '  s += ext(i + 49) * 51 + ext(s ^ 49);'
+  echo '  s += ext(i + 50) * 52 + ext(s ^ 50);'
+  echo '  s += ext(i + 51) * 53 + ext(s ^ 51);'
+  echo '  s += ext(i + 52) * 54 + ext(s ^ 52);'
+  echo '  s += ext(i + 53) * 55 + ext(s ^ 53);'
+  echo '  s += ext(i + 54) * 56 + ext(s ^ 54);'
+  echo '  s += ext(i + 55) * 57 + ext(s ^ 55);'
+  echo '  s += ext(i + 56) * 58 + ext(s ^ 56);'
+  echo '  s += ext(i + 57) * 59 + ext(s ^ 57);'
+  echo '  s += ext(i + 58) * 60 + ext(s ^ 58);'
+  echo '  s += ext(i + 59) * 61 + ext(s ^ 59);'
+  echo '  return s;'
+  echo '}'
+  echo 'int f(int x) { return big(x) + big(x + 1) + big2(x) + big2(x + 1); }'
+} > "$tmp/ai.c"
+check "an always_inline callee over the size cap builds" pb -c "$tmp/ai.c" -o "$tmp/ai.o"
+nm "$tmp/ai.o" | grep -q ' t big$' && bad "an always_inline function is inlined whatever its size" "an out-of-line copy of big remains" || ok "an always_inline function is inlined whatever its size"
+nm "$tmp/ai.o" | grep -q ' t big2$' && ok "the same function without always_inline stays out of line (the cap still holds)" || bad "the same function without always_inline stays out of line" "$(nm "$tmp/ai.o" | tr '\n' ' ')"
+
+# __attribute__((section("S"))) on a function puts it in S (the kernel's __init: .init.text), and such a function is not inlined
+# into code outside the section.
+cat > "$tmp/fs.c" <<'EOF2'
+extern int ext(int);
+static int __attribute__((section(".init.text"))) in_init(int x) { return ext(x) + 1; }
+int __attribute__((section(".noinstr.text"))) other(int x) { return x * 3; }
+int caller(int x) { return in_init(x) + other(x); }
+EOF2
+check "functions with a section attribute build" pb -c "$tmp/fs.c" -o "$tmp/fs.o"
+readelf -SW "$tmp/fs.o" | grep -q ' \.init\.text ' && readelf -SW "$tmp/fs.o" | grep -q ' \.noinstr\.text ' && ok "the section attribute puts a function in its section" || bad "the section attribute puts a function in its section" "$(readelf -SW "$tmp/fs.o" | grep -c text) text sections"
+nm "$tmp/fs.o" | grep -q ' t in_init$' && ok "a function with a section attribute is not inlined out of its section" || bad "a function with a section attribute is not inlined" "$(nm "$tmp/fs.o" | tr '\n' ' ')"
+
+# -fno-PIE: the address of an external function is the symbol itself, not a data cell (a cell in .data that points into .init.text
+# is a section mismatch for the kernel's modpost). With -fPIC (or with neither option) the cell stays.
+printf 'extern void ext(void);\nvoid (*get(void))(void) { return ext; }\n' > "$tmp/fa.c"
+pb -c -fno-PIE "$tmp/fa.c" -o "$tmp/fa1.o" && pb -c "$tmp/fa.c" -o "$tmp/fa2.o" && pb -c -fno-PIE -fPIC "$tmp/fa.c" -o "$tmp/fa3.o" &&
+  ! nm "$tmp/fa1.o" | grep -q pathb_got && nm "$tmp/fa2.o" | grep -q pathb_got && nm "$tmp/fa3.o" | grep -q pathb_got &&
+  ok "-fno-PIE: no cell for a function address (default and -fPIC keep it)" || bad "-fno-PIE: no cell for a function address" "$(nm "$tmp/fa1.o" "$tmp/fa2.o" "$tmp/fa3.o" | grep got | tr '\n' ' ')"
+
+# C inline semantics: an inline function that an `extern` declaration (or a declaration without `inline`) completes is an external
+# definition (one strong symbol, as gcc's: the kernel's `inline int task_curr(...)`, `STATIC inline int INIT unlzma(...)`); an inline
+# definition no such declaration completes is no definition (the symbol is another unit's).
+cat > "$tmp/ci.c" <<'EOF2'
+extern int ext_def(int);
+inline int ext_def(int x) { return x + 1; }
+int plain_decl(int);
+inline int plain_decl(int x) { return x + 2; }
+inline int only_inline(int x) { return x + 3; }
+int use(int x) { return ext_def(x) + plain_decl(x) + only_inline(x); }
+EOF2
+check "C inline definitions build" pb -c -ffreestanding "$tmp/ci.c" -o "$tmp/ci.o"
+nm "$tmp/ci.o" | grep -q ' T ext_def$' && nm "$tmp/ci.o" | grep -q ' T plain_decl$' && ok "an inline function with an extern (or plain) declaration is an external definition" || bad "an inline function with an extern declaration is external" "$(nm "$tmp/ci.o" | tr '\n' ' ')"
+nm "$tmp/ci.o" | grep -q ' U only_inline$' && ok "an inline definition without an extern declaration is not emitted (as gcc)" || bad "an inline definition without an extern declaration is not emitted" "$(nm "$tmp/ci.o" | tr '\n' ' ')"
+
+# Dead code after inlining: a static function only a dead branch reached is not emitted (gcc's copy does not exist either), so its
+# calls are not undefined references; a noinline function with an empty body is inlined (gcc's IPA drops its unused arguments).
+cat > "$tmp/dc.c" <<'EOF2'
+extern int ext(void);
+extern int tab[], tab_end[];
+static __attribute__((noinline)) int wp(int a) { return ext() + a; }
+static inline int off(void) { return 0; }
+static __attribute__((noinline)) void apply(int *s, int *e) { }
+int f(int x) { apply(tab, tab_end); if (off()) return wp(x); return 7; }
+EOF2
+check "dead branches after inlining build" pb -c -ffreestanding "$tmp/dc.c" -o "$tmp/dc.o"
+nm "$tmp/dc.o" | grep -qE ' U (ext|tab|tab_end)$| t (wp|apply)$' && bad "no copy of a function only a dead branch reached, no reference to an empty stub's arguments" "$(nm "$tmp/dc.o" | tr '\n' ' ')" || ok "no copy of a function only a dead branch reached, no reference to an empty stub's arguments"
+
+# Inlining reaches what gcc's constant propagation does: a helper with a bool parameter, and a static function with one call site (gcc's
+# -finline-functions-called-once, whatever its size), carry their constants into the body, where the branches they decide are folded and
+# the calls in the dead ones are gone (no undefined reference to a function the configuration does not build).
+cat > "$tmp/bp.c" <<'EOF2'
+extern int never_defined(int);
+static inline _Bool allowable(int a, _Bool smaps, _Bool in_pf) { return 0; }
+static inline int create(int x) { return never_defined(x); }
+int f(int x) { if (allowable(x, 0, 1)) return create(x); return 7; }
+EOF2
+check "a bool-parameter helper builds" pb -c -ffreestanding "$tmp/bp.c" -o "$tmp/bp.o"
+nm "$tmp/bp.o" | grep -q ' U never_defined$' && bad "a bool-parameter helper is inlined, its dead branch is gone" "U never_defined" || ok "a bool-parameter helper is inlined, its dead branch is gone"
+{
+  echo 'extern int ext(int);'
+  echo 'extern int never_defined(int);'
+  echo 'static int big(int x, _Bool k) {'
+  echo '  int s = 0;'
+  echo '  s += ext(x + 0) * 2 + ext(s ^ 0);'
+  echo '  s += ext(x + 1) * 3 + ext(s ^ 1);'
+  echo '  s += ext(x + 2) * 4 + ext(s ^ 2);'
+  echo '  s += ext(x + 3) * 5 + ext(s ^ 3);'
+  echo '  s += ext(x + 4) * 6 + ext(s ^ 4);'
+  echo '  s += ext(x + 5) * 7 + ext(s ^ 5);'
+  echo '  s += ext(x + 6) * 8 + ext(s ^ 6);'
+  echo '  s += ext(x + 7) * 9 + ext(s ^ 7);'
+  echo '  s += ext(x + 8) * 10 + ext(s ^ 8);'
+  echo '  s += ext(x + 9) * 11 + ext(s ^ 9);'
+  echo '  s += ext(x + 10) * 12 + ext(s ^ 10);'
+  echo '  s += ext(x + 11) * 13 + ext(s ^ 11);'
+  echo '  s += ext(x + 12) * 14 + ext(s ^ 12);'
+  echo '  s += ext(x + 13) * 15 + ext(s ^ 13);'
+  echo '  s += ext(x + 14) * 16 + ext(s ^ 14);'
+  echo '  s += ext(x + 15) * 17 + ext(s ^ 15);'
+  echo '  s += ext(x + 16) * 18 + ext(s ^ 16);'
+  echo '  s += ext(x + 17) * 19 + ext(s ^ 17);'
+  echo '  s += ext(x + 18) * 20 + ext(s ^ 18);'
+  echo '  s += ext(x + 19) * 21 + ext(s ^ 19);'
+  echo '  s += ext(x + 20) * 22 + ext(s ^ 20);'
+  echo '  s += ext(x + 21) * 23 + ext(s ^ 21);'
+  echo '  s += ext(x + 22) * 24 + ext(s ^ 22);'
+  echo '  s += ext(x + 23) * 25 + ext(s ^ 23);'
+  echo '  s += ext(x + 24) * 26 + ext(s ^ 24);'
+  echo '  s += ext(x + 25) * 27 + ext(s ^ 25);'
+  echo '  s += ext(x + 26) * 28 + ext(s ^ 26);'
+  echo '  s += ext(x + 27) * 29 + ext(s ^ 27);'
+  echo '  s += ext(x + 28) * 30 + ext(s ^ 28);'
+  echo '  s += ext(x + 29) * 31 + ext(s ^ 29);'
+  echo '  s += ext(x + 30) * 32 + ext(s ^ 30);'
+  echo '  s += ext(x + 31) * 33 + ext(s ^ 31);'
+  echo '  s += ext(x + 32) * 34 + ext(s ^ 32);'
+  echo '  s += ext(x + 33) * 35 + ext(s ^ 33);'
+  echo '  s += ext(x + 34) * 36 + ext(s ^ 34);'
+  echo '  s += ext(x + 35) * 37 + ext(s ^ 35);'
+  echo '  s += ext(x + 36) * 38 + ext(s ^ 36);'
+  echo '  s += ext(x + 37) * 39 + ext(s ^ 37);'
+  echo '  s += ext(x + 38) * 40 + ext(s ^ 38);'
+  echo '  s += ext(x + 39) * 41 + ext(s ^ 39);'
+  echo '  s += ext(x + 40) * 42 + ext(s ^ 40);'
+  echo '  s += ext(x + 41) * 43 + ext(s ^ 41);'
+  echo '  s += ext(x + 42) * 44 + ext(s ^ 42);'
+  echo '  s += ext(x + 43) * 45 + ext(s ^ 43);'
+  echo '  s += ext(x + 44) * 46 + ext(s ^ 44);'
+  echo '  s += ext(x + 45) * 47 + ext(s ^ 45);'
+  echo '  s += ext(x + 46) * 48 + ext(s ^ 46);'
+  echo '  s += ext(x + 47) * 49 + ext(s ^ 47);'
+  echo '  s += ext(x + 48) * 50 + ext(s ^ 48);'
+  echo '  s += ext(x + 49) * 51 + ext(s ^ 49);'
+  echo '  s += ext(x + 50) * 52 + ext(s ^ 50);'
+  echo '  s += ext(x + 51) * 53 + ext(s ^ 51);'
+  echo '  s += ext(x + 52) * 54 + ext(s ^ 52);'
+  echo '  s += ext(x + 53) * 55 + ext(s ^ 53);'
+  echo '  s += ext(x + 54) * 56 + ext(s ^ 54);'
+  echo '  s += ext(x + 55) * 57 + ext(s ^ 55);'
+  echo '  s += ext(x + 56) * 58 + ext(s ^ 56);'
+  echo '  s += ext(x + 57) * 59 + ext(s ^ 57);'
+  echo '  s += ext(x + 58) * 60 + ext(s ^ 58);'
+  echo '  s += ext(x + 59) * 61 + ext(s ^ 59);'
+  echo '  if (k) s += never_defined(1234);'
+  echo '  return s;'
+  echo '}'
+  echo 'int f(int x) { return big(x, 0); }'
+} > "$tmp/once.c"
+check "a big static function with one call site builds" pb -c -ffreestanding "$tmp/once.c" -o "$tmp/once.o"
+nm "$tmp/once.o" | grep -qE ' U never_defined$| t big$' && bad "a static function with one call site is inlined whatever its size" "$(nm "$tmp/once.o" | tr '\n' ' ')" || ok "a static function with one call site is inlined whatever its size"
+
+# -fPIE with -mno-sse (the kernel's boot decompressor, which allows no run-time relocations): gcc's compile; -fPIE alone stays Path B's
+printf 'int f(int a, int b) { return a + b; }\n' > "$tmp/pie.c"
+check "-fPIE -mno-sse compiles" pb -c -fPIE -mno-sse "$tmp/pie.c" -o "$tmp/pie1.o"
+used gcc pie.c && ok "-fPIE with -mno-sse is gcc's compile" || bad "-fPIE with -mno-sse is gcc's compile" "$(tail -1 "$tmp/log")"
+check "-fPIE compiles" pb -c -fPIE "$tmp/pie.c" -o "$tmp/pie2.o"
+used pathb pie.c && ok "-fPIE alone is Path B's compile" || bad "-fPIE alone is Path B's compile" "$(tail -1 "$tmp/log")"
+
+# The kernel's .head.text runs identity-mapped before its page tables: a unit with a function in it takes the addresses of globals as the
+# link-time absolute ones (R_X86_64_32S, gcc's kernel model; qbe -A), any other unit rip-relative ones
+cat > "$tmp/hd.c" <<'EOF2'
+extern char _text[];
+unsigned long __attribute__((section(".head.text"))) hd(unsigned long phys) { return phys - ((unsigned long)_text - 0xffffffff80000000UL); }
+EOF2
+printf 'extern char _text[];\nunsigned long other(unsigned long phys) { return phys - ((unsigned long)_text - 0xffffffff80000000UL); }\n' > "$tmp/nohd.c"
+check ".head.text unit builds" pb -c "$tmp/hd.c" -o "$tmp/hd.o"
+check "a unit without .head.text builds" pb -c "$tmp/nohd.c" -o "$tmp/nohd.o"
+objdump -dr "$tmp/hd.o" | grep -q 'R_X86_64_32S.*_text' && ok ".head.text: global addresses are absolute" || bad ".head.text: global addresses are absolute" "$(objdump -dr "$tmp/hd.o" | grep _text | head -2 | tr '\n' ' ')"
+objdump -dr "$tmp/nohd.o" | grep -q 'R_X86_64_PC32.*_text' && ok "other units: global addresses are rip-relative" || bad "other units: global addresses are rip-relative" "$(objdump -dr "$tmp/nohd.o" | grep _text | head -2 | tr '\n' ' ')"
+
+# An asm memory operand on a global object is the object itself, `sym(%rip)` (the kernel's `lgdt %0` of head64.c's startup_gdt_descr, run
+# identity-mapped before the page tables that map the object's link-time address); one on a pointer's target stays an address
+cat > "$tmp/mo.c" <<'EOF2'
+struct dp { unsigned short size; unsigned long address; } __attribute__((packed));
+static struct dp gdt_descr = { 10, 0 };
+void setup(unsigned long a) { gdt_descr.address = a; asm volatile("lgdt %0" :: "m"(gdt_descr)); }
+void viaptr(const struct dp *p) { asm volatile("lgdt %0" :: "m"(*p)); }
+EOF2
+check "asm memory operands build" pb -c "$tmp/mo.c" -o "$tmp/mo.o"
+[ "$(objdump -d "$tmp/mo.o" | grep -c 'lgdt   0x0(%rip)')" = 1 ] && [ "$(objdump -d "$tmp/mo.o" | grep -c 'lgdt   (%rax)')" = 1 ] &&
+  ok "a memory operand on a global is sym(%rip), on a pointer's target (%reg)" || bad "asm memory operand forms" "$(objdump -d "$tmp/mo.o" | grep lgdt | tr '\n' ' ')"
+# the helper that names a symbol is in the section of its caller (modpost: no reference from .text to an __init object)
+printf 'static int initdata;\nvoid __attribute__((section(".init.text"))) f(void) { asm volatile("lgdt %%0" :: "m"(initdata)); }\nvoid g(void) { asm volatile("lgdt %%0" :: "m"(initdata)); }\n' > "$tmp/ms.c"
+check "asm helpers in sections build" pb -c "$tmp/ms.c" -o "$tmp/ms.o"
+objdump -t "$tmp/ms.o" | grep __pathb_asm | awk '{print $4}' | sort | tr '\n' ' ' | grep -q '^.init.text .text $' && ok "an asm helper that names a symbol is in its caller's section" || bad "an asm helper that names a symbol is in its caller's section" "$(objdump -t "$tmp/ms.o" | grep __pathb_asm | awk '{print $4}' | tr '\n' ' ')"
+
+# A static local with __attribute__((used)) is emitted where it is declared (the kernel's __ADDRESSABLE in static_call(): its job is to
+# make the object reference the key, so that the object's symbol table has it, which objtool looks up)
+cat > "$tmp/ad.c" <<'EOF2'
+struct key { int x; };
+extern struct key __SCK__apic_call_write;
+extern void tramp(int);
+static inline void apic_write(int v) {
+  ({ static void *__attribute__((used, section(".discard.addressable"))) __addr = (void *)&__SCK__apic_call_write; });
+  tramp(v);
+}
+void f(void) { apic_write(1); }
+EOF2
+check "a static local with the used attribute builds" pb -c "$tmp/ad.c" -o "$tmp/ad.o"
+nm "$tmp/ad.o" | grep -q ' U __SCK__apic_call_write$' && ok "the used static local is emitted: the object references the key" || bad "the used static local is emitted" "$(nm "$tmp/ad.o" | tr '\n' ' ')"
+
+# A function attribute `alias` to a static function defined later: the target is kept (the kernel's SYSCALL_DEFINE0 stubs), and
+# __builtin_isdigit is inline (the kernel's isdigit), not a call of the libc function.
+cat > "$tmp/al.c" <<'EOF2'
+static long __do_sys_getpid(void);
+long __x64_sys_getpid(const void *regs) __attribute__((alias("__do_sys_getpid")));
+static long __do_sys_getpid(void) { return 42; }
+int dig(int c) { return __builtin_isdigit(c); }
+EOF2
+check "an alias of a static function, and __builtin_isdigit, build" pb -c -ffreestanding "$tmp/al.c" -o "$tmp/al.o"
+nm "$tmp/al.o" | grep -q ' T __x64_sys_getpid$' && nm "$tmp/al.o" | grep -q ' t __do_sys_getpid$' && ok "the static target of an alias is emitted with it" || bad "the static target of an alias is emitted" "$(nm "$tmp/al.o" | tr '\n' ' ')"
+nm "$tmp/al.o" | grep -q ' U isdigit$' && bad "__builtin_isdigit is not a call of isdigit" "U isdigit" || ok "__builtin_isdigit is inline"
+printf 'int isd(int);\nint main(void) { return isd(55) * 10 + isd(47) + isd(-1) * 100; }\n' > "$tmp/isd.c"
+printf 'int isd(int c) { return __builtin_isdigit(c); }\n' > "$tmp/isd2.c"
+check "__builtin_isdigit gives 1 for a digit and 0 for others" pb "$tmp/isd.c" "$tmp/isd2.c" -o "$tmp/isd"
+"$tmp/isd"; [ $? = 10 ] && ok "__builtin_isdigit values" || bad "__builtin_isdigit values" "exit $?"
+
+# A function with a section attribute is inlined into a caller of the same section, not into another
+cat > "$tmp/ss.c" <<'EOF2'
+extern int ext(int);
+static int __attribute__((section(".head.text"))) chk(int x) { return x ? 0 : 1; }
+int __attribute__((section(".head.text"))) in_head(int x) { return chk(x) + ext(x); }
+int outside(int x) { return chk(x); }
+EOF2
+check "functions of one section call each other" pb -c "$tmp/ss.c" -o "$tmp/ss.o"
+ncalls() { objdump -dr "$tmp/ss.o" | awk -v fn="<$1>:" '$2 == fn {f=1; next} /^$/ {f=0} f' | grep -cE 'call|jmp  '; }
+[ "$(ncalls in_head)" = 1 ] && ok "a callee of the caller's own section is inlined (one call left: ext)" || bad "a callee of the caller's own section is inlined" "in_head has $(ncalls in_head) calls"
+[ "$(ncalls outside)" = 1 ] && ok "a callee of another section is not inlined" || bad "a callee of another section is not inlined" "outside has $(ncalls outside) calls"
+
 # The default backend: Path B on x86-64 Linux when the harness is built (a unit it cannot take goes to gcc), qbe otherwise; NFCXX_BACKEND chooses.
 if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
   out=$(env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK "$nfcc" --version)

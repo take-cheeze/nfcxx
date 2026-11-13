@@ -290,6 +290,39 @@ For the kernel, the groups that matter are inline asm (templates, `asm goto`, fl
 (`guard()`: used all over the kernel), and `case` ranges; `_Float16` the kernel does not use. These, plus the option
 handling above, are what decides the next Path B follow-ups for a kernel build.
 
+### Linking Path B objects into a kernel
+
+Compiling is not linking: the first link of a tinyconfig kernel whose C files are Path B's showed what the objects lacked (`make vmlinux`
+with `CC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc`, then `bzImage`, booted under qemu). Each cause has a case in
+`tests/nfcc/run.sh` (and `tests/c/global_register_sp.c`, `tests/c/weak_override_gcc.c`):
+
+- `register unsigned long current_stack_pointer asm("rsp")` (`ASM_CALL_CONSTRAINT`) is the register: a read is the IR form `(sp)` (a weak
+  `__pathb_sp` helper, `leaq 8(%rsp), %rax`), a `"+r"` asm operand on it is a temporary, no symbol is defined or referenced.
+- A failed check (division by zero, a shift out of range, ...) in a unit with no hosted libc (`-ffreestanding`, `-nostdinc`, `-mno-sse`) is
+  `ud2` (`pathb-cc --trap-checks`, qbe `hlt`), not a call of `abort`, which the kernel does not have; hosted units keep the abort.
+- `__attribute__((section))` on a function (the kernel's `__init`, `__head`, `noinstr`) places it; such a function is inlined only into a
+  caller of the same section. `__attribute__((used))` keeps a static function (asm-offsets.c's `common()`), `(weak attr)` definitions are weak,
+  roots of pruning and never inlined (`__weak sched_clock`), a static local with `used` (`__ADDRESSABLE`) is emitted where declared (objtool
+  looks the static call key up in the object's symbol table), the target of an `alias` attribute is a root (`SYSCALL_DEFINE0`).
+- C inline semantics: an inline function with an `extern` (or non-`inline`) declaration is one strong external definition (`inline int
+  task_curr()`, `unlzma`), no longer a weak copy that pruning dropped.
+- The inliner reaches what gcc's constant propagation does, so that the calls in compiled-out branches are gone: `always_inline` callees
+  and static functions with one call site are inlined whatever their size, bool parameters no longer stop an inline, an empty `noinline`
+  stub is inlined, and `pathb-ssa-build` prunes again after the e-graph folded the constant branches (a static function only a dead branch
+  reached was emitted, with its undefined references).
+- `__builtin_isdigit` is inline (gcc folds it; the libc function does not exist in a kernel).
+- `-fno-PIE` addresses an external function by its symbol, not through a data cell (a cell in `.data` pointing into `.init.text` is a modpost
+  section mismatch); `-fPIE` with `-mno-sse` (the boot decompressor, which allows no run-time relocations) is gcc's compile.
+- `.head.text` (head64.c's `__startup_64`, which runs identity-mapped before the page tables) is assembled with `qbe -A`: the addresses of
+  globals are the link-time absolute ones, as gcc's kernel model writes them. An asm memory operand on a global is the object itself,
+  `sym(%rip)` (`lgdt startup_gdt_descr`), and the helper of an asm that names a symbol is placed in its caller's section.
+
+State of the build: `vmlinux` links with no undefined or duplicate symbol, and `bzImage` is built (617 compiles went to Path B; the rest are the kbuild probes and the real-mode boot code, which
+gcc compiled). The `.data.rel.ro` sections QBE writes for constant data with relocations are orphans to the kernel's linker script (a
+`ld: warning`, `CONFIG_LD_ORPHAN_WARN_LEVEL="warn"`), and objtool warns about QBE's `leave; jmp` sibling calls and unannotated noreturn calls.
+The kernel boots through `setup_arch`, the console, the scheduler and the initramfs unpacking to `Run /init`, where the first `execve` stops
+in `__mutex_add_waiter` with a bad list head (not yet explained: the layouts of `task_struct`, `signal_struct` and `mutex` are those of gcc's).
+
 ### Measured: why gcc took each compile of the Linux 6.8 tinyconfig kernel on Path B
 
 `KCC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=FILE` logged, per compile, why gcc took it. Besides

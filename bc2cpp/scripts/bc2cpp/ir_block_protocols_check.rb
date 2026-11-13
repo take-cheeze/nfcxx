@@ -44,6 +44,7 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
       def generic_literal(values); generic_walk(values) { |item| 1 }; end
       def stable(values); local = 3; once(1) { |item| local }; end
       def declared_capture(values, label); once(1) { |item| label }; end
+      def guarded_capture(values, label); once(1) { |item| label }; end
       def iterator_capture(values); local = 3; values.map { |item| local }; end
       def written(values); local = 3; values.map { |item| local = :changed; local }; end
       def opaque_capture(values); local = 3; generic_walk(values) { |item| local }; end
@@ -62,7 +63,8 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
       def generic_literal: (Array[String] values) -> untyped
       def stable: (Array[String] values) -> untyped
       def iterator_capture: (Array[String] values) -> untyped
-      def declared_capture: (Array[String] values, Symbol label) -> untyped
+      def declared_capture: (Array[String] values, String label) -> untyped
+      def guarded_capture: (Array[String] values, Symbol label) -> untyped
       def written: (Array[String] values) -> untyped
       def opaque_capture: (Array[String] values) -> untyped
       def numeric_callback: () { () -> Numeric } -> Numeric
@@ -88,7 +90,11 @@ Dir.mktmpdir('ir-block-protocols') do |dir|
   check.call('pure custom yield captures retain independently proven Integer facts', row.call('stable', 'block_return')['type'] == 'Integer' && row.call('stable', 'block_return')['status'] == 'inferred')
   check.call('nominal iterator contracts alone cannot prove capture lifetime', row.call('iterator_capture', 'block_return')['status'] == 'unknown')
   check.call('declared captures retain their argument contract provenance',
-             row.call('declared_capture', 'block_return')['type'] == 'Symbol' && row.call('declared_capture', 'block_return')['status'] == 'declared' && row.call('declared_capture', 'block_return')['contracts'].include?('argument:R2'))
+             row.call('declared_capture', 'block_return')['type'] == 'String' && row.call('declared_capture', 'block_return')['status'] == 'declared' && row.call('declared_capture', 'block_return')['contracts'].include?('argument:R2'))
+  # A declared Symbol (or Integer, Float, `T?`, program class) parameter is checked on entry (DECLARED_PARAM_GUARD) and
+  # seeds the flow, so its capture is a proven fact, not a bare contract: it carries no argument contract.
+  check.call('a guarded declared parameter is proven on entry, so its capture is inferred without a contract',
+             row.call('guarded_capture', 'block_return')['type'] == 'Symbol' && row.call('guarded_capture', 'block_return')['status'] == 'inferred' && row.call('guarded_capture', 'block_return')['contracts'].empty?)
   check.call('capture writes prevent a stale independent Integer fact', row.call('written', 'block_return')['type'] != 'Integer')
   check.call('an RBS callback contract alone cannot prove capture lifetime', row.call('opaque_capture', 'block_return')['status'] == 'unknown')
   check.call('Integer callback returns satisfy Numeric through the known hierarchy', row.call('numeric_caller', 'block_contract')['status'] == 'inferred')

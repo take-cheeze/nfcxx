@@ -276,8 +276,8 @@ module RbsSignatures
       name = t.name.to_s.delete_prefix('::')
       args = t.args
       case name
-      when 'Integer' then args.empty? ? Type.new(kind: :int, text: text) : Type.new(kind: :other, text: text)
-      when 'Symbol' then Type.new(kind: :sym, text: text)
+      when 'Integer' then args.empty? ? Type.new(kind: :int, text: text, value: :integer) : Type.new(kind: :other, text: text)
+      when 'Symbol' then Type.new(kind: :sym, text: text, value: :symbol)
       when 'Array'
         elem = args.size == 1 ? class_name_of(args.first) : nil
         Type.new(kind: :array, element: elem, text: text)

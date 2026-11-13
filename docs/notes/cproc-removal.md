@@ -48,7 +48,11 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
      computed-goto dispatch in `be/nfcxx_ir.c`, `poly.md`; the `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
      one-element trailing array checked against its bound).
    - `tests/ast`: engine.cpp and tier.cpp pass on Path B (the SIGABRT was a null check under the lvalue adjustment of a derived-to-base
-     pointer conversion); the case `inline_loops` still overflows the 8 MB stack on Path B, whose frames are several times gcc's.
+     pointer conversion); the case `inline_loops` was thought to overflow the 8 MB stack on Path B, whose frames were several times
+     gcc's: it needed 4.7 MB of it (`ulimit -s` search), and needs 3.2 MB since the frame work (docs/notes/pathb-ssa-qbe.md, "Frames":
+     slots live across no `_setjmp` are promoted, inlined bodies' slots with disjoint lifetimes share a frame, EH entries are cut to
+     the bytes written). `tests/ast` and `tests/uop` run Path B and gcc, and the QBE-ONLY markers are gone; `tests/uop/test_layout_avx2.cpp`'s
+     `main: operator unsupported` was `__builtin_cpu_supports`, now lowered (`tests/cases/cpu_supports.cpp`).
    - `tests/long-double-abi` runs on Path B and gcc (a variadic call with long double arguments and result goes through a
      per-shape call thunk); `tests/cil/errors/variadic_def.c` is Path B's own refusal, `cil-cc` does not fall back to cproc for it.
    - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
@@ -59,3 +63,13 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 3. Flip `nfcc` and move the third-party C builds; remove their cproc workarounds.
 4. Path B (or gcc) on non-x86-64 hosts, so that no default selects qbe.
 5. When no default, no CI leg and no test needs it, delete the files above in one PR and run the check at the top.
+
+## aarch64 (Linux arm64) status
+
+- Done: the default driver is Path B on every host; the `arm64 cases` CI leg runs `NFCXX_BACKEND=pathb tests/run.sh` (and gcc on main), verified on Linux aarch64 (56 ok both ways).
+- Still on cproc on arm64, and why each cannot move yet (checked on Linux aarch64 with `NFCXX_BACKEND=pathb`):
+  - `tests/lib` and `tests/target` (freestanding): Path B takes freestanding programs only on x86-64 Linux, so the suite cannot run there.
+  - `tests/c` (6 failures: `attr_section_more.c`, `attr_section_used.c`, `gnu_weak_alias.c` (undefined `do_sys`), `init_self_ref.c` (assembler), `ldouble_ops.c` (long double), `va_struct.c`).
+  - `tests/c/cc-mode.sh`: `pathb-cc` does not take `-isystem`; `tests/trace` lacks the `eccp` span on the gcc route.
+  - `tests/builtins` and `tests/determinism` pass on Path B; their default backend list stays until the freestanding suites move.
+  - The `macOS arm64 (qbe backend)` leg is unchanged: it needs a Path B run on macOS CI first (no macOS host here).
