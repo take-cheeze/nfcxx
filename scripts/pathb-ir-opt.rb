@@ -8,7 +8,7 @@
 #                of the module is replaced by f's body. f's ids become fresh ids of the caller, its slots become caller
 #                slots with new names (hoisted to the caller's header), its parameters are bound to the arguments, and
 #                its final return becomes (let %D T OPERAND). A callee is inlined only when its returns are all in tail
-#                position (none, or the last statement); refused callees are: constructors and destructors, sret, byval
+#                position (none, or the last statement); refused callees are: constructors and destructors, sret, hidden-result, byval
 #                and ellipsis parameters, struct or array results, struct or bool parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
@@ -412,6 +412,9 @@ def expand_call(s, fns, st)
   byval_pre = []
   byval_slots = []
   params.each_with_index do |p, i|
+    # A class result EDG lowered into the first parameter (AArch64, marked (hidden-result)): its call passes (hidden-dest ...) and
+    # goes through a thunk that takes the object in x8 (scripts/pathb-ssa-qbe.rb). Not inlined: the binding below does not know it.
+    return nil if p.drop(4).any? { |x| head(x) == "hidden-result" }
     if head(p) == "sret"
       # the result object of a struct-returning callee: the call passes (sret TYPE ADDR), and the callee's stores go to ADDR
       # (the caller copies the result from there after the call, as before the inline)
@@ -1912,10 +1915,25 @@ UNUSED_ROOTS = "\0unused"
 
 def external_root?(f)
   return false if head(f) == "data"
+  # the other units to refer to it (the object it names is kept by the same rule as its functions).
   attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
   return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
   return false if attrs.include?("weak") || attrs.include?("static")
   true   # a definition (or declaration) of external linkage
+end
+
+# A vtable (_ZTV...) is a root when its class has a function of external linkage defined in this unit: the class's key
+# function, or another member. EDG marks such a vtable COMDAT even in the key function's unit, where gcc emits it strong for
+# the other units; a vtable of a class defined elsewhere is not kept. A local class (_ZTVZ...) is used only in its own unit.
+def vtable_roots(nodes)
+  defined = nodes.keys.select { |n| head(nodes[n]) == "function" && external_root?(nodes[n]) }
+  nodes.keys.select do |n|
+    next false unless n.start_with?("_ZTV") && !n.start_with?("_ZTVZ")
+    body = n[4..]
+    inner = body.start_with?("N") && body.end_with?("E") ? body[1..-2] : body
+    pres = ["_ZN#{inner}", "_ZNK#{inner}"]
+    defined.any? { |fn| pres.any? { |pre| fn.start_with?(pre) } }
+  end
 end
 
 # The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
@@ -1936,7 +1954,7 @@ def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
   queue = if substr == UNUSED_ROOTS
-            nodes.keys.select { |n| external_root?(nodes[n]) }
+            nodes.keys.select { |n| external_root?(nodes[n]) } + vtable_roots(nodes)
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end

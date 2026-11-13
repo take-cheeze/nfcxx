@@ -5063,10 +5063,10 @@ static ir_val ir_call(an_expr_node_ptr e)
   int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
 #if defined(__aarch64__)
   /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
-     (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
-     copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
-     module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
-  a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
+     (hidden-dest T DEST). The SSA route passes DEST as the callee's result pointer in x8 (AAPCS64) through a thunk, so the
+     callee builds the object in DEST itself (no copy: a std::string's buffer may point into it). The first operand is
+     the destination, not an argument (scripts/pathb-ssa-qbe.rb, call_parts). */
+  a_type_ptr hid_ft = ir_callee_fn_type(f);   /* a pointer callee too: a virtual call takes the same convention */
   if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
       hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
       !hid_ft->variant.routine.extra_info->return_value_parameter_follows_this &&
@@ -5075,9 +5075,12 @@ static ir_val ir_call(an_expr_node_ptr e)
     a_type_ptr dt = d.t != NULL ? skip_typerefs(d.t) : NULL;
     if (dt != NULL && dt->kind == tk_pointer && ir_is_cabi_agg(dt->variant.pointer.type)) {
       hid_dest = 1;
-      args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
+      args = ir_fmt("%s (hidden-dest %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
     }
   }
+  if (!hid_dest && !agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
+      hid_ft->variant.routine.extra_info->value_returned_as_parameter && !ir_is_cdtor_call(f, 0) && !ir_is_cdtor_call(f, 1))
+    return ir_gap(e->type, "call of a class-result function without its result object", 0, (int)eok_call);
 #endif
   {
     int ints = 0, sse = 0, shape_ok = 1;

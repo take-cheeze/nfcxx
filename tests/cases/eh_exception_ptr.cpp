@@ -1,10 +1,6 @@
 // std::exception_ptr, current_exception, rethrow_exception, make_exception_ptr, nested exceptions on EDG's exception
 // runtime (lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md; the runtime keeps an exception alive while a pointer
 // refers to it). The exit code is the number of wrong results.
-// X86-ONLY-LINUX: on Linux aarch64 std::current_exception() in a catch(...) returns a pointer to a data word, not the
-// caught exception (gcc's build gets the same value and never unpins it). The Path B build then runs the exception_ptr
-// destructor, __eh_unpin, on that word and exits 139. Path B used to refuse this file and fall back to gcc, which hid it.
-// macOS arm64 runs it.
 // EXPECT: 0
 #include <exception>
 #include <stdexcept>

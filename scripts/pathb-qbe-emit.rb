@@ -1888,6 +1888,9 @@ def r_call(fn, x)
   args = []
   rest.each_with_index do |a, i|
     h = head_of(a)
+    # (hidden-dest T DEST): a class result on AArch64 is passed in x8 by the SSA route (scripts/pathb-ssa-qbe.rb); this emitter has
+    # no such convention, so the unit is refused (exit status 3), not miscompiled.
+    raise Refused, "call with a hidden result (AArch64 x8 convention: SSA route only)" if h == "hidden-dest"
     if h == "sret" || h == "byval"
       raise BadIR, "call: bad #{form_text(a)}" if a.length != 3
       info = abi_of(fn.mod, a[1])

@@ -59,3 +59,25 @@ shown. An explicit `--backend=pathb` (or `NFCXX_PATH=b`) keeps the hard errors.
 The rest of the work is listed in `docs/notes/library-suite-results.md` (STL route survey: Path B timeouts and refusals)
 and in the CI notes: the Path B suites run only when their paths change, and no CI job runs the default driver under
 Path B on arm64 or macOS.
+
+## Class results on AArch64
+
+A class result that EDG lowers into a first parameter (a non-trivially-copyable class: std::string, std::optional of one,
+std::exception_ptr) takes the AAPCS64 convention: the caller passes the result object in x8. The SSA route does that without a
+copy, so the callee builds the object in place (a std::string's buffer may point into it). The shape:
+
+- the defining unit's body is `NAME.nfcxxhid`, with the result pointer as its last integer parameter (after the N integer
+  arguments, so it is x N); `NAME` is an assembly entry (`mov xN, x8; b NAME.nfcxxhid`), global unless static or weak;
+- a call goes through a local thunk `NAME.nfcxxx8` (`mov x8, xN; b NAME`), and a call through a pointer (a virtual call, a
+  function pointer) through `nfcxxx8.indN` (`mov x8, xN; mov x16, xN+1; br x16`);
+- a function with more than seven integer arguments, a variadic one, or an aggregate argument whose size is not a whole number
+  of words is refused (the unit falls back to gcc); `scripts/pathb-qbe-emit.rb` (the opt-in probe emitter) refuses the call form.
+
+The inliner does not inline such a callee (scripts/pathb-ir-opt.rb). tests/hidden-result/run.sh builds a program whose class
+results cross translation units through the default driver and checks it against gcc.
+
+## Vtables
+
+EDG marks a vtable COMDAT even in the unit of its key function, where gcc emits it strong. The pruners (scripts/pathb-ir-opt.rb
+`vtable_roots`, scripts/pathb-ssa-build `vtable_roots_of`) keep a vtable (`_ZTV...`, not a local class's) when its class has a
+function of external linkage defined in the unit; the others are pruned as before.
