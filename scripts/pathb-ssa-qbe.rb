@@ -767,6 +767,7 @@ module Qbe
       conflict = {}
       rogue = {}
       @derived = derived_slots(index)
+      return {} if @derived.nil?
       @blocks.each do |b|
         cur = scope_in[b[1].to_s].dup
         b[2..].each { |it| scope_step(it, index, cur, conflict, rogue) }
@@ -805,32 +806,64 @@ module Qbe
     # register outside a slot's scope counts as naming the slot there, so a slot whose address is still in a register after its scope
     # has ended is not shared (the facts say where the language puts the end; the address may outlive it by a mistake of the facts).
     DERIVING = %w[offset index bitcast addr select p2i i2p].freeze
+    DERIVED_LIMIT = 256
+    DERIVED_WORK = 40
 
     def derived_slots(index)
       derived = {}
-      changed = true
-      while changed
-        changed = false
-        @blocks.each do |b|
-          b[2..].each do |it|
-            next unless head(it) == "let" || head(it) == "phi"
+      items = []
+      users = {}   # register => the indexes of the items that read it
+      @blocks.each do |b|
+        b[2..].each do |it|
+          next unless head(it) == "let" || head(it) == "phi"
 
-            src = []
-            if head(it) == "phi"
-              it[3..].each { |_pred, v| slots_of_operand(v, index, derived, src) }
-            elsif it[3].is_a?(Array) && head(it[3]) == "call"
-              slots_of_call(it, index, derived, src)
-            else
-              slots_of_operand(it[3], index, derived, src)
-            end
-            next if src.empty? || derived[it[1]] == src
+          items << it
+          reads = []
+          collect_register_reads(it[3..], reads)
+          reads.each { |r| (users[r] ||= []) << (items.size - 1) }
+        end
+      end
+      # A worklist, not passes over the whole function until nothing changes: an item is looked at again only when a register it
+      # reads got a new set of slots (prism.c's parse_expression has 400,000 of them, and a pass is a pass too many).
+      work = (0...items.size).to_a
+      queued = Array.new(items.size, true)
+      pos = 0
+      while pos < work.size
+        k = work[pos]
+        pos += 1
+        queued[k] = false
+        it = items[k]
+        src = []
+        if head(it) == "phi"
+          it[3..].each { |_pred, v| slots_of_operand(v, index, derived, src) }
+        elsif it[3].is_a?(Array) && head(it[3]) == "call"
+          slots_of_call(it, index, derived, src)
+        else
+          slots_of_operand(it[3], index, derived, src)
+        end
+        next if src.empty? || derived[it[1]] == src
+        # A register derived from hundreds of slots, or a worklist that keeps going: a function that big (prism.c's parse_expression:
+        # thousands of slots, phis that merge them) has no frame worth sharing, and the sets make this quadratic. Not shared.
+        return nil if src.size > DERIVED_LIMIT || pos > DERIVED_WORK * items.size
 
-            derived[it[1]] = src
-            changed = true
-          end
+        derived[it[1]] = src
+        (users[it[1]] || []).each do |u|
+          next if queued[u]
+
+          queued[u] = true
+          work << u
         end
       end
       derived
+    end
+
+    # The registers (strings) inside an item's operands.
+    def collect_register_reads(x, out)
+      if x.is_a?(String)
+        out << x
+      elsif x.is_a?(Array)
+        x.each { |y| collect_register_reads(y, out) }
+      end
     end
 
     # Adds to out the slots an operand or an address expression derives from.
