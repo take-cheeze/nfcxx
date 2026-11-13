@@ -60,9 +60,7 @@ module DeclaredReturns
 
       return [:union, members, false]
     end
-    if defined?(RBS::Types::Bases::Bool) && type.is_a?(RBS::Types::Bases::Bool)
-      return nilable ? nil : [:bool, nil, false]
-    end
+    # A declared `bool` is not a checked kind: callers rely on truthiness, so it is never guarded (see RbsSignatures).
     if defined?(RBS::Types::Bases::Nil) && type.is_a?(RBS::Types::Bases::Nil)
       return nilable ? nil : [:nil, nil, false]
     end
@@ -91,7 +89,7 @@ module DeclaredReturns
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
   # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
   # A module (Enumerable) is a kind-of test, since no exact class test matches its includers.
-  GUARD_ONLY_KINDS = %i[bool nil string hash symbol float module union].freeze
+  GUARD_ONLY_KINDS = %i[nil string hash symbol float module union].freeze
   UNION_MAX = 4
 
   # Entries for the loaded method signatures that name a bytecode definition with the signature's required arity
@@ -153,7 +151,7 @@ module DeclaredReturns
             elsif sig.args.size != mand
               "declares #{sig.args.size} required parameter(s), the body takes #{mand}"
             else
-              "-> #{sig.return_type} is no checked kind (Integer, Array, String, Hash, Symbol, Float, bool, nil, C or C? of a program or listed native class)"
+              "-> #{sig.return_type} is no checked kind (Integer, Array, String, Hash, Symbol, Float, nil, C or C? of a program or listed native class)"
             end
       { key: "#{sig.owner}##{sig.name}", text: sig.return_type.to_s, loc: sig.loc, why: why }
     end

@@ -169,8 +169,8 @@ masks.instance_variable_set(:@owner_of, entries.to_h { |e| [e.label, true] })
 masks.define_singleton_method(:declared_return_proven?) { |_e| false }
 check.call('-> Integer is the INT bit and -> Float the FLT bit', masks.declared_exact_return_mask('int') == NumericFlow::INT &&
                                                                   masks.declared_exact_return_mask('flt') == NumericFlow::FLT)
-check.call('-> Symbol and bool take the immediate class bits', masks.declared_exact_return_mask('sym') == masks.numeric_class_bit('Symbol') &&
-                                                               masks.declared_exact_return_mask('bool') == (masks.numeric_class_bit('TrueClass') | masks.numeric_class_bit('FalseClass')))
+check.call('-> Symbol takes the immediate class bit; a declared bool is unchecked and gets no mask', masks.declared_exact_return_mask('sym') == masks.numeric_class_bit('Symbol') &&
+                                                               masks.declared_exact_return_mask('bool').nil?)
 check.call('-> nil is the NIL bit', masks.declared_exact_return_mask('nilv') == NumericFlow::NIL)
 check.call('-> Foo is Foo\'s class bit and -> Foo? adds NIL', masks.declared_exact_return_mask('foo') == masks.numeric_class_bit('Foo') &&
                                                            masks.declared_exact_return_mask('foo_or_nil') == (masks.numeric_class_bit('Foo') | NumericFlow::NIL))
@@ -182,8 +182,8 @@ off_bits = MaskHarness.new(entries, subclassed: ['Base'])
 off_bits.instance_variable_set(:@ireps, entries.to_h { |e| [e.label, true] })
 off_bits.instance_variable_set(:@owner_of, entries.to_h { |e| [e.label, true] })
 off_bits.define_singleton_method(:declared_return_proven?) { |_e| false }
-check.call('with BC2CPP_IMMEDIATE_CLASS_BITS=0 Symbol and bool give no mask, Integer and Float still do',
-           off_bits.declared_exact_return_mask('sym').nil? && off_bits.declared_exact_return_mask('bool').nil? &&
+check.call('with BC2CPP_IMMEDIATE_CLASS_BITS=0 Symbol gives no mask, Integer and Float still do',
+           off_bits.declared_exact_return_mask('sym').nil? &&
              off_bits.declared_exact_return_mask('int') == NumericFlow::INT)
 ENV.delete('BC2CPP_IMMEDIATE_CLASS_BITS')
 unguarded_mask = MaskHarness.new(entries)
