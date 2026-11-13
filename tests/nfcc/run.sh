@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # nfcc with NFCXX_BACKEND=pathb: EDG's C front end -> typed IR -> QBE (docs/notes/nfcc-pathb.md). Needs the Path B harness
-# (scripts/setup-edg.sh, setup-qbe.sh, setup-pathb.sh). The default backend stays qbe: checked here too.
+# (scripts/setup-edg.sh, setup-qbe.sh, setup-pathb.sh). The default backend is Path B where its harness is built (checked below).
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcc=$root/nfcc
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -269,9 +269,26 @@ refuses "-fsanitize refused" "fsanitize" pb -c -fsanitize=address "$tmp/a.c" -o 
 refuses "C++ refused" "C++" pb -c -x c++ "$tmp/a.c" -o "$tmp/x.o"
 refuses "unknown backend refused" "unknown NFCXX_BACKEND" env NFCXX_BACKEND=nope "$nfcc" -c "$tmp/a.c"
 
-# The default stays qbe
-if [ -x "$root/build/cproc/cproc-qbe" ]; then
-  out=$("$nfcc" --version); grep -q 'backend qbe' <<<"$out" && ok "default backend is qbe" || bad "default backend is qbe" "$out"
+# The default backend: Path B on x86-64 Linux when the harness is built (a unit it cannot take goes to gcc), qbe otherwise; NFCXX_BACKEND chooses.
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  out=$(env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK "$nfcc" --version)
+  grep -q 'backend pathb' <<<"$out" && ok "default backend is pathb (harness built)" || bad "default backend is pathb (harness built)" "$out"
+  printf 'int plain(int x) { return x * 3 + 1; }\n' > "$tmp/plain.c"
+  rm -f "$tmp/dlog"
+  if env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK NFCXX_PATHB_LOG="$tmp/dlog" "$nfcc" -c "$tmp/plain.c" -o "$tmp/d1.o" >/dev/null 2>&1 &&
+     grep -q '^pathb ' "$tmp/dlog"; then ok "default: a plain unit is made by Path B"; else bad "default: a plain unit is made by Path B" "$(cat "$tmp/dlog" 2>&1)"; fi
+  rm -f "$tmp/dlog"
+  if env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK NFCXX_PATHB_LOG="$tmp/dlog" "$nfcc" -c -fshort-enums "$tmp/plain.c" -o "$tmp/d2.o" >/dev/null 2>&1 &&
+     grep -q '^gcc ' "$tmp/dlog"; then ok "default: a unit with an option Path B cannot honour is made by gcc"; else bad "default: a unit with an option Path B cannot honour is made by gcc" "$(cat "$tmp/dlog" 2>&1)"; fi
+  # a unit Path B itself refuses (inline asm it cannot emit) falls back to gcc by default, but not with an explicit NFCXX_BACKEND=pathb
+  cat > "$tmp/refuse.c" <<'EOF2'
+int f(int x) { int r; __asm__ volatile("lea 1(%1), %0" : "=r"(r) : "r"(x), "i"(sizeof(int)) : "cc", "memory"); return r; }
+EOF2
+  if NFCXX_BACKEND=pathb "$nfcc" -c "$tmp/refuse.c" -o "$tmp/d3.o" >/dev/null 2>&1; then :; else
+    env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK "$nfcc" -c "$tmp/refuse.c" -o "$tmp/d3.o" >/dev/null 2>&1 &&
+      ok "default: a unit Path B refuses is made by gcc" || bad "default: a unit Path B refuses is made by gcc" ""
+  fi
 fi
+out=$(NFCXX_BACKEND=qbe "$nfcc" --version 2>&1) && grep -q 'backend qbe' <<<"$out" && ok "NFCXX_BACKEND=qbe still chooses qbe" || { [ -x "$root/build/cproc/cproc-qbe" ] && bad "NFCXX_BACKEND=qbe still chooses qbe" "$out"; }
 echo "nfcc pathb: $pass passed, $fail failed"
 [ $fail = 0 ]
