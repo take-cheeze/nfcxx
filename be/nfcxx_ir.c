@@ -917,6 +917,21 @@ static ir_val ir_ptr_add(const char *base, const char *idx, a_type_ptr ptr_t, a_
   return ir_mk_value(r, ptr_t);
 }
 
+/* The index of `p - n`: -n. An unsigned count narrower than 64 bits is widened (zero-extended) before it is negated: negating an
+   unsigned int in its own type gives 2^32 - n, which the index then takes as a large positive count. A signed count is
+   sign-extended by the index itself, so it is negated as it is. */
+static char *ir_cv(const char *ty, const char *a);
+static char *ir_neg_index(ir_val i)
+{
+  const char *ty = i.ty;
+  char *s = i.s;
+  if (i.t == NULL || (!ir_is_signed(i.t) && ir_size_of(i.t) < 8)) {
+    ty = "long";
+    s = ir_cv("long", s);
+  }
+  return ir_let(ty, ir_fmt("(wneg %s %s)", ty, s));
+}
+
 static void ir_global_print(a_variable_ptr var, const char *name);
 
 /* Thread storage duration: thread_local sets is_thread_local; the GNU __thread only sets DM_THREAD in decl_modifiers
@@ -3244,7 +3259,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       idx = i.s;
       a_type_ptr elem = skip_typerefs(e->type)->variant.pointer.type;
       ir_note(0, k, 1);
-      if (k == eok_psubtract) idx = ir_let(i.ty, ir_fmt("(wneg %s %s)", i.ty, i.s));
+      if (k == eok_psubtract) idx = ir_neg_index(i);
       return ir_ptr_add(p.s, idx, e->type, elem);
     }
     case eok_pdiff: {
@@ -3406,7 +3421,7 @@ static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
     if (base == eok_padd || base == eok_psubtract) {
       char *idx = rhs.s;
       a_type_ptr elem = skip_typerefs(lhs.t)->variant.pointer.type;
-      if (base == eok_psubtract) idx = ir_let(rhs.ty, ir_fmt("(wneg %s %s)", rhs.ty, rhs.s));
+      if (base == eok_psubtract) idx = ir_neg_index(rhs);
       nv = ir_ptr_add(cur.s, idx, lhs.t, elem);
     } else {
       a_type_ptr ct = NULL;
@@ -4000,6 +4015,64 @@ static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op, int pred)
   }
 }
 
+/* __builtin_ia32_addcarryx_u32/u64 (CIN, A, B, &OUT) and __builtin_ia32_sbb_u32/u64: the ADC / SBB of the x86 intrinsics
+   _addcarry_u64 and _subborrow_u64 ({fmt}'s uint128_fallback::operator+= uses the first). OUT gets A + B + CIN (A - B - CIN)
+   wrapped to the type of *OUT; the value is the carry (borrow) out, 0 or 1, as an unsigned char. With R1 = A + B (A - B) the
+   carry out is (R1 < A) | (R1 + CIN < R1), the borrow out (A < B) | (R1 < CIN). Straight-line IR, like the overflow builtins. */
+static int ir_carry_name(const char *n, int *sub)
+{
+  /* gcc spells them addcarryx and sbb, clang addcarry and subborrow */
+  if (strncmp(n, "ia32_", 5) != 0) return 0;
+  n += 5;
+  if (strcmp(n, "addcarryx_u32") == 0 || strcmp(n, "addcarryx_u64") == 0 || strcmp(n, "addcarry_u32") == 0 ||
+      strcmp(n, "addcarry_u64") == 0) { *sub = 0; return 1; }
+  if (strcmp(n, "sbb_u32") == 0 || strcmp(n, "sbb_u64") == 0 || strcmp(n, "subborrow_u32") == 0 ||
+      strcmp(n, "subborrow_u64") == 0) { *sub = 1; return 1; }
+  return 0;
+}
+
+static ir_val ir_builtin_carry(an_expr_node_ptr e, int sub)
+{
+  an_expr_node_ptr n0 = ir_operand(e, 1), n1 = ir_operand(e, 2), n2 = ir_operand(e, 3), n3 = ir_operand(e, 4);
+  a_type_ptr rt;
+  ir_val c, x, y, p;
+  const char *T;
+  char *cin, *xs, *ys, *r1, *r2, *b1, *b2, *carry;
+  if (n0 == NULL || n1 == NULL || n2 == NULL || n3 == NULL || ir_operand(e, 5) != NULL || !ir_is_pointer(n3->type) ||
+      !ir_is_integer(n0->type) || !ir_is_integer(n1->type) || !ir_is_integer(n2->type)) {
+    return ir_gap(e->type, "builtin addcarry (arguments)", 0, (int)eok_call);
+  }
+  rt = skip_typerefs(skip_typerefs(n3->type)->variant.pointer.type);
+  if (!ir_is_integer(rt) || ir_is_signed(rt) || ir_is_bool(rt) || ir_size_of(rt) > 8) {
+    return ir_gap(e->type, "builtin addcarry (result type)", 0, (int)eok_call);
+  }
+  T = ir_valtext(rt);
+  c = ir_rval(n0);
+  x = ir_rval(n1);
+  y = ir_rval(n2);
+  p = ir_rval(n3);
+  /* the carry in is any nonzero byte */
+  cin = ir_cv(T, ir_let("bool", ir_fmt("(ne unsigned_char %s %s)", ir_cv("unsigned_char", c.s), ir_k("unsigned_char", 0))));
+  xs = ir_cv(T, x.s);
+  ys = ir_cv(T, y.s);
+  r1 = ir_o2(sub ? "wsub" : "wadd", T, xs, ys);
+  r2 = ir_o2(sub ? "wsub" : "wadd", T, r1, cin);
+  if (sub) {
+    b1 = ir_let("bool", ir_fmt("(lt.u %s %s %s)", T, xs, ys));
+    b2 = ir_let("bool", ir_fmt("(lt.u %s %s %s)", T, r1, cin));
+  } else {
+    b1 = ir_let("bool", ir_fmt("(lt.u %s %s %s)", T, r1, xs));
+    b2 = ir_let("bool", ir_fmt("(lt.u %s %s %s)", T, r2, r1));
+  }
+  ir_store(rt, p.s, r2, 0);
+  /* the two conversions in a fixed order: as arguments of one call their order was the compiler's (gcc's, a clang-built front end's differ) */
+  b1 = ir_cv("unsigned_char", b1);
+  b2 = ir_cv("unsigned_char", b2);
+  carry = ir_o2("or", "unsigned_char", b1, b2);
+  ir_note(0, eok_call, 1);
+  return ir_mk_value(carry, e->type);
+}
+
 /* SYCL kernel attributes: the top-level form (sycl-kernel-attr "NAME" (reqd-sub-group-size N)) after the function NAME, for
    [[sycl::reqd_sub_group_size(N)]] (a form of its own, which the other emitters skip). The attribute of a kernel lambda
    follows its parameters, so it appertains to the call operator's type (al_post_func); on a function it is the routine's.
@@ -4322,6 +4395,10 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = ir_builtin_overflow(e, op, pred);
     return 1;
   }
+  if (ir_carry_name(name, &op)) {
+    *out = ir_builtin_carry(e, op);
+    return 1;
+  }
   if ((kind = ir_bit_name(name, &bits)) != 0) {
     *out = ir_bit_builtin(e, kind, bits);
     return 1;
@@ -4458,23 +4535,27 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
   if (strcmp(name, "alloca") == 0 || strcmp(name, "alloca_with_align") == 0 || strcmp(name, "alloca_with_align_and_max") == 0) {
     ir_val n;
     long long al = name[6] == '_' ? ir_const_arg(ir_operand(e, 2)) : 0;
+    const char *rty;
     if (arg == NULL || !ir_is_integer(arg->type) || al < 0 || al > 32768 || (al > 0 && (al & (al - 1)) != 0)) {
       *out = ir_gap(e->type, "builtin alloca (alignment argument)", 0, (int)eok_call);
       return 1;
     }
     n = ir_rval(arg);
+    /* `alloca` used without <alloca.h> is implicitly declared to return int; the value is still the 64-bit pointer (gcc
+       gives the built-in its own type), so the IR value is a 64-bit integer then and a cast to a pointer keeps every bit */
+    rty = ir_is_pointer(e->type) ? ir_valtext(e->type) : "unsigned_long";
     ir_note(0, eok_call, 1);
     if (al > 128) {
       /* more than the 16 bytes alloca gives: take A - 1 bytes more and round the address up */
       unsigned long long a = (unsigned long long)al / 8;
       char *sz = ir_o2("wadd", "unsigned_long", ir_cv("unsigned_long", n.s), ir_k("unsigned_long", a));
-      char *raw = ir_let(ir_valtext(e->type), ir_fmt("(alloca %s)", sz));
+      char *raw = ir_let(rty, ir_fmt("(alloca %s)", sz));
       char *ad = ir_o2("wadd", "unsigned_long", ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", raw)), ir_k("unsigned_long", a - 1));
       char *rd = ir_o2("and", "unsigned_long", ad, ir_k("unsigned_long", ~(a - 1)));
-      *out = ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(i2p %s %s)", ir_valtext(e->type), rd)), e->type);
+      *out = ir_mk_value(ir_let(rty, ir_fmt("(i2p %s %s)", rty, rd)), e->type);
       return 1;
     }
-    *out = ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(alloca %s)", ir_cv("unsigned_long", n.s))), e->type);
+    *out = ir_mk_value(ir_let(rty, ir_fmt("(alloca %s)", ir_cv("unsigned_long", n.s))), e->type);
     return 1;
   }
   /* __builtin_return_address(0) and __builtin_frame_address(0) (the kernel's _RET_IP_): QBE has no such operation, but gives

@@ -434,10 +434,27 @@ static bool bc2cpp_dyn_park(mrb_state* M,
       nullptr, mrb_funcall_send(M, recv, mid, argc, argv, kdict, blk)};
 }
 
+// The call of a `super` target found for a step: a registered suspendable
+// target parks its frame as in a dynamic call; any other target is called as
+// bc2cpp_super_call does, with `c` the class it was found on.
+[[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super_method(
+    mrb_state* M,
+    mrb_value self,
+    mrb_method_t method,
+    struct RClass* c,
+    mrb_sym mid,
+    mrb_int argc,
+    const mrb_value* argv,
+    mrb_value blk) {
+  Bc2cppDynResult out;
+  if (bc2cpp_dyn_park(M, self, method, argc, argv, mrb_nil_value(), blk, &out))
+    return out;
+  return Bc2cppDynResult{nullptr, mrb_funcall_with_method(M, self, mid, &method,
+                                                          c, argc, argv, blk)};
+}
+
 // `super` in a step: the lookup starts above `owner`, the class the running
-// method is defined on (OP_SUPER). A registered suspendable target parks its
-// frame as in a dynamic call; any other target is called as bc2cpp_super_call
-// does.
+// method is defined on (OP_SUPER).
 [[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super(mrb_state* M,
                                                          mrb_value self,
                                                          struct RClass* owner,
@@ -451,11 +468,7 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   mrb_method_t method = bc2cpp_find_method(M, &c, mid);
   if (MRB_METHOD_UNDEF_P(method))
     mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
-  Bc2cppDynResult out;
-  if (bc2cpp_dyn_park(M, self, method, argc, argv, mrb_nil_value(), blk, &out))
-    return out;
-  return Bc2cppDynResult{nullptr, mrb_funcall_with_method(M, self, mid, &method,
-                                                          c, argc, argv, blk)};
+  return bc2cpp_dyn_super_method(M, self, method, c, mid, argc, argv, blk);
 }
 
 // STEP_SUPER_STATIC: bc2cpp_dyn_super with the target fixed at compile time:
@@ -472,10 +485,6 @@ static bool bc2cpp_dyn_park(mrb_state* M,
     mrb_value blk) {
   mrb_method_t method;
   MRB_METHOD_FROM_FUNC(method, entry);
-  Bc2cppDynResult out;
-  if (bc2cpp_dyn_park(M, self, method, argc, argv, mrb_nil_value(), blk, &out))
-    return out;
-  return Bc2cppDynResult{
-      nullptr, mrb_funcall_with_method(M, self, mid, &method, target_class,
-                                       argc, argv, blk)};
+  return bc2cpp_dyn_super_method(M, self, method, target_class, mid, argc, argv,
+                                 blk);
 }
