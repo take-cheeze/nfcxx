@@ -928,7 +928,7 @@ module PathbEgraph
 
         memory_write?(ins[3])
       when "set" then memory_write?(ins[2])
-      when "nonnull", "bounds" then false
+      when "nonnull", "bounds", "life-start", "life-end" then false   # the lifetime facts neither read nor write memory
       else true
       end
     end
@@ -975,6 +975,7 @@ module PathbEgraph
             end
           when "store" then escape_in(i, i[2])
           when "nonnull" then escape_in(i, i[1])
+          when "life-start", "life-end" then nil   # a lifetime fact names a slot without taking its address
           else escape_in(i)
           end
         end
@@ -1177,6 +1178,8 @@ module PathbEgraph
       when Array
         if head(x) == "store" && slot_key(x[2])
           collect_slot_reads(x[3], out)
+        elsif head(x) == "life-start" || head(x) == "life-end"
+          nil   # a lifetime fact reads nothing
         else
           x.each { |y| collect_slot_reads(y, out) }
         end

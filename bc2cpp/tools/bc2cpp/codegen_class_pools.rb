@@ -57,9 +57,11 @@ class CodeGen
     # A Float declaration seeds the Float bit.
     @declared_arg_pools = {}
     (self.class.declared_params || {}).each do |label, guards|
-      guards.each do |pos, cls, _key, _text, kind = :class|
+      guards.each do |pos, cls, _key, _text, kind = :class, nilable = false|
         key = [label, pos + 1]
-        bit = declared_arg_bits(cls, kind)
+        bit = declared_arg_bits(cls, kind, nilable)
+        next if bit.zero? # a class with no bit here (Symbol with immediate class bits off): the guard stays, no seed
+
         @class_arg_pools[key] = bit
         @declared_arg_pools[key] = bit
       end
@@ -145,9 +147,16 @@ class CodeGen
     class_pool_ivar_mask(irep, name) || NumericFlow::OTHER
   end
 
-  # The class bit a declared parameter holds on entry (see setup_class_pools): its class, or Float for a Float value kind.
-  def declared_arg_bits(cls, _kind)
-    numeric_class_bit(cls)
+  # The class bits a declared parameter holds on entry (see setup_class_pools): the flow's own bit for Integer (fixnum)
+  # and Float, the class bit for a Symbol or a program class (none when the Symbol bit is off), and nil for `T?`.
+  def declared_arg_bits(cls, kind, nilable)
+    base = case kind
+           when :integer then NumericFlow::INT
+           when :float then NumericFlow::FLT
+           when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : 0
+           else numeric_class_bit(cls)
+           end
+    base.zero? || !nilable ? base : base | NumericFlow::NIL
   end
 
   def class_pool_entry_mask(irep, reg)

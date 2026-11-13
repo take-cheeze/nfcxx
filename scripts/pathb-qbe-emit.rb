@@ -3213,6 +3213,12 @@ def emit_function(mod, f)
       static = true
     elsif h == "weak"
       weak = true
+    elsif h == "always-inline"
+      # (always-inline): a hint for the inliner of the SSA route; nothing here
+    elsif h == "section"
+      # (section "S"): __attribute__((section)) on a function; this emitter leaves the function in .text
+    elsif h == "used"
+      # (used): __attribute__((used)); the function is emitted whether or not anything refers to it, as every function is here
     elsif h == "constructor" || h == "destructor"
       # (constructor [PRIO]) / (destructor [PRIO]): the function runs before main / at exit (an array entry)
       raise BadIR, "function #{name}: bad #{form_text(part)}" if part.length > 2
