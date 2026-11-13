@@ -103,8 +103,9 @@ crossover at K = 24 (vec-n by 0.4%) is inside the spread of the measurements; th
 Its test (`tests/uop/test_layout_avx2.cpp`) compiles each kernel with `cc -O2 -mavx2 -mfma`, loads it with `dlopen` and
 compares C and R with a reference. The inputs are small integers, so the comparison is exact. The VecM shapes run with
 both transposes, and K values that are not multiples of 8 cover the scalar tail. It is not compared
-against the interpreter's `nfcuop` results, which use a different summation order. It also runs under
-`UOP_HOST=1` only so far: the nfcxx back ends have not run it.
+against the interpreter's `nfcuop` results, which use a different summation order. It runs under `UOP_HOST=1`, and under
+the nfcxx qbe and gcc back ends through `tests/uop/run.sh` (all three layout tests pass on the current code). Path B
+builds and passes it when compiled directly with `NFCXX_PATH=b`; the runner does not include Path B yet (see Tests).
 
 ## Timing against the model (not a test)
 
@@ -400,14 +401,19 @@ packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`
 2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Measure the thread constants on a quiet host with more repetitions, and at 3 and 8 threads, before relying on the
    thread choice (see the ninth round).
-4. AVX-512 target: described and planned (tenth round), but its storage and register constants are not measured on AVX-512.
-   Measure a naive AVX-512 kernel, to fit the register-blocking factor there.
+4. AVX-512 target: described and planned (tenth round). Its register-blocking factor is now measured (0.24, tenth round);
+   its storage penalties are not (the eleventh round finds that the AVX2 K-dependence does not carry over).
+5. Thread constants and the register-blocking factor: work in progress (eleventh round, see there for the results so far).
 
 ## Tests
 
-`tests/uop/test_layout.cpp` (the model) and `tests/uop/test_layout_avx2.cpp` (the emitter), both run by
-`tests/uop/run.sh` (`UOP_ONLY="test_layout test_layout_avx2"`). Neither needs an nfcxx build; the emitter test needs a C
-compiler with AVX2 and FMA (it prints SKIP on a CPU without them).
+`tests/uop/test_layout.cpp` (the model), `tests/uop/test_layout_avx2.cpp` (the AVX2 emitters and plans) and
+`tests/uop/test_layout_avx512.cpp` (the AVX-512 packed emitters, threaded and plans) are run by `tests/uop/run.sh`
+(`UOP_ONLY="test_layout test_layout_avx2 test_layout_avx512"`). The emitter tests need a C compiler with AVX2 and FMA, or
+AVX-512F and FMA; each prints SKIP on a CPU without them. On the nfcxx back ends they run under qbe and gcc (`NFCXX_BACKEND`).
+
+Path B: all three build and pass when compiled directly with `NFCXX_PATH=b`. The runner keeps Path B out of the suite for
+another reason: `test.cpp` overflows the 8 MB stack in `graph_rewrite`, and the runner's comment says so.
 
 ## References
 
