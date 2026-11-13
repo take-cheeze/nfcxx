@@ -146,7 +146,7 @@ static void blocked_cost_keeps_strided() {
 
 static void packed_chosen_when_shape_fits() {
   // M = 504, N = 512, K = 512 (504 % 6 == 0, 512 % 16 == 0). fma = 504*512*512/8 = 16515072; the packed kernel's FMA cost is
-  // fma * 0.18. B is packed into Panel16 (512*512 elements at 0.25 each = 65536). The row sum is horizontal (C in Col
+  // fma * 0.18. B is packed into Panel (512*512 elements at 0.25 each = 65536). The row sum is horizontal (C in Col
   // lanes): 504*512/8 + 6*504 = 35280. Total 2972712.96 + 65536 + 35280.
   Solution s = solve(gemm_rowsum(504, 512, 512));
   CHECK(s.feasible);
@@ -154,7 +154,7 @@ static void packed_chosen_when_shape_fits() {
   CHECK(s.variant[0] == "avx2-packed-n");
   CHECK(s.variant[1] == "reduce-horizontal");
   CHECK(s.repairs.empty());
-  CHECK(s.storage.at("B") == Storage::Panel16);
+  CHECK(s.storage.at("B") == Storage::Panel);
   CHECK(s.storage.size() == 1);
   CHECK(std::fabs(s.storage_cost - 65536.0) < 1e-6);
   CHECK(std::fabs(s.cost - (16515072.0 * 0.18 + 65536.0 + 35280.0)) < 1e-6);
@@ -173,7 +173,7 @@ static void packed_absent_when_shape_misses() {
 }
 
 static void packing_cost_is_charged() {
-  // With no packing cost the packed plan is cheaper by exactly the Panel16 storage: 512*512 * 0.25 = 65536.
+  // With no packing cost the packed plan is cheaper by exactly the Panel storage: 512*512 * 0.25 = 65536.
   Avx2F32 free_panel;
   free_panel.panel_instr_per_elem = 0.0;
   Solution with = solve(gemm_rowsum(504, 512, 512));
@@ -181,12 +181,12 @@ static void packing_cost_is_charged() {
   CHECK(std::fabs((with.cost - without.cost) - 65536.0) < 1e-6);
   CHECK(without.storage_cost == 0.0);
   CHECK(without.variant[0] == "avx2-packed-n");
-  CHECK(without.storage.at("B") == Storage::Panel16);
+  CHECK(without.storage.at("B") == Storage::Panel);
 }
 
 static void packed_needs_its_factor() {
   // With the register-blocked factor at 1 the packed kernel costs fma + 65536 + 35280, more than naive vec-n's fma + 35280,
-  // so the plan keeps the naive kernel and stores nothing in Panel16. The choice is the fitted factor's, nothing more.
+  // so the plan keeps the naive kernel and stores nothing in Panel. The choice is the fitted factor's, nothing more.
   Avx2F32 unblocked;
   unblocked.register_blocked_fma_factor = 1.0;
   Solution s = solve(gemm_rowsum(504, 512, 512, unblocked));
@@ -226,6 +226,39 @@ static void threads_not_chosen_for_small_work() {
   CHECK(s.threads == 1);
 }
 
+static void avx512_packed_chosen() {
+  // AVX-512 target: 16 lanes, 32-column tiles. M = 504, N = 512, K = 512 (504 % 6 == 0, 512 % 32 == 0). fma = 504*512*512/16
+  // = 8257536, packed at 0.18 is 1486356.48. B in Panel (512*512 at 2/16 = 32768). Row sum horizontal: 504*512/16 + 8*504
+  // = 16128 + 4032. Only the packed variant exists on this target.
+  F32Target t = avx512_f32();
+  Solution s = solve(gemm_rowsum(504, 512, 512, t));
+  CHECK(s.feasible);
+  CHECK(s.variant.size() == 2);
+  CHECK(s.variant[0] == "avx512-packed-n");
+  CHECK(s.variant[1] == "reduce-horizontal");
+  CHECK(s.storage.at("B") == Storage::Panel);
+  CHECK(std::fabs(s.storage_cost - 32768.0) < 1e-6);
+  CHECK(std::fabs(s.cost - (8257536.0 * 0.18 + 32768.0 + 20160.0)) < 1e-3);
+  CHECK(gemm_rowsum(504, 512, 512, t).ops[0].variants.size() == 1);
+}
+
+static void avx512_infeasible_when_shape_misses() {
+  // 500 % 32 != 0 and there is no VecN or VecM on AVX-512, so no variant computes the GEMM.
+  Solution s = solve(gemm_rowsum(504, 500, 512, avx512_f32()));
+  CHECK(!s.feasible);
+}
+
+static void emitted_row_sum_wins_the_tie() {
+  // AVX-512, M = 12, N = 32, K = 5: the vertical row sum after the packed kernel would transpose C (384 * 0.25 = 96),
+  // the horizontal one costs 8 per row (96): a tie. The packed kernel's pair with the vertical sum is not a plan, so the
+  // horizontal one is chosen.
+  Solution s = solve(gemm_rowsum(12, 32, 5, avx512_f32()));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx512-packed-n");
+  CHECK(s.variant[1] == "reduce-horizontal");
+  CHECK(s.repairs.empty());
+}
+
 int main() {
   k8_transposes_a();
   k64_horizontal_sum();
@@ -243,6 +276,9 @@ int main() {
   threads_default_to_one();
   threads_chosen_when_they_pay();
   threads_not_chosen_for_small_work();
+  avx512_packed_chosen();
+  avx512_infeasible_when_shape_misses();
+  emitted_row_sum_wins_the_tie();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

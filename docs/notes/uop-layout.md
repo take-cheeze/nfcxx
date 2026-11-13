@@ -368,6 +368,29 @@ not as a prediction.
 
 Unchanged: the emitter does not know the thread count, so `emit_for_solution` output is the same for every plan.
 
+## The AVX-512 target in the model (tenth round)
+
+`avx512_f32()` is the AVX-512 target description: 16 lanes, 32-column tiles, `isa = "avx512"`. The model's GEMM for it has
+one variant, `avx512-packed-n` (the register-blocked kernel of the seventh round), with B in `Storage::Panel`. VecN and
+VecM stay AVX2-only: they have no AVX-512 emitter, so the model does not offer them on that target.
+
+Which constants are what:
+
+- Set from the instruction set: 16 lanes, the 32-column tile, panel copy at 2/16 per element (one load and one store per zmm).
+- Assumed, not measured: the 16-lane horizontal sum at 8 instructions per row.
+- Carried over from AVX2 and not measured on AVX-512: the strided and blocked penalties, and the register-blocking
+  factor (0.18). The factor compares against a naive AVX-512 kernel that the emitters do not have, so it cannot be
+  fitted yet. The AVX-512 plan's choice of the packed kernel rests on it, as the AVX2 one does.
+
+Plans on both targets now exclude the pairs the emitters do not produce (`Problem::incompatible`): the packed kernels
+with the vertical row sum, VecN with the vertical sum, and VecM with the horizontal one. Without this, at the smallest
+tile width the vertical sum (its C transpose) ties with the horizontal one (the per-row sum), and the first minimum
+wins, so the solver returned a plan with no kernel. The tie is now a test.
+
+`emit_for_solution` covers the AVX-512 plan too (`avx512-packed-n` with B in Panel). `test_layout_avx512.cpp` solves two
+shapes on this target, emits each plan, runs it against the reference, and checks the result bit for bit. The
+packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`max_threads` stays 1).
+
 ## Next steps on this target
 
 1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
@@ -375,7 +398,8 @@ Unchanged: the emitter does not know the thread count, so `emit_for_solution` ou
 2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Measure the thread constants on a quiet host with more repetitions, and at 3 and 8 threads, before relying on the
    thread choice (see the ninth round).
-4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
+4. AVX-512 target: described and planned (tenth round), but its storage and register constants are not measured on AVX-512.
+   Measure a naive AVX-512 kernel, to fit the register-blocking factor there.
 
 ## Tests
 

@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nfcuop::layout {
@@ -27,17 +28,20 @@ enum class Axis : uint8_t { Row = 0, Col = 1 };
 // How a tensor is kept in memory, beyond its lane axis.
 //   Strided, Blocked8: how a Row-lane tensor (lanes on M) is kept. Strided is column by column, so the lanes of one load
 //     or store are a row length apart. Blocked8 is 8-row blocks, each contiguous. Chosen by solve() per Row-lane tensor.
-//   Panel16: a Col-lane tensor packed into 16-column panels, so the inner loop reads it with unit stride. Not chosen by
-//     solve(): a variant that needs it declares it (Variant::requires_storage) and solve() charges the packing copy.
-enum class Storage : uint8_t { Strided = 0, Blocked8 = 1, Panel16 = 2 };
+//   Panel: a Col-lane tensor packed into panels of F32Target::tile_cols columns, so the inner loop reads it with unit
+//     stride. Not chosen by solve(): a variant that needs it declares it (Variant::requires_storage) and solve() charges
+//     the packing copy.
+enum class Storage : uint8_t { Strided = 0, Blocked8 = 1, Panel = 2 };
 
-// The AVX2 f32 target (ymm: 256 bits, 8 floats).
+// An f32 SIMD target description. The default is AVX2 (ymm: 256 bits, 8 floats); avx512_f32() is the AVX-512 one.
 //
 // Storage cost: each Row-lane tensor the plan holds (a GEMM output in Row lanes, or a copy a repair makes in Row lanes)
 // adds  numel * strided_instr_per_elem  if it is Strided, and  numel * blocked_instr_per_elem  if it is Blocked8.
 // The constants and their sources are in docs/notes/uop-layout.md ("Storage of the lanes-on-M tensors").
-struct Avx2F32 {
+struct F32Target {
+  std::string isa = "avx2";                     // variant-name prefix, and the emitters the target has (VecN/VecM: avx2 only)
   int lanes = 8;
+  int tile_cols = 16;                           // columns of the register-blocked tile: two vectors (16 AVX2, 32 AVX-512)
   double transpose_instr_per_elem = 3.0 / 8.0;  // an 8x8 f32 transpose is 24 shuffles on 64 elements
   double hsum_instr_per_row = 6.0;              // horizontal sum of one ymm: 3 shuffles and 3 adds
   // Strided penalty, per element, in the model's instruction units. From the 40% gap of strided vec-m over vec-n at
@@ -46,7 +50,7 @@ struct Avx2F32 {
   double strided_instr_per_elem = 0.46;
   // Blocked cost, per element. Zero: the blocked kernel matches the model's count within the timing noise at K = 8 to 64.
   double blocked_instr_per_elem = 0.0;
-  // Packing copy, per element: one load and one store per ymm of 8 floats.
+  // Packing copy, per element: one load and one store per vector (8 floats on ymm, 16 on zmm).
   double panel_instr_per_elem = 2.0 / 8.0;
   // Instructions of the register-blocked (6x16) GEMM relative to the naive N-vectorized one, per FMA. Fitted, not derived:
   // at 504x512x512 on one thread the packed kernel took 2623 us and the naive VecN kernel 14848 us, a ratio of 0.177.
@@ -60,6 +64,15 @@ struct Avx2F32 {
   double serial_fraction = 0.10;
   double thread_spawn_instr = 154000.0;
 };
+
+// The AVX2 name of the target description, kept for the existing code and tests.
+using Avx2F32 = F32Target;
+
+// The AVX-512 target: zmm, 16 floats, 32-column tiles. Only the instruction counts that follow from the instruction set
+// are set here: the 16-lane horizontal sum (8 instructions, assumed) and the transpose (not used, as VecM is AVX2 only).
+// The storage penalties and the register-blocking factor are the AVX2 measurements, carried over and NOT measured on
+// AVX-512; docs/notes/uop-layout.md says so.
+F32Target avx512_f32();
 
 struct Tensor {
   std::string name;
@@ -75,7 +88,7 @@ struct Variant {
   std::map<std::string, Axis> requires_lane;
   std::map<std::string, Axis> produces_lane;
   double instructions = 0;
-  // Storage an input must be in, beyond its lane axis (Panel16 for a packed B). The copy is charged to the plan and
+  // Storage an input must be in, beyond its lane axis (Panel for a packed B). The copy is charged to the plan and
   // recorded in Solution::storage under the input's name. Last, so the positional initializers above still work.
   std::map<std::string, Storage> requires_storage;
   // The instructions split over threads (Avx2F32::max_threads): the caller passes Solution::threads as nthreads.
@@ -93,6 +106,9 @@ struct Problem {
   Avx2F32 target;                               // the costs of the repairs (and of whatever the variants count)
   std::vector<Tensor> tensors;
   std::vector<Op> ops;                          // in topological order
+  // Pairs of variant names that solve() does not combine in one plan: the emitters do not produce them, so a plan with
+  // one would have no kernel. Checked on the chosen variants of all ops.
+  std::vector<std::pair<std::string, std::string>> incompatible;
 };
 
 struct Repair {
@@ -113,7 +129,7 @@ struct Solution {
   int threads = 1;                              // threads for the threadable variant (Avx2F32::max_threads); 1 otherwise
   // Storage of each tensor the plan holds in a non-default form, keyed by tensor name: each Row-lane tensor (a produced
   // output, or the copy a repair makes, so "A" is the transposed copy of A while layout["A"] is still Col), and each
-  // input a chosen variant requires in a storage (Variant::requires_storage, for example "B" as Panel16).
+  // input a chosen variant requires in a storage (Variant::requires_storage, for example "B" as Panel).
   std::map<std::string, Storage> storage;
 };
 
@@ -126,9 +142,10 @@ Solution solve(const Problem& p);
 // Variants: "avx2-vec-n" (lanes on N: C and B in Col, broadcast A) and "avx2-vec-m" (lanes on M: A in Row, broadcast B);
 // the row sum is "reduce-vertical" (lanes on M, adds across ymm registers) or "reduce-horizontal" (lanes on N, a
 // horizontal sum per row). The FMA count is the same for both GEMM variants, so it is included as a common cost.
-// "avx2-packed-n" is the register-blocked kernel: lanes on N like vec-n, with B packed into Panel16 and an FMA cost scaled
-// by Avx2F32::register_blocked_fma_factor. It exists only when M % 6 == 0 and N % 16 == 0, the shapes its emitter takes.
-Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const Avx2F32& target = {});  // target is stored in the Problem
+// "<isa>-packed-n" is the register-blocked kernel: lanes on N like vec-n, with B packed into Panel and an FMA cost scaled
+// by F32Target::register_blocked_fma_factor. It exists only when M % 6 == 0 and N % tile_cols == 0, the shapes its emitter
+// takes. The VecN and VecM variants exist on the AVX2 target only (they have no AVX-512 emitter).
+Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const F32Target& target = {});  // target is stored in the Problem
 
 const char* axis_name(Axis a);
 
