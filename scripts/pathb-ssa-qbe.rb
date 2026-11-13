@@ -666,6 +666,127 @@ module Qbe
       info
     end
 
+    # [size, alignment] of a slot's object: the slot's own (slot NAME TYPE SIZE ALIGN), or a scalar's type size.
+    def slot_size_align(s)
+      size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
+      [size, s.size > 4 ? Qbe.int_lit(s[4]) : size]
+    end
+
+    # Stack slots whose lifetimes never overlap share one object, so a function that inlined a callee (or a dozen) has the frame of
+    # the largest, not of all of them (QBE gives each alloc a frame offset of its own). The lifetimes are the facts that the inliner
+    # puts around each inlined body (scripts/pathb-ir-opt.rb --scope-facts): (life-start $"x") where the callee's frame is entered and
+    # (life-end $"x") where it is left. A slot is in scope from a life-start along every path to a life-end; two slots conflict when
+    # one starts while the other is in scope on some path, and a slot with no facts conflicts with all (it is not shared). A slot
+    # that is named outside its scope (a direct use the facts do not cover) is not shared either: only addresses derived from
+    # inside the scope are trusted to die with it, as the language requires. Returns { index of a slot => index of the first slot
+    # of its group }; a slot that does not share is not a key. --asan and --safe register every slot as an object of its own.
+    def share_slots
+      return {} if Qbe.asan || Qbe.safe
+
+      index = {}
+      @slots.each_with_index { |s, i| index["$#{s[1].raw}"] = i }
+      return {} unless @blocks.any? { |b| b[2..].any? { |it| head(it) == "life-start" } }
+
+      by_num = {}
+      @blocks.each { |b| by_num[b[1].to_s] = b }
+      succs = {}
+      @blocks.each { |b| succs[b[1].to_s] = block_successors(b[2..].last) }
+      scope_in = {}
+      @blocks.each { |b| scope_in[b[1].to_s] = {} }
+      work = @blocks.map { |b| b[1].to_s }
+      queued = {}
+      work.each { |n| queued[n] = true }
+      until work.empty?
+        n = work.shift
+        queued[n] = false
+        cur = scope_in[n].dup
+        by_num[n][2..].each { |it| scope_step(it, index, cur, nil, nil) }
+        succs[n].each do |s|
+          next unless scope_in[s]
+
+          grew = false
+          cur.each_key do |k|
+            next if scope_in[s][k]
+
+            scope_in[s][k] = true
+            grew = true
+          end
+          next if !grew || queued[s]
+
+          queued[s] = true
+          work << s
+        end
+      end
+      conflict = {}
+      rogue = {}
+      @blocks.each do |b|
+        cur = scope_in[b[1].to_s].dup
+        b[2..].each { |it| scope_step(it, index, cur, conflict, rogue) }
+      end
+      share = {}
+      members = {}   # representative => its members' indexes (itself included)
+      @slots.each_index do |i|
+        next if rogue[i] || !conflict.key?(i)   # no (life-start) of its own: no facts, or one that was never entered
+
+        rep = members.keys.find { |r| members[r].none? { |m| conflict[i][m] } }
+        if rep
+          share[i] = rep
+          members[rep] << i
+        else
+          members[i] = [i]
+        end
+      end
+      share
+    end
+
+    # The slots a statement or terminator names: [index, ...] of the slot atoms inside it.
+    def slots_named(x, index, out)
+      if x.is_a?(Ref)
+        out << index["$#{x.raw}"] if x.sigil == "$" && index.key?("$#{x.raw}")
+      elsif x.is_a?(Array)
+        x.each { |y| slots_named(y, index, out) }
+      end
+      out
+    end
+
+    # One statement of a block, run on the set `cur` of the slots in scope (indexes). With `conflict` and `rogue` (the last pass, on
+    # the sets that the fixpoint found) it also records which slots overlap and which are named outside their scope.
+    def scope_step(it, index, cur, conflict, rogue)
+      case head(it)
+      when "life-start"
+        i = index[it[1].is_a?(Ref) ? "$#{it[1].raw}" : ""]
+        return unless i
+
+        if conflict
+          conflict[i] ||= {}
+          cur.each_key do |o|
+            next if o == i
+
+            conflict[i][o] = true
+            (conflict[o] ||= {})[i] = true
+          end
+        end
+        cur[i] = true
+      when "life-end"
+        i = index[it[1].is_a?(Ref) ? "$#{it[1].raw}" : ""]
+        cur.delete(i) if i
+      else
+        return unless rogue
+
+        slots_named(it, index, []).each { |i| rogue[i] = true unless cur[i] }
+      end
+    end
+
+    # The block numbers a terminator jumps to.
+    def block_successors(term)
+      case head(term)
+      when "br" then [term[1].to_s]
+      when "condbr" then [term[2].to_s, term[3].to_s]
+      when "switch" then term[2..].select { |c| head(c) == "case" || head(c) == "default" }.map { |c| c.last.to_s }
+      else []
+      end
+    end
+
     def allocs
       @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
       @sp_objs << ["%sretbuf", @sret.size + Qbe::SP_NOPAD] if @sret && @sret.size > 0 && Qbe.safe
@@ -673,11 +794,19 @@ module Qbe
         @lines << "  #{name} =l alloc8 8"
         @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
       end
+      @share = share_slots
+      group = {}   # a representative's index => [size, align] of its group's object: the largest of its members
+      @share.each do |m, r|
+        group[r] ||= slot_size_align(@slots[r])
+        sz, al = slot_size_align(@slots[m])
+        group[r] = [[group[r][0], sz].max, [group[r][1], al].max]
+      end
       @slots.each_with_index do |s, i|
-        @slot["$#{s[1].raw}"] = "%o#{i}"
+        @slot["$#{s[1].raw}"] = "%o#{@share[i] || i}"
+        next if @share.key?(i)   # a member of a group: its representative's object
+
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
-        size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
-        align = s.size > 4 ? Qbe.int_lit(s[4]) : size
+        size, align = group[i] || slot_size_align(s)
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
         if Qbe.asan
           @asan_ssz["$#{s[1].raw}"] = size
@@ -1614,6 +1743,7 @@ end
       when "loc" then set_loc(item)
       when "decl" then asan_scope(item, true)
       when "scope-end" then asan_scope(item, false)
+      when "life-start", "life-end" then nil   # the inliner's lifetime facts: only share_slots reads them
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
@@ -1652,7 +1782,7 @@ end
 
     def escape_slots
       asm_helpers << "escape"
-      @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
+      @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" unless @share.key?(i) }
     end
 
 # `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which

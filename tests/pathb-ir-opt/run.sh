@@ -121,6 +121,20 @@ if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" 
 # Store-to-load forwarding: the load after the store takes the stored value; the load after the call does not.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward forward.ir > "$out/forward.ir" || fail=1
 if grep -q '(let %1 int %0)' "$out/forward.ir" && grep -q '(let %2 int (load int $"x"))' "$out/forward.ir"; then echo "forward: ok"; else echo "forward: FAIL"; fail=1; fi
+# --shrink-eh-frames: an EH entry whose uses are loads and stores at constant offsets (and the push on the EH stack top) is cut to
+# the bytes written: 16 for a noexcept function's (next, kind), 48 for a function's (the region table ends at byte 42). A try
+# block's entry, whose jmp_buf address goes to _setjmp, and a frame that is copied stay whole.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --shrink-eh-frames strip_kind1.ir > "$out/shrink_kind1.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --shrink-eh-frames shrink_eh.ir > "$out/shrink_eh.ir" || fail=1
+if grep '^(function "dtor_like"' "$out/shrink_kind1.ir" | grep -q '(slot "tmp.1" (struct "__C9") 16 8) (slot "tmp.2" (struct "__C9") 48 8)' \
+   && grep '^(function "tryfn"' "$out/shrink_eh.ir" | grep -q '(slot "tmp.1" (struct "__C9") 240 8)' \
+   && grep '^(function "copied"' "$out/shrink_eh.ir" | grep -q '(slot "tmp.1" (struct "__C9") 240 8) (slot "tmp.2" (struct "__C9") 240 8)'; then
+  echo "shrink eh frames: ok"; else echo "shrink eh frames: FAIL"; fail=1; fi
+# --scope-facts: each inlined body is bracketed by (life-start $"x.iK") and (life-end $"x.iK") for the slots it hoists, and nothing
+# is added without the flag.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --scope-facts early_return.ir > "$out/early_facts.ir" || fail=1
+if grep -q '(life-start $"ret.i1")' "$out/early_facts.ir" && grep -q '(life-end $"ret.i1")' "$out/early_facts.ir" \
+   && ! grep -q 'life-' "$out/early_return.ir"; then echo "scope facts: ok"; else echo "scope facts: FAIL"; fail=1; fi
 # A callee with a goto and a label is inlined, and each copy's labels get a suffix of their own: two calls of it leave no call
 # and two different label names (the asm goto of the kernel's static_cpu_has is such a callee).
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline goto_inline.ir > "$out/goto_inline.ir" || fail=1

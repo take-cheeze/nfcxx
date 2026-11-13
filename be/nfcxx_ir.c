@@ -4116,7 +4116,7 @@ static int ir_builtin_unlowerable(const char *n)
 {
   static const char *const names[] = {
     "frame_address", "return_address", "extract_return_addr", "frob_return_addr", "dwarf_cfa", "unwind_init",
-    "apply", "apply_args", "return", "setjmp", "longjmp", "nonlocal_goto", "cpu_init", "cpu_is", "cpu_supports",
+    "apply", "apply_args", "return", "setjmp", "longjmp", "nonlocal_goto", "cpu_is",
     "va_arg_pack", "va_arg_pack_len", "speculation_safe_value", "thread_pointer", "set_thread_pointer",
   };
   size_t i;
@@ -4576,6 +4576,21 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     ir_val a = ir_rval(arg);
     ir_note(0, eok_call, 1);
     *out = a;
+    return 1;
+  }
+  /* __builtin_cpu_init() and __builtin_cpu_supports("feature") (x86): gcc reads its libgcc's __cpu_model; here the calls go to the
+     helpers of be/nfcxx_ldrt.c, which ask the host compiler's own built-ins. (__builtin_cpu_is stays unlowered: its names move
+     from one gcc version to the next.) */
+  if (strcmp(name, "cpu_init") == 0) {
+    ir_note(0, eok_call, 1);
+    ir_emit("(eval (call void &\"__nfcxx_cpu_init\"))");
+    *out = ir_mk_void();
+    return 1;
+  }
+  if (strcmp(name, "cpu_supports") == 0 && arg != NULL) {
+    ir_val a = ir_rval(arg);
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_let("int", ir_fmt("(call int &\"__nfcxx_cpu_supports\" %s)", a.s)), e->type);
     return 1;
   }
   if (ir_builtin_unlowerable(name)) {

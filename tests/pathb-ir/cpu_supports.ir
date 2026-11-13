@@ -1,0 +1,279 @@
+(ir-module "cpu_supports.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "line" (array 16384 char) 16384 1 (static) (init (zero 0 16384)))
+(data "const" (const (array 14 (const char))) (string "/proc/cpuinfo\000"))
+(data "const.1" (const (array 2 (const char))) (string "r\000"))
+(data "const.2" (const (array 6 (const char))) (string "flags\000"))
+(data "const.3" (const (array 5 (const char))) (string "sse2\000"))
+(data "const.4" (const (array 5 (const char))) (string "cmov\000"))
+(data "const.5" (const (array 5 (const char))) (string "avx2\000"))
+(data "const.6" (const (array 4 (const char))) (string "fma\000"))
+
+(function "_ZN34_INTERNAL_16_cpu_supports_cpp_main11cpuinfo_hasEPKc"
+  (ret int)
+  (params (param %0 "flag" (ptr (const char))))
+  (static)
+  (slot "flag" (ptr (const char)) 8 8)
+  (slot "f" (ptr (struct "_IO_FILE")) 8 8)
+  (slot "found" int 4 4)
+  (slot "p" (ptr char) 8 8)
+  (slot "e" (ptr char) 8 8)
+  (slot "tmp" (ptr (const char)) 8 8)
+  (slot "tmp.1" (ptr (const char)) 8 8)
+  (slot "tmp.2" unsigned_long 8 8)
+  (store (ptr (const char)) $"flag" %0)
+  (let %1 (ptr (struct "_IO_FILE")) (call (ptr (struct "_IO_FILE")) &"fopen" @"const" @"const.1"))
+  (store (ptr (struct "_IO_FILE")) $"f" %1)
+  (let %2 (ptr (struct "_IO_FILE")) (load (ptr (struct "_IO_FILE")) $"f"))
+  (let %3 bool (eq (ptr (struct "_IO_FILE")) %2 (null (ptr (struct "_IO_FILE")))))
+  (if %3
+    (then
+      (block
+        (return (const int -1)))))
+  (store int $"found" (const int 0))
+  (loop
+    (body
+      (let %4 (ptr (struct "_IO_FILE")) (load (ptr (struct "_IO_FILE")) $"f"))
+      (let %5 (ptr char) (call (ptr char) &"fgets" @"line" (const int 16384) %4))
+      (let %6 bool (ne (ptr char) %5 (null (ptr char))))
+      (if %6 (then) (else (break)))
+      (block
+        (block
+          (let %7 int (call int &"strncmp" @"line" @"const.2" (const unsigned_long 5)))
+          (let %8 bool (ne int %7 (const int 0)))
+          (if %8
+            (then
+              (block
+                (continue))))
+          (let %9 (ptr char) (call (ptr char) &"strchr" @"line" (const int 58)))
+          (store (ptr char) $"p" %9)
+          (let %10 (ptr char) (load (ptr char) $"p"))
+          (let %11 bool (ne (ptr char) %10 (null (ptr char))))
+          (let %12 (ptr char) (null (ptr char)))
+          (if %11
+            (then
+              (let %13 (ptr char) (load (ptr char) $"p"))
+              (let %14 (ptr char) (index %13 (const int 1) 1))
+              (set %12 %14))
+            (else
+              (let %15 (ptr char) (bitcast (ptr char) @"line"))
+              (set %12 %15)))
+          (store (ptr char) $"p" %12)
+          (loop
+            (body
+              (let %16 (ptr char) (load (ptr char) $"p"))
+              (nonnull %16)
+              (let %17 char (load char %16))
+              (let %18 bool (ne char %17 (const char 0)))
+              (if %18 (then) (else (break)))
+              (block
+                (loop
+                  (body
+                    (let %19 (ptr char) (load (ptr char) $"p"))
+                    (nonnull %19)
+                    (let %20 char (load char %19))
+                    (let %21 int (iconv int %20))
+                    (let %22 bool (eq int %21 (const int 32)))
+                    (if %22 (then) (else (break)))
+                    (block
+                      (let %23 (ptr char) (load (ptr char) $"p"))
+                      (let %24 (ptr char) (index %23 (const long 1) 1))
+                      (store (ptr char) $"p" %24)))
+                  (step))
+                (let %25 (ptr char) (load (ptr char) $"p"))
+                (store (ptr char) $"e" %25)
+                (loop
+                  (body
+                    (let %26 (ptr char) (load (ptr char) $"e"))
+                    (nonnull %26)
+                    (let %27 char (load char %26))
+                    (let %28 bool (ne char %27 (const char 0)))
+                    (let %29 bool (const bool 0))
+                    (if %28
+                      (then
+                        (let %30 (ptr char) (load (ptr char) $"e"))
+                        (nonnull %30)
+                        (let %31 char (load char %30))
+                        (let %32 int (iconv int %31))
+                        (let %33 bool (ne int %32 (const int 32)))
+                        (set %29 %33)))
+                    (let %34 bool (const bool 0))
+                    (if %29
+                      (then
+                        (let %35 (ptr char) (load (ptr char) $"e"))
+                        (nonnull %35)
+                        (let %36 char (load char %35))
+                        (let %37 int (iconv int %36))
+                        (let %38 bool (ne int %37 (const int 10)))
+                        (set %34 %38)))
+                    (if %34 (then) (else (break)))
+                    (block
+                      (let %39 (ptr char) (load (ptr char) $"e"))
+                      (let %40 (ptr char) (index %39 (const long 1) 1))
+                      (store (ptr char) $"e" %40)))
+                  (step))
+                (let %41 (ptr char) (load (ptr char) $"e"))
+                (let %42 (ptr char) (load (ptr char) $"p"))
+                (let %43 long (pdiff %41 %42 1))
+                (let %44 unsigned_long (iconv unsigned_long %43))
+                (let %45 (ptr (const char)) (load (ptr (const char)) $"flag"))
+                (let %46 unsigned_long (call unsigned_long &"strlen" %45))
+                (let %47 bool (eq unsigned_long %44 %46))
+                (let %48 bool (const bool 0))
+                (if %47
+                  (then
+                    (let %49 (ptr char) (load (ptr char) $"p"))
+                    (let %50 (ptr (const char)) (bitcast (ptr (const char)) %49))
+                    (store (ptr (const char)) $"tmp" %50)
+                    (let %51 (ptr (const char)) (load (ptr (const char)) $"flag"))
+                    (store (ptr (const char)) $"tmp.1" %51)
+                    (let %52 (ptr char) (load (ptr char) $"e"))
+                    (let %53 (ptr char) (load (ptr char) $"p"))
+                    (let %54 long (pdiff %52 %53 1))
+                    (let %55 unsigned_long (iconv unsigned_long %54))
+                    (store unsigned_long $"tmp.2" %55)
+                    (let %56 (ptr (const char)) (load (ptr (const char)) $"tmp"))
+                    (let %57 (ptr (const char)) (load (ptr (const char)) $"tmp.1"))
+                    (let %58 unsigned_long (load unsigned_long $"tmp.2"))
+                    (let %59 int (call int &"strncmp" %56 %57 %58))
+                    (let %60 bool (eq int %59 (const int 0)))
+                    (set %48 %60)))
+                (if %48
+                  (then
+                    (block
+                      (store int $"found" (const int 1)))))
+                (let %61 (ptr char) (load (ptr char) $"e"))
+                (nonnull %61)
+                (let %62 char (load char %61))
+                (let %63 bool (eq char %62 (const char 0)))
+                (if %63
+                  (then
+                    (block
+                      (goto "label"))))
+                (let %64 (ptr char) (load (ptr char) $"e"))
+                (store (ptr char) $"p" %64)))
+            (step
+              (let %65 (ptr char) (load (ptr char) $"p"))
+              (let %66 (ptr char) (index %65 (const long 1) 1))
+              (store (ptr char) $"p" %66)))
+          (label "label")
+          (goto "label.1"))))
+    (step))
+  (label "label.1")
+  (let %67 (ptr (struct "_IO_FILE")) (load (ptr (struct "_IO_FILE")) $"f"))
+  (let %68 int (call int &"fclose" %67))
+  (let %69 int (load int $"found"))
+  (return %69))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "avx2" int 4 4)
+  (slot "want" int 4 4)
+  (slot "fma" int 4 4)
+  (eval (call void &"__nfcxx_cpu_init"))
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"__nfcxx_cpu_supports" @"const.3"))
+        (let %1 bool (eq int %0 (const int 0)))
+        (if %1
+          (then
+            (block
+              (let %2 int (load int @"bad"))
+              (let %3 int (wadd int %2 (const int 1)))
+              (store int @"bad" %3))))))
+    (step
+      (let %4 bool (ne int (const int 0) (const int 0)))
+      (if %4 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %5 int (call int &"__nfcxx_cpu_supports" @"const.4"))
+        (let %6 bool (eq int %5 (const int 0)))
+        (if %6
+          (then
+            (block
+              (let %7 int (load int @"bad"))
+              (let %8 int (wadd int %7 (const int 1)))
+              (store int @"bad" %8))))))
+    (step
+      (let %9 bool (ne int (const int 0) (const int 0)))
+      (if %9 (then) (else (break)))))
+  (let %10 int (call int &"__nfcxx_cpu_supports" @"const.5"))
+  (let %11 bool (ne int %10 (const int 0)))
+  (let %12 int (iconv int %11))
+  (store int $"avx2" %12)
+  (loop
+    (body
+      (block
+        (let %13 int (load int $"avx2"))
+        (let %14 int (call int &"__nfcxx_cpu_supports" @"const.5"))
+        (let %15 bool (ne int %14 (const int 0)))
+        (let %16 int (iconv int %15))
+        (let %17 bool (eq int %13 %16))
+        (let %18 bool (eq bool %17 (const bool 0)))
+        (if %18
+          (then
+            (block
+              (let %19 int (load int @"bad"))
+              (let %20 int (wadd int %19 (const int 1)))
+              (store int @"bad" %20))))))
+    (step
+      (let %21 bool (ne int (const int 0) (const int 0)))
+      (if %21 (then) (else (break)))))
+  (let %22 int (call int &"_ZN34_INTERNAL_16_cpu_supports_cpp_main11cpuinfo_hasEPKc" @"const.5"))
+  (store int $"want" %22)
+  (let %23 int (load int $"want"))
+  (let %24 bool (le.s int (const int 0) %23))
+  (if %24
+    (then
+      (block
+        (loop
+          (body
+            (block
+              (let %25 int (load int $"avx2"))
+              (let %26 int (load int $"want"))
+              (let %27 bool (eq int %25 %26))
+              (let %28 bool (eq bool %27 (const bool 0)))
+              (if %28
+                (then
+                  (block
+                    (let %29 int (load int @"bad"))
+                    (let %30 int (wadd int %29 (const int 1)))
+                    (store int @"bad" %30))))))
+          (step
+            (let %31 bool (ne int (const int 0) (const int 0)))
+            (if %31 (then) (else (break))))))))
+  (let %32 int (call int &"__nfcxx_cpu_supports" @"const.6"))
+  (let %33 bool (ne int %32 (const int 0)))
+  (let %34 int (iconv int %33))
+  (store int $"fma" %34)
+  (let %35 int (call int &"_ZN34_INTERNAL_16_cpu_supports_cpp_main11cpuinfo_hasEPKc" @"const.6"))
+  (store int $"want" %35)
+  (let %36 int (load int $"want"))
+  (let %37 bool (le.s int (const int 0) %36))
+  (if %37
+    (then
+      (block
+        (loop
+          (body
+            (block
+              (let %38 int (load int $"fma"))
+              (let %39 int (load int $"want"))
+              (let %40 bool (eq int %38 %39))
+              (let %41 bool (eq bool %40 (const bool 0)))
+              (if %41
+                (then
+                  (block
+                    (let %42 int (load int @"bad"))
+                    (let %43 int (wadd int %42 (const int 1)))
+                    (store int @"bad" %43))))))
+          (step
+            (let %44 bool (ne int (const int 0) (const int 0)))
+            (if %44 (then) (else (break))))))))
+  (let %45 int (load int @"bad"))
+  (return %45))

@@ -18,6 +18,8 @@
 #   --sanitize=LIST  (NFCXX_IR_SANITIZE)  the checks of -fsanitize=undefined (docs/notes/ubsan.md), made by the front end (pathb-dump)
 #   --ir-opt=LIST    (NFCXX_IR_OPT)  the IR passes (scripts/pathb-ir-opt.rb), below; default inline; --ir-opt=none turns them off;
 #                    --ir-opt-max=BYTES (NFCXX_IR_OPT_MAX)
+#                    With the inliner the pass also gets --shrink-eh-frames and, for the SSA emitter without --asan and --safe-pointers,
+#                    --scope-facts (docs/notes/pathb-ir-passes.md): smaller EH entries and stack slots of inlined bodies that share frames
 #   --emitter=ssa|mruby  (NFCXX_PATHB_EMITTER)  the QBE IL emitter
 #   --long-double=trap  (PATHB_LONG_DOUBLE=trap, or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
@@ -116,6 +118,11 @@ if [ -n "$passes" ] && [ "$passes" != none ] && [ "$passes" != off ] && [ -z "${
     echo "pathb-cc: $src: IR is $size bytes, over --ir-opt-max: not optimized" >&2
   else
     irpasses=(); IFS=, read -ra _p <<< "$passes"; for x in "${_p[@]}"; do irpasses+=("--$x"); [ "$x" != inline ] || irpasses=(--prune-unused --strip-leaf-eh "${irpasses[@]}"); done
+    # The inlined bodies bracket their slots with scope facts, which the SSA emitter turns into shared stack slots (the checks of
+    # --asan and --safe-pointers keep every slot of its own).
+    [ "$emitter" != ssa ] || [ $asan_on = 1 ] || [ $safe_on = 1 ] || [ "$passes" = "${passes/inline/}" ] || irpasses+=(--scope-facts)
+    # And the EH entries are cut to the bytes the code writes (docs/notes/pathb-ir-passes.md, "--shrink-eh-frames").
+    [ "$passes" = "${passes/inline/}" ] || irpasses+=(--shrink-eh-frames)
     cp "$tmp/$n.ir" "$tmp/$n.raw.ir"; raw=1
     if ${RUBY:-ruby} "$root/scripts/pathb-ir-opt.rb" "${irpasses[@]}" "$tmp/$n.ir" > "$tmp/$n.opt.ir" 2> "$tmp/$n.opt.err"; then
       mv "$tmp/$n.opt.ir" "$tmp/$n.ir"
