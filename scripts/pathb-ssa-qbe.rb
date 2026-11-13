@@ -1882,22 +1882,37 @@ end
     # An integer conversion to type t from the operand x. A widening keeps the value; a conversion to bool compares
     # with zero; a conversion to a narrower type sign- or zero-extends the low bits.
     def conv_lines(dst, t, x)
-      src = x.is_a?(Array) && head(x) == "const" ? x[1] : @types[x]
+      # (the address of a global, function or slot is a pointer: `(unsigned short)(size_t)&buf` of the kernel's boot code)
+      src = x.is_a?(Array) && head(x) == "const" ? x[1] : x.is_a?(Ref) && Qbe.ptr32 ? ["ptr", "void"] : @types[x]
       raise QbeUnsupported, "conversion of an untyped operand #{sx(x)}" unless src
       raise QbeUnsupported, "float to integer by iconv" if float_type?(src)
 
       dc = Qbe.cls(t)
       sc = Qbe.cls(src)
+      xo = op(x)
+      if x.is_a?(Ref) && Qbe::EXT.key?(t)
+        # A symbol is an address constant, which an extension cannot take as its operand (`movzwl $buf, %eax`): the narrowing is a
+        # mask, or a shift pair, of the address
+        bits = { "sb" => 24, "ub" => 24, "sh" => 16, "uh" => 16 }.fetch(Qbe::EXT[t])
+        if Qbe::EXT[t][0] == "u"
+          @lines << "  #{dst} =w and #{xo}, #{(1 << (32 - bits)) - 1}"
+        else
+          up = fresh
+          @lines << "  #{up} =w shl #{xo}, #{bits}"
+          @lines << "  #{dst} =w sar #{up}, #{bits}"
+        end
+        return
+      end
       if dc == "l" && sc == "w"
-        @lines << "  #{dst} =l #{Qbe.signed?(src) ? 'extsw' : 'extuw'} #{op(x)}"
+        @lines << "  #{dst} =l #{Qbe.signed?(src) ? 'extsw' : 'extuw'} #{xo}"
       elsif dc == "w" && sc == "l" && t != "bool" && !Qbe::EXT.key?(t)
-        @lines << "  #{dst} =w copy #{op(x)}"
+        @lines << "  #{dst} =w copy #{xo}"
       elsif t == "bool"
-        @lines << "  #{dst} =w cne#{sc} #{op(x)}, 0"
+        @lines << "  #{dst} =w cne#{sc} #{xo}, 0"
       elsif Qbe::EXT.key?(t)
-        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{op(x)}"
+        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{xo}"
       else
-        @lines << "  #{dst} =#{dc} copy #{op(x)}"
+        @lines << "  #{dst} =#{dc} copy #{xo}"
       end
     end
 
@@ -3008,7 +3023,7 @@ end
 
   def self.asm_block32(hex, ops, clobbers = [], labels = [])
     tpl = [hex].pack("H*")
-    raise QbeUnsupported, "asm: a template that names %ebp" if tpl.include?("%ebp") || tpl.include?("%bp") || tpl.include?("%esp")
+    raise QbeUnsupported, "asm: a template that names %ebp" if tpl.include?("%ebp") || tpl.include?("%bp")
     regs = Array.new(ops.size)
     used = {}
     clob = {}
@@ -3109,6 +3124,29 @@ end
       i = k
     end
     parts << body
+    # %esp in the template is the caller's: the helper has saved four registers and has the return address (and in cdecl the block
+    # argument is the caller's), 20 bytes on. An address (%esp) or N(%esp) is moved by that much; any other use of %esp is refused.
+    parts = parts.map do |x|
+      next x if x.is_a?(Array) || !x.include?("%esp")
+
+      raise QbeUnsupported, "asm: %esp other than as an address base" if x.gsub("(%esp)", "").include?("%esp")
+
+      adj = 4 * I386_SAVED.size + 4
+      out = +""
+      k = 0
+      while k < x.size
+        if x[k, 6] == "(%esp)"
+          prev = out[-1]
+          glue = !prev.nil? && (DIGITS.include?(prev) || prev == ")" || prev == "_" || prev == "." || (prev >= "a" && prev <= "z") || (prev >= "A" && prev <= "Z"))
+          out << (glue ? "+" : "") << "#{adj}(%esp)"
+          k += 6
+        else
+          out << x[k]
+          k += 1
+        end
+      end
+      out
+    end
     flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
     digest = sha1_hex("32|#{regparm3}|#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
     sym = "__pathb_asm_#{digest}"

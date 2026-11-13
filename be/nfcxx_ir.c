@@ -7149,7 +7149,8 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     if (is_mem || is_imm) continue;
     if (ir_is_float(ot) != (plans[nops].code[0] == 'x')) { ok = 0; break; }
     if (ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
-    if (!ir_is_float(ot) && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
+    /* a bool takes the byte of an output (the setcc of the kernel's CC_OUT(nz) fallback, `"=qm"(diff)`), not an input: that needs a 0 or 1 */
+    if (!ir_is_float(ot) && (!ir_asm_scalar(ot) || (ir_is_bool(ot) && strcmp(plans[nops].kind, "out") != 0) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
                                                               ir_size_of(ot) != 4 && ir_size_of(ot) != 8))) { ok = 0; break; }
   }
   if (!ok) return 0;
@@ -7372,12 +7373,16 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       nin++;
       if (cls != IR_ASM_EMPTY) { why = "asm-operands"; break; }
       if (tie >= 0) {
-        /* tied to a plain output of the same IR type */
+        /* tied to a plain output of the same IR type, or of the same size when one is a pointer and the other an integer
+           (the kernel's absolute_pointer(): `asm("" : "=r"(ul) : "0"(ptr))`) */
         an_asm_operand_ptr o2 = ae->operands;
         int j;
         for (j = 0; j < tie && o2 != NULL; j++) o2 = o2->next;
         if (o2 == NULL || o2->modifiers != aom_output || o2->expression == NULL || !ir_asm_scalar(o2->expression->type) ||
-            !ir_asm_scalar(ot) || strcmp(ir_valtext(o2->expression->type), ir_valtext(ot)) != 0) {
+            !ir_asm_scalar(ot) ||
+            (strcmp(ir_valtext(o2->expression->type), ir_valtext(ot)) != 0 &&
+             !(ir_size_of(o2->expression->type) == ir_size_of(ot) && !ir_is_bool(ot) && !ir_is_bool(o2->expression->type) &&
+               ((ir_is_pointer(ot) && ir_is_integer(o2->expression->type)) || (ir_is_integer(ot) && ir_is_pointer(o2->expression->type)))))) {
           why = "asm-operands";
         }
       } else if (!mem_ok && !ir_asm_scalar(ot)) {
@@ -7470,7 +7475,13 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       }
     }
     for (i = 0; i < n; i++) {
-      if (tied[i] >= 0) ir_store_lv(lv[tied[i]], tv[i].s);
+      if (tied[i] >= 0) {
+        char *v = tv[i].s;
+        const char *to = ir_valtext(lv[tied[i]].t);
+        if (strcmp(to, ir_valtext(tv[i].t)) != 0)   /* a pointer and an integer of one size: the same bits */
+          v = ir_let(to, ir_is_pointer(tv[i].t) ? ir_fmt("(p2i %s %s)", to, v) : ir_fmt("(i2p %s %s)", to, v));
+        ir_store_lv(lv[tied[i]], v);
+      }
     }
   }
   if (mem) ir_line(d, "(barrier)");

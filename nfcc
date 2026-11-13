@@ -332,7 +332,9 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
   if [ $pb_regparm = 1 ] && [ $pb_m16 = 0 ]; then pb_reason="-mregparm=3 without -m16: not honoured by Path B"; return; fi
   if [ $pb_m16 = 1 ]; then
-    pb_opts+=(--i386 --m16); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)   # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding
+    # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding. No inlining: the real-mode image is size limited (the kernel builds it -Os), and
+    # the inliner grows the code (a third more on the boot code)
+    pb_opts+=(--i386 --m16 --ir-opt=none); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)
   fi
   if [ ${#asf[@]} -gt 0 ]; then pb_reason="${asf[*]}: assembler options"; return; fi
   while [ $k2 -lt ${#pp[@]} ]; do
