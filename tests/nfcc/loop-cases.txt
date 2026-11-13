@@ -196,3 +196,46 @@ x.c x.s a.o
 @tests/nfcc/response/tailbs.rsp
 @tests/nfcc/response/utf8.rsp x.c
 -c @tests/nfcc/response/ws.rsp @tests/nfcc/response/inner.rsp -o out @tests/nfcc/response/quotes.rsp
+NFCXX_BACKEND=pathb -c x.c -funsigned-char -fshort-wchar -m16 -mregparm=3 -mno-sse -fno-asynchronous-unwind-tables -fno-PIC -ffreestanding -ftrivial-auto-var-init=zero x.c
+NFCXX_BACKEND=pathb -fno-stack-check -mno-avx512f x.c
+NFCXX_BACKEND=pathb -ftrivial-auto-var-init=pattern x.c
+NFCXX_BACKEND=pathb -m32 -march=native x.c
+NFCXX_BACKEND=pathb -fPIC -fPIE -fno-jump-tables -fwrapv x.c
+NFCXX_BACKEND=pathb -mindirect-branch=thunk x.c
+NFCXX_BACKEND=pathb -fstack-protector-strong -mstack-protector-guard=tls x.c
+NFCXX_BACKEND=pathb -fsanitize=address x.c
+NFCXX_BACKEND=pathb -fdiagnostics-color=auto -fsigned-char x.c
+NFCXX_BACKEND=pathb -fno-stack-protector -fPIC -c x.c
+NFCXX_BACKEND=pathb -mregparm=3 -c x.c
+NFCXX_BACKEND=pathb -m16 -mregparm=3 -fno-crossjumping -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -funsigned-char -fno-stack-protector -mno-red-zone -mcmodel=kernel -m64 -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -fno-jump-tables -march=i386 -mregparm=3 -m16 -c x.c
+NFCXX_BACKEND=qbe -funsigned-char -m64 x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -mno-sse -msoft-float -fno-PIC -falign-jumps=4 x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -ffreestanding -fshort-wchar -ftrivial-auto-var-init=zero x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -fsanitize=address x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -m32 -funsigned-char -fsigned-char -mcmodel=kernel -fno-PIC -march=native -mtune=generic -fwrapv -ffast-math -fsanitize=address x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -fPIC -fstack-protector-strong -fno-stack-protector --param max-inline-insns-single=200 -fno-crossjumping -c x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -ffreestanding -fno-jump-tables -Wa,--32 -c x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -mindirect-branch=thunk -mstack-protector-guard=tls -fstack-protector x.c
+NFCXX_BACKEND=gcc NFCXX_QBE_TRY=1 -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_TRY=1 -c x.c
+-E x.c
+-M x.c -MD
+-fsyntax-only x.c
+-dumpmachine
+-print-file-name=x x.c
+-v
+x.c -v
+-c @tests/nfcc/response/nope.rsp
+NFCXX_BACKEND=bogus x.c
+-S x.c -o a.s
+-c x.a b.c -o out
+-MD x.c
+-MF d.d x.c
+-MD -c x.c -o x.o -MF d.d
+-fstack-protector-strong -mstack-protector-guard=tls x.c
+-mstack-protector-guard=tls x.c
+-c
+-S -c x.c
+-x assembler -S x.c

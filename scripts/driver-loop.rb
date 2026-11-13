@@ -1,13 +1,16 @@
 #!/usr/bin/env ruby
-# nfcc's option loop, ported from the bash in nfcc (the loop between its "args=(\"$@\")" line and its post-loop checks).
-# Covered: -c -S -o -x; the preprocessor options (-D -U -I -isystem -iquote -idirafter -include -imacros, -std=, -ansi,
-# -nostdinc, -undef, --sysroot=); the dependency flags (-MD -MMD -MF -MT -MQ -MP) and -Wp,* (the same parser as
-# scripts/driver-options.rb); -l -L and the link options (-Xlinker -z -u -T, -static ..., -Wl,*, -fuse-ld=*, -shared);
-# the input files by suffix; -O* -g* -pipe -v -time -w -W* and -Wa,*; the -f and -m cases.
-# @file arguments are expanded first, as add_arg does, and an @ that cannot be read is refused.
-# -fno-crossjumping is kept only when the host gcc is GNU gcc, which the shell asks; the caller passes that as the first
-# argument, --host-gnu-gcc=0 or --host-gnu-gcc=1 (the default is 0).
-# Not covered yet, refused as "unported" (exit 3): the helpers qbekernel and pathb_option. A caller can tell "not done yet" from "refused by nfcc".
+# nfcc's option handling, ported from the bash in nfcc: the pre-loop decisions, the @file expansion, the option loop, and the
+# post-loop checks. Covered: every option the loop's case statement handles (the preprocessor, dependency, link, -O, -g,
+# warning, -f and -m options and the -Wp, -Wa, -Wl forms), the Path B option helper (pathb_option) and the QBE kernel helper
+# (qbekernel), with the backend and the passthrough and kernel settings that select them; the post-loop stack-protector,
+# input, -S, -o and dependency checks; and the pre-loop decisions that run the host compiler (-E, -M, -fsyntax-only,
+# -dumpmachine and friends, -v, the qbe-try wrapper), which are printed as "EXEC" instead of run.
+# Not ported: the --version banner, which depends on the host compiler's version (it is refused as "unported", exit 3).
+# -fno-crossjumping depends on the host compiler; the caller says whether it is GNU gcc (--nfcc-host-gnu-gcc=0|1).
+#
+# Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
+# --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
+# (NFCXX_QBE_TRY) and --nfcc-host-gnu-gcc=0|1. They come first on the command line.
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -141,12 +144,37 @@ FOK_PATTERNS = %w[
   record-gcc-switches no-record-gcc-switches verbose-asm no-verbose-asm stack-usage no-stack-usage
 ].freeze
 
-class LoopState
-  attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp
-  attr_accessor :optlvl, :spon, :pathb_pic, :pathb_pie
-  attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf, :isa, :picf, :spguard
 
-  def initialize
+QBE_KERNEL_PATTERNS = %w[
+  -funsigned-char -fshort-wchar -ftrivial-auto-var-init=zero -ffreestanding -fno-PIE -fno-pie -fno-PIC
+  -fno-pic -fno-stack-protector -fno-jump-tables -fno-delete-null-pointer-checks -fno-strict-overflow
+  -fno-strict-aliasing -fwrapv -fcf-protection=none -fno-asynchronous-unwind-tables -fconserve-stack
+  -fno-common -falign-functions=* -falign-jumps=* -falign-loops=* -falign-labels=* -fno-stack-check
+  -fno-stack-clash-protection -fno-allow-store-data-races -fno-optimize-sibling-calls
+  -foptimize-sibling-calls -fno-function-sections -fno-data-sections -fstrict-flex-arrays=*
+  -fomit-frame-pointer -fno-omit-frame-pointer -fmacro-prefix-map=* -m64 -mcmodel=kernel -mno-red-zone
+  -mtune=* -mpreferred-stack-boundary=3 -mskip-rax-setup -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-avx
+  -mno-80387 -mno-fp-ret-in-387 -msoft-float -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2
+].freeze
+
+# Path B (backend pathb) options, bash's pathb_option: flags with an effect, the options with no effect on QBE's code.
+PATHB_PBF_FLAGS = %w[-funsigned-char -fno-signed-char -fsigned-char -fno-unsigned-char -ffreestanding].freeze
+PATHB_TRIVIAL = %w[-ftrivial-auto-var-init=zero -ftrivial-auto-var-init=uninitialized].freeze
+PATHB_NOFP = %w[-mno-sse -mno-sse2 -mno-80387 -msoft-float].freeze
+PATHB_NOPIE = %w[-fno-PIE -fno-pie -fno-PIC -fno-pic].freeze
+PATHB_NO_EFFECT = %w[-fno-stack-check -fno-stack-clash-protection -fno-allow-store-data-races -fno-optimize-sibling-calls
+                     -foptimize-sibling-calls -fno-function-sections -fno-data-sections -fstrict-flex-arrays=* -fconserve-stack
+                     -falign-labels=* -mno-mmx -mno-3dnow -mno-avx -mno-avx2 -mno-avx512* -mno-ssse3 -mno-sse3 -mno-sse4*
+                     -mno-fma -mno-bmi* -mno-popcnt -mno-fp-ret-in-387 -mskip-rax-setup -mno-red-zone -mred-zone].freeze
+
+# The loop's state, and the configuration nfcc reads from the environment (backend, passthrough, qbe_kernel, host_gnu_gcc).
+class LoopState
+  attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp, :optlvl, :spon, :pathb_pic, :pathb_pie
+  attr_accessor :pb_m16, :pb_regparm, :nofp, :nounwind, :wchar16
+  attr_accessor :backend, :passthrough, :qbe_kernel, :host_gnu_gcc
+  attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf, :isa, :picf, :spguard, :gccf, :kqf, :pbf, :needgcc
+
+  def initialize(backend, passthrough, qbe_kernel, host_gnu_gcc)
     @mode = "link"
     @asm = 0
     @out = ""
@@ -155,24 +183,93 @@ class LoopState
     @depmode = ""
     @dfile = ""
     @dp = 0
+    @optlvl = "-O2"
+    @spon = 0
+    @pathb_pic = 0
+    @pathb_pie = 0
+    @pb_m16 = 0
+    @pb_regparm = 0
+    @nofp = 0
+    @nounwind = 0
+    @wchar16 = 0
+    @backend = backend
+    @passthrough = passthrough
+    @qbe_kernel = qbe_kernel
+    @host_gnu_gcc = host_gnu_gcc
     @pp = []
     @ld = []
     @inputs = []
     @dts = []
-    @optlvl = "-O2"
     @dbg = []
     @asf = []
-    @spon = 0
-    @pathb_pic = 0
-    @pathb_pie = 0
     @isa = []
     @picf = []
     @spguard = []
+    @gccf = []
+    @kqf = []
+    @pbf = []
+    @needgcc = []
   end
 end
 
 def die(message)
   raise LoopDie, message
+end
+
+# nfcc's gccplain: an option with no effect on QBE's output that gcc still gets, in the pathb backend or with passthrough.
+def gccplain(state, arg)
+  ok = state.backend == "pathb" || (state.backend == "gcc" && state.passthrough)
+  state.gccf << arg if ok
+  ok
+end
+
+# nfcc's gcconly: an option that changes meaning; pathb gives it to gcc (needgcc), gcc with passthrough gives it to gcc.
+def gcconly(state, arg)
+  if state.backend == "pathb"
+    state.gccf << arg
+    state.needgcc << arg
+    return true
+  end
+  ok = state.backend == "gcc" && state.passthrough
+  state.gccf << arg if ok
+  ok
+end
+
+# nfcc's qbekernel: the Linux kernel's options the qbe backend honours, when NFCXX_QBE_KERNEL is set.
+def qbekernel(state, arg)
+  return false unless state.backend == "qbe" && state.qbe_kernel
+  return false unless matches_any?(arg, QBE_KERNEL_PATTERNS)
+
+  state.kqf << arg
+  true
+end
+
+# nfcc's pathb_option (the pathb backend only): true when the option is handled here; the loop then skips its own case.
+def pathb_option(state, arg)
+  if arg == "-m16"
+    state.pb_m16 = 1
+  elsif arg == "-mregparm=3"
+    state.pb_regparm = 1
+  elsif PATHB_PBF_FLAGS.include?(arg) || PATHB_TRIVIAL.include?(arg)
+    state.pbf << arg
+  elsif arg == "-fshort-wchar"
+    state.pbf << arg
+    state.wchar16 = 1
+  elsif PATHB_NOFP.include?(arg)
+    state.pbf << "--no-fp"
+    state.nofp = 1
+  elsif arg == "-fno-asynchronous-unwind-tables"
+    state.pbf << "--no-unwind"
+    state.nounwind = 1
+  elsif PATHB_NOPIE.include?(arg)
+    state.pbf << "--no-pie"
+  elsif matches_any?(arg, PATHB_NO_EFFECT)
+    nil
+  else
+    return false
+  end
+  state.gccf << arg
+  true
 end
 
 # Bash's glob matching for case patterns and @(...) lists: "*" matches any string (including "/"), "?" one character.
@@ -289,15 +386,17 @@ def input_kind(arg, state)
   end
 end
 
-# Applies the loop to the arguments. Returns the state; raises LoopDie for an error bash would die on, Unported for an
-# option this slice does not cover.
-def run_loop(args, host_gnu_gcc)
-  state = LoopState.new
+# The option loop, in the order of nfcc's case statement. args are already expanded (no @file).
+def run_loop(args, state)
   n = args.length
   i = 0
   while i < n
     a = args[i]
-    # need: the option takes the next argument
+    if qbekernel(state, a) || (state.backend == "pathb" && pathb_option(state, a))
+      i += 1
+      next
+    end
+
     if a == "-c"
       state.mode = "compile"
     elsif a == "-S"
@@ -340,18 +439,8 @@ def run_loop(args, host_gnu_gcc)
       state.dp = 1
     elsif PP_TAKES_ARG.any? { |flag| a.start_with?(flag) && a.length > flag.length }
       state.pp << a
-    elsif (a.start_with?("-l") || a.start_with?("-L")) && a.length > 2
+    elsif a.start_with?("-l") && a.length > 2 || a.start_with?("-L") && a.length > 2
       state.ld << a
-    elsif a == "-Ofast"
-      die("#{a} is not supported (changes floating-point semantics)")
-    elsif a == "-O" || a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Os" || a == "-Og"
-      state.optlvl = a == "-O" ? "-O1" : a
-    elsif a.start_with?("-O")
-      die("unknown optimisation option '#{a}'")
-    elsif a == "-g" || a.start_with?("-g")
-      state.dbg << a
-    elsif a == "-pipe" || a == "-v" || a == "-time"
-      nil
     elsif a.start_with?("-std=c++") || a.start_with?("-std=gnu++")
       die("#{a}: C++ is not supported by nfcc (use nfcxx)")
     elsif a.start_with?("-std=") || a == "-ansi"
@@ -364,70 +453,119 @@ def run_loop(args, host_gnu_gcc)
       state.ld << a
     elsif LD_PASS.include?(a) || matches_any?(a, LD_PATTERNS)
       state.ld << a
-    elsif a.start_with?("-Wa,")
-      state.asf << a
     elsif a.start_with?("-Wp,")
       apply_wp_option(a, state)
+    elsif a.start_with?("-Wa,")
+      state.asf << a
     elsif a == "-w" || a.start_with?("-W")
+      nil
+    elsif a == "-Ofast"
+      die("#{a} is not supported (changes floating-point semantics)")
+    elsif a == "-O" || a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Os" || a == "-Og"
+      state.optlvl = a == "-O" ? "-O1" : a
+    elsif a.start_with?("-O")
+      die("unknown optimisation option '#{a}'")
+    elsif a == "-g" || a.start_with?("-g")
+      state.dbg << a
+    elsif a == "-pipe" || a == "-v" || a == "-time"
       nil
     elsif a == "-fstack-protector" || STACK_PROTECTOR.include?(a)
       state.spon = 1
+      gccplain(state, a)
     elsif a == "-fno-stack-protector"
       state.spon = 0
+      gccplain(state, a)
     elsif a.start_with?("-mstack-protector-guard")
       state.spguard << a
     elsif INDIRECT_KEEP.include?(a)
-      nil
+      gccplain(state, a)
     elsif matches_any?(a, INDIRECT_REFUSED)
-      die("#{a} is not supported")
+      die("#{a} is not supported") unless gcconly(state, a)
     elsif a == "-fPIC" || a == "-fpic"
       state.pathb_pic = 1
       state.ld << a
-      state.picf << a
+      state.picf << a unless gccplain(state, a)
     elsif a == "-fPIE" || a == "-fpie"
       state.pathb_pie = 1
       state.ld << a
-      state.picf << a
+      state.picf << a unless gccplain(state, a)
     elsif a == "-m32" || a == "-mx32" || a == "-m16" || a == "-miamcu"
-      die("#{a} is not supported (x86-64 only)")
-    elsif matches_any?(a, ISA_OPTIONS) || a.start_with?("--param=") || a == "-fno-jump-tables"
+      die("#{a} is not supported (x86-64 only)") unless gcconly(state, a)
+    elsif matches_any?(a, ISA_OPTIONS)
+      state.isa << a unless gccplain(state, a)
+    elsif a.start_with?("--param=")
+      state.isa << a
+    elsif a == "-fno-jump-tables"
       state.isa << a
     elsif a == "-fno-crossjumping"
-      # bash: host_is_gnu_gcc && isa+=(...). The host check runs in the shell; the caller says whether it passed.
-      state.isa << a if host_gnu_gcc
+      state.isa << a if state.host_gnu_gcc
     elsif a == "--param"
       die("option '#{a}' requires an argument") unless i + 1 < n
 
       i += 1
       state.isa << a << args[i]
     elsif matches_any?(a, M_NO_EFFECT) || matches_any?(a, NO_EFFECT_F)
-      nil
+      gccplain(state, a)
     elsif a.start_with?("-m")
-      die("#{a} is not supported")
+      die("#{a} is not supported") unless gcconly(state, a)
     elsif matches_any?(a, INSTRUMENTATION)
       die("#{a} is not supported (instrumentation would be dropped)")
     elsif matches_any?(a, FP_MATH)
-      die("#{a} is not supported (changes floating-point semantics)")
+      die("#{a} is not supported (changes floating-point semantics)") unless gcconly(state, a)
     elsif matches_any?(a, GCCONLY_PATTERNS)
-      die("#{a} is not supported (it changes semantics or code generation that this pipeline cannot honour)")
+      die("#{a} is not supported (it changes semantics or code generation that this pipeline cannot honour)") unless gcconly(state, a)
     elsif a.start_with?("-f")
       if matches_any?(a[2..], FOK_PATTERNS)
-        nil
+        gccplain(state, a)
       else
-        die("#{a} is not supported (not in nfcc's list of harmless -f options)")
+        die("#{a} is not supported (not in nfcc's list of harmless -f options)") unless gcconly(state, a)
       end
     elsif a == "-"
       state.inputs << "c:-"
     elsif a.start_with?("@")
       die("response files (#{a}) are not supported")
     elsif a.start_with?("-")
-      raise Unported, a
+      die("unsupported option '#{a}'")
     else
       state.inputs << "#{input_kind(a, state)}:#{a}"
     end
     i += 1
   end
+
+  # The post-loop checks (nfcc, after its loop).
+  state.spguard.each do |a|
+    if state.spon == 1
+      die("#{a} is not supported") unless gcconly(state, a)
+    else
+      gccplain(state, a)
+    end
+  end
+  die("no input files") if state.inputs.empty?
+  state.mode = "compile" if state.asm == 1
+  if state.mode == "compile"
+    die("cannot specify -o with -c and multiple files") if state.sawout == 1 && state.inputs.length > 1
+  end
+  if !state.depmode.empty? && state.mode != "compile"
+    die("#{state.depmode} needs -c (dependency files for a compile-and-link command are not supported)")
+  end
+  die("-MF needs -MD or -MMD with -c (or -M/-MM for -E)") if !state.dfile.empty? && state.depmode.empty?
   state
+end
+
+EXEC_PREFIXES = %w[-dumpmachine -dumpversion -dumpfullversion -dumpspecs -V -qversion --help --target-help].freeze
+EXEC_TOOLS = %w[-E -M -MM -MG -fsyntax-only].freeze
+
+# The decisions nfcc makes before its loop: a version query (not ported: raises Unported), a query or -E/-M/-fsyntax-only that
+# runs the host compiler, and the qbe-try wrapper. Returns the command that exec runs, or nil to carry on.
+def pre_loop_exec(args, host, qbe_try)
+  args.each do |a|
+    raise Unported, "--version" if a == "--version"
+    return [host] + args if EXEC_PREFIXES.include?(a) || a.start_with?("-print-")
+  end
+  return [host, "-v"] if args == ["-v"]
+  return ["qbe-try"] + args if qbe_try
+  args.each { |a| return [host] + args if EXEC_TOOLS.include?(a) }
+  nil
 end
 
 def emit(state)
@@ -436,7 +574,7 @@ def emit(state)
   $stdout.write("out=#{state.out}\n")
   $stdout.write("sawout=#{state.sawout}\n")
   $stdout.write("lang=#{state.lang}\n")
-  $stdout.write("backend=gcc\n")
+  $stdout.write("backend=#{state.backend}\n")
   $stdout.write("optlvl=#{state.optlvl}\n")
   $stdout.write("depmode=#{state.depmode}\n")
   $stdout.write("dfile=#{state.dfile}\n")
@@ -444,29 +582,51 @@ def emit(state)
   $stdout.write("spon=#{state.spon}\n")
   $stdout.write("pathb_pic=#{state.pathb_pic}\n")
   $stdout.write("pathb_pie=#{state.pathb_pie}\n")
-  state.inputs.each { |x| $stdout.write("inputs+=#{x}\n") }
-  state.pp.each { |x| $stdout.write("pp+=#{x}\n") }
-  state.ld.each { |x| $stdout.write("ld+=#{x}\n") }
-  state.isa.each { |x| $stdout.write("isa+=#{x}\n") }
-  state.asf.each { |x| $stdout.write("asf+=#{x}\n") }
-  state.picf.each { |x| $stdout.write("picf+=#{x}\n") }
-  state.dbg.each { |x| $stdout.write("dbg+=#{x}\n") }
-  state.spguard.each { |x| $stdout.write("spguard+=#{x}\n") }
-  state.dts.each { |x| $stdout.write("dts+=#{x}\n") }
+  $stdout.write("pb_m16=#{state.pb_m16}\n")
+  $stdout.write("pb_regparm=#{state.pb_regparm}\n")
+  $stdout.write("nofp=#{state.nofp}\n")
+  $stdout.write("nounwind=#{state.nounwind}\n")
+  $stdout.write("wchar16=#{state.wchar16}\n")
+  { "inputs" => state.inputs, "pp" => state.pp, "ld" => state.ld, "gccf" => state.gccf, "isa" => state.isa,
+    "asf" => state.asf, "picf" => state.picf, "dbg" => state.dbg, "spguard" => state.spguard, "dts" => state.dts,
+    "kqf" => state.kqf, "pbf" => state.pbf, "needgcc" => state.needgcc }.each do |name, items|
+    items.each { |x| $stdout.write("#{name}+=#{x}\n") }
+  end
+end
+
+# The leading --nfcc-* options carry what nfcc reads from its environment; nothing else starts with --nfcc-.
+def take_config(argv)
+  config = { backend: "gcc", passthrough: false, qbe_kernel: false, host_gnu_gcc: false, qbe_try: false }
+  while argv.first && argv.first.start_with?("--nfcc-")
+    option = argv.shift
+    name, value = option.split("=", 2)
+    die("#{name} takes 0 or 1") if %w[--nfcc-passthrough --nfcc-qbe-kernel --nfcc-host-gnu-gcc --nfcc-qbe-try].include?(name) &&
+                                   value != "0" && value != "1"
+    case name
+    when "--nfcc-backend" then config[:backend] = value
+    when "--nfcc-passthrough" then config[:passthrough] = value == "1"
+    when "--nfcc-qbe-kernel" then config[:qbe_kernel] = value == "1"
+    when "--nfcc-host-gnu-gcc" then config[:host_gnu_gcc] = value == "1"
+    when "--nfcc-qbe-try" then config[:qbe_try] = value == "1"
+    else die("unknown option #{name}")
+    end
+  end
+  config
 end
 
 def main(argv)
-  host_gnu_gcc = false
-  if argv.first && argv.first.start_with?("--host-gnu-gcc=")
-    value = argv.first[15..]
-    die("--host-gnu-gcc takes 0 or 1") unless value == "0" || value == "1"
+  config = take_config(argv)
+  die("unknown NFCXX_BACKEND '#{config[:backend]}' (qbe, cil, gcc or pathb)") unless %w[qbe cil gcc pathb].include?(config[:backend])
+  args = expand_response_args(argv)
+  die("no input files") if args.empty?
 
-    host_gnu_gcc = value == "1"
-    argv = argv[1..]
+  command = pre_loop_exec(args, "cc", config[:qbe_try] && config[:backend] == "gcc")
+  if command
+    $stdout.write("EXEC #{command.join(' ')}\n")
+    return 0
   end
-  die("no input files") if argv.empty?
-
-  emit(run_loop(expand_response_args(argv), host_gnu_gcc))
+  state = LoopState.new(config[:backend], config[:passthrough], config[:qbe_kernel], config[:host_gnu_gcc])
+  emit(run_loop(args, state))
   0
 rescue LoopDie => e
   $stderr.write("nfcc: error: #{e.message}\n")
