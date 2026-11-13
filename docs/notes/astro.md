@@ -338,6 +338,25 @@ the compiler, dominates, or the node classes first being turned into data. Not m
 (on-stack replacement units are not hashed or shared), the async mode with sharing under load (it is covered by the test suite only
 with the env var set).
 
+## Path B
+
+`NFCXX_BACKEND=pathb tests/realworld/run_astro.sh` (nfcc on Path B, no cproc) passes every check: calc (the code store's
+`all.so` built by nfcc and loaded), luastro, libprism, baruby_precise (`--aot-compile`) and koruby_precise. The first run stopped at
+the code store, the libprism link and a front-end error in `runtime/precise_gc/gc.h`; going on from each showed the next. Every
+one was a Path B bug, not an ASTro one:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| calc: `make` of the code store failed, no `all.so`; libprism did not link | Path B code is position dependent: the address of an exported function or object was a PC-relative reference (`R_X86_64_PC32`), which `ld` rejects for a symbol of a shared object | `-fPIC` / `-shared` reach the emitter (`nfcc`, `nfcxx` -> `scripts/pathb-cc --pic` -> `scripts/pathb-ssa-build --pic`): an exported object is read through the GOT, an exported function's address from a pointer cell. `tests/nfcc/run.sh` dlopens such an object |
+| koruby, baruby: `ssize_t`, `CLOCK_MONOTONIC` undefined (`gc.h:321`) | EDG's C mode defines `_POSIX_SOURCE`, which turns off the `_DEFAULT_SOURCE` that glibc implies for gcc's default `-std=gnu17` | `nfcc` adds `-D_DEFAULT_SOURCE` for the gnu dialects |
+| luastro: `hello.lua` segfaults | `alloca` without `<alloca.h>` is implicitly declared as returning `int`; Path B gave the call the type `int`, so the cast to a pointer cut the stack address to 32 bits (gcc uses the built-in's own type) | the IR value is a 64-bit integer for an implicit `alloca` (`tests/c/alloca_implicit.c`) |
+| baruby: `--plain` segfaults in `EVAL_node_call_builtin` | `sp - params_cnt` with a `uint32_t` count negated the count in its own type (`2^32 - n`), then took it as a large positive index | an unsigned count narrower than 64 bits is widened before the negation (`tests/c/ptr_sub_unsigned.c`) |
+| koruby: `variadic call with 6 named arguments but 5` (`korb_raise`, which returns a 16-byte struct) | `(variadic N)` counts the hidden result pointer, the SSA emitter does not pass one | N is reduced by one for an `(sret ...)` call (`tests/c/variadic_sret_nofixed_extra.c`) |
+| koruby: `multiple definition of korb_rt_index` | the SSA route exported every function, `static` ones too; two files that keep a header's `static inline` helper (the inliner took it in elsewhere) clashed | a `static` function is not exported (`tests/nfcc/run.sh`) |
+
+The sources are the pinned ones, unpatched: none of the cproc workarounds (`_Atomic`, `KORB_SD_SHARE_KL`, `ASTRO_ARCH_FORCE_NONE`) is
+needed on Path B, and the code store takes its loader path.
+
 ## Not done
 
 - The other 25 samples.

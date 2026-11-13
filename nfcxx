@@ -934,6 +934,7 @@ fi
 [ $path_b = 0 ] || { backend=pathb; default_backend=0; }
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
+[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc --pic reads a preemptible symbol's address through the GOT
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
 # Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.

@@ -6,7 +6,7 @@ cproc -> QBE), `cil` and `gcc`. `NFCXX_BACKEND=pathb` adds a fourth, **opt-in** 
 The default stays `qbe`.
 
 ```
-NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, -fPIC ... are accepted and do not change the object)
+NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, ... are accepted and do not change the object; -fPIC and -shared make the object fit a shared object, see below)
 NFCXX_BACKEND=pathb nfcc a.o b.c -lm -o prog   link: the host cc, with EDG's runtime (libC.a), the long double helpers, libatomic
 NFCXX_BACKEND=pathb nfcc -S a.c -o a.s         the assembly Path B hands to the assembler
 ```
@@ -40,7 +40,14 @@ classes and never drops one that changes what the program means:
 | `-mno-red-zone`, `-mcmodel=`, `-mtune=`, `-mpreferred-stack-boundary=`, `-mno-mmx`, `-mno-avx`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-common`, `-fcf-protection=`, `-fconserve-stack`, `-fstrict-flex-arrays=`, ... | no effect on QBE's code (it never uses the red zone, makes no jump tables or stack protector, assumes nothing from overflow or null checks, and writes PIC code that a non-PIE link takes): dropped on Path B, kept for a gcc compile |
 | `-iquote`, `-imacros`, `-undef`, `--sysroot=`, `-Wa,*`, `-m16`/`-m32`/`-mx32`, `-fshort-enums`, `-fpack-struct`, `-ftrivial-auto-var-init=`, `-ffast-math`, other semantic `-f`/`-m` options, an `-f` option nfcc does not know | the compile goes to **gcc**; an unknown option is then gcc's own error |
 | `-fsanitize*`, `-fopenmp`, `-fprofile*`, `--coverage`, `-fstack-check`, C++ | refused (instrumentation would be dropped), as on the other backends |
-| `-O*`, `-g*`, `-W*`, `-fPIC`, `-fwrapv`, `-fno-strict-aliasing`, `-m64`, `-march=` ... | accepted, no effect (as on qbe) |
+| `-O*`, `-g*`, `-W*`, `-fwrapv`, `-fno-strict-aliasing`, `-m64`, `-march=` ... | accepted, no effect (as on qbe) |
+| `-fPIC`, `-fpic`, `-shared` | honoured: `--pic` (below) |
+
+`-fPIC`, `-fpic` and `-shared` pass `--pic` to `scripts/pathb-cc` (`nfcxx` does too for `-shared` and `-fPIC`): the object is meant for a
+shared object, so the address of an exported function is read from a pointer cell and the address of an exported or extern data
+object through the GOT, never as a PC-relative reference (`ld`: "relocation R_X86_64_PC32 ... can not be used when making a shared
+object"). The gnu dialects (gcc's default, `-std=gnuNN`) also get `-D_DEFAULT_SOURCE`, which glibc implies for gcc but EDG's C mode
+turns off with its `_POSIX_SOURCE`; a strict `-std=cNN` does not.
 
 A translation unit Path B itself refuses (an unsupported construct, or SSE code under `-mno-sse`) exits with Path B's
 status (3, 5, ...) and a `pathb-cc: FILE: SSA route: ...` line, so a build system sees a failed compile. With
