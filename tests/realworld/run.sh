@@ -22,7 +22,7 @@ for b in $backends; do
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/tinyxml2_main.cpp" "$src/tinyxml2.cpp" \
              -o "$tmp/t-$b" 2>&1); then
     if [ "$b" = qbe ] && grep -q "no type in struct member" <<<"$out"; then
-      echo "xfail qbe tinyxml2: cproc rejects empty classes (docs/notes/freestanding.md)"; continue   # QBE-ONLY: only reachable with NFCXX_BACKEND=qbe
+      echo "xfail qbe tinyxml2: cproc rejects empty classes (docs/notes/freestanding.md)"; continue   # QBE-ONLY: only reachable with NFCXX_BACKEND=gcc
     fi
     echo "FAIL $b tinyxml2 (build)"; head -5 <<<"$out"; fail=1; continue
   fi

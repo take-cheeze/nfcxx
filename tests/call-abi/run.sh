@@ -4,10 +4,10 @@
 # C++20 classes with conditionally trivial copy and move constructors (P0848: libstdc++'s std::optional<T>), a class
 # containing one, and a move-only class with a trivial move constructor. Each direction: a g++ library called by the
 # nfcxx program, and an nfcxx library called by the g++ program; the output must be the all-g++ build's.
-#   NFCXX_BACKEND=qbe|gcc   (default: both)
+#   NFCXX_BACKEND=gcc|gcc   (default: both)
 cd "$(dirname "$0")/../.."
 d=tests/call-abi
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/gxx"
 g++ -std=c++20 -shared -fPIC $d/lib.cpp -o "$tmp/gxx/libabi.so" &&

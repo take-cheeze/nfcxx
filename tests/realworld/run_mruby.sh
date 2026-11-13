@@ -4,7 +4,7 @@
 #   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
 #   MRUBY_CONTROL=1         also build with plain host gcc first, as a control (about a minute)
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
-# Needs ruby and rake (apt-get install ruby). The qbe build (NFCXX_BACKEND=qbe) needs a cproc built with cproc-vaarg-aggregate (a commit on
+# Needs ruby and rake (apt-get install ruby). The qbe build (NFCXX_BACKEND=gcc) needs a cproc built with cproc-vaarg-aggregate (a commit on
 # take-cheeze/cproc branch nfcxx-asan-combined; re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld

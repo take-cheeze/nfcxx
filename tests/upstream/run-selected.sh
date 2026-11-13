@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD; snapshot=$root/build/testsuite-snapshots
 out=${UPSTREAM_OUT:-$snapshot/selected-results}
-routes=${UPSTREAM_ROUTES:-'qbe gcc pathb'}
+routes=${UPSTREAM_ROUTES:-'gcc pathb'}
 manifest=${UPSTREAM_MANIFEST:-tests/upstream/reviewed.tsv}
 xfail_list=${UPSTREAM_XFAIL:-tests/upstream/xfail.tsv}
 host=${HOST_CXX:-g++}; limit=${UPSTREAM_TIMEOUT:-60}
@@ -16,7 +16,7 @@ printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in host $routes; do
   compiler=$root/nfcxx; flags=("--backend=$route")
   if [ "$route" = host ]; then compiler=$host; flags=(); fi
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
     -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke" > "$out/$route-smoke.log" 2>&1
   timeout -k 5 "$limit" "$out/.lock/smoke" >> "$out/$route-smoke.log" 2>&1
 done
@@ -41,7 +41,7 @@ while IFS=$'\t' read -r suite id std relative oracle review; do
   timeout -k 5 "$limit" "$dir/host" > "$dir/host.out" 2> "$dir/host.err"
   for route in $routes; do
     compile=0; run=-; status=pass
-    env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$root/nfcxx" "--backend=$route" \
+    env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 5 "$limit" "$root/nfcxx" "--backend=$route" \
       "${includes[@]}" "-std=$std" "$source" -o "$dir/$route" > "$dir/$route-compile.log" 2>&1 || compile=$?
     case $compile in
       0)

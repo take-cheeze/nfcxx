@@ -17,7 +17,7 @@ d=tests/cuda/driver
 if [ ! -f "$cuda/include/cuda.h" ] || [ ! -f "$cuda/include/cudaTypedefs.h" ] || [ "$(uname -m)" != x86_64 ]; then
   echo "SKIP: driver: needs cuda.h and cudaTypedefs.h (CUDA_HOME) on x86-64"; exit 0
 fi
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; [ -z "${2:-}" ] || head -20 <<<"$2"; fail=1; }

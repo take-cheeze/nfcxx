@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 out=${FEATURE_OUT:-build/cpp-features/results}
-routes=${FEATURE_ROUTES:-'qbe gcc pathb'}
+routes=${FEATURE_ROUTES:-'gcc pathb'}
 driver=${FEATURE_CXX:-$PWD/nfcxx}
 limit=${FEATURE_TIMEOUT:-60}
 mkdir -p "$out"
@@ -19,7 +19,7 @@ printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in $routes; do
   flags=(); compiler="$driver"
   if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; else flags=("--backend=$route"); fi
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
     -std=c++11 -pthread "$out/.lock/smoke.cpp" -o "$out/.lock/program" > "$out/$route-smoke.log" 2>&1 && \
     timeout -k 5 "$limit" "$out/.lock/program" >> "$out/$route-smoke.log" 2>&1 || {
       echo "toolchain smoke check failed for $route: see $out/$route-smoke.log" >&2; exit 1;
@@ -41,7 +41,7 @@ for source in tests/cpp-features/cpp*/*.cpp; do
     if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; else flags=("--backend=$route"); fi
     # Clear inherited route selection, including for the front-end-only check.
     compile=0
-    env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
+    env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 5 "$limit" "$compiler" "${flags[@]}" \
       "-std=$std" -pthread "$source" -o "$dir/program" > "$dir/compile.log" 2>&1 || compile=$?
     run=-; status=pass
     case $compile in

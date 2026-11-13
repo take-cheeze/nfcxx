@@ -1,6 +1,0 @@
-# Refused: a float constant that Python's float() cannot read (a ValueError in the original).
-function w $f(w %a, l %p) {
-@start
-	stored d_1.2.3, %p
-	ret 0
-}

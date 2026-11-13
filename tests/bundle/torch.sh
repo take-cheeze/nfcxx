@@ -5,7 +5,7 @@
 # GPUs; 2.14.1+cu130, libtorch-shared-with-deps-2.14.1%2Bcu130.zip, does). No GPU is needed: without one,
 # the program reports no CUDA device, and the CUDA libraries are still loaded (libtorch_cuda's constructors run) and
 # every library libtorch and cuDNN dlopen is loaded explicitly (T_DLOPEN).
-# For each of g++ and nfcxx (gcc backend; NFCXX_BACKEND=qbe for QBE) the program is built normally, then bundled with
+# For each of g++ and nfcxx (gcc backend; NFCXX_BACKEND=gcc for QBE) the program is built normally, then bundled with
 # --stubs into DIST/t with DIST/lib holding the stubs and the dlopen'ed libraries. The bundle must print what the
 # normal build prints and must open nothing under LIBTORCH (LD_DEBUG=files).
 cd "$(dirname "$0")/../.."

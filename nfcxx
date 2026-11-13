@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
-# Usage: nfcxx [--emit-c] [--backend=qbe|gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
+# Usage: nfcxx [--emit-c] [--backend=gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
 # Options are flags; most also have an NFCXX_* environment variable (listed with each), the fallback for build systems and
 # scripts that cannot change a command line. When both are given the flag wins. Tool and host locations stay environment
 # variables, as CC= does: NFCXX_GCC, NFCXX_CC, NFCXX_CXX, NFCXX_COSMOCC, NFCXX_SYSTEM_PATHS, NFCXX_SYS_INCLUDES,
@@ -11,13 +11,13 @@
 #   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
-#   qbe (default elsewhere, and for the options above): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
+#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
 #   --ir-opt=LIST (NFCXX_IR_OPT): the Path B IR passes (docs/notes/pathb-ir-passes.md), a comma-separated list or none. Off by
 #                  default for host code; a .cu file's device code runs inline,sroa unless it is set (--ir-opt=off turns them off).
-#   --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (gcc and qbe
+#   --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (gcc and Path B
 #                  backends; docs/notes/eh-shim.md). --no-eh-unwind undoes it. --no-eh-shim (NFCXX_EHSHIM=0) links without the EH shim.
 #   --instantiate=used|auto (NFCXX_INSTANTIATE): templates are instantiated in each unit that uses them (default) or by EDG's
 #                  prelinker at link time (docs/notes/cxx-driver.md).
@@ -57,7 +57,7 @@
 #   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.py), like sccache's GHA backend.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
 #                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
-#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=qbe is refused.
+#                  a program Path B does not build falls back to gcc, which instruments the code; --backend=gcc is used.
 #                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are
 #                  refused (-fsanitize=undefined and its checks are the UBSan option above).
 #   -fsafe-pointers: Fil-C-style memory safety checks (docs/notes/safe-pointers.md). Implies Path B: pointer arithmetic must
@@ -685,7 +685,7 @@ fi
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
 # and .cpp2 inputs are prepared, whose stages it records.
 trace_unit=${srcs[0]-$out}; export NFCXX_TRACE_UNIT=$trace_unit   # the back-end scripts it runs log under it too
-# The time log is read by every script that sources scripts/trace.sh (the qbe-cc that eccp runs, ...): the one setting that is
+# The time log is read by every script that sources scripts/trace.sh (the gcc-cc that eccp runs, ...): the one setting that is
 # handed to the processes below as an environment variable, as NFCXX_TRACE is (trace_begin).
 [ -z "$time_log" ] || export NFCXX_TIME_LOG=$(abs_path "$time_log")
 [ -z "$trace" ] || trace_begin "$trace"
@@ -733,7 +733,7 @@ if [ $modules = 1 ]; then
 fi
 
 # The default backend: Path B on x86-64 Linux (and on aarch64 Linux for freestanding programs), unless the request needs
-# something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
+# something only gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
 # x86-64 and aarch64 Linux). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
@@ -741,7 +741,7 @@ default_backend=0
 # on both; see docs/notes/freestanding.md, "Path B on aarch64"). Used for the default and for an explicit --backend=pathb.
 pb_fs_host=0; [ "$(uname -s)" = Linux ] && case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac
 if [ -z "$backend" ]; then
-  backend=qbe
+  backend=gcc
   # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
   # A freestanding program takes Path B on x86-64 and aarch64 Linux (the old harness with the lib/ headers, docs/notes/freestanding.md).
@@ -750,17 +750,14 @@ if [ -z "$backend" ]; then
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
     backend=pathb; default_backend=1
   fi
-  # -fsanitize=address has no qbe instrumentation: what the default would send to qbe is built by gcc, which instruments it
-  [ $asan = 0 ] || [ $backend != qbe ] || backend=gcc
 fi
 
-# -fsanitize=address: gcc's instrumentation on the gcc backend; --backend=qbe is refused. Both link libasan. Path B calls
+# -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
     gcc) ;;
-    qbe) echo "nfcxx: -fsanitize=address does not work with --backend=qbe; use the default, --backend=pathb or --backend=gcc" >&2; exit 2 ;;
     pathb) ;;
     *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
   esac
@@ -770,7 +767,7 @@ else
 fi
 
 # C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
-# (qbe: scripts/qbe-cc, the same cproc -> QBE pipeline as EDG's generated C; gcc: gcc -O2 -fwrapv
+# (gcc: gcc -O2 -fwrapv
 # -fno-strict-aliasing), and the objects are linked with the C++ side (EDG's runtime) when any .cpp is
 # present. -I, -D, -U options reach the C compiler; -l/-L and other options go to the link only.
 # A stand-alone C program therefore needs no EDG build.
@@ -948,20 +945,11 @@ pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-n
 [ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
-# The qbe backend's C compiler (scripts/qbe-cc, which eccp and the .c inputs run) takes its settings as options too.
-qbecc_flags=()
-if [ $backend = qbe ]; then
-  [ $eh_unwind_on = 0 ] || qbecc_flags+=(--eh-unwind)
-fi
 case $backend in
   pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
            { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/qbe-cc   # for the .c inputs
-       # --pathb-c=gcc: the .c inputs go through gcc-cc (cproc, qbe-cc, has no _Atomic: ggml-cpu.c)
-       [ "$pathb_c" != gcc ] || export NFCXX_CC=$root/scripts/gcc-cc ;;
-  qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/qbe-cc ;;
+       export NFCXX_CC=$root/scripts/gcc-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
@@ -1010,12 +998,11 @@ picopts+=(${pie_opts[@]+${pie_opts[@]+"${pie_opts[@]}"}})
 for o in ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}}; do picopts+=(--c_to_obj_option "$o"); done
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
 # -fuse-ld=NAME, or NFCXX_LD=NAME: the linker gcc runs (mold, lld, gold, bfd; ld.NAME must be on PATH). The C++ link gets
-# it through eccp's link options, as the -Wl options do. The qbe backend's C compiler gets its options here too.
+# it through eccp's link options, as the -Wl options do.
 if [ -n "$ld_name" ]; then
   command -v "ld.$ld_name" >/dev/null || { echo "nfcxx: NFCXX_LD=$ld_name: ld.$ld_name is not on PATH" >&2; exit 2; }
   ldopts+=("-fuse-ld=$ld_name"); picopts+=(--c_to_obj_option "-fuse-ld=$ld_name")
 fi
-for o in ${qbecc_flags[@]+"${qbecc_flags[@]}"}; do case $o in -fsanitize=address) ;; *) picopts+=(--c_to_obj_option "$o") ;; esac; done
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
@@ -1026,7 +1013,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     o=$ctmp/$n.o; n=$((n + 1))
     t=$(trace_start)
     if [ $backend = pathb ]; then
-      # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route), not cproc.
+      # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route).
       prc=0
       "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
       if [ $prc != 0 ]; then
@@ -1037,8 +1024,6 @@ if [ ${#cfiles[@]} -gt 0 ]; then
         rm -rf "$ctmp"
         exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
       fi
-    elif [ $backend != gcc ]; then
-      "$NFCXX_CC" --c-input ${qbecc_flags[@]+"${qbecc_flags[@]}"} -c ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     else
       "${NFCXX_GCC:-gcc}" -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${cflags_pic[@]+${cflags_pic[@]+"${cflags_pic[@]}"}} ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o"
     fi
@@ -1055,14 +1040,13 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     exit 0
   fi
   if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
-    # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
+    # Only C: link with the C compiler.
     t=$(trace_start)
     if [ $backend = pathb ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
       cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
-    elif [ $backend != gcc ]; then "$NFCXX_CC" ${qbecc_flags[@]+"${qbecc_flags[@]}"} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -1074,7 +1058,7 @@ fi
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
-  # -c: one object per C++ file, named as the gcc and qbe backends name it (-o FILE for one file, else basename.o)
+  # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
@@ -1141,20 +1125,17 @@ fi
 # compiler give those operations defined behavior. -fkeep-static-functions keeps EDG's static __tls_init
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
-# With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
+# With --trace, eccp's own C compiler steps are child processes that record their spans too (gcc-cc).
 eflist=(); userinc=(); no_as_needed=0; as_needed=0
 # -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
 keep_static=(--c_to_obj_option -fkeep-static-functions)
 "${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
 # --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's --nfcxx_eh_unwind;
 # lib_src/throw.c). gcc: the frames need unwind tables (-fexceptions) and the declarations of
-# lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first. qbe: cproc lowers the cleanups to landing pads (qbe.c,
-# ehcleanupobj); the unwinder flag comes from the link (scripts/qbe-cc).
+# lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first.
 eh_unwind=(${eh_tls[@]+"${eh_tls[@]}"})
 if [ $eh_unwind_on = 1 ] && [ "$backend" = gcc ]; then
   eh_unwind+=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
-elif [ $eh_unwind_on = 1 ] && [ "$backend" = qbe ]; then
-  eh_unwind+=(--nfcxx_eh_unwind)
 fi
 for f in ${files[@]+${files[@]+"${files[@]}"}}; do
   case $f in
@@ -1248,8 +1229,8 @@ cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the head
     cache_sha < "$root/nfcxx"
     find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
     find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    for f in "$root/build/qbe/qbe" "$root/build/cproc/cproc"; do [ ! -f "$f" ] || cache_sha < "$f"; done
-    cat "$root/tools/weak-symbols/weak_symbols.cpp" "$root/tools/qbe-prep/qbe_prep.cpp" | cache_sha   # the back ends' C++ tools (built on first use)
+    for f in "$root/build/qbe/qbe"; do [ ! -f "$f" ] || cache_sha < "$f"; done
+    cat "$root/tools/weak-symbols/weak_symbols.cpp" | cache_sha   # the weak-symbol tool (built on first use)
     # The EDG driver: the eccp script and environment that the wrapper (bin/eccp) runs and sources, and the configuration it reads
     for f in "$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" "$(sed -n 's/^\. "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" \
              "${EDG_BASE:-$root/build/edg-base}/edg_eccp_config"; do

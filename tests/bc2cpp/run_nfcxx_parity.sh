@@ -104,7 +104,7 @@ if [ "${NFCXX_PARITY_FIBER:-}" = 1 ]; then
   done
   # The driver's C++ tools (build.ninja: ${CXX:-g++}) are built on first use; with CXX=nfcxx in the environment they would
   # build themselves with the driver that needs them (the build waits on its own lock), so they are built with g++ first.
-  for tool in qbe-prep weak-symbols; do env -u CXX -u CXXFLAGS ninja -C "tools/$tool" >/dev/null; done
+  for tool in weak-symbols; do env -u CXX -u CXXFLAGS ninja -C "tools/$tool" >/dev/null; done
   export BC2CPP_FULL_BUILD_DIR=${BC2CPP_FULL_BUILD_DIR:-$root/build/nfcxx-parity/full}
   host=$(run_ruby -e 'require "./bc2cpp/scripts/bc2cpp/fixture_runtime"; puts(Bc2cppFixtureRuntime.full_or_build || abort("full-core mruby unavailable"))')
   rc=0

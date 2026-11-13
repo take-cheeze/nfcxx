@@ -57,7 +57,7 @@ astrogen() {
 }
 
 export LC_ALL=C.UTF-8   # node.def holds non-ASCII text; the generator reads it as UTF-8
-backends=${NFCXX_BACKEND:-"gcc qbe pathb"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # One patched copy per backend: the generated files and the code store live in it.

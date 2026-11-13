@@ -10,7 +10,7 @@ for route in host $routes; do
   if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; flags=(-fsyntax-only); fi
   if [ -n "${SURVEY_INCLUDE:-}" ]; then flags+=(-I "$SURVEY_INCLUDE"); fi
   rc=0
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
     "-std=$std" -pthread "$source" -o "$dir/$route.o" > "$dir/$route.log" 2>&1 || rc=$?
   status=accepted
   case $rc in

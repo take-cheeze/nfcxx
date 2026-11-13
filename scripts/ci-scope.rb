@@ -12,11 +12,11 @@ module CiScope
   ISOLATED_PREFIXES = %w[bc2cpp/ tests/bc2cpp/].freeze
   # Preserve the Path B selection, including all scripts and runtime code.
   # Byte matching and absolute anchors also handle unusual git filenames.
-  PATHB = %r{\A(?:be/|3rd/(?:edg|qbe|cproc)\z|scripts/|nfcc/|lib/|tests/run\.sh\z|
+  PATHB = %r{\A(?:be/|3rd/(?:edg|qbe)\z|scripts/|nfcc/|lib/|tests/run\.sh\z|
     tests/realworld/|\.github/actions/|
     tests/(?:pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|
-    tools/(?:pathb-spirv-emit|qbe-prep)/|nfcxx\z|\.github/workflows/ci\.yml\z|\.github/ci-test-matrix\.yml\z)}nx
-  FULL_JOBS = %w[build test arm-build arm-test macos-suites mrustc].freeze
+    tools/pathb-spirv-emit/|nfcxx\z|\.github/workflows/ci\.yml\z|\.github/ci-test-matrix\.yml\z)}nx
+  FULL_JOBS = %w[build test arm-build arm-test macos-suites].freeze
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
   # The bc2cpp jobs of ci.yml: required whenever bc2cpp-changes reports a change to one of their paths (or on a manual run).
   BC2CPP_JOBS = %w[world mrbc-rb mrbc-snapshot checks nfcxx-clang-parity].freeze

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cpp2 inputs (experimental, docs/notes/cpp2.md): nfcxx translates a .cpp2 file with cppfront (build/cppfront, from
 # scripts/setup-cppfront.sh) and compiles the translation through the usual pipeline. Needs that build first.
-#   NFCXX_BACKEND=qbe|gcc   (default: qbe)
+#   NFCXX_BACKEND=gcc|gcc   (default: qbe)
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcxx=$root/nfcxx
 export NFCXX_BACKEND=${NFCXX_BACKEND:-qbe}

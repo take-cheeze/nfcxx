@@ -6,7 +6,7 @@
 #   // XFAIL-gcc: <reason>   same for the gcc backend (XFAIL-pathb for Path B). An XFAIL that passes is a failure (remove the marker).
 cd "$(dirname "$0")/../.."
 # Path B takes freestanding programs on x86-64 Linux (docs/notes/freestanding.md).
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
   case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the product here; qbe stays for the other hosts
 fi

@@ -21,7 +21,6 @@ pathb_ir_opt              4
 pathb_ssa                 4
 pathb_ssa_structurize     3
 pathb_cil_emit            3
-qbe2cil                   3
 cil_link                  3
 llvm_to_pathb             2
 sycl_rewrite              2

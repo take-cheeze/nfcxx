@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AddressSanitizer (nfcxx -fsanitize=address; docs/notes/asan.md, asan-plan.md). The backend is $ASAN_BACKEND (gcc, the
 # default; pathb: the SSA emitter's __asan_load/store calls and stack redzones, milestones 1 to 4, 6 and use after return of the plan,
-# and tests/asan/pathb-pending.txt names the cases it does not detect yet). -fsanitize=address --backend=qbe is refused (checked below).
+# and tests/asan/pathb-pending.txt names the cases it does not detect yet). --backend=qbe is refused (checked below).
 # Other sanitizers are refused.
 #
 #   tests/asan/cases/*.cpp  with a `// ASAN: text` line: the program must be killed by asan (exit 1 from the runtime's
@@ -85,9 +85,9 @@ if env -u NFCXX_BACKEND NFCXX_PATH=b "$nfcxx" -fsanitize=address tests/asan/case
    && ! "$tmp/x" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep"; then ok "NFCXX_PATH=b is instrumented"
 else bad "NFCXX_PATH=b is instrumented" "$(head -2 "$tmp/err" "$tmp/rep" | tr '\n' ' ')"; fi
 fi
-# -fsanitize=address has no qbe instrumentation: --backend=qbe is refused, with the way out in the message
-if "$nfcxx" --backend=qbe -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "--backend=qbe with asan refused" "compiled"
-elif grep -q "use the default, --backend=pathb or --backend=gcc" "$tmp/err"; then ok "--backend=qbe with asan refused"; else bad "--backend=qbe with asan refused" "$(head -2 "$tmp/err")"; fi
+# qbe (cproc) is gone: --backend=qbe is an unknown backend, so it is refused with asan too
+if "$nfcxx" --backend=qbe -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "--backend=qbe is refused" "compiled"
+elif grep -q "unknown backend" "$tmp/err"; then ok "--backend=qbe is refused"; else bad "--backend=qbe is refused" "$(head -2 "$tmp/err")"; fi
 # -fsafe-pointers and -fsanitize=address both replace malloc: refused together
 if "$nfcxx" -fsafe-pointers -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsafe-pointers with asan refused" "compiled"
 elif grep -q "replace malloc" "$tmp/err"; then ok "-fsafe-pointers with asan refused"; else bad "-fsafe-pointers with asan refused" "$(head -2 "$tmp/err")"; fi

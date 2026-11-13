@@ -784,6 +784,7 @@ EOF2
       ok "default: a unit Path B refuses is made by gcc" || bad "default: a unit Path B refuses is made by gcc" ""
   fi
 fi
-out=$(NFCXX_BACKEND=qbe "$nfcc" --version 2>&1) && grep -q 'backend qbe' <<<"$out" && ok "NFCXX_BACKEND=qbe still chooses qbe" || { [ -x "$root/build/cproc/cproc-qbe" ] && bad "NFCXX_BACKEND=qbe still chooses qbe" "$out"; }
+if out=$(NFCXX_BACKEND=qbe "$nfcc" --version 2>&1); then bad "NFCXX_BACKEND=qbe is refused" "$out"
+elif grep -q "unknown NFCXX_BACKEND 'qbe'" <<<"$out"; then ok "NFCXX_BACKEND=qbe is refused"; else bad "NFCXX_BACKEND=qbe is refused" "$out"; fi
 echo "nfcc pathb: $pass passed, $fail failed"
 [ $fail = 0 ]
