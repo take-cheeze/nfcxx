@@ -149,6 +149,10 @@ class CodeGen
     # variant is compiled first, so the guard can name it.
     if !@rsm_variant && rsm_dual?(label, d)
       budget = @ir_inline_remaining
+      # STEP_SUPER_STATIC: the variant's `super` target is resolved here, outside the variant's compile (whose probe of
+      # the target would compile it as a variant too). The probe may restore an older table, so it is read afterwards.
+      target = step_super_target(label, d)
+      (@step_super_targets ||= {})[label] = target
       @rsm_variants ||= {}
       @rsm_variants[label] = compile_rsm_variant(label, d)
       @ir_inline_remaining = budget

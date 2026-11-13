@@ -325,7 +325,7 @@ class CodeGen
   # The probes of drop_unsafe_embeddings compile methods against the raw layout, and a block step (or a resumable variant) is
   # compiled once and kept: its text would read a slot as the type the final layout no longer gives it, or a struct it dropped.
   def forget_layout_probe_code
-    @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = nil
+    @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = @step_super_targets = nil
   end
 
   def const_lookup_helper_used?
