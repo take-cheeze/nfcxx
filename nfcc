@@ -318,7 +318,7 @@ pb_opts=() pb_std=-std=c11 pb_reason=
 pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_opts, pb_std set, when Path B can compile CSRC
   local csrc=$1 o k2=0 w
   shift
-  pb_reason=; pb_opts=(); pb_std=-std=c11
+  pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
   if [ ${#asf[@]} -gt 0 ]; then pb_reason="${asf[*]}: assembler options"; return; fi
   while [ $k2 -lt ${#pp[@]} ]; do
@@ -327,15 +327,18 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
       -D|-U|-I|-include|-isystem|-idirafter) pb_opts+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
       -D?*|-U?*|-I?*|-isystem?*|-idirafter?*|-nostdinc) pb_opts+=("$o") ;;
       -include?*) pb_opts+=(-include "${o#-include}") ;;
-      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) pb_std=$o ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) pb_std=$o; pb_gnu=0 ;;
       -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) pb_std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
-      -ansi|-std=c90|-std=iso9899:1990) pb_std=-std=c89 ;;
-      -std=iso9899:2011) pb_std=-std=c11 ;;
+      -ansi|-std=c90|-std=iso9899:1990) pb_std=-std=c89; pb_gnu=0 ;;
+      -std=iso9899:2011) pb_std=-std=c11; pb_gnu=0 ;;
       *) pb_reason="$o: not honoured by Path B"; return ;;
     esac
     k2=$((k2 + 1))
   done
   while [ $# -gt 0 ]; do pb_opts+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  # EDG's gcc mode defines __STRICT_ANSI__ in every C standard, which makes glibc hide POSIX (struct stat's st_atim, ...). gcc's
+  # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
+  [ $pb_gnu = 0 ] || pb_opts=(-D_DEFAULT_SOURCE "${pb_opts[@]+"${pb_opts[@]}"}")
   if [ $wchar16 = 1 ]; then
     # -fshort-wchar: the headers' wchar_t is unsigned short (pathb-dump), but EDG types a wide literal as the target's int, so a unit that
     # has one goes to gcc. The host preprocessor (same options) shows the literals of the headers and macros too.
