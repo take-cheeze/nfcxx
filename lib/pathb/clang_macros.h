@@ -16,4 +16,30 @@
 #ifndef __has_builtin
 #define __has_builtin(x) 0
 #endif
+/* The built-in types clang's resource headers name (__stddef_ptrdiff_t.h, stdint, stdarg): EDG does not predefine them in
+   the clang dialect, so Path B's macOS front end failed on every C file that includes stdio.h or stddef.h (LP64 types). */
+#ifndef __PTRDIFF_TYPE__
+#define __PTRDIFF_TYPE__ long
+#endif
+#ifndef __SIZE_TYPE__
+#define __SIZE_TYPE__ unsigned long
+#endif
+#ifndef __INTPTR_TYPE__
+#define __INTPTR_TYPE__ long
+#endif
+#ifndef __UINTPTR_TYPE__
+#define __UINTPTR_TYPE__ unsigned long
+#endif
+#ifndef __INTMAX_TYPE__
+#define __INTMAX_TYPE__ long
+#endif
+#ifndef __UINTMAX_TYPE__
+#define __UINTMAX_TYPE__ unsigned long
+#endif
+#ifndef __WCHAR_TYPE__
+#define __WCHAR_TYPE__ int
+#endif
+#ifndef __WINT_TYPE__
+#define __WINT_TYPE__ int
+#endif
 #endif

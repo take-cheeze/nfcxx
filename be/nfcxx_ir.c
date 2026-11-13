@@ -2640,6 +2640,9 @@ static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap);
 #if defined(__aarch64__) && defined(__linux__)
 static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap);
 #endif
+#if defined(__aarch64__) && defined(__APPLE__)
+static ir_val ir_vaarg_aggregate_apple(an_expr_node_ptr e, const char *ap);
+#endif
 static ir_val ir_lval_op(an_expr_node_ptr e);
 static ir_val ir_roof(an_expr_node_ptr e);
 
@@ -3342,6 +3345,8 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       }
 #if defined(__aarch64__) && defined(__linux__)
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate_a64(e, ir_valist_addr(a0));
+#elif defined(__aarch64__) && defined(__APPLE__)
+      if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate_apple(e, ir_valist_addr(a0));
 #else
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
 #endif
@@ -6135,6 +6140,30 @@ static int ir_a64_small_int(a_type_ptr t)
   for (i = 0; i < n; i++) if (lv[i].kind == 's' || lv[i].kind == 'd') return 0;
   return 1;
 }
+
+#if defined(__aarch64__) && defined(__APPLE__)
+/* va_arg of an aggregate on Apple arm64. Apple's va_list is a plain pointer to the next stack slot, and every variadic argument
+   (an aggregate too) is in the stack slots, 8-byte aligned: the aggregate is copied from the slot and the pointer advances by the
+   size rounded up to 8. An over-aligned aggregate is a gap marker. */
+static ir_val ir_vaarg_aggregate_apple(an_expr_node_ptr e, const char *ap)
+{
+  a_type_ptr t = e->type;
+  unsigned long long size = ir_size_of(t);
+  unsigned long long adv;
+  ir_val tmp;
+  char *cur, *next;
+  if (size == 0 || ir_align_of(t) > 8)
+    return ir_gap(t, "op va_arg (aggregate: empty or over-aligned on Apple arm64)", 0, (int)eok_va_arg);
+  adv = (size + 7) / 8 * 8;
+  ir_note(0, eok_va_arg, 1);
+  tmp = ir_temp(t);
+  cur = ir_let("(ptr char)", ir_fmt("(load (ptr char) %s)", ap));
+  ir_copy(t, tmp.s, cur);
+  next = ir_let("(ptr char)", ir_fmt("(offset %s %llu)", cur, adv));
+  ir_emit(ir_fmt("(store (ptr char) %s %s)", ap, next));
+  return ir_mk_addr(tmp.s, t, 0);
+}
+#endif
 
 #if defined(__aarch64__) && defined(__linux__)
 /* va_arg of a struct, class or union by value, AAPCS64. The va_list is the 32-byte { void *__stack; void *__gr_top;
