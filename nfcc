@@ -503,7 +503,9 @@ done
 [ "$sawout" = 1 ] || out=a.out
 if [ $backend = pathb ]; then
   # Path B objects link with EDG's runtime (libC.a), the long double helpers and libatomic, as nfcxx links them
-  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lm -latomic
+  # The C++ and atomic libraries of the host, as the nfcxx driver links them: macOS has libc++ and no libstdc++, libgcc_s or libatomic.
+  if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
+  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $pb_cxx_libs -lm $pb_atomic_lib
 elif [ $backend = qbe ] || [ $backend = cil ]; then
   # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
   # backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
