@@ -327,3 +327,30 @@ NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb x.c -o prog
 NFCXX_PATHB_LOG=/dev/null STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
 NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c -m32
 NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=gcc -c x.c
+--bundle-libs x.c -o prog
+--bundle-libs -c x.c
+--bundle-libs -E x.c
+--bundle-libs -S x.c -o out.s
+--bundle-libs --bundle-only=libm,libc x.c -o prog -L/opt
+--bundle-libs --bundle-exclude=libc x.c -o prog -L/opt -Lmore
+--bundle-libs --bundle-add=libfoo x.c -o out -L lib
+--bundle-libs --bundle-stubs=dir --bundle-runpath=/x --bundle-rpath=/y x.c -o prog
+--bundle-exclude=libc x.c
+--bundle-bogus x.c --bundle-libs
+STUB_NINJA_STATUS=1 --bundle-libs x.c -o prog
+CUDA_HOME=tests/nfcc/cuda-home -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=libcuda -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-none -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-none --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-old -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-old --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcuda -lcudart_static x.c
+CUDA_HOME=tests/nfcc/cuda-home /usr/lib/libcuda.so -lm x.c
+CUDA_HOME=tests/nfcc/cuda-home STUB_SHIM_ERROR=boom -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home STUB_SHIM_ERROR=boom --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=bogus -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcuda -l:libcuda.so.1 x.c -o prog
+NFCXX_CUDA_DRIVER=libcuda CUDA_HOME=tests/nfcc/cuda-home -lcuda x.c
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcc/cuda-none -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcudart_static x.c

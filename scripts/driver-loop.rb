@@ -8,10 +8,14 @@
 # link. The commands are printed as "RUN argv..." (copies as CP, CAT, LN) and not run; tests/nfcc/option-state.sh runs nfcc's
 # own code with the same commands stubbed, so the output can be compared.
 #
-# Not covered, and refused as "unported" (exit 3): the --bundle- options and the libcuda and --cuda-driver options (nfcc runs a
-# second driver or builds a shim for them), and an empty source name (bash prints realpath's own error for it). The --version
-# banner takes the host's answers as inputs (--nfcc-dumpfullversion, --nfcc-host-version-line). A caller can tell "not done
-# yet" from "refused by nfcc".
+# Also covered: the bundle wrapper (scripts/bundle-wrap.sh: the --bundle- options, the driver re-run, the nfcbundle link step) and
+# the CUDA driver wrapper (scripts/cuda-driver-wrap.sh: --cuda-driver=, the libcuda rewrite, the shim, the refusals and the
+# note). Their probes of the file system (the CUDA home's headers and lib64, the shim build, the nfcbundle tool's state, ninja)
+# and the host's answers are inputs here (--nfcc-cuda-*, --nfcc-bundle-tool, --nfcc-ninja-fails, --nfcc-shim).
+#
+# Not covered, and refused as "unported" (exit 3): an empty source name (bash prints realpath's own error for it), and a
+# libcuda on the line with no CUDA_HOME (nfcc then derives the CUDA home from the library's path and probes it).
+# A caller can tell "not done yet" from "refused by nfcc".
 #
 # Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
 # --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
@@ -229,7 +233,10 @@ end
 # unit (the -fshort-wchar check, which runs the host preprocessor and greps its output).
 class Env
   attr_accessor :root, :tmp, :cwd, :os, :ldrt, :edg_build, :wide_literal, :pathb_status, :pathb_fallback, :host
-  attr_accessor :dumpfullversion, :host_version_line, :pathb_log
+  attr_accessor :dumpfullversion, :host_version_line, :pathb_log, :bundle_tool, :ninja_fails
+  # the CUDA driver wrapper's environment and probes (the driver's real run takes them from the shell and the file system)
+  attr_accessor :cuda_home, :cuda_driver_env, :cuda_h, :cuda_typedefs, :cudart_version, :lib64, :machine, :shim, :shim_error
+  attr_accessor :cuda_header
   def initialize
     @root = Dir.pwd
     @tmp = "/tmp/nfcc"
@@ -244,10 +251,40 @@ class Env
     @dumpfullversion = "0"
     @host_version_line = ""
     @pathb_log = nil
+    @bundle_tool = "missing"
+    @ninja_fails = false
+    @cuda_home = ""
+    @cuda_driver_env = "auto"
+    @cuda_h = false
+    @cuda_typedefs = false
+    @cudart_version = 0
+    @lib64 = false
+    @machine = "x86_64"
+    @shim = ""
+    @shim_error = nil
+    @cuda_header = true
   end
 end
 
 # nfcc's "exit $rc" after a failed Path B compile with no gcc fallback.
+# cuda_driver_wrap's exits (its messages and status).
+class CudaExit < StandardError
+  attr_reader :status
+  def initialize(message, status)
+    super(message)
+    @status = status
+  end
+end
+
+# bundle_wrap's own exits (its messages and status); the driver's real run is not part of the port.
+class BundleExit < StandardError
+  attr_reader :status
+  def initialize(message, status)
+    super(message)
+    @status = status
+  end
+end
+
 class PathbExit < StandardError
   attr_reader :status
   def initialize(status)
@@ -896,6 +933,18 @@ def take_config(argv)
     when "--nfcc-host" then env.host = value
     when "--nfcc-pathb-log" then env.pathb_log = value
     when "--nfcc-dumpfullversion" then env.dumpfullversion = value
+    when "--nfcc-bundle-tool" then env.bundle_tool = value
+    when "--nfcc-cuda-home" then env.cuda_home = value
+    when "--nfcc-cuda-driver-env" then env.cuda_driver_env = value
+    when "--nfcc-cuda-h" then env.cuda_h = value == "1"
+    when "--nfcc-cuda-header" then env.cuda_header = value == "1"
+    when "--nfcc-cuda-typedefs" then env.cuda_typedefs = value == "1"
+    when "--nfcc-cudart-version" then env.cudart_version = value.to_i
+    when "--nfcc-lib64" then env.lib64 = value == "1"
+    when "--nfcc-machine" then env.machine = value
+    when "--nfcc-shim" then env.shim = value
+    when "--nfcc-shim-error" then env.shim_error = value
+    when "--nfcc-ninja-fails" then env.ninja_fails = value == "1"
     when "--nfcc-host-version-line" then env.host_version_line = value
     when "--nfcc-pathb-fallback" then env.pathb_fallback = value == "1"
     else die("unknown option #{name}")
@@ -904,20 +953,151 @@ def take_config(argv)
   config
 end
 
-def cuda_driver_option?(arg)
-  return true if arg.start_with?("--cuda-driver=")
+BUNDLE_LINK_OFF = %w[-c -E -S -M -MM -fsyntax-only --emit-c].freeze
+
+# nfcc's bundle_wrap (scripts/bundle-wrap.sh): with no --bundle- option it changes nothing. Otherwise it runs the driver on the
+# arguments without them, and for a link it runs the bundling tool (build/nfcbundle, built with ninja when it is missing or
+# older than its source; the tool's state is an input here, see main). Returns nil when there is nothing to do.
+def bundle_wrap(env, args)
+  return nil unless (" " + args.join(" ") + " ").include?(" --bundle-")
+
+  on = false
+  link = true
+  out = "a.out"
+  prev = ""
+  rest = []
+  opts = []
+  args.each do |a|
+    out = a if prev == "-o"
+    opts << "-L" << a if prev == "-L"
+    if a == "--bundle-libs"
+      on = true
+    elsif a.start_with?("--bundle-exclude=") || a.start_with?("--bundle-only=") || a.start_with?("--bundle-add=")
+      value = a[a.index("=") + 1..]
+      split_wp_fields(value).each do |x|
+        if a.start_with?("--bundle-exclude=") then opts << "--exclude" << x
+        elsif a.start_with?("--bundle-add=") then opts << "--add" << x
+        else opts << "--only" << x
+        end
+      end
+    elsif a.start_with?("--bundle-stubs=")
+      opts << "--stubs" << a[15..]
+    elsif a.start_with?("--bundle-runpath=")
+      opts << "--runpath" << a[17..]
+    elsif a.start_with?("--bundle-rpath=")
+      opts << "--rpath" << a[15..]
+    elsif a.start_with?("--bundle-")
+      raise BundleExit.new("nfcc: unknown option #{a} (--bundle-libs, --bundle-exclude=, --bundle-only=, --bundle-add=, --bundle-stubs=, --bundle-runpath=, --bundle-rpath=)", 2)
+    else
+      rest << a
+      link = false if BUNDLE_LINK_OFF.include?(a)
+      opts << "-L" << a[2..] if a.start_with?("-L") && a.length > 2
+    end
+    prev = a
+  end
+  raise BundleExit.new("nfcc: the --bundle-* options need --bundle-libs", 2) unless on
+
+  run_cmd([env.root + "/nfcc", *rest])
+  return 0 unless link
+
+  tool = "#{env.root}/build/nfcbundle"
+  if env.bundle_tool != "fresh"
+    if env.ninja_fails
+      raise BundleExit.new("nfcc: cannot build #{tool} (tools/bundle)", 1)
+    end
+  end
+  # bash: exec "$tool" ... (the process is replaced: nothing after it runs)
+  $stdout.write("EXEC #{[tool, *opts, out, "-o", out].join(' ')}\n")
+  0
+end
+
+def cuda_libcuda?(arg)
   %w[-lcuda -l:libcuda.so -l:libcuda.so.1].include?(arg) || arg.end_with?("/libcuda.so") || arg.end_with?("/libcuda.so.1")
+end
+
+# nfcc's cuda_driver_wrap (scripts/cuda-driver-wrap.sh). Returns [:args, list] when the driver goes on with list (its arguments
+# without the --cuda-driver= options, which the wrapper drops from cuda_driver_args on every path), or [:exec, list], the
+# arguments the driver is re-run with (the shim in place of libcuda). Raises CudaExit for a refusal.
+def cuda_driver_wrap(env, args, driver_name)
+  mode = env.cuda_driver_env
+  found = ""
+  static = ""
+  args.each do |a|
+    if a.start_with?("--cuda-driver=")
+      mode = a[14..]
+    elsif cuda_libcuda?(a)
+      found = a
+    elsif a == "-lcudart_static" || a.end_with?("/libcudart_static.a")
+      static = a
+    end
+  end
+  unless %w[auto cudart libcuda].include?(mode)
+    raise CudaExit.new("#{driver_name}: --cuda-driver=#{mode}: auto, cudart or libcuda", 2)
+  end
+  kept = args.reject { |a| a.start_with?("--cuda-driver=") }
+  return [:args, kept] if found.empty? || mode == "libcuda"
+
+  home = env.cuda_home
+  raise Unported, "the CUDA home (CUDA_HOME) is not set" if home.empty?
+  # bash runs the version probe (sed on cuda_runtime_api.h) under set -e and pipefail: an unreadable header ends nfcc with
+  # status 2 and no message
+  raise CudaExit.new("", 2) unless env.cuda_header
+
+  why = ""
+  if env.machine != "x86_64"
+    why = "the shim is x86-64 only"
+  elsif !env.cuda_h || !env.cuda_typedefs
+    why = "no cuda.h and cudaTypedefs.h in #{home}/include"
+  elsif env.cudart_version == 0 || env.cudart_version < 12050
+    rtv = env.cudart_version == 0 ? "of unknown version" : env.cudart_version.to_s
+    why = "libcudart #{rtv} is older than 12.5"
+  elsif env.shim_error
+    why = "the shim did not build: #{env.shim_error}"
+  end
+  unless why.empty?
+    raise CudaExit.new("#{driver_name}: --cuda-driver=cudart: #{why}", 1) if mode == "cudart"
+
+    $stderr.write("#{driver_name}: note: linking the CUDA driver library #{found} as named (#{why}; docs/notes/cuda-driver.md)\n")
+    return [:args, kept]
+  end
+
+  shim = env.shim
+  out = []
+  done = false
+  kept.each do |a|
+    if cuda_libcuda?(a)
+      next if done
+
+      done = true
+      out << shim
+      if !static.empty?
+        out << static
+      else
+        out << "-L#{home}/lib64" << "-Wl,-rpath,#{home}/lib64" if env.lib64
+        out << "-lcudart"
+      end
+    else
+      out << a
+    end
+  end
+  [:exec, out]
 end
 
 def main(argv)
   config = take_config(argv)
   die("unknown NFCXX_BACKEND '#{config[:backend]}' (qbe, cil, gcc or pathb)") unless %w[qbe cil gcc pathb].include?(config[:backend])
   args = expand_response_args(argv)
-  die("no input files") if args.empty?
   # nfcc's bundle_wrap and cuda_driver_wrap: with no --bundle- option and no libcuda, they change nothing; the others run a
   # second driver or build a shim, which the port does not do.
-  raise Unported, "--bundle- options" if (" " + args.join(" ") + " ").include?(" --bundle-")
-  raise Unported, "the CUDA driver options" if args.any? { |a| cuda_driver_option?(a) }
+  bundled = bundle_wrap(config[:env], args)
+  return bundled unless bundled.nil?
+  kind, list = cuda_driver_wrap(config[:env], args, "nfcc")
+  if kind == :exec
+    $stdout.write("EXEC #{(["#{config[:env].root}/nfcc"] + list).join(' ')}\n")
+    return 0
+  end
+  args = list
+  die("no input files") if args.empty?
 
   command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc",
                           config[:backend], config[:env])
@@ -941,6 +1121,14 @@ def main(argv)
   0
 rescue PathbExit => e
   $stdout.flush
+  e.status
+rescue CudaExit => e
+  $stdout.flush
+  $stderr.write("#{e.message}\n") unless e.message.empty?
+  e.status
+rescue BundleExit => e
+  $stdout.flush
+  $stderr.write("#{e.message}\n")
   e.status
 rescue LoopDie => e
   $stdout.flush

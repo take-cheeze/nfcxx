@@ -31,19 +31,44 @@ while IFS= read -r line; do
       STUB_WIDE_LITERAL=*) wide=1 ;;
       NFCXX_PATHB_LOG=*) logf=1 ;;
       EDG_BUILD=*) edg=${e#EDG_BUILD=} ;;
+      CUDA_HOME=*) cuda_home_env=${e#CUDA_HOME=} ;;
     esac
   done
   # NFCXX_PATHB_LOG, when the line sets it, is a file for each side: both logs must match too.
+  # the bundling tool's state, as the shell sees it (build/nfcbundle missing, older than its source, or fresh)
+  if [ ! -x "$PWD/build/nfcbundle" ]; then bst=missing
+  elif [ tools/bundle/nfcbundle.cpp -nt "$PWD/build/nfcbundle" ]; then bst=stale
+  else bst=fresh; fi
+  # the CUDA wrapper's probes of the CUDA home (CUDA_HOME, as the line sets it): the same tests as cuda-driver-wrap.sh
+  chome=${cuda_home_env:-}; cuh=0; cutd=0; rtv=0; l64=0; serr=""; chdr=1
+  if [ -n "$chome" ]; then
+    [ -f "$chome/include/cuda.h" ] && cuh=1
+    [ -f "$chome/include/cudaTypedefs.h" ] && cutd=1
+    [ -r "$chome/include/cuda_runtime_api.h" ] || chdr=0
+    rtv=$(sed -nE 's/^#define[ \t]+CUDART_VERSION[ \t]+([0-9]+).*/\1/p' "$chome/include/cuda_runtime_api.h" 2>/dev/null | head -1)
+    rtv=${rtv:-0}
+    [ -d "$chome/lib64" ] && l64=1
+  fi
+  cuenv=auto
+  for e in "${envs[@]+"${envs[@]}"}"; do case $e in NFCXX_CUDA_DRIVER=*) cuenv=${e#NFCXX_CUDA_DRIVER=} ;; esac; done
+  mach=$(uname -m)
+  for e in "${envs[@]+"${envs[@]}"}"; do case $e in STUB_SHIM_ERROR=*) serr=${e#STUB_SHIM_ERROR=} ;; esac; done
+  serrarg=(); [ -n "$serr" ] && serrarg=("--nfcc-shim-error=$serr")
+    nf=0; for e in "${envs[@]+"${envs[@]}"}"; do case $e in STUB_NINJA_STATUS=*) [ "${e#STUB_NINJA_STATUS=}" = 0 ] || nf=1 ;; esac; done
   logA=""; logB=""; oenvs=("${envs[@]+"${envs[@]}"}")
   if [ "$logf" = 1 ]; then
     logA=$(mktemp); logB=$(mktemp)
     for i in "${!oenvs[@]}"; do case ${oenvs[$i]} in NFCXX_PATHB_LOG=*) oenvs[$i]="NFCXX_PATHB_LOG=$logA" ;; esac; done
   fi
-  oracle=$(env "${oenvs[@]+"${oenvs[@]}"}" tests/nfcc/option-state.sh "${args[@]}" 2>&1)
+  # the repository path is ROOT in the port's output; messages that bash prints itself get the same placeholder here
+  oracle=$(env "${oenvs[@]+"${oenvs[@]}"}" tests/nfcc/option-state.sh "${args[@]}" 2>&1 | sed "s|$PWD|ROOT|g")
   port=$(ruby scripts/driver-loop.rb --nfcc-backend="$backend" --nfcc-passthrough=$pt --nfcc-qbe-kernel=$qk \
            --nfcc-host-gnu-gcc=$host_gnu --nfcc-qbe-try=$qt --nfcc-root=ROOT --nfcc-tmp=TMP --nfcc-cwd=ROOT \
            --nfcc-pathb-fallback=$fb --nfcc-pathb-status=$pbst \
            --nfcc-host=$host --nfcc-pathb-log="$logB" \
+           --nfcc-bundle-tool=$bst --nfcc-ninja-fails=$nf \
+           --nfcc-cuda-home="$chome" --nfcc-cuda-driver-env="$cuenv" --nfcc-cuda-h=$cuh --nfcc-cuda-typedefs=$cutd --nfcc-cuda-header=$chdr \
+           --nfcc-cudart-version=$rtv --nfcc-lib64=$l64 --nfcc-machine="$mach" --nfcc-shim=SHIM "${serrarg[@]+"${serrarg[@]}"}" \
            --nfcc-dumpfullversion=13.3.0 --nfcc-host-version-line="cc (stub) 0" \
            --nfcc-os="$os" --nfcc-ldrt=LDRT --nfcc-edg-build=$edg --nfcc-wide-literal="$wide" \
            "${args[@]}" 2>&1)

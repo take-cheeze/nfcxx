@@ -9,7 +9,8 @@
 # The backend and the other settings come from the environment, as nfcc reads them: NFCXX_BACKEND (default gcc),
 # NFCXX_GCC_PASSTHROUGH, NFCXX_QBE_KERNEL, NFCXX_QBE_TRY and NFCXX_PATHB_FALLBACK; STUB_PATHB_STATUS is the status
 # scripts/pathb-cc returns in this harness (default 0); STUB_WIDE_LITERAL=1 makes the host preprocessor show a wide literal;
-# the host's -dumpfullversion is 13.3.0 and its --version first line is "cc (stub) 0". The host is cc; the shell's gcc --version decides -fno-crossjumping.
+# the host's -dumpfullversion is 13.3.0 and its --version first line is "cc (stub) 0"; the CUDA shim is SHIM, or STUB_SHIM_ERROR's text
+# when that is set and the shim fails. The host is cc; the shell's gcc --version decides -fno-crossjumping.
 #   tests/nfcc/option-state.sh ARG...    prints the state and the commands, one per line
 #   tests/nfcc/option-state.sh --self    checks the harness itself on a few argument lists
 cd "$(dirname "$0")/../.."
@@ -21,7 +22,9 @@ stub_funcs='_out() { local tag=$1 s x; shift; s=$tag; for x in "$@"; do x=${x//$
 run_stub() { local rc=0; case $1 in *scripts/pathb-cc) rc=${STUB_PATHB_STATUS:-0} ;; esac; if [ "$2" = -dumpfullversion ]; then echo 13.3.0; return 0; fi; if [ "$2" = --version ]; then echo "cc (stub) 0"; return 0; fi; if [ "$2" = -E ] && [ -n "${STUB_WIDE_LITERAL:-}" ]; then echo L\"x\"; return 0; fi; _out RUN "$@"; return $rc; }
 cp() { _out CP "$@"; }
 cat() { if [ $# -eq 0 ]; then return 0; fi; if [ "$1" = -- ]; then command cat "$@"; return; fi; _out CAT "$@"; }
-exec_stub() { echo "EXEC $*"; exit 0; }'
+exec_stub() { _out EXEC "$@"; exit 0; }
+ninja() { return ${STUB_NINJA_STATUS:-0}; }
+stub_shim() { if [ -n "${STUB_SHIM_ERROR:-}" ]; then echo "$STUB_SHIM_ERROR"; return 1; fi; echo SHIM; }'
 
 # The dump of the state the port prints first, then the compile-only path (which follows it in nfcc).
 dump_state='dump_scalar() { printf "%s=%s\n" "$1" "${!1-}"; }
@@ -35,6 +38,12 @@ for n in inputs pp ld gccf isa asf picf dbg spguard dts kqf pbf needgcc; do dump
 
 harness() {
   local nfcc_sed=$tmp/nfcc.sed
+  # The sourced wrappers, with the driver and the tools stubbed as nfcc's own commands are: a driver run prints RUN, an exec EXEC.
+  sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
+      "$root/scripts/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
+  sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec run_stub "\$driver" |exec_stub "$driver" |g' \
+      -e 's|"\$root/scripts/cuda-driver-shim" "\$home/include" 2>&1|stub_shim "$home/include" 2>\&1|' \
+      "$root/scripts/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" \&\& pwd)|root=$root|" \
       -e 's|die "QBE not built; run scripts/setup-qbe.sh"|:|' \
       -e 's|die "CIL backend not set up; run scripts/setup-cil.sh"|:|' \
@@ -49,6 +58,8 @@ harness() {
       -e 's|\bgcc \$what|run_stub gcc $what|g' \
       -e 's|^  gcc "\${objs|  run_stub gcc "${objs|' \
       -e 's|\bln -s |run_stub LN -s |g' \
+      -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|" \
+      -e "s|source \"\\\$root/scripts/cuda-driver-wrap.sh\"|source \"$tmp/cuda-driver-wrap.sh\"|" \
       "$root/nfcc" > "$nfcc_sed"
   # the compile-only dispatch: the "if" line before the line that sets suffix (the post-loop checks have an "if" of their own)
   local at
