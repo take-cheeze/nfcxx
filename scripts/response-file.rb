@@ -58,21 +58,28 @@ def split_response_text(text)
   words
 end
 
+# The bytes of the response file +path+, or nil when it is not a regular file or cannot be read. (The mruby build of
+# bc2cpp has no File.readable?, so the open is the test.)
 def read_response_file(path)
+  return nil unless File.file?(path)
+
   File.open(path, "rb") { |io| io.read }
+rescue StandardError
+  nil
 end
 
 # Expands one argument into +out+. +depth+ is the response-file nesting of the argument.
 def expand_argument(arg, depth, out)
   path = arg.byteslice(1, arg.bytesize - 1)
-  unless arg.getbyte(0) == AT_SIGN && File.file?(path) && File.readable?(path)
+  text = arg.getbyte(0) == AT_SIGN ? read_response_file(path) : nil
+  if text.nil?
     out << arg
     return out
   end
   if depth >= MAX_RESPONSE_DEPTH
     raise ResponseFileError, "response files nested too deeply (a loop?): #{path}"
   end
-  split_response_text(read_response_file(path)).each do |word|
+  split_response_text(text).each do |word|
     expand_argument(word, depth + 1, out)
   end
   out

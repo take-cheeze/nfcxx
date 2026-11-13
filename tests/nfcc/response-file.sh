@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # scripts/response-file.rb (the Ruby port of nfcc's @file expansion, for bc2cpp) must expand every argument list to the
 # same bytes as nfcc's bash code. The bash code is taken from nfcc itself (the lines from its "# Response files" comment to
-# the loop that calls add_arg), so the check follows the driver, not a copy. Compared: a corpus of response files
-# (whitespace, quotes, backslashes, CRLF, empty files, nesting, unterminated quotes, a trailing backslash, UTF-8, a
-# directory, a missing file), the full argument list, and the exit status of a loop (32 levels: an error, both sides).
+# the loop that calls add_arg), so the check follows the driver, not a copy. The corpus is tests/nfcc/response/ (also the
+# input of the bc2cpp world tests/bc2cpp/run_response_file.sh). Compared: each response file alone, the full argument
+# list, and the loop (32 levels: an error, both sides).
 cd "$(dirname "$0")/../.."
 root=$PWD
+corpus=$root/tests/nfcc/response
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
@@ -22,31 +23,8 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
   echo 'for w in "$@"; do printf "%s\0" "$w"; done'
 } > "$tmp/bash_expand.sh"
 
-# The corpus. Written with quoted heredocs, so the backslashes in the files are the ones the test means.
-cd "$tmp"
-printf 'a b\tc\n' > ws.rsp
-cat > quotes.rsp <<'EOF'
-'x y' "p q" 'it\'s' "say \"hi\""
-EOF
-cat > backslash.rsp <<'EOF'
-a\ b \"c\" "d\\e" \\
-EOF
-printf 'one\r\ntwo\r\n' > crlf.rsp
-: > empty.rsp
-cat > emptyquotes.rsp <<'EOF'
-"" '' x
-EOF
-printf '@inner.rsp outer\n' > nest1.rsp
-printf 'deep\n' > inner.rsp
-printf '@loop.rsp\n' > loop.rsp
-printf '"unterminated x\n' > unterm.rsp
-printf 'tail\\' > tailbs.rsp
-printf 'é ü\n' > utf8.rsp
-printf '@@x.rsp @nope.rsp\n' > dbl.rsp
-mkdir dir.rsp
-
-run_bash() { (cd "$tmp" && bash "$tmp/bash_expand.sh" "$@"); }
-run_ruby() { (cd "$tmp" && ruby "$root/scripts/response-file.rb" "$@"); }
+run_bash() { (cd "$corpus" && bash "$tmp/bash_expand.sh" "$@"); }
+run_ruby() { (cd "$corpus" && ruby "$root/scripts/response-file.rb" "$@"); }
 
 for f in ws quotes backslash crlf empty emptyquotes nest1 unterm tailbs utf8 dbl; do
   b=$(run_bash "@$f.rsp" | od -An -c) ; r=$(run_ruby "@$f.rsp" | od -An -c)
