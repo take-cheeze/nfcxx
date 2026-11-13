@@ -144,7 +144,7 @@ Each option of the kernel's command line is in one of three classes:
 | honoured by Path B | `-nostdinc`, `-isystem DIR`, `-idirafter DIR` (the include path of the front end: `-nostdinc` drops the host's directories, `-isystem $(gcc -print-file-name=include)` gives `<stdarg.h>`); `-funsigned-char` (EDG's `--unsigned_chars`; the IR's `char` is renamed `unsigned_char`); `-fshort-wchar` (the headers' `wchar_t` is `unsigned short`; EDG types `L"x"` as `int`, so a unit with a wide literal is gcc's); `-ffreestanding` (`__STDC_HOSTED__` is 0); `-fno-asynchronous-unwind-tables` (QBE `-U`) | passed to `scripts/pathb-cc` |
 | checked | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | QBE runs with `-n`; the unit's assembly is refused (status 5) if it names an SSE or x87 register or instruction, as `qbe-cc` does. Refused units go to gcc with `NFCXX_PATHB_FALLBACK=gcc` |
 | no effect on QBE's code | `-mno-red-zone`, `-mcmodel=kernel`, `-mpreferred-stack-boundary=`, `-mtune=`, `-mno-mmx`, `-mno-3dnow`, `-mno-avx`, `-mskip-rax-setup`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-strict-aliasing`, `-fwrapv`, `-fno-common`, `-fno-allow-store-data-races`, `-fno-optimize-sibling-calls`, `-fno-function-sections`, `-fconserve-stack`, `-fcf-protection=none`, `-fstrict-flex-arrays=`, `-falign-*` (the reasons of `NFCXX_QBE_KERNEL=1` above) | dropped on Path B |
-| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=zero`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*`, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
+| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=zero`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
 
 `NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
 for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
@@ -216,3 +216,37 @@ mruby sources are downloaded by the run scripts), so nothing there was measured.
 For the kernel, the groups that matter are inline asm (templates, `asm goto`, flags outputs: 7 of the 17 files), `cleanup`
 (`guard()`: used all over the kernel), and `case` ranges; `_Float16` the kernel does not use. These, plus the option
 handling above, are what decides the next Path B follow-ups for a kernel build.
+
+### Measured: why gcc took each compile of the Linux 6.8 tinyconfig kernel on Path B
+
+`KCC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=FILE` logged, per compile, why gcc took it. Besides
+`-ftrivial-auto-var-init` (handled apart) the reasons, with the number of compiles each one sent to gcc, and what Path B
+does with the option now (decided on the QBE output being assembled by the host `cc`):
+
+| option | compiles | decision | why |
+|---|---|---|---|
+| `-Wa,--fatal-warnings` | 32 | **Path B**: given to the assembler step | it is an assembler option, and Path B assembles QBE's output with the host `cc` (`scripts/pathb-cc --as-opt`, which `nfcc` fills from `-Wa,*`); it now also makes a warning of the assembler on QBE's text fatal |
+| `-Wa,-mrelax-relocations=no` | 9 | **Path B**: given to the assembler step | same; `tests/nfcc/run.sh` shows the effect on an `-fPIC` object (`R_X86_64_GOTPCREL` instead of `R_X86_64_REX_GOTPCRELX`) |
+| `-m32 -mregparm=3` | 21 | gcc (kept) | the 32-bit boot code: QBE has no i386 target |
+| `-m16` / `-m32` | 8 | gcc (kept) | the real-mode boot code, same |
+| `-mindirect-branch-cs-prefix` | 20 | gcc (kept) | retpoline thunks: QBE has no indirect-branch thunks, a kernel built with them needs gcc for correctness |
+| `-mindirect-branch-register` | 8 | gcc (kept) | same |
+| `-mrecord-mcount` | 4 | gcc (kept) | the `__mcount_loc` section ftrace patches; QBE writes no `mcount` call or section |
+| `-mstack-protector-guard-reg=fs -mstack-protector-guard-symbol=__stack_chk_guard` | 4 | **Path B only when no stack protector is in effect**; gcc when one is | the options say where the canary lives, so they change nothing without `-fstack-protector*` (the last of it and `-fno-stack-protector` decides, wherever the guard options stand); with a protector QBE has no canary to place |
+| `-fzero-call-used-regs=used-gpr` | 4 | gcc (kept) | register zeroing on return is a hardening the object's behaviour includes; QBE has none |
+| `-fpatchable-function-entry=N` | 4 | gcc (kept) | the nop padding ftrace and live patching rewrite; QBE cannot emit it |
+| `-frandomize-layout-seed-file=` | 4 | gcc (kept) | struct layout randomization (a gcc plugin option); the layout is part of the ABI |
+| `-ftrivial-auto-var-init=pattern` | 4 | gcc (kept) | handled apart |
+
+Only the `-Wa,*` options that the assembler takes with the same meaning for QBE's x86-64 text are passed on
+(`--fatal-warnings`, `--noexecstack`, `-W`, `--no-warn`, `-mrelax-relocations=yes|no`, `-mx86-used-note=yes|no`); any other
+(`--32`, `--defsym`, `-march=`, ...) keeps that compile gcc's, and the log says "assembler option Path B does not pass on".
+A comma list (`-Wa,a,b`) must be wholly known. With `-S` there is no assembler step and the options have no effect, as with gcc.
+
+While checking these, one gap was closed: `-mindirect-branch=`, `-mfunction-return=`, `-mharden-sls=` and
+`-mbranch-protection=` were dropped as "no effect on QBE's code", which is wrong for the retpoline values (a kernel built with
+`-mindirect-branch=thunk-extern` got plain indirect calls). Now only `-mindirect-branch=keep`, `-mfunction-return=keep`,
+`-mharden-sls=none` and `-mbranch-protection=none` (which ask for the plain code) are dropped; the others are gcc's, and on the
+qbe backend an error. Not changed: a plain `-fstack-protector*` is still ignored by Path B (it was before); a kernel with
+`CONFIG_STACKPROTECTOR` is gcc's only through the guard options, so that is the next thing to make gcc's if it matters.
+`tests/nfcc/run.sh` has a case for each row.

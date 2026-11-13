@@ -4,7 +4,7 @@
 #              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
 #              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
 #              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
-#              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, -Wa,* ...) is made by gcc, never
+#              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
 #              dropped. NFCXX_PATHB_LOG=FILE: which one made each compile. NFCXX_PATHB_FALLBACK=gcc: also gcc for a unit Path B refuses)
 #   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
 #
@@ -127,6 +127,7 @@ pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symb
 dts=()       # -MT / -MQ pairs
 dp=0
 asm=0        # -S
+spon=0 spguard=()   # a stack protector is in effect (last of -fstack-protector*, -fno-stack-protector); the -mstack-protector-guard* options
 asf=()       # -Wa,* (assembler options)
 optlvl=-O2      # gcc backend: last -O option (-O2 when none)
 dbg=()       # gcc backend: -g options, in order
@@ -255,6 +256,16 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
+    # -fstack-protector*: noted for -mstack-protector-guard-* (below); the option itself goes where it did (gcc: given; Path B: ignored)
+    -fstack-protector|-fstack-protector-strong|-fstack-protector-all|-fstack-protector-explicit) spon=1; gccplain "$a" || : ;;
+    -fno-stack-protector) spon=0; gccplain "$a" || : ;;
+    # the guard options only say where the canary lives: with no stack protector in effect (the last of -fstack-protector* and
+    # -fno-stack-protector decides) they change nothing; with one, Path B has none to place, so that compile is gcc's. Decided after the loop.
+    -mstack-protector-guard*) spguard+=("$a") ;;
+    # -mindirect-branch=thunk* (retpolines), -mfunction-return=thunk* and -mharden-sls=* other than none change the code; QBE has no
+    # such thunks, so those are gcc's. =keep / =none ask for the plain code, which is what QBE writes.
+    -mindirect-branch=keep|-mfunction-return=keep|-mharden-sls=none|-mbranch-protection=none) gccplain "$a" || : ;;
+    -mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || die "$a is not supported" ;;
     -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -fPIE|-fpie) ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
@@ -270,7 +281,7 @@ for ((i = 0; i < n; i++)); do
     -fno-jump-tables) isa+=("$a") ;;
     -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
-    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gccplain "$a" || : ;;
+    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone) gccplain "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gccplain "$a" || : ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
@@ -298,6 +309,9 @@ for ((i = 0; i < n; i++)); do
   esac
 done
 
+for a in "${spguard[@]+"${spguard[@]}"}"; do
+  if [ $spon = 1 ]; then gcconly "$a" || die "$a is not supported"; else gccplain "$a" || :; fi
+done
 [ ${#inputs[@]} -gt 0 ] || die "no input files"
 [ $asm = 0 ] || mode=compile   # -S stops after code generation, with or without -c
 if [ "$mode" = compile ]; then
@@ -323,7 +337,18 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   shift
   pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
-  if [ ${#asf[@]} -gt 0 ]; then pb_reason="${asf[*]}: assembler options"; return; fi
+  # -Wa,*: options of the assembler step, which is the host cc assembling QBE's output (scripts/pathb-cc --as-opt). The ones the
+  # assembler takes the same for QBE's assembly are given to that step; any other (--32, --defsym, -march=, ...) could change the
+  # object's meaning, so that compile is gcc's.
+  for o in "${asf[@]+"${asf[@]}"}"; do
+    IFS=, read -ra w <<<"${o#-Wa,}"
+    for x in "${w[@]}"; do
+      case $x in
+        --fatal-warnings|--noexecstack|-W|--no-warn|-mrelax-relocations=yes|-mrelax-relocations=no|-mx86-used-note=yes|-mx86-used-note=no) pb_opts+=("--as-opt=$x") ;;
+        *) pb_reason="$o: assembler option Path B does not pass on"; return ;;
+      esac
+    done
+  done
   while [ $k2 -lt ${#pp[@]} ]; do
     o=${pp[k2]}
     case $o in
