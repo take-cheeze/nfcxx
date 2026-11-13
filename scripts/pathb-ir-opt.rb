@@ -250,6 +250,9 @@ def refusal(fn, name)
   return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" }
+  # __attribute__((weak)) definition: the link may replace it with another definition (a strong one in another object), so a
+  # call of it is not the body (gcc does not inline it either). A COMDAT inline or template instance is (weak) and stays inlinable.
+  return "weak definition (may be overridden at link time)" if fn.any? { |f| head(f) == "weak" && f.include?("attr") }
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|

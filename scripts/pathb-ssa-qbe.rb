@@ -668,8 +668,9 @@ module Qbe
             else "#{Qbe.abi_cls(@ret[1])} "
             end
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
-      # the .weak directive for the marker.
-      weak = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
+      # the .weak directive for the marker. So is an __attribute__((weak)) definition, (weak attr): a strong definition in
+      # another object replaces it at link time, as gcc's does.
+      weak = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" }
       @lines << "# pathb-weak #{@name}" if weak
       # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
       # inline `read32le` each, TinyCC's, otherwise collide at link time).
