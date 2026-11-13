@@ -826,6 +826,34 @@
       "mruby": "mrb_exc_get(mrb, \"NoMemoryError\")",
       "needs_mrb": true
     },
+    "rb_warn": {
+      "kind": "call",
+      "mruby": "mrb_warn",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "prints on every call; CRuby's rb_warn is silent when $VERBOSE is nil. Output is 'warning: ' and the message on stderr, with no file or line; PRIsVALUE is not supported"
+    },
+    "rb_sys_fail": {
+      "kind": "call",
+      "mruby": "mrb_sys_fail",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "raises SystemCallError (with the errno) only when mruby-errno defines it; otherwise RuntimeError with the message, which mruby does not allow to be NULL"
+    },
+    "rb_obj_classname": {
+      "kind": "call",
+      "mruby": "mrb_obj_classname",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "an anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive), as for rb_class2name"
+    },
+    "rb_sym2id": {
+      "kind": "call",
+      "mruby": "mrb_symbol",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
+    },
     "rb_warning": {
       "kind": "call",
       "mruby": "mrb_warn",

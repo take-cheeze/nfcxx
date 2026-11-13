@@ -262,6 +262,15 @@ check grep -qF 'mrb_value copy = mrb_hash_dup(mrb, a);' "$work/api_str_ops/src/a
 check grep -qF 'long n = RARRAY_LEN(pair);' "$work/api_str_ops/src/api_str_ops.c"
 check grep -qF 'double f = mrb_float(b);' "$work/api_str_ops/src/api_str_ops.c"
 
+# 2u. rb_warn, rb_obj_classname, rb_sym2id and rb_sys_fail (api_map.json batch D4): call kinds, each with a caveat
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_msg tools/cext2mrbgem/fixtures/api_msg/ext/api_msg "$work/api_msg" > "$work/api_msg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_msg/NOT_BUILDABLE"
+check grep -qF 'const char *name = mrb_obj_classname(mrb, obj);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'mrb_warn(mrb, "say: %s", name);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'mrb_sym id = mrb_symbol(path);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'if (id == 0) mrb_sys_fail(mrb, "open");' "$work/api_msg/src/api_msg.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
