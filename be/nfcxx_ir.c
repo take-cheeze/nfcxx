@@ -2612,7 +2612,7 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap);
-#if defined(__aarch64__)
+#if defined(__aarch64__) && defined(__linux__)
 static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap);
 #endif
 static ir_val ir_lval_op(an_expr_node_ptr e);
@@ -3306,7 +3306,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         ir_fo_call(e->type, "vaarg", ir_fmt("%s %s", d.s, ir_valist_addr(a0)));
         return ir_mk_value(d.s, e->type);
       }
-#if defined(__aarch64__)
+#if defined(__aarch64__) && defined(__linux__)
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate_a64(e, ir_valist_addr(a0));
 #else
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
@@ -6062,7 +6062,7 @@ static int ir_a64_small_int(a_type_ptr t)
   return 1;
 }
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) && defined(__linux__)
 /* va_arg of a struct, class or union by value, AAPCS64. The va_list is the 32-byte { void *__stack; void *__gr_top;
    void *__vr_top; int __gr_offs; int __vr_offs; } that QBE's vastart fills. An aggregate of at most 16 bytes, alignment at
    most 8, with integer members only (ir_a64_small_int) takes nreg = (size + 7) / 8 general registers when __gr_offs + 8 *
