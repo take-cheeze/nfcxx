@@ -5,14 +5,35 @@
     "ID": "mrb_sym"
   },
   "includes": {
-    "ruby.h": [
-      "mruby.h",
-      "mruby/string.h",
-      "mruby/numeric.h"
-    ],
-    "ruby/thread.h": [
-      "nfcx_uv_thread.h"
-    ]
+    "ruby.h": {
+      "headers": [
+        "mruby.h",
+        "mruby/string.h",
+        "mruby/numeric.h"
+      ]
+    },
+    "ruby/ruby.h": {
+      "headers": [
+        "mruby.h",
+        "mruby/string.h",
+        "mruby/numeric.h"
+      ]
+    },
+    "ruby/re.h": {
+      "headers": [
+        "mruby/re.h"
+      ]
+    },
+    "ruby/thread.h": {
+      "headers": [
+        "nfcx_uv_thread.h"
+      ],
+      "quoted": true,
+      "comment": "thread model on mruby-uv",
+      "config_macro": "HAVE_RUBY_THREAD_H",
+      "config_comment": "thread model is on",
+      "caveat": "thread API modelled on mruby-uv"
+    }
   },
   "entries": {
     "rb_define_module": {

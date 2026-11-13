@@ -222,6 +222,14 @@ check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_ref
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
+# 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers; a header with
+# no mruby counterpart (ruby/encoding.h) is refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
+check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
+check grep -q '  #include <ruby/encoding.h>  CRuby header not in the supported subset' "$work/includes_map/REFUSALS.txt"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

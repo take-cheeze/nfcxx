@@ -406,6 +406,7 @@ class Converter
     amap = JSON.parse(File.read(MAP_PATH, encoding: 'UTF-8'))
     @entries = amap['entries']
     @types = amap['types']
+    @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
@@ -1033,6 +1034,26 @@ class Converter
     [hdr, prologue, nil]
   end
 
+  # A CRuby #include that api_map.json maps (its "includes" key): the mruby headers it becomes, one per line, quoted or
+  # angle-bracketed. "comment" follows a quoted include; "config_macro" (when the input's text uses it) is defined by
+  # the converter, as CRuby's extconf would define it; "caveat" is recorded with the rewrite.
+  def map_include(rel, m, ent, masked, ed)
+    heads = ent['headers']
+    repl = heads.map do |h|
+      line = ent['quoted'] ? "#include \"#{h}\"" : "#include <#{h}>"
+      line += "  /* #{ent['comment']} */" if ent['comment'] && ent['quoted']
+      line
+    end.join("\n")
+    ed.add(m.begin(0), m.end(0), repl)
+    cm = ent['config_macro']
+    if cm && masked.include?(cm)
+      # CRuby's extconf sets this macro; the code it guards is in the input, so the converter defines it.
+      ed.add(0, 0, "#define #{cm} 1  /* set by the converter: #{ent['config_comment']} */\n")
+      rewrite(rel, 0, cm, 'defined by converter', 'extconf config macro set on')
+    end
+    rewrite(rel, m.begin(0), m[0], repl.gsub("\n", ' | '), ent['caveat'])
+  end
+
   def process(rel)
     f = @files[rel]
     text, masked, ed = f['text'], f['masked'], @edits[rel]
@@ -1040,24 +1061,13 @@ class Converter
     finditer(INC_RE, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
-      if inc == 'ruby.h'
-        repl = "#include <mruby.h>\n#include <mruby/string.h>\n#include <mruby/numeric.h>"
-        ed.add(m.begin(0), m.end(0), repl)
-        rewrite(rel, m.begin(0), m[0], repl.gsub("\n", ' | '))
+      if @includes.key?(inc)
+        map_include(rel, m, @includes[inc], masked, ed)
       elsif DROP_INCLUDES.key?(inc)
         reason = DROP_INCLUDES[inc]
         ed.add(m.begin(0), m.end(0), "/* BC2CPP-MRBGEM dropped: #include <#{inc}> (#{reason}) */")
         @warnings << { 'file' => rel, 'line' => line_of(text, m.begin(0)), 'api' => "#include <#{inc}>", 'reason' => reason }
         warn "warning: #{rel}:#{line_of(text, m.begin(0))} dropped #include <#{inc}> (#{reason})"
-      elsif inc == 'ruby/thread.h'
-        repl = '#include "nfcx_uv_thread.h"  /* thread model on mruby-uv */'
-        ed.add(m.begin(0), m.end(0), repl)
-        if masked.include?('HAVE_RUBY_THREAD_H')
-          # CRuby's extconf sets this; the thread code is guarded by it, so the converter defines it.
-          ed.add(0, 0, "#define HAVE_RUBY_THREAD_H 1  /* set by the converter: thread model is on */\n")
-          rewrite(rel, 0, 'HAVE_RUBY_THREAD_H', 'defined by converter', 'extconf config macro set on')
-        end
-        rewrite(rel, m.begin(0), m[0], repl, 'thread API modelled on mruby-uv')
       else
         refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
       end
