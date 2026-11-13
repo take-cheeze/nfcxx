@@ -76,6 +76,18 @@ copy, so the callee builds the object in place (a std::string's buffer may point
 The inliner does not inline such a callee (scripts/pathb-ir-opt.rb). tests/hidden-result/run.sh builds a program whose class
 results cross translation units through the default driver and checks it against gcc.
 
+### 16-byte aligned aggregates on AArch64
+
+AAPCS64 (C.8) starts an integer-class aggregate with 16-byte alignment (an `__int128`, a `{long, long}` struct) at an even
+general register: after an odd number of integer arguments, one register is skipped. QBE's arm64 ABI does skip it, but it
+leaves the skipped register live through the call, and the register allocator asserts (`spill.c`: the set at a block end is
+not rglob). The emitters avoid the construct instead of relying on QBE: before such an aggregate they pass a zero integer
+argument (the skipped register), and a definition takes an unused integer parameter there (`even_pad?` in
+scripts/pathb-ssa-qbe.rb and scripts/pathb-qbe-emit.rb, the latter with `--arm64-abi`). The aggregate then lands in the
+register AAPCS64 gives it, so C callers and callees agree (checked with a gcc-compiled C side). A variadic call on Darwin
+passes such an aggregate on the stack and is refused instead (a named refusal). tests/pathb-qbe/cases/int128_misc.cpp
+(`std::sort` of an `__int128` vector) exercises it.
+
 ## Vtables
 
 EDG marks a vtable COMDAT even in the unit of its key function, where gcc emits it strong. The pruners (scripts/pathb-ir-opt.rb

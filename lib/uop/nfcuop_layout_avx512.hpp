@@ -14,5 +14,10 @@
 namespace nfcuop::layout {
 
 std::string emit_gemm_rowsum_packed512_c(int64_t M, int64_t N, int64_t K, int mr = 6);
+// The same kernel with the row tiles split across threads (pthreads; compile with -pthread). The signature is
+//   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp, int nthreads);
+// B is packed once (panels split across the threads), then the row tiles are split. nthreads is clamped to
+// [1, min(64, tiles, panels)]. The packing and the tile loop are two thread launches, so no barrier is needed.
+std::string emit_gemm_rowsum_packed512_mt_c(int64_t M, int64_t N, int64_t K, int mr = 6);
 
 }  // namespace nfcuop::layout

@@ -1,6 +1,7 @@
 // __builtin_trap is an illegal instruction (QBE's hlt, ud2 on x86-64), as in gcc: the process dies of SIGILL (exit 132),
 // not of the SIGABRT (134) that the checked operations raise. Nothing after it runs.
 // TRAP-EXIT: 132
+// TRAP-EXIT-AARCH64: 133 (Linux aarch64: the illegal instruction is brk, SIGTRAP)
 #include <stdio.h>
 static int reached(int x) {
   if (x > 2) __builtin_trap();

@@ -83,6 +83,12 @@ hidden pointer of a memory-class aggregate result, as the C convention of a stru
 aggregate result reads it (a wrapper that returns void gets whatever rax holds, which is a wrong value, not a crash). Routines with a `_Float128` operand and no wrapper
 are a named refusal (`call of ... (_Float128 signature, no wrapper)`), and variadic routines with one are refused too.
 
+On Linux aarch64 the `_Float128` is passed in q0 instead of xmm0, and the same convention problem applies, so the wrapper
+block is built there too (`#if defined(__x86_64__) || defined(__aarch64__)`). The wrappers that call libstdc++'s `to_chars`
+overloads stay x86-64 only: the aarch64 libstdc++ has no `_Float128` overload of `to_chars`, so they would not link.
+The wrapper gets the result pointer as its first ordinary argument on aarch64 (`ir_call`, be/nfcxx_ir.c): an `(sret ...)`
+argument would be passed in x8, which the wrapper does not read.
+
 The wrappers present:
 
 | symbol | used by |
