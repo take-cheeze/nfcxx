@@ -233,4 +233,29 @@ std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr
   return o.str();
 }
 
+std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K) {
+  if (!s.feasible || s.variant.size() != 2)
+    throw std::invalid_argument("emit_for_solution: the plan is not a feasible gemm_rowsum plan");
+  auto storage_of = [&](const char* name) {
+    auto it = s.storage.find(name);
+    return it == s.storage.end() ? Storage::Strided : it->second;
+  };
+  const std::string& gemm = s.variant[0];
+  const std::string& rowsum = s.variant[1];
+  if (gemm == "avx2-vec-n" && rowsum == "reduce-horizontal") return emit_gemm_rowsum_c(GemmVariant::VecN, M, N, K);
+  if (gemm == "avx2-vec-m" && rowsum == "reduce-vertical") {
+    const Storage st = storage_of("C");
+    if (storage_of("A") != st)
+      throw std::invalid_argument("emit_for_solution: VecM needs A^T and C in one storage; the plan has them apart");
+    if (st == Storage::Panel16) throw std::invalid_argument("emit_for_solution: VecM has no Panel16 storage");
+    return emit_gemm_rowsum_c(GemmVariant::VecM, M, N, K, true, st);
+  }
+  if (gemm == "avx2-packed-n" && rowsum == "reduce-horizontal") {
+    if (storage_of("B") != Storage::Panel16)
+      throw std::invalid_argument("emit_for_solution: the packed kernel needs B in Panel16");
+    return emit_gemm_rowsum_packed_mt_c(M, N, K, 6);
+  }
+  throw std::invalid_argument("emit_for_solution: no emitter for the plan (" + gemm + ", " + rowsum + ")");
+}
+
 }  // namespace nfcuop::layout

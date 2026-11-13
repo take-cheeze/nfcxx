@@ -201,7 +201,7 @@ What this says:
   K = 64 and beats it at K = 24.
 - **K = 16 is unexplained:** blk is slower than stc there (about 79 vs 58 µs). I have not found why.
 - **Decision (allow blocked):** the layout model allows a blocked storage for the lanes-on-M data: A's transpose and C
-  are kept in 8-row blocks (`Storage::Blocked8` in `nfcuop_layout_avx2.hpp`). It is an option of the emitter, and the
+  are kept in 8-row blocks (`Storage::Blocked8` in `nfcuop_layout.hpp`). It is an option of the emitter, and the
   default stays strided. The cost model still does not price storage; see the timings below.
 
 ## The emitter's blocked storage (fifth round)
@@ -318,12 +318,40 @@ So the AVX-512 kernel is within about 15 to 20 percent of OpenBLAS's AVX-512 ker
 path here that is not limited by the 256-bit vector width. Single-thread OpenBLAS measurements varied between sessions
 by about 30 percent, so treat the ratio as rough. Threading and tile shapes other than 4 and 6 rows are not done.
 
+## The solver drives the emitter (eighth round)
+
+The solver now has a third GEMM variant, `avx2-packed-n`: the register-blocked 6x16 kernel. It takes B in a new storage,
+`Storage::Panel16` (B packed into 16-column panels). A variant declares that storage with `Variant::requires_storage`;
+solve() charges the packing copy (numel * `panel_instr_per_elem`, one load and one store per ymm, 0.25 per element) and
+records it in `Solution::storage`. The variant exists only when M % 6 == 0 and N % 16 == 0, the shapes its emitter takes.
+
+Its FMA cost is `fma * register_blocked_fma_factor`, with the factor at 0.18. That factor is fitted, not derived, and it
+is the only thing that makes the packed variant win. Measured at 504 x 512 x 512 on one thread (the same host state, best
+of 40): the naive VecN kernel 14848 us, the packed kernel 2623 us, a ratio of 0.177. The packing copy is a small term
+(65536 instructions against about 16.5 million FMAs), so almost all of the gain is register blocking, which the
+instruction-count model cannot see. Setting the factor to 1 makes the solver keep the naive kernel
+(`test_layout.cpp`, `packed_needs_its_factor`). So the solver's choice of the packed kernel is a measured constant, not a
+prediction from the layout.
+
+`emit_for_solution(Solution, M, N, K)` maps the plan to an emitter: (vec-n, reduce-horizontal) to the VecN emitter,
+(vec-m, reduce-vertical) to VecM with the storage the plan holds for C (A^T must match it, and Panel16 is refused), and
+(packed-n, reduce-horizontal) to the threaded packed emitter, which needs B in Panel16. Any other combination throws
+`std::invalid_argument`; the rowsum variant has to match, because the emitters fold the row sum into the kernel.
+
+`tests/uop/test_layout_avx2.cpp` solves four shapes, emits each plan, compiles it and checks it against the reference:
+48 x 64 x 17 (packed), 16 x 24 x 64 (VecN), 16 x 24 x 5 and 64 x 64 x 8 and 256 x 256 x 8 (VecM, Blocked8 in all three,
+since the model prices blocked lanes-on-M storage at zero). The strided VecM path is covered by the direct emitter cases,
+not by a plan, because the model does not choose it at these shapes.
+
+What the model does not do: thread count (the packed plan runs on whatever `nthreads` the caller passes), cache effects
+beyond the register-blocking constant, and the AVX-512 target.
+
 ## Next steps on this target
 
-1. Let the solver choose the storage as well as the variant: the cost model does not price strided access, so it
-   cannot yet tell blocked from strided.
+1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
+   other shapes and targets. This is the weakest part of the model right now.
 2. Repeat the timing on more hosts before drawing a crossover from it.
-3. Let the solver choose the variant and drive the emitter, so the chosen layout is what runs.
+3. Add the thread count to the cost model, so the choice between the threaded and unthreaded kernels is a plan decision.
 4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
 
 ## Tests
