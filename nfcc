@@ -286,7 +286,8 @@ for ((i = 0; i < n; i++)); do
     -mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || die "$a is not supported" ;;
     -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -fPIE|-fpie) pathb_pie=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
-    -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
+    -m32|-mx32|-m16|-miamcu) [ "$(uname -m)" = x86_64 ] || die "$a is not supported (x86-64 only)"
+                              gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
     -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gccplain "$a" || isa+=("$a") ;;
