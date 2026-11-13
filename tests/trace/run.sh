@@ -25,7 +25,10 @@ print(f"ok   {label}: {len(spans)} spans, all required spans present")
 PY
 }
 
-backends=${NFCXX_BACKEND:-"pathb gcc"}
+backends=${NFCXX_BACKEND:-"qbe gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the product on Linux x86-64 and arm64
+fi
 for backend in $backends; do
   json=$tmp/$backend.json
   if ! NFCXX_BACKEND=$backend ./nfcxx --trace="$json" "$src" -o "$tmp/$backend.bin" > "$tmp/$backend.log" 2>&1; then

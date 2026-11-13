@@ -910,7 +910,7 @@ module TypeFacts
     File.write(path, JSON.generate(facts))
   end
 
-  # TC1017: declared parameters a call site contradicts (CodeGen#declared_callsite_contradictions), appended like the
+  # TC1018: declared parameters a call site contradicts (CodeGen#declared_callsite_contradictions), appended like the
   # nilable-index rows: they need the whole analysis to have run. `locate` maps a declaration key ("Owner#name") to its
   # signature's [file, line] or nil.
   def append_declared_callsites(path, gen, root, locate)
