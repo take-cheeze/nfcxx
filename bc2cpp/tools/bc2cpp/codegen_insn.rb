@@ -244,12 +244,14 @@ class CodeGen
       klass = self_class(owner_def)
       code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
+      # DECLARED_IVAR_GUARD: the declared kind of the slot is checked before the value is stored.
+      guard = code ? declared_ivar_setiv_guard(insn, irep, owner_def, idx, reg_offset) : ''
       if code.nil?
         "  #error SETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
       elsif type
-        "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n  #{code}\n"
+        "#{guard}  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n  #{code}\n"
       else
-        "  #{code}\n"
+        "#{guard}  #{code}\n"
       end
     when :ADDI
       d = insn.reg

@@ -669,7 +669,8 @@ module StaticDispatchRegistrations
       precise |= core_compiled_mrblib_srcs(repo_root, BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
                  .map { |p| File.expand_path(p) }.reject { |p| p.start_with?(*unlinked) }
       found = Set.new
-      reflective = core_bytecode_tokens(precise.sort, found, **core)
+      suffix_literals = Set.new
+      reflective = core_bytecode_tokens(precise.sort, found, suffix_literals: suffix_literals, **core)
       tokens.merge(found)
       cite(found, 'core Ruby sends it to a receiver that may be an engine object')
       reflective.each do |path, names|
@@ -677,7 +678,9 @@ module StaticDispatchRegistrations
 
         names = names.flat_map { |n| [n, n.chomp('=').chomp('?').chomp('!')] }.to_set
         tokens.merge(names)
-        text.merge(names)
+        # SUFFIX_EXACT_NAMES: a symbol of bytecode is the exact name looked up; it stands for a setter or a predicate only
+        # where core Ruby has a "=", "?" or "!" to build one with.
+        text.merge(names) unless suffix_literals.empty?
         cite(names, "a symbol of #{path.delete_prefix("#{File.expand_path(repo_root)}/")}, which sends a computed name")
       end
     end
@@ -726,7 +729,7 @@ module StaticDispatchRegistrations
   ].to_set.freeze
   CORE_SELF_CONTEXTS = %w[Object BasicObject Kernel Class Module].freeze
 
-  def core_bytecode_tokens(paths, tokens, mrbc:, superclass_of:, struct_owners: [])
+  def core_bytecode_tokens(paths, tokens, mrbc:, superclass_of:, struct_owners: [], suffix_literals: nil)
     ireps = registry = modules = nil
     Dir.mktmpdir('bc2cpp_core_tokens') do |tmp|
       ireps, root = compile_ireps(paths, 'static_dispatch_core', tmp, mrbc: mrbc)
@@ -734,6 +737,7 @@ module StaticDispatchRegistrations
       registry = result[0]
       modules = result[11]
     end
+    suffix_literals&.merge(ireps.each_value.flat_map { |irep| irep.pool.grep(String).grep(SUFFIX_LITERAL) })
     body_of = {}
     registry.each { |name, defs| defs.each { |d| body_of[d.irep] = [d.owner, name] if d.irep } }
     parent = {}

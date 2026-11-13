@@ -22,8 +22,38 @@ compiled either: the output is text for review, and a directory with refusals is
 - `rb_thread_call_without_gvl` is modelled on mruby-uv: `include/nfcx_uv_thread.h` runs the
   function on the libuv thread pool and runs the loop until it finishes. The gem then
   depends on `mruby-uv`.
+- A variadic method (`rb_define_method(..., -1)`, C signature `(int argc, VALUE *argv, VALUE self)`) is
+  defined with `MRB_ARGS_ANY()`. The converted function takes `(mrb_state *mrb, mrb_value self)` and reads the
+  arguments back with `mrb_get_args(mrb, "*", ...)` into locals named as in the original. The array form
+  (`argc -2`) is refused.
+- `rb_scan_args(argc, argv, "<lead><optional>", &v...)` inside a variadic method becomes
+  `mrb_get_args(mrb, "o|o", &v...)`, with optional outputs set to nil first. Only as a statement and only on the
+  method's own argc and argv. Rest (`*`), keyword (`:`), block and fixed-arity forms are refused.
+- `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
+  singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
+  `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
+  `struct RClass *`) or `rb_cObject`; a `VALUE` parameter or local is refused, since it would need an unchecked
+  `mrb_class_ptr`.
+- `rb_const_get(klass, id)` becomes `mrb_const_get(mrb, klass, id)`. A module receiver does not fall back to
+  `Object` in mruby, and there is no autoload; both are recorded as caveats. `rb_const_get_at` is refused: no mruby
+  function looks up only the receiver.
+- A helper that needs the mruby state gets an `mrb_state *mrb` parameter in its definition, in every prototype (the
+  `.c` and `.h` files are both scanned) and at every call site. This needs a unique definition, and every use must be
+  a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at
+  file scope is refused. A non-static helper is threaded with a caveat, since its signature changes. Any function
+  that calls a helper which is not threaded is refused, so no call is left passing an `mrb` that is not in scope.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
+- `RB_LIKELY(x)` and `RB_UNLIKELY(x)` become `!!(x)`: the branch hint is dropped and the 0 or 1 value is kept.
+- `RB_TYPE_P(obj, T_X)` becomes `(mrb_type(obj) == MRB_TT_X)` when `T_X` maps exactly to an `MRB_TT_` type with no
+  caveat, and `obj` is a plain local. `T_DATA` (TypedData is not RData), `T_NIL`, `T_FIXNUM` and nested objects are refused.
+- `rb_gc_register_mark_object(v)` becomes `mrb_gc_register(mrb, v)`: mruby keeps the value in its root table
+  (`src/gc.c`) until the state is closed, as CRuby keeps it. `rb_gc_start()` as a statement becomes
+  `mrb_full_gc(mrb)`; CRuby's nil return value is not produced, so a used value is refused. `rb_gc_writebarrier(a, b)`
+  as a statement on plain locals becomes an immediate-guarded `mrb_field_write_barrier_value`. These stay refused:
+  address registration (`rb_gc_register_address`, `rb_global_variable`: mruby roots values, not variables),
+  `rb_gc_enable` and `rb_gc_disable` (no mruby function; the flag is `gc.disabled`), and `rb_gc_mark` and
+  `rb_gc_mark_movable` (`mrb_data_type` has no mark callback, so a mark function would never run).
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other
   `Init_` functions are kept under `#if 0`, because CRuby never calls them.
 - `RB_GC_GUARD` outside a function with an mrb_state, `NUM2ULONG`-style signedness, and

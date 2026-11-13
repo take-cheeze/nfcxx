@@ -13,7 +13,8 @@ State as of the PRs named below (#976, #977, #980-#983, #989, #992 and the QBE `
 - The cproc patches: `scripts/cproc-aligned-attr.patch`, `cproc-apple-driver`, `cproc-apple-predefines`, `cproc-apple-valist`,
   `cproc-atomic-builtins`, `cproc-darwin-ldouble`, `cproc-dollar-ident`, `cproc-unprototyped-fnptr`.
 - The workarounds that exist only for cproc: `scripts/quickjs-cproc.patch`, `scripts/lua-cxx-novolatile.patch`,
-  `scripts/mruby-cxx-novolatile.patch`, and the cproc-specific lines of `scripts/setup-poly*.sh`, `setup-sqlite.sh`,
+  `scripts/mruby-cxx-novolatile.patch` (all three and the cproc lines of `scripts/setup-poly*.sh` are gone: `tests/poly` runs on Path B
+  and gcc), and the cproc-specific lines of `setup-sqlite.sh`,
   `setup-mruby.sh`, `mruby-rt-config.rb`, `mruby-tool-config.rb`, `mrustc-nfcc.sh`, `ggml-sycl-lib.sh`, `selfhost-cpfe.sh`.
 - The `qbe` backend itself (`--backend=qbe`, `NFCXX_BACKEND=qbe`, `nfcc`'s `qbe` backend) and `docs/notes/cproc-nfcxx.md`.
 - Tests that are about cproc: `tests/mruby/qbe-prep*.sh` and their taps, the `MACOS-XFAIL-qbe` markers of `tests/c`.
@@ -43,8 +44,8 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
    the exact list of what still needs cproc (`git grep QBE-ONLY`). So far, from the PR descriptions:
    - `tests/builtins/bit_g.cpp`: Path B with `--gnu-version=140000` reports `__builtin_clzg` undefined; `integer_seq.cpp` (#990) needed `--dialect=clang` on Path B: done, `scripts/pathb-dump` gives
      EDG `--clang --clang_version=N` as the qbe path does, `nfcxx` and `scripts/pathb-cc` pass `--dialect=clang` on, and the QBE-ONLY marker is gone.
-   - `tests/poly`: the mruby, Lua and QuickJS C builds are refused (with `POLY_LANGS="python ast"` host.cpp and ops.cpp pass on Path B; the
-     `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
+   - `tests/poly`: done, the suite defaults to Path B and gcc and builds mruby, Lua and QuickJS unpatched (QuickJS needed the shared
+     computed-goto dispatch in `be/nfcxx_ir.c`, `poly.md`; the `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
      one-element trailing array checked against its bound).
    - `tests/ast`: engine.cpp and tier.cpp pass on Path B (the SIGABRT was a null check under the lvalue adjustment of a derived-to-base
      pointer conversion); the case `inline_loops` was thought to overflow the 8 MB stack on Path B, whose frames were several times

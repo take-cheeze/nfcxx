@@ -1407,8 +1407,20 @@ end
     # defined where its edge starts, so the predecessor computes it (pending_phi_operands).
     def phi_computed?(v)
       return true if expression?(v)
+      return true if v.is_a?(Ref) && v.sigil == "@" && global_copy?(v.raw)
 
       v.is_a?(Ref) && v.sigil == "&" && !Qbe.ptr32 && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+    end
+
+    # A global whose address op reads through a `copy extern` line (a weak undefined object, the GOT, a thread-local): the
+    # line is an instruction, so a phi operand that is such a global is computed by its predecessor too (see op). Its line
+    # would otherwise come between the phis at the top of the block (QBE: "unexpected phi instruction").
+    def global_copy?(raw)
+      info = @globals[raw]
+      return false unless info
+
+      (info[:weak] && info[:extern]) || info[:thread] ||
+        (info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static])
     end
 
     def pending_phi_operands(num)
@@ -1871,7 +1883,10 @@ end
           # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
           t = fresh
           @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
-          @lines << "  call $memmove(#{Qbe.kp} #{dest}, #{Qbe.kp} #{t}, #{Qbe.kp} #{sret.size})"
+          # A blit, not a call: QBE reads a blit's operands as loads and stores, so the slot that held the result is not
+          # an escaping address and slots of calls in different blocks share one frame location (QuickJS's JS_CallInternal
+          # had 800 of them, a 14 KB frame). The result and the destination are distinct objects.
+          @lines << (sret.size.to_i <= 4096 ? "  blit #{t}, #{dest}, #{sret.size}" : "  call $memmove(#{Qbe.kp} #{dest}, #{Qbe.kp} #{t}, #{Qbe.kp} #{sret.size})")
         end
       when "condbr"
         cond = op(item[1])

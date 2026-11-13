@@ -266,7 +266,13 @@ class CodeGen
     ivar = name.chomp('=')
     return ivar_get_code(klass, recv, ivar, "r#{d}", self_of_klass: self_of_klass) unless name.end_with?('=')
 
-    ivar_set_code(klass, recv, ivar, argv.first, self_of_klass: self_of_klass, dst: "r#{d}", indent: indent)
+    code = ivar_set_code(klass, recv, ivar, argv.first, self_of_klass: self_of_klass, dst: "r#{d}", indent: indent)
+    return code unless code && declared_ivar_entry(klass, ivar)
+    # DECLARED_IVAR_GUARD: an inlined `x=` stores through the same slot, so it checks the declared kind first. The
+    # value must be a plain register to be tested and stored alike; another shape falls back to the call.
+    return nil unless argv.first.match?(/\A\w+\z/)
+
+    "#{declared_ivar_store_guard(klass, ivar, argv.first).lstrip}#{indent}#{code.lstrip}"
   end
 
   # nil: use the runtime ivar API, which routes through an RData slot descriptor

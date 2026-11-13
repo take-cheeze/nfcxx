@@ -1,5 +1,7 @@
 // LONG-DOUBLE-16: needs a 16-byte long double (x87 extended or IEEE quad); Apple arm64 long double is double
 // X86-ONLY-qbe: qbe aborts in spill.c (Assertion v->t[0] == T.rglob) on aarch64 Linux; the x87 long double helpers in be/nfcxx_ldrt.c are x86-64 only
+// ARM64-XFAIL-pathb: Path B on aarch64 Linux refuses the long double operators (the SSA route: "main: operator unsupported"); the
+// aarch64 long double work (branch claude/aarch64-longdouble-2) owns it. Remove this marker when that lands.
 /* EXPECT: 0
    long double (x87 extended, 16 bytes in memory) through cproc's runtime helpers (docs/notes/float128-qbe.md): arithmetic,
    comparisons, conversions, ++ and --, conditions, initializers, arrays, compound assignment and by-value parameters and
