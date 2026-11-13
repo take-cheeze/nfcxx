@@ -488,6 +488,7 @@ Qbe.got_extern = Qbe.darwin || %w[aarch64 arm64].include?(RbConfig::CONFIG["host
 Qbe.aarch64 = %w[aarch64 arm64].include?(RbConfig::CONFIG["host_cpu"])
 # QBE's xadd (a locked add) is amd64 only: the arm64 backend has no op for it, so the atomics go through libatomic there.
 Qbe.xadd = !Qbe.aarch64
+Qbe.cmpxchg = !Qbe.aarch64   # the fork's cmpxchg0/cmpxchg1 pair (3rd/qbe 44b4eb5 or later), amd64 lock cmpxchg
 # QBE's jtab (a jump table) is amd64 only (the arm64 backend refuses it): other targets keep the decision tree.
 Qbe.jtab = !Qbe.aarch64
 
