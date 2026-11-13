@@ -33,23 +33,34 @@ while IFS= read -r line; do
       EDG_BUILD=*) edg=${e#EDG_BUILD=} ;;
     esac
   done
-  oracle=$(env "${envs[@]+"${envs[@]}"}" tests/nfcc/option-state.sh "${args[@]}" 2>&1)
+  # NFCXX_PATHB_LOG, when the line sets it, is a file for each side: both logs must match too.
+  logA=""; logB=""; oenvs=("${envs[@]+"${envs[@]}"}")
+  if [ "$logf" = 1 ]; then
+    logA=$(mktemp); logB=$(mktemp)
+    for i in "${!oenvs[@]}"; do case ${oenvs[$i]} in NFCXX_PATHB_LOG=*) oenvs[$i]="NFCXX_PATHB_LOG=$logA" ;; esac; done
+  fi
+  oracle=$(env "${oenvs[@]+"${oenvs[@]}"}" tests/nfcc/option-state.sh "${args[@]}" 2>&1)
   port=$(ruby scripts/driver-loop.rb --nfcc-backend="$backend" --nfcc-passthrough=$pt --nfcc-qbe-kernel=$qk \
            --nfcc-host-gnu-gcc=$host_gnu --nfcc-qbe-try=$qt --nfcc-root=ROOT --nfcc-tmp=TMP --nfcc-cwd=ROOT \
            --nfcc-pathb-fallback=$fb --nfcc-pathb-status=$pbst \
-           --nfcc-host=$host --nfcc-pathb-log=$logf \
+           --nfcc-host=$host --nfcc-pathb-log="$logB" \
+           --nfcc-dumpfullversion=13.3.0 --nfcc-host-version-line="cc (stub) 0" \
            --nfcc-os="$os" --nfcc-ldrt=LDRT --nfcc-edg-build=$edg --nfcc-wide-literal="$wide" \
            "${args[@]}" 2>&1)
   case $port in
     *"unported: "*) skipped=$((skipped + 1)); echo "skip $line (not ported yet)"; continue ;;
   esac
-  if [ "$oracle" = "$port" ]; then
+  logs_same=1
+  if [ -n "$logA" ] && ! cmp -s "$logA" "$logB"; then logs_same=0; fi
+  [ -n "$logA" ] && rm -f "$logA" "$logB"
+  if [ "$oracle" = "$port" ] && [ $logs_same = 1 ]; then
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
     echo "FAIL $line"
     echo "  bash:  $(printf '%s' "$oracle" | tr '\n' '|')"
     echo "  ruby:  $(printf '%s' "$port" | tr '\n' '|')"
+    [ $logs_same = 1 ] || echo "  the NFCXX_PATHB_LOG files differ"
   fi
 done < tests/nfcc/loop-cases.txt
 echo "$pass passed, $fail failed, $skipped not ported yet"

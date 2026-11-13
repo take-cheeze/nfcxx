@@ -8,10 +8,10 @@
 # link. The commands are printed as "RUN argv..." (copies as CP, CAT, LN) and not run; tests/nfcc/option-state.sh runs nfcc's
 # own code with the same commands stubbed, so the output can be compared.
 #
-# Not covered, and refused as "unported" (exit 3): the --version banner (it depends on the host compiler's version), the
-# --bundle- options and the libcuda and --cuda-driver options (nfcc runs a second driver or builds a shim for them), the
-# NFCXX_PATHB_LOG file, and an empty source name (bash prints realpath's own error for it). A caller can tell "not done yet"
-# from "refused by nfcc".
+# Not covered, and refused as "unported" (exit 3): the --bundle- options and the libcuda and --cuda-driver options (nfcc runs a
+# second driver or builds a shim for them), and an empty source name (bash prints realpath's own error for it). The --version
+# banner takes the host's answers as inputs (--nfcc-dumpfullversion, --nfcc-host-version-line). A caller can tell "not done
+# yet" from "refused by nfcc".
 #
 # Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
 # --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
@@ -229,6 +229,7 @@ end
 # unit (the -fshort-wchar check, which runs the host preprocessor and greps its output).
 class Env
   attr_accessor :root, :tmp, :cwd, :os, :ldrt, :edg_build, :wide_literal, :pathb_status, :pathb_fallback, :host
+  attr_accessor :dumpfullversion, :host_version_line, :pathb_log
   def initialize
     @root = Dir.pwd
     @tmp = "/tmp/nfcc"
@@ -240,6 +241,9 @@ class Env
     @pathb_status = 0
     @pathb_fallback = false
     @host = "cc"
+    @dumpfullversion = "0"
+    @host_version_line = ""
+    @pathb_log = nil
   end
 end
 
@@ -597,9 +601,9 @@ EXEC_TOOLS = %w[-E -M -MM -MG -fsyntax-only].freeze
 
 # The decisions nfcc makes before its loop: a version query (not ported: raises Unported), a query or -E/-M/-fsyntax-only that
 # runs the host compiler, and the qbe-try wrapper. Returns the command that exec runs, or nil to carry on.
-def pre_loop_exec(args, host, qbe_try)
+def pre_loop_exec(args, host, qbe_try, banner_backend = nil, env = nil)
   args.each do |a|
-    raise Unported, "--version" if a == "--version"
+    return [:banner, banner_backend, env] if a == "--version"
     return [host] + args if EXEC_PREFIXES.include?(a) || a.start_with?("-print-")
   end
   return [host, "-v"] if args == ["-v"]
@@ -648,6 +652,13 @@ PB_PP_JOINED_PREFIXES = %w[-D -U -I -isystem -idirafter].freeze
 
 def run_cmd(argv)
   $stdout.write("RUN #{argv.join(' ')}\n")
+end
+
+# nfcc's pathb_log: NFCXX_PATHB_LOG, when set, gets the line appended.
+def pathb_log(env, message)
+  return if env.pathb_log.nil? || env.pathb_log.empty?
+
+  File.open(env.pathb_log, "ab") { |f| f.write("#{message}\n") }
 end
 
 # bash's ${x%.*}: the text before the last dot (the whole string when there is none).
@@ -797,10 +808,16 @@ def compile_one(state, env, kind, src, obj)
     reason = pathb_reason(state, env, extra)
     if reason.empty?
       status = pathb_compile(state, env, what, csrc, obj)
-      return if status == 0
+      if status == 0
+        pathb_log(env, "pathb #{src}")
+        return
+      end
       # a unit Path B refuses: gcc, when NFCXX_PATHB_FALLBACK=gcc; otherwise nfcc exits with that status
       raise PathbExit.new(status) unless env.pathb_fallback
+
+      reason = "Path B refused it (status #{status})"
     end
+    pathb_log(env, "gcc #{src}: #{reason}")
     run_cmd(gcc_argv(state, what, csrc, obj, extra))
   elsif state.backend == "qbe" || state.backend == "cil"
     qcc = state.backend == "qbe" ? "#{env.root}/scripts/qbe-cc" : "#{env.root}/scripts/cil-cc"
@@ -877,7 +894,9 @@ def take_config(argv)
     when "--nfcc-wide-literal" then env.wide_literal = value == "1"
     when "--nfcc-pathb-status" then env.pathb_status = value.to_i
     when "--nfcc-host" then env.host = value
-    when "--nfcc-pathb-log" then config[:pathb_log] = value == "1"
+    when "--nfcc-pathb-log" then env.pathb_log = value
+    when "--nfcc-dumpfullversion" then env.dumpfullversion = value
+    when "--nfcc-host-version-line" then env.host_version_line = value
     when "--nfcc-pathb-fallback" then env.pathb_fallback = value == "1"
     else die("unknown option #{name}")
     end
@@ -897,11 +916,17 @@ def main(argv)
   die("no input files") if args.empty?
   # nfcc's bundle_wrap and cuda_driver_wrap: with no --bundle- option and no libcuda, they change nothing; the others run a
   # second driver or build a shim, which the port does not do.
-  raise Unported, "NFCXX_PATHB_LOG (the log file is not written by the port)" if config[:pathb_log]
   raise Unported, "--bundle- options" if (" " + args.join(" ") + " ").include?(" --bundle-")
   raise Unported, "the CUDA driver options" if args.any? { |a| cuda_driver_option?(a) }
 
-  command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc")
+  command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc",
+                          config[:backend], config[:env])
+  if command && command[0] == :banner
+    env = command[2]
+    $stdout.write("nfcc (nfcxx C driver 0.1, backend #{command[1]}) #{env.dumpfullversion}\n")
+    $stdout.write("gcc-compatible driver over cproc/QBE; the host compiler is #{env.host_version_line}\n")
+    return 0
+  end
   if command
     $stdout.write("EXEC #{command.join(' ')}\n")
     return 0

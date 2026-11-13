@@ -319,3 +319,11 @@ NFCC_HOST_CC=clang x.c -o prog
 NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c
 STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -fshort-wchar -c x.c
 STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -c x.c
+--version
+-c x.c --version
+-dumpmachine --version
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb x.c -o prog
+NFCXX_PATHB_LOG=/dev/null STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c -m32
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=gcc -c x.c

@@ -8,7 +8,8 @@
 # The state is dumped between the post-loop checks and the compile-only path, so the compile is checked after the state.
 # The backend and the other settings come from the environment, as nfcc reads them: NFCXX_BACKEND (default gcc),
 # NFCXX_GCC_PASSTHROUGH, NFCXX_QBE_KERNEL, NFCXX_QBE_TRY and NFCXX_PATHB_FALLBACK; STUB_PATHB_STATUS is the status
-# scripts/pathb-cc returns in this harness (default 0); STUB_WIDE_LITERAL=1 makes the host preprocessor show a wide literal. The host is cc; the shell's gcc --version decides -fno-crossjumping.
+# scripts/pathb-cc returns in this harness (default 0); STUB_WIDE_LITERAL=1 makes the host preprocessor show a wide literal;
+# the host's -dumpfullversion is 13.3.0 and its --version first line is "cc (stub) 0". The host is cc; the shell's gcc --version decides -fno-crossjumping.
 #   tests/nfcc/option-state.sh ARG...    prints the state and the commands, one per line
 #   tests/nfcc/option-state.sh --self    checks the harness itself on a few argument lists
 cd "$(dirname "$0")/../.."
@@ -17,7 +18,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # The stub functions, defined before nfcc's code runs.
 stub_funcs='_out() { local tag=$1 s x; shift; s=$tag; for x in "$@"; do x=${x//$root/ROOT}; x=${x//"${tmp-}"/TMP}; s+=" $x"; done; printf "%s\n" "$s"; }
-run_stub() { local rc=0; case $1 in *scripts/pathb-cc) rc=${STUB_PATHB_STATUS:-0} ;; esac; if [ "$2" = -E ] && [ -n "${STUB_WIDE_LITERAL:-}" ]; then echo L\"x\"; return 0; fi; _out RUN "$@"; return $rc; }
+run_stub() { local rc=0; case $1 in *scripts/pathb-cc) rc=${STUB_PATHB_STATUS:-0} ;; esac; if [ "$2" = -dumpfullversion ]; then echo 13.3.0; return 0; fi; if [ "$2" = --version ]; then echo "cc (stub) 0"; return 0; fi; if [ "$2" = -E ] && [ -n "${STUB_WIDE_LITERAL:-}" ]; then echo L\"x\"; return 0; fi; _out RUN "$@"; return $rc; }
 cp() { _out CP "$@"; }
 cat() { if [ $# -eq 0 ]; then return 0; fi; if [ "$1" = -- ]; then command cat "$@"; return; fi; _out CAT "$@"; }
 exec_stub() { echo "EXEC $*"; exit 0; }'
