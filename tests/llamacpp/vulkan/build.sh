@@ -90,6 +90,9 @@ compile_one() {
     '') flags="-DGGML_USE_CPU -DGGML_USE_VULKAN" ;;
     *) flags=${!kind} ;;
   esac
+  # NDEBUG as in llama.cpp's Release build (the reference the comparisons use): assert() compiles out, so the host code
+  # carries no assertion checks on its hot paths. GGML_ASSERT stays on, as it does there.
+  flags="$flags -DNDEBUG"
   local start=$SECONDS
   # shellcheck disable=SC2086
   # NFCXX_PATH=b: the generated shader files are byte tables and no code. Path B's route takes minutes per megabyte of
