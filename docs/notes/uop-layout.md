@@ -32,6 +32,50 @@ M-vectorized one costs an extra `3*M*K/8` (transposing A). The M-vectorized kern
 N-vectorized one wins when `K > 16`; at `K = 16` they tie. `tests/uop/test_layout.cpp` checks the solver against these
 hand-computed totals at K = 8, 16 and 64, against a cheap-transpose target, and against an infeasible problem.
 
+## Storage of the lanes-on-M tensors
+
+A tensor in Row lanes (the lanes on M) can be held in `Storage::Strided` (column by column, so the lanes of one access
+are a row length apart) or `Storage::Blocked8` (8-row blocks, each contiguous). The solver enumerates both for each
+Row-lane tensor the plan holds: a GEMM output in Row lanes (C in `avx2-vec-m`), or the copy a repair makes in Row lanes
+(the transposed A). `Solution::storage` reports the choice, keyed by tensor name, and `Solution::storage_cost` is its
+term of `Solution::cost`. Per tensor of `numel` elements:
+
+    storage cost = numel * strided_instr_per_elem    (Strided)
+                 = numel * blocked_instr_per_elem    (Blocked8)
+
+with `strided_instr_per_elem = 0.46` and `blocked_instr_per_elem = 0` (`Avx2F32`). The ties go to Strided.
+
+Sources of the constants. The timings are in `docs/notes/uop-layout.md` on branch `claude/sleepy-faraday-n2e9k7`
+(commits `f20a2e64`, `f09a38d2`, `d72bf5ba`), and the rounds below name the sections there. All are `M = N = 256`, one host.
+
+- **Strided, `0.46`.** At K = 8 the strided M-vectorized kernel runs at 1.41 times vec-n (round 2, quiet host), about 1.4
+  (round 3, the stores ablation) and 1.47 (round 4, -O2). The model's blocked vec-m is 74,496 instructions and vec-n is
+  75,264 (0.99). The excess, `(1.40 - 0.99) * 75264 = 30,858`, is spread over the 67,584 elements of A^T and C
+  (2,048 and 65,536), giving 0.46. This converts a time ratio into the model's instruction units by assuming the
+  instruction count of vec-n tracks its time at this shape, which the model already assumes.
+- **Blocked, `0`.** The blocked kernel's time over vec-n is 1.00, 0.98, 0.92, 1.16, 1.00 at K = 8, 16, 24, 32, 64 (round 5,
+  -O2; at -O3 it is 0.82, 0.77, 0.92, 1.03, 1.07). The model's blocked vec-m over vec-n is 0.990, 1.000, 1.004, 1.006,
+  1.009. The measurements show no excess over the model's count: at -O3 the blocked kernel is faster than the model at
+  K = 8 and 16, and at -O2 it is slower only at K = 32 (1.16, against 1.03 at -O3). The blocked own cost is zero.
+
+How the penalty fits the measured strided-over-vec-n ratio (round 4, -O2, vs the model with the constant above):
+
+| K | 8 | 16 | 24 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- |
+| measured | 1.47 | 0.89 | 1.12 | 1.16 | 1.46 |
+| model | 1.40 | 1.23 | 1.16 | 1.13 | 1.08 |
+
+It matches at K = 8, 24 and 32. It misses K = 16 (the measured strided kernel is faster than vec-n, the note's K = 16
+is unexplained) and K = 64, where the strided kernel is 1.46 times vec-n at both flags. A per-element term cannot give
+K = 64 without a much larger constant, which would then break K = 8, so the constant is kept at the K = 8 value rather
+than fit to the spread of the other points.
+
+What follows. With a positive strided penalty and free blocked storage, the solver chooses Blocked8 for every Row-lane
+tensor. Strided is kept only when the penalty is zero or the blocked cost is higher, and the `storage_cost` tests in
+`tests/uop/test_layout.cpp` cover both. At M = N = 256 the choice is vec-m with Blocked8 at K = 8 and 16 (16 is still a
+tie, broken to vec-m) and vec-n at K = 24 and 64. The measured blocked kernel is 0.92 of vec-n at K = 24, so the model's
+crossover at K = 24 (vec-n by 0.4%) is inside the spread of the measurements; the model puts the crossover at K = 16 as before.
+
 ## What it is not
 
 - **A cost model.** The instruction counts are written in the target description (`Avx2F32`) and in `gemm_rowsum`.
@@ -210,6 +254,69 @@ What this says:
 Consequence: on this AVX2 target, for this shape, the N-vectorized kernel is the faster default at almost every K. The
 M-vectorized kernel only competes with a blocked layout (see the block experiment above), which the layout model does
 not describe yet.
+
+## Against a vendor BLAS (AVX2, 512 x 512 x 512, float32)
+
+The comparison is with OpenBLAS through numpy, on this host. Timings are best of 10 to 30 calls; the host was quiet
+(load about 0.3). The packed kernel packs B inside the timed call.
+
+| kernel | us | vs OpenBLAS 1 thread | vs OpenBLAS 4 threads |
+| --- | --- | --- | --- |
+| emitter VecN (no blocking) | 23,100 | 12.6x slower | 44x slower |
+| emitter VecM, strided | 21,100 | 11.5x slower | 40x slower |
+| register-blocked 4 x 16 (hand written, unpacked B) | 4,900 to 6,900 | 2.7x to 3.7x | 9x to 13x |
+| emitter packed 4 x 16 (`emit_gemm_rowsum_packed_c`) | 4,000 | 2.2x | 7.6x |
+| OpenBLAS, 1 thread | 1,840 | 1x | |
+| OpenBLAS, 4 threads | 531 | | 1x |
+
+The OpenBLAS 1-thread time varied between sessions (1,880 to 3,010 us), so the ratios are rough.
+
+What the steps show: register blocking (one loop iteration updates a 4-row by 16-column tile) gives most of the gain.
+Packing B so the inner loop reads it contiguously gives about 20 percent more. The remaining gap to one thread is
+the tile size (6 x 16 uses more accumulators on AVX2), the lack of K blocking, and the packing pass.
+Four-thread OpenBLAS is outside what this kernel does; it is not a fair comparison for a single-threaded kernel.
+
+Packing B is also the layout repair of the model: a transform of the data so that the inner loop's accesses are
+contiguous. The model does not price it yet.
+
+## Corrected comparison: AVX2 against AVX2 (sixth round)
+
+The earlier table compared an AVX2 kernel with OpenBLAS choosing its kernel itself. On this host (AVX-512 capable)
+OpenBLAS uses AVX-512 kernels by default, so that comparison was not like for like. Forcing OpenBLAS to its AVX2
+kernels (`OPENBLAS_CORETYPE=Haswell`, one thread, 504 x 512 x 512, float32):
+
+| kernel | us | vs OpenBLAS AVX2 |
+| --- | --- | --- |
+| emitter packed 4 x 16 (`emit_gemm_rowsum_packed_c`, mr = 4) | 3,786 | 1.16x slower |
+| emitter packed 6 x 16 (`emit_gemm_rowsum_packed_c`, mr = 6) | 3,305 | parity |
+| OpenBLAS, AVX2 kernels (Haswell) | 3,276 | 1x |
+| OpenBLAS, AVX-512 kernels (SkylakeX) | 1,825 | 1.8x faster |
+
+So the AVX2 path is at parity with OpenBLAS's AVX2 kernels on one thread. The gap that remains is to the AVX-512
+kernels, which use 16-lane vectors this path does not emit.
+
+K blocking (the packed panels kept in cache, with C accumulated across blocks in memory) did not help: 3,486 us with
+no blocking, 3,550 us at a block of 256, 3,507 us at 128. At these sizes the packed panel already stays in cache, and
+the extra loads and stores of C cost what the blocking saves.
+
+## AVX-512 packed kernel (seventh round)
+
+`emit_gemm_rowsum_packed512_c` (`lib/uop/nfcuop_layout_avx512.*`) is the packed kernel on 16-lane zmm vectors: a
+mr-row by 32-column tile over 32-column packed panels of B, mr = 4 or 6. The test (`tests/uop/test_layout_avx512.cpp`)
+checks it bit for bit against the reference and skips without AVX-512F.
+
+504 x 512 x 512, float32, one thread, the same host:
+
+| kernel | us | vs OpenBLAS AVX-512 (SkylakeX) |
+| --- | --- | --- |
+| emitter packed AVX-512, mr = 4 | 2,016 | 1.13x slower |
+| emitter packed AVX-512, mr = 6 | 2,163 | 1.22x slower |
+| OpenBLAS, AVX-512 kernels | 1,778 | 1x |
+| OpenBLAS, AVX2 kernels (Haswell) | 3,337 | 1.6x faster than the AVX-512 kernel |
+
+So the AVX-512 kernel is within about 15 to 20 percent of OpenBLAS's AVX-512 kernels on one thread, and it is the first
+path here that is not limited by the 256-bit vector width. Single-thread OpenBLAS measurements varied between sessions
+by about 30 percent, so treat the ratio as rough. Threading and tile shapes other than 4 and 6 rows are not done.
 
 ## Next steps on this target
 

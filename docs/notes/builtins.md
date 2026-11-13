@@ -35,8 +35,8 @@ Front-end columns from `tests/builtins/fe_matrix.sh`. Runtime columns from `test
 | `__builtin_trap` | OK / OK / OK | **FAIL**: `undeclared identifier: __builtin_trap` (`xfail` in `trap_compile_only`) | compiles; the call is in an unreached branch, so the program is not run to trap | Trap is not run in any test on Path A (it would abort the process). The lib panic helper calls `abort` instead (`docs/notes/freestanding.md`). Path B lowers it to `ud2` (SIGILL, exit 132, `tests/pathb-qbe/traps/builtin_trap.cpp`). |
 | `__builtin_is_constant_evaluated` | OK / OK / OK | ok (`constant_eval`) | ok | Gives `true` only inside constant evaluation. A call in a non-constexpr function is warned about as "always false", which is correct. |
 | `__builtin_FILE`, `__builtin_LINE`, `__builtin_FUNCTION` | OK / OK / OK | ok (`source_loc`) | ok | |
-| `__make_integer_seq` | **rejected** ("is not a template") / rejected / OK | ok with `--dialect=clang` (`integer_seq`) | ok with `--dialect=clang` | The g++ front end does not accept it even with `--gnu-version=130000`. The lib builds `index_sequence` by recursion instead. |
-| `__type_pack_element` | **rejected** / rejected / OK | ok with `--dialect=clang` (`integer_seq`) | ok with `--dialect=clang` | Same as `__make_integer_seq`. |
+| `__make_integer_seq` | **rejected** ("is not a template") / rejected / OK | ok with `--dialect=clang` (`integer_seq`) | ok with `--dialect=clang` (`integer_seq`; `--dialect=clang` reaches Path B's front end as `--clang --clang_version=N`) | The g++ front end does not accept it even with `--gnu-version=130000`. The lib builds `index_sequence` by recursion instead. |
+| `__type_pack_element` | **rejected** / rejected / OK | ok with `--dialect=clang` (`integer_seq`) | ok with `--dialect=clang` (`integer_seq`; `--dialect=clang` reaches Path B's front end as `--clang --clang_version=N`) | Same as `__make_integer_seq`. |
 | `__builtin_bit_cast` | **rejected** / OK / OK | ok (`bit_cast`) | ok | Needs `--gnu-version` in g++ mode, like `__is_same`. Works in constant expressions. |
 | `__builtin_offsetof` | OK / OK / OK | ok (`offsetof`) | ok | cproc knows this name; the test compares against the real layout. |
 
@@ -49,7 +49,7 @@ Front-end columns from `tests/builtins/fe_matrix.sh`. Runtime columns from `test
   (for example to libc calls, which would be a behavioural change for `__builtin_trap`).
 - The g++ front end rejects `__is_same`, `__builtin_bit_cast`, `__make_integer_seq` and `__type_pack_element`
   at the default GNU version. `--gnu-version=130000` fixes the first two, and the clang dialect accepts all four.
-  The default driver is unchanged; the freestanding mode (`--freestanding`) sets GCC 13 emulation.
+  `--dialect=clang` works on every backend: Path B's front end (`scripts/pathb-dump`) is given `--clang` and `--clang_version` (the host's clang version, capped at 20; `--gnu-version` is not passed then), as the qbe path has it. The default driver is unchanged; the freestanding mode (`--freestanding`) sets GCC 13 emulation.
 - Not builtins, but found while probing (details in `docs/notes/freestanding.md`): cproc rejects empty class
   definitions (`struct X {};`, which EDG emits for instantiated classes such as trait metafunctions and empty
   types), and it rejects `__attribute__((aligned))` on local variables (`alignas` on a local). The builtin probes

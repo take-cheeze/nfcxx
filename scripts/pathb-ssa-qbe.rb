@@ -173,7 +173,7 @@ module Qbe
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :safe, :asan, :darwin, :got_extern, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -544,10 +544,12 @@ module Qbe
       @params = form.find { |x| head(x) == "params" }.drop(1)
       @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @tls_cache = {}  # a thread-local global (raw name) => the temporary that holds its address (hoist_tls)
       @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
+      @zeroed = {}     # a local slot that a bit-field access reads before any store: zeroed (see zero_slot_once)
       @temps = 0
       @types = {}
       @params_set = {}
@@ -639,7 +641,10 @@ module Qbe
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
       @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
+      # inline `read32le` each, TinyCC's, otherwise collide at link time).
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -699,6 +704,39 @@ end
       end
       asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+      hoist_tls
+    end
+
+    # Whether op() addresses x (a @ref) as a thread-local object: the thread pointer plus the object's offset.
+    def tls_global?(x)
+      info = @globals[x.raw]
+      return false unless info && info[:thread]
+      return false if info[:weak] && info[:extern]
+      return false if info[:extern] && Qbe.darwin
+
+      true
+    end
+
+    # A thread-local object's address is `mov %fs:0, r; add sym@gottpoff(%rip), r` at every reference, and QBE does not share
+    # them. The EH stack top and the current region (__curr_eh_stack_entry, __eh_curr_region) are read and written at every
+    # push and pop of every frame. A global the function names three times or more has its address computed once, in the entry block,
+    # and shared (as GCC does: a function runs on one thread, so the address does not change under it).
+    def hoist_tls
+      counts = {}
+      walk = lambda do |x|
+        if x.is_a?(Ref)
+          counts[x.raw] = (counts[x.raw] || 0) + 1 if x.sigil == "@" && tls_global?(x)
+        elsif x.is_a?(Array)
+          x.each { |y| walk.call(y) }
+        end
+      end
+      @blocks.each { |b| walk.call(b[2..]) }
+      counts.each do |raw, n|
+        next if n < 3
+        t = fresh
+        @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(raw)}"
+        @tls_cache[raw] = t
+      end
     end
 
     # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
@@ -1150,11 +1188,48 @@ end
       # so labels with one body share a target and can form a bit test.
       tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
       tree_default = switch_forward(default)
-      items = switch_items(switch_ranges(tree_cases), cls)
+      ranges = switch_ranges(tree_cases)
+      # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
+      # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
+      span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
+      if cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+        switch_jtab_lines(operand, ranges, tree_default)
+        return
+      end
+      items = switch_items(ranges, cls)
       if items.any? { |it| it[0] == :bits } || items.size >= 4
         switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), items, tree_default)
       else
         switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # A jump table: the index x - lo below the span jumps to its slot (jtab), any other value to the default. Each slot is
+    # its own block (jtab's targets are distinct) and jumps to one shared block per target, so a target has one
+    # predecessor in the IL and a phi there names that block (the jumper, as the chain and the tree do). Holes go to the
+    # default. QBE checks the index against the count itself (amd64 emit).
+    def switch_jtab_lines(operand, ranges, default)
+      lo = ranges[0][0]
+      span = ranges[-1][1] - lo + 1
+      slot_target = Array.new(span, default)
+      ranges.each { |a, b, t| (a..b).each { |v| slot_target[v - lo] = t } }
+      shared = {}
+      shared_label = lambda do |t|
+        shared[t] = "#{block_label(@cur)}.S#{t}" unless shared[t]
+        shared[t]
+      end
+      idx = "%swi#{@cur}"
+      @lines << "  #{idx} =w sub #{operand}, #{lo}"
+      slots = (0...span).map { |k| "#{block_label(@cur)}.E#{k}" }
+      @lines << "  jtab #{idx}, @#{shared_label.call(default)}, " + slots.map { |l| "@#{l}" }.join(", ")
+      slots.each_with_index do |label, k|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{shared_label.call(slot_target[k])}"
+      end
+      shared.each do |t, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(t)}"
+        @jumper[[t, @cur]] = label if @phi_blocks[t.to_s]
       end
     end
 
@@ -1382,6 +1457,8 @@ end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]
+            return @tls_cache[x.raw] if @tls_cache.key?(x.raw)
+
             t = fresh
             @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
             return t
@@ -1676,6 +1753,16 @@ end
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
           @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
+        elsif atomic_small_result?(rv)
+          # A 1- or 2-byte __atomic_* result is defined in its low bits only (the ABI): extend it to the object's type.
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          ext = if unqual(rv[1]).include?("unsigned") || unqual(rv[1]) == "bool"
+                  rv[2].raw.delete('"')[-1] == "1" ? "extub" : "extuh"
+                else
+                  rv[2].raw.delete('"')[-1] == "1" ? "extsb" : "extsh"
+                end
+          @lines << "  #{dst} =w #{ext} #{raw}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -1964,10 +2051,37 @@ end
       raise QbeUnsupported, "bit-field of type #{sx(ty)}" unless Qbe::INT_W.include?(ty) || Qbe::INT_L.include?(ty)
     end
 
+    # A bit-field access reads its storage unit before the first store (a read-modify-write, or a read of a field that the
+    # object never set). QBE's slot promotion rejects a read before any store as "used undefined", so a local slot that
+    # a bit-field access reaches is zeroed right after its alloc: a memset of the whole slot (its address escapes, so the
+    # promotion leaves it in memory). Only the local slots (%oN); a slot that is already zeroed is not zeroed again.
+    # "%oN": a local slot of the function. Plain string tests: the bundled script runs under mruby, which has no regexps.
+    def local_slot_name?(addr)
+      return false unless addr.is_a?(String) && addr.length > 2 && addr[0, 2] == "%o"
+      i = 2
+      while i < addr.length
+        c = addr[i]
+        return false unless c >= "0" && c <= "9"
+        i += 1
+      end
+      true
+    end
+
+    def zero_slot_once(addr)
+      return unless local_slot_name?(addr)
+      return if @zeroed[addr]
+      @zeroed[addr] = true
+      idx = @lines.index { |l| l.start_with?("  #{addr} =l alloc") }
+      return unless idx
+      size = @lines[idx].split.last.to_i
+      @lines.insert(idx + 1, "  call $memset(l #{addr}, w 0, l #{size})")
+    end
+
     def bfload_lines(dst, rv)
       ty = rv[1]
       bf_type!(ty)
       unit, boff, width = bf_args(rv, 6)
+      zero_slot_once(op(rv[3]))
       uc = unit == 8 ? "l" : "w"
       # The field goes to the top of the register (32 or 64 bits), not of the storage unit: a 1- or 2-byte unit then
       # sign-extends from its own top bit.
@@ -2005,6 +2119,7 @@ end
       raise QbeUnsupported, "bit-field store of a value of another class" unless Qbe.cls(operand_type(x[6])) == tc
 
       addr = op(x[3])
+      zero_slot_once(addr)
       v = op(x[6])
       if tc != uc
         t2 = fresh
@@ -2389,11 +2504,18 @@ end
         end
       end
       if nfixed
+        # (variadic N) counts the hidden result pointer among the leading arguments (be/nfcxx_ir.c); `args` does not hold it.
+        nfixed -= 1 if sret
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      if sret && Qbe.aarch64 && f.is_a?(Ref) && f.sigil == "&" && Qbe.hidden_defs && Qbe.hidden_defs[Qbe.symbol(f.raw)]
+        args.unshift("l #{dest}")   # a defined function takes the result pointer as its first parameter
+        sret = nil
+        dest = nil
+      end
       sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
     end
@@ -2447,6 +2569,17 @@ end
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
       # (libstdc++'s shared_ptr counts use acq_rel, 4).
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
+    end
+
+    # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
+    def atomic_small_result?(c)
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_") && (name.end_with?("_1") || name.end_with?("_2"))
+      return false if name.start_with?("__atomic_load_") || name.start_with?("__atomic_store_")
+
+      true
     end
 
     # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
@@ -3057,6 +3190,16 @@ end
   def module_context(forms)
     gs = forms.select { |g| head(g) == "global" }
     self.module_has_data = forms.any? { |f| %w[global data].include?(head(f)) }
+    # The defined functions whose first parameter is the hidden result pointer (EDG's lowered class result, marked
+    # (hidden-result) by be/nfcxx_ir.c). A call to one of them passes the pointer as an argument (its definition takes it
+    # so); any other call of such a result is an aggregate return (x8 on AArch64, see call_parts).
+    self.hidden_defs = {}
+    forms.each do |f|
+      next unless head(f) == "ssa-function"
+      params = f.find { |x| head(x) == "params" }
+      next unless params && params.drop(1).any? { |p| head(p) == "param" && p.drop(4).any? { |x| head(x) == "hidden-result" } }
+      self.hidden_defs[symbol(f[1].raw)] = true
+    end
     self.sp_objects = []
     self.asan_objects = []
     by_name = gs.to_h { |g| [g[1].raw, g] }
