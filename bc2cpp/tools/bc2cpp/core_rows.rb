@@ -32,7 +32,9 @@ module CoreRows
     /\A\s*r\d+ = mrb_symbol_value\((?:bc2cpp_sym\(M, \d+\)|MRB_(?:Q?SYM|SYM_[QBE])\(\w+\))\);\s*\z/,
     /\A\s*r\d+ = mrb_bool_value\(mrb_symbol_p\(r\d+\) && mrb_symbol\(r\d+\) == (?:bc2cpp_sym\(M, \d+\)|MRB_(?:Q?SYM|SYM_[QBE])\(\w+\))\);\s*\z/,
     /MRB_MT_ENTRY\w*\(/,
-    /\bbc2cpp_(?:nomethod|guard_violation|hint_violation|nil_receiver)\w*\(/
+    /\bbc2cpp_(?:nomethod|guard_violation|hint_violation|nil_receiver)\w*\(/,
+    # STEP_SUPER_STATIC: the name only names the frame of the entry called (StaticDispatchRegistrations::STEP_SUPER_STATIC_NAME).
+    /\bbc2cpp_dyn_super_static\(/
   ].freeze
   # `mrb_sym name = <sym>;` is inert only as the operand of the constant read on the next line.
   CONST_NAME = /\A\s*mrb_sym name = bc2cpp_sym\(M, \d+\);\s*\z/

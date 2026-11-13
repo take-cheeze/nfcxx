@@ -616,9 +616,29 @@ class CodeGen
 
     n = insn.argc.to_i
     dest = insn.reg
-    call = "bc2cpp_dyn_super(M, self, #{owner_class_ptr_expr(d.owner)}, mrb_intern_lit(M, #{d.name.inspect}), #{n}, bc2cpp_dyn_argv, " \
-           "r#{dest + n + 1})"
+    target = @step_super_targets&.[](d.irep)
+    call = if target
+             # STEP_SUPER_STATIC: the target's entry and class are named; nothing is looked up (see step_super_target).
+             "bc2cpp_dyn_super_static(M, self, #{cpp_name(target.owner, target.name)}, #{owner_class_ptr_expr(target.owner)}, " \
+               "mrb_intern_lit(M, #{d.name.inspect}), #{n}, bc2cpp_dyn_argv, r#{dest + n + 1})"
+           else
+             "bc2cpp_dyn_super(M, self, #{owner_class_ptr_expr(d.owner)}, mrb_intern_lit(M, #{d.name.inspect}), #{n}, bc2cpp_dyn_argv, " \
+               "r#{dest + n + 1})"
+           end
     resumable_dyn_site('self', dest, n, "r#{dest + n + 1}", '', name: d.name, call_override: call)
+  end
+
+  # STEP_SUPER_STATIC: the definition a `super` in core method +label+ reaches, when its compiled entry can be called in
+  # place of the lookup: one clean compiled core definition on an ancestor the closed ancestry fixes (module_super_target,
+  # the rule the method's fast body binds its `super` by). nil leaves bc2cpp_dyn_super's lookup. A core target only: the
+  # core entries are all declared in the one core unit the variant is emitted in.
+  def step_super_target(label, d)
+    return nil unless d.core && !d.owner.end_with?('.singleton') && ENV.fetch('BC2CPP_STEP_SUPER_STATIC', '1') == '1'
+    return nil unless BytecodeIR.for(@ireps.fetch(label)).instructions_with_op(:SUPER).any?
+
+    # The entry is called, not the `_impl`, so its own guard still runs: a clean body is all the call needs.
+    target = module_super_target(d, usable: method(:module_super_block_clean?))
+    target&.core && target.irep && target.name == d.name ? target : nil
   end
 
   # BLOCK_STEP_UNWIND: a `break` (BREAK) or `return` (RETURN_BLK) in a block step ends the frames above the one the building
