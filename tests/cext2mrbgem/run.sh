@@ -231,6 +231,13 @@ check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
 check grep -q '  #include <ruby/encoding.h>  CRuby header not in the supported subset' "$work/includes_map/REFUSALS.txt"
 
+# 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_exc_index/NOT_BUILDABLE"
+check grep -qF 'mrb_raisef(mrb, E_INDEX_ERROR, "index out of range");' "$work/api_exc_index/src/api_exc_index.c"
+check grep -qF 'mrb_raisef(mrb, E_RANGE_ERROR, "value out of range");' "$work/api_exc_index/src/api_exc_index.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

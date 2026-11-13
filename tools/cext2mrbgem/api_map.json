@@ -747,6 +747,18 @@
       "mruby": "MRB_TT_INTEGER",
       "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
+    "rb_eIndexError": {
+      "kind": "expr",
+      "mruby": "E_INDEX_ERROR",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "rb_eRangeError": {
+      "kind": "expr",
+      "mruby": "E_RANGE_ERROR",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
     "rb_eNoMemError": {
       "kind": "expr",
       "mruby": "mrb_exc_get(mrb, \"NoMemoryError\")",
