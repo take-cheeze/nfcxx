@@ -314,7 +314,7 @@ jobs:
       fail-fast: false
       matrix:
         # gcc on pushes to main only (GCC_BACKEND, top of the file)
-        backend: ${{ fromJSON(github.ref == 'refs/heads/main' && '["gcc","qbe"]' || '["qbe"]') }}
+        backend: ${{ fromJSON(github.ref == 'refs/heads/main' && '["gcc","pathb"]' || '["pathb"]') }}
     env:
       NFCXX_BACKEND: ${{ matrix.backend }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -342,6 +342,16 @@ jobs:
       - name: EDG front end
         run: scripts/setup-edg.sh
 
+      - name: Path B harness
+        if: matrix.backend == 'pathb'
+        run: scripts/setup-pathb.sh
+
+      # The freestanding suites (tests/lib, tests/target) still use qbe on macOS: Path B takes freestanding programs on
+      # x86-64 and aarch64 Linux only (docs/notes/freestanding.md). This is the one cproc use left in this job.
+      - name: QBE and cproc (freestanding suites)
+        if: matrix.backend == 'pathb'
+        run: scripts/setup-qbe.sh
+
       - name: QBE and cproc
         if: matrix.backend == 'qbe'
         run: scripts/setup-qbe.sh
@@ -349,13 +359,19 @@ jobs:
       - name: Test suites
         run: |
           tests/run.sh
-          tests/lib/run.sh
-          tests/target/run.sh
           tests/builtins/run.sh
           tests/trace/run.sh
           tests/c/run.sh
           tests/c/cc-mode.sh
-          tests/cxx-driver/run.sh
+          # tests/cxx-driver is gcc's by design: its header records that Path B fails 16 of its 52 checks, so the pathb leg runs it on gcc
+          NFCXX_BACKEND=gcc tests/cxx-driver/run.sh
+          if [ "$NFCXX_BACKEND" = pathb ]; then
+            NFCXX_BACKEND=qbe tests/lib/run.sh
+            NFCXX_BACKEND=qbe tests/target/run.sh
+          else
+            tests/lib/run.sh
+            tests/target/run.sh
+          fi
 
       - name: ccache stats
         if: always()

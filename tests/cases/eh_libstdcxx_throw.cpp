@@ -122,3 +122,4 @@ int main()
 }
 // MACOS-XFAIL-gcc: the EH shim covers libstdc++'s std::__throw_*, not libc++'s (macOS links libc++)
 // MACOS-XFAIL-qbe: the EH shim is libstdc++-only; libc++'s throws inside libc++.1.dylib are not caught (the same as gcc)
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md

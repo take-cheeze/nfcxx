@@ -52,3 +52,4 @@ int main() {
     if (run(n) != want(n)) return n + 1;
   return 42;
 }
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md

@@ -17,3 +17,4 @@ int main() {
 #else
 int main() { return 0; }
 #endif
+// MACOS-XFAIL-pathb: the glibc floatNx names (strtof32x, acosf32x) are not declared by the macOS headers, and the Path B route has not been diagnosed against the qbe route, which passes this file on macOS

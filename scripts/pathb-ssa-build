@@ -306,6 +306,12 @@ def marker_asm(il, target, qbe_asm)
   # `# pathb-startup SECTION PRIO SYM`: a (constructor)/(destructor) function's pointer in .init_array/.fini_array, as
   # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
   startup = il.scan(/^# pathb-startup (\S+) (\d+) (\S+)$/).map do |sect, prio, sym|
+    # Mach-O (Apple): the table is the __mod_init_func / __mod_term_func section that dyld runs, its entries name the
+    # underscore symbols QBE gives every function, and the priority is not kept (Mach-O runs them in link order).
+    if target.end_with?("_apple")
+      mo = sect == ".fini_array" ? ["__DATA,__mod_term_func", "mod_term_funcs"] : ["__DATA,__mod_init_func", "mod_init_funcs"]
+      next ["\t.section #{mo[0]},#{mo[1]}", "\t.balign 8", "\t.quad _#{sym}"]
+    end
     sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
     # .balign, not .align: on aarch64 GNU as reads .align's operand as a power of two, so .align 8 aligned the table to 256
     # bytes and left a zero-filled gap in .init_array that glibc called (a NULL call at start-up).
