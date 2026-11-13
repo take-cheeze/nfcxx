@@ -2,7 +2,6 @@
 // runtime (lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md; the runtime keeps an exception alive while a pointer
 // refers to it). The exit code is the number of wrong results.
 // EXPECT: 0
-// AARCH64-QBE-XFAIL: QBE's arm64 emitter writes a register save offset the assembler rejects in a frame over 32 KB (qbe-cc: "register save offset not a multiple of 8"); Path B builds it.
 #include <exception>
 #include <stdexcept>
 #include <string>
