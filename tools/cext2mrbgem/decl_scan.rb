@@ -209,13 +209,11 @@ module DeclScan
     starts
   end
 
-  # The character index of (line, column). EDG's column is 1-based and counts bytes of the line.
+  # The character index of (line, column). The front end's column is 1-based and counts characters of the line (a
+  # multi-byte character is one column; a tab is one).
   def char_position(text, starts, line, col)
     raise Error, "line #{line} is outside the file" if line < 1 || line > starts.size
-    ls = starts[line - 1]
-    le = starts[line] ? starts[line] - 1 : text.length
-    prefix = text[ls...le].byteslice(0, col - 1)
-    ls + prefix.force_encoding(Encoding::UTF_8).length
+    starts[line - 1] + col - 1
   end
 
   # The masked text with preprocessor directives (and their continuation lines) blanked, so a declaration's
