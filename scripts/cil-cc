@@ -30,7 +30,12 @@ if [ $compile = 1 ]; then
     [ -z "${NFCXX_CIL_VERBOSE:-}" ] || echo "cil-cc: Path B: ${srcs[0]}" >&2
     exit 0
   fi
-  cat "$err" >&2
+  # A defined variadic function (va_start) is out of scope of the CIL backend: the refusal is the answer (tests/cil/errors).
+  if grep -qF "variadic definitions (va_start) are not supported by the CIL backend" "$err"; then
+    echo "cil-cc: Path B: ${srcs[0]}: $(head -c 300 "$err" | tr '\n' ' ')" >&2
+  else
+    echo "cil-cc: Path B refused ${srcs[0]}: $(head -c 300 "$err" | tr '\n' ' ')" >&2
+  fi
   rm -f "$out"; exit 1
 fi
 # The link: the fragments of the -c compiles (JSON) and nothing else. cil-link.rb needs no C compiler except for the variadic shim.
