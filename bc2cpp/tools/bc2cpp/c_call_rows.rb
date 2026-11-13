@@ -180,8 +180,15 @@ module CCallRows
     out
   end
 
-  # A generated source with its GENERATED sink operands blanked (the rows run's reading of the generated code).
+  # A generated source with its GENERATED sink operands blanked (the rows run's reading of the generated code). The
+  # generated code names a method to a sink directly, so the local and comparison reading of `blank` is not needed.
   def blank_generated(src)
-    blank(src, GENERATED)
+    out = nil
+    operand_offsets(src, GENERATED).each do |from, to|
+      next unless NativeOwnerMap.name_of(src[from...to].strip)
+
+      (out ||= src.dup)[from...to] = ' ' * (to - from)
+    end
+    out || src
   end
 end
