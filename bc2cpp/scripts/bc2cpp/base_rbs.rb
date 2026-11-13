@@ -102,7 +102,12 @@ module BaseRbs
     ['RGSS::Plane', 'ox'] => 'Integer', ['RGSS::Plane', 'oy'] => 'Integer',
     ['RGSS::Tilemap', 'ox'] => 'Integer', ['RGSS::Tilemap', 'oy'] => 'Integer',
     ['RGSS::Window', 'ox'] => 'Integer', ['RGSS::Window', 'oy'] => 'Integer',
-    ['RGSS::Window', 'contents'] => 'RGSS::Bitmap'
+    ['RGSS::Window', 'contents'] => 'RGSS::Bitmap',
+    # LCF::EventCommand is built only by the packed decoder (LCF.parse_event_commands: read_ber integers, a cp932 string,
+    # an Array of integers) and by Interpreter's teleport command (an integer code, the same shapes), so its readers
+    # have one class each.
+    ['LCF::EventCommand', 'code'] => 'Integer', ['LCF::EventCommand', 'indent'] => 'Integer',
+    ['LCF::EventCommand', 'string'] => 'String', ['LCF::EventCommand', 'parameters'] => 'Array'
   }.freeze
 
   # Signatures written by hand where the source's own return depends on an argument. IO.open without a block is
