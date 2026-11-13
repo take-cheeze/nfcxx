@@ -47,7 +47,7 @@ module RbsSignatures
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   # optional: for `T?`, T's own Type; the `T?` Type itself stays kind :other.
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, :optional,
-                    keyword_init: true)
+                    :value, keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
   # SUBTREE_DISPATCH: a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
@@ -285,8 +285,12 @@ module RbsSignatures
         elem = args.size == 2 ? class_name_of(args.last) : nil
         Type.new(kind: :hash, element: elem, text: text)
       else
-        args.empty? ? Type.new(kind: :class, cls: name, text: text) : Type.new(kind: :other, text: text)
+        # VALUE_KIND: `Float` is a core class with no program hint; `value` carries it to the parameter guard and seed.
+        args.empty? ? Type.new(kind: :class, cls: name, text: text, value: (name == 'Float' ? :float : nil)) : Type.new(kind: :other, text: text)
       end
+    when RBS::Types::Bases::Bool
+      # VALUE_KIND: `bool` is true or false; a parameter of this type has both classes' bits in its pool.
+      Type.new(kind: :other, text: text, value: :bool)
     else
       Type.new(kind: :other, text: text)
     end

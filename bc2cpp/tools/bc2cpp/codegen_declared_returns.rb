@@ -256,11 +256,15 @@ class CodeGen
   # DECLARED_PARAM_GUARD: the C++ statements that check the declared class of each trusted parameter of `label`, given
   # the impl's parameter names (M, self, then the positionals), or "" when it has none.
   def declared_param_guard_statements(label, names)
-    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text|
+    (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class|
       var = names[2 + pos]
       next unless var
 
-      cond = exact_class_guard(owner_class_ptr_expr(cls), var)
+      # VALUE_KIND: Float and bool parameters test the value's kind (the same tests a declared return uses).
+      cond = if kind == :float then declared_return_condition(:float, cls, false, var)
+             elsif kind == :bool then declared_return_condition(:bool, cls, false, var)
+             else exact_class_guard(owner_class_ptr_expr(cls), var)
+             end
       "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_param_violation(M, #{var}, \"#{key}\", #{pos + 1}, \"#{text}\"); " \
         "/* DECLARED_PARAM_GUARD #{key} arg #{pos + 1} */\n"
     end.join
