@@ -279,6 +279,23 @@ jobs:
         with:
           packages: python3 python3-dev ruby rake clang
 
+      # The Path B harness (scripts/setup-pathb.sh): the cases run NFCXX_BACKEND=pathb, and the driver needs the harness.
+      # Keyed as the other Path B jobs key it.
+      - name: Path B harness cache key
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}
 
