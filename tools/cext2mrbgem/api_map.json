@@ -58,6 +58,30 @@
       "handler": "raise",
       "needs_mrb": true
     },
+    "rb_define_module_function": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true
+    },
+    "rb_define_const": {
+      "kind": "special",
+      "handler": "define_const",
+      "needs_mrb": true
+    },
+    "rb_const_get": {
+      "kind": "special",
+      "handler": "const_get",
+      "needs_mrb": true
+    },
+    "rb_const_get_at": {
+      "kind": "refuse",
+      "reason": "no exact mruby equivalent: mrb_const_get also searches the superclass chain, rb_const_get_at looks only in the receiver"
+    },
+    "rb_scan_args": {
+      "kind": "special",
+      "handler": "scan_args",
+      "needs_mrb": true
+    },
     "rb_str_new": {
       "kind": "call",
       "mruby": "mrb_str_new",
@@ -161,35 +185,40 @@
     },
     "rb_gc_register_address": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset (mruby GC rooting must be designed by hand)"
+      "reason": "address form (VALUE *): mruby has no address root. mrb_gc_register roots a value, so a later store through the address would not be rooted; the rooting must be designed by hand"
     },
     "rb_gc_register_mark_object": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "call",
+      "mruby": "mrb_gc_register",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_gc_register keeps the value in mruby's root table (src/gc.c:564) for the life of the state; CRuby never unregisters it either. Immediate values need no root and are ignored by mrb_gc_register"
     },
     "rb_gc_mark": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run"
     },
     "rb_gc_mark_movable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run (movable marking has no mruby form either)"
     },
     "rb_gc_enable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mruby enable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
     },
     "rb_gc_disable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mruby disable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
     },
     "rb_gc_start": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "special",
+      "handler": "gc_start",
+      "needs_mrb": true
     },
     "rb_gc_writebarrier": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "special",
+      "handler": "gc_writebarrier",
+      "needs_mrb": true
     },
     "NIL_P": {
       "kind": "call",
@@ -246,10 +275,445 @@
     "rb_ext_ractor_safe": {
       "kind": "drop",
       "reason": "ractor declaration; mruby has no ractors, so the declaration has no effect"
+    },
+    "rb_intern": {
+      "kind": "call",
+      "mruby": "mrb_intern_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_intern_const": {
+      "kind": "call",
+      "mruby": "mrb_intern_lit",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "argument must be a string literal (mrb_intern_lit is a macro over mrb_intern_static); a char pointer does not compile"
+    },
+    "rb_funcall": {
+      "kind": "call",
+      "mruby": "mrb_funcall_id",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_funcallv": {
+      "kind": "call",
+      "mruby": "mrb_funcall_argv",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_funcall2": {
+      "kind": "call",
+      "mruby": "mrb_funcall_argv",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_new": {
+      "kind": "call",
+      "mruby": "mrb_hash_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_aset": {
+      "kind": "call",
+      "mruby": "mrb_hash_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available"
+    },
+    "rb_hash_aref": {
+      "kind": "call",
+      "mruby": "mrb_hash_get",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new": {
+      "kind": "call",
+      "mruby": "mrb_ary_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_push": {
+      "kind": "call",
+      "mruby": "mrb_ary_push",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the array) is not available"
+    },
+    "rb_ary_entry": {
+      "kind": "call",
+      "mruby": "mrb_ary_entry",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "RARRAY_AREF": {
+      "kind": "call",
+      "mruby": "mrb_ary_entry",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby reads the element pointer without a bounds check; mruby returns nil out of range and accepts negative offsets"
+    },
+    "RARRAY_LEN": {
+      "kind": "macro",
+      "mruby": "RARRAY_LEN"
+    },
+    "rb_utf8_str_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
+    },
+    "rb_obj_class": {
+      "kind": "call",
+      "mruby": "mrb_obj_class",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns struct RClass *, not mrb_value: wrap with mrb_obj_value() where a VALUE is needed"
+    },
+    "rb_respond_to": {
+      "kind": "call",
+      "mruby": "mrb_respond_to",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+    },
+    "rb_float_new": {
+      "kind": "call",
+      "mruby": "mrb_float_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ivar_get": {
+      "kind": "call",
+      "mruby": "mrb_iv_get",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ivar_set": {
+      "kind": "call",
+      "mruby": "mrb_iv_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby returns void; the CRuby return value (the value) is not available"
+    },
+    "ID2SYM": {
+      "kind": "call",
+      "mruby": "mrb_symbol_value",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "INT2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no range check: the mruby fixnum range depends on the value boxing"
+    },
+    "LONG2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no range check: the mruby fixnum range depends on the value boxing"
+    },
+    "FIX2INT": {
+      "kind": "call",
+      "mruby": "mrb_fixnum",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a fixnum; the result is mrb_int, not int"
+    },
+    "FIX2LONG": {
+      "kind": "call",
+      "mruby": "mrb_fixnum",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a fixnum; the result is mrb_int"
+    },
+    "FIXNUM_P": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "rb_type": {
+      "kind": "call",
+      "mruby": "mrb_type",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "returns enum mrb_vtype: compare only with MRB_TT_* values. nil and false both report MRB_TT_FALSE (mruby/boxing_nan.h), so T_NIL and T_FALSE are not mapped"
+    },
+    "Qundef": {
+      "kind": "expr",
+      "mruby": "mrb_undef_value()",
+      "caveat": "mrb_value is a struct: test with mrb_undef_p(), not with =="
+    },
+    "T_STRING": {
+      "kind": "expr",
+      "mruby": "MRB_TT_STRING"
+    },
+    "T_ARRAY": {
+      "kind": "expr",
+      "mruby": "MRB_TT_ARRAY"
+    },
+    "T_HASH": {
+      "kind": "expr",
+      "mruby": "MRB_TT_HASH"
+    },
+    "T_OBJECT": {
+      "kind": "expr",
+      "mruby": "MRB_TT_OBJECT"
+    },
+    "T_CLASS": {
+      "kind": "expr",
+      "mruby": "MRB_TT_CLASS"
+    },
+    "T_MODULE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_MODULE"
+    },
+    "T_FLOAT": {
+      "kind": "expr",
+      "mruby": "MRB_TT_FLOAT"
+    },
+    "T_SYMBOL": {
+      "kind": "expr",
+      "mruby": "MRB_TT_SYMBOL"
+    },
+    "T_DATA": {
+      "kind": "expr",
+      "mruby": "MRB_TT_CDATA",
+      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
+    },
+    "rb_global_variable": {
+      "kind": "refuse",
+      "reason": "address form (VALUE *), as rb_gc_register_address: no mruby equivalent (mrb_gc_register roots a value, not a variable)"
+    },
+    "rb_str_cat": {
+      "kind": "call",
+      "mruby": "mrb_str_cat",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the length is not checked for sign: a negative length becomes a large size_t"
+    },
+    "rb_str_dup": {
+      "kind": "call",
+      "mruby": "mrb_str_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_str_buf_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "capa is a size hint only: the new string is empty, as in CRuby"
+    },
+    "rb_str_intern": {
+      "kind": "call",
+      "mruby": "mrb_str_intern",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_utf8_str_new_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
+    },
+    "rb_obj_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_check_frozen": {
+      "kind": "call",
+      "mruby": "mrb_check_frozen_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_delete": {
+      "kind": "call",
+      "mruby": "mrb_hash_delete_key",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_new_capa": {
+      "kind": "call",
+      "mruby": "mrb_hash_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "RHASH_SIZE": {
+      "kind": "call",
+      "mruby": "mrb_hash_size",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_int (signed), where CRuby returns size_t"
+    },
+    "rb_ary_store": {
+      "kind": "call",
+      "mruby": "mrb_ary_set",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_clear": {
+      "kind": "call",
+      "mruby": "mrb_ary_clear",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_dup": {
+      "kind": "call",
+      "mruby": "mrb_ary_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new_capa": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new2": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "NUM2DBL": {
+      "kind": "call",
+      "mruby": "mrb_as_float",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+    },
+    "rb_num2dbl": {
+      "kind": "call",
+      "mruby": "mrb_as_float",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+    },
+    "DBL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_float_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "ULONG2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+    },
+    "ULL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+    },
+    "NUM2LL": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+    },
+    "rb_id2name": {
+      "kind": "call",
+      "mruby": "mrb_sym_name",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the pointer is into mruby's symbol table: valid until the state is closed"
+    },
+    "rb_id2str": {
+      "kind": "call",
+      "mruby": "mrb_sym_str",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby does not promise a frozen result, as CRuby's rb_id2str does"
+    },
+    "rb_to_id": {
+      "kind": "call",
+      "mruby": "mrb_obj_to_sym",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "accepts only Symbol and String: CRuby also converts other objects with to_str"
+    },
+    "SYMBOL_P": {
+      "kind": "call",
+      "mruby": "mrb_symbol_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "rb_block_given_p": {
+      "kind": "call",
+      "mruby": "mrb_block_given_p",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+    },
+    "rb_exc_raise": {
+      "kind": "call",
+      "mruby": "mrb_exc_raise",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_eStandardError": {
+      "kind": "expr",
+      "mruby": "E_STANDARD_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eException": {
+      "kind": "expr",
+      "mruby": "E_EXCEPTION",
+      "needs_mrb": true
+    },
+    "rb_const_defined": {
+      "kind": "call",
+      "mruby": "mrb_const_defined",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "a module receiver does not fall back to Object, as in rb_const_get; returns mrb_bool"
+    },
+    "rb_const_defined_at": {
+      "kind": "call",
+      "mruby": "mrb_const_defined_at",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool, where CRuby returns int"
+    },
+    "RB_LIKELY": {
+      "kind": "strip",
+      "mruby": "!!",
+      "needs_mrb": false,
+      "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_LIKELY"
+    },
+    "RB_UNLIKELY": {
+      "kind": "strip",
+      "mruby": "!!",
+      "needs_mrb": false,
+      "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_UNLIKELY"
+    },
+    "RB_TYPE_P": {
+      "kind": "special",
+      "handler": "type_p",
+      "needs_mrb": false
     }
   },
   "special_arg_positions_class_only": {
     "rb_define_method": [
+      0
+    ],
+    "rb_define_module_function": [
+      0
+    ],
+    "rb_define_const": [
       0
     ],
     "rb_define_singleton_method": [

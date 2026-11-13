@@ -76,11 +76,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MAP_PATH = os.path.join(HERE, 'api_map.json')
 
 IDENT_RE = re.compile(r'(?<![\w$])[A-Za-z_]\w*')
+# A definition starts at a line start. Return-type words may be split across lines (`static VALUE` then
+# `name(...)` on the next line, as bigdecimal and date write them); every word is followed by at least one
+# separator, so the pattern has no ambiguous splits.
 DEF_RE = re.compile(
-    r'^[ \t]*((?:(?:static|inline|extern)[ \t]+)*)([A-Za-z_][\w \t\*]*?)[ \t\*]*\b'
-    r'([A-Za-z_]\w*)[ \t]*\(([^()]*)\)\s*(\{|;)', re.M)
+    r'^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)'
+    r'((?:[A-Za-z_]\w*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)'
+    r'([A-Za-z_]\w*)[ \t\n]*\(([^()]*)\)\s*(\{|;)', re.M)
 INC_RE = re.compile(r'#[ \t]*include[ \t]*[<"](ruby(?:/[\w./-]*)?\.h)[>"]')
-REG_RE = re.compile(r'(?<![\w$.>])(rb_define_method|rb_define_singleton_method)\s*\(')
+REG_RE = re.compile(r'(?<![\w$.>])(rb_define_method|rb_define_singleton_method|rb_define_module_function)\s*\(')
 CLASS_ASSIGN_RE = re.compile(r'(?<![\w$.>])(\w+)\s*=\s*rb_define_(?:class|module)(?:_under)?\s*\(')
 NON_FUNC_WORDS = {'if', 'while', 'for', 'switch', 'return', 'sizeof', 'else', 'do', 'case', 'goto'}
 
@@ -92,6 +96,16 @@ UNKNOWN_RE = re.compile(
     r'PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_\w+|OBJ_\w+)$')
 
 GEM_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_-]*$')
+
+
+def param_names(d):
+    """Names of the parameters of a function prototype or definition dict (from decl scan)."""
+    names = set()
+    for p in d['params'].split(','):
+        m = re.search(r'([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$', p.strip())
+        if m:
+            names.add(m.group(1))
+    return names
 
 
 def line_of(text, pos):
@@ -272,6 +286,7 @@ class Converter:
         self.regs = []
         self.reg_by_call = {}
         self.reg_names = set()
+        self.valid_reg_names = set()  # registered functions whose registration survived check_refs
         self.decls = []      # dicts for function prototypes and definitions
         self.defs = {}       # name -> [def dicts]
         self.init_defs = []
@@ -307,6 +322,10 @@ class Converter:
             return
         text = self.files[rel]['text']
         self.refusals.append({'file': rel, 'line': line_of(text, pos), 'api': api, 'reason': reason})
+        # a marker strictly inside a declaration's header would overlap the header rewrite (process step 2); the
+        # refusal is still recorded and the output is still marked not buildable
+        if any(d['file'] == rel and d['hstart'] < pos < d['hend'] for d in self.decls):
+            return
         self.edits[rel].add(pos, pos, '/* BC2CPP-MRBGEM REFUSED: %s */ ' % api)
 
     def uses_uv_thread(self):
@@ -373,8 +392,9 @@ class Converter:
                         rec['argc_span'] = (as_, ae)
                         if am is None:
                             rec['error'] = 'argc is not an integer literal'
-                        elif int(am.group()) < 0:
-                            rec['error'] = ('argc %s (variadic or array form) is not in the supported subset'
+                        elif int(am.group()) < -1:
+                            # -1 is the variadic form (int argc, VALUE *argv, VALUE self); -2 takes an array
+                            rec['error'] = ('argc %s (array form) is not in the supported subset'
                                             % am.group())
                         elif fm is None:
                             rec['error'] = ('method function argument is not a plain function name '
@@ -400,18 +420,19 @@ class Converter:
                 self.reg_names.add(r['func'])
         # declarations and definitions
         for rel, f in self.files.items():
-            if f['kind'] != 'src':
-                continue
             text, masked = f['text'], f['masked']
             for m in DEF_RE.finditer(masked):
-                storage, ret, name, term = m.group(1), m.group(2).strip(), m.group(3), m.group(5)
+                storage, name, term = m.group(1), m.group(3), m.group(5)
+                if f['kind'] != 'src' and term != ';':
+                    continue  # a function body in a header is not converted; its prototypes are (below)
+                ret = re.sub(r'[\s\*]+$', '', m.group(2))  # trailing pointer stars are dropped, as before
                 if name in NON_FUNC_WORDS or ret.split()[-1] in NON_FUNC_WORDS:
                     continue
                 po = masked.find('(', m.start(3))
                 pc = masked.find(')', po)
                 d = {'file': rel, 'name': name, 'storage': storage, 'ret': ret,
                      'hstart': m.start(), 'po': po, 'pc': pc,
-                     'params': text[po + 1:pc], 'proto': term == ';'}
+                     'params': text[po + 1:pc], 'proto': term == ';', 'hdr': f['kind'] != 'src'}
                 if term == '{':
                     d['brace'] = m.end() - 1
                     d['body_end'] = match_close(masked, d['brace'])
@@ -492,6 +513,14 @@ class Converter:
             if r['error'] is None:
                 continue
         valid_reg = [r for r in self.regs if r['error'] is None]
+        self.valid_reg_names = {r['func'] for r in valid_reg}
+        # variadic methods (argc -1): (argc, argv, self) parameter names, used by rb_scan_args
+        self.variadic = {}
+        for r in valid_reg:
+            if r['argc'] == -1 and r['func'] in self.defs:
+                p = self.variadic_params(self.defs[r['func']][0])
+                if p:
+                    self.variadic[r['func']] = p
         for name in self.reg_names:
             spans = [(r['open'], r['close']) for r in valid_reg if r['func'] == name and r['file']]
             for rel, s, e in self.occ.get(name, []):
@@ -501,34 +530,113 @@ class Converter:
                        if d['name'] == name):
                     continue
                 self.refuse(rel, s, name, 'registered method function is also called directly (not supported)')
-        # helper functions that need the mruby state
+        # helper functions that need the mruby state are threaded: the mrb argument is added to the definition, to
+        # every prototype (in the .c and .h files, which are scanned) and to every call site. A use is safe when it
+        # is a direct call inside a function body; a use anywhere else is refused. A static helper cannot be called
+        # from another file, so its uses are all in its own file; a non-static one is threaded with a caveat (its
+        # signature changes, so callers outside the input would need the argument too). Every caller of a helper is
+        # itself in needs, so it either gets mrb (a threaded helper, a registered method or Init) or has a refusal of
+        # its own; the check after the loop makes that explicit.
+        cands = set()
         for name in sorted(self.needs):
             if name in self.reg_names or name == init_first or name not in self.defs:
                 continue
-            defs = self.defs[name]
-            def_file = defs[0]['file']
-            ok = len(defs) == 1
+            if len(self.defs[name]) == 1:
+                cands.add(name)
+
+        def helper_uses(name):
+            out = []
             for rel, s, e in self.occ.get(name, []):
                 if any(rel == d['file'] and d['hstart'] <= s < d['hend'] for d in self.decls
                        if d['name'] == name):
                     continue
-                if rel != def_file or next_nonspace(self.files[rel]['masked'], e) < 0 or \
-                        self.files[rel]['masked'][next_nonspace(self.files[rel]['masked'], e)] != '(':
-                    ok = False
-                    self.refuse(rel, s, name,
-                                'helper needs the mruby state threaded in, but is used outside a direct call '
-                                'in its own file (not supported)')
-            if ok:
-                self.helper_names.add(name)
-            else:
-                d0 = defs[0]
+                if self.in_dead_init(rel, s):
+                    continue
+                masked = self.files[rel]['masked']
+                nx = next_nonspace(masked, e)
+                direct = nx >= 0 and masked[nx] == '('
+                fn = self.enclosing_func(rel, s)
+                out.append((rel, s, direct, fn))
+            return out
+
+        def shadowed(name, fn):
+            # a parameter or local of the enclosing function with the helper's name hides the helper there
+            if name in param_names(fn):
+                return True
+            body = self.files[fn['file']]['masked'][fn['brace']:fn['body_end'] + 1]
+            return bool(re.search(r'\b(?!return\b|else\b|case\b|goto\b)[A-Za-z_]\w*[ \t\n\*]+%s\s*[=;,\[)]'
+                                  r'|\(\s*\*\s*%s\s*\)' % (re.escape(name), re.escape(name)), body))
+
+        def use_problem(name, use):
+            rel, s, direct, fn = use
+            if not direct:
+                return 'helper needs the mruby state threaded in, but is used outside a direct call (not supported)'
+            if fn is None:
+                return ('helper needs the mruby state threaded in, but the call is not in a function definition the '
+                        'converter recognises (a macro-decorated definition, or file scope) (not supported)')
+            if shadowed(name, fn):
+                return 'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
+            return None
+
+        uses = {name: helper_uses(name) for name in cands}
+        for name in sorted(cands):
+            if any(use_problem(name, u) for u in uses[name]):
+                cands.discard(name)
+        self.helper_names = cands
+        for name in sorted(cands):
+            d0 = self.defs[name][0]
+            if 'static' not in d0['storage'].split():
+                self.rewrite(d0['file'], d0['hstart'], name, 'mrb-threaded %s' % name,
+                             'non-static helper: its signature gains the mrb argument; callers outside the input would need it too')
+        refused_defs = set()
+        for name in sorted(self.needs):
+            if name in self.reg_names or name == init_first or name not in self.defs or name in cands:
+                continue
+            for u in helper_uses(name):
+                why = use_problem(name, u)
+                if why:
+                    self.refuse(u[0], u[1], name, why)
+            for d0 in self.defs[name]:
                 self.refuse(d0['file'], d0['hstart'], name, 'helper needs mruby state; threading refused')
+            refused_defs.add(name)
+        # fail-safe: a call of a threaded helper from a function that gets no mrb and has no refusal of its own
+        # would not compile, so it is refused
+        mrb_bearing = cands | set(self.valid_reg_names) | ({init_first} if init_first else set())
+        for name in sorted(cands):
+            for rel, s, direct, fn in uses[name]:
+                if fn is not None and fn['name'] not in mrb_bearing and fn['name'] not in refused_defs:
+                    self.refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
 
     # ---- stage 3: per-file rewrite --------------------------------------
+    def variadic_params(self, d):
+        """(argc, argv, self) parameter names of a variadic (argc -1) method definition, or None.
+        mruby calls every method as f(mrb, self) and hands the arguments over through mrb_get_args, so
+        the converted function reads them back with the "*" format into locals of the original names."""
+        params = [p.strip() for p in d['params'].split(',')]
+        if len(params) != 3:
+            return None
+        m_argc = re.fullmatch(r'int\s+([A-Za-z_]\w*)', params[0])
+        m_argv = re.fullmatch(r'VALUE\s*\*\s*([A-Za-z_]\w*)', params[1])
+        m_self = re.fullmatch(r'VALUE\s+([A-Za-z_]\w*)', params[2])
+        if not (m_argc and m_argv and m_self):
+            return None
+        return m_argc.group(1), m_argv.group(1), m_self.group(1)
+
     def registered_header(self, d):
-        n = [r for r in self.regs if r['error'] is None and r['func'] == d['name']][0]['argc']
+        regs = [r for r in self.regs if r['error'] is None and r['func'] == d['name']]
+        n = regs[0]['argc']
         if d['ret'] != 'VALUE':
             return None, None, 'registered method must return VALUE (found %r)' % d['ret']
+        if n == -1:
+            p = self.variadic_params(d)
+            if p is None:
+                return None, None, ('variadic registered method must take (int argc, VALUE *argv, VALUE self)'
+                                    ' (found %r)' % d['params'].strip())
+            argc_n, argv_n, self_n = p
+            hdr = '%smrb_value %s(mrb_state *mrb, mrb_value %s)' % (d['storage'], d['name'], self_n)
+            prologue = ('\n  mrb_int nfcx_argc;\n  mrb_value *%s;\n  mrb_get_args(mrb, "*", &%s, &nfcx_argc);'
+                        '\n  int %s = (int)nfcx_argc;') % (argv_n, argv_n, argc_n)
+            return hdr, prologue, None
         params = [p.strip() for p in d['params'].split(',')]
         if len(params) != n + 1:
             return None, None, ('registered method has %d parameters, arity %d needs %d'
@@ -582,7 +690,9 @@ class Converter:
                 continue
             name = d['name']
             hdr, pro, err = None, '', None
-            if name in self.reg_names:
+            # Only a function with a surviving registration gets the method signature. A refused registration
+            # (e.g. no definition in the input) leaves its prototype as is; the refusal is already recorded.
+            if name in self.valid_reg_names:
                 hdr, pro, err = self.registered_header(d)
                 if d['proto']:
                     pro = ''
@@ -605,13 +715,19 @@ class Converter:
                     E.add(d['brace'] + 1, d['brace'] + 1, pro)
                 self.rewrite(rel, d['hstart'], d['name'] + '(...)', hdr)
         # 3. class variable declarations become struct RClass *
+        # A VALUE parameter that has a class variable's name is an ordinary parameter (it shadows the class
+        # variable in its function) and is left alone.
         for C in sorted(self.class_vars):
             for m in re.finditer(r'\bVALUE\b\s+%s\b(?=\s*[=;,\[])' % re.escape(C), masked):
+                if self.is_param(rel, m.start(), C):
+                    continue
                 E.add(m.start(), m.start() + len('VALUE'), 'struct RClass *')
                 self.rewrite(rel, m.start(), 'VALUE ' + C, 'struct RClass *' + ' ' + C)
-            mm = re.search(r'\bVALUE\b[^;(){}]*,\s*%s\b' % re.escape(C), masked)
-            if mm:
+            for mm in re.finditer(r'\bVALUE\b[^;(){}]*,\s*%s\b' % re.escape(C), masked):
+                if self.is_param(rel, mm.start(), C):
+                    continue
                 self.refuse(rel, mm.start(), C, 'multi-declarator class variable declaration not supported')
+                break
         # 4. helper call sites get the mrb argument
         header_spans = [(d['hstart'], d['hend']) for d in self.decls if d['file'] == rel]
         for name in self.helper_names:
@@ -624,7 +740,7 @@ class Converter:
                 pa = next_nonspace(masked, po + 1)
                 E.add(po + 1, po + 1, 'mrb' if masked[pa] == ')' else 'mrb, ')
         # 5. identifier pass
-        local_syms = set(self.defs) | {d['name'] for d in self.decls} | self.class_vars
+        local_syms = set(self.defs) | {d['name'] for d in self.decls if not d.get('hdr')} | self.class_vars
         body_spans = [(d['brace'], d['body_end']) for lst in self.defs.values() for d in lst
                       if d['file'] == rel]
         for m in IDENT_RE.finditer(masked):
@@ -646,7 +762,7 @@ class Converter:
             elif UNKNOWN_RE.match(name) and name not in local_syms:
                 self.refuse(rel, s, name, 'no entry in api_map.json')
             elif name in self.class_vars:
-                if (rel, s) in self.decl_name_pos:
+                if (rel, s) in self.decl_name_pos or self.is_param(rel, s, name):
                     continue
                 nx = next_nonspace(masked, e)
                 if nx >= 0 and masked[nx] == '=' and masked[nx + 1:nx + 2] != '=':
@@ -661,6 +777,18 @@ class Converter:
             mm = re.search(r'\bmrb\b', masked)
             if mm:
                 self.refuse(rel, mm.start(), 'mrb', 'source already uses the identifier mrb (clashes with the state parameter)')
+
+    def is_param(self, rel, pos, name):
+        """True if name at pos is a parameter of the function (its header, or its body) that encloses pos.
+        A parameter shadows a file-scope class variable of the same name, so it must not be rewritten."""
+        for d in self.decls:
+            if d['file'] != rel:
+                continue
+            if d['hstart'] <= pos < d['hend']:
+                return name in param_names(d)
+            if 'body_end' in d and d['brace'] < pos < d['body_end'] and name in param_names(d):
+                return True
+        return False
 
     def map_entry(self, rel, s, e, name, entry):
         masked = self.files[rel]['masked']
@@ -700,6 +828,14 @@ class Converter:
             if entry['mruby'] != name:
                 E.add(s, e, entry['mruby'])
                 self.rewrite(rel, s, name, entry['mruby'])
+        elif kind == 'strip':
+            # A macro whose only effect is a compiler hint (RB_LIKELY): the name becomes entry['mruby'] and the
+            # argument stays in place, so the call form is kept and the hint is dropped.
+            if not called:
+                self.refuse(rel, s, name, 'used without a call; cannot map it')
+                return
+            E.add(s, e, entry['mruby'])
+            self.rewrite(rel, s, name, entry['mruby'], entry.get('caveat'))
         elif kind == 'expr':
             if called:
                 self.refuse(rel, s, name, 'expression mapping used in call form')
@@ -727,7 +863,7 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_gc_protect(mrb, %s)' % arg,
                          'keeps the value rooted until the arena is restored (fine within the call; use mrb_gc_register to outlive it)')
             return
-        if name in ('rb_define_method', 'rb_define_singleton_method'):
+        if name in ('rb_define_method', 'rb_define_singleton_method', 'rb_define_module_function'):
             rec = self.reg_by_call.get((rel, s))
             if rec is None or not called or nxt != rec['open']:
                 self.refuse(rel, s, name, 'used without a registration call')
@@ -739,16 +875,32 @@ class Converter:
             if tgt not in self.class_vars and tgt != 'rb_cObject':
                 self.refuse(rel, s, name, 'target %r is not a tracked class or module variable' % tgt)
                 return
-            new = 'mrb_define_method' if name == 'rb_define_method' else 'mrb_define_class_method'
+            new = {'rb_define_method': 'mrb_define_method', 'rb_define_singleton_method': 'mrb_define_class_method',
+                   'rb_define_module_function': 'mrb_define_module_function'}[name]
             E.add(s, e, new)
             E.add(nxt + 1, nxt + 1, 'mrb, ')
             fs, fe = rec['func_span']
             E.add(fs, fe, rec['func'])
             as_, ae = rec['argc_span']
-            aspec = 'MRB_ARGS_NONE()' if rec['argc'] == 0 else 'MRB_ARGS_REQ(%d)' % rec['argc']
+            if rec['argc'] == -1:
+                aspec = 'MRB_ARGS_ANY()'  # the function reads its arguments itself (see variadic_params)
+            else:
+                aspec = 'MRB_ARGS_NONE()' if rec['argc'] == 0 else 'MRB_ARGS_REQ(%d)' % rec['argc']
             E.add(as_, ae, aspec)
             self.rewrite(rel, s, name, '%s(mrb, %s, "%s", %s, %s)' % (
                 new, tgt, rec['name'], rec['func'], aspec))
+        elif name == 'rb_scan_args':
+            self.scan_args(rel, s, e, nxt, called)
+        elif name == 'RB_TYPE_P':
+            self.type_p(rel, s, e, nxt, called)
+        elif name == 'rb_gc_start':
+            self.gc_start(rel, s, e, nxt, called)
+        elif name == 'rb_gc_writebarrier':
+            self.gc_writebarrier(rel, s, e, nxt, called)
+        elif name == 'rb_define_const':
+            self.define_const(rel, s, e, nxt, called)
+        elif name == 'rb_const_get':
+            self.const_get(rel, s, e, nxt, called)
         elif name == 'rb_raise':
             if not called:
                 self.refuse(rel, s, name, 'used without a call')
@@ -767,6 +919,186 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_raisef')
         else:
             self.refuse(rel, s, name, 'unknown special handler')
+
+    def const_get(self, rel, s, e, nxt, called):
+        """rb_const_get(klass, id) -> mrb_const_get(mrb, klass, id). Both take the receiver as a VALUE and the name as
+        an ID (mrb_sym); rb_cObject is passed as its VALUE. Differences, recorded as a caveat: a module receiver
+        does not fall back to Object in mruby (CRuby does), and there is no autoload."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_const_get', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'rb_const_get', 'rb_const_get takes a class and an ID')
+            return
+        E.add(s, e, 'mrb_const_get')
+        E.add(nxt + 1, nxt + 1, 'mrb, ')
+        if text[args[0][0]:args[0][1]] == 'rb_cObject':
+            E.add(args[0][0], args[0][1], 'mrb_obj_value(mrb->object_class)')
+        self.rewrite(rel, s, 'rb_const_get', 'mrb_const_get(mrb, klass, id)',
+                     'a module receiver does not fall back to Object as CRuby does; no autoload')
+
+    def define_const(self, rel, s, e, nxt, called):
+        """rb_define_const(klass, "NAME", value) -> mrb_define_const(mrb, klass, "NAME", value). The receiver must be
+        a tracked class or module variable (a struct RClass *) or rb_cObject, as mrb_define_const takes a class
+        pointer. mruby stores the constant without CRuby's 'already initialized' warning on redefinition."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_define_const', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 3:
+            self.refuse(rel, s, 'rb_define_const', 'rb_define_const takes a class, a name and a value')
+            return
+        tgt = text[args[0][0]:args[0][1]]
+        if not (tgt == 'rb_cObject' or (tgt in self.class_vars and not self.is_param(rel, args[0][0], tgt))):
+            self.refuse(rel, s, 'rb_define_const', 'target %r is not a tracked class or module variable' % tgt)
+            return
+        E.add(s, e, 'mrb_define_const')
+        E.add(nxt + 1, nxt + 1, 'mrb, ')
+        self.rewrite(rel, s, 'rb_define_const', 'mrb_define_const(mrb, %s, ...)' % tgt,
+                     'an existing constant is replaced without CRuby\'s "already initialized" warning')
+
+    def scan_args(self, rel, s, e, nxt, called):
+        """rb_scan_args(argc, argv, FMT, &v...) in a variadic method, as a statement, with FMT of the form
+        "<lead><opt>" (no rest, keyword or block parts) -> mrb_get_args(mrb, "o|o", &v...). mrb_get_args reads
+        the same stack the method was called with, and its arity check is the one rb_scan_args makes. Optional
+        outputs are set to nil first, because mrb_get_args leaves a missing optional argument unwritten."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        fn = self.enclosing_func(rel, s)
+        if not called or fn is None or fn['name'] not in self.variadic:
+            self.refuse(rel, s, 'rb_scan_args', 'only supported directly in a variadic method (argc -1)')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) < 3:
+            self.refuse(rel, s, 'rb_scan_args', 'rb_scan_args needs argc, argv and a format string')
+            return
+        argc_n, argv_n, self_n = self.variadic[fn['name']]
+        if text[args[0][0]:args[0][1]] != argc_n or text[args[1][0]:args[1][1]] != argv_n:
+            self.refuse(rel, s, 'rb_scan_args', 'rb_scan_args is not called on the argc and argv of its method')
+            return
+        fm = re.fullmatch(r'"([0-9])([0-9]?)"', text[args[2][0]:args[2][1]])
+        if not fm:
+            self.refuse(rel, s, 'rb_scan_args',
+                        'format %s not supported (only "<lead><optional>" counts: no rest, keyword or block parts)'
+                        % text[args[2][0]:args[2][1]])
+            return
+        lead, opt = int(fm.group(1)), int(fm.group(2) or 0)
+        outs = args[3:]
+        if len(outs) != lead + opt:
+            self.refuse(rel, s, 'rb_scan_args', 'format needs %d output pointer(s), call gives %d' % (lead + opt, len(outs)))
+            return
+        names = []
+        for a, b in outs:
+            om = re.fullmatch(r'&\s*([A-Za-z_]\w*)', text[a:b])
+            if not om or om.group(1) in self.class_vars or om.group(1) in (argc_n, argv_n, self_n):
+                self.refuse(rel, s, 'rb_scan_args', 'output %r is not a plain local variable' % text[a:b])
+                return
+            names.append(om.group(1))
+        prev = prev_nonspace(masked, s - 1)
+        after = next_nonspace(masked, close + 1)
+        if (prev >= 0 and masked[prev] not in ';{}') or after < 0 or masked[after] != ';':
+            self.refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used (mruby returns a different count)')
+            return
+        fmt = 'o' * lead + ('|' + 'o' * opt if opt else '')
+        pre = ''.join('%s = mrb_nil_value(), ' % n for n in names[lead:])
+        callargs = ', '.join(['mrb', '"%s"' % fmt] + ['&' + n for n in names])
+        E.add(s, close + 1, '(%smrb_get_args(%s))' % (pre, callargs))
+        self.rewrite(rel, s, 'rb_scan_args', 'mrb_get_args(mrb, "%s", ...)' % fmt,
+                     'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby')
+
+    def statement_call(self, rel, s, close):
+        """True if the call whose name starts at s and whose ')' is at close is a whole statement: the value is
+        discarded. It must follow a statement boundary, a closed condition or do/else, and be followed by ';'."""
+        masked = self.files[rel]['masked']
+        prev = prev_nonspace(masked, s - 1)
+        after = next_nonspace(masked, close + 1)
+        if after < 0 or masked[after] != ';':
+            return False
+        if prev < 0 or masked[prev] in ';{})':
+            return True
+        return re.search(r'\b(else|do)\s*$', masked[:s]) is not None
+
+    def gc_start(self, rel, s, e, nxt, called):
+        """rb_gc_start() as a statement -> mrb_full_gc(mrb). CRuby returns nil; mruby returns void, so a use of the
+        value is refused. mrb_full_gc does nothing while gc.disabled is set or during an iteration (src/gc.c:1442)."""
+        masked, text = self.files[rel]['masked'], self.files[rel]['text']
+        if not called:
+            self.refuse(rel, s, 'rb_gc_start', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        if close < 0 or text[nxt + 1:close].strip():
+            self.refuse(rel, s, 'rb_gc_start', 'rb_gc_start takes no arguments')
+            return
+        if not self.statement_call(rel, s, close):
+            self.refuse(rel, s, 'rb_gc_start', 'the return value of rb_gc_start (nil) is used; mruby has no equivalent')
+            return
+        self.edits[rel].add(s, close + 1, 'mrb_full_gc(mrb)')
+        self.rewrite(rel, s, 'rb_gc_start', 'mrb_full_gc(mrb)',
+                     'mrb_full_gc does nothing while gc.disabled is set or an object iteration is running; no collection is forced then')
+
+    def type_p(self, rel, s, e, nxt, called):
+        """RB_TYPE_P(obj, T_X) -> (mrb_type(obj) == MRB_TT_X), where T_X is a T_ name whose api_map entry is an exact
+        MRB_TT_ type with no caveat (T_DATA, T_FIXNUM, T_NIL and the like are refused). obj must be a plain local: the
+        whole call is replaced, so a nested mapped name would not be rewritten."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'RB_TYPE_P', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'RB_TYPE_P', 'RB_TYPE_P takes an object and a T_ type')
+            return
+        obj = text[args[0][0]:args[0][1]]
+        tname = text[args[1][0]:args[1][1]]
+        if (not re.fullmatch(r'[A-Za-z_]\w*', obj) or obj in self.entries or obj in self.types
+                or obj in self.class_vars or obj == 'mrb'):
+            self.refuse(rel, s, 'RB_TYPE_P', 'object %r is not a plain local variable (nested names would not be mapped)' % obj)
+            return
+        ent = self.entries.get(tname)
+        if not ent or ent.get('kind') != 'expr' or not ent.get('mruby', '').startswith('MRB_TT_') or 'caveat' in ent:
+            self.refuse(rel, s, 'RB_TYPE_P', '%s has no exact mruby type to compare with' % tname)
+            return
+        new = '(mrb_type(%s) == %s)' % (obj, ent['mruby'])
+        E.add(s, close + 1, new)
+        self.rewrite(rel, s, 'RB_TYPE_P', new)
+
+    def gc_writebarrier(self, rel, s, e, nxt, called):
+        """rb_gc_writebarrier(old, young) as a statement -> an immediate-guarded mrb_field_write_barrier_value. The
+        arguments are plain locals: they are used more than once, and an edit inside them would overlap. CRuby's
+        `old` is never a special constant (RB_OBJ_WRITE only calls this for heap owners), so the guard is a no-op there."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'rb_gc_writebarrier takes an owner and a referenced value')
+            return
+        names = []
+        for a, b in args:
+            t = text[a:b]
+            if (not re.fullmatch(r'[A-Za-z_]\w*', t) or t in self.entries or t in self.types
+                    or t in self.class_vars or t == 'mrb'):
+                self.refuse(rel, s, 'rb_gc_writebarrier', 'argument %r is not a plain local variable (it is used twice)' % t)
+                return
+            names.append(t)
+        if not self.statement_call(rel, s, close):
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'the return value of rb_gc_writebarrier is used (it is void)')
+            return
+        old, young = names
+        new = ('do { if (!mrb_immediate_p(%s)) mrb_field_write_barrier_value(mrb, mrb_basic_ptr(%s), %s); } while (0)'
+               % (old, old, young))
+        E.add(s, close + 1, new)
+        self.rewrite(rel, s, 'rb_gc_writebarrier', new,
+                     'mruby keeps the write barrier only for a heap owner; it does not make C-held storage a GC root '
+                     '(there is no mark callback, see rb_gc_mark)')
 
     # ---- stage 4: write --------------------------------------------------
     def write_outputs(self):

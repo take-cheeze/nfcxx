@@ -8,19 +8,18 @@
 # runs the destructors of the C++ frames it crosses. See docs/notes/poly.md.
 # Not built: lua.c, luac.c, linit.c (it would open io, os, package, debug), liolib.c, loslib.c, loadlib.c, ldblib.c. A script
 # gets no files, no os.exit and no clock unless the host binds them.
-#   NFCXX_BACKEND=qbe|gcc   back end of both compilers (default qbe); one build tree per back end
-#   FORCE=1                 rebuild even if the library is newer than this script and the patch
-# Needs EDG (scripts/setup-edg.sh) and, for the qbe back end, QBE and cproc (scripts/setup-qbe.sh). The Lua source is
-# fetched from GitHub at the pin below.
+#   NFCXX_BACKEND=pathb|gcc   back end of both compilers (default pathb); one build tree per back end
+#   FORCE=1                 rebuild even if the library is newer than this script
+# Needs EDG (scripts/setup-edg.sh) and, for the pathb back end, the Path B harness (scripts/setup-pathb.sh). The Lua source
+# is fetched from GitHub at the pin below, unpatched.
 self=$(realpath "$0")
 cd "$(dirname "$0")/.."
 root=$PWD; work=$root/build/poly-lua
-be=${NFCXX_BACKEND:-qbe}
-case $be in qbe|gcc) ;; *) echo "setup-poly-lua: NFCXX_BACKEND must be qbe or gcc, not '$be'" >&2; exit 1 ;; esac
+be=${NFCXX_BACKEND:-pathb}
+case $be in gcc|pathb) ;; *) echo "setup-poly-lua: NFCXX_BACKEND must be pathb or gcc, not '$be'" >&2; exit 1 ;; esac
 pin=312b9efaa1061c2c4cad08554dbc1351c3270eef   # lua/lua tag v5.4.9, same pin as tests/realworld/run_lua.sh
 src=$work/src; out=$work/out-$be; dest=$work/$be
-fresh() { [ -f "$dest/lib/liblua.a" ] && [ "$dest/lib/liblua.a" -nt scripts/lua-cxx-novolatile.patch ] &&
-          [ "$dest/lib/liblua.a" -nt "$self" ]; }
+fresh() { [ -f "$dest/lib/liblua.a" ] && [ "$dest/lib/liblua.a" -nt "$self" ]; }
 [ -z "${FORCE:-}" ] && fresh && exit 0
 [ -x "$root/build/edg/bin/eccp" ] || { echo "setup-poly-lua: EDG not built; run scripts/setup-edg.sh" >&2; exit 1; }
 mkdir -p "$work"
@@ -34,10 +33,6 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
   git -C "$src" fetch -q --depth 1 origin "$pin" || { echo "setup-poly-lua: fetching Lua $pin failed" >&2; exit 1; }
 fi
 git -C "$src" reset -q --hard "$pin" || exit 1
-# scripts/lua-cxx-novolatile.patch: cproc cannot store to a volatile object, and the two volatile members that ldo.c writes
-# (lua_longjmp.status, a longjmp guard that real exceptions make redundant, and CallInfo.u.l.trap, which only a signal
-# handler could race with) lose the qualifier. Applied to this throwaway checkout.
-patch -s -p1 -d "$src" --batch < scripts/lua-cxx-novolatile.patch || { echo "setup-poly-lua: patch failed" >&2; exit 1; }
 rm -rf "$out"; mkdir -p "$out"
 files=()
 for f in "$src"/l*.c; do

@@ -1485,6 +1485,13 @@ def has_jump?(x, in_switch = false)
   x.any? { |y| has_jump?(y, in_switch) }
 end
 
+def has_label?(x)
+  return false unless x.is_a?(Array)
+  return true if head(x) == "label"
+
+  x.any? { |y| has_label?(y) }
+end
+
 def rename_copy(stmts, counter)
   defined = {}
   all_forms(stmts).each { |sf| defined[sf[1]] = true if head(sf) == "let" && sf[1].is_a?(String) }
@@ -1565,6 +1572,8 @@ def try_unroll(list, i, counter, escaped = {})
   prefix = body[0...j]
   suffix = body[(j + 1)..-1]
   return unroll_no(2) if has_jump?(prefix) || has_jump?(suffix) || has_jump?(step)
+  # a label in the body would be defined once per copy (a `goto fail` into the loop from its own error path, QuickJS)
+  return unroll_no(2) if has_label?(prefix) || has_label?(suffix) || has_label?(step)
   cond = body[j][1]
   cdef = prefix.find { |x| head(x) == "let" && x[1] == cond }
   return unroll_no(3) unless cdef && cdef.length == 4 && UNROLL_CMP.key?(head(cdef[3])) && cdef[3].length == 4 &&
@@ -2173,6 +2182,9 @@ def prune_pass(forms, substr, report)
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end
+  # An alias form (the GNU alias attribute, (alias NAME TARGET KIND [weak])) is kept whatever the pruning (pathb-ssa-build's
+  # alias markers), so its target is reached: a static function that only an alias names is still defined for it.
+  forms.each { |f| queue << unq(f[2]) if head(f) == "alias" && f[2] }
   seen = {}
   until queue.empty?
     n = queue.pop
