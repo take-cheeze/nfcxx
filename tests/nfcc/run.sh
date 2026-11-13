@@ -250,8 +250,17 @@ used pathb en.c && ok "without -fshort-enums Path B builds it" || bad "without -
 check "-m16 compiles with gcc" pb -c -m16 "$tmp/int.c" -o "$tmp/m16.o"
 used gcc int.c && ok "-m16 went to gcc" || bad "-m16 went to gcc" "$(tail -1 "$tmp/log")"
 file -b "$tmp/m16.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is i386 (the option reached gcc)" || bad "-m16: the object is i386" "$(file -b "$tmp/m16.o")"
-check "-ftrivial-auto-var-init=zero compiles with gcc" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
-used gcc int.c && ok "-ftrivial-auto-var-init=zero went to gcc" || bad "-ftrivial-auto-var-init=zero went to gcc" "$(tail -1 "$tmp/log")"
+check "-ftrivial-auto-var-init=pattern compiles with gcc" pb -c -ftrivial-auto-var-init=pattern "$tmp/int.c" -o "$tmp/tz.o"
+used gcc int.c && ok "-ftrivial-auto-var-init=pattern went to gcc (Path B has no pattern fill)" || bad "-ftrivial-auto-var-init=pattern went to gcc" "$(tail -1 "$tmp/log")"
+# -ftrivial-auto-var-init=zero (the kernel's CONFIG_INIT_STACK_ALL_ZERO) is Path B's: a local without an initializer is zero from its
+# declaration. The program reads such locals (scalars, arrays, a struct's padding, nested scopes, loops) after dirtying the stack.
+check "-ftrivial-auto-var-init=zero compiles on Path B" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
+used pathb int.c && ok "-ftrivial-auto-var-init=zero stays on Path B" || bad "-ftrivial-auto-var-init=zero stays on Path B" "$(tail -1 "$tmp/log")"
+avi=$root/tests/c/auto-var-init/zero_locals.c
+pbrun "-ftrivial-auto-var-init=zero: uninitialized locals read as zero" 0 "$avi" -O2 -ftrivial-auto-var-init=zero
+used pathb zero_locals.c && ok "-ftrivial-auto-var-init=zero: that compile was Path B's" || bad "-ftrivial-auto-var-init=zero: that compile was Path B's" "$(tail -1 "$tmp/log")"
+pbrun "-ftrivial-auto-var-init=zero -O0 too" 0 "$avi" -ftrivial-auto-var-init=zero
+if pb -O2 "$avi" -o "$tmp/noavi" >/dev/null 2>&1 && "$tmp/noavi" >/dev/null 2>&1; then bad "without the option the locals are not zeroed" "the program passed"; else ok "without the option the locals are not zeroed (the test reads dirty stack)"; fi
 check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
 used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
 check "-Wa,* compiles with gcc" pb -c -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"

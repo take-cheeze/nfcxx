@@ -64,6 +64,7 @@ while [ $# -gt 0 ]; do
     -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
     -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
     -nostdinc|-ffreestanding|-fshort-wchar) opts+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) dump_opts+=("$1") ;;   # the IR zeroes a local without an initializer (be/nfcxx_ir.c)
     -isystem|-idirafter) opts+=("$1" "$2"); shift ;;
     -isystem?*|-idirafter?*) opts+=("$1") ;;
     --keep=*) keep=${1#--keep=} ;;
