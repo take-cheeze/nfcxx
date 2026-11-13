@@ -8,7 +8,7 @@
 #                of the module is replaced by f's body. f's ids become fresh ids of the caller, its slots become caller
 #                slots with new names (hoisted to the caller's header), its parameters are bound to the arguments, and
 #                its final return becomes (let %D T OPERAND). A callee is inlined only when its returns are all in tail
-#                position (none, or the last statement); refused callees are: constructors and destructors, sret, byval
+#                position (none, or the last statement); refused callees are: constructors and destructors, sret, hidden-result, byval
 #                and ellipsis parameters, struct or array results, struct or bool parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
@@ -212,6 +212,7 @@ end
 $inline_max_callee = 150
 $inline_max_growth = 2.0
 $inline_cost = :weighted
+$inline_tiers = [16, 40]   # --tiers=A,B: callee cost caps of the first rounds; the last round takes --max-callee (empty: one round set)
 $inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
 
 def node_count(x)
@@ -246,8 +247,17 @@ def node_cost(x)
   n
 end
 
+# Whether a function has an inline asm operand that only a constant argument makes valid: an immv or symv (the "i" operand of
+# `asm goto` in an __always_inline function, as the kernel's _static_cpu_has has, be/nfcxx_ir.c). The function cannot be
+# emitted alone (the SSA route refuses it), so it is inlined whatever its size and whatever the module's growth.
+def asm_needs_constant?(x)
+  return false unless x.is_a?(Array)
+  return true if x[0] == "opnd" && (x[1] == "immv" || x[1] == "symv")
+  x.any? { |y| asm_needs_constant?(y) }
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
@@ -392,10 +402,12 @@ def expand_call(s, fns, st)
     return nil
   end
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
-  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !asm_needs_constant?(fn)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end
+  # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
+  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
@@ -412,6 +424,9 @@ def expand_call(s, fns, st)
   byval_pre = []
   byval_slots = []
   params.each_with_index do |p, i|
+    # A class result EDG lowered into the first parameter (AArch64, marked (hidden-result)): its call passes (hidden-dest ...) and
+    # goes through a thunk that takes the object in x8 (scripts/pathb-ssa-qbe.rb). Not inlined: the binding below does not know it.
+    return nil if p.drop(4).any? { |x| head(x) == "hidden-result" }
     if head(p) == "sret"
       # the result object of a struct-returning callee: the call passes (sret TYPE ADDR), and the callee's stores go to ADDR
       # (the caller copies the result from there after the call, as before the inline)
@@ -550,6 +565,8 @@ def inline_pass(forms, max_depth, report)
   calls = IdentityMap.new
   total = node_count(forms)   # the budget bounds the size of the IR (every node), the callee cap weighs the code
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
+  caps = $inline_tiers.select { |c| c > 0 && ($inline_max_callee <= 0 || c < $inline_max_callee) } + [nil]
+  caps.each do |cap|
   max_depth.times do
     round = 0
     forms.each_with_index do |f, i|
@@ -562,7 +579,7 @@ def inline_pass(forms, max_depth, report)
       end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -581,6 +598,7 @@ def inline_pass(forms, max_depth, report)
     end
     inlined += round
     break if round == 0
+  end
   end
   forms.concat(extra)
   if report
@@ -1921,10 +1939,25 @@ UNUSED_ROOTS = "\0unused"
 
 def external_root?(f)
   return false if head(f) == "data"
+  # the other units to refer to it (the object it names is kept by the same rule as its functions).
   attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
   return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
   return false if attrs.include?("weak") || attrs.include?("static")
   true   # a definition (or declaration) of external linkage
+end
+
+# A vtable (_ZTV...) is a root when its class has a function of external linkage defined in this unit: the class's key
+# function, or another member. EDG marks such a vtable COMDAT even in the key function's unit, where gcc emits it strong for
+# the other units; a vtable of a class defined elsewhere is not kept. A local class (_ZTVZ...) is used only in its own unit.
+def vtable_roots(nodes)
+  defined = nodes.keys.select { |n| head(nodes[n]) == "function" && external_root?(nodes[n]) }
+  nodes.keys.select do |n|
+    next false unless n.start_with?("_ZTV") && !n.start_with?("_ZTVZ")
+    body = n[4..]
+    inner = body.start_with?("N") && body.end_with?("E") ? body[1..-2] : body
+    pres = ["_ZN#{inner}", "_ZNK#{inner}"]
+    defined.any? { |fn| pres.any? { |pre| fn.start_with?(pre) } }
+  end
 end
 
 # The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
@@ -1944,8 +1977,25 @@ end
 def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
+  # The x87 thunks are not nodes, but they name the functions they reach: an entry thunk (x87-thunk entry|entryc "F" ...)
+  # is the C-convention symbol F of the long double function __nfcxx_ldr_F, and a call thunk (call|callc "F", callv|callvc
+  # "F") is the symbol of a call of F (scripts/pathb-x87-thunks.rb). Once a call is inlined, nothing else names F or
+  # __nfcxx_ldr_F, so the thunk's name keeps them: entries maps a thunk symbol to the nodes it reaches.
+  entries = {}
+  forms.each do |f|
+    next unless head(f) == "x87-thunk"
+    k = f[1].to_s
+    if %w[entry entryc].include?(k)
+      entries[unq(f[2])] = ["__nfcxx_ldr_" + unq(f[2])]
+    elsif %w[call callc].include?(k)
+      entries["__nfcxx_x87c_" + unq(f[2])] = [unq(f[2])]
+    elsif %w[callv callvc].include?(k)
+      tail = f[3].is_a?(String) && f[3].start_with?("\"") ? "_A" + unq(f[3]) + "R" + f[4].to_s : "_I#{f[3]}S#{f[4]}V#{f[5]}"
+      entries["__nfcxx_x87cv_" + unq(f[2]) + tail] = [unq(f[2])]
+    end
+  end
   queue = if substr == UNUSED_ROOTS
-            nodes.keys.select { |n| external_root?(nodes[n]) }
+            nodes.keys.select { |n| external_root?(nodes[n]) } + vtable_roots(nodes)
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end
@@ -1954,7 +2004,10 @@ def prune_pass(forms, substr, report)
     n = queue.pop
     next if seen[n]
     seen[n] = true
-    quoted_names(nodes[n].drop(2), []).each { |c| queue << c if nodes.key?(c) && !seen[c] }
+    if nodes.key?(n)
+      quoted_names(nodes[n].drop(2), []).each { |c| queue << c if (nodes.key?(c) || entries.key?(c)) && !seen[c] }
+    end
+    (entries[n] || []).each { |t| queue << t unless seen[t] }
   end
   out = forms.select { |f| !%w[function global data].include?(head(f)) || seen[unq(f[1])] }
   $stderr.write("pathb-ir-opt: kept #{seen.size} of #{nodes.size} functions and objects (reachable from #{substr})\n") if report
@@ -2003,6 +2056,8 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a.start_with?("--max-callee=")
       $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--tiers=")
+      $inline_tiers = a[8..-1].split(",").map(&:to_i)
     elsif a.start_with?("--max-tiny=")
       $inline_tiny = a[11..-1].to_i
     elsif a.start_with?("--cost=")

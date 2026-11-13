@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # nfcc with NFCXX_BACKEND=pathb: EDG's C front end -> typed IR -> QBE (docs/notes/nfcc-pathb.md). Needs the Path B harness
-# (scripts/setup-edg.sh, setup-qbe.sh, setup-pathb.sh). The default backend stays qbe: checked here too.
+# (scripts/setup-edg.sh, setup-qbe.sh, setup-pathb.sh). The default backend is Path B where its harness is built (checked below).
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcc=$root/nfcc
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -240,6 +240,27 @@ used pathb int.c && ok "-mno-sse: the integer code is Path B's" || bad "-mno-sse
 refuses "-mno-sse: SSE code is refused" "mno-sse" pb -c -mno-sse "$tmp/fp.c" -o "$tmp/x.o"
 refuses "-mno-80387: SSE code is refused too" "SSE or x87" pb -c -mno-80387 "$tmp/fp.c" -o "$tmp/x.o"
 check "the same code builds without -mno-sse" pb -c "$tmp/fp.c" -o "$tmp/x.o"
+# a volatile integer access under -mno-sse: its helpers are emitted for the operations the unit uses, not for float and double too
+# (their movss/movsd made every kernel file that touches a volatile object, 353 of 614, a gcc compile)
+printf 'volatile int v;\nint vol(int x) { v = x; return v + 1; }\n' > "$tmp/vol.c"
+check "-mno-sse: a volatile integer access builds" pb -c -mno-sse "$tmp/vol.c" -o "$tmp/vol.o"
+used pathb vol.c && ok "-mno-sse: the volatile integer access is Path B's" || bad "-mno-sse: volatile on Path B" "$(tail -1 "$tmp/log")"
+objdump -d "$tmp/vol.o" | grep -qE '%[xyz]mm|%st' && bad "-mno-sse: no SSE in the volatile helpers" "found" || ok "-mno-sse: no SSE in the volatile helpers"
+printf 'volatile double d;\ndouble vd(double x) { d = x; return d; }\n' > "$tmp/vold.c"
+refuses "-mno-sse: a volatile double is still refused" "SSE or x87" pb -c -mno-sse "$tmp/vold.c" -o "$tmp/x.o"
+
+# GNU C of the kernel that needs the inliner and the asm lowering together (tests/c: compared with gcc by pbrun). The unit must
+# build from the optimized IR: a refusal there falls back to the unoptimized IR, where an always_inline function that has an "i"
+# operand of its parameter cannot be emitted, so the compile fails (tests/c/inline_asm_goto_always_inline*.c are the kernel's
+# _static_cpu_has, an offset into a global struct's array and then an index by an inlined parameter).
+for t in inline_asm_goto_always_inline:5 inline_asm_goto_always_inline_large:11 inline_asm_local_address_input:17; do
+  pbrun "${t%%:*} (Path B, the inlined asm operands and the address of a local)" "${t##*:}" "$root/tests/c/${t%%:*}.c"
+  grep -q 'optimized IR is refused' <<<"$out" && bad "${t%%:*}: the optimized IR is accepted" "$out"
+done
+# a function's address cast to an integer in an inlined callee: the cast reaches the emitter with the function as its operand
+printf 'extern void entry(void);\nextern void sink(unsigned int lo, unsigned int hi);\nstatic inline __attribute__((always_inline)) void wr(unsigned long v) { sink((unsigned int)v, (unsigned int)(v >> 32)); }\nvoid f(int c) { if (c) wr((unsigned long)entry); else wr(0); }\n' > "$tmp/fa.c"
+out=$(pb -c "$tmp/fa.c" -o "$tmp/fa.o" 2>&1) && ! grep -q 'optimized IR is refused' <<<"$out" && ok "a function address cast to an integer after inlining: the optimized IR builds" ||
+  bad "function address cast after inlining" "$(head -2 <<<"$out" | tr '\n' ' ')"
 
 # Options that change meaning and that Path B cannot honour: the compile is gcc's, with the option; nothing is dropped
 printf 'enum e { A, B };\nint main(void) { return (int)sizeof(enum e); }\n' > "$tmp/en.c"
@@ -247,15 +268,99 @@ pbrun "-fshort-enums: the enum is 1 byte" 1 "$tmp/en.c" -fshort-enums
 used gcc en.c && ok "-fshort-enums went to gcc" || bad "-fshort-enums went to gcc" "$(tail -1 "$tmp/log")"
 pbrun "no option: the enum is 4 bytes, Path B" 4 "$tmp/en.c"
 used pathb en.c && ok "without -fshort-enums Path B builds it" || bad "without -fshort-enums Path B builds it" "$(tail -1 "$tmp/log")"
-check "-m16 compiles with gcc" pb -c -m16 "$tmp/int.c" -o "$tmp/m16.o"
-used gcc int.c && ok "-m16 went to gcc" || bad "-m16 went to gcc" "$(tail -1 "$tmp/log")"
-file -b "$tmp/m16.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is i386 (the option reached gcc)" || bad "-m16: the object is i386" "$(file -b "$tmp/m16.o")"
-check "-ftrivial-auto-var-init=zero compiles with gcc" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
-used gcc int.c && ok "-ftrivial-auto-var-init=zero went to gcc" || bad "-ftrivial-auto-var-init=zero went to gcc" "$(tail -1 "$tmp/log")"
+# -mregparm=3 and -m32 do not make Path B's 32-bit target on their own: the compile is gcc's, with the option (-m16 below does)
+check "-mregparm=3 without -m16 compiles with gcc" pb -c -m32 -mregparm=3 "$tmp/int.c" -o "$tmp/m32.o"
+used gcc int.c && ok "-m32 -mregparm=3 went to gcc" || bad "-m32 -mregparm=3 went to gcc" "$(tail -1 "$tmp/log")"
+check "-mregparm=3 alone compiles with gcc" pb -c -mregparm=3 "$tmp/int.c" -o "$tmp/rp.o"
+used gcc int.c && tail -1 "$tmp/log" | grep -q "mregparm=3 without -m16" && ok "-mregparm=3 without -m16: gcc's, and the log says why" || bad "-mregparm=3 without -m16" "$(tail -1 "$tmp/log")"
+file -b "$tmp/m32.o" | grep -q 'ELF 32-bit' && ok "-m32: the object is i386 (the option reached gcc)" || bad "-m32: the object is i386" "$(file -b "$tmp/m32.o")"
+
+# -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2, the kernel's real-mode boot code: Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# --regparm=3 --m16). ILP32 (long and pointers are 4 bytes), QBE's i386_regparm3, a 32-bit object whose code is 16-bit code (.code16gcc: the
+# operand size prefixes are in the bytes, objdump -m i8086 shows them), the host's 64-bit headers are not read (freestanding).
+cat > "$tmp/rm.c" <<'EOF2'
+struct hdr { unsigned char a; unsigned short b; unsigned long c; unsigned long long d; void *p; };
+static inline unsigned char rdfs8(unsigned int addr)
+{
+	unsigned char v;
+	asm volatile("movb %%fs:%1,%0" : "=q"(v) : "m"(*(unsigned char *)addr));
+	return v;
+}
+int rm(struct hdr *h, volatile unsigned short *io, int n)
+{
+	int s = 0;
+	for (int i = 0; i < n; i++)
+		s += rdfs8(0x413 + i) + (int)h->c;
+	*io = (unsigned short)s;
+	return s + (int)sizeof(long) * 100 + (int)sizeof(struct hdr) * 1000 + (int)sizeof(void *) * 10000;
+}
+EOF2
+rmflags=(-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2 -ffreestanding -fno-pic -mno-mmx -mno-sse -fno-stack-protector -fno-strict-aliasing -fomit-frame-pointer -Os -g -Wall)
+check "-m16 -march=i386 -mregparm=3: the kernel's real-mode options" pb -c "${rmflags[@]}" "$tmp/rm.c" -o "$tmp/rm.o"
+used pathb rm.c && ok "the real-mode compile is Path B's" || bad "the real-mode compile is Path B's" "$(tail -1 "$tmp/log")"
+file -b "$tmp/rm.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is ELF32 (i386)" || bad "-m16: the object is ELF32" "$(file -b "$tmp/rm.o")"
+objdump -d -m i8086 "$tmp/rm.o" | grep -qE '66 (55|c3)' && ok "-m16: 16-bit code (the operand size prefixes of .code16gcc)" || bad "-m16: 16-bit code" "$(objdump -d -m i8086 "$tmp/rm.o" | head -8 | tr '\n' ' ')"
+pb -S "${rmflags[@]}" "$tmp/rm.c" -o "$tmp/rm.s" 2>/dev/null
+grep -q '\.code16gcc' "$tmp/rm.s" && ok "-m16: .code16gcc in the assembly" || bad "-m16: .code16gcc" "none"
+! grep -q '%[rx]' "$tmp/rm.s" && ok "-m16: 32-bit registers only (no %r.. or %xmm)" || bad "-m16: no 64-bit registers" "$(grep -m1 '%[rx]' "$tmp/rm.s")"
+# the same file with gcc: the same sizes (ILP32, long long 8 aligned on 4) and the same symbols
+gcc -m16 -march=i386 -mregparm=3 -ffreestanding -fno-pic -mno-sse -fno-stack-protector -Os -c "$tmp/rm.c" -o "$tmp/rm-gcc.o" 2>/dev/null
+[ "$(nm -g "$tmp/rm.o" | awk '$3 !~ /^__pathb/ {print $2 $3}' | sort | tr -d '\n')" = "$(nm -g "$tmp/rm-gcc.o" | awk '{print $2 $3}' | sort | tr -d '\n')" ] &&
+  ok "-m16: the symbols are gcc's" || bad "-m16: the symbols are gcc's" "$(nm "$tmp/rm.o" | tr '\n' ' ')"
+# without -m16 alone (cdecl, i386): -m16 with no -mregparm is QBE's i386 convention
+check "-m16 alone: Path B, cdecl" pb -c -m16 -ffreestanding "$tmp/rm.c" -o "$tmp/rm1.o"
+used pathb rm.c && ok "-m16 alone is Path B's" || bad "-m16 alone is Path B's" "$(tail -1 "$tmp/log")"
+# a unit the 32-bit target cannot do (floating point: QBE's i386 has none yet) is refused, and goes to gcc only with NFCXX_PATHB_FALLBACK=gcc
+refuses "-m16: floating point is refused" "i386\|floating\|SSA route" pb -c -m16 -ffreestanding "$tmp/fp.c" -o "$tmp/x.o"
+NFCXX_PATHB_FALLBACK=gcc pb -c -m16 -mregparm=3 -ffreestanding "$tmp/fp.c" -o "$tmp/fpfb.o" >/dev/null 2>&1 && tail -1 "$tmp/log" | grep -q '^gcc .*Path B refused' &&
+  ok "-m16 with NFCXX_PATHB_FALLBACK=gcc: gcc builds what Path B refuses" || bad "-m16 with NFCXX_PATHB_FALLBACK=gcc" "$(tail -1 "$tmp/log")"
+check "-ftrivial-auto-var-init=pattern compiles with gcc" pb -c -ftrivial-auto-var-init=pattern "$tmp/int.c" -o "$tmp/tz.o"
+used gcc int.c && ok "-ftrivial-auto-var-init=pattern went to gcc (Path B has no pattern fill)" || bad "-ftrivial-auto-var-init=pattern went to gcc" "$(tail -1 "$tmp/log")"
+# -ftrivial-auto-var-init=zero (the kernel's CONFIG_INIT_STACK_ALL_ZERO) is Path B's: a local without an initializer is zero from its
+# declaration. The program reads such locals (scalars, arrays, a struct's padding, nested scopes, loops) after dirtying the stack.
+check "-ftrivial-auto-var-init=zero compiles on Path B" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
+used pathb int.c && ok "-ftrivial-auto-var-init=zero stays on Path B" || bad "-ftrivial-auto-var-init=zero stays on Path B" "$(tail -1 "$tmp/log")"
+avi=$root/tests/c/auto-var-init/zero_locals.c
+pbrun "-ftrivial-auto-var-init=zero: uninitialized locals read as zero" 0 "$avi" -O2 -ftrivial-auto-var-init=zero
+used pathb zero_locals.c && ok "-ftrivial-auto-var-init=zero: that compile was Path B's" || bad "-ftrivial-auto-var-init=zero: that compile was Path B's" "$(tail -1 "$tmp/log")"
+pbrun "-ftrivial-auto-var-init=zero -O0 too" 0 "$avi" -ftrivial-auto-var-init=zero
+if pb -O2 "$avi" -o "$tmp/noavi" >/dev/null 2>&1 && "$tmp/noavi" >/dev/null 2>&1; then bad "without the option the locals are not zeroed" "the program passed"; else ok "without the option the locals are not zeroed (the test reads dirty stack)"; fi
 check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
 used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
-check "-Wa,* compiles with gcc" pb -c -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
-used gcc a.c && ok "-Wa,* went to gcc" || bad "-Wa,* went to gcc" "$(tail -1 "$tmp/log")"
+# -Wa,*: options of the assembler step. Path B assembles QBE's output with the host cc, so the ones that mean the same for it are
+# passed on to that step (scripts/pathb-cc --as-opt) and the compile stays Path B's; any other is gcc's.
+printf 'extern int ext;\nint rd(void) { return ext; }\n' > "$tmp/rl.c"
+check "-Wa,--fatal-warnings --noexecstack builds" pb -c -Wa,--fatal-warnings -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
+used pathb a.c && ok "-Wa,--fatal-warnings stays on Path B" || bad "-Wa,--fatal-warnings stays on Path B" "$(tail -1 "$tmp/log")"
+check "-Wa,-mrelax-relocations=no builds" pb -c -fPIC -Wa,-mrelax-relocations=no "$tmp/rl.c" -o "$tmp/rl_no.o"
+used pathb rl.c && ok "-Wa,-mrelax-relocations=no stays on Path B" || bad "-Wa,-mrelax-relocations=no stays on Path B" "$(tail -1 "$tmp/log")"
+check "no -Wa: the default relocation" pb -c -fPIC "$tmp/rl.c" -o "$tmp/rl_def.o"
+objdump -r "$tmp/rl_no.o" | grep -q 'R_X86_64_GOTPCREL ' && ok "-Wa,-mrelax-relocations=no reached the assembler (R_X86_64_GOTPCREL)" || bad "-Wa,-mrelax-relocations=no reached the assembler" "$(objdump -r "$tmp/rl_no.o" | grep GOT)"
+objdump -r "$tmp/rl_def.o" | grep -q 'R_X86_64_REX_GOTPCRELX' && ok "default: relaxable relocation (R_X86_64_REX_GOTPCRELX)" || bad "default: relaxable relocation" "$(objdump -r "$tmp/rl_def.o" | grep GOT)"
+check "-Wa,a,b (comma list) builds" pb -c -Wa,--fatal-warnings,-mrelax-relocations=no "$tmp/rl.c" -o "$tmp/rl_l.o"
+used pathb rl.c && ok "a comma list of known -Wa options stays on Path B" || bad "a comma list of known -Wa options" "$(tail -1 "$tmp/log")"
+check "-Wa,--defsym compiles with gcc" pb -c -Wa,--defsym,WA_SYM=1 -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa2.o"
+used gcc a.c && ok "an unknown -Wa option went to gcc" || bad "an unknown -Wa option went to gcc" "$(tail -1 "$tmp/log")"
+tail -1 "$tmp/log" | grep -q 'assembler option' && ok "the log says why" || bad "the log says why" "$(tail -1 "$tmp/log")"
+nm "$tmp/wa2.o" | grep -q WA_SYM && ok "-Wa,--defsym reached gcc's assembler" || bad "-Wa,--defsym reached gcc's assembler" "$(nm "$tmp/wa2.o")"
+# the kernel's options that change the code and that QBE cannot write: gcc's, never dropped (-mindirect-branch=thunk*: retpolines;
+# -mindirect-branch-register, -mindirect-branch-cs-prefix, -mrecord-mcount, -fpatchable-function-entry, -fzero-call-used-regs, ...)
+for o in -mindirect-branch=thunk-extern -mfunction-return=thunk-extern -mharden-sls=all -mindirect-branch-register -mindirect-branch-cs-prefix \
+         -mrecord-mcount -fpatchable-function-entry=16,16 -fzero-call-used-regs=used-gpr -frandomize-layout-seed-file=/nonexistent-seed \
+         -ftrivial-auto-var-init=pattern -m32; do
+  pb -c $o "$tmp/int.c" -o "$tmp/o.o" >/dev/null 2>&1; used gcc int.c && tail -1 "$tmp/log" | grep -qF -- "$o" && ok "$o is gcc's" || bad "$o is gcc's" "$(tail -1 "$tmp/log")"
+done
+# the same options asking for nothing are dropped: Path B builds
+check "=keep / =none options" pb -c -mindirect-branch=keep -mfunction-return=keep -mharden-sls=none "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "-mindirect-branch=keep -mfunction-return=keep -mharden-sls=none: Path B" || bad "keep/none: Path B" "$(tail -1 "$tmp/log")"
+# -mstack-protector-guard*: only meaningful with a stack protector in effect (the last -fstack-protector* / -fno-stack-protector)
+sg="-mstack-protector-guard=global -mstack-protector-guard-reg=fs -mstack-protector-guard-symbol=__stack_chk_guard"
+check "stack-protector guard options, no protector" pb -c $sg "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "guard options without -fstack-protector: Path B" || bad "guard options without -fstack-protector" "$(tail -1 "$tmp/log")"
+check "guard options, -fno-stack-protector last" pb -c -fstack-protector-strong $sg -fno-stack-protector "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "guard options, -fno-stack-protector last: Path B" || bad "guard options, -fno-stack-protector last" "$(tail -1 "$tmp/log")"
+check "guard options with -fstack-protector-strong" pb -c $sg -fstack-protector-strong "$tmp/int.c" -o "$tmp/o.o"
+used gcc int.c && tail -1 "$tmp/log" | grep -q 'stack-protector-guard' && ok "guard options with a protector (given before it): gcc" || bad "guard options with a protector: gcc" "$(tail -1 "$tmp/log")"
 refuses "an option gcc does not know is gcc's error" "unrecognized\|unknown" pb -c -fno-such-option "$tmp/int.c" -o "$tmp/x.o"
 # a compile that Path B itself refuses moves to gcc only when asked (NFCXX_PATHB_FALLBACK=gcc)
 printf 'typedef int v4 __attribute__((vector_size(16)));\nv4 f(v4 a, v4 b) { return a + b; }\n' > "$tmp/vec.c"   # a vector type: Path B has none
@@ -269,9 +374,26 @@ refuses "-fsanitize refused" "fsanitize" pb -c -fsanitize=address "$tmp/a.c" -o 
 refuses "C++ refused" "C++" pb -c -x c++ "$tmp/a.c" -o "$tmp/x.o"
 refuses "unknown backend refused" "unknown NFCXX_BACKEND" env NFCXX_BACKEND=nope "$nfcc" -c "$tmp/a.c"
 
-# The default stays qbe
-if [ -x "$root/build/cproc/cproc-qbe" ]; then
-  out=$("$nfcc" --version); grep -q 'backend qbe' <<<"$out" && ok "default backend is qbe" || bad "default backend is qbe" "$out"
+# The default backend: Path B on x86-64 Linux when the harness is built (a unit it cannot take goes to gcc), qbe otherwise; NFCXX_BACKEND chooses.
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  out=$(env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK "$nfcc" --version)
+  grep -q 'backend pathb' <<<"$out" && ok "default backend is pathb (harness built)" || bad "default backend is pathb (harness built)" "$out"
+  printf 'int plain(int x) { return x * 3 + 1; }\n' > "$tmp/plain.c"
+  rm -f "$tmp/dlog"
+  if env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK NFCXX_PATHB_LOG="$tmp/dlog" "$nfcc" -c "$tmp/plain.c" -o "$tmp/d1.o" >/dev/null 2>&1 &&
+     grep -q '^pathb ' "$tmp/dlog"; then ok "default: a plain unit is made by Path B"; else bad "default: a plain unit is made by Path B" "$(cat "$tmp/dlog" 2>&1)"; fi
+  rm -f "$tmp/dlog"
+  if env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK NFCXX_PATHB_LOG="$tmp/dlog" "$nfcc" -c -fshort-enums "$tmp/plain.c" -o "$tmp/d2.o" >/dev/null 2>&1 &&
+     grep -q '^gcc ' "$tmp/dlog"; then ok "default: a unit with an option Path B cannot honour is made by gcc"; else bad "default: a unit with an option Path B cannot honour is made by gcc" "$(cat "$tmp/dlog" 2>&1)"; fi
+  # a unit Path B itself refuses (inline asm it cannot emit) falls back to gcc by default, but not with an explicit NFCXX_BACKEND=pathb
+  cat > "$tmp/refuse.c" <<'EOF2'
+int f(int x) { int r; __asm__ volatile("lea 1(%1), %0" : "=r"(r) : "r"(x), "i"(sizeof(int)) : "cc", "memory"); return r; }
+EOF2
+  if NFCXX_BACKEND=pathb "$nfcc" -c "$tmp/refuse.c" -o "$tmp/d3.o" >/dev/null 2>&1; then :; else
+    env -u NFCXX_BACKEND -u NFCXX_PATHB_FALLBACK "$nfcc" -c "$tmp/refuse.c" -o "$tmp/d3.o" >/dev/null 2>&1 &&
+      ok "default: a unit Path B refuses is made by gcc" || bad "default: a unit Path B refuses is made by gcc" ""
+  fi
 fi
+out=$(NFCXX_BACKEND=qbe "$nfcc" --version 2>&1) && grep -q 'backend qbe' <<<"$out" && ok "NFCXX_BACKEND=qbe still chooses qbe" || { [ -x "$root/build/cproc/cproc-qbe" ] && bad "NFCXX_BACKEND=qbe still chooses qbe" "$out"; }
 echo "nfcc pathb: $pass passed, $fail failed"
 [ $fail = 0 ]

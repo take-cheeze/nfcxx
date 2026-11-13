@@ -15,6 +15,10 @@ for f in tests/cases/*.cpp; do
   if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1); [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then
     echo "skip $f (x86-64 only: $x86only)"; continue
   fi
+  # AARCH64-QBE-XFAIL: a documented limit of the qbe backend on Linux aarch64 (QBE's arm64 emitter); the other backends run it.
+  if qxf=$(sed -n 's,^// AARCH64-QBE-XFAIL: *\(.*\),\1,p' "$f" | head -1); [ -n "$qxf" ] && [ "$be" = qbe ] && [ "$(uname -s)-$(uname -m)" = Linux-aarch64 ]; then
+    echo "skip $f (qbe on Linux aarch64: $qxf)"; continue
+  fi
   if linuxonly=$(sed -n 's,^// X86-ONLY-LINUX: *\(.*\),\1,p' "$f" | head -1); [ -n "$linuxonly" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" != x86_64 ]; then
     echo "skip $f (x86-64 Linux only: $linuxonly)"; continue
   fi

@@ -19,6 +19,12 @@
 #   --ir-opt=LIST    (NFCXX_IR_OPT)  the IR passes (scripts/pathb-ir-opt.rb), below; default inline; --ir-opt=none turns them off;
 #                    --ir-opt-max=BYTES (NFCXX_IR_OPT_MAX)
 #   --emitter=ssa|mruby  (NFCXX_PATHB_EMITTER)  the QBE IL emitter
+#   --i386           the 32-bit x86 target (ILP32: long and pointers are 4 bytes, long long 8 on 4; the front end's --target=linux_i686 --freestanding),
+#                    QBE's i386 target, and a 32-bit object (cc -m32). With --regparm=3: gcc's -mregparm=3 (QBE's i386_regparm3), as the
+#                    kernel builds its real-mode code; with --m16 the code is for real mode (.code16gcc: gas adds the operand and address
+#                    size prefixes, gcc's -m16). -march=i386 is what QBE's i386 code is. The SSA emitter only; no floating point (QBE's i386
+#                    has none yet), no long double, no thread-local objects, no checks on null, shifts and bounds (a bare target has no runtime
+#                    to trap into: scripts/pathb-ssa-qbe.rb, Qbe.ptr32). docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
 #   --long-double=trap  (PATHB_LONG_DOUBLE=trap, or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
 #                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
@@ -39,7 +45,8 @@ safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
 asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
 passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the inliner by default; none or off turns the passes off
 passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
-pic=()
+pic=(); asopt=()
+i386=0; regparm=0; m16=0
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
 nofp=0; nounwind=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
@@ -50,6 +57,10 @@ while [ $# -gt 0 ]; do
     -o) out=$2; shift ;;
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
+    --i386|--target=linux_i686) i386=1 ;;
+    --regparm=3) regparm=1 ;;
+    --regparm=*) echo "pathb-cc: $1: only -mregparm=3 is supported" >&2; exit 2 ;;
+    --m16) m16=1 ;;
     --pic) pic=(--pic) ;;   # -fPIC: the objects go into a shared object (scripts/pathb-ssa-qbe.rb, Qbe.pic)
     --sanitize=*) dump_opts+=("$1") ;;
     --dialect=*) opts+=("$1") ;;   # the EDG front-end mode (g++ or clang), as nfcxx's --dialect
@@ -60,10 +71,12 @@ while [ $# -gt 0 ]; do
     --emitter=*) emitter=${1#--emitter=} ;;
     --long-double=trap) ld_trap=1 ;;
     --no-fp) nofp=1 ;;          # -mno-sse: qbe -n, and the assembly is refused when it uses SSE or x87 (status 5)
+    --as-opt=*) asopt+=("${1#--as-opt=}") ;;   # an option of the assembler step (nfcc's -Wa,*): the host cc assembling QBE's output gets it
     --no-unwind) nounwind=1 ;;  # -fno-asynchronous-unwind-tables: qbe -U, no .cfi directives
     -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
     -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
     -nostdinc|-ffreestanding|-fshort-wchar) opts+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) dump_opts+=("$1") ;;   # the IR zeroes a local without an initializer (be/nfcxx_ir.c)
     -isystem|-idirafter) opts+=("$1" "$2"); shift ;;
     -isystem?*|-idirafter?*) opts+=("$1") ;;
     --keep=*) keep=${1#--keep=} ;;
@@ -79,6 +92,18 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$src" ] || { echo "pathb-cc: no input file" >&2; exit 2; }
+# The 32-bit x86 target: the front end reads it as EDG's linux_i686 (freestanding: the host's headers are 64-bit), QBE's i386 or i386_regparm3,
+# and the assembly is a 32-bit object.
+cc32=(); i386opt=()
+if [ $i386 = 1 ]; then
+  [ "$emitter" = ssa ] || { echo "pathb-cc: --i386 needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
+  dump_opts+=(--target=linux_i686 --freestanding); cc32=(-m32)
+  i386opt=(--target=i386); [ $regparm = 0 ] || i386opt=(--target=i386_regparm3)
+  [ $m16 = 0 ] || i386opt+=(--m16)
+  pic=()
+else
+  [ $regparm = 0 ] && [ $m16 = 0 ] || { echo "pathb-cc: --regparm and --m16 need --i386" >&2; exit 2; }
+fi
 [ -n "$out" ] || out=$(basename "${src%.*}").o
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -141,11 +166,11 @@ case $emitter in ssa|mruby) ;; *) echo "pathb-cc: --emitter (NFCXX_PATHB_EMITTER
 rc=0
 [ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: --asan needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $rc != 124 ] && [ $rc != 5 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
-    echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
+    echo "pathb-cc: $src: the optimized IR is refused ($(head -1 "$tmp/$n.emit")), using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; --emitter=mruby
@@ -175,7 +200,8 @@ if [ "$emitter" = mruby ]; then
 fi
 if [ -n "$keep" ]; then mkdir -p "$keep"; cp "$tmp/$n.ir" "$tmp/$n.s" "$keep/"; [ ! -f "$tmp/$n.ssa" ] || cp "$tmp/$n.ssa" "$keep/"; fi
 if [ -n "${NFCXX_GCC:-}" ]; then
-  as -o "$out" "$tmp/$n.s"   # cosmocc does not take assembly input; the QBE output is x86_64 ELF, as gcc-cc does (--cosmo)
+  as ${asopt[@]+"${asopt[@]}"} -o "$out" "$tmp/$n.s"   # cosmocc does not take assembly input; the QBE output is x86_64 ELF, as gcc-cc does (--cosmo)
 else
-  cc -c -o "$out" "$tmp/$n.s"
+  asw=(); for x in ${asopt[@]+"${asopt[@]}"}; do asw+=("-Wa,$x"); done
+  cc ${cc32[@]+"${cc32[@]}"} -c ${asw[@]+"${asw[@]}"} -o "$out" "$tmp/$n.s"
 fi
