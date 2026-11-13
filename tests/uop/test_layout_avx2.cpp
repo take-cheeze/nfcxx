@@ -158,6 +158,53 @@ void run_packed_case(const std::string& dir, int64_t M, int64_t N, int64_t K, in
   }
 }
 
+// The threaded packed kernel (emit_gemm_rowsum_packed_mt_c): the same results at every thread count. Compiled with -pthread.
+void run_mt_case(const std::string& dir, int mr, int64_t M, int64_t N, int64_t K, int threads, std::mt19937& rng) {
+  std::string tag = "packed_mt" + std::to_string(mr) + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K) + "_t" + std::to_string(threads);
+  std::uniform_int_distribution<int> d(-4, 4);
+  std::vector<float> A(M * K), B(K * N);
+  for (auto& x : A) x = float(d(rng));
+  for (auto& x : B) x = float(d(rng));
+  std::vector<float> refC(M * N), refR(M, 0.0f);
+  for (int64_t m = 0; m < M; ++m)
+    for (int64_t n = 0; n < N; ++n) {
+      float s = 0;
+      for (int64_t k = 0; k < K; ++k) s += A[m * K + k] * B[k * N + n];
+      refC[m * N + n] = s;
+      refR[m] += s;
+    }
+  std::string src = emit_gemm_rowsum_packed_mt_c(M, N, K, mr);
+  std::string c = dir + "/" + tag + ".c", so = dir + "/" + tag + ".so";
+  { std::ofstream f(c); f << src; }
+  const char* cc = std::getenv("NFCUOP_CC");
+  std::string cmd = std::string(cc && *cc ? cc : "cc") + " -O2 -mavx2 -mfma -pthread -shared -fPIC -o '" + so + "' '" + c + "'";
+  if (std::system(cmd.c_str()) != 0) {
+    std::fprintf(stderr, "FAIL %s: compile failed\n", tag.c_str());
+    ++failures;
+    return;
+  }
+  void* h = dlopen(so.c_str(), RTLD_NOW | RTLD_LOCAL);
+  using MtFn = void (*)(const float*, const float*, float*, float*, float*, int);
+  MtFn fn = h ? reinterpret_cast<MtFn>(dlsym(h, "nfc_gemm_rowsum")) : nullptr;
+  if (!fn) {
+    std::fprintf(stderr, "FAIL %s: load\n", tag.c_str());
+    ++failures;
+    return;
+  }
+  std::vector<float> C(M * N, -999.0f), R(M, -999.0f), Bp(K * N, -999.0f);
+  fn(A.data(), B.data(), C.data(), R.data(), Bp.data(), threads);
+  dlclose(h);
+  int bad = 0;
+  for (int64_t i = 0; i < M * N; ++i) bad += C[i] != refC[i];
+  for (int64_t m = 0; m < M; ++m) bad += R[m] != refR[m];
+  if (bad) {
+    std::fprintf(stderr, "FAIL %s: %d value(s) differ from the reference\n", tag.c_str(), bad);
+    ++failures;
+  } else {
+    std::printf("ok   %s\n", tag.c_str());
+  }
+}
+
 int main() {
   if (!cpu_has_flags({"avx2", "fma"})) {
     std::printf("SKIP test_layout_avx2: this CPU has no AVX2 and FMA\n");
@@ -193,6 +240,13 @@ int main() {
   expect_throw(GemmVariant::VecN, 8, 12, 4, "VecN with N = 12");
   expect_throw(GemmVariant::VecM, 12, 8, 4, "VecM with M = 12");
   expect_throw(GemmVariant::VecN, 8, 8, 0, "K = 0");
+
+  // Threaded packed kernel: the same results at 1, 2, 3, 4 and 64 threads (more threads than row tiles included).
+  for (int mr : {4, 6}) {
+    for (int threads : {1, 2, 3, 4, 64}) {
+      run_mt_case(dir, mr, 12 * mr, 64, 17, threads, rng);
+    }
+  }
 
   // Packed, register-blocked kernel: M % 4 and N % 16, K values with no alignment requirement.
   for (int mr : {4, 6}) {
