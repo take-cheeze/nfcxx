@@ -54,7 +54,7 @@ std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr
 // The kernel a solver plan describes: the chosen GEMM variant and rowsum variant, and the storages the plan holds. Maps
 //   avx2-vec-n + reduce-horizontal         -> emit_gemm_rowsum_c(VecN)
 //   avx2-vec-m + reduce-vertical           -> emit_gemm_rowsum_c(VecM, storage of C; A must match)
-//   avx2-packed-n + reduce-horizontal      -> emit_gemm_rowsum_packed_mt_c (B must be Panel16)
+//   avx2-packed-n + reduce-horizontal      -> emit_gemm_rowsum_packed_mt_c (B must be Panel)
 // and throws std::invalid_argument for any other plan (no emitter for that combination, or storages the emitter cannot
 // mix). The shape must be one the plan was solved for.
 std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K);

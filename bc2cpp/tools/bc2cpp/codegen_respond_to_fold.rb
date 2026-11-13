@@ -19,9 +19,11 @@ module RespondToFold
     folded = insn.sym == 'respond_to?' && respond_to_fold(insn, kwargs)
     return super unless folded
 
-    expr, why = folded
+    expr, why, asks = folded
     d = insn.reg
     @respond_to_fold_count = (@respond_to_fold_count || 0) + 1
+    return respond_to_fold_partial_code(insn, kwargs, expr, why, asks, super) if asks
+
     "  // RESPOND_TO_FOLD :#{respond_to_fold_name(insn, kwargs)} -- #{why}\n" \
       "#ifdef BC2CPP_UNREGISTERED_VERIFY\n" \
       "  {\n  mrb_bool bc2cpp_rtf = #{expr};\n#{super}" \
@@ -218,7 +220,7 @@ module RespondToFold
     return nil if members.nil? || members.include?(CallFacts::CLASS_OBJECT)
 
     verdicts = members.to_h { |klass| [klass, respond_to_fold_exact(klass, meth)] }
-    return nil if verdicts.value?(nil)
+    return respond_to_fold_partial(meth, recv, verdicts) if verdicts.value?(nil)
 
     yes = verdicts.select { |_, v| v }.keys.sort
     return ['false', 'no class reaches a definition'] if yes.empty?
@@ -226,6 +228,59 @@ module RespondToFold
     bits = yes.reduce(0) { |mask, klass| mask | numeric_class_bit(klass) }
     member = class_narrowing_membership(bits, recv)
     member && ["(#{member})", "only #{yes.join(', ')} define it (in Ruby)"]
+  end
+
+  # RESPOND_TO_OWNERS: when some member's answer is not known (a core or native class such as Proc), the call stays,
+  # but only for a receiver that is neither an instance of a member that answers true nor an exact instance of a
+  # value class (RESPOND_TO_OWNERS_VALUE_CLASSES) outside the members. Members are every class that may answer
+  # (Answers#members), so such an instance reaches no definition: it answers false, unless a singleton def or a module
+  # an object could extend defines the name (the exact-class test accepts an object with a singleton class).
+  # [expression, reason, guard of the receivers that keep the call], or nil.
+  RESPOND_TO_OWNERS_VALUE_CLASSES = %w[NilClass TrueClass FalseClass Integer Float Symbol String Array Hash Range].freeze
+
+  def respond_to_fold_partial(meth, recv, verdicts)
+    return nil if ENV['BC2CPP_RESPOND_TO_OWNERS'] == '0'
+
+    d = call_facts_answers.definers(meth)
+    return nil if d.nil? || d[:singleton] || !d[:modules].empty?
+
+    members = verdicts.keys.to_set
+    outside = RESPOND_TO_OWNERS_VALUE_CLASSES.reject { |klass| members.include?(klass) }
+    return nil if outside.empty?
+
+    yes = verdicts.select { |_, v| v }.keys.sort
+    member = yes.empty? ? 'false' : class_narrowing_membership(yes.reduce(0) { |m, k| m | numeric_class_bit(k) }, recv)
+    return nil unless member
+
+    falses = outside.map { |klass| respond_to_fold_class_guard(klass, recv) }.join(' || ')
+    asking = verdicts.select { |_, v| v.nil? }.keys.sort
+    ["(#{member})", "#{asking.join(', ')} keep the call; #{outside.join(', ')} answer false" \
+                    "#{yes.empty? ? '' : "; #{yes.join(', ')} answer true"}",
+     "!(#{falses} || (#{member}))"]
+  end
+
+  # An exact-class test against the core class +klass+ of the receiver whose class is in bc2cpp_rtc (nil through
+  # mrb_nil_p): bc2cpp_obj_class gives the real class, as bc2cpp_class_is compares.
+  def respond_to_fold_class_guard(klass, recv)
+    return "mrb_nil_p(#{recv})" if klass == 'NilClass'
+
+    "bc2cpp_rtc == M->#{NativeOwnerMap::CORE_FIELD_OWNERS.key(klass)}"
+  end
+
+  # The call runs only for a receiver the asking guard accepts. A verify build makes it for every receiver and aborts
+  # when a folded answer differs.
+  def respond_to_fold_partial_code(insn, kwargs, expr, why, asks, call)
+    d = insn.reg
+    klass = "  struct RClass* bc2cpp_rtc = #{obj_class_expr("r#{d}")};\n"
+    "  // RESPOND_TO_FOLD :#{respond_to_fold_name(insn, kwargs)} -- #{why}\n" \
+      "#ifdef BC2CPP_UNREGISTERED_VERIFY\n" \
+      "  {\n#{klass}  mrb_bool bc2cpp_rta = #{asks};\n  mrb_bool bc2cpp_rtf = #{expr};\n#{call}" \
+      "  if (!bc2cpp_rta && bc2cpp_rtf != mrb_test(r#{d})) {\n" \
+      "    fprintf(stderr, \"bc2cpp: RESPOND_TO_FOLD: folded %d, respond_to? said %d\\n\", (int)bc2cpp_rtf, (int)mrb_test(r#{d}));\n" \
+      "    abort();\n  }\n  }\n" \
+      "#else\n" \
+      "  {\n#{klass}  if (#{asks}) {\n#{call}  } else {\n  r#{d} = mrb_bool_value(#{expr});\n  }\n  }\n" \
+      "#endif\n"
   end
 
   # true, false, or nil when the closed world does not say, for an instance of exactly +klass+.

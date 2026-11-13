@@ -134,8 +134,8 @@ code has none. `arch/x86/realmode/rm` is not built in this configuration and is 
 
 ## Path B (`NFCXX_BACKEND=pathb`): how many C files it builds
 
-nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is opt-in, and it
-takes the kernel's option set. `KCC=nfcc NFCXX_BACKEND=pathb` no longer stops at the first file (it did: `-nostdinc`,
+nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is the default on x86-64 Linux
+when the harness is built (a unit it cannot take is made by gcc), and it takes the kernel's option set. `KCC=nfcc NFCXX_BACKEND=pathb` no longer stops at the first file (it did: `-nostdinc`,
 `-isystem DIR`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding` and the `-m*` options were refused, 0 of 615).
 Each option of the kernel's command line is in one of three classes:
 
@@ -143,8 +143,9 @@ Each option of the kernel's command line is in one of three classes:
 |---|---|---|
 | honoured by Path B | `-nostdinc`, `-isystem DIR`, `-idirafter DIR` (the include path of the front end: `-nostdinc` drops the host's directories, `-isystem $(gcc -print-file-name=include)` gives `<stdarg.h>`); `-funsigned-char` (EDG's `--unsigned_chars`; the IR's `char` is renamed `unsigned_char`); `-fshort-wchar` (the headers' `wchar_t` is `unsigned short`; EDG types `L"x"` as `int`, so a unit with a wide literal is gcc's); `-ffreestanding` (`__STDC_HOSTED__` is 0); `-fno-asynchronous-unwind-tables` (QBE `-U`) | passed to `scripts/pathb-cc` |
 | checked | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | QBE runs with `-n`; the unit's assembly is refused (status 5) if it names an SSE or x87 register or instruction, as `qbe-cc` does. Refused units go to gcc with `NFCXX_PATHB_FALLBACK=gcc` |
+| honoured | `-ftrivial-auto-var-init=zero` (`CONFIG_INIT_STACK_ALL_ZERO`) | the IR zeroes each automatic variable without an initializer, padding included, at its declaration (`be/nfcxx_ir.c` `ir_decl_zero`, `NFCXX_IR_AUTO_INIT=zero`); not VLAs, not `__attribute__((uninitialized))` |
 | no effect on QBE's code | `-mno-red-zone`, `-mcmodel=kernel`, `-mpreferred-stack-boundary=`, `-mtune=`, `-mno-mmx`, `-mno-3dnow`, `-mno-avx`, `-mskip-rax-setup`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-strict-aliasing`, `-fwrapv`, `-fno-common`, `-fno-allow-store-data-races`, `-fno-optimize-sibling-calls`, `-fno-function-sections`, `-fconserve-stack`, `-fcf-protection=none`, `-fstrict-flex-arrays=`, `-falign-*` (the reasons of `NFCXX_QBE_KERNEL=1` above) | dropped on Path B |
-| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=zero`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
+| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=pattern`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
 
 `NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
 for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
@@ -152,7 +153,9 @@ each option (include path, the signedness and `CHAR_MIN`, `wchar_t`, `__STDC_HOS
 gcc fallback, against gcc's own result).
 
 Two things this does not do. A kernel with `CONFIG_INIT_STACK_ALL_ZERO` passes `-ftrivial-auto-var-init=zero` to every
-file, and every file is then gcc's (Path B does not zero automatic variables; cproc did). And the kernel was not built in the
+file: that was the biggest reason for a gcc compile (650 of 914 in the 6.8 tinyconfig measurement), and Path B now honours it
+(`tests/c/auto-var-init/zero_locals.c`, run by `tests/nfcc/run.sh` against gcc with the same option); the next measurement
+shows the remaining fallbacks. And the kernel was not built in the
 session that made this change (the sandbox does not run `make` on a downloaded tree, and the task said not to): the
 option handling is measured on single files and on the kernel's option list, not on the 615 files. The next measurement is
 `KCC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=DIR/pathb.log scripts/linux-qemu.sh`, or
@@ -191,6 +194,43 @@ The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (
 - `drivers/video/console/vgacon.c`: QBE propagates a pointer constant through copies and phis into the displacement of the
   access that uses it, unchecked (`phi_wide_pointer_constant.c`). A pointer constant that does not fit in 32 bits is loaded
   from a one-word data cell (the cleaner fix is a 32-bit check in the QBE fork's `amd64/isel.c`, outside this repo).
+
+### Measured: the kernel's own option set, `NFCXX_PATHB_FALLBACK=gcc`
+
+A second measurement, with the options of the kernel's own `.cmd` files kept (`-mno-sse`, `-funsigned-char`, `-fshort-wchar`, ...;
+only `-ftrivial-auto-var-init=zero` is dropped, which sends every file to gcc), the 614 translation units of a tinyconfig tree
+compiled by `nfcc -c` with `NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=FILE`. A file the log names as gcc's was
+not built by Path B:
+
+| state | built by Path B | gcc's |
+|---|---|---|
+| before | 226 | 388 |
+| after | 581 | 33 |
+
+What the 388 were (355 of them refusals, the rest the 33 below), and what fixed each (regression cases in `tests/c/inline_asm_goto_always_inline*.c`,
+`tests/c/inline_asm_local_address_input.c` and `tests/nfcc/run.sh`):
+
+- 321: the volatile access helpers (`__pathb_vld_*`, `__pathb_vst_*`) were all emitted into every unit that has a volatile
+  access, the `float` and `double` ones too (`movss`, `movsd`), and `-mno-sse` refuses a unit with SSE code. Only the operations
+  a unit uses get a helper now (`volatile_helpers` in `scripts/pathb-ssa-qbe.rb`).
+- 32: `_static_cpu_has` (`asm goto` with `"i"` operands of an `__always_inline` function's parameter). Two causes, both hidden
+  behind a fallback: `pathb-cc` emits the unoptimized IR when the optimized one is refused, and that IR cannot hold the function
+  (its operands are not constants without the inliner), so the unit failed with the second message and the first was never
+  shown (it is now: `the optimized IR is refused (REASON), using the unoptimized IR`). (1) The inliner's budgets (`--max-callee`,
+  `--max-growth`) left the call in a large unit, and (2) the address operand `&((const char *)boot_cpu_data.x86_capability)[bit >> 3]`
+  is an `offset` (a literal byte count) and then an `index` by a folded value, which `asm_symbol_of` read as a constant
+  only for the index. A function with an `immv` or `symv` operand is now inlined whatever its size and the module's growth.
+- 1: the address of a local as an input of a general asm block (`"D"(&val)`, `int3_selftest`): the operand is a slot name
+  with no declared type.
+- 1: a function's address converted to an integer after inlining (`wrmsrl_cstar((unsigned long)entry_SYSCALL32_ignore)`):
+  `conv_lines` had no type for a `&"fn"` operand.
+
+The 33 that remain are gcc's by design: 20 compile with `-m16 -mregparm=3` (the real-mode boot code), 8 with
+`-Wa,-mrelax-relocations=no` (`arch/x86/boot/compressed`), 5 have a wide character or string literal under `-fshort-wchar` (EDG
+types them `int`). Not covered here: a Path B object of a file that uses `ASM_CALL_CONSTRAINT` (`"+r"(current_stack_pointer)`,
+`register unsigned long current_stack_pointer asm("rsp")`) has an undefined reference to `current_stack_pointer`, which gcc's
+object does not: the register variable is a global of the IR, so the kernel link of such an object fails (page_alloc.o is one).
+The measurement counts compiles, not links.
 
 What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
 boot code (`arch/x86/boot`, `-m16`).
