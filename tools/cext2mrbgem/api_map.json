@@ -1,5 +1,5 @@
 {
-  "_comment": "CRuby -> mruby API map for convert_mrbgem.py. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
+  "_comment": "CRuby -> mruby API map for convert_mrbgem.rb. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
   "types": {
     "VALUE": "mrb_value",
     "ID": "mrb_sym"
@@ -700,6 +700,50 @@
       "needs_mrb": false,
       "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_UNLIKELY"
     },
+    "rb_class2name": {
+      "kind": "call",
+      "mruby": "mrb_class_name",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby first skips singleton and include classes (rb_class_real); mrb_class_name does not. An anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive)"
+    },
+    "rb_undef_method": {
+      "kind": "call",
+      "mruby": "mrb_undef_method",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the first argument is a struct RClass *, not a VALUE; a class variable there is passed unwrapped (special_arg_positions_class_only)"
+    },
+    "SYM2ID": {
+      "kind": "call",
+      "mruby": "mrb_symbol",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
+    },
+    "T_FIXNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_INTEGER",
+      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+    },
+    "rb_eNoMemError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"NoMemoryError\")",
+      "needs_mrb": true
+    },
+    "rb_warning": {
+      "kind": "call",
+      "mruby": "mrb_warn",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "prints on every call: CRuby's rb_warning prints only in verbose mode ($VERBOSE true), and rb_warn always prints. Output is 'warning: ' and the message on stderr, with no file or line; PRIsVALUE is not supported"
+    },
+    "rb_gc_location": {
+      "kind": "strip",
+      "mruby": "",
+      "needs_mrb": false,
+      "caveat": "identity: mruby's collector never moves objects (no relocation API in include/ or src/gc.c), so the location is the value itself; the argument stays in parentheses"
+    },
     "RB_TYPE_P": {
       "kind": "special",
       "handler": "type_p",
@@ -728,6 +772,12 @@
     ],
     "rb_define_class": [
       1
+    ],
+    "rb_class2name": [
+      0
+    ],
+    "rb_undef_method": [
+      0
     ]
   }
 }
