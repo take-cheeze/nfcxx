@@ -3,6 +3,7 @@
 // features in main. They are calls of the helpers of be/nfcxx_ldrt.c now, which ask the host's libgcc.
 // Other hosts build an empty main: the built-ins are x86's here.
 // EXPECT: 0
+// X86-ONLY: __builtin_cpu_init and __builtin_cpu_supports are x86's (cpuid); on an arm64 host EDG still defines __x86_64__, so the x86 path is compiled and answers wrongly (CI: want 0 got 2).
 // The exit code is the number of wrong answers: x86-64 has SSE2 and cmov, the AVX2 answer is the same twice, and the avx2 and fma
 // answers agree with the cpuid flags in /proc/cpuinfo (when it can be read).
 #include <stdio.h>
