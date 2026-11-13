@@ -186,8 +186,16 @@ EOF
   rejects "-m32" "m32" -m32 -c util.c -o rej.o
   rejects "-fsanitize=address" "fsanitize" -fsanitize=address -c util.c -o rej.o
   rejects "-fopenmp" "fopenmp" -fopenmp -c util.c -o rej.o
-  rejects "-ffast-math" "ffast-math" -ffast-math -c util.c -o rej.o
-  rejects "-funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
+  if [ $b = pathb ]; then
+    # Path B hands -ffast-math to gcc, which honours it: x != x is folded to 0 for a NaN (IEEE gives 1). -funsigned-char is
+    # honoured by Path B, see 7b.
+    printf 'int main(void) { volatile double z = 0; double x = z / z; return x != x; }\n' > nan.c
+    if "$nfcc" -ffast-math -O2 nan.c -o nan 2>/dev/null && ./nan; then ok "pathb: -ffast-math goes to gcc, which honours it"
+    else bad "pathb: -ffast-math goes to gcc, which honours it" "the NaN compare was not folded, or the compile failed"; fi
+  else
+    rejects "-ffast-math" "ffast-math" -ffast-math -c util.c -o rej.o
+    rejects "-funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
+  fi
   rejects "--coverage" "coverage" --coverage -c util.c -o rej.o
   rejects "-std=c++17" "C++" -std=c++17 -c util.c -o rej.o
   rejects "-x c++" "c++" -x c++ -c util.c -o rej.o
@@ -210,6 +218,14 @@ EOF
          ! readelf -rW pic.o | grep -q 'R_X86_64_32S\? '; then ok "passthrough: codegen options keep their order"
       else bad "passthrough: codegen options keep their order" "$(readelf -rW pic.o 2>&1 | grep R_X86 | head -2 | tr '\n' ' ')"; fi
     fi
+  elif [ $b = pathb ]; then
+    # Path B honours these (docs/notes/nfcc-pathb.md), so the qbe side's refusals do not apply: the compile is accepted and
+    # the program runs as with gcc. -funsigned-char: plain char is unsigned (uchar.c returns 0); -mno-sse: checked, and
+    # util.c has no SSE code, so it is accepted.
+    if "$nfcc" -funsigned-char uchar.c -o uchar 2>/dev/null && ./uchar; then ok "pathb: -funsigned-char honoured"
+    else bad "pathb: -funsigned-char honoured" "char stayed signed or the compile failed"; fi
+    if "$nfcc" -mno-sse -c util.c -o mnosse.o 2>/dev/null && [ -s mnosse.o ]; then ok "pathb: -mno-sse accepted"
+    else bad "pathb: -mno-sse accepted" "the compile failed"; fi
   else
     NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -funsigned-char" "funsigned-char" -funsigned-char -c util.c -o rej.o
     NFCXX_GCC_PASSTHROUGH=1 rejects "passthrough on qbe: -mno-sse" "mno-sse" -mno-sse -c util.c -o rej.o
