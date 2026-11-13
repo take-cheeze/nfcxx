@@ -702,7 +702,7 @@ module StaticDispatchRegistrations
         end
       end
       tokens.merge(found)
-      engine_tokens&.merge(found) unless native.include?(path) && File.expand_path(path).start_with?(third)
+      engine_tokens&.merge(found) unless native.include?(path)
       cite(found, "named in #{path.delete_prefix("#{File.expand_path(repo_root)}/")}")
     end
     tokens

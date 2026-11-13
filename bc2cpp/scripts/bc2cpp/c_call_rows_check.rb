@@ -213,4 +213,37 @@ frames = File.read(File.join(__dir__, '../../tools/bc2cpp/runtime/vm_frames.cxx'
 suite.check("the closed runtime's funcall looks up and falls back to method_missing through mrb_vm_find_method_rows",
             frames.scan(/\bmrb_vm_find_method_rows\(/).size == 2 && !frames.match?(/\bmrb_vm_find_method\(/))
 
+# TERNARY_NAMES: a condition picking one of two literals names both as lookups; a computed arm or a literal in the
+# condition leaves the operand in place.
+pick = <<~C
+  mrb_funcall(M, input, e.press ? "press" : "release", 1, key);
+  mrb_funcall(M, input, tap.frame == frame ? "tap" : "hold", 1, key);
+  mrb_funcall(M, o, ready ? "go" : name, 0);
+  mrb_funcall(M, o, kind == "x" ? "left" : "right", 0);
+C
+picked = CCallRows.blank(pick, base, cxx: true)
+suite.check("a condition's two literals are blanked (left: #{%w[press release tap hold].select { |t| picked.include?("\"#{t}\"") }.join(', ')})",
+            %w[press release tap hold].none? { |t| picked.include?("\"#{t}\"") })
+suite.check('a computed arm and a literal in the condition stay',
+            picked.include?('"go"') && picked.include?('"left"') && picked.include?('"right"'))
+suite.check('the ternary text keeps its length', picked.size == pick.size)
+
+# ENGINE_NATIVES_ROWS_RUN: a native outside 3rd/ is read by the rows run itself, under its own rules, so its names
+# reach the rows run's engine names only through that reading; the plain tokens still hold every name.
+Dir.mktmpdir('engine-native-rows') do |dir|
+  native = File.join(dir, 'mruby-rgss/src/probe.cxx')
+  FileUtils.mkdir_p(File.dirname(native))
+  File.write(native, 'void f(mrb_state* M, V o) { mrb_funcall(M, o, "probe_name", 0); }')
+  old = StaticDispatchRegistrations.method(:outside_world_files)
+  StaticDispatchRegistrations.define_singleton_method(:outside_world_files) { |*_args, **_kw| [[], [native]] }
+  begin
+    engine = Set.new
+    tokens = StaticDispatchRegistrations.outside_world_tokens(dir, closed_only: true, engine_tokens: engine)
+    suite.check('a native outside 3rd/ keeps its names in the plain tokens', tokens.include?('probe_name'))
+    suite.check('and leaves them to the rows run in the engine tokens', !engine.include?('probe_name'))
+  ensure
+    StaticDispatchRegistrations.define_singleton_method(:outside_world_files, old)
+  end
+end
+
 suite.finish!
