@@ -4437,6 +4437,17 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
   }
   if (ir_bit_generic(e, name, out)) return 1;
   if (ir_float_builtin(e, name, out)) return 1;
+  /* __builtin_isdigit(c) is (unsigned)c - '0' <= 9, as gcc folds it (the kernel's isdigit is this builtin): not a call of the libc
+     function, which a freestanding link does not have. */
+  if (strcmp(name, "isdigit") == 0 && arg != NULL && ir_is_integer(arg->type) && !ir_is_bool(arg->type)) {
+    ir_val a = ir_rval(arg);
+    char *x = ir_cv("unsigned_int", a.s);
+    char *d = ir_let("unsigned_int", ir_fmt("(wsub unsigned_int %s (const unsigned_int 48))", x));
+    char *b = ir_let("bool", ir_fmt("(le.u unsigned_int %s (const unsigned_int 9))", d));
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_cv(ir_valtext(e->type), b), e->type);
+    return 1;
+  }
   if (strcmp(name, "expect") == 0 || strcmp(name, "expect_with_probability") == 0) {
     ir_val a = ir_rval(arg);
     ir_note(0, eok_call, 1);
@@ -7584,6 +7595,23 @@ static void ir_decl_zero(a_statement_ptr s)
   }
 }
 
+/* A static local with __attribute__((used)) is emitted where it is declared though nothing refers to it: the kernel's __ADDRESSABLE(sym)
+   (`static void *__used __section(".discard.addressable") x = (void *)&sym;` inside static_call(name)), whose only job is to make this
+   object reference sym, so that its symbol table has it (objtool looks the static call's key up there). Other static locals are
+   printed at their first use. */
+static void ir_decl_used_static(a_statement_ptr s)
+{
+  an_il_entity_list_entry_ptr entry;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    a_variable_ptr var;
+    if (entry->entity.kind != iek_variable) continue;
+    var = (a_variable_ptr)entry->entity.ptr;
+    if (var->has_gnu_used_attribute && var->storage_class != sc_extern && var_has_static_or_thread_storage_duration(var) &&
+        !ignore_variable_in_back_end(var))
+      (void)ir_global_op(var);
+  }
+}
+
 #if GNU_EXTENSIONS_ALLOWED
 /* A GNU case range `case LO ... HI:` of up to IR_CASE_RANGE_MAX values is one (case V) label for each value, one after
    the other: they all mark the same place. A bigger range (`-5000000000L ... 5000000000L`) is a label here and a
@@ -7949,6 +7977,7 @@ static void ir_stmt(a_statement_ptr s, int d)
          and the zeroing of a local that its initialization does not cover all of (ir_decl_zero). */
       ir_note(1, stmk_decl, 1);
       ir_fact_decl(s, d);
+      ir_decl_used_static(s);
       ir_decl_zero(s);
       ir_decl_cleanup(s, d);
       return;
@@ -8308,6 +8337,16 @@ static void ir_function(a_routine_ptr rout)
   fputs(")", nf_out);
 #if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
   if (ir_noinline_attr && rout->never_inline) fputs("\n  (noinline)", nf_out); /* __attribute__((noinline)) */
+  /* __attribute__((used)): kept though nothing refers to it (a static function the kernel's asm-offsets.c only uses for its asm
+     statements, `static void __used common(void)`, which kbuild reads from the assembly). A root of pruning, as a variable's (used). */
+  if (rout->has_gnu_used_attribute) fputs("\n  (used)", nf_out);
+  /* __attribute__((always_inline)): the inliner inlines every call it can, whatever the callee's size and the module's growth (the
+     kernel's `static __always_inline __init` helpers read __initdata that an out-of-line copy in .text may not). */
+  if (rout->always_inline && C_mode()) fputs("\n  (always-inline)", nf_out);   /* C only: the C++ library headers keep the size caps */
+  /* __attribute__((section("S"))): the function goes into section S (the kernel's __init: .init.text; .noinstr.text, .head.text, ...),
+     allocated and executable. The inliner does not inline such a function (its body would leave the section). */
+  if (has_gnu_routine_supp(rout) && gnu_routine_supp(rout)->section != NULL && gnu_routine_supp(rout)->section[0] != '\0')
+    fprintf(nf_out, "\n  (section \"%s\")", gnu_routine_supp(rout)->section);
 #endif
   /* A local entity (a member of a class, or a lambda's operator(), defined in a function) has the linkage of that function:
      EDG gives it internal storage class, which it does not have. It is weak below, as a copy of an inline function. */
@@ -8320,8 +8359,11 @@ static void ir_function(a_routine_ptr rout)
      EDG does not always flag these as COMDAT. */
   else if (rout->is_template_function) fputs("\n  (weak)", nf_out);
   /* An inline function (C++ inline: an in-class definition, a defaulted member, an inline template member) has a copy in
-     each unit that uses it, one COMDAT group: weak, as EDG marks it for the C back end. Out-of-line members are not. */
-  else if (rout->is_inline || ir_is_local_entity(rout)) fputs("\n  (weak)", nf_out);
+     each unit that uses it, one COMDAT group: weak, as EDG marks it for the C back end. Out-of-line members are not. In C an
+     inline function that reaches here is an external definition (an `extern` declaration of it in the unit: the kernel's
+     `inline int task_curr(...)`, declared in sched.h): one strong symbol, as gcc emits it. An inline definition that no
+     `extern` declaration completes was skipped above. */
+  else if ((rout->is_inline && !C_mode()) || ir_is_local_entity(rout)) fputs("\n  (weak)", nf_out);
   else if (rout->is_weak && rout->source_corresp.name != NULL && strncmp(rout->source_corresp.name, "_ZT", 3) == 0)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */

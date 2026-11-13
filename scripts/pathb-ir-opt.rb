@@ -9,7 +9,7 @@
 #                slots with new names (hoisted to the caller's header), its parameters are bound to the arguments, and
 #                its final return becomes (let %D T OPERAND). A callee is inlined only when its returns are all in tail
 #                position (none, or the last statement); refused callees are: constructors and destructors, sret, byval
-#                and ellipsis parameters, struct or array results, struct or bool parameters, printf, recursion, goto and
+#                and ellipsis parameters, struct or array results, struct parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
@@ -49,7 +49,7 @@ class IdentityMap
 end
 
 
-HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline"]
+HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline", "used", "section", "always-inline"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
 def tokenize(text)
@@ -246,15 +246,73 @@ def node_cost(x)
   n
 end
 
+# __attribute__((always_inline)) (the function's (always-inline) head): inlined whatever its size and the module's growth.
+def always_inline?(fn)
+  fn.any? { |f| head(f) == "always-inline" }
+end
+
+# The section a function is placed in (__attribute__((section("S"))): the kernel's __init, __head, noinstr), or nil. The body of a
+# callee in a section is inlined only into a caller of the same section: into another it would leave its section.
+def section_of(fn)
+  s = fn.find { |f| head(f) == "section" }
+  s && s[1].to_s
+end
+
+# A function that does nothing: its statements are the stores of its parameters to their slots and a bare return. noinline does
+# not keep it out of line (gcc's IPA drops its unused arguments, and the references they carry: the kernel's
+# `static void __init_or_module noinline apply_retpolines(s32 *start, s32 *end) { }` stub names __retpoline_sites, which the
+# linker script does not define without CONFIG_RETPOLINE).
+def empty_body?(fn)
+  fn.drop(2).all? do |f|
+    h = head(f)
+    HEADER_HEADS.include?(h) || h == "slot" ||
+      (h == "store" && f[2].is_a?(String) && f[2].start_with?("$\"")) ||
+      (h == "return" && f.length == 1)
+  end
+end
+
+# The static functions that exactly one reference names in the module (a direct call: gcc's -finline-functions-called-once): inlined
+# whatever their size and the module's growth, as the body then exists once, and the constants of the one call site reach it
+# (the kernel's `static inline bool __fpu_restore_sig(..., bool ia32_fxstate)`, called with false where the code that sets it is
+# compiled out: gcc's constant propagation removes the call of convert_to_fxsr, which this build does not define).
+$inline_once = {}
+
+def count_refs(x, counts)
+  if x.is_a?(Array)
+    x.each { |y| count_refs(y, counts) }
+  elsif x.is_a?(String) && x.length > 2 && x[0] == "&" && x[1] == "\""
+    counts[unq(x)] += 1
+  end
+end
+
+def find_called_once(forms)
+  counts = Hash.new(0)
+  forms.each { |f| count_refs(f, counts) }
+  once = {}
+  forms.each do |f|
+    next unless head(f) == "function"
+    attrs = f.drop(2).select { |c| c.is_a?(Array) }
+    next unless attrs.any? { |c| c[0] == "static" && c.length == 1 }
+    next if external_root?(f)
+    name = unq(f[1])
+    once[name] = true if counts[name] == 1
+  end
+  once
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name]
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
-  return "noinline" if fn.any? { |f| head(f) == "noinline" }
+  return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
+  return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|
       return "ellipsis" if head(p) == "ellipsis"
-      return "struct/bool parameter" if head(p) == "param" && (head(p[3]) == "struct" || p[3] == "bool")
+      # A bool parameter is no obstacle: the argument is the front end's converted bool value (0 or 1), so the parameter is the
+      # argument (the kernel's helpers with a `bool` flag that callers pass as a constant, such as thp_vma_allowable_order, whose
+      # inlined `return false` is what removes the branches that call functions the build does not define).
+      return "struct parameter" if head(p) == "param" && head(p[3]) == "struct"
     end
   end
   ret = fn.find { |f| head(f) == "ret" }
@@ -391,8 +449,13 @@ def expand_call(s, fns, st)
     st[:refused][reason] = (st[:refused][reason] || 0) + 1
     return nil
   end
+  csec = section_of(fn)
+  if csec && csec != st[:section]
+    st[:refused]["section"] = (st[:refused]["section"] || 0) + 1
+    return nil
+  end
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
-  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname]
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end
@@ -552,6 +615,8 @@ def inline_pass(forms, max_depth, report)
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
   max_depth.times do
     round = 0
+    $inline_once = find_called_once(forms)   # a round's inlining can add call sites: counted again each round
+    reasons.clear
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
@@ -562,7 +627,7 @@ def inline_pass(forms, max_depth, report)
       end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, section: section_of(f) }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -1914,6 +1979,9 @@ def external_root?(f)
   return false if head(f) == "data"
   attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
   return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
+  # (weak attr), __attribute__((weak)) on a definition, is an interface symbol that another object may override or use: a root, unlike
+  # the plain (weak) of an inline or template copy.
+  return true if f.drop(2).any? { |c| c.is_a?(Array) && c[0] == "weak" && c.length == 2 }
   return false if attrs.include?("weak") || attrs.include?("static")
   true   # a definition (or declaration) of external linkage
 end
@@ -1936,7 +2004,10 @@ def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
   queue = if substr == UNUSED_ROOTS
-            nodes.keys.select { |n| external_root?(nodes[n]) }
+            # An alias (the kernel's SYSCALL_DEFINE0: `long __x64_sys_getpid(...) __alias(__do_sys_getpid)`, the target a static
+            # function) is emitted, so its target is a root: (alias NAME TARGET KIND).
+            targets = forms.select { |f| head(f) == "alias" && f[2].is_a?(String) }.map { |f| unq(f[2]) }
+            nodes.keys.select { |n| external_root?(nodes[n]) || targets.include?(n) }
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end

@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs, :trap_checks
+    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs, :trap_checks, :no_pie
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -643,11 +643,15 @@ module Qbe
             end
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
-      @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
+      # (weak attr), __attribute__((weak)) on a definition, is the same: a weak symbol that is also an interface symbol.
+      @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" }
       # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
       # inline `read32le` each, TinyCC's, otherwise collide at link time).
       static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
-      @lines << "#{static ? "" : "export "}function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # (section "S"): __attribute__((section("S"))) on the function, allocated and executable (the kernel's __init: .init.text).
+      sec = @form.drop(2).find { |p| p.is_a?(Array) && head(p) == "section" }
+      secl = sec ? "section #{sec[1].raw} \"ax\" " : ""
+      @lines << "#{static ? "" : "export "}#{secl}function #{ret}$#{@name}(#{sig.join(", ")}) {"
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -933,9 +937,26 @@ end
           o[:off] = off
         end
       end
+      # A memory operand on a global object ("m"(startup_gdt_descr), the kernel's lgdt of head64.c) is the object itself, `sym(%rip)`, as
+      # gcc writes it: the pointer that the operand block would carry is an absolute address in a .head.text unit (qbe -A), and the code
+      # runs identity-mapped there, before the page tables that map that address.
+      ops.each do |o|
+        next unless o[:kind] == "mem" && o[:code] == "m" && o[:arg].is_a?(Ref) && o[:arg].sigil == "@" && !Qbe.pic
+
+        info = @globals[o[:arg].raw]
+        next if info.nil? || info[:thread] || info[:weak]
+
+        o[:kind] = "msym"
+        o[:sym] = Qbe.symbol(o[:arg].raw)
+      end
       ops.each { |o| o[:sym] = Qbe.symbol(o[:arg].raw) if o[:kind] == "sym" }
       ops.each { |o| o[:imm] = Qbe.int_lit(o[:arg][2]) if o[:kind] == "imm" }
-      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels)
+      # A helper that names a symbol (a memory operand on a global, an "i" address) goes into the section of the function that calls it:
+      # the kernel's modpost refuses a reference from .text to an __init object, which the helper of head64.c's `lgdt %0` of
+      # startup_gdt_descr (.init.data) would be in .text.
+      fsec = @form.drop(2).find { |p| p.is_a?(Array) && head(p) == "section" }
+      sect = fsec && ops.any? { |o| %w[sym msym].include?(o[:kind]) } ? fsec[1].raw.delete('"') : nil
+      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels, sect)
       (@link[:asm_texts] ||= {})[name] ||= text
       blk = fresh
       @lines << "  #{blk} =l alloc8 #{8 * [ops.size, 1].max}"
@@ -943,7 +964,7 @@ end
       ops.each_with_index do |o, i|
         slot = fresh
         @lines << "  #{slot} =l add #{blk}, #{8 * i}"
-        if o[:kind] == "sym"
+        if o[:kind] == "sym" || o[:kind] == "msym"
           # The symbol's address goes into the cell although the template names the symbol: the reference keeps a static
           # object that only the asm uses from being pruned.
           @lines << "  storel #{op(o[:arg])}, #{slot}"
@@ -1474,7 +1495,7 @@ end
 # does: `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared library.
 if x.sigil == "&"
   sym = Qbe.symbol(x.raw)
-  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym)
+  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym) || Qbe.no_pie
   t = fresh
   @lines << "  #{t} =l loadl $pathb_got.#{sym}"
   return t
@@ -2914,7 +2935,7 @@ end
   def self.tied_code?(code) = code.size == 1 && DIGITS.include?(code)
 
   ASM_FLAG_CONDS = %w[a ae b be c e z g ge l le o p s na nae nb nbe nc ne ng nge nl nle no np ns nz pe po].freeze
-  ASM_NOREG = %w[imm sym].freeze
+  ASM_NOREG = %w[imm sym msym].freeze
 
   # An operand's text in the template: letter is the modifier (b w k q c P n a, or empty).
   def self.asm_operand_text(o, reg, letter)
@@ -2929,6 +2950,10 @@ end
       return txt if letter == "c" || letter == "P"
 
       return "$#{txt}"
+    when "msym"
+      raise QbeUnsupported, "asm: modifier %#{letter} on a memory operand" if letter == "c" || letter == "P" || letter == "n"
+
+      return "#{o[:sym]}(%rip)"
     when "flag"
       raise QbeUnsupported, "asm: a flag output named in the template"
     end
@@ -2941,7 +2966,7 @@ end
     "%#{ASM_REGS.fetch(reg)[slot]}"
   end
 
-  def self.asm_block(hex, ops, clobbers = [], labels = [])
+  def self.asm_block(hex, ops, clobbers = [], labels = [], section = nil)
     tpl = [hex].pack("H*")
     regs = Array.new(ops.size)
     used = {}
@@ -3050,10 +3075,10 @@ end
     end
     parts << body
     flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
-    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
+    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}|#{section}")[0, 12]
     sym = "__pathb_asm_#{digest}"
     body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
-    lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
+    lines = [section ? ".section #{section},\"ax\",@progbits" : ".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
     ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
     # 6 pushes and the return address leave %rsp 8 mod 16: 24 more bytes make it 16-aligned for a call in the template.
     lines << "\tsubq $24, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
@@ -3279,7 +3304,7 @@ collect = lambda do |x|
   if x.is_a?(Ref)
     if x.sigil == "&"
       sym = Qbe.symbol(x.raw)
-      unless funcs.key?(sym) || cell_seen.key?(sym)
+      unless Qbe.no_pie || funcs.key?(sym) || cell_seen.key?(sym)
         cell_seen[sym] = true
         cells << sym
       end
