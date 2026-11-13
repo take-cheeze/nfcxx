@@ -107,7 +107,7 @@ module BaseRbs
     # an Array of integers) and by Interpreter's teleport command (an integer code, the same shapes), so its readers
     # have one class each.
     ['LCF::EventCommand', 'code'] => 'Integer', ['LCF::EventCommand', 'indent'] => 'Integer',
-    ['LCF::EventCommand', 'string'] => 'String', ['LCF::EventCommand', 'parameters'] => 'Array'
+    ['LCF::EventCommand', 'string'] => 'String', ['LCF::EventCommand', 'parameters'] => 'Array[Integer]'
   }.freeze
 
   # Signatures written by hand where the source's own return depends on an argument. IO.open without a block is
