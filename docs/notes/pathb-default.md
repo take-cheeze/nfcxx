@@ -1,7 +1,8 @@
 # Path B as the default backend
 
-On x86-64 Linux, `./nfcxx` now builds with Path B unless the request needs something only qbe or gcc does. This note
-says what the default covers, what falls back, and how to get the old behaviour.
+On every host, `./nfcxx` builds a hosted program with Path B unless the request needs something only qbe or gcc does. This
+note says what the default covers, what falls back, and how to get the old behaviour. The hosts are x86-64 Linux, Linux aarch64
+(`scripts/setup-pathb.sh` patches the setjmp buffer for it) and macOS arm64 (`lib/pathb/clang_macros.h`, the libc++ layout macro).
 
 ## Rules (nfcxx, the backend choice before the ASan checks)
 
@@ -12,7 +13,8 @@ Path B is chosen when all of these hold:
   GNU 13 emulation), the program links EDG's runtime and libc, not the host's libstdc++ (`docs/notes/freestanding.md`); on other hosts it keeps qbe;
 - not `--cosmo` (cosmocc is a gcc-backend link);
 - not `--emit-c`, `--target=`, `-E`, `-M` or `-shared`;
-- the host is `Linux x86_64` (`scripts/pathb-cc` assembles x86-64 QBE output with `cc`).
+- the host is any host the Path B harness builds on (x86-64 and aarch64 Linux, macOS arm64); `scripts/pathb-cc` takes the QBE target
+  from the host (`PATHB_QBE_TARGET` overrides it).
 
 Anything else gets qbe, as before (a fallback from Path B goes to gcc, below). `-fsanitize=address` is not an exclusion: since PR #892 Path B instruments the code itself
 (`scripts/pathb-cc --asan`, `docs/notes/asan.md` "Path B"), and a program it does not build is rebuilt with the gcc backend, which has ASan too.
@@ -45,7 +47,7 @@ shown. An explicit `--backend=pathb` (or `NFCXX_PATH=b`) keeps the hard errors.
 |---|---|---|
 | `--freestanding`, not x86-64 Linux | refused | qbe |
 | `--cosmo` | would run Path B silently | qbe (gcc) |
-| non-x86-64 host | `pathb-cc` assembles x86-64 code | qbe |
+| `--emit-c`, `--target=`, `-E`, `-M`, `-shared` | not an object Path B makes | qbe |
 
 `-fsanitize=address` is not in the table: it takes Path B by default, with the gcc fallback.
 ## Going back

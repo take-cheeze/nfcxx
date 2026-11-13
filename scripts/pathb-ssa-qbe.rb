@@ -1453,7 +1453,9 @@ end
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
           # -fPIC: an object that another object of the shared object's process may interpose goes through the GOT as well.
-          if (info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static] && !info[:thread])
+          # A thread-local extern (the EH shim's __curr_eh_stack_entry) is not read through the GOT off Darwin: its TLS
+          # reference must match the shim's TLS definition, and a GOT copy is a non-TLS reference the linker rejects.
+          if (info[:extern] && Qbe.got_extern && !(info[:thread] && !Qbe.darwin)) || (Qbe.pic && !info[:static] && !info[:thread])
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t

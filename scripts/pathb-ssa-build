@@ -235,7 +235,9 @@ def marker_asm(il, target, qbe_asm)
   # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
   startup = il.scan(/^# pathb-startup (\S+) (\d+) (\S+)$/).map do |sect, prio, sym|
     sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
-    ["\t.section #{sect},\"aw\"", "\t.align 8", "\t.quad #{sym}"]
+    # .balign, not .align: on aarch64 GNU as reads .align's operand as a power of two, so .align 8 aligned the table to 256
+    # bytes and left a zero-filled gap in .init_array that glibc called (a NULL call at start-up).
+    ["\t.section #{sect},\"aw\"", "\t.balign 8", "\t.quad #{sym}"]
   end
   texts = il.scan(/^# pathb-text (\S+)$/).flatten.uniq.map { |b| Base64.strict_decode64(b) }
   (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join + texts.join
