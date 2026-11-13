@@ -143,8 +143,9 @@ Each option of the kernel's command line is in one of three classes:
 |---|---|---|
 | honoured by Path B | `-nostdinc`, `-isystem DIR`, `-idirafter DIR` (the include path of the front end: `-nostdinc` drops the host's directories, `-isystem $(gcc -print-file-name=include)` gives `<stdarg.h>`); `-funsigned-char` (EDG's `--unsigned_chars`; the IR's `char` is renamed `unsigned_char`); `-fshort-wchar` (the headers' `wchar_t` is `unsigned short`; EDG types `L"x"` as `int`, so a unit with a wide literal is gcc's); `-ffreestanding` (`__STDC_HOSTED__` is 0); `-fno-asynchronous-unwind-tables` (QBE `-U`) | passed to `scripts/pathb-cc` |
 | checked | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | QBE runs with `-n`; the unit's assembly is refused (status 5) if it names an SSE or x87 register or instruction, as `qbe-cc` does. Refused units go to gcc with `NFCXX_PATHB_FALLBACK=gcc` |
+| honoured | `-ftrivial-auto-var-init=zero` (`CONFIG_INIT_STACK_ALL_ZERO`) | the IR zeroes each automatic variable without an initializer, padding included, at its declaration (`be/nfcxx_ir.c` `ir_decl_zero`, `NFCXX_IR_AUTO_INIT=zero`); not VLAs, not `__attribute__((uninitialized))` |
 | no effect on QBE's code | `-mno-red-zone`, `-mcmodel=kernel`, `-mpreferred-stack-boundary=`, `-mtune=`, `-mno-mmx`, `-mno-3dnow`, `-mno-avx`, `-mskip-rax-setup`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-strict-aliasing`, `-fwrapv`, `-fno-common`, `-fno-allow-store-data-races`, `-fno-optimize-sibling-calls`, `-fno-function-sections`, `-fconserve-stack`, `-fcf-protection=none`, `-fstrict-flex-arrays=`, `-falign-*` (the reasons of `NFCXX_QBE_KERNEL=1` above) | dropped on Path B |
-| changes meaning, no Path B equivalent | `-m32`, `-mregparm=3` without `-m16`, `-ftrivial-auto-var-init=zero`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
+| changes meaning, no Path B equivalent | `-m32`, `-mregparm=3` without `-m16`, `-ftrivial-auto-var-init=pattern`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
 
 `NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
 for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
@@ -152,7 +153,9 @@ each option (include path, the signedness and `CHAR_MIN`, `wchar_t`, `__STDC_HOS
 gcc fallback, against gcc's own result).
 
 Two things this does not do. A kernel with `CONFIG_INIT_STACK_ALL_ZERO` passes `-ftrivial-auto-var-init=zero` to every
-file, and every file is then gcc's (Path B does not zero automatic variables; cproc did). And the kernel was not built in the
+file: that was the biggest reason for a gcc compile (650 of 914 in the 6.8 tinyconfig measurement), and Path B now honours it
+(`tests/c/auto-var-init/zero_locals.c`, run by `tests/nfcc/run.sh` against gcc with the same option); the next measurement
+shows the remaining fallbacks. And the kernel was not built in the
 session that made this change (the sandbox does not run `make` on a downloaded tree, and the task said not to): the
 option handling is measured on single files and on the kernel's option list, not on the 615 files. The next measurement is
 `KCC=nfcc NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=DIR/pathb.log scripts/linux-qemu.sh`, or

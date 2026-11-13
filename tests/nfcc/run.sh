@@ -314,8 +314,17 @@ used pathb rm.c && ok "-m16 alone is Path B's" || bad "-m16 alone is Path B's" "
 refuses "-m16: floating point is refused" "i386\|floating\|SSA route" pb -c -m16 -ffreestanding "$tmp/fp.c" -o "$tmp/x.o"
 NFCXX_PATHB_FALLBACK=gcc pb -c -m16 -mregparm=3 -ffreestanding "$tmp/fp.c" -o "$tmp/fpfb.o" >/dev/null 2>&1 && tail -1 "$tmp/log" | grep -q '^gcc .*Path B refused' &&
   ok "-m16 with NFCXX_PATHB_FALLBACK=gcc: gcc builds what Path B refuses" || bad "-m16 with NFCXX_PATHB_FALLBACK=gcc" "$(tail -1 "$tmp/log")"
-check "-ftrivial-auto-var-init=zero compiles with gcc" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
-used gcc int.c && ok "-ftrivial-auto-var-init=zero went to gcc" || bad "-ftrivial-auto-var-init=zero went to gcc" "$(tail -1 "$tmp/log")"
+check "-ftrivial-auto-var-init=pattern compiles with gcc" pb -c -ftrivial-auto-var-init=pattern "$tmp/int.c" -o "$tmp/tz.o"
+used gcc int.c && ok "-ftrivial-auto-var-init=pattern went to gcc (Path B has no pattern fill)" || bad "-ftrivial-auto-var-init=pattern went to gcc" "$(tail -1 "$tmp/log")"
+# -ftrivial-auto-var-init=zero (the kernel's CONFIG_INIT_STACK_ALL_ZERO) is Path B's: a local without an initializer is zero from its
+# declaration. The program reads such locals (scalars, arrays, a struct's padding, nested scopes, loops) after dirtying the stack.
+check "-ftrivial-auto-var-init=zero compiles on Path B" pb -c -ftrivial-auto-var-init=zero "$tmp/int.c" -o "$tmp/tz.o"
+used pathb int.c && ok "-ftrivial-auto-var-init=zero stays on Path B" || bad "-ftrivial-auto-var-init=zero stays on Path B" "$(tail -1 "$tmp/log")"
+avi=$root/tests/c/auto-var-init/zero_locals.c
+pbrun "-ftrivial-auto-var-init=zero: uninitialized locals read as zero" 0 "$avi" -O2 -ftrivial-auto-var-init=zero
+used pathb zero_locals.c && ok "-ftrivial-auto-var-init=zero: that compile was Path B's" || bad "-ftrivial-auto-var-init=zero: that compile was Path B's" "$(tail -1 "$tmp/log")"
+pbrun "-ftrivial-auto-var-init=zero -O0 too" 0 "$avi" -ftrivial-auto-var-init=zero
+if pb -O2 "$avi" -o "$tmp/noavi" >/dev/null 2>&1 && "$tmp/noavi" >/dev/null 2>&1; then bad "without the option the locals are not zeroed" "the program passed"; else ok "without the option the locals are not zeroed (the test reads dirty stack)"; fi
 check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
 used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
 # -Wa,*: options of the assembler step. Path B assembles QBE's output with the host cc, so the ones that mean the same for it are
