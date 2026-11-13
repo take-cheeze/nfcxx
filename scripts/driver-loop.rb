@@ -1,10 +1,11 @@
 #!/usr/bin/env ruby
-# nfcc's option loop, ported from the bash in nfcc (the loop at its "args=(\"$@\")" line). This first slice covers the groups
-# whose meaning is plain: -c -S -o -x, the preprocessor options (-D -U -I -isystem -iquote -idirafter -include -imacros, with
-# -MD -MMD -MF -MT -MQ -MP), -l and -L, and the input files. Any other option is refused as "unported" (exit 3), so that a
-# caller can tell "not done yet" from "refused by nfcc"; the groups still to port are listed in the branch's notes.
-#
-# Also: -O* -g* -pipe -v -time -w -W* (and -Wa,*, which goes to asf); -Wl,* and -Wp,* are not ported yet.
+# nfcc's option loop, ported from the bash in nfcc (the loop between its "args=(\"$@\")" line and its post-loop checks).
+# Covered: -c -S -o -x; the preprocessor options (-D -U -I -isystem -iquote -idirafter -include -imacros, -std=, -ansi,
+# -nostdinc, -undef, --sysroot=); the dependency flags (-MD -MMD -MF -MT -MQ -MP) and -Wp,* (the same parser as
+# scripts/driver-options.rb); -l -L and the link options (-Xlinker -z -u -T, -static ..., -Wl,*, -fuse-ld=*, -shared);
+# the input files by suffix; -O* -g* -pipe -v -time -w -W* and -Wa,*; the -f and -m cases.
+# Not covered yet, refused as "unported" (exit 3): -fno-crossjumping (host-dependent), @file response files, and the
+# helpers qbekernel and pathb_option. A caller can tell "not done yet" from "refused by nfcc".
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -131,6 +132,64 @@ def matches_any?(arg, patterns)
   patterns.any? { |pattern| glob_match?(pattern, arg) }
 end
 
+# -Wp,a,b,c: bash's wp_option, which the loop calls. Splits on commas the way `IFS=, read -ra` does (an empty middle field
+# is kept, a comma at the end adds no empty field). The same parser is in scripts/driver-options.rb, the sealed build;
+# tests/nfcc/loop-state.sh checks that the two agree on every -Wp option.
+WP_TAKES_ARG = %w[-isystem -iquote -idirafter -include -imacros].freeze
+
+def split_wp_fields(text)
+  fields = []
+  field = "".b
+  text.b.each_byte do |byte|
+    if byte == 44
+      fields << field
+      field = "".b
+    else
+      field << byte
+    end
+  end
+  fields << field unless field.empty?
+  fields
+end
+
+def apply_wp_option(option, state)
+  words = split_wp_fields(option.byteslice(4, option.bytesize - 4))
+  j = 0
+  while j < words.length
+    x = words[j]
+    if x.bytesize > 2 && %w[-D -U -I].include?(x.byteslice(0, 2))
+      state.pp << x
+    elsif WP_TAKES_ARG.include?(x)
+      die("#{option}: '#{x}' needs an argument") unless j + 1 < words.length
+
+      j += 1
+      state.pp << x << words[j]
+    elsif x == "-MD" || x == "-MMD"
+      die("#{option}: '#{x}' needs a file name") unless j + 1 < words.length
+
+      j += 1
+      state.depmode = x
+      state.dfile = words[j]
+    elsif x == "-MF"
+      die("#{option}: '-MF' needs a file name") unless j + 1 < words.length
+
+      j += 1
+      state.dfile = words[j]
+    elsif x == "-MT" || x == "-MQ"
+      die("#{option}: '#{x}' needs a target") unless j + 1 < words.length
+
+      j += 1
+      state.dts << x << words[j]
+    elsif x == "-MP"
+      state.dp = 1
+    else
+      die("#{option}: the preprocessor option '#{x}' is not supported " \
+          "(only -D -U -I -isystem -iquote -idirafter -include -imacros -MD -MMD -MF -MT -MQ -MP)")
+    end
+    j += 1
+  end
+end
+
 def check_lang(lang)
   return if C_LANGS.include?(lang)
 
@@ -235,7 +294,7 @@ def run_loop(args)
     elsif a.start_with?("-Wa,")
       state.asf << a
     elsif a.start_with?("-Wp,")
-      raise Unported, a
+      apply_wp_option(a, state)
     elsif a == "-w" || a.start_with?("-W")
       nil
     elsif a == "-fstack-protector" || STACK_PROTECTOR.include?(a)
