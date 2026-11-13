@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
+    attr_accessor :ptr32, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -187,6 +187,9 @@ module Qbe
   # the argument indices, the length being argument 2.
   SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
+  # --i386 (the 32-bit targets, i386 and i386_regparm3): pointers are 32-bit, of class w; `long` is read as `int` by the driver
+  # (scripts/pathb-ssa-build renames the IR's tokens), long long stays class l. docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
+  self.ptr32 = false
   # --asan (NFCXX_PATHB_ASAN=1, docs/notes/asan-plan.md): a call of libasan's check before each access through a computed address.
   self.asan = false
   self.module_has_data = false
@@ -197,6 +200,12 @@ module Qbe
   module_function
 
   def float?(t) = FLOAT_TYPES.key?(unqual(t))
+
+  # The class and the byte size of a pointer, and its load and store operations: w and 4 on a 32-bit target, else l and 8.
+  def kp = ptr32 ? "w" : "l"
+  def kz = ptr32 ? 4 : 8
+  def kload = ptr32 ? "loadw" : "loadl"
+  def kstore = ptr32 ? "storew" : "storel"
 
   # _Float16 (std::float16_t): QBE has no half type. A value is its binary16 pattern, zero-extended, in a w register; every
   # operation is a call of a __nfcxx_f16_* helper of be/nfcxx_ldrt.c (libnfcxxld.a), which rounds to half after each
@@ -212,7 +221,7 @@ module Qbe
   # float and double.
   def cls(t)
     t = unqual(t)
-    return "l" if head(t) == "ptr"
+    return kp if head(t) == "ptr"
     return "w" if INT_W.include?(t)
     return "l" if INT_L.include?(t)
     return "s" if t == "float"
@@ -225,7 +234,7 @@ module Qbe
   def size(t)
     t = unqual(t)
     return size(t[1]) if head(t) == "volatile"
-    return 8 if head(t) == "ptr"
+    return kz if head(t) == "ptr"
     if head(t) == "array"
       # (array COUNT ELEM): a variable-length array's count is a register, which has no size here: refused.
       return size(t[2]) * int_lit(t[1])
@@ -236,14 +245,14 @@ module Qbe
 
   def load_op(t)
     t = unqual(t)
-    return "loadl" if head(t) == "ptr"
+    return kload if head(t) == "ptr"
 
     LOAD.fetch(t) { raise QbeUnsupported, "load of #{sx(t)}" }
   end
 
   def store_op(t)
     t = unqual(t)
-    return "storel" if head(t) == "ptr"
+    return kstore if head(t) == "ptr"
 
     STORE.fetch(t) { raise QbeUnsupported, "store of #{sx(t)}" }
   end
@@ -480,7 +489,7 @@ module Qbe
         if target.is_a?(Ref) && target.sigil == "&"
           # A function's address is its symbol, a link-time constant (as pathb-qbe-emit.rb writes it).
           suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
-          items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+          items << [int_lit(off), kz, "#{kp} $#{symbol(target.raw)}#{suffix}"]
           next
         end
         return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
@@ -491,7 +500,7 @@ module Qbe
 
         (state[[:users, target.raw]] ||= []) << g[1].raw unless target.raw == g[1].raw
         suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
-        items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+        items << [int_lit(off), kz, "#{kp} $#{symbol(target.raw)}#{suffix}"]
       else return nil
       end
     end
@@ -667,10 +676,10 @@ module Qbe
     end
 
     def allocs
-      @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
+      @lines << "  %sretbuf =#{Qbe.kp} alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
       @sp_objs << ["%sretbuf", @sret.size + Qbe::SP_NOPAD] if @sret && @sret.size > 0 && Qbe.safe
       @empty_bufs.each do |name|
-        @lines << "  #{name} =l alloc8 8"
+        @lines << "  #{name} =#{Qbe.kp} alloc8 8"
         @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
       end
       @slots.each_with_index do |s, i|
@@ -690,11 +699,11 @@ module Qbe
         if align > 16
   # QBE's alloc has no alignment past 16: take the object from a 16-aligned block with align - 16 bytes spare,
   # and round its address up (as pathb-qbe-emit.rb does for an over-aligned slot).
-  @lines << "  %o#{i}r =l alloc16 #{[size, 1].max + pad + align}"
-  @lines << "  %o#{i}a =l add %o#{i}r, #{align - 1}"
-  @lines << "  %o#{i} =l and %o#{i}a, #{-align}"
+  @lines << "  %o#{i}r =#{Qbe.kp} alloc16 #{[size, 1].max + pad + align}"
+  @lines << "  %o#{i}a =#{Qbe.kp} add %o#{i}r, #{align - 1}"
+  @lines << "  %o#{i} =#{Qbe.kp} and %o#{i}a, #{-align}"
 else
-  @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+  @lines << "  %o#{i} =#{Qbe.kp} alloc#{a} #{[size, 1].max + pad}"
 end
       end
       unless @sp_objs.empty?
@@ -1135,13 +1144,13 @@ end
     def phi_computed?(v)
       return true if expression?(v)
 
-      v.is_a?(Ref) && v.sigil == "&" && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+      v.is_a?(Ref) && v.sigil == "&" && !Qbe.ptr32 && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
     end
 
     def pending_phi_operands(num)
       @pending.fetch(num, []).each do |name, v|
         if v.is_a?(Ref)
-          @lines << "  #{reg(name)} =l copy #{op(v)}"
+          @lines << "  #{reg(name)} =#{Qbe.kp} copy #{op(v)}"
           @types[name] = ["ptr", "void"]
           next
         end
@@ -1195,7 +1204,7 @@ end
       # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
       # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
       span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
-      if cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+      if cls == "w" && !Qbe.ptr32 && cases.size >= 5 && span <= 8 * cases.size && span <= 1024   # QBE's i386 has no jtab
         switch_jtab_lines(operand, ranges, tree_default)
         return
       end
@@ -1444,7 +1453,8 @@ end
           info = @globals.fetch(x.raw) { raise QbeUnsupported, "global #{x.raw}" }
           # A weak undefined object is loaded through the GOT in the existing emitter; that is not modelled here.
           # A weak undefined object is read through the GOT (`copy extern`), so an absent definition reads as null.
-          if info[:weak] && info[:extern]
+          raise QbeUnsupported, "a thread-local object on a 32-bit target" if info[:thread] && Qbe.ptr32
+          if info[:weak] && info[:extern] && !Qbe.ptr32   # the 32-bit targets are not position independent: a direct reference
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -1453,7 +1463,7 @@ end
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
           # -fPIC: an object that another object of the shared object's process may interpose goes through the GOT as well.
-          if (info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static] && !info[:thread])
+          if !Qbe.ptr32 && ((info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static] && !info[:thread]))
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -1474,7 +1484,7 @@ end
 # does: `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared library.
 if x.sigil == "&"
   sym = Qbe.symbol(x.raw)
-  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym)
+  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym) || Qbe.ptr32
   t = fresh
   @lines << "  #{t} =l loadl $pathb_got.#{sym}"
   return t
@@ -1560,7 +1570,7 @@ end
         dst = op(item[2])
         safe_check(item[2], dst, n)
         asan_check(item[2], dst, n, "store")
-        @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
+        @lines << "  call $memset(#{Qbe.kp} #{dst}, w 0, #{Qbe.kp} #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -1591,7 +1601,7 @@ end
           # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
           t = fresh
           @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
-          @lines << "  call $memmove(l #{dest}, l #{t}, l #{sret.size})"
+          @lines << "  call $memmove(#{Qbe.kp} #{dest}, #{Qbe.kp} #{t}, #{Qbe.kp} #{sret.size})"
         end
       when "condbr"
         cond = op(item[1])
@@ -1652,7 +1662,7 @@ end
 
     def escape_slots
       asm_helpers << "escape"
-      @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
+      @slots.each_index { |i| @lines << "  call $__pathb_escape(#{Qbe.kp} %o#{i})" }
     end
 
 # `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
@@ -1660,6 +1670,10 @@ end
 # The call is out of the flow: a `jnz` to a trap block of its own (the call, then hlt: the helper does not return),
 # and the operation goes on in the block after it. A call in the hot path cost about 40% of token generation.
     def check_call(cond, code)
+      # The 32-bit targets (the kernel's real-mode code) run bare: no runtime to trap into, and gcc makes no such checks. The
+      # hardware's own traps (#DE) and shift count masking are the behaviour of the code gcc makes.
+      return if Qbe.ptr32
+
       asm_helpers << "check" unless asm_helpers.include?("check")
       @temps += 1
       trap = "ckt#{@temps}"
@@ -1791,7 +1805,7 @@ end
         # QBE does not know that vaarg writes the va_list: a load of it after this read would reuse an earlier load.
         # The barrier call is a memory clobber for QBE.
         barrier_lines
-      when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "addr" then @lines << "  #{dst} =#{Qbe.kp} copy #{op(rv)}"
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.
       when "not"
@@ -1828,7 +1842,7 @@ end
           @lines << "  #{sum} =l add #{base}, #{Qbe.int_lit(rv[2])}"
           @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
         else
-          @lines << "  #{dst} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+          @lines << "  #{dst} =#{Qbe.kp} add #{base}, #{Qbe.int_lit(rv[2])}"
         end
       when "index" then index_lines(dst, rv)
       when "alloca" then alloca_lines(dst, rv)
@@ -1893,7 +1907,7 @@ end
       t = operand_type(n)
       Qbe.signed?(t) # refuses a size that is not an integer
       size = op(n)
-      if Qbe.cls(t) == "w"
+      if Qbe.cls(t) == "w" && !Qbe.ptr32
         wide = fresh
         @lines << "  #{wide} =l extuw #{size}"
         size = wide
@@ -1913,7 +1927,7 @@ end
         @lines << "  #{dst} =l add #{blk}, #{Qbe::ASAN_RZ}"
         return
       end
-      @lines << "  #{dst} =l alloc16 #{size}"
+      @lines << "  #{dst} =#{Qbe.kp} alloc16 #{size}"
     end
 
     def memory_access?(x)
@@ -1928,7 +1942,7 @@ end
       a = op(rv[2])
       safe_check(rv[2], a, Qbe.size(rv[1]))
       asan_check(rv[2], a, Qbe.size(rv[1]), "load")
-      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
+      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(#{Qbe.kp} #{a})"
     end
 
     def volatile_store_lines(item)
@@ -1937,7 +1951,7 @@ end
       v = op(item[3])
       safe_check(item[2], a, Qbe.size(item[1]))
       asan_check(item[2], a, Qbe.size(item[1]), "store")
-      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
+      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(#{Qbe.kp} #{a}, #{Qbe.store_class(op_name)} #{v})"
     end
 
     # --safe (-fsafe-pointers): the check of an access of `bytes` bytes at `addr` (the text of the IR operand `x`), which
@@ -2002,25 +2016,30 @@ end
       idx = rv[2]
       signed = Qbe.signed?(operand_type(idx))
       i = op(idx)
-      if Qbe.cls(operand_type(idx)) == "w"
+      kp = Qbe.kp
+      if Qbe.cls(operand_type(idx)) == "w" && !Qbe.ptr32
         wide = fresh
         @lines << "  #{wide} =l #{signed ? 'extsw' : 'extuw'} #{i}"
         i = wide
+      elsif Qbe.cls(operand_type(idx)) == "l" && Qbe.ptr32
+        narrow = fresh   # a long long index: its low word
+        @lines << "  #{narrow} =w copy #{i}"
+        i = narrow
       end
       scaled = fresh
-      @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
+      @lines << "  #{scaled} =#{kp} mul #{i}, #{Qbe.int_lit(rv[3])}"
       if Qbe.safe
         # --safe: the derived address must stay in base's object (sp_derive in pathb-qbe-emit.rb).
         sum = fresh
         @lines << "  #{sum} =l add #{base}, #{scaled}"
         @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
-      elsif wide_literal?(base)
+      elsif wide_literal?(base) && !Qbe.ptr32
         # QBE folds `add CONST, x` into the displacement of the load or store that uses it, without checking that the
         # constant fits in 32 bits (the assembler: "out of range of signed 32bit displacement", for the kernel's
         # `((long *)0xffff888000000000)[i]`). `sub x, -CONST` is not folded; the constant goes to a register.
         @lines << "  #{dst} =l sub #{scaled}, #{-base.to_i}"
       else
-        @lines << "  #{dst} =l add #{base}, #{scaled}"
+        @lines << "  #{dst} =#{kp} add #{base}, #{scaled}"
       end
     end
 
@@ -2075,10 +2094,10 @@ end
       return unless local_slot_name?(addr)
       return if @zeroed[addr]
       @zeroed[addr] = true
-      idx = @lines.index { |l| l.start_with?("  #{addr} =l alloc") }
+      idx = @lines.index { |l| l.start_with?("  #{addr} =#{Qbe.kp} alloc") }
       return unless idx
       size = @lines[idx].split.last.to_i
-      @lines.insert(idx + 1, "  call $memset(l #{addr}, w 0, l #{size})")
+      @lines.insert(idx + 1, "  call $memset(#{Qbe.kp} #{addr}, w 0, #{Qbe.kp} #{size})")
     end
 
     def bfload_lines(dst, rv)
@@ -2180,13 +2199,13 @@ end
                 (src.is_a?(Array) && %w[null addr].include?(head(src)))
       raise QbeUnsupported, "bitcast of #{sx(src)}" unless pointer
 
-      @lines << "  #{dst} =l copy #{op(src)}"
+      @lines << "  #{dst} =#{Qbe.kp} copy #{op(src)}"
     end
 
     # `(pdiff A B SIZE)`: (A - B) / SIZE, signed, in the 64-bit pointer difference type (docs/notes/pathb-stage2.md).
     # A VLA element size is a register, which is not a constant here, so it is refused.
     def pdiff_lines(dst, t, rv)
-      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == "l"
+      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == Qbe.kp
 
       n = begin
         Qbe.int_lit(rv[3])
@@ -2198,12 +2217,14 @@ end
       a = op(rv[1])
       b = op(rv[2])
       d = fresh
-      @lines << "  #{d} =l sub #{a}, #{b}"
-      @lines << "  #{dst} =l div #{d}, #{n}"
+      @lines << "  #{d} =#{Qbe.kp} sub #{a}, #{b}"
+      @lines << "  #{dst} =#{Qbe.kp} div #{d}, #{n}"
     end
 
     # `(nonnull P)`: a null pointer traps (code 5).
     def nonnull_lines(p)
+      return if Qbe.ptr32   # no checks on the 32-bit targets (check_call)
+
       cond = fresh
       @lines << "  #{cond} =w ceql #{op(p)}, 0"
       check_call(cond, 5)
@@ -2215,7 +2236,7 @@ end
       # (lib/asan/nfcxx_vla_asan.c), and stack and global arrays have redzones (milestones 2 and 3 of docs/notes/asan-plan.md), so
       # libasan reports an access past the end, and the trap would hide that report. As with gcc's ASan, an overflow that stays
       # inside the enclosing object (an array member of a struct) is not reported.
-      return if Qbe.asan
+      return if Qbe.asan || Qbe.ptr32
 
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
@@ -2691,11 +2712,11 @@ end
 
     def arg_cls(a)
       case a
-      when Ref then "l"
+      when Ref then Qbe.kp
       when String then Qbe.cls(@types.fetch(a) { raise QbeUnsupported, "argument #{a} has no declared type" })
       when Array
         case head(a)
-        when "addr", "null" then "l"
+        when "addr", "null" then Qbe.kp
         when "const" then Qbe.cls(a[1])
         else Qbe.cls(Qbe.expr_type(a))
         end
@@ -2848,11 +2869,19 @@ end
       when "leaf"
         parts = []
         cur = 0
+        leaves = []
         f.drop(4).each do |lf|
           raise QbeUnsupported, "abi-type #{name}: bad leaf" unless head(lf) == "leaf" && lf.length == 3
 
-          off = int_lit(lf[1])
-          k = lf[2]
+          if ptr32 && %w[l d s].include?(lf[2])
+            # C's i386 layout puts a long long or a double on 4: it is spelled with words, low first (3rd/qbe/doc/i386.txt).
+            leaves << [int_lit(lf[1]), "w"]
+            leaves << [int_lit(lf[1]) + 4, "w"] unless lf[2] == "s"
+          else
+            leaves << [int_lit(lf[1]), lf[2]]
+          end
+        end
+        leaves.each do |off, k|
           raise QbeUnsupported, "abi-type #{name}: leaf kind" unless k.is_a?(String) && LEAF_BYTES.key?(k)
 
           ks = LEAF_BYTES[k]
@@ -3117,13 +3146,17 @@ end
   # The helpers' text, emitted once in a module that has a volatile access.
   def volatile_helpers
     loads = VOLATILE_LOADS.flat_map do |op_name|
+      next [] if ptr32 && %w[loads loadd].include?(op_name)   # QBE's i386 has no floating point yet
+
       cls = { "loadl" => "l", "loads" => "s", "loadd" => "d" }.fetch(op_name, "w")
-      ["function #{cls} $#{volatile_name("ld", op_name)}(l %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
+      ["function #{cls} $#{volatile_name("ld", op_name)}(#{kp} %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
        "\tret %v", "}", ""]
     end
     stores = VOLATILE_STORES.flat_map do |op_name|
+      next [] if ptr32 && %w[stores stored].include?(op_name)
+
       cls = store_class(op_name)
-      ["function $#{volatile_name("st", op_name)}(l %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
+      ["function $#{volatile_name("st", op_name)}(#{kp} %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
     end
     (loads + stores).join("\n")
   end
@@ -3282,7 +3315,7 @@ collect = lambda do |x|
     # A pointer constant that does not fit in a 32-bit displacement: QBE propagates it through copies and phis into the
     # displacement of the access that uses it, unchecked (Fn#wide_pointer_cell). It is loaded from a cell instead.
     k = head(x) == "i2p" ? Qbe.wrap_lit(Qbe.int_lit(x[2][2]), x[1]) : Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1])
-    unless (-2**31...2**31).cover?(k) || wides.key?(k)
+    unless Qbe.ptr32 || (-2**31...2**31).cover?(k) || wides.key?(k)
       wides[k] = "pathb_wide#{wides.size}"
     end
   elsif head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
@@ -3292,7 +3325,7 @@ collect = lambda do |x|
   end
 end
 forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
-data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
+data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" } unless Qbe.ptr32   # 32-bit: no cells, a direct reference
 data += wides.map { |k, name| "data $#{name} = align 8 { l #{k} }" }
 { data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, wides: wides, ubfiles: {} } }
   end

@@ -115,6 +115,8 @@ if [ -n "$target" ]; then
   [ -d "$base/lib_$target" ] || { echo "pathb-dump: no predefined macros for target '$target' in $base" >&2; exit 2; }
   # plain char is signed, as on the x86-64 host and in wasm32: EDG's linux_riscv32 table has it unsigned
   target_opts=(--target "$target" --signed_chars)
+  # linux_i686: va_list is `char *` (the i386 ABI), which the IR back end reads and writes through the object's address (NFCXX_IR_VALIST_PTR)
+  [ "$target" != linux_i686 ] || export NFCXX_IR_VALIST_PTR=1
 fi
 
 sys_inc=(${isys[@]+"${isys[@]}"}); gnu_opts=()

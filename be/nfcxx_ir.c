@@ -1039,6 +1039,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
 static int ir_noinline_attr = 0;       /* NFCXX_IR_NOINLINE=1: a function with __attribute__((noinline)) has a (noinline) head, which the inliner respects */
+static int ir_valist_ptr = 0;         /* NFCXX_IR_VALIST_PTR=1 (pathb-dump --target=linux_i686): va_list is `char *`, the pointer to the next argument (i386), not the System V tag */
 static int ir_scopes = 0;               /* NFCXX_IR_SCOPES=1: print only (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its
                                            scope ends (block end, return, a jump out of it), for AddressSanitizer's use after scope */
 #define IR_SCOPE_FACTS() (ir_borrow || ir_scopes)
@@ -3136,7 +3137,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     case eok_va_copy: {
       char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
-      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_emit(ir_fmt("(copy %d %s %s)", ir_valist_ptr ? 4 : 24, dst, src));
       ir_note(0, k, 1);
       return ir_mk_void();
     }
@@ -3486,6 +3487,9 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
 static char *ir_valist_addr(an_expr_node_ptr n)
 {
   if (n != NULL && n->type != NULL && skip_typerefs(n->type)->kind == tk_array) return ir_lval(n).s;
+  /* ILP32 (linux_i686): va_list is `char *`, the pointer to the next argument, which vastart, vaarg and va_copy read and write through
+     the address of the object that holds it. */
+  if (ir_valist_ptr) return ir_lval(n).s;
   return ir_rval(n).s;
 }
 
@@ -5537,7 +5541,7 @@ static int ir_abi_collect(a_type_ptr t, unsigned long long base, ir_leaf *lv, in
     }
     case tk_pointer:
       if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
-      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      lv[*n].off = base; lv[*n].kind = sz == 4 ? 'w' : 'l'; (*n)++;   /* ILP32 (linux_i686): a word */
       return 1;
     case tk_float:
       if (sz == 16) { /* long double or _Float128: class X87 or SSE, so two markers ('m') that a union merges (below) */
@@ -5669,6 +5673,17 @@ static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap)
   const char *why = "";
   ir_val tmp;
   char *gp = NULL, *fp = NULL, *ok = NULL;
+  if (ir_valist_ptr) {
+    /* i386: the arguments are words on the stack, an aggregate copied there rounded up to 4 bytes; va_list points at the next one. */
+    ir_note(0, eok_va_arg, 1);
+    tmp = ir_temp(t);
+    if (size > 0) {
+      char *ov = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ap));
+      ir_emit(ir_fmt("(copy %llu %s %s)", size, tmp.s, ov));
+      ir_emit(ir_fmt("(store (ptr void) %s %s)", ap, ir_let("(ptr void)", ir_fmt("(offset %s %llu)", ov, (size + 3) & ~3ULL))));
+    }
+    return ir_mk_addr(tmp.s, t, 0);
+  }
   if (align > 8) return ir_gap(t, "op va_arg (aggregate aligned to 16 bytes)", 0, (int)eok_va_arg);
   if (size <= 16) {
     if (ir_abi_collect(t, 0, lv, &n, &why) && !ir_leaves_have_m(lv, n)) {
@@ -8383,6 +8398,10 @@ void nfcxx_ir_back_end(void)
   {
     const char *nf = getenv("NFCXX_IR_NOINLINE");
     ir_noinline_attr = nf != NULL && strcmp(nf, "1") == 0;
+  }
+  {
+    const char *vp = getenv("NFCXX_IR_VALIST_PTR");
+    ir_valist_ptr = vp != NULL && strcmp(vp, "1") == 0;
   }
   nf_ld_blob = 1; /* long double types print as a 16-byte array in the IR */
   ir_buf_open(&ir_out_globals);
