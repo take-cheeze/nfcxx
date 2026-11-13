@@ -246,8 +246,17 @@ def node_cost(x)
   n
 end
 
+# Whether a function has an inline asm operand that only a constant argument makes valid: an immv or symv (the "i" operand of
+# `asm goto` in an __always_inline function, as the kernel's _static_cpu_has has, be/nfcxx_ir.c). The function cannot be
+# emitted alone (the SSA route refuses it), so it is inlined whatever its size and whatever the module's growth.
+def asm_needs_constant?(x)
+  return false unless x.is_a?(Array)
+  return true if x[0] == "opnd" && (x[1] == "immv" || x[1] == "symv")
+  x.any? { |y| asm_needs_constant?(y) }
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
   return "noinline" if fn.any? { |f| head(f) == "noinline" }
   params = fn.find { |f| head(f) == "params" }
@@ -392,7 +401,7 @@ def expand_call(s, fns, st)
     return nil
   end
   # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
-  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !asm_needs_constant?(fn)
     st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
     return nil
   end

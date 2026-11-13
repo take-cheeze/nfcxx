@@ -143,7 +143,7 @@ rc=0
 if [ "$emitter" = ssa ]; then
   tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $rc != 124 ] && [ $rc != 5 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
-    echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
+    echo "pathb-cc: $src: the optimized IR is refused ($(head -1 "$tmp/$n.emit")), using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
     tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi

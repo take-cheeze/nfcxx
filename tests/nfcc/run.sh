@@ -240,6 +240,27 @@ used pathb int.c && ok "-mno-sse: the integer code is Path B's" || bad "-mno-sse
 refuses "-mno-sse: SSE code is refused" "mno-sse" pb -c -mno-sse "$tmp/fp.c" -o "$tmp/x.o"
 refuses "-mno-80387: SSE code is refused too" "SSE or x87" pb -c -mno-80387 "$tmp/fp.c" -o "$tmp/x.o"
 check "the same code builds without -mno-sse" pb -c "$tmp/fp.c" -o "$tmp/x.o"
+# a volatile integer access under -mno-sse: its helpers are emitted for the operations the unit uses, not for float and double too
+# (their movss/movsd made every kernel file that touches a volatile object, 353 of 614, a gcc compile)
+printf 'volatile int v;\nint vol(int x) { v = x; return v + 1; }\n' > "$tmp/vol.c"
+check "-mno-sse: a volatile integer access builds" pb -c -mno-sse "$tmp/vol.c" -o "$tmp/vol.o"
+used pathb vol.c && ok "-mno-sse: the volatile integer access is Path B's" || bad "-mno-sse: volatile on Path B" "$(tail -1 "$tmp/log")"
+objdump -d "$tmp/vol.o" | grep -qE '%[xyz]mm|%st' && bad "-mno-sse: no SSE in the volatile helpers" "found" || ok "-mno-sse: no SSE in the volatile helpers"
+printf 'volatile double d;\ndouble vd(double x) { d = x; return d; }\n' > "$tmp/vold.c"
+refuses "-mno-sse: a volatile double is still refused" "SSE or x87" pb -c -mno-sse "$tmp/vold.c" -o "$tmp/x.o"
+
+# GNU C of the kernel that needs the inliner and the asm lowering together (tests/c: compared with gcc by pbrun). The unit must
+# build from the optimized IR: a refusal there falls back to the unoptimized IR, where an always_inline function that has an "i"
+# operand of its parameter cannot be emitted, so the compile fails (tests/c/inline_asm_goto_always_inline*.c are the kernel's
+# _static_cpu_has, an offset into a global struct's array and then an index by an inlined parameter).
+for t in inline_asm_goto_always_inline:5 inline_asm_goto_always_inline_large:11 inline_asm_local_address_input:17; do
+  pbrun "${t%%:*} (Path B, the inlined asm operands and the address of a local)" "${t##*:}" "$root/tests/c/${t%%:*}.c"
+  grep -q 'optimized IR is refused' <<<"$out" && bad "${t%%:*}: the optimized IR is accepted" "$out"
+done
+# a function's address cast to an integer in an inlined callee: the cast reaches the emitter with the function as its operand
+printf 'extern void entry(void);\nextern void sink(unsigned int lo, unsigned int hi);\nstatic inline __attribute__((always_inline)) void wr(unsigned long v) { sink((unsigned int)v, (unsigned int)(v >> 32)); }\nvoid f(int c) { if (c) wr((unsigned long)entry); else wr(0); }\n' > "$tmp/fa.c"
+out=$(pb -c "$tmp/fa.c" -o "$tmp/fa.o" 2>&1) && ! grep -q 'optimized IR is refused' <<<"$out" && ok "a function address cast to an integer after inlining: the optimized IR builds" ||
+  bad "function address cast after inlining" "$(head -2 <<<"$out" | tr '\n' ' ')"
 
 # Options that change meaning and that Path B cannot honour: the compile is gcc's, with the option; nothing is dropped
 printf 'enum e { A, B };\nint main(void) { return (int)sizeof(enum e); }\n' > "$tmp/en.c"

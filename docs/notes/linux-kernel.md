@@ -192,6 +192,43 @@ The causes the branch fixed, one regression case each in `tests/pathb-kernel/` (
   access that uses it, unchecked (`phi_wide_pointer_constant.c`). A pointer constant that does not fit in 32 bits is loaded
   from a one-word data cell (the cleaner fix is a 32-bit check in the QBE fork's `amd64/isel.c`, outside this repo).
 
+### Measured: the kernel's own option set, `NFCXX_PATHB_FALLBACK=gcc`
+
+A second measurement, with the options of the kernel's own `.cmd` files kept (`-mno-sse`, `-funsigned-char`, `-fshort-wchar`, ...;
+only `-ftrivial-auto-var-init=zero` is dropped, which sends every file to gcc), the 614 translation units of a tinyconfig tree
+compiled by `nfcc -c` with `NFCXX_BACKEND=pathb NFCXX_PATHB_FALLBACK=gcc NFCXX_PATHB_LOG=FILE`. A file the log names as gcc's was
+not built by Path B:
+
+| state | built by Path B | gcc's |
+|---|---|---|
+| before | 226 | 388 |
+| after | 581 | 33 |
+
+What the 388 were (355 of them refusals, the rest the 33 below), and what fixed each (regression cases in `tests/c/inline_asm_goto_always_inline*.c`,
+`tests/c/inline_asm_local_address_input.c` and `tests/nfcc/run.sh`):
+
+- 321: the volatile access helpers (`__pathb_vld_*`, `__pathb_vst_*`) were all emitted into every unit that has a volatile
+  access, the `float` and `double` ones too (`movss`, `movsd`), and `-mno-sse` refuses a unit with SSE code. Only the operations
+  a unit uses get a helper now (`volatile_helpers` in `scripts/pathb-ssa-qbe.rb`).
+- 32: `_static_cpu_has` (`asm goto` with `"i"` operands of an `__always_inline` function's parameter). Two causes, both hidden
+  behind a fallback: `pathb-cc` emits the unoptimized IR when the optimized one is refused, and that IR cannot hold the function
+  (its operands are not constants without the inliner), so the unit failed with the second message and the first was never
+  shown (it is now: `the optimized IR is refused (REASON), using the unoptimized IR`). (1) The inliner's budgets (`--max-callee`,
+  `--max-growth`) left the call in a large unit, and (2) the address operand `&((const char *)boot_cpu_data.x86_capability)[bit >> 3]`
+  is an `offset` (a literal byte count) and then an `index` by a folded value, which `asm_symbol_of` read as a constant
+  only for the index. A function with an `immv` or `symv` operand is now inlined whatever its size and the module's growth.
+- 1: the address of a local as an input of a general asm block (`"D"(&val)`, `int3_selftest`): the operand is a slot name
+  with no declared type.
+- 1: a function's address converted to an integer after inlining (`wrmsrl_cstar((unsigned long)entry_SYSCALL32_ignore)`):
+  `conv_lines` had no type for a `&"fn"` operand.
+
+The 33 that remain are gcc's by design: 20 compile with `-m16 -mregparm=3` (the real-mode boot code), 8 with
+`-Wa,-mrelax-relocations=no` (`arch/x86/boot/compressed`), 5 have a wide character or string literal under `-fshort-wchar` (EDG
+types them `int`). Not covered here: a Path B object of a file that uses `ASM_CALL_CONSTRAINT` (`"+r"(current_stack_pointer)`,
+`register unsigned long current_stack_pointer asm("rsp")`) has an undefined reference to `current_stack_pointer`, which gcc's
+object does not: the register variable is a global of the IR, so the kernel link of such an object fails (page_alloc.o is one).
+The measurement counts compiles, not links.
+
 What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
 boot code (`arch/x86/boot`, `-m16`).
 
