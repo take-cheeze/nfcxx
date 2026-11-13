@@ -1968,6 +1968,23 @@ end
 def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
+  # The x87 thunks are not nodes, but they name the functions they reach: an entry thunk (x87-thunk entry|entryc "F" ...)
+  # is the C-convention symbol F of the long double function __nfcxx_ldr_F, and a call thunk (call|callc "F", callv|callvc
+  # "F") is the symbol of a call of F (scripts/pathb-x87-thunks.rb). Once a call is inlined, nothing else names F or
+  # __nfcxx_ldr_F, so the thunk's name keeps them: entries maps a thunk symbol to the nodes it reaches.
+  entries = {}
+  forms.each do |f|
+    next unless head(f) == "x87-thunk"
+    k = f[1].to_s
+    if %w[entry entryc].include?(k)
+      entries[unq(f[2])] = ["__nfcxx_ldr_" + unq(f[2])]
+    elsif %w[call callc].include?(k)
+      entries["__nfcxx_x87c_" + unq(f[2])] = [unq(f[2])]
+    elsif %w[callv callvc].include?(k)
+      tail = f[3].is_a?(String) && f[3].start_with?("\"") ? "_A" + unq(f[3]) + "R" + f[4].to_s : "_I#{f[3]}S#{f[4]}V#{f[5]}"
+      entries["__nfcxx_x87cv_" + unq(f[2]) + tail] = [unq(f[2])]
+    end
+  end
   queue = if substr == UNUSED_ROOTS
             nodes.keys.select { |n| external_root?(nodes[n]) } + vtable_roots(nodes)
           else
@@ -1978,7 +1995,10 @@ def prune_pass(forms, substr, report)
     n = queue.pop
     next if seen[n]
     seen[n] = true
-    quoted_names(nodes[n].drop(2), []).each { |c| queue << c if nodes.key?(c) && !seen[c] }
+    if nodes.key?(n)
+      quoted_names(nodes[n].drop(2), []).each { |c| queue << c if (nodes.key?(c) || entries.key?(c)) && !seen[c] }
+    end
+    (entries[n] || []).each { |t| queue << t unless seen[t] }
   end
   out = forms.select { |f| !%w[function global data].include?(head(f)) || seen[unq(f[1])] }
   $stderr.write("pathb-ir-opt: kept #{seen.size} of #{nodes.size} functions and objects (reachable from #{substr})\n") if report

@@ -546,8 +546,11 @@ unless missing.empty?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: calls an x87 thunk with no form in the module: #{missing.first}"
   exit EXIT_PARTIAL
 end
-# The thunks are x86-64 assembly: on arm64 a module that needs one is refused (docs/notes/pathb-longdouble.md).
-unless x87_asm.empty? || x87_target_x86_64?
+# The thunks are x86-64 assembly (the x86 forms) or AArch64 Linux assembly (the forms with a class string, see
+# scripts/pathb-a64-thunks.rb). The x86 text is refused on any other target, as before; an AArch64 form on a target that is
+# not Linux arm64 gets no text, so the missing-thunk check above refuses the module.
+x86_asm = x87_thunks_asm(x87_forms.reject { |f| x87_a64_form?(f) }, il)
+unless x86_asm.empty? || x87_target_x86_64?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: long double ABI thunks (x87) are x86-64 assembly; target is #{x87_target_name}"
   exit EXIT_PARTIAL
 end
