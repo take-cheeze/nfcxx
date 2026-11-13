@@ -98,8 +98,9 @@ if lib
       #include <mruby.h>
       #include <mruby/class.h>
       #include <mruby/presym.h>
+      #include <mruby/proc.h>
       #include <cstdio>
-      static mrb_value row_m(mrb_state*, mrb_value) { return mrb_fixnum_value(42); }
+      static mrb_value row_m(mrb_state* M, mrb_value) { return mrb_int_value(M, 42); }
       int main() {
         mrb_state* M = mrb_open();
         struct RClass* c = mrb_define_class(M, "RowProbe", M->object_class);
@@ -113,7 +114,7 @@ if lib
         k = c;
         bool vm = !MRB_METHOD_UNDEF_P(mrb_method_search_vm(M, &k, mid));
         mrb_value v = mrb_funcall_id(M, o, mid, 0);
-        bool funcall = !M->exc && mrb_fixnum_p(v) && mrb_fixnum(v) == 42;
+        bool funcall = !M->exc && mrb_integer_p(v) && mrb_integer(v) == 42;
         bool responds = mrb_respond_to(M, o, mid);
         std::printf("rows=%d vm=%d funcall=%d respond_to=%d\\n", rows, vm, funcall, responds);
         mrb_close(M);
