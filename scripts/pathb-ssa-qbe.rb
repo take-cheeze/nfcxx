@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
+    attr_accessor :ptr32, :regparm3, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -190,6 +190,7 @@ module Qbe
   # --i386 (the 32-bit targets, i386 and i386_regparm3): pointers are 32-bit, of class w; `long` is read as `int` by the driver
   # (scripts/pathb-ssa-build renames the IR's tokens), long long stays class l. docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
   self.ptr32 = false
+  self.regparm3 = false   # the 32-bit target passes the first three word arguments in registers (-mregparm=3)
   # --asan (NFCXX_PATHB_ASAN=1, docs/notes/asan-plan.md): a call of libasan's check before each access through a computed address.
   self.asan = false
   self.module_has_data = false
@@ -932,7 +933,7 @@ end
           raise QbeUnsupported, "asm: an immediate operand that is not a constant" unless head(o[:arg]) == "const"
 
           o[:kind] = "imm"
-          o[:arg] = ["const", "long", Qbe.int_lit(o[:arg][2]).to_s]
+          o[:arg] = ["const", Qbe.ptr32 ? "int" : "long", Qbe.int_lit(o[:arg][2]).to_s]
         elsif o[:kind] == "symv"
           base, off = asm_symbol_of(o[:arg])
           raise QbeUnsupported, "asm: an address operand that is not a symbol and a constant offset" if base.nil?
@@ -944,18 +945,23 @@ end
       end
       ops.each { |o| o[:sym] = Qbe.symbol(o[:arg].raw) if o[:kind] == "sym" }
       ops.each { |o| o[:imm] = Qbe.int_lit(o[:arg][2]) if o[:kind] == "imm" }
-      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels)
+      name, text = Qbe.ptr32 ? Qbe.asm_block32(item[1].raw.delete('"'), ops, clobbers, labels) : Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels)
       (@link[:asm_texts] ||= {})[name] ||= text
+      # The operand block: a cell for each operand, of the machine's word (8 bytes; 4 on the 32-bit targets, where an operand of
+      # 8 bytes, a register pair, is refused).
+      ws = Qbe.kz
+      kp = Qbe.kp
+      raise QbeUnsupported, "asm-block operand of 8 bytes on a 32-bit target" if Qbe.ptr32 && ops.any? { |o| o[:size] == 8 }
       blk = fresh
-      @lines << "  #{blk} =l alloc8 #{8 * [ops.size, 1].max}"
+      @lines << "  #{blk} =#{kp} alloc#{ws} #{ws * [ops.size, 1].max}"
       addrs = {}
       ops.each_with_index do |o, i|
         slot = fresh
-        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
+        @lines << "  #{slot} =#{kp} add #{blk}, #{ws * i}"
         if o[:kind] == "sym"
           # The symbol's address goes into the cell although the template names the symbol: the reference keeps a static
           # object that only the asm uses from being pruned.
-          @lines << "  storel #{op(o[:arg])}, #{slot}"
+          @lines << "  store#{kp} #{op(o[:arg])}, #{slot}"
         elsif %w[in inout mem].include?(o[:kind])
           v = op(o[:arg])
           val = v
@@ -979,21 +985,21 @@ end
             end
             raise QbeUnsupported, "asm-block input of class #{cls}" unless %w[w l].include?(cls)
           end
-          if cls == "w"
+          if cls == "w" && !Qbe.ptr32
             ext = fresh
             @lines << "  #{ext} =l extuw #{val}"
             val = ext
           end
-          @lines << "  storel #{val}, #{slot}"
+          @lines << "  store#{kp} #{val}, #{slot}"
         end
         addrs[i] = op(o[:arg]) if %w[out inout flag gsel].include?(o[:kind])
       end
-      @lines << "  call $#{name}(l #{blk})"
+      @lines << "  call $#{name}(#{kp} #{blk})"
       ops.each_with_index do |o, i|
         next unless %w[out inout flag gsel].include?(o[:kind])
 
         slot = fresh
-        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
+        @lines << "  #{slot} =#{kp} add #{blk}, #{ws * i}"
         load, store = { 1 => %w[loadub storeb], 2 => %w[loaduh storeh], 4 => %w[loaduw storew], 8 => %w[loadl storel] }
                       .fetch(o[:size]) { raise QbeUnsupported, "asm-block output of #{o[:size]} bytes" }
         t = fresh
@@ -2959,6 +2965,184 @@ end
     size = { "b" => 1, "w" => 2, "k" => 4, "q" => 8 }.fetch(letter) { o[:size] }
     slot = { 8 => 0, 4 => 1, 2 => 2, 1 => 3 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
     "%#{ASM_REGS.fetch(reg)[slot]}"
+  end
+
+  # ---- the 32-bit (i386) helper of an asm template: the same contract as asm_block, with the 32-bit registers ----------------
+  # The operand block is a pointer in %eax (regparm: Qbe.regparm3, the first argument) or at 4(%esp) (cdecl); each operand is a
+  # 4-byte cell. %ebp holds the block while the template runs (so a template that names %ebp is refused), and the helper saves
+  # %ebx, %esi, %edi and %ebp. The register of an operand is one of eax ecx edx ebx esi edi; an operand of one byte takes
+  # one of the first four, which have a byte register.
+  I386_REGS = {
+    "eax" => %w[eax ax al], "ebx" => %w[ebx bx bl], "ecx" => %w[ecx cx cl], "edx" => %w[edx dx dl],
+    "esi" => %w[esi si], "edi" => %w[edi di]
+  }.freeze
+  I386_FIXED = { "a" => "eax", "b" => "ebx", "c" => "ecx", "d" => "edx", "S" => "esi", "D" => "edi" }.freeze
+  I386_POOL = %w[eax ecx edx ebx esi edi].freeze
+  I386_BYTE_POOL = %w[eax ecx edx ebx].freeze
+  I386_SAVED = %w[ebp ebx esi edi].freeze
+
+  def self.asm_operand_text32(o, reg, letter)
+    case o[:kind]
+    when "imm"
+      raise QbeUnsupported, "asm: modifier %#{letter} on an immediate" if letter == "a"
+
+      return (letter == "c" || letter == "P" ? o[:imm].to_s : letter == "n" ? (-o[:imm]).to_s : "$#{o[:imm]}")
+    when "sym"
+      txt = o[:off].zero? ? o[:sym] : "#{o[:sym]}#{o[:off] > 0 ? "+" : ""}#{o[:off]}"
+      return txt if letter == "c" || letter == "P" || letter == "a"
+
+      return "$#{txt}"
+    when "flag"
+      raise QbeUnsupported, "asm: a flag output named in the template"
+    end
+    return "(%#{reg})" if o[:code] == "m" || letter == "a"
+    raise QbeUnsupported, "asm: modifier %#{letter} on a register" if letter == "c" || letter == "P" || letter == "n"
+
+    size = { "b" => 1, "w" => 2, "k" => 4 }.fetch(letter) { o[:size] }
+    slot = { 4 => 0, 2 => 1, 1 => 2 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
+    names = I386_REGS.fetch(reg)
+    raise QbeUnsupported, "asm: no #{size * 8}-bit register #{reg}" if names[slot].nil?
+
+    "%#{names[slot]}"
+  end
+
+  def self.asm_block32(hex, ops, clobbers = [], labels = [])
+    tpl = [hex].pack("H*")
+    raise QbeUnsupported, "asm: a template that names %ebp" if tpl.include?("%ebp") || tpl.include?("%bp") || tpl.include?("%esp")
+    regs = Array.new(ops.size)
+    used = {}
+    clob = {}
+    clobbers.each do |c|
+      r = { "ax" => "eax", "bx" => "ebx", "cx" => "ecx", "dx" => "edx", "si" => "esi", "di" => "edi" }.fetch(c, c)
+      raise QbeUnsupported, "asm: clobber of #{c}" unless I386_REGS.key?(r)
+
+      clob[r] = true
+    end
+    ops.each_with_index do |o, i|
+      next unless (r = I386_FIXED[o[:code]])
+
+      regs[i] = r
+      used[r] = true
+    end
+    ops.each_with_index do |o, i|
+      raise QbeUnsupported, "asm: an SSE operand on a 32-bit target" if o[:code] == "x"
+      next if regs[i] || tied_code?(o[:code]) || ASM_NOREG.include?(o[:kind])
+
+      byte = o[:size] == 1 || o[:kind] == "flag"
+      free = (byte ? I386_BYTE_POOL : I386_POOL).reject { |r| used[r] || clob[r] }
+      raise QbeUnsupported, "asm: more operands than registers" if free.empty?
+
+      regs[i] = o[:kind] == "flag" ? free.last : free.first
+      used[regs[i]] = true
+    end
+    ops.each_with_index do |o, i|
+      next unless tied_code?(o[:code])
+
+      src = o[:code].to_i
+      raise QbeUnsupported, "asm: a tied operand names operand #{src}" if src >= ops.size || src == i
+      raise QbeUnsupported, "asm: a tied operand names an operand with no register" if regs[src].nil?
+
+      regs[i] = regs[src]
+    end
+    ops.each do |o|
+      raise QbeUnsupported, "asm: flag condition #{o[:code]}" if o[:kind] == "flag" && !ASM_FLAG_CONDS.include?(o[:code])
+    end
+    nreal = ops.count { |o| o[:kind] != "gsel" }
+    parts = []
+    body = +""
+    i = 0
+    while i < tpl.size
+      if tpl[i] != "%"
+        body << tpl[i]
+        i += 1
+        next
+      end
+      if tpl[i + 1] == "%"
+        body << "%"
+        i += 2
+        next
+      end
+      if tpl[i + 1] == "="
+        body << "0"
+        i += 2
+        next
+      end
+      j = i + 1
+      letter = %w[b w k c P n a l].include?(tpl[j]) ? tpl[j] : ""
+      j += letter.size
+      idx = nil
+      if tpl[j] == "["
+        close = j + 1
+        close += 1 while close < tpl.size && tpl[close] != "]"
+        raise QbeUnsupported, "asm template: an unterminated %[name]" if close >= tpl.size
+
+        nm = tpl[j + 1...close]
+        if letter == "l"
+          idx = labels.index(nm)
+          raise QbeUnsupported, "asm template: no label named #{nm}" if idx.nil? || nm.empty?
+
+          idx += nreal
+        else
+          idx = ops.index { |o| o[:name] == nm }
+          raise QbeUnsupported, "asm template: no operand named #{nm}" if idx.nil? || nm.empty?
+        end
+
+        k = close + 1
+      else
+        k = j
+        k += 1 while k < tpl.size && DIGITS.include?(tpl[k])
+        raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" if k == j
+
+        idx = tpl[j...k].to_i
+      end
+      if letter == "l"
+        raise QbeUnsupported, "asm template: label #{idx - nreal} of #{labels.size}" if idx < nreal || idx - nreal >= labels.size
+
+        parts << body << [idx - nreal + 1]
+        body = +""
+        i = k
+        next
+      end
+      raise QbeUnsupported, "asm template: operand #{idx} of #{nreal}" if idx >= nreal
+
+      body << asm_operand_text32(ops[idx], regs[idx], letter)
+      i = k
+    end
+    parts << body
+    flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
+    digest = sha1_hex("32|#{regparm3}|#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
+    sym = "__pathb_asm_#{digest}"
+    body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
+    lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:"]
+    I386_SAVED.each { |r| lines << "\tpushl %#{r}" }
+    # the block: in %eax with -mregparm=3, else the first argument, above the return address and the four saved registers
+    lines << (regparm3 ? "\tmovl %eax, %ebp" : "\tmovl #{4 * I386_SAVED.size + 4}(%esp), %ebp")
+    ops.each_with_index do |o, i|
+      lines << "\tmovl #{4 * i}(%ebp), %#{regs[i]}" if %w[in inout mem].include?(o[:kind])
+    end
+    ops.each_with_index do |o, i|
+      lines << "\tmovl $0, %#{regs[i]}" if o[:kind] == "gsel"
+    end
+    lines << body.chomp
+    ops.each_with_index do |o, i|
+      next unless o[:kind] == "flag"
+
+      lines << "\tset#{o[:code]} %#{I386_REGS.fetch(regs[i])[2]}" << "\tmovzbl %#{I386_REGS.fetch(regs[i])[2]}, %#{regs[i]}"
+    end
+    lines << ".L#{sym}_exit:" unless labels.empty?
+    ops.each_with_index do |o, i|
+      next unless %w[out inout flag gsel].include?(o[:kind])
+
+      lines << "\tmovl %#{regs[i]}, #{4 * i}(%ebp)"
+    end
+    lines.concat(I386_SAVED.reverse.map { |r| "\tpopl %#{r}" })
+    lines << "\tret"
+    gi = ops.index { |o| o[:kind] == "gsel" }
+    labels.each_with_index do |_, li|
+      lines << ".L#{sym}_#{li + 1}:" << "\tmovl $#{li + 1}, %#{regs[gi]}" << "\tjmp .L#{sym}_exit"
+    end
+    lines << ".size #{sym}, .-#{sym}"
+    [sym, lines.join("\n") + "\n"]
   end
 
   def self.asm_block(hex, ops, clobbers = [], labels = [])

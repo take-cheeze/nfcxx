@@ -435,6 +435,7 @@ end
 error_exit("--safe and --asan are for the 64-bit targets") if $ilp32 && (safe || asan)
 error_exit("--m16 needs --target=i386 or --target=i386_regparm3") if m16 && !$ilp32
 Qbe.ptr32 = $ilp32
+Qbe.regparm3 = $target32 == "i386_regparm3"
 if $ilp32
   $qbe_flags += ["-t", $target32]
   $qbe_flags << "-m16" if m16

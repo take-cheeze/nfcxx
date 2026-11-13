@@ -178,8 +178,15 @@ gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX
 # front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
 # any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
 pbf=() nofp=0 nounwind=0 wchar16=0
+# The real-mode boot code's options (-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2): Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# --regparm=3 --m16: ILP32, QBE's i386_regparm3, a 32-bit object with .code16gcc code), decided in pathb_reason when the whole command line is known.
+# -mregparm=3 without -m16 is not honoured (a 32-bit hosted compile is gcc's); -march=i386 and -mpreferred-stack-boundary=2 change nothing
+# on QBE's i386 code (it uses 386 instructions only and keeps 4-byte stack alignment). All of them are kept for a gcc compile (gccf).
+pb_m16=0 pb_regparm=0
 pathb_option() {   # 0: handled here
   case $1 in
+    -m16) pb_m16=1 ;;
+    -mregparm=3) pb_regparm=1 ;;
     -funsigned-char|-fno-signed-char|-fsigned-char|-fno-unsigned-char|-ffreestanding) pbf+=("$1") ;;
     -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
     -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
@@ -323,6 +330,10 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   shift
   pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
+  if [ $pb_regparm = 1 ] && [ $pb_m16 = 0 ]; then pb_reason="-mregparm=3 without -m16: not honoured by Path B"; return; fi
+  if [ $pb_m16 = 1 ]; then
+    pb_opts+=(--i386 --m16); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)   # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding
+  fi
   if [ ${#asf[@]} -gt 0 ]; then pb_reason="${asf[*]}: assembler options"; return; fi
   while [ $k2 -lt ${#pp[@]} ]; do
     o=${pp[k2]}
