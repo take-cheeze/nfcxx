@@ -115,6 +115,7 @@ ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
+ruby scripts/bc2cpp/sym_call_chain_check.rb
 ruby scripts/bc2cpp/leaf_owner_else_check.rb
 ruby scripts/bc2cpp/respond_to_fold_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb

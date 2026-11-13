@@ -414,9 +414,10 @@ module StaticDispatchRegistrations
   OWNER_DIRECT = /BC2CPP_OWNER_DIRECT\("((?:[^"\\]|\\.)*)"/
 
   # SYM_SITE (codegen_loop_inline.rb emit_sym_inline): the marker of an inlined `&:sym` loop, `// SYM_SITE <irep label>
-  # <send address>`, and the loop body that follows it up to the loop's closing brace.
+  # <send address>`, and the loop body that follows it up to the loop's closing brace. A SYM_CALL_CHAIN's proven
+  # nomethod else is no lookup (NON_LOOKUP_HELPERS), so it does not count as a by-name call.
   SYM_SITE_MARKER = %r{^[ \t]*// SYM_SITE (\S+) (\d+)[ \t]*$}
-  SYM_SITE_BY_NAME = /mrb_funcall|bc2cpp_send|bc2cpp_funcall|bc2cpp_nomethod|mrb_funcall_with_method|bc2cpp_owner_call_named/
+  SYM_SITE_BY_NAME = /mrb_funcall|bc2cpp_send|bc2cpp_funcall|mrb_funcall_with_method|bc2cpp_owner_call_named/
 
   # The block sites whose generated loop dispatches no name: no by-name call in the body, and every owner call in it
   # covered (guarded_owner_calls). A site with no marker (a generic block call) is never covered. Returns a Hash of
