@@ -1095,6 +1095,29 @@ static const char *ir_var_sym(a_variable_ptr var)
   return var->source_corresp.name;
 }
 
+/* A GNU global register variable (`register unsigned long current_stack_pointer asm("rsp")`, the kernel's ASM_CALL_CONSTRAINT):
+   EDG keeps the register in asm_name_or_reg.reg and leaves asm_name_is_valid clear. The variable IS the machine register, so it has
+   no storage and no symbol. ir_var_is_reg is 1 for such a variable bound to any register, ir_var_is_sp for the one that is lowered,
+   the stack pointer: a read is (sp), and an asm operand on it ("+r"(current_stack_pointer) only orders the asm after the frame
+   setup) is a temporary that takes the value and is dropped. Another register has no lowering and is refused where it is read. */
+static int ir_var_is_reg(a_variable_ptr var)
+{
+  return var_has_static_or_thread_storage_duration(var) && !var->asm_name_is_valid && var->asm_name_or_reg.reg != anr_invalid &&
+         var->asm_name_or_reg.reg != anr_memory;
+}
+
+static int ir_var_is_sp(a_variable_ptr var)
+{
+  return ir_var_is_reg(var) && var->asm_name_or_reg.reg == anr_sp;
+}
+
+/* The register variable e names, or NULL. */
+static a_variable_ptr ir_expr_reg_var(an_expr_node_ptr e)
+{
+  if (e != NULL && e->kind == enk_variable && ir_var_is_reg(e->variant.variable.ptr)) return e->variant.variable.ptr;
+  return NULL;
+}
+
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
 static int ir_force_weak; /* ir_global_print: the declaration being printed is the target of a weakref */
 static const char *ir_global_op(a_variable_ptr var)
@@ -2680,6 +2703,13 @@ static ir_val ir_rval(an_expr_node_ptr e)
         return ir_mk_value(ir_fmt("&\"%s\"", sym), e->type);
       }
     case enk_variable:
+      if (ir_var_is_reg(e->variant.variable.ptr)) {
+        a_variable_ptr rv = e->variant.variable.ptr;
+        if (!ir_var_is_sp(rv) || ir_size_of(e->type) != 8 || (!ir_is_integer(e->type) && !ir_is_pointer(e->type)))
+          return ir_gap(e->type, "global register variable", 2, (int)enk_variable);
+        ir_note(2, enk_variable, 1);
+        return ir_mk_value(ir_let(ir_valtext(e->type), "(sp)"), e->type);
+      }
       ir_note(2, enk_variable, 1);
       return ir_load(ir_lval(e));
     case enk_object_lifetime:
@@ -2716,6 +2746,8 @@ static ir_val ir_rval(an_expr_node_ptr e)
 static ir_val ir_lval(an_expr_node_ptr e)
 {
   if (e == NULL) return ir_mk_void();
+  if (e->kind == enk_variable && ir_var_is_reg(e->variant.variable.ptr))
+    return ir_gap(e->type, "address of a global register variable", 2, (int)enk_variable); /* no storage: asm operands use ir_asm_out_lval */
   if (e->kind == enk_variable) {
     ir_note(2, enk_variable, 1);
     return ir_var_addr(e->variant.variable.ptr, e->type,
@@ -4564,6 +4596,17 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
   }
   if (ir_bit_generic(e, name, out)) return 1;
   if (ir_float_builtin(e, name, out)) return 1;
+  /* __builtin_isdigit(c) is (unsigned)c - '0' <= 9, as gcc folds it (the kernel's isdigit is this builtin): not a call of the libc
+     function, which a freestanding link does not have. */
+  if (strcmp(name, "isdigit") == 0 && arg != NULL && ir_is_integer(arg->type) && !ir_is_bool(arg->type)) {
+    ir_val a = ir_rval(arg);
+    char *x = ir_cv("unsigned_int", a.s);
+    char *d = ir_let("unsigned_int", ir_fmt("(wsub unsigned_int %s (const unsigned_int 48))", x));
+    char *b = ir_let("bool", ir_fmt("(le.u unsigned_int %s (const unsigned_int 9))", d));
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_cv(ir_valtext(e->type), b), e->type);
+    return 1;
+  }
   if (strcmp(name, "expect") == 0 || strcmp(name, "expect_with_probability") == 0) {
     ir_val a = ir_rval(arg);
     ir_note(0, eok_call, 1);
@@ -7423,6 +7466,8 @@ static const char *ir_asm_clobber(a_named_register r, int *ignore)
 
 static void ir_emit_goto(a_label_ptr lbl, int d);
 
+static ir_val ir_asm_out_lval(an_expr_node_ptr e);
+
 static int ir_asm_general(an_asm_entry_ptr ae, int d)
 {
   an_asm_operand_ptr op;
@@ -7493,7 +7538,7 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     } else if (strcmp(kind, "sym") == 0) {
       v = ir_mk_value((char *)plans[nops].base, op->expression->type);
     } else if (strcmp(kind, "out") == 0 || strcmp(kind, "inout") == 0 || strcmp(kind, "flag") == 0) {
-      v = ir_lval(op->expression);
+      v = ir_asm_out_lval(op->expression);
     } else {
       v = ir_rval(op->expression);
     }
@@ -7626,6 +7671,19 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   ir_line(d + 2, "(unreachable)");
   ir_close(1);
   ir_close(1);
+}
+
+/* The location an asm output operand writes: its lvalue, or, for the stack-pointer register variable, a fresh temporary holding the
+   register's value (the write is dropped: gcc's "+r"(current_stack_pointer) names rsp itself, which the template does not change). */
+static ir_val ir_asm_out_lval(an_expr_node_ptr e)
+{
+  a_variable_ptr rv = ir_expr_reg_var(e);
+  if (rv != NULL && ir_var_is_sp(rv) && ir_size_of(e->type) == 8) {
+    ir_val t = ir_temp(e->type);
+    ir_store(e->type, t.s, ir_let(ir_valtext(e->type), "(sp)"), 0);
+    return t;
+  }
+  return ir_lval(e);
 }
 
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
@@ -7770,7 +7828,7 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       ir_asm_constraints(op, &mo, &mk, &ti, &rg, &bd);
       tied[n] = -1;
       if ((op->modifiers & aom_output) != 0) {
-        lv[n] = ir_lval(op->expression);
+        lv[n] = ir_asm_out_lval(op->expression);
       } else if (ti >= 0) {
         tv[n] = ir_rval(op->expression);
         tied[n] = ti;
@@ -7882,6 +7940,23 @@ static void ir_decl_zero(a_statement_ptr s)
     else if (ir_auto_zero && kind == initk_none && !var->is_vla && !ir_is_ref_type(var->type) && !ir_var_uninitialized_attr(var) &&
              !ir_init_follows(s, var))
       ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
+  }
+}
+
+/* A static local with __attribute__((used)) is emitted where it is declared though nothing refers to it: the kernel's __ADDRESSABLE(sym)
+   (`static void *__used __section(".discard.addressable") x = (void *)&sym;` inside static_call(name)), whose only job is to make this
+   object reference sym, so that its symbol table has it (objtool looks the static call's key up there). Other static locals are
+   printed at their first use. */
+static void ir_decl_used_static(a_statement_ptr s)
+{
+  an_il_entity_list_entry_ptr entry;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    a_variable_ptr var;
+    if (entry->entity.kind != iek_variable) continue;
+    var = (a_variable_ptr)entry->entity.ptr;
+    if (var->has_gnu_used_attribute && var->storage_class != sc_extern && var_has_static_or_thread_storage_duration(var) &&
+        !ignore_variable_in_back_end(var))
+      (void)ir_global_op(var);
   }
 }
 
@@ -8250,6 +8325,7 @@ static void ir_stmt(a_statement_ptr s, int d)
          and the zeroing of a local that its initialization does not cover all of (ir_decl_zero). */
       ir_note(1, stmk_decl, 1);
       ir_fact_decl(s, d);
+      ir_decl_used_static(s);
       ir_decl_zero(s);
       ir_decl_cleanup(s, d);
       return;
@@ -8623,6 +8699,16 @@ static void ir_function(a_routine_ptr rout)
   fputs(")", nf_out);
 #if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
   if (ir_noinline_attr && rout->never_inline) fputs("\n  (noinline)", nf_out); /* __attribute__((noinline)) */
+  /* __attribute__((used)): kept though nothing refers to it (a static function the kernel's asm-offsets.c only uses for its asm
+     statements, `static void __used common(void)`, which kbuild reads from the assembly). A root of pruning, as a variable's (used). */
+  if (rout->has_gnu_used_attribute) fputs("\n  (used)", nf_out);
+  /* __attribute__((always_inline)): the inliner inlines every call it can, whatever the callee's size and the module's growth (the
+     kernel's `static __always_inline __init` helpers read __initdata that an out-of-line copy in .text may not). */
+  if (rout->always_inline && C_mode()) fputs("\n  (always-inline)", nf_out);   /* C only: the C++ library headers keep the size caps */
+  /* __attribute__((section("S"))): the function goes into section S (the kernel's __init: .init.text; .noinstr.text, .head.text, ...),
+     allocated and executable. The inliner does not inline such a function (its body would leave the section). */
+  if (has_gnu_routine_supp(rout) && gnu_routine_supp(rout)->section != NULL && gnu_routine_supp(rout)->section[0] != '\0')
+    fprintf(nf_out, "\n  (section \"%s\")", gnu_routine_supp(rout)->section);
 #endif
   /* A local entity (a member of a class, or a lambda's operator(), defined in a function) has the linkage of that function:
      EDG gives it internal storage class, which it does not have. It is weak below, as a copy of an inline function. */
@@ -8635,8 +8721,11 @@ static void ir_function(a_routine_ptr rout)
      EDG does not always flag these as COMDAT. */
   else if (rout->is_template_function) fputs("\n  (weak)", nf_out);
   /* An inline function (C++ inline: an in-class definition, a defaulted member, an inline template member) has a copy in
-     each unit that uses it, one COMDAT group: weak, as EDG marks it for the C back end. Out-of-line members are not. */
-  else if (rout->is_inline || ir_is_local_entity(rout)) fputs("\n  (weak)", nf_out);
+     each unit that uses it, one COMDAT group: weak, as EDG marks it for the C back end. Out-of-line members are not. In C an
+     inline function that reaches here is an external definition (an `extern` declaration of it in the unit: the kernel's
+     `inline int task_curr(...)`, declared in sched.h): one strong symbol, as gcc emits it. An inline definition that no
+     `extern` declaration completes was skipped above. */
+  else if ((rout->is_inline && !C_mode()) || ir_is_local_entity(rout)) fputs("\n  (weak)", nf_out);
   else if (rout->is_weak && rout->source_corresp.name != NULL && strncmp(rout->source_corresp.name, "_ZT", 3) == 0)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
@@ -8783,7 +8872,7 @@ void nfcxx_ir_back_end(void)
   }
   for (var = scope->variables; var != NULL; var = var->next) {
     /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */
-    if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type)) (void)ir_global_op(var);
+    if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type) && !ir_var_is_reg(var)) (void)ir_global_op(var);
   }
   for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(ir_rout_sym(rout));
   for (rout = scope->routines; rout != NULL; rout = rout->next) {

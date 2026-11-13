@@ -45,10 +45,10 @@ safe_on=0; [ "${NFCXX_SAFE_POINTERS:-0}" != 1 ] || safe_on=1
 asan_on=0; [ "${NFCXX_PATHB_ASAN:-0}" != 1 ] || asan_on=1
 passes=${NFCXX_IR_OPT-inline}; ir_opt_max=${NFCXX_IR_OPT_MAX:-268435456}   # the inliner by default; none or off turns the passes off
 passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
-pic=(); asopt=()
+pic=(); nopie=(); asopt=()
 i386=0; regparm=0; m16=0
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
-nofp=0; nounwind=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
+nofp=0; nounwind=0; trapchk=0; trapimp=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
 timeout_s=${NFCXX_PATHB_TIMEOUT:-300}
 dump_opts=()
@@ -57,6 +57,7 @@ while [ $# -gt 0 ]; do
     -o) out=$2; shift ;;
     --safe-pointers) safe_on=1 ;;
     --asan) asan_on=1 ;;
+    --no-pie) nopie=(--no-pie) ;;   # -fno-PIE: a function address is the symbol itself, not a cell (scripts/pathb-ssa-qbe.rb, Qbe.no_pie)
     --i386|--target=linux_i686) i386=1 ;;
     --regparm=3) regparm=1 ;;
     --regparm=*) echo "pathb-cc: $1: only -mregparm=3 is supported" >&2; exit 2 ;;
@@ -70,12 +71,14 @@ while [ $# -gt 0 ]; do
     --ir-opt-max=*) ir_opt_max=${1#--ir-opt-max=} ;;
     --emitter=*) emitter=${1#--emitter=} ;;
     --long-double=trap) ld_trap=1 ;;
+    --trap-checks) trapchk=1 ;;   # a failed check is ud2, not a call of abort (also implied by -ffreestanding, -nostdinc, -mno-sse)
     --no-fp) nofp=1 ;;          # -mno-sse: qbe -n, and the assembly is refused when it uses SSE or x87 (status 5)
     --as-opt=*) asopt+=("${1#--as-opt=}") ;;   # an option of the assembler step (nfcc's -Wa,*): the host cc assembling QBE's output gets it
     --no-unwind) nounwind=1 ;;  # -fno-asynchronous-unwind-tables: qbe -U, no .cfi directives
     -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
     -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
-    -nostdinc|-ffreestanding|-fshort-wchar) opts+=("$1") ;;
+    -nostdinc|-ffreestanding) trapimp=1; opts+=("$1") ;;
+    -fshort-wchar) opts+=("$1") ;;
     -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) dump_opts+=("$1") ;;   # the IR zeroes a local without an initializer (be/nfcxx_ir.c)
     -isystem|-idirafter) opts+=("$1" "$2"); shift ;;
     -isystem?*|-idirafter?*) opts+=("$1") ;;
@@ -152,8 +155,10 @@ fi
 ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
 [ $nofp = 0 ] || ldopt+=(--no-fp)
 [ $nounwind = 0 ] || ldopt+=(--no-unwind)
-if [ $nofp = 1 ] || [ $nounwind = 1 ]; then
-  [ "$emitter" = ssa ] || { echo "pathb-cc: --no-fp and --no-unwind need the SSA emitter (--emitter=ssa)" >&2; exit 2; }
+[ $nofp = 0 ] || trapimp=1
+[ $trapchk = 0 ] && { [ $trapimp = 0 ] || [ "$emitter" != ssa ]; } || ldopt+=(--trap-checks)   # the mruby emitter has no such mode: only the flag itself is an error
+if [ $nofp = 1 ] || [ $nounwind = 1 ] || [ $trapchk = 1 ]; then
+  [ "$emitter" = ssa ] || { echo "pathb-cc: --no-fp, --no-unwind and --trap-checks need the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 fi
 # The mruby emitter only: on Darwin an extern data object is read through the GOT (see pathb-qbe-emit.rb, --extern-data-got).
 emitopt=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emitopt=(--extern-data-got)
@@ -166,11 +171,11 @@ case $emitter in ssa|mruby) ;; *) echo "pathb-cc: --emitter (NFCXX_PATHB_EMITTER
 rc=0
 [ ${#asan[@]} = 0 ] || [ "$emitter" = ssa ] || { echo "pathb-cc: --asan needs the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 if [ "$emitter" = ssa ]; then
-  tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+  tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${nopie[@]+"${nopie[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $rc != 124 ] && [ $rc != 5 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
     echo "pathb-cc: $src: the optimized IR is refused ($(head -1 "$tmp/$n.emit")), using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
-    tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
+    tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${i386opt[@]+"${i386opt[@]}"} ${pic[@]+"${pic[@]}"} ${nopie[@]+"${nopie[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
   if [ $rc != 0 ]; then
     # A function outside the SSA route's subset refuses the unit (no fallback to the mruby emitter; --emitter=mruby
