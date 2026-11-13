@@ -27,13 +27,14 @@
 #include <cstdint>
 #include <string>
 
+#include "nfcuop_layout.hpp"
+
 namespace nfcuop::layout {
 
 enum class GemmVariant : uint8_t { VecN, VecM };
 
-// How VecM lays out its lanes-on-M data (A transposed and the result C). Blocked8 is the layout that the experiments
-// in docs/notes/uop-layout.md found to remove the M-vectorized penalty; VecN ignores it.
-enum class Storage : uint8_t { Strided, Blocked8 };
+// Storage (nfcuop_layout.hpp) of VecM's lanes-on-M data: A transposed and the result C. Blocked8 is the layout that the
+// experiments in docs/notes/uop-layout.md found to remove the M-vectorized penalty; VecN ignores it.
 
 // The C source of nfc_gemm_rowsum for the given shape. Throws std::invalid_argument when the shape does not fit the variant.
 std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose = true,
@@ -49,5 +50,13 @@ std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr = 
 //   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp, int nthreads);
 // B is packed once, then each thread runs the tile loop over its own rows. nthreads is clamped to [1, min(64, tiles)].
 std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr = 6);
+
+// The kernel a solver plan describes: the chosen GEMM variant and rowsum variant, and the storages the plan holds. Maps
+//   avx2-vec-n + reduce-horizontal         -> emit_gemm_rowsum_c(VecN)
+//   avx2-vec-m + reduce-vertical           -> emit_gemm_rowsum_c(VecM, storage of C; A must match)
+//   avx2-packed-n + reduce-horizontal      -> emit_gemm_rowsum_packed_mt_c (B must be Panel16)
+// and throws std::invalid_argument for any other plan (no emitter for that combination, or storages the emitter cannot
+// mix). The shape must be one the plan was solved for.
+std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K);
 
 }  // namespace nfcuop::layout
