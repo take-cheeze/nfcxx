@@ -35,6 +35,8 @@ module CCallRows
   COMPARED = /\A\s*(?:==|!=)/
   NAME_LITERAL = /\bmrb_intern_(?:lit|cstr)\(\s*\w+\s*,\s*"(?:[^"\\\n]|\\.)*"\s*\)|"(?:[^"\\\n]|\\.)*"|\bMRB_(?:SYM|SYM_Q|SYM_B|SYM_E|OPSYM)\(\w+\)/
   NAME_OPERAND = /\A(?:#{NAME_LITERAL})\z/
+  # A condition without a literal or a `?`, then two name literals: the operand names whichever its condition picks.
+  TERNARY_NAMES = /\A[^?:"']+\?\s*(#{NAME_LITERAL})\s*:\s*(#{NAME_LITERAL})\z/
   # MESSAGE_ARGS (the rows run, under the closed-world literal-lookup proof): mruby's exception-message formatters by
   # the position of their format; a literal from there on is message text, which no lookup can take as a name.
   MESSAGE_ARGS = { 'mrb_raisef' => 2, 'mrb_name_error' => 2, 'mrb_no_method_error' => 3, 'mrb_warn' => 1 }.freeze
@@ -197,13 +199,23 @@ module CCallRows
   def blank_operands_and_comparisons(text, sinks, wipe)
     operand_offsets(text, sinks).each do |from, to|
       arg = text[from...to].strip
-      wipe.call(from, to) if NativeOwnerMap.name_of(arg) || arg.match?(NAME_OPERAND)
+      if NativeOwnerMap.name_of(arg) || arg.match?(NAME_OPERAND)
+        wipe.call(from, to)
+      elsif (m = arg.match(TERNARY_NAMES))
+        # TERNARY_NAMES: `cond ? "a" : "b"` names one of two literals, each a lookup like a bare one.
+        [1, 2].each { |k| wipe.call(from + arg_start(text, from, to) + m.begin(k), from + arg_start(text, from, to) + m.end(k)) }
+      end
     end
     text.to_enum(:scan, /(?:==|!=)\s*(#{NAME_LITERAL})|(#{NAME_LITERAL})\s*(?:==|!=)/o).each do
       m = Regexp.last_match
       k = m[1] ? 1 : 2
       wipe.call(m.begin(k), m.end(k))
     end
+  end
+
+  # Offset of the first non-blank character of text[from...to], so a match on the stripped operand maps back into text.
+  def arg_start(text, from, to)
+    text[from...to][/\A\s*/].size
   end
 
   # The literal assigned to each local `mrb_sym` of `body` (at `start` in its text) that sink_variable? accepts.
