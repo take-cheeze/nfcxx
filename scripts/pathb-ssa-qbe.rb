@@ -719,6 +719,7 @@ module Qbe
       end
       conflict = {}
       rogue = {}
+      @derived = derived_slots(index)
       @blocks.each do |b|
         cur = scope_in[b[1].to_s].dup
         b[2..].each { |it| scope_step(it, index, cur, conflict, rogue) }
@@ -739,13 +740,70 @@ module Qbe
       share
     end
 
-    # The slots a statement or terminator names: [index, ...] of the slot atoms inside it.
+    # The slots a statement or terminator names: [index, ...] of the slot atoms inside it, and of the registers that hold an address
+    # derived from a slot (derived_slots).
     def slots_named(x, index, out)
       if x.is_a?(Ref)
         out << index["$#{x.raw}"] if x.sigil == "$" && index.key?("$#{x.raw}")
+      elsif x.is_a?(String)
+        @derived[x].each { |i| out << i } if @derived && @derived.key?(x)
       elsif x.is_a?(Array)
         x.each { |y| slots_named(y, index, out) }
       end
+      out
+    end
+
+    # Registers that hold an address derived from slots (a slot's own address, an offset, index or bitcast of it, a select, a phi or a
+    # copy of those, and the pointer a call returns when it is given one): register => the indexes of the slots. A use of such a
+    # register outside a slot's scope counts as naming the slot there, so a slot whose address is still in a register after its scope
+    # has ended is not shared (the facts say where the language puts the end; the address may outlive it by a mistake of the facts).
+    DERIVING = %w[offset index bitcast addr select p2i i2p].freeze
+
+    def derived_slots(index)
+      derived = {}
+      changed = true
+      while changed
+        changed = false
+        @blocks.each do |b|
+          b[2..].each do |it|
+            next unless head(it) == "let" || head(it) == "phi"
+
+            src = []
+            if head(it) == "phi"
+              it[3..].each { |_pred, v| slots_of_operand(v, index, derived, src) }
+            elsif it[3].is_a?(Array) && head(it[3]) == "call"
+              slots_of_call(it, index, derived, src)
+            else
+              slots_of_operand(it[3], index, derived, src)
+            end
+            next if src.empty? || derived[it[1]] == src
+
+            derived[it[1]] = src
+            changed = true
+          end
+        end
+      end
+      derived
+    end
+
+    # Adds to out the slots an operand or an address expression derives from.
+    def slots_of_operand(v, index, derived, out)
+      if v.is_a?(Ref)
+        i = v.sigil == "$" ? index["$#{v.raw}"] : nil
+        out << i if i && !out.include?(i)
+      elsif v.is_a?(String)
+        (derived[v] || []).each { |i| out << i unless out.include?(i) }
+      elsif v.is_a?(Array) && DERIVING.include?(head(v))
+        v.each { |y| slots_of_operand(y, index, derived, out) if y.is_a?(Ref) || y.is_a?(String) || y.is_a?(Array) }
+      end
+      out
+    end
+
+    # A call that returns a pointer (let R (ptr ...) (call ...)) may return one of its arguments.
+    def slots_of_call(it, index, derived, out)
+      return out unless it[2].is_a?(Array) && head(it[2]) == "ptr"
+
+      it[3][3..].each { |a| slots_of_operand(a, index, derived, out) }
       out
     end
 

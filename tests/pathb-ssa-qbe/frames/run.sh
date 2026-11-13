@@ -4,9 +4,10 @@
 #     the call, set in one arm, read after the second return), and promotes the others ("t": written after the call before any
 #     read). The result of the second return must see a's last store (10 + n + 5): a promoted "a" would give 1 + n + 5.
 #  2. share.ir: slots whose (life-start)/(life-end) lifetimes do not overlap share one stack object (what --scope-facts of
-#     scripts/pathb-ir-opt.rb writes around each inlined body). Seven 1 KB arrays: a, b, c and e (in a loop) are never live together
-#     and share one; d overlaps c and does not join it; f has no facts and g is named after its life-end, so neither is shared.
-#     The frame is 4 KB, not 7 KB (3 KB if c and d overlapped), and the sums (which fill/sumi in drv.c recompute) are right.
+#     scripts/pathb-ir-opt.rb writes around each inlined body). Eight 1 KB arrays: a, b, c and e (in a loop) are never live together
+#     and share one; d overlaps c and does not join it; f has no facts, g is named after its life-end and h's address is still in a
+#     register after it, so those three are not shared. The frame is 5 KB, not 8 KB (3 KB if c and d overlapped), and the sums
+#     (which fill/sumi in drv.c recompute) are right.
 set -eu
 cd "$(dirname "$0")/../../.."
 tmp=$(mktemp -d)
@@ -47,7 +48,7 @@ cc $dir/drv.c "$tmp/sh.s" -o "$tmp/sh"
 got=$("$tmp/sh")
 [ "$got" = ok ] || { echo "FAIL share: $got"; exit 1; }
 frame=$(awk '$0 == "case_main:" { on = 1; next } on && /subq \$[0-9]+, %rsp/ { gsub(/[$,]/, "", $2); print $2; exit }' "$tmp/sh.s")
-if [ -z "$frame" ] || [ "$frame" -lt 4096 ] || [ "$frame" -gt 4300 ]; then
-  echo "FAIL share: frame of case_main is '$frame' bytes, want 4096 to 4300 (7 KB without sharing, 3 KB if c and d were shared)"; exit 1
+if [ -z "$frame" ] || [ "$frame" -lt 5120 ] || [ "$frame" -gt 5400 ]; then
+  echo "FAIL share: frame of case_main is '$frame' bytes, want 5120 to 5400 (8 KB without sharing, 3 KB if c and d were shared)"; exit 1
 fi
-echo "ok   share: frame $frame bytes for seven 1 KB arrays, sums right"
+echo "ok   share: frame $frame bytes for eight 1 KB arrays, sums right"

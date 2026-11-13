@@ -12,8 +12,8 @@ int main(void) {
   int ns[] = {0, 1, -5, 100};
   for (int k = 0; k < 4; k++) {
     int n = ns[k];
-    /* g n+7 (summed last), a n, b n+1, c n+2 and d n+3, f n+4, e in the loop n, n+1, n+2 */
-    int want = sm(n) + sm(n + 1) + sm(n + 2) + sm(n + 3) + sm(n + 4) + sm(n) + sm(n + 1) + sm(n + 2) + sm(n + 7);
+    /* g n+7 (summed last), a n, b n+1, c n+2 and d n+3, f n+4, e in the loop n, n+1, n+2, h n+8 (summed last, through a register that outlives its scope) */
+    int want = sm(n) + sm(n + 1) + sm(n + 2) + sm(n + 3) + sm(n + 4) + sm(n) + sm(n + 1) + sm(n + 2) + sm(n + 7) + sm(n + 8);
     int got = case_main(n);
     if (got != want) { printf("n=%d: got %d, want %d\n", n, got, want); return 1; }
   }

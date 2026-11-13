@@ -82,13 +82,14 @@ measured frames are in `docs/notes/cproc-removal-library-suites.md`). Three thin
   (`pathb-ir-opt.rb --scope-facts`, which `pathb-cc` passes after `--inline` unless `--asan` or `--safe-pointers` is on): the
   callee's frame lives exactly as long as its statements. The emitter runs a forward may-analysis of the slots in scope over the SSA
   blocks (a slot is in scope from its `life-start` on every path to a `life-end`); two slots conflict when one starts while the
-  other is in scope on some path. A slot with no facts, or one whose atom is named outside its scope, never shares (derived
-  addresses are trusted to die with the scope, as the language requires). Slots are grouped greedily in order; a group's object
+  other is in scope on some path. A slot with no facts, one whose atom is named outside its scope, or one whose derived address (an offset, bitcast, index, select or
+  phi of it, the pointer a call returns when given one) is still named in a register outside its scope, never shares; an address kept
+  in memory is trusted to die with the scope, as the language requires. Slots are grouped greedily in order; a group's object
   has its largest size and alignment. Two inlined calls one after the other thus have the frame of the larger, not of both, nested
   ones (a callee's own callees) stay apart, and a call in a loop reuses the same object each iteration. `--asan` and `--safe` (each
   slot an object of its own, with redzones or registered) do not share. The e-graph pass ignores the facts (`life-start` and
   `life-end` neither read nor write memory and do not make a slot escape; the front end's `decl` and `scope-end` do).
-  `tests/pathb-ssa-qbe/frames/share.ir` shows the frame of seven 1 KB arrays at 4 KB, the sums right, the facts-less and
+  `tests/pathb-ssa-qbe/frames/share.ir` shows the frame of eight 1 KB arrays at 5 KB, the sums right, the facts-less and
   rogue slots apart.
 - **EH entries are cut to the bytes written** (`pathb-ir-opt.rb --shrink-eh-frames`, `docs/notes/pathb-ir-passes.md`): of the
   715 KB of memory slots in `nfcast_nodes.cpp`'s IR, 550 KB were the 240-byte EH entries of functions and inlined bodies (2292 of
