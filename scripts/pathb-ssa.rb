@@ -339,13 +339,13 @@ end
 # ---- SSA construction -----------------------------------------------------------------------------------------------
 
 # Scalar slots that are used only as the address of a load or store of their own type. Returns "$name" => type.
+# The second result is true when the code calls a function that returns twice (_setjmp: a try block of the C++ EH lowering): the
+# slots in the first result are then only candidates (Converter#drop_live_across_setjmp keeps the ones live after the call).
 def promotable_slots(fn)
   types = fn.slots.to_h { |s| ["$#{s[1].raw}", s[2]] }
   bad = {}
   twice = fn.body.map { |s| scan_slot_uses(s, types, bad) }.any?
-  return {} if twice
-
-  types.select { |k, t| !bad[k] && scalar_type?(t) }
+  [types.select { |k, t| !bad[k] && scalar_type?(t) }, twice]
 end
 
 # Marks slots used any other way; returns true when the code calls a function that returns twice.
@@ -368,10 +368,10 @@ def scan_slot_uses(x, types, bad)
       key = "$#{y.raw}"
       ok = (h == "load" || h == "store") && i == 2 && types[key] && same_slot_type?(x[1], types[key])
       # The scope facts (NFCXX_IR_SCOPES=1) name a slot without taking its address: they do not stop its promotion.
-      ok ||= (h == "decl" || h == "scope-end") && i == 1
+      ok ||= (h == "decl" || h == "scope-end" || h == "life-start" || h == "life-end") && i == 1
       bad[key] = true unless ok
     else
-      twice ||= scan_slot_uses(y, types, bad)
+      twice = scan_slot_uses(y, types, bad) || twice   # not ||=: every use must be scanned, whatever was found before
     end
   end
   twice
@@ -383,12 +383,23 @@ def zero_of(t) = head(t) == "ptr" ? ["null", t] : ["const", t, "0"]
 
 class Converter
   attr_reader :out, :rpo, :promoted, :mut
+  SETJMP_PROMOTE_BUDGET = 1_000_000
 
   def initialize(fn)
     @fn = fn
     @void = fn.ret[1] == "void"
-    @promoted = promotable_slots(fn)
+    @promoted, twice = promotable_slots(fn)
     @cfg = Cfg.new.build(fn.body, @void).blocks
+    if twice
+      # A huge function that calls _setjmp (mruby's mrb_vm_exec: thousands of blocks, over a thousand candidate slots) keeps all its slots in
+      # memory, as every function with a setjmp did: promoting them made its SSA text 2.3 times larger and the SSA stage take more than
+      # pathb-cc's 300 s. The liveness analysis and the phis of the promoted slots cost blocks times slots.
+      if @cfg.size * @promoted.size > SETJMP_PROMOTE_BUDGET
+        @promoted = {}
+      else
+        drop_live_across_setjmp
+      end
+    end
     @types = {}   # variable => IR type (promoted slots and registers assigned with set)
     @mut = {}     # register => true when some set assigns it
     @subst = {}   # register bound to a promoted load => operand
@@ -428,6 +439,72 @@ class Converter
   end
 
   private
+
+  # A function that calls _setjmp (every try block of the C++ EH lowering) used to keep all its slots in memory, because the code
+  # after the call runs again when a throw lands there, and a promoted slot would hold the value of the first return. Only a slot
+  # that is live after a call (read, on some path from it, before it is written) can show that: the handler's path starts at the
+  # call, so a slot that every path writes before it reads has nothing to restore. The others are promoted as in any function.
+  def drop_live_across_setjmp
+    return if @promoted.empty?
+
+    live_in = Array.new(@cfg.size) { {} }
+    changed = true
+    while changed
+      changed = false
+      (@cfg.size - 1).downto(0) do |b|
+        live = live_out_of(b, live_in)
+        @cfg[b].instrs.reverse_each { |i| step_liveness(i, live) }
+        next if live.size == live_in[b].size
+
+        live_in[b] = live
+        changed = true
+      end
+    end
+    unsafe = {}
+    @cfg.each_index do |b|
+      live = live_out_of(b, live_in)
+      @cfg[b].instrs.reverse_each do |i|
+        unsafe.merge!(live) if calls_setjmp?(i)
+        step_liveness(i, live)
+      end
+    end
+    unsafe.each_key { |k| @promoted.delete(k) }
+  end
+
+  # The promotion candidates live at the end of block b: those live at the start of a successor, and those its terminator reads.
+  def live_out_of(b, live_in)
+    term = @cfg[b].term
+    live = {}
+    succs(term).each { |s| live.merge!(live_in[s]) }
+    loaded_slots(term, live)
+    live
+  end
+
+  # The liveness before statement i, from the one after it: a whole-slot store ends the slot's life, a load of it starts it.
+  def step_liveness(i, live)
+    if head(i) == "store" && (k = slot_key(i[2])) && @promoted.key?(k)
+      live.delete(k)
+      loaded_slots(i[3], live)
+    else
+      loaded_slots(i, live)
+    end
+  end
+
+  def loaded_slots(x, live)
+    return unless x.is_a?(Array)
+
+    if head(x) == "load" && x.size == 3 && (k = slot_key(x[2])) && @promoted.key?(k)
+      live[k] = true
+    else
+      x.each { |y| loaded_slots(y, live) }
+    end
+  end
+
+  def calls_setjmp?(x)
+    return x.sigil == "&" && SETJMP_NAMES.include?(x.raw) if x.is_a?(Ref)
+
+    x.is_a?(Array) && x.any? { |y| calls_setjmp?(y) }
+  end
 
   def reachable_order
     seen = {}
@@ -629,7 +706,7 @@ class Converter
         out << ["let", reg, t, rw(rv)]
       end
     when "set" then push(i[1], rw(i[2]), pushed)
-    when "decl", "scope-end"
+    when "decl", "scope-end", "life-start", "life-end"
       # (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its scope ends (NFCXX_IR_SCOPES=1): about a slot in
       # memory, for AddressSanitizer's use after scope (pathb-ssa-qbe.rb); a promoted slot has no memory, so its facts are dropped.
       k = slot_key(i[1])

@@ -119,6 +119,8 @@ distinct kinds, all lowered. The gap probe `tests/pathb-ir/gaps.cpp` printed 8 u
 - **`setjmp`:** the fix keeps every slot of a function that calls `setjmp` in memory, which is stronger than C
   requires (and costs the promotion in that function). Other functions are unchanged. Functions are recognised by
   the callee name, so an indirect call to `setjmp` is not. It is also what C++ exceptions rely on (section "C++ exceptions" below).
+  (The SSA route, `scripts/pathb-ssa.rb`, keeps in memory only the slots that are live after the call and promotes the rest:
+  `docs/notes/pathb-ssa-qbe.md`, "Frames".)
 - **Reachability** is done by the emitter, not the IR: the IR still prints every routine EDG marks as needed.
   (Routines that run without a reference carry `(constructor)`/`(destructor)` since the dynamic-initialization round
   below, and are roots.)
