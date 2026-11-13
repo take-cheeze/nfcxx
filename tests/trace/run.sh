@@ -25,7 +25,7 @@ print(f"ok   {label}: {len(spans)} spans, all required spans present")
 PY
 }
 
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 for backend in $backends; do
   json=$tmp/$backend.json
   if ! NFCXX_BACKEND=$backend ./nfcxx --trace="$json" "$src" -o "$tmp/$backend.bin" > "$tmp/$backend.log" 2>&1; then

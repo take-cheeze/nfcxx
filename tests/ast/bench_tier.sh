@@ -6,7 +6,7 @@
 # time the driver needs is in the figure), and the tier with the cache warm (best of three: a shared object is loaded, as on any run
 # of a program after the first). The tier compiles each function at its first call here (NFCAST_TIER_THRESHOLD=1).
 cd "$(dirname "$0")/../.."
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 progs=("$@"); [ ${#progs[@]} -gt 0 ] || progs=(tests/ast/bench/*.lua)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp tests/ast/driver.cpp)

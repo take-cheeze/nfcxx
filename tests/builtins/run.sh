@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 #   // GCC-DIALECT-ONLY: <reason>  skip the probe when the host C++ compiler is clang (Apple's g++; its builtins differ).
 cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
 host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then backends="pathb gcc"; fi   # Path B is the product only here
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for route in $backends; do

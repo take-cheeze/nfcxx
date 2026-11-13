@@ -7,7 +7,7 @@
 # variables defined in a shared library (-c -fPIC, -shared) that a program links against.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 d=tests/multi-tu
 srcs=($d/main.cpp $d/a.cpp $d/b.cpp $d/c.cpp)

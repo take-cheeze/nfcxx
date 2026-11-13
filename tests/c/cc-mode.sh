@@ -3,7 +3,7 @@
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcc=$root/nfcc
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0
 ok() { echo "ok   $b $1"; pass=$((pass + 1)); }
