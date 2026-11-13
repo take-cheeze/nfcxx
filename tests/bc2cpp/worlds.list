@@ -32,3 +32,4 @@ strip_atomic              3
 pathb_egraph              5
 pathb_structure           3
 pathb_ssa_qbe             5
+response_file             2
