@@ -195,6 +195,37 @@ static void packed_needs_its_factor() {
   CHECK(s.storage.empty());
 }
 
+static void threads_default_to_one() {
+  // max_threads defaults to 1, so the packed plan is single-threaded and its cost is the unthreaded one.
+  Solution s = solve(gemm_rowsum(504, 512, 512));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-packed-n");
+  CHECK(s.threads == 1);
+}
+
+static void threads_chosen_when_they_pay() {
+  // With up to 8 threads, the packed FMA work W = 504*512*512/8 * 0.18 = 2972712.96 splits as W * (0.10 + 0.90 / t) + 154000 * (t - 1):
+  // 2 threads 1788992, 4 threads 1428131.71, 8 threads 1709779. Four is the minimum. The plan's cost is that plus the
+  // packing copy (65536) and the row sum (35280).
+  Avx2F32 t;
+  t.max_threads = 8;
+  Solution s = solve(gemm_rowsum(504, 512, 512, t));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-packed-n");
+  CHECK(s.threads == 4);
+  CHECK(std::fabs(s.cost - (2972712.96 * 0.325 + 154000.0 * 3 + 65536.0 + 35280.0)) < 1e-3);
+}
+
+static void threads_not_chosen_for_small_work() {
+  // 48 x 64 x 17: the packed FMA work is 1175 instructions, far below one thread spawn, so one thread is kept.
+  Avx2F32 t;
+  t.max_threads = 8;
+  Solution s = solve(gemm_rowsum(48, 64, 17, t));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-packed-n");
+  CHECK(s.threads == 1);
+}
+
 int main() {
   k8_transposes_a();
   k64_horizontal_sum();
@@ -209,6 +240,9 @@ int main() {
   packed_absent_when_shape_misses();
   packing_cost_is_charged();
   packed_needs_its_factor();
+  threads_default_to_one();
+  threads_chosen_when_they_pay();
+  threads_not_chosen_for_small_work();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

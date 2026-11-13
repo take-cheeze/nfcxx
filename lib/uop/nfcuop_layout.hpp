@@ -52,6 +52,13 @@ struct Avx2F32 {
   // at 504x512x512 on one thread the packed kernel took 2623 us and the naive VecN kernel 14848 us, a ratio of 0.177.
   // The layout model cannot see register blocking, so this constant carries the whole difference. See the note.
   double register_blocked_fma_factor = 0.18;
+  // Threads. The threaded packed kernel's work (its FMAs, scaled as above) is split over t threads as
+  //   work * (serial_fraction + (1 - serial_fraction) / t) + thread_spawn_instr * (t - 1),
+  // with t a power of two no larger than max_threads. The default, max_threads = 1, keeps every plan single-threaded.
+  // The constants are fitted to one host's 1/2/4-thread timings and are rough: see docs/notes/uop-layout.md.
+  int max_threads = 1;
+  double serial_fraction = 0.10;
+  double thread_spawn_instr = 154000.0;
 };
 
 struct Tensor {
@@ -71,6 +78,8 @@ struct Variant {
   // Storage an input must be in, beyond its lane axis (Panel16 for a packed B). The copy is charged to the plan and
   // recorded in Solution::storage under the input's name. Last, so the positional initializers above still work.
   std::map<std::string, Storage> requires_storage;
+  // The instructions split over threads (Avx2F32::max_threads): the caller passes Solution::threads as nthreads.
+  bool threadable = false;
 };
 
 struct Op {
@@ -101,6 +110,7 @@ struct Solution {
   std::vector<std::string> variant;             // chosen variant name, per op
   std::map<std::string, Axis> layout;           // lane axis of each tensor that has one
   std::vector<Repair> repairs;
+  int threads = 1;                              // threads for the threadable variant (Avx2F32::max_threads); 1 otherwise
   // Storage of each tensor the plan holds in a non-default form, keyed by tensor name: each Row-lane tensor (a produced
   // output, or the copy a repair makes, so "A" is the transposed copy of A while layout["A"] is still Col), and each
   // input a chosen variant requires in a storage (Variant::requires_storage, for example "B" as Panel16).
