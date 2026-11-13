@@ -182,7 +182,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', ''nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
       - name: Path B harness cache key
