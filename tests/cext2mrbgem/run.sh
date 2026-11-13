@@ -21,6 +21,14 @@ check test "$rc" -eq 2
 check test -e "$work/refuse/NOT_BUILDABLE"
 check grep -q 'rb_ensure' "$work/refuse/REFUSALS.txt"
 
+# 2b. registration refused because its function has no definition (a prototype remains): exit 0 or 2, never a traceback
+ok_rc() { [ "$1" -eq 0 ] || [ "$1" -eq 2 ]; }
+rc=0; python3 "$conv" --name refused_reg tools/cext2mrbgem/fixtures/refused_reg/ext/refused_reg "$work/refused_reg" > "$work/refused_reg.log" 2>&1 || rc=$?
+check ok_rc "$rc"
+check sh -c "! grep -q Traceback '$work/refused_reg.log'"
+check grep -q 'rr_missing  registered function has no definition' "$work/refused_reg/REFUSALS.txt"
+check test -e "$work/refused_reg/NOT_BUILDABLE"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

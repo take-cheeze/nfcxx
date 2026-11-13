@@ -272,6 +272,7 @@ class Converter:
         self.regs = []
         self.reg_by_call = {}
         self.reg_names = set()
+        self.valid_reg_names = set()  # registered functions whose registration survived check_refs
         self.decls = []      # dicts for function prototypes and definitions
         self.defs = {}       # name -> [def dicts]
         self.init_defs = []
@@ -492,6 +493,7 @@ class Converter:
             if r['error'] is None:
                 continue
         valid_reg = [r for r in self.regs if r['error'] is None]
+        self.valid_reg_names = {r['func'] for r in valid_reg}
         for name in self.reg_names:
             spans = [(r['open'], r['close']) for r in valid_reg if r['func'] == name and r['file']]
             for rel, s, e in self.occ.get(name, []):
@@ -582,7 +584,9 @@ class Converter:
                 continue
             name = d['name']
             hdr, pro, err = None, '', None
-            if name in self.reg_names:
+            # Only a function with a surviving registration gets the method signature. A refused registration
+            # (e.g. no definition in the input) leaves its prototype as is; the refusal is already recorded.
+            if name in self.valid_reg_names:
                 hdr, pro, err = self.registered_header(d)
                 if d['proto']:
                     pro = ''
