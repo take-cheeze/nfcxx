@@ -1468,8 +1468,9 @@ module StaticDispatchRegistrations
   # lookups that find rows (bc2cpp_find_proven: owner calls, native singleton calls; the funcall family,
   # mrb_vm_find_method_rows), so an entry may become one when the core rows run (`row_reach`: its names and fragments,
   # which read the engine, the core Ruby, the natives and the generated code by those rules) finds no other lookup of
-  # its name, and no `super` may reach it. Only a plain compiled registration has a row to keep: a native, an accessor
-  # and a guarded registration stay entries. Constructor names are CTOR_ROWS'.
+  # its name, and no `super` may reach it. A plain compiled registration is a row of its generated table, a native ROM
+  # entry one through the exclusion header (2, CoreNativeCandidates.header's engine_rows); a native outside a ROM table,
+  # an accessor and a guarded registration stay entries. Constructor names are CTOR_ROWS'.
   def engine_rows(candidates, row_reach, super_reach, super_unknown, class_owners)
     return Set.new unless row_reach
 
@@ -1477,7 +1478,8 @@ module StaticDispatchRegistrations
     candidates.filter_map do |m|
       owner = m[:owner]
       name = m[:name]
-      next unless owner.is_a?(String) && owner.match?(CLOSED_OWNER_RE) && m[:entry] && !m[:native] && !m[:accessor] && !m[:guard]
+      next unless owner.is_a?(String) && owner.match?(CLOSED_OWNER_RE) && !m[:accessor] && !m[:guard]
+      next unless m[:native] ? m[:rom] : m[:entry]
       next if CTOR_ROW_NAMES.include?(name) || super_unknown.include?(name)
       next if dynamic_name?(name, names, fragments) || super_reached?(super_reach, class_owners, owner, name)
 

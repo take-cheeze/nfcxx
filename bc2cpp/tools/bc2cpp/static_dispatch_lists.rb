@@ -18,9 +18,10 @@
 #   core_rows      core ROM method-table entries the closed build keeps as rows only proven-receiver calls find
 #                  (MtClass#name; CORE_ROWS, core_rows.rb); none of them is in `core_excluded`. A file without it
 #                  reads as empty
-#   engine_rows    compiled engine entries the closed build keeps as rows of their generated table (Owner#name;
-#                  ENGINE_ROWS in static_dispatch_registrations.rb): only proven-receiver calls and the funcall family
-#                  find them. A file without it reads as empty
+#   engine_rows    engine entries the closed build keeps as rows (Owner#name; ENGINE_ROWS in
+#                  static_dispatch_registrations.rb): compiled ones in their generated table, native ROM ones through the
+#                  exclusion header (2). Only proven-receiver calls and the funcall family find them. A file without it
+#                  reads as empty
 #   core_undef_left_out  core undef entries (mrb_undef_*) the closed build removes after init (Owner#name;
 #                  UNDEF_LEFT_OUT, CoreNativeCandidates.undef_candidates). A file without it reads as empty
 #
