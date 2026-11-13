@@ -42,4 +42,8 @@
 #ifndef __WINT_TYPE__
 #define __WINT_TYPE__ int
 #endif
+/* clang's resource headers test a builtin module query in #if (__stddef_ptrdiff_t.h line 15): EDG has none, and it is 0 here. */
+#ifndef __building_module
+#define __building_module(x) 0
+#endif
 #endif
