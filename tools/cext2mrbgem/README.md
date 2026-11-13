@@ -34,6 +34,9 @@ compiled either: the output is text for review, and a directory with refusals is
   `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
   `struct RClass *`) or `rb_cObject`; a `VALUE` parameter or local is refused, since it would need an unchecked
   `mrb_class_ptr`.
+- `rb_const_get(klass, id)` becomes `mrb_const_get(mrb, klass, id)`. A module receiver does not fall back to
+  `Object` in mruby, and there is no autoload; both are recorded as caveats. `rb_const_get_at` is refused: no mruby
+  function looks up only the receiver.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other

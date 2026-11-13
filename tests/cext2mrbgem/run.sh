@@ -86,6 +86,17 @@ check test "$rc" -eq 2
 check grep -q '  rb_define_const  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
 check grep -q '  rb_define_module_function  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
 
+# 2h. rb_const_get maps to mrb_const_get (the receiver as a VALUE, rb_cObject as its VALUE); rb_const_get_at has no
+# exact mruby equivalent and stays refused
+rc=0; python3 "$conv" --name const_get tools/cext2mrbgem/fixtures/const_get/ext/const_get "$work/const_get" > "$work/const_get.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/const_get/NOT_BUILDABLE"
+check grep -qF 'return mrb_const_get(mrb, mrb_obj_value(mCG), id);' "$work/const_get/src/const_get.c"
+check grep -qF 'mrb_const_get(mrb, mrb_obj_value(mrb->object_class), mrb_intern_cstr(mrb, "String"));' "$work/const_get/src/const_get.c"
+rc=0; python3 "$conv" --name const_get_at tools/cext2mrbgem/fixtures/const_get_at/ext/const_get_at "$work/const_get_at" > "$work/const_get_at.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_const_get_at  no exact mruby equivalent' "$work/const_get_at/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

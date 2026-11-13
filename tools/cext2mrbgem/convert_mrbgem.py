@@ -827,6 +827,8 @@ class Converter:
             self.scan_args(rel, s, e, nxt, called)
         elif name == 'rb_define_const':
             self.define_const(rel, s, e, nxt, called)
+        elif name == 'rb_const_get':
+            self.const_get(rel, s, e, nxt, called)
         elif name == 'rb_raise':
             if not called:
                 self.refuse(rel, s, name, 'used without a call')
@@ -845,6 +847,26 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_raisef')
         else:
             self.refuse(rel, s, name, 'unknown special handler')
+
+    def const_get(self, rel, s, e, nxt, called):
+        """rb_const_get(klass, id) -> mrb_const_get(mrb, klass, id). Both take the receiver as a VALUE and the name as
+        an ID (mrb_sym); rb_cObject is passed as its VALUE. Differences, recorded as a caveat: a module receiver
+        does not fall back to Object in mruby (CRuby does), and there is no autoload."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_const_get', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'rb_const_get', 'rb_const_get takes a class and an ID')
+            return
+        E.add(s, e, 'mrb_const_get')
+        E.add(nxt + 1, nxt + 1, 'mrb, ')
+        if text[args[0][0]:args[0][1]] == 'rb_cObject':
+            E.add(args[0][0], args[0][1], 'mrb_obj_value(mrb->object_class)')
+        self.rewrite(rel, s, 'rb_const_get', 'mrb_const_get(mrb, klass, id)',
+                     'a module receiver does not fall back to Object as CRuby does; no autoload')
 
     def define_const(self, rel, s, e, nxt, called):
         """rb_define_const(klass, "NAME", value) -> mrb_define_const(mrb, klass, "NAME", value). The receiver must be

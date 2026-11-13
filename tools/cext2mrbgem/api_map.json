@@ -68,6 +68,15 @@
       "handler": "define_const",
       "needs_mrb": true
     },
+    "rb_const_get": {
+      "kind": "special",
+      "handler": "const_get",
+      "needs_mrb": true
+    },
+    "rb_const_get_at": {
+      "kind": "refuse",
+      "reason": "no exact mruby equivalent: mrb_const_get also searches the superclass chain, rb_const_get_at looks only in the receiver"
+    },
     "rb_scan_args": {
       "kind": "special",
       "handler": "scan_args",
