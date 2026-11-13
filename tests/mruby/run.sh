@@ -45,27 +45,8 @@ report() { # report <ok|fail|skip> message
 }
 
 # ---- 1. weak-symbols ------------------------------------------------------------------------------
-if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ]; then
-  weak_total=0
-  for n in templates_lambdas raii_templates_class virtual_dispatch exceptions qbe_gnu_forms constexpr_static \
-           struct_libc qbe_atomics qbe_global_ctor; do
-    f=$root/tests/cases/$n.cpp
-    if ! "$root/nfcxx" --emit-c "$f" >"$tmp/$n.c" 2>"$tmp/$n.err"; then report skip "weak-symbols $n: front end failed"; continue; fi
-    cc -E -P -undef -D__CPROC__ "$tmp/$n.c" >"$tmp/$n.pp.c" 2>/dev/null
-    if ! "$root/scripts/qbe-prep" "$tmp/$n.pp.c" "$tmp/$n.prep.c" "$tmp/$n.tail.s" 2>/dev/null ||
-       ! "$root/build/cproc/cproc-qbe" <"$tmp/$n.prep.c" >"$tmp/$n.ssa" 2>/dev/null ||
-       ! "$root/build/qbe/qbe" "$tmp/$n.ssa" >"$tmp/$n.s" 2>/dev/null; then
-      report skip "weak-symbols $n: QBE pipeline failed"; continue
-    fi
-    cp "$tmp/$n.s" "$tmp/$n.orc.s"; cp "$tmp/$n.s" "$tmp/$n.rb.s"
-    "$mrb" "$oracle/weak-symbols.rb" "$tmp/$n.prep.c" "$tmp/$n.orc.s"
-    "$root/scripts/weak-symbols" "$tmp/$n.prep.c" "$tmp/$n.rb.s"
-    k=$(grep -c '^\.weak ' "$tmp/$n.orc.s")
-    if cmp -s "$tmp/$n.orc.s" "$tmp/$n.rb.s"; then report ok "weak-symbols $n ($k .weak lines identical)"; weak_total=$((weak_total + k))
-    else report fail "weak-symbols $n: output differs"; diff "$tmp/$n.orc.s" "$tmp/$n.rb.s" | head -5; fi
-  done
-  # The comparison must not be vacuous.
-  if [ $weak_total -eq 0 ]; then report fail "weak-symbols: no input produced a .weak line"; fi
+if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ]; then
+  # The corpus loop went with qbe-prep (cproc); the hand-made edge cases below stay.
   # Hand-made edge cases for the scanner: attributes with nested parentheses, declarations, no match.
   cat >"$tmp/edge.c" <<'EOF'
 int __attribute__((__weak__)) alpha(int x) { return x; }
@@ -293,10 +274,6 @@ printf '%s\n' '(ir-module "p.cpp" (layout (int 4)))' '(data "p" (array 2 (const 
 if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $rcp -eq 1 ]; then
   report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis; scripts/pathb-qbe-emit.rb reads it: known difference)"
 else report fail "pathb-qbe-emit parenthesis string constant: rb= oracle="; fi
-"$root/tests/mruby/qbe-prep.sh" || fail=1
-"$root/tests/mruby/qbe-asm.sh" || fail=1
-"$root/tests/mruby/strip-atomic.sh" || fail=1
-"$root/tests/mruby/qbe2cil.sh" || fail=1
 "$root/tests/mruby/pathb-cil-emit.sh" || fail=1
 "$root/tests/mruby/cil-link.sh" || fail=1
 
