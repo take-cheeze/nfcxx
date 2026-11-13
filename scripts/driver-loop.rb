@@ -13,9 +13,8 @@
 # note). Their probes of the file system (the CUDA home's headers and lib64, the shim build, the nfcbundle tool's state, ninja)
 # and the host's answers are inputs here (--nfcc-cuda-*, --nfcc-bundle-tool, --nfcc-ninja-fails, --nfcc-shim).
 #
-# Not covered, and refused as "unported" (exit 3): an empty source name (bash prints realpath's own error for it), and a
-# libcuda on the line with no CUDA_HOME (nfcc then derives the CUDA home from the library's path and probes it).
-# A caller can tell "not done yet" from "refused by nfcc".
+# Nothing is refused as unported now: the empty source name gets realpath's message, and a libcuda with no CUDA_HOME gets the
+# home nfcc derives from the library path (the port reads the home's files itself). The remaining exits are nfcc's own.
 #
 # Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
 # --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
@@ -816,16 +815,20 @@ def compile_one(state, env, kind, src, obj)
     return
   end
 
-  # bash runs realpath on the name and prints its own error for an empty one; the port does not reproduce that.
-  raise Unported, "an empty source name" if src.empty?
-
   csrc = src
   extra = []
   if src == "-"
     csrc = "#{env.tmp}/stdin#{state.k}.c"
   elsif !src.end_with?(".c")
     csrc = "#{env.tmp}/src#{state.k}.c"
-    real = src.start_with?("/") ? src : "#{env.cwd}/#{src}"
+    # realpath of an empty name fails with its own message (on stderr), and ln gets an empty target
+    if src.empty?
+      $stdout.flush
+      $stderr.write("realpath: '': No such file or directory\n")
+      real = ""
+    else
+      real = src.start_with?("/") ? src : "#{env.cwd}/#{src}"
+    end
     run_cmd(["LN", "-s", real, csrc])
     extra = ["-iquote", File.dirname(src)]
   end
@@ -1011,6 +1014,42 @@ def bundle_wrap(env, args)
   0
 end
 
+# nfcc's case on the library path: its lib64 (or targets/.../lib/stubs) directory's parent, or "" when neither pattern matches.
+def cuda_home_from_library(found)
+  if found.include?("/lib64/stubs/libcuda.so") || found.include?("/lib64/libcuda.so")
+    return found[0, found.rindex("/lib64/")]
+  end
+  targets = found.index("/targets/")
+  stubs = found.index("/lib/stubs/libcuda.so")
+  if targets && stubs && targets < stubs
+    return found[0, found.rindex("/lib/stubs/")]
+  end
+  ""
+end
+
+# The CUDART_VERSION of a header, as nfcc reads it: the first line "#define CUDART_VERSION <digits>" (sed -nE); 0 when none.
+def cudart_version_of(path)
+  text = File.open(path, "rb") { |io| io.read }
+  text.split("\n").each do |line|
+    next unless line.start_with?("#define")
+
+    i = 7
+    i += 1 while i < line.length && (line.getbyte(i) == 32 || line.getbyte(i) == 9)
+    name = "CUDART_VERSION"
+    next unless line[i, name.length] == name
+
+    i += name.length
+    j = i
+    j += 1 while j < line.length && (line.getbyte(j) == 32 || line.getbyte(j) == 9)
+    next if j == i
+
+    k = j
+    k += 1 while k < line.length && line.getbyte(k) >= 48 && line.getbyte(k) <= 57
+    return line[j, k - j].to_i if k > j
+  end
+  0
+end
+
 def cuda_libcuda?(arg)
   %w[-lcuda -l:libcuda.so -l:libcuda.so.1].include?(arg) || arg.end_with?("/libcuda.so") || arg.end_with?("/libcuda.so.1")
 end
@@ -1038,25 +1077,32 @@ def cuda_driver_wrap(env, args, driver_name)
   return [:args, kept] if found.empty? || mode == "libcuda"
 
   home = env.cuda_home
-  raise Unported, "the CUDA home (CUDA_HOME) is not set" if home.empty?
+  if home.empty?
+    # nfcc: the home is the directory above the library's lib64 (or targets) directory, when it has include/cuda.h
+    derived = cuda_home_from_library(found)
+    home = !derived.empty? && File.file?("#{derived}/include/cuda.h") ? derived : "/usr/local/cuda"
+  end
   # bash runs the version probe (sed on cuda_runtime_api.h) under set -e and pipefail: an unreadable header ends nfcc with
   # status 2 and no message
-  raise CudaExit.new("", 2) unless env.cuda_header
+  header = "#{home}/include/cuda_runtime_api.h"
+  raise CudaExit.new("", 2) unless File.file?(header)
+  rtv = cudart_version_of(header)
 
   why = ""
   if env.machine != "x86_64"
     why = "the shim is x86-64 only"
-  elsif !env.cuda_h || !env.cuda_typedefs
+  elsif !File.file?("#{home}/include/cuda.h") || !File.file?("#{home}/include/cudaTypedefs.h")
     why = "no cuda.h and cudaTypedefs.h in #{home}/include"
-  elsif env.cudart_version == 0 || env.cudart_version < 12050
-    rtv = env.cudart_version == 0 ? "of unknown version" : env.cudart_version.to_s
-    why = "libcudart #{rtv} is older than 12.5"
+  elsif rtv == 0 || rtv < 12050
+    rtv_text = rtv == 0 ? "of unknown version" : rtv.to_s
+    why = "libcudart #{rtv_text} is older than 12.5"
   elsif env.shim_error
     why = "the shim did not build: #{env.shim_error}"
   end
   unless why.empty?
     raise CudaExit.new("#{driver_name}: --cuda-driver=cudart: #{why}", 1) if mode == "cudart"
 
+    $stdout.flush
     $stderr.write("#{driver_name}: note: linking the CUDA driver library #{found} as named (#{why}; docs/notes/cuda-driver.md)\n")
     return [:args, kept]
   end
@@ -1073,7 +1119,7 @@ def cuda_driver_wrap(env, args, driver_name)
       if !static.empty?
         out << static
       else
-        out << "-L#{home}/lib64" << "-Wl,-rpath,#{home}/lib64" if env.lib64
+        out << "-L#{home}/lib64" << "-Wl,-rpath,#{home}/lib64" if File.directory?("#{home}/lib64")
         out << "-lcudart"
       end
     else

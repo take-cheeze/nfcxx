@@ -354,3 +354,12 @@ CUDA_HOME=tests/nfcc/cuda-home -lcuda -l:libcuda.so.1 x.c -o prog
 NFCXX_CUDA_DRIVER=libcuda CUDA_HOME=tests/nfcc/cuda-home -lcuda x.c
 NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcc/cuda-none -lcuda x.c
 CUDA_HOME=tests/nfcc/cuda-home -lcudart_static x.c
+-lcuda tests/nfcc/cuda-home/lib64/stubs/libcuda.so x.c
+-lcuda tests/nfcc/cuda-old/lib64/libcuda.so x.c
+--cuda-driver=cudart tests/nfcc/cuda-none/lib64/libcuda.so x.c
+-lcuda /usr/lib/libcuda.so x.c
+-lcuda -c x.c
+--cuda-driver=auto
+--cuda-driver=auto x.c
+--cuda-driver=libcuda -lcuda x.c
+-c "" x.c
