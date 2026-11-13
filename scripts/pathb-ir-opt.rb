@@ -266,7 +266,7 @@ def refusal(fn, name)
   scan = lambda do |x|
     h = x[0]
     if h.is_a?(String)
-      facts[:frame] = true if h == "retaddr" || h == "frameaddr"   # the caller's frame is read: the body must stay in its own
+      facts[:frame] = true if h == "retaddr" || h == "frameaddr" || h == "sp"   # the caller's frame is read: the body must stay in its own
       facts[:jumps] += 1 if h == "goto" || h == "label"
       facts[:rets] += 1 if h == "return"
     end

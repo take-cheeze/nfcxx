@@ -950,6 +950,29 @@ static const char *ir_var_sym(a_variable_ptr var)
   return var->source_corresp.name;
 }
 
+/* A GNU global register variable (`register unsigned long current_stack_pointer asm("rsp")`, the kernel's ASM_CALL_CONSTRAINT):
+   EDG keeps the register in asm_name_or_reg.reg and leaves asm_name_is_valid clear. The variable IS the machine register, so it has
+   no storage and no symbol. ir_var_is_reg is 1 for such a variable bound to any register, ir_var_is_sp for the one that is lowered,
+   the stack pointer: a read is (sp), and an asm operand on it ("+r"(current_stack_pointer) only orders the asm after the frame
+   setup) is a temporary that takes the value and is dropped. Another register has no lowering and is refused where it is read. */
+static int ir_var_is_reg(a_variable_ptr var)
+{
+  return var_has_static_or_thread_storage_duration(var) && !var->asm_name_is_valid && var->asm_name_or_reg.reg != anr_invalid &&
+         var->asm_name_or_reg.reg != anr_memory;
+}
+
+static int ir_var_is_sp(a_variable_ptr var)
+{
+  return ir_var_is_reg(var) && var->asm_name_or_reg.reg == anr_sp;
+}
+
+/* The register variable e names, or NULL. */
+static a_variable_ptr ir_expr_reg_var(an_expr_node_ptr e)
+{
+  if (e != NULL && e->kind == enk_variable && ir_var_is_reg(e->variant.variable.ptr)) return e->variant.variable.ptr;
+  return NULL;
+}
+
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
 static int ir_force_weak; /* ir_global_print: the declaration being printed is the target of a weakref */
 static const char *ir_global_op(a_variable_ptr var)
@@ -2524,6 +2547,13 @@ static ir_val ir_rval(an_expr_node_ptr e)
         return ir_mk_value(ir_fmt("&\"%s\"", sym), e->type);
       }
     case enk_variable:
+      if (ir_var_is_reg(e->variant.variable.ptr)) {
+        a_variable_ptr rv = e->variant.variable.ptr;
+        if (!ir_var_is_sp(rv) || ir_size_of(e->type) != 8 || (!ir_is_integer(e->type) && !ir_is_pointer(e->type)))
+          return ir_gap(e->type, "global register variable", 2, (int)enk_variable);
+        ir_note(2, enk_variable, 1);
+        return ir_mk_value(ir_let(ir_valtext(e->type), "(sp)"), e->type);
+      }
       ir_note(2, enk_variable, 1);
       return ir_load(ir_lval(e));
     case enk_object_lifetime:
@@ -2560,6 +2590,8 @@ static ir_val ir_rval(an_expr_node_ptr e)
 static ir_val ir_lval(an_expr_node_ptr e)
 {
   if (e == NULL) return ir_mk_void();
+  if (e->kind == enk_variable && ir_var_is_reg(e->variant.variable.ptr))
+    return ir_gap(e->type, "address of a global register variable", 2, (int)enk_variable); /* no storage: asm operands use ir_asm_out_lval */
   if (e->kind == enk_variable) {
     ir_note(2, enk_variable, 1);
     return ir_var_addr(e->variant.variable.ptr, e->type,
@@ -7102,6 +7134,8 @@ static const char *ir_asm_clobber(a_named_register r, int *ignore)
 
 static void ir_emit_goto(a_label_ptr lbl, int d);
 
+static ir_val ir_asm_out_lval(an_expr_node_ptr e);
+
 static int ir_asm_general(an_asm_entry_ptr ae, int d)
 {
   an_asm_operand_ptr op;
@@ -7171,7 +7205,7 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     } else if (strcmp(kind, "sym") == 0) {
       v = ir_mk_value((char *)plans[nops].base, op->expression->type);
     } else if (strcmp(kind, "out") == 0 || strcmp(kind, "inout") == 0 || strcmp(kind, "flag") == 0) {
-      v = ir_lval(op->expression);
+      v = ir_asm_out_lval(op->expression);
     } else {
       v = ir_rval(op->expression);
     }
@@ -7304,6 +7338,19 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   ir_line(d + 2, "(unreachable)");
   ir_close(1);
   ir_close(1);
+}
+
+/* The location an asm output operand writes: its lvalue, or, for the stack-pointer register variable, a fresh temporary holding the
+   register's value (the write is dropped: gcc's "+r"(current_stack_pointer) names rsp itself, which the template does not change). */
+static ir_val ir_asm_out_lval(an_expr_node_ptr e)
+{
+  a_variable_ptr rv = ir_expr_reg_var(e);
+  if (rv != NULL && ir_var_is_sp(rv) && ir_size_of(e->type) == 8) {
+    ir_val t = ir_temp(e->type);
+    ir_store(e->type, t.s, ir_let(ir_valtext(e->type), "(sp)"), 0);
+    return t;
+  }
+  return ir_lval(e);
 }
 
 static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
@@ -7444,7 +7491,7 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       ir_asm_constraints(op, &mo, &mk, &ti, &rg, &bd);
       tied[n] = -1;
       if ((op->modifiers & aom_output) != 0) {
-        lv[n] = ir_lval(op->expression);
+        lv[n] = ir_asm_out_lval(op->expression);
       } else if (ti >= 0) {
         tv[n] = ir_rval(op->expression);
         tied[n] = ti;
@@ -8406,7 +8453,7 @@ void nfcxx_ir_back_end(void)
   }
   for (var = scope->variables; var != NULL; var = var->next) {
     /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */
-    if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type)) (void)ir_global_op(var);
+    if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type) && !ir_var_is_reg(var)) (void)ir_global_op(var);
   }
   for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(ir_rout_sym(rout));
   for (rout = scope->routines; rout != NULL; rout = rout->next) {

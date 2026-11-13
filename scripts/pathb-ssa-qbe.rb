@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
+    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs, :trap_checks
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -1660,13 +1660,15 @@ end
 # The call is out of the flow: a `jnz` to a trap block of its own (the call, then hlt: the helper does not return),
 # and the operation goes on in the block after it. A call in the hot path cost about 40% of token generation.
     def check_call(cond, code)
-      asm_helpers << "check" unless asm_helpers.include?("check")
+      # Qbe.trap_checks (a unit with no hosted libc: the kernel's -mno-sse, -ffreestanding, -nostdinc): the trap block is
+      # the trap instruction alone (hlt is ud2 on x86-64, as __builtin_trap), with no helper and so no reference to abort.
+      asm_helpers << "check" unless Qbe.trap_checks || asm_helpers.include?("check")
       @temps += 1
       trap = "ckt#{@temps}"
       ok = "cko#{@temps}"
       @lines << "  jnz #{cond}, @#{trap}, @#{ok}"
       @lines << "@#{trap}"
-      @lines << "  call $pathb_check(w 1, w #{code})"
+      @lines << "  call $pathb_check(w 1, w #{code})" unless Qbe.trap_checks
       @lines << "  hlt"
       @lines << "@#{ok}"
       @label = ok # a jump out of the split block is the one that the phi of its target names
@@ -1812,6 +1814,13 @@ end
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
       # `(retaddr)`, `(frameaddr)`: __builtin_return_address(0) and __builtin_frame_address(0). QBE gives each function a frame
       # pointer, so the helper the driver appends reads this function's frame (%rbp on x86-64, x29 on arm64: the frame record).
+      # `(sp)`: the stack pointer register (a global register variable bound to rsp, the kernel's current_stack_pointer): the
+      # helper returns its caller's %rsp (x86-64 only).
+      when "sp"
+        asm_helpers << "sp"
+        asm_helpers << "barrier" unless asm_helpers.include?("barrier")
+        @lines << "  #{dst} =l call $__pathb_sp()"
+        @lines << "  call $__pathb_barrier()"
       when "retaddr", "frameaddr"
         # The empty call after it keeps QBE from turning `return __builtin_return_address(0);` into a tail call (`leave; jmp`),
         # which would run the helper in the caller's frame.

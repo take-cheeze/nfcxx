@@ -269,6 +269,32 @@ refuses "-fsanitize refused" "fsanitize" pb -c -fsanitize=address "$tmp/a.c" -o 
 refuses "C++ refused" "C++" pb -c -x c++ "$tmp/a.c" -o "$tmp/x.o"
 refuses "unknown backend refused" "unknown NFCXX_BACKEND" env NFCXX_BACKEND=nope "$nfcc" -c "$tmp/a.c"
 
+# A global register variable bound to rsp (the kernel's current_stack_pointer, ASM_CALL_CONSTRAINT) is the register: no symbol is
+# defined or referenced (the kernel's link would have an undefined reference), reads are rsp, and the "+r" operand is dropped.
+cat > "$tmp/rsp.c" <<'EOF2'
+register unsigned long current_stack_pointer asm("rsp");
+extern void ext(void);
+unsigned long f(void) { ext(); asm volatile("" : "+r"(current_stack_pointer) : : "memory"); return 1; }
+unsigned long g(void) { return current_stack_pointer & ~0xfffUL; }
+EOF2
+check "a global register variable on rsp builds" pb -c -mno-sse -mno-red-zone "$tmp/rsp.c" -o "$tmp/rsp.o"
+used pathb rsp.c && ok "the rsp register variable compile is Path B's" || bad "the rsp register variable compile is Path B's" "$(tail -1 "$tmp/log")"
+nm "$tmp/rsp.o" | grep -q current_stack_pointer && bad "the rsp register variable has no symbol" "$(nm "$tmp/rsp.o" | grep current_stack_pointer)" || ok "the rsp register variable has no symbol (not defined, not undefined)"
+cp "$root/tests/c/global_register_sp.c" "$tmp/gr.c"
+check "the rsp register variable program links with no current_stack_pointer" pb "$tmp/gr.c" -o "$tmp/gr"
+"$tmp/gr"; [ $? = 42 ] && ok "the rsp register variable program runs (reads and asm operands)" || bad "the rsp register variable program runs" "exit $?"
+
+# A unit with no hosted libc (-ffreestanding, -nostdinc, -mno-sse: the kernel) must not reference abort: a failed check (division
+# by zero, a shift out of range) is the trap instruction. A hosted unit keeps the abort call (SIGABRT).
+printf 'int d(int a, int b) { return a / b; }\nint sh(int a, int b) { return a << b; }\n' > "$tmp/chk.c"
+check "a checked division and shift build" pb -c "$tmp/chk.c" -o "$tmp/chk.o"
+nm "$tmp/chk.o" | grep -q ' U abort' && ok "hosted: a failed check calls abort" || bad "hosted: a failed check calls abort" "$(nm "$tmp/chk.o" | tr '\n' ' ')"
+for o in -ffreestanding -mno-sse -nostdinc; do
+  check "$o: the checks build" pb -c $o "$tmp/chk.c" -o "$tmp/chkf.o"
+  nm "$tmp/chkf.o" | grep -qE '\babort\b|pathb_check' && bad "$o: no abort and no pathb_check" "$(nm "$tmp/chkf.o" | tr '\n' ' ')" || ok "$o: no abort and no pathb_check"
+  objdump -d "$tmp/chkf.o" | grep -q ud2 && ok "$o: a failed check is ud2" || bad "$o: a failed check is ud2" "no ud2"
+done
+
 # The default stays qbe
 if [ -x "$root/build/cproc/cproc-qbe" ]; then
   out=$("$nfcc" --version); grep -q 'backend qbe' <<<"$out" && ok "default backend is qbe" || bad "default backend is qbe" "$out"

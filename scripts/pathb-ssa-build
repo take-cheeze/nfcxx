@@ -80,7 +80,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--safe | --asan] [--pic] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--trap-checks] [--safe | --asan] [--pic] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -119,6 +119,10 @@ ASM_HELPERS = {
                   "\t.size __pathb_frameaddr, .-__pathb_frameaddr"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  # `__pathb_sp()`: the stack pointer of the caller at the call (a global register variable bound to rsp): its %rsp, past the return
+  # address the call pushed. x86-64 only.
+  "sp" => ["\t.text", "\t.weak __pathb_sp", "\t.type __pathb_sp, @function", "__pathb_sp:", "\tleaq 8(%rsp), %rax", "\tret",
+           "\t.size __pathb_sp, .-__pathb_sp"],
   # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
   # would then not advance past that argument; passing the value to this empty function keeps the read.
   "vasink_w" => ["\t.text", "\t.weak __pathb_vasink_w", "\t.type __pathb_vasink_w, @function", "__pathb_vasink_w:", "\tret",
@@ -365,6 +369,7 @@ no_fp = false
 safe = false
 asan = false
 pic = false
+trap_checks = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -379,6 +384,7 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--safe" then safe = true
   when "--asan" then asan = true
   when "--pic" then pic = true
+  when "--trap-checks" then trap_checks = true   # a failed check is the trap instruction, not a call of abort (no libc)
   when /\A--qbe=(.+)\z/ then $qbe_path = $1
   else usage_exit
   end
@@ -389,6 +395,7 @@ usage_exit if asan && safe   # both replace malloc and check accesses: one at a 
 Qbe.safe = safe
 Qbe.asan = asan
 Qbe.pic = pic
+Qbe.trap_checks = trap_checks
 Qbe.darwin = RbConfig::CONFIG["host_os"].include?("darwin")
 # extern data through the GOT (copy extern): on Darwin (ld64 cannot bind a dylib symbol at a page offset) and on aarch64
 # Linux (a PIE adrp to a symbol in another object or a shared library is out of its range: R_AARCH64_ADR_PREL_PG_HI21)
