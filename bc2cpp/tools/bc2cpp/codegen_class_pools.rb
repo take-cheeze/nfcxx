@@ -51,6 +51,16 @@ class CodeGen
         @checked_pools_used = true unless base.zero?
       end
     end
+    # DECLARED_IVAR_PROOF: a declared slot whose every store is checked holds exactly the declared kind (and nil unless a
+    # constructor assigns it first, class_pool_ivar_entry_mask), whatever the stores' flows show: a fixed seed, never
+    # grown. A slot the pools already refused (a writer outside the SETIV sites) is not seeded.
+    @declared_ivar_pools = {}
+    declared_ivar_seeds.each do |key, (_entry, bits)|
+      next unless @class_ivar_pools.key?(key)
+
+      @class_ivar_pools[key] = bits
+      @declared_ivar_pools[key] = bits
+    end
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
     # SEED: a declared class parameter whose entry guard checks it is exactly that class on entry, whatever the call
     # sites pass (an unmodelled read would otherwise delete the pool), so the declared bits are fixed, not grown.
@@ -192,6 +202,8 @@ class CodeGen
 
     changed = false
     @class_ivar_pools.keys.each do |key|
+      next if @declared_ivar_pools&.key?(key)
+
       group = @numeric_ivar_groups.fetch(key)
       sites = group.sites.map { |irep, idx, reg| [irep, idx, reg] }
       sites += checked_group_reads(group, key[0]) if group.structural
