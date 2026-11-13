@@ -2612,6 +2612,9 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap);
+#if defined(__aarch64__)
+static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap);
+#endif
 static ir_val ir_lval_op(an_expr_node_ptr e);
 static ir_val ir_roof(an_expr_node_ptr e);
 
@@ -3303,7 +3306,11 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         ir_fo_call(e->type, "vaarg", ir_fmt("%s %s", d.s, ir_valist_addr(a0)));
         return ir_mk_value(d.s, e->type);
       }
+#if defined(__aarch64__)
+      if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate_a64(e, ir_valist_addr(a0));
+#else
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
+#endif
       if (ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (bool)", 0, (int)k);
       {
         char *ap = ir_valist_addr(a0);
@@ -6054,6 +6061,68 @@ static int ir_a64_small_int(a_type_ptr t)
   for (i = 0; i < n; i++) if (lv[i].kind == 's' || lv[i].kind == 'd') return 0;
   return 1;
 }
+
+#if defined(__aarch64__)
+/* va_arg of a struct, class or union by value, AAPCS64. The va_list is the 32-byte { void *__stack; void *__gr_top;
+   void *__vr_top; int __gr_offs; int __vr_offs; } that QBE's vastart fills. An aggregate of at most 16 bytes, alignment at
+   most 8, with integer members only (ir_a64_small_int) takes nreg = (size + 7) / 8 general registers when __gr_offs + 8 *
+   nreg <= 0: it is read from __gr_top + __gr_offs, and __gr_offs advances. Otherwise (the whole aggregate goes to the
+   stack, the registers left stay unused) it is read from __stack, which advances by the size rounded up to 8. An aggregate
+   with a floating member (an HFA is in the SIMD&FP registers) or of more than 16 bytes (passed by reference) is a gap
+   marker. */
+static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap)
+{
+  a_type_ptr t = e->type;
+  unsigned long long size = ir_size_of(t);
+  int d = ir_depth, nreg, i;
+  ir_val tmp;
+  char *pgo, *go, *gtop, *base, *ok, *pov, *ov;
+  if (size == 0) {
+    ir_note(0, eok_va_arg, 1);
+    tmp = ir_temp(t);
+    return ir_mk_addr(tmp.s, t, 0);
+  }
+  if (ir_align_of(t) > 8 || size > 16 || !ir_a64_small_int(t))
+    return ir_gap(t, "op va_arg (aggregate: not an integer aggregate of at most 16 bytes, AAPCS64)", 0, (int)eok_va_arg);
+  nreg = (int)((size + 7) / 8);
+  ir_note(0, eok_va_arg, 1);
+  tmp = ir_temp(t);
+  pgo = ir_let("(ptr int)", ir_fmt("(offset %s 24)", ap));
+  go = ir_let("int", ir_fmt("(load int %s)", pgo));
+  ok = ir_let("bool", "(const bool 1)");
+  /* not enough registers: -8 * nreg < __gr_offs */
+  ir_line(d, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s int (const int %d) %s)", -8 * nreg, go))));
+  ir_line(d + 1, "(then");
+  ir_line(d + 2, ir_fmt("(set %s (const bool 0))", ok));
+  ir_close(1);
+  ir_close(1);
+  ir_line(d, ir_fmt("(if %s", ok));
+  ir_line(d + 1, "(then");
+  ir_depth = d + 2;
+  {
+    gtop = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_let("(ptr void)", ir_fmt("(offset %s 8)", ap))));
+    base = ir_let("(ptr void)", ir_fmt("(index %s %s 1)", gtop, ir_cv("long", go)));
+    for (i = 0; i < nreg; i++) {
+      unsigned long long nb = size - 8ULL * (unsigned long long)i < 8 ? size - 8ULL * (unsigned long long)i : 8;
+      char *src = ir_let("(ptr void)", ir_fmt("(offset %s %d)", base, 8 * i));
+      char *dst = ir_let("(ptr void)", ir_fmt("(offset %s %d)", tmp.s, 8 * i));
+      ir_emit(ir_fmt("(copy %llu %s %s)", nb, dst, src));
+    }
+    ir_emit(ir_fmt("(store int %s %s)", pgo, ir_o2("wadd", "int", go, ir_fmt("(const int %d)", 8 * nreg))));
+  }
+  ir_close(1);
+  ir_line(d + 1, "(else");
+  ir_depth = d + 2;
+  pov = ir_let("(ptr void)", ir_fmt("(offset %s 0)", ap));
+  ov = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", pov));
+  ir_emit(ir_fmt("(copy %llu %s %s)", size, tmp.s, ov));
+  ir_emit(ir_fmt("(store (ptr void) %s %s)", pov, ir_let("(ptr void)", ir_fmt("(offset %s %llu)", ov, (size + 7) & ~7ULL))));
+  ir_close(1);
+  ir_close(1);
+  ir_depth = d;
+  return ir_mk_addr(tmp.s, t, 0);
+}
+#endif
 
 static void ir_abi_note(a_type_ptr t)
 {
