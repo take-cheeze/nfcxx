@@ -84,8 +84,11 @@ class CodeGen
     # RESUMABLE_DUAL: the variant's `recv[i]` dispatches by name, as vm.c's OP_GETIDX does for a subclass's own []
     # (the shared index helper picks its arms from program-wide facts, which the variant does not use).
     if @rsm_variant && insn.op == :GETIDX
-      d, s = insn.regs.first(2)
-      return "#{RegName[unshift_proof_reg(d, reg_offset)]} = mrb_funcall(M, #{RegName[unshift_proof_reg(d, reg_offset)]}, \"[]\", 1, #{RegName[unshift_proof_reg(s, reg_offset)]});\n"
+      d, s = insn.regs.first(2).map { |r| unshift_proof_reg(r, reg_offset) }
+      # RSM_GETIDX: the shared helper's tail is the closed `[]` switch, which runs a subclass's own definition.
+      return outlined_index_call('getidx', RegName[d], RegName[d], RegName[s]) if rsm_getidx_helper?
+
+      return "#{RegName[d]} = mrb_funcall(M, #{RegName[d]}, \"[]\", 1, #{RegName[s]});\n"
     end
     # SEALED_INT16 (sealed_int16_locals.rb): a proven int16 array's instructions go to its std::vector.
     if (sealed = sealed_int16_action(irep, idx))
@@ -244,12 +247,14 @@ class CodeGen
       klass = self_class(owner_def)
       code = ivar_set_code(klass, 'self', ivar, "#{RegName[s]}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
+      # DECLARED_IVAR_GUARD: the declared kind of the slot is checked before the value is stored.
+      guard = code ? declared_ivar_setiv_guard(insn, irep, owner_def, idx, reg_offset) : ''
       if code.nil?
         "  #error SETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
       elsif type
-        "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n  #{code}\n"
+        "#{guard}  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n  #{code}\n"
       else
-        "  #{code}\n"
+        "#{guard}  #{code}\n"
       end
     when :ADDI
       d = insn.reg

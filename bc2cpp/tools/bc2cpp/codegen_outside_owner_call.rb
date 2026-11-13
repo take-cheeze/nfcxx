@@ -96,6 +96,12 @@ module OutsideOwnerCall
     @closed_world || @core_program_world || (ENV['BC2CPP_RSM_OWNER_CALL'] == '0' ? nil : @rsm_owner_world)
   end
 
+  # RSM_GETIDX: a variant's `recv[i]` calls the shared index helper like the plain body's untyped site, whose
+  # tail is the closed `[]` switch; a runtime-installed `[]` keeps the by-name send.
+  def rsm_getidx_helper?
+    owner_call_world && ENV['BC2CPP_RSM_GETIDX'] != '0' && !devirt_blocked_name?('[]')
+  end
+
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)

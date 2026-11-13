@@ -198,7 +198,7 @@ else
 fi
 trace_end "$t" "qbe-prep (rewrite for cproc)" qbe-backend
 t=$(trace_start)
-# macOS arm64: the aarch64-apple target (Apple's va_list, see scripts/cproc-apple-valist.patch); elsewhere the default.
+# macOS arm64: the aarch64-apple target (Apple's va_list: the cproc fork's commit, once in scripts/cproc-apple-valist.patch); elsewhere the default.
 cprocarg=(); case "$(uname -m)" in arm64|aarch64) [ $macos = 1 ] && cprocarg=(-t aarch64-apple) ;; esac
 # GNU extended inline asm is lowered to out-of-line thunks cproc writes here (x86_64 ELF only; the Mach-O label prefix
 # and the CIL backend have no path, so -a is withheld there and cproc then refuses any asm instead of miscompiling it).

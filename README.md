@@ -36,7 +36,7 @@ scripts/setup-poly.sh     # mruby built with C++ exceptions for lib/poly (NFCXX_
 scripts/setup-poly-lua.sh # Lua 5.4 built with C++ exceptions for lib/poly (Python uses the system python3-dev)
 scripts/setup-poly-js.sh  # QuickJS-NG (plain C, patched for cproc) for lib/poly
 scripts/setup-poly-go.sh  # yaegi, a Go interpreter, in a cgo shared library for lib/poly (needs Go >= 1.24 and the Go module proxy; one library for both back ends)
-tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript, Go and ast from C++ with bound host objects, exceptions across the boundary (both backends; docs/notes/poly.md)
+tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript, Go and ast from C++ with bound host objects, exceptions across the boundary (Path B and gcc; docs/notes/poly.md)
 tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter with inlining of small functions and a tier for hot numeric kernels, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
 scripts/sycl-build.sh prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
 tests/sycl/run.sh         # SYCL programs on the host path and on WebGPU (Chromium/SwiftShader through Playwright), traps and refusals

@@ -3,9 +3,11 @@
 require_relative 'bytecode_ir'
 require_relative 'bytecode_ir_containers'
 
+require_relative 'numeric_flow'
 require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
+require_relative 'codegen_declared_ivars'
 
 # CodeGen: DECLARED_RETURN_CHECK and DECLARED_RETURN_GUARD.
 #
@@ -145,6 +147,60 @@ class CodeGen
     end
   end
 
+  # EXACT_DECLARED_RETURN: the exact-class flow's mask of a call of +name+ whose declaration is checked at run time, or
+  # nil. The guard raises on a mismatch, so a value that comes back IS what the declaration says: `-> Foo` is exactly
+  # Foo (the guard is the exact class test), `-> Float` a Float, `-> Integer` a Fixnum, `-> Symbol`, `bool`, `nil` the
+  # immediate classes (their bits exist only under immediate_class_bits_enabled?). Applied only when every definition of
+  # the name is declared alike (declared_return_refusal), each one's guard is emitted (declared_return_guard) or its
+  # body is proven (declared_return_proven?), and the class is a program class nothing derives from, as RBS_CHECKED_PARAMS
+  # trusts one (the `subclassed` rule of rbs_param_check.rb). Otherwise the declaration stays the ceiling it was.
+  # BC2CPP_EXACT_DECLARED_RETURNS=0 turns it off.
+  def declared_exact_return_mask(name)
+    return nil unless @declared_returns_final && ENV['BC2CPP_EXACT_DECLARED_RETURNS'] != '0'
+
+    @declared_exact_return ||= {}
+    @declared_exact_return[name] = declared_exact_return_spec(name) unless @declared_exact_return.key?(name)
+    spec = @declared_exact_return[name]
+    return nil unless spec
+
+    kind, cls, nilable = spec
+    bit = case kind
+          when :fixnum then NumericFlow::INT
+          when :float then NumericFlow::FLT
+          when :nil then NumericFlow::NIL
+          when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : nil
+          when :bool
+            immediate_class_bits_enabled? ? numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass') : nil
+          when :class then RETURN_CORE_CLASS.key(cls) || numeric_class_bit(cls)
+          end
+    bit && (nilable ? bit | NumericFlow::NIL : bit)
+  end
+
+  # [kind, class, nilable] when +name+ may be read as an exact result (declared_exact_return_mask), or nil.
+  def declared_exact_return_spec(name)
+    entries = declared_return_by_name[name]
+    return nil if entries.nil? || entries.empty? || declared_return_refusal(name)
+
+    guarded = entries.all? { |e| @ireps[e.label] && @owner_of[e.label] && (declared_return_guard(e.label) || declared_return_proven?(e)) }
+    return nil unless guarded
+
+    entry = entries.first
+    spec = [entry.kind, entry.cls, entry.nilable]
+    return nil unless entries.all? { |e| [e.kind, e.cls, e.nilable] == spec }
+
+    case entry.kind
+    when :fixnum, :float then entry.nilable ? nil : spec
+    when :symbol, :bool, :nil then entry.nilable ? nil : spec
+    when :class
+      klass = entry.cls
+      return nil if RETURN_BITLESS_CLASSES.include?(klass) || !instance_class?(klass)
+      return nil if (@declared_subclassed ||= @superclass_of.values.grep(String).to_set).include?(klass)
+      return nil unless native_table_name_visible?(name, klass)
+
+      spec
+    end
+  end
+
   # Runs once the return fixpoints are final. Diagnostics are hashes in RbsSignatures::Diag's shape.
   def check_declared_returns
     @declared_return_diagnostics = []
@@ -153,6 +209,7 @@ class CodeGen
     @declared_returns_final = true
     @declared_return_hints = nil
     @declared_return_guards = nil
+    @declared_exact_return = nil
     # The proofs run on the closed world's outside-source scan, a required bc2cpp input.
     if @foreign_method_names.nil? && !declared_return_entries.empty?
       raise 'DECLARED_RETURN_CHECK: no outside-source scan; bc2cpp compiles closed-world programs only (ADR 0466)'

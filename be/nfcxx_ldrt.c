@@ -458,6 +458,30 @@ int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_is
    is returned in rax as well as written through the hidden pointer, as the C convention of a struct requires. */
 void *__nfcxx_f128w_fabsf128(void *ret, const void *a) { f128_wr(ret, __builtin_fabsf128(f128_rd(a))); return ret; }
 
+/* The NaN and infinity built-ins that <limits> and <cmath> reach for _Float128 (nanf128, nansf128, nansq, huge_valf128). No
+   libc or libquadmath function of these names is there to call, so the wrapper builds the value: the binary128 bits (the
+   f128 of this file is IEEE binary128, little-endian: the low 64 bits first). A tag is the payload of the NaN, read as an
+   integer by strtoull (base 0), as glibc's nan reads its n-char-sequence; an empty or unparsable tag is payload 0. A quiet
+   NaN has the top mantissa bit set; a signaling NaN must have a nonzero mantissa, so its payload 0 becomes 1. */
+static void f128_bits_wr(void *d, unsigned long long hi, unsigned long long lo)
+{
+  memcpy(d, &lo, sizeof lo);
+  memcpy((char *)d + 8, &hi, sizeof hi);
+}
+static void *f128_nan_wr(void *ret, const char *tag, int signaling)
+{
+  unsigned long long payload = tag != NULL ? strtoull(tag, NULL, 0) : 0;
+  unsigned long long hi = 0x7fff000000000000ULL;   /* exponent all ones */
+  if (!signaling) hi |= 0x0000800000000000ULL;     /* the quiet bit: the top mantissa bit */
+  else if (payload == 0) payload = 1;
+  f128_bits_wr(ret, hi, payload);
+  return ret;
+}
+void *__nfcxx_f128w_nanf128(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 0); }
+void *__nfcxx_f128w_nansf128(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 1); }
+void *__nfcxx_f128w_nansq(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 1); }
+void *__nfcxx_f128w_huge_valf128(void *ret) { f128_bits_wr(ret, 0x7fff000000000000ULL, 0); return ret; }
+
 #if defined(__x86_64__)
 /* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them).
    x86-64 only: the aarch64 libstdc++ has no _Float128 overloads of to_chars. */

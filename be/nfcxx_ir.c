@@ -5234,6 +5234,7 @@ static int ir_f128_wrapped(const char *sym)
 {
   static const char *const tab[] = {
     "fabsf128",
+    "nanf128", "nansf128", "nansq", "huge_valf128",
     "_ZSt8to_charsPcS_DF128_",
     "_ZSt8to_charsPcS_DF128_St12chars_format",
     "_ZSt8to_charsPcS_DF128_St12chars_formati",
@@ -7729,6 +7730,15 @@ static void ir_agl_scan(a_statement_ptr s, a_label_ptr *out, int *n, int max)
 }
 
 #define IR_AGL_MAX 4096
+/* A function with many address-taken labels (an interpreter loop: QuickJS's has about 250, a `goto *` after every opcode)
+   would get one switch of that many cases per `goto *`, a quadratic number of edges that QBE cannot take. From
+   IR_AGD_MIN labels on, each `goto *` stores the label id in a slot of the function and jumps to the one switch that
+   ir_assigned_goto_tail writes at the end of the body. */
+#define IR_AGD_MIN 16
+static const char *ir_agd_slot; /* the slot of the shared switch's selector, or NULL: no `goto *` of this function shares it */
+static int ir_agd_n;
+static a_label_ptr ir_agd_lbls[IR_AGL_MAX];
+
 /* `goto *p`: a switch on the pointer's value over the ids of the address-taken labels, each case a goto. */
 static void ir_assigned_goto(a_statement_ptr s, int d)
 {
@@ -7745,6 +7755,19 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   ir_tmp_end(&tmps, d);
   sel = ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", v.s));
   if (ir_cur_scope != NULL) ir_agl_scan(ir_cur_scope->assoc_block, lbls, &n, IR_AGL_MAX);
+  if (n >= IR_AGD_MIN) {
+    if (ir_agd_slot == NULL) {
+      ir_agd_slot = ir_tab_add(&ir_slots, NULL, "agd", "$");
+      ir_buf_begin(&ir_slot_buf);
+      fprintf(nf_out, "\n  (slot %s unsigned_long 8 8)", ir_agd_slot + 1);
+      ir_buf_end(&ir_slot_buf);
+      memcpy(ir_agd_lbls, lbls, (size_t)n * sizeof lbls[0]);
+      ir_agd_n = n;
+    }
+    ir_line(d, ir_fmt("(store unsigned_long %s %s)", ir_agd_slot, sel));
+    ir_line(d, "(goto \"__agd\")");
+    return;
+  }
   ir_line(d, ir_fmt("(switch %s", sel));
   ir_line(d + 1, "(body");
   for (i = 0; i < n; i++) {
@@ -7753,6 +7776,27 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   }
   ir_line(d + 2, "(default)");
   ir_line(d + 2, "(unreachable)");
+  ir_close(1);
+  ir_close(1);
+}
+
+/* The shared switch of the function's `goto *` (ir_assigned_goto), after the last statement, which does not fall into it. */
+static void ir_assigned_goto_tail(int fell_off_void)
+{
+  int i;
+  char *sel;
+  if (ir_agd_slot == NULL) return;
+  if (fell_off_void) ir_line(1, "(return)");
+  ir_line(1, "(label \"__agd\")");
+  sel = ir_let("unsigned_long", ir_fmt("(load unsigned_long %s)", ir_agd_slot));
+  ir_line(1, ir_fmt("(switch %s", sel));
+  ir_line(2, "(body");
+  for (i = 0; i < ir_agd_n; i++) {
+    ir_line(3, ir_fmt("(case (const unsigned_long %d))", ir_label_id((void *)ir_agd_lbls[i])));
+    ir_line(3, ir_fmt("(goto %s)", ir_tab_get(&ir_labels, ir_agd_lbls[i], ir_name_or(ir_agd_lbls[i]->source_corresp.name, "label"), "")));
+  }
+  ir_line(3, "(default)");
+  ir_line(3, "(unreachable)");
   ir_close(1);
   ir_close(1);
 }
@@ -8614,6 +8658,7 @@ static void ir_function(a_routine_ptr rout)
   ir_cur_rout = rout;
   ir_slots.n = 0;
   ir_labels.n = 0;
+  ir_agd_slot = NULL;
   ir_loop_n = 0;
   ir_decl_top = NULL;
   ir_obl_n = 0;
@@ -8764,6 +8809,7 @@ static void ir_function(a_routine_ptr rout)
       ir_line(1, ir_ubsan ? "(unreachable missing-return)" : "(unreachable)");
     }
   }
+  ir_assigned_goto_tail(ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block));
   ir_buf_end(&body);
 
   /* Output: header, slots, body. */
