@@ -441,9 +441,10 @@ int __nfcxx_f128_isfinite(const void *a) { return __builtin_isfinite(f128_rd(a))
 int __nfcxx_f128_signbit(const void *a) { return __builtin_signbit(f128_rd(a)) != 0; }
 int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_isunordered(f128_rd(a), f128_rd(b)); }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 /* ---- C-ABI wrappers for _Float128 (docs/notes/pathb-float128.md, "Calls of C functions").
-   x86-64 only (kept as before): the SSE-register convention they work around is the x86-64 one.
+   x86-64 and aarch64 (Linux): the convention they work around is the one that passes a _Float128 in a vector register
+   (xmm0 on x86-64, q0 on aarch64, which QBE cannot express).
 
    A _Float128 is passed in one SSE register and returned in xmm0 by the C convention, which QBE cannot express. A call from
    Path B of a routine defined elsewhere with a _Float128 in its signature goes to __nfcxx_f128w_ + the routine's linkage
@@ -453,15 +454,17 @@ int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_is
    returns it (rax:rdx), with no pointer.
    The wrapper calls the routine through a declaration with the same linkage name (__asm__ label). Only the routines listed
    in the IR (be/nfcxx_ir.c, ir_f128_wrapped) have one. */
-typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
-f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
-f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
-f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 /* std::abs(_Float128) of <cmath> reaches fabsf128 (a built-in: gcc inlines it as a sign-bit clear). A memory-class result
    is returned in rax as well as written through the hidden pointer, as the C convention of a struct requires. */
 void *__nfcxx_f128w_fabsf128(void *ret, const void *a) { f128_wr(ret, __builtin_fabsf128(f128_rd(a))); return ret; }
 
-/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them) */
+#if defined(__x86_64__)
+/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them).
+   x86-64 only: the aarch64 libstdc++ has no _Float128 overloads of to_chars. */
+typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
+f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
+f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
+f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_(char *f, char *l, const void *v) { return f128_tc2(f, l, f128_rd(v)); }
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_format(char *f, char *l, const void *v, int fmt)
 {
@@ -471,8 +474,9 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
 {
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
+#endif /* defined(__x86_64__): to_chars */
 
-#endif /* defined(__x86_64__): the C-ABI wrappers */
+#endif /* defined(__x86_64__) || defined(__aarch64__): the C-ABI wrappers */
 #endif /* _Float128 helpers */
 
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----

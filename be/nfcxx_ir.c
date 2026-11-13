@@ -347,9 +347,28 @@ static int ir_pointee_is_volatile(a_type_ptr t)
   return 0;
 }
 
+/* The va_list object. EDG's front end is configured for the x86-64 target, so its __va_list_tag is the System V 24-byte
+   struct. On an aarch64 host the va_start that QBE emits fills the 32-byte AAPCS64 __va_list (__stack, __gr_top, __vr_top,
+   __gr_offs, __vr_offs): a 24-byte slot overlapped the next local (sqlite3_mprintf's StrAccum overwrote gr_offs). */
+#if defined(__aarch64__)
+#define IR_VA_LIST_SIZE 32ULL
+#else
+#define IR_VA_LIST_SIZE 24ULL
+#endif
+
 static unsigned long long ir_size_of(a_type_ptr t)
 {
-  return (unsigned long long)f_size_of_type(skip_typerefs(t));
+  a_type_ptr s = skip_typerefs(t);
+  if (s->kind == tk_array && !s->variant.array.is_variable_size_array) {
+    a_type_ptr e = skip_typerefs(s->variant.array.element_type);
+    if (e->kind == tk_class || e->kind == tk_struct) {
+      if (class_type_supp(e)->is_va_list_tag)
+        return (unsigned long long)s->variant.array.variant.number_of_elements * IR_VA_LIST_SIZE;
+    }
+  }
+  if ((s->kind == tk_class || s->kind == tk_struct) && class_type_supp(s)->is_va_list_tag)
+    return IR_VA_LIST_SIZE;
+  return (unsigned long long)f_size_of_type(s);
 }
 
 /* Alignment in bytes of an object type (EDG's layout). Printed next to sizes of slots and globals. */
@@ -587,9 +606,135 @@ static int ir_x87_rout_kind(a_routine_ptr r)
   return k;
 }
 
+/* ---- Linux aarch64: the long double calling convention (AAPCS64; docs/notes/pathb-longdouble.md, "Linux aarch64")
+
+   Path B passes a long double (and a _Complex long double, a struct of one long double) to QBE as a 16-byte aggregate, a
+   register pair of the integer registers. The C convention passes it in a SIMD&FP register (a quad), and a _Complex long
+   double in two of them, so a routine with such a parameter or result is reached through the thunks of
+   scripts/pathb-a64-thunks.rb, which read the class letters written here (the C view):
+     i integer, pointer, reference, or an aggregate of more than 16 bytes (its address)   d double   f float
+     L long double or an X87-class struct   C _Complex long double   T __int128
+   A result is v (no value, or a scalar in x0/d0), L or C. Only Linux: the Darwin arm64 ABI differs. */
+#if defined(__aarch64__) && defined(__linux__)
+#define IR_A64_ABI 1
+#else
+#define IR_A64_ABI 0
+#endif
+
+/* The thunk-based AArch64 convention is opt-in: NFCXX_LONG_DOUBLE_ABI=aarch64. Until EDG's long double model is the binary128
+   one (its constants, limits and macros are the x86 long double's, see docs/notes/pathb-longdouble.md, "Linux aarch64"), a
+   program that needs it is refused by name and the driver builds it with gcc, instead of running with x87 precision.
+   The constant conversion (ir_x87_bytes) is not gated: it is the layout of the target. */
+static int ir_a64_on(void)
+{
+  const char *e = getenv("NFCXX_LONG_DOUBLE_ABI");
+  return IR_A64_ABI && e != NULL && strcmp(e, "aarch64") == 0;
+}
+
+static int ir_a64_small_int(a_type_ptr t);
+
+/* The class letter of a parameter of type t (C view). 0 for a type the thunks do not describe (_Float128, a floating
+   aggregate of at most 16 bytes, an aggregate with alignment above 8: its registers depend on its members). */
+static int ir_a64_letter(a_type_ptr t, char *c)
+{
+  a_type_ptr s;
+  if (t == NULL) { *c = 'i'; return 1; }
+  s = skip_typerefs(t);
+  if (ir_is_f128(s)) return 0;
+  if (ir_x87_mem(s)) { *c = 'L'; return 1; }
+  if (ir_is_complex_x87(s)) { *c = 'C'; return 1; }
+  if (ir_is_i128(s)) { *c = 'T'; return 1; }
+  if (s->kind == tk_integer || s->kind == tk_pointer || s->kind == tk_nullptr) { *c = 'i'; return 1; }
+  if (s->kind == tk_float) { *c = ir_size_of(s) == 4 ? 'f' : 'd'; return 1; }
+  if (s->kind == tk_class || s->kind == tk_struct || s->kind == tk_union) {
+    /* by address above 16 bytes; an integer aggregate of at most 16 bytes in one or two general registers (S, U) */
+    if (ir_size_of(s) > 16) { *c = 'i'; return 1; }
+    if (ir_size_of(s) == 0 || !ir_a64_small_int(s)) return 0;
+    *c = ir_size_of(s) <= 8 ? 'S' : 'U';
+    return 1;
+  }
+  return 0;
+}
+
+/* The result letter of type t: v for void and for a scalar, L and C for the long double results. 0 for the others. */
+static int ir_a64_res_letter(a_type_ptr t, char *c)
+{
+  a_type_ptr s;
+  if (t == NULL || ir_is_void(t)) { *c = 'v'; return 1; }
+  if (ir_x87_mem(t)) { *c = 'L'; return 1; }
+  if (ir_is_complex_x87(t)) { *c = 'C'; return 1; }
+  s = skip_typerefs(t);
+  if (ir_is_f128(s)) return 0;
+  /* any other result is left where the callee put it (x0, x1, d0, v0, the x8 buffer of a memory-class result): the thunk
+     moves only the parameters and never touches those registers, so it passes the result through */
+  *c = 'v';
+  return 1;
+}
+
+/* The class string of the parameters of routine type ft (cls, cap bytes) and its result letter. 0 when one is not described. */
+static int ir_a64_sig_ft(a_type_ptr ft, char *cls, size_t cap, char *res)
+{
+  a_param_type_ptr p;
+  size_t n = 0;
+  char c;
+  if (ft == NULL || ft->kind != tk_routine) return 0;
+  if (!ir_a64_res_letter(ft->variant.routine.return_type, res)) return 0;
+  cls[0] = '\0';
+  if (ft->variant.routine.extra_info != NULL) {
+    for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) {
+      if (n + 1 >= cap || !ir_a64_letter(p->type, &c)) return 0;
+      cls[n++] = c;
+      cls[n] = '\0';
+    }
+  }
+  return 1;
+}
+
+/* Does a routine of type ft use a long double in the C convention (an L or C parameter, or an L or C result)? Variadic
+   routines are excluded: their named parameters are described by ir_function, their calls by ir_call. */
+static int ir_a64_needs(a_type_ptr ft)
+{
+  a_param_type_ptr p;
+  char c;
+  if (!ir_a64_on() || ft == NULL || ft->kind != tk_routine) return 0;
+  if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) return 0;
+  if (ir_x87_kind(ft->variant.routine.return_type)) return 1;
+  if (ft->variant.routine.extra_info == NULL) return 0;
+  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next)
+    if (ir_a64_letter(p->type, &c) && (c == 'L' || c == 'C')) return 1;
+  return 0;
+}
+
+/* With the AArch64 convention off (ir_a64_on), a signature that uses a long double in the C convention is refused by name:
+   the program is built with gcc. Variadic signatures included: their named long double is not in the C convention either. */
+static int ir_a64_refuse_sig(a_type_ptr ft)
+{
+  a_param_type_ptr p;
+  char c;
+  if (!IR_A64_ABI || ft == NULL || ft->kind != tk_routine) return 0;
+  if (ir_x87_kind(ft->variant.routine.return_type)) return 1;
+  if (ft->variant.routine.extra_info == NULL) return 0;
+  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next)
+    if (ir_a64_letter(p->type, &c) && (c == 'L' || c == 'C')) return 1;
+  return 0;
+}
+
+/* The routine r is reached through the AArch64 thunks: it is defined under __nfcxx_ldr_NAME, or called through
+   __nfcxx_x87c_NAME when defined elsewhere (see ir_rout_name). */
+static int ir_a64_rout(a_routine_ptr r)
+{
+  a_type_ptr ft;
+  if (!ir_a64_on()) return 0;
+  ft = skip_typerefs(r->type);
+  if (ft == NULL || ft->kind != tk_routine) return 0;
+  /* EDG's own runtime (__c99_complex_long_double_*, libC.a) is ordinary C on this target: its _Complex_long_double is two
+     quads in registers, as gcc passes it (the x86 hidden-pointer rule of ir_x87_rout_kind does not apply) */
+  return ir_a64_needs(ft);
+}
+
 static int ir_x87_ret_rout(a_routine_ptr r)
 {
-  return ir_x87_rout_kind(r) != 0;
+  return ir_x87_rout_kind(r) != 0 || ir_a64_rout(r);
 }
 
 static void ir_x87_note_extern(a_routine_ptr r, const char *n);
@@ -1062,6 +1207,8 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
 static int ir_noinline_attr = 0;       /* NFCXX_IR_NOINLINE=1: a function with __attribute__((noinline)) has a (noinline) head, which the inliner respects */
+static int ir_valist_ptr = 0;         /* NFCXX_IR_VALIST_PTR=1 (pathb-dump --target=linux_i686): va_list is `char *`, the pointer to the next argument (i386), not the System V tag */
+static int ir_auto_zero = 0;            /* NFCXX_IR_AUTO_INIT=zero: -ftrivial-auto-var-init=zero, see ir_decl_zero */
 static int ir_scopes = 0;               /* NFCXX_IR_SCOPES=1: print only (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its
                                            scope ends (block end, return, a jump out of it), for AddressSanitizer's use after scope */
 #define IR_SCOPE_FACTS() (ir_borrow || ir_scopes)
@@ -2319,9 +2466,18 @@ static void ir_x87_bytes(a_constant_ptr c, unsigned long long *lo, unsigned long
   unsigned char b[16];
   unsigned long long w[2];
   memset(b, 0, sizeof b);
-  /* a _Float128 constant is EDG's __float128 host value: the 16 bytes of the IEEE binary128 format */
+  /* a _Float128 constant is EDG's __float128 host value: the 16 bytes of the IEEE binary128 format. A long double is the
+     80-bit x87 value in the low 10 bytes (EDG's own format on every host), except on Linux aarch64, where it is binary128 */
   memcpy(b, c->variant.float_value.bytes, ir_is_f128(c->type) ? 16 : 10);
   memcpy(w, b, sizeof w);
+  if (IR_A64_ABI && !ir_is_f128(c->type)) {
+    /* x87 -> binary128: the same sign and exponent (bias 16383), the explicit integer bit dropped, and the 63-bit fraction
+       placed in the 112-bit one (the bits above the 15 that go to the high word shift down by 15) */
+    unsigned long long frac = w[0] & 0x7FFFFFFFFFFFFFFFULL;
+    unsigned long long se = w[1] & 0xFFFF;
+    w[0] = (frac & 0x7FFF) << 49;
+    w[1] = (se << 48) | (frac >> 15);
+  }
   *lo = w[0];
   *hi = w[1];
 }
@@ -3168,7 +3324,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     case eok_va_copy: {
       char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
-      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_emit(ir_fmt("(copy %llu %s %s)", ir_valist_ptr ? 4ULL : IR_VA_LIST_SIZE, dst, src));
       ir_note(0, k, 1);
       return ir_mk_void();
     }
@@ -3518,6 +3674,9 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
 static char *ir_valist_addr(an_expr_node_ptr n)
 {
   if (n != NULL && n->type != NULL && skip_typerefs(n->type)->kind == tk_array) return ir_lval(n).s;
+  /* ILP32 (linux_i686): va_list is `char *`, the pointer to the next argument, which vastart, vaarg and va_copy read and write through
+     the address of the object that holds it. */
+  if (ir_valist_ptr) return ir_lval(n).s;
   return ir_rval(n).s;
 }
 
@@ -4832,6 +4991,52 @@ static char *ir_x87_vthunk(const char *sym, int kind, int ints, unsigned long lo
   return ir_fmt("__nfcxx_x87cv_%s", key);
 }
 
+/* ---- AArch64 thunk forms (scripts/pathb-a64-thunks.rb). The class string and the result letter describe the C view:
+     (x87-thunk entry "F" LINKAGE "CLASSES" R)     F itself: C calls it, the thunk calls __nfcxx_ldr_F
+     (x87-thunk call "F" "CLASSES" R)              __nfcxx_x87c_F: Path B calls it, the thunk calls F
+     (x87-thunk callv "F" "CLASSES" R)             __nfcxx_x87cv_F_A<CLASSES>R<R>: one variadic call shape
+     (x87-thunk icall "A<CLASSES>R<R>" "CLASSES" R) __nfcxx_x87i_A<CLASSES>R<R>: a call through a C pointer */
+static char **ir_a64_tab;
+static int ir_a64_n;
+
+static void ir_a64_form(const char *kind, const char *name, const char *link, const char *cls, char res)
+{
+  int i;
+  char *key = ir_fmt("%s|%s|%s|%s|%c", kind, name, link != NULL ? link : "", cls, res);
+  for (i = 0; i < ir_a64_n; i++)
+    if (strcmp(ir_a64_tab[i], key) == 0) return;
+  if (ir_a64_n >= IR_X87T_MAX) return;
+  ir_a64_tab = (char **)realloc(ir_a64_tab, sizeof *ir_a64_tab * (ir_a64_n + 1));
+  ir_a64_tab[ir_a64_n++] = key;
+  ir_buf_begin(&ir_out_types);
+  if (link != NULL) fprintf(nf_out, "(x87-thunk %s \"%s\" %s \"%s\" %c)\n", kind, name, link, cls, res);
+  else fprintf(nf_out, "(x87-thunk %s \"%s\" \"%s\" %c)\n", kind, name, cls, res);
+  ir_buf_end(&ir_out_types);
+}
+
+/* The class string and result letter of a routine defined here (its scope's parameters). 0 when one is not described. */
+static int ir_a64_sig_scope(a_scope_ptr scope, a_type_ptr ret, char *cls, size_t cap, char *res)
+{
+  a_variable_ptr p;
+  size_t n = 0;
+  char c;
+  if (!ir_a64_res_letter(ret, res)) return 0;
+  cls[0] = '\0';
+  for (p = scope->variant.routine.parameters; p != NULL; p = p->next) {
+    if (n + 1 >= cap || !ir_a64_letter(p->type, &c)) return 0;
+    cls[n++] = c;
+    cls[n] = '\0';
+  }
+  return 1;
+}
+
+/* The C-view thunk of a variadic call shape: the arguments of this call (cls, res) are the variadic ones too. */
+static char *ir_a64_vthunk(const char *sym, const char *cls, char res)
+{
+  ir_a64_form("callv", sym, NULL, cls, res);
+  return ir_fmt("__nfcxx_x87cv_%s_A%sR%c", sym, cls, res);
+}
+
 /* System V classification of one parameter of type t: *ints integer registers used so far, *sse vector registers,
    *stack bytes of stack arguments. 0 for a shape the thunks do not know (an aggregate of at most 16 bytes). */
 static int ir_x87_param(a_type_ptr t, int *ints, int *sse, unsigned long long *stack)
@@ -4881,6 +5086,11 @@ static void ir_x87_note_extern(a_routine_ptr r, const char *n)
   int ints = 0, sse = 0;
   unsigned long long stack = 0;
   int kind = ir_x87_rout_kind(r);
+  if (ir_a64_rout(r)) {
+    char cls[256], res;
+    if (ir_a64_sig_ft(ft, cls, sizeof cls, &res)) ir_a64_form("call", n, NULL, cls, res);
+    return;
+  }
   if (ft->variant.routine.extra_info == NULL) {
     ir_x87_thunk(n, 0, kind, NULL, 0, 0);
     return;
@@ -4903,6 +5113,11 @@ static const char *ir_x87_entry_why(a_routine_ptr r)
   unsigned long long stack = 0;
   if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) return "variadic function returning long double";
   if (scope == NULL) return "long double function without a body";
+  if (ir_a64_rout(r)) {
+    char cls[256], res;
+    return ir_a64_sig_scope(scope, ft->variant.routine.return_type, cls, sizeof cls, &res) ? NULL
+           : "long double function with a small aggregate parameter";
+  }
   for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
     if (!ir_x87_param(param->type, &ints, &sse, &stack)) return "long double function with a small aggregate parameter";
   }
@@ -4958,6 +5173,17 @@ static char *ir_x87_icall(a_type_ptr ft, int complex, const char **why)
     *why = "call through a pointer to a variadic function returning long double";
     return NULL;
   }
+  if (ir_a64_on()) {
+    char cls[256], res;
+    char *k64;
+    if (!ir_a64_sig_ft(ft, cls, sizeof cls, &res)) {
+      *why = "call through a pointer to a long double function with a small aggregate parameter";
+      return NULL;
+    }
+    k64 = ir_fmt("A%sR%c", cls, res);
+    ir_a64_form("icall", k64, NULL, cls, res);
+    return ir_fmt("__nfcxx_x87i_%s", k64);
+  }
   for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) {
     if (!ir_x87_param(p->type, &ints, &sse, &stack)) {
       *why = "call through a pointer to a long double function with a small aggregate parameter";
@@ -5007,8 +5233,20 @@ static ir_val ir_call(an_expr_node_ptr e)
   char *callee;
   char *args = ir_dup("");
   int xk = ir_x87_kind(e->type);
+  /* AArch64 (IR_A64_ABI): the routine's thunks (a64_thk: a routine with a long double parameter or result, not variadic);
+     a variadic call with a long double argument uses the call thunk of its own shape (a64_ldarg, a64_act: the classes
+     of the arguments as the thunk takes them) */
+  int a64_thk = ir_a64_on() && f->kind == enk_routine && ir_a64_rout(f->variant.routine.ptr);
+  a_type_ptr a64_ft = ir_a64_on() ? ir_callee_fn_type(f) : NULL;
+  int a64_var = a64_ft != NULL && a64_ft->kind == tk_routine && a64_ft->variant.routine.extra_info != NULL &&
+                a64_ft->variant.routine.extra_info->has_ellipsis;
+  int a64_ldarg = 0, a64_bad = 0;
+  const char *a64_cname = NULL; /* the C symbol of a routine called directly (its builtin name, when it is one) */
+  char a64_act[256];
+  size_t a64_n = 0;
+  a64_act[0] = '\0';
   int f128w = 0; /* a routine defined elsewhere with a _Float128 in its signature: called through its wrapper */
-  if (xk == 2 && f->kind == enk_routine && ir_x87_rout_kind(f->variant.routine.ptr) == 0) xk = 0; /* EDG runtime: sret */
+  if (xk == 2 && !ir_a64_on() && f->kind == enk_routine && ir_x87_rout_kind(f->variant.routine.ptr) == 0) xk = 0; /* EDG runtime: sret */
   int agg_ret = (ir_is_cabi_agg(e->type) || ir_is_f128(e->type)) && xk == 0;
   int x87_ret = xk != 0;
   int x87_first = 0; /* variadic callee: the result pointer is the first argument */
@@ -5019,6 +5257,8 @@ static ir_val ir_call(an_expr_node_ptr e)
   ir_val ldres = ir_mk_void();
   const char *obj_op = NULL;       /* the first argument, when it is a whole local object of class type (flag only) */
   a_variable_ptr obj_var = NULL;
+  if (IR_A64_ABI && !ir_a64_on() && ir_a64_refuse_sig(ir_callee_fn_type(f)))
+    return ir_gap(e->type, "call of a long double function on aarch64 (the C convention is opt-in: NFCXX_LONG_DOUBLE_ABI=aarch64)", 0, (int)eok_call);
   if (f->kind == enk_routine) {
     const char *bsym = ir_builtin_sym(f->variant.routine.ptr->source_corresp.name);
     ir_note(2, enk_routine, 1);
@@ -5044,6 +5284,7 @@ static ir_val ir_call(an_expr_node_ptr e)
       size_t i;
       for (i = 0; i < sizeof tab / sizeof tab[0]; i++) if (strcmp(bsym, tab[i][0]) == 0) bsym = tab[i][1];
     }
+    a64_cname = bsym != NULL ? bsym : ir_rout_sym(f->variant.routine.ptr);
     if (f->variant.routine.ptr->function_def_number == NULL_function_def_number &&
         ir_sig_has_f128(ir_callee_fn_type(f))) {
       /* a routine defined elsewhere that takes or returns a _Float128 (an SSE register in the C convention), a library
@@ -5056,7 +5297,7 @@ static ir_val ir_call(an_expr_node_ptr e)
         return ir_gap(e->type, ir_fmt("call of %s (variadic, _Float128)", sym), 0, (int)eok_call);
       f128w = 1;
       callee = ir_fmt("&\"__nfcxx_f128w_%s\"", sym);
-    } else if (x87_ret && (bsym != NULL || f->variant.routine.ptr->function_def_number == NULL_function_def_number)) {
+    } else if ((x87_ret || a64_thk) && (bsym != NULL || f->variant.routine.ptr->function_def_number == NULL_function_def_number)) {
       thunk_sym = bsym != NULL ? bsym : ir_name_or(ir_rout_sym(f->variant.routine.ptr), "fn");
       callee = ir_fmt("&\"__nfcxx_x87c_%s\"", thunk_sym);
     } else {
@@ -5075,6 +5316,13 @@ static ir_val ir_call(an_expr_node_ptr e)
          no C-convention entry for such a function, so one defined elsewhere cannot be called */
       if (thunk_sym != NULL) vthunk = 1; /* the call thunk of this call's shape (ir_x87_vthunk) takes the result pointer last */
       else if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function returning long double", 0, (int)eok_call);
+      else if (ir_a64_on() && f->kind == enk_routine && f->variant.routine.ptr->function_def_number != NULL_function_def_number)
+        return ir_gap(e->type, "call of a variadic function defined here that returns long double (AArch64: no C-convention entry)", 0, (int)eok_call);
+      else if (ir_a64_on() && f->kind == enk_routine) {
+        /* AArch64: the C convention has the result in q0, so the call goes through the thunk of its shape, as above */
+        thunk_sym = ir_name_or(a64_cname, "fn");
+        vthunk = 1;
+      }
       else x87_first = 1;
     }
     ldres = ir_temp(e->type);
@@ -5082,15 +5330,22 @@ static ir_val ir_call(an_expr_node_ptr e)
   }
   if (agg_ret) {
     sret = ir_temp(e->type);
+#if defined(__aarch64__)
+    /* A _Float128 result of a wrapper (be/nfcxx_ldrt.c, __nfcxx_f128w_): the wrapper takes the result pointer as its first
+       ordinary argument. (sret ...) would pass it in x8, the AArch64 indirect-result register, which the wrapper does not
+       read. The call is void (the wrapper's own return value is not used), so nothing else changes. */
+    if (f128w) args = ir_fmt("%s %s", args, sret.s);
+    else
+#endif
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
 #if defined(__aarch64__)
   /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
-     (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
-     copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
-     module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
-  a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
+     (hidden-dest T DEST). The SSA route passes DEST as the callee's result pointer in x8 (AAPCS64) through a thunk, so the
+     callee builds the object in DEST itself (no copy: a std::string's buffer may point into it). The first operand is
+     the destination, not an argument (scripts/pathb-ssa-qbe.rb, call_parts). */
+  a_type_ptr hid_ft = ir_callee_fn_type(f);   /* a pointer callee too: a virtual call takes the same convention */
   if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
       hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
       !hid_ft->variant.routine.extra_info->return_value_parameter_follows_this &&
@@ -5099,9 +5354,12 @@ static ir_val ir_call(an_expr_node_ptr e)
     a_type_ptr dt = d.t != NULL ? skip_typerefs(d.t) : NULL;
     if (dt != NULL && dt->kind == tk_pointer && ir_is_cabi_agg(dt->variant.pointer.type)) {
       hid_dest = 1;
-      args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
+      args = ir_fmt("%s (hidden-dest %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
     }
   }
+  if (!hid_dest && !agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
+      hid_ft->variant.routine.extra_info->value_returned_as_parameter && !ir_is_cdtor_call(f, 0) && !ir_is_cdtor_call(f, 1))
+    return ir_gap(e->type, "call of a class-result function without its result object", 0, (int)eok_call);
 #endif
   {
     int ints = 0, sse = 0, shape_ok = 1;
@@ -5114,7 +5372,17 @@ static ir_val ir_call(an_expr_node_ptr e)
       ir_val a = ir_rval(arg);
       if (ir_borrow && nrref < 32 && ir_is_rref_type(ir_arg_param_type(f, idx, nargs))) rref[nrref++] = a.s;
       if (ir_borrow && idx == 0 && !agg_ret && !x87_ret && a.s[0] == '$' && (obj_var = ir_obj_arg(arg)) != NULL) obj_op = a.s;
-      if (thunk_sym != NULL && !ir_x87_param(a.t, &ints, &sse, &stack)) shape_ok = 0;
+      if (ir_a64_on()) {
+        char c = 0;
+        if (ir_a64_letter(a.t, &c)) {
+          if (a64_n + 1 < sizeof a64_act) { a64_act[a64_n++] = c; a64_act[a64_n] = '\0'; }
+          if (c == 'L' || c == 'C') a64_ldarg = 1;
+        } else {
+          a64_bad = 1;
+        }
+      } else if (thunk_sym != NULL && !ir_x87_param(a.t, &ints, &sse, &stack)) {
+        shape_ok = 0;
+      }
       if (f128w && ir_is_f128(a.t)) { /* a wrapper takes the _Float128 by address */
         args = ir_fmt("%s %s", args, a.s);
       } else if (ir_is_memval(a.t)) {
@@ -5127,14 +5395,41 @@ static ir_val ir_call(an_expr_node_ptr e)
     }
     /* The moves of this call: a (rref-arg OP) right before the call (flag only). */
     for (k = 0; k < nrref; k++) ir_emit(ir_fmt("(rref-arg %s)", rref[k]));
-    if (thunk_sym != NULL) {
+    if (ir_a64_on() && a64_ldarg && a64_var) {
+      /* a variadic call with a long double argument: its own call thunk (the C convention of every argument) */
+      if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function with a long double argument", 0, (int)eok_call);
+      if (f->kind == enk_routine && f->variant.routine.ptr->function_def_number != NULL_function_def_number)
+        /* a variadic function defined here (a template instance of a header, say) is not emitted when its only uses are
+           through the thunk; the call is refused rather than linked to a missing symbol */
+        return ir_gap(e->type, "call of a variadic function defined here with a long double argument (AArch64)", 0, (int)eok_call);
+      if (thunk_sym == NULL) thunk_sym = ir_name_or(a64_cname, "fn");
+      vthunk = 1;
+    }
+    if (ir_a64_on() && a64_thk && thunk_sym == NULL) {
+      /* a routine defined here with a long double in its signature: its definition takes the trailing result pointer only
+         when every parameter is described (ir_function), so the call must agree with that */
+      char cls[256], res;
+      if (!ir_a64_sig_ft(a64_ft, cls, sizeof cls, &res))
+        return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
+    }
+    if (ir_a64_on() && thunk_sym != NULL) {
+      char cls[256], res;
+      if (a64_bad) return ir_gap(e->type, "call of a function with a long double ABI the thunks do not describe", 0, (int)eok_call);
+      if (vthunk) {
+        if (!ir_a64_res_letter(e->type, &res)) return ir_gap(e->type, "call of a variadic function with a long double result", 0, (int)eok_call);
+        callee = ir_fmt("&\"%s\"", ir_a64_vthunk(thunk_sym, a64_act, res));
+      } else {
+        if (!ir_a64_sig_ft(a64_ft, cls, sizeof cls, &res)) return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
+        ir_a64_form("call", thunk_sym, NULL, cls, res);
+      }
+    } else if (thunk_sym != NULL) {
       if (!shape_ok) return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
       if (vthunk) callee = ir_fmt("&\"%s\"", ir_x87_vthunk(thunk_sym, xk, ints, stack, sse));
       else ir_x87_thunk(thunk_sym, 0, xk, NULL, ints, stack);
     }
   }
   if (x87_ret && !x87_first) args = ir_fmt("%s %s", args, ldres.s);
-  if (x87_ret && indirect_fp != NULL) {
+  if ((x87_ret || (ir_a64_on() && ir_a64_needs(a64_ft))) && indirect_fp != NULL) {
     /* A pointer's function is the C-convention function: the indirect call thunk takes the pointer after the result
        pointer and calls it (docs/notes/pathb-longdouble.md, "Calling convention"). */
     const char *why = NULL;
@@ -5580,7 +5875,7 @@ static int ir_abi_collect(a_type_ptr t, unsigned long long base, ir_leaf *lv, in
     }
     case tk_pointer:
       if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
-      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      lv[*n].off = base; lv[*n].kind = sz == 4 ? 'w' : 'l'; (*n)++;   /* ILP32 (linux_i686): a word */
       return 1;
     case tk_float:
       if (sz == 16) { /* long double or _Float128: class X87 or SSE, so two markers ('m') that a union merges (below) */
@@ -5712,6 +6007,17 @@ static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap)
   const char *why = "";
   ir_val tmp;
   char *gp = NULL, *fp = NULL, *ok = NULL;
+  if (ir_valist_ptr) {
+    /* i386: the arguments are words on the stack, an aggregate copied there rounded up to 4 bytes; va_list points at the next one. */
+    ir_note(0, eok_va_arg, 1);
+    tmp = ir_temp(t);
+    if (size > 0) {
+      char *ov = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ap));
+      ir_emit(ir_fmt("(copy %llu %s %s)", size, tmp.s, ov));
+      ir_emit(ir_fmt("(store (ptr void) %s %s)", ap, ir_let("(ptr void)", ir_fmt("(offset %s %llu)", ov, (size + 3) & ~3ULL))));
+    }
+    return ir_mk_addr(tmp.s, t, 0);
+  }
   if (align > 8) return ir_gap(t, "op va_arg (aggregate aligned to 16 bytes)", 0, (int)eok_va_arg);
   if (size <= 16) {
     if (ir_abi_collect(t, 0, lv, &n, &why) && !ir_leaves_have_m(lv, n)) {
@@ -5793,6 +6099,21 @@ static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap)
 static ir_tab ir_abi_tab;
 
 /* Print the (abi-type ...) form of aggregate type t once. */
+/* AArch64 (ir_a64_letter): an aggregate of at most 16 bytes, alignment at most 8, whose scalars are all integers (no
+   floating member: an HFA is passed in the SIMD&FP registers, and is not described). */
+static int ir_a64_small_int(a_type_ptr t)
+{
+  ir_leaf lv[IR_LEAF_MAX];
+  int n = 0, i;
+  const char *why = "";
+  a_type_ptr s = skip_typerefs(t);
+  if (ir_align_of(s) > 8 || ir_size_of(s) > 16) return 0;
+  if (!ir_abi_collect(s, 0, lv, &n, &why)) return 0;
+  if (ir_leaves_have_m((const ir_leaf *)lv, n)) return 0;
+  for (i = 0; i < n; i++) if (lv[i].kind == 's' || lv[i].kind == 'd') return 0;
+  return 1;
+}
+
 static void ir_abi_note(a_type_ptr t)
 {
   a_type_ptr s = skip_typerefs(t);
@@ -7179,7 +7500,8 @@ static int ir_asm_general(an_asm_entry_ptr ae, int d)
     if (is_mem || is_imm) continue;
     if (ir_is_float(ot) != (plans[nops].code[0] == 'x')) { ok = 0; break; }
     if (ir_is_float(ot) && ir_size_of(ot) != 4 && ir_size_of(ot) != 8) { ok = 0; break; }
-    if (!ir_is_float(ot) && (!ir_asm_scalar(ot) || ir_is_bool(ot) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
+    /* a bool takes the byte of an output (the setcc of the kernel's CC_OUT(nz) fallback, `"=qm"(diff)`), not an input: that needs a 0 or 1 */
+    if (!ir_is_float(ot) && (!ir_asm_scalar(ot) || (ir_is_bool(ot) && strcmp(plans[nops].kind, "out") != 0) || (ir_size_of(ot) != 1 && ir_size_of(ot) != 2 &&
                                                               ir_size_of(ot) != 4 && ir_size_of(ot) != 8))) { ok = 0; break; }
   }
   if (!ok) return 0;
@@ -7415,12 +7737,16 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       nin++;
       if (cls != IR_ASM_EMPTY) { why = "asm-operands"; break; }
       if (tie >= 0) {
-        /* tied to a plain output of the same IR type */
+        /* tied to a plain output of the same IR type, or of the same size when one is a pointer and the other an integer
+           (the kernel's absolute_pointer(): `asm("" : "=r"(ul) : "0"(ptr))`) */
         an_asm_operand_ptr o2 = ae->operands;
         int j;
         for (j = 0; j < tie && o2 != NULL; j++) o2 = o2->next;
         if (o2 == NULL || o2->modifiers != aom_output || o2->expression == NULL || !ir_asm_scalar(o2->expression->type) ||
-            !ir_asm_scalar(ot) || strcmp(ir_valtext(o2->expression->type), ir_valtext(ot)) != 0) {
+            !ir_asm_scalar(ot) ||
+            (strcmp(ir_valtext(o2->expression->type), ir_valtext(ot)) != 0 &&
+             !(ir_size_of(o2->expression->type) == ir_size_of(ot) && !ir_is_bool(ot) && !ir_is_bool(o2->expression->type) &&
+               ((ir_is_pointer(ot) && ir_is_integer(o2->expression->type)) || (ir_is_integer(ot) && ir_is_pointer(o2->expression->type)))))) {
           why = "asm-operands";
         }
       } else if (!mem_ok && !ir_asm_scalar(ot)) {
@@ -7513,7 +7839,13 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
       }
     }
     for (i = 0; i < n; i++) {
-      if (tied[i] >= 0) ir_store_lv(lv[tied[i]], tv[i].s);
+      if (tied[i] >= 0) {
+        char *v = tv[i].s;
+        const char *to = ir_valtext(lv[tied[i]].t);
+        if (strcmp(to, ir_valtext(tv[i].t)) != 0)   /* a pointer and an integer of one size: the same bits */
+          v = ir_let(to, ir_is_pointer(tv[i].t) ? ir_fmt("(p2i %s %s)", to, v) : ir_fmt("(i2p %s %s)", to, v));
+        ir_store_lv(lv[tied[i]], v);
+      }
     }
   }
   if (mem) ir_line(d, "(barrier)");
@@ -7577,6 +7909,16 @@ static int ir_init_follows(a_statement_ptr s, a_variable_ptr var)
   return 0;
 }
 
+/* __attribute__((uninitialized)) on a variable: -ftrivial-auto-var-init leaves it alone. The attribute is in the harness's
+   attribute table (scripts/setup-pathb.sh), as an unrecognized-kind entry that EDG keeps on the variable. */
+static int ir_var_uninitialized_attr(a_variable_ptr var)
+{
+  an_attribute_ptr ap;
+  for (ap = var->source_corresp.attributes; ap != NULL; ap = ap->next)
+    if (ap->name != NULL && strcmp(ap->name, "uninitialized") == 0) return 1;
+  return 0;
+}
+
 static void ir_decl_zero(a_statement_ptr s)
 {
   an_il_entity_list_entry_ptr entry;
@@ -7591,6 +7933,12 @@ static void ir_decl_zero(a_statement_ptr s)
     if ((kind == initk_zero ||
          (kind == initk_dynamic && var->initializer.dynamic != NULL && var->initializer.dynamic->is_partially_initialized)) &&
         !ir_init_follows(s, var))
+      ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
+    /* -ftrivial-auto-var-init=zero: an automatic variable with no initializer is all-bits-zero from its declaration (padding
+       too, as gcc's), each time the declaration is reached. A jump past the declaration skips the zeroing, as in gcc. A
+       variable-length array has a stmk_vla_decl, not this; a reference has an initializer by the language. */
+    else if (ir_auto_zero && kind == initk_none && !var->is_vla && !ir_is_ref_type(var->type) && !ir_var_uninitialized_attr(var) &&
+             !ir_init_follows(s, var))
       ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
   }
 }
@@ -8235,6 +8583,18 @@ static void ir_function(a_routine_ptr rout)
       }
     }
   }
+  if (ir_a64_on() && x87_unsupported == NULL && fn_type->variant.routine.extra_info != NULL &&
+      fn_type->variant.routine.extra_info->has_ellipsis) {
+    /* AArch64: the named parameters of a variadic function are in the C convention, which the thunks of a variadic call
+       do not change; a long double among them is not described */
+    for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+      char c = 0;
+      if (ir_a64_letter(param->type, &c) && (c == 'L' || c == 'C')) x87_unsupported = "variadic function with a long double parameter";
+    }
+  } else if (ir_a64_on() && x87_unsupported == NULL && ir_a64_rout(rout)) {
+    char cls[256], res;
+    if (!ir_a64_sig_scope(scope, ret, cls, sizeof cls, &res)) x87_unsupported = "long double function with a small aggregate parameter";
+  }
   if (ir_x87_kind(ret) && x87_unsupported == NULL) {
     /* the result of a long double function is written through a trailing pointer (x87 thunks) */
     ir_sret = ir_newreg();
@@ -8256,6 +8616,8 @@ static void ir_function(a_routine_ptr rout)
   /* Body. Scalar parameters are copied into slots first, so that every named variable has an address. */
   ir_buf_open(&body);
   ir_buf_begin(&body);
+  if (IR_A64_ABI && !ir_a64_on() && ir_a64_refuse_sig(fn_type))
+    ir_emit("(unsupported long double calling convention on aarch64: set NFCXX_LONG_DOUBLE_ABI=aarch64)");
   free(ir_loc_file);
   ir_loc_file = NULL;
   if (ir_borrow) {
@@ -8392,10 +8754,17 @@ static void ir_function(a_routine_ptr rout)
 
   /* A long double function is also defined under its own symbol, the C-convention entry (returns in st(0)): what its
      address is (ir_rout_addr). A static one gets a local entry, which the emitter keeps when the function is kept. */
-  if (ir_x87_kind(ret) && x87_unsupported == NULL && ir_rout_sym(rout) != NULL && ir_rout_sym(rout)[0] != '\0') {
+  if (!ir_a64_on() && ir_x87_kind(ret) && x87_unsupported == NULL && ir_rout_sym(rout) != NULL && ir_rout_sym(rout)[0] != '\0') {
     int weak = rout->use_comdat || rout->suppress_inline_body || rout->is_weak;
     ir_x87_thunk(ir_rout_sym(rout), 1, ir_x87_kind(ret),
                  rout->storage_class == sc_static ? "local" : weak ? "weak" : "global", x87_ints, x87_stack);
+  }
+  if (ir_a64_on() && x87_unsupported == NULL && ir_a64_rout(rout) && ir_rout_sym(rout) != NULL && ir_rout_sym(rout)[0] != '\0') {
+    /* AArch64: the C-convention entry of the routine, which calls __nfcxx_ldr_<symbol> (scripts/pathb-a64-thunks.rb) */
+    char cls[256], res;
+    int weak = rout->use_comdat || rout->suppress_inline_body || rout->is_weak;
+    if (ir_a64_sig_scope(scope, ret, cls, sizeof cls, &res))
+      ir_a64_form("entry", ir_rout_sym(rout), rout->storage_class == sc_static ? "local" : weak ? "weak" : "global", cls, res);
   }
 }
 
@@ -8470,8 +8839,16 @@ void nfcxx_ir_back_end(void)
     ir_scopes = sf != NULL && strcmp(sf, "1") == 0;
   }
   {
+    const char *az = getenv("NFCXX_IR_AUTO_INIT");
+    ir_auto_zero = az != NULL && strcmp(az, "zero") == 0;
+  }
+  {
     const char *nf = getenv("NFCXX_IR_NOINLINE");
     ir_noinline_attr = nf != NULL && strcmp(nf, "1") == 0;
+  }
+  {
+    const char *vp = getenv("NFCXX_IR_VALIST_PTR");
+    ir_valist_ptr = vp != NULL && strcmp(vp, "1") == 0;
   }
   nf_ld_blob = 1; /* long double types print as a 16-byte array in the IR */
   ir_buf_open(&ir_out_globals);

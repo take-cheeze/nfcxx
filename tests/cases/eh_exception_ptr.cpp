@@ -280,4 +280,3 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
-// X86-ONLY-LINUX: exits with SIGSEGV (139) on Linux aarch64 with both backends; macOS arm64 runs it

@@ -5,6 +5,17 @@
 # existing emitter does with its markers (emit_x87_thunks).
 
 require_relative "pathb-ssa-qbe"
+require_relative "pathb-a64-thunks"
+
+# The AArch64 forms: (x87-thunk call|callv|icall "NAME" "CLASSES" RES) and (x87-thunk entry "F" LINKAGE "CLASSES" RES),
+# where the CLASSES string is a quoted token (scripts/pathb-a64-thunks.rb). The x86 forms have integers there.
+def x87_a64_form?(f)
+  case head(f).to_s == "x87-thunk" ? f[1].to_s : nil
+  when "call", "callv", "icall" then f[3].is_a?(Str)
+  when "entry" then f[4].is_a?(Str)
+  else false
+  end
+end
 
 # ---- long double: the x87 thunks (docs/notes/pathb-longdouble.md)
 #
@@ -148,6 +159,12 @@ def x87_target_x86_64?
   %w[x86_64 amd64].include?(x87_target_name)
 end
 
+# The AArch64 Linux thunks (scripts/pathb-a64-thunks.rb, AAPCS64). Darwin's arm64 ABI differs (variadic arguments on
+# the stack), so only a Linux host takes them.
+def x87_a64_target?
+  %w[aarch64 arm64].include?(x87_target_name) && RbConfig::CONFIG["host_os"].include?("linux")
+end
+
 def x87_thunks_asm(forms, il)
   out = []
   # The function header lines of the IL, found once: an entry thunk asks whether one defines __nfcxx_ldr_F, and matching
@@ -156,6 +173,38 @@ def x87_thunks_asm(forms, il)
   forms.each do |f|
     kind = f[1].to_s
     name = Qbe.symbol(sname(f[2]))
+    if x87_a64_form?(f)
+      # AArch64 forms carry the class string of the parameters (scripts/pathb-a64-thunks.rb); x86 targets skip them
+      next unless x87_a64_target?
+      case kind
+      when "call", "callv", "icall"
+        cls = sname(f[3])
+        res = f[4].to_s
+        # the names: __nfcxx_x87c_F; __nfcxx_x87cv_F_A<classes>R<result> for a variadic call shape; __nfcxx_x87i_KEY (KEY
+        # is A<classes>R<result>, written by the IR)
+        sym = case kind
+              when "call" then "__nfcxx_x87c_" + sname(f[2])
+              when "callv" then "__nfcxx_x87cv_" + sname(f[2]) + "_A" + cls + "R" + res
+              else "__nfcxx_x87i_" + sname(f[2])
+              end
+        sym = Qbe.symbol(sym)
+        # a call with a hidden result goes through the thunk sym.nfcxxx8 (pathb-ssa-build's hidden_result_asm), which branches here
+        used = il.include?("$#{sym}(") || il.include?("$#{sym}.nfcxxx8(")
+        if kind == "icall"
+          out << A64Thunks.call(sym, nil, cls, res, icall: true) if used
+        else
+          out << A64Thunks.call(sym, name, cls, res) if used
+        end
+      when "entry"
+        linkage = f[3].to_s
+        cls = sname(f[4])
+        res = f[5].to_s
+        headers ||= il.scan(/^(?:export )?function [^\n]*/).join("\n")
+        defined = headers.include?("$#{Qbe.symbol("__nfcxx_ldr_" + sname(f[2]))}(")
+        out << A64Thunks.entry(name, linkage, cls, res) if defined
+      end
+      next
+    end
     case kind
     when "call", "callc"
       sym = Qbe.symbol("__nfcxx_x87c_" + sname(f[2]))

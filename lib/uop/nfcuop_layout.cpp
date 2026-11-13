@@ -8,19 +8,33 @@ namespace nfcuop::layout {
 const char* axis_name(Axis a) { return a == Axis::Row ? "row" : "col"; }
 
 namespace {
+// The instructions of a threadable variant at the best power-of-two thread count up to max_threads, and that count.
+double threaded_cost(double work, const F32Target& t, int& threads) {
+  double best = work;
+  threads = 1;
+  for (int n = 2; n <= t.max_threads; n *= 2) {
+    const double c = work * (t.serial_fraction + (1 - t.serial_fraction) / n) + t.thread_spawn_instr * (n - 1);
+    if (c < best) {
+      best = c;
+      threads = n;
+    }
+  }
+  return best;
+}
+
 // Instructions per element of a tensor held in storage s.
-double storage_instr_per_elem(const Avx2F32& t, Storage s) {
+double storage_instr_per_elem(const F32Target& t, Storage s) {
   switch (s) {
     case Storage::Strided: return t.strided_instr_per_elem;
     case Storage::Blocked8: return t.blocked_instr_per_elem;
-    case Storage::Panel16: return t.panel_instr_per_elem;
+    case Storage::Panel: return t.panel_instr_per_elem;
   }
   return 0;
 }
 }  // namespace
 
 Solution solve(const Problem& p) {
-  const Avx2F32& target = p.target;
+  const F32Target& target = p.target;
   Solution best;
   std::map<std::string, const Tensor*> by_name;
   for (const Tensor& t : p.tensors) by_name[t.name] = &t;
@@ -36,6 +50,7 @@ Solution solve(const Problem& p) {
     for (const Tensor& t : p.tensors)
       if (t.given) layout[t.name] = *t.given;
     double cost = 0, repair_cost = 0, required_storage_cost = 0;
+    int threads = 1;
     std::map<std::string, Storage> required_storage;  // inputs a chosen variant needs in a storage (not enumerated)
     std::vector<Repair> repairs;
     std::vector<std::string> chosen;
@@ -49,7 +64,9 @@ Solution solve(const Problem& p) {
       const Op& op = p.ops[i];
       const Variant& v = op.variants[pick[i]];
       chosen.push_back(v.name);
-      cost += v.instructions;
+      int variant_threads = 1;
+      cost += v.threadable ? threaded_cost(v.instructions, target, variant_threads) : v.instructions;
+      if (variant_threads > threads) threads = variant_threads;
       for (const std::string& in : op.inputs) {
         auto need = v.requires_lane.find(in);
         auto have = layout.find(in);
@@ -72,6 +89,11 @@ Solution solve(const Problem& p) {
       if (!v.produces_lane.count(op.output)) layout.erase(op.output);
     }
     cost += repair_cost;
+    bool excluded = false;
+    for (const auto& [a, b] : p.incompatible)
+      for (const std::string& x : chosen)
+        for (const std::string& y : chosen)
+          if (x == a && y == b) excluded = true;
     // Storage of the Row-lane tensors: bit i of mask set means row_lane[i] is Blocked8. Mask 0 (all Strided) is tried
     // first, so it wins ties, such as a zero strided penalty.
     uint32_t storage_mask = 0;
@@ -89,11 +111,12 @@ Solution solve(const Problem& p) {
     }
     const double storage_cost = row_storage_cost + required_storage_cost;
     cost += storage_cost;
-    if (cost < best_cost) {
+    if (!excluded && cost < best_cost) {
       best_cost = cost;
       best.feasible = true;
       best.cost = cost;
       best.repair_cost = repair_cost;
+      best.threads = threads;
       best.storage_cost = storage_cost;
       best.variant = chosen;
       best.layout = layout;
@@ -114,7 +137,21 @@ Solution solve(const Problem& p) {
   return best;
 }
 
-Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const Avx2F32& target) {
+F32Target avx512_f32() {
+  F32Target t;
+  t.isa = "avx512";
+  t.lanes = 16;
+  t.tile_cols = 32;
+  t.transpose_instr_per_elem = 0.25;   // a 16x16 transpose is 64 unpack and shuffle instructions on 256 elements (not used)
+  t.hsum_instr_per_row = 8.0;          // reduce_add of one zmm (assumed; not measured)
+  t.panel_instr_per_elem = 2.0 / 16.0; // one load and one store per zmm
+  // Measured on this host at 504 x 512 x 512, one thread: the packed kernel 1901 us, a naive AVX-512 kernel (no packing,
+  // no register blocking, B read per k) 7790 to 8229 us. Ratio 0.23 to 0.25; 0.24 is the middle of it.
+  t.register_blocked_fma_factor = 0.24;
+  return t;
+}
+
+Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const F32Target& target) {
   Problem p;
   p.target = target;
   p.tensors = {
@@ -126,18 +163,28 @@ Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const Avx2F32& target) {
   const double fma = double(M) * double(N) * double(K) / target.lanes;  // one ymm FMA does 8 multiply-adds
   const double store_adds = double(M) * double(N) / target.lanes;       // the N/8 vector adds per row, or per 8 rows
   Op gemm{"gemm", {"A", "B"}, "C", {}};
-  gemm.variants.push_back({"avx2-vec-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma, {}});
-  gemm.variants.push_back({"avx2-vec-m", {{"A", Axis::Row}}, {{"C", Axis::Row}}, fma, {}});
-  if (M % 6 == 0 && N % 16 == 0) {  // the register-blocked kernel's shapes (6 rows by 16 columns)
-    Variant packed{"avx2-packed-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma * target.register_blocked_fma_factor, {}};
-    packed.requires_storage["B"] = Storage::Panel16;
+  if (target.isa == "avx2") {
+    gemm.variants.push_back({"avx2-vec-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma, {}, false});
+    gemm.variants.push_back({"avx2-vec-m", {{"A", Axis::Row}}, {{"C", Axis::Row}}, fma, {}, false});
+  }
+  if (M % 6 == 0 && N % target.tile_cols == 0) {  // the register-blocked kernel's shapes (6 rows by tile_cols columns)
+    Variant packed{target.isa + "-packed-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma * target.register_blocked_fma_factor, {}, false};
+    packed.requires_storage["B"] = Storage::Panel;
+    packed.threadable = true;
     gemm.variants.push_back(packed);
   }
   Op rowsum{"rowsum", {"C"}, "R", {}};
-  rowsum.variants.push_back({"reduce-vertical", {{"C", Axis::Row}}, {}, store_adds, {}});
+  rowsum.variants.push_back({"reduce-vertical", {{"C", Axis::Row}}, {}, store_adds, {}, false});
   rowsum.variants.push_back({"reduce-horizontal", {{"C", Axis::Col}}, {},
-                             store_adds + double(M) * target.hsum_instr_per_row, {}});
+                             store_adds + double(M) * target.hsum_instr_per_row, {}, false});
   p.ops = {gemm, rowsum};
+  // The row sums the emitters produce: horizontal for the packed kernels, and VecM with its vertical sum. Other pairs
+  // would be a plan with a repair the emitters do not perform (for example C transposed for a vertical sum after the
+  // packed kernel), and they tie with the emitted plan at the smallest N.
+  p.incompatible = {{"avx2-vec-n", "reduce-vertical"},
+                    {"avx2-packed-n", "reduce-vertical"},
+                    {"avx512-packed-n", "reduce-vertical"},
+                    {"avx2-vec-m", "reduce-horizontal"}};
   return p;
 }
 
