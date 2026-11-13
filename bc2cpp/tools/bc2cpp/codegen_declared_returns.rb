@@ -255,10 +255,12 @@ class CodeGen
 
   # DECLARED_PARAM_GUARD: the C++ statements that check the declared class of each trusted parameter of `label`, given
   # the impl's parameter names (M, self, then the positionals), or "" when it has none.
-  def declared_param_guard_statements(label, names)
+  def declared_param_guard_statements(label, names, types = [])
     (self.class.declared_params&.[](label) || []).filter_map do |pos, cls, key, text, kind = :class, nilable = false|
       var = names[2 + pos]
       next unless var
+      # An unboxed specialization (`mrb_int id`, `mrb_float f`) already carries the kind: its callers box-check it.
+      next unless (types[2 + pos] || 'mrb_value') == 'mrb_value'
 
       # VALUE_KIND: a Float, Integer (fixnum) or Symbol parameter tests the value's kind (the same tests a declared
       # return uses); a program class tests its exact class. `T?` also admits nil.
@@ -289,7 +291,8 @@ class CodeGen
     head = /^mrb_value #{Regexp.escape(impl_name)}\(([^)]*)\) \{$/
     params = code.scan(head).first&.first
     names = params&.split(',')&.map { |p| p.strip[/(\w+)\z/, 1] }
-    checks = names ? declared_param_guard_statements(label, names) : ''
+    types = params ? params.split(',').map { |p| p.strip.sub(/\s*\w+\z/, '').strip } : []
+    checks = names ? declared_param_guard_statements(label, names, types) : ''
     return code unless entry || !checks.empty?
 
     heads = code.scan(head)
