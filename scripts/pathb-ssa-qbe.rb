@@ -901,12 +901,19 @@ end
       when "bitcast"
         asm_symbol_of(rv[2], depth + 1)
       when "offset", "index"
-        return nil unless head(rv[2]) == "const"
+        # (offset BASE BYTES) has its byte count as a literal; (index BASE N SCALE) an operand that must have folded to a const
+        # (an inlined parameter: `&((const char *)boot_cpu_data.x86_capability)[bit >> 3]` is an offset and then an index).
+        if head(rv) == "offset"
+          step = rv[2]
+        else
+          return nil unless head(rv[2]) == "const"
 
+          step = Qbe.int_lit(rv[2][2]) * Qbe.int_lit(rv[3])
+        end
         base, off = asm_symbol_of(rv[1], depth + 1)
         return nil if base.nil?
 
-        [base, off + Qbe.int_lit(rv[2][2]) * (head(rv) == "index" ? Qbe.int_lit(rv[3]) : 1)]
+        [base, off + Qbe.int_lit(step)]
       end
     end
 
@@ -975,7 +982,8 @@ end
             val = fresh
             @lines << "  #{val} =#{cls} #{ld} #{v}"
           elsif o[:kind] == "in"
-            cls = Qbe.cls(operand_type(o[:arg]))
+            # the address of a local or a global (the front end names the slot or the object: "D"(&val)) is a pointer
+            cls = o[:arg].is_a?(Ref) ? "l" : Qbe.cls(operand_type(o[:arg]))
             if cls == "s" || cls == "d"
               bits = fresh
               @lines << "  #{bits} =#{cls == "s" ? "w" : "l"} cast #{v}"
@@ -1882,8 +1890,8 @@ end
     # An integer conversion to type t from the operand x. A widening keeps the value; a conversion to bool compares
     # with zero; a conversion to a narrower type sign- or zero-extends the low bits.
     def conv_lines(dst, t, x)
-      # (the address of a global, function or slot is a pointer: `(unsigned short)(size_t)&buf` of the kernel's boot code)
-      src = x.is_a?(Array) && head(x) == "const" ? x[1] : x.is_a?(Ref) && Qbe.ptr32 ? ["ptr", "void"] : @types[x]
+      src = x.is_a?(Array) && head(x) == "const" ? x[1] : @types[x]
+      src = ["ptr", "void"] if src.nil? && x.is_a?(Ref) # a function's or an object's address (an inlined cast of &fn to an integer)
       raise QbeUnsupported, "conversion of an untyped operand #{sx(x)}" unless src
       raise QbeUnsupported, "float to integer by iconv" if float_type?(src)
 
@@ -3373,42 +3381,38 @@ end
     { "storel" => "l", "stores" => "s", "stored" => "d" }.fetch(op_name, "w")
   end
 
-  # The helpers' text, emitted once in a module that has a volatile access.
-  def volatile_helpers(used = nil)
-    loads = VOLATILE_LOADS.flat_map do |op_name|
-      next [] if ptr32 && %w[loads loadd].include?(op_name)   # QBE's i386 has no floating point yet
-      next [] if used && !used.include?(op_name)
-
+  # The helpers' text, emitted once in a module that has a volatile access: those of the operations the module uses.
+  # (All of them would put SSE loads of float and double into every unit, which -mno-sse refuses.)
+  def volatile_helpers(forms)
+    used = volatile_ops(forms)
+    loads = VOLATILE_LOADS.select { |op_name| used.include?("ld " + op_name) && !(ptr32 && %w[loads loadd].include?(op_name)) }.flat_map do |op_name|
       cls = { "loadl" => "l", "loads" => "s", "loadd" => "d" }.fetch(op_name, "w")
       ["function #{cls} $#{volatile_name("ld", op_name)}(#{kp} %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
        "\tret %v", "}", ""]
     end
-    stores = VOLATILE_STORES.flat_map do |op_name|
-      next [] if ptr32 && %w[stores stored].include?(op_name)
-      next [] if used && !used.include?(op_name)
-
+    stores = VOLATILE_STORES.select { |op_name| used.include?("st " + op_name) && !(ptr32 && %w[stores stored].include?(op_name)) }.flat_map do |op_name|
       cls = store_class(op_name)
       ["function $#{volatile_name("st", op_name)}(#{kp} %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
     end
     (loads + stores).join("\n")
   end
 
-  # The load and store operations of the volatile accesses of the forms (a load.v or store.v of a type): the helpers a 32-bit
-  # module needs. The real-mode image is size limited, so only these are emitted (a 64-bit module has all of them).
+  # The operations of a module's volatile accesses, as "ld loadl" / "st storew" (the helpers they call).
   def volatile_ops(forms)
-    found = []
+    used = []
     walk = lambda do |x|
       next unless x.is_a?(Array)
 
-      if head(x) == "load.v" && x.length > 1
-        found << load_op(x[1])
-      elsif head(x) == "store.v" && x.length > 1
-        found << store_op(x[1])
+      begin
+        used << ("ld " + load_op(x[1])) if head(x) == "load.v"
+        used << ("st " + store_op(x[1])) if head(x) == "store.v"
+      rescue QbeUnsupported
+        nil # the function that has it is refused when it is emitted
       end
       x.each { |y| walk.call(y) }
     end
     forms.each { |f| walk.call(f) }
-    found
+    used
   end
 
   # Whether a module has a volatile access (a load.v or store.v, or a volatile type): then its helpers are emitted.
@@ -3519,7 +3523,7 @@ end
       d if d.is_a?(String)
     end
     data = type_decls + string_decls + global_decls
-    data << volatile_helpers(ptr32 ? volatile_ops(forms) : nil) if uses_volatile?(forms)
+    data << volatile_helpers(forms) if uses_volatile?(forms)
     data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
     data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
