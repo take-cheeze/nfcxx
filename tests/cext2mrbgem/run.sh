@@ -179,6 +179,14 @@ check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local var
 check grep -q '  RB_TYPE_P  T_FIXNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 check grep -q '  RB_TYPE_P  T_NIL has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 
+# 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
+# wrapped in mrb_obj_value, which the mruby functions do not take)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_undef tools/cext2mrbgem/fixtures/api_class_undef/ext/api_class_undef "$work/api_class_undef" > "$work/api_class_undef.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_undef/NOT_BUILDABLE"
+check grep -qF 'const char *name = mrb_class_name(mrb, cApiBase);' "$work/api_class_undef/src/api_class_undef.c"
+check grep -qF 'mrb_undef_method(mrb, cApiBase, "to_s");' "$work/api_class_undef/src/api_class_undef.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

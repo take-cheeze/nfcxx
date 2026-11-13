@@ -700,6 +700,20 @@
       "needs_mrb": false,
       "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_UNLIKELY"
     },
+    "rb_class2name": {
+      "kind": "call",
+      "mruby": "mrb_class_name",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby first skips singleton and include classes (rb_class_real); mrb_class_name does not. An anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive)"
+    },
+    "rb_undef_method": {
+      "kind": "call",
+      "mruby": "mrb_undef_method",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the first argument is a struct RClass *, not a VALUE; a class variable there is passed unwrapped (special_arg_positions_class_only)"
+    },
     "RB_TYPE_P": {
       "kind": "special",
       "handler": "type_p",
@@ -728,6 +742,12 @@
     ],
     "rb_define_class": [
       1
+    ],
+    "rb_class2name": [
+      0
+    ],
+    "rb_undef_method": [
+      0
     ]
   }
 }
