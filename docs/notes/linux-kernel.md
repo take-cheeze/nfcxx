@@ -145,7 +145,7 @@ Each option of the kernel's command line is in one of three classes:
 | checked | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | QBE runs with `-n`; the unit's assembly is refused (status 5) if it names an SSE or x87 register or instruction, as `qbe-cc` does. Refused units go to gcc with `NFCXX_PATHB_FALLBACK=gcc` |
 | honoured | `-ftrivial-auto-var-init=zero` (`CONFIG_INIT_STACK_ALL_ZERO`) | the IR zeroes each automatic variable without an initializer, padding included, at its declaration (`be/nfcxx_ir.c` `ir_decl_zero`, `NFCXX_IR_AUTO_INIT=zero`); not VLAs, not `__attribute__((uninitialized))` |
 | no effect on QBE's code | `-mno-red-zone`, `-mcmodel=kernel`, `-mpreferred-stack-boundary=`, `-mtune=`, `-mno-mmx`, `-mno-3dnow`, `-mno-avx`, `-mskip-rax-setup`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-strict-aliasing`, `-fwrapv`, `-fno-common`, `-fno-allow-store-data-races`, `-fno-optimize-sibling-calls`, `-fno-function-sections`, `-fconserve-stack`, `-fcf-protection=none`, `-fstrict-flex-arrays=`, `-falign-*` (the reasons of `NFCXX_QBE_KERNEL=1` above) | dropped on Path B |
-| changes meaning, no Path B equivalent | `-m16`/`-m32` (the real-mode boot code), `-ftrivial-auto-var-init=pattern`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
+| changes meaning, no Path B equivalent | `-m32`, `-mregparm=3` without `-m16`, `-ftrivial-auto-var-init=pattern`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
 
 `NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
 for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
@@ -225,15 +225,48 @@ What the 388 were (355 of them refusals, the rest the 33 below), and what fixed 
 - 1: a function's address converted to an integer after inlining (`wrmsrl_cstar((unsigned long)entry_SYSCALL32_ignore)`):
   `conv_lines` had no type for a `&"fn"` operand.
 
-The 33 that remain are gcc's by design: 20 compile with `-m16 -mregparm=3` (the real-mode boot code), 8 with
+The 33 that remain are gcc's by design: 20 compile with `-m16 -mregparm=3` (the real-mode boot code, Path B's own since the section below), 8 with
 `-Wa,-mrelax-relocations=no` (`arch/x86/boot/compressed`), 5 have a wide character or string literal under `-fshort-wchar` (EDG
 types them `int`). Not covered here: a Path B object of a file that uses `ASM_CALL_CONSTRAINT` (`"+r"(current_stack_pointer)`,
 `register unsigned long current_stack_pointer asm("rsp")`) has an undefined reference to `current_stack_pointer`, which gcc's
 object does not: the register variable is a global of the IR, so the kernel link of such an object fails (page_alloc.o is one).
 The measurement counts compiles, not links.
 
-What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant) and the real-mode
-boot code (`arch/x86/boot`, `-m16`).
+What is still refused is inline asm (`asm-template`, `asm-operands`, an `"i"` operand that is not a constant). The real-mode
+boot code (`arch/x86/boot`, `-m16`) is Path B's now: next section.
+
+### Measured: the real-mode boot code (`-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2`) on Path B
+
+`scripts/pathb-cc --i386 --regparm=3 --m16` (docs/notes/nfcc-pathb.md, "The 32-bit x86 target") builds it; nfcc gives a compile with
+`-m16` to it instead of to gcc. Method: Linux 6.8, tinyconfig, the compile command of the kernel's `REALMODE_CFLAGS` (arch/x86/Makefile) and
+`-D_SETUP`, the include path of `LINUXINCLUDE`, replayed with `scripts/nfcc-pathb-measure.sh` (`NFCC_MEASURE_FLAGS`) on the C files of
+`arch/x86/boot` (21: `apm.c` is compiled although tinyconfig does not build it; `mkcpustr.c` is a host program) and of
+`arch/x86/realmode/rm` (6, built only with `CONFIG_ACPI_SLEEP`: not in this configuration):
+
+| | builds | refused |
+|---|---|---|
+| `arch/x86/boot` | 21 of 21 (12, 17 and 19 on the way, with the fixes below) | none |
+| `arch/x86/realmode/rm` | 6 of 6 | none |
+
+The generated headers the files include were made by hand, not by `make` (the sandbox does not build a downloaded tree): the
+asm-generic wrappers of `arch/x86/include/generated/asm`, `utsrelease.h`, `utsversion.h`, `compile.h`, and a `cpustr.h` with the shape of
+`mkcpustr`'s but a short table (`cpu.c`'s code does not depend on its content). gcc builds every file with the same command lines. The causes
+Path B had to fix, in the order they came: the asm helpers for the 32-bit registers (13 of the files have inline asm); a tied
+asm operand that is a pointer and an integer (`absolute_pointer()` in `boot.h`); `%esp` in a template (`main.c`); a `bool` output (`CC_OUT(nz)` in
+`string.c`, `CC_SET(nz)` setting the flag with `setnz`); a global's address narrowed to 16 bits (`memory.c`, `video-vesa.c`).
+
+What was checked beyond building: each object's global symbols equal gcc's (plus the helpers `__pathb_*`; Path B calls `memcpy` and `memset`
+where gcc inlined them, and `copy.S` has them); and the kernel's own `string.c`, `printf.c` and `cpuflags.c` were run in real mode under
+`qemu-system-i386` (`tests/pathb-i386/realmode.sh` with `REALMODE_SRCS`): `sprintf` with `%d %u %x %s %c %08x %5d %-5d %lu %llu %llx %lld`,
+`simple_strtoull`, `kstrtoull`, `atou`, `strcmp`, `strncmp`, `memcmp`, `strlen`, `strnlen`, `strchr`, `strstr`, `has_eflag`,
+`get_cpuflags` and `cpuid_count` write the same bytes to the debug console as the same files built by gcc `-m16`. The setup image was **not** built
+or booted as a whole (that needs `make bzImage`, which the sandbox does not run on a downloaded tree): `header.S`, `bioscall.S`, `copy.S`
+and `pmjump.S` are assembly, `tools/build` was not run.
+
+The size is the open problem: 26.5 KB of text for the 21 boot files with Path B (after `ld -r` merges the identical COMDAT helpers) against 13.7 KB
+with gcc `-Os`, and the setup code of an image may be 32 KB (`SETUP_SECT_MAX` is 64 sectors in `tools/build.c`). The
+tinyconfig has about 2 KB of assembly besides, so it is near the limit, and a configuration with more (`CONFIG_X86_APM_BOOT`, `CONFIG_EDD`) may be over it.
+QBE keeps a frame pointer in every function and has no size mode; the helpers of the asm templates are calls.
 
 What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
 uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with

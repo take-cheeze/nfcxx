@@ -45,9 +45,9 @@ module RbsParamCheck
     # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
     # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
     found = targets(ctx)
-    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
+    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, _cls, _kind| [d.irep, pos] } }.to_set
     guards = found.to_h do |sig, d, positions|
-      [d.irep, positions.map { |pos, cls| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text] }]
+      [d.irep, positions.map { |pos, cls, kind| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text, kind] }]
     end
     [[], trusted, guards]
   end
@@ -103,10 +103,14 @@ module RbsParamCheck
       d = ctx[:def_of][label]
       ann = ctx[:class_annotations][label]
       positions = sig.args.each_with_index.filter_map do |type, i|
-        next unless type.kind == :class && ann && ann.args[i] == type.cls
         next if ctx[:comment_class_args][label]&.[](i)
+        if type.value == :float
+          # VALUE_KIND: a Float parameter is guarded by its kind, not by a program class annotation.
+          next [i, 'Float', :float]
+        end
+        next unless type.kind == :class && ann && ann.args[i] == type.cls
 
-        [i, type.cls]
+        [i, type.cls, :class]
       end
       out << [sig, d, positions] unless positions.empty?
     end

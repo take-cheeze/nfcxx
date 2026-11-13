@@ -268,9 +268,52 @@ pbrun "-fshort-enums: the enum is 1 byte" 1 "$tmp/en.c" -fshort-enums
 used gcc en.c && ok "-fshort-enums went to gcc" || bad "-fshort-enums went to gcc" "$(tail -1 "$tmp/log")"
 pbrun "no option: the enum is 4 bytes, Path B" 4 "$tmp/en.c"
 used pathb en.c && ok "without -fshort-enums Path B builds it" || bad "without -fshort-enums Path B builds it" "$(tail -1 "$tmp/log")"
-check "-m16 compiles with gcc" pb -c -m16 "$tmp/int.c" -o "$tmp/m16.o"
-used gcc int.c && ok "-m16 went to gcc" || bad "-m16 went to gcc" "$(tail -1 "$tmp/log")"
-file -b "$tmp/m16.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is i386 (the option reached gcc)" || bad "-m16: the object is i386" "$(file -b "$tmp/m16.o")"
+# -mregparm=3 and -m32 do not make Path B's 32-bit target on their own: the compile is gcc's, with the option (-m16 below does)
+check "-mregparm=3 without -m16 compiles with gcc" pb -c -m32 -mregparm=3 "$tmp/int.c" -o "$tmp/m32.o"
+used gcc int.c && ok "-m32 -mregparm=3 went to gcc" || bad "-m32 -mregparm=3 went to gcc" "$(tail -1 "$tmp/log")"
+check "-mregparm=3 alone compiles with gcc" pb -c -mregparm=3 "$tmp/int.c" -o "$tmp/rp.o"
+used gcc int.c && tail -1 "$tmp/log" | grep -q "mregparm=3 without -m16" && ok "-mregparm=3 without -m16: gcc's, and the log says why" || bad "-mregparm=3 without -m16" "$(tail -1 "$tmp/log")"
+file -b "$tmp/m32.o" | grep -q 'ELF 32-bit' && ok "-m32: the object is i386 (the option reached gcc)" || bad "-m32: the object is i386" "$(file -b "$tmp/m32.o")"
+
+# -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2, the kernel's real-mode boot code: Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# --regparm=3 --m16). ILP32 (long and pointers are 4 bytes), QBE's i386_regparm3, a 32-bit object whose code is 16-bit code (.code16gcc: the
+# operand size prefixes are in the bytes, objdump -m i8086 shows them), the host's 64-bit headers are not read (freestanding).
+cat > "$tmp/rm.c" <<'EOF2'
+struct hdr { unsigned char a; unsigned short b; unsigned long c; unsigned long long d; void *p; };
+static inline unsigned char rdfs8(unsigned int addr)
+{
+	unsigned char v;
+	asm volatile("movb %%fs:%1,%0" : "=q"(v) : "m"(*(unsigned char *)addr));
+	return v;
+}
+int rm(struct hdr *h, volatile unsigned short *io, int n)
+{
+	int s = 0;
+	for (int i = 0; i < n; i++)
+		s += rdfs8(0x413 + i) + (int)h->c;
+	*io = (unsigned short)s;
+	return s + (int)sizeof(long) * 100 + (int)sizeof(struct hdr) * 1000 + (int)sizeof(void *) * 10000;
+}
+EOF2
+rmflags=(-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2 -ffreestanding -fno-pic -mno-mmx -mno-sse -fno-stack-protector -fno-strict-aliasing -fomit-frame-pointer -Os -g -Wall)
+check "-m16 -march=i386 -mregparm=3: the kernel's real-mode options" pb -c "${rmflags[@]}" "$tmp/rm.c" -o "$tmp/rm.o"
+used pathb rm.c && ok "the real-mode compile is Path B's" || bad "the real-mode compile is Path B's" "$(tail -1 "$tmp/log")"
+file -b "$tmp/rm.o" | grep -q 'ELF 32-bit' && ok "-m16: the object is ELF32 (i386)" || bad "-m16: the object is ELF32" "$(file -b "$tmp/rm.o")"
+objdump -d -m i8086 "$tmp/rm.o" | grep -qE '66 (55|c3)' && ok "-m16: 16-bit code (the operand size prefixes of .code16gcc)" || bad "-m16: 16-bit code" "$(objdump -d -m i8086 "$tmp/rm.o" | head -8 | tr '\n' ' ')"
+pb -S "${rmflags[@]}" "$tmp/rm.c" -o "$tmp/rm.s" 2>/dev/null
+grep -q '\.code16gcc' "$tmp/rm.s" && ok "-m16: .code16gcc in the assembly" || bad "-m16: .code16gcc" "none"
+! grep -q '%[rx]' "$tmp/rm.s" && ok "-m16: 32-bit registers only (no %r.. or %xmm)" || bad "-m16: no 64-bit registers" "$(grep -m1 '%[rx]' "$tmp/rm.s")"
+# the same file with gcc: the same sizes (ILP32, long long 8 aligned on 4) and the same symbols
+gcc -m16 -march=i386 -mregparm=3 -ffreestanding -fno-pic -mno-sse -fno-stack-protector -Os -c "$tmp/rm.c" -o "$tmp/rm-gcc.o" 2>/dev/null
+[ "$(nm -g "$tmp/rm.o" | awk '$3 !~ /^__pathb/ {print $2 $3}' | sort | tr -d '\n')" = "$(nm -g "$tmp/rm-gcc.o" | awk '{print $2 $3}' | sort | tr -d '\n')" ] &&
+  ok "-m16: the symbols are gcc's" || bad "-m16: the symbols are gcc's" "$(nm "$tmp/rm.o" | tr '\n' ' ')"
+# without -m16 alone (cdecl, i386): -m16 with no -mregparm is QBE's i386 convention
+check "-m16 alone: Path B, cdecl" pb -c -m16 -ffreestanding "$tmp/rm.c" -o "$tmp/rm1.o"
+used pathb rm.c && ok "-m16 alone is Path B's" || bad "-m16 alone is Path B's" "$(tail -1 "$tmp/log")"
+# a unit the 32-bit target cannot do (floating point: QBE's i386 has none yet) is refused, and goes to gcc only with NFCXX_PATHB_FALLBACK=gcc
+refuses "-m16: floating point is refused" "i386\|floating\|SSA route" pb -c -m16 -ffreestanding "$tmp/fp.c" -o "$tmp/x.o"
+NFCXX_PATHB_FALLBACK=gcc pb -c -m16 -mregparm=3 -ffreestanding "$tmp/fp.c" -o "$tmp/fpfb.o" >/dev/null 2>&1 && tail -1 "$tmp/log" | grep -q '^gcc .*Path B refused' &&
+  ok "-m16 with NFCXX_PATHB_FALLBACK=gcc: gcc builds what Path B refuses" || bad "-m16 with NFCXX_PATHB_FALLBACK=gcc" "$(tail -1 "$tmp/log")"
 check "-ftrivial-auto-var-init=pattern compiles with gcc" pb -c -ftrivial-auto-var-init=pattern "$tmp/int.c" -o "$tmp/tz.o"
 used gcc int.c && ok "-ftrivial-auto-var-init=pattern went to gcc (Path B has no pattern fill)" || bad "-ftrivial-auto-var-init=pattern went to gcc" "$(tail -1 "$tmp/log")"
 # -ftrivial-auto-var-init=zero (the kernel's CONFIG_INIT_STACK_ALL_ZERO) is Path B's: a local without an initializer is zero from its

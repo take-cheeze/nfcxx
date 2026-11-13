@@ -103,8 +103,9 @@ crossover at K = 24 (vec-n by 0.4%) is inside the spread of the measurements; th
 Its test (`tests/uop/test_layout_avx2.cpp`) compiles each kernel with `cc -O2 -mavx2 -mfma`, loads it with `dlopen` and
 compares C and R with a reference. The inputs are small integers, so the comparison is exact. The VecM shapes run with
 both transposes, and K values that are not multiples of 8 cover the scalar tail. It is not compared
-against the interpreter's `nfcuop` results, which use a different summation order. It also runs under
-`UOP_HOST=1` only so far: the nfcxx back ends have not run it.
+against the interpreter's `nfcuop` results, which use a different summation order. It runs under `UOP_HOST=1`, and under
+the nfcxx qbe and gcc back ends through `tests/uop/run.sh` (all three layout tests pass on the current code). Path B
+builds and passes it when compiled directly with `NFCXX_PATH=b`; the runner does not include Path B yet (see Tests).
 
 ## Timing against the model (not a test)
 
@@ -393,6 +394,95 @@ wins, so the solver returned a plan with no kernel. The tie is now a test.
 shapes on this target, emits each plan, runs it against the reference, and checks the result bit for bit. The
 packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`max_threads` stays 1).
 
+## Thread constants, register blocking, and AVX-512 measurements (eleventh round)
+
+Three measurements were repeated or extended in this round. None of them changes a model constant.
+
+**Thread constants (AVX2 packed, 504 x 512 x 512, eight interleaved sweeps, best of 20 per count):**
+
+| threads | median us | ratio to 1 thread, median | ratio range |
+|---|---|---|---|
+| 1 | 2557 | 1.000 | 1.000 |
+| 2 | 1567 | 0.613 | 0.584 to 0.637 |
+| 3 | 1165 | 0.455 | 0.441 to 0.681 (one outlier; about 0.44 to 0.47 without it) |
+| 4 | 1109 | 0.434 | 0.372 to 0.509 |
+
+The model's fit (serial fraction 0.10, spawn 154000) predicts 0.60, 0.50 and 0.48. The two and four-thread medians agree
+with it; at four threads it overstates the overhead, and it misses the three-thread point. A two-parameter refit to the
+two- and four-thread points (serial fraction about 0.21, spawn about 28000) does not reproduce three threads either, so
+the simple serial-plus-spawn form does not describe all three counts well. Eight threads cannot be measured on this
+four-core host, so the choice of four over eight stays unmeasured. The constants are left as they were.
+
+**Register blocking: the 1/mr traffic law is refuted.** The hypothesis was that the packed kernel's gain comes from
+reusing B across an mr-row tile, so time falls as 1/mr and mr=4 should be 1.5 times slower than mr=6. Measured
+(504 x 512 x 512, single thread, best of 40):
+
+| kernel | time, us |
+|---|---|
+| AVX2 packed, mr 4 | 2700 to 2840 |
+| AVX2 packed, mr 6 | 2550 to 2610 |
+| AVX2 naive VecN | 14680 to 15400 |
+| AVX-512 packed, mr 4 | 2477 to 2540 |
+| AVX-512 packed, mr 6 | 1896 to 2075 |
+
+The mr4/mr6 ratio is 1.06 to 1.10 on AVX2 and 1.22 to 1.31 on AVX-512, not 1.5. B reuse alone does not explain the tile
+size dependence. Two other explanations are not fitted here:
+
+- Loads per FMA. A tile of mr rows by two vectors reads two B vectors and mr broadcasts per k, for 2 mr FMAs: 0.75 loads
+  per FMA at mr=4 and 0.67 at mr=6, a ratio of 1.125. That is close to the AVX2 result, not to the AVX-512 one.
+- Independent accumulators. The naive kernel has one accumulator per output vector, so each k step waits on the previous
+  FMA's latency; the packed kernels have 8 or 12. This is probably the larger part of the naive-to-packed gap, and it is
+  not a layout property. A derived model would need to capture it.
+
+The AVX2 mr6/naive ratio is 0.17, which agrees with the fitted 0.18, but it is the same measurement, not a check. The
+0.18 and the AVX-512 0.24 stay as the measured constants they are.
+
+**AVX-512 threaded packed kernel (branch `claude/layout-avx512-threads`, PR #1070), 504 x 512 x 512, three sweeps:**
+
+| threads | nfcxx AVX-512 packed, us | OpenBLAS SkylakeX, us |
+|---|---|---|
+| 1 | 1837 to 1898 | 1497 to 1548 |
+| 2 | 1155 to 1173 | 1152 to 1158 |
+| 4 | 720 to 798 | 598 to 601 |
+
+**AVX-512 strided and blocked storage (lanes on M, 256 x 256, single thread, two runs agreeing within about 5%).** The core
+loop, with the transpose given as input:
+
+| K | strided, us | blocked, us | packed AVX-512, us |
+|---|---|---|---|
+| 8 | 14 | 17 | 8 |
+| 16 | 37 | 36 | 13 |
+| 32 | 76 | 51 | 27 |
+| 64 | 316 | 176 | 60 |
+
+The strided penalty is absent at K=8 and K=16 and grows to about 1.8 times at K=64. That is the opposite of the AVX2
+pattern (the AVX2 fit was at K=8 and missed K=16 and 64), so the AVX2 storage constant is not carried over. The
+transposes in that bench were scalar loops, and only one shape was run, so this is a qualitative result. Converting the
+gap into model instruction units needs a cycles-per-instruction figure that is not measured.
+
+## Accumulator latency (twelfth round)
+
+The eleventh round found that the 1/mr law does not explain the tile-size dependence, and named independent accumulators
+as a candidate. This round tests it. AVX2, single thread, 504 x 512 x 512, best of 40, three sweeps. The naive kernel
+reads B from memory for every row; U is the number of independent accumulators, one per output vector, sharing the k loop.
+
+| kernel | min, us | speedup over U=1 |
+|---|---|---|
+| naive, U=1 | 16665 | 1.00 |
+| naive, U=2 | 14021 | 1.19 |
+| naive, U=4 | 8149 | 2.04 |
+| naive, U=8 | 6574 | 2.54 |
+| packed, mr=6 | 2344 | 7.11 |
+
+Independent accumulators close about 71% of the naive-to-packed gap (16.7 ms to 6.6 ms, against 2.3 ms for packed). The
+rest is not explained by accumulators: the U=8 kernel is still about 2.8 times slower than the packed one. What remains
+is B reuse across rows (the naive kernels still stream B once per row), loads per FMA (about 1.1 for the naive U=8 tile
+against about 0.67 for the 6 x 2 packed tile), and the packing itself. These three are not separated by this experiment.
+
+The accumulator term is therefore a real part of the gap, and it is not a layout property. A derived model would need it
+as a separate term, and the rest would still need to be fitted or measured. The model's 0.18 (AVX2) and 0.24 (AVX-512)
+factors are not changed by this round.
+
 ## Next steps on this target
 
 1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
@@ -400,14 +490,22 @@ packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`
 2. Repeat the timing on more hosts before drawing a crossover from it.
 3. Measure the thread constants on a quiet host with more repetitions, and at 3 and 8 threads, before relying on the
    thread choice (see the ninth round).
-4. AVX-512 target: described and planned (tenth round), but its storage and register constants are not measured on AVX-512.
-   Measure a naive AVX-512 kernel, to fit the register-blocking factor there.
+4. AVX-512 target: described and planned (tenth round). Its register-blocking factor is now measured (0.24, tenth round);
+   its storage penalties are not (the eleventh round finds that the AVX2 K-dependence does not carry over).
+5. Thread constants: measured again (eleventh round); the 3- and 4-thread points disagree with the fit and 8 threads is
+   not measurable here. Refit only on a host with at least 8 cores.
+6. Register blocking: the 1/mr law is refuted, and accumulator latency explains about 71% of the naive-to-packed gap
+   (twelfth round). The rest is B reuse, loads per FMA and packing, which are not yet separated.
 
 ## Tests
 
-`tests/uop/test_layout.cpp` (the model) and `tests/uop/test_layout_avx2.cpp` (the emitter), both run by
-`tests/uop/run.sh` (`UOP_ONLY="test_layout test_layout_avx2"`). Neither needs an nfcxx build; the emitter test needs a C
-compiler with AVX2 and FMA (it prints SKIP on a CPU without them).
+`tests/uop/test_layout.cpp` (the model), `tests/uop/test_layout_avx2.cpp` (the AVX2 emitters and plans) and
+`tests/uop/test_layout_avx512.cpp` (the AVX-512 packed emitters, threaded and plans) are run by `tests/uop/run.sh`
+(`UOP_ONLY="test_layout test_layout_avx2 test_layout_avx512"`). The emitter tests need a C compiler with AVX2 and FMA, or
+AVX-512F and FMA; each prints SKIP on a CPU without them. On the nfcxx back ends they run under qbe and gcc (`NFCXX_BACKEND`).
+
+Path B: all three build and pass when compiled directly with `NFCXX_PATH=b`. The runner keeps Path B out of the suite for
+another reason: `test.cpp` overflows the 8 MB stack in `graph_rewrite`, and the runner's comment says so.
 
 ## References
 

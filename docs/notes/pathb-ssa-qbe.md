@@ -52,6 +52,12 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
 A function outside the subset raises `QbeUnsupported` and nothing is emitted for it, so a module with an unsupported
 function still emits the rest.
 
+## The 32-bit x86 targets
+
+`scripts/pathb-ssa-build --target=i386|i386_regparm3 [--m16]` emits for QBE's i386 targets (`Qbe.ptr32`: pointers are of class `w`, `long` is
+`int`, a structure's `l` and `d` leaves are words, no checks, no jump tables, asm templates as helpers with 32-bit registers). The IR is the
+front end's `--target=linux_i686` one (its layout has `(pointer 4)`, which selects the mode). docs/notes/nfcc-pathb.md, "The 32-bit x86 target".
+
 ## Status
 
 `tests/pathb-ssa-qbe/run.rb` on the current cases: 32 match the interpreter, 0 mismatches, 3 skipped (a double-typed
