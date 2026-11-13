@@ -182,7 +182,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
       - name: Path B harness cache key
@@ -346,8 +346,8 @@ jobs:
         if: matrix.backend == 'pathb'
         run: scripts/setup-pathb.sh
 
-      # The freestanding suites (tests/lib, tests/target) still use qbe on macOS: Path B takes freestanding programs on
-      # x86-64 and aarch64 Linux only (docs/notes/freestanding.md).
+      # The freestanding suites (tests/lib, tests/target) run Path B on x86-64 and aarch64 Linux and arm64 macOS
+      # (docs/notes/freestanding.md); QBE is the code generator of Path B on every host.
       - name: QBE
         run: scripts/setup-qbe.sh
 
@@ -361,8 +361,10 @@ jobs:
           # tests/cxx-driver is gcc's by design: its header records that Path B fails 16 of its 52 checks, so the pathb leg runs it on gcc
           NFCXX_BACKEND=gcc tests/cxx-driver/run.sh
           if [ "$NFCXX_BACKEND" = pathb ]; then
+            # Freestanding programs take Path B on arm64 macOS too (docs/notes/freestanding.md, "Path B on macOS").
             tests/lib/run.sh
-            tests/target/run.sh
+            # tests/target only emits C (--emit-c): no back end runs there, so the backend does not change what is tested.
+            NFCXX_BACKEND=gcc tests/target/run.sh
           else
             tests/lib/run.sh
             tests/target/run.sh

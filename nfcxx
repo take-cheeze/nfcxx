@@ -9,7 +9,7 @@
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
 #   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
-#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux.
+#                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux and arm64 macOS.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
 #   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
@@ -732,19 +732,23 @@ if [ $modules = 1 ]; then
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
-# The default backend: Path B on x86-64 Linux (and on aarch64 Linux for freestanding programs), unless the request needs
-# something only gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
-# x86-64 and aarch64 Linux). A program Path B does not build is built again with gcc, below
+# The default backend: Path B on x86-64 Linux (and on aarch64 Linux and arm64 macOS for freestanding programs), unless the request needs
+# something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
+# x86-64 and aarch64 Linux, arm64 macOS). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
 default_backend=0
-# pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64 Linux (the EDG front end is the x86-64 target
-# on both; see docs/notes/freestanding.md, "Path B on aarch64"). Used for the default and for an explicit --backend=pathb.
-pb_fs_host=0; [ "$(uname -s)" = Linux ] && case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac
+# pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64 Linux and arm64 macOS (the EDG front end is the
+# x86-64 target on all; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). Used for the default and for an explicit --backend=pathb.
+pb_fs_host=0
+case $(uname -s) in
+  Linux) case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac ;;
+  Darwin) [ "$(uname -m)" = arm64 ] && pb_fs_host=1 ;;   # macOS arm64: the same front end; its link is the Darwin one (docs/notes/freestanding.md)
+esac
 if [ -z "$backend" ]; then
   backend=gcc
   # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
   # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  # A freestanding program takes Path B on x86-64 and aarch64 Linux (the old harness with the lib/ headers, docs/notes/freestanding.md).
+  # A freestanding program takes Path B on x86-64 and aarch64 Linux and arm64 macOS (the old harness with the lib/ headers, docs/notes/freestanding.md).
   fs_ok=1; [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] || fs_ok=0
   if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
      && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
@@ -951,7 +955,7 @@ pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-n
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 case $backend in
   pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
-           { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux only" >&2; exit 2; }
+           { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux and arm64 macOS only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/gcc-cc ;;
   gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
