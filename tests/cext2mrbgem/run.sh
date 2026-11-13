@@ -112,6 +112,27 @@ check test "$rc" -eq 2
 check grep -q '  ht_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_thread_refused/REFUSALS.txt"
 check grep -q '  ht_shadow_helper  helper needs the mruby state threaded in, but its name is shadowed' "$work/helper_thread_refused/REFUSALS.txt"
 
+# 2j. GC: rb_gc_register_mark_object -> mrb_gc_register (rooted in mruby's table, src/gc.c), rb_gc_start as a statement
+# -> mrb_full_gc, rb_gc_writebarrier on plain locals -> immediate-guarded barrier. Each GC form without an exact
+# equivalent (address registration, enable/disable, rb_gc_mark with no mark callback, a used rb_gc_start value, a
+# non-variable barrier argument) stays refused with its reason.
+rc=0; python3 "$conv" --name gc_map tools/cext2mrbgem/fixtures/gc_map/ext/gc_map "$work/gc_map" > "$work/gc_map.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/gc_map/NOT_BUILDABLE"
+check grep -qF 'mrb_gc_register(mrb, gcm_cache);' "$work/gc_map/src/gc_map.c"
+check grep -qF 'if (mrb_test(force)) mrb_full_gc(mrb);' "$work/gc_map/src/gc_map.c"
+check grep -qF 'do { if (!mrb_immediate_p(self)) mrb_field_write_barrier_value(mrb, mrb_basic_ptr(self), v); } while (0);' "$work/gc_map/src/gc_map.c"
+rc=0; python3 "$conv" --name gc_map_refused tools/cext2mrbgem/fixtures/gc_map_refused/ext/gc_map_refused "$work/gc_map_refused" > "$work/gc_map_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/gc_map_refused/NOT_BUILDABLE"
+check grep -q '  rb_gc_register_address  address form (VALUE \*)' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_global_variable  address form' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_mark  no mark callback in mruby' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

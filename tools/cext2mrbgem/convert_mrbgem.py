@@ -883,6 +883,10 @@ class Converter:
                 new, tgt, rec['name'], rec['func'], aspec))
         elif name == 'rb_scan_args':
             self.scan_args(rel, s, e, nxt, called)
+        elif name == 'rb_gc_start':
+            self.gc_start(rel, s, e, nxt, called)
+        elif name == 'rb_gc_writebarrier':
+            self.gc_writebarrier(rel, s, e, nxt, called)
         elif name == 'rb_define_const':
             self.define_const(rel, s, e, nxt, called)
         elif name == 'rb_const_get':
@@ -996,6 +1000,68 @@ class Converter:
         E.add(s, close + 1, '(%smrb_get_args(%s))' % (pre, callargs))
         self.rewrite(rel, s, 'rb_scan_args', 'mrb_get_args(mrb, "%s", ...)' % fmt,
                      'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby')
+
+    def statement_call(self, rel, s, close):
+        """True if the call whose name starts at s and whose ')' is at close is a whole statement: the value is
+        discarded. It must follow a statement boundary, a closed condition or do/else, and be followed by ';'."""
+        masked = self.files[rel]['masked']
+        prev = prev_nonspace(masked, s - 1)
+        after = next_nonspace(masked, close + 1)
+        if after < 0 or masked[after] != ';':
+            return False
+        if prev < 0 or masked[prev] in ';{})':
+            return True
+        return re.search(r'\b(else|do)\s*$', masked[:s]) is not None
+
+    def gc_start(self, rel, s, e, nxt, called):
+        """rb_gc_start() as a statement -> mrb_full_gc(mrb). CRuby returns nil; mruby returns void, so a use of the
+        value is refused. mrb_full_gc does nothing while gc.disabled is set or during an iteration (src/gc.c:1442)."""
+        masked, text = self.files[rel]['masked'], self.files[rel]['text']
+        if not called:
+            self.refuse(rel, s, 'rb_gc_start', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        if close < 0 or text[nxt + 1:close].strip():
+            self.refuse(rel, s, 'rb_gc_start', 'rb_gc_start takes no arguments')
+            return
+        if not self.statement_call(rel, s, close):
+            self.refuse(rel, s, 'rb_gc_start', 'the return value of rb_gc_start (nil) is used; mruby has no equivalent')
+            return
+        self.edits[rel].add(s, close + 1, 'mrb_full_gc(mrb)')
+        self.rewrite(rel, s, 'rb_gc_start', 'mrb_full_gc(mrb)',
+                     'mrb_full_gc does nothing while gc.disabled is set or an object iteration is running; no collection is forced then')
+
+    def gc_writebarrier(self, rel, s, e, nxt, called):
+        """rb_gc_writebarrier(old, young) as a statement -> an immediate-guarded mrb_field_write_barrier_value. The
+        arguments are plain locals: they are used more than once, and an edit inside them would overlap. CRuby's
+        `old` is never a special constant (RB_OBJ_WRITE only calls this for heap owners), so the guard is a no-op there."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'rb_gc_writebarrier takes an owner and a referenced value')
+            return
+        names = []
+        for a, b in args:
+            t = text[a:b]
+            if (not re.fullmatch(r'[A-Za-z_]\w*', t) or t in self.entries or t in self.types
+                    or t in self.class_vars or t == 'mrb'):
+                self.refuse(rel, s, 'rb_gc_writebarrier', 'argument %r is not a plain local variable (it is used twice)' % t)
+                return
+            names.append(t)
+        if not self.statement_call(rel, s, close):
+            self.refuse(rel, s, 'rb_gc_writebarrier', 'the return value of rb_gc_writebarrier is used (it is void)')
+            return
+        old, young = names
+        new = ('do { if (!mrb_immediate_p(%s)) mrb_field_write_barrier_value(mrb, mrb_basic_ptr(%s), %s); } while (0)'
+               % (old, old, young))
+        E.add(s, close + 1, new)
+        self.rewrite(rel, s, 'rb_gc_writebarrier', new,
+                     'mruby keeps the write barrier only for a heap owner; it does not make C-held storage a GC root '
+                     '(there is no mark callback, see rb_gc_mark)')
 
     # ---- stage 4: write --------------------------------------------------
     def write_outputs(self):

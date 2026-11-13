@@ -185,35 +185,40 @@
     },
     "rb_gc_register_address": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset (mruby GC rooting must be designed by hand)"
+      "reason": "address form (VALUE *): mruby has no address root. mrb_gc_register roots a value, so a later store through the address would not be rooted; the rooting must be designed by hand"
     },
     "rb_gc_register_mark_object": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "call",
+      "mruby": "mrb_gc_register",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_gc_register keeps the value in mruby's root table (src/gc.c:564) for the life of the state; CRuby never unregisters it either. Immediate values need no root and are ignored by mrb_gc_register"
     },
     "rb_gc_mark": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run"
     },
     "rb_gc_mark_movable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run (movable marking has no mruby form either)"
     },
     "rb_gc_enable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mruby enable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
     },
     "rb_gc_disable": {
       "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "reason": "no mruby disable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
     },
     "rb_gc_start": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "special",
+      "handler": "gc_start",
+      "needs_mrb": true
     },
     "rb_gc_writebarrier": {
-      "kind": "refuse",
-      "reason": "GC API not in the supported subset"
+      "kind": "special",
+      "handler": "gc_writebarrier",
+      "needs_mrb": true
     },
     "NIL_P": {
       "kind": "call",
@@ -479,6 +484,10 @@
       "kind": "expr",
       "mruby": "MRB_TT_CDATA",
       "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
+    },
+    "rb_global_variable": {
+      "kind": "refuse",
+      "reason": "address form (VALUE *), as rb_gc_register_address: no mruby equivalent (mrb_gc_register roots a value, not a variable)"
     }
   },
   "special_arg_positions_class_only": {
