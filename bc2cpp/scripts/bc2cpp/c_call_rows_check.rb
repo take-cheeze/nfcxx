@@ -207,4 +207,10 @@ helper = File.read(File.join(__dir__, '../../tools/bc2cpp/bc2cpp.rb'))
 suite.check('bc2cpp_funcall_keep is mrb_funcall',
             helper.include?('#define bc2cpp_funcall_keep(M, ...) bc2cpp_keep_call(M, [&] { return mrb_funcall(M, __VA_ARGS__); })'))
 
+# The closed (VM-free) build links its own funcall, so the rows lookup must be there too: a by-name call that does not
+# find a row where its entry would be raises NoMethodError for a name the proof let go.
+frames = File.read(File.join(__dir__, '../../tools/bc2cpp/runtime/vm_frames.cxx'))
+suite.check("the closed runtime's funcall looks up and falls back to method_missing through mrb_vm_find_method_rows",
+            frames.scan(/\bmrb_vm_find_method_rows\(/).size == 2 && !frames.match?(/\bmrb_vm_find_method\(/))
+
 suite.finish!
