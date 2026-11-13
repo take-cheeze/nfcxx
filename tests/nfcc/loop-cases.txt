@@ -239,3 +239,83 @@ NFCXX_BACKEND=bogus x.c
 -c
 -S -c x.c
 -x assembler -S x.c
+-c x.c -o x.o -MD -MF x.d -MT x.o -MP
+-c x.c -MMD -MQ q -MT t -o x.o
+-c x.c -MD -MT tgt
+-c x.c -MMD
+-c x.s -o x.o
+-S x.c -o out.s
+-S x.c -o -
+-c -S x.S -o x.s
+-S x.s -o x.out
+-x assembler-with-cpp -c x.S
+-x assembler -c x.s
+-S -x assembler-with-cpp x.S -MD -MF d.d
+-c x.c y.c
+-c x.c y.c -o out
+-c x.c -o x.o -MD -MT t
+-c -o out.o x.c -I inc -iquote q -include a.h -std=c99 -D_X
+-c x.c -std=gnu11 -ansi
+-c x.c -std=iso9899:2011 -std=c17
+-c x.c -std=c89 -std=gnu89
+NFCXX_BACKEND=pathb -c x.c -std=c99 -include a.h -isystem /s -nostdinc -I inc
+NFCXX_BACKEND=pathb -c x.c -Wa,--noexecstack -Wa,--fatal-warnings
+NFCXX_BACKEND=pathb -c x.c -Wa,--32
+NFCXX_BACKEND=pathb -c x.c -Wa,
+NFCXX_BACKEND=pathb -S x.c -o out.s
+NFCXX_BACKEND=pathb -S x.c -o -
+NFCXX_BACKEND=pathb -c x.c -o x.o -MD -MF d.d
+NFCXX_BACKEND=pathb -c x.c -std=c++17
+NFCXX_BACKEND=pathb -c x.c -fshort-wchar
+NFCXX_BACKEND=pathb -c x.c -fshort-wchar -fno-PIE -mno-sse
+NFCXX_BACKEND=pathb -fno-PIE -mno-sse -c x.c
+NFCXX_BACKEND=pathb -c x.c -m16 -mregparm=3 -std=gnu99
+NFCXX_BACKEND=pathb -c x.c -DFOO=1 -UBAR -Ifoo -include b.h -std=c23
+NFCXX_BACKEND=pathb -c x.c -std=c11 -std=c18 -fPIC
+NFCXX_BACKEND=pathb -c x.c -std=gnu17
+NFCXX_BACKEND=pathb -c x.c -std=c90
+NFCXX_BACKEND=pathb x.c -o prog -lm -L/usr/lib
+NFCXX_BACKEND=pathb x.c y.o -o prog -Wl,--as-needed -static
+NFCXX_BACKEND=pathb x.c -m32
+NFCXX_BACKEND=pathb -c x.s
+NFCXX_BACKEND=pathb -S x.S -o out.s
+NFCXX_BACKEND=pathb -c x.c -include?a
+NFCXX_BACKEND=qbe -c x.c -o x.o -funsigned-char
+NFCXX_BACKEND=qbe x.c y.o -o prog -lm
+NFCXX_BACKEND=qbe -S x.c -o out.s
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -c x.c -mno-red-zone -mcmodel=kernel
+NFCXX_BACKEND=cil -c x.c -o x.o
+NFCXX_BACKEND=cil x.c -o prog
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -c x.c -o x.o -m32
+NFCXX_BACKEND=gcc x.c y.o -o prog -shared -fPIC
+x.o y.o -o prog -static
+x.c -o prog -pthread -lm
+-c -x c x.c
+-c -o x.o -
+-c x.c -x none
+-c ./sub/x.c
+-c /abs/x.c
+-c x.c -o sub/y.o
+-c x.c -o sub/
+-c -I inc -o x.o x.c -DA=1 -MD -MF deps/x.d
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -S x.c -o o.s
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -S x.c -o -
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb x.c -o prog
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb x.c -o prog
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -c x.c -m32
+NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=gcc -c x.c
+STUB_PATHB_STATUS=3 NFCXX_BACKEND=pathb -S x.s
+--bundle-libs x.c
+--bundle-only=libc x.c -o prog
+-lcuda x.c
+--cuda-driver=auto x.c
+-lcudart_static x.c
+/usr/lib/libcuda.so x.c
+NFCC_HOST_CC=clang -c x.c
+NFCC_HOST_CC=clang x.c -o prog
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c
+STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -fshort-wchar -c x.c
+STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -c x.c

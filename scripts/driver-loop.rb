@@ -1,12 +1,17 @@
 #!/usr/bin/env ruby
-# nfcc's option handling, ported from the bash in nfcc: the pre-loop decisions, the @file expansion, the option loop, and the
-# post-loop checks. Covered: every option the loop's case statement handles (the preprocessor, dependency, link, -O, -g,
-# warning, -f and -m options and the -Wp, -Wa, -Wl forms), the Path B option helper (pathb_option) and the QBE kernel helper
-# (qbekernel), with the backend and the passthrough and kernel settings that select them; the post-loop stack-protector,
-# input, -S, -o and dependency checks; and the pre-loop decisions that run the host compiler (-E, -M, -fsyntax-only,
-# -dumpmachine and friends, -v, the qbe-try wrapper), which are printed as "EXEC" instead of run.
-# Not ported: the --version banner, which depends on the host compiler's version (it is refused as "unported", exit 3).
-# -fno-crossjumping depends on the host compiler; the caller says whether it is GNU gcc (--nfcc-host-gnu-gcc=0|1).
+# nfcc, ported from the bash in nfcc: its option handling and its compile stage. Covered: the @file expansion; the pre-loop
+# decisions that run the host compiler (-E, -M, -MM, -MG, -fsyntax-only, -dumpmachine and friends, -print-*, -v, the qbe-try
+# wrapper), printed as "EXEC"; every option of the loop's case statement, with the Path B helper (pathb_option), the QBE
+# kernel helper (qbekernel) and the gcc-only and passthrough rules, and the -fno-crossjumping host check; the post-loop
+# checks; the Path B reason checks (pathb_reason, with the -fshort-wchar answer as an input); the compile of each input
+# (compile_one: the Path B command, its -S copy, the gcc fallback, the qbe and cil commands, the dependency commands) and the
+# link. The commands are printed as "RUN argv..." (copies as CP, CAT, LN) and not run; tests/nfcc/option-state.sh runs nfcc's
+# own code with the same commands stubbed, so the output can be compared.
+#
+# Not covered, and refused as "unported" (exit 3): the --version banner (it depends on the host compiler's version), the
+# --bundle- options and the libcuda and --cuda-driver options (nfcc runs a second driver or builds a shim for them), the
+# NFCXX_PATHB_LOG file, and an empty source name (bash prints realpath's own error for it). A caller can tell "not done yet"
+# from "refused by nfcc".
 #
 # Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
 # --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
@@ -172,6 +177,7 @@ class LoopState
   attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp, :optlvl, :spon, :pathb_pic, :pathb_pie
   attr_accessor :pb_m16, :pb_regparm, :nofp, :nounwind, :wchar16
   attr_accessor :backend, :passthrough, :qbe_kernel, :host_gnu_gcc
+  attr_accessor :k, :pb_std, :pb_gnu, :pb_opts, :pb_reason
   attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf, :isa, :picf, :spguard, :gccf, :kqf, :pbf, :needgcc
 
   def initialize(backend, passthrough, qbe_kernel, host_gnu_gcc)
@@ -209,6 +215,40 @@ class LoopState
     @kqf = []
     @pbf = []
     @needgcc = []
+    @k = 0
+    @pb_std = "-std=c11"
+    @pb_gnu = 1
+    @pb_opts = []
+    @pb_reason = ""
+  end
+end
+
+# What the compile stage needs from the environment. The driver's real run takes these from the shell; the port takes them
+# as options (see main): the root and the temporary directory and the working directory (for realpath), the OS (uname -s),
+# the output of scripts/pathb-ldrt, the EDG build directory, and whether the host preprocessor finds a wide literal in the
+# unit (the -fshort-wchar check, which runs the host preprocessor and greps its output).
+class Env
+  attr_accessor :root, :tmp, :cwd, :os, :ldrt, :edg_build, :wide_literal, :pathb_status, :pathb_fallback, :host
+  def initialize
+    @root = Dir.pwd
+    @tmp = "/tmp/nfcc"
+    @cwd = Dir.pwd
+    @os = "Linux"
+    @ldrt = ""
+    @edg_build = nil
+    @wide_literal = false
+    @pathb_status = 0
+    @pathb_fallback = false
+    @host = "cc"
+  end
+end
+
+# nfcc's "exit $rc" after a failed Path B compile with no gcc fallback.
+class PathbExit < StandardError
+  attr_reader :status
+  def initialize(status)
+    super("path b failed")
+    @status = status
   end
 end
 
@@ -594,24 +634,260 @@ def emit(state)
   end
 end
 
+# ---- the compile stage: nfcc's pathb_reason, pathb_compile, compile_one, the compile and link loops ----
+# Each command the driver would run is printed as "RUN argv..." (copies as CP, CAT, LN), not run. The oracle prints the same
+# for the same commands (tests/nfcc/option-state.sh stubs them), so the decisions can be compared.
+
+PB_SIMPLE_ASM = %w[--fatal-warnings --noexecstack -W --no-warn -mrelax-relocations=yes -mrelax-relocations=no
+                   -mx86-used-note=yes -mx86-used-note=no].freeze
+PB_STD_DIRECT = %w[-std=c89 -std=c99 -std=c11 -std=c17 -std=c18 -std=c23].freeze
+PB_STD_GNU = %w[-std=gnu89 -std=gnu99 -std=gnu11 -std=gnu17 -std=gnu18 -std=gnu23].freeze
+PB_STD_C89 = %w[-ansi -std=c90 -std=iso9899:1990].freeze
+PB_PP_FLAGS = %w[-D -U -I -include -isystem -idirafter].freeze
+PB_PP_JOINED_PREFIXES = %w[-D -U -I -isystem -idirafter].freeze
+
+def run_cmd(argv)
+  $stdout.write("RUN #{argv.join(' ')}\n")
+end
+
+# bash's ${x%.*}: the text before the last dot (the whole string when there is none).
+def strip_ext(path)
+  dot = path.rindex(".")
+  dot.nil? ? path : path[0, dot]
+end
+
+# basename, then bash's ${base%.*}
+def base_name_no_ext(path)
+  strip_ext(File.basename(path))
+end
+
+# nfcc's pathb_reason: sets state.pb_opts and state.pb_std; returns the reason the unit cannot go to Path B, or "" when it can.
+def pathb_reason(state, env, extra)
+  state.pb_opts = []
+  state.pb_std = "-std=c11"
+  state.pb_gnu = 1
+  return "#{state.needgcc.join(' ')}: not honoured by Path B" unless state.needgcc.empty?
+  if state.pathb_pie == 1 && state.nofp == 1
+    return "-fPIE with -mno-sse: Path B's data is absolute relocations a position-independent boot image cannot carry"
+  end
+  return "-mregparm=3 without -m16: not honoured by Path B" if state.pb_regparm == 1 && state.pb_m16 == 0
+  if state.pb_m16 == 1
+    state.pb_opts << "--i386" << "--m16" << "--ir-opt=none"
+    state.pb_opts << "--regparm=3" unless state.pb_regparm == 0
+  end
+  state.asf.each do |o|
+    split_wp_fields(o.byteslice(4, o.bytesize - 4)).each do |x|
+      if PB_SIMPLE_ASM.include?(x)
+        state.pb_opts << "--as-opt=#{x}"
+      else
+        return "#{o}: assembler option Path B does not pass on"
+      end
+    end
+  end
+  k2 = 0
+  while k2 < state.pp.length
+    o = state.pp[k2]
+    if PB_PP_FLAGS.include?(o)
+      state.pb_opts << o << state.pp[k2 + 1].to_s
+      k2 += 1
+    elsif PB_PP_JOINED_PREFIXES.any? { |f| o.start_with?(f) && o.length > f.length } || o == "-nostdinc"
+      state.pb_opts << o
+    elsif o.start_with?("-include") && o.length > 8
+      state.pb_opts << "-include" << o[8..]
+    elsif PB_STD_DIRECT.include?(o)
+      state.pb_std = o
+      state.pb_gnu = 0
+    elsif PB_STD_GNU.include?(o)
+      state.pb_std = "-std=c#{o[8..]}"
+    elsif PB_STD_C89.include?(o)
+      state.pb_std = "-std=c89"
+      state.pb_gnu = 0
+    elsif o == "-std=iso9899:2011"
+      state.pb_std = "-std=c11"
+      state.pb_gnu = 0
+    else
+      return "#{o}: not honoured by Path B"
+    end
+    k2 += 1
+  end
+  index = 0
+  while index < extra.length
+    state.pb_opts << "-I" << extra[index + 1]
+    index += 2
+  end
+  state.pb_opts.unshift("-D_DEFAULT_SOURCE") if state.pb_gnu != 0
+  state.pb_opts << "--pic" if state.pathb_pic != 0
+  return "-fshort-wchar: a wide character or string literal" if state.wchar16 == 1 && env.wide_literal
+  ""
+end
+
+# nfcc's pathb_compile: runs scripts/pathb-cc; with -S, the assembly is copied to obj (or written to stdout for -).
+# Returns the status of scripts/pathb-cc (env.pathb_status, from the caller: the driver's real run has it from the tool).
+def pathb_compile(state, env, what, csrc, obj)
+  root_cc = "#{env.root}/scripts/pathb-cc"
+  if what == "-S"
+    keep = "#{env.tmp}/keep#{state.k}"
+    run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", "#{env.tmp}/pb#{state.k}.o"])
+    if env.pathb_status == 0
+      base = base_name_no_ext(csrc)
+      if obj == "-"
+        $stdout.write("CAT #{keep}/#{base}.s\n")
+      else
+        $stdout.write("CP #{keep}/#{base}.s #{obj}\n")
+      end
+    end
+  else
+    run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", obj])
+  end
+  env.pathb_status
+end
+
+def gcc_argv(state, what, csrc, obj, extra)
+  ["gcc", what, state.optlvl, *state.dbg, "-fwrapv", "-fno-strict-aliasing", *state.picf, *state.isa, *state.gccf,
+   *state.pp, *state.asf, *extra, "-x", "c", csrc, "-o", obj]
+end
+
+# nfcc's compile_one KIND SOURCE OBJECT. Any kind other than "s" takes the C path (as the bash does for "o").
+def compile_one(state, env, kind, src, obj)
+  if kind == "s"
+    xl = %w[assembler assembler-with-cpp].include?(state.lang) ? ["-x", state.lang] : []
+    dep = []
+    if !state.depmode.empty? && state.asm == 0
+      df = state.dfile
+      df = state.sawout == 1 ? "#{strip_ext(obj)}.d" : "#{base_name_no_ext(src)}.d" if df.empty?
+      dep = [state.depmode, "-MF", df, *state.dts]
+      dep << "-MP" unless state.dp == 0
+    end
+    if state.asm == 1
+      die("-S: #{src} is assembly already") unless src.end_with?(".S") || state.lang == "assembler-with-cpp"
+
+      run_cmd([env.host, "-S", *state.gccf, *state.pp, *xl, src, "-o", obj])
+      return
+    end
+    run_cmd([env.host, "-c", *state.gccf, *dep, *state.pp, *state.asf, *xl, src, "-o", obj])
+    return
+  end
+
+  # bash runs realpath on the name and prints its own error for an empty one; the port does not reproduce that.
+  raise Unported, "an empty source name" if src.empty?
+
+  csrc = src
+  extra = []
+  if src == "-"
+    csrc = "#{env.tmp}/stdin#{state.k}.c"
+  elsif !src.end_with?(".c")
+    csrc = "#{env.tmp}/src#{state.k}.c"
+    real = src.start_with?("/") ? src : "#{env.cwd}/#{src}"
+    run_cmd(["LN", "-s", real, csrc])
+    extra = ["-iquote", File.dirname(src)]
+  end
+  state.k += 1
+  unless state.depmode.empty?
+    df = state.dfile
+    tg = state.dts.dup
+    opt = state.depmode == "-MMD" ? "-MM" : "-M"
+    df = state.sawout == 1 ? "#{strip_ext(obj)}.d" : "#{base_name_no_ext(src)}.d" if df.empty?
+    tg = ["-MT", obj] if tg.empty?
+    unless src == "-"
+      run_cmd([env.host, opt, "-MF", df, *tg, *(state.dp == 1 ? ["-MP"] : []), *state.gccf, *state.pp, *extra, "-x", "c", csrc])
+    end
+  end
+  what = state.asm == 0 ? "-c" : "-S"
+  if state.backend == "pathb"
+    reason = pathb_reason(state, env, extra)
+    if reason.empty?
+      status = pathb_compile(state, env, what, csrc, obj)
+      return if status == 0
+      # a unit Path B refuses: gcc, when NFCXX_PATHB_FALLBACK=gcc; otherwise nfcc exits with that status
+      raise PathbExit.new(status) unless env.pathb_fallback
+    end
+    run_cmd(gcc_argv(state, what, csrc, obj, extra))
+  elsif state.backend == "qbe" || state.backend == "cil"
+    qcc = state.backend == "qbe" ? "#{env.root}/scripts/qbe-cc" : "#{env.root}/scripts/cil-cc"
+    run_cmd([qcc, "--c-input", what, *state.kqf, *state.pp, *state.asf, *extra, csrc, "-o", obj])
+  else
+    run_cmd(gcc_argv(state, what, csrc, obj, extra))
+  end
+end
+
+# The compile-only path: one object (or assembly) per input.
+def compile_mode(state, env)
+  suffix = state.asm == 0 ? ".o" : ".s"
+  state.inputs.each do |entry|
+    kind, src = entry.split(":", 2)
+    obj = state.sawout == 1 ? state.out : "#{base_name_no_ext(src)}#{suffix}"
+    compile_one(state, env, kind, src, obj)
+  end
+end
+
+# The link path: compile the sources, keep the other inputs in command-line order, then link with the backend's link.
+def link_mode(state, env)
+  objs = []
+  state.inputs.each do |entry|
+    kind, src = entry.split(":", 2)
+    if kind == "o"
+      objs << src
+    elsif kind == "c" || kind == "s"
+      obj = "#{env.tmp}/obj#{state.k}.o"
+      compile_one(state, env, kind, src, obj)
+      objs << obj
+    end
+  end
+  out = state.sawout == 1 ? state.out : "a.out"
+  if state.backend == "pathb"
+    if env.os == "Darwin"
+      cxx_libs = ["-lc++"]
+      atomic = []
+    else
+      cxx_libs = ["-lstdc++", "-lgcc_s"]
+      atomic = ["-latomic"]
+    end
+    edg = env.edg_build || "#{env.root}/build/edg"
+    run_cmd([env.host, *objs, *state.ld, "-o", out, env.ldrt, "-L#{edg}/lib", "-lC", *cxx_libs, "-lm", *atomic])
+  elsif state.backend == "qbe" || state.backend == "cil"
+    qcc = state.backend == "qbe" ? "#{env.root}/scripts/qbe-cc" : "#{env.root}/scripts/cil-cc"
+    run_cmd([qcc, *objs, *state.ld, "-o", out])
+  else
+    run_cmd(["gcc", *objs, *state.ld, "-o", out])
+  end
+end
+
 # The leading --nfcc-* options carry what nfcc reads from its environment; nothing else starts with --nfcc-.
 def take_config(argv)
-  config = { backend: "gcc", passthrough: false, qbe_kernel: false, host_gnu_gcc: false, qbe_try: false }
+  config = { backend: "gcc", passthrough: false, qbe_kernel: false, host_gnu_gcc: false, qbe_try: false, env: Env.new }
+  env = config[:env]
   while argv.first && argv.first.start_with?("--nfcc-")
     option = argv.shift
     name, value = option.split("=", 2)
-    die("#{name} takes 0 or 1") if %w[--nfcc-passthrough --nfcc-qbe-kernel --nfcc-host-gnu-gcc --nfcc-qbe-try].include?(name) &&
-                                   value != "0" && value != "1"
+    value = "" if value.nil?
+    flag = %w[--nfcc-passthrough --nfcc-qbe-kernel --nfcc-host-gnu-gcc --nfcc-qbe-try --nfcc-wide-literal --nfcc-pathb-fallback]
+    die("#{name} takes 0 or 1") if flag.include?(name) && value != "0" && value != "1"
     case name
     when "--nfcc-backend" then config[:backend] = value
     when "--nfcc-passthrough" then config[:passthrough] = value == "1"
     when "--nfcc-qbe-kernel" then config[:qbe_kernel] = value == "1"
     when "--nfcc-host-gnu-gcc" then config[:host_gnu_gcc] = value == "1"
     when "--nfcc-qbe-try" then config[:qbe_try] = value == "1"
+    when "--nfcc-root" then env.root = value
+    when "--nfcc-tmp" then env.tmp = value
+    when "--nfcc-cwd" then env.cwd = value
+    when "--nfcc-os" then env.os = value
+    when "--nfcc-ldrt" then env.ldrt = value
+    when "--nfcc-edg-build" then env.edg_build = value
+    when "--nfcc-wide-literal" then env.wide_literal = value == "1"
+    when "--nfcc-pathb-status" then env.pathb_status = value.to_i
+    when "--nfcc-host" then env.host = value
+    when "--nfcc-pathb-log" then config[:pathb_log] = value == "1"
+    when "--nfcc-pathb-fallback" then env.pathb_fallback = value == "1"
     else die("unknown option #{name}")
     end
   end
   config
+end
+
+def cuda_driver_option?(arg)
+  return true if arg.start_with?("--cuda-driver=")
+  %w[-lcuda -l:libcuda.so -l:libcuda.so.1].include?(arg) || arg.end_with?("/libcuda.so") || arg.end_with?("/libcuda.so.1")
 end
 
 def main(argv)
@@ -619,19 +895,34 @@ def main(argv)
   die("unknown NFCXX_BACKEND '#{config[:backend]}' (qbe, cil, gcc or pathb)") unless %w[qbe cil gcc pathb].include?(config[:backend])
   args = expand_response_args(argv)
   die("no input files") if args.empty?
+  # nfcc's bundle_wrap and cuda_driver_wrap: with no --bundle- option and no libcuda, they change nothing; the others run a
+  # second driver or build a shim, which the port does not do.
+  raise Unported, "NFCXX_PATHB_LOG (the log file is not written by the port)" if config[:pathb_log]
+  raise Unported, "--bundle- options" if (" " + args.join(" ") + " ").include?(" --bundle-")
+  raise Unported, "the CUDA driver options" if args.any? { |a| cuda_driver_option?(a) }
 
-  command = pre_loop_exec(args, "cc", config[:qbe_try] && config[:backend] == "gcc")
+  command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc")
   if command
     $stdout.write("EXEC #{command.join(' ')}\n")
     return 0
   end
   state = LoopState.new(config[:backend], config[:passthrough], config[:qbe_kernel], config[:host_gnu_gcc])
   emit(run_loop(args, state))
+  if state.mode == "compile"
+    compile_mode(state, config[:env])
+  else
+    link_mode(state, config[:env])
+  end
   0
+rescue PathbExit => e
+  $stdout.flush
+  e.status
 rescue LoopDie => e
+  $stdout.flush
   $stderr.write("nfcc: error: #{e.message}\n")
   1
 rescue Unported => e
+  $stdout.flush
   $stderr.write("unported: #{e.message}\n")
   3
 end
