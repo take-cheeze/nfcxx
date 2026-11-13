@@ -4,12 +4,13 @@
 # ENGINE_ROWS (tools/bc2cpp/static_dispatch_registrations.rb): a compiled engine entry whose name only lookups that
 # find rows reach (the core rows run's names) is kept as a row of its generated ROM table.
 #
-#   - the rule: a plain compiled entry of an engine owner (a module's singleton too) is a row; a name the rows run
-#     reaches or a fragment may build, a `super` that may reach the owner or of unknown reach, a native, an accessor,
-#     a guarded registration, a constructor name (CTOR_ROWS'), an outside owner and an operator each keep the entry,
-#     and without the rows run nothing is a row;
-#   - the outputs: the lists read without the key as empty, and the closed build's ROM tables mark an engine row
-#     MRB_MT_ENTRY_CTOR_ (MRB_MT_CTOR_ROW) like a constructor row, while any other build marks none;
+#   - the rule: a plain compiled entry of an engine owner (a module's singleton too) and a native ROM entry are rows;
+#     a name the rows run reaches or a fragment may build, a `super` that may reach the owner or of unknown reach, a
+#     native outside a ROM table, an accessor, a guarded registration, a constructor name (CTOR_ROWS'), an outside
+#     owner and an operator each keep the entry, and without the rows run nothing is a row;
+#   - the outputs: the lists read without the key as empty, the closed build's ROM tables mark a compiled engine row
+#     MRB_MT_ENTRY_CTOR_ (MRB_MT_CTOR_ROW) like a constructor row while any other build marks none, and the exclusion
+#     header defines a native engine row to 2 (a caller passing no engine_rows keeps it an entry);
 #   - the runtime, on the full-core mruby when one is built: a row of a ROM table answers mrb_method_search_rows
 #     (bc2cpp_find_proven: owner and native singleton calls) and mrb_funcall, and is invisible to mrb_method_search_vm
 #     and respond_to?, which the proof keeps from its name.
@@ -35,6 +36,7 @@ cands = [
   { owner: 'Game::Map', name: 'refresh', entry: 'Game__Map_refresh' },
   { owner: 'Game::Map', name: 'map_data', entry: 'Game__Map_map_data' },
   { owner: 'RGSS::Sprite', name: 'flash', native: true, rom: true },
+  { owner: 'RGSS::Sprite', name: 'dispose', native: true },
   { owner: 'Game::Map', name: 'mode', entry: nil, accessor: true },
   { owner: 'Game::Map', name: 'guarded', entry: 'Game__Map_guarded', guard: true },
   { owner: 'Game::Map', name: 'initialize', entry: 'Game__Map_initialize' },
@@ -45,7 +47,8 @@ rows = ->(names: Set.new, fragments: Set.new, reach: {}, unknown: Set.new, owner
   SDR.engine_rows(cands, [names, fragments], reach, unknown, owners)
 end
 suite.check('a plain compiled entry of an engine owner, a module singleton too, is a row',
-            rows.call(names: Set['refresh'], fragments: Set['_data']) == Set['Game::Map#update', 'RGSS.singleton#update'])
+            rows.call(names: Set['refresh'], fragments: Set['_data']).then { |r| r.include?('Game::Map#update') && r.include?('RGSS.singleton#update') })
+suite.check('a native ROM entry is a row', rows.call.include?('RGSS::Sprite#flash'))
 suite.check('a name the rows run reaches keeps it', !rows.call(names: Set['update']).include?('Game::Map#update'))
 suite.check('a fragment that may build the name keeps it', !rows.call(fragments: Set['_data']).include?('Game::Map#map_data') &&
                                                             rows.call.include?('Game::Map#map_data'))
@@ -54,8 +57,8 @@ suite.check('a super reaching another class keeps a class owner a row, but not a
             rows.call(reach: { 'update' => Set['Game::Other'] }).then { |r| r.include?('Game::Map#update') && !r.include?('RGSS.singleton#update') })
 suite.check('a super of unknown reach keeps the name', !rows.call(unknown: Set['update']).include?('RGSS.singleton#update'))
 others = rows.call
-suite.check('a native, an accessor and a guarded registration stay entries',
-            (others & Set['RGSS::Sprite#flash', 'Game::Map#mode', 'Game::Map#guarded']).empty?)
+suite.check('a native outside a ROM table, an accessor and a guarded registration stay entries',
+            (others & Set['RGSS::Sprite#dispose', 'Game::Map#mode', 'Game::Map#guarded']).empty?)
 suite.check('a constructor name is CTOR_ROWS\', an outside owner and an operator stay',
             (others & Set['Game::Map#initialize', 'Array#update', 'Game::Map#==']).empty?)
 suite.check('without the rows run nothing is a row', SDR.engine_rows(cands, nil, {}, Set.new, Set.new).empty?)
@@ -87,6 +90,14 @@ table = +''
 row = { name: 'update', key: 'MRB_SYM(update)', entry: 'Game__Map_update', aspec: 'MRB_ARGS_NONE()', ctor: true }
 CodeGen.allocate.send(:rom_method_table, [table, 0], 'Game::Map', 'v', false, [row])
 suite.check('a row is a MRB_MT_ENTRY_CTOR_ of its ROM table', table.include?('MRB_MT_ENTRY_CTOR_(Game__Map_update, MRB_SYM(update)'))
+
+entries = [{ mt_class: 'RGSS__Sprite', owner: 'RGSS::Sprite', kind: 'SYM', cname: 'flash', name: 'flash' },
+           { mt_class: 'RGSS__Sprite', owner: 'RGSS::Sprite', kind: 'SYM', cname: 'dispose', name: 'dispose' }]
+header = CoreNativeCandidates.header([], [], ['RGSS::Sprite#dispose'], entries, engine_rows: ['RGSS::Sprite#flash'])
+suite.check('the exclusion header defines a native engine row to 2 next to a left-out entry (1)',
+            header.include?('MRB_MT_EXCLUDE_RGSS__Sprite_SYM__flash 2') && header.include?('MRB_MT_EXCLUDE_RGSS__Sprite_SYM__dispose 1'))
+suite.check('a caller passing no engine_rows keeps the native row an entry',
+            !CoreNativeCandidates.header([], [], [], entries).include?('flash'))
 
 # The runtime premise the rule relies on, on the full-core mruby (mruby#20's row lookups).
 require_relative 'fixture_runtime'
