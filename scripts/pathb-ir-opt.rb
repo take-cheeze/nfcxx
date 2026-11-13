@@ -2173,6 +2173,9 @@ def prune_pass(forms, substr, report)
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end
+  # An alias form (the GNU alias attribute, (alias NAME TARGET KIND [weak])) is kept whatever the pruning (pathb-ssa-build's
+  # alias markers), so its target is reached: a static function that only an alias names is still defined for it.
+  forms.each { |f| queue << unq(f[2]) if head(f) == "alias" && f[2] }
   seen = {}
   until queue.empty?
     n = queue.pop
