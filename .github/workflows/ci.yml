@@ -290,7 +290,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/pathb
-          key: pathb-${{ runner.os }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+          # runner.arch too: the x86-64 jobs cache the same path under the same runner.os, and an x86-64 cpfe does not run here
+          key: pathb-${{ runner.os }}-${{ runner.arch }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
 
       - name: Build the Path B harness
         if: steps.harness.outputs.cache-hit != 'true'
