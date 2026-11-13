@@ -972,10 +972,27 @@ class Converter
       !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
     end
 
+    # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
+    value_problem = lambda do |rel, s, name|
+      masked = @files[rel]['masked']
+      open, callee = innermost_open(masked, s)
+      before = prev_nonspace(masked, s - 1)
+      after = next_nonspace(masked, s + name.length)
+      if open != '(' || callee.nil?
+        'its address is assigned or stored, so the pointer may escape the method context'
+      elsif !(before >= 0 && '(,'.include?(masked[before])) || after < 0 || !')'.include?(masked[after]) && masked[after] != ','
+        'the pointer is part of an expression, not a plain argument'
+      elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
+        "the pointer is passed to #{callee}, which may keep it"
+      end
+    end
+
     use_problem = lambda do |name, use|
-      _rel, _s, direct, fn = use
+      rel, s, direct, fn = use
       if !direct
-        next 'helper needs the mruby state threaded in, but is used outside a direct call (not supported)'
+        # the address is kept or passed on, so the helper's signature cannot gain mrb; the reason says how
+        why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
+        next "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
       end
       if fn.nil?
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
@@ -1012,19 +1029,6 @@ class Converter
       gcands << name if @defs[name].size == 1
     end
     with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
-    value_problem = lambda do |rel, s, name|
-      masked = @files[rel]['masked']
-      open, callee = innermost_open(masked, s)
-      before = prev_nonspace(masked, s - 1)
-      after = next_nonspace(masked, s + name.length)
-      if open != '(' || callee.nil?
-        'its address is assigned or stored, so the pointer may escape the method context'
-      elsif !(before >= 0 && '(,'.include?(masked[before])) || after < 0 || !')'.include?(masked[after]) && masked[after] != ','
-        'the pointer is part of an expression, not a plain argument'
-      elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
-        "the pointer is passed to #{callee}, which may keep it"
-      end
-    end
     global_use = lambda do |name, use, members|
       rel, s, direct, fn = use
       macro = fn.nil? && direct ? define_at(rel, s) : nil

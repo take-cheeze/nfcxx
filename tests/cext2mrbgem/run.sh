@@ -123,6 +123,20 @@ check test "$rc" -eq 2
 check grep -q '  ht_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_thread_refused/REFUSALS.txt"
 check grep -q '  ht_shadow_helper  helper needs the mruby state threaded in, but its name is shadowed' "$work/helper_thread_refused/REFUSALS.txt"
 
+# 2i2. a helper whose name is also a struct member (t.tm_isdst, a member of struct tm declared outside the input): the
+# member accesses are not uses of the helper, so its direct calls from a registered method alone decide and it takes mrb
+rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_member_thread tools/cext2mrbgem/fixtures/helper_member_thread/ext/helper_member_thread "$work/helper_member_thread" > "$work/helper_member_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/helper_member_thread/NOT_BUILDABLE"
+check grep -qF 'static mrb_value tm_isdst(mrb_state *mrb, mrb_value s) {' "$work/helper_member_thread/src/helper_member_thread.c"
+check grep -qF 'return tm_isdst(mrb, s);' "$work/helper_member_thread/src/helper_member_thread.c"
+check grep -qF 't.tm_isdst = 0;' "$work/helper_member_thread/src/helper_member_thread.c"
+# negative: a helper whose address is stored in a static table (a file-scope initializer) stays refused, with the reason
+rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_table_refused tools/cext2mrbgem/fixtures/helper_table_refused/ext/helper_table_refused "$work/helper_table_refused" > "$work/helper_table_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/helper_table_refused/NOT_BUILDABLE"
+check grep -q '  htr_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_table_refused/REFUSALS.txt"
+
 # 2k. global state (no mrb argument): a helper whose only uses are direct calls through a macro expanded in two registered
 # methods is not threaded: it uses the file-scope state, defined once in Init's file and declared in the others. Each
 # method saves the previous state and restores it on every return (the two returns of hg_pick). No refusal.
