@@ -5,10 +5,10 @@
 # error paths. See docs/notes/ffi.md.
 # The ABI integration: abi_gcc.c, built by the system C compiler, and abi_host.cpp, built by nfcxx, print the same lines for
 # the functions of abi.h. Their output must match.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: pathb and gcc; the poly part (the mruby build of scripts/setup-poly.sh) is Path B or gcc only)
 cd "$(dirname "$0")/../.."
 root=$PWD
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 # The declaration reader (Ffi::declarations) runs the libclang-edg front end: build it once if it is missing.

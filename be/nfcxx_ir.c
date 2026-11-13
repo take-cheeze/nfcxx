@@ -2637,6 +2637,9 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap);
+#if defined(__aarch64__) && defined(__linux__)
+static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap);
+#endif
 static ir_val ir_lval_op(an_expr_node_ptr e);
 static ir_val ir_roof(an_expr_node_ptr e);
 
@@ -3337,7 +3340,11 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         ir_fo_call(e->type, "vaarg", ir_fmt("%s %s", d.s, ir_valist_addr(a0)));
         return ir_mk_value(d.s, e->type);
       }
+#if defined(__aarch64__) && defined(__linux__)
+      if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate_a64(e, ir_valist_addr(a0));
+#else
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
+#endif
       if (ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (bool)", 0, (int)k);
       {
         char *ap = ir_valist_addr(a0);
@@ -6129,6 +6136,68 @@ static int ir_a64_small_int(a_type_ptr t)
   return 1;
 }
 
+#if defined(__aarch64__) && defined(__linux__)
+/* va_arg of a struct, class or union by value, AAPCS64. The va_list is the 32-byte { void *__stack; void *__gr_top;
+   void *__vr_top; int __gr_offs; int __vr_offs; } that QBE's vastart fills. An aggregate of at most 16 bytes, alignment at
+   most 8, with integer members only (ir_a64_small_int) takes nreg = (size + 7) / 8 general registers when __gr_offs + 8 *
+   nreg <= 0: it is read from __gr_top + __gr_offs, and __gr_offs advances. Otherwise (the whole aggregate goes to the
+   stack, the registers left stay unused) it is read from __stack, which advances by the size rounded up to 8. An aggregate
+   with a floating member (an HFA is in the SIMD&FP registers) or of more than 16 bytes (passed by reference) is a gap
+   marker. */
+static ir_val ir_vaarg_aggregate_a64(an_expr_node_ptr e, const char *ap)
+{
+  a_type_ptr t = e->type;
+  unsigned long long size = ir_size_of(t);
+  int d = ir_depth, nreg, i;
+  ir_val tmp;
+  char *pgo, *go, *gtop, *base, *ok, *pov, *ov;
+  if (size == 0) {
+    ir_note(0, eok_va_arg, 1);
+    tmp = ir_temp(t);
+    return ir_mk_addr(tmp.s, t, 0);
+  }
+  if (ir_align_of(t) > 8 || size > 16 || !ir_a64_small_int(t))
+    return ir_gap(t, "op va_arg (aggregate: not an integer aggregate of at most 16 bytes, AAPCS64)", 0, (int)eok_va_arg);
+  nreg = (int)((size + 7) / 8);
+  ir_note(0, eok_va_arg, 1);
+  tmp = ir_temp(t);
+  pgo = ir_let("(ptr int)", ir_fmt("(offset %s 24)", ap));
+  go = ir_let("int", ir_fmt("(load int %s)", pgo));
+  ok = ir_let("bool", "(const bool 1)");
+  /* not enough registers: -8 * nreg < __gr_offs */
+  ir_line(d, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.s int (const int %d) %s)", -8 * nreg, go))));
+  ir_line(d + 1, "(then");
+  ir_line(d + 2, ir_fmt("(set %s (const bool 0))", ok));
+  ir_close(1);
+  ir_close(1);
+  ir_line(d, ir_fmt("(if %s", ok));
+  ir_line(d + 1, "(then");
+  ir_depth = d + 2;
+  {
+    gtop = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", ir_let("(ptr void)", ir_fmt("(offset %s 8)", ap))));
+    base = ir_let("(ptr void)", ir_fmt("(index %s %s 1)", gtop, ir_cv("long", go)));
+    for (i = 0; i < nreg; i++) {
+      unsigned long long nb = size - 8ULL * (unsigned long long)i < 8 ? size - 8ULL * (unsigned long long)i : 8;
+      char *src = ir_let("(ptr void)", ir_fmt("(offset %s %d)", base, 8 * i));
+      char *dst = ir_let("(ptr void)", ir_fmt("(offset %s %d)", tmp.s, 8 * i));
+      ir_emit(ir_fmt("(copy %llu %s %s)", nb, dst, src));
+    }
+    ir_emit(ir_fmt("(store int %s %s)", pgo, ir_o2("wadd", "int", go, ir_fmt("(const int %d)", 8 * nreg))));
+  }
+  ir_close(1);
+  ir_line(d + 1, "(else");
+  ir_depth = d + 2;
+  pov = ir_let("(ptr void)", ir_fmt("(offset %s 0)", ap));
+  ov = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", pov));
+  ir_emit(ir_fmt("(copy %llu %s %s)", size, tmp.s, ov));
+  ir_emit(ir_fmt("(store (ptr void) %s %s)", pov, ir_let("(ptr void)", ir_fmt("(offset %s %llu)", ov, (size + 7) & ~7ULL))));
+  ir_close(1);
+  ir_close(1);
+  ir_depth = d;
+  return ir_mk_addr(tmp.s, t, 0);
+}
+#endif
+
 static void ir_abi_note(a_type_ptr t)
 {
   a_type_ptr s = skip_typerefs(t);
@@ -7660,6 +7729,15 @@ static void ir_agl_scan(a_statement_ptr s, a_label_ptr *out, int *n, int max)
 }
 
 #define IR_AGL_MAX 4096
+/* A function with many address-taken labels (an interpreter loop: QuickJS's has about 250, a `goto *` after every opcode)
+   would get one switch of that many cases per `goto *`, a quadratic number of edges that QBE cannot take. From
+   IR_AGD_MIN labels on, each `goto *` stores the label id in a slot of the function and jumps to the one switch that
+   ir_assigned_goto_tail writes at the end of the body. */
+#define IR_AGD_MIN 16
+static const char *ir_agd_slot; /* the slot of the shared switch's selector, or NULL: no `goto *` of this function shares it */
+static int ir_agd_n;
+static a_label_ptr ir_agd_lbls[IR_AGL_MAX];
+
 /* `goto *p`: a switch on the pointer's value over the ids of the address-taken labels, each case a goto. */
 static void ir_assigned_goto(a_statement_ptr s, int d)
 {
@@ -7676,6 +7754,19 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   ir_tmp_end(&tmps, d);
   sel = ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", v.s));
   if (ir_cur_scope != NULL) ir_agl_scan(ir_cur_scope->assoc_block, lbls, &n, IR_AGL_MAX);
+  if (n >= IR_AGD_MIN) {
+    if (ir_agd_slot == NULL) {
+      ir_agd_slot = ir_tab_add(&ir_slots, NULL, "agd", "$");
+      ir_buf_begin(&ir_slot_buf);
+      fprintf(nf_out, "\n  (slot %s unsigned_long 8 8)", ir_agd_slot + 1);
+      ir_buf_end(&ir_slot_buf);
+      memcpy(ir_agd_lbls, lbls, (size_t)n * sizeof lbls[0]);
+      ir_agd_n = n;
+    }
+    ir_line(d, ir_fmt("(store unsigned_long %s %s)", ir_agd_slot, sel));
+    ir_line(d, "(goto \"__agd\")");
+    return;
+  }
   ir_line(d, ir_fmt("(switch %s", sel));
   ir_line(d + 1, "(body");
   for (i = 0; i < n; i++) {
@@ -7684,6 +7775,27 @@ static void ir_assigned_goto(a_statement_ptr s, int d)
   }
   ir_line(d + 2, "(default)");
   ir_line(d + 2, "(unreachable)");
+  ir_close(1);
+  ir_close(1);
+}
+
+/* The shared switch of the function's `goto *` (ir_assigned_goto), after the last statement, which does not fall into it. */
+static void ir_assigned_goto_tail(int fell_off_void)
+{
+  int i;
+  char *sel;
+  if (ir_agd_slot == NULL) return;
+  if (fell_off_void) ir_line(1, "(return)");
+  ir_line(1, "(label \"__agd\")");
+  sel = ir_let("unsigned_long", ir_fmt("(load unsigned_long %s)", ir_agd_slot));
+  ir_line(1, ir_fmt("(switch %s", sel));
+  ir_line(2, "(body");
+  for (i = 0; i < ir_agd_n; i++) {
+    ir_line(3, ir_fmt("(case (const unsigned_long %d))", ir_label_id((void *)ir_agd_lbls[i])));
+    ir_line(3, ir_fmt("(goto %s)", ir_tab_get(&ir_labels, ir_agd_lbls[i], ir_name_or(ir_agd_lbls[i]->source_corresp.name, "label"), "")));
+  }
+  ir_line(3, "(default)");
+  ir_line(3, "(unreachable)");
   ir_close(1);
   ir_close(1);
 }
@@ -8545,6 +8657,7 @@ static void ir_function(a_routine_ptr rout)
   ir_cur_rout = rout;
   ir_slots.n = 0;
   ir_labels.n = 0;
+  ir_agd_slot = NULL;
   ir_loop_n = 0;
   ir_decl_top = NULL;
   ir_obl_n = 0;
@@ -8695,6 +8808,7 @@ static void ir_function(a_routine_ptr rout)
       ir_line(1, ir_ubsan ? "(unreachable missing-return)" : "(unreachable)");
     }
   }
+  ir_assigned_goto_tail(ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block));
   ir_buf_end(&body);
 
   /* Output: header, slots, body. */

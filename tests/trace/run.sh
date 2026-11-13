@@ -33,13 +33,15 @@ for backend in $backends; do
   fi
   "$tmp/$backend.bin"; rc=$?
   [ $rc -eq 120 ] || { echo "FAIL $backend: exit $rc, want 120"; fail=1; continue; }
-  common=("nfcxx" "host C++ headers" "eccp (front end, C compile, link)")
-  if [ $backend = qbe ]; then
-    check_json "$json" qbe "${common[@]}" "cc -E (preprocess)" "cproc (C to QBE IL)" \
-      "qbe (IL to assembly)" "cc -c (assemble)" || fail=1
-  else
-    check_json "$json" gcc "${common[@]}" || fail=1
-  fi
+  # Each backend's own spans: qbe and gcc run eccp (EDG's front end, then the C compile of its output); pathb has no eccp, its
+  # driver times the Path B compile of each source and the link.
+  case $backend in
+    qbe) check_json "$json" qbe nfcxx "host C++ headers" "eccp (front end, C compile, link)" "cc -E (preprocess)" \
+           "cproc (C to QBE IL)" "qbe (IL to assembly)" "cc -c (assemble)" || fail=1 ;;
+    gcc) check_json "$json" gcc nfcxx "host C++ headers" "eccp (front end, C compile, link)" || fail=1 ;;
+    pathb) check_json "$json" pathb nfcxx "host C++ headers" "Path B: $src" link || fail=1 ;;
+    *) echo "FAIL $backend: no trace expectation for this backend"; fail=1 ;;
+  esac
 done
 
 # --emit-c runs the front end alone; its span is named accordingly.
@@ -51,8 +53,9 @@ check_json "$tmp/emit.json" emit-c "nfcxx" "host C++ headers" "cpfe --emit-c (fr
 tl=$tmp/time.log; tb=${backends%% *}
 for i in 1 2; do NFCXX_BACKEND=$tb ./nfcxx --time-log="$tl" "$src" -o "$tmp/tl$i.bin" > "$tmp/tl.log" 2>&1 || { echo "FAIL time log: build"; cat "$tmp/tl.log"; fail=1; }; done
 qsteps=0; [ "$tb" != qbe ] || qsteps=8
+compile_stage="eccp (front end, C compile, link)"; [ "$tb" != pathb ] || compile_stage="Path B: $src"
 if awk -F'\t' -v src="$src" 'NF != 4 || $1 !~ /^[0-9]+\.[0-9]{6}$/ || $4 != src { bad = 1 } END { exit bad }' "$tl" \
-   && [ "$(cut -f3 "$tl" | grep -c '^eccp (front end, C compile, link)$')" = 2 ] && [ "$(cut -f2 "$tl" | grep -c '^qbe-backend$')" -ge $qsteps ]; then
+   && [ "$(cut -f3 "$tl" | grep -cxF "$compile_stage")" = 2 ] && [ "$(cut -f2 "$tl" | grep -c '^qbe-backend$')" -ge $qsteps ]; then
   echo "ok   time log: $(wc -l < "$tl") lines"
 else
   echo "FAIL time log:"; cat "$tl"; fail=1

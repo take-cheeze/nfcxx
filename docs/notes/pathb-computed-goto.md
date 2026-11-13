@@ -35,3 +35,7 @@ member is `T[1]` (`[]` and `[0]` already had no bound).
 - tests/c/computed_goto.c: a dispatch table, a label address in a local, a pointer compare, a backward `goto *`.
 - tests/c/wide_phi.c: a join of 70 predecessors (fails in QBE without the grouping).
 - tests/realworld/run_lua.sh and run_lua_make.sh now run gcc and Path B (the QBE-ONLY markers are gone).
+- A function with 16 or more address-taken labels gets one shared dispatch switch instead of one switch per `goto *`
+  (`ir_assigned_goto`, `ir_assigned_goto_tail` in be/nfcxx_ir.c): each `goto *p` stores the label id in a slot (`$"agd"`) and jumps
+  to `(label "__agd")` at the end of the function, which switches on it. QuickJS's `JS_CallInternal` (about 250 `goto *`, 250
+  labels) had 60,000 edges and QBE ran out of memory; now `quickjs.c` builds in about 100 s (tests/poly/run.sh, poly.md).
