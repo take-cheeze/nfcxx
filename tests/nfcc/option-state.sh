@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The state nfcc's option loop leaves behind, for one argument list: the oracle for the Ruby port of the loop (option 3 of
-# docs/notes/mruby-scripting.md's plan; see the branch's commits). The loop is taken from nfcc itself: the first 345 lines
-# (the setup, the helpers, and the loop with its final checks), with nfcc's own root, followed by a dump of the variables the
+# docs/notes/mruby-scripting.md's plan; see the branch's commits). The loop is taken from nfcc itself: the lines up to the option loop's
+# closing done (cut by pattern, so edits to nfcc do not move it: the setup, the helpers and the loop), with nfcc's own root, followed by a dump of the variables the
 # loop sets. Nothing after the loop runs, so no compiler is needed. The gcc backend is selected so that the QBE check
 # (which needs build/qbe) is not reached.
 #   tests/nfcc/option-state.sh ARG...    prints the state, one variable per line
@@ -11,7 +11,7 @@ root=$PWD
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 harness() {
-  sed -n '1,345p' "$root/nfcc" | sed "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|"
+  awk '{ print } /^for \(\(i = 0; i < n; i\+\+\)\); do$/ { s = 1 } s && /^done$/ { exit }' "$root/nfcc" | sed "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|"
   cat <<'EOF'
 dump_scalar() { printf '%s=%s\n' "$1" "${!1-}"; }
 dump_array() {
