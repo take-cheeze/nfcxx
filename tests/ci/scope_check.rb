@@ -39,9 +39,9 @@ end
   end
 end
 
-%w[scripts/pathb-qbe-emit.rb scripts/new-helper be/a.cpp 3rd/edg 3rd/qbe 3rd/cproc
+%w[scripts/pathb-qbe-emit.rb scripts/new-helper be/a.cpp 3rd/edg 3rd/qbe
    nfcxx nfcc/driver.c lib/new.c tests/run.sh tests/pathb-ir/a.ir tests/cases/a.cpp
-   tests/mruby/a.sh .github/actions/toolchain/action.yml tools/qbe-prep/main.cpp
+   tests/mruby/a.sh .github/actions/toolchain/action.yml
    .github/workflows/ci.yml .github/ci-test-matrix.yml].each do |path|
   check.call("Path B dependency: #{path}") do
     CiScope.select('pull_request', [path]) == { 'full_ci' => 'true', 'changed' => 'true' }

@@ -660,7 +660,6 @@ jobs:
             - "scripts/pathb-structure.rb"
             - "scripts/pathb-ssa-structurize.rb"
             - "scripts/pathb-cil-emit.rb"
-            - "scripts/cil-link.rb"
             - "scripts/pathb-wgsl-emit.rb"
             - "scripts/pathb-spirv-emit.rb"
             - "scripts/pathb-spirv-kernel-emit.rb"
