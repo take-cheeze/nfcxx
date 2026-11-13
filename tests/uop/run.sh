@@ -47,8 +47,9 @@
 # QBE-ONLY: Path B builds lib/uop (nfcuop_lower.cpp no longer fails in QBE) and runs test_ut, test_np, test_nn, test_onnx,
 # test_sym, test_shaping, test_grad, test_layout, test_cgen and np_compat, but two programs do not pass yet, so the suite stays on
 # qbe and gcc: test.cpp overflows the 8 MB stack in graph_rewrite's recursion (Rewriter::go has a 6 KB frame on Path B, the
-# emitter gives every local its own stack slot; it passes under `ulimit -s unlimited`), and test_layout_avx2.cpp is refused
-# ("pathb-ssa-build: not emitted: main: operator unsupported").
+# emitter gives every local its own stack slot; it passes under `ulimit -s unlimited`). test_layout_avx2.cpp and
+# test_layout_avx512.cpp build and pass under Path B when compiled directly (NFCXX_PATH=b); the runner does not include them
+# there yet.
 #   UOP_JOBS=N              the library objects are compiled N at a time (default: the CPU count)
 #   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
 #                           the ONNX models and the Python checks run on the models the selected programs wrote, and the

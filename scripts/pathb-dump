@@ -27,6 +27,8 @@
 # gcc's own options, as nfcc's Path B route passes them (docs/notes/nfcc-pathb.md):
 #   -funsigned-char / -fno-signed-char, -fsigned-char / -fno-unsigned-char   the signedness of plain char (EDG's --unsigned_chars,
 #                     --signed_chars; -funsigned-char also defines __CHAR_UNSIGNED__ as gcc does)
+#   -ftrivial-auto-var-init=zero   (--ir; NFCXX_IR_AUTO_INIT=zero) an automatic variable without an initializer, padding included, is
+#                     zeroed where it is declared (not a VLA, not one with __attribute__((uninitialized))); =uninitialized turns it off
 #   -nostdinc         no host system include directories (hosted mode); only the -isystem and -idirafter ones, and EDG's own
 #   -isystem DIR      a system include directory, searched before the host's; -idirafter DIR after them
 #   -fshort-wchar     wchar_t of the headers (__WCHAR_TYPE__, __WCHAR_MAX__, __SIZEOF_WCHAR_T__ ...) is unsigned short, as gcc's. EDG has no such
@@ -36,6 +38,9 @@
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
 # wasm32 (its plain char is unsigned in EDG's table, so --signed_chars is passed). It needs --freestanding: the host's C
 # and C++ library headers are the host target's. Without it the IR is as before.
+# --target=linux_i686 is the same for 32-bit x86 (the kernel's real-mode boot code, scripts/pathb-cc --i386): ILP32 with long long 8 aligned
+# on 4, and va_list is `char *`, the pointer to the next argument, so the back end reads and writes it through the object's address
+# (NFCXX_IR_VALIST_PTR=1, set here; the other targets keep the System V tag). Its IR is for scripts/pathb-ssa-build --target=i386[_regparm3].
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
@@ -76,6 +81,8 @@ while [ $i -lt ${#args[@]} ]; do
     -funsigned-char|-fno-signed-char) user_opts+=(--unsigned_chars -U__CHAR_UNSIGNED__ -D__CHAR_UNSIGNED__=1) ;;
     -fsigned-char|-fno-unsigned-char) user_opts+=(--signed_chars -U__CHAR_UNSIGNED__) ;;
     -nostdinc) nostdinc=1 ;;
+    -ftrivial-auto-var-init=zero) export NFCXX_IR_AUTO_INIT=zero ;;   # --ir: an automatic variable without an initializer is zeroed at its declaration
+    -ftrivial-auto-var-init=uninitialized) unset NFCXX_IR_AUTO_INIT ;;
     -isystem|-idirafter)
       i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: $arg needs a directory" >&2; exit 2; }
       if [ "$arg" = -isystem ]; then isys+=("--sys_include=$(abs_path "${args[$i]}")"); else idafter+=("--sys_include=$(abs_path "${args[$i]}")"); fi ;;
@@ -115,6 +122,8 @@ if [ -n "$target" ]; then
   [ -d "$base/lib_$target" ] || { echo "pathb-dump: no predefined macros for target '$target' in $base" >&2; exit 2; }
   # plain char is signed, as on the x86-64 host and in wasm32: EDG's linux_riscv32 table has it unsigned
   target_opts=(--target "$target" --signed_chars)
+  # linux_i686: va_list is `char *` (the i386 ABI), which the IR back end reads and writes through the object's address (NFCXX_IR_VALIST_PTR)
+  [ "$target" != linux_i686 ] || export NFCXX_IR_VALIST_PTR=1
 fi
 
 sys_inc=(${isys[@]+"${isys[@]}"}); gnu_opts=()

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc|pathb   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
+#   NFCXX_BACKEND=qbe|gcc|pathb   (default: pathb on x86-64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
+#              else qbe; qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
+#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
 #              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
 #              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
 #              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
@@ -39,7 +40,14 @@ set -euo pipefail
 shopt -s extglob
 root=$(cd "$(dirname "$0")" && pwd)
 host=${NFCC_HOST_CC:-cc}
-backend=${NFCXX_BACKEND:-qbe}
+# The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux, and then a unit Path B cannot
+# take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the environment sets it).
+# Anywhere else, or without the harness, it is the qbe backend (cproc), as before. NFCXX_BACKEND=qbe|gcc|pathb chooses one.
+if [ -n "${NFCXX_BACKEND:-}" ]; then backend=$NFCXX_BACKEND
+elif [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] && [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] &&
+     [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc" ]; then
+  backend=pathb; export NFCXX_PATHB_FALLBACK=${NFCXX_PATHB_FALLBACK:-gcc}
+else backend=qbe; fi
 version=0.1
 
 die() { echo "nfcc: error: $*" >&2; exit 1; }
@@ -175,13 +183,21 @@ gcconly() {
 }
 gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ]; }; } || return 1; gccf+=("$1"); }
 # NFCXX_BACKEND=pathb: the kernel's option set (docs/notes/nfcc-pathb.md, docs/notes/linux-kernel.md). The options Path B honours go to
-# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
+# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -ftrivial-auto-var-init=zero, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
 # front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
 # any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
 pbf=() nofp=0 nounwind=0 wchar16=0
+# The real-mode boot code's options (-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2): Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# --regparm=3 --m16: ILP32, QBE's i386_regparm3, a 32-bit object with .code16gcc code), decided in pathb_reason when the whole command line is known.
+# -mregparm=3 without -m16 is not honoured (a 32-bit hosted compile is gcc's); -march=i386 and -mpreferred-stack-boundary=2 change nothing
+# on QBE's i386 code (it uses 386 instructions only and keeps 4-byte stack alignment). All of them are kept for a gcc compile (gccf).
+pb_m16=0 pb_regparm=0
 pathb_option() {   # 0: handled here
   case $1 in
+    -m16) pb_m16=1 ;;
+    -mregparm=3) pb_regparm=1 ;;
     -funsigned-char|-fno-signed-char|-fsigned-char|-fno-unsigned-char|-ffreestanding) pbf+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) pbf+=("$1") ;;   # =pattern is gcc's (needgcc)
     -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
     -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
     -fno-asynchronous-unwind-tables) pbf+=(--no-unwind); nounwind=1 ;;
@@ -326,8 +342,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 k=0
 
 # Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
-# -fshort-wchar, -ffreestanding, and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
-# changes meaning and that Path B cannot honour (-m16, -fshort-enums, -ftrivial-auto-var-init=, -iquote, -Wa,*, ...) is made by gcc with
+# -fshort-wchar, -ffreestanding, -m16 (with -mregparm=3: the 32-bit x86 target), and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
+# changes meaning and that Path B cannot honour (-m32, -fshort-enums, -ftrivial-auto-var-init=pattern, -iquote, -Wa,*, ...) is made by gcc with
 # the options as given (pb_reason says why); it is not dropped and not an error. NFCXX_PATHB_LOG=FILE appends one line per compile:
 # "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc refuses (inline asm it
 # cannot emit, a unit with SSE code under -mno-sse) to gcc, as the nfcxx driver does; without it that compile fails.
@@ -337,6 +353,12 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   shift
   pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
+  if [ $pb_regparm = 1 ] && [ $pb_m16 = 0 ]; then pb_reason="-mregparm=3 without -m16: not honoured by Path B"; return; fi
+  if [ $pb_m16 = 1 ]; then
+    # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding. No inlining: the real-mode image is size limited (the kernel builds it -Os), and
+    # the inliner grows the code (a third more on the boot code)
+    pb_opts+=(--i386 --m16 --ir-opt=none); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)
+  fi
   # -Wa,*: options of the assembler step, which is the host cc assembling QBE's output (scripts/pathb-cc --as-opt). The ones the
   # assembler takes the same for QBE's assembly are given to that step; any other (--32, --defsym, -march=, ...) could change the
   # object's meaning, so that compile is gcc's.

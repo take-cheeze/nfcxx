@@ -336,7 +336,7 @@ module CoreNativeCandidates
     hook_names = diagnostic_literals ? verified_hook_names(native_paths) : {}
     # C_CALL_ROWS (c_call_rows.rb; the rows run only): a name only C calls that see rows take reaches no entry.
     sinks = row_calls ? CCallRows.sinks(native_paths.to_h { |p| [p, StaticDispatchRegistrations.strip_c_comments(File.read(p, encoding: 'BINARY'))] }) : nil
-    row_blank = ->(t, path) { sinks ? CCallRows.blank(StaticDispatchRegistrations.strip_c_comments(t), sinks, cxx: path.match?(CCallRows::CXX)) : t }
+    row_blank = ->(t, path) { sinks ? CCallRows.blank(StaticDispatchRegistrations.strip_c_comments(t), sinks, cxx: path.match?(CCallRows::CXX), proven: diagnostic_literals) : t }
     native_paths.each do |path|
       note.call("native #{path}")
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }

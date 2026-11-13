@@ -9,7 +9,10 @@
 #   - a function or macro whose parameter reaches only sinks or comparisons is a sink in its turn, unless a definition
 #     of its name is in C++ or cannot be read; a local `mrb_sym` assigned literals and used only by sinks is too;
 #   - the rows run leaves out a name only such calls spell; the plain run still reads it;
-#   - a macro redefinition of a base sink turns the rule off;
+#   - a local spelled as its own presym, an interned literal, and a generated local compared or passed to sinks only;
+#   - under the literal-lookup proof, the literals of an exception message (MESSAGE_ARGS);
+#   - the runtime's own registration on a core class field and its send-count label name no lookup;
+#   - a macro redefinition of a base sink or a message formatter turns the rule off;
 #   - the world's mruby looks the base sinks up through mrb_vm_find_method_rows, and the generated funcall helper is
 #     mrb_funcall.
 #
@@ -86,6 +89,54 @@ suite.check('a macro redefinition of a base sink turns the rule off',
 gen = "r1 = bc2cpp_funcall_keep(M, a, \"%\", 1, b); r2 = bc2cpp_owner_call(M, a, \"zero?\");\n"
 g_out = CCallRows.blank_generated(gen)
 suite.check('the generated funcall helper is a sink', !g_out.include?('"%"') && g_out.include?('"zero?"'))
+
+# A local named as its own presym, and an interned literal, are read as the literal they hold.
+own = <<~C
+  static mrb_value
+  inc(mrb_state *mrb, mrb_value mod, mrb_value m)
+  {
+    mrb_sym included = MRB_SYM(included);
+    if (!mrb_func_basic_p(mrb, m, included, mrb_do_nothing)) mrb_funcall_argv(mrb, m, included, 1, &mod);
+    mrb_sym kept = mrb_intern_lit(mrb, "kept_name");
+    mrb_method_search_vm(mrb, &c, kept);
+    return mrb_funcall(mrb, m, mrb_intern_lit(mrb, "interned_operand"), 0);
+  }
+C
+own_out = CCallRows.blank(own, base)
+suite.check('a local spelled as its own presym is blanked', !own_out.include?('MRB_SYM(included)'))
+suite.check('an interned literal operand is blanked, one another lookup reads stays',
+            !own_out.include?('"interned_operand"') && own_out.include?('"kept_name"'))
+# The generated code's locals are read around their literal assignment, a static one compared included.
+runtime = <<~C
+  static bool is_ps(mrb_state* M, mrb_sym mid) {
+    static mrb_state* st; static mrb_sym ps;
+    if (st != M) { ps = mrb_intern_lit(M, "public_send"); st = M; }
+    return mid == ps;
+  }
+  static void leaky(mrb_state* M, mrb_value r) {
+    mrb_sym s = mrb_intern_lit(M, "leaks");
+    other(M, r, s);
+  }
+C
+rt_out = CCallRows.blank_generated(runtime)
+suite.check('a generated static local only compared is blanked, one passed elsewhere stays',
+            !rt_out.include?('"public_send"') && rt_out.include?('"leaks"') && rt_out.size == runtime.size)
+# MESSAGE_ARGS: under the literal-lookup proof a message's literals are no names; the format's earlier operands stay.
+msg = 'mrb_no_method_error(M, mid, args, "%s method", priv ? "private" : "protected", mid, recv); ' \
+      'mrb_name_error(mrb, mrb_intern_lit(mrb, "named"), "no %s", "worded");' + "\n"
+suite.check('message literals are blanked only under the proof',
+            CCallRows.blank(msg, base).include?('"protected"') &&
+              !CCallRows.blank(msg, base, proven: true).match?(/"protected"|"private"|"worded"/) &&
+              CCallRows.blank(msg, base, proven: true).include?('"named"') &&
+              !CCallRows.blank_generated(msg, proven: true).include?('"protected"'))
+suite.check('a macro redefinition of a message formatter turns the rule off',
+            CCallRows.sinks({ 'a.c' => flow, 'w.h' => "#define mrb_raisef(mrb, c, ...) other(mrb, c)\n" }).nil?)
+# The runtime's own registration names the method it defines; a send-count label is a counter key.
+unit = 'mrb_define_method(M, M->proc_class, "arity", f, MRB_ARGS_NONE());'
+suite.check("the runtime's own registration is a definition",
+            !unit.gsub(StaticDispatchRegistrations::RUNTIME_REGISTRATION_STMT, '').include?('"arity"'))
+suite.check('a send-count label is inert',
+            !StaticDispatchRegistrations.blank_inert_string_args('BC2CPP_SEND_HIT(M, "send", mid);').include?('"send"'))
 
 Dir.mktmpdir('c-call-rows') do |dir|
   native = File.join(dir, 'widget.c')
