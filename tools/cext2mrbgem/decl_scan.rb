@@ -6,11 +6,12 @@
 # What libclang gives: which function declarations the main file has, and the line and column of each name. The
 # library's cursor extents are points, so everything else is read from the text, with the regex scan's conventions:
 # the storage class and return type before the name, the parameter text, the "{" or ";" after the parameter list.
-# Columns are checked against the source (an identifier followed by "("), so a name that comes from a macro expansion
-# is refused rather than recorded under the macro's name.
+# Each position is checked against the text: it must start an identifier followed by "(". The library does not give
+# the name, so a declaration whose name comes from a macro expansion is not caught by that check; such a declaration
+# needs a return type before its name in the text to be recorded at all.
 #
-# The C API is called by value-correct means only. CXCursor and CXSourceLocation are 32 and 24 bytes, so the System V
-# x86-64 ABI passes them in memory: the call is made with six register arguments (unused) followed by the words of
+# Struct arguments and results follow the System V x86-64 ABI. CXCursor and CXSourceLocation are 32 and 24 bytes, so
+# the ABI passes them in memory: the call is made with six register arguments (unused) followed by the words of
 # the struct on the stack, and a struct result is written through a hidden first pointer. CXString (returned in two
 # registers, and only the first one is readable here) is not used. The library's C mode is not reachable through
 # clang_parseTranslationUnit, so C sources go to the runner tools/cext2mrbgem/libclang-cursors-c (LIBCLANG_EDG_RUNNER),
