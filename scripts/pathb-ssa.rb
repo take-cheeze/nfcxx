@@ -383,13 +383,23 @@ def zero_of(t) = head(t) == "ptr" ? ["null", t] : ["const", t, "0"]
 
 class Converter
   attr_reader :out, :rpo, :promoted, :mut
+  SETJMP_PROMOTE_BUDGET = 1_000_000
 
   def initialize(fn)
     @fn = fn
     @void = fn.ret[1] == "void"
     @promoted, twice = promotable_slots(fn)
     @cfg = Cfg.new.build(fn.body, @void).blocks
-    drop_live_across_setjmp if twice
+    if twice
+      # A huge function that calls _setjmp (mruby's mrb_vm_exec: thousands of blocks, over a thousand candidate slots) keeps all its slots in
+      # memory, as every function with a setjmp did: promoting them made its SSA text 2.3 times larger and the SSA stage take more than
+      # pathb-cc's 300 s. The liveness analysis and the phis of the promoted slots cost blocks times slots.
+      if @cfg.size * @promoted.size > SETJMP_PROMOTE_BUDGET
+        @promoted = {}
+      else
+        drop_live_across_setjmp
+      end
+    end
     @types = {}   # variable => IR type (promoted slots and registers assigned with set)
     @mut = {}     # register => true when some set assigns it
     @subst = {}   # register bound to a promoted load => operand
