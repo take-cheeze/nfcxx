@@ -134,8 +134,8 @@ code has none. `arch/x86/realmode/rm` is not built in this configuration and is 
 
 ## Path B (`NFCXX_BACKEND=pathb`): how many C files it builds
 
-nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is opt-in, and it
-takes the kernel's option set. `KCC=nfcc NFCXX_BACKEND=pathb` no longer stops at the first file (it did: `-nostdinc`,
+nfcc has a Path B route (EDG's C front end -> typed IR -> QBE, no cproc; docs/notes/nfcc-pathb.md). It is the default on x86-64 Linux
+when the harness is built (a unit it cannot take is made by gcc), and it takes the kernel's option set. `KCC=nfcc NFCXX_BACKEND=pathb` no longer stops at the first file (it did: `-nostdinc`,
 `-isystem DIR`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding` and the `-m*` options were refused, 0 of 615).
 Each option of the kernel's command line is in one of three classes:
 

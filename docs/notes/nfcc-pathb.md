@@ -1,9 +1,11 @@
 # nfcc on Path B (`NFCXX_BACKEND=pathb`)
 
-`nfcc`, the `cc` drop-in for make, CMake, autoconf and the Linux kernel build, has three backends: `qbe` (the default:
-cproc -> QBE), `cil` and `gcc`. `NFCXX_BACKEND=pathb` adds a fourth, **opt-in** one: each C source goes through
+`nfcc`, the `cc` drop-in for make, CMake, autoconf and the Linux kernel build, has four backends: `qbe` (cproc -> QBE), `cil`, `gcc` and
+`pathb`, which is the **default** on x86-64 Linux when this checkout has the Path B harness (`scripts/setup-pathb.sh`) and QBE: each C source goes through
 `scripts/pathb-cc` in C mode (EDG's C front end -> typed IR -> QBE IL, no cproc), the route `./nfcxx` takes for a C input.
-The default stays `qbe`.
+With the default (no `NFCXX_BACKEND`), a unit Path B cannot take (an option it cannot honour, a construct it refuses) is made by gcc, as `./nfcxx` does
+(`NFCXX_PATHB_FALLBACK=gcc` is then set unless the environment sets it); an explicit `NFCXX_BACKEND=pathb` keeps the strict behaviour below. Without the
+harness, or on another host, the default is still `qbe`. `NFCXX_BACKEND=qbe` chooses cproc.
 
 ```
 NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, ... are accepted and do not change the object; -fPIC and -shared make the object fit a shared object, see below)
