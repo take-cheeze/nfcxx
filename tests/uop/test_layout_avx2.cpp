@@ -361,12 +361,12 @@ int main() {
   run_plan_case(dir, 64, 64, 8, rng);
   run_plan_case(dir, 256, 256, 8, rng);
 
-  // emit_for_solution refuses what it cannot emit: a packed plan without B in Panel16, VecM with A^T and C in different
+  // emit_for_solution refuses what it cannot emit: a packed plan without B in Panel, VecM with A^T and C in different
   // storages, and a combination with no emitter (VecN with reduce-vertical).
   {
     Solution s = solve(gemm_rowsum(48, 64, 17));
     s.storage.erase("B");
-    expect_plan_throw(s, 48, 64, 17, "packed plan without Panel16 B");
+    expect_plan_throw(s, 48, 64, 17, "packed plan without Panel B");
   }
   {
     Solution s = solve(gemm_rowsum(256, 256, 8));

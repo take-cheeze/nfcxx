@@ -1,4 +1,5 @@
 /* EXPECT: 0 */
+// MACOS-XFAIL-gcc: Apple clang 21 at -O2 takes the wrong label for `goto *p` when p is compared against label addresses (local_ptr(0) = 12, not 2; -O0 is right)
 // XFAIL-qbe: cproc has no computed goto (label addresses, goto *p); Path B lowers it (docs/notes/pathb-computed-goto.md)
 /* GNU C computed goto: label addresses (&&label), `goto *ptr`, a static dispatch table of label addresses (Lua's lvm.c
    and the ljumptab.h pattern), a label address kept in a local, a table indexed at run time, and a pointer compare.

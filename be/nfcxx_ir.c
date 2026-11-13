@@ -347,9 +347,28 @@ static int ir_pointee_is_volatile(a_type_ptr t)
   return 0;
 }
 
+/* The va_list object. EDG's front end is configured for the x86-64 target, so its __va_list_tag is the System V 24-byte
+   struct. On an aarch64 host the va_start that QBE emits fills the 32-byte AAPCS64 __va_list (__stack, __gr_top, __vr_top,
+   __gr_offs, __vr_offs): a 24-byte slot overlapped the next local (sqlite3_mprintf's StrAccum overwrote gr_offs). */
+#if defined(__aarch64__)
+#define IR_VA_LIST_SIZE 32ULL
+#else
+#define IR_VA_LIST_SIZE 24ULL
+#endif
+
 static unsigned long long ir_size_of(a_type_ptr t)
 {
-  return (unsigned long long)f_size_of_type(skip_typerefs(t));
+  a_type_ptr s = skip_typerefs(t);
+  if (s->kind == tk_array && !s->variant.array.is_variable_size_array) {
+    a_type_ptr e = skip_typerefs(s->variant.array.element_type);
+    if (e->kind == tk_class || e->kind == tk_struct) {
+      if (class_type_supp(e)->is_va_list_tag)
+        return (unsigned long long)s->variant.array.variant.number_of_elements * IR_VA_LIST_SIZE;
+    }
+  }
+  if ((s->kind == tk_class || s->kind == tk_struct) && class_type_supp(s)->is_va_list_tag)
+    return IR_VA_LIST_SIZE;
+  return (unsigned long long)f_size_of_type(s);
 }
 
 /* Alignment in bytes of an object type (EDG's layout). Printed next to sizes of slots and globals. */
@@ -1039,6 +1058,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
 static int ir_noinline_attr = 0;       /* NFCXX_IR_NOINLINE=1: a function with __attribute__((noinline)) has a (noinline) head, which the inliner respects */
+static int ir_auto_zero = 0;            /* NFCXX_IR_AUTO_INIT=zero: -ftrivial-auto-var-init=zero, see ir_decl_zero */
 static int ir_scopes = 0;               /* NFCXX_IR_SCOPES=1: print only (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its
                                            scope ends (block end, return, a jump out of it), for AddressSanitizer's use after scope */
 #define IR_SCOPE_FACTS() (ir_borrow || ir_scopes)
@@ -3136,7 +3156,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     case eok_va_copy: {
       char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
-      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_emit(ir_fmt("(copy %llu %s %s)", IR_VA_LIST_SIZE, dst, src));
       ir_note(0, k, 1);
       return ir_mk_void();
     }
@@ -5054,15 +5074,22 @@ static ir_val ir_call(an_expr_node_ptr e)
   }
   if (agg_ret) {
     sret = ir_temp(e->type);
+#if defined(__aarch64__)
+    /* A _Float128 result of a wrapper (be/nfcxx_ldrt.c, __nfcxx_f128w_): the wrapper takes the result pointer as its first
+       ordinary argument. (sret ...) would pass it in x8, the AArch64 indirect-result register, which the wrapper does not
+       read. The call is void (the wrapper's own return value is not used), so nothing else changes. */
+    if (f128w) args = ir_fmt("%s %s", args, sret.s);
+    else
+#endif
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
 #if defined(__aarch64__)
   /* A copy-elided class result that EDG lowered into the first parameter (ir_makes_first_arg): the call says so with
-     (sret T DEST), and the SSA route returns the aggregate in its own register (x8 on AArch64, as the library does) and
-     copies it to DEST. The first operand is the destination, not an argument. A call to a function defined in this
-     module keeps the hidden pointer (its definition takes the pointer as a parameter): scripts/pathb-ssa-qbe.rb decides. */
-  a_type_ptr hid_ft = f->kind == enk_routine ? ir_callee_fn_type(f) : NULL;
+     (hidden-dest T DEST). The SSA route passes DEST as the callee's result pointer in x8 (AAPCS64) through a thunk, so the
+     callee builds the object in DEST itself (no copy: a std::string's buffer may point into it). The first operand is
+     the destination, not an argument (scripts/pathb-ssa-qbe.rb, call_parts). */
+  a_type_ptr hid_ft = ir_callee_fn_type(f);   /* a pointer callee too: a virtual call takes the same convention */
   if (!agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
       hid_ft->variant.routine.extra_info->value_returned_as_parameter &&
       !hid_ft->variant.routine.extra_info->return_value_parameter_follows_this &&
@@ -5071,9 +5098,12 @@ static ir_val ir_call(an_expr_node_ptr e)
     a_type_ptr dt = d.t != NULL ? skip_typerefs(d.t) : NULL;
     if (dt != NULL && dt->kind == tk_pointer && ir_is_cabi_agg(dt->variant.pointer.type)) {
       hid_dest = 1;
-      args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
+      args = ir_fmt("%s (hidden-dest %s %s)", args, ir_abi_ty(dt->variant.pointer.type), d.s);
     }
   }
+  if (!hid_dest && !agg_ret && ir_is_void(e->type) && hid_ft != NULL && hid_ft->variant.routine.extra_info != NULL &&
+      hid_ft->variant.routine.extra_info->value_returned_as_parameter && !ir_is_cdtor_call(f, 0) && !ir_is_cdtor_call(f, 1))
+    return ir_gap(e->type, "call of a class-result function without its result object", 0, (int)eok_call);
 #endif
   {
     int ints = 0, sse = 0, shape_ok = 1;
@@ -7534,6 +7564,16 @@ static int ir_init_follows(a_statement_ptr s, a_variable_ptr var)
   return 0;
 }
 
+/* __attribute__((uninitialized)) on a variable: -ftrivial-auto-var-init leaves it alone. The attribute is in the harness's
+   attribute table (scripts/setup-pathb.sh), as an unrecognized-kind entry that EDG keeps on the variable. */
+static int ir_var_uninitialized_attr(a_variable_ptr var)
+{
+  an_attribute_ptr ap;
+  for (ap = var->source_corresp.attributes; ap != NULL; ap = ap->next)
+    if (ap->name != NULL && strcmp(ap->name, "uninitialized") == 0) return 1;
+  return 0;
+}
+
 static void ir_decl_zero(a_statement_ptr s)
 {
   an_il_entity_list_entry_ptr entry;
@@ -7548,6 +7588,12 @@ static void ir_decl_zero(a_statement_ptr s)
     if ((kind == initk_zero ||
          (kind == initk_dynamic && var->initializer.dynamic != NULL && var->initializer.dynamic->is_partially_initialized)) &&
         !ir_init_follows(s, var))
+      ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
+    /* -ftrivial-auto-var-init=zero: an automatic variable with no initializer is all-bits-zero from its declaration (padding
+       too, as gcc's), each time the declaration is reached. A jump past the declaration skips the zeroing, as in gcc. A
+       variable-length array has a stmk_vla_decl, not this; a reference has an initializer by the language. */
+    else if (ir_auto_zero && kind == initk_none && !var->is_vla && !ir_is_ref_type(var->type) && !ir_var_uninitialized_attr(var) &&
+             !ir_init_follows(s, var))
       ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
   }
 }
@@ -8394,6 +8440,10 @@ void nfcxx_ir_back_end(void)
   {
     const char *sf = getenv("NFCXX_IR_SCOPES");
     ir_scopes = sf != NULL && strcmp(sf, "1") == 0;
+  }
+  {
+    const char *az = getenv("NFCXX_IR_AUTO_INIT");
+    ir_auto_zero = az != NULL && strcmp(az, "zero") == 0;
   }
   {
     const char *nf = getenv("NFCXX_IR_NOINLINE");

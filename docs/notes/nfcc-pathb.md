@@ -1,9 +1,11 @@
 # nfcc on Path B (`NFCXX_BACKEND=pathb`)
 
-`nfcc`, the `cc` drop-in for make, CMake, autoconf and the Linux kernel build, has three backends: `qbe` (the default:
-cproc -> QBE), `cil` and `gcc`. `NFCXX_BACKEND=pathb` adds a fourth, **opt-in** one: each C source goes through
+`nfcc`, the `cc` drop-in for make, CMake, autoconf and the Linux kernel build, has four backends: `qbe` (cproc -> QBE), `cil`, `gcc` and
+`pathb`, which is the **default** on x86-64 Linux when this checkout has the Path B harness (`scripts/setup-pathb.sh`) and QBE: each C source goes through
 `scripts/pathb-cc` in C mode (EDG's C front end -> typed IR -> QBE IL, no cproc), the route `./nfcxx` takes for a C input.
-The default stays `qbe`.
+With the default (no `NFCXX_BACKEND`), a unit Path B cannot take (an option it cannot honour, a construct it refuses) is made by gcc, as `./nfcxx` does
+(`NFCXX_PATHB_FALLBACK=gcc` is then set unless the environment sets it); an explicit `NFCXX_BACKEND=pathb` keeps the strict behaviour below. Without the
+harness, or on another host, the default is still `qbe`. `NFCXX_BACKEND=qbe` chooses cproc.
 
 ```
 NFCXX_BACKEND=pathb nfcc -c a.c -o a.o        compile (-O*, -g*, -W*, ... are accepted and do not change the object; -fPIC and -shared make the object fit a shared object, see below)
@@ -37,8 +39,9 @@ classes and never drops one that changes what the program means:
 | `-ffreestanding` | honoured: `__STDC_HOSTED__` is 0. The headers are still the ones on the include path: choose them with `-nostdinc -isystem` |
 | `-mno-sse`, `-mno-sse2`, `-mno-80387`, `-msoft-float` | checked, as `qbe-cc` does: QBE runs with `-n` (no `%xmm15` for integer moves) and the assembly of the unit is refused (status 5, `uses SSE or x87`) when it names an SSE or x87 register or an x87 instruction. Inline asm is the program's own and is not checked. See `NFCXX_PATHB_FALLBACK` below |
 | `-fno-asynchronous-unwind-tables` | honoured: QBE `-U`, no `.cfi` directives and so no `.eh_frame` |
+| `-ftrivial-auto-var-init=zero` (`=uninitialized` turns it off again) | honoured: `scripts/pathb-cc` and `scripts/pathb-dump` pass it to the IR lowering (`NFCXX_IR_AUTO_INIT=zero`, `be/nfcxx_ir.c` `ir_decl_zero`): every automatic variable (scalar, array, struct, union, padding too) with no initializer is zeroed where its declaration is reached, each time it is reached. Not VLAs, not a variable with `__attribute__((uninitialized))`, not one whose declaration a `goto` or `switch` jumps over (gcc's own rule) |
 | `-mno-red-zone`, `-mcmodel=`, `-mtune=`, `-mpreferred-stack-boundary=`, `-mno-mmx`, `-mno-avx`, `-fno-PIE`, `-fno-stack-protector`, `-fno-jump-tables`, `-fno-delete-null-pointer-checks`, `-fno-strict-overflow`, `-fno-common`, `-fcf-protection=`, `-fconserve-stack`, `-fstrict-flex-arrays=`, ... | no effect on QBE's code (it never uses the red zone, makes no jump tables or stack protector, assumes nothing from overflow or null checks, and writes PIC code that a non-PIE link takes): dropped on Path B, kept for a gcc compile |
-| `-iquote`, `-imacros`, `-undef`, `--sysroot=`, `-Wa,*`, `-m16`/`-m32`/`-mx32`, `-fshort-enums`, `-fpack-struct`, `-ftrivial-auto-var-init=`, `-ffast-math`, other semantic `-f`/`-m` options, an `-f` option nfcc does not know | the compile goes to **gcc**; an unknown option is then gcc's own error |
+| `-iquote`, `-imacros`, `-undef`, `--sysroot=`, `-Wa,*` other than `--fatal-warnings`, `--noexecstack`, `-W`, `--no-warn`, `-mrelax-relocations=`, `-mx86-used-note=` (those go to the assembler step), `-m16`/`-m32`/`-mx32`, `-fshort-enums`, `-fpack-struct`, `-ftrivial-auto-var-init=`, `-ffast-math`, other semantic `-f`/`-m` options, an `-f` option nfcc does not know | the compile goes to **gcc**; an unknown option is then gcc's own error |
 | `-fsanitize*`, `-fopenmp`, `-fprofile*`, `--coverage`, `-fstack-check`, C++ | refused (instrumentation would be dropped), as on the other backends |
 | `-O*`, `-g*`, `-W*`, `-fwrapv`, `-fno-strict-aliasing`, `-m64`, `-march=` ... | accepted, no effect (as on qbe) |
 | `-fPIC`, `-fpic`, `-shared` | honoured: `--pic` (below) |
@@ -54,7 +57,8 @@ status (3, 5, ...) and a `pathb-cc: FILE: SSA route: ...` line, so a build syste
 `NFCXX_PATHB_FALLBACK=gcc` nfcc makes that compile with gcc instead (the log line is `gcc SRC: Path B refused it (status N)`),
 which is how a kernel build keeps going on the files Path B cannot do (inline asm it cannot emit, the real-mode boot
 code); without it nfcc, as a `cc`, does not choose for the build. The `-ftrivial-auto-var-init=zero` of a kernel with
-`CONFIG_INIT_STACK_ALL_ZERO` sends every file to gcc: Path B does not zero automatic variables.
+`CONFIG_INIT_STACK_ALL_ZERO` is honoured by Path B and no longer sends a file to gcc (it was 650 of 914 compiles of the 6.8 tinyconfig
+measurement). `=pattern` (the 0xFE fill) is not: Path B has no pattern fill, so that compile is gcc's.
 
 Test: `tests/nfcc/run.sh`.
 

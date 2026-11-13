@@ -96,6 +96,8 @@ module StaticDispatchRegistrations
   # LEFT_OUT (codegen_emit.rb): what stands in for a left-out entry's registration, which looks nothing up.
   # A compiled class body's registration on `self` (CORE_ROWS_COMPILED: the core gem's class bodies), as a statement.
   SELF_REGISTRATION_STMT = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*mrb_class_ptr\((?:self|r\d+)\)\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,[^;]*\);/
+  # The runtime's own registration on a core class field (bc2cpp.rb: Proc#arity on M->proc_class), as a statement.
+  RUNTIME_REGISTRATION_STMT = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*M->\w+\s*,\s*"(?:[^"\\\n]|\\.)*"\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,[^;]*\);/
   # GENERATED_COMMENTS: a whole-line comment of the generated code (the probe's annotations, `// POLY_DIAG ... name="x"`)
   # looks nothing up, so its quoted names are no literals.
   GENERATED_COMMENT = %r{^[ \t]*//[^\n]*$}
@@ -982,10 +984,11 @@ module StaticDispatchRegistrations
 
   # INERT_STRING_ARGS (closed only): a string literal that is the whole of one of these arguments is read, never
   # interned: mrb_get_args' format, an operator-table key (cdump.c's OPERATOR_SYMBOL names the operator
-  # MRB_OPSYM(key) stands for) and a strcmp-family operand (compared with a name, not looked up). A position of nil
+  # MRB_OPSYM(key) stands for), a strcmp-family operand (compared with a name, not looked up) and the generated
+  # code's send-count label (bc2cpp.rb's BC2CPP_SEND_HIT, a counter key). A position of nil
   # is every argument. mrb_sys_fail's message is not here: it reaches SystemCallError._sys_fail when that class
   # exists, so CoreNativeCandidates decides it (only while nothing makes SystemCallError).
-  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil }.freeze
+  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil, 'BC2CPP_SEND_HIT' => 1 }.freeze
   INERT_CALL = /(?<![\w.>])(?:std::)?(#{INERT_STRING_ARGS.keys.join('|')})\s*\(/
   STRING_ARG = /\A"(?:[^"\\\n]|\\.)*"\z/
 
@@ -1490,12 +1493,17 @@ module StaticDispatchRegistrations
       row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, row_generated.map { |src| CoreRows.strip_sym_table(src) },
                                                                 core: core, exact_impls: true,
                                                                 strip_generated: lambda { |src|
-                                                                  src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
-                                                                     .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
+                                                                  # C_CALL_ROWS: funcall names and inert literals as in a native.
+                                                                  CCallRows.blank_generated(blank_inert_string_args(
+                                                                    src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                                       .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
+                                                                       .gsub(RUNTIME_REGISTRATION_STMT, '')
+                                                                  ), proven: !symbol_lookups.nil?)
                                                                 },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
                                                                 enumerator_free: -> { proof.call.holds }, engine_names: engine,
-                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?)
+                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?,
+                                                                row_calls: true)
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
     end
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,

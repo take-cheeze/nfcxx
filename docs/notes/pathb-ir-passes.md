@@ -35,6 +35,10 @@ at the default depth (an 8.9 MB unit of libstdc++-heavy code went to 300 MB in 7
 - `--max-growth=F` (default 2.0): once the module has grown to F times its node count on entry, only a callee of at most
   `--max-tiny=N` (default 16, 0 for none) is inlined any more ("module over --max-growth" for the others). An accessor or
   wrapper costs about what its call does, and the first functions of the module must not use the budget up for the later ones.
+- `--tiers=A,B` (default 16,40, empty for none): the rounds run in tiers. The first rounds take only callees that cost up to A,
+  then up to B, and the last rounds take everything up to `--max-callee`. The small callees (accessors, shared_ptr and
+  vector members) are inlined everywhere before the budget goes to the big ones, which the first functions of the module
+  would otherwise use up.
 
 The cost weighs each node by what it becomes in code (`--cost=weighted`, the default; `--cost=nodes` counts every node as 1).
 Type forms, declarations, constants, casts and address arithmetic cost 0, as do loads and stores of a local slot (promotion makes
