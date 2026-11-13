@@ -54,7 +54,7 @@ class CodeGen
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
     # SEED: a declared class parameter whose entry guard checks it is exactly that class on entry, whatever the call
     # sites pass (an unmodelled read would otherwise delete the pool), so the declared bits are fixed, not grown.
-    # A Float or bool declaration seeds the bits of its class (both booleans for bool).
+    # A Float declaration seeds the Float bit.
     @declared_arg_pools = {}
     (self.class.declared_params || {}).each do |label, guards|
       guards.each do |pos, cls, _key, _text, kind = :class|
@@ -145,12 +145,9 @@ class CodeGen
     class_pool_ivar_mask(irep, name) || NumericFlow::OTHER
   end
 
-  # The class bits a declared parameter of +kind+ holds on entry (see setup_class_pools).
-  def declared_arg_bits(cls, kind)
-    case kind
-    when :bool then numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass')
-    else numeric_class_bit(cls)
-    end
+  # The class bit a declared parameter holds on entry (see setup_class_pools): its class, or Float for a Float value kind.
+  def declared_arg_bits(cls, _kind)
+    numeric_class_bit(cls)
   end
 
   def class_pool_entry_mask(irep, reg)

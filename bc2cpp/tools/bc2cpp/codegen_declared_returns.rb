@@ -260,9 +260,8 @@ class CodeGen
       var = names[2 + pos]
       next unless var
 
-      # VALUE_KIND: Float and bool parameters test the value's kind (the same tests a declared return uses).
+      # VALUE_KIND: a Float parameter tests the value's kind (the same test a declared return uses).
       cond = if kind == :float then declared_return_condition(:float, cls, false, var)
-             elsif kind == :bool then declared_return_condition(:bool, cls, false, var)
              else exact_class_guard(owner_class_ptr_expr(cls), var)
              end
       "  if (mrb_unlikely(!(#{cond}))) bc2cpp_declared_param_violation(M, #{var}, \"#{key}\", #{pos + 1}, \"#{text}\"); " \

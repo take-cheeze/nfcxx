@@ -104,9 +104,9 @@ module RbsParamCheck
       ann = ctx[:class_annotations][label]
       positions = sig.args.each_with_index.filter_map do |type, i|
         next if ctx[:comment_class_args][label]&.[](i)
-        if type.value
-          # VALUE_KIND: a Float or bool parameter is guarded by its kind, not by a program class annotation.
-          next [i, type.value == :float ? 'Float' : 'bool', type.value]
+        if type.value == :float
+          # VALUE_KIND: a Float parameter is guarded by its kind, not by a program class annotation.
+          next [i, 'Float', :float]
         end
         next unless type.kind == :class && ann && ann.args[i] == type.cls
 

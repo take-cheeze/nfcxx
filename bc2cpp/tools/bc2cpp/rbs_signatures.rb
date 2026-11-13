@@ -288,10 +288,9 @@ module RbsSignatures
         # VALUE_KIND: `Float` is a core class with no program hint; `value` carries it to the parameter guard and seed.
         args.empty? ? Type.new(kind: :class, cls: name, text: text, value: (name == 'Float' ? :float : nil)) : Type.new(kind: :other, text: text)
       end
-    when RBS::Types::Bases::Bool
-      # VALUE_KIND: `bool` is true or false; a parameter of this type has both classes' bits in its pool.
-      Type.new(kind: :other, text: text, value: :bool)
     else
+      # `bool` stays an unchecked, hint-free type: callers rely on truthiness (an implicit conversion), so a declared
+      # `bool` is neither guarded nor trusted by the seed.
       Type.new(kind: :other, text: text)
     end
   end
