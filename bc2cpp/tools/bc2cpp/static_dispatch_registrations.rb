@@ -1262,6 +1262,9 @@ module StaticDispatchRegistrations
     # CORE_ROWS: the dynamic names the engine itself gives, less what only core Ruby, the natives under 3rd/ and the
     # generated code's literals give (the core run reads those again by its own rules; CoreRows.engine_names).
     rows_dynamic = Set.new(protocol)
+    # The names the engine's bytecode sends (the fixpoint's and the load phase's), for rows only when
+    # CoreRows.bytecode_sends_count? says a body may run as bytecode.
+    rows_bytecode = Set.new
     cite(protocol, 'always dynamic (ALWAYS_DYNAMIC)')
     if symbol_lookups
       dynamic.merge(symbol_lookups)
@@ -1387,7 +1390,7 @@ module StaticDispatchRegistrations
           known.merge(reach)
           next
         end
-        rows_dynamic << name if into.equal?(dynamic)
+        rows_bytecode << name if into.equal?(dynamic)
         next unless into.add?(name)
 
         grew = true
@@ -1411,7 +1414,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
-    rows_dynamic.merge(load_names)
+    rows_bytecode.merge(load_names)
     cite(load_names, 'sent while mrblib loads')
     bytecode_blocks = runs.each_value.any? { |r| runnable_proc_text(r[:gen]).match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
@@ -1443,7 +1446,8 @@ module StaticDispatchRegistrations
                  compiled: NeverCalledRegistrations.parse_compiled_entries(core_err).to_set { |m| "#{m[:owner]}##{m[:name]}" } }
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven,
-                                                engine_dynamic: symbol_lookups && rows_dynamic,
+                                                engine_dynamic: symbol_lookups &&
+                                                  (CoreRows.bytecode_sends_count?(closed_only, bytecode_blocks) ? rows_dynamic | rows_bytecode : rows_dynamic),
                                                 super_names: super_reach.keys.to_set | super_unknown, core_run: core_run) : nil
 
     { super_reach: super_reach, class_owners: class_owners,

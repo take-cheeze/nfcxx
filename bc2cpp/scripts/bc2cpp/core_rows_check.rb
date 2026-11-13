@@ -9,7 +9,8 @@
 #     bare index an owner call or a native singleton call takes;
 #   - the engine reading: a send's or Symbol literal's operand looks nothing up, any other operand does, and an
 #     unresolved alias keeps every symbol; the dynamic and `super` names count, and a name only a native under 3rd/
-#     gives is none of the engine's (the core run reads that source itself);
+#     gives is none of the engine's (the core run reads that source itself); the closed build's engine bytecode sends
+#     count only where a bytecode proc may run (ENGINE_ROWS_COMPILED);
 #   - the outputs: the header defines a row to 2, the lists read without the key as empty, and the runtime helpers a
 #     proven receiver calls through find rows (bc2cpp_find_proven).
 #
@@ -81,6 +82,10 @@ suite.check('another operand of the engine is a lookup', names.include?('undef_m
 suite.check('the dynamic and super names count', names.superset?(Set['dyn', 'sup']))
 ireps['c'] = irep.new('c', %i[hidden], [insn.new(:ALIAS, :x, nil)])
 suite.check('an unresolved alias keeps every symbol', CoreRows.engine_names(ireps, [], Set.new, Set.new).include?('hidden'))
+suite.check('ENGINE_ROWS_COMPILED: in the VM-free closed build the engine bytecode sends give no row lookup',
+            !CoreRows.bytecode_sends_count?(true, false))
+suite.check('they still count in the open build, or when the generated code builds a bytecode proc',
+            CoreRows.bytecode_sends_count?(false, false) && CoreRows.bytecode_sends_count?(true, true))
 
 Dir.mktmpdir do |dir|
   core_c = File.join(dir, '3rd/mruby/src/x.c')
