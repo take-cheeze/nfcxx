@@ -782,19 +782,41 @@ void init_tables() {
        {"__nfcxx_signbit",
         "static int __nfcxx_signbit(double x) { union { double d; unsigned long u; } v; v.d = x; return (int)(v.u >> 63); }"}},
   };
-  for (int bytes : {4, 8}) {
-    string t = bytes == 4 ? "unsigned int" : "unsigned long", b = std::to_string(bytes);
+  // The legacy __sync_* family (GCC): cproc has no such built-ins, so each sized form is a helper over the __atomic_*
+  // forms with sequential consistency (5). EDG calls them by these names; without a helper the call is undeclared.
+  for (int bytes : {1, 2, 4, 8}) {
+    string t = bytes == 1 ? "unsigned char" : bytes == 2 ? "unsigned short" : bytes == 4 ? "unsigned int" : "unsigned long",
+           b = std::to_string(bytes);
+    auto helper = [&](const string &name, const string &def) { HELPER_BUILTINS[name] = {"__nfcxx_" + name, def}; };
     for (auto [op, sym] : vector<std::pair<string, string>>{{"add", "+"}, {"sub", "-"}, {"and", "&"}, {"or", "|"}, {"xor", "^"}}) {
       string name = "__sync_" + op + "_and_fetch_" + b;
-      HELPER_BUILTINS[name] = {"__nfcxx_" + name, "static " + t + " __nfcxx_" + name + "(void *p, " + t +
-                                                      " v) { return __atomic_fetch_" + op + "((" + t + " *)p, v, 5) " +
-                                                      sym + " v; }"};
+      helper(name, "static " + t + " __nfcxx_" + name + "(void *p, " + t + " v) { return __atomic_fetch_" + op + "((" + t +
+                       " *)p, v, 5) " + sym + " v; }");
+      name = "__sync_fetch_and_" + op + "_" + b;
+      helper(name, "static " + t + " __nfcxx_" + name + "(void *p, " + t + " v) { return __atomic_fetch_" + op + "((" + t +
+                       " *)p, v, 5); }");
     }
-    string name = "__sync_val_compare_and_swap_" + b;
-    HELPER_BUILTINS[name] = {"__nfcxx_" + name, "static " + t + " __nfcxx_" + name + "(void *p, " + t + " o, " + t +
-                                                    " n) { __atomic_compare_exchange_n((" + t +
-                                                    " *)p, &o, n, 0, 5, 5); return o; }"};
+    // nand has no __atomic_fetch_ form here: a compare-and-swap loop stores ~(old & v).
+    string nand = "static " + t + " __nfcxx___sync_fetch_and_nand_" + b + "(void *p, " + t + " v) { " + t +
+                  " o = __atomic_load_n((" + t + " *)p, 5); while (!__atomic_compare_exchange_n((" + t +
+                  " *)p, &o, (" + t + ")~(o & v), 0, 5, 5)) { } return o; }";
+    helper("__sync_fetch_and_nand_" + b, nand);
+    helper("__sync_nand_and_fetch_" + b, "static " + t + " __nfcxx___sync_nand_and_fetch_" + b + "(void *p, " + t +
+                                              " v) { " + t + " o = __atomic_load_n((" + t + " *)p, 5); while (!__atomic_compare_exchange_n((" +
+                                              t + " *)p, &o, (" + t + ")~(o & v), 0, 5, 5)) { } return (" + t + ")~(o & v); }");
+    helper("__sync_val_compare_and_swap_" + b, "static " + t + " __nfcxx___sync_val_compare_and_swap_" + b + "(void *p, " + t +
+                                                   " o, " + t + " n) { __atomic_compare_exchange_n((" + t + " *)p, &o, n, 0, 5, 5); return o; }");
+    helper("__sync_bool_compare_and_swap_" + b, "static int __nfcxx___sync_bool_compare_and_swap_" + b + "(void *p, " + t +
+                                                    " o, " + t + " n) { return __atomic_compare_exchange_n((" + t + " *)p, &o, n, 0, 5, 5); }");
+    helper("__sync_lock_test_and_set_" + b, "static " + t + " __nfcxx___sync_lock_test_and_set_" + b + "(void *p, " + t +
+                                                " v) { return __atomic_exchange_n((" + t + " *)p, v, 5); }");
+    helper("__sync_lock_release_" + b, "static void __nfcxx___sync_lock_release_" + b + "(void *p) { __atomic_store_n((" + t +
+                                           " *)p, 0, 5); }");
   }
+  // A full barrier without __atomic_thread_fence (cproc lacks it): a sequentially consistent locked RMW on a private
+  // word, as the Path B lowering does (docs/notes/pathb-hosted.md).
+  HELPER_BUILTINS["__sync_synchronize"] = {"__nfcxx___sync_synchronize",
+                                           "static unsigned int __nfcxx_fence_word; static void __nfcxx___sync_synchronize(void) { __atomic_fetch_or(&__nfcxx_fence_word, 0u, 5); }"};
   HELPER_BUILTINS["__builtin_ia32_pause"] = {"__nfcxx_pause", "static void __nfcxx_pause(void) { }"};
   HELPER_BUILTINS["__builtin_prefetch"] = {"__nfcxx_prefetch",
                                            "static void __nfcxx_prefetch(const void *p, ...) { (void)p; }"};

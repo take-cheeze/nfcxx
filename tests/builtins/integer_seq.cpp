@@ -1,5 +1,4 @@
 // EXPECT: 0
-// QBE-ONLY: Path B reports __make_integer_seq/__type_pack_element "not a template" with --dialect=clang (pathb-dump does not model the clang dialect)
 // DIALECT: clang
 // __make_integer_seq and __type_pack_element (the builtins libc++/libstdc++ use for index_sequence).
 template <typename T, T... Is> struct seq { static const int size = sizeof...(Is); };

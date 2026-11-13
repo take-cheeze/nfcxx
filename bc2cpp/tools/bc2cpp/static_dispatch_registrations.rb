@@ -100,6 +100,9 @@ module StaticDispatchRegistrations
   # looks nothing up, so its quoted names are no literals.
   GENERATED_COMMENT = %r{^[ \t]*//[^\n]*$}
   LEFT_OUT_CALL = /bc2cpp_left_out\(\s*M\s*,\s*[A-Za-z_][A-Za-z0-9_$]*\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:true|false)\s*\);/m
+  # STEP_SUPER_STATIC (codegen_resumable.rb): the name a static step `super` passes only names the frame; the entry
+  # before it is called with no lookup. The name argument (a presym or a literal) is what this blanks.
+  STEP_SUPER_STATIC_NAME = /(?<=\bbc2cpp_dyn_super_static\(M, self, )([A-Za-z_][\w$]*, \w+\(M\), )(?:MRB_[QS]?SYM(?:_[QBE])?\(\w+\)|bc2cpp_sym\(M, \d+\)|mrb_intern_lit\(M, "(?:[^"\\]|\\.)*"\))/
   # A Ruby identifier, and -- because a generated C++ symbol may contain the
   # mangling's `$<hex>` escapes -- a generated one. Kept lowercase-initial and
   # `$`-accepting so `Game__Battle_enemy_active$3f` is recognized as the
@@ -1489,7 +1492,7 @@ module StaticDispatchRegistrations
                                                                   # C_CALL_ROWS: funcall names and inert literals as in a native.
                                                                   CCallRows.blank_generated(blank_inert_string_args(
                                                                     src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
-                                                                       .gsub(SELF_REGISTRATION_STMT, '')
+                                                                       .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
                                                                   ))
                                                                 },
                                                                 diagnostic_literals: !symbol_lookups.nil?,

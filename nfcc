@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
 #   NFCXX_BACKEND=qbe|gcc|pathb   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md)
+#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
+#              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
+#              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
+#              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, -Wa,* ...) is made by gcc, never
+#              dropped. NFCXX_PATHB_LOG=FILE: which one made each compile. NFCXX_PATHB_FALLBACK=gcc: also gcc for a unit Path B refuses)
 #   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
 #
 #   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
@@ -158,7 +162,35 @@ qbekernel() {
     *) return 1 ;;
   esac
 }
-gcconly() { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1"); }
+# gcconly OPT: an option that changes meaning or code generation in a way QBE cannot honour. gcc backend with NFCXX_GCC_PASSTHROUGH:
+# given to gcc. Path B: kept for the compile that falls back to gcc (needgcc: that compile goes to gcc, see pathb_reason). Otherwise
+# refused by the caller. gccplain OPT: an option with no effect on QBE's output (nothing the program means or QBE can honour is lost
+# by dropping it) that gcc still wants, given to gcc by the passthrough mode and kept for Path B's gcc fallback.
+needgcc=()
+gcconly() {
+  if [ "$backend" = pathb ]; then gccf+=("$1"); needgcc+=("$1"); return 0; fi
+  [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1")
+}
+gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ]; }; } || return 1; gccf+=("$1"); }
+# NFCXX_BACKEND=pathb: the kernel's option set (docs/notes/nfcc-pathb.md, docs/notes/linux-kernel.md). The options Path B honours go to
+# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
+# front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
+# any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
+pbf=() nofp=0 nounwind=0 wchar16=0
+pathb_option() {   # 0: handled here
+  case $1 in
+    -funsigned-char|-fno-signed-char|-fsigned-char|-fno-unsigned-char|-ffreestanding) pbf+=("$1") ;;
+    -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
+    -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
+    -fno-asynchronous-unwind-tables) pbf+=(--no-unwind); nounwind=1 ;;
+    -fno-PIE|-fno-pie|-fno-PIC|-fno-pic|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
+    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|\
+    -fconserve-stack|-falign-labels=*|-mno-mmx|-mno-3dnow|-mno-avx|-mno-avx2|-mno-avx512*|-mno-ssse3|-mno-sse3|-mno-sse4*|\
+    -mno-fma|-mno-bmi*|-mno-popcnt|-mno-fp-ret-in-387|-mskip-rax-setup|-mno-red-zone|-mred-zone) ;;
+    *) return 1 ;;
+  esac
+  gccf+=("$1")
+}
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
 wp_option() {
@@ -184,6 +216,7 @@ need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"
 for ((i = 0; i < n; i++)); do
   a=${args[i]}
   qbekernel "$a" && continue
+  [ "$backend" != pathb ] || ! pathb_option "$a" || continue
   case $a in
     -c) mode=compile ;;
     -S) asm=1 ;;
@@ -220,11 +253,11 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
-    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
+    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
-    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gcconly "$a" || isa+=("$a") ;;
+    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gccplain "$a" || isa+=("$a") ;;
     # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
     # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
     --param=*) isa+=("$a") ;;
@@ -234,9 +267,9 @@ for ((i = 0; i < n; i++)); do
     -fno-jump-tables) isa+=("$a") ;;
     -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
-    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || : ;;
+    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gccplain "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
-    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gcconly "$a" || : ;;
+    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gccplain "$a" || : ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
     -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) gcconly "$a" || die "$a is not supported (changes floating-point semantics)" ;;
     -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
@@ -245,7 +278,7 @@ for ((i = 0; i < n; i++)); do
         # With NFCXX_GCC_PASSTHROUGH every -f option goes to gcc, the harmless ones too: gcc's own defaults (a
         # distribution's -fstack-protector-strong, -fPIE, -fcf-protection) would otherwise stand where the build turned
         # them off.
-        if [[ ${a#-f} == @($fok) ]]; then gcconly "$a" || :; else gcconly "$a" || die "$a is not supported (not in nfcc's list of harmless -f options)"; fi ;;
+        if [[ ${a#-f} == @($fok) ]]; then gccplain "$a" || :; else gcconly "$a" || die "$a is not supported (not in nfcc's list of harmless -f options)"; fi ;;
     @*) die "response files ($a) are not supported" ;;
     -) inputs+=("c:-") ;;
     --param=*) gcconly "$a" || die "$a is not supported" ;;
@@ -275,37 +308,58 @@ if [ -n "$dfile" ] && [ -z "$depmode" ]; then die "-MF needs -MD or -MMD with -c
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 k=0
 
-# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include and a C standard; it ignores other options. So
-# nothing else may reach it: the options it cannot honour are refused here, with their names, not dropped.
-pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
-  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0
-  shift 3
-  [ ${#asf[@]} = 0 ] || die "-Wa,*: assembler options cannot be given to the pathb backend (it assembles with the host cc)"
+# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
+# -fshort-wchar, -ffreestanding, and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
+# changes meaning and that Path B cannot honour (-m16, -fshort-enums, -ftrivial-auto-var-init=, -iquote, -Wa,*, ...) is made by gcc with
+# the options as given (pb_reason says why); it is not dropped and not an error. NFCXX_PATHB_LOG=FILE appends one line per compile:
+# "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc refuses (inline asm it
+# cannot emit, a unit with SSE code under -mno-sse) to gcc, as the nfcxx driver does; without it that compile fails.
+pb_opts=() pb_std=-std=c11 pb_reason=
+pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_opts, pb_std set, when Path B can compile CSRC
+  local csrc=$1 o k2=0 w
+  shift
+  pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
+  if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
+  if [ ${#asf[@]} -gt 0 ]; then pb_reason="${asf[*]}: assembler options"; return; fi
   while [ $k2 -lt ${#pp[@]} ]; do
     o=${pp[k2]}
     case $o in
-      -D|-U|-I|-include) pbo+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
-      -D?*|-U?*|-I?*) pbo+=("$o") ;;
-      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o ;;
-      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
-      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89 ;;
-      -std=iso9899:2011) std=-std=c11 ;;
-      -isystem|-iquote|-idirafter|-imacros|-isystem?*|-iquote?*|-idirafter?*|-imacros?*|-nostdinc|-undef|--sysroot=*)
-        die "$o: not supported by the pathb backend (scripts/pathb-cc takes -I -D -U -include and -std only)" ;;
-      *) die "$o: not supported by the pathb backend" ;;
+      -D|-U|-I|-include|-isystem|-idirafter) pb_opts+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
+      -D?*|-U?*|-I?*|-isystem?*|-idirafter?*|-nostdinc) pb_opts+=("$o") ;;
+      -include?*) pb_opts+=(-include "${o#-include}") ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) pb_std=$o; pb_gnu=0 ;;
+      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) pb_std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
+      -ansi|-std=c90|-std=iso9899:1990) pb_std=-std=c89; pb_gnu=0 ;;
+      -std=iso9899:2011) pb_std=-std=c11; pb_gnu=0 ;;
+      *) pb_reason="$o: not honoured by Path B"; return ;;
     esac
     k2=$((k2 + 1))
   done
-  while [ $# -gt 0 ]; do pbo+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
-  if [ "$what" = -S ]; then
-    keep=$tmp/keep$k
-    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
-    [ $rc = 0 ] || exit $rc
-    cp "$keep/$(basename "${csrc%.*}").s" "$obj"
-  else
-    "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$obj" || exit $?
+  while [ $# -gt 0 ]; do pb_opts+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  # EDG's gcc mode defines __STRICT_ANSI__ in every C standard, which makes glibc hide POSIX (struct stat's st_atim, ...). gcc's
+  # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
+  [ $pb_gnu = 0 ] || pb_opts=(-D_DEFAULT_SOURCE "${pb_opts[@]+"${pb_opts[@]}"}")
+  if [ $wchar16 = 1 ]; then
+    # -fshort-wchar: the headers' wchar_t is unsigned short (pathb-dump), but EDG types a wide literal as the target's int, so a unit that
+    # has one goes to gcc. The host preprocessor (same options) shows the literals of the headers and macros too.
+    w=$tmp/wide$k.i
+    "$host" -E -P "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" "$@" -x c "$csrc" > "$w" 2>/dev/null || { pb_reason="-fshort-wchar: preprocessing failed"; return; }
+    if grep -Eq "(^|[^A-Za-z0-9_\"'])L[\"']" "$w"; then pb_reason="-fshort-wchar: a wide character or string literal"; return; fi
   fi
 }
+# pathb_compile -c|-S SOURCE OUTPUT: pb_opts and pb_std as pathb_reason set them
+pathb_compile() {
+  local what=$1 csrc=$2 obj=$3 keep rc=0
+  if [ "$what" = -S ]; then
+    keep=$tmp/keep$k
+    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
+    [ $rc != 0 ] || cp "$keep/$(basename "${csrc%.*}").s" "$obj"
+  else
+    "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$obj" || rc=$?
+  fi
+  return $rc
+}
+pathb_log() { [ -z "${NFCXX_PATHB_LOG:-}" ] || echo "$1" >> "$NFCXX_PATHB_LOG"; }
 
 # compile_one KIND SOURCE OBJECT
 compile_one() {
@@ -349,7 +403,17 @@ compile_one() {
   fi
   local what=-c; [ $asm = 0 ] || what=-S
   if [ $backend = pathb ]; then
-    pathb_compile "$what" "$csrc" "$obj" "${extra[@]+"${extra[@]}"}"
+    local rc=0
+    pathb_reason "$csrc" "${extra[@]+"${extra[@]}"}"
+    if [ -z "$pb_reason" ]; then
+      pathb_compile "$what" "$csrc" "$obj" || rc=$?
+      if [ $rc = 0 ]; then pathb_log "pathb $src"; return 0; fi
+      [ "${NFCXX_PATHB_FALLBACK:-}" = gcc ] || exit $rc
+      pb_reason="Path B refused it (status $rc)"
+    fi
+    pathb_log "gcc $src: $pb_reason"
+    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
+        "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
   elif [ $backend = qbe ] || [ $backend = cil ]; then
     "$qcc" --c-input $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else

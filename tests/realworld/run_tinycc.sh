@@ -3,12 +3,10 @@
 # nfcxx's nfcc as the C compiler, then run the compiler's own test suite (tests/tests2: 84 programs, each compiled and
 # run by the new tcc and compared with its .expect output). The source is cloned into build/realworld/tinycc, not
 # vendored; the build runs in a scratch copy so that checkout stays clean.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc and pathb)
 # Two build settings are not nfcxx's concern and are set here: the system include and library directories are
 # multiarch paths that tcc's defaults do not list, and the memory checker (lib/bcheck.c) is left out because it
 # uses __malloc_hook, which glibc 2.34 removed.
-# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) fails TinyCC's libtcc.c in QBE ("QBE failed: invalid type for
-# first operand %vs3 in add", the QBE xadd issue of Path B stage 3); the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=d348a9a51d32cece842b7885d27a411436d7887b   # TinyCC tag release_0_9_27
@@ -22,7 +20,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL tinycc: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 machine=$(gcc -dumpmachine)
 for b in $backends; do

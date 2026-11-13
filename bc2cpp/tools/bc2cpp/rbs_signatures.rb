@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require 'shellwords'
 require_relative 'annotations'
 require_relative 'bytecode_ir_ops'
 require_relative 'core_fact_sigs'
@@ -90,7 +91,9 @@ module RbsSignatures
     value = ENV['BC2CPP_BUILD_GEMS']
     return false if value.nil? || value.strip.empty?
 
-    gems = value.split(/\s+/).map { |kv| kv.split('=', 2).first }
+    # The gem list is written with shell escapes (Shellwords.join escapes the `=`), so split it the way bc2cpp.rb's
+    # build_gems parse does; a plain split leaves `mruby-rpg2k\` and reads the game as absent.
+    gems = Shellwords.split(value).map { |kv| kv.split('=', 2).first }
     !gems.include?('mruby-rpg2k')
   end
 

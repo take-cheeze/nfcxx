@@ -457,3 +457,25 @@ static bool bc2cpp_dyn_park(mrb_state* M,
   return Bc2cppDynResult{nullptr, mrb_funcall_with_method(M, self, mid, &method,
                                                           c, argc, argv, blk)};
 }
+
+// STEP_SUPER_STATIC: bc2cpp_dyn_super with the target fixed at compile time:
+// `entry` is the compiled entry of the definition the lookup would find, on
+// `target_class`; `mid` only names the frame.
+[[maybe_unused]] static Bc2cppDynResult bc2cpp_dyn_super_static(
+    mrb_state* M,
+    mrb_value self,
+    mrb_func_t entry,
+    struct RClass* target_class,
+    mrb_sym mid,
+    mrb_int argc,
+    const mrb_value* argv,
+    mrb_value blk) {
+  mrb_method_t method;
+  MRB_METHOD_FROM_FUNC(method, entry);
+  Bc2cppDynResult out;
+  if (bc2cpp_dyn_park(M, self, method, argc, argv, mrb_nil_value(), blk, &out))
+    return out;
+  return Bc2cppDynResult{
+      nullptr, mrb_funcall_with_method(M, self, mid, &method, target_class,
+                                       argc, argv, blk)};
+}

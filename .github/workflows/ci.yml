@@ -546,6 +546,7 @@ jobs:
             run: |
               tests/pathb-qbe/run.sh
               tests/pathb-qbe/hosted.sh
+              tests/pathb-qbe/static_linkage.sh
           - name: C++11 and C++14 probes (Path B) and the EH shim (gcc, qbe and Path B)
             run: |
               FEATURE_ROUTES=pathb FEATURE_REQUIRE_PASS=1 tests/cpp-features/run.sh
@@ -694,6 +695,9 @@ jobs:
     outputs:
       changed: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.paths.outputs.bc2cpp == 'true' }}
     steps:
+      # dorny/paths-filter diffs against the checked-out repository; without this step its git calls fail outside a checkout.
+      - uses: actions/checkout@v7
+
       - uses: dorny/paths-filter@v3
         id: paths
         if: github.event_name == 'push' || github.event_name == 'pull_request'

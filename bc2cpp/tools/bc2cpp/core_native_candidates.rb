@@ -482,6 +482,8 @@ module CoreNativeCandidates
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
+    # STEP_SUPER_STATIC: a step's static `super` calls the target's entry, which runs its body as its `_impl` does.
+    generated.each { |src| src.scan(/\bbc2cpp_dyn_super_static\(M, self, ([\w$]+),/) { |(entry)| impls << "#{entry}_impl" } }
     pending = Hash.new { |h, k| h[k] = [] }
     core.each do |file|
       parent = {}
