@@ -7,7 +7,9 @@
 #      membership test; a name nothing defines folds to false; a world with a respond_to_missing? folds nothing;
 #   2. run on a full-core mruby, compiled against interpreted: every answer is the same, for instances of the
 #      defining class, its subclass, another class, nil and an Integer;
-#   3. a class or module constant receiver (RESPOND_TO_FOLD_CONSTANT) folds from its singleton lookup: a `class << self`
+#   3. RESPOND_TO_OWNERS: an unknown receiver of a name a core class (Proc) and a Ruby class define answers false for
+#      an exact value-class instance and true for the Ruby class without a call; every other receiver keeps the call;
+#   4. a class or module constant receiver (RESPOND_TO_FOLD_CONSTANT) folds from its singleton lookup: a `class << self`
 #      def, a module_function and a superclass's singleton def answer true; a name
 #      nothing defines and another module's singleton def answer false.
 #
@@ -54,7 +56,12 @@ SOURCE = <<~RUBY
   end
   class Derived < Base
   end
+  class Job
+    def initialize; @n = 1; end
+    def call; @n; end
+  end
   class Probe
+    def callable?(o); o.respond_to?(:call); end
     def mod_yes; Tunes.respond_to?(:tune_pos); end
     def mod_no; Tunes.respond_to?(:rtf_absent_singleton); end
     def mod_fn; Tools.respond_to?(:tool); end
@@ -67,7 +74,7 @@ SOURCE = <<~RUBY
     def priv; Rev.new.respond_to?(:secret); end
   end
 RUBY
-OWNERS = %w[Rev Kid Plain Tunes Tools Base Derived Probe].freeze
+OWNERS = %w[Rev Kid Plain Job Tunes Tools Base Derived Probe].freeze
 
 # The same probe where a class answers through respond_to_missing?: no fold may stand.
 MISSING_SOURCE = <<~RUBY
@@ -124,6 +131,12 @@ SCENARIO = <<~'CPP'
     row(M, "mod_fn", "mod_fn", 0, mrb_nil_value());
     row(M, "cls_inh", "cls_inh", 0, mrb_nil_value());
     row(M, "cls_no", "cls_no", 0, mrb_nil_value());
+    row(M, "proc.call", "callable?", 1, eval(M, "proc { 1 }"));
+    row(M, "lambda.call", "callable?", 1, eval(M, "->(x) { x }"));
+    row(M, "job.call", "callable?", 1, eval(M, "Job.new"));
+    row(M, "rev.call", "callable?", 1, eval(M, "Rev.new"));
+    row(M, "nil.call", "callable?", 1, mrb_nil_value());
+    row(M, "int.call", "callable?", 1, mrb_int_value(M, 1));
     return 0;
   }
 CPP
@@ -169,6 +182,10 @@ Dir.mktmpdir('respond-to-fold') do |dir|
   { 'mod_no' => 'a module object: a name nothing defines', 'cls_no' => "a class object: another module's singleton def" }.each do |m, what|
     check.call("#{m}: #{what} folds to false", fold.call(body.call(code, m)).end_with?('mrb_bool_value(false);'))
   end
+  callable = fold.call(body.call(code, 'callable?'))
+  check.call('callable?: a value class answers false and a Job true without the call, which the rest keep',
+             callable.include?('bc2cpp_rtc = bc2cpp_obj_class(M, r') && callable.include?('if (!(mrb_nil_p(r') && callable.include?('bc2cpp_rtc == M->integer_class') &&
+             callable[/else \{\n(.*)/m, 1].to_s.match?(/mrb_bool_value\(\(bc2cpp_class_is\(M, r\d+, bc2cpp_owner_class_\d+\(M\)\)\)\)/))
   folded = %w[rev? nope? known known_no priv mod_yes mod_no mod_fn cls_inh cls_no].all? { |m| !body.call(code, m).split('#else').last.to_s.split('#endif').first.to_s.include?('bc2cpp_owner_call') }
   check.call('no folded site keeps a respond_to? call outside the verify branch', folded)
 
@@ -179,6 +196,9 @@ Dir.mktmpdir('respond-to-fold') do |dir|
       check.call('class and module objects answer as interpreted mruby',
                  %w[mod_yes mod_fn cls_inh].all? { |l| compiled.include?("#{l} => true") } &&
                  %w[mod_no cls_no].all? { |l| compiled.include?("#{l} => false") })
+      check.call('RESPOND_TO_OWNERS: a proc, a lambda and a Job answer true; the rest false',
+                 %w[proc.call lambda.call job.call].all? { |l| compiled.include?("#{l} => true") } &&
+                 %w[rev.call nil.call int.call].all? { |l| compiled.include?("#{l} => false") })
       check.call('an unrelated class, nil and an Integer answer false',
                  %w[plain.revision nil.revision int.revision].all? { |l| compiled.include?("#{l} => false") })
     end

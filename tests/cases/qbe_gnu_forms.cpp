@@ -26,4 +26,3 @@ int main() {
     if (!(std::numbers::pi_v<double> > 3.0)) return 5;
     return tl == 7 ? 0 : 4;
 }
-// X86-ONLY-LINUX: the qbe arm64 backend has no extern thread (TLS) support (gcc passes; the gate covers the whole file); macOS arm64 runs it

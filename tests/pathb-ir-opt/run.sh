@@ -21,6 +21,11 @@ if ! grep -q '(call int &"decls"' "$out/wc_w.ir" && grep -q '(call int &"decls"'
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 weighted_cost.ir > "$out/tiny_on.ir" || fail=1
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 --max-tiny=0 weighted_cost.ir > "$out/tiny_off.ir" || fail=1
 if ! grep -q '(call int &"decls"' "$out/tiny_on.ir" && grep -q '(call int &"decls"' "$out/tiny_off.ir"; then echo "tiny callee: ok"; else echo "tiny callee: FAIL"; fail=1; fi
+# Tiers: the small callees go in before the budget is spent on big ones. "first" calls a 100-op callee and "second" a 25-op one;
+# with a tight budget the big inline would use it up before "second" is reached, so without tiers "second" stays a call.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=1.3 tiers.ir > "$out/tiers_on.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=1.3 --tiers= tiers.ir > "$out/tiers_off.ir" || fail=1
+if ! grep -q '(call int &"mid"' "$out/tiers_on.ir" && grep -q '(call int &"mid"' "$out/tiers_off.ir"; then echo "inline tiers: ok"; else echo "inline tiers: FAIL"; fail=1; fi
 # The same file through the whole pipeline (inline, then scalar replacement with constant propagation and unrolling): the
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1

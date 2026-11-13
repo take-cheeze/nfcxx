@@ -65,6 +65,7 @@ while [ $# -gt 0 ]; do
     -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
     -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
     -nostdinc|-ffreestanding|-fshort-wchar) opts+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) dump_opts+=("$1") ;;   # the IR zeroes a local without an initializer (be/nfcxx_ir.c)
     -isystem|-idirafter) opts+=("$1" "$2"); shift ;;
     -isystem?*|-idirafter?*) opts+=("$1") ;;
     --keep=*) keep=${1#--keep=} ;;
@@ -144,7 +145,7 @@ rc=0
 if [ "$emitter" = ssa ]; then
   tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ] && [ $rc != 124 ] && [ $rc != 5 ] && [ $raw = 1 ]; then   # the optimized IR is refused: emit the unoptimized one
-    echo "pathb-cc: $src: the optimized IR is refused, using the unoptimized IR" >&2
+    echo "pathb-cc: $src: the optimized IR is refused ($(head -1 "$tmp/$n.emit")), using the unoptimized IR" >&2
     cp "$tmp/$n.raw.ir" "$tmp/$n.ir"; rc=0
     tmo "$root/scripts/pathb-ssa-build" --qbe="$qbe" -o "$tmp/$n.s" ${pic[@]+"${pic[@]}"} ${ldopt[@]+"${ldopt[@]}"} ${safe[@]+"${safe[@]}"} ${asan[@]+"${asan[@]}"} "$tmp/$n.ir" 2> "$tmp/$n.emit" || rc=$?
   fi
