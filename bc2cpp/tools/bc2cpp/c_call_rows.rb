@@ -33,12 +33,22 @@ module CCallRows
   CXX = /\.(?:cxx|cpp|cc|hpp|hxx|hh)\z/
   COMPARE = /(?:==|!=)\s*\z/
   COMPARED = /\A\s*(?:==|!=)/
-  NAME_LITERAL = /"(?:[^"\\\n]|\\.)*"|\bMRB_(?:SYM|SYM_Q|SYM_B|SYM_E|OPSYM)\(\w+\)/
+  NAME_LITERAL = /\bmrb_intern_(?:lit|cstr)\(\s*\w+\s*,\s*"(?:[^"\\\n]|\\.)*"\s*\)|"(?:[^"\\\n]|\\.)*"|\bMRB_(?:SYM|SYM_Q|SYM_B|SYM_E|OPSYM)\(\w+\)/
+  NAME_OPERAND = /\A(?:#{NAME_LITERAL})\z/
+  # MESSAGE_ARGS (the rows run, under the closed-world literal-lookup proof): mruby's exception-message formatters by
+  # the position of their format; a literal from there on is message text, which no lookup can take as a name.
+  MESSAGE_ARGS = { 'mrb_raisef' => 2, 'mrb_name_error' => 2, 'mrb_no_method_error' => 3, 'mrb_warn' => 1 }.freeze
+  MESSAGE_CALL = /(?<![\w.>])(#{MESSAGE_ARGS.keys.join('|')})\s*\(/
+  STRING_LITERAL = /"(?:[^"\\\n]|\\.)*"/
+  # FRAME_NAME (likewise): the name a C caller gives the frame of a method it found (`ci->mid = name;`). A frame's name
+  # is looked up again only by a `super` from it, whose name the rows run counts (super_names), or comes back as a
+  # Symbol (__method__), which no lookup takes under the proof.
+  FRAME_NAME = /->mid\s*=\s*\z/
 
   # The sinks of `texts` ({path => comment-free text}): BASE and the functions and macros found to pass a parameter
   # into one. nil when a source redefines a BASE name as a macro (the calls might not be the runtime's).
   def sinks(texts)
-    return nil if texts.any? { |path, t| !path.end_with?('/presym/scanning.h') && t.match?(/^[ \t]*#[ \t]*(?:define|undef)[ \t]+(?:#{BASE.keys.join('|')})\b/) }
+    return nil if texts.any? { |path, t| !path.end_with?('/presym/scanning.h') && t.match?(/^[ \t]*#[ \t]*(?:define|undef)[ \t]+(?:#{(BASE.keys + MESSAGE_ARGS.keys).join('|')})\b/) }
 
     defs = Hash.new { |h, k| h[k] = [] }
     texts.each do |path, text|
@@ -120,16 +130,20 @@ module CCallRows
   end
 
   # Whether every use of `var` in `body` is a sink operand, a comparison or, for a local, its `mrb_sym` declaration or
-  # an assignment of a NAME_LITERAL.
-  def sink_variable?(body, var, sinks, param: false, offsets: nil)
+  # an assignment of a NAME_LITERAL; with +proven+, also a FRAME_NAME.
+  def sink_variable?(body, var, sinks, param: false, offsets: nil, proven: false)
     ok = (offsets || operand_offsets(body, sinks)).select { |from, to| body[from...to].strip == var }.to_set { |from, to| from + body[from...to].index(var) }
+    # A NAME_LITERAL spelling the variable's own name (`mrb_sym included = MRB_SYM(included)`) is no use of it.
+    literals = body.to_enum(:scan, NAME_LITERAL).map { Regexp.last_match.begin(0)...Regexp.last_match.end(0) }
     uses = body.to_enum(:scan, /(?<![\w.>"])#{Regexp.escape(var)}\b/).map { Regexp.last_match.begin(0) }
+    uses.reject! { |at| literals.any? { |span| span.cover?(at) } }
     return false if uses.empty?
 
     uses.all? do |at|
       before = body[[at - 64, 0].max...at]
       after = body[(at + var.size), 160].to_s
       ok.include?(at) || before.match?(COMPARE) || after.match?(COMPARED) ||
+        (proven && before.match?(FRAME_NAME) && after.match?(/\A\s*;/)) ||
         (!param && (before.match?(/\bmrb_sym\s+\z/) && after.match?(/\A\s*(?:;|=\s*(?:#{NAME_LITERAL})\s*;)/) ||
                     after.match?(/\A\s*=\s*(?:#{NAME_LITERAL})\s*;/) && before.match?(/[;{}]\s*\z/)))
     end
@@ -148,47 +162,92 @@ module CCallRows
 
   # `text` with each name literal blanked that reaches only sinks: a sink operand, a compared literal, and what a
   # local sink variable is assigned.
-  def blank(text, sinks, cxx: false)
+  # +proven+ (under the closed-world literal-lookup proof): MESSAGE_ARGS' literals and FRAME_NAMEs too.
+  def blank(text, sinks, cxx: false, proven: false)
     return text unless sinks
 
     sinks = sinks.select { |name, _| BASE.key?(name) } if cxx
 
     out = text.dup
     wipe = ->(from, to) { out[from...to] = ' ' * (to - from) }
+    blank_operands_and_comparisons(text, sinks, wipe)
+    each_definition(text) { |_name, _params, body, start| blank_locals(body, start, sinks, wipe, proven: proven) }
+    blank_proven(text, wipe) if proven
+    out
+  end
+
+  # A generated source read the same way (the rows run's reading of the generated code) with GENERATED's sinks. Only
+  # the definitions around a literal assignment are read for locals: the units are large and few locals take one.
+  def blank_generated(src, proven: false)
+    out = nil
+    wipe = ->(from, to) { (out ||= src.dup)[from...to] = ' ' * (to - from) }
+    blank_operands_and_comparisons(src, GENERATED, wipe)
+    seen = Set.new
+    src.to_enum(:scan, /(?<![\w.>])\w+\s*=\s*(?:#{NAME_LITERAL})\s*;/o).each do
+      at = Regexp.last_match.begin(0)
+      start, body = enclosing_definition(src, at)
+      next unless body && seen.add?(start)
+
+      blank_locals(body, start, GENERATED, wipe, proven: proven)
+    end
+    blank_proven(src, wipe) if proven
+    out || src
+  end
+
+  def blank_operands_and_comparisons(text, sinks, wipe)
     operand_offsets(text, sinks).each do |from, to|
-      wipe.call(from, to) if NativeOwnerMap.name_of(text[from...to].strip)
+      arg = text[from...to].strip
+      wipe.call(from, to) if NativeOwnerMap.name_of(arg) || arg.match?(NAME_OPERAND)
     end
     text.to_enum(:scan, /(?:==|!=)\s*(#{NAME_LITERAL})|(#{NAME_LITERAL})\s*(?:==|!=)/o).each do
       m = Regexp.last_match
       k = m[1] ? 1 : 2
       wipe.call(m.begin(k), m.end(k))
     end
-    each_definition(text) do |_name, _params, body, start|
-      vars = body.scan(/\bmrb_sym\s+(\w+)\s*[;=]/).flatten.uniq
-      next if vars.empty?
-
-      offsets = operand_offsets(body, sinks)
-      vars.each do |var|
-        next unless sink_variable?(body, var, sinks, offsets: offsets)
-
-        body.to_enum(:scan, /(?<![\w.>])#{Regexp.escape(var)}\s*=\s*(#{NAME_LITERAL})/).each do
-          m = Regexp.last_match
-          wipe.call(start + m.begin(1), start + m.end(1))
-        end
-      end
-    end
-    out
   end
 
-  # A generated source with its GENERATED sink operands blanked (the rows run's reading of the generated code). The
-  # generated code names a method to a sink directly, so the local and comparison reading of `blank` is not needed.
-  def blank_generated(src)
-    out = nil
-    operand_offsets(src, GENERATED).each do |from, to|
-      next unless NativeOwnerMap.name_of(src[from...to].strip)
+  # The literal assigned to each local `mrb_sym` of `body` (at `start` in its text) that sink_variable? accepts.
+  def blank_locals(body, start, sinks, wipe, proven: false)
+    vars = body.scan(/\bmrb_sym\s+(\w+)\s*[;=]/).flatten.uniq
+    return if vars.empty?
 
-      (out ||= src.dup)[from...to] = ' ' * (to - from)
+    offsets = operand_offsets(body, sinks)
+    vars.each do |var|
+      next unless sink_variable?(body, var, sinks, offsets: offsets, proven: proven)
+
+      body.to_enum(:scan, /(?<![\w.>])#{Regexp.escape(var)}\s*=\s*(#{NAME_LITERAL})/).each do
+        m = Regexp.last_match
+        wipe.call(start + m.begin(1), start + m.end(1))
+      end
     end
-    out || src
+  end
+
+  # [offset of the body, body] of the innermost definition each_definition would read around `at`, or nil.
+  def enclosing_definition(text, at)
+    from = [at - 20_000, 0].max
+    found = nil
+    text[from...at].to_enum(:scan, DEFINITION).each do
+      m = Regexp.last_match
+      next if KEYWORDS.include?(m[1])
+      list = m[2].strip
+      next unless list.empty? || list == 'void' || list.split(',').all? { |p| p.strip.match?(/\A[\w\s\*]+\w\s*(?:\[\s*\])?\z|\A\.\.\.\z/) }
+
+      open = from + m.end(0) - 1
+      close = matching_brace(text, open)
+      found = [open, text[open..close]] if close && close > at
+    end
+    found
+  end
+
+  def blank_proven(text, wipe)
+    text.to_enum(:scan, /#{FRAME_NAME.source.delete_suffix('\\z')}(#{NAME_LITERAL})\s*;/o).each do
+      wipe.call(Regexp.last_match.begin(1), Regexp.last_match.end(1))
+    end
+    text.scan(MESSAGE_CALL) do |(fn)|
+      spans = StaticDispatchRegistrations.call_arg_spans(text, Regexp.last_match.end(0) - 1) or next
+      spans.drop(MESSAGE_ARGS.fetch(fn)).each do |from, to|
+        text[from...to].to_enum(:scan, STRING_LITERAL).each { wipe.call(from + Regexp.last_match.begin(0), from + Regexp.last_match.end(0)) }
+      end
+    end
   end
 end

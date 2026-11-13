@@ -35,6 +35,10 @@ at the default depth (an 8.9 MB unit of libstdc++-heavy code went to 300 MB in 7
 - `--max-growth=F` (default 2.0): once the module has grown to F times its node count on entry, only a callee of at most
   `--max-tiny=N` (default 16, 0 for none) is inlined any more ("module over --max-growth" for the others). An accessor or
   wrapper costs about what its call does, and the first functions of the module must not use the budget up for the later ones.
+- `--tiers=A,B` (default 16,40, empty for none): the rounds run in tiers. The first rounds take only callees that cost up to A,
+  then up to B, and the last rounds take everything up to `--max-callee`. The small callees (accessors, shared_ptr and
+  vector members) are inlined everywhere before the budget goes to the big ones, which the first functions of the module
+  would otherwise use up.
 
 The cost weighs each node by what it becomes in code (`--cost=weighted`, the default; `--cost=nodes` counts every node as 1).
 Type forms, declarations, constants, casts and address arithmetic cost 0, as do loads and stores of a local slot (promotion makes
@@ -45,6 +49,30 @@ The same unit with both caps: 16 MB, 3740 calls inlined, 3.8 s. 0 turns a cap of
 
 Known gap: after inlining, the SSA emitter (scripts/pathb-ssa-qbe.rb) refuses some functions of that unit ("let of $\"__j\""), so
 `pathb-cc` falls back to the unoptimized IR for it. The pass is therefore not on by default.
+
+## Lifetime facts of inlined slots (`--scope-facts`)
+
+An inlined body's slots live exactly as long as its statements, but QBE gives each slot a frame offset of its own, so a function
+that inlined a dozen callees had a dozen frames. With `--scope-facts` the inliner brackets each copy: `(life-start $"x.iK")` for
+every slot it hoists (the callee's slots, the copies of `byval` arguments, the result and done slots of an early return) before
+the copy, and `(life-end $"x.iK")` after it (after the `let` that reads the result). `scripts/pathb-cc` passes the flag after
+`--inline` when the SSA emitter runs without `--asan` and `--safe-pointers`; `scripts/pathb-ssa-qbe.rb` lays slots whose lifetimes
+do not overlap out at one address (`docs/notes/pathb-ssa-qbe.md`, "Frames"). Without the flag the output is as before (the device
+emitters do not know the two heads). They are not `decl` and `scope-end`, the source scopes' facts for AddressSanitizer: the e-graph
+pass counts a slot named by those as escaping, which costs it its store forwarding. `--strip-leaf-eh` drops the facts of the EH
+frames it removes.
+
+## The size of EH frames (`--shrink-eh-frames`)
+
+The front end makes every EH stack entry a slot of one 240-byte struct, because a try block's entry holds a 200-byte `jmp_buf` in its
+variant. A function's entry (kind 1: `next`, `kind`, then the region table, the object table, the array table and the saved region
+number) ends at byte 42, a noexcept function's (kind 6) at byte 9, and the runtime reads only the fields the compiled code wrote
+(`3rd/edg/lib_src/eh.h`). `pathb-ir-opt.rb --shrink-eh-frames` (which `pathb-cc` passes after `--inline`) cuts the size field of such a
+slot to the bytes accessed, rounded up to 8: 16 or 48. It follows loads and stores at constant offsets through `offset` and `bitcast`
+of the slot's address, the push of the address on `@"__curr_eh_stack_entry"` and the lifetime facts; any other use (the address of the
+`jmp_buf` passed to `_setjmp` by a try block, a copy) leaves the slot whole. Of the 715 KB of stack slots in `nfcast_nodes.cpp`'s
+objects, 550 KB were EH entries (2292 of them, a function that inlined a few callees has a frame each: `std::vector::emplace_back`
+had four, 960 bytes).
 
 ## EH frames of functions that cannot throw (`--strip-leaf-eh`)
 

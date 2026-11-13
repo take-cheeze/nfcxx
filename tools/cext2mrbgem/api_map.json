@@ -1,0 +1,269 @@
+{
+  "_comment": "CRuby -> mruby API map for convert_mrbgem.py. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
+  "types": {
+    "VALUE": "mrb_value",
+    "ID": "mrb_sym"
+  },
+  "includes": {
+    "ruby.h": [
+      "mruby.h",
+      "mruby/string.h",
+      "mruby/numeric.h"
+    ],
+    "ruby/thread.h": [
+      "nfcx_uv_thread.h"
+    ]
+  },
+  "entries": {
+    "rb_define_module": {
+      "kind": "call",
+      "mruby": "mrb_define_module",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "returns": "class"
+    },
+    "rb_define_class": {
+      "kind": "call",
+      "mruby": "mrb_define_class",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "returns": "class"
+    },
+    "rb_define_module_under": {
+      "kind": "call",
+      "mruby": "mrb_define_module_under",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "returns": "class"
+    },
+    "rb_define_class_under": {
+      "kind": "call",
+      "mruby": "mrb_define_class_under",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "returns": "class"
+    },
+    "rb_define_method": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true
+    },
+    "rb_define_singleton_method": {
+      "kind": "special",
+      "handler": "define_singleton",
+      "needs_mrb": true
+    },
+    "rb_raise": {
+      "kind": "special",
+      "handler": "raise",
+      "needs_mrb": true
+    },
+    "rb_str_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_str_new_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "RSTRING_PTR": {
+      "kind": "macro",
+      "mruby": "RSTRING_PTR"
+    },
+    "RSTRING_LEN": {
+      "kind": "macro",
+      "mruby": "RSTRING_LEN"
+    },
+    "NUM2INT": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "NUM2LONG": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "INT2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "LONG2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "RTEST": {
+      "kind": "call",
+      "mruby": "mrb_test",
+      "inject_mrb": false
+    },
+    "Qnil": {
+      "kind": "expr",
+      "mruby": "mrb_nil_value()"
+    },
+    "Qtrue": {
+      "kind": "expr",
+      "mruby": "mrb_true_value()"
+    },
+    "Qfalse": {
+      "kind": "expr",
+      "mruby": "mrb_false_value()"
+    },
+    "rb_cObject": {
+      "kind": "expr",
+      "mruby": "mrb->object_class",
+      "needs_mrb": true
+    },
+    "rb_eArgError": {
+      "kind": "expr",
+      "mruby": "E_ARGUMENT_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eRuntimeError": {
+      "kind": "expr",
+      "mruby": "E_RUNTIME_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eTypeError": {
+      "kind": "expr",
+      "mruby": "E_TYPE_ERROR",
+      "needs_mrb": true
+    },
+    "rb_ensure": {
+      "kind": "refuse",
+      "reason": "no direct mruby equivalent (ensure callback not in the supported subset)"
+    },
+    "rb_rescue": {
+      "kind": "refuse",
+      "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
+    },
+    "rb_rescue2": {
+      "kind": "refuse",
+      "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
+    },
+    "Check_Type": {
+      "kind": "refuse",
+      "reason": "type-check macro not in the supported subset"
+    },
+    "rb_check_type": {
+      "kind": "refuse",
+      "reason": "type-check function not in the supported subset"
+    },
+    "rb_gc_register_address": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset (mruby GC rooting must be designed by hand)"
+    },
+    "rb_gc_register_mark_object": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_mark": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_mark_movable": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_enable": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_disable": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_start": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "rb_gc_writebarrier": {
+      "kind": "refuse",
+      "reason": "GC API not in the supported subset"
+    },
+    "NIL_P": {
+      "kind": "call",
+      "mruby": "mrb_nil_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "StringValuePtr": {
+      "kind": "call",
+      "mruby": "RSTRING_PTR",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "argument must already be a String: no implicit to_str conversion"
+    },
+    "StringValueCStr": {
+      "kind": "call",
+      "mruby": "RSTRING_PTR",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "argument must already be a String: no to_str conversion and no NUL-byte check"
+    },
+    "NUM2ULONG": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "signed conversion: unsigned range is not checked"
+    },
+    "rb_str_new2": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_str_new_frozen": {
+      "kind": "call",
+      "mruby": "mrb_str_dup",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns a copy; the copy is not frozen"
+    },
+    "RB_GC_GUARD": {
+      "kind": "special",
+      "handler": "gc_guard",
+      "needs_mrb": true
+    },
+    "rb_thread_call_without_gvl": {
+      "kind": "call",
+      "mruby": "nfcx_thread_call_without_gvl",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "modelled on mruby-uv: func runs on the libuv thread pool and the caller runs the loop until it finishes; ubf is ignored (no interrupt)"
+    },
+    "rb_ext_ractor_safe": {
+      "kind": "drop",
+      "reason": "ractor declaration; mruby has no ractors, so the declaration has no effect"
+    }
+  },
+  "special_arg_positions_class_only": {
+    "rb_define_method": [
+      0
+    ],
+    "rb_define_singleton_method": [
+      0
+    ],
+    "rb_define_module_under": [
+      0
+    ],
+    "rb_define_class_under": [
+      0,
+      2
+    ],
+    "rb_define_class": [
+      1
+    ]
+  }
+}

@@ -44,6 +44,10 @@ def normalise_const!(x)
   end
 end
 
+# ILP32 (a 32-bit target, see below): the IR's long and unsigned_long are int and unsigned_int, read as such from the start so that
+# a literal is brought into its range as a 32-bit type. Plain tokens only: a name is quoted.
+$ilp32 = false
+
 def read_forms(text)
   stack = []
   cur = []
@@ -63,6 +67,10 @@ def read_forms(text)
       cur << Str.new(t)
     elsif t.length > 1 && t.getbyte(1) == 34 && (c == 36 || c == 64 || c == 38)
       cur << Ref.new(t[0], t[1..])
+    elsif $ilp32 && t == "long"
+      cur << "int"
+    elsif $ilp32 && t == "unsigned_long"
+      cur << "unsigned_int"
     else
       cur << t
     end
@@ -80,7 +88,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--safe | --asan] [--pic] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -91,6 +99,8 @@ end
 
 $qbe_path = nil
 $qbe_flags = []   # --no-fp (qbe -n) and --no-unwind (qbe -U): nfcc's -mno-sse and -fno-asynchronous-unwind-tables
+$il_path = nil
+$target32 = nil   # --target=i386 or i386_regparm3: the 32-bit QBE target the (32-bit) IR is emitted for
 
 def qbe_binary
   $qbe_path || ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
@@ -119,6 +129,10 @@ ASM_HELPERS = {
                   "\t.size __pathb_frameaddr, .-__pathb_frameaddr"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  # `__pathb_sp()`: the stack pointer of the caller at the call (a global register variable bound to rsp): its %rsp, past the return
+  # address the call pushed. x86-64 only.
+  "sp" => ["\t.text", "\t.weak __pathb_sp", "\t.type __pathb_sp, @function", "__pathb_sp:", "\tleaq 8(%rsp), %rax", "\tret",
+           "\t.size __pathb_sp, .-__pathb_sp"],
   # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
   # would then not advance past that argument; passing the value to this empty function keeps the read.
   "vasink_w" => ["\t.text", "\t.weak __pathb_vasink_w", "\t.type __pathb_vasink_w, @function", "__pathb_vasink_w:", "\tret",
@@ -129,6 +143,20 @@ ASM_HELPERS = {
                  "\t.size __pathb_vasink_s, .-__pathb_vasink_s"],
   "vasink_d" => ["\t.text", "\t.weak __pathb_vasink_d", "\t.type __pathb_vasink_d, @function", "__pathb_vasink_d:", "\tret",
                  "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
+}.freeze
+
+# The 32-bit x86 helpers: each is a COMDAT section of its own (.text.NAME in the group NAME), so that a link of many objects keeps one copy
+# of each (the kernel's real-mode image is size limited). The same semantics as the x86-64 ones; fence has no mfence (SSE2) on an i386, a
+# locked or of the stack top orders memory as it does; a long comes back in edx:eax, as rdtsc leaves it.
+I386_HELPERS = {
+  "barrier" => ["__pathb_barrier", ["ret"]],
+  "escape" => ["__pathb_escape", ["ret"]],
+  "fence" => ["__pathb_fence", ["lock orl $0, (%esp)", "ret"]],
+  "retaddr" => ["__pathb_retaddr", ["movl 4(%ebp), %eax", "ret"]],
+  "frameaddr" => ["__pathb_frameaddr", ["movl %ebp, %eax", "ret"]],
+  "rdtsc" => ["__pathb_rdtsc", ["rdtsc", "ret"]],
+  "vasink_w" => ["__pathb_vasink_w", ["ret"]],
+  "vasink_l" => ["__pathb_vasink_l", ["ret"]],
 }.freeze
 
 # The arm64 versions of the helpers above, for the arm64 QBE targets (arm64, arm64_apple), with the same semantics: check
@@ -153,6 +181,8 @@ ARM64_HELPERS = {
 # The QBE target the IL is assembled for: PATHB_QBE_TARGET when set (and passed to QBE with -t), else the host's, which is
 # QBE's default for this host (the same as `uname`: Apple and Linux, arm64 and x86-64).
 def qbe_target
+  return $target32 if $target32
+
   ENV.fetch("PATHB_QBE_TARGET") { host_qbe_target }
 end
 
@@ -195,6 +225,11 @@ end
 
 # The assembly lines of the helper NAME for TARGET: the x86-64 text of ASM_HELPERS, or the arm64 one (ELF, or Apple's form).
 def asm_helper(name, target)
+  if target.start_with?("i386")
+    sym, body = I386_HELPERS.fetch(name) { error_exit("no assembly helper for #{name} on a 32-bit target") }
+    return ["\t.section .text.#{sym},\"axG\",@progbits,#{sym},comdat", "\t.weak #{sym}", "\t.type #{sym}, @function", "#{sym}:"] +
+           body.map { |l| "\t#{l}" } + ["\t.size #{sym}, .-#{sym}"]
+  end
   return ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } unless arm64_target?(target)
   sym, body = ARM64_HELPERS.fetch(name) { error_exit("no arm64 assembly helper for #{name}") }
   apple = arm64_apple?(target)
@@ -207,6 +242,33 @@ def asm_helper(name, target)
   end
 end
 
+# AArch64, the result object of a call whose class EDG lowered into a first parameter (scripts/pathb-ssa-qbe.rb: header and
+# call_parts). The AAPCS64 entry of such a function is `# pathb-hidden-entry NAME N KIND`: it takes the result object in x8 and
+# passes it in x N, the register after the N integer arguments, to the body NAME.nfcxxhid. `# pathb-hidden-thunk NAME N` is the
+# thunk a caller uses: it moves x N into x8 and branches to NAME. `# pathb-hidden-ind N` is the thunk of a call through a pointer:
+# the pointer is in x N+1 and the result object in x N. Apple's symbols carry the underscore.
+def hidden_result_asm(il, target)
+  apple = arm64_apple?(target)
+  label = ->(name) { apple ? "_" + name : name }
+  lines = []
+  il.scan(/^# pathb-hidden-entry (\S+) (\d+) (local|global|weak)$/).uniq.each do |name, n, kind|
+    lines << "\t.text"
+    lines << "\t.globl #{label.(name)}" if kind == "global"
+    lines << "\t.type #{name}, %function" unless apple
+    lines << "#{label.(name)}:"
+    lines << "\tmov x#{n}, x8"
+    lines << "\tb #{label.(name + ".nfcxxhid")}"
+    lines << "\t.size #{name}, .-#{name}" unless apple
+  end
+  il.scan(/^# pathb-hidden-thunk (\S+) (\d+)$/).uniq.each do |name, n|
+    lines << "\t.text" << "#{label.(name + ".nfcxxx8")}:" << "\tmov x8, x#{n}" << "\tb #{label.(name)}"
+  end
+  il.scan(/^# pathb-hidden-ind (\d+)$/).flatten.uniq.each do |n|
+    lines << "\t.text" << "#{label.("nfcxxx8.ind#{n}")}:" << "\tmov x8, x#{n}" << "\tmov x16, x#{n.to_i + 1}" << "\tbr x16"
+  end
+  lines
+end
+
 # The assembly directives for the markers in the IL: `# pathb-weak SYM` gives `.weak SYM` (QBE has no weak linkage), and
 # `# pathb-asm NAME` appends that helper. TARGET is the QBE target the assembly is for.
 def marker_asm(il, target, qbe_asm)
@@ -215,6 +277,7 @@ def marker_asm(il, target, qbe_asm)
   if arm64_apple?(target)
     qbe_asm.each_line { |l| defined[l.chomp.chop] = true if l.end_with?(":\n") && !l.start_with?("\t") }
     il.scan(/^# pathb-alias \S+ (\S+) /).flatten.each { |name| defined["_" + name] = true }
+    il.scan(/^# pathb-hidden-entry (\S+) /).flatten.each { |name| defined["_" + name] = true }
   end
   weak = il.scan(/^# pathb-weak (\S+)$/).flatten.uniq.flat_map { |sym| weak_lines(sym, target, defined.key?("_" + sym) || !arm64_apple?(target)) }
   helpers = il.scan(/^# pathb-asm (\S+)$/).flatten.uniq.flat_map { |h| asm_helper(h, target) }
@@ -235,10 +298,12 @@ def marker_asm(il, target, qbe_asm)
   # scripts/pathb-qbe-emit.rb's emit_startup_tables does (one entry per function; a priority P goes to SECTION.PPPPP).
   startup = il.scan(/^# pathb-startup (\S+) (\d+) (\S+)$/).map do |sect, prio, sym|
     sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
-    ["\t.section #{sect},\"aw\"", "\t.align 8", "\t.quad #{sym}"]
+    # .balign, not .align: on aarch64 GNU as reads .align's operand as a power of two, so .align 8 aligned the table to 256
+    # bytes and left a zero-filled gap in .init_array that glibc called (a NULL call at start-up).
+    $target32 ? ["\t.section #{sect},\"aw\"", "\t.balign 4", "\t.long #{sym}"] : ["\t.section #{sect},\"aw\"", "\t.balign 8", "\t.quad #{sym}"]
   end
   texts = il.scan(/^# pathb-text (\S+)$/).flatten.uniq.map { |b| Base64.strict_decode64(b) }
-  (weak + helpers + aliases + startup.flatten(1)).map { |line| "#{line}\n" }.join + texts.join
+  (weak + helpers + aliases + startup.flatten(1) + hidden_result_asm(il, target)).map { |line| "#{line}\n" }.join + texts.join
 end
 
 # The SSA text of the module's forms, from scripts/pathb-ssa.rb's convert_module, run in this process (the IR file is read
@@ -268,7 +333,7 @@ def stub_long_double(forms)
   out = [forms[0]]
   forms.drop(1).each do |f|
     if head(f) == "function" && mentions_long_double?(f)
-      keep = f.drop(2).select { |p| %w[static weak constructor destructor].include?(head(p)) }
+      keep = f.drop(2).select { |p| %w[static weak constructor destructor used section always-inline].include?(head(p)) }
       out << (["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
     elsif head(f) == "global" && mentions_long_double?(f)
       next
@@ -283,6 +348,21 @@ end
 # The names a module keeps (pathb-qbe-emit.rb's prune rule): a linked definition (not static, not weak, not an
 # extern declaration) or a constructor or destructor is a root, and everything a live definition refers to with
 # a global (@) or function (&) name is live too. A definition nothing reaches is left out.
+# The vtables (_ZTV...) whose class has a function of external linkage defined in this unit (its key function, or another
+# member): kept whatever refers to them, as scripts/pathb-ir-opt.rb's vtable_roots keeps them. A local class's is not.
+def vtable_roots_of(defs)
+  defined = defs.select { |_, f| head(f) == "function" && linked_or_startup?(f) }.keys
+  out = {}
+  defs.each_key do |n|
+    next unless n.start_with?("_ZTV") && !n.start_with?("_ZTVZ")
+    body = n[4..]
+    inner = body.start_with?("N") && body.end_with?("E") ? body[1..-2] : body
+    pres = ["_ZN#{inner}", "_ZNK#{inner}"]
+    out[n] = true if defined.any? { |fn| pres.any? { |pre| fn.start_with?(pre) } }
+  end
+  out
+end
+
 def live_names(forms)
   defs = {}
   forms.each do |f|
@@ -300,9 +380,10 @@ def live_names(forms)
   end
   live = {}
   work = []
+  vtables = vtable_roots_of(defs)
   defs.each do |name, f|
     next if x87_entries.key?(name)
-    next unless linked_or_startup?(f)
+    next unless linked_or_startup?(f) || vtables.key?(name)
 
     live[name] = true
     work << name
@@ -331,6 +412,7 @@ def live_names(forms)
 end
 
 def linked_or_startup?(f)
+  # emits it strong and other units refer to it), so a unit that does not construct the class would drop the only copy.
   f.drop(2).any? { |p| %w[constructor destructor used].include?(head(p)) } ||
     f.drop(2).none? { |p| head(p) == "static" || head(p) == "extern" || (head(p) == "weak" && p.length == 1) }
 end
@@ -348,7 +430,7 @@ def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
     path = File.join(dir, "module.qbe")
     File.write(path, il)
-    qbe_args = ENV.key?("PATHB_QBE_TARGET") ? ["-t", qbe_target] : []
+    qbe_args = ENV.key?("PATHB_QBE_TARGET") && !$target32 ? ["-t", qbe_target] : []
     qbe_args += $qbe_flags
     asm, err, st = Open3.capture3(qbe_binary, *qbe_args, path)
     return [nil, err] unless st.success?
@@ -365,6 +447,9 @@ no_fp = false
 safe = false
 asan = false
 pic = false
+no_pie = false
+trap_checks = false
+m16 = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -379,6 +464,11 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--safe" then safe = true
   when "--asan" then asan = true
   when "--pic" then pic = true
+  when "--no-pie" then no_pie = true   # -fno-PIE: a function address is the symbol, not a cell
+  when "--trap-checks" then trap_checks = true   # a failed check is the trap instruction, not a call of abort (no libc)
+  when /\A--target=(i386|i386_regparm3)\z/ then $target32 = $1
+  when "--m16" then m16 = true
+  when /\A--il=(.+)\z/ then $il_path = $1   # keep the QBE IL (debugging)
   when /\A--qbe=(.+)\z/ then $qbe_path = $1
   else usage_exit
   end
@@ -389,17 +479,45 @@ usage_exit if asan && safe   # both replace malloc and check accesses: one at a 
 Qbe.safe = safe
 Qbe.asan = asan
 Qbe.pic = pic
+Qbe.trap_checks = trap_checks
+Qbe.no_pie = no_pie && !pic   # -fPIC wins
 Qbe.darwin = RbConfig::CONFIG["host_os"].include?("darwin")
 # extern data through the GOT (copy extern): on Darwin (ld64 cannot bind a dylib symbol at a page offset) and on aarch64
 # Linux (a PIE adrp to a symbol in another object or a shared library is out of its range: R_AARCH64_ADR_PREL_PG_HI21)
 Qbe.got_extern = Qbe.darwin || %w[aarch64 arm64].include?(RbConfig::CONFIG["host_cpu"])
 Qbe.aarch64 = %w[aarch64 arm64].include?(RbConfig::CONFIG["host_cpu"])
+# QBE's xadd (a locked add) is amd64 only: the arm64 backend has no op for it, so the atomics go through libatomic there.
+Qbe.xadd = !Qbe.aarch64
+# QBE's jtab (a jump table) is amd64 only (the arm64 backend refuses it): other targets keep the decision tree.
+Qbe.jtab = !Qbe.aarch64
 
 file = args.first
+# A 32-bit module (the front end's --target=linux_i686: its layout has (pointer 4)) goes to QBE's i386 targets: pointers are of class w
+# (Qbe.ptr32) and long is int (read_forms). The target is named by --target= (nfcc: i386_regparm3 for -mregparm=3, else i386).
+$ilp32 = File.open(file) { |io| io.gets.to_s.include?("(pointer 4)") }
+if $ilp32 != !$target32.nil?
+  error_exit($ilp32 ? "a 32-bit IR needs --target=i386 or --target=i386_regparm3" : "--target=#{$target32} needs a 32-bit IR (pathb-dump --target=linux_i686)")
+end
+error_exit("--safe and --asan are for the 64-bit targets") if $ilp32 && (safe || asan)
+error_exit("--m16 needs --target=i386 or --target=i386_regparm3") if m16 && !$ilp32
+Qbe.ptr32 = $ilp32
+Qbe.regparm3 = $target32 == "i386_regparm3"
+if $ilp32
+  $qbe_flags += ["-t", $target32]
+  $qbe_flags << "-m16" if m16
+end
 # The x87 ABI thunks (`(x87-thunk ...)` forms: long double through the x87 helpers) are generated by scripts/
 # pathb-x87-thunks.rb for the symbols the IL uses. A reference to a thunk with no matching form is refused (see below).
 # Each input is parsed once: the IR file (the data, alias, x87 and live-name forms) and the SSA text (the globals and functions).
 ir_forms = read_forms(File.read(file))
+# The kernel's .head.text (__head: head64.c's __startup_64) runs identity-mapped, before the kernel's page tables: the addresses it
+# computes (`_text - __START_KERNEL_map`) must be the link-time ones, which gcc's kernel model writes as absolute immediates, while
+# QBE's default is `leaq sym(%rip)`, the run-time address. A unit with a function in that section is assembled with qbe -A (absolute
+# addresses of globals; loads stay rip-relative), as scripts/qbe-try does for the cproc route.
+head_text = ir_forms.any? do |f|
+  head(f) == "function" && f.drop(2).any? { |p| head(p) == "section" && p[1].respond_to?(:raw) && p[1].raw == '".head.text"' }
+end
+$qbe_flags << "-A" if head_text
 # Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one). It comes
 # before the conversion, the optimizer and the emitter, which work on each function alone: a function nothing reaches
 # costs their time for no output (the STL route timed out on it, docs/notes/library-suite-results.md).
@@ -423,6 +541,11 @@ globals += ir_forms.select { |f| head(f) == "data" }
 text = no_opt ? ssa : PathbEgraph.optimize_forms(ssa_forms).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 unless no_prune
+  # The reachable set again, from the optimized functions: the e-graph pass and the SSA simplifier fold constant branches, so a
+  # call in a dead branch is gone (the kernel's `if (IS_ENABLED(CONFIG_X) && ...)` after the inlining of a helper that returns 0),
+  # and a static function only that call reached is no longer reached. gcc emits no copy of it; a copy here would carry its
+  # undefined references (do_huge_pmd_wp_page of mm/memory.c's wp_huge_pmd).
+  live = live_names(fns.map { |f| ["function"] + f.drop(1) } + ir_forms.reject { |f| head(f) == "function" })
   fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
   # An abi-type is a layout every function may need, not a definition to prune: it is kept.
   globals = globals.select { |g| head(g) == "abi-type" || live.key?(g[1].raw.delete('"')) }
@@ -433,6 +556,7 @@ end
 ctx = Qbe.module_context(globals + fns)
 data_text = ctx[:data].join("\n\n").strip
 bodies = []
+Qbe.hidden_thunks = {}   # the thunks of the hidden-result calls the bodies make (AArch64), marked below
 fns.each do |fn|
   name = fn[1].raw.delete('"')
   bodies << Qbe.function_text(ctx, fn).strip
@@ -483,19 +607,30 @@ end
 asm_decl_markers = ir_forms.select { |f| head(f) == "asm-decl" }.map do |f|
   "# pathb-text #{Base64.strict_encode64(text_of_asm_decl(f))}"
 end
-il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + weak_ref_markers + startup_markers + [asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
+hidden_thunk_markers = (Qbe.hidden_thunks || {}).keys.map do |kind, sym, n|
+  kind == "direct" ? "# pathb-hidden-thunk #{sym} #{n}" : "# pathb-hidden-ind #{n}"
+end
+il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + weak_ref_markers + startup_markers + [hidden_thunk_markers.join("\n"), asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
+if $ilp32 && (!x87_asm.empty? || il.include?("$__nfcxx_x87") || il.include?("__nfcxx_ldr_"))
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: long double is not supported on the 32-bit targets"
+  exit EXIT_PARTIAL
+end
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }
 unless missing.empty?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: calls an x87 thunk with no form in the module: #{missing.first}"
   exit EXIT_PARTIAL
 end
-# The thunks are x86-64 assembly: on arm64 a module that needs one is refused (docs/notes/pathb-longdouble.md).
-unless x87_asm.empty? || x87_target_x86_64?
+# The thunks are x86-64 assembly (the x86 forms) or AArch64 Linux assembly (the forms with a class string, see
+# scripts/pathb-a64-thunks.rb). The x86 text is refused on any other target, as before; an AArch64 form on a target that is
+# not Linux arm64 gets no text, so the missing-thunk check above refuses the module.
+x86_asm = x87_thunks_asm(x87_forms.reject { |f| x87_a64_form?(f) }, il)
+unless x86_asm.empty? || x87_target_x86_64?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: long double ABI thunks (x87) are x86-64 assembly; target is #{x87_target_name}"
   exit EXIT_PARTIAL
 end
+File.write($il_path, il) if $il_path
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
 # -mno-sse: QBE has no switch to avoid SSE and x87 (-n only keeps integer moves out of %xmm15), so the code it wrote is checked, as

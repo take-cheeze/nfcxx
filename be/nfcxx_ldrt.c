@@ -441,9 +441,10 @@ int __nfcxx_f128_isfinite(const void *a) { return __builtin_isfinite(f128_rd(a))
 int __nfcxx_f128_signbit(const void *a) { return __builtin_signbit(f128_rd(a)) != 0; }
 int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_isunordered(f128_rd(a), f128_rd(b)); }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__aarch64__)
 /* ---- C-ABI wrappers for _Float128 (docs/notes/pathb-float128.md, "Calls of C functions").
-   x86-64 only (kept as before): the SSE-register convention they work around is the x86-64 one.
+   x86-64 and aarch64 (Linux): the convention they work around is the one that passes a _Float128 in a vector register
+   (xmm0 on x86-64, q0 on aarch64, which QBE cannot express).
 
    A _Float128 is passed in one SSE register and returned in xmm0 by the C convention, which QBE cannot express. A call from
    Path B of a routine defined elsewhere with a _Float128 in its signature goes to __nfcxx_f128w_ + the routine's linkage
@@ -453,15 +454,17 @@ int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_is
    returns it (rax:rdx), with no pointer.
    The wrapper calls the routine through a declaration with the same linkage name (__asm__ label). Only the routines listed
    in the IR (be/nfcxx_ir.c, ir_f128_wrapped) have one. */
-typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
-f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
-f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
-f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 /* std::abs(_Float128) of <cmath> reaches fabsf128 (a built-in: gcc inlines it as a sign-bit clear). A memory-class result
    is returned in rax as well as written through the hidden pointer, as the C convention of a struct requires. */
 void *__nfcxx_f128w_fabsf128(void *ret, const void *a) { f128_wr(ret, __builtin_fabsf128(f128_rd(a))); return ret; }
 
-/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them) */
+#if defined(__x86_64__)
+/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them).
+   x86-64 only: the aarch64 libstdc++ has no _Float128 overloads of to_chars. */
+typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
+f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
+f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
+f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_(char *f, char *l, const void *v) { return f128_tc2(f, l, f128_rd(v)); }
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_format(char *f, char *l, const void *v, int fmt)
 {
@@ -471,8 +474,9 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
 {
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
+#endif /* defined(__x86_64__): to_chars */
 
-#endif /* defined(__x86_64__): the C-ABI wrappers */
+#endif /* defined(__x86_64__) || defined(__aarch64__): the C-ABI wrappers */
 #endif /* _Float128 helpers */
 
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
@@ -702,4 +706,28 @@ void nfcxx_mm_pause(void) { __builtin_ia32_pause(); }
 void _mm_pause(void) { nfcxx_mm_pause(); }
 /* a C++ caller names the mangled symbol (the header's function is in the C++ namespace, _Z9_mm_pausev) */
 __asm__(".globl _Z9_mm_pausev\n.set _Z9_mm_pausev, nfcxx_mm_pause");
+#endif
+
+/* __builtin_cpu_init() and __builtin_cpu_supports("feature") (x86; be/nfcxx_ir.c ir_builtin_call): the IR has no libgcc __cpu_model
+   to read, so the call goes to these helpers, which ask the host compiler's own built-ins (cpuid through libgcc). The feature
+   names are the ones gcc has accepted since version 6 (the argument is a string literal for gcc, a runtime string here); a name
+   not listed reads as absent. Where the host is not x86 the answer is always 0. */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__) && !defined(__clang__)
+void __nfcxx_cpu_init(void) { __builtin_cpu_init(); }
+int __nfcxx_cpu_supports(const char *name)
+{
+#define NFCXX_CPU_FEATURE(f) if (strcmp(name, f) == 0) return __builtin_cpu_supports(f) != 0;
+  __builtin_cpu_init();
+  NFCXX_CPU_FEATURE("cmov") NFCXX_CPU_FEATURE("mmx") NFCXX_CPU_FEATURE("popcnt") NFCXX_CPU_FEATURE("sse")
+  NFCXX_CPU_FEATURE("sse2") NFCXX_CPU_FEATURE("sse3") NFCXX_CPU_FEATURE("ssse3") NFCXX_CPU_FEATURE("sse4.1")
+  NFCXX_CPU_FEATURE("sse4.2") NFCXX_CPU_FEATURE("avx") NFCXX_CPU_FEATURE("avx2") NFCXX_CPU_FEATURE("sse4a")
+  NFCXX_CPU_FEATURE("fma4") NFCXX_CPU_FEATURE("xop") NFCXX_CPU_FEATURE("fma") NFCXX_CPU_FEATURE("avx512f")
+  NFCXX_CPU_FEATURE("bmi") NFCXX_CPU_FEATURE("bmi2") NFCXX_CPU_FEATURE("aes") NFCXX_CPU_FEATURE("pclmul")
+  NFCXX_CPU_FEATURE("avx512vl") NFCXX_CPU_FEATURE("avx512bw") NFCXX_CPU_FEATURE("avx512dq") NFCXX_CPU_FEATURE("avx512cd")
+#undef NFCXX_CPU_FEATURE
+  return 0;
+}
+#else
+void __nfcxx_cpu_init(void) {}
+int __nfcxx_cpu_supports(const char *name) { (void)name; return 0; }
 #endif

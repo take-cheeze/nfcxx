@@ -52,6 +52,12 @@ with the interpreter. Cases the emitter or the interpreter does not cover are re
 A function outside the subset raises `QbeUnsupported` and nothing is emitted for it, so a module with an unsupported
 function still emits the rest.
 
+## The 32-bit x86 targets
+
+`scripts/pathb-ssa-build --target=i386|i386_regparm3 [--m16]` emits for QBE's i386 targets (`Qbe.ptr32`: pointers are of class `w`, `long` is
+`int`, a structure's `l` and `d` leaves are words, no checks, no jump tables, asm templates as helpers with 32-bit registers). The IR is the
+front end's `--target=linux_i686` one (its layout has `(pointer 4)`, which selects the mode). docs/notes/nfcc-pathb.md, "The 32-bit x86 target".
+
 ## Status
 
 `tests/pathb-ssa-qbe/run.rb` on the current cases: 32 match the interpreter, 0 mismatches, 3 skipped (a double-typed
@@ -62,6 +68,55 @@ The runner runs the interpreter through `tests/pathb-egraph/check.rb`'s `CaseMac
 volatile accesses are modelled on both sides. A case whose `clobber` targets a non-int slot is skipped.
 The emitter uses the same naming and cls rules as the QBE it is tested against; a mismatch is a bug in the emitter,
 the optimizer, or the interpreter, and the runner reports which one by comparing against the interpreter.
+
+## Frames
+
+QBE gives every `alloc` a frame offset of its own and shares nothing, and Path B code used to have frames several times gcc's
+(`tests/ast` `inline_loops` and `tests/uop` `test.cpp` overflowed the 8 MB stack in a recursion of a few thousand levels; the
+measured frames are in `docs/notes/cproc-removal-library-suites.md`). Three things now keep them small:
+
+- **A function that calls `_setjmp` promotes its slots again.** Every `try` block of the C++ EH lowering is an `_setjmp`, and
+  `scripts/pathb-ssa.rb` used to keep *every* slot of such a function in memory (the inlined bodies of `std::vector`'s
+  `_M_realloc_insert` and the like: 300 slots, 3 KB). A promoted slot would hold the value of the first return when a throw lands
+  after the call, so the slots that are *live after a call of `_setjmp`* (read, on some path from it, before a store: `Converter#
+  drop_live_across_setjmp`, a backward liveness over the CFG) stay in memory, and the others (written before every read on any path
+  from the call, so that both returns see their own values) are promoted. The emitter still passes the address of each remaining
+  slot to `__pathb_escape`. `tests/pathb-ssa-qbe/frames/setjmp.ir`: `a` (set in one arm and read after the second return) stays, `t`
+  (stored right after the call) is promoted.
+- **Slots whose lifetimes do not overlap share one stack object** (`Fn#share_slots`). A lifetime is bracketed by
+  `(life-start $"x")` and `(life-end $"x")` facts that the inliner writes around each inlined body for the slots it hoists
+  (`pathb-ir-opt.rb --scope-facts`, which `pathb-cc` passes after `--inline` unless `--asan` or `--safe-pointers` is on): the
+  callee's frame lives exactly as long as its statements. The emitter runs a forward may-analysis of the slots in scope over the SSA
+  blocks (a slot is in scope from its `life-start` on every path to a `life-end`); two slots conflict when one starts while the
+  other is in scope on some path. A slot with no facts, one whose atom is named outside its scope, or one whose derived address (an offset, bitcast, index, select or
+  phi of it, the pointer a call returns when given one) is still named in a register outside its scope, never shares; an address kept
+  in memory is trusted to die with the scope, as the language requires. Slots are grouped greedily in order; a group's object
+  has its largest size and alignment. Two inlined calls one after the other thus have the frame of the larger, not of both, nested
+  ones (a callee's own callees) stay apart, and a call in a loop reuses the same object each iteration. `--asan` and `--safe` (each
+  slot an object of its own, with redzones or registered) do not share. The e-graph pass ignores the facts (`life-start` and
+  `life-end` neither read nor write memory and do not make a slot escape; the front end's `decl` and `scope-end` do).
+  `tests/pathb-ssa-qbe/frames/share.ir` shows the frame of eight 1 KB arrays at 5 KB, the sums right, the facts-less and
+  rogue slots apart.
+- **EH entries are cut to the bytes written** (`pathb-ir-opt.rb --shrink-eh-frames`, `docs/notes/pathb-ir-passes.md`): of the
+  715 KB of memory slots in `nfcast_nodes.cpp`'s IR, 550 KB were the 240-byte EH entries of functions and inlined bodies (2292 of
+  them), and a function's needs 48 bytes, a noexcept function's 16. `--strip-leaf-eh` removes the facts of the EH frames it drops.
+
+Measured with `scripts/pathb-cc` (HEAD, then this change; `objdump -d`, `sub $N, %rsp` of each function; gcc -O2 in the last column):
+
+| | before | after | gcc -O2 |
+| --- | --- | --- | --- |
+| `nfcuop_pattern.o`: total of all frames / the largest | 54376 / 4152 B (`vector<Rule>::_M_range_insert`) | 20856 / 760 | 1616 / 248 |
+| `Rewriter::go` (graph_rewrite's recursion, tests/uop `test.cpp`) | 680 | 408 | 248 |
+| `nfcast_nodes.o`: total / the largest | 1332448 / 3408 B (`vector<unique_ptr<Node>>::_M_realloc_insert`) | 424008 / 968 (`Cloner::clone`) | 27584 / 776 |
+| `NumForNode::exec`, `ReturnNode::exec` (tests/ast) | 872, 472 | 664, 280 | 216, 120 |
+| `vector<unique_ptr<N>>::_M_realloc_insert` (a small test unit: a try block, all slots used to stay in memory) | 3296 | 680 | |
+| `inline_loops.lua` (State::max_depth 1500 levels): the smallest stack it runs in | 4699 KB | 3212 KB | |
+
+What is left: the 240-byte entry of every try block (the catch fields sit behind the `jmp_buf`, so it does not shrink), and the
+locals of the source function itself (named locals in disjoint blocks, the front end's temporaries) have no lifetime facts, so they
+do not share: of the memory slots of `nfcast_nodes.cpp` after the passes, 199 KB are try entries, 88 KB are slots whose address
+escapes and that have no facts, 85 KB have facts (and share), 45 KB are never addressed except by loads, stores and copies (a
+liveness over the slot contents could share those too).
 
 ## Next
 
