@@ -1,5 +1,6 @@
 // asm volatile("ud2") is lowered to the same illegal instruction as __builtin_trap: SIGILL (exit 132).
 // TRAP-EXIT: 132
+// TRAP-EXIT-AARCH64: 133 (Linux aarch64: the illegal instruction is brk, SIGTRAP)
 static int reached(int x) {
   if (x == 4) __asm__ __volatile__("ud2");
   return x;

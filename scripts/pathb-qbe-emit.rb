@@ -865,15 +865,27 @@ end
 # scalars to classify), "memory" (more than 16 bytes), "empty" (no data: not passed) or "unsupported" (why: the reason).
 # QBE classifies the eightbytes of its own aggregate type declarations like the System V x86-64 psABI.
 class AbiType
-  attr_reader :tn, :size, :align, :shape, :why
+  attr_reader :tn, :size, :align, :shape, :why, :ints
 
-  def initialize(tn, size, align, shape, why)
+  # ints: the integer argument registers the aggregate takes (AArch64), or nil when that is not known
+  def initialize(tn, size, align, shape, why, ints = nil)
     @tn = tn
     @size = size
     @align = align
     @shape = shape
     @why = why
+    @ints = ints
   end
+end
+
+# --arm64-abi (set by tests/pathb-qbe/run.sh on arm64): an aggregate with 16-byte alignment that is passed in integer registers
+# starts at an even one (AAPCS64 C.8). QBE's arm64 ABI skips the register but leaves it live through the call (spill.c's
+# assertion), so the emitter takes the skipped register itself: a zero integer argument before the aggregate, and an unused
+# integer parameter before it in the definition (the same as pathb-ssa-qbe.rb's even_pad?).
+$arm64_abi = false
+$arm64_apple = false
+def even_pad?(info, ints)
+  $arm64_abi && info.shape == "leaves" && info.align == 16 && info.ints.to_i > 0 && ints.odd? && ints + info.ints <= 8
 end
 
 LEAF_SIZE = { "b" => 1, "h" => 2, "w" => 4, "l" => 8, "s" => 4, "d" => 8 }
@@ -890,6 +902,7 @@ def declare_abi_type(mod, f)
   shape = head_of(spec)
   why = nil
   fields = nil
+  ints = nil
   case shape
   when "memory"
     fields = "#{size}"
@@ -916,10 +929,14 @@ def declare_abi_type(mod, f)
     parts << "b #{size - cur}" if size > cur
     fields = parts.join(", ")
     shape = "leaves"
+    # AArch64: a homogeneous float aggregate of up to four members takes FP registers, any other up to 16 bytes size/8 integer ones
+    kinds = f.drop(4).map { |lf| lf[2] }
+    floats = kinds.all? { |k| k == "s" || k == "d" } && kinds.length <= 4
+    ints = floats ? 0 : (size % 8 == 0 ? size / 8 : nil)
   else
     raise BadIR, "abi-type #{name}: unknown shape #{form_text(spec)}"
   end
-  mod.abi[name] = AbiType.new(tn, size, align, shape, why)
+  mod.abi[name] = AbiType.new(tn, size, align, shape, why, ints)
   mod.out << "type #{tn} = align #{align} { #{fields} }" unless fields.nil?
 end
 
@@ -1886,6 +1903,7 @@ def r_call(fn, x)
   # (older IR) they are plain addresses.
   sret = nil
   args = []
+  cints = 0   # integer argument registers used so far (even_pad?)
   rest.each_with_index do |a, i|
     h = head_of(a)
     # (hidden-dest T DEST): a class result on AArch64 is passed in x8 by the SSA route (scripts/pathb-ssa-qbe.rb); this emitter has
@@ -1896,6 +1914,7 @@ def r_call(fn, x)
       info = abi_of(fn.mod, a[1])
       if info.nil?
         args << [fn.opnd(a[2], "l"), nil]
+        cints += 1
       else
         raise Refused, "aggregate #{pstr(parse_type(a[1])[2])} by value: #{info.why}" if info.shape == "unsupported"
         if h == "sret"
@@ -1903,11 +1922,22 @@ def r_call(fn, x)
           sret = [info, fn.opnd(a[2], "l")]
           args << nil
         else
+          if even_pad?(info, cints)
+            # the register AAPCS64 skips (even_pad?). A pad before the "..." boundary is a named argument, so the boundary moves;
+            # on Darwin a variadic aggregate is passed on the stack, so no register is skipped and the call is refused
+            raise Refused, "variadic call on Darwin with a 16-byte aligned aggregate after an odd number of integer arguments" if nfixed && $arm64_apple
+            nfixed += 1 if nfixed && args.size < nfixed
+            args << [Val.new("0", "l", nil), nil]
+            cints += 1
+          end
           args << [fn.opnd(a[2], "l"), info]
+          cints += info.ints.to_i unless info.shape == "empty"
         end
       end
     else
-      args << [fn.opnd(a), nil]
+      v = fn.opnd(a)
+      args << [v, nil]
+      cints += 1 unless v.cls == "s" || v.cls == "d"
     end
   end
   parts = []
@@ -3223,6 +3253,7 @@ def emit_function(mod, f)
   end
   # Parameters: each arrives in a QBE temporary %pI and is copied into its register slot.
   pi = 0
+  pints = 0   # integer argument registers used by the parameters so far (even_pad?)
   sret_tn = nil
   params_form.drop(1).each do |p|
     h = head_of(p)
@@ -3253,6 +3284,7 @@ def emit_function(mod, f)
         if info.nil?
           qparams << "l %p#{pi}"
           param_stores << ["l", pi, n]
+          pints += 1
         else
           raise Refused, "aggregate #{pstr(parse_type(pty[1])[2])} passed by value: #{info.why}" if info.shape == "unsupported"
           if info.shape == "empty"
@@ -3260,9 +3292,14 @@ def emit_function(mod, f)
             fn.inits << "\tstorel %ebuf#{pi}, %r#{n}"
             fn.sp_extra << ["%ebuf#{pi}", 8 + SP_NOPAD] if $safe   # an empty class's this (8: the whole buffer)
           else
+            if even_pad?(info, pints)
+              qparams << "l %p#{pi}"   # the register AAPCS64 skips (even_pad?): not stored, the body does not read it
+              pi += 1
+            end
             qparams << "#{info.tn} %p#{pi}"
             param_stores << ["l", pi, n]
             fn.sp_extra << ["%p#{pi}", info.size + SP_NOPAD] if $safe
+            pints += info.ints.to_i
           end
         end
       else
@@ -3271,6 +3308,7 @@ def emit_function(mod, f)
         fn.declare_reg(n, ty)
         qparams << "#{cls} %p#{pi}"
         param_stores << [cls, pi, n]
+        pints += 1 unless cls == "s" || cls == "d"
       end
     elsif h == "ellipsis"
       qparams << "..."
@@ -3644,6 +3682,16 @@ def main(argv)
     # An adrp/add pair to its @page is a relocation ld64 cannot resolve for a symbol in a dylib (libc++'s vtables).
     $extern_got = true
     args = args.drop(1)
+  end
+  if !args.empty? && args[0] == "--arm64-abi"
+    # AArch64 targets: the 16-byte aligned aggregates start at an even integer register (even_pad?). --arm64-abi-apple: Darwin,
+    # where a variadic aggregate is passed on the stack.
+    $arm64_abi = true
+    args = args.drop(1)
+    if !args.empty? && args[0] == "--arm64-abi-apple"
+      $arm64_apple = true
+      args = args.drop(1)
+    end
   end
   if !args.empty? && args[0].start_with?("--x87-target=")
     # The target of the x87 thunks (x86_64 or arm64), after --extern-data-got and before --safe: arm64 refuses a module that

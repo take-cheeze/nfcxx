@@ -3,6 +3,7 @@
 // are printed as their bit patterns, compared with the gcc backend.
 // STDOUT: same
 // EXPECT: 0
+// GCC-SKIP-AARCH64: the gcc backend's front end rejects __builtin_isnan on __float128 on aarch64 ("more than one" match); EXPECT is checked
 #include <cmath>
 #include <cstdio>
 #include <cstring>
