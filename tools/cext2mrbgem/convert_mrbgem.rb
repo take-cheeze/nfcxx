@@ -99,7 +99,7 @@ CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
-UNKNOWN_RE = /\A(?:rb_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+)\z/
+UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+)\z/
 
 GEM_NAME_RE = /\A[A-Za-z][A-Za-z0-9_-]*\n?\z/
 
@@ -406,7 +406,9 @@ class Converter
     amap = JSON.parse(File.read(MAP_PATH, encoding: 'UTF-8'))
     @entries = amap['entries']
     @types = amap['types']
+    @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
+    @type_check_refused = amap['type_check_refused'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
     @ignored = []
@@ -428,6 +430,7 @@ class Converter
     @init_rel = nil
     @dead_inits = []
     @variadic = {}
+    @local_macros = Set.new
   end
 
   # ---- reporting ---------------------------------------------------------
@@ -497,6 +500,137 @@ class Converter
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
     end
+  end
+
+  # ---- local macros: names the input defines itself -----------------------
+  # A name is local when every #define of it in the input is unconditional, apart from the include guard of a
+  # header. A #define under any other conditional (or #if 0) may be a compatibility fallback for a CRuby name
+  # (e.g. #if !defined(HAVE_...) #define rb_x ...), so the name stays refused. An #undef must be unconditional and
+  # no use may follow it in its file. A name whose first use in its own file precedes the #define is not local
+  # either: that use is the CRuby name. A local name is kept as it is (it is not a CRuby API); the body of its
+  # macro is still scanned like any other text, so a CRuby API used there is checked.
+  GUARD_RE = /(?:_h_*|_included)\z/i
+
+  def scan_local_macros
+    defined = {}     # name -> [[rel, directive position, tainted]]
+    undefined = {}   # name -> [[rel, directive position, tainted]]
+    @files.each do |rel, f|
+      stack = []     # one frame per open conditional: [guard?, condition texts]
+      f['masked'].scan(/^[ \t]*#[ \t]*(\w+)([^\n]*(?:\\\n[^\n]*)*)/) do
+        kw, rest, pos = $1, $2.strip, $~.begin(0)
+        case kw
+        when 'if', 'ifdef', 'ifndef'
+          gname = rest[/\A\w+\z/] if kw == 'ifndef'
+          gname ||= rest[/\A!\s*defined\s*\(?\s*(\w+)\s*\)?\z/, 1] if kw == 'if'
+          guard = stack.empty? && f['kind'] == 'hdr' && !gname.nil? && GUARD_RE.match?(gname)
+          stack.push([guard, [rest], false])
+        when 'elif', 'else'
+          if stack.any?
+            stack.last[1] << rest
+            stack.last[0] = false   # an include guard has no other branch
+          end
+        when 'endif' then stack.pop
+        when 'define'
+          name = rest[/\A(\w+)/, 1]
+          next if name.nil?
+          tainted = stack.any? { |g, _, _| !g }
+          (defined[name] ||= []) << [rel, pos, tainted]
+        when 'undef'
+          name = rest[/\A(\w+)/, 1]
+          (undefined[name] ||= []) << [rel, pos, stack.any? { |g, _, _| !g }] if name
+        end
+      end
+    end
+    @local_macros = Set.new
+    defined.each do |name, defs|
+      next if defs.any? { |_, _, t| t }
+      use_re = /(?<![#{WC}$])#{Regexp.escape(name)}(?![#{WC}])/
+      # an #undef ends the gem's meaning: it must be unconditional, and no use of the name may follow it
+      undone = (undefined[name] || []).any? do |rel, pos, t|
+        masked = @files[rel]['masked']
+        t || !masked.index(use_re, masked.index("\n", pos) || masked.length).nil?
+      end
+      next if undone
+      early = defs.any? do |rel, pos, _|
+        first = @files[rel]['masked'].index(use_re)
+        !first.nil? && first < pos
+      end
+      @local_macros << name unless early
+    end
+  end
+
+  # ---- local variables and struct tags the input declares ----------------
+  # A parameter or top-level local of a function definition is local when every occurrence of its name in the input
+  # lies inside a function that declares it, from the declaration on: within that function it shadows any CRuby name
+  # of the same spelling, and no other occurrence can refer to it. A class variable is never local this way. A
+  # struct, union or enum tag the input defines (with a body) is in the tag namespace, so `struct NAME` with that tag
+  # is local; a forward declaration is not enough, since the definition may be CRuby's.
+  NOT_A_TYPE = %w[return goto else case typedef sizeof break continue do].freeze
+
+  def scan_local_names
+    @local_tags = Set.new
+    @files.each_value do |f|
+      f['masked'].scan(/\b(?:struct|union|enum)[ \t\n]+([A-Za-z_][#{WC}]*)[ \t\n]*\{/) { @local_tags << $1 }
+    end
+    cands = Hash.new { |h, k| h[k] = [] }   # name -> [[rel, lo, hi, declaration position]]
+    @defs.values.flatten.each do |d|
+      next unless d.key?('body_end')
+      span = [d['file'], d['hstart'], d['body_end']]
+      param_names(d).each { |n| cands[n] << [*span, d['hstart']] }
+      body_top_declarations(d).each { |n, pos| cands[n] << [*span, pos] }
+    end
+    @local_var_occ = Set.new
+    cands.each do |name, list|
+      next if @class_vars.include?(name) || !@occ.key?(name)
+      occs = @occ[name]
+      covered = occs.all? do |orel, s, _|
+        list.any? { |rel, lo, hi, dpos| rel == orel && lo <= s && s < hi && s >= dpos }
+      end
+      occs.each { |orel, s, _| @local_var_occ << [orel, s] } if covered
+    end
+  end
+
+  # [name, declaration position] for the declarators of the top-level declarations in a function body
+  def body_top_declarations(d)
+    masked = @files[d['file']]['masked']
+    out = []
+    depth = 0
+    seg = d['brace'] + 1
+    i = seg
+    while i < d['body_end']
+      c = masked[i]
+      if c == '{'
+        depth += 1
+      elsif c == '}'
+        depth -= 1
+        seg = i + 1 if depth.zero?
+      elsif c == ';' && depth.zero?
+        text = masked[seg...i]
+        head = /\A\s*(?:(?:static|const|volatile|unsigned|signed|struct|union|enum)\s+)*([A-Za-z_]\w*)\s+(?=[*A-Za-z_])/.match(text)
+        if head && !NOT_A_TYPE.include?(head[1])
+          rest = text[head.end(0)..]
+          parts, cur, pd = [], +'', 0
+          rest.each_char do |ch|
+            pd += 1 if ch == '('
+            pd -= 1 if ch == ')'
+            if ch == ',' && pd.zero?
+              parts << cur
+              cur = +''
+            else
+              cur << ch
+            end
+          end
+          parts << cur
+          parts.each do |part|
+            nm = part.sub(/=.*\z/m, '')[/([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*\z/, 1]
+            out << [nm, seg] if nm
+          end
+        end
+        seg = i + 1
+      end
+      i += 1
+    end
+    out
   end
 
   # ---- stage 2: classes, registrations, definitions -----------------------
@@ -901,6 +1035,26 @@ class Converter
     [hdr, prologue, nil]
   end
 
+  # A CRuby #include that api_map.json maps (its "includes" key): the mruby headers it becomes, one per line, quoted or
+  # angle-bracketed. "comment" follows a quoted include; "config_macro" (when the input's text uses it) is defined by
+  # the converter, as CRuby's extconf would define it; "caveat" is recorded with the rewrite.
+  def map_include(rel, m, ent, masked, ed)
+    heads = ent['headers']
+    repl = heads.map do |h|
+      line = ent['quoted'] ? "#include \"#{h}\"" : "#include <#{h}>"
+      line += "  /* #{ent['comment']} */" if ent['comment'] && ent['quoted']
+      line
+    end.join("\n")
+    ed.add(m.begin(0), m.end(0), repl)
+    cm = ent['config_macro']
+    if cm && masked.include?(cm)
+      # CRuby's extconf sets this macro; the code it guards is in the input, so the converter defines it.
+      ed.add(0, 0, "#define #{cm} 1  /* set by the converter: #{ent['config_comment']} */\n")
+      rewrite(rel, 0, cm, 'defined by converter', 'extconf config macro set on')
+    end
+    rewrite(rel, m.begin(0), m[0], repl.gsub("\n", ' | '), ent['caveat'])
+  end
+
   def process(rel)
     f = @files[rel]
     text, masked, ed = f['text'], f['masked'], @edits[rel]
@@ -908,24 +1062,13 @@ class Converter
     finditer(INC_RE, text).each do |m|
       next if masked[m.begin(0)] != '#'
       inc = m[1]
-      if inc == 'ruby.h'
-        repl = "#include <mruby.h>\n#include <mruby/string.h>\n#include <mruby/numeric.h>"
-        ed.add(m.begin(0), m.end(0), repl)
-        rewrite(rel, m.begin(0), m[0], repl.gsub("\n", ' | '))
+      if @includes.key?(inc)
+        map_include(rel, m, @includes[inc], masked, ed)
       elsif DROP_INCLUDES.key?(inc)
         reason = DROP_INCLUDES[inc]
         ed.add(m.begin(0), m.end(0), "/* BC2CPP-MRBGEM dropped: #include <#{inc}> (#{reason}) */")
         @warnings << { 'file' => rel, 'line' => line_of(text, m.begin(0)), 'api' => "#include <#{inc}>", 'reason' => reason }
         warn "warning: #{rel}:#{line_of(text, m.begin(0))} dropped #include <#{inc}> (#{reason})"
-      elsif inc == 'ruby/thread.h'
-        repl = '#include "nfcx_uv_thread.h"  /* thread model on mruby-uv */'
-        ed.add(m.begin(0), m.end(0), repl)
-        if masked.include?('HAVE_RUBY_THREAD_H')
-          # CRuby's extconf sets this; the thread code is guarded by it, so the converter defines it.
-          ed.add(0, 0, "#define HAVE_RUBY_THREAD_H 1  /* set by the converter: thread model is on */\n")
-          rewrite(rel, 0, 'HAVE_RUBY_THREAD_H', 'defined by converter', 'extconf config macro set on')
-        end
-        rewrite(rel, m.begin(0), m[0], repl, 'thread API modelled on mruby-uv')
       else
         refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
       end
@@ -986,13 +1129,15 @@ class Converter
         ed.add(po + 1, po + 1, masked[pa] == ')' ? 'mrb' : 'mrb, ')
       end
     end
-    # 5. identifier pass
-    local_syms = Set.new(@defs.keys) | Set.new(@decls.reject { |d| d['hdr'] }.map { |d| d['name'] }) | @class_vars
+    # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
+    # CRuby API), class variables and the macros the input defines (scan_local_macros).
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      next if @local_var_occ.include?([rel, s])
       entry = @entries[name]
       if !entry.nil?
         if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b }
@@ -1004,7 +1149,8 @@ class Converter
         next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}[A-Za-z_]/)
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
-      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name)
+      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
+            !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         refuse(rel, s, name, 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
@@ -1154,6 +1300,8 @@ class Converter
       scan_args(rel, s, e, nxt, called)
     when 'RB_TYPE_P'
       type_p(rel, s, e, nxt, called)
+    when 'Check_Type', 'rb_check_type'
+      check_type(rel, s, e, name, nxt, called)
     when 'rb_gc_start'
       gc_start(rel, s, e, nxt, called)
     when 'rb_gc_writebarrier'
@@ -1358,6 +1506,45 @@ class Converter
     rewrite(rel, s, 'RB_TYPE_P', new)
   end
 
+  # Check_Type(v, T_X) and rb_check_type(v, T_X) -> mrb_check_type(mrb, v, MRB_TT_X). Only the name and the type
+  # argument are edited, so the value argument is left to the identifier pass (it may be any expression). The type
+  # argument must be a literal T_ identifier: CRuby's int values differ from mruby's enum, so a variable is refused.
+  # The name must have type_check "exact" or "caveat" in api_map.json; the others are refused with type_check_refused.
+  def check_type(rel, s, e, name, nxt, called)
+    masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
+    unless called
+      refuse(rel, s, name, 'used without a call')
+      return
+    end
+    close = match_close(masked, nxt)
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    if args.size != 2
+      refuse(rel, s, name, "#{name} takes a value and a T_ type")
+      return
+    end
+    ts, te = args[1]
+    tname = psl(text, ts, te)
+    unless /\A(?:RUBY_)?T_[A-Z]+\z/.match?(tname)
+      refuse(rel, s, name, 'type argument is not a literal T_ constant')
+      return
+    end
+    ent = @entries[tname]
+    if !@type_check_refused[tname].nil? || ent.nil? || !%w[exact caveat].include?(ent['type_check']) ||
+       !(ent['mruby'] || '').start_with?('MRB_TT_')
+      reason = @type_check_refused[tname] || "#{tname} has no exact mruby type test in the supported subset"
+      refuse(rel, s, name, reason)
+      # keep the T_ name as written: the identifier pass must not map it inside a refused call
+      ed.add(ts, te, tname)
+      return
+    end
+    obj = psl(text, args[0][0], args[0][1])
+    to = "mrb_check_type(mrb, #{obj}, #{ent['mruby']})"
+    ed.add(s, e, 'mrb_check_type')
+    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    ed.add(ts, te, ent['mruby'])
+    rewrite(rel, s, name, to, ent['caveat'])
+  end
+
   # rb_gc_writebarrier(old, young) as a statement -> an immediate-guarded mrb_field_write_barrier_value. The
   # arguments are plain locals: they are used more than once, and an edit inside them would overlap. CRuby's
   # `old` is never a special constant (RB_OBJ_WRITE only calls this for heap owners), so the guard is a no-op there.
@@ -1471,8 +1658,10 @@ class Converter
   def run
     choose_scanner
     load
+    scan_local_macros
     scan
     build_occurrences
+    scan_local_names
     compute_needs
     check_refs
     @files.keys.sort.each { |rel| process(rel) }

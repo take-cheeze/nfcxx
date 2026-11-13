@@ -203,11 +203,112 @@ check grep -qF 'mrb_warn(mrb, "boom check: %s", "start");' "$work/api_exc_misc/s
 check grep -qF 'mrb_raisef(mrb, mrb_exc_get(mrb, "NoMemoryError"), "out of room");' "$work/api_exc_misc/src/api_exc_misc.c"
 check grep -qF 'mrb_value now = (obj);' "$work/api_exc_misc/src/api_exc_misc.c"
 
+# 2p. identifiers the input defines itself: a #define'd macro, a struct tag with a body, and a local variable or
+# parameter (every use inside a function that declares it) are local, not refused. Refused: a name used but never
+# defined, a fallback #define under #if !defined(...), and a CRuby call in a local macro's body
+rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names tools/cext2mrbgem/fixtures/local_names/ext/local_names "$work/local_names" > "$work/local_names.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/local_names/NOT_BUILDABLE"
+check grep -qF '#define LN_TWICE(x) ((x) * 2)' "$work/local_names/src/local_names.c"
+check grep -qF 'mrb_int_value(mrb, LN_TWICE(n));' "$work/local_names/src/local_names.c"
+check grep -qF 'mrb_value rb_ln_out;' "$work/local_names/src/local_names.c"
+check grep -qF 'struct rb_ln_state s;' "$work/local_names/src/local_names.c"
+check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/local_names.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/local_names_refused/NOT_BUILDABLE"
+check grep -q '  rb_reg_nth_match  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
+
+# 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers; a header with
+# no mruby counterpart (ruby/encoding.h) is refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/fixtures/includes_map/ext/includes_map "$work/includes_map" > "$work/includes_map.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
+check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
+check grep -q '  #include <ruby/encoding.h>  CRuby header not in the supported subset' "$work/includes_map/REFUSALS.txt"
+
+# 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_exc_index/NOT_BUILDABLE"
+check grep -qF 'mrb_raisef(mrb, E_INDEX_ERROR, "index out of range");' "$work/api_exc_index/src/api_exc_index.c"
+check grep -qF 'mrb_raisef(mrb, E_RANGE_ERROR, "value out of range");' "$work/api_exc_index/src/api_exc_index.c"
+
+# 2s. type tags T_TRUE, RUBY_T_STRING, RUBY_T_SYMBOL, T_FALSE and RUBY_T_FIXNUM (api_map.json batch D2): RB_TYPE_P on an
+# exact tag compares the mruby type; the caveated tags (T_FALSE, RUBY_T_FIXNUM) are rewritten as plain expressions
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_tags tools/cext2mrbgem/fixtures/api_type_tags/ext/api_type_tags "$work/api_type_tags" > "$work/api_type_tags.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_tags/NOT_BUILDABLE"
+check grep -qF '(mrb_type(v) == MRB_TT_TRUE) ? mrb_true_value() : mrb_false_value();' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF '(mrb_type(v) == MRB_TT_STRING) ? mrb_true_value() : mrb_false_value();' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int sym_tag = MRB_TT_SYMBOL;' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int false_tag = MRB_TT_FALSE;' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int fix_tag = MRB_TT_INTEGER;' "$work/api_type_tags/src/api_type_tags.c"
+
+# 2t. String, Array and Hash helpers and RFLOAT_VALUE (api_map.json batch D3): rb_str_freeze, rb_str_append,
+# rb_str_resize, rb_assoc_new, rb_hash_dup (call, mrb injected), rb_array_len (RARRAY_LEN) and RFLOAT_VALUE (mrb_float)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_ops tools/cext2mrbgem/fixtures/api_str_ops/ext/api_str_ops "$work/api_str_ops" > "$work/api_str_ops.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_str_ops/NOT_BUILDABLE"
+check grep -qF 'return mrb_obj_freeze(mrb, str);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_str_append(mrb, dst, src);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'return mrb_str_resize(mrb, dst, 4);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_value pair = mrb_assoc_new(mrb, a, b);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_value copy = mrb_hash_dup(mrb, a);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'long n = RARRAY_LEN(pair);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'double f = mrb_float(b);' "$work/api_str_ops/src/api_str_ops.c"
+
+# 2u. rb_warn, rb_obj_classname, rb_sym2id and rb_sys_fail (api_map.json batch D4): call kinds, each with a caveat
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_msg tools/cext2mrbgem/fixtures/api_msg/ext/api_msg "$work/api_msg" > "$work/api_msg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_msg/NOT_BUILDABLE"
+check grep -qF 'const char *name = mrb_obj_classname(mrb, obj);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'mrb_warn(mrb, "say: %s", name);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'mrb_sym id = mrb_symbol(path);' "$work/api_msg/src/api_msg.c"
+check grep -qF 'if (id == 0) mrb_sys_fail(mrb, "open");' "$work/api_msg/src/api_msg.c"
+
+# 2v. rb_define_alias on a tracked class variable (api_map.json batch D5): mrb_define_alias with the class passed unwrapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alias tools/cext2mrbgem/fixtures/api_alias/ext/api_alias "$work/api_alias" > "$work/api_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alias/NOT_BUILDABLE"
+check grep -qF 'mrb_define_alias(mrb, cApiAlias, "copy", "orig");' "$work/api_alias/src/api_alias.c"
+
+# 2w. Check_Type and rb_check_type with a literal exact T_ type (api_map.json type_check): mrb_check_type with the MRB_TT_
+# tag; T_DATA maps to MRB_TT_CDATA with its caveat logged. Types with no exact mruby tag (T_FIXNUM, T_NIL, T_CLASS) and a
+# type argument that is a variable stay refused, and the T_ name of a refused call is not mapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type tools/cext2mrbgem/fixtures/check_type/ext/check_type "$work/check_type" > "$work/check_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/check_type/NOT_BUILDABLE"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_STRING);' "$work/check_type/src/check_type.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_ARRAY);' "$work/check_type/src/check_type.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_CDATA);' "$work/check_type/src/check_type.c"
+check grep -q 'CRuby T_DATA also covers TypedData' "$work/check_type/conversion_log.json"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type_refused tools/cext2mrbgem/fixtures/check_type_refused/ext/check_type_refused "$work/check_type_refused" > "$work/check_type_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/check_type_refused/NOT_BUILDABLE"
+check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
+check test "$(grep -c '  rb_check_type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
+check grep -q '  Check_Type  mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
+check grep -q '  rb_check_type  nil and false share' "$work/check_type_refused/REFUSALS.txt"
+check grep -q 'MRB_TT_CLASS does not match' "$work/check_type_refused/REFUSALS.txt"
+check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
+check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
   if [ "$scanner" = libclang ]; then check sh -c "! grep -q scanner_fallback '$d/conversion_log.json'"; fi
 done
+
+# 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
+ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q "st_init_numtable  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
+check grep -q "ruby_xmalloc  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
 
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
