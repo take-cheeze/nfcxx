@@ -14,7 +14,8 @@
 #     dp 1             -MP given
 #   or, for a refused option, "nfcc: error: <message>" on stderr and status 1.
 
-WpError = Class.new(StandardError)
+class WpError < StandardError
+end
 
 # The state -Wp sets. Values are the same as the bash globals: pp, depmode, dfile, dts, dp.
 WpState = Struct.new(:pp, :depmode, :dfile, :dts, :dp)
@@ -81,7 +82,11 @@ def main(argv)
   state.pp.each { |x| $stdout.write("pp #{x}\n") }
   $stdout.write("depmode #{state.depmode}\n") unless state.depmode.empty?
   $stdout.write("dfile #{state.dfile}\n") unless state.dfile.empty?
-  state.dts.each_slice(2) { |flag, target| $stdout.write("dt #{flag} #{target}\n") }
+  index = 0
+  while index < state.dts.length
+    $stdout.write("dt #{state.dts[index]} #{state.dts[index + 1]}\n")
+    index += 2
+  end
   $stdout.write("dp 1\n") if state.dp == 1
   0
 rescue WpError => e

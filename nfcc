@@ -213,7 +213,23 @@ pathb_option() {   # 0: handled here
 }
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
+# The same option parsed by the sealed scripts/driver-options.rb (build/driver-options, made by tests/bc2cpp/run_driver_options.sh):
+# its output lines set the same variables. Used when that file exists; the bash below is the fallback.
+wp_option_sealed() {
+  local out line rest
+  out=$("$root/build/driver-options" "$1") || exit 1
+  while IFS= read -r line; do
+    case $line in
+      "pp "*) pp+=("${line#pp }") ;;
+      "depmode "*) depmode=${line#depmode } ;;
+      "dfile "*) dfile=${line#dfile } ;;
+      "dt "*) rest=${line#dt }; dts+=("${rest%% *}" "${rest#* }") ;;
+      "dp 1") dp=1 ;;
+    esac
+  done <<<"$out"
+}
 wp_option() {
+  if [ -x "$root/build/driver-options" ]; then wp_option_sealed "$1"; return; fi
   local w j x
   IFS=, read -ra w <<<"${1#-Wp,}"
   for ((j = 0; j < ${#w[@]}; j++)); do

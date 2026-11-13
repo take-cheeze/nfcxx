@@ -14,7 +14,7 @@ module CiScope
   # Byte matching and absolute anchors also handle unusual git filenames.
   PATHB = %r{\A(?:be/|3rd/(?:edg|qbe|cproc)\z|scripts/|nfcc/|lib/|tests/run\.sh\z|
     tests/realworld/|\.github/actions/|
-    tests/(?:pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/)|
+    tests/(?:pathb/|pathb-|wasm/|sycl/|mruby/|cases/|cpp-features/|ehshim/|safeptr/|nfcc/)|nfcc\z|
     tools/(?:pathb-spirv-emit|qbe-prep)/|nfcxx\z|\.github/workflows/ci\.yml\z|\.github/ci-test-matrix\.yml\z)}nx
   FULL_JOBS = %w[build test arm-build arm-test macos-suites mrustc].freeze
   PATHB_JOBS = %w[pathb-build pathb-test].freeze
