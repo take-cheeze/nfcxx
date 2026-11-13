@@ -26,6 +26,12 @@ Solution solve(const Problem& p) {
     double cost = 0, repair_cost = 0;
     std::vector<Repair> repairs;
     std::vector<std::string> chosen;
+    std::vector<std::string> row_lane;          // the Row-lane tensors this choice holds (their storage is enumerated)
+    auto add_row_lane = [&](const std::string& name) {
+      for (const std::string& r : row_lane)
+        if (r == name) return;
+      row_lane.push_back(name);
+    };
     for (size_t i = 0; i < p.ops.size(); ++i) {
       const Op& op = p.ops[i];
       const Variant& v = op.variants[pick[i]];
@@ -39,19 +45,43 @@ Solution solve(const Problem& p) {
         Repair r{op.name, in, have->second, need->second, t->numel() * target.transpose_instr_per_elem};
         repair_cost += r.instructions;
         repairs.push_back(r);
+        if (need->second == Axis::Row) add_row_lane(in);  // the repaired copy is in Row lanes
       }
-      for (const auto& [name, axis] : v.produces_lane) layout[name] = axis;
+      for (const auto& [name, axis] : v.produces_lane) {
+        layout[name] = axis;
+        if (axis == Axis::Row) add_row_lane(name);
+      }
       if (!v.produces_lane.count(op.output)) layout.erase(op.output);
     }
     cost += repair_cost;
+    // Storage of the Row-lane tensors: bit i of mask set means row_lane[i] is Blocked8. Mask 0 (all Strided) is tried
+    // first, so it wins ties, such as a zero strided penalty.
+    uint32_t storage_mask = 0;
+    double storage_cost = std::numeric_limits<double>::infinity();
+    for (uint32_t mask = 0; mask < (1u << row_lane.size()); ++mask) {
+      double sc = 0;
+      for (size_t i = 0; i < row_lane.size(); ++i) {
+        const double numel = double(by_name.at(row_lane[i])->numel());
+        sc += numel * ((mask >> i) & 1 ? target.blocked_instr_per_elem : target.strided_instr_per_elem);
+      }
+      if (sc < storage_cost) {
+        storage_cost = sc;
+        storage_mask = mask;
+      }
+    }
+    cost += storage_cost;
     if (cost < best_cost) {
       best_cost = cost;
       best.feasible = true;
       best.cost = cost;
       best.repair_cost = repair_cost;
+      best.storage_cost = storage_cost;
       best.variant = chosen;
       best.layout = layout;
       best.repairs = repairs;
+      best.storage.clear();
+      for (size_t i = 0; i < row_lane.size(); ++i)
+        best.storage[row_lane[i]] = (storage_mask >> i) & 1 ? Storage::Blocked8 : Storage::Strided;
     }
     // Advance the counter.
     size_t i = 0;

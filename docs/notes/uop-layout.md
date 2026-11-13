@@ -32,6 +32,50 @@ M-vectorized one costs an extra `3*M*K/8` (transposing A). The M-vectorized kern
 N-vectorized one wins when `K > 16`; at `K = 16` they tie. `tests/uop/test_layout.cpp` checks the solver against these
 hand-computed totals at K = 8, 16 and 64, against a cheap-transpose target, and against an infeasible problem.
 
+## Storage of the lanes-on-M tensors
+
+A tensor in Row lanes (the lanes on M) can be held in `Storage::Strided` (column by column, so the lanes of one access
+are a row length apart) or `Storage::Blocked8` (8-row blocks, each contiguous). The solver enumerates both for each
+Row-lane tensor the plan holds: a GEMM output in Row lanes (C in `avx2-vec-m`), or the copy a repair makes in Row lanes
+(the transposed A). `Solution::storage` reports the choice, keyed by tensor name, and `Solution::storage_cost` is its
+term of `Solution::cost`. Per tensor of `numel` elements:
+
+    storage cost = numel * strided_instr_per_elem    (Strided)
+                 = numel * blocked_instr_per_elem    (Blocked8)
+
+with `strided_instr_per_elem = 0.46` and `blocked_instr_per_elem = 0` (`Avx2F32`). The ties go to Strided.
+
+Sources of the constants. The timings are in `docs/notes/uop-layout.md` on branch `claude/sleepy-faraday-n2e9k7`
+(commits `f20a2e64`, `f09a38d2`, `d72bf5ba`), and the rounds below name the sections there. All are `M = N = 256`, one host.
+
+- **Strided, `0.46`.** At K = 8 the strided M-vectorized kernel runs at 1.41 times vec-n (round 2, quiet host), about 1.4
+  (round 3, the stores ablation) and 1.47 (round 4, -O2). The model's blocked vec-m is 74,496 instructions and vec-n is
+  75,264 (0.99). The excess, `(1.40 - 0.99) * 75264 = 30,858`, is spread over the 67,584 elements of A^T and C
+  (2,048 and 65,536), giving 0.46. This converts a time ratio into the model's instruction units by assuming the
+  instruction count of vec-n tracks its time at this shape, which the model already assumes.
+- **Blocked, `0`.** The blocked kernel's time over vec-n is 1.00, 0.98, 0.92, 1.16, 1.00 at K = 8, 16, 24, 32, 64 (round 5,
+  -O2; at -O3 it is 0.82, 0.77, 0.92, 1.03, 1.07). The model's blocked vec-m over vec-n is 0.990, 1.000, 1.004, 1.006,
+  1.009. The measurements show no excess over the model's count: at -O3 the blocked kernel is faster than the model at
+  K = 8 and 16, and at -O2 it is slower only at K = 32 (1.16, against 1.03 at -O3). The blocked own cost is zero.
+
+How the penalty fits the measured strided-over-vec-n ratio (round 4, -O2, vs the model with the constant above):
+
+| K | 8 | 16 | 24 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- |
+| measured | 1.47 | 0.89 | 1.12 | 1.16 | 1.46 |
+| model | 1.40 | 1.23 | 1.16 | 1.13 | 1.08 |
+
+It matches at K = 8, 24 and 32. It misses K = 16 (the measured strided kernel is faster than vec-n, the note's K = 16
+is unexplained) and K = 64, where the strided kernel is 1.46 times vec-n at both flags. A per-element term cannot give
+K = 64 without a much larger constant, which would then break K = 8, so the constant is kept at the K = 8 value rather
+than fit to the spread of the other points.
+
+What follows. With a positive strided penalty and free blocked storage, the solver chooses Blocked8 for every Row-lane
+tensor. Strided is kept only when the penalty is zero or the blocked cost is higher, and the `storage_cost` tests in
+`tests/uop/test_layout.cpp` cover both. At M = N = 256 the choice is vec-m with Blocked8 at K = 8 and 16 (16 is still a
+tie, broken to vec-m) and vec-n at K = 24 and 64. The measured blocked kernel is 0.92 of vec-n at K = 24, so the model's
+crossover at K = 24 (vec-n by 0.4%) is inside the spread of the measurements; the model puts the crossover at K = 16 as before.
+
 ## What it is not
 
 - **A cost model.** The instruction counts are written in the target description (`Avx2F32`) and in `gemm_rowsum`.
