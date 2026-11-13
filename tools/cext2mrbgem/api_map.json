@@ -742,6 +742,28 @@
       "needs_mrb": false,
       "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
     },
+    "T_TRUE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_TRUE"
+    },
+    "T_FALSE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_FALSE",
+      "caveat": "mruby's nil also has type MRB_TT_FALSE (mrb_nil_p tells them apart by value), so this matches nil, which CRuby reports as T_NIL; RB_TYPE_P(x, T_FALSE) stays refused for this reason"
+    },
+    "RUBY_T_STRING": {
+      "kind": "expr",
+      "mruby": "MRB_TT_STRING"
+    },
+    "RUBY_T_SYMBOL": {
+      "kind": "expr",
+      "mruby": "MRB_TT_SYMBOL"
+    },
+    "RUBY_T_FIXNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_INTEGER",
+      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+    },
     "T_FIXNUM": {
       "kind": "expr",
       "mruby": "MRB_TT_INTEGER",

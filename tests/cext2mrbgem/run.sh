@@ -238,6 +238,17 @@ check test ! -e "$work/api_exc_index/NOT_BUILDABLE"
 check grep -qF 'mrb_raisef(mrb, E_INDEX_ERROR, "index out of range");' "$work/api_exc_index/src/api_exc_index.c"
 check grep -qF 'mrb_raisef(mrb, E_RANGE_ERROR, "value out of range");' "$work/api_exc_index/src/api_exc_index.c"
 
+# 2s. type tags T_TRUE, RUBY_T_STRING, RUBY_T_SYMBOL, T_FALSE and RUBY_T_FIXNUM (api_map.json batch D2): RB_TYPE_P on an
+# exact tag compares the mruby type; the caveated tags (T_FALSE, RUBY_T_FIXNUM) are rewritten as plain expressions
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_tags tools/cext2mrbgem/fixtures/api_type_tags/ext/api_type_tags "$work/api_type_tags" > "$work/api_type_tags.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_tags/NOT_BUILDABLE"
+check grep -qF '(mrb_type(v) == MRB_TT_TRUE) ? mrb_true_value() : mrb_false_value();' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF '(mrb_type(v) == MRB_TT_STRING) ? mrb_true_value() : mrb_false_value();' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int sym_tag = MRB_TT_SYMBOL;' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int false_tag = MRB_TT_FALSE;' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int fix_tag = MRB_TT_INTEGER;' "$work/api_type_tags/src/api_type_tags.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
