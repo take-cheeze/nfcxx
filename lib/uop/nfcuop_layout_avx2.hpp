@@ -45,5 +45,9 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
 // where Bp is scratch of K * N floats (the packed B). mr is the row tile, 4 or 6: requires M % mr == 0, N % 16 == 0.
 // The packing is the layout repair of the model: the cost of the packing pass is M-independent and O(K*N).
 std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr = 4);
+// The same kernel with the row tiles split across threads (pthreads; compile with -pthread). The signature is
+//   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp, int nthreads);
+// B is packed once, then each thread runs the tile loop over its own rows. nthreads is clamped to [1, min(64, tiles)].
+std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr = 6);
 
 }  // namespace nfcuop::layout
