@@ -181,3 +181,18 @@ x.c x.s a.o
 -Wp,-foo x.c
 -Wp,-DX,-foo x.c
 -Wp,-MD,a,-zz x.c
+@tests/nfcc/response/ws.rsp -c
+@tests/nfcc/response/quotes.rsp
+@tests/nfcc/response/nest1.rsp x.c
+@tests/nfcc/response/backslash.rsp
+@tests/nfcc/response/loop.rsp
+@tests/nfcc/response/nope.rsp -c x.c
+@tests/nfcc/response/dir.rsp x.c
+@tests/nfcc/response/unterm.rsp
+@tests/nfcc/response/crlf.rsp -c x.c
+@tests/nfcc/response/dbl.rsp
+@tests/nfcc/response/empty.rsp -c x.c
+@tests/nfcc/response/emptyquotes.rsp -c x.c
+@tests/nfcc/response/tailbs.rsp
+@tests/nfcc/response/utf8.rsp x.c
+-c @tests/nfcc/response/ws.rsp @tests/nfcc/response/inner.rsp -o out @tests/nfcc/response/quotes.rsp

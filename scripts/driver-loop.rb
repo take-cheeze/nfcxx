@@ -4,8 +4,9 @@
 # -nostdinc, -undef, --sysroot=); the dependency flags (-MD -MMD -MF -MT -MQ -MP) and -Wp,* (the same parser as
 # scripts/driver-options.rb); -l -L and the link options (-Xlinker -z -u -T, -static ..., -Wl,*, -fuse-ld=*, -shared);
 # the input files by suffix; -O* -g* -pipe -v -time -w -W* and -Wa,*; the -f and -m cases.
-# Not covered yet, refused as "unported" (exit 3): -fno-crossjumping (host-dependent), @file response files, and the
-# helpers qbekernel and pathb_option. A caller can tell "not done yet" from "refused by nfcc".
+# @file arguments are expanded first, as add_arg does, and an @ that cannot be read is refused.
+# Not covered yet, refused as "unported" (exit 3): -fno-crossjumping (host-dependent) and the helpers qbekernel and
+# pathb_option. A caller can tell "not done yet" from "refused by nfcc".
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -14,6 +15,77 @@
 #                                        an error as bash prints it ("nfcc: error: ..." on stderr, status 1)
 
 class LoopDie < StandardError
+end
+
+# nfcc expands @file arguments before its loop (add_arg): the same rules as scripts/response-file.rb (gcc's buildargv:
+# whitespace separates, quotes group, a backslash escapes, nested @file up to 32 levels). An @file that is not a readable
+# regular file stays as it is; the loop then refuses it.
+MAX_RESPONSE_DEPTH = 32
+RESPONSE_WHITESPACE = [32, 9, 10, 13, 12, 11].freeze
+
+def split_response_text(text)
+  bytes = text.b
+  size = bytes.bytesize
+  words = []
+  word = "".b
+  have_word = false
+  quote = nil
+  j = 0
+  while j < size
+    ch = bytes.getbyte(j)
+    if ch == 92
+      j += 1
+      break if j >= size
+
+      word << bytes.getbyte(j)
+      have_word = true
+    elsif quote
+      if ch == quote
+        quote = nil
+      else
+        word << ch
+      end
+    elsif ch == 39 || ch == 34
+      quote = ch
+      have_word = true
+    elsif RESPONSE_WHITESPACE.include?(ch)
+      words << word if have_word
+      word = "".b
+      have_word = false
+    else
+      word << ch
+      have_word = true
+    end
+    j += 1
+  end
+  words << word if have_word
+  words
+end
+
+def read_response_file(path)
+  return nil unless File.file?(path)
+
+  File.open(path, "rb") { |io| io.read }
+rescue StandardError
+  nil
+end
+
+def expand_argument(arg, depth, out)
+  path = arg.byteslice(1, arg.bytesize - 1)
+  text = arg.getbyte(0) == 64 ? read_response_file(path) : nil
+  if text.nil?
+    out << arg
+    return out
+  end
+  die("response files nested too deeply (a loop?): #{path}") if depth >= MAX_RESPONSE_DEPTH
+  split_response_text(text).each { |word| expand_argument(word, depth + 1, out) }
+  out
+end
+
+def expand_response_args(args)
+  out = []
+  args.each { |arg| expand_argument(arg, 0, out) }
+  out
 end
 
 class Unported < StandardError
@@ -344,7 +416,9 @@ def run_loop(args)
       end
     elsif a == "-"
       state.inputs << "c:-"
-    elsif a.start_with?("-") || a.start_with?("@")
+    elsif a.start_with?("@")
+      die("response files (#{a}) are not supported")
+    elsif a.start_with?("-")
       raise Unported, a
     else
       state.inputs << "#{input_kind(a, state)}:#{a}"
@@ -382,7 +456,7 @@ end
 def main(argv)
   die("no input files") if argv.empty?
 
-  emit(run_loop(argv))
+  emit(run_loop(expand_response_args(argv)))
   0
 rescue LoopDie => e
   $stderr.write("nfcc: error: #{e.message}\n")
