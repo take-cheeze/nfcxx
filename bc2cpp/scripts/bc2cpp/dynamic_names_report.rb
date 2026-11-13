@@ -97,7 +97,8 @@ if options[:entries]
 else
   # A source's kind: the reason without the name that varies per site.
   kind = ->(r) { r.sub(/ in .*\z/, ' in ...').sub(/\Asent by .*, which/, 'sent by ..., which').sub(/`[^`]*`/, '`...`') }
-  puts "kept entries: #{rows.size} (eligible: #{eligible.size}, engine rows: #{row_kept.size})"
+  puts "kept entries: #{rows.size} (eligible: #{eligible.size})"
+  puts "engine rows: #{row_kept.size}" unless row_kept.empty?
   puts "\nby kind of source:"
   rows.group_by { |_, _, r| kind.call(r) }.sort_by { |_, v| -v.size }.each { |k, v| puts format('%6d  %s', v.size, k) }
   puts "\ntop sources:"
