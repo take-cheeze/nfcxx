@@ -125,6 +125,30 @@ Dir.mktmpdir do |dir|
   end
 end
 
+# SUFFIX_EXACT_NAMES: a symbol of a reflective core file is the exact name looked up, a base of a setter or predicate
+# only where core Ruby has a "=", "?" or "!" to build one with.
+sdr = StaticDispatchRegistrations
+stubbed = %i[outside_world_files closed_unlinked_dirs core_compiled_mrblib_srcs core_bytecode_tokens]
+saved = stubbed.to_h { |name| [name, sdr.singleton_class.instance_method(name)] }
+text_of = lambda do |literals|
+  sdr.singleton_class.send(:define_method, :outside_world_files) { |*_a, **_k| [['/w/3rd/mruby/mrblib/refl.rb'], []] }
+  sdr.singleton_class.send(:define_method, :closed_unlinked_dirs) { |*_a| [] }
+  sdr.singleton_class.send(:define_method, :core_compiled_mrblib_srcs) { |*_a| [] }
+  sdr.singleton_class.send(:define_method, :core_bytecode_tokens) do |_paths, _tokens, suffix_literals: nil, **_k|
+    suffix_literals&.merge(literals)
+    { '/w/3rd/mruby/mrblib/refl.rb' => Set['size', 'done?'] }
+  end
+  text = Set.new
+  sdr.outside_world_tokens('/w', closed_only: true, core: { mrbc: 'mrbc', superclass_of: {} }, text: text)
+  text
+ensure
+  saved.each { |name, method| sdr.singleton_class.send(:define_method, name, method) }
+end
+tokens = text_of.call([])
+suite.check('a reflective core file with no suffix literal gives no text base', !tokens.include?('size') && !tokens.include?('done'))
+tokens = text_of.call(['='])
+suite.check('with a "=" in core Ruby its symbols and their stems are text bases', tokens.include?('size') && tokens.include?('done'))
+
 entries = [{ mt_class: 'Array', kind: 'SYM', cname: 'first', name: 'first' },
            { mt_class: 'Array', kind: 'SYM', cname: 'pack', name: 'pack' }]
 text = CoreNativeCandidates.header(['Array#pack'], entries, rows: ['Array#first'])
