@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Freestanding library tests: compile each tests/lib/*.cpp with `nfcxx --freestanding` (headers from lib/ only)
-# and compare the exit code with `// EXPECT: N`. Runs qbe and gcc (and pathb on x86-64 and aarch64 Linux) unless NFCXX_BACKEND is set.
+# and compare the exit code with `// EXPECT: N`. Runs qbe and gcc (and pathb on x86-64 and aarch64 Linux, arm64 macOS) unless NFCXX_BACKEND is set.
 # Header lines (first lines of a test):
 #   // XFAIL-qbe: <reason>   known failure on the qbe backend (compile or run); reported as xfail.
 #   // XFAIL-gcc: <reason>   same for the gcc backend (XFAIL-pathb for Path B). An XFAIL that passes is a failure (remove the marker).
 cd "$(dirname "$0")/../.."
-# Path B takes freestanding programs on x86-64 Linux (docs/notes/freestanding.md).
+# Path B takes freestanding programs on x86-64 and aarch64 Linux and arm64 macOS (docs/notes/freestanding.md).
 backends=${NFCXX_BACKEND:-"pathb gcc"}
-if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
-  case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the product here; qbe stays for the other hosts
+if [ -z "${NFCXX_BACKEND:-}" ]; then
+  case $(uname -s)-$(uname -m) in Linux-x86_64|Linux-aarch64|Linux-arm64|Darwin-arm64) backends="gcc pathb" ;; esac   # Path B is the product here; qbe stays for the other hosts
 fi
 # Path B needs its harness (scripts/setup-pathb.sh). Without it the column is skipped, and said so; NFCXX_BACKEND=pathb asks for it, so it fails.
 if [ -z "${NFCXX_BACKEND:-}" ] && [ ! -x "${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}" ]; then
