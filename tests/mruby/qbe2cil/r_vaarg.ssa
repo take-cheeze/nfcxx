@@ -1,6 +1,0 @@
-# Refused: va_arg.
-function l $f(l %ap) {
-@start
-	%x =l vaarg %ap
-	ret %x
-}

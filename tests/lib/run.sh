@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Freestanding library tests: compile each tests/lib/*.cpp with `nfcxx --freestanding` (headers from lib/ only)
-# and compare the exit code with `// EXPECT: N`. Runs qbe and gcc (and pathb on x86-64 and aarch64 Linux, arm64 macOS) unless NFCXX_BACKEND is set.
+# and compare the exit code with `// EXPECT: N`. Runs gcc and pathb (on x86-64 and aarch64 Linux, arm64 macOS) unless NFCXX_BACKEND is set.
 # Header lines (first lines of a test):
 #   // XFAIL-qbe: <reason>   known failure on the qbe backend (compile or run); reported as xfail.
 #   // XFAIL-gcc: <reason>   same for the gcc backend (XFAIL-pathb for Path B). An XFAIL that passes is a failure (remove the marker).

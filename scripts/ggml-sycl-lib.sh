@@ -10,7 +10,7 @@
 # runs). The oneMKL calls (gemm, gemm_batch, trsm_batch) are lib/sycl-ggml/oneapi/mkl.hpp's reference kernels. The macros
 # are tests/gpu/ggml/sweep.sh's. A compile that fails is listed with its first error and the link is not run (exit 1).
 # Objects are kept in OUTDIR/obj and rebuilt when missing or older than their source, a header of lib/sycl or
-# lib/sycl-ggml, or the compilers (build/pathb, build/edg, cproc, qbe and their scripts).
+# lib/sycl-ggml, or the compilers (build/pathb, build/edg, build/qbe and their scripts).
 # Env: GGML_SRC (the ggml-sycl source dir), GGML_BUILD (the bin dir with libggml-base.so), SPIRV_TOOLS_BIN.
 set -uo pipefail
 export PATH=${SPIRV_TOOLS_BIN:+$SPIRV_TOOLS_BIN:}$PATH
@@ -35,8 +35,8 @@ stubs=$root/lib/sycl-ggml/stubs
 # the newest input every object depends on: a stamp file dated like it
 stamp=$outdir/obj/.inputs
 newest=$(find "$root/lib/sycl" "$root/lib/sycl-ggml" "$root/scripts/sycl-build.sh" "$root/scripts/pathb-spirv-emit.rb" \
-  "$root/build/pathb/cmake/bin/cpfe" "$root/build/edg/bin/cpfe" "$root/build/cproc/cproc-qbe" "$root/build/qbe/qbe" \
-  "$root/scripts/qbe-cc" "$root/scripts/qbe-prep" "$root/tools/qbe-prep/qbe_prep.cpp" "$root/scripts/weak-symbols" "$root/tools/weak-symbols/weak_symbols.cpp" "$root/nfcxx" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+  "$root/build/pathb/cmake/bin/cpfe" "$root/build/edg/bin/cpfe" "$root/build/qbe/qbe" \
+  "$root/scripts/weak-symbols" "$root/tools/weak-symbols/weak_symbols.cpp" "$root/nfcxx" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 touch -r "$newest" "$stamp"
 srcs=()
 for f in "$ggml_src"/*.cpp; do

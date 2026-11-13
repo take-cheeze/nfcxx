@@ -26,7 +26,7 @@ run_prog() {  # run_prog NAME BACKEND SOURCES...: compile, link and run; the pro
   fi
   if [ "$("$out/prog" 2>/dev/null)" = "ok" ]; then echo "ok   $name ($be)"; else echo "FAIL $name ($be): run"; fail=1; fi
 }
-for be in gcc qbe; do
+for be in gcc; do
   run_prog "directory_iterator, one unit" $be dir_shared.cpp
 done
 run_prog "directory_iterator, three units" gcc dir_shared_tu2.cpp dir_shared_tu3.cpp dir_shared_main.cpp

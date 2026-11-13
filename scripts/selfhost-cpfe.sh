@@ -3,7 +3,7 @@
 #
 # EDG's cmake build (scripts/setup-edg.sh) compiles the 75 front-end sources of cpfe with `g++ -x c++`, so each
 # one is also a C++ input here. Each source is linked into build/selfhost/src/<name>.cpp (a symlink into 3rd/edg/src,
-# nfcxx needs the .cpp suffix) and compiled by ./nfcxx with NFCXX_BACKEND=qbe, using the same defines and include
+# nfcxx needs the .cpp suffix) and compiled by ./nfcxx with NFCXX_BACKEND=gcc, using the same defines and include
 # directory as the cmake build. The objects are then linked by ./nfcxx, which adds libnfcxxld.a (scripts/qbe-cc) and
 # EDG's libC.a. mk_errinfo.c is a host tool, not part of cpfe, and is skipped.
 #
@@ -55,7 +55,7 @@ done <<< "$srcs"
 compile_one() {
   local name=$1 dir=$out/run/$1
   mkdir -p "$dir"
-  if ! (cd "$dir" && NFCXX_BACKEND=qbe EDG_BUILD=$fe_build EDG_BASE=$base "$root/nfcxx" -c \
+  if ! (cd "$dir" && NFCXX_BACKEND=gcc EDG_BUILD=$fe_build EDG_BASE=$base "$root/nfcxx" -c \
       -DBACK_END_IS_C_GEN_BE=1 -DCOMPILE_MULTIPLE_TRANSLATION_UNITS=1 \
       -DDO_IL_LOWERING=1 -DLOWER_FIXED_POINT=1 -DLOWER_IFUNC=1 -DNEED_IL_DISPLAY=1 \
       -DRECORD_BACKING_EXPRS_WITH_IL_LOWERING=1 -DUSE_CMAKE_DEFINES \
@@ -77,7 +77,7 @@ echo "selfhost-cpfe: $(ls "$out/obj"/*.o | wc -l) objects"
 objs=()
 for name in "${names[@]}"; do objs+=("$out/obj/$name.o"); done
 x86rt=$(NFCXX_LDRT_X86=1 "$root/scripts/pathb-ldrt")
-(cd "$out/run" && NFCXX_BACKEND=qbe EDG_BUILD=$fe_build EDG_BASE=$base "$root/nfcxx" \
+(cd "$out/run" && NFCXX_BACKEND=gcc EDG_BUILD=$fe_build EDG_BASE=$base "$root/nfcxx" \
   "${objs[@]}" "$x86rt" -o "$out/cpfe" > "$out/link.log" 2>&1) \
   || { echo "selfhost-cpfe: link failed (see $out/link.log)" >&2; exit 1; }
 echo "selfhost-cpfe: built $out/cpfe"

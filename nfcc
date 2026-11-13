@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc|pathb   (default: pathb on x86-64 and aarch64/arm64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
-#              else qbe; qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
+#   NFCXX_BACKEND=gcc|pathb|cil   (default: pathb on x86-64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
+#              else gcc; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
+#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc), docs/notes/nfcc-pathb.md;
 #              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
 #              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
 #              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
@@ -13,7 +13,7 @@
 #   nfcc a.o b.o -lm -o prog  link; .c inputs are compiled to temporary objects first
 #   nfcc -E ... / -M ... / -fsyntax-only   preprocess / dependency query / syntax check: host compiler, unchanged
 #   nfcc --version, -v, -dumpmachine, -dumpversion, -print-*: answered like gcc (the host compiler answers)
-#   nfcc -S a.c [-o a.s]      emit assembly (qbe: QBE's output; gcc: the host compiler's), one .s per source
+#   nfcc -S a.c [-o a.s]      emit assembly (pathb: QBE's output; gcc: the host compiler's), one .s per source
 #   @file                     response files are expanded first with gcc's rules (quotes, backslash, nested @file)
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
@@ -25,10 +25,10 @@
 #              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
-#              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
-#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
-#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (qbe: ignored)
-#   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
+#              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (pathb: ignored)
+#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (pathb: ignored)
+#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (pathb: ignored)
+#   ignored:   -O* and -g* on the pathb backend (QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
 #   rejected with an error: -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -Ofast,
@@ -40,29 +40,25 @@ set -euo pipefail
 shopt -s extglob
 root=$(cd "$(dirname "$0")" && pwd)
 host=${NFCC_HOST_CC:-cc}
-# The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux or aarch64 (arm64) Linux, and then a
-# unit Path B cannot take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the
-# environment sets it). Anywhere else (macOS, other systems), or without the harness, it is the qbe backend (cproc), as before.
-# NFCXX_BACKEND=qbe|gcc|pathb chooses one.
+# The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux, and then a unit Path B cannot
+# take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the environment sets it).
+# Anywhere else, or without the harness, it is gcc. NFCXX_BACKEND=gcc|pathb|cil chooses one.
 if [ -n "${NFCXX_BACKEND:-}" ]; then backend=$NFCXX_BACKEND
 elif [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = x86_64 ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } &&
      [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc" ]; then
   backend=pathb; export NFCXX_PATHB_FALLBACK=${NFCXX_PATHB_FALLBACK:-gcc}
-else backend=qbe; fi
+else backend=gcc; fi
 version=0.1
 
 die() { echo "nfcc: error: $*" >&2; exit 1; }
 
 case $backend in
-  qbe) [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ] ||
-         die "QBE not built; run scripts/setup-qbe.sh"
-       qcc=$root/scripts/qbe-cc ;;
   cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
        qcc=$root/scripts/cil-cc ;;
   pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
          [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;
   gcc) ;;
-  *) die "unknown NFCXX_BACKEND '$backend' (qbe, cil, gcc or pathb)" ;;
+  *) die "unknown NFCXX_BACKEND '$backend' (gcc, pathb or cil)" ;;
 esac
 
 # Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
@@ -105,7 +101,7 @@ for a in "$@"; do
   case $a in
     --version)
       echo "nfcc (nfcxx C driver $version, backend $backend) $("$host" -dumpfullversion 2>/dev/null || echo 0)"
-      echo "gcc-compatible driver over cproc/QBE; the host compiler is $("$host" --version | head -1)"
+      echo "gcc-compatible driver over Path B and gcc; the host compiler is $("$host" --version | head -1)"
       exit 0 ;;
     -dumpmachine|-dumpversion|-dumpfullversion|-dumpspecs|-print-*|-V|-qversion|--help|--target-help)
       exec "$host" "$@" ;;
@@ -117,9 +113,6 @@ if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
 # understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
 # -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
 # header search path): the host front end answers it.
-# NFCXX_QBE_TRY (gcc backend): scripts/qbe-try runs the compile, then moves it to the qbe backend when the qbe object
-# matches the gcc one (docs/notes/linux-kernel.md)
-if [ -n "${NFCXX_QBE_TRY:-}" ] && [ "$backend" = gcc ]; then exec "$root/scripts/qbe-try" "$@"; fi
 for a in "$@"; do
   case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
 done
@@ -153,27 +146,6 @@ isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...),
 # program that builds on one builds on the other. The Linux kernel's build needs it (-mcmodel=kernel, -mno-red-zone,
 # -mno-sse, ...): docs/notes/linux-kernel.md.
 gccf=()
-# NFCXX_QBE_KERNEL=1 with the qbe backend: the Linux kernel's options that the qbe path honours are accepted and given
-# to qbe-cc (kqf), the rest are still refused. Honoured by cproc: -funsigned-char, -fshort-wchar,
-# -ftrivial-auto-var-init=zero; by construction (QBE has no stack protector, jump tables, red-zone use, null-check or
-# overflow assumptions, and writes PIC code that a non-PIE link takes): the rest of the list. -mno-sse and the other
-# no-floating-point options are checked: qbe-cc refuses a translation unit whose QBE code touches SSE or x87 registers.
-# docs/notes/linux-kernel.md.
-kqf=()
-qbekernel() {
-  [ "$backend" = qbe ] && [ -n "${NFCXX_QBE_KERNEL:-}" ] || return 1
-  case $1 in
-    -funsigned-char|-fshort-wchar|-ftrivial-auto-var-init=zero|-ffreestanding|-fno-PIE|-fno-pie|-fno-PIC|-fno-pic|\
-    -fno-stack-protector|-fno-jump-tables|-fno-delete-null-pointer-checks|-fno-strict-overflow|-fno-strict-aliasing|-fwrapv|\
-    -fcf-protection=none|-fno-asynchronous-unwind-tables|-fconserve-stack|-fno-common|-falign-functions=*|-falign-jumps=*|\
-    -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
-    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
-    -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
-    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float|\
-    -m16|-march=i386|-mregparm=3|-mpreferred-stack-boundary=2) kqf+=("$1") ;;
-    *) return 1 ;;
-  esac
-}
 # gcconly OPT: an option that changes meaning or code generation in a way QBE cannot honour. gcc backend with NFCXX_GCC_PASSTHROUGH:
 # given to gcc. Path B: kept for the compile that falls back to gcc (needgcc: that compile goes to gcc, see pathb_reason). Otherwise
 # refused by the caller. gccplain OPT: an option with no effect on QBE's output (nothing the program means or QBE can honour is lost
@@ -252,7 +224,6 @@ n=${#args[@]}
 need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
 for ((i = 0; i < n; i++)); do
   a=${args[i]}
-  qbekernel "$a" && continue
   [ "$backend" != pathb ] || ! pathb_option "$a" || continue
   case $a in
     -c) mode=compile ;;
@@ -491,8 +462,8 @@ compile_one() {
     # gcc's own error is printed first; the nfcc line says which option sent the unit to gcc (the cc-mode checks match it)
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj" || die "$src: gcc, the Path B fallback for $pb_reason, failed"
-  elif [ $backend = qbe ] || [ $backend = cil ]; then
-    "$qcc" --c-input $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+  elif [ $backend = cil ]; then
+    "$qcc" --c-input $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
@@ -524,9 +495,8 @@ if [ $backend = pathb ]; then
   # The C++ and atomic libraries of the host, as the nfcxx driver links them: macOS has libc++ and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
   "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $pb_cxx_libs -lm $pb_atomic_lib
-elif [ $backend = qbe ] || [ $backend = cil ]; then
-  # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
-  # backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
+elif [ $backend = cil ]; then
+  # the cil backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
 else
   gcc "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"

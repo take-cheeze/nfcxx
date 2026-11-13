@@ -17,7 +17,10 @@ d=tests/cuda/driver
 if [ ! -f "$cuda/include/cuda.h" ] || [ ! -f "$cuda/include/cudaTypedefs.h" ] || [ "$(uname -m)" != x86_64 ]; then
   echo "SKIP: driver: needs cuda.h and cudaTypedefs.h (CUDA_HOME) on x86-64"; exit 0
 fi
-backends=${NFCXX_BACKEND:-"pathb gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; [ -z "${2:-}" ] || head -20 <<<"$2"; fail=1; }

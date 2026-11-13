@@ -86,7 +86,7 @@ export ref nfc fwk dev out xfail_test xfail_be
 # The qbe back end runs scripts/mrb for each compile. Build the mruby tool first: when it is missing, the first qbe compile
 # starts setup-mruby.sh, which builds the onig gem through nfcc, which runs mrb again, and the two wait on each other.
 PATH=$base_path "$root/scripts/setup-mruby.sh" || exit 1
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc"}
 for b in $backends; do
   # The nfcc build: the compiler proper (src/), objects from scratch, on this back end.
   make -C src clean > /dev/null 2>&1

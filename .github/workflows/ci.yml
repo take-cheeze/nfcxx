@@ -36,7 +36,7 @@ env:
   GCC_BACKEND: ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
 
 jobs:
-  # Builds the EDG front end and QBE/cproc once and saves them to the Actions cache (.github/actions/toolchain); the
+  # Builds the EDG front end and QBE once and saves them to the Actions cache (.github/actions/toolchain); the
   # test jobs below, the Path B jobs and the hexagon and realworld workflows, restore them instead of rebuilding.
   # build/ holds absolute paths, so every job uses the same checkout path.
   build:
@@ -108,7 +108,7 @@ jobs:
       - name: Cache keys for the rebuilt outputs
         id: key
         run: |
-          echo "toolchain=$(git rev-parse HEAD:3rd/edg)-$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(git rev-parse HEAD:3rd/edg)-$(git rev-parse HEAD:3rd/qbe)" >> "$GITHUB_OUTPUT"
           echo "host=$(gcc -dumpfullversion)-$(g++ -dumpfullversion)-ruby$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"
           echo "go=$(go env GOVERSION 2>/dev/null)" >> "$GITHUB_OUTPUT"
 
@@ -131,7 +131,7 @@ jobs:
             build/poly/${{ matrix.backend }}
             build/poly-lua/${{ matrix.backend }}
             build/poly-js/${{ matrix.backend }}
-          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
+          key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
 
       # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
@@ -182,7 +182,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/test-bin
-          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'tools/qbe-prep/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
+          key: test-bin-${{ matrix.group || matrix.suite }}-${{ runner.os }}-${{ matrix.backend }}-${{ matrix.suite == 'poly' && hashFiles('lib/poly/**', 'lib/ast/**', 'tests/poly/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') || hashFiles('lib/uop/**', 'lib/poly/**', 'tests/uop/**', 'scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/ehshim/**', 'lib/asan/**', 'lib/cuda/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}-${{ steps.key.outputs.go }}
 
       # The Path B harness (scripts/setup-pathb.sh), keyed as the pathb-build job keys it: its inputs are be/ and the script, and the EDG revision.
       - name: Path B harness cache key
@@ -250,7 +250,7 @@ jobs:
         include:
           - name: cases (QBE and gcc backends)
             run: |
-              # Path B, not cproc: the default driver is Path B on every host (docs/notes/pathb-default.md). The name is kept
+              # Path B: the default driver is Path B on every host (docs/notes/pathb-default.md). The name is kept
               # so a required check of this name does not disappear.
               NFCXX_BACKEND=pathb tests/run.sh
               if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
@@ -346,13 +346,9 @@ jobs:
         if: matrix.backend == 'pathb'
         run: scripts/setup-pathb.sh
 
-      # Path B needs QBE (build/qbe/qbe) for its code generation; the .c inputs of a test go through qbe-cc (cproc).
-      - name: QBE and cproc (Path B's code generation)
-        if: matrix.backend == 'pathb'
-        run: scripts/setup-qbe.sh
-
-      - name: QBE and cproc
-        if: matrix.backend == 'qbe'
+      # The freestanding suites (tests/lib, tests/target) run Path B on x86-64 and aarch64 Linux and arm64 macOS
+      # (docs/notes/freestanding.md); QBE is the code generator of Path B on every host.
+      - name: QBE
         run: scripts/setup-qbe.sh
 
       - name: Test suites
@@ -367,8 +363,8 @@ jobs:
           if [ "$NFCXX_BACKEND" = pathb ]; then
             # Freestanding programs take Path B on arm64 macOS too (docs/notes/freestanding.md, "Path B on macOS").
             tests/lib/run.sh
-            # tests/target only emits C (--emit-c): no back end runs there, so its qbe pin does not change what is tested.
-            NFCXX_BACKEND=qbe tests/target/run.sh
+            # tests/target only emits C (--emit-c): no back end runs there, so the backend does not change what is tested.
+            NFCXX_BACKEND=gcc tests/target/run.sh
           else
             tests/lib/run.sh
             tests/target/run.sh
@@ -378,94 +374,6 @@ jobs:
         if: always()
         run: ccache -s || true
 
-  # The mrustc suite (tests/mrustc/run.sh): Rust programs that mrustc compiles to C, with every crate they link compiled
-  # through nfcxx's C pipeline (cproc, QBE). A cache miss builds mrustc and its Rust 1.90 standard library
-  # (scripts/setup-mrustc.sh: minutes, and a download of the rustc source). Only mrustc's compiler and the library output
-  # are cached: the rest of build/mrustc/src is the rustc source tree and mrustc's intermediate objects, about 5 GB, which
-  # the suite does not read.
-  mrustc:
-    if: github.event_name != 'schedule'
-    needs: build
-    runs-on: ubuntu-24.04
-    env:
-      # sccache stores compiler outputs in the GitHub Actions cache.
-      SCCACHE_GHA_ENABLED: "true"
-      CMAKE_C_COMPILER_LAUNCHER: sccache
-      CMAKE_CXX_COMPILER_LAUNCHER: sccache
-    steps:
-      # fetch-depth 0: the change check below diffs against the PR's base commit, which a shallow clone does not have.
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      # mrustc's build needs zlib (-dev), curl and pkg-config; its mruby tool (scripts/mrb) needs ruby and rake.
-      - uses: ./.github/actions/toolchain
-        with:
-          packages: ruby rake zlib1g-dev pkg-config patch curl
-
-      - name: Cache keys
-        id: key
-        run: echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/qbe-wflag.patch', 'scripts/qbe-empty-align.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
-
-      # The key holds the pin, which setup-mrustc.sh has: a new mrustc commit changes the script.
-      - name: Restore mrustc and its standard library
-        id: mrustc
-        uses: actions/cache@v6
-        with:
-          path: |
-            build/mrustc/src/bin/mrustc
-            build/mrustc/src/bin/minicargo
-            build/mrustc/src/output-1.90.0
-          key: mrustc-v2-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh') }}
-
-      - name: Build mrustc and its standard library
-        if: steps.mrustc.outputs.cache-hit != 'true'
-        run: scripts/setup-mrustc.sh
-
-      # The crates compiled through the pipeline, cached per crate by mrustc-nfcc.sh. The key holds the scripts that rewrite
-      # and compile them, the mrustc pin and the QBE and cproc revisions.
-      - name: Restore the crates compiled through nfcxx
-        id: crates
-        uses: actions/cache@v6
-        with:
-          path: build/mrustc/nfcxx
-          key: mrustc-nfcxx-${{ runner.os }}-${{ hashFiles('scripts/setup-mrustc.sh', 'scripts/mrustc-nfcc.sh', 'scripts/mrustc-prep.rb', 'scripts/qbe-prep', 'tools/qbe-prep/**', 'scripts/qbe-cc') }}-${{ steps.key.outputs.qbe }}
-
-      # mrustc-nfcc.sh rebuilds a crate whose C file is newer than its object. Restored files keep the mtimes they were saved
-      # with, so the objects are touched here (as the poly step does): their inputs are the ones the key holds.
-      - name: Mark the restored crates up to date
-        if: steps.crates.outputs.cache-hit == 'true'
-        run: find build/mrustc/nfcxx -type f -exec touch {} +
-
-      - name: The mrustc suite (every crate through nfcxx)
-        run: tests/mrustc/run.sh
-
-      # Rust programs borrow-checked through mrustc's MIR (scripts/mrustc-borrowck.sh), each case's verdict also
-      # checked against the runner image's rustc.
-      - name: Rust borrow checks through mrustc
-        run: tests/mrustc-borrow/run.sh
-
-      # The real-world cases that pass: clap, regex, serde-json, and batch (13 small crates, through the QBE large-block and large-alloc fixes).
-      # They run only when the change touches the Rust frontend path: the real-world cases, their runner, the mrustc scripts
-      # and the mrustc suite. A push to main compares with the commit before it.
-      - name: Did the change touch the Rust frontend
-        id: rust-changes
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$BASE" HEAD | grep -qE '^(tests/realworld/mrustc/|tests/realworld/run_mrustc\.sh|tests/mrustc/|scripts/(mrustc-|setup-mrustc\.sh|qbe-cc|qbe-prep\.rb)|\.github/workflows/ci\.yml)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Real-world mrustc cases (clap, regex, serde-json, batch)
-        if: steps.rust-changes.outputs.changed == 'true'
-        run: tests/realworld/run_mrustc.sh clap regex serde-json batch
 
   # Path B (docs/notes/pathb-stage1.md to pathb-stage3.md). Building the harness compiles the whole EDG front end a second
   # time, so these jobs run only when a change can affect them (the list below), and on demand (workflow_dispatch). A build
@@ -592,7 +500,7 @@ jobs:
           - name: Safe pointers (-fsafe-pointers, with the sweep of the Path B probes)
             run: SAFEPTR_SWEEP=1 tests/safeptr/run.sh
           # Explicit --backend=pathb: the SSA emitter's __asan_load/store checks (docs/notes/asan.md, "Path B"). The default
-          # backend with -fsanitize=address is Path B too (and --backend=qbe with it is refused).
+          # backend with -fsanitize=address is Path B too (and --backend=gcc with it is refused).
           - name: AddressSanitizer on Path B (heap checks; tests/asan/pathb-pending.txt lists the later milestones)
             run: ASAN_BACKEND=pathb tests/asan/run.sh
           - name: SYCL on WebGPU and Vulkan (host path, Chromium's WebGPU through Playwright, lavapipe for Vulkan)
@@ -648,7 +556,7 @@ jobs:
   # lost a leg). The run's jobs are listed first for that (JOBS_FILE); a run whose list is missing does not pass.
   build-and-test:
     if: always() && github.event_name != 'schedule'
-    needs: [build, test, arm-build, arm-test, macos-suites, mrustc, pathb-changes, pathb-build, pathb-test,
+    needs: [build, test, arm-build, arm-test, macos-suites, pathb-changes, pathb-build, pathb-test,
       bc2cpp-changes, world, mrbc-rb, mrbc-snapshot, checks, nfcxx-clang-parity]
     runs-on: ubuntu-24.04
     permissions:
@@ -754,16 +662,12 @@ jobs:
             - "scripts/pathb-structure.rb"
             - "scripts/pathb-ssa-structurize.rb"
             - "scripts/pathb-cil-emit.rb"
-            - "scripts/qbe2cil.rb"
-            - "scripts/cil-link.rb"
             - "scripts/pathb-wgsl-emit.rb"
             - "scripts/pathb-spirv-emit.rb"
             - "scripts/pathb-spirv-kernel-emit.rb"
             - "scripts/pathb-wasm-emit.rb"
             - "scripts/llvm-to-pathb.rb"
             - "scripts/sycl-rewrite.rb"
-            - "scripts/strip-atomic.rb"
-            - "scripts/mrustc-prep.rb"
             - "scripts/cpp-feature-checklist.rb"
             - "scripts/cpp-feature-report.rb"
             - "scripts/bc2cpp"
@@ -782,13 +686,11 @@ jobs:
             - "scripts/build-libclang-edg.sh"
             - "scripts/setup-edg.sh"
             # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
-            # of EDG, QBE or cproc, or a change to their setup, must re-run the parity check.
+            # of EDG or QBE, or a change to their setup, must re-run the parity check.
             - "3rd/edg"
             - "3rd/qbe"
-            - "3rd/cproc"
             - "scripts/setup-qbe.sh"
             - "scripts/qbe-*.patch"
-            - "scripts/cproc-*.patch"
             - "scripts/pathb-ldrt"
             - "be/nfcxx_*.h"
             - ".github/actions/toolchain/**"
@@ -1067,7 +969,7 @@ jobs:
 
   # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers (return kinds, and the host program's main_ast roots) and both
   # preprocessors (and the analysis headers' presym ids) on the pinned world's mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
-  # toolchain action restores build/edg, build/qbe and build/cproc from the cache that ci.yml's build job saves (same keys,
+  # toolchain action restores build/edg and build/qbe from the cache that ci.yml's build job saves (same keys,
   # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
   # configuration, cached below. The checkout takes only the submodules those need.
   nfcxx-clang-parity:
@@ -1083,8 +985,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: EDG, QBE and cproc sources
-        run: git submodule update --init --depth 1 3rd/edg 3rd/qbe 3rd/cproc
+      - name: EDG and QBE sources
+        run: git submodule update --init --depth 1 3rd/edg 3rd/qbe
 
       # clang: the oracle of the parity checks (nfcxx is the default AST producer, preprocessor and host compiler wherever it is
       # built; clang stays installed only here, and is the fallback elsewhere). bison, gperf, autoconf, automake and libtool: the fork's mruby build
@@ -1141,7 +1043,6 @@ jobs:
         run: git submodule update --init --depth 1 3rd/edg
       - uses: ./.github/actions/toolchain
         with:
-          qbe: "false"
           packages: clang bison gperf autoconf automake libtool
       - uses: ruby/setup-ruby@v1
         with:

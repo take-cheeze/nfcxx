@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD; snapshot=$root/build/testsuite-snapshots
 out=${SURVEY_OUT:-$snapshot/gcc-positive-survey}
-routes=${SURVEY_ROUTES:-'qbe gcc pathb'}
+routes=${SURVEY_ROUTES:-'gcc pathb'}
 jobs=${SURVEY_JOBS:-8}; limit=${SURVEY_TIMEOUT:-60}
 for route in $routes; do case $route in qbe|gcc|pathb) ;; *) exit 1 ;; esac; done
 mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -15,7 +15,7 @@ printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in host $routes; do
   compiler=$root/nfcxx; flags=("--backend=$route" -c)
   if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; flags=(-fsyntax-only); fi
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
     -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke.o" > "$out/preflight-$route.log" 2>&1
 done
 scripts/mrb tests/upstream/gcc-positive-manifest.rb "$snapshot" > "$out/manifest.tsv"

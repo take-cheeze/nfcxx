@@ -7,7 +7,10 @@
 # variables defined in a shared library (-c -fPIC, -shared) that a program links against.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
-backends=${NFCXX_BACKEND:-"pathb gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 d=tests/multi-tu
 srcs=($d/main.cpp $d/a.cpp $d/b.cpp $d/c.cpp)

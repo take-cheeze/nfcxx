@@ -12,9 +12,9 @@
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
 root=$PWD; dir=$root/tests/c
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
-  case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the product on Linux x86-64 and arm64
+  case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the default on Linux x86-64 and arm64
 fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0; xfail=0

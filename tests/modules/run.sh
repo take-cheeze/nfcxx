@@ -5,7 +5,7 @@
 # reason, and a program with identifiers named import and module, which is not a module and must still compile.
 #   NFCXX_BACKEND=gcc|qbe|pathb   (default: all three; pathb is the default backend of ./nfcxx for modules, docs/notes/modules.md)
 cd "$(dirname "$0")/../.."
-backends=${NFCXX_BACKEND:-"pathb qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 d=tests/modules
 
