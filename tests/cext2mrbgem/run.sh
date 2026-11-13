@@ -38,6 +38,14 @@ check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_valu
 check grep -qF 'if (klass == obj)' "$work/shadow_param/src/shadow_param.c"
 check grep -qF 'static struct RClass * klass;' "$work/shadow_param/src/shadow_param.c"
 
+# 2d. definitions whose return type or name is on another line are found (no false "no definition" refusal)
+rc=0; python3 "$conv" --name split_return tools/cext2mrbgem/fixtures/split_return/ext/split_return "$work/split_return" > "$work/split_return.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/split_return/NOT_BUILDABLE"
+check grep -qF 'static inline mrb_value split_double(mrb_state *mrb, mrb_value self) {' "$work/split_return/src/split_return.c"
+check grep -qF 'mrb_value split_load(mrb_state *mrb, mrb_value self) {' "$work/split_return/src/split_return.c"
+check grep -qF 'mrb_value split_name(mrb_state *mrb, mrb_value self) {' "$work/split_return/src/split_return.c"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

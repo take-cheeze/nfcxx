@@ -76,9 +76,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MAP_PATH = os.path.join(HERE, 'api_map.json')
 
 IDENT_RE = re.compile(r'(?<![\w$])[A-Za-z_]\w*')
+# A definition starts at a line start. Return-type words may be split across lines (`static VALUE` then
+# `name(...)` on the next line, as bigdecimal and date write them); every word is followed by at least one
+# separator, so the pattern has no ambiguous splits.
 DEF_RE = re.compile(
-    r'^[ \t]*((?:(?:static|inline|extern)[ \t]+)*)([A-Za-z_][\w \t\*]*?)[ \t\*]*\b'
-    r'([A-Za-z_]\w*)[ \t]*\(([^()]*)\)\s*(\{|;)', re.M)
+    r'^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)'
+    r'((?:[A-Za-z_]\w*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)'
+    r'([A-Za-z_]\w*)[ \t\n]*\(([^()]*)\)\s*(\{|;)', re.M)
 INC_RE = re.compile(r'#[ \t]*include[ \t]*[<"](ruby(?:/[\w./-]*)?\.h)[>"]')
 REG_RE = re.compile(r'(?<![\w$.>])(rb_define_method|rb_define_singleton_method)\s*\(')
 CLASS_ASSIGN_RE = re.compile(r'(?<![\w$.>])(\w+)\s*=\s*rb_define_(?:class|module)(?:_under)?\s*\(')
@@ -415,7 +419,8 @@ class Converter:
                 continue
             text, masked = f['text'], f['masked']
             for m in DEF_RE.finditer(masked):
-                storage, ret, name, term = m.group(1), m.group(2).strip(), m.group(3), m.group(5)
+                storage, name, term = m.group(1), m.group(3), m.group(5)
+                ret = re.sub(r'[\s\*]+$', '', m.group(2))  # trailing pointer stars are dropped, as before
                 if name in NON_FUNC_WORDS or ret.split()[-1] in NON_FUNC_WORDS:
                     continue
                 po = masked.find('(', m.start(3))
