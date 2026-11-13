@@ -150,6 +150,7 @@ ruby scripts/bc2cpp/setter_receiver_filter_check.rb
 ruby scripts/bc2cpp/exact_arith_check.rb
 ruby scripts/bc2cpp/element_picks_check.rb
 ruby scripts/bc2cpp/sealed_hash_stores_check.rb
+ruby scripts/bc2cpp/declared_ivar_guard_check.rb
 ruby scripts/bc2cpp/nilable_class_tests_check.rb
 ruby scripts/bc2cpp/optional_arg_pools_check.rb
 ruby scripts/bc2cpp/declared_callsite_check.rb

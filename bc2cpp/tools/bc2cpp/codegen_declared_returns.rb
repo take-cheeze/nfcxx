@@ -7,6 +7,7 @@ require_relative 'numeric_flow'
 require_relative 'declared_constants'
 require_relative 'declared_returns'
 require_relative 'codegen_sealed_containers'
+require_relative 'codegen_declared_ivars'
 
 # CodeGen: DECLARED_RETURN_CHECK and DECLARED_RETURN_GUARD.
 #
