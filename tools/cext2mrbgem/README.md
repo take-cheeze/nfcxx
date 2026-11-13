@@ -83,6 +83,12 @@ What differs from the regex scan, and why:
   a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at
   file scope is refused. A non-static helper is threaded with a caveat, since its signature changes. Any function
   that calls a helper which is not threaded is refused, so no call is left passing an `mrb` that is not in scope.
+  A use through the address is refused with the reason (assigned or stored, passed to a call that may keep it, or
+  part of an expression). A member access (`x.name`, `x->name`) is not a use. The refusals that remain for helpers
+  are sound and were not threaded: a call in a function body in a header (header bodies are not converted), a call
+  in a macro body (only the global-state path expands macro bodies), a prototype the scanner does not recognise
+  (`NORETURN(...)`), and a function under `#ifndef NDEBUG`: `ruby.h` defines NDEBUG in a non-debug CRuby build, so
+  that code is dead there, and the front end excludes it while the regex scan does not.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - `RB_LIKELY(x)` and `RB_UNLIKELY(x)` become `!!(x)`: the branch hint is dropped and the 0 or 1 value is kept.
