@@ -123,6 +123,26 @@ check test "$rc" -eq 2
 check grep -q '  ht_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_thread_refused/REFUSALS.txt"
 check grep -q '  ht_shadow_helper  helper needs the mruby state threaded in, but its name is shadowed' "$work/helper_thread_refused/REFUSALS.txt"
 
+# 2k. global state (no mrb argument): a helper whose only uses are direct calls through a macro expanded in two registered
+# methods is not threaded: it uses the file-scope state, defined once in Init's file and declared in the others. Each
+# method saves the previous state and restores it on every return (the two returns of hg_pick). No refusal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global tools/cext2mrbgem/fixtures/helper_global/ext/helper_global "$work/helper_global" > "$work/helper_global.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/helper_global/NOT_BUILDABLE"
+check grep -qF 'struct mrb_state *helper_global_bc2_mrb = NULL;' "$work/helper_global/src/helper_global.c"
+check grep -qF 'static mrb_value hg_make(mrb_value s) {' "$work/helper_global/src/helper_global.c"
+check grep -qF 'return mrb_str_new_cstr(helper_global_bc2_mrb, "made");' "$work/helper_global/src/helper_global.c"
+check grep -qF '  mrb_state *nfcx_bc2_old = helper_global_bc2_mrb;' "$work/helper_global/src/helper_global.c"
+check test "$(grep -c 'helper_global_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/helper_global/src/helper_global.c")" -eq 3
+check grep -qF ' helper_global_bc2_mrb = nfcx_bc2_old; }' "$work/helper_global/src/helper_global.c"
+check grep -q 'global-state hg_make' "$work/helper_global/conversion_log.json"
+
+# 2l. global state refused: a helper whose address sits in a file-scope initializer may run with no method context
+rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global_refused tools/cext2mrbgem/fixtures/helper_global_refused/ext/helper_global_refused "$work/helper_global_refused" > "$work/helper_global_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/helper_global_refused/NOT_BUILDABLE"
+check grep -q '  hgr_cb  helper needs the mruby state threaded in, but is used outside a direct call (not supported): its address is in a file-scope initializer' "$work/helper_global_refused/REFUSALS.txt"
+
 # 2j. GC: rb_gc_register_mark_object -> mrb_gc_register (rooted in mruby's table, src/gc.c), rb_gc_start as a statement
 # -> mrb_full_gc, rb_gc_writebarrier on plain locals -> immediate-guarded barrier. Each GC form without an exact
 # equivalent (address registration, enable/disable, rb_gc_mark with no mark callback, a used rb_gc_start value, a
