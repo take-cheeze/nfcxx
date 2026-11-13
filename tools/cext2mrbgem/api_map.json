@@ -1,5 +1,5 @@
 {
-  "_comment": "CRuby -> mruby API map for convert_mrbgem.py. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
+  "_comment": "CRuby -> mruby API map for convert_mrbgem.rb. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
   "types": {
     "VALUE": "mrb_value",
     "ID": "mrb_sym"
