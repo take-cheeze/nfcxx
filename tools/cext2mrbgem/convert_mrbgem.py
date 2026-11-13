@@ -94,6 +94,16 @@ UNKNOWN_RE = re.compile(
 GEM_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_-]*$')
 
 
+def param_names(d):
+    """Names of the parameters of a function prototype or definition dict (from decl scan)."""
+    names = set()
+    for p in d['params'].split(','):
+        m = re.search(r'([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$', p.strip())
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def line_of(text, pos):
     return text.count('\n', 0, pos) + 1
 
@@ -609,13 +619,19 @@ class Converter:
                     E.add(d['brace'] + 1, d['brace'] + 1, pro)
                 self.rewrite(rel, d['hstart'], d['name'] + '(...)', hdr)
         # 3. class variable declarations become struct RClass *
+        # A VALUE parameter that has a class variable's name is an ordinary parameter (it shadows the class
+        # variable in its function) and is left alone.
         for C in sorted(self.class_vars):
             for m in re.finditer(r'\bVALUE\b\s+%s\b(?=\s*[=;,\[])' % re.escape(C), masked):
+                if self.is_param(rel, m.start(), C):
+                    continue
                 E.add(m.start(), m.start() + len('VALUE'), 'struct RClass *')
                 self.rewrite(rel, m.start(), 'VALUE ' + C, 'struct RClass *' + ' ' + C)
-            mm = re.search(r'\bVALUE\b[^;(){}]*,\s*%s\b' % re.escape(C), masked)
-            if mm:
+            for mm in re.finditer(r'\bVALUE\b[^;(){}]*,\s*%s\b' % re.escape(C), masked):
+                if self.is_param(rel, mm.start(), C):
+                    continue
                 self.refuse(rel, mm.start(), C, 'multi-declarator class variable declaration not supported')
+                break
         # 4. helper call sites get the mrb argument
         header_spans = [(d['hstart'], d['hend']) for d in self.decls if d['file'] == rel]
         for name in self.helper_names:
@@ -650,7 +666,7 @@ class Converter:
             elif UNKNOWN_RE.match(name) and name not in local_syms:
                 self.refuse(rel, s, name, 'no entry in api_map.json')
             elif name in self.class_vars:
-                if (rel, s) in self.decl_name_pos:
+                if (rel, s) in self.decl_name_pos or self.is_param(rel, s, name):
                     continue
                 nx = next_nonspace(masked, e)
                 if nx >= 0 and masked[nx] == '=' and masked[nx + 1:nx + 2] != '=':
@@ -665,6 +681,18 @@ class Converter:
             mm = re.search(r'\bmrb\b', masked)
             if mm:
                 self.refuse(rel, mm.start(), 'mrb', 'source already uses the identifier mrb (clashes with the state parameter)')
+
+    def is_param(self, rel, pos, name):
+        """True if name at pos is a parameter of the function (its header, or its body) that encloses pos.
+        A parameter shadows a file-scope class variable of the same name, so it must not be rewritten."""
+        for d in self.decls:
+            if d['file'] != rel:
+                continue
+            if d['hstart'] <= pos < d['hend']:
+                return name in param_names(d)
+            if 'body_end' in d and d['brace'] < pos < d['body_end'] and name in param_names(d):
+                return True
+        return False
 
     def map_entry(self, rel, s, e, name, entry):
         masked = self.files[rel]['masked']

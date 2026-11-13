@@ -29,6 +29,15 @@ check sh -c "! grep -q Traceback '$work/refused_reg.log'"
 check grep -q 'rr_missing  registered function has no definition' "$work/refused_reg/REFUSALS.txt"
 check test -e "$work/refused_reg/NOT_BUILDABLE"
 
+# 2c. a parameter named like a file-scope class variable: no overlapping edits (used to raise), and the
+# parameter is not wrapped as a class (header and body); the file-scope declaration is still rewritten
+rc=0; python3 "$conv" --name shadow_param tools/cext2mrbgem/fixtures/shadow_param/ext/shadow_param "$work/shadow_param" > "$work/shadow_param.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check sh -c "! grep -q 'overlapping\\|Traceback' '$work/shadow_param.log'"
+check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_value klass, int depth) {' "$work/shadow_param/src/shadow_param.c"
+check grep -qF 'if (klass == obj)' "$work/shadow_param/src/shadow_param.c"
+check grep -qF 'static struct RClass * klass;' "$work/shadow_param/src/shadow_param.c"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then
