@@ -346,13 +346,62 @@ not by a plan, because the model does not choose it at these shapes.
 What the model does not do: thread count (the packed plan runs on whatever `nthreads` the caller passes), cache effects
 beyond the register-blocking constant, and the AVX-512 target.
 
+## Threads in the model (ninth round)
+
+`Avx2F32::max_threads` (default 1) lets the solver pick a thread count for the threadable packed variant. The packed
+FMA work W is split as `W * (serial_fraction + (1 - serial_fraction) / t) + thread_spawn_instr * (t - 1)` over powers of
+two up to `max_threads`, and `Solution::threads` reports the count. The caller passes that count as the kernel's `nthreads`.
+Default 1 keeps every plan as it was.
+
+The constants are fitted to one host's timings at 504 x 512 x 512 (packed kernel, best of 40), and they are rough:
+
+| run | 1 thread | 2 threads | 3 threads | 4 threads |
+|---|---|---|---|---|
+| fit run | 2468 us (1.00) | 1485 us (0.60) | not measured | 1183 us (0.48) |
+| check run | 2316 us (1.00) | 1349 us (0.58) | 1008 us (0.44) | 848 us (0.37) |
+
+The fit (`serial_fraction` 0.10, `thread_spawn_instr` 154000) was made from the fit run, which gives 0.60 and 0.48 at two and four threads. The
+check run was not used in the fit. It shows the four-thread ratio moving from 0.48 to 0.37 between runs, and the
+three-thread value (0.44) is below the fit's 0.50. So the four-thread ratio is uncertain by about 0.1 on this host, and
+the model's choice of four threads rests on constants that this noise is as large as. Treat `max_threads` as a knob,
+not as a prediction.
+
+Unchanged: the emitter does not know the thread count, so `emit_for_solution` output is the same for every plan.
+
+## The AVX-512 target in the model (tenth round)
+
+`avx512_f32()` is the AVX-512 target description: 16 lanes, 32-column tiles, `isa = "avx512"`. The model's GEMM for it has
+one variant, `avx512-packed-n` (the register-blocked kernel of the seventh round), with B in `Storage::Panel`. VecN and
+VecM stay AVX2-only: they have no AVX-512 emitter, so the model does not offer them on that target.
+
+Which constants are what:
+
+- Set from the instruction set: 16 lanes, the 32-column tile, panel copy at 2/16 per element (one load and one store per zmm).
+- Assumed, not measured: the 16-lane horizontal sum at 8 instructions per row.
+- Measured on AVX-512: the register-blocking factor, 0.24. At 504 x 512 x 512, one thread, the packed kernel took
+  1901 us and a naive AVX-512 kernel 7790 to 8229 us (two runs, ratio 0.23 to 0.25). The naive kernel was a scratch
+  file (N-vectorized, B read per k, no packing), not one of the emitters, so it is a comparison in spirit with the AVX2
+  one (VecN, 0.18), not the same code.
+- Carried over from AVX2 and not measured on AVX-512: the strided and blocked penalties.
+
+Plans on both targets now exclude the pairs the emitters do not produce (`Problem::incompatible`): the packed kernels
+with the vertical row sum, VecN with the vertical sum, and VecM with the horizontal one. Without this, at the smallest
+tile width the vertical sum (its C transpose) ties with the horizontal one (the per-row sum), and the first minimum
+wins, so the solver returned a plan with no kernel. The tie is now a test.
+
+`emit_for_solution` covers the AVX-512 plan too (`avx512-packed-n` with B in Panel). `test_layout_avx512.cpp` solves two
+shapes on this target, emits each plan, runs it against the reference, and checks the result bit for bit. The
+packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`max_threads` stays 1).
+
 ## Next steps on this target
 
 1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
    other shapes and targets. This is the weakest part of the model right now.
 2. Repeat the timing on more hosts before drawing a crossover from it.
-3. Add the thread count to the cost model, so the choice between the threaded and unthreaded kernels is a plan decision.
-4. AVX-512 as a second target description (16 lanes, `vpermt2ps`-based transposes), to see whether the model's shape holds.
+3. Measure the thread constants on a quiet host with more repetitions, and at 3 and 8 threads, before relying on the
+   thread choice (see the ninth round).
+4. AVX-512 target: described and planned (tenth round), but its storage and register constants are not measured on AVX-512.
+   Measure a naive AVX-512 kernel, to fit the register-blocking factor there.
 
 ## Tests
 

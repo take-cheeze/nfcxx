@@ -1,6 +1,8 @@
 // nfcuop layout, AVX2 emitter: see nfcuop_layout_avx2.hpp.
 #include "nfcuop_layout_avx2.hpp"
 
+#include "nfcuop_layout_avx512.hpp"
+
 #include <sstream>
 #include <stdexcept>
 
@@ -247,13 +249,18 @@ std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K
     const Storage st = storage_of("C");
     if (storage_of("A") != st)
       throw std::invalid_argument("emit_for_solution: VecM needs A^T and C in one storage; the plan has them apart");
-    if (st == Storage::Panel16) throw std::invalid_argument("emit_for_solution: VecM has no Panel16 storage");
+    if (st == Storage::Panel) throw std::invalid_argument("emit_for_solution: VecM has no Panel storage");
     return emit_gemm_rowsum_c(GemmVariant::VecM, M, N, K, true, st);
   }
   if (gemm == "avx2-packed-n" && rowsum == "reduce-horizontal") {
-    if (storage_of("B") != Storage::Panel16)
-      throw std::invalid_argument("emit_for_solution: the packed kernel needs B in Panel16");
+    if (storage_of("B") != Storage::Panel)
+      throw std::invalid_argument("emit_for_solution: the packed kernel needs B in Panel");
     return emit_gemm_rowsum_packed_mt_c(M, N, K, 6);
+  }
+  if (gemm == "avx512-packed-n" && rowsum == "reduce-horizontal") {
+    if (storage_of("B") != Storage::Panel)
+      throw std::invalid_argument("emit_for_solution: the packed AVX-512 kernel needs B in Panel");
+    return emit_gemm_rowsum_packed512_c(M, N, K, 6);  // single-threaded: the plan's threads are not used on AVX-512
   }
   throw std::invalid_argument("emit_for_solution: no emitter for the plan (" + gemm + ", " + rowsum + ")");
 }
