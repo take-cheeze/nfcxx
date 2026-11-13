@@ -97,6 +97,21 @@ rc=0; python3 "$conv" --name const_get_at tools/cext2mrbgem/fixtures/const_get_a
 check test "$rc" -eq 2
 check grep -q '  rb_const_get_at  no exact mruby equivalent' "$work/const_get_at/REFUSALS.txt"
 
+# 2i. helper threading: a helper with a header declaration, called from another file and from a registered
+# method, is threaded everywhere (declaration, definition, calls) with a caveat; a helper taken as a value and a
+# helper name shadowed by a local stay refused
+rc=0; python3 "$conv" --name helper_thread tools/cext2mrbgem/fixtures/helper_thread/ext/helper_thread "$work/helper_thread" > "$work/helper_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/helper_thread/NOT_BUILDABLE"
+check grep -qF 'mrb_value ht_wrap(mrb_state *mrb, mrb_value self, mrb_value s);' "$work/helper_thread/include/helper_thread.h"
+check grep -qF 'return ht_wrap(mrb, self, s);' "$work/helper_thread/src/helper_thread_other.c"
+check grep -qF 'return ht_static(mrb, s);' "$work/helper_thread/src/helper_thread.c"
+check grep -q 'mrb-threaded ht_wrap' "$work/helper_thread/conversion_log.json"
+rc=0; python3 "$conv" --name helper_thread_refused tools/cext2mrbgem/fixtures/helper_thread_refused/ext/helper_thread_refused "$work/helper_thread_refused" > "$work/helper_thread_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  ht_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_thread_refused/REFUSALS.txt"
+check grep -q '  ht_shadow_helper  helper needs the mruby state threaded in, but its name is shadowed' "$work/helper_thread_refused/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

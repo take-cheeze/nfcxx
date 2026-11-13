@@ -322,6 +322,10 @@ class Converter:
             return
         text = self.files[rel]['text']
         self.refusals.append({'file': rel, 'line': line_of(text, pos), 'api': api, 'reason': reason})
+        # a marker strictly inside a declaration's header would overlap the header rewrite (process step 2); the
+        # refusal is still recorded and the output is still marked not buildable
+        if any(d['file'] == rel and d['hstart'] < pos < d['hend'] for d in self.decls):
+            return
         self.edits[rel].add(pos, pos, '/* BC2CPP-MRBGEM REFUSED: %s */ ' % api)
 
     def uses_uv_thread(self):
@@ -416,11 +420,11 @@ class Converter:
                 self.reg_names.add(r['func'])
         # declarations and definitions
         for rel, f in self.files.items():
-            if f['kind'] != 'src':
-                continue
             text, masked = f['text'], f['masked']
             for m in DEF_RE.finditer(masked):
                 storage, name, term = m.group(1), m.group(3), m.group(5)
+                if f['kind'] != 'src' and term != ';':
+                    continue  # a function body in a header is not converted; its prototypes are (below)
                 ret = re.sub(r'[\s\*]+$', '', m.group(2))  # trailing pointer stars are dropped, as before
                 if name in NON_FUNC_WORDS or ret.split()[-1] in NON_FUNC_WORDS:
                     continue
@@ -428,7 +432,7 @@ class Converter:
                 pc = masked.find(')', po)
                 d = {'file': rel, 'name': name, 'storage': storage, 'ret': ret,
                      'hstart': m.start(), 'po': po, 'pc': pc,
-                     'params': text[po + 1:pc], 'proto': term == ';'}
+                     'params': text[po + 1:pc], 'proto': term == ';', 'hdr': f['kind'] != 'src'}
                 if term == '{':
                     d['brace'] = m.end() - 1
                     d['body_end'] = match_close(masked, d['brace'])
@@ -526,28 +530,82 @@ class Converter:
                        if d['name'] == name):
                     continue
                 self.refuse(rel, s, name, 'registered method function is also called directly (not supported)')
-        # helper functions that need the mruby state
+        # helper functions that need the mruby state are threaded: the mrb argument is added to the definition, to
+        # every prototype (in the .c and .h files, which are scanned) and to every call site. A use is safe when it
+        # is a direct call inside a function body; a use anywhere else is refused. A static helper cannot be called
+        # from another file, so its uses are all in its own file; a non-static one is threaded with a caveat (its
+        # signature changes, so callers outside the input would need the argument too). Every caller of a helper is
+        # itself in needs, so it either gets mrb (a threaded helper, a registered method or Init) or has a refusal of
+        # its own; the check after the loop makes that explicit.
+        cands = set()
         for name in sorted(self.needs):
             if name in self.reg_names or name == init_first or name not in self.defs:
                 continue
-            defs = self.defs[name]
-            def_file = defs[0]['file']
-            ok = len(defs) == 1
+            if len(self.defs[name]) == 1:
+                cands.add(name)
+
+        def helper_uses(name):
+            out = []
             for rel, s, e in self.occ.get(name, []):
                 if any(rel == d['file'] and d['hstart'] <= s < d['hend'] for d in self.decls
                        if d['name'] == name):
                     continue
-                if rel != def_file or next_nonspace(self.files[rel]['masked'], e) < 0 or \
-                        self.files[rel]['masked'][next_nonspace(self.files[rel]['masked'], e)] != '(':
-                    ok = False
-                    self.refuse(rel, s, name,
-                                'helper needs the mruby state threaded in, but is used outside a direct call '
-                                'in its own file (not supported)')
-            if ok:
-                self.helper_names.add(name)
-            else:
-                d0 = defs[0]
+                if self.in_dead_init(rel, s):
+                    continue
+                masked = self.files[rel]['masked']
+                nx = next_nonspace(masked, e)
+                direct = nx >= 0 and masked[nx] == '('
+                fn = self.enclosing_func(rel, s)
+                out.append((rel, s, direct, fn, fn is not None and fn['name'] in self.needs))
+            return out
+
+        def shadowed(name, fn):
+            # a parameter or local of the enclosing function with the helper's name hides the helper there
+            if name in param_names(fn):
+                return True
+            body = self.files[fn['file']]['masked'][fn['brace']:fn['body_end'] + 1]
+            return bool(re.search(r'\b(?!return\b|else\b|case\b|goto\b)[A-Za-z_]\w*[ \t\n\*]+%s\s*[=;,\[)]'
+                                  r'|\(\s*\*\s*%s\s*\)' % (re.escape(name), re.escape(name)), body))
+
+        def use_problem(name, use):
+            rel, s, direct, fn, _ = use
+            if not direct:
+                return 'helper needs the mruby state threaded in, but is used outside a direct call (not supported)'
+            if fn is None:
+                return ('helper needs the mruby state threaded in, but the call is not in a function definition the '
+                        'converter recognises (a macro-decorated definition, or file scope) (not supported)')
+            if shadowed(name, fn):
+                return 'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
+            return None
+
+        uses = {name: helper_uses(name) for name in cands}
+        for name in sorted(cands):
+            if any(use_problem(name, u) for u in uses[name]):
+                cands.discard(name)
+        self.helper_names = cands
+        for name in sorted(cands):
+            d0 = self.defs[name][0]
+            if 'static' not in d0['storage'].split():
+                self.rewrite(d0['file'], d0['hstart'], name, 'mrb-threaded %s' % name,
+                             'non-static helper: its signature gains the mrb argument; callers outside the input would need it too')
+        refused_defs = set()
+        for name in sorted(self.needs):
+            if name in self.reg_names or name == init_first or name not in self.defs or name in cands:
+                continue
+            for u in helper_uses(name):
+                why = use_problem(name, u)
+                if why:
+                    self.refuse(u[0], u[1], name, why)
+            for d0 in self.defs[name]:
                 self.refuse(d0['file'], d0['hstart'], name, 'helper needs mruby state; threading refused')
+            refused_defs.add(name)
+        # fail-safe: a call of a threaded helper from a function that gets no mrb and has no refusal of its own
+        # would not compile, so it is refused
+        mrb_bearing = cands | set(self.valid_reg_names) | ({init_first} if init_first else set())
+        for name in sorted(cands):
+            for rel, s, direct, fn, in_needs in uses[name]:
+                if fn is not None and fn['name'] not in mrb_bearing and fn['name'] not in refused_defs:
+                    self.refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
 
     # ---- stage 3: per-file rewrite --------------------------------------
     def variadic_params(self, d):
@@ -682,7 +740,7 @@ class Converter:
                 pa = next_nonspace(masked, po + 1)
                 E.add(po + 1, po + 1, 'mrb' if masked[pa] == ')' else 'mrb, ')
         # 5. identifier pass
-        local_syms = set(self.defs) | {d['name'] for d in self.decls} | self.class_vars
+        local_syms = set(self.defs) | {d['name'] for d in self.decls if not d.get('hdr')} | self.class_vars
         body_spans = [(d['brace'], d['body_end']) for lst in self.defs.values() for d in lst
                       if d['file'] == rel]
         for m in IDENT_RE.finditer(masked):
