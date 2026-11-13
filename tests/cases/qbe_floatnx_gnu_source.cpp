@@ -1,3 +1,4 @@
+// MACOS-XFAIL-pathb: the glibc floatNx names (strtof32x, acosf32x) are not declared by the macOS headers, and the Path B route has not been diagnosed against the qbe route, which passes this file on macOS
 // EXPECT: 0
 // PATHB-SKIP: Path B refuses the _Float32x type (pathb-cc); the QBE path is what this case checks.
 // QBE path (scripts/qbe-prep): with _GNU_SOURCE, glibc's <stdlib.h> and <math.h> declare strtof32x and acosf32x with the

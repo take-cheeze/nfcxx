@@ -1,3 +1,4 @@
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md
 // std::exception_ptr, current_exception, rethrow_exception, make_exception_ptr, nested exceptions on EDG's exception
 // runtime (lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md; the runtime keeps an exception alive while a pointer
 // refers to it). The exit code is the number of wrong results.

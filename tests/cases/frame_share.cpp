@@ -1,3 +1,4 @@
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md
 // Stack frames on Path B: the locals of inlined calls that are never live together share stack slots, and a function with a try
 // block (a setjmp of its EH entry) promotes the locals that are dead across the call, keeping the others in memory. Every call
 // below fills an array of its own and sums it back, so a slot shared by two lifetimes that overlap, or a promoted local that the

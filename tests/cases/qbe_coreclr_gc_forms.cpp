@@ -1,3 +1,4 @@
+// MACOS-XFAIL-pathb: Path B's volatile helpers call __atomic_*_fetch_N, which the Linux link gets from libatomic; the macOS toolchain has no libatomic, so the link fails (___atomic_add_fetch_4)
 // EXPECT: 0
 // MACOS-XFAIL-gcc: Apple clang rejects the volatile-qualified address that EDG passes to __sync_*_4 ("address argument to
 // atomic builtin must be a pointer to integer or pointer"); gcc on Linux accepts it. The QBE path has no such check.
