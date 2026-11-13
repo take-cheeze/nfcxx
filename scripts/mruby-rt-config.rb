@@ -29,14 +29,8 @@ MRuby::Build.new do |conf|
   conf.archiver.command = 'ar'
 
   # vm.c is compiled as C++ by EDG, which requires `void *` for the table of `goto *optable[insn]` (mruby declares it
-  # `const void *`; docs/notes/cxx-driver.md). The switch dispatch is the portable form anyway (cproc has no
-  # computed goto either).
+  # `const void *`; docs/notes/cxx-driver.md). The switch dispatch is the portable form anyway.
   [conf.cc, conf.cxx].each { |c| c.defines << 'MRB_USE_VM_SWITCH_DISPATCH' }
-
-  # The one volatile in the files mruby compiles as C++, `volatile int err` in mrb_core_init_protect (src/error.c), is
-  # removed by scripts/mruby-cxx-novolatile.patch, which setup-poly.sh applies: cproc rejects every store to a
-  # volatile object, and a -Dvolatile= here would break the hosted libstdc++ headers (std::launder, numeric_limits
-  # overload on volatile). See docs/notes/poly.md, "Building mruby".
 
   # Order matters: the linker command was set above and enable_cxx_exception reads cxx.command.
   conf.enable_cxx_exception

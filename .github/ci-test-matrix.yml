@@ -82,12 +82,13 @@
     NFCXX_EH_UNWIND=1 NFCXX_BACKEND=qbe tests/c/run.sh
 # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
 # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
-- name: nfcpoly host (QBE backend)
+- name: nfcpoly host (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   go: true
   interp: true
   suite: poly
-  backend: qbe
-  run: NFCXX_BACKEND=qbe tests/poly/run.sh
+  backend: pathb
+  run: NFCXX_BACKEND=pathb tests/poly/run.sh
 - name: nfcpoly host (gcc backend)
   gcc_only: true
   go: true
@@ -118,14 +119,15 @@
   group: onnx
   backend: pathb
   run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=pathb tests/uop/run.sh
-- name: uop poly languages (QBE backend)
+- name: uop poly languages (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   go: true
   onnx: true
   interp: true
   suite: uop
   group: poly
-  backend: qbe
-  run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
+  backend: pathb
+  run: NFCXX_BACKEND=pathb tests/uop/run_poly.sh
 - name: uop core and numpy (gcc backend)
   gcc_only: true
   onnx: true

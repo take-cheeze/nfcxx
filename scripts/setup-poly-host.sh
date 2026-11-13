@@ -2,7 +2,7 @@
 # Build the interpreters that lib/poly embeds with the HOST compilers (gcc and g++), for machines where nfcxx itself is not built
 # (tests/uop/run_poly.sh with UOP_HOST=1): the same engines and settings as scripts/setup-poly.sh (mruby with C++ exceptions),
 # scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS-NG, plain C), without nfcc or nfcxx and
-# without the patches that only cproc needs. Go (yaegi) is scripts/setup-poly-go.sh, which already uses the host's Go and gcc, and
+# without any patch (the sources are built as they are, as setup-poly*.sh now do). Go (yaegi) is scripts/setup-poly-go.sh, which already uses the host's Go and gcc, and
 # Python is the system CPython; neither is built here.
 #   scripts/setup-poly-host.sh ruby|lua|js     builds build/poly-host/<language>/{lib,include}
 #   FORCE=1                                    rebuild even if the library exists

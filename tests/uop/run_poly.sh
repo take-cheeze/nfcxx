@@ -3,7 +3,7 @@
 # Python, JavaScript and Go through nfcpoly and checks the values, the exported ONNX bytes, the operators, the errors, the dtype
 # configuration and the C backend against the C++ API. Run by tests/uop/run.sh; per back end built with nfcxx, the interpreters from
 # the setup scripts of tests/poly/run.sh.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb   (default: both; the interpreters of the setup scripts are built by Path B or gcc, not qbe)
 #   POLY_LANGS="ruby lua python js go"   (default: all five; one that cannot be built here is skipped with a SKIP line)
 #   UOP_HOST=1              build with the host g++ and the interpreters of scripts/setup-poly-host.sh (mruby, Lua and QuickJS built
 #                           with gcc; Go as scripts/setup-poly-go.sh builds it; the system CPython), for a machine where nfcxx is
@@ -13,7 +13,7 @@
 # onnxruntime are installed (SKIP otherwise).
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled program is kept between CI runs (tests/bin-cache.sh)
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 langs=${POLY_LANGS:-"ruby lua python js go"}
 lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp
      lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp lib/uop/nfcuop_poly.cpp lib/poly/nfcpoly.cpp)

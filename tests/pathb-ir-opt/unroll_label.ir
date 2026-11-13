@@ -1,0 +1,19 @@
+(ir-module "unroll_label.c" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "f"
+  (ret int)
+  (params (param %0 "a" int))
+  (slot "i" int 4 4)
+  (store int $"i" (const int 0))
+  (loop
+    (body
+      (let %1 int (load int $"i"))
+      (let %2 bool (lt.s int %1 (const int 2)))
+      (if %2 (then) (else (break)))
+      (let %3 bool (eq int %0 (const int 7)))
+      (if %3 (then (goto "fail")))
+      (if %3 (then (label "fail") (return (const int -1)))))
+    (step
+      (let %4 int (load int $"i"))
+      (let %5 int (wadd int %4 (const int 1)))
+      (store int $"i" %5)))
+  (return (const int 0)))
