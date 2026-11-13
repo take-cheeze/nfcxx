@@ -1265,6 +1265,9 @@ module StaticDispatchRegistrations
     # CORE_ROWS: the dynamic names the engine itself gives, less what only core Ruby, the natives under 3rd/ and the
     # generated code's literals give (the core run reads those again by its own rules; CoreRows.engine_names).
     rows_dynamic = Set.new(protocol)
+    # The names the engine's bytecode sends (the fixpoint's and the load phase's), for rows only when
+    # CoreRows.bytecode_sends_count? says a body may run as bytecode.
+    rows_bytecode = Set.new
     cite(protocol, 'always dynamic (ALWAYS_DYNAMIC)')
     if symbol_lookups
       dynamic.merge(symbol_lookups)
@@ -1390,7 +1393,7 @@ module StaticDispatchRegistrations
           known.merge(reach)
           next
         end
-        rows_dynamic << name if into.equal?(dynamic)
+        rows_bytecode << name if into.equal?(dynamic)
         next unless into.add?(name)
 
         grew = true
@@ -1414,7 +1417,7 @@ module StaticDispatchRegistrations
 
     load_bodies, load_names = load_phase(ireps, body_of, method_of, overridden, send_ops: send_ops)
     dynamic.merge(load_names)
-    rows_dynamic.merge(load_names)
+    rows_bytecode.merge(load_names)
     cite(load_names, 'sent while mrblib loads')
     bytecode_blocks = runs.each_value.any? { |r| runnable_proc_text(r[:gen]).match?(BYTECODE_PROC) }
     fixpoint.call(dynamic, lambda do |label|
@@ -1446,7 +1449,8 @@ module StaticDispatchRegistrations
                  compiled: NeverCalledRegistrations.parse_compiled_entries(core_err).to_set { |m| "#{m[:owner]}##{m[:name]}" } }
     core_excluded = closed_only ? core_excluded(repo_root, mrbc, ireps, runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }, registry, superclass_of,
                                                 engine_tuple, symbol_lookups, proven,
-                                                engine_dynamic: symbol_lookups && rows_dynamic,
+                                                engine_dynamic: symbol_lookups &&
+                                                  (CoreRows.bytecode_sends_count?(closed_only, bytecode_blocks) ? rows_dynamic | rows_bytecode : rows_dynamic),
                                                 super_names: super_reach.keys.to_set | super_unknown, core_run: core_run) : nil
 
     { super_reach: super_reach, class_owners: class_owners,
@@ -1455,7 +1459,32 @@ module StaticDispatchRegistrations
       core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new,
       ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
                                          gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
+      engine_rows: closed_only ? engine_rows(candidates, core_excluded&.at(4), super_reach, super_unknown, class_owners) : Set.new,
       frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
+  end
+
+  # ENGINE_ROWS (closed only): compiled engine entries the closed build keeps as rows of their generated ROM table
+  # (MRB_MT_CTOR_ROW) instead of method-table entries, as CORE_ROWS does for the core's. A row answers only the
+  # lookups that find rows (bc2cpp_find_proven: owner calls, native singleton calls; the funcall family,
+  # mrb_vm_find_method_rows), so an entry may become one when the core rows run (`row_reach`: its names and fragments,
+  # which read the engine, the core Ruby, the natives and the generated code by those rules) finds no other lookup of
+  # its name, and no `super` may reach it. A plain compiled registration is a row of its generated table, a native ROM
+  # entry one through the exclusion header (2, CoreNativeCandidates.header's engine_rows); a native outside a ROM table,
+  # an accessor and a guarded registration stay entries. Constructor names are CTOR_ROWS'.
+  def engine_rows(candidates, row_reach, super_reach, super_unknown, class_owners)
+    return Set.new unless row_reach
+
+    names, fragments = row_reach
+    candidates.filter_map do |m|
+      owner = m[:owner]
+      name = m[:name]
+      next unless owner.is_a?(String) && owner.match?(CLOSED_OWNER_RE) && !m[:accessor] && !m[:guard]
+      next unless m[:native] ? m[:rom] : m[:entry]
+      next if CTOR_ROW_NAMES.include?(name) || super_unknown.include?(name)
+      next if dynamic_name?(name, names, fragments) || super_reached?(super_reach, class_owners, owner, name)
+
+      "#{owner}##{name}"
+    end.to_set
   end
 
   # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
@@ -1486,30 +1515,36 @@ module StaticDispatchRegistrations
     self.core_state = [entries, names, fragments, proven] if core_names
     rom = CoreNativeCandidates.candidates(entries, names, fragments, proven)
     rows = []
+    row_reach = nil
     if engine_dynamic
       # CORE_ROWS_COMPILED: the core gem's code counts like the engine's, and the bodies it compiles are not read again.
       row_generated = core_run ? generated + [core_run[:gen]] : generated
       engine = CoreRows.engine_names(ireps, row_generated, engine_dynamic, super_names)
       row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, row_generated.map { |src| CoreRows.strip_sym_table(src) },
                                                                 core: core, exact_impls: true,
-                                                                strip_generated: lambda { |src|
-                                                                  # C_CALL_ROWS: funcall names and inert literals as in a native.
-                                                                  CCallRows.blank_generated(blank_inert_string_args(
-                                                                    src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
-                                                                       .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
-                                                                       .gsub(RUNTIME_REGISTRATION_STMT, '')
-                                                                  ), proven: !symbol_lookups.nil?)
-                                                                },
+                                                                strip_generated: ->(src) { rows_generated_text(src, proven: !symbol_lookups.nil?) },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
                                                                 enumerator_free: -> { proof.call.holds }, engine_names: engine,
                                                                 compiled_core: core_run&.dig(:compiled), operators: !proven.empty?,
                                                                 row_calls: true)
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
+      row_reach = [row_names, row_fragments]
     end
+    # The fifth element is the rows run's [names, fragments] (ENGINE_ROWS), nil when it did not run.
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
-     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only)]
+     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach]
   ensure
     @enumerator_free_proof = nil
+  end
+
+  # The generated text the core rows run reads literals from. C_CALL_ROWS: funcall names and inert literals as in a
+  # native. PROC_SPEC names are a compiled block's locals, as c_literals reads them.
+  def rows_generated_text(src, proven: false)
+    CCallRows.blank_generated(blank_inert_string_args(
+      src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+         .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1').gsub(RUNTIME_REGISTRATION_STMT, '')
+         .gsub(PROC_SPEC_NAMES, '')
+    ), proven: proven)
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
@@ -1868,6 +1903,8 @@ module StaticDispatchRegistrations
     # The CoreEnumeratorFree::Result of the last core_excluded run (nil when it had nothing to prove).
     attr_reader :enumerator_free
     attr_accessor :why
+    # WHY_ALL: when set (a Hash), every reason that made each name dynamic, not only the first.
+    attr_accessor :why_all
     # core_kept_report.rb: a Set that answers `note` (it records where each name comes from) for core_excluded to read
     # names into, and the [entries, names, fragments, proven] it ended with.
     attr_accessor :core_names, :core_state
@@ -1876,7 +1913,13 @@ module StaticDispatchRegistrations
   def cite(names, reason)
     return unless @why
 
-    names.each { |name| @why[name] ||= reason }
+    names.each do |name|
+      @why[name] ||= reason
+      next unless @why_all
+
+      reasons = (@why_all[name] ||= [])
+      reasons << reason unless reasons.include?(reason)
+    end
   end
 
   def irep_site(irep, method_of, body_of)
@@ -2056,6 +2099,7 @@ module StaticDispatchRegistrations
                                    ctor_rows: closed[:ctor_rows].freeze,
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
                                    core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
+                                   engine_rows: (closed[:engine_rows] - closed_names).freeze,
                                    frame_free: closed[:frame_free].freeze, digest: digest)
   end
 

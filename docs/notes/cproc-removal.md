@@ -28,7 +28,7 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 | `--freestanding` on x86-64 Linux | Path B (`pathb-dump --freestanding --eh-runtime`) | #976 merged |
 | C that Path B refused: unions by value, `_Float16`, inline asm, return/frame address, `cleanup`, `section`, case ranges, flexible array initializers | Path B lowerings | #980, #981, #982, #983 merged. Left in `tests/c` (`XFAIL-pathb`): `asm goto` and any other marker still present |
 | `nfcc` (cc for make, CMake, autoconf, the kernel) | Path B, gcc for a unit it cannot take | default on x86-64 Linux with the harness built (opt-in before: #977). It takes the kernel's option set (`-nostdinc`, `-isystem`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding`, `-mno-sse` checked, codegen options dropped; other semantic options make that compile gcc's: docs/notes/linux-kernel.md). `NFCXX_BACKEND=qbe` still chooses cproc; other hosts and checkouts without the harness default to it |
-| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **570 of 615 build** (538 before the `claude/pathb-kernel-refusals` branch): docs/notes/linux-kernel.md, "Measured". The rest is inline asm and the real-mode boot code |
+| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **570 of 615 build** (538 before the `claude/pathb-kernel-refusals` branch): docs/notes/linux-kernel.md, "Measured". The rest is inline asm; the real-mode boot code (`arch/x86/boot`, 21 files) builds on Path B too: docs/notes/linux-kernel.md, "Measured: the real-mode boot code" |
 | C++ modules (default backend was qbe) | Path B (the `-c` compile passes the module options) | #989 merged; `--backend=qbe` with modules still uses cproc |
 | qbe-backend ASan (cproc's own checks, branch `nfcxx-asan-combined`) | Path B ASan (the default since #892) | #992 merged: `-fsanitize=address --backend=qbe` is an error; the cproc ASan code is dead and goes with cproc |
 | CIL (.NET) backend: `cil-cc` is `qbe-cc` | `scripts/pathb-cil` for C | #993 open |
@@ -62,3 +62,13 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 3. Flip `nfcc` and move the third-party C builds; remove their cproc workarounds.
 4. Path B (or gcc) on non-x86-64 hosts, so that no default selects qbe.
 5. When no default, no CI leg and no test needs it, delete the files above in one PR and run the check at the top.
+
+## aarch64 (Linux arm64) status
+
+- Done: the default driver is Path B on every host; the `arm64 cases` CI leg runs `NFCXX_BACKEND=pathb tests/run.sh` (and gcc on main), verified on Linux aarch64 (56 ok both ways).
+- Still on cproc on arm64, and why each cannot move yet (checked on Linux aarch64 with `NFCXX_BACKEND=pathb`):
+  - `tests/lib` and `tests/target` (freestanding): Path B takes freestanding programs only on x86-64 Linux, so the suite cannot run there.
+  - `tests/c` (6 failures: `attr_section_more.c`, `attr_section_used.c`, `gnu_weak_alias.c` (undefined `do_sys`), `init_self_ref.c` (assembler), `ldouble_ops.c` (long double), `va_struct.c`).
+  - `tests/c/cc-mode.sh`: `pathb-cc` does not take `-isystem`; `tests/trace` lacks the `eccp` span on the gcc route.
+  - `tests/builtins` and `tests/determinism` pass on Path B; their default backend list stays until the freestanding suites move.
+  - The `macOS arm64 (qbe backend)` leg is unchanged: it needs a Path B run on macOS CI first (no macOS host here).
