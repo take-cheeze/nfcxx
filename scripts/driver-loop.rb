@@ -5,8 +5,9 @@
 # scripts/driver-options.rb); -l -L and the link options (-Xlinker -z -u -T, -static ..., -Wl,*, -fuse-ld=*, -shared);
 # the input files by suffix; -O* -g* -pipe -v -time -w -W* and -Wa,*; the -f and -m cases.
 # @file arguments are expanded first, as add_arg does, and an @ that cannot be read is refused.
-# Not covered yet, refused as "unported" (exit 3): -fno-crossjumping (host-dependent) and the helpers qbekernel and
-# pathb_option. A caller can tell "not done yet" from "refused by nfcc".
+# -fno-crossjumping is kept only when the host gcc is GNU gcc, which the shell asks; the caller passes that as the first
+# argument, --host-gnu-gcc=0 or --host-gnu-gcc=1 (the default is 0).
+# Not covered yet, refused as "unported" (exit 3): the helpers qbekernel and pathb_option. A caller can tell "not done yet" from "refused by nfcc".
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -290,7 +291,7 @@ end
 
 # Applies the loop to the arguments. Returns the state; raises LoopDie for an error bash would die on, Unported for an
 # option this slice does not cover.
-def run_loop(args)
+def run_loop(args, host_gnu_gcc)
   state = LoopState.new
   n = args.length
   i = 0
@@ -392,7 +393,8 @@ def run_loop(args)
     elsif matches_any?(a, ISA_OPTIONS) || a.start_with?("--param=") || a == "-fno-jump-tables"
       state.isa << a
     elsif a == "-fno-crossjumping"
-      raise Unported, a
+      # bash: host_is_gnu_gcc && isa+=(...). The host check runs in the shell; the caller says whether it passed.
+      state.isa << a if host_gnu_gcc
     elsif a == "--param"
       die("option '#{a}' requires an argument") unless i + 1 < n
 
@@ -454,9 +456,17 @@ def emit(state)
 end
 
 def main(argv)
+  host_gnu_gcc = false
+  if argv.first && argv.first.start_with?("--host-gnu-gcc=")
+    value = argv.first[15..]
+    die("--host-gnu-gcc takes 0 or 1") unless value == "0" || value == "1"
+
+    host_gnu_gcc = value == "1"
+    argv = argv[1..]
+  end
   die("no input files") if argv.empty?
 
-  emit(run_loop(expand_response_args(argv)))
+  emit(run_loop(expand_response_args(argv), host_gnu_gcc))
   0
 rescue LoopDie => e
   $stderr.write("nfcc: error: #{e.message}\n")
