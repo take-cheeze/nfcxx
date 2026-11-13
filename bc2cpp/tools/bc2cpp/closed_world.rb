@@ -60,6 +60,13 @@ class ClosedWorld
   RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const)\b/
+  # DYNAMIC_NAME_LOOPS: a definer whose name is an interpolated Symbol (`alias_method :"x_#{v}", v`) is dynamic too.
+  RUBY_DYNAMIC_SYMBOL = /\b(?:define_method|define_singleton_method|alias_method)\b[ \t]*\(?[ \t]*:"[^"\n]*#\{/
+  # The definers a loop can enumerate, with the name argument they define (a loop variable, or a Symbol built from one).
+  RUBY_DEFINER_ARG = /\b(?:define_method|define_singleton_method|alias_method)\b[ \t]*\(?[ \t]*
+                      (?:(?<var>[a-z_]\w*)\b(?![ \t]*\()|:"(?<dsym>[^"\n]*)")/x
+  # The head of a block over a constant or an inline %i[] / %w[] literal, with its loop variable.
+  RUBY_LOOP_HEAD = /(?:\b(?<const>[A-Z]\w*)|%[iw]\[(?<words>[^\]]*)\])\.each\s*(?:do|\{)\s*\|\s*(?<var>[a-z_]\w*)(?:\s*,\s*\w+)?\s*\|/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
   # Project native code that freezes an object, or asks Ruby to (registering a method named
   # `freeze` is not one).
@@ -165,6 +172,8 @@ class ClosedWorld
     # Set when a probe send's name is not one proven Symbol: any miss could then be the probed one.
     @dynamic_probe = false
     @outside_def_names = Set.new
+    # DYNAMIC_NAME_LOOPS: the names outside Ruby defines through a literal-container loop, not as a computed name.
+    @outside_dyn_names = Set.new
     # REMOVED_NAMES: literal names undefined or removed by the program; @dynamic_removal when one is computed.
     @removed_names = Set.new
     @dynamic_removal = false
@@ -1428,6 +1437,30 @@ class ClosedWorld
       @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
       global!(:outside_class_factory) if file.fetch(:class_factory)
     end
+    # Every constant write is noted by now, native ones included, so the loops can be judged.
+    facts.fetch(:files).each { |file| resolve_definer_loops(file) }
+  end
+
+  # DYNAMIC_NAME_LOOPS: a loop over a literal (inline, or a constant the program writes once) whose body only defines
+  # names built from its loop variable defines exactly those names. They join the outside-defined names. A constant
+  # written again, or a constant-free loop that is not a literal, keeps the global refusal.
+  def resolve_definer_loops(file)
+    path = file.fetch(:path)
+    file.fetch(:definer_loops).each do |loop|
+      const = loop.fetch(:const)
+      exact = const.nil? || (@outside_constant_write_counts[const] == 1 && @constant_write_counts[const].zero? &&
+                             !@dynamic_constant_mutation)
+      unless exact
+        global!(:outside_dynamic_definition)
+        next
+      end
+      loop.fetch(:names).each do |name|
+        @outside_dyn_names << name
+        @outside_ruby_names << name
+        @outside_names << name
+        (@outside_name_paths[name] ||= Set.new) << path
+      end
+    end
   end
 
   def self.ruby_facts(paths)
@@ -1443,6 +1476,67 @@ class ClosedWorld
   # ends in at most one of those; an unsuffixed token is returned as is, not copied.
   def self.token_stem(tok)
     tok.end_with?('=', '?', '!') ? tok.chop : tok
+  end
+
+  # DYNAMIC_NAME_LOOPS: the Symbol names of `CONST = %i[...].freeze` or `CONST = { key: "...", ... }.freeze` written
+  # in +text+ (once, plain literal), or nil when the literal is not one of those shapes.
+  def self.loop_literal_names(text, const)
+    definition = text.match(/\b#{const}\s*=(?![=~>])\s*(?:\{(?<hash>[^{}]*)\}\.freeze|%i\[(?<sym>[^\]]*)\]\.freeze)/)
+    return nil unless definition
+
+    if definition[:hash]
+      body = definition[:hash]
+      return nil unless body.match?(/\A\s*(?:\w+:\s*"[^"\n]*"\s*,?\s*)+\z/)
+
+      body.scan(/(\w+):/).flatten
+    else
+      names = definition[:sym].split
+      names.all? { |n| n.match?(/\A\w+\z/) } && !names.empty? ? names : nil
+    end
+  end
+
+  # DYNAMIC_NAME_LOOPS: the body of the block +head+ opens (up to the `end` at the same indentation), or nil.
+  def self.loop_body(text, head)
+    line_start = text.rindex("\n", head.begin(0) - 1)
+    line_start = line_start ? line_start + 1 : 0
+    indent = text[line_start..][/\A[ \t]*/]
+    rest = text[head.end(0)..]
+    close = rest.match(/^#{Regexp.escape(indent)}end\b/)
+    close && rest[0...close.begin(0)]
+  end
+
+  # DYNAMIC_NAME_LOOPS: { const:, names:, dyn: } for the loop +head+ opens, where +dyn+ counts its dynamic definers and
+  # +names+ is what they define over every value of the loop. nil when a definer in it cannot be enumerated.
+  def self.definer_loop(text, head)
+    body = loop_body(text, head)
+    return nil unless body
+
+    dyn = body.scan(RUBY_DYNAMIC).size + body.scan(RUBY_DYNAMIC_SYMBOL).size
+    return { const: head[:const], names: [], dyn: 0 } if dyn.zero?
+    var = head[:var]
+    # The loop variable is read as bound: no block parameter or assignment of it in the body.
+    return nil if body.match?(/\|[^|\n]*\b#{var}\b[^|\n]*\||\b#{var}\s*(?:[-+*\/|&]?=)(?!=)/)
+
+    values = head[:words] ? head[:words].split : loop_literal_names(text, head[:const])
+    return nil unless values && !values.empty? && values.all? { |v| v.match?(/\A\w+\z/) }
+
+    args = body.to_enum(:scan, RUBY_DEFINER_ARG).map { Regexp.last_match }
+    return nil unless args.size == dyn
+
+    names = args.flat_map do |arg|
+      if arg[:var]
+        return nil unless arg[:var] == var
+
+        values
+      else
+        return nil unless arg[:dsym].scan(/#\{(\w+)\}/).flatten.all? { |v| v == var }
+
+        values.map { |value| arg[:dsym].gsub("\#{#{var}}", value) }
+      end
+    end
+    return nil unless names.all? { |n| n.match?(/\A[A-Za-z_]\w*[?!]?\z/) }
+
+    { const: head[:const], names: names.uniq, dyn: dyn }
   end
 
   def self.ruby_file_facts(path)
@@ -1467,6 +1561,13 @@ class ClosedWorld
 
     core = CoreDefs.core_source?(path)
 
+    # DYNAMIC_NAME_LOOPS: every dynamic definer is either inside a loop this file enumerates exactly, or unresolved.
+    loops = text.to_enum(:scan, RUBY_LOOP_HEAD).map { Regexp.last_match }.map { |head| definer_loop(text, head) }
+    covered = loops.compact.sum { |loop| loop[:dyn] }
+    dynamic_total = text.scan(RUBY_DYNAMIC).size + text.scan(RUBY_DYNAMIC_SYMBOL).size
+    dynamic_unresolved = covered != dynamic_total
+    definer_loops = dynamic_unresolved ? [] : loops.compact.select { |loop| loop[:dyn].positive? }
+
     {
       path: path,
       tokens: tokens.to_a,
@@ -1476,7 +1577,8 @@ class ClosedWorld
       freeze_possible: !core && text.match?(/\bfreeze\b/),
       singleton_maker: !core && text.match?(RUBY_SINGLETON),
       constant_writes: text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/).map(&:first),
-      dynamic: text.match?(RUBY_DYNAMIC),
+      dynamic: dynamic_unresolved,
+      definer_loops: definer_loops,
       dynamic_constant_mutation: text.match?(RUBY_CONST_DYNAMIC),
       class_factory: text.match?(/\b(?:Class|Struct)\.new\b/)
     }
@@ -1525,6 +1627,12 @@ class ClosedWorld
     return @define_method_trusted if defined?(@define_method_trusted)
 
     @define_method_trusted = !@global_refusal && !installer_intercepted?('define_method')
+  end
+
+  # DYNAMIC_NAME_LOOPS: a define_method site may be a definition for +name+ when the program trusts define_method
+  # and no outside dynamic definer can name +name+ (the names of the literal loops it could be, not every name).
+  def define_method_name_trusted?(name)
+    define_method_sites_trusted? && !@outside_dyn_names.include?(name)
   end
 
   # ALIAS_SITES: the same question for `alias_method`, whose class-body sites the registry

@@ -7,9 +7,16 @@ require 'shellwords'
 # The script-world build kind (compiled_gems.rb BC2CPP_PROBE_BUILDS): one mruby script as a closed-world program. The
 # script is a gem's mrblib, its top-level statements that need the command line (the tail) are moved into
 # ScriptWorld.run, and a fixed C main calls that. Same sealed gem set as tools/optcarrot_probe/sealed_build.rb, without
-# the regexp gem (the scripts have no Regexp).
+# the regexp gem unless BC2CPP_SCRIPT_WORLD_ONIG=1 (the scripts have no Regexp by default).
 module ScriptSealedBuild
   PROBE = 'ScriptWorldProbe'
+
+  # The mruby-onig-regexp gem next to the mruby root, or nil. Opt-in: BC2CPP_SCRIPT_WORLD_ONIG=1.
+  def self.onig_gem(root)
+    return nil unless ENV['BC2CPP_SCRIPT_WORLD_ONIG'] == '1'
+
+    File.join(File.dirname(File.join(root, '3rd/mruby')), 'mruby-onig-regexp')
+  end
 
   def self.sealed_gems(root, compiled_gem)
     mruby = File.join(root, '3rd/mruby')
@@ -22,6 +29,8 @@ module ScriptSealedBuild
       gems[gem_name] = File.join(mruby, 'mrbgems', gem_name)
     end
     gems['mruby-bc2cpp-core-ext'] = File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-core-ext')
+    onig = onig_gem(root)
+    gems['mruby-onig-regexp'] = onig if onig
     gems['script-compiled'] = compiled_gem
     gems
   end

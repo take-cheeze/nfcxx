@@ -351,7 +351,7 @@ BC2CPP_MAIN = lambda do
   # DEFINE_METHOD_SITES: the class-body `define_method(:x) { }` candidates the registry
   # collected stay definitions only in a closed world that trusts `define_method` itself.
   define_method_kept, define_method_dropped =
-    DefineMethodSites.settle(registry, trusted: closed_world.define_method_sites_trusted?)
+    DefineMethodSites.settle(registry, trusted: closed_world.method(:define_method_name_trusted?))
   if define_method_kept + define_method_dropped > 0
     warn "== define_method sites (#{define_method_kept} registered as definitions, " \
          "#{define_method_dropped} left as installers) =="

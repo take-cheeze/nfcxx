@@ -156,10 +156,13 @@ module DefineMethodSites
   # DEFINE_METHOD_LOOPS: the expansions of one loop send (one `site` entry) are kept or dropped together:
   # that send is settled only while the registry holds every name it installs.
   # Returns [kept, dropped].
+  # +trusted+ is a boolean, or a callable from a name to whether that name's sites are trusted.
   def settle(registry, trusted:)
+    trusted_for = trusted.respond_to?(:call) ? trusted : ->(_name) { trusted }
     doomed = registry.each_value.flat_map do |defs|
       defs.select do |d|
-        d.installer == :define_method && (!trusted || defs.any? { |other| !other.equal?(d) && other.owner == d.owner })
+        d.installer == :define_method &&
+          (!trusted_for.call(d.name) || defs.any? { |other| !other.equal?(d) && other.owner == d.owner })
       end
     end
     doomed_sites = doomed.flat_map { |d| d.site || [] }.to_set
