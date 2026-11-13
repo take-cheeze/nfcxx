@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :xadd, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
+    attr_accessor :xadd, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -1195,7 +1195,7 @@ end
       # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
       # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
       span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
-      if cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+      if Qbe.jtab && cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
         switch_jtab_lines(operand, ranges, tree_default)
         return
       end
