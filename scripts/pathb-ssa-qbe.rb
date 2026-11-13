@@ -986,6 +986,24 @@ end
       hoist_tls
     end
 
+    # The address of a thread-local object, in a temporary. On -fPIC x86-64 Linux it is the general-dynamic model: a call to
+    # the helper __pathb_tlsaddr_SYM (scripts/pathb-ssa-build appends it), which calls __tls_get_addr. The initial-exec form
+    # (the thread pointer plus an offset from the GOT, the only TLS form QBE has) makes the linker mark a shared object
+    # DF_STATIC_TLS, and dlopen then fails once the static TLS surplus is used up ("cannot allocate memory in static TLS
+    # block", tests/eval). An executable keeps initial-exec, which the linker resolves for any module.
+    def tls_address(raw)
+      sym = Qbe.symbol(raw)
+      t = fresh
+      if Qbe.pic && !Qbe.aarch64 && !Qbe.darwin && !Qbe.ptr32 && sym.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+        helper = "tlsaddr:#{sym}"
+        asm_helpers << helper unless asm_helpers.include?(helper)
+        @lines << "  #{t} =l call $__pathb_tlsaddr_#{sym}()"
+      else
+        @lines << "  #{t} =l copy extern thread $#{sym}"
+      end
+      t
+    end
+
     # Whether op() addresses x (a @ref) as a thread-local object: the thread pointer plus the object's offset.
     def tls_global?(x)
       info = @globals[x.raw]
@@ -1012,9 +1030,7 @@ end
       @blocks.each { |b| walk.call(b[2..]) }
       counts.each do |raw, n|
         next if n < 3
-        t = fresh
-        @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(raw)}"
-        @tls_cache[raw] = t
+        @tls_cache[raw] = tls_address(raw)
       end
     end
 
@@ -1784,9 +1800,7 @@ end
           if info[:thread]
             return @tls_cache[x.raw] if @tls_cache.key?(x.raw)
 
-            t = fresh
-            @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
-            return t
+            return tls_address(x.raw)
           end
           return "$#{Qbe.symbol(x.raw)}"
         end

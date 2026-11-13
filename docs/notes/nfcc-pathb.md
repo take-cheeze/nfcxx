@@ -103,6 +103,19 @@ own `string.c`, `printf.c` and `cpuflags.c` were run this way with `REALMODE_SRC
 
 Test: `tests/nfcc/run.sh`.
 
+## Thread-local objects in a shared object
+
+QBE has no general-dynamic TLS form, so Path B's first emitter read every thread-local object through the initial-exec model
+(the thread pointer plus an offset from the GOT). The linker then marks a shared object DF_STATIC_TLS, and `dlopen` fails once the
+static TLS surplus is used up ("cannot allocate memory in static TLS block"; `tests/eval/run.sh` on the Path B backend). On
+`-fPIC` x86-64 Linux the address is now general-dynamic: a call to `__pathb_tlsaddr_SYM`, a helper `scripts/pathb-ssa-build` appends
+(`tls_address` in scripts/pathb-ssa-qbe.rb), which calls `__tls_get_addr` through the GOT pair, as gcc emits it. An executable keeps
+initial-exec. Not yet covered: arm64 and Darwin (their TLS forms are not the x86-64 sequence), and 32-bit targets (no thread-local
+objects).
+
+`-rdynamic` reaches the executable link (the driver's `ldopts`): without it the program's global symbols are not in `.dynsym`, and a
+`dlopen`ed module cannot bind to them (`Vec3::len2` in the eval host).
+
 ## Measuring: `scripts/nfcc-pathb-measure.sh`
 
 `scripts/nfcc-pathb-measure.sh [-o REPORT] FILE.c...` compiles each file with `nfcc -c` on `pathb` and prints the number

@@ -7,7 +7,7 @@
 #   NFCXX_BACKEND=qbe|gcc   (default: both)
 cd "$(dirname "$0")/../.."
 d=tests/call-abi
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/gxx"
 g++ -std=c++20 -shared -fPIC $d/lib.cpp -o "$tmp/gxx/libabi.so" &&

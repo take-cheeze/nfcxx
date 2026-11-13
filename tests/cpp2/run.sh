@@ -4,7 +4,7 @@
 #   NFCXX_BACKEND=qbe|gcc   (default: qbe)
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcxx=$root/nfcxx
-export NFCXX_BACKEND=${NFCXX_BACKEND:-qbe}
+export NFCXX_BACKEND=${NFCXX_BACKEND:-pathb}
 [ -x "$root/build/cppfront" ] || { echo "FAIL: build/cppfront is missing; run scripts/setup-cppfront.sh" >&2; exit 1; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0

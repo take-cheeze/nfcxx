@@ -16,7 +16,7 @@ cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
 host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
-  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the product only here (Linux x86-64 and arm64)
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the product on Linux x86-64 and arm64
 fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for route in $backends; do

@@ -10,7 +10,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 zip_url=https://sqlite.org/2026/sqlite-amalgamation-3540100.zip
 zip_sha256=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
 c_sha256=0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52
-backend=${NFCXX_BACKEND:-qbe}
+backend=${NFCXX_BACKEND:-pathb}
 dest=$root/build/sqlite/$backend
 src=$root/build/sqlite/src
 

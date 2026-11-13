@@ -12,7 +12,7 @@
 cd "$(dirname "$0")/../.."
 root=$PWD
 d=tests/bundle
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ninja -C tools/bundle >/dev/null || exit 1
 B=$root/build/nfcbundle
