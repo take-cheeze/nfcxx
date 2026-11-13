@@ -89,3 +89,14 @@ NFCXX_DIALECT=clang -c a.cpp
 NFCXX_DIALECT= -c a.cpp
 NFCXX_TRACE=t.json -c a.cpp
 NFCXX_BACKEND=qbe NFCXX_PATH=b NFCXX_EHSHIM=0 NFCXX_CACHE=/tmp/c --backend=pathb -c a.cpp
+-fsyntax-only x.cpp
+-c x.cpp -fsyntax-only -o out.o
+-fsyntax-only -E x.cpp
+-fsyntax-only -o
+-fsyntax-only -DA=1 -O2 -fsyntax-only x.cpp
+-fsyntax-only --bundle-libs x.cpp
+-fsyntax-only --cuda-driver=libcuda x.cpp
+-fsyntax-only --bogus-option x.cpp
+-fsyntax-only -fuse-ld=gold -std=c++20 x.cpp
+NFCXX_BACKEND=qbe -fsyntax-only x.cpp
+NFCXX_CACHE_REMOTE=nope -fsyntax-only x.cpp

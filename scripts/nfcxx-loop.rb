@@ -4,9 +4,10 @@
 # error exits 2 with nfcxx's message. Checked against the bash by tests/nfcxx/loop-state.sh, which runs nfcxx's own setup
 # and loop with the build step (ensure_tool) stubbed out (tests/nfcxx/option-state.sh).
 #
-# Not covered in this slice (refused as "unported", exit 3): the -fsyntax-only re-run, --bundle- and --cuda-driver (their
-# wrappers run the driver again), -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=),
-# and every NFCXX_* variable (the defaults here are the ones with no variable set).
+# -fsyntax-only (the re-run before the setup) prints the command the bash would run instead of the state (syntax_only_plan).
+# Not covered in this slice (refused as "unported", exit 3): --bundle- and --cuda-driver (their wrappers run the driver
+# again), -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
+# variables that are not in the apply_environment list.
 #
 #   ruby scripts/nfcxx-loop.rb ARG...   prints the state the loop leaves, one line per variable
 #   --ld-available=NAME,...             the ld.NAME programs that exist (for -fuse-ld=NAME)
@@ -310,6 +311,31 @@ def emit(state)
   end
 end
 
+# nfcxx's -fsyntax-only block, which runs before its setup: the compile again, without its object (a type check). Returns the
+# command the bash runs as [kind, argv], kind RUN (the driver) or EXEC (nfcxx replaces itself), or nil when there is no
+# -fsyntax-only. TMP stands for the temporary directory the bash makes for the object.
+def syntax_only_plan(argv)
+  return nil unless argv.include?("-fsyntax-only")
+  args = argv.reject { |b| b == "-fsyntax-only" }
+  return ["EXEC", ["nfcxx", *args]] if args.include?("-E")
+  if args.include?("-o")
+    # an explicit -o is honoured by the real compile: the object goes to the temporary directory instead
+    rewritten = []
+    skip = false
+    args.each do |b|
+      if skip
+        skip = false
+        rewritten << "TMP/x.o"
+        next
+      end
+      skip = true if b == "-o"
+      rewritten << b
+    end
+    return ["RUN", ["nfcxx", "-c", *rewritten]]
+  end
+  ["RUN", ["nfcxx", "-c", *args, "-o", "TMP/x.o"]]
+end
+
 def main(argv)
   ld_available = []
   env = {}
@@ -331,8 +357,13 @@ def main(argv)
       raise NfcxxUnported, option
     end
   end
+  plan = syntax_only_plan(argv)
+  if plan
+    $stdout.write("#{plan[0]} #{plan[1].join(" ")}\n")
+    return 0
+  end
   argv.each do |a|
-    if a == "-fsyntax-only" || a.start_with?("--bundle-") || a.start_with?("--cuda-driver=")
+    if a.start_with?("--bundle-") || a.start_with?("--cuda-driver=")
       raise NfcxxUnported, a
     end
   end
