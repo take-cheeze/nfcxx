@@ -52,6 +52,18 @@ class CodeGen
       end
     end
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
+    # SEED: a declared class parameter whose entry guard checks it is exactly that class on entry, whatever the call
+    # sites pass (an unmodelled read would otherwise delete the pool), so the declared bits are fixed, not grown.
+    # A Float declaration seeds the Float bit.
+    @declared_arg_pools = {}
+    (self.class.declared_params || {}).each do |label, guards|
+      guards.each do |pos, cls, _key, _text, kind = :class|
+        key = [label, pos + 1]
+        bit = declared_arg_bits(cls, kind)
+        @class_arg_pools[key] = bit
+        @declared_arg_pools[key] = bit
+      end
+    end
     poly_arg_candidates.each_key { |key| @class_arg_pools[key] = 0 }
     setter_arg_candidates.each_key do |key|
       if setter_unguarded?(setter_arg_names.fetch(key))
@@ -133,6 +145,11 @@ class CodeGen
     class_pool_ivar_mask(irep, name) || NumericFlow::OTHER
   end
 
+  # The class bit a declared parameter holds on entry (see setup_class_pools): its class, or Float for a Float value kind.
+  def declared_arg_bits(cls, _kind)
+    numeric_class_bit(cls)
+  end
+
   def class_pool_entry_mask(irep, reg)
     return NumericFlow::OTHER unless @class_pools_on
 
@@ -174,6 +191,7 @@ class CodeGen
       changed = true
     end
     @class_arg_pools.keys.each do |key|
+      next if @declared_arg_pools&.key?(key)
       if (poly = poly_arg_candidates[key])
         reads = poly_arg_reads(*poly, key)
         # A pool the receiver flow can no longer bound is dropped for good (OTHER at every read).
