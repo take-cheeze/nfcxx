@@ -59,6 +59,13 @@ module LoopInstallers
   STEP_LIMIT = 200_000
 
   Sym = Struct.new(:name)
+  # A String literal piece (STRING) and a String an interpolation built (STRCAT). Only a built one names a method:
+  # `define_method(n)` with a String n stays refused, as before. A Lit that a call could have reached (poison)
+  # may have been changed in place, so an interpolation refuses it.
+  Lit = Struct.new(:text, :poisoned)
+  Built = Struct.new(:text)
+  # Classes whose `to_s` an interpolation of a Symbol calls (STRCAT): a user definition on any of them refuses it.
+  SYMBOL_OWNERS = (%w[Symbol Object Kernel BasicObject] + CoreHierarchySigs.ancestors('Symbol')).uniq.freeze
   # kind :hash (items: name => value, Symbol keys only) or :array.
   Cont = Struct.new(:kind, :items, :poisoned)
   BlockVal = Struct.new(:label)
@@ -172,7 +179,21 @@ module LoopInstallers
     end
   end
 
+  # DEFINE_METHOD_LOOPS: an interpolated name reads a Symbol through its to_s, so no user definition of to_s may sit on
+  # the Symbol's ancestry (a core one is mruby's own Symbol#to_s).
+  def symbol_to_s_untouched?(registry, ireps)
+    registry.fetch('to_s', []).all? do |d|
+      next true if d.core || (d.irep && ireps[d.irep] && CoreDefs.core_source?(ireps[d.irep].file))
+
+      !SYMBOL_OWNERS.include?(d.owner.to_s.delete_suffix('.singleton'))
+    end
+  end
+
   def poison(value, seen = {}.compare_by_identity)
+    if value.is_a?(Lit)
+      value.poisoned = true
+      return
+    end
     return unless value.is_a?(Cont) && !seen.key?(value)
 
     seen[value] = true
@@ -186,6 +207,13 @@ module LoopInstallers
     seen[value] = true
     (value.kind == :hash ? value.items.values : value.items).each { |v| reachable(v, seen) }
     seen
+  end
+
+  # DEFINE_METHOD_LOOPS: the value of a STRING (a literal String): its text as a Lit, or OPAQUE for a pool entry
+  # that is not a String. Shared by the walk (`%w[a b]` elements) and the interpreter (`"x_#{n}"` pieces).
+  def string_piece(irep, insn)
+    entry = irep.pool[insn.pool_index.to_i]
+    entry.is_a?(String) ? Lit.new(entry) : OPAQUE
   end
 
   # One class or module body, walked forward with the registers and constants it holds.
@@ -253,7 +281,8 @@ module LoopInstallers
       return generic_refusal(insn, 'a container that code may have reached') if reached.each_key.any?(&:poisoned)
       return generic_refusal(insn, 'a block that is not a literal block') unless block.is_a?(BlockVal)
 
-      interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace))
+      interp = Interp.new(@ireps, @consts, reached, definer: definer?(namespace),
+                                                    symbol_text: LoopInstallers.symbol_to_s_untouched?(@registry, @ireps))
       interp.iterate(insn.sym, recv, block)
       @regs[insn.reg.to_i] = recv
       @regs[insn.reg.to_i + 1] = OPAQUE
@@ -286,6 +315,7 @@ module LoopInstallers
       when :LOADTRUE then @regs[insn.reg.to_i] = true
       when :LOADFALSE then @regs[insn.reg.to_i] = false
       when :LOADSELF then @regs[insn.reg.to_i] = SELF
+      when :STRING then @regs[insn.reg.to_i] = LoopInstallers.string_piece(@irep, insn)
       when LOAD_TRUTHY then @regs[insn.reg.to_i] = TRUTHY
       when :ARRAY, :ARRAY2 then @regs[insn.reg.to_i] = build_array(insn)
       when :HASH then @regs[insn.reg.to_i] = build_hash(insn)
@@ -396,11 +426,12 @@ module LoopInstallers
   class Interp
     attr_reader :installs
 
-    def initialize(ireps, consts, protected_conts, definer: false)
+    def initialize(ireps, consts, protected_conts, definer: false, symbol_text: false)
       @ireps = ireps
       @consts = consts
       @protected = protected_conts
       @definer = definer
+      @symbol_text = symbol_text
       @installs = []
       @steps = 0
     end
@@ -470,7 +501,9 @@ module LoopInstallers
       when :LOADTRUE then regs[insn.reg.to_i] = true
       when :LOADFALSE then regs[insn.reg.to_i] = false
       when :LOADSELF then regs[insn.reg.to_i] = SELF
+      when :STRING then regs[insn.reg.to_i] = LoopInstallers.string_piece(irep, insn)
       when LOAD_TRUTHY then regs[insn.reg.to_i] = TRUTHY
+      when :STRCAT then regs[insn.reg.to_i] = string_cat(get.call(insn.reg), get.call(insn.regs[1]))
       when :NOP then nil
       when :RETURN, :RETNIL, :RETSELF, :RETTRUE, :RETFALSE then return nil
       when :JMP then return jump(irep, insn)
@@ -488,6 +521,21 @@ module LoopInstallers
       else refuse("the unmodeled opcode #{insn.op}")
       end
       pc + 1
+    end
+
+    # DEFINE_METHOD_LOOPS: STRCAT appends an interpolated value's text: a literal piece, or a Symbol's name when no
+    # user code can change Symbol#to_s. Anything else is refused.
+    def string_cat(recv, value)
+      refuse('an interpolation into something that is not a literal string') unless recv.is_a?(Lit) || recv.is_a?(Built)
+      refuse('an interpolation of a String a call could have changed') if [recv, value].any? { |v| v.is_a?(Lit) && v.poisoned }
+      text = case value
+             when Lit, Built then value.text
+             when Sym
+               refuse('an interpolated Symbol whose to_s may be redefined') unless @symbol_text
+               value.name
+             else refuse('an interpolated value the interpreter does not know')
+             end
+      Built.new(recv.text + text)
     end
 
     def jump(irep, insn)
@@ -560,15 +608,19 @@ module LoopInstallers
       refuse('define_method outside a class or module body of the engine') unless @definer
       name = get.call(insn.reg.to_i + 1)
       block = get.call(insn.reg.to_i + 2)
-      refuse('a method name that is not a Symbol literal') unless name.is_a?(Sym)
-      refuse("the method name #{name.name.inspect}") unless name.name.match?(METHOD_NAME)
+      # A Symbol, or a String an interpolation built from literal pieces and Symbols (`"x_#{n}"`).
+      text = if name.is_a?(Sym) then name.name
+             elsif name.is_a?(Built) then name.text
+             else refuse('a method name that is not a Symbol literal')
+             end
+      refuse("the method name #{text.inspect}") unless text.match?(METHOD_NAME)
       refuse('a define_method body that is not a literal block') unless block.is_a?(BlockVal)
       body = @ireps[block.label] or refuse('a missing define_method body')
       registers = DefineMethodSites.loop_body_captures(body, @ireps)
       refuse('a define_method body a method cannot spell') unless registers
 
-      defines << [name.name, block.label, registers.to_a.sort, [irep.label, pc]]
-      name
+      defines << [text, block.label, registers.to_a.sort, [irep.label, pc]]
+      Sym.new(text)
     end
 
     def nested(insn, get, regs)

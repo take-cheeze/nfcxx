@@ -1490,12 +1490,16 @@ module StaticDispatchRegistrations
       row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, row_generated.map { |src| CoreRows.strip_sym_table(src) },
                                                                 core: core, exact_impls: true,
                                                                 strip_generated: lambda { |src|
-                                                                  src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
-                                                                     .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
+                                                                  # C_CALL_ROWS: funcall names and inert literals as in a native.
+                                                                  CCallRows.blank_generated(blank_inert_string_args(
+                                                                    src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+                                                                       .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
+                                                                  ))
                                                                 },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
                                                                 enumerator_free: -> { proof.call.holds }, engine_names: engine,
-                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?)
+                                                                compiled_core: core_run&.dig(:compiled), operators: !proven.empty?,
+                                                                row_calls: true)
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
     end
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,

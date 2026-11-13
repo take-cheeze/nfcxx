@@ -263,8 +263,40 @@ pbrun "-ftrivial-auto-var-init=zero -O0 too" 0 "$avi" -ftrivial-auto-var-init=ze
 if pb -O2 "$avi" -o "$tmp/noavi" >/dev/null 2>&1 && "$tmp/noavi" >/dev/null 2>&1; then bad "without the option the locals are not zeroed" "the program passed"; else ok "without the option the locals are not zeroed (the test reads dirty stack)"; fi
 check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
 used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
-check "-Wa,* compiles with gcc" pb -c -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
-used gcc a.c && ok "-Wa,* went to gcc" || bad "-Wa,* went to gcc" "$(tail -1 "$tmp/log")"
+# -Wa,*: options of the assembler step. Path B assembles QBE's output with the host cc, so the ones that mean the same for it are
+# passed on to that step (scripts/pathb-cc --as-opt) and the compile stays Path B's; any other is gcc's.
+printf 'extern int ext;\nint rd(void) { return ext; }\n' > "$tmp/rl.c"
+check "-Wa,--fatal-warnings --noexecstack builds" pb -c -Wa,--fatal-warnings -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
+used pathb a.c && ok "-Wa,--fatal-warnings stays on Path B" || bad "-Wa,--fatal-warnings stays on Path B" "$(tail -1 "$tmp/log")"
+check "-Wa,-mrelax-relocations=no builds" pb -c -fPIC -Wa,-mrelax-relocations=no "$tmp/rl.c" -o "$tmp/rl_no.o"
+used pathb rl.c && ok "-Wa,-mrelax-relocations=no stays on Path B" || bad "-Wa,-mrelax-relocations=no stays on Path B" "$(tail -1 "$tmp/log")"
+check "no -Wa: the default relocation" pb -c -fPIC "$tmp/rl.c" -o "$tmp/rl_def.o"
+objdump -r "$tmp/rl_no.o" | grep -q 'R_X86_64_GOTPCREL ' && ok "-Wa,-mrelax-relocations=no reached the assembler (R_X86_64_GOTPCREL)" || bad "-Wa,-mrelax-relocations=no reached the assembler" "$(objdump -r "$tmp/rl_no.o" | grep GOT)"
+objdump -r "$tmp/rl_def.o" | grep -q 'R_X86_64_REX_GOTPCRELX' && ok "default: relaxable relocation (R_X86_64_REX_GOTPCRELX)" || bad "default: relaxable relocation" "$(objdump -r "$tmp/rl_def.o" | grep GOT)"
+check "-Wa,a,b (comma list) builds" pb -c -Wa,--fatal-warnings,-mrelax-relocations=no "$tmp/rl.c" -o "$tmp/rl_l.o"
+used pathb rl.c && ok "a comma list of known -Wa options stays on Path B" || bad "a comma list of known -Wa options" "$(tail -1 "$tmp/log")"
+check "-Wa,--defsym compiles with gcc" pb -c -Wa,--defsym,WA_SYM=1 -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa2.o"
+used gcc a.c && ok "an unknown -Wa option went to gcc" || bad "an unknown -Wa option went to gcc" "$(tail -1 "$tmp/log")"
+tail -1 "$tmp/log" | grep -q 'assembler option' && ok "the log says why" || bad "the log says why" "$(tail -1 "$tmp/log")"
+nm "$tmp/wa2.o" | grep -q WA_SYM && ok "-Wa,--defsym reached gcc's assembler" || bad "-Wa,--defsym reached gcc's assembler" "$(nm "$tmp/wa2.o")"
+# the kernel's options that change the code and that QBE cannot write: gcc's, never dropped (-mindirect-branch=thunk*: retpolines;
+# -mindirect-branch-register, -mindirect-branch-cs-prefix, -mrecord-mcount, -fpatchable-function-entry, -fzero-call-used-regs, ...)
+for o in -mindirect-branch=thunk-extern -mfunction-return=thunk-extern -mharden-sls=all -mindirect-branch-register -mindirect-branch-cs-prefix \
+         -mrecord-mcount -fpatchable-function-entry=16,16 -fzero-call-used-regs=used-gpr -frandomize-layout-seed-file=/nonexistent-seed \
+         -ftrivial-auto-var-init=pattern -m32; do
+  pb -c $o "$tmp/int.c" -o "$tmp/o.o" >/dev/null 2>&1; used gcc int.c && tail -1 "$tmp/log" | grep -qF -- "$o" && ok "$o is gcc's" || bad "$o is gcc's" "$(tail -1 "$tmp/log")"
+done
+# the same options asking for nothing are dropped: Path B builds
+check "=keep / =none options" pb -c -mindirect-branch=keep -mfunction-return=keep -mharden-sls=none "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "-mindirect-branch=keep -mfunction-return=keep -mharden-sls=none: Path B" || bad "keep/none: Path B" "$(tail -1 "$tmp/log")"
+# -mstack-protector-guard*: only meaningful with a stack protector in effect (the last -fstack-protector* / -fno-stack-protector)
+sg="-mstack-protector-guard=global -mstack-protector-guard-reg=fs -mstack-protector-guard-symbol=__stack_chk_guard"
+check "stack-protector guard options, no protector" pb -c $sg "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "guard options without -fstack-protector: Path B" || bad "guard options without -fstack-protector" "$(tail -1 "$tmp/log")"
+check "guard options, -fno-stack-protector last" pb -c -fstack-protector-strong $sg -fno-stack-protector "$tmp/int.c" -o "$tmp/o.o"
+used pathb int.c && ok "guard options, -fno-stack-protector last: Path B" || bad "guard options, -fno-stack-protector last" "$(tail -1 "$tmp/log")"
+check "guard options with -fstack-protector-strong" pb -c $sg -fstack-protector-strong "$tmp/int.c" -o "$tmp/o.o"
+used gcc int.c && tail -1 "$tmp/log" | grep -q 'stack-protector-guard' && ok "guard options with a protector (given before it): gcc" || bad "guard options with a protector: gcc" "$(tail -1 "$tmp/log")"
 refuses "an option gcc does not know is gcc's error" "unrecognized\|unknown" pb -c -fno-such-option "$tmp/int.c" -o "$tmp/x.o"
 # a compile that Path B itself refuses moves to gcc only when asked (NFCXX_PATHB_FALLBACK=gcc)
 printf 'typedef int v4 __attribute__((vector_size(16)));\nv4 f(v4 a, v4 b) { return a + b; }\n' > "$tmp/vec.c"   # a vector type: Path B has none

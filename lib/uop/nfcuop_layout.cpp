@@ -7,6 +7,18 @@ namespace nfcuop::layout {
 
 const char* axis_name(Axis a) { return a == Axis::Row ? "row" : "col"; }
 
+namespace {
+// Instructions per element of a tensor held in storage s.
+double storage_instr_per_elem(const Avx2F32& t, Storage s) {
+  switch (s) {
+    case Storage::Strided: return t.strided_instr_per_elem;
+    case Storage::Blocked8: return t.blocked_instr_per_elem;
+    case Storage::Panel16: return t.panel_instr_per_elem;
+  }
+  return 0;
+}
+}  // namespace
+
 Solution solve(const Problem& p) {
   const Avx2F32& target = p.target;
   Solution best;
@@ -23,7 +35,8 @@ Solution solve(const Problem& p) {
     std::map<std::string, Axis> layout;
     for (const Tensor& t : p.tensors)
       if (t.given) layout[t.name] = *t.given;
-    double cost = 0, repair_cost = 0;
+    double cost = 0, repair_cost = 0, required_storage_cost = 0;
+    std::map<std::string, Storage> required_storage;  // inputs a chosen variant needs in a storage (not enumerated)
     std::vector<Repair> repairs;
     std::vector<std::string> chosen;
     std::vector<std::string> row_lane;          // the Row-lane tensors this choice holds (their storage is enumerated)
@@ -47,6 +60,11 @@ Solution solve(const Problem& p) {
         repairs.push_back(r);
         if (need->second == Axis::Row) add_row_lane(in);  // the repaired copy is in Row lanes
       }
+      for (const auto& [name, st] : v.requires_storage) {
+        const Tensor* t = by_name.at(name);
+        required_storage_cost += double(t->numel()) * storage_instr_per_elem(target, st);
+        required_storage[name] = st;
+      }
       for (const auto& [name, axis] : v.produces_lane) {
         layout[name] = axis;
         if (axis == Axis::Row) add_row_lane(name);
@@ -57,18 +75,19 @@ Solution solve(const Problem& p) {
     // Storage of the Row-lane tensors: bit i of mask set means row_lane[i] is Blocked8. Mask 0 (all Strided) is tried
     // first, so it wins ties, such as a zero strided penalty.
     uint32_t storage_mask = 0;
-    double storage_cost = std::numeric_limits<double>::infinity();
+    double row_storage_cost = std::numeric_limits<double>::infinity();
     for (uint32_t mask = 0; mask < (1u << row_lane.size()); ++mask) {
       double sc = 0;
       for (size_t i = 0; i < row_lane.size(); ++i) {
-        const double numel = double(by_name.at(row_lane[i])->numel());
-        sc += numel * ((mask >> i) & 1 ? target.blocked_instr_per_elem : target.strided_instr_per_elem);
+        const Storage st = (mask >> i) & 1 ? Storage::Blocked8 : Storage::Strided;
+        sc += double(by_name.at(row_lane[i])->numel()) * storage_instr_per_elem(target, st);
       }
-      if (sc < storage_cost) {
-        storage_cost = sc;
+      if (sc < row_storage_cost) {
+        row_storage_cost = sc;
         storage_mask = mask;
       }
     }
+    const double storage_cost = row_storage_cost + required_storage_cost;
     cost += storage_cost;
     if (cost < best_cost) {
       best_cost = cost;
@@ -82,6 +101,7 @@ Solution solve(const Problem& p) {
       best.storage.clear();
       for (size_t i = 0; i < row_lane.size(); ++i)
         best.storage[row_lane[i]] = (storage_mask >> i) & 1 ? Storage::Blocked8 : Storage::Strided;
+      for (const auto& [name, st] : required_storage) best.storage[name] = st;
     }
     // Advance the counter.
     size_t i = 0;
@@ -106,12 +126,17 @@ Problem gemm_rowsum(int64_t M, int64_t N, int64_t K, const Avx2F32& target) {
   const double fma = double(M) * double(N) * double(K) / target.lanes;  // one ymm FMA does 8 multiply-adds
   const double store_adds = double(M) * double(N) / target.lanes;       // the N/8 vector adds per row, or per 8 rows
   Op gemm{"gemm", {"A", "B"}, "C", {}};
-  gemm.variants.push_back({"avx2-vec-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma});
-  gemm.variants.push_back({"avx2-vec-m", {{"A", Axis::Row}}, {{"C", Axis::Row}}, fma});
+  gemm.variants.push_back({"avx2-vec-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma, {}});
+  gemm.variants.push_back({"avx2-vec-m", {{"A", Axis::Row}}, {{"C", Axis::Row}}, fma, {}});
+  if (M % 6 == 0 && N % 16 == 0) {  // the register-blocked kernel's shapes (6 rows by 16 columns)
+    Variant packed{"avx2-packed-n", {{"B", Axis::Col}}, {{"C", Axis::Col}}, fma * target.register_blocked_fma_factor, {}};
+    packed.requires_storage["B"] = Storage::Panel16;
+    gemm.variants.push_back(packed);
+  }
   Op rowsum{"rowsum", {"C"}, "R", {}};
-  rowsum.variants.push_back({"reduce-vertical", {{"C", Axis::Row}}, {}, store_adds});
+  rowsum.variants.push_back({"reduce-vertical", {{"C", Axis::Row}}, {}, store_adds, {}});
   rowsum.variants.push_back({"reduce-horizontal", {{"C", Axis::Col}}, {},
-                             store_adds + double(M) * target.hsum_instr_per_row});
+                             store_adds + double(M) * target.hsum_instr_per_row, {}});
   p.ops = {gemm, rowsum};
   return p;
 }

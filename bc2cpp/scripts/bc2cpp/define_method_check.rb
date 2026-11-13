@@ -78,7 +78,6 @@ check.call('without the settled sends a loop send is a computed name', DynamicNa
 WRAP = ->(body) { "class DmN\n#{body}end\n" }
 REFUSED = {
   'a String name' => "  %w[dn_a].each { |n| define_method(n) { 1 } }\n",
-  'a computed name' => "  %i[dn_a].each { |n| define_method(\"x_\#{n}\") { 1 } }\n",
   'a container a call could have reached' => "  NAMES = %i[dn_a]\n  NAMES.push(:dn_b)\n  NAMES.each { |n| define_method(n) { 1 } }\n",
   'a container that is not a literal' => "  def self.names; %i[dn_a]; end\n  names.each { |n| define_method(n) { 1 } }\n",
   'a body reading a class-body local' => "  k = 1\n  %i[dn_a].each { |n| define_method(n) { k } }\n",
@@ -96,6 +95,25 @@ REFUSED.each do |what, body|
   check.call("#{what} registers nothing", kept.zero? && defined_by.call(registry, 'dn_a').empty?)
   check.call("#{what} keeps the installed names unknown", installed.nil? || installed.include?('dn_a'))
 end
+# DEFINE_METHOD_LOOPS: an interpolated name is a method name when a literal container's values build it (`"x_#{n}"`).
+# A piece the interpreter cannot model, a name that is not an identifier, or a user to_s on Symbol stays refused.
+COMPUTED_REFUSED = {
+  'a computed name the interpreter cannot build' => "  %i[dn_a].each { |n| define_method(\"x_\#{n.to_s}\") { 1 } }\n",
+  'a computed name that is not a method name' => "  %i[dn_a].each { |n| define_method(\"x-\#{n}\") { 1 } }\n",
+  'a String changed in place before the loop' => "  s = \"dn_a\"\n  NAMES = [s]\n  s << \"_b\"\n  NAMES.each { |n| define_method(\"x_\#{n}\") { 1 } }\n"
+}.freeze
+COMPUTED_REFUSED.each do |what, body|
+  registry, _ireps, kept, _dropped, = registry_of.call(WRAP.call(body))
+  check.call("#{what} registers nothing", kept.zero? && defined_by.call(registry, 'x_dn_a').empty?)
+end
+# A user to_s on Symbol itself (top level, not DmN::Symbol) is what makes an interpolated Symbol unknown.
+registry, _ireps, kept, = registry_of.call("class Symbol\n  def to_s; 'z'; end\nend\n#{WRAP.call("  %i[dn_a].each { |n| define_method(\"x_\#{n}\") { 1 } }\n")}")
+check.call('a computed name with a user to_s on Symbol registers nothing', kept.zero? && defined_by.call(registry, 'x_dn_a').empty?)
+registry, _ireps, kept, dropped, = registry_of.call(WRAP.call("  %i[dn_a].each { |n| define_method(\"x_\#{n}\") { 1 } }\n  %w[dn_b].each { |n| define_method(\"y_\#{n}\") { 1 } }\n"))
+check.call('a computed name built from a Symbol and a String registers both built names',
+           kept == 2 && dropped.zero? && defined_by.call(registry, 'x_dn_a').size == 1 && defined_by.call(registry, 'y_dn_b').size == 1)
+_r, _i, untrusted_kept, = registry_of.call(WRAP.call("  %i[dn_a].each { |n| define_method(\"x_\#{n}\") { 1 } }\n"), trusted: false)
+check.call('an untrusted world drops the built name with every other define_method site', untrusted_kept.zero?)
 registry, _ireps, kept, = registry_of.call("%i[dn_a].each { |n| define_method(n) { 1 } }\n")
 check.call('a loop at top level registers nothing', kept.zero? && defined_by.call(registry, 'dn_a').empty?)
 
