@@ -249,6 +249,19 @@ check grep -qF 'int sym_tag = MRB_TT_SYMBOL;' "$work/api_type_tags/src/api_type_
 check grep -qF 'int false_tag = MRB_TT_FALSE;' "$work/api_type_tags/src/api_type_tags.c"
 check grep -qF 'int fix_tag = MRB_TT_INTEGER;' "$work/api_type_tags/src/api_type_tags.c"
 
+# 2t. String, Array and Hash helpers and RFLOAT_VALUE (api_map.json batch D3): rb_str_freeze, rb_str_append,
+# rb_str_resize, rb_assoc_new, rb_hash_dup (call, mrb injected), rb_array_len (RARRAY_LEN) and RFLOAT_VALUE (mrb_float)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_ops tools/cext2mrbgem/fixtures/api_str_ops/ext/api_str_ops "$work/api_str_ops" > "$work/api_str_ops.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_str_ops/NOT_BUILDABLE"
+check grep -qF 'return mrb_obj_freeze(mrb, str);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_str_append(mrb, dst, src);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'return mrb_str_resize(mrb, dst, 4);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_value pair = mrb_assoc_new(mrb, a, b);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'mrb_value copy = mrb_hash_dup(mrb, a);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'long n = RARRAY_LEN(pair);' "$work/api_str_ops/src/api_str_ops.c"
+check grep -qF 'double f = mrb_float(b);' "$work/api_str_ops/src/api_str_ops.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

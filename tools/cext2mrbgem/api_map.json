@@ -543,6 +543,46 @@
       "needs_mrb": true,
       "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
     },
+    "rb_str_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_obj_freeze freezes any object; CRuby's rb_str_freeze takes a String"
+    },
+    "rb_str_append": {
+      "kind": "call",
+      "mruby": "mrb_str_append",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no encoding compatibility check (mruby has no encodings); CRuby raises Encoding::CompatibilityError for incompatible encodings"
+    },
+    "rb_str_resize": {
+      "kind": "call",
+      "mruby": "mrb_str_resize",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_assoc_new": {
+      "kind": "call",
+      "mruby": "mrb_assoc_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_dup": {
+      "kind": "call",
+      "mruby": "mrb_hash_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_array_len": {
+      "kind": "macro",
+      "mruby": "RARRAY_LEN"
+    },
+    "RFLOAT_VALUE": {
+      "kind": "macro",
+      "mruby": "mrb_float"
+    },
     "rb_obj_freeze": {
       "kind": "call",
       "mruby": "mrb_obj_freeze",
