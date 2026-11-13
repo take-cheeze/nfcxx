@@ -55,6 +55,35 @@ module RbsParamCheck
     [[], trusted, guards]
   end
 
+  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol or :class
+  # (the exact program class cls); nilable admits nil too (`T?`).
+  IvarGuard = Struct.new(:owner, :name, :cls, :kind, :nilable, :key, :text)
+
+  # { [owner, name without @] => IvarGuard } of the instance-variable declarations (`@x: T`, `attr_reader x: T`) of a
+  # program class whose type is Integer, Float, Symbol or an exact program class, or the same with `?`. A program class
+  # with a subclass is left out (the guard is the exact-class test, and a subclass instance is a legal value), like a
+  # nilable class parameter; `bool` stays unchecked by design, as for parameters and returns.
+  def ivar_guards(loaded, superclass_of)
+    classes = superclass_of.keys.to_set
+    subclassed = superclass_of.values.grep(String).to_set
+    loaded.ivars.each_value.with_object({}) do |iv, out|
+      next if iv.owner.end_with?('.singleton') || !classes.include?(iv.owner)
+
+      inner = iv.type.optional
+      t = inner || iv.type
+      nilable = !inner.nil?
+      kind = VALUE_CLASSES.key?(t.value) ? t.value : nil
+      cls = kind ? VALUE_CLASSES[kind] : t.cls
+      unless kind
+        next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
+
+        kind = :class
+      end
+      name = iv.name.delete_prefix('@')
+      out[[iv.owner, name]] = IvarGuard.new(iv.owner, name, cls, kind, nilable, "#{iv.owner}##{iv.name}", iv.type.text)
+    end
+  end
+
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an
   # instance_exec may change; `owner_of` also for blocks, for lexical constant lookup) and the signature of each body.
   def context(loaded, ireps, registry, superclass_of)
