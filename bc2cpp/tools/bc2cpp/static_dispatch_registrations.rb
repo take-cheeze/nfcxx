@@ -1520,14 +1520,7 @@ module StaticDispatchRegistrations
       engine = CoreRows.engine_names(ireps, row_generated, engine_dynamic, super_names)
       row_names, row_fragments = CoreNativeCandidates.reachable(ireps, native, row_generated.map { |src| CoreRows.strip_sym_table(src) },
                                                                 core: core, exact_impls: true,
-                                                                strip_generated: lambda { |src|
-                                                                  # C_CALL_ROWS: funcall names and inert literals as in a native.
-                                                                  CCallRows.blank_generated(blank_inert_string_args(
-                                                                    src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
-                                                                       .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1')
-                                                                       .gsub(RUNTIME_REGISTRATION_STMT, '')
-                                                                  ), proven: !symbol_lookups.nil?)
-                                                                },
+                                                                strip_generated: ->(src) { rows_generated_text(src, proven: !symbol_lookups.nil?) },
                                                                 diagnostic_literals: !symbol_lookups.nil?,
                                                                 enumerator_free: -> { proof.call.holds }, engine_names: engine,
                                                                 compiled_core: core_run&.dig(:compiled), operators: !proven.empty?,
@@ -1540,6 +1533,16 @@ module StaticDispatchRegistrations
      CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach]
   ensure
     @enumerator_free_proof = nil
+  end
+
+  # The generated text the core rows run reads literals from. C_CALL_ROWS: funcall names and inert literals as in a
+  # native. PROC_SPEC names are a compiled block's locals, as c_literals reads them.
+  def rows_generated_text(src, proven: false)
+    CCallRows.blank_generated(blank_inert_string_args(
+      src.gsub(GENERATED_COMMENT, '').gsub(REGISTRATION_CALL, '').gsub(LEFT_OUT_CALL, '')
+         .gsub(SELF_REGISTRATION_STMT, '').gsub(STEP_SUPER_STATIC_NAME, '\\1').gsub(RUNTIME_REGISTRATION_STMT, '')
+         .gsub(PROC_SPEC_NAMES, '')
+    ), proven: proven)
   end
 
   # The core and external mrblib files the closed binary loads, each compiled on its own, with the name of each method body
