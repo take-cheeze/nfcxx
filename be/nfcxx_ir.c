@@ -5058,6 +5058,13 @@ static ir_val ir_call(an_expr_node_ptr e)
   }
   if (agg_ret) {
     sret = ir_temp(e->type);
+#if defined(__aarch64__)
+    /* A _Float128 result of a wrapper (be/nfcxx_ldrt.c, __nfcxx_f128w_): the wrapper takes the result pointer as its first
+       ordinary argument. (sret ...) would pass it in x8, the AArch64 indirect-result register, which the wrapper does not
+       read. The call is void (the wrapper's own return value is not used), so nothing else changes. */
+    if (f128w) args = ir_fmt("%s %s", args, sret.s);
+    else
+#endif
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   int hid_dest = 0; /* the first operand is the destination of a lowered class result (AArch64 only: below) */
