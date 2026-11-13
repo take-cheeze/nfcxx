@@ -1,0 +1,112 @@
+# One argument list per line, words separated by spaces (no quotes). Compared with the bash loop by tests/nfcc/loop-state.sh.
+-c x.c
+-c -S x.c
+-S x.c
+x.c -o out
+-o out x.c
+-oout x.c
+-o out -o out2 x.c
+-o
+x.c -o
+-c x.c -o x.o -O2 -Wall
+-x c x.cc
+-x c x.c
+-xc x.c
+-x assembler x.c
+-x assembler-with-cpp x.c
+-x none a.o
+-x c++ x.c
+-x
+-xc++ x.c
+x.c -x c
+x.cc
+x.cpp
+x.c x.cc
+-x c x.cc
+x.s
+x.S
+x.i
+a.o
+lib.a
+libfoo.so
+-
+x.c -
+-DFOO
+-DFOO=1 -D BAR -Dbaz
+-D
+-U FOO -UBAR
+-I inc -Iinc2
+-I
+-isystem /sys -isystem
+-iquote q -idirafter d -include a.h -imacros b.h
+-include
+-MD x.c
+-MMD x.c
+-MD -MF d.d x.c
+-MF d.d -MT tgt x.c
+-MF
+-MT
+-MQ q x.c
+-MTt x.c
+-MQq -MP x.c
+-MP
+-MD -MT -MQ x.c
+-MFd.d x.c
+-l m x.c
+-lm -L /usr/lib -L/opt x.c
+-l
+-L
+-Ldir -lfoo x.o
+-DA=1 -c -o x.o x.c
+-I inc -DX -c x.c -o x.o -MD -MF x.d
+-c -x c x.s
+x.c x.s a.o
+-DA -- x.c
+-c x.c -O0
+-O x.c
+-O1 -O2 -O3 -Os -Og x.c
+-Ofast x.c
+-Ofoo x.c
+-O -c x.c
+-g x.c
+-g3 -ggdb -gdwarf-4 -c x.c
+-pipe -v -time x.c
+-w -Wall -Wextra -c x.c
+-Wa,--noexecstack -Wa,a,b x.c
+-Wl,--as-needed x.c
+-c x.c -fstack-protector-strong
+-c x.c -fstack-protector -fno-stack-protector
+-fstack-protector-all -fstack-protector-explicit x.c
+-mstack-protector-guard=tls x.c
+-mindirect-branch=keep -mfunction-return=keep -mharden-sls=none x.c
+-mindirect-branch=thunk x.c
+-mfunction-return=thunk-extern x.c
+-fPIC x.c
+-fpic -fPIE x.c
+-fpie x.c
+-m32 x.c
+-mx32 x.c
+-march=native -msse4.2 -mavx2 x.c
+--param max-inline-insns-single=200 x.c
+--param
+--param=foo=1 -fno-jump-tables x.c
+-fno-crossjumping x.c
+-m64 -mtune=generic -mcmodel=kernel -mno-red-zone x.c
+-mno-sse x.c
+-fwrapv -fno-strict-aliasing -fno-strict-overflow x.c
+-fsanitize=address x.c
+-fopenmp x.c
+-ffast-math x.c
+-funsigned-char x.c
+-ffreestanding x.c
+-fcall-used-rbx x.c
+-fdump-rtl-expand x.c
+-fomit-frame-pointer -fno-omit-frame-pointer -fcommon -fdata-sections x.c
+-fzzz-not-real x.c
+-f x.c
+-fstack-check x.c
+-fwhole-program x.c
+-mtune=generic -Ofast x.c
+-fno-stack-protector -fstack-protector-strong -fPIC -c x.c
+-fdiagnostics-color=auto -fmessage-length=0 x.c
+-fsigned-char -fno-signed-char x.c
