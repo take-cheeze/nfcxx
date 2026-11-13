@@ -1058,6 +1058,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 
 static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end), (rref-arg) and drop facts */
 static int ir_noinline_attr = 0;       /* NFCXX_IR_NOINLINE=1: a function with __attribute__((noinline)) has a (noinline) head, which the inliner respects */
+static int ir_auto_zero = 0;            /* NFCXX_IR_AUTO_INIT=zero: -ftrivial-auto-var-init=zero, see ir_decl_zero */
 static int ir_scopes = 0;               /* NFCXX_IR_SCOPES=1: print only (decl $"x" val|ref) at a local's declaration and (scope-end $"x") where its
                                            scope ends (block end, return, a jump out of it), for AddressSanitizer's use after scope */
 #define IR_SCOPE_FACTS() (ir_borrow || ir_scopes)
@@ -7541,6 +7542,16 @@ static int ir_init_follows(a_statement_ptr s, a_variable_ptr var)
   return 0;
 }
 
+/* __attribute__((uninitialized)) on a variable: -ftrivial-auto-var-init leaves it alone. The attribute is in the harness's
+   attribute table (scripts/setup-pathb.sh), as an unrecognized-kind entry that EDG keeps on the variable. */
+static int ir_var_uninitialized_attr(a_variable_ptr var)
+{
+  an_attribute_ptr ap;
+  for (ap = var->source_corresp.attributes; ap != NULL; ap = ap->next)
+    if (ap->name != NULL && strcmp(ap->name, "uninitialized") == 0) return 1;
+  return 0;
+}
+
 static void ir_decl_zero(a_statement_ptr s)
 {
   an_il_entity_list_entry_ptr entry;
@@ -7555,6 +7566,12 @@ static void ir_decl_zero(a_statement_ptr s)
     if ((kind == initk_zero ||
          (kind == initk_dynamic && var->initializer.dynamic != NULL && var->initializer.dynamic->is_partially_initialized)) &&
         !ir_init_follows(s, var))
+      ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
+    /* -ftrivial-auto-var-init=zero: an automatic variable with no initializer is all-bits-zero from its declaration (padding
+       too, as gcc's), each time the declaration is reached. A jump past the declaration skips the zeroing, as in gcc. A
+       variable-length array has a stmk_vla_decl, not this; a reference has an initializer by the language. */
+    else if (ir_auto_zero && kind == initk_none && !var->is_vla && !ir_is_ref_type(var->type) && !ir_var_uninitialized_attr(var) &&
+             !ir_init_follows(s, var))
       ir_zero_object(ir_var_addr(var, var->type, ir_is_volatile(var->type)), var->type);
   }
 }
@@ -8401,6 +8418,10 @@ void nfcxx_ir_back_end(void)
   {
     const char *sf = getenv("NFCXX_IR_SCOPES");
     ir_scopes = sf != NULL && strcmp(sf, "1") == 0;
+  }
+  {
+    const char *az = getenv("NFCXX_IR_AUTO_INIT");
+    ir_auto_zero = az != NULL && strcmp(az, "zero") == 0;
   }
   {
     const char *nf = getenv("NFCXX_IR_NOINLINE");

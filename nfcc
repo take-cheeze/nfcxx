@@ -183,13 +183,14 @@ gcconly() {
 }
 gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ]; }; } || return 1; gccf+=("$1"); }
 # NFCXX_BACKEND=pathb: the kernel's option set (docs/notes/nfcc-pathb.md, docs/notes/linux-kernel.md). The options Path B honours go to
-# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
+# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -ftrivial-auto-var-init=zero, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
 # front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
 # any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
 pbf=() nofp=0 nounwind=0 wchar16=0
 pathb_option() {   # 0: handled here
   case $1 in
     -funsigned-char|-fno-signed-char|-fsigned-char|-fno-unsigned-char|-ffreestanding) pbf+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) pbf+=("$1") ;;   # =pattern is gcc's (needgcc)
     -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
     -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
     -fno-asynchronous-unwind-tables) pbf+=(--no-unwind); nounwind=1 ;;
@@ -335,7 +336,7 @@ k=0
 
 # Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
 # -fshort-wchar, -ffreestanding, and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
-# changes meaning and that Path B cannot honour (-m16, -fshort-enums, -ftrivial-auto-var-init=, -iquote, -Wa,*, ...) is made by gcc with
+# changes meaning and that Path B cannot honour (-m16, -fshort-enums, -ftrivial-auto-var-init=pattern, -iquote, -Wa,*, ...) is made by gcc with
 # the options as given (pb_reason says why); it is not dropped and not an error. NFCXX_PATHB_LOG=FILE appends one line per compile:
 # "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc refuses (inline asm it
 # cannot emit, a unit with SSE code under -mno-sse) to gcc, as the nfcxx driver does; without it that compile fails.
