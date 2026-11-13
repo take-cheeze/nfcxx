@@ -1097,6 +1097,23 @@ class Converter
     end
     compute_global_macros(with_state | gset)
     @global_wrap = !gset.empty? || @global_macro_spans.any? { |_r, l| !l.empty? }
+    if @global_wrap
+      # a macro that expands a return skips the restore of a registered method or Init that expands it (wrap_returns
+      # only sees return statements written in the body). Such a use is refused; the macro's own body is not changed.
+      wrapped = @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+      @files.each do |rel, f|
+        define_spans(rel).each do |mname, a, b|
+          next unless psl(f['masked'], a, b) =~ /(?<![#{WC}])return(?![#{WC}])/
+          (@occ[mname] || []).each do |orel, os, _oe|
+            next if orel == rel && a <= os && os < b
+            fn = enclosing_func(orel, os)
+            next unless fn && wrapped.include?(fn['name'])
+            refuse(orel, os, mname, 'macro expands a return, which would skip the restore of the mruby global state in ' \
+                                    'this registered method or Init (not supported)')
+          end
+        end
+      end
+    end
   end
 
   # Macros whose body calls an api that needs the mruby state. At file scope such a body is refused unless every
