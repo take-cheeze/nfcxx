@@ -54,11 +54,13 @@ cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"
 # 1b. SYCL kernel attributes: [[sycl::reqd_sub_group_size(N)]] is a known attribute (namespace sycl, one integral
 # constant argument, evaluated in the template instance), so the back end can read N (be/nfcxx_ir.c: ir_kernel_attrs).
 # ggml-sycl's flash-attention tile kernels need 32-lane sub-groups; without the entry EDG drops the attribute.
+# Likewise gcc's __attribute__((uninitialized)), the opt-out of -ftrivial-auto-var-init (be/nfcxx_ir.c: ir_decl_zero).
 rm -f "$tree/src/attribute.c"   # a symlink into the EDG checkout: the patched table must be a file of its own
 sed -e 's/^  "_Clang",$/  "_Clang",\n  "sycl",/' \
     -e 's/^  { "carries_dependency", "", "c+", ak_carries_dependency },$/&\n  { "reqd_sub_group_size", "(ci)", "c+[sycl]", ak_unrecognized },/' \
+    -e 's/^  { "unused", "", "gx", ak_unused },$/&\n  { "uninitialized", "", "gx", ak_unrecognized },/' \
   "$src/src/attribute.c" > "$tree/src/attribute.c"
-grep -q '"reqd_sub_group_size", "(ci)"' "$tree/src/attribute.c" && grep -q '^  "sycl",$' "$tree/src/attribute.c" ||
+grep -q '"reqd_sub_group_size", "(ci)"' "$tree/src/attribute.c" && grep -q '"uninitialized", ""' "$tree/src/attribute.c" && grep -q '^  "sycl",$' "$tree/src/attribute.c" ||
   { echo "setup-pathb: attribute table patch failed" >&2; exit 1; }
 
 # 2. Macro config. Same lowering options as linux-gcc-release, but the C back end (and its C++ sibling) off.

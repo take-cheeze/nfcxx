@@ -21,7 +21,7 @@ require 'fileutils'
 #
 # Entries are Marshal dumps, so the cache directory must be one only this user writes.
 module ScanCache
-  VERSION = 2
+  VERSION = 4
   DEFAULT_DIR = File.join(BC2CPP_WORLD_ROOT, "build/bc2cpp-cache")
   MAGIC = 'bc2cpp-scan-cache'
 

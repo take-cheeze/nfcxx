@@ -115,7 +115,9 @@ ruby scripts/bc2cpp/constant_typing_check.rb
 ruby scripts/bc2cpp/stack_tuples_check.rb
 ruby scripts/bc2cpp/static_owner_dispatch_check.rb
 ruby scripts/bc2cpp/core_owner_arms_check.rb
+ruby scripts/bc2cpp/sym_call_chain_check.rb
 ruby scripts/bc2cpp/leaf_owner_else_check.rb
+ruby scripts/bc2cpp/native_leaf_check.rb
 ruby scripts/bc2cpp/respond_to_fold_check.rb
 ruby scripts/bc2cpp/owner_set_direct_check.rb
 ruby scripts/bc2cpp/owner_call_icache_check.rb
@@ -141,6 +143,7 @@ ruby scripts/bc2cpp/initializer_sites_check.rb
 ruby scripts/bc2cpp/super_direct_check.rb
 ruby scripts/bc2cpp/core_super_direct_check.rb
 ruby scripts/bc2cpp/step_super_static_check.rb
+ruby scripts/bc2cpp/rsm_owner_call_check.rb
 ruby scripts/bc2cpp/native_args_check.rb
 ruby scripts/bc2cpp/operator_sends_check.rb
 ruby scripts/bc2cpp/setter_receiver_filter_check.rb
@@ -162,8 +165,10 @@ ruby scripts/bc2cpp/self_new_leaf_check.rb
 ruby scripts/bc2cpp/class_object_new_check.rb
 ruby scripts/bc2cpp/ctor_rows_check.rb
 ruby scripts/bc2cpp/core_rows_check.rb
+ruby scripts/bc2cpp/engine_rows_check.rb
 ruby scripts/bc2cpp/core_rows_compiled_check.rb
 ruby scripts/bc2cpp/core_operator_rows_check.rb
+ruby scripts/bc2cpp/c_call_rows_check.rb
 ruby scripts/bc2cpp/undef_left_out_check.rb
 ruby scripts/bc2cpp/sealed_int16_local_check.rb
 ruby scripts/bc2cpp/freeze_fold_check.rb

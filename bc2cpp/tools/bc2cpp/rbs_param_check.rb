@@ -16,6 +16,9 @@ require_relative 'scan_cache'
 # declared parameter is a ClassAnnotations fact for the method's own body; the compiled body checks it on entry
 # (DECLARED_PARAM_GUARD) and raises BC2cppDeclarationViolation for another class.
 module RbsParamCheck
+  # VALUE_KIND: the value kinds a parameter declaration can name besides a program class, and the class each stands for.
+  VALUE_CLASSES = { float: 'Float', integer: 'Integer', symbol: 'Symbol' }.freeze
+
   # IS_A_GUARD's two closed-world answers for NilNarrowing (CodeGen#is_a_guard_class, #raise_never_returns?).
   IsAGuard = Struct.new(:gen) do
     def is_a_class(irep, idx) = gen.is_a_guard_class(irep, idx)
@@ -45,9 +48,9 @@ module RbsParamCheck
     # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
     # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
     found = targets(ctx)
-    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
+    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, *| [d.irep, pos] } }.to_set
     guards = found.to_h do |sig, d, positions|
-      [d.irep, positions.map { |pos, cls| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text] }]
+      [d.irep, positions.map { |pos, cls, kind, nilable| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text, kind, nilable] }]
     end
     [[], trusted, guards]
   end
@@ -56,6 +59,7 @@ module RbsParamCheck
   # instance_exec may change; `owner_of` also for blocks, for lexical constant lookup) and the signature of each body.
   def context(loaded, ireps, registry, superclass_of)
     ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set,
+            classes: superclass_of.keys.to_set,
             dynamic: DynamicNames.universe(ireps), self_of: {}, method_name: {}, owner_of: {}, sig_of: {}, def_of: {},
             aliased: alias_names(ireps), parent: {} }
     defs_by = {}
@@ -103,10 +107,26 @@ module RbsParamCheck
       d = ctx[:def_of][label]
       ann = ctx[:class_annotations][label]
       positions = sig.args.each_with_index.filter_map do |type, i|
-        next unless type.kind == :class && ann && ann.args[i] == type.cls
         next if ctx[:comment_class_args][label]&.[](i)
 
-        [i, type.cls]
+        inner = type.optional # `T?`: T or nil
+        t = inner || type
+        nilable = !inner.nil?
+        if (kind = t.value) && VALUE_CLASSES.key?(kind)
+          # VALUE_KIND: Float, Integer (fixnum) and Symbol parameters are guarded by their kind, not by a program class
+          # annotation; `T?` also admits nil.
+          next [i, VALUE_CLASSES[kind], kind, nilable]
+        end
+        if nilable
+          # A nilable program class gives no hint, so no annotation names it: take the class itself when it is a class
+          # the program defines and nothing subclasses (the guard is the exact-class test).
+          next unless t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+
+          next [i, t.cls, :class, true]
+        end
+        next unless type.kind == :class && ann && ann.args[i] == type.cls
+
+        [i, type.cls, :class, false]
       end
       out << [sig, d, positions] unless positions.empty?
     end

@@ -38,6 +38,8 @@
     tests/cxx-driver/run.sh
     tests/nfcc/run.sh
     tests/pathb-kernel/run.sh
+    tests/pathb-i386/run.sh
+    tests/pathb-i386/realmode.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
 - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
@@ -96,23 +98,26 @@
 - name: nfcpoly Go under AddressSanitizer
   go: true
   run: tests/poly/asan-go.sh
-- name: nfcast engine and tier (QBE backend)
-  run: NFCXX_BACKEND=qbe tests/ast/run.sh
+- name: nfcast engine and tier (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
+  run: NFCXX_BACKEND=pathb tests/ast/run.sh
 - name: nfcast engine and tier (gcc backend)
   gcc_only: true
   run: NFCXX_BACKEND=gcc tests/ast/run.sh
-- name: uop core and numpy (QBE backend)
+- name: uop core and numpy (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   onnx: true
   suite: uop
   group: core
-  backend: qbe
-  run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=qbe tests/uop/run.sh
-- name: uop onnx and runtimes (QBE backend)
+  backend: pathb
+  run: UOP_ONLY="test test_ut test_shaping test_np np_compat" NFCXX_BACKEND=pathb tests/uop/run.sh
+- name: uop onnx and runtimes (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   onnx: true
   suite: uop
   group: onnx
-  backend: qbe
-  run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
+  backend: pathb
+  run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=pathb tests/uop/run.sh
 - name: uop poly languages (QBE backend)
   go: true
   onnx: true

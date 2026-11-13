@@ -27,8 +27,8 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 | `./nfcxx` default on x86-64 Linux, C++ and C | Path B, gcc on a file it does not build | done |
 | `--freestanding` on x86-64 Linux | Path B (`pathb-dump --freestanding --eh-runtime`) | #976 merged |
 | C that Path B refused: unions by value, `_Float16`, inline asm, return/frame address, `cleanup`, `section`, case ranges, flexible array initializers | Path B lowerings | #980, #981, #982, #983 merged. Left in `tests/c` (`XFAIL-pathb`): `asm goto` and any other marker still present |
-| `nfcc` (cc for make, CMake, autoconf, the kernel) | `NFCXX_BACKEND=pathb` | opt-in since #977. It takes the kernel's option set (`-nostdinc`, `-isystem`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding`, `-mno-sse` checked, codegen options dropped; other semantic options make that compile gcc's: docs/notes/linux-kernel.md). The default stays qbe until the kernel is built with it |
-| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **570 of 615 build** (538 before the `claude/pathb-kernel-refusals` branch): docs/notes/linux-kernel.md, "Measured". The rest is inline asm and the real-mode boot code |
+| `nfcc` (cc for make, CMake, autoconf, the kernel) | Path B, gcc for a unit it cannot take | default on x86-64 Linux with the harness built (opt-in before: #977). It takes the kernel's option set (`-nostdinc`, `-isystem`, `-funsigned-char`, `-fshort-wchar`, `-ffreestanding`, `-mno-sse` checked, codegen options dropped; other semantic options make that compile gcc's: docs/notes/linux-kernel.md). `NFCXX_BACKEND=qbe` still chooses cproc; other hosts and checkouts without the harness default to it |
+| Linux 6.8 tinyconfig kernel (`scripts/linux-qemu.sh`, `linux-qemu.yml`), 615 C files | `nfcc` on Path B | **570 of 615 build** (538 before the `claude/pathb-kernel-refusals` branch): docs/notes/linux-kernel.md, "Measured". The rest is inline asm; the real-mode boot code (`arch/x86/boot`, 21 files) builds on Path B too: docs/notes/linux-kernel.md, "Measured: the real-mode boot code" |
 | C++ modules (default backend was qbe) | Path B (the `-c` compile passes the module options) | #989 merged; `--backend=qbe` with modules still uses cproc |
 | qbe-backend ASan (cproc's own checks, branch `nfcxx-asan-combined`) | Path B ASan (the default since #892) | #992 merged: `-fsanitize=address --backend=qbe` is an error; the cproc ASan code is dead and goes with cproc |
 | CIL (.NET) backend: `cil-cc` is `qbe-cc` | `scripts/pathb-cil` for C | #993 open |
@@ -47,7 +47,11 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
      `ops.cpp` abort was a function-local static with a constant initializer whose destructor was registered at every call, and a
      one-element trailing array checked against its bound).
    - `tests/ast`: engine.cpp and tier.cpp pass on Path B (the SIGABRT was a null check under the lvalue adjustment of a derived-to-base
-     pointer conversion); the case `inline_loops` still overflows the 8 MB stack on Path B, whose frames are several times gcc's.
+     pointer conversion); the case `inline_loops` was thought to overflow the 8 MB stack on Path B, whose frames were several times
+     gcc's: it needed 4.7 MB of it (`ulimit -s` search), and needs 3.2 MB since the frame work (docs/notes/pathb-ssa-qbe.md, "Frames":
+     slots live across no `_setjmp` are promoted, inlined bodies' slots with disjoint lifetimes share a frame, EH entries are cut to
+     the bytes written). `tests/ast` and `tests/uop` run Path B and gcc, and the QBE-ONLY markers are gone; `tests/uop/test_layout_avx2.cpp`'s
+     `main: operator unsupported` was `__builtin_cpu_supports`, now lowered (`tests/cases/cpu_supports.cpp`).
    - `tests/long-double-abi` runs on Path B and gcc (a variadic call with long double arguments and result goes through a
      per-shape call thunk); `tests/cil/errors/variadic_def.c` is Path B's own refusal, `cil-cc` does not fall back to cproc for it.
    - CIL route (#993): of 63 single-file `tests/c` programs 36 build and pass, 27 are refused on Path B (10 asm, 4 runtime helpers, 4
