@@ -1128,9 +1128,9 @@ class Converter
         ed.add(po + 1, po + 1, masked[pa] == ')' ? 'mrb' : 'mrb, ')
       end
     end
-    # 5. identifier pass
-    local_syms = Set.new(@defs.keys) | Set.new(@decls.reject { |d| d['hdr'] }.map { |d| d['name'] }) | @class_vars |
-                 @local_macros
+    # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
+    # CRuby API), class variables and the macros the input defines (scan_local_macros).
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)

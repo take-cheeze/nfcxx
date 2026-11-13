@@ -220,6 +220,7 @@ check test -e "$work/local_names_refused/NOT_BUILDABLE"
 check grep -q '  rb_reg_nth_match  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
 
 # 2q. includes come from api_map.json ("includes"): ruby/ruby.h and ruby/re.h map to their mruby headers; a header with
