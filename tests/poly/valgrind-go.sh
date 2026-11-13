@@ -4,7 +4,7 @@
 # innermost frame is in libnfcgo.so, and the host functions' accesses to Go-owned memory; what is left is a leak of a block that C
 # or C++ code allocated (the bridge's tables, cgo's C.malloc replies), an invalid free, and an uninitialised read in the host code.
 # AddressSanitizer (tests/poly/asan-go.sh) is the stronger tool for the same code; use this one as a second opinion.
-#   NFCXX_BACKEND=gcc|qbe   (default gcc)    POLY_GO_DIR=DIR   the library (default build/poly-go)
+#   NFCXX_BACKEND=gcc|pathb   (default gcc)    POLY_GO_DIR=DIR   the library (default build/poly-go)
 cd "$(dirname "$0")/../.."
 be=${NFCXX_BACKEND:-gcc}
 command -v valgrind >/dev/null || { echo "SKIP valgrind go: valgrind is not installed"; exit 0; }

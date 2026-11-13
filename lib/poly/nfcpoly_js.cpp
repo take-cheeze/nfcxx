@@ -154,6 +154,12 @@ struct JsLang : Lang {
       rt = JS_NewRuntime();
       if (!rt) throw Error("nfcpoly: JS_NewRuntime failed (out of memory)");
       JS_SetCanBlock(rt, false);  // Atomics.wait would hang the host thread
+#ifdef NFCPOLY_JS_STACK_SIZE
+      // QuickJS refuses a call that would pass this many bytes of native stack (RangeError), 1 MiB by default. Path B's frame of
+      // the interpreter loop (JS_CallInternal) is about 14 KB, because QBE gives every spilled value a slot of its own (gcc:
+      // under 1 KB), so a script gets about 70 levels of calls instead of thousands: tests/poly/run.sh raises the limit.
+      JS_SetMaxStackSize(rt, NFCPOLY_JS_STACK_SIZE);
+#endif
       ctx = JS_NewContext(rt);
       if (!ctx) throw Error("nfcpoly: JS_NewContext failed (out of memory)");
       JS_NewClassID(rt, &obj_class);

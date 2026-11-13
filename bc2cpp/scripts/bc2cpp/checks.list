@@ -232,4 +232,5 @@ ruby scripts/bc2cpp/decided_fold_count_check.rb
 ruby scripts/bc2cpp/class_bodies_check.rb
 ruby scripts/bc2cpp/const_site_cache_check.rb
 ruby scripts/bc2cpp/native_frame_use_check.rb
+ruby scripts/bc2cpp/exact_declared_return_check.rb
 # ci:parallel end

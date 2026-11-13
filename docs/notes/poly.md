@@ -39,7 +39,7 @@ linked in), plus that language's library:
 | Go (`"go"`, `"golang"`) | `nfcpoly_go.cpp` | `build/poly-go/libnfcgo.so`: yaegi and the bridge of `lib/poly/go`, a cgo shared library | `scripts/setup-poly-go.sh` (Go >= 1.24 and the Go module proxy) |
 | astro (`"astro"`, `"luastro"`) | `nfcpoly_astro.cpp` | `build/poly-astro/<backend>/lib/libluastro.a`: `nfcpoly_astro_shim.c` and the evaluator ASTroGen generates for ASTro's `sample/luastro`, with `-ldl -lm -lpthread` | `scripts/setup-poly-astro.sh` (`ruby` and GitHub) |
 
-`tests/poly/run.sh` builds all seven for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
+`tests/poly/run.sh` builds all seven for Path B (`pathb`) and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
 with a `SKIP` line when `python3-config` or `Python.h` is missing, Go when Go (>= 1.24, from `$GO`, `PATH` or
 `/usr/local/go/bin`), a C compiler for cgo or the Go module proxy is missing, and astro when `ruby` or GitHub is missing.
 `POLY_LANGS="lua js ast go astro"` selects languages. astro is the one language that is not in the shared checks (it has no
@@ -81,18 +81,16 @@ its own rake build (`scripts/mruby-rt-config.rb`): `nfcc` is the C compiler, `nf
 `src/vm.c`, `error.c`, `gc.c` and the compiler gem's parser and code generator as C++ through generated `*-cxx.cxx`
 wrappers; every other file stays C. With nfcxx as the C++ compiler those throws are EDG's exception runtime, the one the
 host's `throw` and `catch` use (checked with `nm` on both back ends: exactly those five members of `libmruby.a` reference
-`__throw`; no other member references `setjmp` or `longjmp`). Two workarounds: `MRB_USE_VM_SWITCH_DISPATCH` (EDG rejects
-mruby's `const void *` computed-goto table when `vm.c` is compiled as C++, `cxx-driver.md`), and
-`scripts/mruby-cxx-novolatile.patch` (the only `volatile` in those files is a setjmp guard; cproc cannot store to a volatile,
-and a `-Dvolatile=` breaks the hosted libstdc++ headers). The gems are the compiler, sprintf, the `*-ext` gems, `mruby-set`,
+`__throw`; no other member references `setjmp` or `longjmp`). One workaround: `MRB_USE_VM_SWITCH_DISPATCH` (EDG rejects
+mruby's `const void *` computed-goto table when `vm.c` is compiled as C++, `cxx-driver.md`). The source is built as it is on
+Path B and gcc (the `volatile` patch the qbe back end needed is gone). The gems are the compiler, sprintf, the `*-ext` gems, `mruby-set`,
 `-error`, `-metaprog`, `-math`, `-bigint`, `-struct`: no `mruby-io`, `-exit`, `-time` or `-sleep`.
 
 **Lua: ldo.c as C++.** `scripts/setup-poly-lua.sh` builds Lua 5.4.9 (the pin of `tests/realworld/run_lua.sh`) into
 `liblua.a`. Lua raises an error with `longjmp`, or, when the file is compiled as C++, with `throw`; `ldo.c` is the only file
 that does either, so it is built by nfcxx as C++ (in a generated wrapper that includes it inside `extern "C"`) and every
-other file by nfcc as C. Checked with `nm`: only `ldo.o` references `__throw`. `scripts/lua-cxx-novolatile.patch` drops the two
-volatile members that `ldo.c` writes (`lua_longjmp.status`, and `CallInfo.u.l.trap`, which only a signal handler could race
-with). The libraries a script gets are base (without `dofile` and `loadfile`), coroutine, table, string, math and utf8: no
+other file by nfcc as C. Checked with `nm`: only `ldo.o` references `__throw`. The source is built as it is (the qbe back end needed a patch
+that dropped two `volatile` members). The libraries a script gets are base (without `dofile` and `loadfile`), coroutine, table, string, math and utf8: no
 `io`, `os`, `package` or `debug`.
 
 **astro: ASTro's luastro behind a C shim.** [ASTro](https://github.com/ko1/astro) is a framework that generates an AST
@@ -139,18 +137,18 @@ errors as return values (`JS_EXCEPTION`), so no C++ build is needed (checked wit
 `longjmp`, `__throw` or `_Unwind_*`). Not built: `quickjs-libc.c`, `qjs.c`, `qjsc.c`, so a script has no `std`, no `os`, no
 files, no module loader, no `console` and no timers; it has every standard intrinsic of `JS_NewContext` (`JSON`, `RegExp`,
 `Date`, `Proxy`, `Map`/`Set`/`WeakRef`, typed arrays, `Atomics`, `Promise`, `BigInt`, `queueMicrotask`, `atob`/`btoa`,
-`performance`, ...) and no `Intl`, `TextEncoder`, `URL` or `structuredClone`. The source is patched by
-`scripts/quickjs-cproc.patch` (applied to the throwaway checkout, for both back ends) at four spots that cproc cannot
-compile; where the change would cost gcc something it is selected with `__CPROC__`, which the qbe back end defines:
-- `return js_free_cstring(...);` in `void` functions (a GNU/C++ form; cproc: `expected ';' after 'return' statement`): the
-  `return` is dropped.
-- `__attribute((unused))` (QuickJS's spelling without the trailing underscores, which cproc does not know): `__maybe_unused`.
-- The interpreter loop's computed goto (`&&label`, `goto *`): with `__CPROC__` QuickJS's own `switch` dispatch
-  (`DIRECT_DISPATCH` 0), as for mruby (`realworld.md`); the gcc back end keeps computed goto.
-- `<stdatomic.h>` and `_Atomic` (the JavaScript `Atomics` object; cproc: `_Atomic type qualifier is not yet supported`): with
-  `__CPROC__`, `quickjs-c-atomics.h` maps the C11 operations to libatomic's sized functions (`__atomic_fetch_add_4`, ...), chosen
-  with `_Generic` by the size of the element; `qbe-prep` declares them and the qbe link has `-latomic` already (`nm`: 36
-  libatomic symbols in the qbe archive, none in the gcc one). The gcc back end inlines `<stdatomic.h>` as before.
+`performance`, ...) and no `Intl`, `TextEncoder`, `URL` or `structuredClone`. The source is built as it is, on Path B (the default) and gcc. Three points of the Path B build matter:
+- The interpreter loop's computed goto (`&&label`, `goto *` after each of about 250 opcodes, `DIRECT_DISPATCH`): Path B turns a
+  `goto *` into a switch over the function's labels, which for 250 sites of 250 cases is 60,000 edges, and QBE ran out of memory
+  on it. From 16 address-taken labels on, every `goto *` of a function stores the label id in a slot and jumps to one shared switch
+  at the end of the function (`be/nfcxx_ir.c`, `ir_assigned_goto`; `pathb-computed-goto.md`). `quickjs.c` builds in about 100 s.
+- A `for` loop whose body has a label (`goto fail` into the loop from its own error path, `js_create_resolving_functions`) is not
+  unrolled by the `sroa` pass any more (the copies defined the label twice: "B8 terminated twice").
+- QBE gives each spilled value its own stack slot and shares none, so `JS_CallInternal` has a frame of about 14 KB on Path B (gcc:
+  under 1 KB) and QuickJS's default stack limit of 1 MiB allows about 70 nested calls. `tests/poly/run.sh` builds the host with
+  `-DNFCPOLY_JS_STACK_SIZE=6 MiB` on Path B, which `lib/poly/nfcpoly_js.cpp` passes to `JS_SetMaxStackSize`.
+The qbe back end needed `scripts/quickjs-cproc.patch` (four spots cproc cannot compile: `return f();` in `void` functions,
+`__attribute((unused))`, the computed goto, and `_Atomic`); it is gone with the library builds on qbe.
 
 QuickJS is built **without `-D_GNU_SOURCE`**, which its CMakeLists defines but its sources do not need on Linux. With the macro,
 glibc's `<stdlib.h>` and `<math.h>` declare functions of the types `_Float32x` and `_Float64x` (`strtof32x`, `acosf32x`, ...);

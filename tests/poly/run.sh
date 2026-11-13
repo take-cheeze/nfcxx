@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 # nfcpoly: build the host test (tests/poly/host.cpp with lib/poly/nfcpoly.cpp and the language backends) with nfcxx and run
-# it, per back end. The languages' interpreters are built per back end by scripts/setup-poly.sh (mruby with C++
+# it, per back end. The languages' interpreters are built per back end, unpatched, by scripts/setup-poly.sh (mruby with C++
 # exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
 # system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. Go is yaegi in a cgo
 # shared library built by scripts/setup-poly-go.sh (one library for both back ends), skipped with a SKIP line when Go or the
 # module proxy is missing. ASTro's luastro is built by scripts/setup-poly-astro.sh (ASTroGen is Ruby, the source comes from GitHub:
-# a SKIP line when either is missing). See docs/notes/poly.md.
-#   NFCXX_BACKEND=gcc|qbe          (default: both)
-# QBE-ONLY: the suite stays on qbe, because Path B (NFCXX_BACKEND=pathb) does not build the whole suite yet:
-#   - the language libraries are C built by nfcc, and Path B refuses them: mruby (mrbc.c, "parse_args: operator unsupported"),
-#     Lua (lvm.c, "luaV_execute: unsupported stmt assigned_goto"), QuickJS (cutils.h line 1618, front-end errors).
-#   With POLY_LANGS="python ast" (nothing built) host.cpp (290 checks) and ops.cpp (31 checks) pass on Path B.
+# a SKIP line when either is missing). See docs/notes/poly.md. Path B needs its harness (scripts/setup-pathb.sh).
+#   NFCXX_BACKEND=pathb|gcc        (default: both)
 #   POLY_LANGS="ruby lua python ast js go astro"   (default: all seven; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 #   TEST_BIN_CACHE=DIR             keep the compiled hosts in DIR and reuse one whose command line is the same (tests/bin-cache.sh; CI)
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled hosts are kept between CI runs (tests/bin-cache.sh)
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 langs=${POLY_LANGS:-"ruby lua python ast js go astro"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
@@ -32,7 +28,7 @@ for be in $backends; do
         defs+=(-DTEST_LUA); incs+=(-I build/poly-lua/$be/include); srcs+=(lib/poly/nfcpoly_lua.cpp); libs+=(build/poly-lua/$be/lib/liblua.a); built+=(lua) ;;
       js)
         if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-js.sh 2>&1); then echo "FAIL $be poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
-        defs+=(-DTEST_JS); incs+=(-I build/poly-js/$be/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=(build/poly-js/$be/lib/libquickjs.a); built+=(js) ;;
+        defs+=(-DTEST_JS); [ $be != pathb ] || defs+=(-DNFCPOLY_JS_STACK_SIZE=$((6 * 1024 * 1024))); incs+=(-I build/poly-js/$be/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=(build/poly-js/$be/lib/libquickjs.a); built+=(js) ;;
       python)
         if command -v python3-config >/dev/null && pyinc=$(python3-config --includes 2>/dev/null) && pylib=$(python3-config --ldflags --embed 2>/dev/null) &&
            [ -f "$(python3-config --includes | sed 's/^-I\([^ ]*\).*/\1/')/Python.h" ]; then
