@@ -131,6 +131,7 @@ pp=()        # preprocessor options (-D -I -std ...), given to cc -E / cc -M and
 ld=()        # link options, in order
 inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
 picf=()
+pathb_pie=0   # -fPIE: with -mno-sse (the kernel's boot decompressor) the compile is gcc's, see pathb_reason
 pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc --pic)
 dts=()       # -MT / -MQ pairs
 dp=0
@@ -201,7 +202,8 @@ pathb_option() {   # 0: handled here
     -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
     -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
     -fno-asynchronous-unwind-tables) pbf+=(--no-unwind); nounwind=1 ;;
-    -fno-PIE|-fno-pie|-fno-PIC|-fno-pic|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
+    -fno-PIE|-fno-pie|-fno-PIC|-fno-pic) pbf+=(--no-pie) ;;   # no GOT-like cells for function addresses (a -fPIC given too wins)
+    -fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
     -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|\
     -fconserve-stack|-falign-labels=*|-mno-mmx|-mno-3dnow|-mno-avx|-mno-avx2|-mno-avx512*|-mno-ssse3|-mno-sse3|-mno-sse4*|\
     -mno-fma|-mno-bmi*|-mno-popcnt|-mno-fp-ret-in-387|-mskip-rax-setup|-mno-red-zone|-mred-zone) ;;
@@ -283,7 +285,7 @@ for ((i = 0; i < n; i++)); do
     -mindirect-branch=keep|-mfunction-return=keep|-mharden-sls=none|-mbranch-protection=none) gccplain "$a" || : ;;
     -mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || die "$a is not supported" ;;
     -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
-    -fPIE|-fpie) ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
+    -fPIE|-fpie) pathb_pie=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
@@ -353,6 +355,9 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   shift
   pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
   if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
+  # -fPIE in a freestanding unit (-mno-sse: the kernel's boot decompressor, which relocates itself and links with no run-time
+  # relocations allowed): Path B's pointer cells and tables are absolute relocations, so that compile is gcc's.
+  if [ $pathb_pie = 1 ] && [ $nofp = 1 ]; then pb_reason="-fPIE with -mno-sse: Path B's data is absolute relocations a position-independent boot image cannot carry"; return; fi
   if [ $pb_regparm = 1 ] && [ $pb_m16 = 0 ]; then pb_reason="-mregparm=3 without -m16: not honoured by Path B"; return; fi
   if [ $pb_m16 = 1 ]; then
     # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding. No inlining: the real-mode image is size limited (the kernel builds it -Os), and

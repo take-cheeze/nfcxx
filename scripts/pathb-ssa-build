@@ -88,7 +88,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -129,6 +129,10 @@ ASM_HELPERS = {
                   "\t.size __pathb_frameaddr, .-__pathb_frameaddr"],
   "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
               "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  # `__pathb_sp()`: the stack pointer of the caller at the call (a global register variable bound to rsp): its %rsp, past the return
+  # address the call pushed. x86-64 only.
+  "sp" => ["\t.text", "\t.weak __pathb_sp", "\t.type __pathb_sp, @function", "__pathb_sp:", "\tleaq 8(%rsp), %rax", "\tret",
+           "\t.size __pathb_sp, .-__pathb_sp"],
   # `__pathb_vasink_CLS(v)`: takes the value of a va_arg that nothing else uses. QBE drops an unused vaarg, and the va_list
   # would then not advance past that argument; passing the value to this empty function keeps the read.
   "vasink_w" => ["\t.text", "\t.weak __pathb_vasink_w", "\t.type __pathb_vasink_w, @function", "__pathb_vasink_w:", "\tret",
@@ -329,7 +333,7 @@ def stub_long_double(forms)
   out = [forms[0]]
   forms.drop(1).each do |f|
     if head(f) == "function" && mentions_long_double?(f)
-      keep = f.drop(2).select { |p| %w[static weak constructor destructor].include?(head(p)) }
+      keep = f.drop(2).select { |p| %w[static weak constructor destructor used section always-inline].include?(head(p)) }
       out << (["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
     elsif head(f) == "global" && mentions_long_double?(f)
       next
@@ -443,6 +447,8 @@ no_fp = false
 safe = false
 asan = false
 pic = false
+no_pie = false
+trap_checks = false
 m16 = false
 args = ARGV.dup
 usage_exit if args.empty?
@@ -458,6 +464,8 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--safe" then safe = true
   when "--asan" then asan = true
   when "--pic" then pic = true
+  when "--no-pie" then no_pie = true   # -fno-PIE: a function address is the symbol, not a cell
+  when "--trap-checks" then trap_checks = true   # a failed check is the trap instruction, not a call of abort (no libc)
   when /\A--target=(i386|i386_regparm3)\z/ then $target32 = $1
   when "--m16" then m16 = true
   when /\A--il=(.+)\z/ then $il_path = $1   # keep the QBE IL (debugging)
@@ -471,6 +479,8 @@ usage_exit if asan && safe   # both replace malloc and check accesses: one at a 
 Qbe.safe = safe
 Qbe.asan = asan
 Qbe.pic = pic
+Qbe.trap_checks = trap_checks
+Qbe.no_pie = no_pie && !pic   # -fPIC wins
 Qbe.darwin = RbConfig::CONFIG["host_os"].include?("darwin")
 # extern data through the GOT (copy extern): on Darwin (ld64 cannot bind a dylib symbol at a page offset) and on aarch64
 # Linux (a PIE adrp to a symbol in another object or a shared library is out of its range: R_AARCH64_ADR_PREL_PG_HI21)
@@ -500,6 +510,14 @@ end
 # pathb-x87-thunks.rb for the symbols the IL uses. A reference to a thunk with no matching form is refused (see below).
 # Each input is parsed once: the IR file (the data, alias, x87 and live-name forms) and the SSA text (the globals and functions).
 ir_forms = read_forms(File.read(file))
+# The kernel's .head.text (__head: head64.c's __startup_64) runs identity-mapped, before the kernel's page tables: the addresses it
+# computes (`_text - __START_KERNEL_map`) must be the link-time ones, which gcc's kernel model writes as absolute immediates, while
+# QBE's default is `leaq sym(%rip)`, the run-time address. A unit with a function in that section is assembled with qbe -A (absolute
+# addresses of globals; loads stay rip-relative), as scripts/qbe-try does for the cproc route.
+head_text = ir_forms.any? do |f|
+  head(f) == "function" && f.drop(2).any? { |p| head(p) == "section" && p[1].respond_to?(:raw) && p[1].raw == '".head.text"' }
+end
+$qbe_flags << "-A" if head_text
 # Pruning: a definition nothing reaches is left out, as pathb-qbe-emit.rb does (--no-prune keeps every one). It comes
 # before the conversion, the optimizer and the emitter, which work on each function alone: a function nothing reaches
 # costs their time for no output (the STL route timed out on it, docs/notes/library-suite-results.md).
@@ -523,6 +541,11 @@ globals += ir_forms.select { |f| head(f) == "data" }
 text = no_opt ? ssa : PathbEgraph.optimize_forms(ssa_forms).first
 fns = read_forms(text).select { |f| head(f) == "ssa-function" }
 unless no_prune
+  # The reachable set again, from the optimized functions: the e-graph pass and the SSA simplifier fold constant branches, so a
+  # call in a dead branch is gone (the kernel's `if (IS_ENABLED(CONFIG_X) && ...)` after the inlining of a helper that returns 0),
+  # and a static function only that call reached is no longer reached. gcc emits no copy of it; a copy here would carry its
+  # undefined references (do_huge_pmd_wp_page of mm/memory.c's wp_huge_pmd).
+  live = live_names(fns.map { |f| ["function"] + f.drop(1) } + ir_forms.reject { |f| head(f) == "function" })
   fns = fns.select { |f| live.key?(f[1].raw.delete('"')) }
   # An abi-type is a layout every function may need, not a definition to prune: it is kept.
   globals = globals.select { |g| head(g) == "abi-type" || live.key?(g[1].raw.delete('"')) }
