@@ -1537,6 +1537,11 @@ class Function
       emit(@try_depth > depth ? "leave #{target}" : "br #{target}")
       return
     end
+    # An `(unsupported TEXT)` statement is the lowering's own reason (the IR says why, e.g. the aarch64 long double
+    # convention): the reason is the message, not the bare head.
+    if head == 'unsupported'
+      refuse("#{pys(@name)}: unsupported #{pytail(s, 1).map { |x| pys(x) }.join(' ')}")
+    end
     refuse("#{pys(@name)}: unsupported statement #{pys(head)}")
   end
 
