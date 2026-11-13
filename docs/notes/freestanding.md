@@ -7,7 +7,7 @@ tested with `tests/lib/run.sh`.
 ## Enabling it
 
 ```
-./nfcxx --freestanding hello.cpp -o hello          # Path B on x86-64 and aarch64 Linux, qbe elsewhere
+./nfcxx --freestanding hello.cpp -o hello          # Path B on x86-64 and aarch64 Linux and arm64 macOS, qbe elsewhere
 ./nfcxx --freestanding --backend=qbe hello.cpp -o hello
 ./nfcxx --freestanding --backend=gcc hello.cpp -o hello
 ```
@@ -46,6 +46,16 @@ What that means for the tests:
 - x87 long double ABI thunks are x86-64 assembly: `scripts/pathb-ssa-build` refuses a module that needs them on arm64
   (docs/notes/pathb-longdouble.md). The `tests/lib` programs do not use `long double`, so no test hits this.
 - Not verified on an x86-64 host after this change; the gate is `pb_fs_host` in the nfcxx driver (x86_64, aarch64, arm64).
+
+## Path B on macOS arm64
+
+The same gate, `pb_fs_host` in the driver, admits arm64 macOS. Path B's code generation there is the `arm64_apple` QBE target
+(Mach-O symbols with a leading underscore, no `.type`/`.size`, weak definitions as `.weak_definition`), which hosted Path B already
+uses. The freestanding link is the hosted one minus the C++ runtime: `libC.a`, the long double helpers, `-lpthread -lm` and
+the libSystem that `cc` links; no `-lc++` (the hosted macOS link), no `-latomic`, no `-lstdc++`/`-lgcc_s`, no `-z` or
+`--no-pie` options (the driver adds none for a freestanding link on any host).
+`tests/lib/run.sh` runs the pathb column there (and on Linux), and the macOS CI leg runs it in the pathb job.
+Not verified on an Intel Mac: the gate is arm64 only.
 
 ## Targets (`--target=NAME`)
 
