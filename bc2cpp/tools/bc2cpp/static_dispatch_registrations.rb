@@ -62,6 +62,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_class_guards'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'static_dispatch_name_sinks'
 require_relative 'owner_call_direct'
 require_relative 'core_private_ruby'
 require_relative 'core_enumerator_free'
@@ -1337,8 +1338,13 @@ module StaticDispatchRegistrations
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text, enumerator_free: enumerator_free,
                                                 diagnostic_literals: !symbol_lookups.nil?, engine_tokens: rows_dynamic)
     dynamic.merge(outside)
+    # NAME_SINKS (closed only): while SYMBOL_USES holds and every native that converts a String to a name is an audited
+    # one, a String reaches a lookup only as a literal argument of a LOOKUP_SENDS call (symbol_lookups), so an
+    # identifier-shaped literal or a fragment of a built name looks nothing up whatever it flows into.
+    literal_only = symbol_lookups && StaticDispatchNameSinks.audited?(outside_world_files(repo_root, closed_only: true).last, repo_root)
     looked_up = literal_sites.keys.to_set
-    looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
+    looked_up = Set.new if literal_only
+    looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups && !literal_only
     literal_sites.each do |s, sites|
       next unless looked_up.include?(s)
 
@@ -1439,7 +1445,7 @@ module StaticDispatchRegistrations
     # SUFFIX_BASES (closed only): see dynamic_name?. nil keeps the rule for every dynamic name.
     suffix_bases = nil
     if closed_only
-      fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
+      fragments = literal_only ? Set.new : fragments & StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
       built = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, SUFFIX_LITERAL)
       suffix_bases = text if built.empty?
     end
