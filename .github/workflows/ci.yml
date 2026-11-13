@@ -346,9 +346,8 @@ jobs:
         if: matrix.backend == 'pathb'
         run: scripts/setup-pathb.sh
 
-      # The freestanding suites (tests/lib, tests/target) still use qbe on macOS: Path B takes freestanding programs on
-      # x86-64 and aarch64 Linux only (docs/notes/freestanding.md). This is the one cproc use left in this job.
-      - name: QBE and cproc (freestanding suites)
+      # Path B needs QBE (build/qbe/qbe) for its code generation; the .c inputs of a test go through qbe-cc (cproc).
+      - name: QBE and cproc (Path B's code generation)
         if: matrix.backend == 'pathb'
         run: scripts/setup-qbe.sh
 
@@ -366,7 +365,9 @@ jobs:
           # tests/cxx-driver is gcc's by design: its header records that Path B fails 16 of its 52 checks, so the pathb leg runs it on gcc
           NFCXX_BACKEND=gcc tests/cxx-driver/run.sh
           if [ "$NFCXX_BACKEND" = pathb ]; then
-            NFCXX_BACKEND=qbe tests/lib/run.sh
+            # Freestanding programs take Path B on arm64 macOS too (docs/notes/freestanding.md, "Path B on macOS").
+            tests/lib/run.sh
+            # tests/target only emits C (--emit-c): no back end runs there, so its qbe pin does not change what is tested.
             NFCXX_BACKEND=qbe tests/target/run.sh
           else
             tests/lib/run.sh
