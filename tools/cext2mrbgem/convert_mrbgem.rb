@@ -347,6 +347,51 @@ def call_context(masked, pos)
   [nil, nil]
 end
 
+# (opening character, callee name) of the innermost unclosed bracket before pos in the same statement; the
+# callee is the identifier before a '(' (nil when there is none). [nil, nil] at the statement start.
+def innermost_open(masked, pos)
+  depth = 0
+  k = pos - 1
+  while k >= 0
+    ch = masked[k]
+    if ')]}'.include?(ch)
+      depth += 1
+    elsif '([{'.include?(ch)
+      if depth == 0
+        return [ch, nil] if ch != '('
+        j = prev_nonspace(masked, k - 1)
+        e = j + 1
+        j -= 1 while j >= 0 && (ALNUM_RE.match?(masked[j]) || masked[j] == '_')
+        name = psl(masked, j + 1, e)
+        return ['(', (name.empty? ? nil : name)]
+      end
+      depth -= 1
+    elsif ch == ';' && depth == 0
+      return [nil, nil]
+    end
+    k -= 1
+  end
+  [nil, nil]
+end
+
+# a use of a global-state helper in a function that has no mruby state (see global_use)
+CTX_REASON = 'helper needs mruby state, and a use is in a function with no mruby state in scope (not a method, Init or threaded helper)'.freeze
+
+# calls that may keep a pointer they are given (registration, storage, threads, data objects): a helper passed to one
+# of them is not a use that stays inside the method call
+# rb_thread_* runs its function on another thread (rb_thread_call_without_gvl): the state must not be used there.
+STORE_CALL_RE = /\A(?:rb_define|mrb_define|rb_gc_register|rb_global|rb_set_end|rb_iv_set|rb_ivar_set|rb_const_set|
+  rb_hash_aset|rb_ary_store|rb_ary_push|rb_thread_|nfcx_thread_|rb_obj_call_init|rb_data_|st_|Data_|TypedData_)/x
+
+# the end of the logical line (a backslash-newline continues it) that starts before k
+def logical_line_end(masked, k)
+  while k < masked.length
+    return k if masked[k] == "\n" && (k == 0 || masked[k - 1] != '\\')
+    k += 1
+  end
+  masked.length
+end
+
 def map_types(s, types)
   types.each do |ctype, mtype|
     if ctype == 'ID'
@@ -927,10 +972,27 @@ class Converter
       !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
     end
 
+    # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
+    value_problem = lambda do |rel, s, name|
+      masked = @files[rel]['masked']
+      open, callee = innermost_open(masked, s)
+      before = prev_nonspace(masked, s - 1)
+      after = next_nonspace(masked, s + name.length)
+      if open != '(' || callee.nil?
+        'its address is assigned or stored, so the pointer may escape the method context'
+      elsif !(before >= 0 && '(,'.include?(masked[before])) || after < 0 || !')'.include?(masked[after]) && masked[after] != ','
+        'the pointer is part of an expression, not a plain argument'
+      elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
+        "the pointer is passed to #{callee}, which may keep it"
+      end
+    end
+
     use_problem = lambda do |name, use|
-      _rel, _s, direct, fn = use
+      rel, s, direct, fn = use
       if !direct
-        next 'helper needs the mruby state threaded in, but is used outside a direct call (not supported)'
+        # the address is kept or passed on, so the helper's signature cannot gain mrb; the reason says how
+        why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
+        next "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
       end
       if fn.nil?
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
@@ -954,27 +1016,221 @@ class Converter
       rewrite(d0['file'], d0['hstart'], name, "mrb-threaded #{name}",
               'non-static helper: its signature gains the mrb argument; callers outside the input would need it too')
     end
-    refused_defs = Set.new
+    # Global state path (the design in the comment at @global_name). A needs-helper the threading path refused is not
+    # threaded: it uses the file-scope state @global_name, which the registered methods and Init set on entry and
+    # restore on exit (process, wrap_returns). Its uses must be direct calls, or a function pointer passed as an
+    # argument to a call that does not keep it, inside a function with the mruby state: a registered method, Init, a
+    # threaded helper or another helper of this set. The set is the greatest fixpoint: a helper leaves it when one of
+    # its uses fails, and its callers are then checked again.
+    @global_name = "#{@funcname}_bc2_mrb"
+    gcands = Set.new
     @needs.to_a.sort.each do |name|
       next if @reg_names.include?(name) || name == init_first || !@defs.key?(name) || cands.include?(name)
-      helper_uses.call(name).each do |u|
-        why = use_problem.call(name, u)
-        refuse(u[0], u[1], name, why) if why
+      gcands << name if @defs[name].size == 1
+    end
+    with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+    global_use = lambda do |name, use, members|
+      rel, s, direct, fn = use
+      macro = fn.nil? && direct ? define_at(rel, s) : nil
+      if fn.nil?
+        if direct && macro && macro_expansions_ok(macro, with_state | members)
+          nil
+        elsif direct
+          'helper needs the mruby state threaded in, but the call is not in a function definition the converter ' \
+          'recognises (a macro-decorated definition, or file scope) (not supported)'
+        else
+          'helper needs the mruby state threaded in, but is used outside a direct call (not supported): ' \
+          'its address is in a file-scope initializer, so it may run with no method context'
+        end
+      elsif shadowed.call(name, fn)
+        'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
+      elsif !(with_state.include?(fn['name']) || members.include?(fn['name']))
+        CTX_REASON
+      elsif !direct
+        why = value_problem.call(rel, s, name)
+        why && "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
+      end
+    end
+    gset = gcands.dup
+    changed = true
+    while changed
+      changed = false
+      gset.to_a.sort.each do |name|
+        next unless helper_uses.call(name).any? { |u| global_use.call(name, u, gset) }
+        gset.delete(name)
+        changed = true
+      end
+    end
+    @global_helpers = gset
+    gset.to_a.sort.each do |name|
+      d0 = @defs[name][0]
+      rewrite(d0['file'], d0['hstart'], name, "global-state #{name}",
+              "uses #{@global_name} (set by the registered method or Init it runs under), not an mrb argument")
+    end
+    refused_defs = Set.new
+    @needs.to_a.sort.each do |name|
+      next if @reg_names.include?(name) || name == init_first || !@defs.key?(name) || cands.include?(name) || gset.include?(name)
+      ctx_why = nil
+      if gcands.include?(name)
+        # a use in a function with no state (a callback path) is reported once, on the helper's definition
+        helper_uses.call(name).each do |u|
+          why = global_use.call(name, u, gset)
+          ctx_why ||= why if why == CTX_REASON
+          refuse(u[0], u[1], name, why) if why && why != CTX_REASON
+        end
+      else
+        helper_uses.call(name).each do |u|
+          why = use_problem.call(name, u)
+          refuse(u[0], u[1], name, why) if why
+        end
       end
       @defs[name].each do |d0|
-        refuse(d0['file'], d0['hstart'], name, 'helper needs mruby state; threading refused')
+        refuse(d0['file'], d0['hstart'], name, ctx_why ? "helper needs mruby state; threading refused: #{ctx_why}" :
+                                               'helper needs mruby state; threading refused')
       end
       refused_defs << name
     end
     # fail-safe: a call of a threaded helper from a function that gets no mrb and has no refusal of its own
-    # would not compile, so it is refused
-    mrb_bearing = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+    # would not compile, so it is refused. A global-state helper has the state in scope through the global.
+    mrb_bearing = with_state | gset
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
         next unless fn && !mrb_bearing.include?(fn['name']) && !refused_defs.include?(fn['name'])
         refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
       end
     end
+    compute_global_macros(with_state | gset)
+    @global_wrap = !gset.empty? || @global_macro_spans.any? { |_r, l| !l.empty? }
+    if @global_wrap
+      # a macro that expands a return skips the restore of a registered method or Init that expands it (wrap_returns
+      # only sees return statements written in the body). Such a use is refused; the macro's own body is not changed.
+      wrapped = @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+      @files.each do |rel, f|
+        define_spans(rel).each do |mname, a, b|
+          next unless psl(f['masked'], a, b) =~ /(?<![#{WC}])return(?![#{WC}])/
+          (@occ[mname] || []).each do |orel, os, _oe|
+            next if orel == rel && a <= os && os < b
+            fn = enclosing_func(orel, os)
+            next unless fn && wrapped.include?(fn['name'])
+            refuse(orel, os, mname, 'macro expands a return, which would skip the restore of the mruby global state in ' \
+                                    'this registered method or Init (not supported)')
+          end
+        end
+      end
+    end
+  end
+
+  # Macros whose body calls an api that needs the mruby state. At file scope such a body is refused unless every
+  # expansion is in a function with the state (a with_state or global-state function, mrb_tok) and the body has no
+  # return (a return would skip the restore). Their mrb argument is then the global. A use in a preprocessor line
+  # or in a file-scope initializer keeps the macro refused. Conservative: a macro that calls a helper is not handled.
+  def compute_global_macros(ctx)
+    @global_macro_spans = {}
+    @files.each do |rel, f|
+      masked = f['masked']
+      masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
+        name = m[1]
+        s = m.begin(0)
+        e = logical_line_end(masked, m.end(0))
+        body = psl(masked, m.end(0), e)
+        next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
+        next if body =~ /(?<![#{WC}])return(?![#{WC}])/
+        ok = (@occ[name] || []).all? do |orel, os, _oe|
+          inside = orel == rel && s <= os && os < e
+          if inside
+            true
+          else
+            fn = enclosing_func(orel, os)
+            !fn.nil? && ctx.include?(fn['name'])
+          end
+        end
+        next unless ok
+        (@global_macro_spans[rel] ||= []) << [s, e]
+        @rewrites << { 'file' => rel, 'line' => line_of(f['text'], s), 'from' => name, 'to' => "#{name} (mrb = #{@global_name})" }
+      end
+    end
+  end
+
+  # [name, start, end, rel] of the #define that holds pos, or nil
+  def define_at(rel, pos)
+    d = define_spans(rel).find { |_n, a, b| a < pos && pos < b }
+    d && [d[0], d[1], d[2], rel]
+  end
+
+  def define_spans(rel)
+    @define_spans ||= {}
+    @define_spans[rel] ||= begin
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.map do |m|
+        [m[1], m.begin(0), logical_line_end(masked, m.end(0))]
+      end
+    end
+  end
+
+  # A macro whose body calls a global-state helper: safe when the body has no return and every expansion is in a
+  # function with the state (ctx). Checked again as the set of global-state helpers changes (its fixpoint).
+  def macro_expansions_ok(macro, ctx)
+    name, a, b, rel = macro
+    body = psl(@files[rel]['masked'], a, b)
+    return false if body =~ /(?<![#{WC}])return(?![#{WC}])/
+    (@occ[name] || []).all? do |orel, os, _oe|
+      next true if rel == orel && a <= os && os < b
+      fn = enclosing_func(orel, os)
+      !fn.nil? && ctx.include?(fn['name'])
+    end
+  end
+
+  # The state a use inside function or macro position pos gets: the mrb parameter, or the file-scope global for a
+  # global-state helper or a global macro body.
+  def mrb_tok(rel, pos)
+    fd = enclosing_func(rel, pos)
+    return @global_name if fd && @global_helpers && @global_helpers.include?(fd['name'])
+    return @global_name if in_global_macro?(rel, pos)
+    'mrb'
+  end
+
+  def in_global_macro?(rel, pos)
+    (@global_macro_spans[rel] || []).any? { |a, b| a < pos && pos < b }
+  end
+
+  # A registered method or Init with a global-state user saves the previous value on entry and restores it on each
+  # return, so a nested state (a method that runs Ruby code in another state) sees its own state again afterwards.
+  # The return expression is evaluated before the restore. A VALUE function that falls off its end is undefined in C
+  # already, so it gets no restore; Init (void) gets one before its closing brace.
+  def wrap_returns(rel, d, void)
+    ed = @edits[rel]
+    masked, text = @files[rel]['masked'], @files[rel]['text']
+    g = @global_name
+    finditer(/(?<![#{WC}])return(?![#{WC}])/, masked).each do |m|
+      rs = m.begin(0)
+      re = m.end(0)
+      next if rs <= d['brace'] || rs >= d['body_end']
+      depth = 0
+      k = re
+      semi = nil
+      while k < masked.length
+        ch = masked[k]
+        if '([{'.include?(ch)
+          depth += 1
+        elsif ')]}'.include?(ch)
+          depth -= 1
+        elsif ch == ';' && depth == 0
+          semi = k
+          break
+        end
+        k += 1
+      end
+      next unless semi
+      expr = py_strip(psl(text, re, semi))
+      if expr.empty?
+        ed.add(rs, rs, "{ #{g} = nfcx_bc2_old; ")
+        ed.add(semi + 1, semi + 1, ' }')
+      else
+        ed.add(rs, re, '{ mrb_value nfcx_bc2_ret = (')
+        ed.add(semi, semi + 1, "); #{g} = nfcx_bc2_old; return nfcx_bc2_ret; }")
+      end
+    end
+    ed.add(d['body_end'], d['body_end'], " #{g} = nfcx_bc2_old; ") if void
   end
 
   # ---- stage 3: per-file rewrite -----------------------------------------
@@ -1074,6 +1330,7 @@ class Converter
       end
     end
     # 2. function headers
+    init_name = @init_defs.empty? ? nil : @init_defs[0]['name']
     @decls.each do |d|
       next if d['file'] != rel
       name = d['name']
@@ -1098,6 +1355,12 @@ class Converter
       if d['proto']
         ed.add(d['hstart'], d['hend'], hdr)
       else
+        # a registered method or Init of a gem that uses the global state saves and restores it (wrap_returns)
+        if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
+          g = @global_name
+          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  #{g} = mrb;" + pro
+          wrap_returns(rel, d, name == init_name && !@valid_reg_names.include?(name))
+        end
         ed.add(d['hstart'], d['hend'], hdr + ' ')
         ed.add(d['brace'] + 1, d['brace'] + 1, pro) unless pro.empty?
         rewrite(rel, d['hstart'], "#{d['name']}(...)", hdr)
@@ -1126,7 +1389,8 @@ class Converter
         po = next_nonspace(masked, e)
         next if po < 0 || masked[po] != '('
         pa = next_nonspace(masked, po + 1)
-        ed.add(po + 1, po + 1, masked[pa] == ')' ? 'mrb' : 'mrb, ')
+        t = mrb_tok(rel, s)
+        ed.add(po + 1, po + 1, masked[pa] == ')' ? t : "#{t}, ")
       end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
@@ -1140,7 +1404,7 @@ class Converter
       next if @local_var_occ.include?([rel, s])
       entry = @entries[name]
       if !entry.nil?
-        if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b }
+        if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b } && !in_global_macro?(rel, s)
           refuse(rel, s, name, 'needs the mruby state, which is not in scope at file scope')
           next
         end
@@ -1213,7 +1477,8 @@ class Converter
       ed.add(s, e, entry['mruby'])
       if entry['inject_mrb']
         pa = next_nonspace(masked, nxt + 1)
-        ed.add(nxt + 1, nxt + 1, masked[pa] == ')' ? 'mrb' : 'mrb, ')
+        t = mrb_tok(rel, s)
+        ed.add(nxt + 1, nxt + 1, masked[pa] == ')' ? t : "#{t}, ")
       end
       rewrite(rel, s, name, entry['mruby'], entry['caveat'])
     when 'macro'
@@ -1258,7 +1523,7 @@ class Converter
         refuse(rel, s, name, 'GC guard argument is not a plain variable')
         return
       end
-      ed.add(s, close + 1, "mrb_gc_protect(mrb, #{arg})")
+      ed.add(s, close + 1, "mrb_gc_protect(#{mrb_tok(rel, s)}, #{arg})")
       rewrite(rel, s, name, "mrb_gc_protect(mrb, #{arg})",
               'keeps the value rooted until the arena is restored (fine within the call; use mrb_gc_register to outlive it)')
       return
@@ -1282,7 +1547,7 @@ class Converter
       new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_singleton_method' => 'mrb_define_class_method',
               'rb_define_module_function' => 'mrb_define_module_function' }[name]
       ed.add(s, e, new)
-      ed.add(nxt + 1, nxt + 1, 'mrb, ')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
       fs, fe = rec['func_span']
       ed.add(fs, fe, rec['func'])
       as_, ae = rec['argc_span']
@@ -1327,7 +1592,7 @@ class Converter
         return
       end
       ed.add(s, e, 'mrb_raisef')
-      ed.add(nxt + 1, nxt + 1, 'mrb, ')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
       rewrite(rel, s, name, 'mrb_raisef')
     else
       refuse(rel, s, name, 'unknown special handler')
@@ -1350,8 +1615,8 @@ class Converter
       return
     end
     ed.add(s, e, 'mrb_const_get')
-    ed.add(nxt + 1, nxt + 1, 'mrb, ')
-    ed.add(args[0][0], args[0][1], 'mrb_obj_value(mrb->object_class)') if psl(text, args[0][0], args[0][1]) == 'rb_cObject'
+    ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+    ed.add(args[0][0], args[0][1], "mrb_obj_value(#{mrb_tok(rel, s)}->object_class)") if psl(text, args[0][0], args[0][1]) == 'rb_cObject'
     rewrite(rel, s, 'rb_const_get', 'mrb_const_get(mrb, klass, id)',
             'a module receiver does not fall back to Object as CRuby does; no autoload')
   end
@@ -1377,7 +1642,7 @@ class Converter
       return
     end
     ed.add(s, e, 'mrb_define_const')
-    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
     rewrite(rel, s, 'rb_define_const', "mrb_define_const(mrb, #{tgt}, ...)",
             'an existing constant is replaced without CRuby\'s "already initialized" warning')
   end
@@ -1469,7 +1734,7 @@ class Converter
       refuse(rel, s, 'rb_gc_start', 'the return value of rb_gc_start (nil) is used; mruby has no equivalent')
       return
     end
-    @edits[rel].add(s, close + 1, 'mrb_full_gc(mrb)')
+    @edits[rel].add(s, close + 1, "mrb_full_gc(#{mrb_tok(rel, s)})")
     rewrite(rel, s, 'rb_gc_start', 'mrb_full_gc(mrb)',
             'mrb_full_gc does nothing while gc.disabled is set or an object iteration is running; no collection is forced then')
   end
@@ -1540,7 +1805,7 @@ class Converter
     obj = psl(text, args[0][0], args[0][1])
     to = "mrb_check_type(mrb, #{obj}, #{ent['mruby']})"
     ed.add(s, e, 'mrb_check_type')
-    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
     ed.add(ts, te, ent['mruby'])
     rewrite(rel, s, name, to, ent['caveat'])
   end
@@ -1575,7 +1840,7 @@ class Converter
       return
     end
     old, young = names
-    new = "do { if (!mrb_immediate_p(#{old})) mrb_field_write_barrier_value(mrb, mrb_basic_ptr(#{old}), #{young}); } while (0)"
+    new = "do { if (!mrb_immediate_p(#{old})) mrb_field_write_barrier_value(#{mrb_tok(rel, s)}, mrb_basic_ptr(#{old}), #{young}); } while (0)"
     ed.add(s, close + 1, new)
     rewrite(rel, s, 'rb_gc_writebarrier', new,
             'mruby keeps the write barrier only for a heap owner; it does not make C-held storage a GC root ' \
@@ -1590,6 +1855,15 @@ class Converter
     FileUtils.mkdir_p(inc_dir)
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
+    if @global_wrap
+      # the global state (check_refs): defined once, in the file of Init; declared before any other text in the others.
+      # Declared as struct mrb_state so the prefix needs no include (the typedef is the same type).
+      @files.each do |rel, _f|
+        pre = "extern struct mrb_state *#{@global_name};\n"
+        pre += "struct mrb_state *#{@global_name} = NULL;\n" if rel == @init_rel
+        outputs[rel] = pre + outputs[rel]
+      end
+    end
     @files.each do |rel, f|
       dest = File.join(f['kind'] == 'src' ? src_dir : inc_dir, rel)
       write_bytes(dest, outputs[rel])
