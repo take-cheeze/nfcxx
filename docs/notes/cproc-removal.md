@@ -10,8 +10,7 @@ State as of the PRs named below (#976, #977, #980-#983, #989, #992 and the QBE `
 
 - `3rd/cproc` and the cproc part of `scripts/setup-qbe.sh` (QBE is still built there).
 - `scripts/qbe-cc`, `scripts/qbe-prep`, `tools/qbe-prep/`, `scripts/qbe-try`, `scripts/qbe-file-check.sh`, `scripts/cil-cc` (a wrapper of `qbe-cc`).
-- The cproc patches: `scripts/cproc-aligned-attr.patch`, `cproc-apple-driver`, `cproc-apple-predefines`, `cproc-apple-valist`,
-  `cproc-atomic-builtins`, `cproc-darwin-ldouble`, `cproc-dollar-ident`, `cproc-unprototyped-fnptr`.
+- The cproc patches (`scripts/cproc-*.patch`): removed; nothing applied them, they only described commits of the cproc fork.
 - The workarounds that exist only for cproc: `scripts/quickjs-cproc.patch`, `scripts/lua-cxx-novolatile.patch`,
   `scripts/mruby-cxx-novolatile.patch` (all three and the cproc lines of `scripts/setup-poly*.sh` are gone: `tests/poly` runs on Path B
   and gcc), and the cproc-specific lines of `setup-sqlite.sh`,

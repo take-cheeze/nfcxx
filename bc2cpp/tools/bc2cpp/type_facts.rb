@@ -910,6 +910,22 @@ module TypeFacts
     File.write(path, JSON.generate(facts))
   end
 
+  # TC1017: declared parameters a call site contradicts (CodeGen#declared_callsite_contradictions), appended like the
+  # nilable-index rows: they need the whole analysis to have run. `locate` maps a declaration key ("Owner#name") to its
+  # signature's [file, line] or nil.
+  def append_declared_callsites(path, gen, root, locate)
+    facts = JSON.parse(File.read(path))
+    ctx = Struct.new(:root).new(root)
+    facts['declared_callsites'] = gen.declared_callsite_contradictions.map do |r|
+      insn = BytecodeIR.for(r[:irep]).source_at(r[:index])
+      sig_file, sig_line = locate.call(r[:key])
+      { 'declaration' => r[:key], 'position' => r[:position], 'declared' => r[:text],
+        'passed' => mask_classes(gen, r[:mask]).join(' | '), 'file' => relative(ctx, r[:irep].file),
+        'line' => insn&.lineno.to_i, 'col' => 1, 'sig_file' => sig_file, 'sig_line' => sig_line }
+    end
+    File.write(path, JSON.generate(facts))
+  end
+
   def write(path, facts)
     File.write(path, JSON.generate(facts))
   end

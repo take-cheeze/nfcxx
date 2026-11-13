@@ -63,7 +63,7 @@ if [ "$(uname -m)" = x86_64 ]; then
   (cd "$root/build/cproc" && PATH="$root/build/qbe:$PATH" make -j"$jobs" stage2 \
     LDFLAGS="-Wl,-u,__nfcxx_ld_add $ldrt -lgcc -lgcc_s -lstdc++ -lm" >/dev/null)
 fi
-# Apple arm64 stage 2 (no helper archive: long double is a double there, scripts/cproc-darwin-ldouble.patch). The SDK's
+# Apple arm64 stage 2 (no helper archive: long double is a double there, the cproc fork's commit, once in scripts/cproc-darwin-ldouble.patch). The SDK's
 # ARM register state (mach/arm/_structs.h) has __uint128_t arrays that cproc cannot parse, and the stage-2 driver compiles
 # its sources with the SDK headers without qbe-cc's defines. So __uint128_t is unsigned for this build only; cproc's
 # sources do not use the 128-bit type, and the IR of cproc-qbe from stage 2 is identical to stage 1's on tests/c inputs.
