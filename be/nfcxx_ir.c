@@ -4065,7 +4065,10 @@ static ir_val ir_builtin_carry(an_expr_node_ptr e, int sub)
     b2 = ir_let("bool", ir_fmt("(lt.u %s %s %s)", T, r2, r1));
   }
   ir_store(rt, p.s, r2, 0);
-  carry = ir_o2("or", "unsigned_char", ir_cv("unsigned_char", b1), ir_cv("unsigned_char", b2));
+  /* the two conversions in a fixed order: as arguments of one call their order was the compiler's (gcc's, a clang-built front end's differ) */
+  b1 = ir_cv("unsigned_char", b1);
+  b2 = ir_cv("unsigned_char", b2);
+  carry = ir_o2("or", "unsigned_char", b1, b2);
   ir_note(0, eok_call, 1);
   return ir_mk_value(carry, e->type);
 }
