@@ -2596,7 +2596,10 @@ end
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
-      head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+      # A load is plain for every order (x86 loads are acquire), so a non-constant order (a std::atomic member function
+      # emitted out of line, whose order is a parameter) is a plain load too.
+      return true unless head(c[4]) == "const"
+      %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
 
     # __atomic_store_N (N = 1, 2, 4, 8) with a constant order: a plain store, which on x86 is already a release store. A
@@ -2612,20 +2615,24 @@ end
       name = f.raw.delete('"')
       return false unless name.start_with?("__atomic_store_") && ATOMIC_STORE_OP.key?(name[-1])
 
-      order = c[5]
-      return false unless head(order) == "const"
-
-      o = order[2].to_s
+      # A non-constant order is taken as sequentially consistent (the strongest: the barrier below), since the order is
+      # a parameter of an out-of-line member function.
+      return true unless head(c[5]) == "const"
+      o = c[5][2].to_s
       return true if o == "0" || o == "3"
 
       o == "5"
+    end
+
+    def atomic_store_seq_cst?(c)
+      head(c[5]) != "const" || c[5][2].to_s == "5"
     end
 
     def atomic_store_lines(c)
       size = c[2].raw.delete('"')[-1]
       addr = op(c[3])
       @lines << "  #{ATOMIC_STORE_OP[size]} #{op(c[4])}, #{addr}"
-      return unless c[5][2].to_s == "5"
+      return unless atomic_store_seq_cst?(c)
 
       if size == "1" || size == "2"
         word = fresh
