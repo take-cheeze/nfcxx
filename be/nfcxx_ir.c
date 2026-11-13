@@ -671,17 +671,6 @@ static int ir_a64_res_letter(a_type_ptr t, char *c)
   return 1;
 }
 
-/* Does the parameter list of routine type ft have a long double (or _Complex long double) among its named parameters? */
-static int ir_a64_named_ld(a_type_ptr ft)
-{
-  a_param_type_ptr p;
-  char c;
-  if (ft == NULL || ft->kind != tk_routine || ft->variant.routine.extra_info == NULL) return 0;
-  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next)
-    if (ir_a64_letter(p->type, &c) && (c == 'L' || c == 'C')) return 1;
-  return 0;
-}
-
 /* The class string of the parameters of routine type ft (cls, cap bytes) and its result letter. 0 when one is not described. */
 static int ir_a64_sig_ft(a_type_ptr ft, char *cls, size_t cap, char *res)
 {
@@ -5361,8 +5350,10 @@ static ir_val ir_call(an_expr_node_ptr e)
     if (ir_a64_on() && a64_ldarg && a64_var) {
       /* a variadic call with a long double argument: its own call thunk (the C convention of every argument) */
       if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function with a long double argument", 0, (int)eok_call);
-      if (f->kind == enk_routine && f->variant.routine.ptr->function_def_number != NULL_function_def_number && ir_a64_named_ld(a64_ft))
-        return ir_gap(e->type, "call of a variadic function defined here with a named long double parameter (AArch64)", 0, (int)eok_call);
+      if (f->kind == enk_routine && f->variant.routine.ptr->function_def_number != NULL_function_def_number)
+        /* a variadic function defined here (a template instance of a header, say) is not emitted when its only uses are
+           through the thunk; the call is refused rather than linked to a missing symbol */
+        return ir_gap(e->type, "call of a variadic function defined here with a long double argument (AArch64)", 0, (int)eok_call);
       if (thunk_sym == NULL) thunk_sym = ir_name_or(a64_cname, "fn");
       vthunk = 1;
     }
