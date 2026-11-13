@@ -12,8 +12,8 @@ require_relative 'bytecode_ir'
 # leaves out of the tables too (RESPOND_TO_PHANTOM, codegen_emit.rb), so it needs no registration.
 #
 # `lookups` proves that every such use in the closed bytecode takes a literal: each name argument of a
-# LOOKUP_SENDS call and each block argument is written only by a literal load (or, for a block, a block literal or
-# the caller's own block). Then a Symbol from anywhere else -- a hash key, a variable, a container -- never reaches
+# LOOKUP_SENDS call and each block argument is written only by a literal load (a Symbol or a String, `send("name")`;
+# or, for a block, a block literal or the caller's own block). Then a Symbol from anywhere else -- a hash key, a variable, a container -- never reaches
 # one, and only the literals at those sites name a method. Natives look a method up only by a name they spell
 # (NATIVE_NAME_TOKENS), and the core Ruby that forwards a name it was given is reached only through LOOKUP_SENDS.
 # INTROSPECTION_SENDS list the methods of a class and so see a missing registration directly; any call of one,
@@ -88,7 +88,7 @@ module StaticDispatchSymbolUses
       next false unless ops
       next false unless ops.all? { |op, _| LITERAL_OPS.include?(op) }
 
-      ops.each { |op, sym| names << sym if op == :LOADSYM }
+      ops.each { |op, sym| names << sym if sym && %i[LOADSYM STRING].include?(op) }
       true
     end
   end
@@ -118,7 +118,7 @@ module StaticDispatchSymbolUses
         next [entry_kind(program, p.reg), nil] if p.entry?
 
         src = program.source_at(p.index)
-        [src.op, src.sym]
+        [src.op, literal_name(irep, src)]
       end
     end
 
@@ -130,9 +130,17 @@ module StaticDispatchSymbolUses
       return nil unless BytecodeIR::WRITES_LEADING_REG_OPS.include?(prev.op) || BytecodeIR::Ops::LOADI_OPS.include?(prev.op)
       next unless prev.reg.to_i == reg
 
-      return (LITERAL_OPS | BLOCK_OPS).include?(prev.op) ? [[prev.op, prev.sym]] : nil
+      return (LITERAL_OPS | BLOCK_OPS).include?(prev.op) ? [[prev.op, literal_name(irep, prev)]] : nil
     end
     nil
+  end
+
+  # The name a literal load carries: a Symbol's, or the value of a String literal (`send("name")` looks `name` up).
+  def literal_name(irep, src)
+    return src.sym unless src.op == :STRING
+
+    literal = irep.pool[src.pool_index]
+    literal.is_a?(String) ? literal : nil
   end
 
   def entry_kind(program, reg)

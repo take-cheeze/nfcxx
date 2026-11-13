@@ -1524,7 +1524,7 @@ BC2CPP_MAIN = lambda do
   if type_facts_path
     require_relative 'type_facts'
     TypeFacts.append_nilable_index(type_facts_path, gen.unguarded_index_sites, ENV['BC2CPP_TYPE_FACTS_ROOT'])
-    # TC1017: a declared parameter a call site provably contradicts (DECLARED_CALLSITE_CONTRADICTION).
+    # TC1018: a declared parameter a call site provably contradicts (DECLARED_CALLSITE_CONTRADICTION).
     sig_at = (sig_loaded&.methods || {}).each_value.to_h { |sig| ["#{sig.owner}##{sig.name}", [sig.loc.file, sig.loc.line]] }
     TypeFacts.append_declared_callsites(type_facts_path, gen, ENV['BC2CPP_TYPE_FACTS_ROOT'], ->(key) { sig_at[key] })
   end

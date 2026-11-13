@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :ptr32, :regparm3, :xadd, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -1904,6 +1904,10 @@ end
           atomic_store_lines(item[1])
           return
         end
+        if atomic_cas?(item[1])
+          atomic_cas_lines(fresh, item[1])
+          return
+        end
 
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
@@ -2081,6 +2085,8 @@ end
       when "call"
         if atomic_fetch?(rv)
           atomic_fetch_lines(dst, c, rv)
+        elsif atomic_cas?(rv)
+          atomic_cas_lines(dst, rv)
         elsif Qbe.f16?(rv[1])
           # The result is the low 16 bits of xmm0.
           raw = fresh
@@ -3008,7 +3014,11 @@ end
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
-      !contains_call?(c[4])
+      # A load is plain for every order (x86 loads are acquire), so a non-constant order (a std::atomic member function
+      # emitted out of line, whose order is a parameter) is a plain load too, unless the order holds a call: the order is not
+      # evaluated, so a call in it would lose its effects.
+      return !contains_call?(c[4]) unless head(c[4]) == "const"
+      %w[0 1 2 3 4 5].include?(c[4][2].to_s)
     end
 
     # Whether a form (an operand or an expression) holds a call, which may have effects that dropping the call would lose.
@@ -3032,20 +3042,24 @@ end
       name = f.raw.delete('"')
       return false unless name.start_with?("__atomic_store_") && ATOMIC_STORE_OP.key?(name[-1])
 
-      order = c[5]
-      return false unless head(order) == "const"
-
-      o = order[2].to_s
+      # A non-constant order is taken as sequentially consistent (the strongest: the barrier below), since the order is
+      # a parameter of an out-of-line member function.
+      return true unless head(c[5]) == "const"
+      o = c[5][2].to_s
       return true if o == "0" || o == "3"
 
       o == "5"
+    end
+
+    def atomic_store_seq_cst?(c)
+      head(c[5]) != "const" || c[5][2].to_s == "5"
     end
 
     def atomic_store_lines(c)
       size = c[2].raw.delete('"')[-1]
       addr = op(c[3])
       @lines << "  #{ATOMIC_STORE_OP[size]} #{op(c[4])}, #{addr}"
-      return unless c[5][2].to_s == "5"
+      return unless atomic_store_seq_cst?(c)
 
       if size == "1" || size == "2"
         word = fresh
@@ -3054,6 +3068,40 @@ end
       else
         @lines << "  #{fresh} =#{size == "4" ? "w" : "l"} xadd #{addr}, 0"
       end
+    end
+
+    # __atomic_compare_exchange_N (N = 4 or 8; the call has the pointer, the expected pointer, the desired value, weak, and the
+    # two orders): a locked compare-exchange (QBE's cmpxchg0/cmpxchg1 pair, amd64 lock cmpxchg), a full barrier, so every
+    # constant order is the same. Only without --safe, and only where the fork has the pair (Qbe.cmpxchg).
+    CAS_SIZES = %w[4 8].freeze
+
+    def atomic_cas?(c)
+      return false unless ATOMIC_XADD && Qbe.cmpxchg && !Qbe.safe
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&" && c.length == 9
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_compare_exchange_") && CAS_SIZES.include?(name[-1])
+      return false unless name.length == "__atomic_compare_exchange_".length + 1
+
+      [7, 8].all? { |i| head(c[i]) == "const" && %w[0 1 2 3 4 5].include?(c[i][2].to_s) }
+    end
+
+    # The expected value is loaded, the exchange is made on the object, and the old value is stored back to the expected
+    # object (on success it is the same value, on failure it is what the object held). The result is old == expected.
+    def atomic_cas_lines(dst, c)
+      size = c[2].raw.delete('"')[-1]
+      k = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      exp = op(c[4])
+      des = op(c[5])
+      ev = fresh
+      @lines << "  #{ev} =#{k} load#{k} #{exp}"
+      h = fresh
+      @lines << "  #{h} =#{k} cmpxchg0 #{addr}, #{ev}"
+      old = fresh
+      @lines << "  #{old} =#{k} cmpxchg1 #{h}, #{des}"
+      @lines << "  store#{k} #{old}, #{exp}"
+      @lines << "  #{dst} =w ceq#{k} #{old}, #{ev}"
     end
 
     def atomic_fetch_lines(dst, cls, c)

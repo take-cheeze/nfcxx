@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runner for libclang-edg (lib/libclang-edg) on C sources, used by decl_scan.rb through LIBCLANG_EDG_RUNNER:
+# scripts/libclang-cursors in C mode. The library passes its runner only -std=, -I, -D, -U and the file, so the
+# language is set here. Front-end diagnostics go to CEXT_LIBCLANG_LOG when it is set, and are discarded otherwise.
+here=$(cd "$(dirname "$0")" && pwd)
+exec "$here/../../scripts/libclang-cursors" --c "$@" 2>>"${CEXT_LIBCLANG_LOG:-/dev/null}"
