@@ -59,6 +59,19 @@ rc=0; python3 "$conv" --name variadic_array tools/cext2mrbgem/fixtures/variadic_
 check test "$rc" -eq 2
 check grep -q 'argc -2 (array form)' "$work/variadic_array/REFUSALS.txt"
 
+# 2f. rb_scan_args in a variadic method: "<lead><optional>" formats become mrb_get_args with nil-initialised
+# optional outputs; rest, keyword, used-return and non-variadic forms stay refused
+rc=0; python3 "$conv" --name scan_args tools/cext2mrbgem/fixtures/scan_args/ext/scan_args "$work/scan_args" > "$work/scan_args.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/scan_args/NOT_BUILDABLE"
+check grep -qF '(second = mrb_nil_value(), mrb_get_args(mrb, "o|o", &first, &second));' "$work/scan_args/src/scan_args.c"
+check grep -qF '(mrb_get_args(mrb, ""));' "$work/scan_args/src/scan_args.c"
+check grep -qF '(b = mrb_nil_value(), c = mrb_nil_value(), mrb_get_args(mrb, "o|oo", &a, &b, &c));' "$work/scan_args/src/scan_args.c"
+rc=0; python3 "$conv" --name scan_args_refused tools/cext2mrbgem/fixtures/scan_args_refused/ext/scan_args_refused "$work/scan_args_refused" > "$work/scan_args_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test "$(grep -c '  rb_scan_args  ' "$work/scan_args_refused/REFUSALS.txt")" -eq 4
+check grep -q 'return value of rb_scan_args is used' "$work/scan_args_refused/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

@@ -510,6 +510,13 @@ class Converter:
                 continue
         valid_reg = [r for r in self.regs if r['error'] is None]
         self.valid_reg_names = {r['func'] for r in valid_reg}
+        # variadic methods (argc -1): (argc, argv, self) parameter names, used by rb_scan_args
+        self.variadic = {}
+        for r in valid_reg:
+            if r['argc'] == -1 and r['func'] in self.defs:
+                p = self.variadic_params(self.defs[r['func']][0])
+                if p:
+                    self.variadic[r['func']] = p
         for name in self.reg_names:
             spans = [(r['open'], r['close']) for r in valid_reg if r['func'] == name and r['file']]
             for rel, s, e in self.occ.get(name, []):
@@ -815,6 +822,8 @@ class Converter:
             E.add(as_, ae, aspec)
             self.rewrite(rel, s, name, '%s(mrb, %s, "%s", %s, %s)' % (
                 new, tgt, rec['name'], rec['func'], aspec))
+        elif name == 'rb_scan_args':
+            self.scan_args(rel, s, e, nxt, called)
         elif name == 'rb_raise':
             if not called:
                 self.refuse(rel, s, name, 'used without a call')
@@ -833,6 +842,55 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_raisef')
         else:
             self.refuse(rel, s, name, 'unknown special handler')
+
+    def scan_args(self, rel, s, e, nxt, called):
+        """rb_scan_args(argc, argv, FMT, &v...) in a variadic method, as a statement, with FMT of the form
+        "<lead><opt>" (no rest, keyword or block parts) -> mrb_get_args(mrb, "o|o", &v...). mrb_get_args reads
+        the same stack the method was called with, and its arity check is the one rb_scan_args makes. Optional
+        outputs are set to nil first, because mrb_get_args leaves a missing optional argument unwritten."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        fn = self.enclosing_func(rel, s)
+        if not called or fn is None or fn['name'] not in self.variadic:
+            self.refuse(rel, s, 'rb_scan_args', 'only supported directly in a variadic method (argc -1)')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) < 3:
+            self.refuse(rel, s, 'rb_scan_args', 'rb_scan_args needs argc, argv and a format string')
+            return
+        argc_n, argv_n, self_n = self.variadic[fn['name']]
+        if text[args[0][0]:args[0][1]] != argc_n or text[args[1][0]:args[1][1]] != argv_n:
+            self.refuse(rel, s, 'rb_scan_args', 'rb_scan_args is not called on the argc and argv of its method')
+            return
+        fm = re.fullmatch(r'"([0-9])([0-9]?)"', text[args[2][0]:args[2][1]])
+        if not fm:
+            self.refuse(rel, s, 'rb_scan_args',
+                        'format %s not supported (only "<lead><optional>" counts: no rest, keyword or block parts)'
+                        % text[args[2][0]:args[2][1]])
+            return
+        lead, opt = int(fm.group(1)), int(fm.group(2) or 0)
+        outs = args[3:]
+        if len(outs) != lead + opt:
+            self.refuse(rel, s, 'rb_scan_args', 'format needs %d output pointer(s), call gives %d' % (lead + opt, len(outs)))
+            return
+        names = []
+        for a, b in outs:
+            om = re.fullmatch(r'&\s*([A-Za-z_]\w*)', text[a:b])
+            if not om or om.group(1) in self.class_vars or om.group(1) in (argc_n, argv_n, self_n):
+                self.refuse(rel, s, 'rb_scan_args', 'output %r is not a plain local variable' % text[a:b])
+                return
+            names.append(om.group(1))
+        prev = prev_nonspace(masked, s - 1)
+        after = next_nonspace(masked, close + 1)
+        if (prev >= 0 and masked[prev] not in ';{}') or after < 0 or masked[after] != ';':
+            self.refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used (mruby returns a different count)')
+            return
+        fmt = 'o' * lead + ('|' + 'o' * opt if opt else '')
+        pre = ''.join('%s = mrb_nil_value(), ' % n for n in names[lead:])
+        callargs = ', '.join(['mrb', '"%s"' % fmt] + ['&' + n for n in names])
+        E.add(s, close + 1, '(%smrb_get_args(%s))' % (pre, callargs))
+        self.rewrite(rel, s, 'rb_scan_args', 'mrb_get_args(mrb, "%s", ...)' % fmt,
+                     'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby')
 
     # ---- stage 4: write --------------------------------------------------
     def write_outputs(self):

@@ -26,6 +26,9 @@ compiled either: the output is text for review, and a directory with refusals is
   defined with `MRB_ARGS_ANY()`. The converted function takes `(mrb_state *mrb, mrb_value self)` and reads the
   arguments back with `mrb_get_args(mrb, "*", ...)` into locals named as in the original. The array form
   (`argc -2`) is refused.
+- `rb_scan_args(argc, argv, "<lead><optional>", &v...)` inside a variadic method becomes
+  `mrb_get_args(mrb, "o|o", &v...)`, with optional outputs set to nil first. Only as a statement and only on the
+  method's own argc and argv. Rest (`*`), keyword (`:`), block and fixed-arity forms are refused.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other

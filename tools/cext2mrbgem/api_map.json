@@ -58,6 +58,11 @@
       "handler": "raise",
       "needs_mrb": true
     },
+    "rb_scan_args": {
+      "kind": "special",
+      "handler": "scan_args",
+      "needs_mrb": true
+    },
     "rb_str_new": {
       "kind": "call",
       "mruby": "mrb_str_new",
