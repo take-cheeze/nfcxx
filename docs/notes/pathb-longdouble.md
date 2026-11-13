@@ -281,9 +281,9 @@ scalars, aggregates and results it has).
   `to_chars_result` of two words (x0, x1) or an aggregate through x8 works without a class for it.
 - A variadic callee defined elsewhere with a `long double` argument or result (`printf("%Lf", x)`) is called through its
   `callv` thunk, which carries the classes of that call's arguments (`ir_a64_vthunk`).
-- A variadic function **defined here** that returns `long double` (or takes a named one) has no C-convention entry on this
-  target: a call of it is refused by name (`call of a variadic function defined here that returns long double`). It is the
-  one shape the x86 path has and this one does not.
+- A variadic function **defined here** has no C-convention entry on this target, so a call of it that passes or returns a
+  `long double` through `...` is refused by name (`call of a variadic function defined here with a long double argument`,
+  or `... that returns long double`). The x86 path has no such refusal: its variadic results go through a leading pointer.
 
 ### 8.5 The pruner and the IR optimizer
 
@@ -309,7 +309,7 @@ Until then the opt-in is for checking the convention, not for claiming gcc-exact
 
 ### 8.7 Verified on Linux aarch64 (Ubuntu 24.04 in an Apple `container` VM)
 
-Each result was produced by the driver or the test binary in the VM, with Path B forced (`NFCXX_PATH=b`, which makes a
+Each result was produced by the driver or the test binary in the VM with the opt-in set (`NFCXX_LONG_DOUBLE_ABI=aarch64`), with Path B forced (`NFCXX_PATH=b`, which makes a
 Path B failure an error instead of a gcc fallback) and the C side compiled by gcc (`NFCXX_PATHB_C=gcc`):
 
 - `tests/pathb-qbe/multi/abi_ld` (`a.cpp` by Path B, `c.c` by gcc, both directions: long double with double, float and
@@ -322,8 +322,9 @@ Path B failure an error instead of a gcc fallback) and the C side compiled by gc
 - `tests/pathb-qbe/cases/longdouble_cmath.cpp`: builds and runs (its values differ from gcc, see 8.6).
 - `tests/pathb-qbe/cases/longdouble_call.cpp`: refused by name (a variadic function defined here returns `long double`),
   so the driver builds it with gcc.
-- `tests/pathb-qbe/cases/longdouble_io.cpp`: refused by name (the `_Float128` builtins it uses have no wrapper on this
-  target, a gap that is not about `long double`).
+- `tests/pathb-qbe/cases/longdouble_io.cpp`: refused by name with the opt-in (a variadic function defined here, the
+  `__to_xstring` instance, is called with a `long double` through `...`), and by the gate without it. Its `_Float128`
+  builtins (`nanf128`, `huge_valf128`) are refused on every target by the existing `_Float128` gap, not by this change.
 - `tests/pathb-qbe/cases/longdouble_complex.cpp`: builds and runs (its EXPECT is checked; the gcc backend cannot build it).
 
 The QBE translation-validation harness `tests/pathb-qbe/run.sh` (`scripts/pathb-qbe-emit.rb`, the mruby emitter) does not
