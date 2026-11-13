@@ -726,6 +726,24 @@
       "mruby": "MRB_TT_INTEGER",
       "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
+    "rb_eNoMemError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"NoMemoryError\")",
+      "needs_mrb": true
+    },
+    "rb_warning": {
+      "kind": "call",
+      "mruby": "mrb_warn",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "prints on every call: CRuby's rb_warning prints only in verbose mode ($VERBOSE true), and rb_warn always prints. Output is 'warning: ' and the message on stderr, with no file or line; PRIsVALUE is not supported"
+    },
+    "rb_gc_location": {
+      "kind": "strip",
+      "mruby": "",
+      "needs_mrb": false,
+      "caveat": "identity: mruby's collector never moves objects (no relocation API in include/ or src/gc.c), so the location is the value itself; the argument stays in parentheses"
+    },
     "RB_TYPE_P": {
       "kind": "special",
       "handler": "type_p",

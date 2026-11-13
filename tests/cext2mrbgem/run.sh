@@ -194,6 +194,15 @@ check test ! -e "$work/api_sym_type/NOT_BUILDABLE"
 check grep -qF 'mrb_sym id = mrb_symbol(sym);' "$work/api_sym_type/src/api_sym_type.c"
 check grep -qF 'if (mrb_type(v) == MRB_TT_INTEGER) return mrb_true_value();' "$work/api_sym_type/src/api_sym_type.c"
 
+# 2o. exception class, warning and GC location (api_map.json batch C3): rb_eNoMemError is the NoMemoryError lookup,
+# rb_warning is mrb_warn (always prints; caveated), rb_gc_location is the identity (strip form keeps the call's parentheses)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_misc tools/cext2mrbgem/fixtures/api_exc_misc/ext/api_exc_misc "$work/api_exc_misc" > "$work/api_exc_misc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_exc_misc/NOT_BUILDABLE"
+check grep -qF 'mrb_warn(mrb, "boom check: %s", "start");' "$work/api_exc_misc/src/api_exc_misc.c"
+check grep -qF 'mrb_raisef(mrb, mrb_exc_get(mrb, "NoMemoryError"), "out of room");' "$work/api_exc_misc/src/api_exc_misc.c"
+check grep -qF 'mrb_value now = (obj);' "$work/api_exc_misc/src/api_exc_misc.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
