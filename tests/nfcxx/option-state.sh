@@ -28,7 +28,7 @@ harness() {
 }
 harness > "$tmp/harness.sh"
 
-state() { NFCXX_BACKEND= bash "$tmp/harness.sh" "$@" 2>&1; }
+state() { bash "$tmp/harness.sh" "$@" 2>&1; }
 
 if [ "${1:-}" = --self ]; then
   pass=0; fail=0

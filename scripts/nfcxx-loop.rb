@@ -99,6 +99,55 @@ class LoopState
   end
 end
 
+# The NFCXX_* variables that set the loop's state during nfcxx's setup, as the setup reads them: the port takes them as
+# explicit inputs (--nfcxx-env=NAME=VALUE, one per variable that is set, empty values included) instead of reading the
+# environment. A variable that is not in the list is not read here (the tools it names run after the loop).
+ENV_STATE_VARIABLES = %w[NFCXX_BACKEND NFCXX_PATH NFCXX_IR_OPT NFCXX_EH_UNWIND NFCXX_EHSHIM NFCXX_CACHE NFCXX_CACHE_LOG
+                         NFCXX_CACHE_REMOTE NFCXX_KEEP_INTERMEDIATES NFCXX_TIME_LOG NFCXX_INSTANTIATE NFCXX_PROMOTE_SLOTS
+                         NFCXX_UNROLL NFCXX_STRUCT_SLOTS NFCXX_LD NFCXX_PATHB_C NFCXX_OBFUSCATE_KERNELS NFCXX_DIALECT
+                         NFCXX_TRACE].freeze
+
+# nfcxx's setup, for the variables above: each sets the loop's state the way the bash does (${VAR:-default}, and the
+# tests of the value). env maps a variable name to its value (only the variables that are set); uid is id -u, and it is
+# used only for the default remote-cache directory.
+def apply_environment(state, env, uid, tmpdir)
+  state.backend = env["NFCXX_BACKEND"] if env.key?("NFCXX_BACKEND")
+  state.path_b = 1 if env["NFCXX_PATH"] == "b"
+  if env.key?("NFCXX_IR_OPT")
+    state.ir_opt = env["NFCXX_IR_OPT"]
+    state.ir_opt_set = 1
+  end
+  state.eh_unwind_on = 1 if env["NFCXX_EH_UNWIND"] == "1"
+  state.eh_shim_on = 0 if env["NFCXX_EHSHIM"] == "0"
+  state.cache_dir = env["NFCXX_CACHE"] if env.key?("NFCXX_CACHE")
+  state.cache_log_file = env["NFCXX_CACHE_LOG"] if env.key?("NFCXX_CACHE_LOG")
+  remote = env.fetch("NFCXX_CACHE_REMOTE", "")
+  unless remote.empty? || remote == "gha"
+    raise NfcxxExit.new("nfcxx: NFCXX_CACHE_REMOTE takes gha (got '#{remote}')", 2)
+  end
+  if state.cache_dir.empty? && !remote.empty?
+    base = tmpdir.empty? ? "/tmp" : tmpdir
+    state.cache_dir = "#{base}/nfcxx-cache-#{uid}"
+  end
+  state.keep_intermediates = 1 if env["NFCXX_KEEP_INTERMEDIATES"] == "1"
+  state.time_log = env["NFCXX_TIME_LOG"] if env.key?("NFCXX_TIME_LOG")
+  state.instantiate = env.fetch("NFCXX_INSTANTIATE", "") == "" ? "used" : env["NFCXX_INSTANTIATE"]
+  state.promote_slots = env.fetch("NFCXX_PROMOTE_SLOTS", "") == "" ? "1" : env["NFCXX_PROMOTE_SLOTS"]
+  state.unroll = env.fetch("NFCXX_UNROLL", "") == "" ? "1" : env["NFCXX_UNROLL"]
+  state.struct_slots = env.fetch("NFCXX_STRUCT_SLOTS", "") == "" ? "1" : env["NFCXX_STRUCT_SLOTS"]
+  state.ld_name = env["NFCXX_LD"] if env.key?("NFCXX_LD")
+  state.pathb_c = env["NFCXX_PATHB_C"] if env.key?("NFCXX_PATHB_C")
+  obf = env.fetch("NFCXX_OBFUSCATE_KERNELS", "0")
+  state.obfuscate = obf == "0" || obf == "" ? 0 : 1
+  if env.key?("NFCXX_DIALECT")
+    unless env["NFCXX_DIALECT"].empty?
+      state.dialect = env["NFCXX_DIALECT"]
+      state.dialect_asked = "1"
+    end
+  end
+  state.trace = env["NFCXX_TRACE"] if env.key?("NFCXX_TRACE")
+end
+
 def onoff(flag, value)
   return 1 if value == "on" || value == "1"
   return 0 if value == "off" || value == "0"
@@ -263,15 +312,33 @@ end
 
 def main(argv)
   ld_available = []
-  if argv.first && argv.first.start_with?("--ld-available=")
-    ld_available = argv.shift[15..].split(",")
+  env = {}
+  uid = "0"
+  tmpdir = ""
+  # the configuration first: --ld-available=, --nfcxx-env=NAME=VALUE (repeated), --nfcxx-uid=, --nfcxx-tmpdir=
+  while argv.first && argv.first.start_with?("--ld-available=", "--nfcxx-")
+    option = argv.shift
+    if option.start_with?("--ld-available=")
+      ld_available = option[15..].split(",")
+    elsif option.start_with?("--nfcxx-env=")
+      name, value = option[12..].split("=", 2)
+      env[name] = value.to_s
+    elsif option.start_with?("--nfcxx-uid=")
+      uid = option[12..]
+    elsif option.start_with?("--nfcxx-tmpdir=")
+      tmpdir = option[15..]
+    else
+      raise NfcxxUnported, option
+    end
   end
   argv.each do |a|
     if a == "-fsyntax-only" || a.start_with?("--bundle-") || a.start_with?("--cuda-driver=")
       raise NfcxxUnported, a
     end
   end
-  state = run_loop(argv, LoopState.new, ld_available)
+  state = LoopState.new
+  apply_environment(state, env, uid, tmpdir)
+  state = run_loop(argv, state, ld_available)
   emit(state)
   0
 rescue NfcxxExit => e

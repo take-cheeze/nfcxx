@@ -7,9 +7,17 @@ pass=0; fail=0; skipped=0
 ldav=""
 while IFS= read -r line; do
   case $line in ''|'#'*) continue ;; esac
-  read -r -a args <<< "$line"
-  oracle=$(tests/nfcxx/option-state.sh "${args[@]}" 2>&1)
-  port=$(ruby scripts/nfcxx-loop.rb --ld-available="$ldav" "${args[@]}" 2>&1)
+  read -r -a words <<< "$line"
+  # leading NAME=VALUE words are the environment of the line (the variables nfcxx's setup reads): both sides get them
+  envs=(); args=()
+  for w in "${words[@]}"; do
+    if [ ${#args[@]} -eq 0 ] && [[ $w =~ ^(NFCXX_[A-Z_]+|TMPDIR)= ]]; then envs+=("$w"); else args+=("$w"); fi
+  done
+  nenv=(); for e in "${envs[@]+"${envs[@]}"}"; do nenv+=("--nfcxx-env=$e"); done
+  tmpdir=${TMPDIR-}; for e in "${envs[@]+"${envs[@]}"}"; do case $e in TMPDIR=*) tmpdir=${e#TMPDIR=} ;; esac; done
+  oracle=$(env "${envs[@]+"${envs[@]}"}" tests/nfcxx/option-state.sh "${args[@]}" 2>&1)
+  port=$(ruby scripts/nfcxx-loop.rb --ld-available="$ldav" --nfcxx-uid="$(id -u)" --nfcxx-tmpdir="$tmpdir" \
+           "${nenv[@]+"${nenv[@]}"}" "${args[@]}" 2>&1)
   case $port in
     *"unported: "*) skipped=$((skipped + 1)); echo "skip $line (not ported yet)"; continue ;;
   esac

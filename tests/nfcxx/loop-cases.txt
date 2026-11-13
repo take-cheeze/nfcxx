@@ -57,3 +57,35 @@ a.cpp b.o c.a d.so -rdynamic
 -O3 -g -fopenmp a.cpp
 -c a.cu b.cpp2 c.c d.o
 -c a.cu -o b.o
+NFCXX_BACKEND=qbe -c a.cpp
+NFCXX_BACKEND= -c a.cpp
+NFCXX_BACKEND=pathb -c a.cpp --backend=gcc
+NFCXX_PATH=b -c a.cpp
+NFCXX_PATH=c -c a.cpp
+NFCXX_IR_OPT=inline,sroa -c a.cpp
+NFCXX_IR_OPT= -c a.cpp
+NFCXX_EH_UNWIND=1 -c a.cpp
+NFCXX_EH_UNWIND=0 -c a.cpp
+NFCXX_EHSHIM=0 -c a.cpp
+NFCXX_EHSHIM=1 -c a.cpp
+NFCXX_CACHE=/tmp/c -c a.cpp
+NFCXX_CACHE_LOG=/tmp/l -c a.cpp
+NFCXX_CACHE_REMOTE=gha TMPDIR=/tmp -c a.cpp
+NFCXX_CACHE_REMOTE=gha NFCXX_CACHE=/tmp/c -c a.cpp
+NFCXX_CACHE_REMOTE=bogus -c a.cpp
+NFCXX_CACHE_REMOTE= -c a.cpp
+NFCXX_KEEP_INTERMEDIATES=1 -c a.cpp
+NFCXX_KEEP_INTERMEDIATES=yes -c a.cpp
+NFCXX_TIME_LOG=t.json -c a.cpp
+NFCXX_INSTANTIATE=auto -c a.cpp
+NFCXX_INSTANTIATE= -c a.cpp
+NFCXX_PROMOTE_SLOTS=off NFCXX_UNROLL=0 NFCXX_STRUCT_SLOTS= -c a.cpp
+NFCXX_LD=gold -c a.cpp
+NFCXX_PATHB_C=gcc -c a.c
+NFCXX_OBFUSCATE_KERNELS=1 -c a.cu
+NFCXX_OBFUSCATE_KERNELS=0 -c a.cu
+NFCXX_OBFUSCATE_KERNELS= -c a.cu
+NFCXX_DIALECT=clang -c a.cpp
+NFCXX_DIALECT= -c a.cpp
+NFCXX_TRACE=t.json -c a.cpp
+NFCXX_BACKEND=qbe NFCXX_PATH=b NFCXX_EHSHIM=0 NFCXX_CACHE=/tmp/c --backend=pathb -c a.cpp
