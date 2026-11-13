@@ -5922,6 +5922,44 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
         zend = uoff + unit;
       }
     }
+    /* The padding of a C struct (C only: the C++ goldens predate it) (between members and after the last one) is zero too: a constant that is copied as a whole
+       (`static const struct S z = {...}; *p = z;`, with the object replaced by its initializer) copies the padding bytes,
+       and a union over the struct (mruby's RVALUE: a header, then `char padding[24]` that stops 4 bytes short of the
+       union's end) has live members there. The gaps are the bytes no member (or bit-field unit) covers. */
+    if (C_mode() && s->kind == tk_struct && n > 0) {
+      unsigned long long iv[2 * IR_MAX_MEMBERS][2];
+      int ni = 0, a, b;
+      unsigned long long end = 0, size = ir_size_of(t);
+      for (a = 0; a < n; a++) {
+        unsigned long long s0 = mem[a].off, e0;
+        unsigned unit = 0, boff = 0;
+        if (mem[a].bf != NULL) {
+          if (!ir_bf_layout(mem[a].bf, size, &s0, &unit, &boff)) { ni = -1; break; }
+          e0 = s0 + unit;
+        } else {
+          e0 = s0 + ir_size_of(mem[a].t);
+        }
+        if (e0 > s0) { iv[ni][0] = s0; iv[ni][1] = e0; ni++; }
+      }
+      for (a = 1; a < ni; a++) {   /* insertion sort by start */
+        unsigned long long k0 = iv[a][0], k1 = iv[a][1];
+        for (b = a - 1; b >= 0 && iv[b][0] > k0; b--) { iv[b + 1][0] = iv[b][0]; iv[b + 1][1] = iv[b][1]; }
+        iv[b + 1][0] = k0; iv[b + 1][1] = k1;
+      }
+      for (a = 0; a < ni; a++) {
+        if (iv[a][0] > end && !ir_zero_bytes(dst.s, end, iv[a][0] - end, ir_align_of(t))) {
+          ir_note(4, dik_constant, 0);
+          ir_emit("(unsupported init zero-aggregate)");
+          return;
+        }
+        if (iv[a][1] > end) end = iv[a][1];
+      }
+      if (ni > 0 && end < size && !ir_zero_bytes(dst.s, end, size - end, ir_align_of(t))) {
+        ir_note(4, dik_constant, 0);
+        ir_emit("(unsupported init zero-aggregate)");
+        return;
+      }
+    }
     /* A designated list (`(struct xa_limit){ .max = M, .min = 2 }` kept as a constant of a static or a constant
        initializer: lowering leaves a designator in front of the value of the member it names). The members it does not
        name are zero, so the object is zeroed first, and each designator moves the current member. */

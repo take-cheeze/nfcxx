@@ -2508,7 +2508,7 @@ end
         end
       end
       if nfixed
-        # (variadic N) counts the hidden result pointer of an (sret ...) argument, which QBE passes itself (not in args).
+        # (variadic N) counts the hidden result pointer among the leading arguments (be/nfcxx_ir.c); `args` does not hold it.
         nfixed -= 1 if sret
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 

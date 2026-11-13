@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Real-world check: build mruby (MIT, C99 VM and compiler) with its own rake build, with nfcc as the C compiler
 # and linker, and run the resulting `mruby`. The source is cloned into build/realworld/mruby, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
 #   MRUBY_CONTROL=1         also build with plain host gcc first, as a control (about a minute)
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
-# Needs ruby and rake (apt-get install ruby). The QBE build needs a cproc built with
-# cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-asan-combined) (re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
-# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) refuses mruby's tools/mrbc/mrbc.c
-# ("SSA route: pathb-ssa-build: not emitted: parse_args: operator unsupported"), so the rake build stops in its first step; the suite stays on qbe.
+# Needs ruby and rake (apt-get install ruby). The qbe build (NFCXX_BACKEND=qbe) needs a cproc built with cproc-vaarg-aggregate (a commit on
+# take-cheeze/cproc branch nfcxx-asan-combined; re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, 2026-04-20 (newest non-rc tag)
@@ -26,7 +24,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL mruby: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 [ -z "${MRUBY_CONTROL:-}" ] || backends="control $backends"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp "$root/tests/realworld/mruby_build_config.rb" "$tmp/build_config.rb"   # mruby writes a .lock file next to its config
