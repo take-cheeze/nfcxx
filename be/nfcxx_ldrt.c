@@ -707,3 +707,27 @@ void _mm_pause(void) { nfcxx_mm_pause(); }
 /* a C++ caller names the mangled symbol (the header's function is in the C++ namespace, _Z9_mm_pausev) */
 __asm__(".globl _Z9_mm_pausev\n.set _Z9_mm_pausev, nfcxx_mm_pause");
 #endif
+
+/* __builtin_cpu_init() and __builtin_cpu_supports("feature") (x86; be/nfcxx_ir.c ir_builtin_call): the IR has no libgcc __cpu_model
+   to read, so the call goes to these helpers, which ask the host compiler's own built-ins (cpuid through libgcc). The feature
+   names are the ones gcc has accepted since version 6 (the argument is a string literal for gcc, a runtime string here); a name
+   not listed reads as absent. Where the host is not x86 the answer is always 0. */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__) && !defined(__clang__)
+void __nfcxx_cpu_init(void) { __builtin_cpu_init(); }
+int __nfcxx_cpu_supports(const char *name)
+{
+#define NFCXX_CPU_FEATURE(f) if (strcmp(name, f) == 0) return __builtin_cpu_supports(f) != 0;
+  __builtin_cpu_init();
+  NFCXX_CPU_FEATURE("cmov") NFCXX_CPU_FEATURE("mmx") NFCXX_CPU_FEATURE("popcnt") NFCXX_CPU_FEATURE("sse")
+  NFCXX_CPU_FEATURE("sse2") NFCXX_CPU_FEATURE("sse3") NFCXX_CPU_FEATURE("ssse3") NFCXX_CPU_FEATURE("sse4.1")
+  NFCXX_CPU_FEATURE("sse4.2") NFCXX_CPU_FEATURE("avx") NFCXX_CPU_FEATURE("avx2") NFCXX_CPU_FEATURE("sse4a")
+  NFCXX_CPU_FEATURE("fma4") NFCXX_CPU_FEATURE("xop") NFCXX_CPU_FEATURE("fma") NFCXX_CPU_FEATURE("avx512f")
+  NFCXX_CPU_FEATURE("bmi") NFCXX_CPU_FEATURE("bmi2") NFCXX_CPU_FEATURE("aes") NFCXX_CPU_FEATURE("pclmul")
+  NFCXX_CPU_FEATURE("avx512vl") NFCXX_CPU_FEATURE("avx512bw") NFCXX_CPU_FEATURE("avx512dq") NFCXX_CPU_FEATURE("avx512cd")
+#undef NFCXX_CPU_FEATURE
+  return 0;
+}
+#else
+void __nfcxx_cpu_init(void) {}
+int __nfcxx_cpu_supports(const char *name) { (void)name; return 0; }
+#endif

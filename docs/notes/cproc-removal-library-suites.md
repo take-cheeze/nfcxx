@@ -16,8 +16,9 @@ A case that does not work on Path B stays on qbe and carries a `QBE-ONLY: <reaso
 | tests/realworld/run_sdcc.sh | unchanged | not run on Path B (needs flex and boost in the session that did this) |
 | tests/sqlite/run.sh | gcc, Path B | none |
 | tests/poly/run.sh (+ setup-poly*.sh) | qbe, gcc | C libraries (mruby, Lua, QuickJS) refused as above; `ops.cpp` aborts (double free) on Path B |
-| tests/ast/run.sh | qbe, gcc | engine.cpp aborts in "inlining of small functions" on Path B |
-| tests/uop/run.sh, run_poly.sh | qbe, gcc | lib/uop builds on Path B now (no more phi error); `test.cpp` overflows the stack (6 KB frames, no stack-slot sharing), `test_layout_avx2.cpp`: `main: operator unsupported` |
+| tests/ast/run.sh | gcc, Path B | none (`inline_loops` needs 3.2 MB of its 8 MB stack on Path B now, 4.7 MB before the frame work below) |
+| tests/uop/run.sh | gcc, Path B | none (`test_layout_avx2.cpp` asked for `__builtin_cpu_supports`, which is lowered now) |
+| tests/uop/run_poly.sh | qbe, gcc | its mruby, Lua and QuickJS builds are the C libraries of tests/poly (refused as above) |
 | tests/int128, tests/sret, tests/determinism | Path B (+ gcc for sret) | none |
 | tests/float-to-int | Path B | `classify.c`: `__builtin_fpclassify` ignores its five class arguments |
 | tests/long-double-abi | qbe | both directions: Path B refuses a variadic call with a long double argument |
