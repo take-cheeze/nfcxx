@@ -622,6 +622,10 @@ module Qbe
               @empty_bufs << "%ebuf#{i}"
             else
               # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
+              if even_pad?(info, @ints)
+                sig << "l %ppad#{i}"   # the register AAPCS64 skips before the 16-byte aligned aggregate (even_pad?)
+                @ints += 1
+              end
               sig << "#{info.tn} %p#{p[1][1..]}"
               @ints += info.ints || 0
               @ints_unknown ||= info.ints.nil?
@@ -693,6 +697,15 @@ module Qbe
       raise QbeUnsupported, "#{what} by value: #{info.why}" if info.shape == "unsupported"
 
       info
+    end
+
+    # AArch64 (AAPCS64 C.8): an aggregate with 16-byte alignment that is passed in integer registers starts at an even one,
+    # so a call or a definition with `ints` integer registers used before it skips one. QBE's arm64 ABI does skip it, but
+    # leaves the skipped register live through the call (spill.c: the register set at a block end is not rglob, an assertion).
+    # The emitter takes the skipped register itself instead: a zero integer argument before the aggregate, and an unused
+    # integer parameter before it in the definition. The aggregate then starts at the same register AAPCS64 gives it.
+    def even_pad?(info, ints)
+      Qbe.aarch64 && info.shape == "leaves" && info.align == 16 && info.ints.to_i > 0 && ints.odd? && ints + info.ints <= 8
     end
 
     def allocs
@@ -2521,6 +2534,7 @@ end
       dest = nil
       hdest = nil     # the result object of a hidden-result call (AArch64): passed last, in x8 through a thunk
       ints = 0        # integer argument registers of the arguments (the hidden result's register follows them)
+      pad_slots = []  # the positions in args of the integer padding arguments (even_pad?)
   ints_unknown = false
       args = []
       nfixed = nil
@@ -2540,6 +2554,14 @@ end
           info = aggregate_info(a[1], "passed")
           # An empty class is passed as nothing (its argument is dropped, as the callee does not take it).
           unless info.shape == "empty"
+            if even_pad?(info, ints)
+              # the register AAPCS64 skips before the 16-byte aligned aggregate (even_pad?); a variadic call on Darwin passes
+              # the aggregate on the stack (no register is skipped there), so the pad is refused in that case
+              raise QbeUnsupported, "variadic call on Darwin with a 16-byte aligned aggregate after an odd number of integer arguments" if nfixed && Qbe.darwin
+              pad_slots << args.size
+              args << "l 0"
+              ints += 1
+            end
             args << "#{info.tn} #{op(a[2])}"
             ints += info.ints || 0
             ints_unknown ||= info.ints.nil?
@@ -2557,6 +2579,8 @@ end
         nfixed -= 1 if sret || hdest
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 
+        # a padding argument before the "..." boundary is a named argument: the boundary moves past it
+        pad_slots.each { |sl| nfixed += 1 if sl < nfixed }
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
