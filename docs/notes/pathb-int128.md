@@ -59,7 +59,10 @@ EDG prints an integer constant in decimal or in hex (`0x...`) with a `-` for a n
 - **Division and remainder** call the same functions gcc calls (`__divti3`, `__modti3`, `__udivti3`, `__umodti3`), so
   `INT128_MIN / -1` wraps to `INT128_MIN` and a zero divisor dies the way gcc's program does: SIGFPE for a divisor known
   only at run time (gcc at -O0 and gcc's own libgcc give 136). A literal zero divisor is folded by gcc at -O2 into `ud2`
-  (SIGILL), which Path B does not reproduce; that is gcc's optimizer, not its semantics.
+  (SIGILL), which Path B does not reproduce; that is gcc's optimizer, not its semantics. On Linux aarch64 there is no trap:
+  the hardware divides by zero without one, libgcc's `__divti3` returns 0, and gcc's program exits 0 too (at -O0 and -O2).
+  Path B does the same; `traps/int128_div_zero.cpp` carries `// TRAP-SKIP-AARCH64:` and the runner checks that the exit
+  status matches gcc's build instead.
 - **Shifts** abort when the count is negative or not below 128 (the IR's `cshl`/`cshr` rule for every integer type). gcc
   leaves this undefined; the abort is the Path B choice.
 - **Conversions from floating types** truncate toward zero, like gcc, and **abort** on a NaN or a value outside the
@@ -107,6 +110,6 @@ it touches (the emitter places each bit at its absolute position; `ir_gi_i128_bi
 | `tests/pathb-qbe/cases/int128_misc.cpp` | switch (negative labels, values outside 64 bits, fallthrough, nested switch), exceptions carrying a 128-bit value, variadic calls, `std::function`, `std::sort` of 128-bit values |
 | `tests/pathb-qbe/cases/int128_atomic.cpp` | `std::atomic<__int128>` and `<unsigned __int128>` (self-checking, not compared with gcc) |
 | `tests/pathb-qbe/multi/abi_i128/` | the C ABI both ways: `__int128` arguments in registers and on the stack, results in rax:rdx, a struct of one 128-bit member, a 48-byte struct in memory; `c.c` built by cc |
-| `tests/pathb-qbe/traps/int128_div_zero.cpp` | division by a zero divisor known at run time dies with SIGFPE (136), as gcc's |
+| `tests/pathb-qbe/traps/int128_div_zero.cpp` | division by a zero divisor known at run time dies with SIGFPE (136), as gcc's (x86-64; not applicable on aarch64, see above) |
 | `tests/pathb-qbe/traps/int128_float_range.cpp` | a float out of the 128-bit range aborts |
 | `tests/pathb-ir/eval_order_calls.ir` | golden: the lowering of the `__uint128_t` numeric limits and static initializer |
