@@ -10,11 +10,13 @@
 #   compiled the library sources src/format.cc and src/os.cc are #included at the end of the program
 #            (-DFMT_COMPILED_UNITY), so the non-header-only configuration (extern templates, explicit
 #            instantiations, fmt::output_file on POSIX) is built without a second translation unit.
-#   NFCXX_BACKEND=gcc|qbe   (default: gcc)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc and pathb)
 #   FMT_MODES="header compiled"   (default: both)
-# Decision: {fmt} is checked on the gcc backend only. Its floating-point formatting needs `unsigned __int128`
-# (dragonbox / Grisu) and `long double`, neither of which cproc/QBE has (docs/notes/realworld.md), so asking for
-# qbe prints a skip with that reason. FMT_QBE=1 tries it anyway.
+# Decision: {fmt} is checked on the gcc backend and on Path B (nfcxx's own IR -> SSA -> QBE, NFCXX_BACKEND=pathb). Path B builds
+# it since the lowering of __builtin_ia32_addcarryx_u64 (detail::uint128_fallback::operator+=; tests/cases/builtin_addcarry.cpp).
+# The qbe backend (cproc) stays out: the floating-point formatting needs `unsigned __int128` (dragonbox / Grisu) and `long
+# double`, neither of which cproc has (docs/notes/realworld.md), so asking for qbe prints a skip with that reason. FMT_QBE=1
+# tries it anyway.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=1be298e1bd68957e4cd352e1f676f00e07dcfb57   # fmtlib/fmt tag 12.2.0
@@ -28,9 +30,7 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL fmt: checkout $pin failed"; exit 1; }
 
-# Path B (NFCXX_BACKEND=pathb) does not build fmt yet: the SSA route refuses fmt_main.cpp ("not emitted:
-# _ZN3fmt3v126detail7uint128pLEm: operator unsupported", detail::uint128_fallback::operator+=), so the default stays gcc.
-backends=${NFCXX_BACKEND:-gcc}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 modes=${FMT_MODES:-"header compiled"}
 main=$root/tests/realworld/fmt_main.cpp
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

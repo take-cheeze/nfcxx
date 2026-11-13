@@ -123,6 +123,7 @@ pp=()        # preprocessor options (-D -I -std ...), given to cc -E / cc -M and
 ld=()        # link options, in order
 inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
 picf=()
+pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc --pic)
 dts=()       # -MT / -MQ pairs
 dp=0
 asm=0        # -S
@@ -242,7 +243,8 @@ for ((i = 0; i < n; i++)); do
     -l|-L) need; ld+=("$a" "${args[++i]}") ;;
     -l?*|-L?*) ld+=("$a") ;;
     -Xlinker|-z|-u|-T) need; ld+=("$a" "${args[++i]}") ;;
-    -Wl,*|-shared|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
+    -shared) pathb_pic=1; ld+=("$a") ;;
+    -Wl,*|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
     -Wp,*) wp_option "$a" ;;
     -Wa,*) asf+=("$a") ;;
     -w|-W*) ;;
@@ -253,7 +255,8 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
-    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
+    -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
+    -fPIE|-fpie) ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
     -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
@@ -339,6 +342,7 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
   # EDG's gcc mode defines __STRICT_ANSI__ in every C standard, which makes glibc hide POSIX (struct stat's st_atim, ...). gcc's
   # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
   [ $pb_gnu = 0 ] || pb_opts=(-D_DEFAULT_SOURCE "${pb_opts[@]+"${pb_opts[@]}"}")
+  [ $pathb_pic = 0 ] || pb_opts+=(--pic)   # -fPIC: the object goes into a shared object (scripts/pathb-ssa-qbe.rb, Qbe.pic)
   if [ $wchar16 = 1 ]; then
     # -fshort-wchar: the headers' wchar_t is unsigned short (pathb-dump), but EDG types a wide literal as the target's int, so a unit that
     # has one goes to gcc. The host preprocessor (same options) shows the literals of the headers and macros too.
