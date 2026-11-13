@@ -58,3 +58,13 @@ Check at the end: `grep -rIl 'cproc\|qbe-cc\|qbe-prep'` outside `docs/` and git 
 3. Flip `nfcc` and move the third-party C builds; remove their cproc workarounds.
 4. Path B (or gcc) on non-x86-64 hosts, so that no default selects qbe.
 5. When no default, no CI leg and no test needs it, delete the files above in one PR and run the check at the top.
+
+## aarch64 (Linux arm64) status
+
+- Done: the default driver is Path B on every host; the `arm64 cases` CI leg runs `NFCXX_BACKEND=pathb tests/run.sh` (and gcc on main), verified on Linux aarch64 (56 ok both ways).
+- Still on cproc on arm64, and why each cannot move yet (checked on Linux aarch64 with `NFCXX_BACKEND=pathb`):
+  - `tests/lib` and `tests/target` (freestanding): Path B takes freestanding programs only on x86-64 Linux, so the suite cannot run there.
+  - `tests/c` (6 failures: `attr_section_more.c`, `attr_section_used.c`, `gnu_weak_alias.c` (undefined `do_sys`), `init_self_ref.c` (assembler), `ldouble_ops.c` (long double), `va_struct.c`).
+  - `tests/c/cc-mode.sh`: `pathb-cc` does not take `-isystem`; `tests/trace` lacks the `eccp` span on the gcc route.
+  - `tests/builtins` and `tests/determinism` pass on Path B; their default backend list stays until the freestanding suites move.
+  - The `macOS arm64 (qbe backend)` leg is unchanged: it needs a Path B run on macOS CI first (no macOS host here).

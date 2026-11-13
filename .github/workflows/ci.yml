@@ -250,7 +250,9 @@ jobs:
         include:
           - name: cases (QBE and gcc backends)
             run: |
-              NFCXX_BACKEND=qbe tests/run.sh
+              # Path B, not cproc: the default driver is Path B on every host (docs/notes/pathb-default.md). The name is kept
+              # so a required check of this name does not disappear.
+              NFCXX_BACKEND=pathb tests/run.sh
               if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
           # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism
