@@ -228,7 +228,7 @@ static void threads_not_chosen_for_small_work() {
 
 static void avx512_packed_chosen() {
   // AVX-512 target: 16 lanes, 32-column tiles. M = 504, N = 512, K = 512 (504 % 6 == 0, 512 % 32 == 0). fma = 504*512*512/16
-  // = 8257536, packed at 0.18 is 1486356.48. B in Panel (512*512 at 2/16 = 32768). Row sum horizontal: 504*512/16 + 8*504
+  // = 8257536, packed at 0.24 is 1981808.64. B in Panel (512*512 at 2/16 = 32768). Row sum horizontal: 504*512/16 + 8*504
   // = 16128 + 4032. Only the packed variant exists on this target.
   F32Target t = avx512_f32();
   Solution s = solve(gemm_rowsum(504, 512, 512, t));
@@ -238,7 +238,7 @@ static void avx512_packed_chosen() {
   CHECK(s.variant[1] == "reduce-horizontal");
   CHECK(s.storage.at("B") == Storage::Panel);
   CHECK(std::fabs(s.storage_cost - 32768.0) < 1e-6);
-  CHECK(std::fabs(s.cost - (8257536.0 * 0.18 + 32768.0 + 20160.0)) < 1e-3);
+  CHECK(std::fabs(s.cost - (8257536.0 * 0.24 + 32768.0 + 20160.0)) < 1e-3);
   CHECK(gemm_rowsum(504, 512, 512, t).ops[0].variants.size() == 1);
 }
 

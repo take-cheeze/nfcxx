@@ -145,6 +145,9 @@ F32Target avx512_f32() {
   t.transpose_instr_per_elem = 0.25;   // a 16x16 transpose is 64 unpack and shuffle instructions on 256 elements (not used)
   t.hsum_instr_per_row = 8.0;          // reduce_add of one zmm (assumed; not measured)
   t.panel_instr_per_elem = 2.0 / 16.0; // one load and one store per zmm
+  // Measured on this host at 504 x 512 x 512, one thread: the packed kernel 1901 us, a naive AVX-512 kernel (no packing,
+  // no register blocking, B read per k) 7790 to 8229 us. Ratio 0.23 to 0.25; 0.24 is the middle of it.
+  t.register_blocked_fma_factor = 0.24;
   return t;
 }
 

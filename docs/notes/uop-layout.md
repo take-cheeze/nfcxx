@@ -378,9 +378,11 @@ Which constants are what:
 
 - Set from the instruction set: 16 lanes, the 32-column tile, panel copy at 2/16 per element (one load and one store per zmm).
 - Assumed, not measured: the 16-lane horizontal sum at 8 instructions per row.
-- Carried over from AVX2 and not measured on AVX-512: the strided and blocked penalties, and the register-blocking
-  factor (0.18). The factor compares against a naive AVX-512 kernel that the emitters do not have, so it cannot be
-  fitted yet. The AVX-512 plan's choice of the packed kernel rests on it, as the AVX2 one does.
+- Measured on AVX-512: the register-blocking factor, 0.24. At 504 x 512 x 512, one thread, the packed kernel took
+  1901 us and a naive AVX-512 kernel 7790 to 8229 us (two runs, ratio 0.23 to 0.25). The naive kernel was a scratch
+  file (N-vectorized, B read per k, no packing), not one of the emitters, so it is a comparison in spirit with the AVX2
+  one (VecN, 0.18), not the same code.
+- Carried over from AVX2 and not measured on AVX-512: the strided and blocked penalties.
 
 Plans on both targets now exclude the pairs the emitters do not produce (`Problem::incompatible`): the packed kernels
 with the vertical row sum, VecN with the vertical sum, and VecM with the horizontal one. Without this, at the smallest

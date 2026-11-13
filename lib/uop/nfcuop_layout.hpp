@@ -68,10 +68,10 @@ struct F32Target {
 // The AVX2 name of the target description, kept for the existing code and tests.
 using Avx2F32 = F32Target;
 
-// The AVX-512 target: zmm, 16 floats, 32-column tiles. Only the instruction counts that follow from the instruction set
-// are set here: the 16-lane horizontal sum (8 instructions, assumed) and the transpose (not used, as VecM is AVX2 only).
-// The storage penalties and the register-blocking factor are the AVX2 measurements, carried over and NOT measured on
-// AVX-512; docs/notes/uop-layout.md says so.
+// The AVX-512 target: zmm, 16 floats, 32-column tiles. The instruction counts follow from the instruction set (the
+// 16-lane horizontal sum is 8 instructions, assumed; the transpose is not used, as VecM is AVX2 only). The register-
+// blocking factor (0.24) is measured on AVX-512 against a naive kernel. The storage penalties are the AVX2 measurements,
+// carried over and NOT measured on AVX-512; docs/notes/uop-layout.md says so.
 F32Target avx512_f32();
 
 struct Tensor {
