@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# DECLARED_CALLSITE_CONTRADICTION (TC1017): an RBS parameter declaration (Integer / Float / `T?` / a program class)
+# DECLARED_CALLSITE_CONTRADICTION (TC1018): an RBS parameter declaration (Integer / Float / `T?` / a program class)
 # that a call site provably contradicts is a type-check error: the entry guard (DECLARED_PARAM_GUARD) would raise
 # BC2cppDeclarationViolation there. A site that only MAY pass another class is silent. Generated end to end through
 # type_check's analysis on a fixture program with its own signature (no mruby build).
@@ -128,7 +128,7 @@ diagnostics = Dir.mktmpdir('declared_callsite') do |dir|
                      sends: false, sig_dirs: [sig], display_root: dir)
   end
   facts = JSON.parse(File.read(result.facts_path))
-  TypeCheckReport.diagnostics(facts, []).select { |d| d.code == 'TC1017' }
+  TypeCheckReport.diagnostics(facts, []).select { |d| d.code == 'TC1018' }
 end
 
 lines = diagnostics.map(&:message)

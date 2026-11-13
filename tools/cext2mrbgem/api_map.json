@@ -1,18 +1,54 @@
 {
-  "_comment": "CRuby -> mruby API map for convert_mrbgem.py. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
+  "_comment": "CRuby -> mruby API map for convert_mrbgem.rb. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
   "types": {
     "VALUE": "mrb_value",
     "ID": "mrb_sym"
   },
+  "type_check_refused": {
+    "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
+    "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
+    "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
+    "T_FIXNUM": "mruby has one integer tag (MRB_TT_INTEGER, include/mruby/value.h:144); CRuby's Fixnum range is not mruby's integer range, and mruby's bignum tag is MRB_TT_BIGINT (value.h:165)",
+    "T_BIGNUM": "mruby's bignum tag MRB_TT_BIGINT (include/mruby/value.h:165) is chosen by mruby's integer width, not CRuby's Fixnum/Bignum boundary, so the tags do not select the same values",
+    "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:245-248; mrb_nil_p tells them apart by value), so a type check cannot tell nil from false",
+    "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:245-248) also matches nil, which CRuby reports as T_NIL",
+    "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (value.h:251) is true only, so it can be added as its own change",
+    "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF is a separate value kind",
+    "T_STRUCT": "mruby's MRB_TT_STRUCT (include/mruby/value.h:160) is not documented as the type of Struct instances, so the match is not verified",
+    "T_REGEXP": "mruby has no core Regexp type tag (none in include/mruby/value.h:138-167), so there is no fixed tag to compare with",
+    "T_RATIONAL": "mruby's MRB_TT_RATIONAL (include/mruby/value.h:164) is a gem type; the match with CRuby's Rational is not verified",
+    "T_COMPLEX": "mruby's MRB_TT_COMPLEX (include/mruby/value.h:163) is a gem type; the match with CRuby's Complex is not verified"
+  },
   "includes": {
-    "ruby.h": [
-      "mruby.h",
-      "mruby/string.h",
-      "mruby/numeric.h"
-    ],
-    "ruby/thread.h": [
-      "nfcx_uv_thread.h"
-    ]
+    "ruby.h": {
+      "headers": [
+        "mruby.h",
+        "mruby/string.h",
+        "mruby/numeric.h"
+      ]
+    },
+    "ruby/ruby.h": {
+      "headers": [
+        "mruby.h",
+        "mruby/string.h",
+        "mruby/numeric.h"
+      ]
+    },
+    "ruby/re.h": {
+      "headers": [
+        "mruby/re.h"
+      ]
+    },
+    "ruby/thread.h": {
+      "headers": [
+        "nfcx_uv_thread.h"
+      ],
+      "quoted": true,
+      "comment": "thread model on mruby-uv",
+      "config_macro": "HAVE_RUBY_THREAD_H",
+      "config_comment": "thread model is on",
+      "caveat": "thread API modelled on mruby-uv"
+    }
   },
   "entries": {
     "rb_define_module": {
@@ -176,12 +212,14 @@
       "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
     },
     "Check_Type": {
-      "kind": "refuse",
-      "reason": "type-check macro not in the supported subset"
+      "kind": "special",
+      "handler": "check_type",
+      "needs_mrb": true
     },
     "rb_check_type": {
-      "kind": "refuse",
-      "reason": "type-check function not in the supported subset"
+      "kind": "special",
+      "handler": "check_type",
+      "needs_mrb": true
     },
     "rb_gc_register_address": {
       "kind": "refuse",
@@ -450,39 +488,48 @@
     },
     "T_STRING": {
       "kind": "expr",
-      "mruby": "MRB_TT_STRING"
+      "mruby": "MRB_TT_STRING",
+      "type_check": "exact"
     },
     "T_ARRAY": {
       "kind": "expr",
-      "mruby": "MRB_TT_ARRAY"
+      "mruby": "MRB_TT_ARRAY",
+      "type_check": "exact"
     },
     "T_HASH": {
       "kind": "expr",
-      "mruby": "MRB_TT_HASH"
+      "mruby": "MRB_TT_HASH",
+      "type_check": "exact"
     },
     "T_OBJECT": {
       "kind": "expr",
-      "mruby": "MRB_TT_OBJECT"
+      "mruby": "MRB_TT_OBJECT",
+      "caveat": "CRuby T_OBJECT also covers exception objects, which mruby types as MRB_TT_EXCEPTION (src/error.c:42); RB_TYPE_P and Check_Type do not match them, so T_OBJECT is refused in both"
     },
     "T_CLASS": {
       "kind": "expr",
-      "mruby": "MRB_TT_CLASS"
+      "mruby": "MRB_TT_CLASS",
+      "caveat": "mruby types singleton classes as MRB_TT_SCLASS (src/class.c:371) and CRuby reports them as T_CLASS, so T_CLASS is refused in both RB_TYPE_P and Check_Type"
     },
     "T_MODULE": {
       "kind": "expr",
-      "mruby": "MRB_TT_MODULE"
+      "mruby": "MRB_TT_MODULE",
+      "type_check": "exact"
     },
     "T_FLOAT": {
       "kind": "expr",
-      "mruby": "MRB_TT_FLOAT"
+      "mruby": "MRB_TT_FLOAT",
+      "type_check": "exact"
     },
     "T_SYMBOL": {
       "kind": "expr",
-      "mruby": "MRB_TT_SYMBOL"
+      "mruby": "MRB_TT_SYMBOL",
+      "type_check": "exact"
     },
     "T_DATA": {
       "kind": "expr",
       "mruby": "MRB_TT_CDATA",
+      "type_check": "caveat",
       "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
     },
     "rb_global_variable": {
@@ -521,6 +568,46 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
+    },
+    "rb_str_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_obj_freeze freezes any object; CRuby's rb_str_freeze takes a String"
+    },
+    "rb_str_append": {
+      "kind": "call",
+      "mruby": "mrb_str_append",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no encoding compatibility check (mruby has no encodings); CRuby raises Encoding::CompatibilityError for incompatible encodings"
+    },
+    "rb_str_resize": {
+      "kind": "call",
+      "mruby": "mrb_str_resize",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_assoc_new": {
+      "kind": "call",
+      "mruby": "mrb_assoc_new",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_dup": {
+      "kind": "call",
+      "mruby": "mrb_hash_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_array_len": {
+      "kind": "macro",
+      "mruby": "RARRAY_LEN"
+    },
+    "RFLOAT_VALUE": {
+      "kind": "macro",
+      "mruby": "mrb_float"
     },
     "rb_obj_freeze": {
       "kind": "call",
@@ -700,6 +787,119 @@
       "needs_mrb": false,
       "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_UNLIKELY"
     },
+    "rb_class2name": {
+      "kind": "call",
+      "mruby": "mrb_class_name",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby first skips singleton and include classes (rb_class_real); mrb_class_name does not. An anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive)"
+    },
+    "rb_define_alias": {
+      "kind": "call",
+      "mruby": "mrb_define_alias",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the class is a struct RClass * (as rb_undef_method): a class variable is passed unwrapped, and a VALUE there would not type-check. Names are C strings with the new name first (as in CRuby); the original must exist, as in CRuby (NameError)"
+    },
+    "rb_undef_method": {
+      "kind": "call",
+      "mruby": "mrb_undef_method",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the first argument is a struct RClass *, not a VALUE; a class variable there is passed unwrapped (special_arg_positions_class_only)"
+    },
+    "SYM2ID": {
+      "kind": "call",
+      "mruby": "mrb_symbol",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
+    },
+    "T_TRUE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_TRUE"
+    },
+    "T_FALSE": {
+      "kind": "expr",
+      "mruby": "MRB_TT_FALSE",
+      "caveat": "mruby's nil also has type MRB_TT_FALSE (mrb_nil_p tells them apart by value), so this matches nil, which CRuby reports as T_NIL; RB_TYPE_P(x, T_FALSE) stays refused for this reason"
+    },
+    "RUBY_T_STRING": {
+      "kind": "expr",
+      "mruby": "MRB_TT_STRING"
+    },
+    "RUBY_T_SYMBOL": {
+      "kind": "expr",
+      "mruby": "MRB_TT_SYMBOL"
+    },
+    "RUBY_T_FIXNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_INTEGER",
+      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+    },
+    "T_FIXNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_INTEGER",
+      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+    },
+    "rb_eIndexError": {
+      "kind": "expr",
+      "mruby": "E_INDEX_ERROR",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "rb_eRangeError": {
+      "kind": "expr",
+      "mruby": "E_RANGE_ERROR",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "rb_eNoMemError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"NoMemoryError\")",
+      "needs_mrb": true
+    },
+    "rb_warn": {
+      "kind": "call",
+      "mruby": "mrb_warn",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "prints on every call; CRuby's rb_warn is silent when $VERBOSE is nil. Output is 'warning: ' and the message on stderr, with no file or line; PRIsVALUE is not supported"
+    },
+    "rb_sys_fail": {
+      "kind": "call",
+      "mruby": "mrb_sys_fail",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "raises SystemCallError (with the errno) only when mruby-errno defines it; otherwise RuntimeError with the message, which mruby does not allow to be NULL"
+    },
+    "rb_obj_classname": {
+      "kind": "call",
+      "mruby": "mrb_obj_classname",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "an anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive), as for rb_class2name"
+    },
+    "rb_sym2id": {
+      "kind": "call",
+      "mruby": "mrb_symbol",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
+    },
+    "rb_warning": {
+      "kind": "call",
+      "mruby": "mrb_warn",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "prints on every call: CRuby's rb_warning prints only in verbose mode ($VERBOSE true), and rb_warn always prints. Output is 'warning: ' and the message on stderr, with no file or line; PRIsVALUE is not supported"
+    },
+    "rb_gc_location": {
+      "kind": "strip",
+      "mruby": "",
+      "needs_mrb": false,
+      "caveat": "identity: mruby's collector never moves objects (no relocation API in include/ or src/gc.c), so the location is the value itself; the argument stays in parentheses"
+    },
     "RB_TYPE_P": {
       "kind": "special",
       "handler": "type_p",
@@ -728,6 +928,15 @@
     ],
     "rb_define_class": [
       1
+    ],
+    "rb_class2name": [
+      0
+    ],
+    "rb_define_alias": [
+      0
+    ],
+    "rb_undef_method": [
+      0
     ]
   }
 }

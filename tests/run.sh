@@ -9,7 +9,7 @@
 #   // MACOS-XFAIL-<backend>: reason   a documented macOS-only failure of that backend: reported as xfail on Darwin. A pass
 #                                there is an XPASS and fails the run, so the marker gets removed.
 cd "$(dirname "$0")/.."
-be=${NFCXX_BACKEND:-qbe}
+be=${NFCXX_BACKEND:-pathb}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for f in tests/cases/*.cpp; do
   if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1); [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then

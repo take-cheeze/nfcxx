@@ -5239,6 +5239,7 @@ static int ir_f128_wrapped(const char *sym)
 {
   static const char *const tab[] = {
     "fabsf128",
+    "nanf128", "nansf128", "nansq", "huge_valf128",
     "_ZSt8to_charsPcS_DF128_",
     "_ZSt8to_charsPcS_DF128_St12chars_format",
     "_ZSt8to_charsPcS_DF128_St12chars_formati",

@@ -8,6 +8,9 @@ cd "$(dirname "$0")/../.."
 # Path B takes freestanding programs on x86-64 Linux (docs/notes/freestanding.md).
 backends=${NFCXX_BACKEND:-"gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
   case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the product here; qbe stays for the other hosts
 fi
 # Path B needs its harness (scripts/setup-pathb.sh). Without it the column is skipped, and said so; NFCXX_BACKEND=pathb asks for it, so it fails.

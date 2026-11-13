@@ -1,6 +1,6 @@
 # cext2mrbgem: CRuby C extension to mrbgem converter
 
-`convert_mrbgem.py [--name GEM] <cext_dir> <out_dir>` reads a CRuby extension directory
+`convert_mrbgem.rb [--name GEM] <cext_dir> <out_dir>` reads a CRuby extension directory
 (`ext/<name>/*.c`, `*.h`, `extconf.rb`) as text and writes an mruby mrbgem directory:
 `mrbgem.rake`, `src/*.c`, `src/gem_init.c`, `include/*.h`, plus `REFUSALS.txt`,
 `WARNINGS.txt` and `conversion_log.json`.
@@ -8,6 +8,47 @@
 The input is never compiled, loaded or executed. Nothing the converter writes has been
 compiled either: the output is text for review, and a directory with refusals is marked
 `NOT_BUILDABLE`.
+
+## Run
+
+The converter is CRuby code and needs only the standard library (`json`, `fileutils`, `set`, and `fiddle` for the
+libclang scanner). It was tested with Ruby 3.3 and Ruby 4.0:
+
+```
+ruby tools/cext2mrbgem/convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... <cext_dir> <out_dir>
+```
+
+`--name` sets the gem name (default: the name of `<cext_dir>`). Exit status: 0 converted with no refusals;
+2 refusals recorded (the output is marked `NOT_BUILDABLE`); 1 usage or input error.
+
+## Declaration scanner
+
+The function declarations and definitions are found by one of two scanners, recorded as `"scanner"` in
+`conversion_log.json`:
+
+- `regex`: the `DEF_RE` regex over the text (the original scan).
+- `libclang`: `decl_scan.rb` loads `libclang-edg.so` (`lib/libclang-edg`, built by `scripts/build-libclang-edg.sh`)
+  through Fiddle and walks each file's declarations with `clang_visitChildren`. The library gives each function's
+  name position; storage, return type, parameters and braces are read from the text with the regex scan's rules.
+  C sources go through `libclang-cursors-c` (`LIBCLANG_EDG_RUNNER`), which runs `scripts/libclang-cursors --c`.
+- `auto` (the default) uses libclang when the library loads, and the regex otherwise.
+
+Environment: `CEXT_LIBCLANG` (the library; relative paths are from the repository root, default
+`build/libclang-edg/libclang-edg.so`), `CEXT_RUBY_INCLUDE` (colon-separated Ruby header directories for a file that
+includes `ruby.h`; default: this Ruby's own), `CEXT_LIBCLANG_LOG` (a file for the front end's diagnostics; they are
+discarded otherwise). The input is never compiled or run: the front end only parses it.
+
+What differs from the regex scan, and why:
+
+- A file the front end cannot parse is read by the regex scan, and listed in `scanner_fallback`. Headers that are
+  not self-contained (`date_tmx.h`, `crypt.h`) and sources that need extconf's `HAVE_*` results are such files.
+  `--define` passes `-D` to the front end; the converter never runs `extconf.rb`, so it does not know those results.
+- The front end honours `#if`: code the configuration excludes is not a declaration. A registration (`rb_define_method`)
+  is still found by text, so one whose function is excluded is refused with "no active definition" instead of being
+  converted.
+- A prototype with a definition later in the same file is listed by the library only at the definition; the
+  prototype is taken from the text.
+- Declarations inside function bodies are not listed (the library gives statements no cursors).
 
 ## Behaviour
 
@@ -54,6 +95,8 @@ compiled either: the output is text for review, and a directory with refusals is
   address registration (`rb_gc_register_address`, `rb_global_variable`: mruby roots values, not variables),
   `rb_gc_enable` and `rb_gc_disable` (no mruby function; the flag is `gc.disabled`), and `rb_gc_mark` and
   `rb_gc_mark_movable` (`mrb_data_type` has no mark callback, so a mark function would never run).
+- Refusals are written in a stable order. Registered-method checks visit the function names in sorted order; the
+  former Python converter iterated a set there, so its refusal order changed between runs.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other
   `Init_` functions are kept under `#if 0`, because CRuby never calls them.
 - `RB_GC_GUARD` outside a function with an mrb_state, `NUM2ULONG`-style signedness, and
@@ -61,8 +104,9 @@ compiled either: the output is text for review, and a directory with refusals is
 
 ## Tests
 
-`tests/cext2mrbgem/run.sh` runs the converter on the in-repo fixtures and checks the exit
-status and key output. It also converts `bcrypt-ruby` at a pinned commit (fetched to
+`tests/cext2mrbgem/run.sh` runs the converter (`RUBY` selects the interpreter, default `ruby`) on the in-repo fixtures and checks the exit
+status and key output, once with `--scanner regex` and once with `--scanner libclang` (printed as SKIP when the library does
+not load). It also converts `bcrypt-ruby` at a pinned commit (fetched to
 `build/cext2mrbgem/`; set `BCRYPT_DIR` to use an existing checkout) and checks that the
 conversion has no refusals, the entry function is `mrb_bcrypt_gem_init`, and the two
 expected warnings are recorded. None of the outputs are compiled by the test.

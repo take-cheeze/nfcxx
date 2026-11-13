@@ -7,6 +7,9 @@
 cd "$(dirname "$0")/../.."
 root=$PWD
 backends=${NFCXX_BACKEND:-"gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 for be in $backends; do

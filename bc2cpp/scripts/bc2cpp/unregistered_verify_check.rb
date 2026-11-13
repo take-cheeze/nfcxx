@@ -129,6 +129,16 @@ suite.check('an alias defines its new name and looks its source name up',
 suite.check('the same name elsewhere still counts, including a lookup of an alias',
             tokens.include?('defined_and_called') && tokens.include?('alias_id_new'))
 
+# FORMAT_MACROS: inttypes.h's printf / scanf conversion macros name nothing; a string macro of any other name does.
+tokens = Set.new
+StaticDispatchRegistrations.native_name_tokens(<<~'C', tokens, [])
+  # define PRIx32 "fmt_x"
+  # define SCNu64 "fmt_u"
+  # define KEEP_NAME "keep_name"
+C
+suite.check('an inttypes conversion macro\'s string is no lookup, another macro\'s string is',
+            !tokens.include?('fmt_x') && !tokens.include?('fmt_u') && tokens.include?('keep_name'))
+
 full = Bc2cppFixtureRuntime.full_or_build
 if full.nil?
   puts '  SKIP: no full-core libmruby; the behavioural checks need it'

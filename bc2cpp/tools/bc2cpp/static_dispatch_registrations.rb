@@ -62,6 +62,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'static_dispatch_class_guards'
 require_relative 'static_dispatch_fragment_uses'
 require_relative 'static_dispatch_symbol_uses'
+require_relative 'static_dispatch_name_sinks'
 require_relative 'owner_call_direct'
 require_relative 'core_private_ruby'
 require_relative 'core_enumerator_free'
@@ -970,7 +971,7 @@ module StaticDispatchRegistrations
   # Comments are left out (strip_c_comments): a name in one (`/* "count" is "width" */`) is never compiled.
   # `text_tokens`: also receives a naming macro's arguments, which the macro may suffix itself (`#name "="`).
   def native_name_tokens(text, tokens, macros, text_tokens: nil)
-    text = blank_inert_string_args(blank_native_definitions(blank_registration_names(strip_c_comments(text))))
+    text = blank_format_macros(blank_inert_string_args(blank_native_definitions(blank_registration_names(strip_c_comments(text)))))
     text.scan(STRING_LITERAL) { |(s)| tokens << unescape(s) }
     unless macros.empty?
       text.scan(/\b(?:#{macros.map { |m| Regexp.escape(m) }.join('|')})\s*\(([^()]*)\)/) do |(args)|
@@ -984,6 +985,14 @@ module StaticDispatchRegistrations
       tokens << name
       tokens << name + { 'Q' => '?', 'B' => '!', 'E' => '=' }.fetch(kind) if kind
     end
+  end
+
+  # FORMAT_MACROS: inttypes.h's PRI* / SCN* macros stand for printf / scanf conversions (`"x"`, `"lld"`), which no
+  # lookup takes for a name.
+  FORMAT_MACRO_STRING = /^([ \t]*#[ \t]*define[ \t]+(?:PRI|SCN)[A-Za-z]+\d*[ \t]+)"(?:[^"\\\n]|\\.)*"/
+
+  def blank_format_macros(text)
+    text.gsub(FORMAT_MACRO_STRING) { Regexp.last_match(1) }
   end
 
   # INERT_STRING_ARGS (closed only): a string literal that is the whole of one of these arguments is read, never
@@ -1341,8 +1350,13 @@ module StaticDispatchRegistrations
     outside = outside_world_tokens(repo_root, closed_only: closed_only, core: core, text: text, enumerator_free: enumerator_free,
                                                 diagnostic_literals: !symbol_lookups.nil?, engine_tokens: rows_dynamic)
     dynamic.merge(outside)
+    # NAME_SINKS (closed only): while SYMBOL_USES holds and every native that converts a String to a name is an audited
+    # one, a String reaches a lookup only as a literal argument of a LOOKUP_SENDS call (symbol_lookups), so an
+    # identifier-shaped literal or a fragment of a built name looks nothing up whatever it flows into.
+    literal_only = symbol_lookups && StaticDispatchNameSinks.audited?(outside_world_files(repo_root, closed_only: true).last, repo_root)
     looked_up = literal_sites.keys.to_set
-    looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups
+    looked_up = Set.new if literal_only
+    looked_up &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, IDENT) if symbol_lookups && !literal_only
     literal_sites.each do |s, sites|
       next unless looked_up.include?(s)
 
@@ -1443,7 +1457,7 @@ module StaticDispatchRegistrations
     # SUFFIX_BASES (closed only): see dynamic_name?. nil keeps the rule for every dynamic name.
     suffix_bases = nil
     if closed_only
-      fragments &= StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
+      fragments = literal_only ? Set.new : fragments & StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, FRAGMENT)
       built = StaticDispatchFragmentUses.escaping(ireps, body_of, method_of, outside, SUFFIX_LITERAL)
       suffix_bases = text if built.empty?
     end

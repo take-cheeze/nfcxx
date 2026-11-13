@@ -230,6 +230,15 @@ def asm_helper(name, target)
     return ["\t.section .text.#{sym},\"axG\",@progbits,#{sym},comdat", "\t.weak #{sym}", "\t.type #{sym}, @function", "#{sym}:"] +
            body.map { |l| "\t#{l}" } + ["\t.size #{sym}, .-#{sym}"]
   end
+  if name.start_with?("tlsaddr:")
+    # The general-dynamic address of the thread-local SYM (scripts/pathb-ssa-qbe.rb tls_address): __tls_get_addr with the
+    # GOT pair of SYM, in the sequence the linker relaxes. The stack is 16-aligned at the call: entry is 8 mod 16, so 8 bytes.
+    sym = name.delete_prefix("tlsaddr:")
+    fn = "__pathb_tlsaddr_#{sym}"
+    return ["\t.text", "\t.weak #{fn}", "\t.type #{fn}, @function", "#{fn}:", "\tsubq $8, %rsp", "\t.byte 0x66",
+            "\tleaq #{sym}@tlsgd(%rip), %rdi", "\t.value 0x6666", "\trex64", "\tcall __tls_get_addr@PLT", "\taddq $8, %rsp",
+            "\tret", "\t.size #{fn}, .-#{fn}"]
+  end
   return ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } unless arm64_target?(target)
   sym, body = ARM64_HELPERS.fetch(name) { error_exit("no arm64 assembly helper for #{name}") }
   apple = arm64_apple?(target)
@@ -494,6 +503,7 @@ Qbe.got_extern = Qbe.darwin || %w[aarch64 arm64].include?(RbConfig::CONFIG["host
 Qbe.aarch64 = %w[aarch64 arm64].include?(RbConfig::CONFIG["host_cpu"])
 # QBE's xadd (a locked add) is amd64 only: the arm64 backend has no op for it, so the atomics go through libatomic there.
 Qbe.xadd = !Qbe.aarch64
+Qbe.cmpxchg = !Qbe.aarch64   # the fork's cmpxchg0/cmpxchg1 pair (3rd/qbe 44b4eb5 or later), amd64 lock cmpxchg
 # QBE's jtab (a jump table) is amd64 only (the arm64 backend refuses it): other targets keep the decision tree.
 Qbe.jtab = !Qbe.aarch64
 

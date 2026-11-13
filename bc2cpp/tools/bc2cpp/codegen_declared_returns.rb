@@ -169,8 +169,6 @@ class CodeGen
           when :float then NumericFlow::FLT
           when :nil then NumericFlow::NIL
           when :symbol then immediate_class_bits_enabled? ? numeric_class_bit('Symbol') : nil
-          when :bool
-            immediate_class_bits_enabled? ? numeric_class_bit('TrueClass') | numeric_class_bit('FalseClass') : nil
           when :class then RETURN_CORE_CLASS.key(cls) || numeric_class_bit(cls)
           end
     bit && (nilable ? bit | NumericFlow::NIL : bit)
@@ -190,7 +188,7 @@ class CodeGen
 
     case entry.kind
     when :fixnum, :float then entry.nilable ? nil : spec
-    when :symbol, :bool, :nil then entry.nilable ? nil : spec
+    when :symbol, :nil then entry.nilable ? nil : spec
     when :class
       klass = entry.cls
       return nil if RETURN_BITLESS_CLASSES.include?(klass) || !instance_class?(klass)
@@ -284,7 +282,6 @@ class CodeGen
     when :fixnum then "mrb_fixnum_p(#{var})"
     when :array then "mrb_array_p(#{var})"
     when :string then "mrb_string_p(#{var})"
-    when :bool then "mrb_true_p(#{var}) || mrb_false_p(#{var})"
     when :nil then "mrb_nil_p(#{var})"
     when :hash then "mrb_hash_p(#{var})"
     when :symbol then "mrb_symbol_p(#{var})"
