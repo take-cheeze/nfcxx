@@ -126,6 +126,55 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   [owner, sets.map(&:first)]
 end
 
+# CLASS_EVAL_FOLD: `Const.class_eval { ... }` with a literal block runs the block with self = Const and the definee = Const
+# (mrb_mod_module_eval -> yield_with_class), so a `def` in it defines on Const, as in a class body. The block is walked as
+# that body only when every part of the call is one the walk can name: the receiver is a constant written directly and
+# proven by its reaching definitions (a local holding it is refused), resolved to a class or module the walk has already
+# declared; the call takes no arguments; the block takes no parameters (class_eval hands self to a block that takes one);
+# and the block's own code reads no self and opens no class, module or singleton body and writes no constant (those name the
+# lexical scope, not Const). Self is read by the ops in CLASS_EVAL_SELF_OPS (an implicit-self send, an ivar, super, a return
+# of self) and by any operand that names register 0. Returns [block label, Const's name], or [nil, why it is refused].
+CLASS_EVAL_SCOPE_OPS = %i[CLASS MODULE SCLASS SETCONST].freeze
+# mruby's VM copies self (regs[0]) into the receiver register of an implicit-self send (vm.c OP_SSEND), so those ops read
+# self without naming R0; LOADSELF, ivars, SUPER and the return/call ops read it directly.
+CLASS_EVAL_SELF_OPS = %i[LOADSELF SSEND SSEND0 SSENDB GETIV SETIV SUPER RETSELF CALL BLKCALL].freeze
+
+def class_eval_fold(irep, idx, insn, ireps, declared, resolve_receiver)
+  direct = irep.last_writer(idx - 1, insn.reg)
+  proven = receiver_source(irep, idx, insn.reg)
+  unless direct&.op == :GETCONST && proven&.op == :GETCONST && proven.const_name == direct.const_name
+    return [nil, 'receiver is not a constant']
+  end
+
+  name = resolve_receiver.call(insn.reg, idx)
+  return [nil, 'receiver is not a declared class'] unless name && declared.call(name)
+  return [nil, 'argument or splat'] unless insn.argc.to_i.zero? && !insn.positional_splat? && !insn.keyword_splat?
+
+  block_insn = BytecodeIR.for(irep).source_at(idx - 1)
+  return [nil, 'block is not a literal block'] unless block_insn&.op == :BLOCK && block_insn.block_index
+
+  label = irep.reps[block_insn.block_index.to_i]
+  return [nil, 'block is not a literal block'] unless label
+
+  block = ireps.fetch(label)
+  # ENTER's operand: required, optional, rest, post, keyword, keyword-dict, block; any non-zero one is a parameter.
+  params = block.enter&.first_of(:enter)&.value
+  return [nil, 'block takes parameters'] if params && params.first(7).any?(&:positive?)
+
+  uses = []
+  BytecodeIR.for(block).each_source do |block_insn_at, _index|
+    op = block_insn_at.op
+    if CLASS_EVAL_SCOPE_OPS.include?(op)
+      uses << "scope (#{op})"
+    elsif CLASS_EVAL_SELF_OPS.include?(op) || block_insn_at.mentions_reg?(0)
+      uses << "self (#{op})"
+    end
+  end
+  return [nil, "block uses #{uses.first}"] unless uses.empty?
+
+  [label, name]
+end
+
 # ---------------------------------------------------------------------------
 # Step 6: whole-program class/method registry, walking the tree from the
 # root: CLASS/EXEC pairs define classes and recurse into their class-body
@@ -174,6 +223,9 @@ def build_registry(ireps, root_label)
   # LOOP_INSTALLERS: [irep label, index, namespace, visibility] of each container loop
   # in a body whose block sends attr_*; settled once the walk has seen every definition.
   loop_sites = []
+  # CLASS_EVAL_FOLD: one entry per class_eval send the walk met: [folded?, why]. A refused one is reported, not dropped.
+  class_eval_sites = []
+  declared = ->(name) { class_decls.key?(name) || module_names.include?(name) }
   # ALIAS_SITES: how many alias copies the walk made (names their ireps), and the def labels a
   # branch can skip, computed on the first alias that asks.
   alias_seq = 0
@@ -414,6 +466,8 @@ def build_registry(ireps, root_label)
       when :SEND0, :SEND, :SSEND0, :SSEND
         # Same charset as compile_send's name extraction; keep the two in sync.
         name = insn.sym
+        # CLASS_EVAL_FOLD: a class_eval without a literal block (a String, a heredoc, or a block passed by name) is refused.
+        class_eval_sites << { folded: false, why: 'no literal block (string or block argument)' } if name == 'class_eval'
         if name == 'new'
           # STRUCT_MEMBERS_ANALYSIS for the block-less `Const = Struct.new(...)` shape.
           # Additive only: returns nil for anything but a SETCONST-named Struct.new.
@@ -569,6 +623,17 @@ def build_registry(ireps, root_label)
         # Game::Battle::Combatant#state? and #actor looked MONO and devirtualized into
         # Game::Actor/RPG2k::Scene::EquipMenu bodies that read ivars a Struct does not
         # have (Struct members are positional, not iv_tbl).
+        if insn.sym == 'class_eval'
+          label, found = class_eval_fold(irep, idx, insn, ireps, declared, resolve_singleton_receiver)
+          if label
+            class_eval_sites << { folded: true, why: 'folded' }
+            walk.call(label, found)
+          else
+            class_eval_sites << { folded: false, why: found }
+          end
+          next
+        end
+
         name = insn.sym
         next unless name == 'new'
 
@@ -598,6 +663,13 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
+  unless class_eval_sites.empty?
+    folded = class_eval_sites.count { |site| site[:folded] }
+    warn "== class_eval blocks (#{folded} of #{class_eval_sites.size} walked as class bodies) =="
+    class_eval_sites.reject { |site| site[:folded] }.map { |site| site[:why] }.tally.sort.each do |why, count|
+      warn "  left dynamic: #{why}#{count > 1 ? " (x#{count})" : ''}"
+    end
+  end
   unless loop_sites.empty?
     recognized, refused = LoopInstallers.install(registry, ireps, loop_sites)
     warn "== loop installers (#{recognized} of #{loop_sites.size} registered as definitions) =="
