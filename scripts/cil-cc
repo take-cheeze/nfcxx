@@ -17,8 +17,9 @@ while [ $# -gt 0 ]; do
     -O*|-g*|-W*|-w|-fPIC|-fpic|-fno-PIC|-fno-pic|-fwrapv|-fno-strict-aliasing|-m64|-pipe|-fno-common|-fno-builtin|-fomit-frame-pointer) ;;
     -*) echo "cil-cc: option '$a' is not supported by the CIL route" >&2; exit 2 ;;
     *.c|*.cc|*.cpp|*.cxx) srcs+=("$a") ;;
-    *.json) frags+=("$a") ;;
-    *) echo "cil-cc: unsupported input '$a'" >&2; exit 2 ;;
+    *) # an object of the -c compile: the JSON fragment of one file (nfcc names it .o)
+       if [ -f "$a" ] && [ "$(head -c1 "$a")" = "{" ]; then frags+=("$a")
+       else echo "cil-cc: unsupported input '$a'" >&2; exit 2; fi ;;
   esac
 done
 [ -n "$out" ] || out=a.out
