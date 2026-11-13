@@ -187,6 +187,13 @@ check test ! -e "$work/api_class_undef/NOT_BUILDABLE"
 check grep -qF 'const char *name = mrb_class_name(mrb, cApiBase);' "$work/api_class_undef/src/api_class_undef.c"
 check grep -qF 'mrb_undef_method(mrb, cApiBase, "to_s");' "$work/api_class_undef/src/api_class_undef.c"
 
+# 2n. symbol id and integer type tag (api_map.json batch C2): SYM2ID is mrb_symbol, T_FIXNUM is MRB_TT_INTEGER (caveated)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sym_type tools/cext2mrbgem/fixtures/api_sym_type/ext/api_sym_type "$work/api_sym_type" > "$work/api_sym_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_sym_type/NOT_BUILDABLE"
+check grep -qF 'mrb_sym id = mrb_symbol(sym);' "$work/api_sym_type/src/api_sym_type.c"
+check grep -qF 'if (mrb_type(v) == MRB_TT_INTEGER) return mrb_true_value();' "$work/api_sym_type/src/api_sym_type.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

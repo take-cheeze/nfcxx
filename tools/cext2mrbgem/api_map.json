@@ -714,6 +714,18 @@
       "needs_mrb": true,
       "caveat": "the first argument is a struct RClass *, not a VALUE; a class variable there is passed unwrapped (special_arg_positions_class_only)"
     },
+    "SYM2ID": {
+      "kind": "call",
+      "mruby": "mrb_symbol",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a Symbol; the result is mrb_sym (the mapped type of ID), not an unsigned long"
+    },
+    "T_FIXNUM": {
+      "kind": "expr",
+      "mruby": "MRB_TT_INTEGER",
+      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+    },
     "RB_TYPE_P": {
       "kind": "special",
       "handler": "type_p",
