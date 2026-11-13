@@ -185,8 +185,10 @@ EOF
   # 7. unsupported options fail loudly and write nothing
   if [ $b != pathb ]; then rejects "-m32" "m32" -m32 -c util.c -o rej.o
   else
-    # Path B sends -m32 to gcc (it is not one of its options): the object is a 32-bit ELF
-    if "$nfcc" -m32 -c util.c -o pb_m32.o 2>/dev/null && file -b pb_m32.o | grep -q 'ELF 32-bit'; then ok "pathb: -m32 is gcc's, the object is ELF32"
+    # Path B sends -m32 to gcc (it is not one of its options): the object is a 32-bit ELF.
+    # Only on x86-64: the arm64 gcc has no 32-bit multilib, so -m32 cannot build there.
+    if [ "$(uname -m)" != x86_64 ]; then echo "skip pathb -m32 (needs an x86-64 gcc with multilib)"
+    elif "$nfcc" -m32 -c util.c -o pb_m32.o 2>/dev/null && file -b pb_m32.o | grep -q 'ELF 32-bit'; then ok "pathb: -m32 is gcc's, the object is ELF32"
     else bad "pathb: -m32 is gcc's, the object is ELF32" "no 32-bit object"; fi
   fi
   rejects "-fsanitize=address" "fsanitize" -fsanitize=address -c util.c -o rej.o
