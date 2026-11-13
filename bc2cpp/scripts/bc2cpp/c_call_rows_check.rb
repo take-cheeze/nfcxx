@@ -10,11 +10,12 @@
 #     of its name is in C++ or cannot be read; a local `mrb_sym` assigned literals and used only by sinks is too;
 #   - the rows run leaves out a name only such calls spell; the plain run still reads it;
 #   - a local spelled as its own presym, an interned literal, and a generated local compared or passed to sinks only;
-#   - under the literal-lookup proof, the literals of an exception message (MESSAGE_ARGS);
+#   - under the literal-lookup proof, the literals of an exception message (MESSAGE_ARGS) and a frame's name
+#     (FRAME_NAME);
 #   - the runtime's own registration on a core class field and its send-count label name no lookup;
 #   - a macro redefinition of a base sink or a message formatter turns the rule off;
-#   - the world's mruby looks the base sinks up through mrb_vm_find_method_rows, and the generated funcall helper is
-#     mrb_funcall.
+#   - the world's mruby looks the base sinks up through mrb_vm_find_method_rows, and so its by-name call's
+#     method_missing and mruby-io's found-then-called methods; the generated funcall helper is mrb_funcall.
 #
 # Usage: ruby scripts/bc2cpp/c_call_rows_check.rb
 
@@ -129,6 +130,21 @@ suite.check('message literals are blanked only under the proof',
               !CCallRows.blank(msg, base, proven: true).match?(/"protected"|"private"|"worded"/) &&
               CCallRows.blank(msg, base, proven: true).include?('"named"') &&
               !CCallRows.blank_generated(msg, proven: true).include?('"protected"'))
+# FRAME_NAME: under the proof, the name a C caller gives a found method's frame is no lookup of it.
+frame = <<~C
+  static mrb_method_t
+  missing_of(mrb_state *mrb, mrb_callinfo *ci, mrb_value recv)
+  {
+    mrb_sym missing = MRB_SYM(method_missing);
+    mrb_method_t m = mrb_vm_find_method_rows(mrb, mrb_class(mrb, recv), &c, missing);
+    ci->mid = missing;
+    ci->mid = MRB_SYM(named_frame);
+    return m;
+  }
+C
+suite.check('a frame name is blanked only under the proof',
+            CCallRows.blank(frame, base).include?('MRB_SYM(method_missing)') &&
+              !CCallRows.blank(frame, base, proven: true).match?(/MRB_SYM\((?:method_missing|named_frame)\)/))
 suite.check('a macro redefinition of a message formatter turns the rule off',
             CCallRows.sinks({ 'a.c' => flow, 'w.h' => "#define mrb_raisef(mrb, c, ...) other(mrb, c)\n" }).nil?)
 # The runtime's own registration names the method it defines; a send-count label is a counter key.
@@ -167,6 +183,19 @@ end
   b = body.call(kernel, name)
   suite.check("#{name} looks up through mrb_vm_find_method_rows", b.include?('mrb_vm_find_method_rows(') && !b.match?(other_lookup))
 end
+# The C lookups made for a by-name call that misses, and the find-then-call sites, find rows too.
+%w[prepare_missing send_method].each do |name|
+  b = body.call(vm, name)
+  suite.check("#{name} looks method_missing up through mrb_vm_find_method_rows",
+              b.match?(/mrb_vm_find_method_rows\([^;]*(?:missing|MRB_SYM\(method_missing\))\)/) &&
+                !b.match?(/mrb_vm_find_method\([^;]*(?:\bmissing|MRB_SYM\(method_missing\))\)/))
+end
+io_c = File.read(File.join(mruby, 'mrbgems/mruby-io/src/io.c'))
+file_c = File.read(File.join(mruby, 'mrbgems/mruby-io/src/file.c'))
+suite.check("mruby-io's found-then-called methods are found through mrb_vm_find_method_rows",
+            [[file_c, 'sysopen'], [file_c, 'initialize'], [io_c, 'puts']].all? do |text, name|
+              text.include?("mrb_vm_find_method_rows(mrb, ") && !text.match?(/mrb_method_search_vm\([^;]*MRB_SYM\(#{name}\)/)
+            end)
 rows = body.call(class_c, 'mrb_vm_find_method_rows')
 suite.check('mrb_vm_find_method_rows searches with rows', rows.include?('mrb_vm_find_ctor(') && !rows.match?(other_lookup))
 entry = %w[mrb_funcall mrb_funcall_id mrb_funcall_argv mrb_funcall_with_block mrb_funcall_send].all? do |name|
