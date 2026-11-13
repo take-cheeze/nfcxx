@@ -33,6 +33,10 @@ INSTRUMENTATION = %w[-fopenmp* -fsanitize* -fprofile* -fcoverage* --coverage -ft
 FP_MATH = %w[-ffast-math -ffinite-math-only -funsafe-math-optimizations -fassociative-math -freciprocal-math
              -fno-signed-zeros -fno-math-errno].freeze
 NO_EFFECT_F = %w[-fno-strict-aliasing -fwrapv -fno-strict-overflow].freeze
+# Link options passed to the linker unchanged (the bash ld+= group after -l and -L).
+LD_PASS = %w[-static -rdynamic -pie -no-pie -s -nostdlib -nostartfiles -nodefaultlibs -static-libgcc -shared-libgcc
+             -pthread -Bstatic -Bdynamic -symbolic -r].freeze
+LD_PATTERNS = %w[-Wl,* -fuse-ld=*].freeze
 
 GCCONLY_PATTERNS = %w[
   -funsigned-char -fshort-enums -fpack-struct* -ftrapv -fgnu89-inline -fms-extensions -fplan9-extensions
@@ -167,7 +171,7 @@ def run_loop(args)
     elsif a == "-S"
       state.asm = 1
     elsif a == "-o" || a == "-x" || a == "-MF" || a == "-MT" || a == "-MQ" || a == "-l" || a == "-L" ||
-          PP_TAKES_ARG.include?(a)
+          a == "-Xlinker" || a == "-z" || a == "-u" || a == "-T" || PP_TAKES_ARG.include?(a)
       die("option '#{a}' requires an argument") unless i + 1 < n
 
       i += 1
@@ -183,7 +187,7 @@ def run_loop(args)
         state.dfile = value
       when "-MT", "-MQ"
         state.dts << a << value
-      when "-l", "-L"
+      when "-l", "-L", "-Xlinker", "-z", "-u", "-T"
         state.ld << a << value
       else
         state.pp << a << value
@@ -216,9 +220,21 @@ def run_loop(args)
       state.dbg << a
     elsif a == "-pipe" || a == "-v" || a == "-time"
       nil
+    elsif a.start_with?("-std=c++") || a.start_with?("-std=gnu++")
+      die("#{a}: C++ is not supported by nfcc (use nfcxx)")
+    elsif a.start_with?("-std=") || a == "-ansi"
+      state.pp << a
+    elsif a == "-nostdinc" || a == "-undef" || a.start_with?("--sysroot=")
+      state.pp << a
+      state.ld << a
+    elsif a == "-shared"
+      state.pathb_pic = 1
+      state.ld << a
+    elsif LD_PASS.include?(a) || matches_any?(a, LD_PATTERNS)
+      state.ld << a
     elsif a.start_with?("-Wa,")
       state.asf << a
-    elsif a.start_with?("-Wl,") || a.start_with?("-Wp,")
+    elsif a.start_with?("-Wp,")
       raise Unported, a
     elsif a == "-w" || a.start_with?("-W")
       nil

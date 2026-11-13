@@ -110,3 +110,20 @@ x.c x.s a.o
 -fno-stack-protector -fstack-protector-strong -fPIC -c x.c
 -fdiagnostics-color=auto -fmessage-length=0 x.c
 -fsigned-char -fno-signed-char x.c
+-Wl,--as-needed -Wl,-z,relro x.c
+-static -rdynamic -pie -no-pie -s x.c
+-nostdlib -nostartfiles -nodefaultlibs -static-libgcc -shared-libgcc -pthread x.c
+-Bstatic -Bdynamic -symbolic -r x.c
+-fuse-ld=gold x.c
+-Xlinker --gc-sections x.c
+-Xlinker
+-z now x.c
+-u foo -T link.ld x.c
+-z
+-shared -o lib.so x.c
+-nostdinc -undef --sysroot=/sysroot -I inc x.c
+-std=c99 -ansi x.c
+-std=c++17 x.c
+-std=gnu++14 x.c
+-c -std=gnu11 x.c
+-Wp,-DX x.c

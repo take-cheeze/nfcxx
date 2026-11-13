@@ -11,7 +11,8 @@ root=$PWD
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 harness() {
-  sed -n '1,345p' "$root/nfcc" | sed "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|"
+  # up to (not including) the post-loop checks, found by their text rather than by line number
+  awk '/^for a in "\$\{spguard\[@\]/ { exit } { print }' "$root/nfcc" | sed "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|"
   cat <<'EOF'
 dump_scalar() { printf '%s=%s\n' "$1" "${!1-}"; }
 dump_array() {
