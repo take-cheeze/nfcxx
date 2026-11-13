@@ -756,6 +756,7 @@ jobs:
             - "Gemfile"
             - "Gemfile.lock"
             - "scripts/pathb-borrowck.rb"
+            - "scripts/response-file.rb"
             - "tests/pathb-borrow/**"
             - "be/nfcxx_*.c"
             - "scripts/nfcxx-*"
