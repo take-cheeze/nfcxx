@@ -277,6 +277,27 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_alias/NOT_BUILDABLE"
 check grep -qF 'mrb_define_alias(mrb, cApiAlias, "copy", "orig");' "$work/api_alias/src/api_alias.c"
 
+# 2w. Check_Type and rb_check_type with a literal exact T_ type (api_map.json type_check): mrb_check_type with the MRB_TT_
+# tag; T_DATA maps to MRB_TT_CDATA with its caveat logged. Types with no exact mruby tag (T_FIXNUM, T_NIL, T_CLASS) and a
+# type argument that is a variable stay refused, and the T_ name of a refused call is not mapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type tools/cext2mrbgem/fixtures/check_type/ext/check_type "$work/check_type" > "$work/check_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/check_type/NOT_BUILDABLE"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_STRING);' "$work/check_type/src/check_type.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_ARRAY);' "$work/check_type/src/check_type.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_CDATA);' "$work/check_type/src/check_type.c"
+check grep -q 'CRuby T_DATA also covers TypedData' "$work/check_type/conversion_log.json"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type_refused tools/cext2mrbgem/fixtures/check_type_refused/ext/check_type_refused "$work/check_type_refused" > "$work/check_type_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/check_type_refused/NOT_BUILDABLE"
+check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
+check test "$(grep -c '  rb_check_type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
+check grep -q '  Check_Type  mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
+check grep -q '  rb_check_type  nil and false share' "$work/check_type_refused/REFUSALS.txt"
+check grep -q 'MRB_TT_CLASS does not match' "$work/check_type_refused/REFUSALS.txt"
+check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
+check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

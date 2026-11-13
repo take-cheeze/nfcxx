@@ -408,6 +408,7 @@ class Converter
     @types = amap['types']
     @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
+    @type_check_refused = amap['type_check_refused'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
     @ignored = []
@@ -1299,6 +1300,8 @@ class Converter
       scan_args(rel, s, e, nxt, called)
     when 'RB_TYPE_P'
       type_p(rel, s, e, nxt, called)
+    when 'Check_Type', 'rb_check_type'
+      check_type(rel, s, e, name, nxt, called)
     when 'rb_gc_start'
       gc_start(rel, s, e, nxt, called)
     when 'rb_gc_writebarrier'
@@ -1501,6 +1504,45 @@ class Converter
     new = "(mrb_type(#{obj}) == #{ent['mruby']})"
     ed.add(s, close + 1, new)
     rewrite(rel, s, 'RB_TYPE_P', new)
+  end
+
+  # Check_Type(v, T_X) and rb_check_type(v, T_X) -> mrb_check_type(mrb, v, MRB_TT_X). Only the name and the type
+  # argument are edited, so the value argument is left to the identifier pass (it may be any expression). The type
+  # argument must be a literal T_ identifier: CRuby's int values differ from mruby's enum, so a variable is refused.
+  # The name must have type_check "exact" or "caveat" in api_map.json; the others are refused with type_check_refused.
+  def check_type(rel, s, e, name, nxt, called)
+    masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
+    unless called
+      refuse(rel, s, name, 'used without a call')
+      return
+    end
+    close = match_close(masked, nxt)
+    args = close > 0 ? split_args(masked, nxt, close) : []
+    if args.size != 2
+      refuse(rel, s, name, "#{name} takes a value and a T_ type")
+      return
+    end
+    ts, te = args[1]
+    tname = psl(text, ts, te)
+    unless /\A(?:RUBY_)?T_[A-Z]+\z/.match?(tname)
+      refuse(rel, s, name, 'type argument is not a literal T_ constant')
+      return
+    end
+    ent = @entries[tname]
+    if !@type_check_refused[tname].nil? || ent.nil? || !%w[exact caveat].include?(ent['type_check']) ||
+       !(ent['mruby'] || '').start_with?('MRB_TT_')
+      reason = @type_check_refused[tname] || "#{tname} has no exact mruby type test in the supported subset"
+      refuse(rel, s, name, reason)
+      # keep the T_ name as written: the identifier pass must not map it inside a refused call
+      ed.add(ts, te, tname)
+      return
+    end
+    obj = psl(text, args[0][0], args[0][1])
+    to = "mrb_check_type(mrb, #{obj}, #{ent['mruby']})"
+    ed.add(s, e, 'mrb_check_type')
+    ed.add(nxt + 1, nxt + 1, 'mrb, ')
+    ed.add(ts, te, ent['mruby'])
+    rewrite(rel, s, name, to, ent['caveat'])
   end
 
   # rb_gc_writebarrier(old, young) as a statement -> an immediate-guarded mrb_field_write_barrier_value. The

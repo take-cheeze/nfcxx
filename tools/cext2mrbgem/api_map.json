@@ -4,6 +4,21 @@
     "VALUE": "mrb_value",
     "ID": "mrb_sym"
   },
+  "type_check_refused": {
+    "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
+    "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
+    "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
+    "T_FIXNUM": "mruby has one integer tag (MRB_TT_INTEGER, include/mruby/value.h:144); CRuby's Fixnum range is not mruby's integer range, and mruby's bignum tag is MRB_TT_BIGINT (value.h:165)",
+    "T_BIGNUM": "mruby's bignum tag MRB_TT_BIGINT (include/mruby/value.h:165) is chosen by mruby's integer width, not CRuby's Fixnum/Bignum boundary, so the tags do not select the same values",
+    "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:245-248; mrb_nil_p tells them apart by value), so a type check cannot tell nil from false",
+    "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:245-248) also matches nil, which CRuby reports as T_NIL",
+    "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (value.h:251) is true only, so it can be added as its own change",
+    "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF is a separate value kind",
+    "T_STRUCT": "mruby's MRB_TT_STRUCT (include/mruby/value.h:160) is not documented as the type of Struct instances, so the match is not verified",
+    "T_REGEXP": "mruby has no core Regexp type tag (none in include/mruby/value.h:138-167), so there is no fixed tag to compare with",
+    "T_RATIONAL": "mruby's MRB_TT_RATIONAL (include/mruby/value.h:164) is a gem type; the match with CRuby's Rational is not verified",
+    "T_COMPLEX": "mruby's MRB_TT_COMPLEX (include/mruby/value.h:163) is a gem type; the match with CRuby's Complex is not verified"
+  },
   "includes": {
     "ruby.h": {
       "headers": [
@@ -197,12 +212,14 @@
       "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
     },
     "Check_Type": {
-      "kind": "refuse",
-      "reason": "type-check macro not in the supported subset"
+      "kind": "special",
+      "handler": "check_type",
+      "needs_mrb": true
     },
     "rb_check_type": {
-      "kind": "refuse",
-      "reason": "type-check function not in the supported subset"
+      "kind": "special",
+      "handler": "check_type",
+      "needs_mrb": true
     },
     "rb_gc_register_address": {
       "kind": "refuse",
@@ -471,39 +488,48 @@
     },
     "T_STRING": {
       "kind": "expr",
-      "mruby": "MRB_TT_STRING"
+      "mruby": "MRB_TT_STRING",
+      "type_check": "exact"
     },
     "T_ARRAY": {
       "kind": "expr",
-      "mruby": "MRB_TT_ARRAY"
+      "mruby": "MRB_TT_ARRAY",
+      "type_check": "exact"
     },
     "T_HASH": {
       "kind": "expr",
-      "mruby": "MRB_TT_HASH"
+      "mruby": "MRB_TT_HASH",
+      "type_check": "exact"
     },
     "T_OBJECT": {
       "kind": "expr",
-      "mruby": "MRB_TT_OBJECT"
+      "mruby": "MRB_TT_OBJECT",
+      "caveat": "CRuby T_OBJECT also covers exception objects, which mruby types as MRB_TT_EXCEPTION (src/error.c:42); RB_TYPE_P and Check_Type do not match them, so T_OBJECT is refused in both"
     },
     "T_CLASS": {
       "kind": "expr",
-      "mruby": "MRB_TT_CLASS"
+      "mruby": "MRB_TT_CLASS",
+      "caveat": "mruby types singleton classes as MRB_TT_SCLASS (src/class.c:371) and CRuby reports them as T_CLASS, so T_CLASS is refused in both RB_TYPE_P and Check_Type"
     },
     "T_MODULE": {
       "kind": "expr",
-      "mruby": "MRB_TT_MODULE"
+      "mruby": "MRB_TT_MODULE",
+      "type_check": "exact"
     },
     "T_FLOAT": {
       "kind": "expr",
-      "mruby": "MRB_TT_FLOAT"
+      "mruby": "MRB_TT_FLOAT",
+      "type_check": "exact"
     },
     "T_SYMBOL": {
       "kind": "expr",
-      "mruby": "MRB_TT_SYMBOL"
+      "mruby": "MRB_TT_SYMBOL",
+      "type_check": "exact"
     },
     "T_DATA": {
       "kind": "expr",
       "mruby": "MRB_TT_CDATA",
+      "type_check": "caveat",
       "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
     },
     "rb_global_variable": {
