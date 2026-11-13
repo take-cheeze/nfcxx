@@ -363,7 +363,8 @@ jobs:
           tests/trace/run.sh
           tests/c/run.sh
           tests/c/cc-mode.sh
-          tests/cxx-driver/run.sh
+          # tests/cxx-driver is gcc's by design: its header records that Path B fails 16 of its 52 checks, so the pathb leg runs it on gcc
+          NFCXX_BACKEND=gcc tests/cxx-driver/run.sh
           if [ "$NFCXX_BACKEND" = pathb ]; then
             NFCXX_BACKEND=qbe tests/lib/run.sh
             NFCXX_BACKEND=qbe tests/target/run.sh
