@@ -110,3 +110,13 @@ not load). It also converts `bcrypt-ruby` at a pinned commit (fetched to
 `build/cext2mrbgem/`; set `BCRYPT_DIR` to use an existing checkout) and checks that the
 conversion has no refusals, the entry function is `mrb_bcrypt_gem_init`, and the two
 expected warnings are recorded. None of the outputs are compiled by the test.
+
+## Known gap: helper threading and exceptions
+
+Helpers that need the mruby state read a file-scope global `<funcname>_bc2_mrb`. Each
+wrapped method saves the previous value on entry and restores it on exit. mruby raises
+exceptions by longjmp, so when an exception unwinds through a wrapped method the
+restore is skipped. The global can then hold a stale state for code that runs later.
+Nothing in the converter or its tests detects this, and the generated C has not been
+compiled. Restoring at each call boundary, or refusing helpers that run after a call
+which may raise, would close the gap. Until then, treat the helper path as unverified.
