@@ -166,6 +166,7 @@ ruby scripts/bc2cpp/ctor_rows_check.rb
 ruby scripts/bc2cpp/core_rows_check.rb
 ruby scripts/bc2cpp/core_rows_compiled_check.rb
 ruby scripts/bc2cpp/core_operator_rows_check.rb
+ruby scripts/bc2cpp/c_call_rows_check.rb
 ruby scripts/bc2cpp/undef_left_out_check.rb
 ruby scripts/bc2cpp/sealed_int16_local_check.rb
 ruby scripts/bc2cpp/freeze_fold_check.rb

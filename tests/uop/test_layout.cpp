@@ -144,6 +144,57 @@ static void blocked_cost_keeps_strided() {
   CHECK(s.storage.at("C") == Storage::Strided);
 }
 
+static void packed_chosen_when_shape_fits() {
+  // M = 504, N = 512, K = 512 (504 % 6 == 0, 512 % 16 == 0). fma = 504*512*512/8 = 16515072; the packed kernel's FMA cost is
+  // fma * 0.18. B is packed into Panel16 (512*512 elements at 0.25 each = 65536). The row sum is horizontal (C in Col
+  // lanes): 504*512/8 + 6*504 = 35280. Total 2972712.96 + 65536 + 35280.
+  Solution s = solve(gemm_rowsum(504, 512, 512));
+  CHECK(s.feasible);
+  CHECK(s.variant.size() == 2);
+  CHECK(s.variant[0] == "avx2-packed-n");
+  CHECK(s.variant[1] == "reduce-horizontal");
+  CHECK(s.repairs.empty());
+  CHECK(s.storage.at("B") == Storage::Panel16);
+  CHECK(s.storage.size() == 1);
+  CHECK(std::fabs(s.storage_cost - 65536.0) < 1e-6);
+  CHECK(std::fabs(s.cost - (16515072.0 * 0.18 + 65536.0 + 35280.0)) < 1e-6);
+  CHECK(s.layout.at("C") == Axis::Col);
+}
+
+static void packed_absent_when_shape_misses() {
+  // 500 % 16 != 0 and 64 % 6 != 0: the packed kernel is not a candidate, so the GEMM has the two layout variants only.
+  CHECK(gemm_rowsum(504, 500, 512).ops[0].variants.size() == 2);
+  CHECK(gemm_rowsum(64, 64, 64).ops[0].variants.size() == 2);
+  CHECK(gemm_rowsum(504, 512, 512).ops[0].variants.size() == 3);
+  Solution s = solve(gemm_rowsum(504, 500, 512));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] != "avx2-packed-n");
+  CHECK(!s.storage.count("B"));
+}
+
+static void packing_cost_is_charged() {
+  // With no packing cost the packed plan is cheaper by exactly the Panel16 storage: 512*512 * 0.25 = 65536.
+  Avx2F32 free_panel;
+  free_panel.panel_instr_per_elem = 0.0;
+  Solution with = solve(gemm_rowsum(504, 512, 512));
+  Solution without = solve(gemm_rowsum(504, 512, 512, free_panel));
+  CHECK(std::fabs((with.cost - without.cost) - 65536.0) < 1e-6);
+  CHECK(without.storage_cost == 0.0);
+  CHECK(without.variant[0] == "avx2-packed-n");
+  CHECK(without.storage.at("B") == Storage::Panel16);
+}
+
+static void packed_needs_its_factor() {
+  // With the register-blocked factor at 1 the packed kernel costs fma + 65536 + 35280, more than naive vec-n's fma + 35280,
+  // so the plan keeps the naive kernel and stores nothing in Panel16. The choice is the fitted factor's, nothing more.
+  Avx2F32 unblocked;
+  unblocked.register_blocked_fma_factor = 1.0;
+  Solution s = solve(gemm_rowsum(504, 512, 512, unblocked));
+  CHECK(s.feasible);
+  CHECK(s.variant[0] == "avx2-vec-n");
+  CHECK(s.storage.empty());
+}
+
 int main() {
   k8_transposes_a();
   k64_horizontal_sum();
@@ -154,6 +205,10 @@ int main() {
   k8_zero_penalty_keeps_strided();
   k64_storage_does_not_change_choice();
   blocked_cost_keeps_strided();
+  packed_chosen_when_shape_fits();
+  packed_absent_when_shape_misses();
+  packing_cost_is_charged();
+  packed_needs_its_factor();
   if (failures) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

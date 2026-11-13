@@ -4,6 +4,7 @@ require 'set'
 require_relative 'bytecode_ir'
 require_relative 'diagnostics'
 require_relative 'native_names'
+require_relative 'c_call_rows'
 
 # CORE_ROWS (closed only): core ROM entries the closed build keeps as rows (MRB_MT_CTOR_ROW, value 2 in the exclusion
 # header) instead of method-table entries. A row answers only a lookup made for a receiver the compiler proved
@@ -57,7 +58,8 @@ module CoreRows
         names.merge(irep.syms.map(&:to_s)) if insn.op == :ALIAS && insn.first_of(:name).nil?
       end
     end
-    generated.each { |src| names.merge(generated_lookups(src)) }
+    # C_CALL_ROWS: a generated funcall's literal name finds a row where its entry would be (c_call_rows.rb).
+    generated.each { |src| names.merge(generated_lookups(CCallRows.blank_generated(src))) }
     names
   end
 

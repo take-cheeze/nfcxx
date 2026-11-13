@@ -27,7 +27,8 @@ int failures = 0;
 using KernelFn = void (*)(const float*, const float*, float*, float*, float*);
 
 // Compile the source into a shared object in dir and load the kernel; returns nullptr (and prints why) on failure.
-void* load_kernel(const std::string& dir, const std::string& src, const std::string& tag, KernelFn* out) {
+template <class F>
+void* load_kernel(const std::string& dir, const std::string& src, const std::string& tag, F* out) {
   std::string c = dir + "/" + tag + ".c", so = dir + "/" + tag + ".so";
   { std::ofstream f(c); f << src; }
   const char* cc = std::getenv("NFCUOP_CC");
@@ -43,7 +44,7 @@ void* load_kernel(const std::string& dir, const std::string& src, const std::str
     ++failures;
     return nullptr;
   }
-  *out = reinterpret_cast<KernelFn>(dlsym(h, "nfc_gemm_rowsum"));
+  *out = reinterpret_cast<F>(dlsym(h, "nfc_gemm_rowsum"));
   if (!*out) {
     std::fprintf(stderr, "FAIL %s: nfc_gemm_rowsum not found\n", tag.c_str());
     ++failures;
@@ -93,6 +94,16 @@ void run_case(const std::string& dir, GemmVariant v, bool simd, Storage st, int6
     ++failures;
   } else {
     std::printf("ok   %s\n", tag.c_str());
+  }
+}
+
+void expect_plan_throw(const Solution& s, int64_t M, int64_t N, int64_t K, const char* what) {
+  try {
+    emit_for_solution(s, M, N, K);
+    std::fprintf(stderr, "FAIL %s: no exception\n", what);
+    ++failures;
+  } catch (const std::invalid_argument&) {
+    std::printf("ok   refused: %s\n", what);
   }
 }
 
@@ -205,6 +216,78 @@ void run_mt_case(const std::string& dir, int mr, int64_t M, int64_t N, int64_t K
   }
 }
 
+// The plan the solver picks for gemm_rowsum(M, N, K), emitted by emit_for_solution, compiled and run against the
+// reference. The kernel's arguments and its output layout follow the plan: packed takes the packing scratch and a thread
+// count (run with 2 threads), VecN and VecM the transpose scratch, and VecM's C is in the storage the plan holds for it.
+void run_plan_case(const std::string& dir, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  using PackedFn = void (*)(const float*, const float*, float*, float*, float*, int);
+  Solution s = solve(gemm_rowsum(M, N, K));
+  std::string tag = "plan_" + s.variant[0] + "_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+  if (s.variant.size() == 2 && s.variant[0] == "avx2-vec-m" && s.storage.count("C"))
+    tag += s.storage.at("C") == Storage::Blocked8 ? "_blocked8" : "_strided";
+  if (!s.feasible || s.variant.size() != 2) {
+    std::fprintf(stderr, "FAIL %s: the model found no plan\n", tag.c_str());
+    ++failures;
+    return;
+  }
+  std::string src;
+  try {
+    src = emit_for_solution(s, M, N, K);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "FAIL %s: %s\n", tag.c_str(), e.what());
+    ++failures;
+    return;
+  }
+  const bool packed = s.variant[0] == "avx2-packed-n";
+  const bool row_major = packed || s.variant[0] == "avx2-vec-n";
+  const Storage st = s.storage.count("C") ? s.storage.at("C") : Storage::Strided;
+
+  std::uniform_int_distribution<int> d(-4, 4);
+  std::vector<float> A(M * K), B(K * N);
+  for (auto& x : A) x = float(d(rng));
+  for (auto& x : B) x = float(d(rng));
+  std::vector<float> refC(M * N), refR(M, 0.0f);
+  for (int64_t m = 0; m < M; ++m)
+    for (int64_t n = 0; n < N; ++n) {
+      float acc = 0;
+      for (int64_t k = 0; k < K; ++k) acc += A[m * K + k] * B[k * N + n];
+      refC[m * N + n] = acc;
+      refR[m] += acc;
+    }
+
+  std::vector<float> C(M * N, -999.0f), R(M, -999.0f), scratch(std::max(M * K, K * N), -999.0f);
+  if (packed) {
+    PackedFn fn = nullptr;
+    void* h = load_kernel(dir, src, tag, &fn);
+    if (!h) return;
+    fn(A.data(), B.data(), C.data(), R.data(), scratch.data(), 2);
+    dlclose(h);
+  } else {
+    KernelFn fn = nullptr;
+    void* h = load_kernel(dir, src, tag, &fn);
+    if (!h) return;
+    fn(A.data(), B.data(), C.data(), R.data(), scratch.data());
+    dlclose(h);
+  }
+
+  int bad = 0;
+  for (int64_t m = 0; m < M; ++m) {
+    for (int64_t n = 0; n < N; ++n) {
+      float got = row_major ? C[m * N + n]
+                : st == Storage::Blocked8 ? C[(m - m % 8) * N + n * 8 + m % 8]
+                                          : C[n * M + m];
+      if (got != refC[m * N + n]) ++bad;
+    }
+    if (R[m] != refR[m]) ++bad;
+  }
+  if (bad) {
+    std::fprintf(stderr, "FAIL %s: %d value(s) differ from the reference\n", tag.c_str(), bad);
+    ++failures;
+  } else {
+    std::printf("ok   %s\n", tag.c_str());
+  }
+}
+
 int main() {
   if (!cpu_has_flags({"avx2", "fma"})) {
     std::printf("SKIP test_layout_avx2: this CPU has no AVX2 and FMA\n");
@@ -267,6 +350,33 @@ int main() {
     ++failures;
   } catch (const std::invalid_argument&) {
     std::printf("ok   refused: packed with N = 24\n");
+  }
+
+  // Plans from the solver, emitted through emit_for_solution. Each shape picks a different kernel: 48x64x17 the packed
+  // one (M % 6 and N % 16 fit), 16x24x64 VecN (K large, N not a multiple of 16), 16x24x5 and 64x64x8 and 256x256x8 VecM.
+  // The tag shows the storage of VecM's lanes-on-M tensors that the model chose.
+  run_plan_case(dir, 48, 64, 17, rng);
+  run_plan_case(dir, 16, 24, 64, rng);
+  run_plan_case(dir, 16, 24, 5, rng);
+  run_plan_case(dir, 64, 64, 8, rng);
+  run_plan_case(dir, 256, 256, 8, rng);
+
+  // emit_for_solution refuses what it cannot emit: a packed plan without B in Panel16, VecM with A^T and C in different
+  // storages, and a combination with no emitter (VecN with reduce-vertical).
+  {
+    Solution s = solve(gemm_rowsum(48, 64, 17));
+    s.storage.erase("B");
+    expect_plan_throw(s, 48, 64, 17, "packed plan without Panel16 B");
+  }
+  {
+    Solution s = solve(gemm_rowsum(256, 256, 8));
+    s.storage["A"] = Storage::Strided;
+    expect_plan_throw(s, 256, 256, 8, "VecM plan with A^T and C in different storages");
+  }
+  {
+    Solution s = solve(gemm_rowsum(16, 24, 64));
+    s.variant[1] = "reduce-vertical";
+    expect_plan_throw(s, 16, 24, 64, "VecN with reduce-vertical");
   }
 
   std::string rm = "rm -rf '" + dir + "'";
