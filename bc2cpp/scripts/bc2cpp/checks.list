@@ -143,6 +143,7 @@ ruby scripts/bc2cpp/initializer_sites_check.rb
 ruby scripts/bc2cpp/super_direct_check.rb
 ruby scripts/bc2cpp/core_super_direct_check.rb
 ruby scripts/bc2cpp/step_super_static_check.rb
+ruby scripts/bc2cpp/rsm_getidx_check.rb
 ruby scripts/bc2cpp/rsm_owner_call_check.rb
 ruby scripts/bc2cpp/native_args_check.rb
 ruby scripts/bc2cpp/operator_sends_check.rb
