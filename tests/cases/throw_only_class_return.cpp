@@ -1,4 +1,3 @@
-// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md
 // EXPECT: 1
 // that, with both backends (the same as exceptions.cpp); macOS arm64 runs it
 // A class-returning routine whose body only throws (no return statement) is inlined by the front end, and the expansion
@@ -24,3 +23,4 @@ int main() {
   }
   return 0;
 }
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md

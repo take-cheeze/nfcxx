@@ -1,4 +1,3 @@
-// MACOS-XFAIL-pathb: the Mach-O relocation format cannot carry the address offset of the initializer ("addend too big for relocation"); Linux accepts it
 // EXPECT: 42
 // X86-ONLY-qbe: the offsets beyond 32 bits are the x86-64 encoding this checks; QBE's arm64 backend writes them as an add immediate the assembler rejects (add x0, x0, #2147483648)
 // An automatic object whose initializer takes its address in a statement expression (the kernel's
@@ -18,3 +17,4 @@ int main(void) {
 	struct work w = { { &w.n, &w.n }, (*({ init(&w.done); &w.done; })) };
 	return w.n.next == &w.n && w.done == 7 ? 42 : 1;
 }
+// MACOS-XFAIL-pathb: the Mach-O relocation format cannot carry the address offset of the initializer ("addend too big for relocation"); Linux accepts it

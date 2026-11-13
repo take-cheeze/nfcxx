@@ -1,4 +1,3 @@
-// MACOS-XFAIL-pathb: the variadic va_list forwarding to vsnprintf (a double argument) segfaults on macOS arm64 under Path B; not diagnosed, the gcc and qbe legs pass this file
 /* EXPECT: 11 */
 /* stdio, string.h, ctype.h, stdlib.h, errno.h and limits.h from the host headers. */
 #include <stdio.h>
@@ -25,3 +24,4 @@ int main(void) {
   fprintf(stderr, "stderr ok\n");
   return ok ? n - 1 : 1;                                                 /* 12 - 1 */
 }
+// MACOS-XFAIL-pathb: the variadic va_list forwarding to vsnprintf (a double argument) segfaults on macOS arm64 under Path B; not diagnosed, the gcc and qbe legs pass this file
