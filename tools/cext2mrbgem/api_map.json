@@ -488,6 +488,100 @@
     "rb_global_variable": {
       "kind": "refuse",
       "reason": "address form (VALUE *), as rb_gc_register_address: no mruby equivalent (mrb_gc_register roots a value, not a variable)"
+    },
+    "rb_str_cat": {
+      "kind": "call",
+      "mruby": "mrb_str_cat",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the length is not checked for sign: a negative length becomes a large size_t"
+    },
+    "rb_str_dup": {
+      "kind": "call",
+      "mruby": "mrb_str_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_str_buf_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "capa is a size hint only: the new string is empty, as in CRuby"
+    },
+    "rb_str_intern": {
+      "kind": "call",
+      "mruby": "mrb_str_intern",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_utf8_str_new_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
+    },
+    "rb_obj_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_check_frozen": {
+      "kind": "call",
+      "mruby": "mrb_check_frozen_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_delete": {
+      "kind": "call",
+      "mruby": "mrb_hash_delete_key",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_hash_new_capa": {
+      "kind": "call",
+      "mruby": "mrb_hash_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "RHASH_SIZE": {
+      "kind": "call",
+      "mruby": "mrb_hash_size",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_int (signed), where CRuby returns size_t"
+    },
+    "rb_ary_store": {
+      "kind": "call",
+      "mruby": "mrb_ary_set",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_clear": {
+      "kind": "call",
+      "mruby": "mrb_ary_clear",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_dup": {
+      "kind": "call",
+      "mruby": "mrb_ary_dup",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new_capa": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_ary_new2": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_capa",
+      "inject_mrb": true,
+      "needs_mrb": true
     }
   },
   "special_arg_positions_class_only": {

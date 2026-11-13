@@ -133,6 +133,18 @@ check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$w
 check grep -q '  rb_gc_mark  no mark callback in mruby' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
 
+# 2k. String, Hash and Array calls with exact mruby equivalents (api_map.json batch B1; header lines in the commit)
+rc=0; python3 "$conv" --name api_str_hash_ary tools/cext2mrbgem/fixtures/api_str_hash_ary/ext/api_str_hash_ary "$work/api_str_hash_ary" > "$work/api_str_hash_ary.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_str_hash_ary/NOT_BUILDABLE"
+check grep -qF 'mrb_str_cat(mrb, dup, "!", 1);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_str_intern(mrb, dup);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_check_frozen_value(mrb, s);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'long n = mrb_hash_size(mrb, h);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_hash_delete_key(mrb, h, k);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_ary_set(mrb, copy, 0, fresh);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_ary_new_capa(mrb, 2);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then
