@@ -347,9 +347,28 @@ static int ir_pointee_is_volatile(a_type_ptr t)
   return 0;
 }
 
+/* The va_list object. EDG's front end is configured for the x86-64 target, so its __va_list_tag is the System V 24-byte
+   struct. On an aarch64 host the va_start that QBE emits fills the 32-byte AAPCS64 __va_list (__stack, __gr_top, __vr_top,
+   __gr_offs, __vr_offs): a 24-byte slot overlapped the next local (sqlite3_mprintf's StrAccum overwrote gr_offs). */
+#if defined(__aarch64__)
+#define IR_VA_LIST_SIZE 32ULL
+#else
+#define IR_VA_LIST_SIZE 24ULL
+#endif
+
 static unsigned long long ir_size_of(a_type_ptr t)
 {
-  return (unsigned long long)f_size_of_type(skip_typerefs(t));
+  a_type_ptr s = skip_typerefs(t);
+  if (s->kind == tk_array && !s->variant.array.is_variable_size_array) {
+    a_type_ptr e = skip_typerefs(s->variant.array.element_type);
+    if (e->kind == tk_class || e->kind == tk_struct) {
+      if (class_type_supp(e)->is_va_list_tag)
+        return (unsigned long long)s->variant.array.variant.number_of_elements * IR_VA_LIST_SIZE;
+    }
+  }
+  if ((s->kind == tk_class || s->kind == tk_struct) && class_type_supp(s)->is_va_list_tag)
+    return IR_VA_LIST_SIZE;
+  return (unsigned long long)f_size_of_type(s);
 }
 
 /* Alignment in bytes of an object type (EDG's layout). Printed next to sizes of slots and globals. */
@@ -3136,7 +3155,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     case eok_va_copy: {
       char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
-      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_emit(ir_fmt("(copy %llu %s %s)", IR_VA_LIST_SIZE, dst, src));
       ir_note(0, k, 1);
       return ir_mk_void();
     }
