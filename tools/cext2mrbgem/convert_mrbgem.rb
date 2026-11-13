@@ -428,6 +428,7 @@ class Converter
     @init_rel = nil
     @dead_inits = []
     @variadic = {}
+    @local_macros = Set.new
   end
 
   # ---- reporting ---------------------------------------------------------
@@ -497,6 +498,137 @@ class Converter
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
     end
+  end
+
+  # ---- local macros: names the input defines itself -----------------------
+  # A name is local when every #define of it in the input is unconditional, apart from the include guard of a
+  # header. A #define under any other conditional (or #if 0) may be a compatibility fallback for a CRuby name
+  # (e.g. #if !defined(HAVE_...) #define rb_x ...), so the name stays refused. An #undef must be unconditional and
+  # no use may follow it in its file. A name whose first use in its own file precedes the #define is not local
+  # either: that use is the CRuby name. A local name is kept as it is (it is not a CRuby API); the body of its
+  # macro is still scanned like any other text, so a CRuby API used there is checked.
+  GUARD_RE = /(?:_h_*|_included)\z/i
+
+  def scan_local_macros
+    defined = {}     # name -> [[rel, directive position, tainted]]
+    undefined = {}   # name -> [[rel, directive position, tainted]]
+    @files.each do |rel, f|
+      stack = []     # one frame per open conditional: [guard?, condition texts]
+      f['masked'].scan(/^[ \t]*#[ \t]*(\w+)([^\n]*(?:\\\n[^\n]*)*)/) do
+        kw, rest, pos = $1, $2.strip, $~.begin(0)
+        case kw
+        when 'if', 'ifdef', 'ifndef'
+          gname = rest[/\A\w+\z/] if kw == 'ifndef'
+          gname ||= rest[/\A!\s*defined\s*\(?\s*(\w+)\s*\)?\z/, 1] if kw == 'if'
+          guard = stack.empty? && f['kind'] == 'hdr' && !gname.nil? && GUARD_RE.match?(gname)
+          stack.push([guard, [rest], false])
+        when 'elif', 'else'
+          if stack.any?
+            stack.last[1] << rest
+            stack.last[0] = false   # an include guard has no other branch
+          end
+        when 'endif' then stack.pop
+        when 'define'
+          name = rest[/\A(\w+)/, 1]
+          next if name.nil?
+          tainted = stack.any? { |g, _, _| !g }
+          (defined[name] ||= []) << [rel, pos, tainted]
+        when 'undef'
+          name = rest[/\A(\w+)/, 1]
+          (undefined[name] ||= []) << [rel, pos, stack.any? { |g, _, _| !g }] if name
+        end
+      end
+    end
+    @local_macros = Set.new
+    defined.each do |name, defs|
+      next if defs.any? { |_, _, t| t }
+      use_re = /(?<![#{WC}$])#{Regexp.escape(name)}(?![#{WC}])/
+      # an #undef ends the gem's meaning: it must be unconditional, and no use of the name may follow it
+      undone = (undefined[name] || []).any? do |rel, pos, t|
+        masked = @files[rel]['masked']
+        t || !masked.index(use_re, masked.index("\n", pos) || masked.length).nil?
+      end
+      next if undone
+      early = defs.any? do |rel, pos, _|
+        first = @files[rel]['masked'].index(use_re)
+        !first.nil? && first < pos
+      end
+      @local_macros << name unless early
+    end
+  end
+
+  # ---- local variables and struct tags the input declares ----------------
+  # A parameter or top-level local of a function definition is local when every occurrence of its name in the input
+  # lies inside a function that declares it, from the declaration on: within that function it shadows any CRuby name
+  # of the same spelling, and no other occurrence can refer to it. A class variable is never local this way. A
+  # struct, union or enum tag the input defines (with a body) is in the tag namespace, so `struct NAME` with that tag
+  # is local; a forward declaration is not enough, since the definition may be CRuby's.
+  NOT_A_TYPE = %w[return goto else case typedef sizeof break continue do].freeze
+
+  def scan_local_names
+    @local_tags = Set.new
+    @files.each_value do |f|
+      f['masked'].scan(/\b(?:struct|union|enum)[ \t\n]+([A-Za-z_][#{WC}]*)[ \t\n]*\{/) { @local_tags << $1 }
+    end
+    cands = Hash.new { |h, k| h[k] = [] }   # name -> [[rel, lo, hi, declaration position]]
+    @defs.values.flatten.each do |d|
+      next unless d.key?('body_end')
+      span = [d['file'], d['hstart'], d['body_end']]
+      param_names(d).each { |n| cands[n] << [*span, d['hstart']] }
+      body_top_declarations(d).each { |n, pos| cands[n] << [*span, pos] }
+    end
+    @local_var_occ = Set.new
+    cands.each do |name, list|
+      next if @class_vars.include?(name) || !@occ.key?(name)
+      occs = @occ[name]
+      covered = occs.all? do |orel, s, _|
+        list.any? { |rel, lo, hi, dpos| rel == orel && lo <= s && s < hi && s >= dpos }
+      end
+      occs.each { |orel, s, _| @local_var_occ << [orel, s] } if covered
+    end
+  end
+
+  # [name, declaration position] for the declarators of the top-level declarations in a function body
+  def body_top_declarations(d)
+    masked = @files[d['file']]['masked']
+    out = []
+    depth = 0
+    seg = d['brace'] + 1
+    i = seg
+    while i < d['body_end']
+      c = masked[i]
+      if c == '{'
+        depth += 1
+      elsif c == '}'
+        depth -= 1
+        seg = i + 1 if depth.zero?
+      elsif c == ';' && depth.zero?
+        text = masked[seg...i]
+        head = /\A\s*(?:(?:static|const|volatile|unsigned|signed|struct|union|enum)\s+)*([A-Za-z_]\w*)\s+(?=[*A-Za-z_])/.match(text)
+        if head && !NOT_A_TYPE.include?(head[1])
+          rest = text[head.end(0)..]
+          parts, cur, pd = [], +'', 0
+          rest.each_char do |ch|
+            pd += 1 if ch == '('
+            pd -= 1 if ch == ')'
+            if ch == ',' && pd.zero?
+              parts << cur
+              cur = +''
+            else
+              cur << ch
+            end
+          end
+          parts << cur
+          parts.each do |part|
+            nm = part.sub(/=.*\z/m, '')[/([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*\z/, 1]
+            out << [nm, seg] if nm
+          end
+        end
+        seg = i + 1
+      end
+      i += 1
+    end
+    out
   end
 
   # ---- stage 2: classes, registrations, definitions -----------------------
@@ -987,12 +1119,14 @@ class Converter
       end
     end
     # 5. identifier pass
-    local_syms = Set.new(@defs.keys) | Set.new(@decls.reject { |d| d['hdr'] }.map { |d| d['name'] }) | @class_vars
+    local_syms = Set.new(@defs.keys) | Set.new(@decls.reject { |d| d['hdr'] }.map { |d| d['name'] }) | @class_vars |
+                 @local_macros
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      next if @local_var_occ.include?([rel, s])
       entry = @entries[name]
       if !entry.nil?
         if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b }
@@ -1004,7 +1138,8 @@ class Converter
         next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}[A-Za-z_]/)
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
-      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name)
+      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
+            !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         refuse(rel, s, name, 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
@@ -1471,8 +1606,10 @@ class Converter
   def run
     choose_scanner
     load
+    scan_local_macros
     scan
     build_occurrences
+    scan_local_names
     compute_needs
     check_refs
     @files.keys.sort.each { |rel| process(rel) }

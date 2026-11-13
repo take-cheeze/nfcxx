@@ -203,6 +203,25 @@ check grep -qF 'mrb_warn(mrb, "boom check: %s", "start");' "$work/api_exc_misc/s
 check grep -qF 'mrb_raisef(mrb, mrb_exc_get(mrb, "NoMemoryError"), "out of room");' "$work/api_exc_misc/src/api_exc_misc.c"
 check grep -qF 'mrb_value now = (obj);' "$work/api_exc_misc/src/api_exc_misc.c"
 
+# 2p. identifiers the input defines itself: a #define'd macro, a struct tag with a body, and a local variable or
+# parameter (every use inside a function that declares it) are local, not refused. Refused: a name used but never
+# defined, a fallback #define under #if !defined(...), and a CRuby call in a local macro's body
+rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names tools/cext2mrbgem/fixtures/local_names/ext/local_names "$work/local_names" > "$work/local_names.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/local_names/NOT_BUILDABLE"
+check grep -qF '#define LN_TWICE(x) ((x) * 2)' "$work/local_names/src/local_names.c"
+check grep -qF 'mrb_int_value(mrb, LN_TWICE(n));' "$work/local_names/src/local_names.c"
+check grep -qF 'mrb_value rb_ln_out;' "$work/local_names/src/local_names.c"
+check grep -qF 'struct rb_ln_state s;' "$work/local_names/src/local_names.c"
+check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/local_names.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/local_names_refused/NOT_BUILDABLE"
+check grep -q '  rb_reg_nth_match  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check test "$(grep -c '  LNR_CALL  ' "$work/local_names_refused/REFUSALS.txt")" -eq 0
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
