@@ -3,7 +3,7 @@
 require 'delegate'
 require_relative 'codegen_return_classes'
 
-# CodeGen: DECLARED_CALLSITE_CONTRADICTION (TC1017).
+# CodeGen: DECLARED_CALLSITE_CONTRADICTION (TC1018).
 #
 # A declared parameter (an RBS `Integer` / `Float` / `Symbol` / program-class parameter, `T?` included) is checked on
 # entry (DECLARED_PARAM_GUARD) and seeds its argument pool with the declared class bit (setup_class_pools). Whole-program
