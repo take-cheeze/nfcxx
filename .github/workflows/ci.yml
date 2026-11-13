@@ -250,7 +250,9 @@ jobs:
         include:
           - name: cases (QBE and gcc backends)
             run: |
-              NFCXX_BACKEND=qbe tests/run.sh
+              # Path B, not cproc: the default driver is Path B on every host (docs/notes/pathb-default.md). The name is kept
+              # so a required check of this name does not disappear.
+              NFCXX_BACKEND=pathb tests/run.sh
               if [ "$GCC_BACKEND" = 1 ]; then NFCXX_BACKEND=gcc tests/run.sh; fi
           # float-to-int checks the x87 helpers of be/nfcxx_ldrt.c, which exist only on x86-64, so it stays off this runner.
           - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options, determinism
@@ -276,6 +278,24 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           packages: python3 python3-dev ruby rake clang
+
+      # The Path B harness (scripts/setup-pathb.sh): the cases run NFCXX_BACKEND=pathb, and the driver needs the harness.
+      # Keyed as the other Path B jobs key it.
+      - name: Path B harness cache key
+        id: pathb-key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v6
+        with:
+          path: build/pathb
+          # runner.arch too: the x86-64 jobs cache the same path under the same runner.os, and an x86-64 cpfe does not run here
+          key: pathb-${{ runner.os }}-${{ runner.arch }}-${{ steps.pathb-key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}

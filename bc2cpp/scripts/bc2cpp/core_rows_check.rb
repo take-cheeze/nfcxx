@@ -6,7 +6,8 @@
 #
 #   - the generated-code scan: a by-name send, a presym or symbol reference passed to a by-name helper is a lookup;
 #     a variable, constant, keyword, Symbol value or comparison, table entry or diagnostic is none, and neither is the
-#     bare index an owner call or a native singleton call takes;
+#     bare index an owner call or a native singleton call takes, nor ARRAY_FIXNUM_HASH's compared `hash`; the
+#     literal scan reads no PROC_SPEC name;
 #   - the engine reading: a send's or Symbol literal's operand looks nothing up, any other operand does, and an
 #     unresolved alias keeps every symbol; the dynamic and `super` names count, and a name only a native under 3rd/
 #     gives is none of the engine's (the core run reads that source itself); the closed build's engine bytecode sends
@@ -63,6 +64,23 @@ suite.check('an owner call and a native singleton call look nothing up by name',
 suite.check('a Symbol value, a comparison, a variable and a constant are no lookup',
             (found & %w[last sort @x Foo]).empty?)
 suite.check('the symbol table itself is no lookup', CoreRows.strip_sym_table(gen).count('"') == gen.count('"') - 18)
+hash_gen = <<~CPP
+  static const char* const bc2cpp_sym_names[1] = {
+    "hash",
+  };
+  { mrb_value h; if (bc2cpp_ary_fixnum_hash(M, self, bc2cpp_sym(M, 0), &h)) return h; }
+CPP
+suite.check("ARRAY_FIXNUM_HASH's `hash` (a recursion guard's compare) is no lookup",
+            !CoreRows.generated_lookups(hash_gen).include?('hash'))
+spec_gen = <<~'CPP'
+  static const char* const bc2cpp_proc_spec_7_names[] = { "\x6b\x65\x79", "", nullptr };
+  mrb_value v = mrb_funcall(M, x, "kept_literal", 0);
+  mrb_value w = bc2cpp_pool_str(M, "\x6b\x65\x79\x32");
+CPP
+lits = StaticDispatchRegistrations.rows_generated_text(spec_gen).scan(StaticDispatchRegistrations::STRING_LITERAL)
+                                  .map { |(s)| StaticDispatchRegistrations.unescape(s) }
+suite.check("the rows run reads no PROC_SPEC name (a block's local), a code literal still (#{lits.join(', ')})",
+            !lits.include?('key') && lits.include?('key2'))
 
 insn = Struct.new(:op, :sym, :alias_name) do
   def first_of(_kind) = alias_name && Struct.new(:value).new(alias_name)
