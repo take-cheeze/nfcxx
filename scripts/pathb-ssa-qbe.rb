@@ -2239,7 +2239,15 @@ end
       b = op(rv[2])
       d = fresh
       @lines << "  #{d} =#{Qbe.kp} sub #{a}, #{b}"
-      @lines << "  #{dst} =#{Qbe.kp} div #{d}, #{n}"
+      if Qbe.ptr32 && n == 1
+        @lines << "  #{dst} =#{Qbe.kp} copy #{d}"   # no division of a byte count (the image of the real-mode code is size limited)
+      elsif Qbe.ptr32 && n > 0 && (n & (n - 1)).zero?
+        shift = 0
+        shift += 1 while (1 << shift) < n
+        @lines << "  #{dst} =#{Qbe.kp} sar #{d}, #{shift}"   # the difference of two pointers into one object is a multiple of n
+      else
+        @lines << "  #{dst} =#{Qbe.kp} div #{d}, #{n}"
+      end
     end
 
     # `(nonnull P)`: a null pointer traps (code 5).
@@ -3129,7 +3137,7 @@ end
     parts = parts.map do |x|
       next x if x.is_a?(Array) || !x.include?("%esp")
 
-      raise QbeUnsupported, "asm: %esp other than as an address base" if x.gsub("(%esp)", "").include?("%esp")
+      raise QbeUnsupported, "asm: %esp other than as an address base" if x.split("(%esp)").join.include?("%esp")
 
       adj = 4 * I386_SAVED.size + 4
       out = +""
@@ -3151,7 +3159,7 @@ end
     digest = sha1_hex("32|#{regparm3}|#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
     sym = "__pathb_asm_#{digest}"
     body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
-    lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:"]
+    lines = [".section .text.#{sym},\"axG\",@progbits,#{sym},comdat", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:"]
     I386_SAVED.each { |r| lines << "\tpushl %#{r}" }
     # the block: in %eax with -mregparm=3, else the first argument, above the return address and the four saved registers
     lines << (regparm3 ? "\tmovl %eax, %ebp" : "\tmovl #{4 * I386_SAVED.size + 4}(%esp), %ebp")
@@ -3366,9 +3374,10 @@ end
   end
 
   # The helpers' text, emitted once in a module that has a volatile access.
-  def volatile_helpers
+  def volatile_helpers(used = nil)
     loads = VOLATILE_LOADS.flat_map do |op_name|
       next [] if ptr32 && %w[loads loadd].include?(op_name)   # QBE's i386 has no floating point yet
+      next [] if used && !used.include?(op_name)
 
       cls = { "loadl" => "l", "loads" => "s", "loadd" => "d" }.fetch(op_name, "w")
       ["function #{cls} $#{volatile_name("ld", op_name)}(#{kp} %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
@@ -3376,11 +3385,30 @@ end
     end
     stores = VOLATILE_STORES.flat_map do |op_name|
       next [] if ptr32 && %w[stores stored].include?(op_name)
+      next [] if used && !used.include?(op_name)
 
       cls = store_class(op_name)
       ["function $#{volatile_name("st", op_name)}(#{kp} %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
     end
     (loads + stores).join("\n")
+  end
+
+  # The load and store operations of the volatile accesses of the forms (a load.v or store.v of a type): the helpers a 32-bit
+  # module needs. The real-mode image is size limited, so only these are emitted (a 64-bit module has all of them).
+  def volatile_ops(forms)
+    found = []
+    walk = lambda do |x|
+      next unless x.is_a?(Array)
+
+      if head(x) == "load.v" && x.length > 1
+        found << load_op(x[1])
+      elsif head(x) == "store.v" && x.length > 1
+        found << store_op(x[1])
+      end
+      x.each { |y| walk.call(y) }
+    end
+    forms.each { |f| walk.call(f) }
+    found
   end
 
   # Whether a module has a volatile access (a load.v or store.v, or a volatile type): then its helpers are emitted.
@@ -3491,7 +3519,7 @@ end
       d if d.is_a?(String)
     end
     data = type_decls + string_decls + global_decls
-    data << volatile_helpers if uses_volatile?(forms)
+    data << volatile_helpers(ptr32 ? volatile_ops(forms) : nil) if uses_volatile?(forms)
     data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
     data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).

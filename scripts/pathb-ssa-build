@@ -141,17 +141,18 @@ ASM_HELPERS = {
                  "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
 }.freeze
 
-# The 32-bit x86 versions of the helpers that differ (ret and the empty helpers are the same text). fence: no mfence (SSE2) on an i386,
-# a locked or of the stack top orders memory as it does. A long comes back in edx:eax, as rdtsc leaves it.
+# The 32-bit x86 helpers: each is a COMDAT section of its own (.text.NAME in the group NAME), so that a link of many objects keeps one copy
+# of each (the kernel's real-mode image is size limited). The same semantics as the x86-64 ones; fence has no mfence (SSE2) on an i386, a
+# locked or of the stack top orders memory as it does; a long comes back in edx:eax, as rdtsc leaves it.
 I386_HELPERS = {
-  "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tlock orl $0, (%esp)", "\tret",
-              "\t.size __pathb_fence, .-__pathb_fence"],
-  "retaddr" => ["\t.text", "\t.weak __pathb_retaddr", "\t.type __pathb_retaddr, @function", "__pathb_retaddr:", "\tmovl 4(%ebp), %eax", "\tret",
-                "\t.size __pathb_retaddr, .-__pathb_retaddr"],
-  "frameaddr" => ["\t.text", "\t.weak __pathb_frameaddr", "\t.type __pathb_frameaddr, @function", "__pathb_frameaddr:", "\tmovl %ebp, %eax", "\tret",
-                  "\t.size __pathb_frameaddr, .-__pathb_frameaddr"],
-  "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tret",
-              "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+  "barrier" => ["__pathb_barrier", ["ret"]],
+  "escape" => ["__pathb_escape", ["ret"]],
+  "fence" => ["__pathb_fence", ["lock orl $0, (%esp)", "ret"]],
+  "retaddr" => ["__pathb_retaddr", ["movl 4(%ebp), %eax", "ret"]],
+  "frameaddr" => ["__pathb_frameaddr", ["movl %ebp, %eax", "ret"]],
+  "rdtsc" => ["__pathb_rdtsc", ["rdtsc", "ret"]],
+  "vasink_w" => ["__pathb_vasink_w", ["ret"]],
+  "vasink_l" => ["__pathb_vasink_l", ["ret"]],
 }.freeze
 
 # The arm64 versions of the helpers above, for the arm64 QBE targets (arm64, arm64_apple), with the same semantics: check
@@ -220,7 +221,11 @@ end
 
 # The assembly lines of the helper NAME for TARGET: the x86-64 text of ASM_HELPERS, or the arm64 one (ELF, or Apple's form).
 def asm_helper(name, target)
-  return I386_HELPERS.fetch(name) { ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } } if target.start_with?("i386")
+  if target.start_with?("i386")
+    sym, body = I386_HELPERS.fetch(name) { error_exit("no assembly helper for #{name} on a 32-bit target") }
+    return ["\t.section .text.#{sym},\"axG\",@progbits,#{sym},comdat", "\t.weak #{sym}", "\t.type #{sym}, @function", "#{sym}:"] +
+           body.map { |l| "\t#{l}" } + ["\t.size #{sym}, .-#{sym}"]
+  end
   return ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } unless arm64_target?(target)
   sym, body = ARM64_HELPERS.fetch(name) { error_exit("no arm64 assembly helper for #{name}") }
   apple = arm64_apple?(target)

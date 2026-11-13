@@ -38,6 +38,8 @@
     tests/cxx-driver/run.sh
     tests/nfcc/run.sh
     tests/pathb-kernel/run.sh
+    tests/pathb-i386/run.sh
+    tests/pathb-i386/realmode.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
 - name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
