@@ -442,7 +442,11 @@ class ClosedWorld
 
     names = set.map { |k| simple(k) }.to_set
     return nil if names.any? { |n| @dynamic_subclassed.include?(n) || @outside_ruby_supers.include?(n) }
-    return nil if @native_code_tokens.each_value.any? { |tokens| names.any? { |n| tokens.include?(n) } }
+    # NATIVE_LEAF: a declared class no outside file touches (opaque?) has no native subclass either -- the touch scan
+    # records a native class definition's superclass and a class_new's argument as touches. Any other class keeps the
+    # spelled-name test.
+    spelled = set.reject { |k| @class_decls.key?(k) && !opaque?(k) }.map { |k| simple(k) }
+    return nil if @native_code_tokens.each_value.any? { |tokens| spelled.any? { |n| tokens.include?(n) } }
 
     set.to_a.sort
   end
@@ -2170,9 +2174,7 @@ class ClosedWorld
         case d[:super]
         when nil then @wild << klass
         when String
-          # Constant lookup is lexical then by ancestry: any class of that
-          # simple name may be the one meant.
-          parents = by_simple[simple(d[:super])]
+          parents = superclass_candidates(d[:super], by_simple)
           if parents.empty?
             @undeclared_children[d[:super]] << klass unless d[:super] == klass
           else
@@ -2181,6 +2183,19 @@ class ClosedWorld
         end
       end
     end
+  end
+
+  # The declared classes a superclass expression +sup+ may name. Constant lookup is lexical then by ancestry, so any
+  # class of that simple name may be the one meant; a written path (`RPG2k::Scene::Battle`) narrows that to the classes
+  # whose path ends with it, unless one of its segments is rebound or no declared class ends with it.
+  def superclass_candidates(sup, by_simple)
+    all = by_simple[simple(sup)]
+    path = sup.delete_prefix('::')
+    segments = path.split('::')
+    return all if segments.size < 2 || segments.any? { |seg| @rebound.include?(seg) || @outside_constant_writes.include?(seg) }
+
+    written = all.select { |c| c == path || c.end_with?("::#{path}") }
+    written.empty? ? all : written
   end
 
   def descendants(klass)

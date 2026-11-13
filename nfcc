@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc|pathb   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
+#   NFCXX_BACKEND=qbe|gcc|pathb   (default: pathb on x86-64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
+#              else qbe; qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
+#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md;
 #              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
 #              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
 #              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
@@ -39,7 +40,14 @@ set -euo pipefail
 shopt -s extglob
 root=$(cd "$(dirname "$0")" && pwd)
 host=${NFCC_HOST_CC:-cc}
-backend=${NFCXX_BACKEND:-qbe}
+# The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux, and then a unit Path B cannot
+# take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the environment sets it).
+# Anywhere else, or without the harness, it is the qbe backend (cproc), as before. NFCXX_BACKEND=qbe|gcc|pathb chooses one.
+if [ -n "${NFCXX_BACKEND:-}" ]; then backend=$NFCXX_BACKEND
+elif [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] && [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] &&
+     [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc" ]; then
+  backend=pathb; export NFCXX_PATHB_FALLBACK=${NFCXX_PATHB_FALLBACK:-gcc}
+else backend=qbe; fi
 version=0.1
 
 die() { echo "nfcc: error: $*" >&2; exit 1; }

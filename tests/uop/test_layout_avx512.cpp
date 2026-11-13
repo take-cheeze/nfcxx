@@ -3,6 +3,7 @@
 // bit against a reference (the inputs are small integers, so every sum is exact). Prints SKIP without AVX-512F.
 #undef NDEBUG
 #include "nfcuop_layout_avx512.hpp"
+#include "nfcuop_layout_avx2.hpp"  // emit_for_solution: the plan-to-emitter map covers both targets
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -97,6 +98,52 @@ void run_case(const std::string& dir, int mr, int64_t M, int64_t N, int64_t K, s
   }
 }
 
+// The plan the AVX-512 target's solver picks, emitted through emit_for_solution, compiled and checked bit for bit.
+void run_plan_case(const std::string& dir, int64_t M, int64_t N, int64_t K, std::mt19937& rng) {
+  Solution s = solve(gemm_rowsum(M, N, K, avx512_f32()));
+  std::string tag = "plan_avx512_" + std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+  if (!s.feasible) {
+    std::fprintf(stderr, "FAIL %s: the model found no plan\n", tag.c_str());
+    ++failures;
+    return;
+  }
+  std::string src;
+  try {
+    src = emit_for_solution(s, M, N, K);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "FAIL %s: %s\n", tag.c_str(), e.what());
+    ++failures;
+    return;
+  }
+  std::uniform_int_distribution<int> d(-4, 4);
+  std::vector<float> A(M * K), B(K * N);
+  for (auto& x : A) x = float(d(rng));
+  for (auto& x : B) x = float(d(rng));
+  std::vector<float> refC(M * N), refR(M, 0.0f);
+  for (int64_t m = 0; m < M; ++m)
+    for (int64_t n = 0; n < N; ++n) {
+      float acc = 0;
+      for (int64_t k = 0; k < K; ++k) acc += A[m * K + k] * B[k * N + n];
+      refC[m * N + n] = acc;
+      refR[m] += acc;
+    }
+  KernelFn fn = nullptr;
+  void* h = load_kernel(dir, src, tag, &fn);
+  if (!h) return;
+  std::vector<float> C(M * N, -999.0f), R(M, -999.0f), Bp(K * N, -999.0f);
+  fn(A.data(), B.data(), C.data(), R.data(), Bp.data());
+  dlclose(h);
+  int bad = 0;
+  for (int64_t i = 0; i < M * N; ++i) bad += C[i] != refC[i];
+  for (int64_t m = 0; m < M; ++m) bad += R[m] != refR[m];
+  if (bad) {
+    std::fprintf(stderr, "FAIL %s: %d value(s) differ from the reference\n", tag.c_str(), bad);
+    ++failures;
+  } else {
+    std::printf("ok   %s (%s)\n", tag.c_str(), s.variant[0].c_str());
+  }
+}
+
 void expect_refused(int64_t M, int64_t N, int64_t K, int mr, const char* what) {
   try {
     emit_gemm_rowsum_packed512_c(M, N, K, mr);
@@ -130,6 +177,10 @@ int main() {
   expect_refused(12, 32, 4, 5, "mr = 5");
   expect_refused(10, 32, 4, 4, "M = 10 with mr = 4");
   expect_refused(8, 32, 0, 4, "K = 0");
+
+  // Plans from the AVX-512 solver, emitted through emit_for_solution and checked (the shapes are the packed kernel's).
+  run_plan_case(dir, 12, 32, 5, rng);
+  run_plan_case(dir, 24, 64, 33, rng);
 
   if (failures == 0) {
     std::string rm = "rm -rf '" + dir + "'";
