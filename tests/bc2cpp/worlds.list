@@ -21,13 +21,10 @@ pathb_ir_opt              4
 pathb_ssa                 4
 pathb_ssa_structurize     3
 pathb_cil_emit            3
-cil_link                  3
 llvm_to_pathb             2
 sycl_rewrite              2
-mrustc_prep               2
 cpp_feature_checklist     1
 cpp_feature_report        2
-strip_atomic              3
 pathb_egraph              5
 pathb_structure           3
 pathb_ssa_qbe             5
