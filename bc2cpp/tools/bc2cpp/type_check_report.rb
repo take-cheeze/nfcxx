@@ -21,6 +21,8 @@ require_relative 'type_check_rbs'
 #   TC1007 error    an inferred IR may-set is disjoint from a nominal RBS return/ivar contract
 #   TC1008 warning  an inferred IR may-set partly overlaps the contract
 #   TC1009 info     as TC1008, but --trace runtime evidence observed only contract classes for that return
+#   TC1017 error    a call site provably passes a class other than the one an RBS parameter declares (the entry guard
+#                   would raise BC2cppDeclarationViolation there); a site that only may pass one is silent
 #   TC1016 error    an RBS `class C < S` whose S is not the program's superclass of C
 #   TC2004 info     (--all) an IR query is unknown, with its refusal reason
 #   TC2001 info     (--all) a parameter has no type, with the reason bucket
@@ -170,6 +172,12 @@ module TypeCheckReport
       out << Diagnostic.new(file: n['file'], line: n['line'], col: n['col'], severity: 'warning', code: 'TC1005',
                             message: "#{n['owner']}##{n['method']}: index `#{n['name']}` on a receiver that may be nil; " \
                                      'check it for nil first (ADR 0439)')
+    end
+    Array(facts['declared_callsites']).each do |c|
+      where = c['sig_file'] ? " (declared at #{c['sig_file']}:#{c['sig_line']})" : ''
+      out << Diagnostic.new(file: c['file'], line: c['line'], col: c['col'], severity: 'error', code: 'TC1017',
+                            message: "#{c['declaration']} parameter #{c['position']}: declared #{c['declared']}, but this call " \
+                                     "passes #{c['passed']}#{where}; BC2cppDeclarationViolation at run time")
     end
     Array(facts['signature_diagnostics']).each do |d|
       out << Diagnostic.new(file: d['file'], line: d['line'], col: d['col'], severity: d['severity'], code: d['code'],
