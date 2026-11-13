@@ -1,0 +1,59 @@
+-c a.cpp
+-c a.cpp -o a.o
+-c a.cpp -O2 -DX=1 -Iinc
+-c a.cpp -DX -UY -I inc -D Z=1
+-c -I
+-c a.cpp -std=c++17
+-c a.cpp -std=gnu++20
+-std=c++14 a.cpp -o prog
+a.cpp -o prog -lm -L/opt -pthread
+a.cpp b.o c.a d.so -rdynamic
+-shared a.cpp -o lib.so -fPIC
+-fPIC -c a.cpp
+-fpic -c a.cpp
+-pie a.cpp -o p -fPIE
+-fPIE -c a.cpp
+-c --emit-c a.cpp
+-c --emit-hip a.cu
+--emit-c a.cpp
+--backend=pathb -c a.cpp
+--backend=qbe a.cpp -o p
+--backend=gcc -c a.cpp
+--ir-opt=inline,sroa -c a.cpp
+--eh-unwind --no-eh-unwind --no-eh-shim -c a.cpp
+--cache=/tmp/c --cache-log=/tmp/l -c a.cpp
+--keep-intermediates --time-log=t.json -c a.cpp
+--instantiate=auto -c a.cpp
+--instantiate=bogus -c a.cpp
+--promote-slots=on --unroll=off --struct-slots=0 -c a.cpp
+--promote-slots=maybe -c a.cpp
+--unroll=yes -c a.cpp
+--pathb-c=gcc -c a.c
+--dialect=clang -c a.cpp
+--gnu-version=130000 -c a.cpp
+--freestanding --cosmo --target=linux_i686 --emit-c a.c
+--trace=t.json -c a.cpp
+--module-dir=mods -c a.cpp
+--obfuscate-kernels -c a.cu
+-fsanitize=address a.cpp -o p
+-fsafe-pointers -fno-safe-pointers -c a.cpp
+-fno-sanitize=address -fsanitize=address -c a.cpp
+-fsanitize=undefined -c a.cpp
+-fno-sanitize=all -c a.cpp
+-fno-sanitize=thread -c a.cpp
+-fno-omit-frame-pointer -fomit-frame-pointer -c a.cpp
+-fexceptions -fwrapv -fno-strict-aliasing -pipe -c a.cpp
+-fvisibility=hidden -fvisibility-inlines-hidden -c a.cpp
+-Wl,--as-needed -Wall -w -Wno-narrowing -c a.cpp
+-m64 -march=native -mavx2 -c a.cpp
+-MD -MP -MF d.d -MT t -c a.cpp
+-MMD -MQ q -c a.cpp
+-include h.h -isystem /s -isystem/t -c a.cpp
+-E a.cpp
+-P -E a.cpp
+-x c++ -c -
+- -E
+-x c -c a.c
+-O3 -g -fopenmp a.cpp
+-c a.cu b.cpp2 c.c d.o
+-c a.cu -o b.o
