@@ -1,7 +1,7 @@
 # nfcc on Path B (`NFCXX_BACKEND=pathb`)
 
 `nfcc`, the `cc` drop-in for make, CMake, autoconf and the Linux kernel build, has four backends: `qbe` (cproc -> QBE), `cil`, `gcc` and
-`pathb`, which is the **default** on x86-64 Linux when this checkout has the Path B harness (`scripts/setup-pathb.sh`) and QBE: each C source goes through
+`pathb`, which is the **default** on x86-64 and aarch64 (arm64) Linux when this checkout has the Path B harness (`scripts/setup-pathb.sh`) and QBE: each C source goes through
 `scripts/pathb-cc` in C mode (EDG's C front end -> typed IR -> QBE IL, no cproc), the route `./nfcxx` takes for a C input.
 With the default (no `NFCXX_BACKEND`), a unit Path B cannot take (an option it cannot honour, a construct it refuses) is made by gcc, as `./nfcxx` does
 (`NFCXX_PATHB_FALLBACK=gcc` is then set unless the environment sets it); an explicit `NFCXX_BACKEND=pathb` keeps the strict behaviour below. Without the

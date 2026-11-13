@@ -859,6 +859,10 @@ done
 # Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
 # target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump does the same).
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
+# Hosted Linux aarch64 (either backend): the front end's predefined macros have __aarch64__ but not __AARCH64EL__, which gcc
+# defines there. glibc's and CPython's multiarch headers (python3.12's pyconfig.h) choose their directory by both, so without
+# it Python.h stops with "unknown multiarch location for pyconfig.h". The value is the one gcc defines.
+[ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && { cflags+=(-D__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }
 gnu_opts=()
 if [ "$dialect" = clang ]; then
   cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
