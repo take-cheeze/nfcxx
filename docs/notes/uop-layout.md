@@ -460,6 +460,29 @@ pattern (the AVX2 fit was at K=8 and missed K=16 and 64), so the AVX2 storage co
 transposes in that bench were scalar loops, and only one shape was run, so this is a qualitative result. Converting the
 gap into model instruction units needs a cycles-per-instruction figure that is not measured.
 
+## Accumulator latency (twelfth round)
+
+The eleventh round found that the 1/mr law does not explain the tile-size dependence, and named independent accumulators
+as a candidate. This round tests it. AVX2, single thread, 504 x 512 x 512, best of 40, three sweeps. The naive kernel
+reads B from memory for every row; U is the number of independent accumulators, one per output vector, sharing the k loop.
+
+| kernel | min, us | speedup over U=1 |
+|---|---|---|
+| naive, U=1 | 16665 | 1.00 |
+| naive, U=2 | 14021 | 1.19 |
+| naive, U=4 | 8149 | 2.04 |
+| naive, U=8 | 6574 | 2.54 |
+| packed, mr=6 | 2344 | 7.11 |
+
+Independent accumulators close about 71% of the naive-to-packed gap (16.7 ms to 6.6 ms, against 2.3 ms for packed). The
+rest is not explained by accumulators: the U=8 kernel is still about 2.8 times slower than the packed one. What remains
+is B reuse across rows (the naive kernels still stream B once per row), loads per FMA (about 1.1 for the naive U=8 tile
+against about 0.67 for the 6 x 2 packed tile), and the packing itself. These three are not separated by this experiment.
+
+The accumulator term is therefore a real part of the gap, and it is not a layout property. A derived model would need it
+as a separate term, and the rest would still need to be fitted or measured. The model's 0.18 (AVX2) and 0.24 (AVX-512)
+factors are not changed by this round.
+
 ## Next steps on this target
 
 1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
@@ -471,8 +494,8 @@ gap into model instruction units needs a cycles-per-instruction figure that is n
    its storage penalties are not (the eleventh round finds that the AVX2 K-dependence does not carry over).
 5. Thread constants: measured again (eleventh round); the 3- and 4-thread points disagree with the fit and 8 threads is
    not measurable here. Refit only on a host with at least 8 cores.
-6. Register blocking: the 1/mr law is refuted. A derived factor needs the accumulator latency term, which is not a layout
-   property; that is a design question for the model, not a measurement.
+6. Register blocking: the 1/mr law is refuted, and accumulator latency explains about 71% of the naive-to-packed gap
+   (twelfth round). The rest is B reuse, loads per FMA and packing, which are not yet separated.
 
 ## Tests
 

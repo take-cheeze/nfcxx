@@ -44,6 +44,10 @@ def normalise_const!(x)
   end
 end
 
+# ILP32 (a 32-bit target, see below): the IR's long and unsigned_long are int and unsigned_int, read as such from the start so that
+# a literal is brought into its range as a 32-bit type. Plain tokens only: a name is quoted.
+$ilp32 = false
+
 def read_forms(text)
   stack = []
   cur = []
@@ -63,6 +67,10 @@ def read_forms(text)
       cur << Str.new(t)
     elsif t.length > 1 && t.getbyte(1) == 34 && (c == 36 || c == 64 || c == 38)
       cur << Ref.new(t[0], t[1..])
+    elsif $ilp32 && t == "long"
+      cur << "int"
+    elsif $ilp32 && t == "unsigned_long"
+      cur << "unsigned_int"
     else
       cur << t
     end
@@ -80,7 +88,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--safe | --asan] [--pic] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -91,6 +99,8 @@ end
 
 $qbe_path = nil
 $qbe_flags = []   # --no-fp (qbe -n) and --no-unwind (qbe -U): nfcc's -mno-sse and -fno-asynchronous-unwind-tables
+$il_path = nil
+$target32 = nil   # --target=i386 or i386_regparm3: the 32-bit QBE target the (32-bit) IR is emitted for
 
 def qbe_binary
   $qbe_path || ENV.fetch("NFCXX_QBE") { File.expand_path("../build/qbe/qbe", __dir__) }
@@ -131,6 +141,20 @@ ASM_HELPERS = {
                  "\t.size __pathb_vasink_d, .-__pathb_vasink_d"],
 }.freeze
 
+# The 32-bit x86 helpers: each is a COMDAT section of its own (.text.NAME in the group NAME), so that a link of many objects keeps one copy
+# of each (the kernel's real-mode image is size limited). The same semantics as the x86-64 ones; fence has no mfence (SSE2) on an i386, a
+# locked or of the stack top orders memory as it does; a long comes back in edx:eax, as rdtsc leaves it.
+I386_HELPERS = {
+  "barrier" => ["__pathb_barrier", ["ret"]],
+  "escape" => ["__pathb_escape", ["ret"]],
+  "fence" => ["__pathb_fence", ["lock orl $0, (%esp)", "ret"]],
+  "retaddr" => ["__pathb_retaddr", ["movl 4(%ebp), %eax", "ret"]],
+  "frameaddr" => ["__pathb_frameaddr", ["movl %ebp, %eax", "ret"]],
+  "rdtsc" => ["__pathb_rdtsc", ["rdtsc", "ret"]],
+  "vasink_w" => ["__pathb_vasink_w", ["ret"]],
+  "vasink_l" => ["__pathb_vasink_l", ["ret"]],
+}.freeze
+
 # The arm64 versions of the helpers above, for the arm64 QBE targets (arm64, arm64_apple), with the same semantics: check
 # branches to abort when its argument is nonzero, fence is a full barrier (dmb ish), and rdtsc reads the generic timer's
 # virtual count (cntvct_el0: arm64 has no time stamp counter). Each entry is [symbol, body]; ABORT names abort (or _abort).
@@ -153,6 +177,8 @@ ARM64_HELPERS = {
 # The QBE target the IL is assembled for: PATHB_QBE_TARGET when set (and passed to QBE with -t), else the host's, which is
 # QBE's default for this host (the same as `uname`: Apple and Linux, arm64 and x86-64).
 def qbe_target
+  return $target32 if $target32
+
   ENV.fetch("PATHB_QBE_TARGET") { host_qbe_target }
 end
 
@@ -195,6 +221,11 @@ end
 
 # The assembly lines of the helper NAME for TARGET: the x86-64 text of ASM_HELPERS, or the arm64 one (ELF, or Apple's form).
 def asm_helper(name, target)
+  if target.start_with?("i386")
+    sym, body = I386_HELPERS.fetch(name) { error_exit("no assembly helper for #{name} on a 32-bit target") }
+    return ["\t.section .text.#{sym},\"axG\",@progbits,#{sym},comdat", "\t.weak #{sym}", "\t.type #{sym}, @function", "#{sym}:"] +
+           body.map { |l| "\t#{l}" } + ["\t.size #{sym}, .-#{sym}"]
+  end
   return ASM_HELPERS.fetch(name) { error_exit("no assembly helper for #{name}") } unless arm64_target?(target)
   sym, body = ARM64_HELPERS.fetch(name) { error_exit("no arm64 assembly helper for #{name}") }
   apple = arm64_apple?(target)
@@ -265,7 +296,7 @@ def marker_asm(il, target, qbe_asm)
     sect = sect + format(".%05d", prio.to_i) if prio.to_i != 0
     # .balign, not .align: on aarch64 GNU as reads .align's operand as a power of two, so .align 8 aligned the table to 256
     # bytes and left a zero-filled gap in .init_array that glibc called (a NULL call at start-up).
-    ["\t.section #{sect},\"aw\"", "\t.balign 8", "\t.quad #{sym}"]
+    $target32 ? ["\t.section #{sect},\"aw\"", "\t.balign 4", "\t.long #{sym}"] : ["\t.section #{sect},\"aw\"", "\t.balign 8", "\t.quad #{sym}"]
   end
   texts = il.scan(/^# pathb-text (\S+)$/).flatten.uniq.map { |b| Base64.strict_decode64(b) }
   (weak + helpers + aliases + startup.flatten(1) + hidden_result_asm(il, target)).map { |line| "#{line}\n" }.join + texts.join
@@ -395,7 +426,7 @@ def assemble(il)
   Dir.mktmpdir("pathb-ssa-build") do |dir|
     path = File.join(dir, "module.qbe")
     File.write(path, il)
-    qbe_args = ENV.key?("PATHB_QBE_TARGET") ? ["-t", qbe_target] : []
+    qbe_args = ENV.key?("PATHB_QBE_TARGET") && !$target32 ? ["-t", qbe_target] : []
     qbe_args += $qbe_flags
     asm, err, st = Open3.capture3(qbe_binary, *qbe_args, path)
     return [nil, err] unless st.success?
@@ -412,6 +443,7 @@ no_fp = false
 safe = false
 asan = false
 pic = false
+m16 = false
 args = ARGV.dup
 usage_exit if args.empty?
 while args.first&.start_with?("-") && args.first != "-"
@@ -426,6 +458,9 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--safe" then safe = true
   when "--asan" then asan = true
   when "--pic" then pic = true
+  when /\A--target=(i386|i386_regparm3)\z/ then $target32 = $1
+  when "--m16" then m16 = true
+  when /\A--il=(.+)\z/ then $il_path = $1   # keep the QBE IL (debugging)
   when /\A--qbe=(.+)\z/ then $qbe_path = $1
   else usage_exit
   end
@@ -447,6 +482,20 @@ Qbe.xadd = !Qbe.aarch64
 Qbe.jtab = !Qbe.aarch64
 
 file = args.first
+# A 32-bit module (the front end's --target=linux_i686: its layout has (pointer 4)) goes to QBE's i386 targets: pointers are of class w
+# (Qbe.ptr32) and long is int (read_forms). The target is named by --target= (nfcc: i386_regparm3 for -mregparm=3, else i386).
+$ilp32 = File.open(file) { |io| io.gets.to_s.include?("(pointer 4)") }
+if $ilp32 != !$target32.nil?
+  error_exit($ilp32 ? "a 32-bit IR needs --target=i386 or --target=i386_regparm3" : "--target=#{$target32} needs a 32-bit IR (pathb-dump --target=linux_i686)")
+end
+error_exit("--safe and --asan are for the 64-bit targets") if $ilp32 && (safe || asan)
+error_exit("--m16 needs --target=i386 or --target=i386_regparm3") if m16 && !$ilp32
+Qbe.ptr32 = $ilp32
+Qbe.regparm3 = $target32 == "i386_regparm3"
+if $ilp32
+  $qbe_flags += ["-t", $target32]
+  $qbe_flags << "-m16" if m16
+end
 # The x87 ABI thunks (`(x87-thunk ...)` forms: long double through the x87 helpers) are generated by scripts/
 # pathb-x87-thunks.rb for the symbols the IL uses. A reference to a thunk with no matching form is refused (see below).
 # Each input is parsed once: the IR file (the data, alias, x87 and live-name forms) and the SSA text (the globals and functions).
@@ -540,6 +589,10 @@ hidden_thunk_markers = (Qbe.hidden_thunks || {}).keys.map do |kind, sym, n|
 end
 il = ([data_text] + bodies + Qbe.ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])] + alias_markers + weak_ref_markers + startup_markers + [hidden_thunk_markers.join("\n"), asm_decl_markers.join("\n")]).reject(&:empty?).join("\n\n") + "\n"
 x87_asm = x87_thunks_asm(x87_forms, il)
+if $ilp32 && (!x87_asm.empty? || il.include?("$__nfcxx_x87") || il.include?("__nfcxx_ldr_"))
+  warn "pathb-ssa-build: refused: #{File.basename(file)}: long double is not supported on the 32-bit targets"
+  exit EXIT_PARTIAL
+end
 thunk_refs = il.scan(/\$(__nfcxx_x87\w*)\(/).flatten.uniq
 missing = thunk_refs.reject { |s| x87_asm.include?("#{s}:") }
 unless missing.empty?
@@ -554,6 +607,7 @@ unless x86_asm.empty? || x87_target_x86_64?
   warn "pathb-ssa-build: refused: #{File.basename(file)}: long double ABI thunks (x87) are x86-64 assembly; target is #{x87_target_name}"
   exit EXIT_PARTIAL
 end
+File.write($il_path, il) if $il_path
 asm, qbe_err = assemble(il)
 error_exit("QBE failed: #{qbe_err.lines.first&.strip}") if asm.nil?
 # -mno-sse: QBE has no switch to avoid SSE and x87 (-n only keeps integer moves out of %xmm15), so the code it wrote is checked, as

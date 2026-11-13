@@ -1455,7 +1455,30 @@ module StaticDispatchRegistrations
       core_excluded: core_excluded, initializers_proven: closed_only ? initializers_proven : Set.new,
       ctor_rows: closed_only ? ctor_rows(repo_root, candidates, ireps, superclass_of, symbol_lookups, super_reach, super_unknown,
                                          gens: runs.values.map { |r| NativeFrameUse.strip_rows(r[:gen]) }) : Set.new,
+      engine_rows: closed_only ? engine_rows(candidates, core_excluded&.at(4), super_reach, super_unknown, class_owners) : Set.new,
       frame_free: closed_only ? frame_free_names(repo_root, registry) : Set.new }
+  end
+
+  # ENGINE_ROWS (closed only): compiled engine entries the closed build keeps as rows of their generated ROM table
+  # (MRB_MT_CTOR_ROW) instead of method-table entries, as CORE_ROWS does for the core's. A row answers only the
+  # lookups that find rows (bc2cpp_find_proven: owner calls, native singleton calls; the funcall family,
+  # mrb_vm_find_method_rows), so an entry may become one when the core rows run (`row_reach`: its names and fragments,
+  # which read the engine, the core Ruby, the natives and the generated code by those rules) finds no other lookup of
+  # its name, and no `super` may reach it. Only a plain compiled registration has a row to keep: a native, an accessor
+  # and a guarded registration stay entries. Constructor names are CTOR_ROWS'.
+  def engine_rows(candidates, row_reach, super_reach, super_unknown, class_owners)
+    return Set.new unless row_reach
+
+    names, fragments = row_reach
+    candidates.filter_map do |m|
+      owner = m[:owner]
+      name = m[:name]
+      next unless owner.is_a?(String) && owner.match?(CLOSED_OWNER_RE) && m[:entry] && !m[:native] && !m[:accessor] && !m[:guard]
+      next if CTOR_ROW_NAMES.include?(name) || super_unknown.include?(name)
+      next if dynamic_name?(name, names, fragments) || super_reached?(super_reach, class_owners, owner, name)
+
+      "#{owner}##{name}"
+    end.to_set
   end
 
   # CORE_NATIVE_CANDIDATES (closed only): [the core ROM entries the closed build leaves out of its tables, the core
@@ -1486,6 +1509,7 @@ module StaticDispatchRegistrations
     self.core_state = [entries, names, fragments, proven] if core_names
     rom = CoreNativeCandidates.candidates(entries, names, fragments, proven)
     rows = []
+    row_reach = nil
     if engine_dynamic
       # CORE_ROWS_COMPILED: the core gem's code counts like the engine's, and the bodies it compiles are not read again.
       row_generated = core_run ? generated + [core_run[:gen]] : generated
@@ -1505,9 +1529,11 @@ module StaticDispatchRegistrations
                                                                 compiled_core: core_run&.dig(:compiled), operators: !proven.empty?,
                                                                 row_calls: true)
       rows = CoreNativeCandidates.candidates(entries, row_names, row_fragments, proven, operators: !proven.empty?) - rom
+      row_reach = [row_names, row_fragments]
     end
+    # The fifth element is the rows run's [names, fragments] (ENGINE_ROWS), nil when it did not run.
     [rom, (CoreNativeCandidates.ram_candidates(map, names, fragments, entries, proven) + private_ruby + ruby).uniq.sort, rows,
-     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only)]
+     CoreNativeCandidates.undef_candidates(map, names, fragments, undef_only), row_reach]
   ensure
     @enumerator_free_proof = nil
   end
@@ -1868,6 +1894,8 @@ module StaticDispatchRegistrations
     # The CoreEnumeratorFree::Result of the last core_excluded run (nil when it had nothing to prove).
     attr_reader :enumerator_free
     attr_accessor :why
+    # WHY_ALL: when set (a Hash), every reason that made each name dynamic, not only the first.
+    attr_accessor :why_all
     # core_kept_report.rb: a Set that answers `note` (it records where each name comes from) for core_excluded to read
     # names into, and the [entries, names, fragments, proven] it ended with.
     attr_accessor :core_names, :core_state
@@ -1876,7 +1904,13 @@ module StaticDispatchRegistrations
   def cite(names, reason)
     return unless @why
 
-    names.each { |name| @why[name] ||= reason }
+    names.each do |name|
+      @why[name] ||= reason
+      next unless @why_all
+
+      reasons = (@why_all[name] ||= [])
+      reasons << reason unless reasons.include?(reason)
+    end
   end
 
   def irep_site(irep, method_of, body_of)
@@ -2056,6 +2090,7 @@ module StaticDispatchRegistrations
                                    ctor_rows: closed[:ctor_rows].freeze,
                                    core_rows: closed[:core_excluded][2].to_set.freeze,
                                    core_undef_left_out: Array(closed[:core_excluded][3]).to_set.freeze,
+                                   engine_rows: (closed[:engine_rows] - closed_names).freeze,
                                    frame_free: closed[:frame_free].freeze, digest: digest)
   end
 

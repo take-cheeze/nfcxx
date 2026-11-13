@@ -382,9 +382,13 @@ class CodeGen
     "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
   end
 
-  # CTOR_ROWS: the compiled entries this closed build keeps as constructor rows.
+  # CTOR_ROWS, ENGINE_ROWS: the compiled entries this closed build keeps as rows of their table.
   def ctor_row_keys
-    @ctor_row_keys ||= ENV['BC2CPP_BUILD_NAME'] == 'closed' ? (static_dispatch_lists.ctor_rows || Set.new) : Set.new
+    @ctor_row_keys ||= if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+                         (static_dispatch_lists.ctor_rows || Set.new) | (static_dispatch_lists.engine_rows || Set.new)
+                       else
+                         Set.new
+                       end
   end
 
   def presym_key(name)
