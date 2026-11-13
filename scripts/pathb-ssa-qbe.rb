@@ -176,7 +176,7 @@ module Qbe
     # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
     # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
+    attr_accessor :xadd, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_defs
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -2569,7 +2569,7 @@ end
     ATOMIC_XADD = true
 
     def atomic_fetch?(c)
-      return false unless ATOMIC_XADD
+      return false unless ATOMIC_XADD && Qbe.xadd
       return false unless atomic_fetch_kind(c)
       order = c[5]
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
@@ -2608,7 +2608,7 @@ end
 
     def atomic_store?(c)
       f = c[2]
-      return false unless ATOMIC_XADD
+      return false unless ATOMIC_XADD && Qbe.xadd
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
 
       name = f.raw.delete('"')
