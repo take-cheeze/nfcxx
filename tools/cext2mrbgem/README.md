@@ -37,6 +37,11 @@ compiled either: the output is text for review, and a directory with refusals is
 - `rb_const_get(klass, id)` becomes `mrb_const_get(mrb, klass, id)`. A module receiver does not fall back to
   `Object` in mruby, and there is no autoload; both are recorded as caveats. `rb_const_get_at` is refused: no mruby
   function looks up only the receiver.
+- A helper that needs the mruby state gets an `mrb_state *mrb` parameter in its definition, in every prototype (the
+  `.c` and `.h` files are both scanned) and at every call site. This needs a unique definition, and every use must be
+  a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at
+  file scope is refused. A non-static helper is threaded with a caveat, since its signature changes. Any function
+  that calls a helper which is not threaded is refused, so no call is left passing an `mrb` that is not in scope.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other

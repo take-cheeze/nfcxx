@@ -556,7 +556,7 @@ class Converter:
                 nx = next_nonspace(masked, e)
                 direct = nx >= 0 and masked[nx] == '('
                 fn = self.enclosing_func(rel, s)
-                out.append((rel, s, direct, fn, fn is not None and fn['name'] in self.needs))
+                out.append((rel, s, direct, fn))
             return out
 
         def shadowed(name, fn):
@@ -568,7 +568,7 @@ class Converter:
                                   r'|\(\s*\*\s*%s\s*\)' % (re.escape(name), re.escape(name)), body))
 
         def use_problem(name, use):
-            rel, s, direct, fn, _ = use
+            rel, s, direct, fn = use
             if not direct:
                 return 'helper needs the mruby state threaded in, but is used outside a direct call (not supported)'
             if fn is None:
@@ -603,7 +603,7 @@ class Converter:
         # would not compile, so it is refused
         mrb_bearing = cands | set(self.valid_reg_names) | ({init_first} if init_first else set())
         for name in sorted(cands):
-            for rel, s, direct, fn, in_needs in uses[name]:
+            for rel, s, direct, fn in uses[name]:
                 if fn is not None and fn['name'] not in mrb_bearing and fn['name'] not in refused_defs:
                     self.refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
 
