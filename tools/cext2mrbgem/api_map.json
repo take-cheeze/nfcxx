@@ -768,6 +768,13 @@
       "needs_mrb": true,
       "caveat": "CRuby first skips singleton and include classes (rb_class_real); mrb_class_name does not. An anonymous class gets a new name string, and the pointer into it can dangle after the next GC (a named class keeps its path string alive)"
     },
+    "rb_define_alias": {
+      "kind": "call",
+      "mruby": "mrb_define_alias",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the class is a struct RClass * (as rb_undef_method): a class variable is passed unwrapped, and a VALUE there would not type-check. Names are C strings with the new name first (as in CRuby); the original must exist, as in CRuby (NameError)"
+    },
     "rb_undef_method": {
       "kind": "call",
       "mruby": "mrb_undef_method",
@@ -897,6 +904,9 @@
       1
     ],
     "rb_class2name": [
+      0
+    ],
+    "rb_define_alias": [
       0
     ],
     "rb_undef_method": [

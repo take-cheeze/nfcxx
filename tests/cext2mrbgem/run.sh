@@ -271,6 +271,12 @@ check grep -qF 'mrb_warn(mrb, "say: %s", name);' "$work/api_msg/src/api_msg.c"
 check grep -qF 'mrb_sym id = mrb_symbol(path);' "$work/api_msg/src/api_msg.c"
 check grep -qF 'if (id == 0) mrb_sys_fail(mrb, "open");' "$work/api_msg/src/api_msg.c"
 
+# 2v. rb_define_alias on a tracked class variable (api_map.json batch D5): mrb_define_alias with the class passed unwrapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alias tools/cext2mrbgem/fixtures/api_alias/ext/api_alias "$work/api_alias" > "$work/api_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alias/NOT_BUILDABLE"
+check grep -qF 'mrb_define_alias(mrb, cApiAlias, "copy", "orig");' "$work/api_alias/src/api_alias.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
