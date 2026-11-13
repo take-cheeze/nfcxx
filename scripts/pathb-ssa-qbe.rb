@@ -2997,7 +2997,9 @@ end
     end
 
     # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
-    # locked stores and exchanges the lowering uses). Only without --safe.
+    # locked stores and exchanges the lowering uses), whatever the memory order: a load has no order that x86 must fence. The
+    # order is not evaluated then, so it must have no call in it (a std::atomic::load with a runtime order passes a variable).
+    # Only without --safe.
     ATOMIC_LOAD = %w[__atomic_load_1 __atomic_load_2 __atomic_load_4 __atomic_load_8].freeze
     ATOMIC_LOAD_OP = { "1" => "w loadub", "2" => "w loaduh", "4" => "w loadw", "8" => "l loadl" }.freeze
 
@@ -3006,7 +3008,15 @@ end
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
-      head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+      !contains_call?(c[4])
+    end
+
+    # Whether a form (an operand or an expression) holds a call, which may have effects that dropping the call would lose.
+    def contains_call?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call"
+
+      x.any? { |y| contains_call?(y) }
     end
 
     # __atomic_store_N (N = 1, 2, 4, 8) with a constant order: a plain store, which on x86 is already a release store. A
