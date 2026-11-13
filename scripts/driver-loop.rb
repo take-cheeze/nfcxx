@@ -4,6 +4,8 @@
 # -MD -MMD -MF -MT -MQ -MP), -l and -L, and the input files. Any other option is refused as "unported" (exit 3), so that a
 # caller can tell "not done yet" from "refused by nfcc"; the groups still to port are listed in the branch's notes.
 #
+# Also: -O* -g* -pipe -v -time -w -W* (and -Wa,*, which goes to asf); -Wl,* and -Wp,* are not ported yet.
+#
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
 #
@@ -22,7 +24,8 @@ PP_TAKES_ARG = %w[-D -U -I -isystem -iquote -idirafter -include -imacros].freeze
 
 class LoopState
   attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp
-  attr_reader :pp, :ld, :inputs, :dts
+  attr_accessor :optlvl
+  attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf
 
   def initialize
     @mode = "link"
@@ -37,6 +40,9 @@ class LoopState
     @ld = []
     @inputs = []
     @dts = []
+    @optlvl = "-O2"
+    @dbg = []
+    @asf = []
   end
 end
 
@@ -123,6 +129,22 @@ def run_loop(args)
       state.pp << a
     elsif (a.start_with?("-l") || a.start_with?("-L")) && a.length > 2
       state.ld << a
+    elsif a == "-Ofast"
+      die("#{a} is not supported (changes floating-point semantics)")
+    elsif a == "-O" || a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Os" || a == "-Og"
+      state.optlvl = a == "-O" ? "-O1" : a
+    elsif a.start_with?("-O")
+      die("unknown optimisation option '#{a}'")
+    elsif a == "-g" || a.start_with?("-g")
+      state.dbg << a
+    elsif a == "-pipe" || a == "-v" || a == "-time"
+      nil
+    elsif a.start_with?("-Wa,")
+      state.asf << a
+    elsif a.start_with?("-Wl,") || a.start_with?("-Wp,")
+      raise Unported, a
+    elsif a == "-w" || a.start_with?("-W")
+      nil
     elsif a == "-"
       state.inputs << "c:-"
     elsif a.start_with?("-") || a.start_with?("@")
@@ -142,7 +164,7 @@ def emit(state)
   $stdout.write("sawout=#{state.sawout}\n")
   $stdout.write("lang=#{state.lang}\n")
   $stdout.write("backend=gcc\n")
-  $stdout.write("optlvl=-O2\n")
+  $stdout.write("optlvl=#{state.optlvl}\n")
   $stdout.write("depmode=#{state.depmode}\n")
   $stdout.write("dfile=#{state.dfile}\n")
   $stdout.write("dp=#{state.dp}\n")
@@ -153,6 +175,8 @@ def emit(state)
   state.pp.each { |x| $stdout.write("pp+=#{x}\n") }
   state.ld.each { |x| $stdout.write("ld+=#{x}\n") }
   state.dts.each { |x| $stdout.write("dts+=#{x}\n") }
+  state.dbg.each { |x| $stdout.write("dbg+=#{x}\n") }
+  state.asf.each { |x| $stdout.write("asf+=#{x}\n") }
 end
 
 def main(argv)

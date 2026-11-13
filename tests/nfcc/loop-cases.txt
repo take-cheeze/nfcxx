@@ -62,3 +62,15 @@ x.c -
 -c -x c x.s
 x.c x.s a.o
 -DA -- x.c
+-c x.c -O0
+-O x.c
+-O1 -O2 -O3 -Os -Og x.c
+-Ofast x.c
+-Ofoo x.c
+-O -c x.c
+-g x.c
+-g3 -ggdb -gdwarf-4 -c x.c
+-pipe -v -time x.c
+-w -Wall -Wextra -c x.c
+-Wa,--noexecstack -Wa,a,b x.c
+-Wl,--as-needed x.c

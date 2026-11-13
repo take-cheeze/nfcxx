@@ -39,6 +39,7 @@
     tests/nfcc/run.sh
     tests/nfcc/response-file.sh
     tests/nfcc/wp-option.sh
+    tests/nfcc/loop-state.sh
     tests/pathb-kernel/run.sh
     tests/pathb-i386/run.sh
     tests/pathb-i386/realmode.sh
