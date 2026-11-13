@@ -1,14 +1,16 @@
 // The oneMKL BLAS names ggml-sycl calls (the dpct helper's gemm wrappers, MUL_MAT's f32 path, out_prod, conv3d,
 // fattn-mkl and solve_tri), as plain SYCL kernels of lib/sycl: column-major gemm, gemm_batch (strided, and the group
-// form over pointer arrays) and trsm_batch (right side, not transposed). They are reference kernels: one work-item per
-// output element (per row for trsm), the products summed in float in index order, so results match a float CPU
-// reference to rounding, not oneMKL's blocking. Element types are float, sycl::half and bfloat16, converted to float;
+// form over pointer arrays) and trsm_batch (right side, not transposed). The strided gemm and gemm_batch are tiled (local
+// memory and register blocking, see below); the group form and trsm_batch use one work-item per output element (per row
+// for trsm). In all of them the products are summed in float in k order, so results match a float CPU reference to
+// rounding, not oneMKL's blocking. Element types are float, sycl::half and bfloat16, converted to float;
 // the result is rounded to the type of C. With beta == 0, C is not read (as in BLAS: a NaN in C does not survive).
 // A form not listed, and other element types (double and the complex types, which the dpct helper instantiates for every
 // library_data_t but ggml does not call), throw sycl::exception (errc::feature_not_supported) without a kernel.
 #pragma once
 #include <sycl/sycl.hpp>
 #include <sycl/half_type.hpp>
+#include <sycl/ext/oneapi/work_group_static.hpp>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
@@ -57,20 +59,63 @@ sycl::event gemm_batch(sycl::queue &q, transpose ta, transpose tb, std::int64_t 
   if (m <= 0 || n <= 0 || batch <= 0) return sycl::event();
   const bool at = detail::trans(ta), bt = detail::trans(tb);
   const float al = detail::to_f(alpha), be = detail::to_f(beta);
-  return q.parallel_for(sycl::range<3>((size_t)batch, (size_t)n, (size_t)m), [=](sycl::id<3> id) {
-    const std::int64_t p = (std::int64_t)id[0], j = (std::int64_t)id[1], i = (std::int64_t)id[2];
+  // Tiles of TM x TN outputs per work-group (TS x TS work-items, each with an RM x RN register tile). The k loop runs in
+  // steps of TK: the A and B tiles of a step are staged in work-group local memory, the group barriers, and each output
+  // adds its products in k order, so the sums are those of the one-item-per-output form.
+  constexpr int TS = 16, RM = 4, RN = 4, TM = TS * RM, TN = TS * RN, TK = 16;
+  const std::int64_t gm = (m + TM - 1) / TM, gn = (n + TN - 1) / TN;
+  return q.parallel_for(sycl::nd_range<3>(sycl::range<3>((size_t)batch, (size_t)gn * TS, (size_t)gm * TS),
+                                          sycl::range<3>(1, TS, TS)),
+                        [=](sycl::nd_item<3> it) {
+    namespace syclex = sycl::ext::oneapi::experimental;
+    syclex::work_group_static<float[TM * TK]> as_buf;   // [row][k]
+    syclex::work_group_static<float[TK * TN]> bs_buf;   // [k][col]
+    float *as = (float *)&as_buf, *bs = (float *)&bs_buf;
+    const std::int64_t p = (std::int64_t)it.get_group(0);
+    const std::int64_t i0 = (std::int64_t)it.get_group(2) * TM, j0 = (std::int64_t)it.get_group(1) * TN;
+    const int ti = (int)it.get_local_id(2), tj = (int)it.get_local_id(1);
+    const int lid = tj * TS + ti;
     const Ta *ap = a + p * stride_a;
     const Tb *bp = b + p * stride_b;
     Tc *cp = c + p * stride_c;
-    float s = 0.0f;
-    for (std::int64_t l = 0; l < k; l++) {
-      const float x = detail::to_f(at ? ap[l + i * lda] : ap[i + l * lda]);
-      const float y = detail::to_f(bt ? bp[j + l * ldb] : bp[l + j * ldb]);
-      s += x * y;
+    float acc[RM][RN];
+    for (int r = 0; r < RM; r++)
+      for (int q2 = 0; q2 < RN; q2++) acc[r][q2] = 0.0f;
+    for (std::int64_t k0 = 0; k0 < k; k0 += TK) {
+      for (int e = 0; e < TM * TK / (TS * TS); e++) {
+        const int idx = lid + e * TS * TS;
+        const int r = at ? idx / TK : idx % TM, kk = at ? idx % TK : idx / TM;   // the k-contiguous direction is the fast one
+        const std::int64_t i = i0 + r, l = k0 + kk;
+        float v = 0.0f;
+        if (i < m && l < k) v = detail::to_f(at ? ap[l + i * lda] : ap[i + l * lda]);
+        as[r * TK + kk] = v;
+      }
+      for (int e = 0; e < TK * TN / (TS * TS); e++) {
+        const int idx = lid + e * TS * TS;
+        const int kk = bt ? idx / TN : idx % TK, cc = bt ? idx % TN : idx / TK;
+        const std::int64_t j = j0 + cc, l = k0 + kk;
+        float v = 0.0f;
+        if (j < n && l < k) v = detail::to_f(bt ? bp[j + l * ldb] : bp[l + j * ldb]);
+        bs[kk * TN + cc] = v;
+      }
+      sycl::group_barrier(it.get_group());
+      for (int kk = 0; kk < TK; kk++) {
+        float av[RM], bv[RN];
+        for (int r = 0; r < RM; r++) av[r] = as[(ti + TS * r) * TK + kk];
+        for (int q2 = 0; q2 < RN; q2++) bv[q2] = bs[kk * TN + tj + TS * q2];
+        for (int r = 0; r < RM; r++)
+          for (int q2 = 0; q2 < RN; q2++) acc[r][q2] += av[r] * bv[q2];
+      }
+      sycl::group_barrier(it.get_group());
     }
-    float r = al * s;
-    if (be != 0.0f) r += be * detail::to_f(cp[i + j * ldc]);
-    cp[i + j * ldc] = detail::from_f<Tc>(r);
+    for (int r = 0; r < RM; r++)
+      for (int q2 = 0; q2 < RN; q2++) {
+        const std::int64_t i = i0 + ti + TS * r, j = j0 + tj + TS * q2;
+        if (i >= m || j >= n) continue;
+        float out = al * acc[r][q2];
+        if (be != 0.0f) out += be * detail::to_f(cp[i + j * ldc]);
+        cp[i + j * ldc] = detail::from_f<Tc>(out);
+      }
   });
   }
 }
