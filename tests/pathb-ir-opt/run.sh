@@ -126,4 +126,8 @@ if grep -q '(let %1 int %0)' "$out/forward.ir" && grep -q '(let %2 int (load int
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline goto_inline.ir > "$out/goto_inline.ir" || fail=1
 if ! grep -q '(call' "$out/goto_inline.ir" && [ "$(grep -o '(label "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ] \
    && [ "$(grep -o '(goto "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ]; then echo "goto and label inline: ok"; else echo "goto and label inline: FAIL"; fail=1; fi
+# A counted loop whose body holds a label is not unrolled (every copy would define the label: "terminated twice" in the SSA
+# converter; QuickJS's js_create_resolving_functions jumps to `fail` from inside its own loop): one label, the loop stays.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --no-prune --sroa unroll_label.ir > "$out/unroll_label.ir" || fail=1
+if [ "$(grep -o '(label "fail")' "$out/unroll_label.ir" | wc -l)" = 1 ] && [ "$(grep -o '(loop' "$out/unroll_label.ir" | wc -l)" = 1 ]; then echo "no unroll over a label: ok"; else echo "no unroll over a label: FAIL"; fail=1; fi
 exit $fail

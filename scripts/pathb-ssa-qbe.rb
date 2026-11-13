@@ -1591,7 +1591,10 @@ end
           # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
           t = fresh
           @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
-          @lines << "  call $memmove(l #{dest}, l #{t}, l #{sret.size})"
+          # A blit, not a call: QBE reads a blit's operands as loads and stores, so the slot that held the result is not
+          # an escaping address and slots of calls in different blocks share one frame location (QuickJS's JS_CallInternal
+          # had 800 of them, a 14 KB frame). The result and the destination are distinct objects.
+          @lines << (sret.size.to_i <= 4096 ? "  blit #{t}, #{dest}, #{sret.size}" : "  call $memmove(l #{dest}, l #{t}, l #{sret.size})")
         end
       when "condbr"
         cond = op(item[1])
