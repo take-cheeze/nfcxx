@@ -394,6 +394,72 @@ wins, so the solver returned a plan with no kernel. The tie is now a test.
 shapes on this target, emits each plan, runs it against the reference, and checks the result bit for bit. The
 packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`max_threads` stays 1).
 
+## Thread constants, register blocking, and AVX-512 measurements (eleventh round)
+
+Three measurements were repeated or extended in this round. None of them changes a model constant.
+
+**Thread constants (AVX2 packed, 504 x 512 x 512, eight interleaved sweeps, best of 20 per count):**
+
+| threads | median us | ratio to 1 thread, median | ratio range |
+|---|---|---|---|
+| 1 | 2557 | 1.000 | 1.000 |
+| 2 | 1567 | 0.613 | 0.584 to 0.637 |
+| 3 | 1165 | 0.455 | 0.441 to 0.681 (one outlier; about 0.44 to 0.47 without it) |
+| 4 | 1109 | 0.434 | 0.372 to 0.509 |
+
+The model's fit (serial fraction 0.10, spawn 154000) predicts 0.60, 0.50 and 0.48. The two and four-thread medians agree
+with it; at four threads it overstates the overhead, and it misses the three-thread point. A two-parameter refit to the
+two- and four-thread points (serial fraction about 0.21, spawn about 28000) does not reproduce three threads either, so
+the simple serial-plus-spawn form does not describe all three counts well. Eight threads cannot be measured on this
+four-core host, so the choice of four over eight stays unmeasured. The constants are left as they were.
+
+**Register blocking: the 1/mr traffic law is refuted.** The hypothesis was that the packed kernel's gain comes from
+reusing B across an mr-row tile, so time falls as 1/mr and mr=4 should be 1.5 times slower than mr=6. Measured
+(504 x 512 x 512, single thread, best of 40):
+
+| kernel | time, us |
+|---|---|
+| AVX2 packed, mr 4 | 2700 to 2840 |
+| AVX2 packed, mr 6 | 2550 to 2610 |
+| AVX2 naive VecN | 14680 to 15400 |
+| AVX-512 packed, mr 4 | 2477 to 2540 |
+| AVX-512 packed, mr 6 | 1896 to 2075 |
+
+The mr4/mr6 ratio is 1.06 to 1.10 on AVX2 and 1.22 to 1.31 on AVX-512, not 1.5. B reuse alone does not explain the tile
+size dependence. Two other explanations are not fitted here:
+
+- Loads per FMA. A tile of mr rows by two vectors reads two B vectors and mr broadcasts per k, for 2 mr FMAs: 0.75 loads
+  per FMA at mr=4 and 0.67 at mr=6, a ratio of 1.125. That is close to the AVX2 result, not to the AVX-512 one.
+- Independent accumulators. The naive kernel has one accumulator per output vector, so each k step waits on the previous
+  FMA's latency; the packed kernels have 8 or 12. This is probably the larger part of the naive-to-packed gap, and it is
+  not a layout property. A derived model would need to capture it.
+
+The AVX2 mr6/naive ratio is 0.17, which agrees with the fitted 0.18, but it is the same measurement, not a check. The
+0.18 and the AVX-512 0.24 stay as the measured constants they are.
+
+**AVX-512 threaded packed kernel (branch `claude/layout-avx512-threads`, PR #1070), 504 x 512 x 512, three sweeps:**
+
+| threads | nfcxx AVX-512 packed, us | OpenBLAS SkylakeX, us |
+|---|---|---|
+| 1 | 1837 to 1898 | 1497 to 1548 |
+| 2 | 1155 to 1173 | 1152 to 1158 |
+| 4 | 720 to 798 | 598 to 601 |
+
+**AVX-512 strided and blocked storage (lanes on M, 256 x 256, single thread, two runs agreeing within about 5%).** The core
+loop, with the transpose given as input:
+
+| K | strided, us | blocked, us | packed AVX-512, us |
+|---|---|---|---|
+| 8 | 14 | 17 | 8 |
+| 16 | 37 | 36 | 13 |
+| 32 | 76 | 51 | 27 |
+| 64 | 316 | 176 | 60 |
+
+The strided penalty is absent at K=8 and K=16 and grows to about 1.8 times at K=64. That is the opposite of the AVX2
+pattern (the AVX2 fit was at K=8 and missed K=16 and 64), so the AVX2 storage constant is not carried over. The
+transposes in that bench were scalar loops, and only one shape was run, so this is a qualitative result. Converting the
+gap into model instruction units needs a cycles-per-instruction figure that is not measured.
+
 ## Next steps on this target
 
 1. Price the register-blocking gain from a layout property rather than a fitted constant, so the solver can predict it for
@@ -403,7 +469,10 @@ packed kernel is single-threaded: its plan's `threads` is not used on AVX-512 (`
    thread choice (see the ninth round).
 4. AVX-512 target: described and planned (tenth round). Its register-blocking factor is now measured (0.24, tenth round);
    its storage penalties are not (the eleventh round finds that the AVX2 K-dependence does not carry over).
-5. Thread constants and the register-blocking factor: work in progress (eleventh round, see there for the results so far).
+5. Thread constants: measured again (eleventh round); the 3- and 4-thread points disagree with the fit and 8 threads is
+   not measurable here. Refit only on a host with at least 8 cores.
+6. Register blocking: the 1/mr law is refuted. A derived factor needs the accumulator latency term, which is not a layout
+   property; that is a design question for the model, not a measurement.
 
 ## Tests
 
