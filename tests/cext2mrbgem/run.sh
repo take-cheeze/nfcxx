@@ -72,6 +72,20 @@ check test "$rc" -eq 2
 check test "$(grep -c '  rb_scan_args  ' "$work/scan_args_refused/REFUSALS.txt")" -eq 4
 check grep -q 'return value of rb_scan_args is used' "$work/scan_args_refused/REFUSALS.txt"
 
+# 2g. rb_define_module_function (singleton and private instance method, mrb_define_module_function) and
+# rb_define_const (mrb_define_const on a tracked module or rb_cObject); a local receiver stays refused
+rc=0; python3 "$conv" --name module_const tools/cext2mrbgem/fixtures/module_const/ext/module_const "$work/module_const" > "$work/module_const.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/module_const/NOT_BUILDABLE"
+check grep -qF 'mrb_define_module_function(mrb, mMC, "twice", mc_twice, MRB_ARGS_REQ(1));' "$work/module_const/src/module_const.c"
+check grep -qF 'mrb_define_module_function(mrb, mMC, "argc", mc_argc, MRB_ARGS_ANY());' "$work/module_const/src/module_const.c"
+check grep -qF 'mrb_define_const(mrb, mMC, "VERSION", mrb_fixnum_value(3));' "$work/module_const/src/module_const.c"
+check grep -qF 'mrb_define_const(mrb, mrb->object_class, "MODULE_CONST_LOADED", mrb_true_value());' "$work/module_const/src/module_const.c"
+rc=0; python3 "$conv" --name module_const_refused tools/cext2mrbgem/fixtures/module_const_refused/ext/module_const_refused "$work/module_const_refused" > "$work/module_const_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_define_const  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
+check grep -q '  rb_define_module_function  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then

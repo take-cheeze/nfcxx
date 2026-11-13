@@ -29,6 +29,11 @@ compiled either: the output is text for review, and a directory with refusals is
 - `rb_scan_args(argc, argv, "<lead><optional>", &v...)` inside a variadic method becomes
   `mrb_get_args(mrb, "o|o", &v...)`, with optional outputs set to nil first. Only as a statement and only on the
   method's own argc and argv. Rest (`*`), keyword (`:`), block and fixed-arity forms are refused.
+- `rb_define_module_function(mod, "name", fn, argc)` becomes `mrb_define_module_function`, which defines the
+  singleton and private instance method as CRuby does. `rb_define_const(klass, "NAME", v)` becomes
+  `mrb_define_const(mrb, klass, "NAME", v)`. Both need the receiver to be a tracked class or module variable (a
+  `struct RClass *`) or `rb_cObject`; a `VALUE` parameter or local is refused, since it would need an unchecked
+  `mrb_class_ptr`.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other

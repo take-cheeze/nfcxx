@@ -84,7 +84,7 @@ DEF_RE = re.compile(
     r'((?:[A-Za-z_]\w*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)'
     r'([A-Za-z_]\w*)[ \t\n]*\(([^()]*)\)\s*(\{|;)', re.M)
 INC_RE = re.compile(r'#[ \t]*include[ \t]*[<"](ruby(?:/[\w./-]*)?\.h)[>"]')
-REG_RE = re.compile(r'(?<![\w$.>])(rb_define_method|rb_define_singleton_method)\s*\(')
+REG_RE = re.compile(r'(?<![\w$.>])(rb_define_method|rb_define_singleton_method|rb_define_module_function)\s*\(')
 CLASS_ASSIGN_RE = re.compile(r'(?<![\w$.>])(\w+)\s*=\s*rb_define_(?:class|module)(?:_under)?\s*\(')
 NON_FUNC_WORDS = {'if', 'while', 'for', 'switch', 'return', 'sizeof', 'else', 'do', 'case', 'goto'}
 
@@ -797,7 +797,7 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_gc_protect(mrb, %s)' % arg,
                          'keeps the value rooted until the arena is restored (fine within the call; use mrb_gc_register to outlive it)')
             return
-        if name in ('rb_define_method', 'rb_define_singleton_method'):
+        if name in ('rb_define_method', 'rb_define_singleton_method', 'rb_define_module_function'):
             rec = self.reg_by_call.get((rel, s))
             if rec is None or not called or nxt != rec['open']:
                 self.refuse(rel, s, name, 'used without a registration call')
@@ -809,7 +809,8 @@ class Converter:
             if tgt not in self.class_vars and tgt != 'rb_cObject':
                 self.refuse(rel, s, name, 'target %r is not a tracked class or module variable' % tgt)
                 return
-            new = 'mrb_define_method' if name == 'rb_define_method' else 'mrb_define_class_method'
+            new = {'rb_define_method': 'mrb_define_method', 'rb_define_singleton_method': 'mrb_define_class_method',
+                   'rb_define_module_function': 'mrb_define_module_function'}[name]
             E.add(s, e, new)
             E.add(nxt + 1, nxt + 1, 'mrb, ')
             fs, fe = rec['func_span']
@@ -824,6 +825,8 @@ class Converter:
                 new, tgt, rec['name'], rec['func'], aspec))
         elif name == 'rb_scan_args':
             self.scan_args(rel, s, e, nxt, called)
+        elif name == 'rb_define_const':
+            self.define_const(rel, s, e, nxt, called)
         elif name == 'rb_raise':
             if not called:
                 self.refuse(rel, s, name, 'used without a call')
@@ -842,6 +845,28 @@ class Converter:
             self.rewrite(rel, s, name, 'mrb_raisef')
         else:
             self.refuse(rel, s, name, 'unknown special handler')
+
+    def define_const(self, rel, s, e, nxt, called):
+        """rb_define_const(klass, "NAME", value) -> mrb_define_const(mrb, klass, "NAME", value). The receiver must be
+        a tracked class or module variable (a struct RClass *) or rb_cObject, as mrb_define_const takes a class
+        pointer. mruby stores the constant without CRuby's 'already initialized' warning on redefinition."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'rb_define_const', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 3:
+            self.refuse(rel, s, 'rb_define_const', 'rb_define_const takes a class, a name and a value')
+            return
+        tgt = text[args[0][0]:args[0][1]]
+        if not (tgt == 'rb_cObject' or (tgt in self.class_vars and not self.is_param(rel, args[0][0], tgt))):
+            self.refuse(rel, s, 'rb_define_const', 'target %r is not a tracked class or module variable' % tgt)
+            return
+        E.add(s, e, 'mrb_define_const')
+        E.add(nxt + 1, nxt + 1, 'mrb, ')
+        self.rewrite(rel, s, 'rb_define_const', 'mrb_define_const(mrb, %s, ...)' % tgt,
+                     'an existing constant is replaced without CRuby\'s "already initialized" warning')
 
     def scan_args(self, rel, s, e, nxt, called):
         """rb_scan_args(argc, argv, FMT, &v...) in a variadic method, as a statement, with FMT of the form

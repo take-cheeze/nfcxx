@@ -58,6 +58,16 @@
       "handler": "raise",
       "needs_mrb": true
     },
+    "rb_define_module_function": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true
+    },
+    "rb_define_const": {
+      "kind": "special",
+      "handler": "define_const",
+      "needs_mrb": true
+    },
     "rb_scan_args": {
       "kind": "special",
       "handler": "scan_args",
@@ -464,6 +474,12 @@
   },
   "special_arg_positions_class_only": {
     "rb_define_method": [
+      0
+    ],
+    "rb_define_module_function": [
+      0
+    ],
+    "rb_define_const": [
       0
     ],
     "rb_define_singleton_method": [
