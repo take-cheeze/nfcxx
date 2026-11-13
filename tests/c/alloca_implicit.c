@@ -1,3 +1,4 @@
+// MACOS-XFAIL-gcc: Apple clang 21 makes the implicit declaration of alloca an error (C99 and later), so the gcc backend cannot build this on macOS
 /* EXPECT: 0 */
 /* alloca without <alloca.h> is implicitly declared (returning int, as K&R C has it). gcc treats it as the built-in and
    its result is a 64-bit pointer; the implicit int must not cut a stack address (Path B once did: a crash in ASTro's
