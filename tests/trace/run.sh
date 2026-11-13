@@ -26,6 +26,10 @@ PY
 }
 
 backends=${NFCXX_BACKEND:-"qbe gcc"}
+# Linux aarch64: Path B is the product backend here, as in tests/lib/run.sh.
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in aarch64|arm64) backends="pathb gcc" ;; esac
+fi
 for backend in $backends; do
   json=$tmp/$backend.json
   if ! NFCXX_BACKEND=$backend ./nfcxx --trace="$json" "$src" -o "$tmp/$backend.bin" > "$tmp/$backend.log" 2>&1; then

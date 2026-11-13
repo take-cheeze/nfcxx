@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builtin probes: compile each tests/builtins/*.cpp with nfcxx (--gnu-version=130000, see docs/notes/builtins.md)
-# and compare the exit code with `// EXPECT: N`. Runs Path B and gcc (x86-64 Linux) or qbe and gcc (other hosts) unless NFCXX_BACKEND is set.
+# and compare the exit code with `// EXPECT: N`. Runs Path B and gcc (Linux x86-64 and arm64) or qbe and gcc (other hosts) unless NFCXX_BACKEND is set.
 # Header lines (first lines of a test):
 #   // DIALECT: clang           compile in the clang front-end mode (default g++).
 #   // GNU-VERSION: 140000      --gnu-version for the probe (default 130000); GCC 14 builtins (clzg) need 140000.
@@ -15,7 +15,9 @@ cd "$(dirname "$0")/../.."
 cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
 host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then backends="pathb gcc"; fi   # Path B is the product only here
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the product only here (Linux x86-64 and arm64)
+fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for route in $backends; do
   for f in tests/builtins/*.cpp; do
