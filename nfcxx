@@ -1013,6 +1013,7 @@ fi
 picopts+=(${pie_opts[@]+${pie_opts[@]+"${pie_opts[@]}"}})
 for o in ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}}; do picopts+=(--c_to_obj_option "$o"); done
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
+[ $rdynamic = 0 ] || ldopts+=(-rdynamic)   # the executable link exports its global symbols (a dlopen'd module binds to them)
 # -fuse-ld=NAME, or NFCXX_LD=NAME: the linker gcc runs (mold, lld, gold, bfd; ld.NAME must be on PATH). The C++ link gets
 # it through eccp's link options, as the -Wl options do. The qbe backend's C compiler gets its options here too.
 if [ -n "$ld_name" ]; then
