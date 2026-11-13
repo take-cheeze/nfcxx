@@ -114,14 +114,15 @@
   group: onnx
   backend: qbe
   run: UOP_ONLY="test_nn test_onnx test_sym test_grad test_ort test_tinygrad test_cgen" NFCXX_BACKEND=qbe tests/uop/run.sh
-- name: uop poly languages (QBE backend)
+- name: uop poly languages (Path B backend)
+  pathb: true   # NFCXX_BACKEND=pathb needs the Path B harness
   go: true
   onnx: true
   interp: true
   suite: uop
   group: poly
-  backend: qbe
-  run: NFCXX_BACKEND=qbe tests/uop/run_poly.sh
+  backend: pathb
+  run: NFCXX_BACKEND=pathb tests/uop/run_poly.sh
 - name: uop core and numpy (gcc backend)
   gcc_only: true
   onnx: true
