@@ -74,3 +74,39 @@ x.c x.s a.o
 -w -Wall -Wextra -c x.c
 -Wa,--noexecstack -Wa,a,b x.c
 -Wl,--as-needed x.c
+-c x.c -fstack-protector-strong
+-c x.c -fstack-protector -fno-stack-protector
+-fstack-protector-all -fstack-protector-explicit x.c
+-mstack-protector-guard=tls x.c
+-mindirect-branch=keep -mfunction-return=keep -mharden-sls=none x.c
+-mindirect-branch=thunk x.c
+-mfunction-return=thunk-extern x.c
+-fPIC x.c
+-fpic -fPIE x.c
+-fpie x.c
+-m32 x.c
+-mx32 x.c
+-march=native -msse4.2 -mavx2 x.c
+--param max-inline-insns-single=200 x.c
+--param
+--param=foo=1 -fno-jump-tables x.c
+-fno-crossjumping x.c
+-m64 -mtune=generic -mcmodel=kernel -mno-red-zone x.c
+-mno-sse x.c
+-fwrapv -fno-strict-aliasing -fno-strict-overflow x.c
+-fsanitize=address x.c
+-fopenmp x.c
+-ffast-math x.c
+-funsigned-char x.c
+-ffreestanding x.c
+-fcall-used-rbx x.c
+-fdump-rtl-expand x.c
+-fomit-frame-pointer -fno-omit-frame-pointer -fcommon -fdata-sections x.c
+-fzzz-not-real x.c
+-f x.c
+-fstack-check x.c
+-fwhole-program x.c
+-mtune=generic -Ofast x.c
+-fno-stack-protector -fstack-protector-strong -fPIC -c x.c
+-fdiagnostics-color=auto -fmessage-length=0 x.c
+-fsigned-char -fno-signed-char x.c

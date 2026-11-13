@@ -22,10 +22,51 @@ C_LANGS = %w[c none assembler assembler-with-cpp].freeze
 CXX_SUFFIXES = %w[.cc .cpp .cxx .C .c++ .ii .m .mm .f .f90 .F .go .d .rs].freeze
 PP_TAKES_ARG = %w[-D -U -I -isystem -iquote -idirafter -include -imacros].freeze
 
+# Case patterns of the -f and -m groups, in the bash order (see nfcc, the loop's -f and -m cases). "*" is a glob, as in bash.
+STACK_PROTECTOR = %w[-fstack-protector -fstack-protector-strong -fstack-protector-all -fstack-protector-explicit].freeze
+INDIRECT_KEEP = %w[-mindirect-branch=keep -mfunction-return=keep -mharden-sls=none -mbranch-protection=none].freeze
+INDIRECT_REFUSED = %w[-mindirect-branch=* -mfunction-return=* -mharden-sls=* -mbranch-protection=*].freeze
+ISA_OPTIONS = %w[-march=* -msse* -mavx* -mfma -mbmi* -mpopcnt -mlzcnt -mf16c -mcx16 -mmmx -mrdrnd -mrdseed].freeze
+M_NO_EFFECT = %w[-m64 -mtune=* -mcpu=* -mfpmath=* -mcmodel=* -mstackrealign -mpreferred-stack-boundary=*
+                 -mtls-dialect=* -mrelax* -masm=* -mno-red-zone -mred-zone].freeze
+INSTRUMENTATION = %w[-fopenmp* -fsanitize* -fprofile* -fcoverage* --coverage -ftest-coverage -fstack-check -fmudflap].freeze
+FP_MATH = %w[-ffast-math -ffinite-math-only -funsafe-math-optimizations -fassociative-math -freciprocal-math
+             -fno-signed-zeros -fno-math-errno].freeze
+NO_EFFECT_F = %w[-fno-strict-aliasing -fwrapv -fno-strict-overflow].freeze
+
+GCCONLY_PATTERNS = %w[
+  -funsigned-char -fshort-enums -fpack-struct* -ftrapv -fgnu89-inline -fms-extensions -fplan9-extensions
+  -fno-signed-char -fshort-wchar -fshort-double -fno-short-double -fleading-underscore
+  -fno-leading-underscore -fnon-call-exceptions -fcheck-pointer-bounds -fsigned-bitfields
+  -funsigned-bitfields -fno-asm -fno-gnu-keywords -ffreestanding -fhosted -fopenacc* -fgnu-tm -fcilkplus
+  -fsplit-stack -fgnu-unique -fno-gnu-unique -fstack-reuse=* -fno-zero-initialized-in-bss -fgraphite*
+  -fsel-sched* -fcall-used-* -fcall-saved-* -ffixed-* -finstrument-functions* -fwhole-program -fplugin*
+  -fdump-* -fchecking*
+].freeze
+
+FOK_PATTERNS = %w[
+  PIC pic PIE pie wrapv no-strict-aliasing strict-aliasing no-common common visibility=*
+  no-omit-frame-pointer omit-frame-pointer exceptions no-exceptions asynchronous-unwind-tables
+  no-asynchronous-unwind-tables unwind-tables stack-protector stack-protector-* no-stack-protector
+  stack-clash-protection function-sections data-sections ident no-ident diagnostics-color=* color-diagnostics
+  no-color-diagnostics diagnostics-show-option message-length=* max-errors=* no-builtin builtin no-builtin-*
+  lto no-lto no-plt plt semantic-interposition no-semantic-interposition signed-char
+  no-delete-null-pointer-checks no-strict-overflow strict-overflow trapping-math no-trapping-math math-errno
+  merge-all-constants no-inline inline inline-functions no-inline-functions unroll-loops tree-vectorize
+  no-tree-vectorize no-tree-* tree-* no-gcse gcse ipa-* no-ipa-* prefetch-loop-arrays align-functions=*
+  align-loops=* align-jumps=* reorder-blocks no-reorder-blocks schedule-insns no-schedule-insns
+  schedule-insns2 no-schedule-insns2 keep-inline-functions no-keep-static-consts permissive no-permissive
+  no-rtti stack-protector-all cf-protection=* cf-protection no-cf-protection no-fat-lto-objects
+  fat-lto-objects use-linker-plugin no-use-linker-plugin lto-partition=* file-prefix-map=* debug-prefix-map=*
+  macro-prefix-map=* dwarf2-cfi-asm no-dwarf2-cfi-asm var-tracking no-var-tracking var-tracking-assignments
+  no-var-tracking-assignments no-eliminate-unused-debug-types eliminate-unused-debug-types
+  record-gcc-switches no-record-gcc-switches verbose-asm no-verbose-asm stack-usage no-stack-usage
+].freeze
+
 class LoopState
   attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp
-  attr_accessor :optlvl
-  attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf
+  attr_accessor :optlvl, :spon, :pathb_pic, :pathb_pie
+  attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf, :isa, :picf, :spguard
 
   def initialize
     @mode = "link"
@@ -43,11 +84,47 @@ class LoopState
     @optlvl = "-O2"
     @dbg = []
     @asf = []
+    @spon = 0
+    @pathb_pic = 0
+    @pathb_pie = 0
+    @isa = []
+    @picf = []
+    @spguard = []
   end
 end
 
 def die(message)
   raise LoopDie, message
+end
+
+# Bash's glob matching for case patterns and @(...) lists: "*" matches any string (including "/"), "?" one character.
+def glob_match?(pattern, text)
+  pi = 0
+  ti = 0
+  star_p = -1
+  star_t = -1
+  while ti < text.length
+    if pi < pattern.length && (pattern[pi] == "?" || pattern[pi] == text[ti])
+      pi += 1
+      ti += 1
+    elsif pi < pattern.length && pattern[pi] == "*"
+      star_p = pi
+      star_t = ti
+      pi += 1
+    elsif star_p >= 0
+      pi = star_p + 1
+      star_t += 1
+      ti = star_t
+    else
+      return false
+    end
+  end
+  pi += 1 while pi < pattern.length && pattern[pi] == "*"
+  pi == pattern.length
+end
+
+def matches_any?(arg, patterns)
+  patterns.any? { |pattern| glob_match?(pattern, arg) }
 end
 
 def check_lang(lang)
@@ -145,6 +222,51 @@ def run_loop(args)
       raise Unported, a
     elsif a == "-w" || a.start_with?("-W")
       nil
+    elsif a == "-fstack-protector" || STACK_PROTECTOR.include?(a)
+      state.spon = 1
+    elsif a == "-fno-stack-protector"
+      state.spon = 0
+    elsif a.start_with?("-mstack-protector-guard")
+      state.spguard << a
+    elsif INDIRECT_KEEP.include?(a)
+      nil
+    elsif matches_any?(a, INDIRECT_REFUSED)
+      die("#{a} is not supported")
+    elsif a == "-fPIC" || a == "-fpic"
+      state.pathb_pic = 1
+      state.ld << a
+      state.picf << a
+    elsif a == "-fPIE" || a == "-fpie"
+      state.pathb_pie = 1
+      state.ld << a
+      state.picf << a
+    elsif a == "-m32" || a == "-mx32" || a == "-m16" || a == "-miamcu"
+      die("#{a} is not supported (x86-64 only)")
+    elsif matches_any?(a, ISA_OPTIONS) || a.start_with?("--param=") || a == "-fno-jump-tables"
+      state.isa << a
+    elsif a == "-fno-crossjumping"
+      raise Unported, a
+    elsif a == "--param"
+      die("option '#{a}' requires an argument") unless i + 1 < n
+
+      i += 1
+      state.isa << a << args[i]
+    elsif matches_any?(a, M_NO_EFFECT) || matches_any?(a, NO_EFFECT_F)
+      nil
+    elsif a.start_with?("-m")
+      die("#{a} is not supported")
+    elsif matches_any?(a, INSTRUMENTATION)
+      die("#{a} is not supported (instrumentation would be dropped)")
+    elsif matches_any?(a, FP_MATH)
+      die("#{a} is not supported (changes floating-point semantics)")
+    elsif matches_any?(a, GCCONLY_PATTERNS)
+      die("#{a} is not supported (it changes semantics or code generation that this pipeline cannot honour)")
+    elsif a.start_with?("-f")
+      if matches_any?(a[2..], FOK_PATTERNS)
+        nil
+      else
+        die("#{a} is not supported (not in nfcc's list of harmless -f options)")
+      end
     elsif a == "-"
       state.inputs << "c:-"
     elsif a.start_with?("-") || a.start_with?("@")
@@ -168,15 +290,18 @@ def emit(state)
   $stdout.write("depmode=#{state.depmode}\n")
   $stdout.write("dfile=#{state.dfile}\n")
   $stdout.write("dp=#{state.dp}\n")
-  $stdout.write("spon=0\n")
-  $stdout.write("pathb_pic=0\n")
-  $stdout.write("pathb_pie=0\n")
+  $stdout.write("spon=#{state.spon}\n")
+  $stdout.write("pathb_pic=#{state.pathb_pic}\n")
+  $stdout.write("pathb_pie=#{state.pathb_pie}\n")
   state.inputs.each { |x| $stdout.write("inputs+=#{x}\n") }
   state.pp.each { |x| $stdout.write("pp+=#{x}\n") }
   state.ld.each { |x| $stdout.write("ld+=#{x}\n") }
-  state.dts.each { |x| $stdout.write("dts+=#{x}\n") }
-  state.dbg.each { |x| $stdout.write("dbg+=#{x}\n") }
+  state.isa.each { |x| $stdout.write("isa+=#{x}\n") }
   state.asf.each { |x| $stdout.write("asf+=#{x}\n") }
+  state.picf.each { |x| $stdout.write("picf+=#{x}\n") }
+  state.dbg.each { |x| $stdout.write("dbg+=#{x}\n") }
+  state.spguard.each { |x| $stdout.write("spguard+=#{x}\n") }
+  state.dts.each { |x| $stdout.write("dts+=#{x}\n") }
 end
 
 def main(argv)
