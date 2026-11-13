@@ -583,6 +583,8 @@ class CodeGen
     return tracked if tracked && return_class_of_mask(tracked)
     scoped = state && @rc_scoped_ready && return_class_scoped_send_mask(name, insn, state)
     return scoped if scoped
+    declared = %i[SEND SEND0 SSEND SSEND0].include?(insn.op) && declared_exact_return_mask(name)
+    return declared if declared && (tracked.nil? || !tracked.is_a?(Integer) || tracked.anybits?(NumericFlow::OTHER))
     return tracked if tracked
     return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == :SEND0
 
