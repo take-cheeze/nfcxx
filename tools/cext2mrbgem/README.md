@@ -22,6 +22,10 @@ compiled either: the output is text for review, and a directory with refusals is
 - `rb_thread_call_without_gvl` is modelled on mruby-uv: `include/nfcx_uv_thread.h` runs the
   function on the libuv thread pool and runs the loop until it finishes. The gem then
   depends on `mruby-uv`.
+- A variadic method (`rb_define_method(..., -1)`, C signature `(int argc, VALUE *argv, VALUE self)`) is
+  defined with `MRB_ARGS_ANY()`. The converted function takes `(mrb_state *mrb, mrb_value self)` and reads the
+  arguments back with `mrb_get_args(mrb, "*", ...)` into locals named as in the original. The array form
+  (`argc -2`) is refused.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
 - The Init entry is the `Init_<name>` that `extconf.rb` passes to `create_makefile`. Other

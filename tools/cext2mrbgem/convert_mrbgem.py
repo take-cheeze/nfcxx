@@ -388,8 +388,9 @@ class Converter:
                         rec['argc_span'] = (as_, ae)
                         if am is None:
                             rec['error'] = 'argc is not an integer literal'
-                        elif int(am.group()) < 0:
-                            rec['error'] = ('argc %s (variadic or array form) is not in the supported subset'
+                        elif int(am.group()) < -1:
+                            # -1 is the variadic form (int argc, VALUE *argv, VALUE self); -2 takes an array
+                            rec['error'] = ('argc %s (array form) is not in the supported subset'
                                             % am.group())
                         elif fm is None:
                             rec['error'] = ('method function argument is not a plain function name '
@@ -542,10 +543,35 @@ class Converter:
                 self.refuse(d0['file'], d0['hstart'], name, 'helper needs mruby state; threading refused')
 
     # ---- stage 3: per-file rewrite --------------------------------------
+    def variadic_params(self, d):
+        """(argc, argv, self) parameter names of a variadic (argc -1) method definition, or None.
+        mruby calls every method as f(mrb, self) and hands the arguments over through mrb_get_args, so
+        the converted function reads them back with the "*" format into locals of the original names."""
+        params = [p.strip() for p in d['params'].split(',')]
+        if len(params) != 3:
+            return None
+        m_argc = re.fullmatch(r'int\s+([A-Za-z_]\w*)', params[0])
+        m_argv = re.fullmatch(r'VALUE\s*\*\s*([A-Za-z_]\w*)', params[1])
+        m_self = re.fullmatch(r'VALUE\s+([A-Za-z_]\w*)', params[2])
+        if not (m_argc and m_argv and m_self):
+            return None
+        return m_argc.group(1), m_argv.group(1), m_self.group(1)
+
     def registered_header(self, d):
-        n = [r for r in self.regs if r['error'] is None and r['func'] == d['name']][0]['argc']
+        regs = [r for r in self.regs if r['error'] is None and r['func'] == d['name']]
+        n = regs[0]['argc']
         if d['ret'] != 'VALUE':
             return None, None, 'registered method must return VALUE (found %r)' % d['ret']
+        if n == -1:
+            p = self.variadic_params(d)
+            if p is None:
+                return None, None, ('variadic registered method must take (int argc, VALUE *argv, VALUE self)'
+                                    ' (found %r)' % d['params'].strip())
+            argc_n, argv_n, self_n = p
+            hdr = '%smrb_value %s(mrb_state *mrb, mrb_value %s)' % (d['storage'], d['name'], self_n)
+            prologue = ('\n  mrb_int nfcx_argc;\n  mrb_value *%s;\n  mrb_get_args(mrb, "*", &%s, &nfcx_argc);'
+                        '\n  int %s = (int)nfcx_argc;') % (argv_n, argv_n, argc_n)
+            return hdr, prologue, None
         params = [p.strip() for p in d['params'].split(',')]
         if len(params) != n + 1:
             return None, None, ('registered method has %d parameters, arity %d needs %d'
@@ -782,7 +808,10 @@ class Converter:
             fs, fe = rec['func_span']
             E.add(fs, fe, rec['func'])
             as_, ae = rec['argc_span']
-            aspec = 'MRB_ARGS_NONE()' if rec['argc'] == 0 else 'MRB_ARGS_REQ(%d)' % rec['argc']
+            if rec['argc'] == -1:
+                aspec = 'MRB_ARGS_ANY()'  # the function reads its arguments itself (see variadic_params)
+            else:
+                aspec = 'MRB_ARGS_NONE()' if rec['argc'] == 0 else 'MRB_ARGS_REQ(%d)' % rec['argc']
             E.add(as_, ae, aspec)
             self.rewrite(rel, s, name, '%s(mrb, %s, "%s", %s, %s)' % (
                 new, tgt, rec['name'], rec['func'], aspec))

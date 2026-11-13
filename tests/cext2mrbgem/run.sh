@@ -46,6 +46,19 @@ check grep -qF 'static inline mrb_value split_double(mrb_state *mrb, mrb_value s
 check grep -qF 'mrb_value split_load(mrb_state *mrb, mrb_value self) {' "$work/split_return/src/split_return.c"
 check grep -qF 'mrb_value split_name(mrb_state *mrb, mrb_value self) {' "$work/split_return/src/split_return.c"
 
+# 2e. variadic methods (argc -1): argc and argv are read back with mrb_get_args("*") in the converted function,
+# and the method is defined with MRB_ARGS_ANY(); argc -2 (array form) stays refused
+rc=0; python3 "$conv" --name variadic tools/cext2mrbgem/fixtures/variadic/ext/variadic "$work/variadic" > "$work/variadic.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/variadic/NOT_BUILDABLE"
+check grep -qF 'static mrb_value variadic_first(mrb_state *mrb, mrb_value self) {' "$work/variadic/src/variadic.c"
+check grep -qF 'mrb_get_args(mrb, "*", &argv, &nfcx_argc);' "$work/variadic/src/variadic.c"
+check grep -qF 'int argc = (int)nfcx_argc;' "$work/variadic/src/variadic.c"
+check grep -qF 'mrb_define_method(mrb, mVariadic, "first", variadic_first, MRB_ARGS_ANY());' "$work/variadic/src/variadic.c"
+rc=0; python3 "$conv" --name variadic_array tools/cext2mrbgem/fixtures/variadic_array/ext/variadic_array "$work/variadic_array" > "$work/variadic_array.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q 'argc -2 (array form)' "$work/variadic_array/REFUSALS.txt"
+
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
 if [ -z "${BCRYPT_DIR:-}" ]; then
