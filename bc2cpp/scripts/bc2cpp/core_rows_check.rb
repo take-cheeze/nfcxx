@@ -119,7 +119,8 @@ Dir.mktmpdir do |dir|
     all = sdr.outside_world_tokens(dir, engine_tokens: engine)
     suite.check('a native under 3rd/ names its tokens for the engine proof only',
                 all.include?('core_only') && !engine.include?('core_only'))
-    suite.check('a native outside 3rd/ names its tokens for the core rows too', engine.include?('engine_named'))
+    suite.check('a native outside 3rd/ is read by the rows run alone: its tokens reach the rows run, not the engine proof',
+                all.include?('engine_named') && !engine.include?('engine_named'))
   ensure
     sdr.singleton_class.send(:define_method, :outside_world_files, files)
   end
