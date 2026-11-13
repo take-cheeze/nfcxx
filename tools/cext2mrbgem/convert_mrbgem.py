@@ -828,6 +828,14 @@ class Converter:
             if entry['mruby'] != name:
                 E.add(s, e, entry['mruby'])
                 self.rewrite(rel, s, name, entry['mruby'])
+        elif kind == 'strip':
+            # A macro whose only effect is a compiler hint (RB_LIKELY): the name becomes entry['mruby'] and the
+            # argument stays in place, so the call form is kept and the hint is dropped.
+            if not called:
+                self.refuse(rel, s, name, 'used without a call; cannot map it')
+                return
+            E.add(s, e, entry['mruby'])
+            self.rewrite(rel, s, name, entry['mruby'], entry.get('caveat'))
         elif kind == 'expr':
             if called:
                 self.refuse(rel, s, name, 'expression mapping used in call form')
@@ -883,6 +891,8 @@ class Converter:
                 new, tgt, rec['name'], rec['func'], aspec))
         elif name == 'rb_scan_args':
             self.scan_args(rel, s, e, nxt, called)
+        elif name == 'RB_TYPE_P':
+            self.type_p(rel, s, e, nxt, called)
         elif name == 'rb_gc_start':
             self.gc_start(rel, s, e, nxt, called)
         elif name == 'rb_gc_writebarrier':
@@ -1030,6 +1040,33 @@ class Converter:
         self.edits[rel].add(s, close + 1, 'mrb_full_gc(mrb)')
         self.rewrite(rel, s, 'rb_gc_start', 'mrb_full_gc(mrb)',
                      'mrb_full_gc does nothing while gc.disabled is set or an object iteration is running; no collection is forced then')
+
+    def type_p(self, rel, s, e, nxt, called):
+        """RB_TYPE_P(obj, T_X) -> (mrb_type(obj) == MRB_TT_X), where T_X is a T_ name whose api_map entry is an exact
+        MRB_TT_ type with no caveat (T_DATA, T_FIXNUM, T_NIL and the like are refused). obj must be a plain local: the
+        whole call is replaced, so a nested mapped name would not be rewritten."""
+        masked, text, E = self.files[rel]['masked'], self.files[rel]['text'], self.edits[rel]
+        if not called:
+            self.refuse(rel, s, 'RB_TYPE_P', 'used without a call')
+            return
+        close = match_close(masked, nxt)
+        args = split_args(masked, nxt, close) if close > 0 else []
+        if len(args) != 2:
+            self.refuse(rel, s, 'RB_TYPE_P', 'RB_TYPE_P takes an object and a T_ type')
+            return
+        obj = text[args[0][0]:args[0][1]]
+        tname = text[args[1][0]:args[1][1]]
+        if (not re.fullmatch(r'[A-Za-z_]\w*', obj) or obj in self.entries or obj in self.types
+                or obj in self.class_vars or obj == 'mrb'):
+            self.refuse(rel, s, 'RB_TYPE_P', 'object %r is not a plain local variable (nested names would not be mapped)' % obj)
+            return
+        ent = self.entries.get(tname)
+        if not ent or ent.get('kind') != 'expr' or not ent.get('mruby', '').startswith('MRB_TT_') or 'caveat' in ent:
+            self.refuse(rel, s, 'RB_TYPE_P', '%s has no exact mruby type to compare with' % tname)
+            return
+        new = '(mrb_type(%s) == %s)' % (obj, ent['mruby'])
+        E.add(s, close + 1, new)
+        self.rewrite(rel, s, 'RB_TYPE_P', new)
 
     def gc_writebarrier(self, rel, s, e, nxt, called):
         """rb_gc_writebarrier(old, young) as a statement -> an immediate-guarded mrb_field_write_barrier_value. The

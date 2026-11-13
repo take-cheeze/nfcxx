@@ -44,6 +44,9 @@ compiled either: the output is text for review, and a directory with refusals is
   that calls a helper which is not threaded is refused, so no call is left passing an `mrb` that is not in scope.
 - `RB_GC_GUARD(x)` becomes `mrb_gc_protect(mrb, x)` inside a function that has an mrb_state.
   Values that must outlive a call need `mrb_gc_register`, which is not converted.
+- `RB_LIKELY(x)` and `RB_UNLIKELY(x)` become `!!(x)`: the branch hint is dropped and the 0 or 1 value is kept.
+- `RB_TYPE_P(obj, T_X)` becomes `(mrb_type(obj) == MRB_TT_X)` when `T_X` maps exactly to an `MRB_TT_` type with no
+  caveat, and `obj` is a plain local. `T_DATA` (TypedData is not RData), `T_NIL`, `T_FIXNUM` and nested objects are refused.
 - `rb_gc_register_mark_object(v)` becomes `mrb_gc_register(mrb, v)`: mruby keeps the value in its root table
   (`src/gc.c`) until the state is closed, as CRuby keeps it. `rb_gc_start()` as a statement becomes
   `mrb_full_gc(mrb)`; CRuby's nil return value is not produced, so a used value is refused. `rb_gc_writebarrier(a, b)`

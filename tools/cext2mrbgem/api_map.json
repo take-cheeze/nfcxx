@@ -582,6 +582,128 @@
       "mruby": "mrb_ary_new_capa",
       "inject_mrb": true,
       "needs_mrb": true
+    },
+    "NUM2DBL": {
+      "kind": "call",
+      "mruby": "mrb_as_float",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+    },
+    "rb_num2dbl": {
+      "kind": "call",
+      "mruby": "mrb_as_float",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+    },
+    "DBL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_float_value",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "ULONG2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+    },
+    "ULL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+    },
+    "NUM2LL": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+    },
+    "rb_id2name": {
+      "kind": "call",
+      "mruby": "mrb_sym_name",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the pointer is into mruby's symbol table: valid until the state is closed"
+    },
+    "rb_id2str": {
+      "kind": "call",
+      "mruby": "mrb_sym_str",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby does not promise a frozen result, as CRuby's rb_id2str does"
+    },
+    "rb_to_id": {
+      "kind": "call",
+      "mruby": "mrb_obj_to_sym",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "accepts only Symbol and String: CRuby also converts other objects with to_str"
+    },
+    "SYMBOL_P": {
+      "kind": "call",
+      "mruby": "mrb_symbol_p",
+      "inject_mrb": false,
+      "needs_mrb": false
+    },
+    "rb_block_given_p": {
+      "kind": "call",
+      "mruby": "mrb_block_given_p",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+    },
+    "rb_exc_raise": {
+      "kind": "call",
+      "mruby": "mrb_exc_raise",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_eStandardError": {
+      "kind": "expr",
+      "mruby": "E_STANDARD_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eException": {
+      "kind": "expr",
+      "mruby": "E_EXCEPTION",
+      "needs_mrb": true
+    },
+    "rb_const_defined": {
+      "kind": "call",
+      "mruby": "mrb_const_defined",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "a module receiver does not fall back to Object, as in rb_const_get; returns mrb_bool"
+    },
+    "rb_const_defined_at": {
+      "kind": "call",
+      "mruby": "mrb_const_defined_at",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool, where CRuby returns int"
+    },
+    "RB_LIKELY": {
+      "kind": "strip",
+      "mruby": "!!",
+      "needs_mrb": false,
+      "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_LIKELY"
+    },
+    "RB_UNLIKELY": {
+      "kind": "strip",
+      "mruby": "!!",
+      "needs_mrb": false,
+      "caveat": "the branch-prediction hint is dropped; !!(x) has the same 0 or 1 value as the GCC definition of RB_UNLIKELY"
+    },
+    "RB_TYPE_P": {
+      "kind": "special",
+      "handler": "type_p",
+      "needs_mrb": false
     }
   },
   "special_arg_positions_class_only": {
