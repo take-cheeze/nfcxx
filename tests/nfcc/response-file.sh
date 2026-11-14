@@ -14,11 +14,8 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 
 # The bash side: die, then the expansion as nfcc has it, then the expanded words, each followed by a NUL byte.
 {
-  echo 'die() { echo "nfcc: error: $*" >&2; exit 1; }'
-  start=$(grep -n '^# Response files (@file)' "$root/nfcc" | cut -d: -f1)
-  end=$(grep -n '^for a in "\$@"; do add_arg' "$root/nfcc" | cut -d: -f1)
-  [ -n "$start" ] && [ -n "$end" ] || { bad setup "cannot find the expansion in nfcc"; exit 1; }
-  sed -n "${start},${end}p" "$root/nfcc"
+  cat "$root/tests/nfcc-args/oracle-add-arg.sh"
+  echo 'for a in "$@"; do add_arg "$a" 0; done'
   echo 'set -- "${expanded[@]+"${expanded[@]}"}"'
   echo 'for w in "$@"; do printf "%s\0" "$w"; done'
 } > "$tmp/bash_expand.sh"

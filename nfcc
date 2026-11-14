@@ -61,35 +61,13 @@ case $backend in
   *) die "unknown NFCXX_BACKEND '$backend' (gcc, pathb or cil)" ;;
 esac
 
-# Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
-# whitespace; single or double quotes group (and are removed); a backslash makes the next character literal, even
-# inside quotes; @file inside a response file is expanded again. A file that cannot be read stays an "@file"
-# argument (gcc does the same) and is rejected below.
+# Response files (@file), expanded by scripts/nfcc-args.rb with gcc's (libiberty buildargv) rules: whitespace, quotes,
+# backslashes, nested @file (see that script). A file that cannot be read stays an "@file" argument and is rejected below.
+rsp=$(mktemp)
+ruby "$root/scripts/nfcc-args.rb" "$@" > "$rsp" || { rm -f "$rsp"; exit 1; }
 expanded=()
-add_arg() {   # add_arg ARG DEPTH: ARG, or the arguments in the response file it names
-  local f=${1:1} text len j ch q="" have=0 cur="" parsed=() k
-  if [ "${1:0:1}" != @ ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then expanded+=("$1"); return; fi
-  [ "$2" -lt 32 ] || die "response files nested too deeply (a loop?): $f"
-  text=$(cat -- "$f"; echo x); text=${text%x}; len=${#text}
-  for ((j = 0; j < len; j++)); do
-    ch=${text:j:1}
-    if [ "$ch" = "\\" ]; then
-      j=$((j + 1)); [ $j -lt $len ] || break
-      cur+=${text:j:1}; have=1
-    elif [ -n "$q" ]; then
-      if [ "$ch" = "$q" ]; then q=""; else cur+=$ch; fi
-    else
-      case $ch in
-        "'"|'"') q=$ch; have=1 ;;
-        ' '|$'\t'|$'\n'|$'\r'|$'\f'|$'\v') if [ $have = 1 ]; then parsed+=("$cur"); fi; cur=""; have=0 ;;
-        *) cur+=$ch; have=1 ;;
-      esac
-    fi
-  done
-  if [ $have = 1 ]; then parsed+=("$cur"); fi
-  for k in "${parsed[@]+"${parsed[@]}"}"; do add_arg "$k" $(($2 + 1)); done
-}
-for a in "$@"; do add_arg "$a" 0; done
+while IFS= read -r -d '' x; do expanded+=("$x"); done < "$rsp"
+rm -f "$rsp"
 set -- "${expanded[@]+"${expanded[@]}"}"
 source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
 source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcc" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
