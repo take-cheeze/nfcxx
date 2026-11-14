@@ -2104,6 +2104,9 @@ end
         'the pointer is part of an expression, not a plain argument'
       elsif macro_arg_nonretaining?(rel, s, callee)
         nil
+      elsif callee == 'rb_define_alloc_func'
+        # the allocator is called by the VM with no state argument: the fork has no per-class allocator hook (accepted stuck point)
+        'stuck point (per-class allocator): the pointer is an allocator, which the VM calls with no state argument in the fork'
       elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
         "the pointer is passed to #{callee}, which may keep it"
       end
