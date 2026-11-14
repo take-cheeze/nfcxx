@@ -1,6 +1,6 @@
 #include <ruby.h>
 
-/* Forms that have no exact mruby equivalent: rest, block, a used return value with a keyword part, and a call outside a variadic method. */
+/* Forms that have no exact mruby equivalent: rest, block, a used return value with a block part, and a call outside a variadic method. */
 static VALUE mRef;
 
 static VALUE ref_rest(int argc, VALUE *argv, VALUE self) {
@@ -17,7 +17,7 @@ static VALUE ref_block(int argc, VALUE *argv, VALUE self) {
 
 static VALUE ref_used(int argc, VALUE *argv, VALUE self) {
     VALUE a, kw;
-    int n = rb_scan_args(argc, argv, "1:", &a, &kw);
+    int n = rb_scan_args(argc, argv, "1&", &a, &kw);
     (void)n;
     return a;
 }

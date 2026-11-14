@@ -3590,10 +3590,6 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # arguments it consumed, which is the argument count here (no rest part, and extra arguments are an error). The keyword
     # form's trailing step is a statement, so a used value is refused there.
     used = (prev >= 0 && !";{}".include?(masked[prev])) || after < 0 || masked[after] != ';'
-    if used && kw
-      refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used with a keyword part (mruby returns a different count)')
-      return
-    end
     fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (kw ? ':' : '')
     # the keyword output takes every keyword (an empty table: mrb_kwargs::rest holds the whole keyword hash); CRuby gives nil
     # when there are no keywords, so an empty hash is replaced by nil
@@ -3603,7 +3599,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     callargs = (['mrb', "\"#{fmt}\""] + names.map { |n| '&' + n }).join(', ')
     callargs += ", (const mrb_kwargs[]){{0, NULL, NULL, 0, &#{kw_name}}}" if kw
     tail = kw ? ", #{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()), (void)0" : ''
-    ed.add(s, close + 1, "(#{pre}mrb_get_args(#{callargs})#{tail})")
+    if used && kw
+      # the value is used and there is a keyword part: a statement expression (GNU C, which the mruby build accepts)
+      # takes the mrb_get_args count, then normalises the keyword hash, so the count is the value
+      stmts = names[lead..].map { |n| "#{n} = mrb_nil_value(); " }.join
+      stmts += "#{kw_name} = mrb_nil_value(); " 
+      ed.add(s, close + 1, "({ #{stmts}mrb_int nfcx_n = mrb_get_args(#{callargs}); " \
+                           "#{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()); nfcx_n; })")
+    else
+      ed.add(s, close + 1, "(#{pre}mrb_get_args(#{callargs})#{tail})")
+    end
     rewrite(rel, s, 'rb_scan_args', "mrb_get_args(mrb, \"#{fmt}\", ...)",
             'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby; a keyword part takes the trailing Hash (mruby decides keyword-ness by the Hash in the last argument, CRuby 3 by the call site)')
   end

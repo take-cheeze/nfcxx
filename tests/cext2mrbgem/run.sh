@@ -81,7 +81,7 @@ check grep -qF '(b = mrb_nil_value(), c = mrb_nil_value(), mrb_get_args(mrb, "o|
 rc=0; "$rb" "$conv" --scanner "$scanner" --name scan_args_refused tools/cext2mrbgem/fixtures/scan_args_refused/ext/scan_args_refused "$work/scan_args_refused" > "$work/scan_args_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test "$(grep -c '  rb_scan_args  ' "$work/scan_args_refused/REFUSALS.txt")" -eq 4
-check grep -q 'return value of rb_scan_args is used with a keyword part' "$work/scan_args_refused/REFUSALS.txt"
+check grep -q 'format "1&" not supported' "$work/scan_args_refused/REFUSALS.txt"
 
 # 2g. rb_define_module_function (singleton and private instance method, mrb_define_module_function) and
 # rb_define_const (mrb_define_const on a tracked module or rb_cObject); a local receiver stays refused
@@ -270,6 +270,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_kw tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF 'mrb_get_args(mrb, "o|o:", &a, &b, (const mrb_kwargs[]){{0, NULL, NULL, 0, &kw}})' "$work/api_scan_kw/src/api_scan_kw.c"
 check grep -qF 'kw = (mrb_hash_size(mrb, kw) ? kw : mrb_nil_value())' "$work/api_scan_kw/src/api_scan_kw.c"
+# 2zzz42. the used return of the keyword form: a statement expression takes the mrb_get_args count, then normalises the hash.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_kw_used tools/cext2mrbgem/fixtures/api_scan_kw_used/ext/api_scan_kw_used "$work/api_scan_kw_used" > "$work/api_scan_kw_used.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'int n = ({ kw = mrb_nil_value(); mrb_int nfcx_n = mrb_get_args(mrb, "o:", &a, (const mrb_kwargs[]){{0, NULL, NULL, 0, &kw}}); kw = (mrb_hash_size(mrb, kw) ? kw : mrb_nil_value()); nfcx_n; });' "$work/api_scan_kw_used/src/api_scan_kw_used.c"
 # 2zzz31. the used return of rb_scan_args (no keyword part) is the mrb_get_args count (the arguments consumed).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_used tools/cext2mrbgem/fixtures/api_scan_used/ext/api_scan_used "$work/api_scan_used" > "$work/api_scan_used.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
