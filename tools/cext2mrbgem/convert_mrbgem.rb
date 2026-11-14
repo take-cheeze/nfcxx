@@ -1913,6 +1913,10 @@ end
       out = []
       (@occ[name] || []).each do |rel, s, e|
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        # the body of an object-like alias (#define alias real_name): its invocations are the uses, resolved by object_macro_name
+        lstart = @files[rel]['masked'].rindex("\n", s - 1) || -1
+        dline = @files[rel]['masked'][(lstart + 1)...s].to_s
+        next if dline.match?(/\A[ \t]*#[ \t]*define[ \t]+[#{WC}]+[ \t]+\z/)
         # a definition header in the text (also one the front end excludes, as in an inactive #if branch): name (params) {
         next if @files[rel]['masked'][e..].to_s.match?(/\A[ \t\n]*\([^()]*\)[ \t\n]*\{/)
         # a definition's own header (a name that has several definitions: each is a header, not a use)

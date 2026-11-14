@@ -347,6 +347,10 @@ check grep -qF 'if (mrb_str_equal(mrb, s, mrb_str_new_cstr(mrb, "add"))) return 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_freeze tools/cext2mrbgem/fixtures/api_ary_freeze/ext/api_ary_freeze "$work/api_ary_freeze" > "$work/api_ary_freeze.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_freeze(mrb, ary);' "$work/api_ary_freeze/src/api_ary_freeze.c"
+# 2zzz49. an object-like alias of a callback (#define alias real_cb) is not a use in its own define line: its invocations are.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_ret_cb tools/cext2mrbgem/fixtures/api_macro_ret_cb/ext/api_macro_ret_cb "$work/api_macro_ret_cb" > "$work/api_macro_ret_cb.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q 'mr_run2' "$work/api_macro_ret_cb/REFUSALS.txt"
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?
