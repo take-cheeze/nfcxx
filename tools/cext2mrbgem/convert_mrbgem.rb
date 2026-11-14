@@ -1405,6 +1405,15 @@ end
 
   # for each invocation of macro name (outside any #define), its k-th argument when that is a plain helper name:
   # [helper, rel, position], or nil when some invocation's argument is not one
+  # The name an object-like macro stands for when the macro's body is a single identifier (#define cb real_cb): real_cb.
+  def object_macro_name(name)
+    @files.each_value do |f|
+      m = /^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}[ \t]+([A-Za-z_][#{WC}]*)[ \t]*$/.match(f['masked'])
+      return m[1] if m
+    end
+    nil
+  end
+
   def macro_invocation_helpers(name, k)
     out = []
     (@occ[name] || []).each do |irel, is, ie|
@@ -1416,7 +1425,10 @@ end
       args = close > 0 ? split_args(mk, nx, close) : []
       a = args[k]
       return nil if a.nil?
+      # an invocation in an inactive definition (its #if is false in this build) is dead code: it passes nothing
+      next if ((@excluded_spans || {})[irel] || []).any? { |x, z| x < is && is < z }
       t = psl(@files[irel]['text'], a[0], a[1]).strip
+      t = object_macro_name(t) || t
       return nil unless t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
       lead = psl(@files[irel]['text'], a[0], a[1])[/\A\s*/].length
       out << [t, irel, a[0] + lead]
@@ -2238,6 +2250,8 @@ use_problem = lambda do |name, use|
     name, a, b, rel = macro
     (@occ[name] || []).all? do |orel, os, _oe|
       next true if rel == orel && a <= os && os < b
+      # an expansion in an inactive definition (its #if is false in this build) is dead code
+      next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
       fn = enclosing_func(orel, os)
       !fn.nil? && ctx.include?(fn['name'])
     end
