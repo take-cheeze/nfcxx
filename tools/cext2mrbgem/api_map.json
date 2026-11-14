@@ -967,6 +967,13 @@
       "template": "mrb_hash_bulk_insert($m, $0, $1, $2)",
       "caveat": "the fork's mrb_hash_bulk_insert (src/hash.c): argv holds argc elements, alternating keys and values, inserted in order as rb_hash_bulk_insert does"
     },
+    "rb_apply": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, $1, RARRAY_LEN($2), RARRAY_PTR($2))",
+      "caveat": "rb_apply(recv, mid, args) calls mid with the elements of the array args, as rb_funcallv does; the array is read, not retained"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",

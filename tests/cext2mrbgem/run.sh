@@ -405,6 +405,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_class tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'mrb_hash_bulk_insert(mrb, 4, pairs, h);' "$work/api_hash_class/src/api_hash_class.c"
 check grep -qF 'mrb_class_inherited_p(mrb, mrb_class_ptr(sub), mrb_class_ptr(sup))' "$work/api_hash_class/src/api_hash_class.c"
+# 2zzz65. rb_apply(recv, mid, args) calls mrb_funcall_argv with the array's elements.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_apply tools/cext2mrbgem/fixtures/api_apply/ext/api_apply "$work/api_apply" > "$work/api_apply.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_funcall_argv(mrb, recv, mrb_intern_cstr(mrb, "to_s"), RARRAY_LEN(args), RARRAY_PTR(args))' "$work/api_apply/src/api_apply.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
