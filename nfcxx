@@ -11,7 +11,7 @@
 #   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux and arm64 macOS.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
-#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc)
+#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc.rb)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
@@ -962,8 +962,8 @@ case $backend in
   pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
            { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux and arm64 macOS only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/gcc-cc ;;
-  gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
+       export NFCXX_CC=$root/scripts/gcc-cc.rb ;;
+  gcc) export NFCXX_CC=$root/scripts/gcc-cc.rb ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 

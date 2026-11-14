@@ -33,7 +33,7 @@ run_port() {  # run_port: the port's output for the case, in the sandbox (the -M
   local opts=() e v a mdeps=$scratch/mdeps.txt
   if (cd "$work" && g++ -M -std=c++23 "$CASE_SRC" > "$mdeps" 2>/dev/null); then opts+=("--mdeps=$mdeps"); else opts+=(--mdeps-failed); fi
   # the setup exports NFCXX_CC for --backend=gcc (nfcxx's case on the backend): the port is given it as the setup leaves it
-  for e in "${base_env[@]}" "${CASE_ENV[@]}" "NFCXX_CC=$root/scripts/gcc-cc"; do opts+=("--env=$e"); done
+  for e in "${base_env[@]}" "${CASE_ENV[@]}" "NFCXX_CC=$root/scripts/gcc-cc.rb"; do opts+=("--env=$e"); done
   for v in compile_only=1 ncpp=1 outset=1 nobj=0 modules=0 preprocess=0 stdin_src=0 depmode= cfiles_n=0 cu_n=0 cpp2_n=0 "out=$CASE_OUT"; do
     opts+=("--var=$v")
   done
