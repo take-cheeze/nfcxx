@@ -80,9 +80,14 @@ Relax swaps recompiled functions into a live process; that is a JIT-scale change
 step is a per-function or per-translation-unit cache keyed by hashes of the preprocessed input. It matters most for
 the large-library tests (`tests/realworld`, `tests/llamacpp`, `tests/coreclr-gc`).
 
-Status: largely present. `nfcxx --cache=DIR` (NFCXX_CACHE) keeps each `-c` compile under a key built from its inputs, and
-`NFCXX_CACHE_REMOTE=gha` shares the objects through the GitHub Actions cache (docs/notes/cxx-driver.md, "Compile cache").
-Not measured: how much of a large library's build time an unchanged unit saves with it.
+Status: largely present, measured on tinyxml2 (`tests/realworld`, one 79 KB translation unit, pinned commit). With
+`--backend=gcc --cache=DIR`: cold compile 1.37 s, unchanged source (hit) 0.27 s, edited source (miss) 1.55 s, edited again
+(hit) 0.26 s. So a hit saves about 80% of an unchanged unit, and a miss costs about 0.2 s to store the entry.
+
+Gap found: the default Path B route does not use the cache. `nfcxx -c x.cpp -o x.o` (Path B, the default on x86-64 Linux)
+never reaches the cache lookup, so the same unit compiles in 4.43 s every time. `--backend=gcc` is needed for a hit. The
+cache test (`tests/nfcxx-cache/run.sh`, 11 cases) passes because it runs the gcc-side decision. Fixing the Path B route is
+the next step for this idea.
 
 ## What not to copy
 
