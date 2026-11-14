@@ -100,7 +100,7 @@ CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
-UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|x(?:malloc|calloc|realloc|free)|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
+UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|x(?:malloc|calloc|realloc|free)|[A-Z][A-Z0-9_]*2[A-Z][A-Z0-9_]*|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
 
 GEM_NAME_RE = /\A[A-Za-z][A-Za-z0-9_-]*\n?\z/
 
@@ -2775,10 +2775,64 @@ end
     end
   end
 
+  # rb_funcall(recv, ID, n, a1..an) -> mrb_funcall_argv(mrb, recv, name, n, (mrb_value[]){a1..an}), with the name from
+  # rb_intern("lit") or a character ID ('*'). Only the call's head, its ID and count and its closing paren are rewritten:
+  # the receiver and the arguments stay in place, so the identifier pass converts them as it does everywhere else.
+  def funcall_special(rel, s, nxt, called)
+    masked = @files[rel]['masked']
+    text = @files[rel]['text']
+    ed = @edits[rel]
+    unless called
+      refuse(rel, s, 'rb_funcall', 'used without a call')
+      return
+    end
+    cp = match_close(masked, nxt)
+    args = cp > 0 ? split_args(masked, nxt, cp) : []
+    if args.size < 3
+      refuse(rel, s, 'rb_funcall', 'rb_funcall needs a receiver, an ID and a count')
+      return
+    end
+    id_text = psl(text, args[1][0], args[1][1]).strip
+    n_text = psl(text, args[2][0], args[2][1]).strip
+    unless n_text.match?(/\A\d+\z/) && args.size == 3 + n_text.to_i
+      refuse(rel, s, 'rb_funcall', 'the argument count must be an integer literal that matches the arguments')
+      return
+    end
+    name =
+      if (m = /\Arb_intern\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
+      elsif (m = /\A'([^'\\])'\z/.match(id_text)) then m[1]
+      end
+    if name.nil?
+      refuse(rel, s, 'rb_funcall', "the ID #{id_text} is not rb_intern of a string literal or a character (not supported)")
+      return
+    end
+    tok = mrb_tok(rel, s)
+    n = n_text.to_i
+    spans = [[s, nxt + 1], [args[1][0], n.zero? ? args[2][1] : args[3][0]]]
+    spans << [cp, cp + 1] if n.positive?
+    if spans.any? { |a, b| ed.overlaps(a, b) }
+      refuse(rel, s, 'rb_funcall', 'the call overlaps a rewritten span (not supported)')
+      return
+    end
+    ed.add(s, nxt + 1, "mrb_funcall_argv(#{tok}, ")
+    if n.zero?
+      ed.add(args[1][0], args[2][1], "mrb_intern_cstr(#{tok}, \"#{name}\"), 0, NULL")
+    else
+      ed.add(args[1][0], args[3][0], "mrb_intern_cstr(#{tok}, \"#{name}\"), #{n}, (mrb_value[]){")
+      ed.add(cp, cp + 1, '})')
+    end
+    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., \"#{name}\", #{n}, ...)",
+            'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
+  end
+
   def special(rel, s, e, name, entry, nxt, called)
     masked = @files[rel]['masked']
     text = @files[rel]['text']
     ed = @edits[rel]
+    if name == 'rb_funcall'
+      funcall_special(rel, s, nxt, called)
+      return
+    end
     if name == 'RB_GC_GUARD'
       fn = enclosing_func(rel, s)
       if !called || fn.nil? || !@needs.include?(fn['name'])

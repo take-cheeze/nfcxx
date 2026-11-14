@@ -165,15 +165,17 @@
     },
     "INT2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); the value is converted to mrb_int"
     },
     "LONG2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); the value is converted to mrb_int"
     },
     "RTEST": {
       "kind": "call",
@@ -454,8 +456,10 @@
       "caveat": "argument must be a string literal (mrb_intern_lit is a macro over mrb_intern_static); a char pointer does not compile"
     },
     "rb_funcall": {
-      "kind": "refuse",
-      "reason": "variadic CRuby call with an ID; mruby's mrb_funcall takes a name and mrb_funcall_argv a symbol and an argv array: the argument list must be written by hand"
+      "kind": "special",
+      "handler": "funcall",
+      "needs_mrb": true,
+      "caveat": "a literal argument count; the method name is rb_intern of a string literal or a character ID; the argument list is an mrb_value array (mrb_funcall_argv)"
     },
     "rb_funcallv": {
       "kind": "call",
@@ -818,17 +822,17 @@
     },
     "ULONG2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); no range check: an unsigned value above the mrb_int maximum wraps negative"
     },
     "ULL2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); no range check: an unsigned value above the mrb_int maximum wraps negative"
     },
     "NUM2LL": {
       "kind": "template",
@@ -1064,10 +1068,10 @@
     },
     "rb_ll2inum": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); mrb_int may be narrower than long long: values outside its range are not preserved"
     },
     "NUM2UINT": {
       "kind": "template",
@@ -1641,6 +1645,20 @@
       "needs_mrb": true,
       "template": "do { mrb_field_write_barrier_value($m, mrb_basic_ptr($0), $2); } while (0)",
       "caveat": "the object must be a heap value; the old value is not needed by mruby's field barrier, as CRuby's write barrier does not need it"
+    },
+    "SSIZET2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby's Integer from a C size (signed for SSIZET2NUM): mruby's fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "SIZET2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby's Integer from a C size (signed for SSIZET2NUM): mruby's fixnum; a value beyond mruby's integer range is not represented"
     }
   },
   "special_arg_positions_class_only": {

@@ -196,7 +196,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_num_sym_ctl/NOT_BUILDABLE"
 check grep -qF 'double d = mrb_to_flo(mrb, x);' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_float_value(mrb, d * 2.0)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
-check grep -qF 'mrb_int_value(mrb, 3)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
+check grep -qF 'mrb_fixnum_value(3)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_sym_name(mrb, id)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_symbol_p(name)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'if (mrb_const_defined(mrb, mrb_obj_value(cNumSymBase), id))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
@@ -242,10 +242,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check test ! -e "$work/local_names/NOT_BUILDABLE"
 check grep -qF '#define LN_TWICE(x) ((x) * 2)' "$work/local_names/src/local_names.c"
-check grep -qF 'mrb_int_value(mrb, LN_TWICE(n));' "$work/local_names/src/local_names.c"
+check grep -qF 'mrb_fixnum_value(LN_TWICE(n));' "$work/local_names/src/local_names.c"
 check grep -qF 'mrb_value rb_ln_out;' "$work/local_names/src/local_names.c"
 check grep -qF 'struct rb_ln_state s;' "$work/local_names/src/local_names.c"
-check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/local_names.c"
+check grep -qF 'return mrb_fixnum_value(LN_ANSWER);' "$work/local_names/src/local_names.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
@@ -451,7 +451,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_inline tools/cext2mrb
 check test "$rc" -eq 0
 check test ! -e "$work/api_header_inline/NOT_BUILDABLE"
 check grep -qF 'static inline int ahi_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_inline/include/helper.h"
-check grep -qF 'return mrb_int_value(mrb, ahi_check(mrb, v));' "$work/api_header_inline/src/api_header_inline.c"
+check grep -qF 'return mrb_fixnum_value(ahi_check(mrb, v));' "$work/api_header_inline/src/api_header_inline.c"
 
 # 2zu. a CRuby NORETURN(decl); prototype is unwrapped: the declaration is converted as a prototype (api_map.json batch N13)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_noreturn tools/cext2mrbgem/fixtures/api_noreturn/ext/api_noreturn "$work/api_noreturn" > "$work/api_noreturn.log" 2>&1 || rc=$?
@@ -519,7 +519,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_static tools/cext2mrb
 check test "$rc" -eq 0
 check test ! -e "$work/api_header_static/NOT_BUILDABLE"
 check grep -qF 'static int hs_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_static/include/helper.h"
-check grep -qF 'return mrb_int_value(mrb, hs_check(mrb, v));' "$work/api_header_static/src/api_header_static.c"
+check grep -qF 'return mrb_fixnum_value(hs_check(mrb, v));' "$work/api_header_static/src/api_header_static.c"
 
 # 2zze. a struct function-pointer field whose entries are designated initializers at file scope (.func = handler) is threaded
 # like an assigned field: the field takes mrb, the handlers take it, and the call through the field passes it
@@ -698,7 +698,7 @@ check grep -qF 'return mrb_hash_fetch(mrb, h, k, dflt);' "$work/api_fetch_num_st
 check grep -qF 'mrb_str_cat(mrb, dst, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'return mrb_str_new(mrb, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'mrb_str_new_cstr(mrb, "ok");' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
-check grep -qF 'return mrb_int_value(mrb, big);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_fixnum_value(big);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'unsigned int u = ((unsigned int)mrb_int(mrb, a));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'size_t s = ((size_t)mrb_int(mrb, b));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'unsigned long ul = mrb_fixnum(v);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
@@ -801,6 +801,13 @@ check grep -qF 'mrb_obj_equal(mrb, a, b)' "$work/api_value_eq/src/api_value_eq.c
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'static Real * rp_ptr(mrb_state *mrb, mrb_value obj) {' "$work/api_ret_pointer/src/api_ret_pointer.c"
+
+# 2zzz2. rb_funcall(recv, rb_intern("lit"), n, args...) -> mrb_funcall_argv with an argv array (the receiver and the arguments
+# are converted in place); the integer conversions are mrb_fixnum_value (the Integer tag), not a Float
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_funcall tools/cext2mrbgem/fixtures/api_funcall/ext/api_funcall "$work/api_funcall" > "$work/api_funcall.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value a = mrb_funcall_argv(mrb, v, mrb_intern_cstr(mrb, "to_i"), 0, NULL);' "$work/api_funcall/src/api_funcall.c"
+check grep -qF 'mrb_intern_cstr(mrb, "*"), 1, (mrb_value[]){mrb_fixnum_value(-1)});' "$work/api_funcall/src/api_funcall.c"
 # 2zzz. a registered method whose return type is VP_EXPORT VALUE, where #define VP_EXPORT static is storage: a registered method
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
