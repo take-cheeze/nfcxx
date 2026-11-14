@@ -348,6 +348,13 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_private_reg/NOT_BUILDABLE"
 check grep -qF 'mrb_define_private_method(mrb, cApiPriv, "secret", api_secret, MRB_ARGS_REQ(1));' "$work/api_private_reg/src/api_private_reg.c"
 
+# 2zd. instance variables named by a string literal (api_map.json batch D3): the name is interned with mrb_intern_cstr
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_name tools/cext2mrbgem/fixtures/api_ivar_name/ext/api_ivar_name "$work/api_ivar_name" > "$work/api_ivar_name.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_ivar_name/NOT_BUILDABLE"
+check grep -qF 'mrb_iv_get(mrb, obj, mrb_intern_cstr(mrb, "@count"))' "$work/api_ivar_name/src/api_ivar_name.c"
+check grep -qF 'mrb_iv_set(mrb, obj, mrb_intern_cstr(mrb, "@count"), v);' "$work/api_ivar_name/src/api_ivar_name.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -443,9 +450,9 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c 'no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt")" -eq 7
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 6
 check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
-check grep -q '  rb_iv_get  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
 # 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included

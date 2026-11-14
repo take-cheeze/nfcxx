@@ -1652,6 +1652,18 @@ class Converter
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
       end
+      if entry['intern_arg']
+        # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        k = entry['intern_arg']
+        lit = args.size > k ? psl(@files[rel]['text'], args[k][0], args[k][1]) : ''
+        unless lit.match?(/\A"[^"\\\n]*"\z/)
+          refuse(rel, s, name, "argument #{k + 1} is not a string literal (mruby takes a symbol; only a literal name is rewritten)")
+          return
+        end
+        ed.add(args[k][0], args[k][1], "mrb_intern_cstr(#{mrb_tok(rel, s)}, #{lit})")
+      end
       ed.add(s, e, entry['mruby'])
       if entry['inject_mrb']
         pa = next_nonspace(masked, nxt + 1)
