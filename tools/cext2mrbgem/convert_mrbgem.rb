@@ -1214,6 +1214,58 @@ end
     end
   end
 
+  # A typedef of a function-pointer type, typedef RET (*T)(PARAMS);, declared in this file. Its variables (T v; or
+  # T v[] = {helpers};) hold the callbacks, and their calls are v(...) or v[i](...). fnptr_typed_global collects them.
+  def fnptr_typedefs(rel)
+    masked = @files[rel]['masked']
+    out = []
+    masked.to_enum(:scan, /\btypedef\b[^;{}]*?\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+      m = Regexp.last_match
+      open = m.end(0) - 1
+      close = match_close(masked, open)
+      next if close < 0
+      params = psl(masked, open + 1, close).strip
+      next if params.empty? || params == 'void'
+      out << { rel: rel, name: m[1], params_start: open + 1 }
+    end
+    out
+  end
+
+  # The variables of typedef T and their callbacks and calls, across every file of the input.
+  def fnptr_typed_global(rec)
+    rec[:assigns] = []
+    rec[:calls] = []
+    vars = []
+    @files.each do |frel, f|
+      masked = f['masked']
+      masked.to_enum(:scan, /\b#{rec[:name]}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*(=|;|,)/).each do
+        dm = Regexp.last_match
+        vars << dm[1]
+        next unless dm[2] == '='
+        after = next_nonspace(masked, dm.end(0))
+        if masked[after] == '{'
+          close = match_close(masked, after)
+          next if close < 0
+          split_args(masked, after, close).each do |a, b|
+            t = psl(f['text'], a, b).strip
+            rec[:assigns] << [t, frel, a] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+          end
+        elsif (am = masked[after..].match(/\A([A-Za-z_]\w*)\s*;/))
+          rec[:assigns] << [am[1], frel, after]
+        end
+      end
+    end
+    vars.uniq.each do |v|
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /(?<![\w.>])#{v}\s*(?:\[[^\]]*\]\s*)*\(/).each do
+          cm = Regexp.last_match
+          rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+        end
+      end
+    end
+    rec
+  end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
@@ -1225,6 +1277,7 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     # type takes mrb (fnptr_global; the edits are in edit_fnptr_fields)
     @fnptr_recs = []
     @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
+    @files.keys.each { |frel| fnptr_typedefs(frel).each { |d| @fnptr_recs << fnptr_typed_global(d) } }
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
       r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }

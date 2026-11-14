@@ -463,6 +463,13 @@ check test ! -e "$work/api_fnptr_field/NOT_BUILDABLE"
 check grep -qF 'void (*on_value)(mrb_state *mrb, struct afp_parser *p, mrb_value v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
 check grep -qF 'p.on_value(mrb, &p, v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
 
+# 2zw. a typedef'd function-pointer table: its callbacks are threaded and its indexed calls pass mrb (api_map.json batch N15)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_table tools/cext2mrbgem/fixtures/api_fnptr_table/ext/api_fnptr_table "$work/api_fnptr_table" > "$work/api_fnptr_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_table/NOT_BUILDABLE"
+check grep -qF 'typedef void (*atb_dump_fn)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_fnptr_table/src/api_fnptr_table.c"
+check grep -qF 'atb_table[0](mrb, v, 0);' "$work/api_fnptr_table/src/api_fnptr_table.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
