@@ -104,3 +104,4 @@ a.cc -o prog
 # a toolkit without the runtime header: the wrap's sed fails, and the script ends with status 2
 --backend=gcc --cuda-driver=cudart nort/lib64/stubs/libcuda.so a.cc -o prog
 --backend=gcc nort/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc -c a.cc b.cc

@@ -144,10 +144,10 @@ def tool(opt)
   opt[:backend] == "gcc" ? "ECCP" : "PATHB"
 end
 
-# the output of a compile with -c: the -o file; without one, gcc's compile names it a.out and Path B's names it
-# after the source (basename.o, in the directory of the command)
+# the output of a compile with -c: the -o file; without one, both backends name it after the source (basename.o, in the
+# directory of the command: nfcxx takes <stem>.o for a C++ -c since #1137)
 def compile_out(opt, src)
-  return opt[:out] if opt[:outset] || opt[:backend] == "gcc"
+  return opt[:out] if opt[:outset]
   File.basename(src).sub(/\.[^.]*\z/, "") + ".o"
 end
 

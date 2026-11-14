@@ -305,7 +305,9 @@ class Driver
     argv += picopts
     argv += cobjs
     argv += eflist
-    argv += ["-o", ecp_arg(@out, moves)]
+    # -c without -o: the object is <stem>.o (eccp makes one object per call; nfcxx takes a single source, since #1137)
+    out = @compile_only && !@outset ? "#{File.basename(@srcs[0].to_s, ".*")}.o" : @out
+    argv += ["-o", ecp_arg(out, moves)]
     run_cmd("eccp", argv)
     env_lines(eccp: true)
   end

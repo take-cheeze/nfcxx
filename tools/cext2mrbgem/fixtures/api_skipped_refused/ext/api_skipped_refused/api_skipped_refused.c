@@ -10,8 +10,10 @@ static VALUE api_sub(VALUE self, VALUE s) {
     return rb_str_subseq(s, 0, 1);
 }
 
+static const char *iv_name = "@a";
+
 static VALUE api_iv(VALUE self, VALUE o) {
-    return rb_iv_get(o, "@a");
+    return rb_iv_get(o, iv_name);
 }
 
 static VALUE api_gv(VALUE self) {

@@ -363,10 +363,16 @@ class Plan
       end
       emit("ENV", "EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=#{lk.join(" ")}")
     end
+    # -c without -o: the object is <stem>.o, as for C and .cu inputs; eccp makes one object per call
+    out = @out
+    if @compile_only && !@outset && @ncpp > 0
+      raise NfcxxExit.new("nfcxx: -c with several sources needs -o (one object is made per call)", 2) if @srcs.length > 1
+      out = "#{File.basename(@srcs[0], ".*")}.o"
+    end
     emit("RUN", ECCP, @std, "--#{@dialect}", "--wdir", "/", *inst_opts, *@diag_opts, *userinc, *sys_inc, *hosted_libs,
          "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
          *keep_static, *eh_unwind, "--c_to_obj_option", "-fgnu89-inline", *picopts, *cobjs, *pre_opts, *eflist,
-         *shim, *vlart, *rtlib, "-o", ecp_arg(@out))
+         *shim, *vlart, *rtlib, "-o", ecp_arg(out))
     depend_step unless @depmode.empty?
     nil
   end
@@ -637,14 +643,14 @@ class Plan
 
   # the reason the wrap cannot replace libcuda with the shim, or nil (the bash's why)
   def cuda_why(home)
-    # the wrap reads the runtime header's CUDART_VERSION first: a missing header fails the sed, and the script with it
+    # the version is read from cuda_runtime_api.h; a missing header leaves it unknown (the bash reads it with || rtv=)
     header = "#{home}/include/cuda_runtime_api.h"
-    raise NfcxxExit.new("nfcxx: cuda-driver-wrap: sed cannot read #{header}", 2) unless @facts.file?(header)
-
     machine = @facts.value("machine") or unported("uname -m is not in the facts")
     return "the shim is x86-64 only" unless machine == "x86_64"
     return "no cuda.h and cudaTypedefs.h in #{home}/include" unless @facts.file?("#{home}/include/cuda.h") &&
                                                                     @facts.file?("#{home}/include/cudaTypedefs.h")
+
+    return "no cuda_runtime_api.h in #{home}/include" unless @facts.file?(header)
 
     rtv = @facts.cuda_rtv(header)
     return "libcudart #{rtv || "of unknown version"} is older than 12.5" if rtv.nil? || rtv.to_i < 12050
