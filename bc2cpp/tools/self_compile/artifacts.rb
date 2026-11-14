@@ -24,7 +24,9 @@ module Bc2cppSelfCompile
     env = base.merge(keys.uniq.reject { |key| base.key?(key) }.to_h { |key| [key, nil] })
     selectors = %w[BC2CPP_HOST_RUBY BC2CPP_SELF_BUILD_DIR BC2CPP_SELF_CXX BC2CPP_SELF_SHARDS BC2CPP_BUILD_JOBS]
     controls = caller_env.select { |key, _| selectors.include?(key) }.sort.to_h
-    inherited = INHERITED_KEYS.to_h { |key| [key, caller_env[key]] }
+    # Only the inherited variables that are set: an unset one is absent from the controls, not a nil control.
+    inherited = {}
+    INHERITED_KEYS.each { |key| inherited[key] = caller_env[key] unless caller_env[key].nil? }
     [env, controls.merge(inherited)]
   end
 
