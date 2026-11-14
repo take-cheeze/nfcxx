@@ -2868,6 +2868,13 @@ end
         return
       end
       class_args = entry['class_args'] || []
+      value_class_arg = lambda do |t, at|
+        fnc = enclosing_func(rel, at)
+        vn = fnc ? value_names_of(fnc) : Set.new
+        vf = value_field_names
+        (t.match?(/\A[A-Za-z_]\w*\z/) && vn.include?(t) && !@class_vars.include?(t)) ||
+          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/]))
+      end
       # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
       if entry['requires_block']
         fnb = enclosing_func(rel, s)
@@ -2905,18 +2912,31 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&'))) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
       # a call used as a condition (if/while, !, &&, ||) takes the template_cond form when the entry has one
       cond = entry['template_cond'] && condition_context?(rel, s)
+      # a VALUE class argument (a VALUE name of the function, or a VALUE struct member) is unwrapped with mrb_class_ptr
+      vnames_t = (f_t = enclosing_func(rel, s)) ? value_names_of(f_t) : Set.new
+      vfields_t = value_field_names
+      value_class = lambda do |t|
+        (vnames_t.include?(t) && !@class_vars.include?(t)) ||
+          (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields_t.include?(t[/([A-Za-z_]\w*)\z/]))
+      end
       out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
         next mrb_tok(rel, s) unless $1
         k = $1.to_i
         t = texts[k].delete('&')
         # a class argument that the map turns into an RClass * expression (rb_cHash -> mrb->hash_class): the expression
-        class_args.include?(k) && !@class_vars.include?(t) && class_expr_ok.call(t) ? @entries[t]['mruby'] : texts[k]
+        if class_args.include?(k) && !@class_vars.include?(t) && class_expr_ok.call(t)
+          @entries[t]['mruby']
+        elsif class_args.include?(k) && value_class.call(t)
+          "mrb_class_ptr(#{t})"
+        else
+          texts[k]
+        end
       end
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])

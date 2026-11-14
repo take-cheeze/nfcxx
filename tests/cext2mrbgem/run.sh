@@ -108,8 +108,8 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name const_get_at tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check grep -qF 'return mrb_const_get_at(mrb, mCGA, version);' "$work/const_get_at/src/const_get_at.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name const_get_at_value tools/cext2mrbgem/fixtures/const_get_at_value/ext/const_get_at_value "$work/const_get_at_value" > "$work/const_get_at_value.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
-check grep -q '  rb_const_get_at  the arguments are not all plain identifiers' "$work/const_get_at_value/REFUSALS.txt"
+check test "$rc" -eq 0
+check grep -qF 'mrb_const_get_at(mrb, mrb_class_ptr(mod), version)' "$work/const_get_at_value/src/const_get_at_value.c"
 
 # 2i. helper threading: a helper with a header declaration, called from another file and from a registered
 # method, is threaded everywhere (declaration, definition, calls) with a caveat; a helper taken as a value and a
@@ -305,6 +305,10 @@ check grep -qF 'static const mrb_data_type dt_type = { "DtBox", dt_free, dt_mark
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_xfile tools/cext2mrbgem/fixtures/api_dtype_xfile/ext/api_dtype_xfile "$work/api_dtype_xfile" > "$work/api_dtype_xfile.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'const mrb_data_type xf_type = { "Xf", xf_free, xf_mark };' "$work/api_dtype_xfile/src/xfile_cache.c"
+# 2zzz34. a class argument that is a VALUE parameter (rb_obj_is_kind_of(x, c)) is unwrapped with mrb_class_ptr.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kind_value tools/cext2mrbgem/fixtures/api_kind_value/ext/api_kind_value "$work/api_kind_value" > "$work/api_kind_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_obj_is_kind_of(mrb, x, mrb_class_ptr(c))' "$work/api_kind_value/src/api_kind_value.c"
 
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.

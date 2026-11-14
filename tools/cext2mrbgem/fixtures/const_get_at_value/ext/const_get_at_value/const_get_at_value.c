@@ -1,6 +1,6 @@
 #include <ruby.h>
 
-/* the receiver is a VALUE parameter, not a known class: rb_const_get_at stays refused */
+/* the receiver is a VALUE parameter: a class value, unwrapped with mrb_class_ptr */
 static VALUE cgv_lookup(VALUE self, VALUE mod) {
     ID version = rb_intern("VERSION");
     return rb_const_get_at(mod, version);
