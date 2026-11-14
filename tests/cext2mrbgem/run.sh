@@ -808,6 +808,13 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_funcall_argv(mrb, mrb_top_self(mrb), mrb_intern_cstr(mrb, "Rational"), 2, (mrb_value[]){n, d})' "$work/api_gem_values/src/api_gem_values.c"
 check grep -qF 'mrb_intern_cstr(mrb, "[]"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)(0))})' "$work/api_gem_values/src/api_gem_values.c"
 
+# 2zzz8. the encoding-dropping string helpers (rb_enc_interned_str: the bytes, asciicompat_p as a condition) and the time gem's
+# Time.at for rb_time_nano_new (nanoseconds to microseconds); the output compiles against the fork's headers
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_time tools/cext2mrbgem/fixtures/api_enc_time/ext/api_enc_time "$work/api_enc_time" > "$work/api_enc_time.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (1) return r;' "$work/api_enc_time/src/api_enc_time.c"
+check grep -qF 'mrb_intern_cstr(mrb, "at"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)(sec)), mrb_fixnum_value((mrb_int)(nsec) / 1000)})' "$work/api_enc_time/src/api_enc_time.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

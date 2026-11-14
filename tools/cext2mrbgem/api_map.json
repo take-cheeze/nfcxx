@@ -1880,6 +1880,36 @@
       "needs_mrb": true,
       "template": "mrb_int($m, mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"size\"), 0, NULL))",
       "caveat": "needs the mruby-struct gem (Struct#[] and Struct#size); the call raises at run time if the gem is not in the build; the length is an mrb_int (as CRuby's long)"
+    },
+    "rb_time_nano_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_class_get($m, \"Time\")), mrb_intern_cstr($m, \"at\"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)($0)), mrb_fixnum_value((mrb_int)($1) / 1000)})",
+      "caveat": "needs the mruby-time gem (Time.at); mruby's Time keeps microseconds, so the nanoseconds are divided by 1000 (the sub-microsecond part is dropped)"
+    },
+    "rb_time_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_class_get($m, \"Time\")), mrb_intern_cstr($m, \"at\"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)($0)), mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "needs the mruby-time gem (Time.at with seconds and microseconds, as CRuby's rb_time_new)"
+    },
+    "rb_enc_interned_str": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [2],
+      "template": "mrb_str_new($m, $0, $1)",
+      "caveat": "the encoding argument is dropped (mruby strings carry no encoding): the bytes are kept; CRuby's interned string is frozen, this one is not"
+    },
+    "rb_enc_str_asciicompat_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_true_value()",
+      "caveat": "mruby strings are byte strings with no encoding, so every string is taken as ASCII-compatible; a CRuby string in a non-ASCII-compatible encoding (UTF-16) has no mruby form",
+      "template_cond": "1"
     }
   },
   "special_arg_positions_class_only": {
