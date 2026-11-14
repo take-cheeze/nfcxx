@@ -1,0 +1,115 @@
+#!/bin/bash
+# Compares scripts/nfcxx-k1om.rb (the port of nfcxx's --target gate) with nfcxx's bash, for each argument list of cases.txt.
+#
+# The oracle is the bash: a copy of nfcxx in a sandbox, run to its end, with the commands it could reach stubbed (stub.sh):
+# gcc, cc, g++ (probes: GCC 13), cp, ninja and eccp are logged, mktemp makes a directory. Everything else (rm, ls, sed,
+# ...) runs for real. The bash runs under env -i with NFCXX_K1OM_ROOT set to the sandbox's k1om toolchain. In the output the
+# sandbox's repository is ROOT, its work directory WORK, its temporary directories TMP.
+#
+# The state of each case is set from its leading !TOKENS (cases.txt): the k1om GCC is removed (!nogcc), the k1om runtime
+# (build/k1om/libC.a, !nolibc) and the EDG driver (!noeccp). The port gets the same state as facts (FILE of
+# scripts/nfcxx-k1om.rb): eccp, k1om-gcc, k1om-libc and one edg-table line per lib_* table.
+#
+# A case the port leaves unported (exit 3) is listed with its reason and not compared, except that the bash must not refuse
+# it (status 2): a refusal the port missed is a failure. Every other case must print the same log lines and exit status as
+# the bash (the stderr text is not compared). The bash's log is empty for each refusal
+# it makes: a refusal comes before any command, so the expected output is "STATUS 2".
+#
+#   bash tests/nfcxx-k1om/run.sh [CASES]     CASES defaults to tests/nfcxx-k1om/cases.txt
+set -u
+here=$(cd "$(dirname "$0")" && pwd -P)
+repo=$(cd "$here/../.." && pwd -P)
+cases=${1:-$here/cases.txt}
+sb=$(mktemp -d)
+trap 'rm -rf "$sb"' EXIT
+root=$sb/root; work=$sb/work; bin=$sb/bin; tmp=$sb/tmp; k1om=$sb/k1om
+mkdir -p "$root/build/edg/bin" "$root/build/edg-base/lib_linux_aarch64" "$root/build/edg-base/lib_win64" \
+  "$root/build/k1om" "$bin" "$work" "$tmp" "$k1om/bin"
+cp -r "$repo/scripts" "$root/scripts"
+# the copy of nfcxx, unchanged
+cp "$repo/nfcxx" "$root/nfcxx"
+chmod +x "$root/nfcxx"
+for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
+ln -s "$here/stub.sh" "$bin/ld.mold"
+# the repository's tool is built (ensure_tool finds it fresh: no ninja run); the sandbox has no tool sources
+: > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
+ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
+# the sources the cases name (empty: the gate reads no source)
+for f in a.cc b.o c.c libq.a; do : > "$work/$f"; done
+mkdir -p "$work/inc"
+
+# set_state TOKENS...: the files the case's tokens remove or restore
+set_state() {
+  local t
+  for t in "$@"; do
+    case $t in nogcc|nolibc|noeccp) ;; *) echo "run.sh: unknown token !$t" >&2; exit 1 ;; esac
+  done
+  if has nogcc; then rm -f "$k1om/bin/k1om-mpss-linux-gcc"; else printf '#!/bin/sh\n' > "$k1om/bin/k1om-mpss-linux-gcc"; chmod +x "$k1om/bin/k1om-mpss-linux-gcc"; fi
+  if has nolibc; then rm -f "$root/build/k1om/libC.a"; else : > "$root/build/k1om/libC.a"; fi
+  if has noeccp; then rm -f "$root/build/edg/bin/eccp"; else ln -sf "$here/stub.sh" "$root/build/edg/bin/eccp"; fi
+}
+TOKENS=()
+has() { case " ${TOKENS[*]} " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# write_facts: the facts the bash tests, read from the sandbox
+write_facts() {
+  {
+    if [ -x "$root/build/edg/bin/eccp" ]; then echo "eccp 1"; else echo "eccp 0"; fi
+    if [ -x "$k1om/bin/k1om-mpss-linux-gcc" ]; then echo "k1om-gcc 1"; else echo "k1om-gcc 0"; fi
+    if [ -f "$root/build/k1om/libC.a" ]; then echo "k1om-libc 1"; else echo "k1om-libc 0"; fi
+    for d in "$root"/build/edg-base/lib_*; do [ -d "$d" ] && echo "edg-table ${d##*/lib_}"; done
+  } > "$sb/facts"
+}
+
+pass=0; fail=0; unp=0; unported_list=""; failed_list=""
+while IFS= read -r line; do
+  case $line in ""|"#"*) continue ;; esac
+  read -r -a words <<< "$line"
+  TOKENS=()
+  while [ ${#words[@]} -gt 0 ] && [[ ${words[0]} == !* ]]; do
+    TOKENS+=("${words[0]#!}"); words=("${words[@]:1}")
+  done
+  args=("${words[@]}")
+  set_state "${TOKENS[@]}"
+  write_facts
+  port_out=$(ruby "$repo/scripts/nfcxx-k1om.rb" --facts="$sb/facts" "${args[@]}" 2>"$sb/perr"); rc=$?
+  : > "$sb/stublog"
+  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
+     NFCXX_K1OM_ROOT="$k1om" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
+  if [ $rc = 3 ]; then
+    # not compared, but a refusal the bash makes (status 2) that the port left unported is a failure
+    if [ $orc = 2 ]; then
+      fail=$((fail + 1)); failed_list+="== $line
+--- port
+unported: $(head -1 "$sb/perr")
+--- bash
+STATUS 2 (a refusal the port does not make)
+--- bash stderr
+$(head -3 "$sb/oerr")
+"
+    else
+      unp=$((unp + 1)); unported_list+="  $line
+      $(head -1 "$sb/perr")
+"
+    fi
+    continue
+  fi
+  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" "$sb/stublog"; echo "STATUS $orc")
+  if [ "$port_out" = "$oracle_out" ]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); failed_list+="== $line
+--- port
+$port_out
+--- bash
+$oracle_out
+--- bash stderr
+$(head -3 "$sb/oerr")
+"
+  fi
+done < "$cases"
+
+[ -z "$failed_list" ] || printf '%s' "$failed_list"
+echo "passed $pass, failed $fail, unported $unp"
+[ -z "$unported_list" ] || { echo "unported (reason from the port):"; printf '%s' "$unported_list"; }
+[ "$fail" = 0 ]
