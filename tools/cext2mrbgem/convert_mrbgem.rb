@@ -1288,6 +1288,10 @@ end
           break
         end
         close = match_close(mk, nx)
+        # a prototype (name(...);) is a declaration, not a call
+        ns = next_nonspace(mk, close + 1)
+        before = psl(mk, [ce - 0 - 80, 0].max, cs)[/(\w+)[ \t\n*]*\z/, 1]
+        next if close > 0 && ns >= 0 && mk[ns] == ';' && before && before != 'return' && before != 'else'
         args = close > 0 ? split_args(mk, nx, close) : []
         a = args[pidx]
         if a.nil?
