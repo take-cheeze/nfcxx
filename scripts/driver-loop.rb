@@ -921,6 +921,7 @@ def link_mode(state, env)
     elsif kind == "c" || kind == "s"
       obj = "#{env.tmp}/obj#{state.k}.o"
       compile_one(state, env, kind, src, obj)
+      state.k += 1 if kind == "s"   # compile_one counts a C input, not an assembly one: the next temporary name must differ
       objs << obj
     end
   end

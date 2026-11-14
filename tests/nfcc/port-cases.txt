@@ -58,3 +58,5 @@ NFCC -o prog a.c m.c --bundle-only=libc.so.6
 CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c -lcuda
 CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=cudart -lcuda
 CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=libcuda -lcuda
+NFCC s1.s s2.s sm.c -o sprog && ./sprog; echo "run=$?"
+NFCC -c s1.s -o s1o.o && NFCC s1o.o s2.s sm.c -o sprog2 && ./sprog2; echo "run=$?"

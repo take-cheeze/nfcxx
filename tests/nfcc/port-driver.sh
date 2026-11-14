@@ -9,7 +9,7 @@ root=$PWD
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 base=$tmp/base
 mkdir -p "$base/inc"
-cp tests/nfcc/port/*.c tests/nfcc/port/*.cpp tests/nfcc/port/resp "$base/" 2>/dev/null
+cp tests/nfcc/port/*.c tests/nfcc/port/*.cpp tests/nfcc/port/*.s tests/nfcc/port/resp "$base/" 2>/dev/null
 cp tests/nfcc/port/h.h "$base/inc/" 2>/dev/null
 pass=0; fail=0
 norm() { sed -e "s|$tmp/bash|W|g" -e "s|$tmp/ruby|W|g" -e "s|$tmp|TMP|g" -e "s|/tmp/[A-Za-z0-9._-]*|TMP|g" -e "s|$root|ROOT|g" "$1"; }

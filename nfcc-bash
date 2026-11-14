@@ -464,7 +464,7 @@ objs=()
 for e in "${inputs[@]}"; do
   case ${e%%:*} in
     o) objs+=("${e#?:}") ;;
-    c|s) o=$tmp/obj$k.o; compile_one "${e%%:*}" "${e#?:}" "$o"; objs+=("$o") ;;
+    c|s) o=$tmp/obj$k.o; compile_one "${e%%:*}" "${e#?:}" "$o"; [ "${e%%:*}" = c ] || k=$((k + 1)); objs+=("$o") ;;   # an assembly input takes no k (compile_one does not count it): the next name differs
   esac
 done
 [ "$sawout" = 1 ] || out=a.out
