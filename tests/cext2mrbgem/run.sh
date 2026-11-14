@@ -133,9 +133,9 @@ check grep -qF 'return tm_isdst(mrb, s);' "$work/helper_member_thread/src/helper
 check grep -qF 't.tm_isdst = 0;' "$work/helper_member_thread/src/helper_member_thread.c"
 # negative: a helper whose address is stored in a static table (a file-scope initializer) stays refused, with the reason
 rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_table_refused tools/cext2mrbgem/fixtures/helper_table_refused/ext/helper_table_refused "$work/helper_table_refused" > "$work/helper_table_refused.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
-check test -e "$work/helper_table_refused/NOT_BUILDABLE"
-check grep -q '  htr_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_table_refused/REFUSALS.txt"
+check test "$rc" -eq 0
+check test ! -e "$work/helper_table_refused/NOT_BUILDABLE"
+check grep -qF 'static mrb_value htr_dispatch(mrb_state *mrb, mrb_value s) {' "$work/helper_table_refused/src/helper_table_refused.c"
 
 # 2k. global state (no mrb argument): a helper whose only uses are direct calls through a macro expanded in two registered
 # methods is not threaded: it uses the file-scope state, defined once in Init's file and declared in the others. Each
@@ -144,12 +144,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global tools/cext2mrbgem/
 check test "$rc" -eq 0
 check test ! -e "$work/helper_global/NOT_BUILDABLE"
 check grep -qF 'struct mrb_state *helper_global_bc2_mrb = NULL;' "$work/helper_global/src/helper_global.c"
-check grep -qF 'static mrb_value hg_make(mrb_value s) {' "$work/helper_global/src/helper_global.c"
-check grep -qF 'return mrb_str_new_cstr(helper_global_bc2_mrb, "made");' "$work/helper_global/src/helper_global.c"
+check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s) {' "$work/helper_global/src/helper_global.c"
+check grep -qF 'return mrb_str_new_cstr(mrb, "made");' "$work/helper_global/src/helper_global.c"
+check grep -qF '#define HG_MAKE(x) hg_make(helper_global_bc2_mrb, x)' "$work/helper_global/src/helper_global.c"
 check grep -qF '  mrb_state *nfcx_bc2_old = helper_global_bc2_mrb;' "$work/helper_global/src/helper_global.c"
 check test "$(grep -c 'helper_global_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/helper_global/src/helper_global.c")" -eq 3
 check grep -qF ' helper_global_bc2_mrb = nfcx_bc2_old; }' "$work/helper_global/src/helper_global.c"
-check grep -q 'global-state hg_make' "$work/helper_global/conversion_log.json"
+check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s)' "$work/helper_global/conversion_log.json"
 
 # 2l. global state refused: a helper whose address sits in a file-scope initializer may run with no method context
 rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global_refused tools/cext2mrbgem/fixtures/helper_global_refused/ext/helper_global_refused "$work/helper_global_refused" > "$work/helper_global_refused.log" 2>&1 || rc=$?
@@ -251,7 +252,7 @@ check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/lo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_yield  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -482,6 +483,148 @@ check test "$rc" -eq 0
 check grep -qF 'static int sd_check__other(mrb_value v) {' "$work/api_static_dup/src/other.c"
 check grep -qF 'static int sd_check__api_static_dup(mrb_state *mrb, mrb_value v) {' "$work/api_static_dup/src/api_static_dup.c"
 
+# 2zy. batch N17 (api_map.json): rb_ary_pop and rb_str_subseq are direct calls with mrb; rb_intern3 drops its encoding argument;
+# rb_deprecate_constant is dropped (no-op in mruby); RB_UNUSED_VAR keeps the name, but a parameter in that form is refused (not a plain VALUE)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_batch_n17 tools/cext2mrbgem/fixtures/api_batch_n17/ext/api_batch_n17 "$work/api_batch_n17" > "$work/api_batch_n17.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_batch_n17/NOT_BUILDABLE"
+check grep -qF 'b_unused  ' "$work/api_batch_n17/REFUSALS.txt"
+check grep -qF 'return mrb_ary_pop(mrb, ary);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'return mrb_str_substr(mrb, str, 1, 2);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'mrb_sym id = mrb_intern(mrb, p, 4);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'return 0;' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'dropped: rb_deprecate_constant' "$work/api_batch_n17/src/api_batch_n17.c"
+
+# 2zz. batch N18 (api_map.json): RSTRING_END is the end pointer of a String (a template over RSTRING_PTR and RSTRING_LEN);
+# RARRAY_CONST_PTR maps to the mruby RARRAY_PTR macro
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_batch_n18 tools/cext2mrbgem/fixtures/api_batch_n18/ext/api_batch_n18 "$work/api_batch_n18" > "$work/api_batch_n18.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_batch_n18/NOT_BUILDABLE"
+check grep -qF 'char *e = (RSTRING_PTR(str) + RSTRING_LEN(str));' "$work/api_batch_n18/src/api_batch_n18.c"
+check grep -qF 'const mrb_value *items = RARRAY_PTR(ary);' "$work/api_batch_n18/src/api_batch_n18.c"
+
+# 2zzb. a use inside a body that the build's #if leaves out is dead code, not a file-scope use: the guard is kept and no refusal is recorded
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gated_body tools/cext2mrbgem/fixtures/api_gated_body/ext/api_gated_body "$work/api_gated_body" > "$work/api_gated_body.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gated_body/NOT_BUILDABLE"
+check grep -qF '#ifdef GATED_TEST_METHODS' "$work/api_gated_body/src/api_gated_body.c"
+check grep -qE 'NUM2INT|mrb_as_int' "$work/api_gated_body/src/api_gated_body.c"
+
+# 2zzc. TYPE(x) is rb_type (compared with MRB_TT_*); T_STRING is exact; rb_obj_alloc allocates a plain object of the class (mrb_class_ptr)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_alloc tools/cext2mrbgem/fixtures/api_type_alloc/ext/api_type_alloc "$work/api_type_alloc" > "$work/api_type_alloc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_alloc/NOT_BUILDABLE"
+check grep -qF 'return mrb_type(v) == MRB_TT_STRING ? mrb_true_value() : mrb_false_value();' "$work/api_type_alloc/src/api_type_alloc.c"
+check grep -qF 'return mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_OBJECT, mrb_class_ptr(klass)));' "$work/api_type_alloc/src/api_type_alloc.c"
+
+# 2zzd. a static (not inline) helper in a header is converted with mrb, like a static inline one: it is local to each includer
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_static tools/cext2mrbgem/fixtures/api_header_static/ext/api_header_static "$work/api_header_static" > "$work/api_header_static.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_header_static/NOT_BUILDABLE"
+check grep -qF 'static int hs_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_static/include/helper.h"
+check grep -qF 'return mrb_int_value(mrb, hs_check(mrb, v));' "$work/api_header_static/src/api_header_static.c"
+
+# 2zze. a struct function-pointer field whose entries are designated initializers at file scope (.func = handler) is threaded
+# like an assigned field: the field takes mrb, the handlers take it, and the call through the field passes it
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_init tools/cext2mrbgem/fixtures/api_fnptr_init/ext/api_fnptr_init "$work/api_fnptr_init" > "$work/api_fnptr_init.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_init/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*func)(mrb_state *mrb, mrb_value self, mrb_value value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
+check grep -qF 'return op->func(mrb, self, value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
+
+# 2zzf. a local named like a helper, used without a call, is that local: the helper converts (a direct call in another function threads mrb)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_shadow_local tools/cext2mrbgem/fixtures/api_shadow_local/ext/api_shadow_local "$work/api_shadow_local" > "$work/api_shadow_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_shadow_local/NOT_BUILDABLE"
+check grep -qF 'mrb_value sl_check = mrb_false_value();' "$work/api_shadow_local/src/api_shadow_local.c"
+check grep -qF 'return sl_check(mrb, v);' "$work/api_shadow_local/src/api_shadow_local.c"
+
+# 2zzg. rb_yield in a registered method's body: the wrapper fetches the block ("o&") and the yield passes it to mrb_yield
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield tools/cext2mrbgem/fixtures/api_yield/ext/api_yield "$work/api_yield" > "$work/api_yield.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_yield/NOT_BUILDABLE"
+check grep -qF 'mrb_get_args(mrb, "o&", &v, &nfcx_block);' "$work/api_yield/src/api_yield.c"
+check grep -qF 'return mrb_yield(mrb, nfcx_block, v);' "$work/api_yield/src/api_yield.c"
+# 2zzh. rb_yield in a helper is refused: a helper has no block to yield to
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield_refused tools/cext2mrbgem/fixtures/api_yield_refused/ext/api_yield_refused "$work/api_yield_refused" > "$work/api_yield_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'rb_yield is supported only in the body of a registered method' "$work/api_yield_refused/REFUSALS.txt"
+
+# 2zzi. a helper's function-pointer parameter, RET (*NAME)(PARAMS), is called with the mruby state: the helper takes mrb, the
+# callback type takes mrb first, the callbacks passed for it are threaded, and the call through it passes mrb (fnptr_param_recs).
+# The regex scanner cannot read a parameter with nested parentheses (DEF_RE), so there the callback stays refused: the
+# output is NOT_BUILDABLE with the refusal of fp_cb (the libclang scanner reads the definition).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_param tools/cext2mrbgem/fixtures/api_fnptr_param/ext/api_fnptr_param "$work/api_fnptr_param" > "$work/api_fnptr_param.log" 2>&1 || rc=$?
+if [ "$scanner" = libclang ]; then
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_param/NOT_BUILDABLE"
+check grep -qF 'static mrb_value fp_each(mrb_state *mrb, mrb_value (*cb)(mrb_state *mrb, mrb_value, mrb_value), mrb_value v, mrb_value hash) {' "$work/api_fnptr_param/src/api_fnptr_param.c"
+check grep -qF 'return cb(mrb, v, hash);' "$work/api_fnptr_param/src/api_fnptr_param.c"
+check grep -qF 'return fp_each(mrb, fp_cb, v, mrb_nil_value());' "$work/api_fnptr_param/src/api_fnptr_param.c"
+else
+check test "$rc" -eq 2
+check test -e "$work/api_fnptr_param/NOT_BUILDABLE"
+check grep -q '  fp_cb  ' "$work/api_fnptr_param/REFUSALS.txt"
+fi
+
+# 2zzj. a struct function-pointer field filled by a positional initializer (struct TAG var = { h1, h2, ... }): the member index
+# gives the field; the helper there is threaded like an assigned field, and calls through the field pass mrb
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_positional tools/cext2mrbgem/fixtures/api_fnptr_positional/ext/api_fnptr_positional "$work/api_fnptr_positional" > "$work/api_fnptr_positional.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_positional/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*on_second)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
+check grep -qF 'return ops->on_second(mrb, ops->on_first(mrb, v));' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
+
+# 2zzk. TYPE(v) == T_NIL and TYPE(v) != T_FALSE are value tests: mrb_nil_p and !mrb_false_p (nil and false share MRB_TT_FALSE)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_nil tools/cext2mrbgem/fixtures/api_type_nil/ext/api_type_nil "$work/api_type_nil" > "$work/api_type_nil.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_nil/NOT_BUILDABLE"
+check grep -qF 'return mrb_nil_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
+check grep -qF 'return !mrb_false_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
+
+# 2zzl. code under #ifndef NDEBUG is live in the mruby output: ruby.h defines NDEBUG (CRuby drops it), so the scan reads a copy with the guard true
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ndebug_guard tools/cext2mrbgem/fixtures/api_ndebug_guard/ext/api_ndebug_guard "$work/api_ndebug_guard" > "$work/api_ndebug_guard.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_ndebug_guard/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ng_guarded(mrb_state *mrb, mrb_value self) {' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
+check grep -qF 'mrb_define_module_function(mrb, mNG, "guarded", ng_guarded, MRB_ARGS_REQ(1));' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
+
+# 2zzm. switch (TYPE(v)) with case T_NIL / T_FALSE: nil is routed to case 1000 (a value test), so the false label is MRB_TT_FALSE only
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_type tools/cext2mrbgem/fixtures/api_switch_type/ext/api_switch_type "$work/api_switch_type" > "$work/api_switch_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_type/NOT_BUILDABLE"
+check grep -qF 'switch ((mrb_nil_p(v) ? 1000 : mrb_type(v))) {' "$work/api_switch_type/src/api_switch_type.c"
+check grep -qF 'case 1000 /* nil */: return mrb_str_new_cstr(mrb, "nil");' "$work/api_switch_type/src/api_switch_type.c"
+
+# 2zzn. rb_enc_str_new and rb_enc_associate drop their encoding argument (a pure encoding getter is accepted there): mruby strings carry no encoding
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_drop tools/cext2mrbgem/fixtures/api_enc_drop/ext/api_enc_drop "$work/api_enc_drop" > "$work/api_enc_drop.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
+check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
+check grep -qF 'return s;' "$work/api_enc_drop/src/api_enc_drop.c"
+
+# 2zzo. a positional callback table with a NULL entry, and a callback stored by address (x.NAME = &helper;): both are read by the field rule
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_null tools/cext2mrbgem/fixtures/api_fnptr_null/ext/api_fnptr_null "$work/api_fnptr_null" > "$work/api_fnptr_null.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_null/NOT_BUILDABLE"
+check grep -qF 'void (*store)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_null/src/api_fnptr_null.c"
+check grep -qF 'ops->store = &fn_store;' "$work/api_fnptr_null/src/api_fnptr_null.c"
+
+# 2zzp. a static helper defined in two files is renamed where it is used as a value too (followed by ';'): a prototype is followed by '(', not ';'
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_static_value tools/cext2mrbgem/fixtures/api_static_value/ext/api_static_value "$work/api_static_value" > "$work/api_static_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_static_value/NOT_BUILDABLE"
+check grep -qF 'sv_table.fn = sv_dup__api_static_value;' "$work/api_static_value/src/api_static_value.c"
+check grep -qF 'return sv_dup__other(v);' "$work/api_static_value/src/other.c"
+
+# 2zzq. a struct member of a typedef'd function-pointer type, filled by a positional table of structs (array of struct TAG at file scope):
+# the typedef takes mrb and the table entries are threaded; the call through the member passes mrb (fnptr_typed_global members, arrays of structs)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_table tools/cext2mrbgem/fixtures/api_typed_table/ext/api_typed_table "$work/api_typed_table" > "$work/api_typed_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_table/NOT_BUILDABLE"
+check grep -qF 'return tt_codes[0].handler(mrb, v);' "$work/api_typed_table/src/api_typed_table.c"
+check grep -qF '{"first", tt_first},' "$work/api_typed_table/src/api_typed_table.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -577,8 +720,8 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 4
-check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 3
+check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
