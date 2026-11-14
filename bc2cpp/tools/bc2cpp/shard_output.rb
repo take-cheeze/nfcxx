@@ -47,26 +47,41 @@ module ShardOutput
     n
   end
 
-  # BC2CPP_SHARD_COLD_OPT=O1 (docs/notes/bc2cpp-shard-tiers.md): the shards other than the main file are compiled at
-  # this optimization level (a GCC `#pragma GCC optimize` at the top of each), and BC2CPP_SHARD_HOT_OWNERS names a file
-  # of owners (one per line) whose methods stay in the main file, which keeps the build's own flags. The cold level
-  # trades run time of the moved methods for compile time; the hot list is the profile's, supplied by the caller.
+  # The shard tier (docs/notes/bc2cpp-shard-tiers.md), set by flags on the bc2cpp command line:
+  #   --shard-cold-opt=LEVEL  the shards other than the main file are compiled at this optimization level (a GCC
+  #                           `#pragma GCC optimize` at the top of each; GCC only, other compilers ignore it);
+  #   --shard-hot-owners=FILE owners (one per line, `#` comments) whose methods stay in the main file, which keeps the
+  #                           build's own flags. Needs --shard-cold-opt. The list is the profile's, supplied by the caller.
+  COLD_OPT_FLAG = '--shard-cold-opt='
+  HOT_OWNERS_FLAG = '--shard-hot-owners='
   COLD_OPT = /\AO[0-3sz]\z/
 
-  # nil unless BC2CPP_SHARD_COLD_OPT is set. GCC only: other compilers ignore the pragma.
-  def cold_opt(env = ENV)
-    raw = env['BC2CPP_SHARD_COLD_OPT']
-    return nil if raw.nil? || raw.empty?
-    raise Error, "BC2CPP_SHARD_COLD_OPT must be O0, O1, O2, O3, Os or Oz, got #{raw.inspect}" unless raw =~ COLD_OPT
+  # Takes the tier flags out of argv (in place) and returns { tier: level or nil, hot: Set of owners }.
+  def take_argv!(argv)
+    tier = nil
+    hot_path = nil
+    argv.dup.each do |arg|
+      if arg.start_with?(COLD_OPT_FLAG)
+        tier = arg.delete_prefix(COLD_OPT_FLAG)
+        argv.delete(arg)
+      elsif arg.start_with?(HOT_OWNERS_FLAG)
+        hot_path = arg.delete_prefix(HOT_OWNERS_FLAG)
+        argv.delete(arg)
+      end
+    end
+    tier = valid_tier(tier) if tier
+    raise Error, "#{HOT_OWNERS_FLAG.chomp('=')} needs #{COLD_OPT_FLAG.chomp('=')}" if hot_path && tier.nil?
 
-    raw
+    { tier: tier, hot: hot_path ? owners_file(hot_path) : Set.new }
   end
 
-  # The owners named in BC2CPP_SHARD_HOT_OWNERS, empty without a tier (cold_opt) so the default split is unchanged.
-  def hot_owners(env = ENV)
-    path = env['BC2CPP_SHARD_HOT_OWNERS']
-    return Set.new if path.nil? || path.empty? || cold_opt(env).nil?
+  def valid_tier(level)
+    raise Error, "#{COLD_OPT_FLAG.chomp('=')} must be O0, O1, O2, O3, Os or Oz, got #{level.inspect}" unless level =~ COLD_OPT
 
+    level
+  end
+
+  def owners_file(path)
     names = File.read(path).split("\n").map(&:strip)
     names.reject { |name| name.empty? || name[0] == '#' }.to_set
   end
@@ -80,7 +95,7 @@ module ShardOutput
   end
 
   # Register before every other stdout rewriter: at_exit runs last-in first-out, so this splits their final text.
-  def capture_stdout(symbol, out_dir, shards)
+  def capture_stdout(symbol, out_dir, shards, tier = nil, hot = nil)
     original = $stdout
     buffer = StringIO.new
     $stdout = buffer
@@ -88,22 +103,25 @@ module ShardOutput
       $stdout = original
       next if $!
 
-      main, files = split(buffer.string, symbol, shards)
+      main, files = split(buffer.string, symbol, shards, tier, hot)
       files.each_with_index { |text, i| File.write(shard_path(out_dir, symbol, i + 1), text) }
       original.write(main)
     end
   end
 
   # [main text, the texts of shards 1...shards-1].
-  def split(text, symbol, shards)
+  def split(text, symbol, shards, tier = nil, hot = nil)
+    tier = valid_tier(tier) if tier
+    # Owners are kept in the main file only under a tier; without one the split is the default.
+    hot = tier ? (hot || Set.new) : Set.new
     prelude, units, hooks = sections(text)
-    groups = assign(units, shards)
+    groups = assign(units, shards, hot)
     if groups.count { |g| !g.empty? } <= 1
       plain = prelude + units.map { |u| u[:code] }.join + hooks
       return [plain, Array.new(shards - 1) { |i| empty_shard(symbol, i + 1, shards) }]
     end
 
-    rewrite(symbol, shards, prelude, groups, hooks)
+    rewrite(symbol, shards, prelude, groups, hooks, tier)
   end
 
   def empty_shard(symbol, index, shards)
@@ -125,7 +143,7 @@ module ShardOutput
 
   # An owner's methods stay together (they call each other most); owners go largest first onto the lightest shard.
   # `shards` lists of units, each in print order.
-  def assign(units, shards)
+  def assign(units, shards, hot = Set.new)
     by_owner = units.each_with_index.group_by { |u, _| u[:owner] }
     size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
     total = units.sum { |u| u[:code].bytesize }
@@ -133,7 +151,6 @@ module ShardOutput
     wanted = [[shards, by_owner.size, (total / min_bytes.to_f).ceil].min, 1].max
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
-    hot = hot_owners
     # Hot owners all go to the main file (shard 0), before the cold ones are spread over the lightest shards.
     hot_part, cold_part = by_owner.partition { |owner, _| hot.include?(owner) }
     hot_part.each do |_, list|
@@ -148,7 +165,7 @@ module ShardOutput
     placed.map { |list| list.sort_by(&:last).map(&:first) } + Array.new(shards - wanted) { [] }
   end
 
-  def rewrite(symbol, shards, prelude, groups, hooks)
+  def rewrite(symbol, shards, prelude, groups, hooks, tier)
     texts = groups.each_with_index.map { |g, i| g.map { |u| u[:code] }.join + (i.zero? ? hooks : '') }
     items = texts.map { |t| top_level_items(t.lines) }
     defined = {}
@@ -180,7 +197,6 @@ module ShardOutput
     main = String.new(prelude_out)
     main << "// SHARD_DECLS: methods-section definitions another shard names (docs/bc2cpp-shards.md).\n" << decls
     main << "#ifndef #{PRELUDE_ONLY}\n" << bodies[0] << "#endif // #{PRELUDE_ONLY}\n"
-    tier = cold_opt
     files = bodies.drop(1).each_with_index.map do |body, i|
       next empty_shard(symbol, i + 1, shards) if groups[i + 1].empty?
 

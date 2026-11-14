@@ -143,16 +143,8 @@ else
   puts '  SKIP: no C++ compiler'
 end
 
-# BC2CPP_SHARD_COLD_OPT and BC2CPP_SHARD_HOT_OWNERS (docs/notes/bc2cpp-shard-tiers.md): a GCC optimize pragma on the
-# shards other than the main file, and the hot owners kept in the main file.
-def tier_with_env(pairs)
-  saved = pairs.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
-  pairs.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
-  yield
-ensure
-  saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
-end
-
+# The shard tier flags (docs/notes/bc2cpp-shard-tiers.md): a GCC optimize pragma on the shards other than the main
+# file, and the hot owners kept in the main file. The flags are --shard-cold-opt= and --shard-hot-owners=.
 TIER_PRELUDE = <<~'CPP'
   #include <stdio.h>
   static int tier_counter = 0;
@@ -168,35 +160,54 @@ def tier_program_text
   text << ShardOutput::HOOKS_MARK << "/* hooks */\n"
 end
 
-def tier_split(pairs, hot_file = nil, shards: 3)
-  env = { 'BC2CPP_SHARD_MIN_BYTES' => '1', 'BC2CPP_SHARD_COLD_OPT' => nil, 'BC2CPP_SHARD_HOT_OWNERS' => hot_file }
-  tier_with_env(env.merge(pairs)) { ShardOutput.split(tier_program_text, 'chk', shards) }
+# BC2CPP_SHARD_MIN_BYTES (the existing knob) lowers the threshold so the small fixture splits.
+def tier_split(tier, hot, shards = 3)
+  tier_with_env('BC2CPP_SHARD_MIN_BYTES' => '1') { ShardOutput.split(tier_program_text, 'chk', shards, tier, hot) }
+end
+
+def tier_with_env(pairs)
+  saved = pairs.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
+  pairs.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  yield
+ensure
+  saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
 end
 
 puts '-- tiers'
 Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
   hot_file = File.join(dir, 'hot.txt')
   File.write(hot_file, "# profile hot owners\nA\nB\n")
+  hot_set = Set.new(%w[A B])
 
-  plain_main, plain_files = tier_split({})
+  plain_main, plain_files = tier_split(nil, nil)
   suite.check('without a tier there is no pragma', plain_files.none? { |t| t.include?('#pragma GCC optimize') })
-  suite.check('without a tier the hot list is ignored',
-              tier_with_env('BC2CPP_SHARD_HOT_OWNERS' => hot_file, 'BC2CPP_SHARD_COLD_OPT' => nil) { ShardOutput.hot_owners.empty? })
+  ignored_main, ignored_files = tier_split(nil, hot_set)
+  suite.check('without a tier the hot owners are ignored',
+              ignored_main == plain_main && ignored_files == plain_files)
 
-  tier_main, tier_files = tier_split({ 'BC2CPP_SHARD_COLD_OPT' => 'O1' })
-  nonempty = tier_files.select { |t| t.include?('#define BC2CPP_SHARD_PRELUDE_ONLY') }
-  suite.check('a tier puts the pragma at the top of every non-empty shard',
-              !nonempty.empty? && nonempty.all? { |t| t.start_with?(%(#pragma GCC optimize ("O1")\n)) })
-  suite.check('the main file gets no pragma', !tier_main.include?('#pragma GCC optimize'))
-  refused = begin
-    tier_split({ 'BC2CPP_SHARD_COLD_OPT' => 'fast' })
+  argv = ['x.rb', '--shard-cold-opt=O1', "--shard-hot-owners=#{hot_file}", 'y.rb']
+  flags = ShardOutput.take_argv!(argv)
+  suite.check('the flags come out of argv and the sources stay',
+              argv == ['x.rb', 'y.rb'] && flags[:tier] == 'O1' && flags[:hot] == hot_set)
+  suite.check('no flags give no tier and no hot owners',
+              ShardOutput.take_argv!(['x.rb']) == { tier: nil, hot: Set.new })
+
+  refused = lambda do |args|
+    ShardOutput.take_argv!(args)
     false
   rescue ShardOutput::Error
     true
   end
-  suite.check('a bad tier level is refused', refused)
+  suite.check('a hot-owners flag without a cold level is refused', refused.call(["--shard-hot-owners=#{hot_file}"]))
+  suite.check('a bad cold level is refused', refused.call(['--shard-cold-opt=fast']))
 
-  hot_main, hot_files = tier_split({ 'BC2CPP_SHARD_COLD_OPT' => 'O1' }, hot_file)
+  tier_main, tier_files = tier_split('O1', nil)
+  nonempty = tier_files.select { |t| t.include?('#define BC2CPP_SHARD_PRELUDE_ONLY') }
+  suite.check('a tier puts the pragma at the top of every non-empty shard',
+              !nonempty.empty? && nonempty.all? { |t| t.start_with?(%(#pragma GCC optimize ("O1")\n)) })
+  suite.check('the main file gets no pragma', !tier_main.include?('#pragma GCC optimize'))
+
+  hot_main, hot_files = tier_split('O1', hot_set)
   suite.check('hot owners are defined in the main file',
               hot_main.include?('int hot_a(') && hot_main.include?('int hot_b('))
   suite.check('no shard defines a hot owner',
