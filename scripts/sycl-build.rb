@@ -191,7 +191,7 @@ dev_ir = "#{absout}.dev.ir"
 pathb = ->(name) { File.join(ROOT, "scripts", name) }
 rb = envd("RUBY", "ruby")
 
-st = run_status({}, [pathb.call("pathb-dump")] + ["--ir", "-std=#{std}", "-D__NFCXX_SYCL_DEVICE__"] +
+st = run_status({}, [pathb.call("pathb-dump.rb")] + ["--ir", "-std=#{std}", "-D__NFCXX_SYCL_DEVICE__"] +
                     (ndebug ? [ndebug] : []) + ["-I#{inc}"] + opts + diag + [src], out: dev_ir)
 exit st unless st.zero?
 
