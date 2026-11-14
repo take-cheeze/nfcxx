@@ -29,6 +29,7 @@ stub_shim() { if [ -n "${STUB_SHIM_ERROR:-}" ]; then echo "$STUB_SHIM_ERROR"; re
 # The dump of the state the port prints first, then the compile-only path (which follows it in nfcc).
 dump_state='dump_scalar() { printf "%s=%s\n" "$1" "${!1-}"; }
 dump_array() {
+  declare -p "$1" >/dev/null 2>&1 || return 0
   local name=$1; local -n ref=$1
   [ -n "${ref[*]+x}" ] || return 0
   local x; for x in "${ref[@]}"; do printf "%s+=%s\n" "$name" "$x"; done
