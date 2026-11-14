@@ -41,12 +41,15 @@
 #   cuda-shim-error TEXT    scripts/cuda-driver-shim fails with TEXT (takes precedence over cuda-shim)
 #   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
 #   cuda-file, cuda-dir     run.sh makes these in the work directory; the port reads the exists and dir lines instead
+#   usr-local-cuda absent|present  whether /usr/local/cuda exists on the host: the bash reads that absolute path itself,
+#                           so run.sh measures it (it is not a sandboxed path); only "absent" is modelled
 #
 # Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none, and CUDA_HOME
 # only as the cuda-home fact), the SYCL pre-pass (it needs a sycl include in the source), the existence of eccp and of the
 # built repository tools (ensure_tool finds them fresh, so no ninja run), and the host GNU version (not used by this path).
 # A CUDA toolkit that is /usr/local/cuda (CUDA_HOME unset, and the libcuda path does not name a toolkit with cuda.h) is
-# not read: unported.
+# modelled only when the host has no /usr/local/cuda (the usr-local-cuda fact): the wrap's sed cannot read its runtime
+# header, so the script ends with status 2. With the directory present its headers would be read: unported.
 
 require "pathname"
 
@@ -624,7 +627,7 @@ class Plan
     end
   end
 
-  # the toolkit: CUDA_HOME when it is set, else the derived one when it has include/cuda.h, else /usr/local/cuda (not read)
+  # the toolkit: CUDA_HOME when it is set, else the derived one when it has include/cuda.h, else /usr/local/cuda
   def cuda_toolkit(found)
     env_home = @facts.value("cuda-home").to_s
     return env_home unless env_home.empty?
@@ -632,7 +635,16 @@ class Plan
     home = derived_home(found)
     return home if !home.empty? && @facts.file?("#{home}/include/cuda.h")
 
-    unported("the CUDA toolkit is /usr/local/cuda (CUDA_HOME unset, and #{found} names no toolkit with cuda.h): not read")
+    # /usr/local/cuda: the bash reads that path itself. With no such directory the sed of its runtime header fails before
+    # any other check, whatever the mode (the bash's set -e and pipefail end the script with the sed's status, 2).
+    case @facts.value("usr-local-cuda")
+    when "absent"
+      raise NfcxxExit.new("nfcxx: cuda-driver-wrap: sed cannot read /usr/local/cuda/include/cuda_runtime_api.h", 2)
+    when "present"
+      unported("the CUDA toolkit is /usr/local/cuda, which the host has (CUDA_HOME unset, and #{found} names no toolkit with cuda.h): its headers are not modelled")
+    else
+      unported("the CUDA toolkit is /usr/local/cuda (CUDA_HOME unset, and #{found} names no toolkit with cuda.h): the host's state is not in the facts")
+    end
   end
 
   # the reason the wrap cannot replace libcuda with the shim, or nil (the bash's why)

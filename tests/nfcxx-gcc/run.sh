@@ -59,6 +59,8 @@ run_set() {
   done < "$sb/facts"
   (cd "$work" && find . -mindepth 1 -printf '%y %P\n' | sort -k2) \
     | awk '{ print "exists " $2; if ($1 == "d") print "dir " $2 }' >> "$sb/facts"
+  # the bash reads /usr/local/cuda by its absolute path (the host's file system, not the sandbox's): the fact is measured
+  if [ -e /usr/local/cuda ]; then echo "usr-local-cuda present" >> "$sb/facts"; else echo "usr-local-cuda absent" >> "$sb/facts"; fi
   cuda_home=$(awk '$1 == "cuda-home" { print $2; exit }' "$sb/facts")
   # the ld.NAME stubs (-fuse-ld=NAME): the facts' ld lines
   awk '$1 == "ld" { print $2 }' "$sb/facts" | while read -r x; do ln -s "$here/stub.sh" "$bin/ld.$x"; done
