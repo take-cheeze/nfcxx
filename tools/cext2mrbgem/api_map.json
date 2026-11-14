@@ -1659,6 +1659,124 @@
       "inject_mrb": false,
       "needs_mrb": false,
       "caveat": "CRuby's Integer from a C size (signed for SSIZET2NUM): mruby's fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "rb_const_set": {
+      "kind": "call",
+      "mruby": "mrb_const_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the class is a VALUE here (mrb_const_set takes an mrb_value); the ID is an mrb_sym"
+    },
+    "rb_obj_as_string": {
+      "kind": "call",
+      "mruby": "mrb_obj_as_string",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "calls to_s, as CRuby's rb_obj_as_string"
+    },
+    "rb_inspect": {
+      "kind": "call",
+      "mruby": "mrb_inspect",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "calls inspect, as CRuby's rb_inspect"
+    },
+    "rb_class_name": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_str_new_cstr($m, mrb_class_name($m, mrb_class_ptr($0)))",
+      "caveat": "returns the class name as a String (CRuby returns a VALUE); the argument is a class value"
+    },
+    "rb_id2sym": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_symbol_value($0)",
+      "caveat": "an ID is an mrb_sym here; the Symbol value is mrb_symbol_value"
+    },
+    "rb_intern2": {
+      "kind": "call",
+      "mruby": "mrb_intern",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "interns the bytes (length given), as CRuby's rb_intern2"
+    },
+    "rb_mEnumerable": {
+      "kind": "expr",
+      "mruby": "mrb_module_get(mrb, \"Enumerable\")",
+      "needs_mrb": true,
+      "caveat": "Enumerable is a mruby gem module (mruby-enumerator); looked up by name, raises at run time if the gem is not loaded"
+    },
+    "rb_mComparable": {
+      "kind": "expr",
+      "mruby": "mrb_module_get(mrb, \"Comparable\")",
+      "needs_mrb": true,
+      "caveat": "Comparable is looked up by name, as Enumerable"
+    },
+    "rb_str_concat": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "(mrb_str_concat($m, $0, $1), $0)",
+      "caveat": "appends the other value to the string and returns the string, as CRuby's rb_str_concat"
+    },
+    "RB_NIL_P": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_nil_p($0)",
+      "caveat": "nil test, as CRuby's NIL_P"
+    },
+    "RB_OBJ_FREEZE": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void)mrb_obj_freeze($m, $0))",
+      "caveat": "freezes the object; the result is not used (CRuby's RB_OBJ_FREEZE is void)"
+    },
+    "RUBY_T_HASH": {
+      "kind": "expr",
+      "mruby": "MRB_TT_HASH"
+    },
+    "RUBY_T_ARRAY": {
+      "kind": "expr",
+      "mruby": "MRB_TT_ARRAY"
+    },
+    "RB_INT2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "an mruby fixnum (see INT2NUM)"
+    },
+    "LL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "an mruby fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "NUM2SSIZET": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((ssize_t)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "NUM2USHORT": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((unsigned short)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "NUM2ULL": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((unsigned long long)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
     }
   },
   "special_arg_positions_class_only": {
