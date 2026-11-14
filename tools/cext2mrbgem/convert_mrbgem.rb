@@ -3184,7 +3184,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       tgt = rec['target']
-      if !@class_vars.include?(tgt) && tgt != 'rb_cObject'
+      # a tracked class variable, or a CRuby class constant with a mruby class expression (rb_cString -> mrb->string_class)
+      if !@class_vars.include?(tgt) && tgt != 'rb_cObject' && !class_expr_ok.call(tgt)
         refuse(rel, s, name, "target #{py_repr(tgt)} is not a tracked class or module variable")
         return
       end
@@ -3294,7 +3295,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     tgt = psl(text, args[0][0], args[0][1])
-    unless tgt == 'rb_cObject' || (@class_vars.include?(tgt) && !is_param(rel, args[0][0], tgt))
+    unless tgt == 'rb_cObject' || (@class_vars.include?(tgt) && !is_param(rel, args[0][0], tgt)) || class_expr_ok.call(tgt)
       refuse(rel, s, 'rb_define_const', "target #{py_repr(tgt)} is not a tracked class or module variable")
       return
     end
