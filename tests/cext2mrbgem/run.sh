@@ -764,6 +764,23 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_barrier tools/cext2mrbge
 check test "$rc" -eq 0
 check test ! -e "$work/api_str_barrier/NOT_BUILDABLE"
 check grep -qF 'mrb_str_cat_cstr(mrb, s, "!");' "$work/api_str_barrier/src/api_str_barrier.c"
+
+# 2zzv. a stateful callback passed down a forwarding chain (fnptr_param_recs with retention): converts, compiles with -Wall -Werror
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fwd_callback tools/cext2mrbgem/fixtures/api_fwd_callback/ext/api_fwd_callback "$work/api_fwd_callback" > "$work/api_fwd_callback.log" 2>&1 || rc=$?
+if [ "$scanner" = libclang ]; then
+check test "$rc" -eq 0
+check test ! -e "$work/api_fwd_callback/NOT_BUILDABLE"
+check grep -qF 'return fwd_outer(mrb, v, fwd_c);' "$work/api_fwd_callback/src/api_fwd_callback.c"
+else
+check test "$rc" -eq 2
+check test -e "$work/api_fwd_callback/NOT_BUILDABLE"
+fi
+
+# 2zzw. a stateful callback stored into a global (the callee keeps the pointer): refused, the output is not buildable
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_store_callback_refused tools/cext2mrbgem/fixtures/api_store_callback_refused/ext/api_store_callback_refused "$work/api_store_callback_refused" > "$work/api_store_callback_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_store_callback_refused/NOT_BUILDABLE"
+check grep -q '  sr_c  helper needs the mruby state threaded in' "$work/api_store_callback_refused/REFUSALS.txt"
 check grep -qF 'mrb_undef_class_method(mrb, cBox, "new");' "$work/api_str_barrier/src/api_str_barrier.c"
 }
 

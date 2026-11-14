@@ -1349,6 +1349,8 @@ end
           break
         end
       end
+      # the callback is threaded (it takes mrb): only a parameter that calls the callback, and does not keep it, can take it
+      rec[:bad] = true unless non_retaining?(hname, pidx)
       next if rec[:bad] || rec[:assigns].empty?
       recs << rec
     end
@@ -1600,6 +1602,7 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
       # the function that calls an ok field passes it the state (edit_fnptr_fields): it needs the state too
       r[:calls].each { |_, cfn, _| forced << cfn if r[:ok] && cfn && @defs.key?(cfn) }
     end
+    (@fnptr_recs || []).each { |r| warn "DBG2 owner=#{r[:owner].inspect} name=#{r[:name]} ok=#{r[:ok].inspect} pidx=#{r[:pidx].inspect} assigns=#{r[:assigns].inspect} calls=#{r[:calls].map { |c| c[1..] }.inspect}" } if ENV['NR_DEBUG']
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
 @dtype_cb_pos = Set.new
@@ -1761,6 +1764,8 @@ use_problem = lambda do |name, use|
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
+  # a value use passed to a defined function that only calls it (or forwards it to one that does): not a keep
+  next nil if !direct && non_retaining_use?(rel, s)
   if !direct
         # the address is kept or passed on, so the helper's signature cannot gain mrb; the reason says how
         why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
@@ -2033,6 +2038,83 @@ use_problem = lambda do |name, use|
       fn = enclosing_func(orel, os)
       !fn.nil? && ctx.include?(fn['name'])
     end
+  end
+
+  # The call that the position pos is an argument of: [open, close, callee name, argument index], or nil when pos is not
+  # inside a call (a parenthesized expression or a statement has no callee name before its '(')
+  def enclosing_call(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      ch = masked[k]
+      if ')]}'.include?(ch)
+        depth += 1
+      elsif '([{'.include?(ch)
+        if depth == 0
+          return nil unless ch == '('
+          j = prev_nonspace(masked, k - 1)
+          return nil if j < 0
+          m = /([A-Za-z_]\w*)\z/.match(masked[[j - 120, 0].max..j].to_s)
+          return nil unless m
+          close = match_close(masked, k)
+          return nil if close <= 0
+          args = split_args(masked, k, close)
+          idx = args.index { |a, b| a <= pos && pos <= b }
+          return nil if idx.nil?
+          return [k, close, m[1], idx]
+        end
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
+  # true when the parameter at index k of the defined function fname never keeps the function pointer it receives: every
+  # use in its body is a call of it (NAME(...) or (*NAME)(...)) or an argument of a call of another such function. The
+  # depth bounds the forwarding chain.
+  def non_retaining?(fname, k, depth = 0)
+    return false if depth > 6
+    defs = (@defs[fname] || []).reject { |x| x['proto'] }
+    return false unless defs.size == 1
+    d = defs[0]
+    return false unless d['po'] && d['pc'] && d['brace'] && d['body_end'] && d['file']
+    pname = fn_param_names(d)[k]
+    return false unless pname && pname.match?(/\A[A-Za-z_]\w*\z/)
+    rel = d['file']
+    masked = @files[rel]['masked']
+    body = psl(masked, d['brace'], d['body_end'] + 1)
+    body.to_enum(:scan, /(?<![#{WC}.>])#{Regexp.escape(pname)}(?![#{WC}])/).each do
+      q = d['brace'] + Regexp.last_match.begin(0)
+      nx = next_nonspace(masked, q + pname.length)
+      next if nx >= 0 && masked[nx] == '('
+      pv = prev_nonspace(masked, q - 1)
+      if pv >= 0 && masked[pv] == '*'
+        pv2 = prev_nonspace(masked, pv - 1)
+        if pv2 >= 0 && masked[pv2] == '('
+          cl = next_nonspace(masked, q + pname.length)
+          next if cl >= 0 && masked[cl] == ')' && (nn = next_nonspace(masked, cl + 1)) >= 0 && masked[nn] == '('
+        end
+      end
+      ec = enclosing_call(masked, q)
+      return false if ec.nil?
+      open_pos, close_pos, g, idx = ec
+      return false unless @defs.key?(g) && g != fname
+      return false unless pv >= 0 && '(,'.include?(masked[pv]) && nx >= 0 && ',)'.include?(masked[nx])
+      return false unless non_retaining?(g, idx, depth + 1)
+    end
+    true
+  end
+
+  # a helper name used as an argument of a defined function whose parameter does not keep it (see non_retaining?)
+  def non_retaining_use?(rel, pos)
+    ec = enclosing_call(@files[rel]['masked'], pos)
+    return false if ec.nil?
+    _o, _c, g, idx = ec
+    # the callee's callback record must exist and be ok (the callback is threaded for it): without it the callee's
+    # parameter keeps its C type while the helper gains mrb
+    ok_rec = (@fnptr_recs || []).any? { |r| r[:ok] && r[:owner] == g && r[:pidx] == idx }
+    ok_rec && @defs.key?(g) && non_retaining?(g, idx)
   end
 
   # The functions the runtime calls while it marks: the data type mark callbacks, and the helpers every call of which is
