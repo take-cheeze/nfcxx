@@ -25,6 +25,7 @@ repo=$(cd "$here/../.." && pwd -P)
 cases=${1:-$here/cases.txt}
 [ "$(uname -s)" = Linux ] || { echo "run.sh: the sandbox's tools are Linux tools (GNU find, realpath)" >&2; exit 2; }
 sb=$(mktemp -d)
+sb=$(cd "$sb" && pwd -P)   # physical, as abs_path prints a directory (the parent of WORK is $sb)
 trap 'rm -rf "$sb"' EXIT
 root=$sb/root; work=$sb/work; bin=$sb/bin; tmp=$sb/tmp
 mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$root/build/edg-base" "$bin" "$work" "$tmp" "$root/tools/cuda-rewrite" "$root/build/qbe"
@@ -91,7 +92,7 @@ while IFS= read -r line; do
   : > "$sb/stublog"
   (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_FACTS="$facts" NFCXX_STUB_LOG="$sb/stublog" \
      NFCXX_STUB_TMP="$tmp" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
-  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" "$sb/stublog")
+  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb#PARENT#g" "$sb/stublog")
   if ! grep -q '^EXEC ' "$sb/stublog"; then   # after EXEC the status is the program's: none is compared
     if [ -n "$oracle_out" ]; then oracle_out="$oracle_out
 STATUS $orc"; else oracle_out="STATUS $orc"; fi

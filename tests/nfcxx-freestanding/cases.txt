@@ -143,3 +143,60 @@ clang --freestanding -c a.cc
 clang --freestanding -c -Iinc a.cc
 clang --freestanding -E a.cc
 clang --freestanding --dialect=g++ -c a.cc
+# C inputs: the Path B C compile (pathb-cc -std=c11) or the gcc backend's (gcc -c -O2 -fwrapv -fno-strict-aliasing), and
+# the link with cc or gcc; with -c the object is copied, -o names the one object
+--freestanding c.c
+--freestanding -c c.c
+--freestanding -c -o x.o c.c
+--freestanding -c -o x.o c.c d.c
+--freestanding -c c.c d.c
+--freestanding c.c d.c -o prog
+--freestanding -Iinc -DFOO=1 -U BAR -Wno-narrowing c.c
+--freestanding -include pre.h -isystem inc c.c
+--freestanding --gnu-version=140000 c.c
+--freestanding --dialect=clang c.c
+--freestanding -x c++ c.c
+--freestanding -x c c.c
+--freestanding --backend=pathb c.c
+--freestanding --backend=gcc c.c
+--freestanding --backend=gcc -c -Iinc c.c
+--freestanding --backend=gcc c.c d.c -o prog
+--freestanding --backend=bogus c.c
+--freestanding --emit-c c.c
+--freestanding -c c.c a.cc
+--freestanding c.c a.cc -o prog
+--freestanding -c -o x.o c.c a.cc
+noqbe --freestanding c.c
+noqbe --freestanding --backend=pathb c.c
+clang --freestanding c.c
+darwin --freestanding c.c
+darwin machine=arm64 --freestanding c.c
+darwin machine=arm64 --freestanding -c c.c
+machine=riscv64 --freestanding c.c
+machine=aarch64 --freestanding -c c.c
+c.c
+-c c.c
+-c -o x.o c.c d.c
+-Iinc c.c -o prog
+--backend=gcc c.c
+--backend=gcc -c -Iinc -DX c.c
+clang -c c.c
+-x c c.c
+-c c.c a.cc
+-c -o x.o c.c a.cc
+# hosted -c: Path B compiles each source (no link)
+-c a.cc
+-c a.cc -o x.o
+-c -Iinc -DFOO=1 a.cc b.cc
+-c --gnu-version=140000 a.cc
+-c -include pre.h a.cc
+-c a.cc b.cc -o x.o
+-c -std=c++17 -Wno-narrowing a.cc
+-c -Isub/../x a.cc
+-c -I.. a.cc
+clang -c a.cc
+# -I with .. under --emit-c: abs_path (the directory is entered, the parent of WORK is PARENT)
+--emit-c -I.. a.cc
+--emit-c -I../x a.cc
+--emit-c -Isub/../../x a.cc
+--emit-c --freestanding -Iinc -I../x a.cc

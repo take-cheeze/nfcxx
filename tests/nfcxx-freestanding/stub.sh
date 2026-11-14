@@ -1,7 +1,8 @@
 #!/bin/bash
 # Stub for the commands the paths of nfcxx run. tests/nfcxx-freestanding/run.sh links this file under each name (see run.sh).
 #   g++           probes (--version, -dumpfullversion, -v) answer from facts.txt; any other call is the -E exec: logged (EXEC)
-#   gcc           probes answer from facts.txt; any other call is not expected (the -m probe: it fails, its output is unused)
+#   gcc           probes answer from facts.txt; the C compile and the link of a C input: logged (RUN gcc); the -m probe
+#                 (gcc -dM -E) fails, its output is unused
 #   cc            the link (or the C compile): logged (RUN cc)
 #   cpfe          the EDG front end: logged (RUN); it writes a stand-in to its --gen_c_file_name
 #   pathb-cc      the Path B compile of one source: logged (RUN)
@@ -34,7 +35,10 @@ case $name in
         exit 0 ;;
     esac
     if [ "$name" = g++ ]; then log "EXEC g++ $*"; exit 0; fi
-    echo "stub: $name called without a probe" >&2; exit 99 ;;
+    # gcc's other calls are the C compile (-c) and the link of a C input: logged (RUN gcc). The -m probe (gcc -dM -E)
+    # is not: its output is unused (the stub gives none), so it is refused as before.
+    case " $* " in *" -dM "*) echo "stub: $name called without a probe" >&2; exit 99 ;; esac
+    envlog; log "RUN gcc $*"; exit 0 ;;
   cc) envlog; log "RUN cc $*"; exit 0 ;;
   cpfe)
     envlog

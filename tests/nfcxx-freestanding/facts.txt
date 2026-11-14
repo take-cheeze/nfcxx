@@ -19,3 +19,4 @@ target-table win32
 module mod.cc
 qbe 1
 pathb-ldrt build/libnfcxxld.a
+work-parent PARENT
