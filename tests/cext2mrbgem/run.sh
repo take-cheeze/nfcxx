@@ -822,6 +822,13 @@ check test "$rc" -eq 0
 check grep -qF 'int ar = ' "$work/api_method_str/src/api_method_str.c"
 check grep -qF 'mrb_intern_cstr(mrb, "write"), 1, (mrb_value[]){big})' "$work/api_method_str/src/api_method_str.c"
 
+# 2zzz10. rb_ary_new3(n, values...) -> mrb_ary_new_from_values with the values in an mrb_value array (the count literal; an
+# empty array with NULL); the output compiles against the fork's headers
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_new3 tools/cext2mrbgem/fixtures/api_ary_new3/ext/api_ary_new3 "$work/api_ary_new3" > "$work/api_ary_new3.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value a = mrb_ary_new_from_values(mrb, 2, (mrb_value[]){x, y});' "$work/api_ary_new3/src/api_ary_new3.c"
+check grep -qF 'mrb_value b = mrb_ary_new_from_values(mrb, 0, NULL);' "$work/api_ary_new3/src/api_ary_new3.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

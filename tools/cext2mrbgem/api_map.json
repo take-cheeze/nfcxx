@@ -1966,6 +1966,12 @@
       "needs_mrb": false,
       "template": "((void)($0))",
       "caveat": "every mruby string is ASCII-compatible (see rb_enc_str_asciicompat_p), so the check always passes"
+    },
+    "rb_ary_new3": {
+      "kind": "special",
+      "handler": "ary_new3",
+      "needs_mrb": true,
+      "caveat": "a literal count; the values are an mrb_value array (mrb_ary_new_from_values)"
     }
   },
   "special_arg_positions_class_only": {

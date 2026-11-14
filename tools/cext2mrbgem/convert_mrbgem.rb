@@ -2865,6 +2865,43 @@ end
     end
   end
 
+  # rb_ary_new3(n, a1..an) -> mrb_ary_new_from_values(mrb, n, (mrb_value[]){a1..an}): the count is a literal and the values
+  # stay in place (the identifier pass converts them); the head and the closing paren are rewritten
+  def ary_new3_special(rel, s, nxt, called)
+    masked = @files[rel]['masked']
+    text = @files[rel]['text']
+    ed = @edits[rel]
+    unless called
+      refuse(rel, s, 'rb_ary_new3', 'used without a call')
+      return
+    end
+    cp = match_close(masked, nxt)
+    args = cp > 0 ? split_args(masked, nxt, cp) : []
+    n_text = args.empty? ? '' : psl(text, args[0][0], args[0][1]).strip
+    unless n_text.match?(/\A\d+\z/) && args.size == 1 + n_text.to_i
+      refuse(rel, s, 'rb_ary_new3', 'the count must be an integer literal that matches the values (not supported)')
+      return
+    end
+    n = n_text.to_i
+    tok = mrb_tok(rel, s)
+    spans = [[s, nxt + 1]]
+    spans << [args[0][0], args[1][0]] if n.positive?
+    spans << [cp, cp + 1]
+    if spans.any? { |a, b| ed.overlaps(a, b) }
+      refuse(rel, s, 'rb_ary_new3', 'the call overlaps a rewritten span (not supported)')
+      return
+    end
+    if n.zero?
+      ed.add(s, cp + 1, "mrb_ary_new_from_values(#{tok}, 0, NULL)")
+    else
+      ed.add(s, nxt + 1, "mrb_ary_new_from_values(#{tok}, #{n}, (mrb_value[]){")
+      ed.add(args[0][0], args[1][0], '')
+      ed.add(cp, cp + 1, '})')
+    end
+    rewrite(rel, s, 'rb_ary_new3', "mrb_ary_new_from_values(#{tok}, #{n}, ...)",
+            'the values are the arguments of rb_ary_new3, in an mrb_value array (mrb_ary_new_from_values)')
+  end
+
   # rb_funcall(recv, ID, n, a1..an) -> mrb_funcall_argv(mrb, recv, name, n, (mrb_value[]){a1..an}), with the name from
   # rb_intern("lit") or a character ID ('*'). Only the call's head, its ID and count and its closing paren are rewritten:
   # the receiver and the arguments stay in place, so the identifier pass converts them as it does everywhere else.
@@ -2921,6 +2958,10 @@ end
     ed = @edits[rel]
     if name == 'rb_funcall'
       funcall_special(rel, s, nxt, called)
+      return
+    end
+    if name == 'rb_ary_new3'
+      ary_new3_special(rel, s, nxt, called)
       return
     end
     if name == 'RB_GC_GUARD'
