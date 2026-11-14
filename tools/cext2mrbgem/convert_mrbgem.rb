@@ -1229,6 +1229,14 @@ def noreturn_mask(rel)
   end
 end
 
+  def pp_conditional_at?(masked, pos)
+    ls = (masked.rindex("\n", pos - 1) || -1) + 1 if pos > 0
+    ls ||= 0
+    le = masked.index("\n", pos) || masked.length
+    line = masked[ls...le]
+    line.match?(/\A[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif)\b/) || line.match?(/\bdefined\b/)
+  end
+
   # rb_ensure(body, data1, ensure, data2): both callbacks are static functions of this file, each used only by this call
   # and each VALUE f(VALUE); they are threaded (mrb, mrb_value) for mrb_ensure. The data arguments are VALUE names or Q constants.
   def ensure_calls
@@ -2724,6 +2732,9 @@ end
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      # a name in a conditional directive (#if, #ifdef, #ifndef, #elif, or defined(...)) is a feature test, not a use: it stays
+      # as written, and the preprocessor of the mruby build answers it (mruby defines none of CRuby's feature macros)
+      next if pp_conditional_at?(masked, s)
       # TYPE(v) == T_NIL (or !=) is a nil test: mruby has no nil type tag (nil and false share MRB_TT_FALSE), so the whole
       # comparison is rewritten to mrb_nil_p, and the T_NIL token inside that edit is not refused
       if name == 'TYPE' && (tn = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)\s*(==|!=)\s*(T_NIL|T_FALSE)(?![#{WC}])/.match(masked[e..(e + 80)].to_s)) &&

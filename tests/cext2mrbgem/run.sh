@@ -233,6 +233,12 @@ check test "$rc" -eq 0
 check grep -qF 'return mrb_ensure(mrb, ec_body, arr, ec_ensure, mrb_nil_value());' "$work/api_ensure_call/src/api_ensure_call.c"
 check grep -qF 'static mrb_value ec_body(mrb_state *mrb, mrb_value data) {' "$work/api_ensure_call/src/api_ensure_call.c"
 
+# 2zzz20. a feature test (#ifdef of a CRuby macro) is a conditional directive: its name stays as written, the directive is
+# answered by mruby's preprocessor (no RSTRUCT_LEN there), and the name is not refused as an unmapped use.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_pp_feature tools/cext2mrbgem/fixtures/api_pp_feature/ext/api_pp_feature "$work/api_pp_feature" > "$work/api_pp_feature.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '#ifdef RSTRUCT_LEN' "$work/api_pp_feature/src/api_pp_feature.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
