@@ -33,6 +33,27 @@ module NativeCoreResultSigs
     kinds(path).values.flat_map(&:keys).to_set.freeze
   end
 
+  # The vetted bytecode overrides whose fresh-Array return class_layout.rb core_array_return? admits: the methods marked
+  # `# bc2cpp-vetted: fresh-array` in core.rbs, as Owner#name. The marker is a comment only; the declaration's type and
+  # the hints it makes are unchanged. A marker in any other file is ignored.
+  VETTED_MARK = 'bc2cpp-vetted: fresh-array'
+
+  def vetted_array_overrides(file = NativeSigs::CORE_FILE)
+    out = Set.new
+    RbsParseMemo.decls(File.basename(file), File.read(file)).each do |decl|
+      next unless decl.is_a?(RBS::AST::Declarations::Class)
+
+      owner = decl.name.name.to_s
+      decl.members.each do |m|
+        next unless m.is_a?(RBS::AST::Members::MethodDefinition)
+        next unless m.comment&.string.to_s.lines.any? { |l| l.strip == VETTED_MARK }
+
+        out << "#{owner}##{m.name}"
+      end
+    end
+    out.freeze
+  end
+
   # The declarations of one native table (NativeSigs.table names it), or of a file holding one table's text.
   def parse_decls(path)
     return NativeSigs.decls(path) if NativeSigs.table?(path)
