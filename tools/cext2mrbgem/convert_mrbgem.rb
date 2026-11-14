@@ -22,6 +22,7 @@
 
 require 'json'
 require 'fileutils'
+require 'open3'
 require 'set'
 require_relative 'decl_scan'
 
@@ -2106,6 +2107,30 @@ use_problem = lambda do |name, use|
     true
   end
 
+  # true when the use at position s is a condition: the operand of if/while, of ! or of && / ||
+  def condition_context?(rel, s)
+    masked = @files[rel]['masked']
+    p = prev_nonspace(masked, s - 1)
+    return false if p < 0
+    if masked[p] == '('
+      j = prev_nonspace(masked, p - 1)
+      return false if j < 0
+      return !!(/(?:\bif|\bwhile)\z/.match(psl(masked, [j - 6, 0].max, j + 1)))
+    end
+    return true if masked[p] == '!'
+    return true if masked[p] == '&' || masked[p] == '|'
+    false
+  end
+
+  # an identifier the map turns into an RClass * expression (rb_cHash -> mrb->hash_class, rb_cNumeric -> mrb_class_get)
+  def class_expr_ok
+    lambda do |t|
+      e = @entries[t]
+      next false unless e.is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].is_a?(String)
+      e['mruby'].match?(/\Amrb->\w+_class\z/) || e['mruby'].match?(/\Amrb_class_get\(mrb, "[^"]+"\)\z/)
+    end
+  end
+
   # a helper name used as an argument of a defined function whose parameter does not keep it (see non_retaining?)
   def non_retaining_use?(rel, pos)
     ec = enclosing_call(@files[rel]['masked'], pos)
@@ -2557,11 +2582,19 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? @class_vars.include?(t.delete('&')) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&'))) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
-      out = entry['template'].gsub(/\$(\d+)|\$m/) { $1 ? texts[$1.to_i] : mrb_tok(rel, s) }
+      # a call used as a condition (if/while, !, &&, ||) takes the template_cond form when the entry has one
+      cond = entry['template_cond'] && condition_context?(rel, s)
+      out = (cond ? entry['template_cond'] : entry['template']).gsub(/\$(\d+)|\$m/) do
+        next mrb_tok(rel, s) unless $1
+        k = $1.to_i
+        t = texts[k].delete('&')
+        # a class argument that the map turns into an RClass * expression (rb_cHash -> mrb->hash_class): the expression
+        class_args.include?(k) && !@class_vars.include?(t) && class_expr_ok.call(t) ? @entries[t]['mruby'] : texts[k]
+      end
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])
     when 'hash_foreach'
@@ -3025,6 +3058,27 @@ end
   end
 
   # ---- stage 4: write ----------------------------------------------------
+  # Compiles each converted source with gcc -fsyntax-only against the mruby headers (NFCX_MRUBY_INCLUDE, colon-separated).
+  # A compile error becomes a refusal at its output line, so the gem is marked not buildable. The converter's own
+  # refusals do not see every wrong conversion (a CRuby VALUE compared with == has no mruby form in the output).
+  def verify_compile(src_dir, inc_dir)
+    incs = ENV['NFCX_MRUBY_INCLUDE'].split(':').reject(&:empty?)
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src'
+      path = File.join(src_dir, rel)
+      args = ['gcc', '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
+      incs.each { |d| args += ['-I', d] }
+      args << path
+      _o, err, _st = Open3.capture3(*args)
+      err.each_line do |ln|
+        m = ln.chomp.match(/\A#{Regexp.escape(path)}:(\d+):\d+: (?:fatal )?error: (.+)\z/)
+        next unless m
+        @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                       'reason' => "the converted code does not compile: #{m[2].strip}" }
+      end
+    end
+  end
+
   def write_outputs
     src_dir = File.join(@out_dir, 'src')
     inc_dir = File.join(@out_dir, 'include')
@@ -3032,6 +3086,19 @@ end
     FileUtils.mkdir_p(inc_dir)
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
+    # a converted source that uses mruby names includes the mruby headers itself (gem_init.c has its own include)
+    prelude_headers = %w[mruby.h mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h
+                         mruby/numeric.h mruby/string.h mruby/variable.h]
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src'
+      t = outputs[rel]
+      next unless t.match?(/\bmrb_|\bmrb_state\b/)
+      # each header the file does not include yet (the API map adds some of them itself)
+      missing = prelude_headers.reject { |h| t.match?(/#\s*include\s*[<"]#{Regexp.escape(h)}[>"]/) }
+      # mruby.h first: the other mruby headers need its types (and the include guards make a repeat harmless)
+      missing = ['mruby.h'] + missing.reject { |h| h == 'mruby.h' } unless missing.empty?
+      outputs[rel] = missing.map { |h| "#include <#{h}>\n" }.join + t unless missing.empty?
+    end
     if @global_wrap
       # the global state (check_refs): defined once, in the file of Init; declared before any other text in the others.
       # Declared as struct mrb_state so the prefix needs no include (the typedef is the same type).
@@ -3045,6 +3112,9 @@ end
       dest = File.join(f['kind'] == 'src' ? src_dir : inc_dir, rel)
       write_bytes(dest, outputs[rel])
     end
+    # the thread header the sources include is written first, so the compile check finds it
+    write_bytes(File.join(inc_dir, 'nfcx_uv_thread.h'), NFCX_UV_THREAD_H) if uses_uv_thread?
+    verify_compile(src_dir, inc_dir) if ENV['NFCX_MRUBY_INCLUDE']
     write_bytes(File.join(inc_dir, 'nfcx_uv_thread.h'), NFCX_UV_THREAD_H) if uses_uv_thread?
     fn = @funcname
     init_file = @init_rel

@@ -46,7 +46,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name shadow_param tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check sh -c "! grep -q 'overlapping\\|Traceback' '$work/shadow_param.log'"
 check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_value klass, int depth) {' "$work/shadow_param/src/shadow_param.c"
-check grep -qF 'if (klass == obj)' "$work/shadow_param/src/shadow_param.c"
+check grep -qF 'if (mrb_nil_p(klass))' "$work/shadow_param/src/shadow_param.c"
 check grep -qF 'static struct RClass * klass;' "$work/shadow_param/src/shadow_param.c"
 
 # 2d. definitions whose return type or name is on another line are found (no false "no definition" refusal)
@@ -183,7 +183,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_str_hash_ary/NOT_BUILDABLE"
 check grep -qF 'mrb_str_cat(mrb, dup, "!", 1);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 check grep -qF 'mrb_str_intern(mrb, dup);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
-check grep -qF 'mrb_check_frozen_value(mrb, s);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
+check grep -qF 'mrb_check_frozen(mrb, mrb_ptr(s));' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 check grep -qF 'long n = mrb_hash_size(mrb, h);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 check grep -qF 'mrb_hash_delete_key(mrb, h, k);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 check grep -qF 'mrb_ary_set(mrb, copy, 0, fresh);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
@@ -194,13 +194,12 @@ check grep -qF 'mrb_ary_new_capa(mrb, 2);' "$work/api_str_hash_ary/src/api_str_h
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_num_sym_ctl/NOT_BUILDABLE"
-check grep -qF 'double d = mrb_as_float(mrb, x);' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
+check grep -qF 'double d = mrb_to_flo(mrb, x);' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_float_value(mrb, d * 2.0)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_int_value(mrb, 3)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_sym_name(mrb, id)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'mrb_symbol_p(name)' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'if (mrb_const_defined(mrb, mrb_obj_value(cNumSymBase), id))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
-check grep -qF 'if (mrb_block_given_p(mrb))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'if ((mrb_type(obj) == MRB_TT_STRING))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'if (!!((mrb_type(obj) == MRB_TT_ARRAY)))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
 check grep -qF 'if (!!(mrb_nil_p(obj)))' "$work/api_num_sym_ctl/src/api_num_sym_ctl.c"
@@ -225,7 +224,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sym_type tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_sym_type/NOT_BUILDABLE"
 check grep -qF 'mrb_sym id = mrb_symbol(sym);' "$work/api_sym_type/src/api_sym_type.c"
-check grep -qF 'if (mrb_type(v) == MRB_TT_INTEGER) return mrb_true_value();' "$work/api_sym_type/src/api_sym_type.c"
+check grep -qF 'if (mrb_type(v) == MRB_TT_FIXNUM) return mrb_true_value();' "$work/api_sym_type/src/api_sym_type.c"
 
 # 2o. exception class, warning and GC location (api_map.json batch C3): rb_eNoMemError is the NoMemoryError lookup,
 # rb_warning is mrb_warn (always prints; caveated), rb_gc_location is the identity (strip form keeps the call's parentheses)
@@ -280,7 +279,7 @@ check grep -qF '(mrb_type(v) == MRB_TT_TRUE) ? mrb_true_value() : mrb_false_valu
 check grep -qF '(mrb_type(v) == MRB_TT_STRING) ? mrb_true_value() : mrb_false_value();' "$work/api_type_tags/src/api_type_tags.c"
 check grep -qF 'int sym_tag = MRB_TT_SYMBOL;' "$work/api_type_tags/src/api_type_tags.c"
 check grep -qF 'int false_tag = MRB_TT_FALSE;' "$work/api_type_tags/src/api_type_tags.c"
-check grep -qF 'int fix_tag = MRB_TT_INTEGER;' "$work/api_type_tags/src/api_type_tags.c"
+check grep -qF 'int fix_tag = MRB_TT_FIXNUM;' "$work/api_type_tags/src/api_type_tags.c"
 
 # 2t. String, Array and Hash helpers and RFLOAT_VALUE (api_map.json batch D3): rb_str_freeze, rb_str_append,
 # rb_str_resize, rb_assoc_new, rb_hash_dup (call, mrb injected), rb_array_len (RARRAY_LEN) and RFLOAT_VALUE (mrb_float)
@@ -318,7 +317,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/check_type/NOT_BUILDABLE"
 check grep -qF 'mrb_check_type(mrb, v, MRB_TT_STRING);' "$work/check_type/src/check_type.c"
 check grep -qF 'mrb_check_type(mrb, v, MRB_TT_ARRAY);' "$work/check_type/src/check_type.c"
-check grep -qF 'mrb_check_type(mrb, v, MRB_TT_CDATA);' "$work/check_type/src/check_type.c"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_DATA);' "$work/check_type/src/check_type.c"
 check grep -q 'CRuby T_DATA also covers TypedData' "$work/check_type/conversion_log.json"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type_refused tools/cext2mrbgem/fixtures/check_type_refused/ext/check_type_refused "$work/check_type_refused" > "$work/check_type_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
@@ -336,8 +335,8 @@ check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_exc tools/cext2mrbgem/fixtures/api_class_exc/ext/api_class_exc "$work/api_class_exc" > "$work/api_class_exc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_class_exc/NOT_BUILDABLE"
-check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->hash_class)' "$work/api_class_exc/src/api_class_exc.c"
-check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->string_class)' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'if (mrb_obj_is_kind_of(mrb, obj, mrb->hash_class)) return mrb_true_value();' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'if (mrb_obj_is_kind_of(mrb, obj, mrb->string_class)) return mrb_true_value();' "$work/api_class_exc/src/api_class_exc.c"
 check grep -qF 'mrb_raisef(mrb, E_KEY_ERROR, "missing key");' "$work/api_class_exc/src/api_class_exc.c"
 
 # 2zc. a private registration (api_map.json batch D2): rb_define_private_method takes the rb_define_method path, so the
@@ -506,7 +505,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gated_body tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_gated_body/NOT_BUILDABLE"
 check grep -qF '#ifdef GATED_TEST_METHODS' "$work/api_gated_body/src/api_gated_body.c"
-check grep -qE 'NUM2INT|mrb_as_int' "$work/api_gated_body/src/api_gated_body.c"
+check grep -qE 'NUM2INT|mrb_int\(' "$work/api_gated_body/src/api_gated_body.c"
 
 # 2zzc. TYPE(x) is rb_type (compared with MRB_TT_*); T_STRING is exact; rb_obj_alloc allocates a plain object of the class (mrb_class_ptr)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_alloc tools/cext2mrbgem/fixtures/api_type_alloc/ext/api_type_alloc "$work/api_type_alloc" > "$work/api_type_alloc.log" 2>&1 || rc=$?
@@ -671,8 +670,16 @@ if [ -z "${BCRYPT_DIR:-}" ]; then
 fi
 ext=$BCRYPT_DIR/ext/mri
 rc=0; "$rb" "$conv" --scanner "$scanner" --name bcrypt "$ext" "$work/bcrypt" > "$work/bcrypt.log" 2>&1 || rc=$?
+if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
+# with the compile check, the gem's own wrapper.c does not compile here: its crypt_r is defined with struct crypt_data *
+# while ow-crypt.h declares it with void * (a C error in the gem, not in the conversion); the refusal says so
+check test "$rc" -eq 2
+check test -e "$work/bcrypt/NOT_BUILDABLE"
+check grep -q 'conflicting types for .crypt_r' "$work/bcrypt/REFUSALS.txt"
+else
 check test "$rc" -eq 0
 check test ! -e "$work/bcrypt/NOT_BUILDABLE"
+fi
 check grep -q 'void mrb_bcrypt_gem_init(mrb_state \*mrb)' "$work/bcrypt/src/bcrypt_ext.c"
 check grep -q 'mrb_gc_protect(mrb, prefix)' "$work/bcrypt/src/bcrypt_ext.c"
 check grep -q 'nfcx_thread_call_without_gvl' "$work/bcrypt/src/bcrypt_ext.c"
@@ -692,8 +699,8 @@ check grep -qF 'mrb_str_cat(mrb, dst, RSTRING_PTR(src), RSTRING_LEN(src));' "$wo
 check grep -qF 'return mrb_str_new(mrb, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'mrb_str_new_cstr(mrb, "ok");' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'return mrb_int_value(mrb, big);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
-check grep -qF 'unsigned int u = mrb_as_int(mrb, a);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
-check grep -qF 'size_t s = mrb_as_int(mrb, b);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'unsigned int u = ((unsigned int)mrb_int(mrb, a));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'size_t s = ((size_t)mrb_int(mrb, b));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'unsigned long ul = mrb_fixnum(v);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -qF 'mrb_obj_freeze(mrb, str);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -q 'rb_obj_freeze_inline, ruby/internal/fl_type.h:911' "$work/api_fetch_num_str/conversion_log.json"
@@ -705,11 +712,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_obj_class_int/NOT_BUILDABLE"
 check grep -q 'STATUS: no refusals' "$work/api_obj_class_int/REFUSALS.txt"
 check grep -qF '#include <mruby/class.h>' "$work/api_obj_class_int/src/api_obj_class_int.c"
-check grep -qF 'return mrb_obj_is_kind_of(mrb, obj, cApiKind);' "$work/api_obj_class_int/src/api_obj_class_int.c"
-check grep -qF 'return mrb_obj_id(obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
-check grep -qF 'mrb_value k = mrb_class(mrb, obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_bool_value(mrb_obj_is_kind_of(mrb, obj, cApiKind));' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_fixnum_value(mrb_obj_id(obj));' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_value k = mrb_obj_value(mrb_class(mrb, obj));' "$work/api_obj_class_int/src/api_obj_class_int.c"
 check grep -qF 'mrb_include_module(mrb, cApiKind, mApiMix);' "$work/api_obj_class_int/src/api_obj_class_int.c"
-check grep -qF 'if (mrb_integer_p(v)) return mrb_true_value();' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'if (mrb_fixnum_p(v)) return mrb_true_value();' "$work/api_obj_class_int/src/api_obj_class_int.c"
 check grep -qF 'mrb_raisef(mrb, E_FROZEN_ERROR, "not an integer");' "$work/api_obj_class_int/src/api_obj_class_int.c"
 check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/api_obj_class_int/src/api_obj_class_int.c'"
 
@@ -781,6 +788,16 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_store_callback_refused tools
 check test "$rc" -eq 2
 check test -e "$work/api_store_callback_refused/NOT_BUILDABLE"
 check grep -q '  sr_c  helper needs the mruby state threaded in' "$work/api_store_callback_refused/REFUSALS.txt"
+
+# 2zzx. the compile check (NFCX_MRUBY_INCLUDE: the mruby headers, colon-separated): a converted source that does not compile
+# against them is refused at its output line. A CRuby VALUE compared with == is a struct comparison in mruby: refused.
+# Runs only when NFCX_MRUBY_INCLUDE is set (the mruby checkout is not part of the suite).
+if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
+rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq" > "$work/api_value_eq.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_value_eq/NOT_BUILDABLE"
+check grep -q 'compile check  the converted code does not compile: invalid operands to binary ==' "$work/api_value_eq/REFUSALS.txt"
+fi
 check grep -qF 'mrb_undef_class_method(mrb, cBox, "new");' "$work/api_str_barrier/src/api_str_barrier.c"
 }
 

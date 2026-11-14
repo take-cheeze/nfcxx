@@ -5,7 +5,7 @@
 static VALUE klass;
 
 static VALUE dump_it(VALUE obj, VALUE klass, int depth) {
-    if (klass == obj) return rb_str_new_cstr("same");
+    if (NIL_P(klass)) return rb_str_new_cstr("same");
     if (depth > 0) return rb_str_new_cstr("deep");
     return rb_str_new_cstr("shallow");
 }

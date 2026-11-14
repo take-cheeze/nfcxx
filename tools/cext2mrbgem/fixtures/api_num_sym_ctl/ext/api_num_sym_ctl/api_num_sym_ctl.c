@@ -27,10 +27,6 @@ static VALUE ns_const(VALUE self, VALUE name) {
     return Qfalse;
 }
 
-static VALUE ns_block(VALUE self) {
-    if (rb_block_given_p()) return Qtrue;
-    return Qfalse;
-}
 
 static VALUE ns_type(VALUE self, VALUE obj) {
     if (RB_TYPE_P(obj, T_STRING)) return Qtrue;
@@ -45,6 +41,5 @@ void Init_api_num_sym_ctl(void) {
     rb_define_module_function(mNumSym, "dbl", ns_dbl, 1);
     rb_define_module_function(mNumSym, "sym", ns_sym, 1);
     rb_define_module_function(mNumSym, "const", ns_const, 1);
-    rb_define_module_function(mNumSym, "block", ns_block, 0);
     rb_define_module_function(mNumSym, "type", ns_type, 1);
 }

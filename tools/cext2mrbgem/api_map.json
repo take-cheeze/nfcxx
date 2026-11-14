@@ -3,7 +3,9 @@
   "types": {
     "rb_data_type_t": "struct mrb_data_type",
     "VALUE": "mrb_value",
-    "ID": "mrb_sym"
+    "ID": "mrb_sym",
+    "SIGNED_VALUE": "intptr_t",
+    "st_index_t": "uintptr_t"
   },
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
@@ -148,16 +150,18 @@
       "mruby": "RSTRING_LEN"
     },
     "NUM2INT": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((int)mrb_int($m, $0))",
+      "caveat": "NUM2INT converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "NUM2LONG": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((long)mrb_int($m, $0))",
+      "caveat": "NUM2LONG converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "INT2NUM": {
       "kind": "call",
@@ -299,11 +303,11 @@
       "caveat": "argument must already be a String: no to_str conversion and no NUL-byte check"
     },
     "NUM2ULONG": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: unsigned range is not checked"
+      "template": "((unsigned long)mrb_int($m, $0))",
+      "caveat": "NUM2ULONG converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "rb_str_new2": {
       "kind": "call",
@@ -450,10 +454,8 @@
       "caveat": "argument must be a string literal (mrb_intern_lit is a macro over mrb_intern_static); a char pointer does not compile"
     },
     "rb_funcall": {
-      "kind": "call",
-      "mruby": "mrb_funcall_id",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "refuse",
+      "reason": "variadic CRuby call with an ID; mruby's mrb_funcall takes a name and mrb_funcall_argv a symbol and an argv array: the argument list must be written by hand"
     },
     "rb_funcallv": {
       "kind": "call",
@@ -524,11 +526,11 @@
       "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
     },
     "rb_obj_class": {
-      "kind": "call",
-      "mruby": "mrb_obj_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, not mrb_value: wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_obj_class($m, $0))",
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby returns the class as a VALUE"
     },
     "rb_respond_to": {
       "kind": "call",
@@ -650,9 +652,9 @@
     },
     "T_DATA": {
       "kind": "expr",
-      "mruby": "MRB_TT_CDATA",
+      "mruby": "MRB_TT_DATA",
       "type_check": "caveat",
-      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
+      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_DATA is the nearest mruby C-data type, so check each use"
     },
     "rb_global_variable": {
       "kind": "call",
@@ -741,10 +743,11 @@
       "needs_mrb": true
     },
     "rb_check_frozen": {
-      "kind": "call",
-      "mruby": "mrb_check_frozen_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_check_frozen($m, mrb_ptr($0))",
+      "caveat": "checks the object is not frozen; a value that is not a heap object raises in mruby's mrb_ptr"
     },
     "rb_hash_delete": {
       "kind": "call",
@@ -778,10 +781,8 @@
       "needs_mrb": true
     },
     "rb_ary_dup": {
-      "kind": "call",
-      "mruby": "mrb_ary_dup",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "refuse",
+      "reason": "mrb_ary_dup is not in this fork; a copy is mrb_ary_new_from_values over the elements, which needs the RARRAY accessors by hand"
     },
     "rb_ary_new_capa": {
       "kind": "call",
@@ -796,18 +797,18 @@
       "needs_mrb": true
     },
     "NUM2DBL": {
-      "kind": "call",
-      "mruby": "mrb_as_float",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+      "template": "mrb_to_flo($m, $0)",
+      "caveat": "a Float conversion through mruby's mrb_to_flo; a non-numeric value raises TypeError"
     },
     "rb_num2dbl": {
-      "kind": "call",
-      "mruby": "mrb_as_float",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+      "template": "mrb_to_flo($m, $0)",
+      "caveat": "a Float conversion through mruby's mrb_to_flo; a non-numeric value raises TypeError"
     },
     "DBL2NUM": {
       "kind": "call",
@@ -830,11 +831,11 @@
       "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
     },
     "NUM2LL": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+      "template": "((long long)mrb_int($m, $0))",
+      "caveat": "NUM2LL converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "rb_id2name": {
       "kind": "call",
@@ -864,11 +865,8 @@
       "needs_mrb": false
     },
     "rb_block_given_p": {
-      "kind": "call",
-      "mruby": "mrb_block_given_p",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+      "kind": "refuse",
+      "reason": "mruby's block presence is not a public API in this fork (no mrb_block_given_p): the block is fetched with the \"&\" argument of a registered method (rb_yield)"
     },
     "rb_exc_raise": {
       "kind": "call",
@@ -878,12 +876,12 @@
     },
     "rb_eStandardError": {
       "kind": "expr",
-      "mruby": "E_STANDARD_ERROR",
+      "mruby": "mrb_exc_get(mrb, \"StandardError\")",
       "needs_mrb": true
     },
     "rb_eException": {
       "kind": "expr",
-      "mruby": "E_EXCEPTION",
+      "mruby": "mrb_exc_get(mrb, \"Exception\")",
       "needs_mrb": true
     },
     "rb_const_defined": {
@@ -959,13 +957,13 @@
     },
     "RUBY_T_FIXNUM": {
       "kind": "expr",
-      "mruby": "MRB_TT_INTEGER",
-      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "mruby": "MRB_TT_FIXNUM",
+      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
     "T_FIXNUM": {
       "kind": "expr",
-      "mruby": "MRB_TT_INTEGER",
-      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "mruby": "MRB_TT_FIXNUM",
+      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
     "rb_eIndexError": {
       "kind": "expr",
@@ -1072,18 +1070,18 @@
       "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
     },
     "NUM2UINT": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: the unsigned int range is not checked, and the result is mrb_int, not unsigned int"
+      "template": "((unsigned int)mrb_int($m, $0))",
+      "caveat": "NUM2UINT converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "NUM2SIZET": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: the size_t range is not checked, and the result is mrb_int, not size_t"
+      "template": "((size_t)mrb_int($m, $0))",
+      "caveat": "NUM2SIZET converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "FIX2ULONG": {
       "kind": "call",
@@ -1100,32 +1098,36 @@
       "caveat": "CRuby's OBJ_FREEZE (rb_obj_freeze_inline, ruby/internal/fl_type.h:911) returns void; mruby's mrb_obj_freeze returns the object, which a statement use discards"
     },
     "rb_obj_is_kind_of": {
-      "kind": "call",
-      "mruby": "mrb_obj_is_kind_of",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 2,
+      "class_args": [
+        1
+      ],
       "needs_mrb": true,
-      "caveat": "returns mrb_bool (0 or 1), where CRuby returns VALUE (Qtrue or Qfalse); the class argument is a struct RClass * (a class variable is passed unwrapped: special_arg_positions_class_only), so a VALUE class does not type-check"
+      "template": "mrb_bool_value(mrb_obj_is_kind_of($m, $0, $1))",
+      "template_cond": "mrb_obj_is_kind_of($m, $0, $1)",
+      "caveat": "a condition (if/while, !, &&, ||) gets the mrb_bool; a value gets Qtrue/Qfalse; the class argument must be a tracked class variable or an RClass * expression"
     },
     "rb_obj_id": {
-      "kind": "call",
-      "mruby": "mrb_obj_id",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": false,
-      "caveat": "returns mrb_int, where CRuby returns an Integer VALUE: wrap with mrb_int_value(mrb, ...) where a VALUE is needed. mruby's id is the object's address (src/etc.c), CRuby's is a sequence number: both are unique among live objects, but the values differ"
+      "template": "mrb_fixnum_value(mrb_obj_id($0))",
+      "caveat": "mruby's object id (mrb_int) is wrapped as an Integer VALUE; the numbers differ from CRuby's object_id, which only has to be stable and unique"
     },
     "CLASS_OF": {
-      "kind": "call",
-      "mruby": "mrb_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, where CRuby's CLASS_OF returns VALUE: wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_class($m, $0))",
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby's CLASS_OF returns a VALUE"
     },
     "rb_class_of": {
-      "kind": "call",
-      "mruby": "mrb_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, where CRuby's rb_class_of returns VALUE (ruby/internal/globals.h:174): wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_class($m, $0))",
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby's rb_class_of returns a VALUE (ruby/internal/globals.h:174)"
     },
     "rb_include_module": {
       "kind": "call",
@@ -1148,11 +1150,11 @@
       "caveat": "both read the data field of a VALUE and are lvalues. mruby has no typed/untyped split: the object must be an mruby data object (mrb_data_type), and the type is not checked, as in CRuby"
     },
     "RB_INTEGER_TYPE_P": {
-      "kind": "call",
-      "mruby": "mrb_integer_p",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": false,
-      "caveat": "mruby has no bignum: MRB_TT_INTEGER matches every Integer, including values CRuby reports as a bignum (the same reason RUBY_T_FIXNUM is caveated)"
+      "template": "mrb_fixnum_p($0)",
+      "caveat": "mruby has one fixnum tag (MRB_TT_FIXNUM): only a fixnum is an Integer here; a bignum-sized Integer has no mruby tag in this build"
     },
     "rb_cString": {
       "kind": "expr",
@@ -1241,7 +1243,7 @@
     },
     "rb_eZeroDivError": {
       "kind": "expr",
-      "mruby": "E_ZERODIV_ERROR",
+      "mruby": "mrb_exc_get(mrb, \"ZeroDivisionError\")",
       "needs_mrb": true
     },
     "rb_eFloatDomainError": {
