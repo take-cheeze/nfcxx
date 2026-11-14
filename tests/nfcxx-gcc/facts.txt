@@ -10,3 +10,19 @@ ld mold
 ehshim ROOT/build/ehshim.o
 asan-vla ROOT/build/asan/vla.o
 module mod.cc
+machine x86_64
+cuda-cub ROOT/build/cuda-cub/libcub.a
+cuda-shim ROOT/build/cuda-driver/SHIM/libnfcxx_cudrv.a
+# the CUDA toolkits the wrap tests, made in the work directory by run.sh (a toolkit is named by a relative path). cuda/
+# has every header and libcudart 12.6; oldtk/ has no cudaTypedefs.h; oldrt/ is libcudart 12.4; nort/ has no runtime
+# header (the wrap's sed of it fails before its other checks).
+cuda-file cuda/include/cuda.h
+cuda-file cuda/include/cudaTypedefs.h
+cuda-rtv cuda/include/cuda_runtime_api.h 12060
+cuda-dir cuda/lib64
+cuda-file oldtk/include/cuda.h
+cuda-rtv oldtk/include/cuda_runtime_api.h 12060
+cuda-file nort/include/cuda.h
+cuda-file oldrt/include/cuda.h
+cuda-file oldrt/include/cudaTypedefs.h
+cuda-rtv oldrt/include/cuda_runtime_api.h 12040

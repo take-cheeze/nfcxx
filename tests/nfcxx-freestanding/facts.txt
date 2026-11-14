@@ -1,0 +1,21 @@
+# The facts the bash reads from the machine, for the port (scripts/nfcxx-freestanding.rb --facts=) and the stubs (stub.sh).
+# run.sh appends one "exists" line per directory of the work directory. A case's leading host tokens pick the variant
+# (run.sh writes it): clang (cxx-clang 1), darwin (uname Darwin), machine=NAME (uname -m).
+uname Linux
+machine x86_64
+cxx-clang 0
+gnu-dump 13.3.0
+host-sys /fx/include/c++/13
+host-sys /fx/include/x86_64-linux-gnu/c++/13
+host-sys /fx/include
+eh-tls 1
+target-table linux_aarch64
+target-table linux_armv7
+target-table linux_riscv64
+target-table linux_riscv32
+target-table linux_i686
+target-table win64
+target-table win32
+module mod.cc
+qbe 1
+pathb-ldrt build/libnfcxxld.a

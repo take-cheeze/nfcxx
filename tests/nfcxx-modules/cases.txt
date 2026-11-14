@@ -1,0 +1,103 @@
+# One argument list per line (words separated by spaces). The bash is nfcxx with these arguments; the port is
+# scripts/nfcxx-modules.rb. Sources: tests/modules/*, and src/ here. Lines starting with # are skipped.
+# a single compile (-c): the interface unit, the import-only unit, the module directory, the default output
+--backend=gcc -c geom.cppm -o build/geom.o
+--backend=gcc -c main.cpp -o build/main.o
+--backend=gcc -c geom.cppm --module-dir=mods -o build/geom.o
+--backend=gcc -c geom.cppm
+--backend=gcc -c --module-dir= mid.cppm -o o/mid.o
+--backend=gcc -std=c++2b -c --module-dir=mods geom.cppm -o build/geom.o -O2
+--backend=gcc -c ix.ixx -o build/ix.o
+--backend=gcc -c impl.cpp -o build/impl.o
+--backend=gcc -c main.cpp --module-dir=mods -o build/main.o -DX=1 -lm
+# refusals of the -c path
+--backend=gcc -std=c++17 -c geom.cppm -o g.o
+--backend=gcc -std=gnu++14 -c geom.cppm -o g.o
+--backend=gcc -c geom.cppm base.cppm -o x.o
+--backend=gcc -c partition.cppm -o p.o
+--backend=gcc -c std_import.cpp -o s.o
+--backend=gcc -c header.cpp -o h.o
+--backend=gcc --emit-c -c geom.cppm -o g.o
+--backend=gcc -c csrc.c geom.cppm -o x.o
+--backend=gcc -c geom.cppm main.cpp -o x.o
+# a program: order of the interface units, the other sources, the module directory, the link
+--backend=gcc geom.cppm main.cpp -o prog
+--backend=gcc main.cpp geom.cppm -o prog
+--backend=gcc chain.cpp base.cppm mid.cppm -o prog
+--backend=gcc mid.cppm base.cppm chain.cpp -o prog
+--backend=gcc ord_a.cppm ord_c.cppm ord_b.cppm user.cpp -o prog
+--backend=gcc main.cpp -o prog
+--backend=gcc geom.cppm main.cpp --module-dir=mods -o prog
+--backend=gcc geom.cppm main.cpp -o out/prog
+--backend=gcc geom.cppm impl.cpp bare.cc -o prog -O2 -lm
+--backend=gcc geom.cppm main.cpp ix.ixx -o prog -DX=1
+# refusals of a program
+--backend=gcc cycle_a.cppm cycle_b.cppm -o prog
+--backend=gcc self.cppm -o prog
+--backend=gcc -std=c++17 geom.cppm main.cpp -o prog
+--backend=gcc geom.cppm partition.cppm -o prog
+--backend=gcc geom.cppm header.cpp -o prog
+--backend=gcc geom.cppm std_import.cpp -o prog
+--backend=gcc geom.cppm main.cpp -c -o prog
+# not covered: the unchanged path, the default backend, pathb, an option outside the list
+--backend=gcc bare.cc -o prog
+--backend=gcc geom.cppm main.cpp -fPIC -o prog
+geom.cppm main.cpp -o prog
+--backend=pathb geom.cppm main.cpp -o prog
+# no module source (the plain path, one source): gcc's eccp call, and Path B's compile and cc link (the default backend, --backend=pathb)
+--backend=gcc bare.cc -o prog
+--backend=gcc bare.cc
+--backend=gcc -c bare.cc -o x.o
+--backend=gcc -c bare.cc
+--backend=gcc -std=c++17 bare.cc -o prog
+--backend=gcc -fPIC bare.cc -o prog
+--backend=gcc bare.cc -fPIC -rdynamic -pipe -Wall -o prog
+--backend=gcc -fPIE -pie bare.cc -o prog
+--backend=gcc -Wno-narrowing bare.cc -o prog
+--backend=gcc bare.cc -fvisibility=hidden -o prog
+--backend=gcc -fexceptions -fwrapv -fno-strict-aliasing -W -w bare.cc -o prog
+--backend=gcc -pthread -O2 -g bare.cc -o prog
+bare.cc -o prog
+bare.cc
+--backend=pathb bare.cc -o prog
+--backend=pathb -c bare.cc -o x.o
+--backend=pathb -c bare.cc
+-c bare.cc -o x.o
+--backend=pathb -fPIC bare.cc -o prog
+# module builds on Path B: the default backend and --backend=pathb (nested pathb-cc compiles, then cc links the objects)
+geom.cppm main.cpp -o prog
+--backend=pathb geom.cppm main.cpp -o prog
+--backend=pathb main.cpp geom.cppm -o prog
+--backend=pathb chain.cpp base.cppm mid.cppm -o prog
+--backend=pathb geom.cppm impl.cpp bare.cc -o prog -O2 -lm
+--backend=pathb geom.cppm main.cpp --module-dir=mods -o prog
+--backend=pathb geom.cppm main.cpp -o out/prog
+--backend=pathb geom.cppm main.cpp -fPIC -o prog
+geom.cppm main.cpp -fPIE -pie -rdynamic -o prog
+ord_a.cppm ord_c.cppm ord_b.cppm user.cpp -o prog
+geom.cppm main.cpp ix.ixx -o prog -DX=1 -fPIC
+# module compiles (-c) on Path B: the module words, the output named as given or basename.o
+-c geom.cppm -o build/geom.o
+-c main.cpp -o build/main.o
+-c ix.ixx -o build/ix.o
+-c impl.cpp
+-c geom.cppm
+--backend=pathb -c geom.cppm -o build/geom.o
+--backend=pathb -c main.cpp -o build/main.o
+--backend=pathb -c geom.cppm
+--backend=pathb -c --module-dir=mods geom.cppm -o build/geom.o
+--backend=pathb -std=c++2b -c --module-dir=mods geom.cppm -o build/geom.o -O2
+--backend=pathb -c ix.ixx -o build/ix.o
+# refusals on Path B (the same checks, before the backend)
+--backend=pathb -std=c++17 -c geom.cppm -o g.o
+--backend=pathb -std=c++17 geom.cppm main.cpp -o prog
+--backend=pathb cycle_a.cppm cycle_b.cppm -o prog
+--backend=pathb geom.cppm partition.cppm -o prog
+--backend=pathb geom.cppm header.cpp -o prog
+--backend=pathb -c geom.cppm main.cpp -o x.o
+--backend=pathb geom.cppm main.cpp -c -o prog
+geom.cppm header.cpp -o prog
+# not covered: options outside the list (-shared, -E, a sanitizer), and an object with a source (no module)
+--backend=gcc -shared geom.cppm main.cpp -o prog
+--backend=pathb -fsanitize=address geom.cppm main.cpp -o prog
+--backend=gcc geom.cppm main.cpp -E -o prog

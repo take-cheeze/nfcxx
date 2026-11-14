@@ -1,0 +1,4 @@
+# the shim does not build (cuda-driver-shim fails): cudart fails, auto goes on with libcuda as named
+--backend=gcc --cuda-driver=cudart cuda/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc cuda/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc -lcuda a.cc -o prog

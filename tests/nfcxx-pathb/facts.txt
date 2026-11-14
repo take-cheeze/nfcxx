@@ -1,0 +1,14 @@
+# The facts the bash reads from the machine and its helper scripts. Read by the stubs (stub.sh) and by the port
+# (scripts/nfcxx-pathb.rb --facts=). run.sh appends one "exists" line per file and directory of the work directory.
+host linux-x86_64
+eccp 1
+qbe 1
+libc-a 1
+pathb-ldrt ROOT/build/nfcxxld.a
+ehshim ROOT/build/ehshim.o
+asan-vla ROOT/build/nfcxxvla.a
+safeptr-rt ROOT/build/nfcxxsafeptr.a
+ld mold
+module mod.cc
+pathb-status bad.cc 3
+pathb-status fail.cc 7

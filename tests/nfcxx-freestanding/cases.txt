@@ -1,0 +1,145 @@
+# One argument list per line (words separated by spaces; no quoting). A line starting with "clang " runs with the
+# clang host (facts-clang.txt: the host C++ compiler is clang), the rest with facts.txt. Lines starting with # are skipped.
+# hosted --emit-c
+--emit-c a.cc
+--emit-c a.cc b.cc
+--emit-c -o out.c a.cc
+--emit-c -std=c++17 a.cc
+--emit-c -std=gnu++20 a.cc
+--emit-c -Iinc a.cc
+--emit-c -I inc -Isub a.cc
+--emit-c -Isub/x a.cc
+--emit-c -I. a.cc
+--emit-c --gnu-version=120000 a.cc
+--emit-c --dialect=clang a.cc
+--emit-c -Wno-narrowing -Wall -fwrapv a.cc
+clang --emit-c a.cc
+clang --emit-c --dialect=g++ a.cc
+# freestanding --emit-c
+--freestanding --emit-c a.cc
+--freestanding --emit-c --gnu-version=140000 -Iinc a.cc
+--emit-c --freestanding -Iinc -Isub a.cc
+--emit-c --freestanding -DFOO=1 -U BAR a.cc
+clang --freestanding --emit-c a.cc
+clang --freestanding --emit-c --dialect=g++ a.cc
+# --target
+--emit-c --freestanding --target=linux_aarch64 a.cc
+--emit-c --freestanding --target=linux_armv7 a.cc
+--emit-c --freestanding --target=win64 a.cc
+--emit-c --freestanding --target=nosuch a.cc
+--emit-c --target=linux_aarch64 a.cc
+--freestanding --target=linux_aarch64 a.cc
+--target=linux_aarch64 a.cc
+--emit-c --freestanding --target=linux_k1om a.cc
+# refusals before the run
+--emit-c c.c
+--emit-c c.c a.cc
+--emit-c mod.cc
+--emit-c --dialect=bogus a.cc
+--emit-hip
+# --emit-hip
+--emit-hip x.cu
+--emit-hip -Iinc -DFOO=2 x.cu
+--emit-hip -I inc -D FOO x.cu
+--emit-hip --freestanding -std=c++17 x.cu
+--emit-hip a.cc
+--emit-hip x.cu y.cu
+# the compile and link path
+a.cc -o prog
+--freestanding a.cc
+--backend=gcc --freestanding a.cc
+-c a.cc
+--emit-c -E a.cc
+--emit-c -x c++ a.cc
+--emit-c -Isub/../x a.cc
+--emit-c -I../x a.cc
+--emit-c a.cc x.o
+--emit-c -fsanitize=address a.cc
+--emit-c -fsanitize=foo a.cc
+# freestanding compile and link (Path B on x86-64 and aarch64 Linux, arm64 macOS; the gcc backend elsewhere)
+--freestanding a.cc
+--freestanding a.cc -o prog
+--freestanding a.cc b.cc -o prog
+--freestanding --gnu-version=140000 a.cc
+--freestanding --gnu-version= a.cc
+--freestanding --backend=pathb a.cc
+--freestanding -std=c++17 -Iinc -DFOO=1 -U BAR -Wno-narrowing a.cc
+--freestanding -Isub/../x -I../x -I/abs/root a.cc
+--freestanding -I inc -D FOO a.cc
+--freestanding -include pre.h a.cc
+--freestanding -isystem inc a.cc
+--freestanding -mavx2 -march=native a.cc
+--freestanding -fwrapv -w -Wall a.cc
+--freestanding --dialect=clang a.cc
+--freestanding --dialect=g++ --gnu-version=140000 a.cc
+clang --freestanding a.cc
+clang --freestanding --dialect=clang a.cc
+--freestanding -x c++ a.cc
+--freestanding -x c a.cc
+--freestanding -x c++
+--freestanding mod.cc
+--freestanding a.c
+--freestanding x.cu a.cc
+--freestanding --backend=gcc a.cc
+--freestanding --backend=bogus a.cc
+--freestanding --target=linux_aarch64 a.cc
+--freestanding
+--freestanding -o prog
+--freestanding -c -
+# freestanding -c
+--freestanding -c a.cc
+--freestanding -c -o x.o a.cc
+--freestanding -c -o x.o a.cc b.cc
+-c --freestanding a.cc
+--freestanding -c -Iinc -I../x -I/abs/root -Isub/../x a.cc
+--freestanding -c -I inc a.cc
+--freestanding -c -include pre.h -DX a.cc
+--freestanding -c -mavx2 -isystem inc a.cc
+--freestanding -c -std=c++20 -Wno-narrowing a.cc b.cc
+--freestanding -c -fwrapv -w -W a.cc
+--freestanding -c -E a.cc
+--freestanding --emit-c --backend=bogus a.cc
+# -E (the host C++ compiler preprocesses)
+-E a.cc
+-E -P -x c++ a.cc -o out.ii
+-E -isystem inc -Iinc -include pre.h a.cc
+-E -
+-E --freestanding a.cc
+--freestanding -E -isystem inc -Iinc -include pre.h a.cc
+--freestanding -E -x c a.cc
+--freestanding -E --target=linux_aarch64 a.cc
+-E -x c++ -
+--emit-c -E a.cc
+--emit-c --freestanding -E -x c++ a.cc
+--freestanding --emit-c -isystem inc a.cc
+--emit-c --freestanding -include pre.h -mavx2 a.cc
+--emit-c --freestanding -c -Iinc -I../x a.cc
+--emit-c --freestanding -x c++ a.cc
+--emit-c -mavx2 a.cc
+--emit-c -isystem inc a.cc
+--emit-c -x c a.cc
+--emit-c -include pre.h a.cc
+--freestanding --emit-c -Iinc -isystem inc a.cc
+# the host
+darwin machine=arm64 --freestanding a.cc
+darwin machine=arm64 --freestanding -c a.cc
+darwin machine=arm64 --backend=pathb --freestanding -c -o x.o a.cc
+darwin --freestanding a.cc
+darwin --freestanding --emit-c a.cc
+darwin machine=arm64 --freestanding --emit-c a.cc
+machine=aarch64 --freestanding a.cc
+machine=aarch64 --freestanding -c a.cc
+machine=aarch64 --freestanding -E a.cc
+machine=riscv64 --freestanding a.cc
+machine=riscv64 --freestanding -c a.cc
+machine=riscv64 --backend=pathb --freestanding a.cc
+machine=riscv64 --freestanding --emit-c a.cc
+machine=riscv64 --freestanding --backend=pathb -E a.cc
+noqbe --freestanding a.cc
+noqbe --freestanding -c a.cc
+noqbe --freestanding --emit-c a.cc
+noqbe --freestanding --backend=pathb a.cc
+clang --freestanding -c a.cc
+clang --freestanding -c -Iinc a.cc
+clang --freestanding -E a.cc
+clang --freestanding --dialect=g++ -c a.cc

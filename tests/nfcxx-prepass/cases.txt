@@ -1,0 +1,75 @@
+# facts-name, then the driver's argument list
+base hello.cpp2
+base -c hello.cpp2
+base -c hello.cpp2 -o out/hello.o
+base -c -std=c++20 -O2 -DX=1 -I inc hello.cpp2
+base -c sub/x.cpp2
+base hello.cpp2 plain.cc
+base -c a.cpp2 b.cpp2
+base a.cpp2 b.cpp2
+base plain.cc
+base -c plain.cc
+base -c -Iinc plain.cc
+base -c -Iinc sy.cc
+base -c -Iinc sy.cc -o sy.o
+base -c -I inc sy.cc
+base -c -Iinc ./sy.cc
+base -c -Iinc sy.cpp2
+base -c -Iother sy.cc
+base -c -Iinc
+base -I
+base -c
+base -c missing.cpp2
+base hello.cpp2 missing.cpp2
+base nosuch.cpp2 -o x
+nocppfront hello.cpp2
+noutil hello.cpp2
+noutil plain.cc
+rc4 -c hello.cpp2
+rc4 hello.cpp2
+xdg -c hello.cpp2
+dump0 -c -Iinc sy.cc
+hdr3 -c -Iinc sy.cc
+pass2_5 -c -Iinc sy.cc -o sy.o
+nohdr -c -Iinc sy.cc
+nosycl -c -Iinc sy.cc
+nosycl -c -Iinc plain.cc
+base --trace=x.json hello.cpp2
+base -fsyntax-only hello.cpp2
+base -E hello.cpp2
+base -c -foo hello.cpp2
+base -c hello.cu
+base -E hello.cpp2
+base -P -x c++ hello.cpp2
+base -c -fPIC -pthread -MD -MF dep.d hello.cpp2
+base -c -Ifoo.c hello.cpp2
+base -c -Iinc sy.c
+base -c -Iinc sy.cxx
+base -c -Iinc -MD -MF dep.d sy.cc
+base -c -Iinc -include pre.h sy.cc
+base -c -Iinc -E sy.cc
+base -c -Iinc --emit-c sy.cc
+base -c -Iinc -foo.o sy.cc
+base -c plain.c
+base -c hello.cpp2 -
+base -
+base -c -Iinc -
+base -c -Iinc sy.cc -fsanitize=undefined
+base -c hello.cpp2 -fno-sanitize=undefined
+base -c hello.cpp2 -fno-sanitize=all
+base --promote-slots=maybe hello.cpp2
+base --promote-slots=off --unroll=1 hello.cpp2
+base --emit-hip hello.cpp2
+base --cuda-driver=bogus hello.cpp2
+base --cuda-driver=libcuda hello.cpp2
+envcuda hello.cpp2
+remotebad -c hello.cpp2
+gha -c hello.cpp2
+base -fsyntax-only -E hello.cpp2
+base -fsyntax-only -Iinc sy.cc
+base -fsyntax-only -o out.o -Iinc sy.cc
+base -fsyntax-only -Iinc plain.cc
+base --trace=x.json hello.cpp2
+base -c -Iinc/ sy.cc
+base -c -Iinc sy.cc --bundle-libs
+base -c hello.cpp2 -x

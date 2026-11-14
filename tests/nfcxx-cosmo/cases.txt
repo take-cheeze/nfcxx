@@ -1,0 +1,95 @@
+# One argument list per line. Leading NFCXX_*=VALUE words are environment for both the port and the bash; a value starting with
+# ROOT/ names a file under the sandbox's repository, and SB/ a file in the sandbox's host directory. Lines starting with # are comments.
+# compile and link (C only)
+--cosmo a.c -o a.com
+--cosmo a.c
+--cosmo a.c b.c -o p
+--cosmo --backend=gcc a.c -o p
+--cosmo -I inc -DFOO=1 -UBAR a.c -o p
+--cosmo -Iinc -DFOO=1 a.c -o p
+--cosmo -O2 -g -std=c11 a.c -o p
+--cosmo -Wall -Wl,--gc-sections -fwrapv a.c -o p
+--cosmo -Llibs -lq a.c libq.a -o p
+--cosmo -o p a.c
+--cosmo -w -pipe -fno-strict-aliasing a.c b.c -o p
+# -c
+--cosmo -c a.c
+--cosmo -c a.c -o x.o
+--cosmo -c -O2 sub/x.c
+--cosmo -c a.c b.c
+--cosmo -c -I inc -DX=2 a.c
+--cosmo -c a.c b.c -o x.o
+# the cosmocc location and environment
+NFCXX_COSMOCC=ROOT/alt/cosmocc --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/alt/cosmocc --cosmo -c a.c
+NFCXX_COSMOCC= --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/missing --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/notexec --cosmo a.c -o p
+NFCXX_PATH=x --cosmo a.c -o p
+NFCXX_BACKEND=gcc --cosmo a.c -o p
+NFCXX_BACKEND=qbe --cosmo a.c -o p
+NFCXX_BACKEND=gcc --cosmo --backend=qbe a.c
+# errors the bash makes
+--cosmo
+--cosmo -c
+--cosmo -I
+--cosmo --backend=qbe a.c
+--cosmo -E
+# link inputs: objects (the C-only link takes them; with no C source the EDG path is needed)
+--cosmo a.c b.o
+--cosmo a.c b.o -o p
+--cosmo -c a.c b.o
+--cosmo -shared a.c b.o
+--cosmo b.o
+# the link options, bare (the bash's -* case: the next word is a source, so the EDG path refuses)
+--cosmo a.c -L libs
+# C++ sources need the EDG path (EDG is not built in the sandbox)
+--cosmo a.cpp
+--cosmo -c a.cpp
+--cosmo --backend=qbe a.cpp
+NFCXX_PATH=b --cosmo a.cpp
+# -E: the host C++ preprocessor, run before the cosmo block (no cosmocc check, no cosmo defines)
+--cosmo -E a.c
+--cosmo -E a.cpp
+--cosmo -E -P -Iinc -DX=1 a.cpp -o p
+--cosmo -E -std=gnu++17 a.cpp
+--cosmo -E -std=c++20 -c a.c
+--cosmo -E a.c -o p
+--cosmo -E -fPIC -shared a.c
+--cosmo -E --backend=qbe a.c
+NFCXX_PATH=b --cosmo -E a.cpp
+NFCXX_COSMOCC=SB/outside/notexec --cosmo -E a.c
+# -fPIC, -shared, -rdynamic (C path): -fPIC on each compile; -shared and -rdynamic on the C-only link
+--cosmo -fPIC a.c
+--cosmo -fPIC -c a.c -o x.o
+--cosmo -shared a.c
+--cosmo -shared a.c -o libx.so
+--cosmo -shared -fPIC a.c b.o
+--cosmo -shared -c a.c
+--cosmo -rdynamic a.c -o p
+--cosmo -shared -rdynamic a.c
+# -fsanitize=address on the gcc-backend C path
+--cosmo -fsanitize=address a.c -o p
+--cosmo -fsanitize=address -c a.c
+--cosmo -fsanitize=address -fno-omit-frame-pointer a.c -o p
+# options that change nothing on the C path
+--cosmo -pthread -fPIE -pie a.c -o p
+--cosmo -Wno-narrowing -fvisibility=hidden a.c -o p
+--cosmo -fvisibility-inlines-hidden a.c
+# the Path B backend: QBE is not built in the sandbox, so the bash refuses before any C compile
+--cosmo --backend=pathb a.c -o p
+NFCXX_PATH=b --cosmo a.c -o p
+NFCXX_PATH=x --cosmo --backend=pathb a.c
+NFCXX_BACKEND=pathb --cosmo a.c
+# cosmocc outside the repository (a stand-in under the sandbox's host directory; the facts say whether it is executable)
+NFCXX_COSMOCC=SB/outside/cosmocc --cosmo a.c -o p
+NFCXX_COSMOCC=SB/outside/cosmocc --cosmo -c a.c
+NFCXX_COSMOCC=SB/outside/cosmocc --cosmo -fPIC -shared a.c b.o
+NFCXX_COSMOCC=SB/outside/notexec --cosmo a.c
+NFCXX_COSMOCC=SB/outside/missing --cosmo a.c
+# unported
+a.c -o p
+--cosmo -m64 a.c
+--cosmo -fsanitize=address a.c b.o
+--cosmo -fsanitize=undefined a.c
+NFCXX_COSMOCC=/usr/bin/cc --cosmo a.c

@@ -68,4 +68,40 @@ a.cc -o prog
 --backend=gcc --freestanding a.cc -o prog
 --backend=gcc -lcuda a.cc -o prog
 --backend=gcc -fsyntax-only a.cc
+# -fsyntax-only: the re-run as -c -o TMP/x.o (-E execs g++ -E); the cache and CUDA options of the re-run
+--backend=gcc -fsyntax-only -o out.o a.cc
+--backend=gcc -fsyntax-only -E a.cc
+--backend=gcc -fsyntax-only c.c
+--backend=gcc -fsyntax-only -MD a.cc
+-fsyntax-only --backend=gcc a.cc
+--backend=gcc -fsyntax-only -lcudart a.cc
+--backend=gcc -fsyntax-only -lcuda a.cc
+--backend=gcc --cache=cachedir -fsyntax-only a.cc
+# the object cache: inert unless a -c compile of one source with -o and an extension (a lookup, not modelled)
+--backend=gcc --cache=cachedir -c a.cc -o a.o
+--backend=gcc --cache=cachedir -c -o out.o a.cc b.cc
+--backend=gcc --cache=cachedir -c a.cc -o noext
+--backend=gcc -c a.cc -o noext
+--backend=gcc --cache=cachedir -c c.c -o out.o
+--backend=gcc --cache-log=log.txt a.cc -o prog
+--backend=gcc --cache=cachedir -c -MD -MF deps.d -MT tgt a.cc -o a.o
+--backend=gcc --cache= a.cc -o prog
+# CUDA driver library, CUDA_HOME unset: the toolkit of a libcuda path is the directory above lib64 (cuda/ has its headers)
+--backend=gcc cuda/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc cuda/lib64/stubs/libcuda.so -lcudart_static a.cc -o prog
+--backend=gcc -c cuda/lib64/stubs/libcuda.so a.cc -o a.o
+--backend=gcc --cuda-driver=libcuda cuda/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc --cuda-driver=auto a.cc -o prog
+--backend=gcc --cuda-driver=bogus a.cc -o prog
+--backend=gcc --cuda-driver=cudart oldtk/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc --cuda-driver=cudart oldrt/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc oldtk/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc oldrt/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc -fsyntax-only cuda/lib64/stubs/libcuda.so a.cc
+-lcudart a.cc -o prog
+--backend=gcc -lcudart a.cc -o prog
+--backend=gcc -c -lcudart a.cc -o a.o
+# a toolkit without the runtime header: the wrap's sed fails, and the script ends with status 2
+--backend=gcc --cuda-driver=cudart nort/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc nort/lib64/stubs/libcuda.so a.cc -o prog
 --backend=gcc -c a.cc b.cc

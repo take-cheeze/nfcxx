@@ -1,0 +1,116 @@
+# One argument list per line. A leading !TOKEN removes part of the toolchain for that case: !nogcc (the k1om
+# GCC), !nolibc (build/k1om/libC.a), !noeccp (the EDG driver), !ehtls (the EDG runtime's per-thread EH marker).
+# Blank and # lines are skipped.
+# The target gate: linux_k1om (the k1om block of nfcxx)
+--target=linux_k1om --freestanding a.cc
+--target=linux_k1om a.cc
+--target=linux_k1om --freestanding --backend=pathb a.cc
+--target=linux_k1om --freestanding --backend=qbe a.cc
+--target=linux_k1om --freestanding --backend=gcc a.cc
+--target=linux_k1om --freestanding --backend=gcc -c a.cc
+--target=linux_k1om --freestanding --emit-c a.cc
+--freestanding --emit-c --target=linux_k1om --backend=pathb a.cc
+--target=linux_k1om --freestanding --gnu-version=130000 -std=c++17 -O2 -DNDEBUG a.cc -o prog
+--target=linux_k1om --freestanding a.cc b.o
+--target=linux_k1om --freestanding libq.a
+--target=linux_k1om --freestanding -o prog
+--target=linux_k1om --freestanding a.cc -D
+--target=linux_k1om --freestanding -D a.cc
+--target=linux_k1om --freestanding -fsanitize=address a.cc
+--target=linux_k1om --freestanding --dialect=clang a.cc
+--target=linux_k1om --freestanding --dialect=g++ c.c
+--target=linux_k1om --freestanding a.cc -I inc
+--target=linux_k1om --freestanding
+!nogcc --target=linux_k1om --freestanding a.cc
+!nolibc --target=linux_k1om --freestanding a.cc
+!nogcc !nolibc --target=linux_k1om --freestanding a.cc
+!noeccp --target=linux_k1om --freestanding a.cc
+--target=linux_k1om --freestanding --backend=gcc --target=linux_aarch64 a.cc
+--target= --freestanding --emit-c a.cc
+# the other targets (the EDG tables present: linux_aarch64, win64)
+--freestanding --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=linux_armv7 a.cc
+--emit-c --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=win64 a.cc
+--freestanding --emit-c --target=win32 a.cc
+--freestanding --emit-c --target=linux_i686 a.cc
+!noeccp --freestanding --emit-c --target=win64 a.cc
+# no target: not this gate, so unported
+--emit-c a.cc
+# the k1om compile line: the EDG driver's options, the k1om GCC's C compiles and links
+--target=linux_k1om --freestanding a.cc
+--target=linux_k1om --freestanding --backend=gcc -c a.cc
+--target=linux_k1om --freestanding -c a.cc -o a.o
+--target=linux_k1om --freestanding -c a.cc
+--target=linux_k1om --freestanding --backend=gcc -c a.cc -o out/x.o
+--target=linux_k1om --freestanding a.cc a.cc
+--target=linux_k1om --freestanding -std=gnu++17 -DFOO -UBAR -Wno-narrowing -O0 -g -w a.cc -o prog
+--target=linux_k1om --freestanding -std=c++20 -DX=1 -D Y -U Z a.cc -o prog
+--target=linux_k1om --freestanding --instantiate=auto a.cc
+--target=linux_k1om --freestanding --instantiate=bogus a.cc
+--target=linux_k1om --freestanding --dialect=clang --gnu-version=130000 a.cc
+--target=linux_k1om --freestanding --dialect=g++ --gnu-version=120000 a.cc -lm -fwrapv -pipe
+--target=linux_k1om --freestanding -lm a.cc libq.a b.o -o prog
+--target=linux_k1om --freestanding -pthread a.cc
+--target=linux_k1om --freestanding b.o -o prog
+--target=linux_k1om --freestanding a.cc -o out/prog
+--target=linux_k1om --freestanding -I inc a.cc -o prog
+--target=linux_k1om --freestanding -I inc -c a.cc
+--target=linux_k1om --freestanding -c -I inc a.cc -o a.o
+--target=linux_k1om --freestanding -fsanitize=address -fno-omit-frame-pointer -pthread a.cc
+--target=linux_k1om --freestanding -fsanitize=address -fno-sanitize=address a.cc
+--target=linux_k1om --freestanding -fno-sanitize=address -fomit-frame-pointer a.cc
+--target=linux_k1om --freestanding -fsanitize=address --backend=pathb a.cc
+--target=linux_k1om --freestanding -fsanitize=undefined a.cc
+--target=linux_k1om --freestanding -fno-sanitize=undefined a.cc
+--target=linux_k1om --freestanding -fsanitize=address -fsanitize=undefined a.cc
+--target=linux_k1om --freestanding -fsafe-pointers a.cc
+--target=linux_k1om --freestanding -fsafe-pointers --emit-c a.cc
+--target=linux_k1om --freestanding --keep-intermediates --no-eh-unwind --no-eh-shim a.cc
+!ehtls --target=linux_k1om --freestanding a.cc
+--target=linux_k1om --freestanding -fno-strict-aliasing -fexceptions -W -w -fno-omit-frame-pointer a.cc
+--target=linux_k1om --freestanding -x c++ a.cc
+--target=linux_k1om --freestanding a.s
+# C inputs: the k1om GCC compiles each one, then links them (or copies the object with -c)
+--target=linux_k1om --freestanding c.c
+--target=linux_k1om --freestanding -c c.c
+--target=linux_k1om --freestanding -c c.c -o out.o
+--target=linux_k1om --freestanding -c c.c a.cc
+--target=linux_k1om --freestanding c.c a.cc -I inc -DZ -o prog
+--target=linux_k1om --freestanding -fsanitize=address c.c
+--target=linux_k1om --freestanding -c c.c libq.a
+--target=linux_k1om --freestanding -c c.c c.c -o out.o
+--target=linux_k1om --freestanding --emit-c c.c
+--target=linux_k1om --freestanding --emit-c -c c.c a.cc
+!noeccp --target=linux_k1om --freestanding c.c
+!noeccp --target=linux_k1om --freestanding -c c.c
+!nogcc --target=linux_k1om --freestanding c.c
+!nogcc --target=linux_k1om --freestanding -c c.c
+# the EDG front end for --emit-c: the k1om gate's state, the host dialect's GNU version, the include directories
+--target=linux_k1om --freestanding --emit-c -std=c++17 -I inc a.cc
+--target=linux_k1om --freestanding --emit-c -I inc -I other a.cc
+--target=linux_k1om --freestanding --emit-c --dialect=clang a.cc
+--target=linux_k1om --freestanding --emit-c --gnu-version=130000 a.cc
+--target=linux_k1om --freestanding --emit-c -fsanitize=address a.cc
+--freestanding --emit-c a.cc
+--freestanding --emit-c -std=gnu++20 --dialect=clang a.cc
+--freestanding --emit-c -fsanitize=address a.cc
+--freestanding --emit-c --backend=qbe -DX a.cc
+--freestanding --emit-c -I inc a.cc
+--target= --freestanding --emit-c a.cc
+--target= --freestanding --emit-c c.c
+!noeccp --target=linux_k1om --freestanding --emit-c a.cc
+!nogcc --freestanding --emit-c a.cc
+# -E: the host g++ preprocesses, whatever the target (no gate, no EDG driver)
+-E a.cc
+-E --target=linux_k1om --freestanding -Iinc -DX=2 -UY a.cc -o out.i
+--target=linux_aarch64 -E a.cc
+--target=linux_k1om --freestanding -E -std=c++17 a.cc
+--target=linux_k1om --freestanding -E c.c
+--target=linux_k1om --freestanding -E a.cc b.o
+!noeccp -E a.cc
+!nogcc -E a.cc
+-E
+-E a.cc -o pre.ii -DNDEBUG
+-E -x c++ a.cc
