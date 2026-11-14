@@ -409,6 +409,11 @@ check grep -qF 'mrb_class_inherited_p(mrb, mrb_class_ptr(sub), mrb_class_ptr(sup
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_apply tools/cext2mrbgem/fixtures/api_apply/ext/api_apply "$work/api_apply" > "$work/api_apply.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_funcall_argv(mrb, recv, mrb_intern_cstr(mrb, "to_s"), RARRAY_LEN(args), RARRAY_PTR(args))' "$work/api_apply/src/api_apply.c"
+# 2zzz66. A macro whose body calls a state macro needs the state too (nested macros); an unused macro is kept under #if 0.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_nested tools/cext2mrbgem/fixtures/api_macro_nested/ext/api_macro_nested "$work/api_macro_nested" > "$work/api_macro_nested.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static mrb_value nest_sum(mrb_state *mrb, union DD *x)' "$work/api_macro_nested/src/api_macro_nested.c"
+check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

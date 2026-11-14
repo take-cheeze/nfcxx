@@ -1898,6 +1898,7 @@ end
         macro_needs << m[1] if body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
       end
     end
+    @macro_needs = macro_needs
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) }
@@ -1907,7 +1908,8 @@ end
       changed = false
       macro_idents.each do |mn, idents|
         next if macro_needs.include?(mn)
-        if idents.any? { |c| needs.include?(c) && @defs.key?(c) }
+        # a macro whose body uses a needing helper or a needing macro needs the state too
+        if idents.any? { |c| (needs.include?(c) && @defs.key?(c)) || macro_needs.include?(c) }
           macro_needs << mn
           changed = true
         end
@@ -2284,6 +2286,8 @@ use_problem = lambda do |name, use|
     names = {}      # rel -> { start => macro name }
     loop do
       added = false
+      # a macro body that calls a macro accepted in an earlier round is a candidate too (its expansions are checked)
+      accepted_names = Set.new(names.values.flat_map { |h| h.values })
       @files.each do |rel, f|
         masked = f['masked']
         masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
@@ -2296,7 +2300,7 @@ use_problem = lambda do |name, use|
           # a macro is a global macro only when its body calls the global state: a macro that calls only threaded helpers
           # expands with the mrb of its function (mrb_tok), so it is not on the global path
           threaded = @threaded_cands || Set.new
-          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) }
+          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) || accepted_names.include?(i) || (@macro_needs || Set.new).include?(i) }
           # a return in the body skips the state restore of a registered method or Init that expands it: refused there
           if body =~ /(?<![#{WC}])return(?![#{WC}])/
             wrapped = (@occ[name] || []).any? do |orel, os, _oe|
@@ -2971,10 +2975,20 @@ end
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
     local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
+    # A macro with no use anywhere in the gem (no occurrence outside its own #define) is dead text: its CRuby body is not
+    # converted, so the #define is kept under #if 0 and its names are not refused. A macro used in any file is not dead.
+    unused_spans = define_spans(rel).select do |mname, a, b|
+      (@occ[mname] || []).none? { |r, os, _oe| !(r == rel && a <= os && os < b) }
+    end.map { |_n, a, b| [a, b] }
+    unused_spans.each do |a, b|
+      ed.add(a, a, "#if 0  /* BC2CPP-MRBGEM: unused macro (no use in the gem): its CRuby body is not converted */\n")
+      ed.add(b, b, "\n#endif")
+    end
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      next if unused_spans.any? { |a, b| a <= s && s < b }
       # a name in a conditional directive (#if, #ifdef, #ifndef, #elif, or defined(...)) is a feature test, not a use: it stays
       # as written, and the preprocessor of the mruby build answers it (mruby defines none of CRuby's feature macros)
       next if pp_conditional_at?(masked, s)
