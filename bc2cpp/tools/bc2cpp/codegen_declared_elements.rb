@@ -108,13 +108,21 @@ class CodeGen
 
   # DECLARED_ELEMENT_GUARD on a native store: `@items << v` (a one-argument `<<` on a declared element receiver) tests
   # the argument before the push. Only that form: other stores that run a native mutator are not checked here.
+  PUSH_SENDS = { '<<' => 1, 'push' => :any, 'unshift' => :any }.freeze
+
   def declared_element_push_guard(insn, irep, owner_def, idx)
-    return '' unless insn.op == :SEND && insn.sym.to_s == '<<' && insn.argc == 1 && !insn.keyword_argc.to_i.positive?
+    return '' unless insn.op == :SEND && PUSH_SENDS.key?(insn.sym.to_s)
+    return '' if insn.keyword_argc.to_i.positive? || insn.positional_splat?
+
+    arity = PUSH_SENDS[insn.sym.to_s]
+    argc = insn.argc.to_i
+    return '' unless arity == :any ? argc.positive? : argc == arity
 
     entry = declared_element_receiver(irep, idx, insn.reg, owner_def&.owner)
     return '' unless entry
 
-    element_guard_statement(entry, RegName[insn.reg + 1], nil_ok: false, verb: 'assigned')
+    # Every pushed argument is tested, in order, before the native mutator runs.
+    (1..argc).map { |k| element_guard_statement(entry, RegName[insn.reg + k], nil_ok: false, verb: 'assigned') }.join
   end
 
   # The C statement raising when `var` (an mrb_value) is not the declared element kind (and not nil, when nil_ok).

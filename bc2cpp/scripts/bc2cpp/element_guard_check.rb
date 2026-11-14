@@ -26,7 +26,12 @@ SOURCE = <<~RUBY
     end
 
     def poison
-      @items.push("a")
+      @items.replace([1, 2, "a"])
+      nil
+    end
+
+    def shove(v)
+      @items.push(v)
       nil
     end
   end
@@ -43,7 +48,7 @@ DRIVER = <<~'RUBY'
   puts s.at(0).inspect
   s.poison
   begin
-    puts s.at(3).inspect
+    puts s.at(2).inspect
   rescue => e
     puts "raised #{e.class}"
   end
@@ -109,7 +114,17 @@ THING_SOURCE = <<~RUBY
     end
 
     def poison
-      @things.push(Other.new)
+      @things.replace([Thing.new, Other.new])
+      nil
+    end
+
+    def shove(v)
+      @things.push(v)
+      nil
+    end
+
+    def front(v)
+      @things.unshift(v)
       nil
     end
 
@@ -140,7 +155,7 @@ THING_DRIVER = <<~'RUBY'
   puts c.at(0).class
   c.poison
   begin
-    puts c.at(2).class
+    puts c.at(1).class
   rescue => e
     puts "raised #{e.class}"
   end
@@ -155,6 +170,18 @@ THING_DRIVER = <<~'RUBY'
     puts 'pushed'
   rescue => e
     puts "push raised #{e.class}"
+  end
+  begin
+    c.shove(Other.new)
+    puts 'shoved'
+  rescue => e
+    puts "shove raised #{e.class}"
+  end
+  begin
+    c.front(Other.new)
+    puts 'unshifted'
+  rescue => e
+    puts "unshift raised #{e.class}"
   end
   puts 'end'
 RUBY
@@ -173,7 +200,9 @@ Dir.mktmpdir('element_guard_thing_sig') do |sig_dir|
     check.call('the interpreted run returns the wrong-class element', interpreted&.include?('Other'))
     check.call('the compiled run raises the declaration violation', compiled&.any? { |l| l.start_with?('raised') })
     check.call('a wrong-class store raises before it writes (compiled), and stores (interpreted)', interpreted&.include?('stored') && compiled&.include?('store raised BC2cppDeclarationViolation'))
-    check.call('a wrong-class push raises before it runs (compiled), and pushes (interpreted)', interpreted&.include?('pushed') && compiled&.include?('push raised BC2cppDeclarationViolation'))
+    check.call('a wrong-class << raises before it runs (compiled), and pushes (interpreted)', interpreted&.include?('pushed') && compiled&.include?('push raised BC2cppDeclarationViolation'))
+    check.call('a wrong-class push raises before it runs (compiled), and pushes (interpreted)', interpreted&.include?('shoved') && compiled&.include?('shove raised BC2cppDeclarationViolation'))
+    check.call('a wrong-class unshift raises before it runs (compiled), and unshifts (interpreted)', interpreted&.include?('unshifted') && compiled&.include?('unshift raised BC2cppDeclarationViolation'))
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')
