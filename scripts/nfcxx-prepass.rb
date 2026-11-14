@@ -21,7 +21,7 @@
 #   env NAME VALUE     an environment variable the bash sees (an empty value counts as unset, as ${NAME:-...} does)
 #   cppfront-rc N      the exit status of every cppfront run
 #   sycl-dump N        the number of kernel records pass 1 writes (0: the dump file is empty)
-#   sycl-header-rc N   the exit status of scripts/sycl-integration-header.sh
+#   sycl-header-rc N   the exit status of scripts/sycl-integration-header.rb
 #   sycl-pass2-rc N    the exit status of the second SYCL pass
 # A fact the plan needs and the file does not give makes the plan unported. A file is considered present only when it
 # is listed as a file fact (the facts list what exists). The input sources are read from the disk, relative to the
@@ -269,7 +269,7 @@ def sycl_path(plan, st, argv)
     plan.emit "CAT #{WRAPPER_TMP}/pass1.log"
     raise Stop.new(2, "nfcxx: the SYCL pre-pass recorded no kernels")
   end
-  plan.emit "RUN #{plan.root}/scripts/sycl-integration-header.sh #{dump}"
+  plan.emit "RUN #{plan.root}/scripts/sycl-integration-header.rb #{dump}"
   plan.emit "WRITE #{WRAPPER_TMP}/integration.hpp"
   raise Stop.new(2) unless plan.int_fact("sycl-header-rc") == 0
   wrapper = [

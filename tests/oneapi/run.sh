@@ -14,7 +14,7 @@ if [ "$n" != 2 ]; then echo "FAIL pre-pass: $n records, want 2"; fail=1; fi
 awk -F'\t' '$2 == 1 && $6 == 0 { a = 1 } $2 == 4 && $6 == 1 && $7 == 1 && $8 == 4 && $9 == 0 { b = 1 } END { exit !(a && b) }' "$tmp/dump" \
   || { echo "FAIL pre-pass: want a size-1 kernel with no captures and a size-4 kernel with one standard-layout int"; fail=1; }
 # Generated header: one specialization per kernel, naming the file it came from.
-scripts/sycl-integration-header.sh "$tmp/dump" > "$tmp/integ.hpp" || fail=1
+scripts/sycl-integration-header.rb "$tmp/dump" > "$tmp/integ.hpp" || fail=1
 [ "$(grep -c 'template <> struct KernelInfoData<' "$tmp/integ.hpp")" = 2 ] || { echo "FAIL header: want 2 specializations"; fail=1; }
 grep -q 'getKernelSize() { return 4; }' "$tmp/integ.hpp" || { echo "FAIL header: the size-4 kernel"; fail=1; }
 # The whole build: the queue file with the macro set by the second pass compiles to an object.
