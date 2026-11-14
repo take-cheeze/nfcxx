@@ -1821,7 +1821,7 @@ end
         return
       end
       class_args = entry['class_args'] || []
-unless texts.each_with_index.all? { |t, i| t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|struct[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) }
+unless texts.each_with_index.all? { |t, i| t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
