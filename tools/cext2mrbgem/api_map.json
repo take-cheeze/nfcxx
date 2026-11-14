@@ -239,8 +239,12 @@
       "caveat": "mrb_gc_register keeps the value in mruby's root table (src/gc.c:564) for the life of the state; CRuby never unregisters it either. Immediate values need no root and are ignored by mrb_gc_register"
     },
     "rb_gc_mark": {
-      "kind": "refuse",
-      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run"
+      "kind": "call",
+      "mruby": "mrb_gc_mark_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "gc_mark_context": true,
+      "caveat": "valid only inside a data type mark callback (the runtime passes the state); refused elsewhere"
     },
     "rb_gc_mark_movable": {
       "kind": "refuse",

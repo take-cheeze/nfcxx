@@ -99,7 +99,7 @@ CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
-UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+)\z/
+UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
 
 GEM_NAME_RE = /\A[A-Za-z][A-Za-z0-9_-]*\n?\z/
 
@@ -999,13 +999,93 @@ class Converter
             'non-static registered method: the name now names the mruby wrapper, so a caller outside the input would need the impl')
   end
 
+# A rb_data_type_t declaration: its initializer's open and close braces, the five top-level element spans, the nested
+# {mark, free, size} spans, and the callback names. Returns a hash with 'error' when the shape is not CRuby's.
+def dtype_parse(rel, m)
+  mk = @files[rel]['masked']
+  tx = @files[rel]['text']
+  open = m.end(0) - 1
+  close = match_close(mk, open)
+  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }
+    if !els.empty? && els.all? { |e| e[2].start_with?('.') }
+      return dtype_designated(rel, m, open, close, els)
+    end
+  return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless els.size == 5 && els[1][2].start_with?('{') && els[1][2].end_with?('}')
+  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+  ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
+  unless nested.size == 3 && ok_fn.call(nested[0][2]) && ok_fn.call(nested[1][2]) && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
+    return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
+  end
+  return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
+  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested[1][2],
+    'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
+end
+
+  # A designated initializer: .wrap_struct_name, .function = {.dmark, .dfree, .dsize}, .parent, .data, .flags (fields in
+  # any order; a field may be left out). The same result as the positional form.
+  def dtype_designated(rel, m, open, close, els)
+    mk = @files[rel]['masked']
+    tx = @files[rel]['text']
+    fields = {}
+    els.each do |a, b, t|
+      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+      return { 'error' => 'an initializer element is not a designated field' } unless mm
+      return { 'error' => "the designated field .#{mm[1]} is repeated" } if fields.key?(mm[1])
+      fields[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+    end
+    return { 'error' => 'the name is not a string literal' } unless fields['wrap_struct_name'] && fields['wrap_struct_name'][2].start_with?('"')
+    fn = fields['function']
+    return { 'error' => 'no .function field' } unless fn
+    return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
+    brace = fn[0] + tx[fn[0]...fn[1]].index('{')
+    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.empty? }
+    sf = {}
+    sub.each do |a, b, t|
+      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+      return { 'error' => '.function holds a non-designated element' } unless mm
+      sf[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+    end
+    ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
+    mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
+    free = sf['dfree'] ? sf['dfree'][2] : 'NULL'
+    unless ok_fn.call(mark) && ok_fn.call(free)
+      return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
+    end
+    parent = fields['parent'] ? fields['parent'][2] : '0'
+    data = fields['data'] ? fields['data'][2] : '0'
+    return { 'error' => 'the parent or the data slot is not 0/NULL' } unless %w[0 NULL].include?(parent) && %w[0 NULL].include?(data)
+    { 'error' => nil, 'open' => open, 'close' => close, 'name' => fields['wrap_struct_name'][2], 'mark' => mark, 'free' => free,
+      'mark_pos' => sf['dmark'] ? sf['dmark'][3] : nil, 'free_pos' => sf['dfree'] ? sf['dfree'][3] : nil }
+  end
+
+# the data type declarations of the input, and the callback positions (the mark and free names) they use
+def dtype_decls
+  out = []
+  @files.each do |rel, f|
+    finditer(/\brb_data_type_t[ \t\n]+[A-Za-z_][#{WC}]*[ \t\n]*=[ \t\n]*\{/, f['masked']).each do |m|
+      out << [rel, m, dtype_parse(rel, m)]
+    end
+  end
+  out
+end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
       lst.each { |d| (ids[name] ||= Set.new).merge(body_idents(d)) }
     end
     # a split registered method (compute_splits) is forced only through its body: its impl gets mrb when the body needs it
-    forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+# a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
+@dtype_cb_pos = Set.new
+dtype_decls.each do |rel, _m, info|
+  next if info['error']
+  [[info['mark'], info['mark_pos']], [info['free'], info['free_pos']]].each do |nm, pos|
+    next if nm == 'NULL' || nm == '0' || !@defs.key?(nm)
+    forced << nm
+    @dtype_cb_pos << [rel, pos]
+  end
+end
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] }
@@ -1135,6 +1215,7 @@ end
 
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
+  next nil if !direct && @dtype_cb_pos.include?([rel, s])
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -1267,6 +1348,7 @@ use_problem = lambda do |name, use|
     end
     # fail-safe: a call of a threaded helper from a function that gets no mrb and has no refusal of its own
     # would not compile, so it is refused. A global-state helper has the state in scope through the global.
+    @threaded_cands = cands.dup
     mrb_bearing = with_state | gset
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
@@ -1582,6 +1664,28 @@ use_problem = lambda do |name, use|
         rewrite(rel, s, name, "#{name}_impl")
       end
     end
+    # 4c. a rb_data_type_t initializer is CRuby's {name, {dmark, dfree, dsize}, parent, data, flags}; mruby's
+    # mrb_data_type is {name, dfree, mark} (the fork's mark hook). The whole initializer is one edit, so the identifiers
+    # inside it are not converted again (the identifier pass skips overlapping ranges). The mark and free functions must
+    # be threaded (they take (mrb, data)); the flags are dropped (RUBY_TYPED_* are 0 in mruby, with a caveat).
+    dtype_decls.select { |drel, _dm, _di| drel == rel }.each do |drel, m, info|
+      if info['error']
+        refuse(rel, m.begin(0), 'rb_data_type_t', info['error'])
+        next
+      end
+      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' }
+      unless cbs.all? { |n| @threaded_cands.include?(n) }
+        refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        next
+      end
+      (@dtype_mark_names ||= Set.new) << info['mark'] unless info['mark'] == '0' || info['mark'] == 'NULL'
+      mark = info['mark'] == '0' ? 'NULL' : info['mark']
+      free = info['free'] == '0' ? 'NULL' : info['free']
+      ed.add(m.begin(0), m.begin(0) + 'rb_data_type_t'.length, 'mrb_data_type')
+      ed.add(info['open'], info['close'] + 1, "{ #{info['name']}, #{free}, #{mark} }")
+      rewrite(rel, m.begin(0), 'rb_data_type_t', 'mrb_data_type',
+              'the initializer is reordered to mruby\'s {name, dfree, mark}; RUBY_TYPED_* flags are dropped (0 in mruby)')
+    end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
     local_syms = Set.new(@defs.keys) | @class_vars | @local_macros
@@ -1662,6 +1766,14 @@ use_problem = lambda do |name, use|
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
+      end
+      if entry['gc_mark_context']
+        # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
+        fn = enclosing_func(rel, s)
+        unless fn && (@dtype_mark_names || Set.new).include?(fn['name'])
+          refuse(rel, s, name, 'rb_gc_mark is valid only in a data type mark callback (the runtime calls it during marking)')
+          return
+        end
       end
       if entry['arg_order']
         # the arguments are reordered (rb_class_new_instance(argc, argv, klass) -> mrb_obj_new(mrb, klass, argc, argv)).
