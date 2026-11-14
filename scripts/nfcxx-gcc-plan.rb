@@ -5,13 +5,15 @@
 # -MD dependency step that follows the eccp call. The argument loop is the one of scripts/nfcxx-loop.rb, copied here for the
 # options in this slice (nfcxx-loop.rb is a script with a main, so it is not required).
 #
-#   ruby scripts/nfcxx-gcc-plan.rb --facts=FILE ARG...
+#   ruby scripts/nfcxx-gcc-plan.rb --facts=FILE ARG...   the facts of a file (the tests)
+#   ruby scripts/nfcxx-gcc-plan.rb --live=ROOT ARG...    the facts of this machine (tabs: --tabs first, for a plan file)
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the exit status the bash ends with):
 #   RUN PROGRAM ARG...     a program the driver runs (gcc, g++, cp's CP below, the EDG driver as ROOT/build/edg/bin/eccp)
 #   EXEC PROGRAM ARG...    the program replaces nfcxx (-E: exec g++ -E)
 #   CP SRC DST             a copy (the objects of a C-only -c)
-#   ENV NAME=VALUE         a variable the bash exports for the program that follows (EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS, -shared)
+#   ENV NAME=VALUE         a variable the bash exports, for the programs that follow (EDG_CPFE_DEFAULT_OPTIONS for the GNU or
+#                          clang version, EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS for -shared)
 # ROOT stands for the repository and WORK for the working directory; TMP for a temporary directory (mktemp -d).
 # An argument list outside the gcc backend (Path B by default, cosmo, the CUDA inputs, a cache lookup, modules, cppfront,
 # freestanding, ...) exits 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints
@@ -48,6 +50,7 @@
 # A CUDA toolkit that is /usr/local/cuda (CUDA_HOME unset, and the libcuda path does not name a toolkit with cuda.h) is
 # not read: unported.
 
+require "open3"
 require "pathname"
 
 class NfcxxUnported < StandardError
@@ -122,8 +125,37 @@ class Facts
     @values[key]
   end
 
+  def host_sys
+    @host_sys
+  end
+
   def flag?(key)
-    @values[key] == "1"
+    value(key) == "1"
+  end
+
+  # the working directory as the plan names it (WORK, the placeholder, for a file of the facts)
+  def cwd_name
+    CWD
+  end
+
+  # ld.NAME is on PATH (the -fuse-ld= names)
+  def ld_available?(name)
+    @ld.include?(name)
+  end
+
+  # the facts' sources that declare or import a module (the port does not plan those)
+  def module_source?(path)
+    @modules.include?(path)
+  end
+
+  # a source the plan may compile: a file (the facts of a file list the sources the tests use, so this is true there)
+  def source_ok?(_path)
+    true
+  end
+
+  # the isa macros of the -m options FLAGS (the facts list one entry per flag and macro)
+  def isa_for(flags)
+    @isa.select { |flag, _, _| flags.include?(flag) }
   end
 
   def exists?(path)
@@ -146,6 +178,179 @@ class Facts
   # the CUDART_VERSION of the header at PATH (nil when the header has no such line)
   def cuda_rtv(path)
     @rtv[path]
+  end
+end
+
+# The facts read from this machine, for the repository (--live=ROOT): each fact is probed when the port asks for it, with
+# the commands the bash runs. A fact the live facts do not model is unported, never guessed: the CUDA toolkit and shim,
+# more than one -m option, a macro with arguments, a module source (the bash's grammar is read, but a module is not
+# planned), and NFCXX_* or CUDA_HOME in the environment (the port does not read them; the bash does).
+class LiveFacts < Facts
+  def initialize(root, cwd)
+    super()
+    @root = root
+    @cwd = cwd
+    @probes = {}
+    @host_sys = nil  # computed on first use (Facts sets an empty list)
+    ENV.each_key do |name|
+      # NFCXX_DRIVER_TRACE is the CRuby driver's own switch (scripts/nfcxx.rb); the bash does not read it
+      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
+                  %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+
+      unported("environment #{name} (the live facts do not read it)")
+    end
+    # the bash builds these on first use (ensure_tool); the live facts do not build anything
+    unported("the EDG front end is not built (build/edg/bin/eccp)") unless File.executable?(File.join(root, "build/edg/bin/eccp"))
+    unported("the C++ runtime is not built (build/edg/lib/libC.a)") unless File.file?(File.join(root, "build/edg/lib/libC.a"))
+  end
+
+  def cwd_name
+    @cwd
+  end
+
+  # the file a plan path names on this machine: ROOT is the repository, a relative path is in the working directory
+  def real(path)
+    return @root if path == ROOT
+    return File.join(@root, path[(ROOT.size + 1)..]) if path.start_with?("#{ROOT}/")
+    return path if path.start_with?("/")
+
+    File.join(@cwd, path)
+  end
+
+  def exists?(path)
+    File.exist?(real(path))
+  end
+
+  def file?(path)
+    File.file?(real(path))
+  end
+
+  def dir?(path)
+    File.directory?(real(path))
+  end
+
+  def source_ok?(path)
+    File.file?(real(path))
+  end
+
+  def ld_available?(name)
+    ENV.fetch("PATH", "").split(":").any? do |d|
+      f = File.join(d, "ld.#{name}")
+      File.file?(f) && File.executable?(f)
+    end
+  end
+
+  def module_source?(path)
+    f = real(path)
+    return false unless File.file?(f)
+
+    File.foreach(f, mode: "rb").any? { |l| l.match?(/\A[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]/n) }
+  end
+
+  # the host C++ library directories of g++, as host_sys_includes (scripts/host-sys.sh) prints them
+  def host_sys
+    @host_sys ||= begin
+      _out, err, _status = Open3.capture3("g++", "-E", "-x", "c++", "-v", "-", stdin_data: "")
+      dirs = []
+      on = false
+      err.each_line do |l|
+        if l.include?("search starts here:") then on = true
+        elsif l.include?("End of search list") then on = false
+        elsif on && !l.include?("framework directory")
+          dirs << (l.start_with?(" ") ? l.sub(/\A +/, "").chomp : l.chomp)
+        end
+      end
+      dirs
+    end
+  end
+
+  def isa_for(flags)
+    return [] if flags.empty?
+
+    unported("more than one -m option (the live facts take one at a time)") if flags.size > 1
+    new_macros = macro_lines(flags) - macro_lines([])
+    new_macros.map do |line|
+      unported("a macro with arguments (#{line})") if line.match?(/\A#define [^ ]*\(/)
+      m = line.match(/\A#define (\S+) ?(.*)\z/) or unported("a macro line the live facts do not read (#{line})")
+      [flags.first, m[1], m[2]]
+    end
+  end
+
+  def value(key)
+    @probes.fetch(key) { @probes[key] = probe(key) }
+  end
+
+  def cuda_rtv(_path)
+    unported("the CUDA toolkit is not in the live facts")
+  end
+
+  private
+
+  def probe(key)
+    case key
+    when "cxx-clang" then clang?("g++") ? "1" : "0"
+    when "cc-clang" then clang?("cc") ? "1" : "0"
+    when "eh-tls" then File.file?(File.join(@root, "build", "edg", "eh-tls")) ? "1" : nil
+    when "ehshim" then script_output("scripts/ehshim", require_success: true)
+    when "sret" then script_output("scripts/sret.sh", require_success: false)
+    when "asan-vla" then script_output("scripts/asan-vla", require_success: true)
+    when "machine" then Open3.capture2("uname", "-m", err: File::NULL).first.chomp
+    when "cuda-home" then nil
+    when "gnu-version" then host_gnu_version
+    when "clang-version" then host_clang_version
+    else unported("#{key} is not in the live facts")
+    end
+  end
+
+  # host_gnu_version (scripts/host-sys.sh): major*10000 + minor*100 + patch from g++ -dumpfullversion; Apple clang, which has
+  # no -dumpfullversion, reports 150000
+  def host_gnu_version
+    ver, = Open3.capture2("g++", "-dumpfullversion", err: File::NULL)
+    ver = ver.to_s.chomp
+    return "150000" if ver.empty? && clang?("g++")
+    return nil if ver.empty?
+
+    maj, min, pat = ver.split(".")
+    (maj.to_i * 10000 + min.to_i * 100 + pat.to_i).to_s
+  rescue SystemCallError
+    nil
+  end
+
+  # host_clang_version (scripts/host-sys.sh): the version of the host clang as major*10000 + minor*100 + patch, at most 200000
+  def host_clang_version
+    out, = Open3.capture2("g++", "--version", err: File::NULL)
+    m = out.lines.first.to_s.match(/version ([0-9][0-9.]*)/)
+    return nil unless m
+
+    maj, min, pat = m[1].split(".")
+    [maj.to_i * 10000 + min.to_i * 100 + pat.to_i, 200000].min.to_s
+  rescue SystemCallError
+    nil
+  end
+
+  def clang?(compiler)
+    out, = Open3.capture2(compiler, "--version", err: File::NULL)
+    out.lines.first.to_s.match?(/clang/i)
+  rescue SystemCallError
+    false
+  end
+
+  # a script of the repository, as the bash runs it in command substitution: its output (no trailing newline) when it
+  # succeeds; with require_success false, its output whatever its status
+  def script_output(script, require_success:)
+    out, status = Open3.capture2(File.join(@root, script), err: File::NULL)
+    return nil if require_success && !status.success?
+
+    out.chomp
+  rescue SystemCallError
+    nil
+  end
+
+  # the -dM macro lines of gcc with the -m FLAGS, sorted
+  def macro_lines(flags)
+    out, status = Open3.capture2("gcc", *flags, "-dM", "-E", "-x", "c", "/dev/null", err: File::NULL)
+    unported("gcc -dM failed") unless status.success?
+    out.lines.map(&:chomp).sort
   end
 end
 
@@ -234,7 +439,7 @@ class Plan
       elsif a.start_with?("--gnu-version=") then nil
       elsif a.start_with?("-fuse-ld=")
         name = a[9..]
-        if @facts.ld.include?(name) then @ld_name = name else @files << a end
+        if @facts.ld_available?(name) then @ld_name = name else @files << a end
       elsif a == "-fsanitize=address" then @asan = true
       elsif a == "-fno-sanitize=address" then @asan = false
       elsif a == "-fno-sanitize=all" then nil
@@ -310,7 +515,8 @@ class Plan
     if @ncpp + @nobj + @cfiles.length + (@stdin_src ? 1 : 0) == 0
       raise NfcxxExit.new("nfcxx: no input files", 2)
     end
-    @srcs.each { |s| unported("module source #{s}") if @facts.modules.include?(s) }
+    @srcs.each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
+    @srcs.each { |s| unported("module source #{s}") if @facts.module_source?(s) }
     return preprocess if @preprocess
 
     raise NfcxxExit.new("nfcxx: a source on stdin is supported only with -E", 2) if @stdin_src
@@ -369,6 +575,11 @@ class Plan
       raise NfcxxExit.new("nfcxx: -c with several sources needs -o (one object is made per call)", 2) if @srcs.length > 1
       out = "#{File.basename(@srcs[0], ".*")}.o"
     end
+    # the bash exports EDG_CPFE_DEFAULT_OPTIONS (the GNU or clang version) before it runs the EDG driver
+    cpfe = if @dialect == "clang" then @facts.value("clang-version") && ["--clang_version=#{@facts.value("clang-version")}"]
+           else @facts.value("gnu-version") && ["--gnu_version=#{@facts.value("gnu-version")}"]
+           end
+    emit("ENV", "EDG_CPFE_DEFAULT_OPTIONS=#{cpfe.join(" ")} ") if cpfe && !cpfe.empty?
     emit("RUN", ECCP, @std, "--#{@dialect}", "--wdir", "/", *inst_opts, *@diag_opts, *userinc, *sys_inc, *hosted_libs,
          "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
          *keep_static, *eh_unwind, "--c_to_obj_option", "-fgnu89-inline", *picopts, *cobjs, *pre_opts, *eflist,
@@ -380,7 +591,7 @@ class Plan
   private
 
   def emit(kind, *words)
-    @lines << [kind, *words].join(" ")
+    @lines << [kind, *words]
   end
 
   # the backend: an explicit --backend=, else gcc unless the default would be Path B (which is not ported)
@@ -426,7 +637,7 @@ class Plan
     return normalize(path) if path.start_with?("/")
     return path unless dir_exists?(File.dirname(path))
 
-    normalize(File.join(CWD, path))
+    normalize(File.join(@facts.cwd_name, path))
   end
 
   def dir_exists?(dir)
@@ -464,7 +675,7 @@ class Plan
   def isa_defines
     return [] if @isa_opts.empty?
 
-    defs = @facts.isa.select { |flag, _, _| @isa_opts.include?(flag) }
+    defs = @facts.isa_for(@isa_opts)
     defs.map { |_, name, value| [name, value] }.uniq.sort_by { |name, value| "#{name} #{value}" }
         .map { |name, value| "-D#{name}=#{value}" }
   end
@@ -747,10 +958,15 @@ class Plan
 end
 
 def main(argv)
-  facts_arg = argv.shift.to_s
-  raise ArgumentError, "the first argument is --facts=FILE" unless facts_arg.start_with?("--facts=")
-
-  plan = Plan.new(Facts.load(facts_arg.delete_prefix("--facts=")))
+  tabs = argv.first == "--tabs"
+  argv.shift if tabs
+  source = argv.shift.to_s
+  facts =
+    if source.start_with?("--facts=") then Facts.load(source.delete_prefix("--facts="))
+    elsif source.start_with?("--live=") then LiveFacts.new(source.delete_prefix("--live="), Dir.pwd)
+    else raise ArgumentError, "the first argument is --facts=FILE or --live=ROOT"
+    end
+  plan = Plan.new(facts)
   status = 0
   begin
     plan.run(argv)
@@ -760,8 +976,8 @@ def main(argv)
     $stderr.write("#{e.message}\n")
     status = e.status
   end
-  plan.lines.each { |line| $stdout.write("#{line}\n") }
-  $stdout.write("STATUS #{status}\n")
+  plan.lines.each { |fields| $stdout.write("#{fields.join(tabs ? "\t" : " ")}\n") }
+  $stdout.write("STATUS #{status}\n") unless tabs  # a plan file (--tabs) holds commands only; the status is the exit status
   status
 rescue NfcxxUnported => e
   $stderr.write("unported: #{e.message}\n")
