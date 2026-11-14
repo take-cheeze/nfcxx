@@ -165,3 +165,6 @@ a.cpp -lcuda -o p
 -fsanitize=address,undefined -c a.cpp
 -fsanitize-recover=undefined -c a.cpp
 -fno-sanitize=undefined -c a.cpp
+# a toolkit with cuda.h and cudaTypedefs.h but no cuda_runtime_api.h: the version is unknown (no silent exit)
+CUDA_HOME=tests/nfcxx/cuda-fixtures/noruntime a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/noruntime --cuda-driver=cudart a.cpp -lcuda -o p

@@ -45,6 +45,12 @@ declarations = File.expand_path(ARGV[1] || File.join(ROOT, 'sig/bc2cpp/declarati
 text = File.read(declarations)
 declared_section = BaseSection.section_of(text)
 committed = BaseSection.combined_section(declared_section)
+# A generated stub whose method the hand sections declare is not written (see BaseSection.generated_ruby_decls): the
+# hand sections are the world's declarations after the base section, and core.rbs beside it.
+hand_texts = [text[declared_section.length..]]
+core_rbs = File.join(File.dirname(declarations), 'core.rbs')
+hand_texts << File.read(core_rbs) if File.file?(core_rbs)
+hand = BaseSection.method_keys(hand_texts)
 
 failures = []
 Dir.mktmpdir('base-section-check') do |temporary|
@@ -59,7 +65,7 @@ Dir.mktmpdir('base-section-check') do |temporary|
 
   if write
     bodies = BaseSection.native_bodies(gen)
-    by_tag = BaseSection.generated_ruby_by_tag(gen)
+    by_tag = BaseSection.generated_ruby_by_tag(gen, hand)
     merged = BaseSection.regenerate_ruby_by_tag(BaseSection.regenerate_native_bodies(committed, bodies), by_tag)
     core_text, rest_text = BaseSection.core_split(merged)
     File.write(BaseSection::CORE_FILE, core_text)
@@ -77,7 +83,7 @@ Dir.mktmpdir('base-section-check') do |temporary|
   end
 
   committed_ruby = BaseSection.ruby_decls(committed)
-  generated_ruby = BaseSection.generated_ruby_decls(gen)
+  generated_ruby = BaseSection.generated_ruby_decls(gen, hand)
   missing = generated_ruby - committed_ruby
   stale = committed_ruby - generated_ruby
   unless missing.empty? && stale.empty?

@@ -332,11 +332,44 @@ check grep -q 'MRB_TT_CLASS does not match' "$work/check_type_refused/REFUSALS.t
 check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
 check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
 
+# 2zb. built-in class and exception references (api_map.json batch D1): rb_cHash is mrb->hash_class and rb_eKeyError is
+# E_KEY_ERROR; both are expressions, so the lookup stays inline at each use
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_exc tools/cext2mrbgem/fixtures/api_class_exc/ext/api_class_exc "$work/api_class_exc" > "$work/api_class_exc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_exc/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->hash_class)' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->string_class)' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'mrb_raisef(mrb, E_KEY_ERROR, "missing key");' "$work/api_class_exc/src/api_class_exc.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
   if [ "$scanner" = libclang ]; then check sh -c "! grep -q scanner_fallback '$d/conversion_log.json'"; fi
 done
+
+# 2x. a registered method that is also called directly is split: the body is <name>_impl (the direct calls go to it),
+# the registration keeps <name> for a wrapper with the mruby signature. The impl takes mrb when its body needs it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_split tools/cext2mrbgem/fixtures/reg_split/ext/reg_split "$work/reg_split" > "$work/reg_split.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/reg_split/NOT_BUILDABLE"
+check grep -qF 'static mrb_value reg_split_twice_impl(mrb_state *mrb, mrb_value self, mrb_value x) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_twice(mrb_state *mrb, mrb_value self) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'return reg_split_twice_impl(mrb, self, x);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value a = reg_split_twice_impl(mrb, self, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_plain_impl(mrb_value self, mrb_value x) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value b = reg_split_plain_impl(self, a);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_var_impl(int argc, mrb_value *argv, mrb_value self) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value c = reg_split_var_impl(0, NULL, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'return reg_split_var_impl((int)nfcx_argc, argv, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_define_method(mrb, mRegSplit, "twice", reg_split_twice, MRB_ARGS_REQ(1));' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_define_method(mrb, mRegSplit, "var", reg_split_var, MRB_ARGS_ANY());' "$work/reg_split/src/reg_split.c"
+check sh -c "! grep -q 'reg_split_twice(self, self)\|reg_split_plain(self, a)' '$work/reg_split/src/reg_split.c'"
+# negative: the direct caller has no mruby state (its address is taken), so the impl cannot take mrb: stays refused, with the reason
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_split_refused tools/cext2mrbgem/fixtures/reg_split_refused/ext/reg_split_refused "$work/reg_split_refused" > "$work/reg_split_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/reg_split_refused/NOT_BUILDABLE"
+check grep -qF '  rsr_make  registered method function is also called directly (not supported) (its direct caller rsr_plain_caller has no mruby state in scope' "$work/reg_split_refused/REFUSALS.txt"
+check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_refused.c'"
 
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
@@ -364,6 +397,58 @@ check grep -q 'nfcx_thread_call_without_gvl' "$work/bcrypt/src/bcrypt_ext.c"
 check grep -q "spec.add_dependency 'mruby-uv'" "$work/bcrypt/mrbgem.rake"
 check grep -q '#if 0' "$work/bcrypt/src/crypt.c"
 check test "$(grep -c '^warning' "$work/bcrypt.log")" -eq 2
+
+# 4. api_map.json batch A1 (rb_hash_lookup2, rb_str_buf_cat, rb_usascii_str_new*, rb_ll2inum, NUM2UINT, NUM2SIZET,
+# FIX2ULONG, OBJ_FREEZE): each name maps with no refusal, the hash mapping adds mruby/hash.h, and caveats are logged
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fetch_num_str tools/cext2mrbgem/fixtures/api_fetch_num_str/ext/api_fetch_num_str "$work/api_fetch_num_str" > "$work/api_fetch_num_str.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fetch_num_str/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_fetch_num_str/REFUSALS.txt"
+check grep -qF '#include <mruby/hash.h>' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_hash_fetch(mrb, h, k, dflt);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_str_cat(mrb, dst, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_str_new(mrb, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_str_new_cstr(mrb, "ok");' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_int_value(mrb, big);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'unsigned int u = mrb_as_int(mrb, a);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'size_t s = mrb_as_int(mrb, b);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'unsigned long ul = mrb_fixnum(v);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_obj_freeze(mrb, str);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -q 'rb_obj_freeze_inline, ruby/internal/fl_type.h:911' "$work/api_fetch_num_str/conversion_log.json"
+
+# 5. api_map.json batch B1 (rb_obj_is_kind_of, rb_obj_id, CLASS_OF, rb_class_of, rb_include_module, rb_eFrozenError,
+# RB_INTEGER_TYPE_P): mapped with no refusal; the class variables in the class-only argument positions are not wrapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_obj_class_int tools/cext2mrbgem/fixtures/api_obj_class_int/ext/api_obj_class_int "$work/api_obj_class_int" > "$work/api_obj_class_int.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_obj_class_int/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_obj_class_int/REFUSALS.txt"
+check grep -qF '#include <mruby/class.h>' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_obj_is_kind_of(mrb, obj, cApiKind);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_obj_id(obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_value k = mrb_class(mrb, obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_include_module(mrb, cApiKind, mApiMix);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'if (mrb_integer_p(v)) return mrb_true_value();' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_raisef(mrb, E_FROZEN_ERROR, "not an integer");' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/api_obj_class_int/src/api_obj_class_int.c'"
+
+# 5b. names kept refused in batch B1 (no exact mruby equivalent: rb_str_subseq, rb_iv_get, rb_gv_get, rb_sym2str,
+# rb_cstr_to_inum, rb_bug, StringValue) stay refused with the no-entry reason, so a later mapping is a deliberate change
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
+check test "$(grep -c 'no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt")" -eq 7
+check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_iv_get  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+
+# 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_ptr/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_typed_ptr/REFUSALS.txt"
+check grep -qF '#include <mruby/data.h>' "$work/api_typed_ptr/src/api_typed_ptr.c"
+check grep -qF 'void *p = DATA_PTR(obj);' "$work/api_typed_ptr/src/api_typed_ptr.c"
+check grep -qF 'DATA_PTR(obj) = NULL;' "$work/api_typed_ptr/src/api_typed_ptr.c"
 
 }
 

@@ -58,10 +58,10 @@ end
 CORE_ARRAY_RETURN_METHODS = NativeCoreResultSigs.fresh_array_names
 
 # CORE_ARRAY_CHAIN: vetted bytecode overrides, by exact Owner#name (a bare name
-# here would defeat core_array_return?). mruby-rgss/mrblib/array_sort.rb
-# redefines Array#sort; both of its paths return `dup._rgss_native_sort!` (mruby's
-# C sort! on a copy), and Enumerable#sort returns an Array too.
-VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
+# here would defeat core_array_return?), marked `# bc2cpp-vetted: fresh-array` in sig/bc2cpp/core.rbs.
+# Array#sort (mruby-rgss/mrblib/array_sort.rb) is one: both of its paths return `dup._rgss_native_sort!` (mruby's
+# C sort! on a copy).
+VETTED_ARRAY_RETURN_OVERRIDES = NativeCoreResultSigs.vetted_array_overrides.freeze
 
 # CORE_ARRAY_CHAIN: does `name`'s fresh-Array claim hold against this
 # program's registry? Every MethodDef must be mruby core (`'<native>'`;

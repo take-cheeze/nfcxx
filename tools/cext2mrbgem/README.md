@@ -78,6 +78,13 @@ What differs from the regex scan, and why:
 - `rb_const_get(klass, id)` becomes `mrb_const_get(mrb, klass, id)`. A module receiver does not fall back to
   `Object` in mruby, and there is no autoload; both are recorded as caveats. `rb_const_get_at` is refused: no mruby
   function looks up only the receiver.
+- A registered method that is also called directly from C is split. Its body becomes `<name>_impl` with the original C
+  parameters, direct calls go to the impl, and the registration keeps `<name>` for a generated wrapper with the mruby
+  signature (`mrb_value <name>(mrb_state *mrb, mrb_value self)`), which unpacks the arguments with `mrb_get_args` and calls
+  the impl. The impl takes `mrb` first only when its body needs the state and every direct caller has it in scope (a
+  method, Init or threaded helper); otherwise the method is refused, with the reason. Refused too: a variadic method whose
+  body calls `rb_scan_args` (its arguments would come from the mruby call frame), a name defined more than once, a use
+  through its address, and a direct call in a header. The wrapper is not compiled, so the split is text only.
 - A helper that needs the mruby state gets an `mrb_state *mrb` parameter in its definition, in every prototype (the
   `.c` and `.h` files are both scanned) and at every call site. This needs a unique definition, and every use must be
   a direct call inside a function body whose name is not shadowed there. A use as a value (a function pointer) or at
