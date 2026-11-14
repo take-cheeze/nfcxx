@@ -634,7 +634,7 @@ def link(args)
 
   dll = out + ".dll"
   write_file("#{out}.il", text) if keep_il # debugging: keep the CIL text next to the output
-  die("ilasm not found at #{ilasm} (run scripts/setup-cil.sh, or pass --ilasm)") unless File.exist?(ilasm)
+  die("ilasm not found at #{ilasm} (run scripts/setup-cil.rb, or pass --ilasm)") unless File.exist?(ilasm)
   il_path = "#{out}.tmp.il"
   write_file(il_path, text)
   status, so, se = run_shell("#{sh_quote(ilasm)} -exe #{sh_quote("-output=#{dll}")} #{sh_quote(il_path)}", "#{out}.ilasm")

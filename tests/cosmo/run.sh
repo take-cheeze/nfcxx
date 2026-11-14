@@ -2,7 +2,7 @@
 # --cosmo (docs/notes/cosmo.md). Two parts:
 #  1. Routing, always: a stand-in cosmocc (gcc, logging its arguments) must be the compiler of both the C compile and
 #     the link, and the program must run. Checks the driver's wiring, not Cosmopolitan itself.
-#  2. The real cosmocc, when it is installed (scripts/setup-cosmo.sh or NFCXX_COSMOCC): the program is an APE binary
+#  2. The real cosmocc, when it is installed (scripts/setup-cosmo.rb or NFCXX_COSMOCC): the program is an APE binary
 #     and runs. Skipped otherwise.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -40,7 +40,7 @@ echo "ok: refusals (qbe backend, missing cosmocc)"
 # 2. the real cosmocc
 real=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
 if [ ! -x "$real" ]; then
-  echo "skip: no cosmocc at $real (scripts/setup-cosmo.sh)"; exit 0
+  echo "skip: no cosmocc at $real (scripts/setup-cosmo.rb)"; exit 0
 fi
 NFCXX_COSMOCC=$real "$root/nfcxx" --cosmo "$src" -o "$tmp/hello.com"
 "$tmp/hello.com" | grep -qx 'cosmo ok'

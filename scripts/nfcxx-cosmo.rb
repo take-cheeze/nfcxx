@@ -194,14 +194,14 @@ def cosmocc_path(env, facts)
   path = env["NFCXX_COSMOCC"]
   path = DEFAULT_COSMOCC if path.nil? || path.empty?
   if path.start_with?("ROOT/")
-    raise Failed, "nfcxx: #{path} is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" unless facts.root_exec?(path.delete_prefix("ROOT/"))
+    raise Failed, "nfcxx: #{path} is not installed; run scripts/setup-cosmo.rb (or set NFCXX_COSMOCC)" unless facts.root_exec?(path.delete_prefix("ROOT/"))
 
     return path
   end
   case facts.host(path)
   when :exec then path
   when :file, :absent
-    raise Failed, "nfcxx: #{path} is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)"
+    raise Failed, "nfcxx: #{path} is not installed; run scripts/setup-cosmo.rb (or set NFCXX_COSMOCC)"
   else
     raise Unported, "NFCXX_COSMOCC=#{path}: no fact says what this file is (the port sees ROOT and the facts only)"
   end

@@ -293,10 +293,10 @@ def cpp2_path(plan, st, tmp_obj)
   root = plan.root
   cppfront_src = plan.env("CPPFRONT_SRC") || "#{root}/build/cppfront-src"
   unless plan.exec?("#{root}/build/cppfront")
-    raise Stop.new(2, "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)")
+    raise Stop.new(2, "nfcxx: cppfront is not built; run scripts/setup-cppfront.rb (docs/notes/cpp2.md)")
   end
   unless plan.file?("#{cppfront_src}/include/cpp2util.h")
-    raise Stop.new(2, "nfcxx: no cpp2util.h under #{cppfront_src}; run scripts/setup-cppfront.sh")
+    raise Stop.new(2, "nfcxx: no cpp2util.h under #{cppfront_src}; run scripts/setup-cppfront.rb")
   end
   dir =
     if st[:compile_only]

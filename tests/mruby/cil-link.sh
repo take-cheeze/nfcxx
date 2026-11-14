@@ -7,14 +7,14 @@
 # the linked programs (exit status and stdout, against the program's EXPECT line and its .out file when it has them).
 # Then the hand-written fragments of tests/mruby/cil-link: a fragment that makes ilasm fail (OUT.failed.il), 64-bit
 # integers and float bit patterns above 2**63 - 1 (what JSON.parse loses), a main with arguments, and the usage errors.
-# SKIP without python3, an mruby interpreter or build/cil/ilasm (scripts/setup-cil.sh). Parts 1 and 2 need the front
+# SKIP without python3, an mruby interpreter or build/cil/ilasm (scripts/setup-cil.rb). Parts 1 and 2 need the front
 # ends (build/edg, build/qbe, build/cproc: scripts/setup-edg.sh, setup-qbe.sh; build/pathb: setup-pathb.sh) and are
 # skipped with a message without them. The programs run only when dotnet is installed.
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle/cil-link.rb; here=$root/tests/mruby/cil-link
 ilasm=${ILASM:-$root/build/cil/ilasm}
 [ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP cil-link: no mruby (scripts/setup-mruby.sh)"; exit 0; }
-[ -x "$ilasm" ] || { echo "SKIP cil-link: scripts/setup-cil.sh has not run"; exit 0; }
+[ -x "$ilasm" ] || { echo "SKIP cil-link: scripts/setup-cil.rb has not run"; exit 0; }
 dotnet=$(command -v dotnet || true)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/frag"

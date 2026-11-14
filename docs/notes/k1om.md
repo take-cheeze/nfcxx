@@ -4,7 +4,7 @@ nfcxx compiles freestanding C++ for the Intel Xeon Phi coprocessor 3120 series (
 k1om GCC 5.1.1 of Intel's MPSS 3.8.6, rebuilt for a modern host (Ubuntu 24.04, GCC 13).
 
 ```
-scripts/setup-k1om.sh                                  # EDG tree for the host, and build/k1om/libC.a
+scripts/setup-k1om.rb                                  # EDG tree for the host, and build/k1om/libC.a
 ./nfcxx --freestanding --target=linux_k1om prog.cpp -o prog
 tests/k1om/run.sh                                      # ELF machine of each tests/k1om/*.cpp (EM_K1OM)
 ```
@@ -21,7 +21,7 @@ The toolchain is read from `NFCXX_K1OM_ROOT` (default `/opt/k1om`): `bin/k1om-mp
   `-std=gnu17` to `gnu1x` and drops `-fdiagnostics-plain-output` and `-fkeep-static-functions` (newer GCC only).
 - **Assembler**: `gcc-cc` runs `$NFCXX_AS` (default `as`). The target sets it to `scripts/k1om-bin/as`, which passes
   `--march=k1om`: without it, the assembler emits x86-64 objects that the k1om linker rejects.
-- **Runtime**: `build/k1om/libC.a`, EDG's C++ runtime compiled for k1om by `setup-k1om.sh` through the same chain.
+- **Runtime**: `build/k1om/libC.a`, EDG's C++ runtime compiled for k1om by `setup-k1om.rb` through the same chain.
   `c99_complex.o` is left out (it needs `_Float16` and `__bf16`).
 
 ## Verified

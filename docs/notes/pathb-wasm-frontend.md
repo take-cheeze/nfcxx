@@ -10,7 +10,7 @@ IR and the IR in the page, with the server's result byte for byte (`docs/notes/w
 ## Build and run
 
 ```
-scripts/setup-emsdk.sh                          # Emscripten 6.0.13 into build/emsdk
+scripts/setup-emsdk.rb                          # Emscripten 6.0.13 into build/emsdk
 source build/emsdk/emsdk_env.sh
 PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh       # build/pathb-wasm/cmake/bin/cpfe.js and cpfe.wasm, about 4 minutes
 scripts/pathb-dump-wasm.cjs --ir prog.cpp       # pathb-dump's options and output, the wasm front end under node

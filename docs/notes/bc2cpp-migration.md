@@ -205,7 +205,7 @@ Original plan:
   Rename them to this layout and merge the result with `--allow-unrelated-histories`. rpg-maker-clone's rule is that
   design rationale lives in commit messages, not in comments, so a plain copy would lose the reasons behind bc2cpp's
   soundness rules.
-- Add `3rd/mruby-bc2cpp`, the fork at rpg-maker-clone's pin, and `scripts/setup-bc2cpp.sh`, which installs the gems and
+- Add `3rd/mruby-bc2cpp`, the fork at rpg-maker-clone's pin, and `scripts/setup-bc2cpp.rb`, which installs the gems and
   builds the fork and the host `mrbc`.
 - The standalone closed world is the optcarrot probe. It is self-contained, and its pin is already here.
 - CI adds a fast-tier job, two or three runtime-tier shards and the optcarrot compiled run. The fork build is cached the

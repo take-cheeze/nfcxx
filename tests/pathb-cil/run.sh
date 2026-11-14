@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/pathb-cil
 command -v dotnet >/dev/null || { echo "SKIP pathb-cil: dotnet is not installed"; exit 0; }
-[ -x "$root/build/cil/ilasm" ] || { echo "SKIP pathb-cil: scripts/setup-cil.sh has not run"; exit 0; }
+[ -x "$root/build/cil/ilasm" ] || { echo "SKIP pathb-cil: scripts/setup-cil.rb has not run"; exit 0; }
 [ -x "$root/build/pathb/cmake/bin/cpfe" ] || { echo "SKIP pathb-cil: scripts/setup-pathb.sh has not run"; exit 0; }
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for f in "$here"/cases/*.cpp "$here"/cases/*.c; do   # a .c file is read as C (scripts/pathb-cil)

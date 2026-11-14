@@ -7,11 +7,11 @@
 # Path B refuses a file. A file with `// QBE-ONLY: reason` is one that still needs cproc (it must fall back: when it stops
 # doing so the marker is stale); every other file must go through Path B. `// PATHB-ONLY: reason` is a case the cproc route
 # gets wrong; it is skipped when NFCXX_CIL_CPROC=1 (the cproc route for every file, which CI runs too).
-# SKIP when dotnet is not installed or scripts/setup-cil.sh has not fetched ilasm.
+# SKIP when dotnet is not installed or scripts/setup-cil.rb has not fetched ilasm.
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/cil
 command -v dotnet >/dev/null || { echo "SKIP cil: dotnet is not installed"; exit 0; }
-[ -x "$root/build/cil/ilasm" ] || { echo "SKIP cil: scripts/setup-cil.sh has not run"; exit 0; }
+[ -x "$root/build/cil/ilasm" ] || { echo "SKIP cil: scripts/setup-cil.rb has not run"; exit 0; }
 export NFCXX_BACKEND=cil NFCXX_CIL_VERBOSE=1
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 check_exit() {  # check_exit NAME WANT_EXIT

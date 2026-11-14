@@ -5,7 +5,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 k1om=${NFCXX_K1OM_ROOT:-/opt/k1om}
 [ -x "$k1om/bin/k1om-mpss-linux-gcc" ] || { echo "tests/k1om: no k1om toolchain at $k1om (skipped)"; exit 0; }
-[ -f "$root/build/k1om/libC.a" ] || "$root/scripts/setup-k1om.sh"
+[ -f "$root/build/k1om/libC.a" ] || "$root/scripts/setup-k1om.rb"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 for src in "$root"/tests/k1om/*.cpp; do

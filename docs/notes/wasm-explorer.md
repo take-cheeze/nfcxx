@@ -12,7 +12,7 @@ It runs in two ways:
 
 ```
 scripts/setup-pathb.sh && scripts/setup-mruby.sh    # the harness and the mruby tool (once)
-scripts/setup-tinygo.sh                              # Go: TinyGo (pinned), which runs go (1.22 to 1.25); Rust: rustc on PATH
+scripts/setup-tinygo.rb                              # Go: TinyGo (pinned), which runs go (1.22 to 1.25); Rust: rustc on PATH
 node tools/wasm-explorer/server.cjs                  # live: http://127.0.0.1:8080/ (--port, --host)
 node tools/wasm-explorer/build-static.cjs            # static: _site/, the examples built and checked
 ```
@@ -97,7 +97,7 @@ stopped by the page's timeout. Enums, slices, iterators, closures, trait
 objects (`dyn`) and function pointers work. `-O0` is not used: its code keeps unwinding edges (`invoke`, `resume`),
 which the translator refuses. `std` is not available (it needs an operating system the module does not have).
 
-**Go** is compiled by TinyGo (`TINYGO`, else `build/tinygo/bin/tinygo` from `scripts/setup-tinygo.sh`, else `tinygo` on
+**Go** is compiled by TinyGo (`TINYGO`, else `build/tinygo/bin/tinygo` from `scripts/setup-tinygo.rb`, else `tinygo` on
 PATH) for its Linux target, which writes the whole program, runtime included, as one LLVM IR module. The flags: a
 leaking heap (`-gc=leaking`: TinyGo's bump allocator, which takes its memory from `mmap`), no goroutines
 (`-scheduler=none`), and panics that trap (`-panic=trap`). TinyGo's `main` is the C entry point `main(argc, argv)`;

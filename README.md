@@ -8,7 +8,7 @@ git submodule update --init --depth 1   # fetch 3rd/edg
 scripts/setup-edg.sh      # build EDG (3rd/edg submodule) into build/edg (~3 min)
 scripts/setup-qbe.sh      # build QBE (3rd/qbe) into build/ (the code generator of Path B)
 scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (needs ruby + rake once); built on first use otherwise
-scripts/setup-cppfront.sh # cppfront v0.8.2 (Cpp2 to C++1) into build/, for .cpp2 inputs (experimental; docs/notes/cpp2.md)
+scripts/setup-cppfront.rb # cppfront v0.8.2 (Cpp2 to C++1) into build/, for .cpp2 inputs (experimental; docs/notes/cpp2.md)
 ./nfcxx hello.cpp2 -o hello  # Cpp2: cppfront translates it, then the C++ pipeline above (experimental)
 tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, includes, a syntax error (experimental)
 ./nfcxx hello.cpp -o hello   # default on x86-64 Linux: C++ -> EDG IL -> Path B IR -> QBE -> asm (docs/notes/pathb-default.md)
@@ -40,7 +40,7 @@ tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpre
 scripts/sycl-build.sh prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
 tests/sycl/run.sh         # SYCL programs on the host path and on WebGPU (Chromium/SwiftShader through Playwright), traps and refusals
 scripts/linux-qemu.sh     # minimal x86_64 Linux 6.8 (tinyconfig) + busybox initramfs, booted under qemu-system-x86_64; KCC=nfcc builds it with nfcc (docs/notes/linux-kernel.md)
-./nfcxx --cosmo hello.c -o hello.com # Cosmopolitan: cosmocc (APE binary, runs on several OSes) via scripts/setup-cosmo.sh; C only so far (docs/notes/cosmo.md)
+./nfcxx --cosmo hello.c -o hello.com # Cosmopolitan: cosmocc (APE binary, runs on several OSes) via scripts/setup-cosmo.rb; C only so far (docs/notes/cosmo.md)
 scripts/setup-pathb.sh    # Path B harness (own back end on EDG's IL); then tests/pathb{,-ir,-qbe}/run.sh (docs/notes/pathb-stage3.md)
 ./nfcxx -c a.cpp -o a.o; ./nfcxx a.o b.o -o x # separate compilation (docs/notes/multi-tu.md)
 tests/multi-tu/run.sh     # several translation units sharing libstdc++ templates (both backends)

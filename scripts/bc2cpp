@@ -2,7 +2,7 @@
 # Run the mruby bc2cpp command; setup also rebuilds changed baked sources.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-runner=$("$root/scripts/setup-bc2cpp.sh")
+runner=$("$root/scripts/setup-bc2cpp.rb")
 export BC2CPP_WORLD_ROOT=${BC2CPP_WORLD_ROOT:-${BC2CPP_RPG_DIR:-$root/build/bc2cpp/rpg-maker-clone}}
 export BC2CPP_TREE_ROOT=$root/bc2cpp
 export BC2CPP_RUBY=$root/bc2cpp/tools/bc2cpp/mruby-ruby BC2CPP_MRUBY=$runner

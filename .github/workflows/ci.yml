@@ -671,7 +671,7 @@ jobs:
             - "scripts/cpp-feature-checklist.rb"
             - "scripts/cpp-feature-report.rb"
             - "scripts/bc2cpp"
-            - "scripts/setup-bc2cpp.sh"
+            - "scripts/setup-bc2cpp.rb"
             - "scripts/bc2cpp-self"
             - "scripts/setup-bc2cpp-self.sh"
             - "Gemfile"

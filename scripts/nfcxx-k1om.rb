@@ -32,7 +32,7 @@
 #   k1om-root DIR        NFCXX_K1OM_ROOT as the bash sees it (the harness sets it)
 #   eccp 0|1             ${EDG}/eccp is executable (scripts/setup-edg.sh built the EDG driver)
 #   k1om-gcc 0|1         $NFCXX_K1OM_ROOT/bin/k1om-mpss-linux-gcc is executable
-#   k1om-libc 0|1        ROOT/build/k1om/libC.a is a file (scripts/setup-k1om.sh)
+#   k1om-libc 0|1        ROOT/build/k1om/libC.a is a file (scripts/setup-k1om.rb)
 #   eh-tls 0|1           ROOT/build/edg/eh-tls exists (the EDG runtime has per-thread EH state)
 #   edg-table NAME       ROOT/build/edg-base/lib_NAME is a directory (one line per table)
 #   module PATH          PATH declares or imports a C++ module (the module check reads the source; not ported)
@@ -245,7 +245,7 @@ class Driver
     refuse("--target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)") unless @freestanding
     refuse("--target=linux_k1om uses the gcc backend (the k1om GCC)") if @backend_explicit && @backend != "gcc"
     refuse("no k1om toolchain at #{k1om_root} (NFCXX_K1OM_ROOT; docs/notes/k1om.md)") unless @facts.flag?("k1om-gcc")
-    refuse("no k1om runtime at #{root}/build/k1om/libC.a (run scripts/setup-k1om.sh)") unless @facts.flag?("k1om-libc")
+    refuse("no k1om runtime at #{root}/build/k1om/libC.a (run scripts/setup-k1om.rb)") unless @facts.flag?("k1om-libc")
     @backend = "gcc"
     @k1om = true
   end

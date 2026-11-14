@@ -12,7 +12,7 @@ prog.cpp2 --build/cppfront -q -o DIR/prog.cpp (run in a scratch directory)--> pr
 prog.cpp + -I DIR-of-prog.cpp2 + -I 3rd-or-build/cppfront-src/include (cpp2util.h) --> the C++ pipeline
 ```
 
-- `scripts/setup-cppfront.sh` shallow-clones hsutter/cppfront at the pinned commit `66eb614` (v0.8.2, from
+- `scripts/setup-cppfront.rb` shallow-clones hsutter/cppfront at the pinned commit `66eb614` (v0.8.2, from
   `source/version.info`) into `build/cppfront-src` and builds `build/cppfront` with `$CXX -std=c++20 -O2`. The pin is
   not a submodule: a fresh checkout and CI do not fetch cppfront unless a `.cpp2` build asks for it.
   `CPPFRONT_SRC=DIR` uses a checkout instead of the clone; `CPPFRONT_REPO=URL` names another remote.
@@ -79,4 +79,4 @@ The count is from the logs of this run, grouped by their first diagnostic; a sam
 
 `tests/cpp2/run.sh` (5 cases): a Cpp2 program builds and prints; `-c` then link; a `.cpp2` and a `.cpp` in one command;
 a quoted include next to the Cpp2 file; a Cpp2 syntax error fails the build and names the `.cpp2` file. It needs
-`build/cppfront` (`scripts/setup-cppfront.sh`). It is not in CI.
+`build/cppfront` (`scripts/setup-cppfront.rb`). It is not in CI.

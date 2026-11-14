@@ -47,7 +47,7 @@ harness() {
       "$root/scripts/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" \&\& pwd)|root=$root|" \
       -e 's|die "QBE not built; run scripts/setup-qbe.sh"|:|' \
-      -e 's|die "CIL backend not set up; run scripts/setup-cil.sh"|:|' \
+      -e 's|die "CIL backend not set up; run scripts/setup-cil.rb"|:|' \
       -e 's|die "Path B not available (scripts/pathb-cc)"|:|' \
       -e 's|"\$("\$root/scripts/pathb-ldrt")"|"LDRT"|' \
       -e 's|"\$host" |run_stub "$host" |g' \

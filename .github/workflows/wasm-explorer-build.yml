@@ -5,7 +5,7 @@ name: wasm explorer (build)
 # wasm-explorer-preview.yml to a Cloudflare Pages preview. The compiler runs here, in CI: the Path B harness and the
 # mruby tool are built as in ci.yml, and each example is compiled ahead of time in every mode of its language and
 # checked against its expected result, so a broken example fails this job. The Rust and Go examples also need rustc
-# (pinned below) and TinyGo with Go (scripts/setup-tinygo.sh), and the Swift examples need the Swift front end
+# (pinned below) and TinyGo with Go (scripts/setup-tinygo.rb), and the Swift examples need the Swift front end
 # (tools/swiftfe, built below). The in-browser compiler (docs/notes/pathb-wasm-frontend.md:
 # the same front end and emitter, built with Emscripten) is built and checked against the native one here too, and the
 # site carries it (inbrowser/), so the page compiles C, C++, LLVM IR and the IR without a server.
@@ -79,7 +79,7 @@ jobs:
           rustup toolchain install 1.97.0 --profile minimal --component llvm-tools
           echo "RUSTC=$(rustup which --toolchain 1.97.0 rustc)" >> "$GITHUB_ENV"
 
-      # The Go examples: TinyGo (scripts/setup-tinygo.sh, pinned) runs the Go toolchain.
+      # The Go examples: TinyGo (scripts/setup-tinygo.rb, pinned) runs the Go toolchain.
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -91,11 +91,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/tinygo
-          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.sh') }}
+          key: tinygo-${{ runner.os }}-${{ hashFiles('scripts/setup-tinygo.rb') }}
 
       - name: Install TinyGo
         if: steps.tinygo.outputs.cache-hit != 'true'
-        run: scripts/setup-tinygo.sh
+        run: scripts/setup-tinygo.rb
 
       # The in-browser compiler: Emscripten (pinned), the front end built with it (with SoftFloat) and mruby built with it.
       - name: Restore Emscripten
@@ -103,11 +103,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/emsdk
-          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.sh') }}
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/setup-emsdk.rb') }}
 
       - name: Install Emscripten
         if: steps.emsdk.outputs.cache-hit != 'true'
-        run: scripts/setup-emsdk.sh
+        run: scripts/setup-emsdk.rb
 
       - name: Restore the in-browser front end
         id: pathbwasm
@@ -116,14 +116,14 @@ jobs:
           path: |
             build/pathb-wasm
             build/softfloat
-          key: pathb-wasm-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh', 'scripts/setup-emsdk.sh') }}
+          key: pathb-wasm-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh', 'scripts/setup-emsdk.rb') }}
 
       - name: Restore the in-browser mruby
         id: mrubywasm
         uses: actions/cache@v6
         with:
           path: build/mruby-wasm
-          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
+          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.rb') }}
 
       - name: Build the in-browser compiler
         if: steps.pathbwasm.outputs.cache-hit != 'true' || steps.mrubywasm.outputs.cache-hit != 'true'

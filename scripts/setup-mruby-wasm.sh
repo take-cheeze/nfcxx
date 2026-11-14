@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The mruby interpreter of scripts/mrb, built with Emscripten (scripts/mruby-wasm-config.rb), for the browser:
 # build/mruby-wasm/out/wasm/bin/mruby.js and mruby.wasm. Uses the pinned mruby source of scripts/setup-mruby.sh and
-# Emscripten on PATH (scripts/setup-emsdk.sh, then source build/emsdk/emsdk_env.sh).
+# Emscripten on PATH (scripts/setup-emsdk.rb, then source build/emsdk/emsdk_env.sh).
 #   FORCE=1   build again
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$root/build/mruby-wasm
 out=$work/out/wasm/bin/mruby.js
 [ -z "${FORCE:-}" ] && [ -f "$out" ] && exit 0
-command -v emcc >/dev/null || { echo "setup-mruby-wasm: emcc is not on PATH (scripts/setup-emsdk.sh)" >&2; exit 1; }
+command -v emcc >/dev/null || { echo "setup-mruby-wasm: emcc is not on PATH (scripts/setup-emsdk.rb)" >&2; exit 1; }
 FORCE= "$root/scripts/setup-mruby.sh"     # the pinned source (and the host interpreter)
 src=$root/build/mruby-tool/src
 if command -v rake >/dev/null; then rake=(rake); else rake=(ruby -rrake -e 'Rake.application.run(ARGV)' --); fi

@@ -53,7 +53,7 @@ version=0.1
 die() { echo "nfcc: error: $*" >&2; exit 1; }
 
 case $backend in
-  cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
+  cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.rb"
        qcc=$root/scripts/cil-cc ;;
   pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
          [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;

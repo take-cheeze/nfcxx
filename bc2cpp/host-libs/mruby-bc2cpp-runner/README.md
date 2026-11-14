@@ -6,7 +6,7 @@ this gem's C main calls its entry (`BC2CPPRunner.run`).
 Build from nfcxx's repository root (requires the EDG toolchain from `scripts/setup-edg.sh`):
 
 ```sh
-scripts/setup-bc2cpp.sh
+scripts/setup-bc2cpp.rb
 scripts/bc2cpp --annotated path/to/program.rb
 ```
 
@@ -40,7 +40,7 @@ strict verification modes have all been checked.
 Reproduce with a full pinned-world checkout selected by `BC2CPP_WORLD_ROOT`:
 
 ```sh
-runner=$(scripts/setup-bc2cpp.sh)
+runner=$(scripts/setup-bc2cpp.rb)
 MRBC="$(dirname "$runner")/mrbc" BC2CPP_MRUBY_RUNNER="$runner" \
   CXX="$PWD/nfcxx" NFCXX_BACKEND=gcc ruby tests/bc2cpp/runner_generation.rb
 ruby tests/bc2cpp/source_baking.rb

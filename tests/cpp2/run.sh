@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Cpp2 inputs (experimental, docs/notes/cpp2.md): nfcxx translates a .cpp2 file with cppfront (build/cppfront, from
-# scripts/setup-cppfront.sh) and compiles the translation through the usual pipeline. Needs that build first.
+# scripts/setup-cppfront.rb) and compiles the translation through the usual pipeline. Needs that build first.
 #   NFCXX_BACKEND=gcc|gcc   (default: qbe)
 cd "$(dirname "$0")/../.."
 root=$PWD; nfcxx=$root/nfcxx
 export NFCXX_BACKEND=${NFCXX_BACKEND:-pathb}
-[ -x "$root/build/cppfront" ] || { echo "FAIL: build/cppfront is missing; run scripts/setup-cppfront.sh" >&2; exit 1; }
+[ -x "$root/build/cppfront" ] || { echo "FAIL: build/cppfront is missing; run scripts/setup-cppfront.rb" >&2; exit 1; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }

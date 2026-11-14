@@ -23,7 +23,7 @@ const emitter = path.join(root, "scripts", "pathb-wasm-emit.rb");
 const flatOpt = path.join(root, "scripts", "pathb-flat-opt");
 const ruby = "ruby";
 const llvmToPathb = path.join(root, "scripts", "llvm-to-pathb.rb");
-// rustc and tinygo: RUSTC and TINYGO name them, else build/tinygo (scripts/setup-tinygo.sh) or the PATH. tinygo runs go.
+// rustc and tinygo: RUSTC and TINYGO name them, else build/tinygo (scripts/setup-tinygo.rb) or the PATH. tinygo runs go.
 // A path in RUSTC or TINYGO is taken from the caller's directory (tinygo runs in the temporary one); a bare name is
 // looked up on the PATH.
 const tool = (value) => (value.includes(path.sep) ? path.resolve(value) : value);

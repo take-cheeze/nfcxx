@@ -27,7 +27,7 @@
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
 #   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
 #                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
-#   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.sh) translates it to C++ first.
+#   file.cpp2:     Cpp2 source, experimental: cppfront (build/cppfront, scripts/setup-cppfront.rb) translates it to C++ first.
 #                  docs/notes/cpp2.md.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
 #   --time-log=FILE (NFCXX_TIME_LOG=FILE): appends one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", to FILE; the compiles
@@ -71,7 +71,7 @@
 #                  linux_i686, linux_k1om (Intel Knights Corner: freestanding, the k1om GCC; docs/notes/k1om.md), win64 (MinGW's macros when MinGW is installed at setup; docs/notes/freestanding.md, "Windows"), win32. The generated C is for that target, so the
 #                  host cc must not compile it: give it to a cross compiler. docs/notes/freestanding.md, "Targets".
 #   --cosmo: build with cosmocc (Cosmopolitan libc, APE output) as the C compiler. Implies --backend=gcc. cosmocc is
-#                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.sh). docs/notes/cosmo.md.
+#                  read from NFCXX_COSMOCC, else build/cosmocc/bin/cosmocc (scripts/setup-cosmo.rb). docs/notes/cosmo.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 # -fsyntax-only: the compile without keeping its object (a full front-end and back-end pass, so it reports every error a
@@ -211,7 +211,7 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
   done
 }
-# A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
+# A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.rb) before the
 # front end, the way .cu inputs are rewritten: the copy has the source's basename, so default output names are unchanged, and
 # its #line directives name the .cpp2 file. cppfront writes cpp2_post_build.sh into its working directory, so it runs in a
 # scratch directory. The metaclass build steps that file would hold are not run. cpp2util.h, which the copy includes, comes from the pinned source.
@@ -219,8 +219,8 @@ cpp2_inputs=()
 cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its translation in srcs and files in place of the source
   [ ${#cpp2_inputs[@]} -gt 0 ] || return 0
   local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
-  [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
-  [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
+  [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.rb (docs/notes/cpp2.md)" >&2; exit 2; }
+  [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.rb" >&2; exit 2; }
   if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
@@ -812,7 +812,7 @@ if [ $cosmo = 1 ]; then
     backend=gcc
   fi
   cosmo_bin=${NFCXX_COSMOCC:-$root/build/cosmocc/bin/cosmocc}
-  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.sh (or set NFCXX_COSMOCC)" >&2; exit 2; }
+  [ -x "$cosmo_bin" ] || { echo "nfcxx: $cosmo_bin is not installed; run scripts/setup-cosmo.rb (or set NFCXX_COSMOCC)" >&2; exit 2; }
   cosmo_root=$(cd "$(dirname "$cosmo_bin")/.." && pwd)
   export NFCXX_GCC=$cosmo_bin
   # cosmoc++ is a wrapper that prints no include list, so the directories are named here: libc++ first, then the C library.
@@ -874,14 +874,14 @@ fi
 # library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
 # --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
 # same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc) with the k1om assembler and
-# runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
+# runtime (scripts/setup-k1om.rb). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
 if [ "$target" = linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)" >&2; exit 2; }
   [ "$backend_explicit" = 0 ] || [ "$backend" = gcc ] || { echo "nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)" >&2; exit 2; }
   backend=gcc
   k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
   [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
-  [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
+  [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.rb)" >&2; exit 2; }
   export NFCXX_GCC="$root/scripts/k1om-cc" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om_root"
 fi
 if [ -n "$target" ] && [ "$target" != linux_k1om ]; then

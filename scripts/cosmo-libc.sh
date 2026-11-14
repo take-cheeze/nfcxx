@@ -5,7 +5,7 @@
 # for EDG's prelinker, and eh_util.o defines std::terminate, std::unexpected and the handler setters, which cosmo's
 # libc++abi (libcosmo.a) already has.
 # Needs build/edg (scripts/setup-edg.sh) for the member list and the eccp driver, and cosmocc (NFCXX_COSMOCC, or
-# build/cosmocc/bin/cosmocc from scripts/setup-cosmo.sh). COSMO_LIBC_OUT: another output directory.
+# build/cosmocc/bin/cosmocc from scripts/setup-cosmo.rb). COSMO_LIBC_OUT: another output directory.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 edg=${EDG_BUILD:-$root/build/edg}
@@ -14,7 +14,7 @@ cosmo_root=$(cd "$(dirname "$cosmocc")/.." && pwd)
 out=${COSMO_LIBC_OUT:-$root/build/cosmo-libc}
 host=$edg/lib/libC.a
 [ -f "$host" ] || { echo "cosmo-libc: $host is missing; run scripts/setup-edg.sh" >&2; exit 2; }
-[ -x "$cosmocc" ] || { echo "cosmo-libc: $cosmocc is not installed; run scripts/setup-cosmo.sh" >&2; exit 2; }
+[ -x "$cosmocc" ] || { echo "cosmo-libc: $cosmocc is not installed; run scripts/setup-cosmo.rb" >&2; exit 2; }
 lib=$out/libC.a
 if [ ! -f "$lib" ] || [ "$host" -nt "$lib" ] || [ "$root/scripts/cosmo-libc.sh" -nt "$lib" ]; then
   mkdir -p "$out/obj"

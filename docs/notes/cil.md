@@ -23,7 +23,7 @@ C --cpp--> prep (qbe-prep) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) 
   functions, data, the calls with their signatures, and the global symbols the unit uses.
 - `scripts/cil-link.rb` links the fragments into one static class `Prog`, writes the CIL, runs ilasm, and writes the
   launcher. Shim source is built with `cc` when a program calls a variadic function (below).
-- `scripts/setup-cil.sh` fetches ilasm into `build/cil/ilasm`: `runtime.linux-x64.microsoft.netcore.ilasm` 10.0.13 on
+- `scripts/setup-cil.rb` fetches ilasm into `build/cil/ilasm`: `runtime.linux-x64.microsoft.netcore.ilasm` 10.0.13 on
   x86-64, `runtime.linux-arm64.microsoft.netcore.ilasm` 10.0.13 on aarch64 (both from NuGet, the same layout). ilasm 10
   writes assemblies that run on .NET 8. The .NET 8 runtime (or later) must be on `PATH` to run a program; the SDK is
   not needed to run one. On Ubuntu 24.04 (either architecture) `apt-get install dotnet-runtime-8.0` provides it; the

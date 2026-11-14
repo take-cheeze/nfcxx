@@ -9,7 +9,7 @@
 #                                  linux-gcc-release (so the IL is lowered exactly as the C generator sees it)
 # Result: build/pathb/cmake/bin/cpfe. scripts/pathb-dump runs it from build/pathb/edg-base like the driver does.
 # Reruns refresh the tree and rebuild only what changed (build/pathb/cmake is kept).
-#   PATHB_EMSCRIPTEN=1   build the same cpfe for the browser with Emscripten (emcc on PATH: scripts/setup-emsdk.sh) into
+#   PATHB_EMSCRIPTEN=1   build the same cpfe for the browser with Emscripten (emcc on PATH: scripts/setup-emsdk.rb) into
 #                        build/pathb-wasm: cmake/bin/cpfe.js and cpfe.wasm, a module (createCpfe) whose callMain runs one
 #                        compilation, with Emscripten's in-memory file system (docs/notes/pathb-wasm-frontend.md)
 set -euo pipefail
@@ -119,7 +119,7 @@ if [ "$emscripten" = 1 ]; then
   # The SoftFloat configuration of the target (x86-64 NaN rules), not of the host: its build directory in the pinned checkout.
   sf=$root/build/softfloat; sf_commit=497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1; sf_config=${PATHB_SOFTFLOAT_CONFIG:-Linux-x86_64-GCC}
   if [ ! -f "$sf/build/$sf_config/softfloat.a" ] || [ "$(git -C "$sf" rev-parse HEAD 2>/dev/null)" != $sf_commit ]; then
-    command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.sh, then source its env)" >&2; exit 1; }
+    command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.rb, then source its env)" >&2; exit 1; }
     rm -rf "$sf"; git clone -q https://github.com/ucb-bar/berkeley-softfloat-3.git "$sf"
     git -C "$sf" checkout -q $sf_commit
     make -s -C "$sf/build/$sf_config" -j"${PATHB_JOBS:-4}" MAKELIB='emar crs $@' \
@@ -177,7 +177,7 @@ rm -rf "$base/include"; ln -s "$src/include_c++" "$base/include"
 
 cd "$tree"
 if [ "$emscripten" = 1 ]; then
-  command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.sh, then source its env)" >&2; exit 1; }
+  command -v emcc >/dev/null || { echo "setup-pathb: emcc is not on PATH (scripts/setup-emsdk.rb, then source its env)" >&2; exit 1; }
   # A module rather than a program: the page instantiates it per compilation (callMain), with the source, EDG's base
   # directory and the headers in its in-memory file system. The front end recurses deeply on large inputs: a big stack.
   # emcmake runs the build's own tool (mk_errinfo, the error tables) under node.

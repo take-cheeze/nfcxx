@@ -245,7 +245,7 @@ and with `--pipeline` the second too.
     `mold-wrapper.so` (for `mold -run`) beside `mold` by that layout, and wrote it at the root of the checkout before.
 
   The binary links a C program, a C++ program with threads and exceptions, and mrustc itself (231 MB), to an output
-  byte-identical to that of mold built by rustc (`scripts/setup-mold.sh`): 2.0 to 2.6 s against 1.1 s on 4 cores.
+  byte-identical to that of mold built by rustc (`scripts/setup-mold.rb`): 2.0 to 2.6 s against 1.1 s on 4 cores.
 - **nfcxx's pipeline.** Every crate of the link goes through `mrustc-prep.rb`, cproc and QBE, portable-atomic's
   inline asm outlined (section 2). The build takes about 7 minutes once mrustc's C exists (20 before cproc copied
   structs with `blit`, below). The binary is 77 MB. What it needed:

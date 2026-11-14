@@ -21,7 +21,7 @@
 - name: CIL backend (C programs as .NET assemblies, run with dotnet 8)
   dotnet: true
   run: |
-    scripts/setup-cil.sh
+    scripts/setup-cil.rb
     scripts/setup-pathb.sh
     tests/cil/run.sh
     tests/pathb-cil/run.sh
@@ -44,11 +44,11 @@
     tests/pathb-i386/realmode.sh
     tests/determinism/run.sh
     tests/float-to-int/run.sh
-- name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.sh)
+- name: --cosmo (routing, then the real cosmocc from scripts/setup-cosmo.rb)
   env:
     COSMOCC_SHA256: ${{ vars.COSMOCC_SHA256 }}
   run: |
-    scripts/setup-cosmo.sh
+    scripts/setup-cosmo.rb
     tests/cosmo/run.sh
 - name: real-world tinyxml2, nlohmann/json, doctest (gcc and Path B), and {fmt}
   pathb: true   # run.sh, run_json.sh and run_doctest.sh build with Path B
