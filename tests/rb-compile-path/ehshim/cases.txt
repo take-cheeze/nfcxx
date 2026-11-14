@@ -1,0 +1,23 @@
+# no object yet: built by nfcxx (the stub writes it), the path printed
+ :: "$S"
+# an object newer than its source and the EDG runtime: kept
+ :: mkdir -p "$SB/build/ehshim" && echo o > "$SB/build/ehshim/nfcxx_eh_shim-130300.o"; "$S"
+# the EDG runtime newer than the object: rebuilt
+ :: mkdir -p "$SB/build/ehshim" "$SB/build/edg/lib" && echo o > "$SB/build/ehshim/nfcxx_eh_shim-130300.o" && touch -d 2001-01-01 "$SB/build/ehshim/nfcxx_eh_shim-130300.o" && : > "$SB/build/edg/lib/libC.a"; "$S"
+# EDG's exception runtime with the eh-tls marker: the -tls object
+ :: mkdir -p "$SB/build/edg" && : > "$SB/build/edg/eh-tls"; "$S"
+ :: NFCXX_EHSHIM=0 "$S"
+ :: NFCXX_EHSHIM= "$S"
+ :: NFCXX_EHSHIM_DIR="$SB/elsewhere" "$S"
+ :: NFCXX_STUB_RC=1 NFCXX_STUB_NFCXX_OUT='error one
+error two' "$S"
+ :: NFCXX_STUB_RC=1 NFCXX_STUB_NFCXX_OUT='one
+two
+three
+four
+five
+six' "$S"
+# no version from the host g++: clang has GNU 15's number, a GNU g++ none
+ :: NFCXX_STUB_NOVER=1 NFCXX_STUB_CXX_CLANG=1 "$S"
+ :: NFCXX_STUB_NOVER=1 "$S"
+ :: NFCXX_CXX=g++ "$S"

@@ -106,10 +106,10 @@ list of statement heads at the top of a function and silently drop the rest (`as
 `scripts/pathb-cil` takes C as `./nfcxx` does: a `.c` file is read by EDG's C front end (`pathb-dump --ir -std=c11`, plus
 `-D_DEFAULT_SOURCE`, because gcc's default dialect defines it and a strict `-std=c11` leaves `strdup` undeclared, so an implicit `int`
 truncates its pointer), several files are several fragments of one link, and `-c` writes one fragment (the object of
-`scripts/cil-cc`). A static function, global or string literal is `name@UNIT`, as in `qbe2cil.rb`, so two files may each have a
+`scripts/cil-cc.rb`). A static function, global or string literal is `name@UNIT`, as in `qbe2cil.rb`, so two files may each have a
 `static` of one name.
 
-`scripts/cil-cc` (nfcc's `NFCXX_BACKEND=cil`) compiles a `-c file.c` through this route first and falls back to the cproc route
+`scripts/cil-cc.rb` (nfcc's `NFCXX_BACKEND=cil`) compiles a `-c file.c` through this route first and falls back to the cproc route
 (`qbe-cc`: cproc -> QBE IL -> `qbe2cil.rb`) when Path B refuses the file or the options are not ones it takes (anything beyond
 `-c -o -I -D -U -std=` and the ignorable `-O -g -W -fPIC`...). The fragments of both routes link together, so the choice is per file.
 `NFCXX_CIL_CPROC=1` takes the cproc route for every file; `NFCXX_CIL_VERBOSE=1` says which route each file took.

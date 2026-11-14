@@ -48,9 +48,8 @@
 #   eccp 1|0                   ROOT/build/edg/bin/eccp is executable (the bash checks it for a C++ input or an object link)
 #   qbe 1|0                    ROOT/build/qbe/qbe is executable (the bash checks it for the Path B backend)
 #   libc-a 1|0                 ROOT/build/edg/lib/libC.a exists (the link names it; the port refuses a link without it)
-#   pathb-ldrt PATH            scripts/pathb-ldrt prints PATH (the long double helper archive)
-#   ehshim PATH                scripts/ehshim prints PATH (absent or empty: it prints nothing, so the link has no EH shim)
-#   sret PATH                  scripts/sret.sh prints PATH (absent or empty: nothing)
+#   pathb-ldrt PATH            scripts/pathb-ldrt.rb prints PATH (the long double helper archive)
+#   ehshim PATH                scripts/ehshim.rb prints PATH (absent or empty: it prints nothing, so the link has no EH shim)
 #   asan-vla PATH              scripts/asan-vla.rb prints PATH (the C++ VLA runtime of an ASan link; absent: the port refuses)
 #   safeptr-rt PATH            scripts/safeptr-rt.rb prints PATH (the safe-pointer runtime of a link; absent: the port refuses)
 #   ld NAME                    ld.NAME is on PATH (for -fuse-ld=NAME; the other names pass to cc as they are)
@@ -62,7 +61,6 @@
 # repository tools (ensure_tool finds them fresh), the build of pathb-cc itself (its harness is inside pathb-cc: its status
 # is the pathb-status fact), and the host GNU version and dialect (only an explicit --dialect reaches the command line).
 
-require "open3"
 require "pathname"
 
 # A construct the port does not cover (exit 3): the bash may do anything with it, so nothing is guessed.
@@ -179,11 +177,6 @@ class Facts
     @exists.include?(path)
   end
 
-  # a source the plan may compile (the test facts list the sources they use: true there)
-  def source_ok?(_path)
-    true
-  end
-
   def status(name)
     @statuses.fetch(name, 0)
   end
@@ -234,7 +227,6 @@ class Plan
   def run
     parse
     exit_with("nfcxx: no input files", 2) if @ncpp + @nobj + @cfiles.size + (@stdin_src ? 1 : 0) == 0
-    (@srcs + @cfiles).each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
     preprocess_exec if @preprocess
     checks
     @pb_pre = @preinc.flat_map { |h| ["-include", h] }
@@ -298,8 +290,6 @@ class Plan
         @asanopts << x
       elsif x == "-fPIC" || x == "-fpic"
         @pic = true
-      elsif x == "-ftree-vectorize"
-        @vectorize = true   # the QBE loop vectorizer: pathb-cc --vectorize, qbe -V (3rd/qbe vec.c)
       elsif x == "-rdynamic"
         @rdynamic = true
       elsif x == "-shared"
@@ -440,7 +430,7 @@ class Plan
     argv += @srcs
     argv << "-" if @stdin_src
     argv += ["-o", @out] if @outset
-    @lines << ["EXEC", "g++", *argv]
+    @lines << "EXEC g++ #{argv.join(' ')}"
     raise PlanExec
   end
 
@@ -452,7 +442,6 @@ class Plan
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
     f << "--pic" if @pic
-    f << "--vectorize" if @vectorize
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?
@@ -462,7 +451,7 @@ class Plan
   # One pathb-cc call on a C++ source; returns its status (the pathb-status fact).
   def pathb_cc(source, dst)
     argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, source, "-o", dst]
-    @lines << ["RUN", *argv]
+    @lines << "RUN #{argv.join(' ')}"
     @facts.status(source)
   end
 
@@ -473,7 +462,7 @@ class Plan
     exit_with("nfcxx: pathb-cc status #{status} on #{source}", status) unless @default_backend
     warn "nfcxx: Path B did not build #{source} (status #{status}); building the program with the gcc backend, which " \
          "compiles with C semantics (-fwrapv -fno-strict-aliasing)"
-    @lines << ["EXEC", "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
+    @lines << "EXEC env NFCXX_BACKEND=gcc #{DRIVER} #{@args.join(' ')}".rstrip
     raise PlanExec
   end
 
@@ -483,7 +472,7 @@ class Plan
     @cfiles.each_with_index do |c, n|
       dst = "TMP/#{n}.o"
       argv = [PATHB_CC, *@pb_flags, "-std=c11", *@cflags, c, "-o", dst]
-      @lines << ["RUN", *argv]
+      @lines << "RUN #{argv.join(' ')}"
       check_status(c, @facts.status(c))
       @c_objs << dst
     end
@@ -494,7 +483,7 @@ class Plan
     exit_with("nfcxx: -c with -o needs exactly one source", 2) if @outset && @c_objs.size != 1
     @cfiles.each_with_index do |c, i|
       dst = @outset ? @out : "#{File.basename(c).sub(/\.c\z/, '')}.o"
-      @lines << ["RUN", "cp", @c_objs[i], dst]
+      @lines << "RUN cp #{@c_objs[i]} #{dst}"
     end
   end
 
@@ -530,7 +519,7 @@ class Plan
     v
   end
 
-  # The link's cc (the bash's hosted block): the EH shim and the sret objects, and with -fsanitize=address the C++ VLA runtime.
+  # The link's cc (the bash's hosted block): the EH shim, and with -fsanitize=address the C++ VLA runtime.
   # Neither is added to a -shared link or a link with no C++ or object input (the block is not entered).
   def hosted_extras
     return [[], []] if @shared
@@ -538,8 +527,6 @@ class Plan
     shim = []
     eh = @facts.value("ehshim")
     shim << eh if @eh_shim && eh && !eh.empty?
-    sret = @facts.value("sret")
-    shim << sret if sret && !sret.empty?
     vla = @asan ? [fact_path("asan-vla")] : []
     [shim, vla]
   end
@@ -573,7 +560,7 @@ class Plan
     end
     argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *pobjs, *plink, ldrt, *shim, *vla,
             LIBC, "-lstdc++", "-lgcc_s", "-lpthread", "-lm", "-latomic"]
-    @lines << ["RUN", *argv]
+    @lines << "RUN #{argv.join(' ')}"
   end
 
   # The link of C sources alone (or with object files when eccp is not built): cc with the C objects, every link option of the
@@ -583,110 +570,18 @@ class Plan
     ldrt = fact_path("pathb-ldrt")
     cvla = @asan ? [fact_path("asan-vla")] : []
     argv = ["cc", *asan_c, *ldopts, *@c_objs, *@files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
-    @lines << ["RUN", *argv]
-  end
-end
-
-# The facts of this machine (--live=ROOT): each one is probed when the port asks for it, with the commands the bash runs.
-# Path B's status is not a fact here: every pathb-cc call is planned as succeeding, and the driver (scripts/nfcxx.rb) builds the
-# program again with the bash when one fails. Anything the live facts do not model is unported.
-class LiveFacts < Facts
-  def initialize(root, cwd)
-    super()
-    @root = root
-    @cwd = cwd
-    @probes = {}
-    ENV.each_key do |name|
-      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
-                  %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
-
-      unported("environment #{name} (the live facts do not read it)")
-    end
-  end
-
-  def real(path)
-    return @root if path == "ROOT"
-    return File.join(@root, path[5..]) if path.start_with?("ROOT/")
-    return path if path.start_with?("/")
-
-    File.join(@cwd, path)
-  end
-
-  def value(key)
-    @probes.fetch(key) { @probes[key] = probe(key) }
-  end
-
-  def flag?(key)
-    value(key) == "1"
-  end
-
-  def ld?(name)
-    ENV.fetch("PATH", "").split(":").any? do |d|
-      f = File.join(d, "ld.#{name}")
-      File.file?(f) && File.executable?(f)
-    end
-  end
-
-  def module?(path)
-    f = real(path)
-    return false unless File.file?(f)
-
-    File.foreach(f, mode: "rb").any? { |l| l.match?(/\A[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]/n) }
-  end
-
-  def exists?(path)
-    File.exist?(real(path))
-  end
-
-  def source_ok?(path)
-    File.file?(real(path))
-  end
-
-  def status(_name)
-    0
-  end
-
-  private
-
-  def probe(key)
-    case key
-    when "host" then `uname -s`.chomp == "Linux" && `uname -m`.chomp == "x86_64" ? "linux-x86_64" : "other"
-    when "eccp" then File.executable?(File.join(@root, "build/edg/bin/eccp")) ? "1" : "0"
-    when "qbe" then File.executable?(File.join(@root, "build/qbe/qbe")) ? "1" : "0"
-    when "libc-a" then File.file?(File.join(@root, "build/edg/lib/libC.a")) ? "1" : "0"
-    when "pathb-ldrt" then script_output("scripts/pathb-ldrt", require_success: true)
-    when "ehshim" then script_output("scripts/ehshim", require_success: true)
-    when "sret" then script_output("scripts/sret.sh", require_success: false)
-    when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
-    when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
-    else unported("#{key} is not in the live facts")
-    end
-  end
-
-  def script_output(script, require_success:)
-    out, status = Open3.capture2(File.join(@root, script), err: File::NULL)
-    return nil if require_success && !status.success?
-
-    out.chomp
-  rescue SystemCallError
-    nil
+    @lines << "RUN #{argv.join(' ')}"
   end
 end
 
 def main(argv)
   facts_path = nil
   choice = "default"
-  tabs = false
-  live = nil
   i = 0
   while i < argv.size && argv[i] != "--"
     a = argv[i]
     if a.start_with?("--facts=")
       facts_path = a.delete_prefix("--facts=")
-    elsif a.start_with?("--live=")
-      live = a.delete_prefix("--live=")
-    elsif a == "--tabs"
-      tabs = true
     elsif a.start_with?("--backend=")
       choice = a.delete_prefix("--backend=")
     else
@@ -696,23 +591,22 @@ def main(argv)
     i += 1
   end
   args = argv[(i + 1)..] || []
-  unless (facts_path || live) && CHOICES.include?(choice)
+  unless facts_path && CHOICES.include?(choice)
     warn "usage: nfcxx-pathb.rb --facts=FILE --backend=default|pathb -- ARG..."
     return 2
   end
 
   begin
-    facts = live ? LiveFacts.new(live, Dir.pwd) : Facts.load(facts_path)
-    plan = Plan.new(facts, choice, fsyntax_only_args(args))
+    plan = Plan.new(Facts.load(facts_path), choice, fsyntax_only_args(args))
     plan.run
-    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
-    puts "STATUS 0" unless tabs
+    plan.lines.each { |l| puts l }
+    puts "STATUS 0"
   rescue PlanExec
-    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
+    plan.lines.each { |l| puts l }
   rescue NfcxxExit => e
-    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
+    plan.lines.each { |l| puts l }
     warn e.message unless e.message.empty?
-    puts "STATUS #{e.status}" unless tabs
+    puts "STATUS #{e.status}"
   rescue NfcxxUnported => e
     warn "unported: #{e.message}"
     return 3

@@ -404,7 +404,7 @@ scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld
 scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld-oracle.qbe"
 cmp "$tmp/ld.qbe" "$tmp/ld-oracle.qbe"
 scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld.ir" | cmp - "$tmp/ld.qbe"
-ldrt=$(scripts/pathb-ldrt)
+ldrt=$(scripts/pathb-ldrt.rb)
 "${QBE:-build/qbe/qbe}" "$tmp/ld.qbe" -o "$tmp/ld.s"
 cc "$tmp/ld.s" "$ldrt" -lstdc++ -lm -o "$tmp/ld"
 "$tmp/ld" || { echo "FAIL $ldsrc runtime: expected 0"; exit 1; }
@@ -488,7 +488,7 @@ for name in array_fields longdouble_byval; do
   scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
   cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
   "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
-  cc "$tmp/$name.s" $(scripts/pathb-ldrt) -lstdc++ -lm -o "$tmp/$name"
+  cc "$tmp/$name.s" $(scripts/pathb-ldrt.rb) -lstdc++ -lm -o "$tmp/$name"
   "$tmp/$name" || { echo "FAIL $src runtime: expected 0"; exit 1; }
 done
 echo "ok   array fields in records, long double by value through the (struct \"__nfcxx_ld\") record, mutants, emitter validation, and native execution"
@@ -522,7 +522,7 @@ for name in sret int128_return; do
   scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
   cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
   "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
-  cc "$tmp/$name.s" $(scripts/pathb-ldrt) -lstdc++ -lm -o "$tmp/$name"
+  cc "$tmp/$name.s" $(scripts/pathb-ldrt.rb) -lstdc++ -lm -o "$tmp/$name"
   "$tmp/$name" || { echo "FAIL $src runtime: expected 0"; exit 1; }
 done
 sed 's/^  P q = make(2);$/  P q;/' tests/pathb-borrow/contracts/sret.cpp > "$tmp/sret_nocall.cpp"

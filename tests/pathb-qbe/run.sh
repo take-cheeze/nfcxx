@@ -58,7 +58,7 @@ qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 libdir=${EDG_LIB:-$root/build/edg/lib}
 # The EH shim (lib/ehshim; exceptions thrown by libstdc++.so, std::exception_ptr) is part of every hosted program the
 # driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too).
-shim=$(scripts/ehshim) || shim=
+shim=$(scripts/ehshim.rb) || shim=
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
@@ -70,7 +70,7 @@ case $(uname -s)/$(uname -m) in
   Darwin/arm64) emit_opts+=(--arm64-abi --arm64-abi-apple) ;;   # Apple: a variadic aggregate is on the stack
 esac
 mrb=$root/scripts/mrb
-ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
+ldrt=$(scripts/pathb-ldrt.rb) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0; na=0

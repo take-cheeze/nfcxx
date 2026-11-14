@@ -19,7 +19,7 @@ k1om=${NFCXX_K1OM_ROOT:-/opt/k1om}
 cd "$root/build/edg-k1om"
 cmds=$(ninja -t commands lib/libC.a | grep -E 'rt-cache|lib_src' | grep -v ' ar qc' | grep -v 'c99_complex' || true)
 [ -n "$cmds" ] || { echo "setup-k1om: no runtime compile commands in build/edg-k1om" >&2; exit 1; }
-export NFCXX_GCC="$root/scripts/k1om-cc" NFCXX_CC="$root/scripts/gcc-cc" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om"
+export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_CC="$root/scripts/gcc-cc" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om"
 export NFCXX_CCACHE=0
 while IFS= read -r c; do
   bash -c "$c" > "$root/build/edg-k1om-rt.log" 2>&1 || { echo "setup-k1om: runtime compile failed: ${c:0:160}" >&2; grep -m3 error "$root/build/edg-k1om-rt.log" >&2; exit 1; }

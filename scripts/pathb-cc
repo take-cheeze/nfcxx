@@ -29,7 +29,7 @@
 #                    to trap into: scripts/pathb-ssa-qbe.rb, Qbe.ptr32). docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
 #   --long-double=trap  (PATHB_LONG_DOUBLE=trap, or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
 #                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
-#                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
+#                    object with $(scripts/pathb-ldrt.rb) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
 # Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
 set -euo pipefail

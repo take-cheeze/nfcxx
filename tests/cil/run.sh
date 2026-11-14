@@ -3,7 +3,7 @@
 # with dotnet. Each case's first line says `// EXPECT: N` (the exit status) and, when tests/cil/cases/NAME.out exists, its
 # stdout must match it exactly. tests/cil/multi/NAME is one program of several files (EXPECT in main.c, the first file).
 # tests/cil/errors/NAME.c must fail to compile with the text after `// EXPECT-ERROR:`.
-# The compile goes through Path B first (scripts/cil-cc, docs/notes/pathb-cil.md) and falls back to the cproc route when
+# The compile goes through Path B first (scripts/cil-cc.rb, docs/notes/pathb-cil.md) and falls back to the cproc route when
 # Path B refuses a file. A file with `// QBE-ONLY: reason` is one that still needs cproc (it must fall back: when it stops
 # doing so the marker is stale); every other file must go through Path B. `// PATHB-ONLY: reason` is a case the cproc route
 # gets wrong; it is skipped when NFCXX_CIL_CPROC=1 (the cproc route for every file, which CI runs too).

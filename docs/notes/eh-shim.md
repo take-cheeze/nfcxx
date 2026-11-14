@@ -12,7 +12,7 @@ read the Itanium ABI's list of caught exceptions, which is empty when the except
 ## What the shim is
 
 `lib/ehshim/nfcxx_eh_shim.cpp` is a C++ file compiled by nfcxx itself (EDG front end, gcc backend, so its `throw` statements are EDG
-throws) into `build/ehshim/nfcxx_eh_shim-<gnu version>.o` by `scripts/ehshim`, on first use. The driver (`nfcxx`, both paths) and the
+throws) into `build/ehshim/nfcxx_eh_shim-<gnu version>.o` by `scripts/ehshim.rb`, on first use. The driver (`nfcxx`, both paths) and the
 Path B harness (`tests/pathb-qbe/run.sh`) link that object into every hosted program, ahead of libstdc++. It defines
 
 - every `std::__throw_*` function of libstdc++ (`bad_exception`, `bad_alloc`, `bad_array_new_length`, `bad_cast`, `bad_typeid`,
@@ -105,8 +105,8 @@ EDG's `std::bad_alloc::what()` is `""`, libstdc++'s is `"std::bad_alloc"`.
 ## Using it
 
 - `nfcxx` links the shim into hosted programs it links (not with `-c`, `-shared`, `--freestanding`). `NFCXX_EHSHIM=0` leaves it out;
-  `NFCXX_EHSHIM_DIR` moves the object. If it cannot be built (`scripts/ehshim` prints why) the program is linked without it.
-- `scripts/ehshim` prints the object's path and builds it when the source is newer. It runs `nfcxx --backend=gcc -c` (it unsets
+  `NFCXX_EHSHIM_DIR` moves the object. If it cannot be built (`scripts/ehshim.rb` prints why) the program is linked without it.
+- `scripts/ehshim.rb` prints the object's path and builds it when the source is newer. It runs `nfcxx --backend=gcc -c` (it unsets
   `NFCXX_PATH`, `NFCXX_BACKEND`, `NFCXX_CC`: the shim is always built by the gcc backend, because cproc drops `weak`).
 - Programs linked by hand: add the object before `-lC -lstdc++` (`tests/pathb-qbe/run.sh` does).
 

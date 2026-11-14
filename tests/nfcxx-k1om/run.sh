@@ -46,7 +46,7 @@ set_state() {
   for t in "$@"; do
     case $t in nogcc|nolibc|noeccp|ehtls) ;; *) echo "run.sh: unknown token !$t" >&2; exit 1 ;; esac
   done
-  # the k1om GCC logs its arguments (NFCXX_STUB_LOG is inherited from the bash, through scripts/k1om-cc)
+  # the k1om GCC logs its arguments (NFCXX_STUB_LOG is inherited from the bash, through scripts/k1om-cc.rb)
   if has nogcc; then rm -f "$k1om/bin/k1om-mpss-linux-gcc"; else
     printf '#!/bin/sh\necho "RUN k1om-gcc $*" >> "$NFCXX_STUB_LOG"\n' > "$k1om/bin/k1om-mpss-linux-gcc"; chmod +x "$k1om/bin/k1om-mpss-linux-gcc"; fi
   if has nolibc; then rm -f "$root/build/k1om/libC.a"; else : > "$root/build/k1om/libC.a"; fi
@@ -84,7 +84,8 @@ while IFS= read -r line; do
   port_raw=$(ruby "$repo/scripts/nfcxx-k1om.rb" --facts="$sb/facts" "${args[@]}" 2>"$sb/perr"); rc=$?
   port_out=$(printf '%s\n' "$port_raw" | norm)
   : > "$sb/stublog"
-  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
+  # ruby is on the PATH too: scripts/k1om-cc.rb (the k1om GCC's wrapper) is a Ruby script
+  (cd "$work" && env -i PATH="$bin:$(dirname "$(command -v ruby)"):/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
      NFCXX_K1OM_ROOT="$k1om" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
   if [ $rc = 3 ]; then
     # not compared, but a refusal the bash makes (status 2) that the port left unported is a failure

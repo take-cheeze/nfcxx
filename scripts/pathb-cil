@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Path B CIL spike (docs/notes/pathb-cil.md): a C++ file -> Path B IR (pathb-dump --ir) -> pathb-cil-emit.rb (fragment) ->
 # cil-link.rb (CIL, ilasm) -> an executable launcher (dotnet).
-# -c writes the JSON fragment of the one file to OUT and does not link (the object file of scripts/cil-cc).
+# -c writes the JSON fragment of the one file to OUT and does not link (the object file of scripts/cil-cc.rb).
 # Usage: scripts/pathb-cil [-c] [-o OUT] [-std=STD] [-Idir] [-Dmacro] [-Umacro] file.cpp|file.c...
 # A .c file is read as C (-std=c11 and _DEFAULT_SOURCE, as gcc's default dialect defines it, unless -std is given), as nfcxx reads a C input; every file is one fragment of the link.
 set -euo pipefail

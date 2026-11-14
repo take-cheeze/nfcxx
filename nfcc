@@ -54,7 +54,7 @@ die() { echo "nfcc: error: $*" >&2; exit 1; }
 
 case $backend in
   cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
-       qcc=$root/scripts/cil-cc ;;
+       qcc=$root/scripts/cil-cc.rb ;;
   pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
          [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;
   gcc) ;;
@@ -494,7 +494,7 @@ if [ $backend = pathb ]; then
   # Path B objects link with EDG's runtime (libC.a), the long double helpers and libatomic, as nfcxx links them
   # The C++ and atomic libraries of the host, as the nfcxx driver links them: macOS has libc++ and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
-  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $pb_cxx_libs -lm $pb_atomic_lib
+  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt.rb")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $pb_cxx_libs -lm $pb_atomic_lib
 elif [ $backend = cil ]; then
   # the cil backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"

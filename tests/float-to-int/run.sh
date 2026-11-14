@@ -13,7 +13,7 @@ ld 0: int=-2147483648 long=-9223372036854775808
 ld 1: int=-2147483648 long=-9223372036854775808
 ld 2: int=-2147483648 long=-9223372036854775808'
 fail=0
-x86=$(NFCXX_LDRT_X86=1 scripts/pathb-ldrt) && def=$(scripts/pathb-ldrt)
+x86=$(NFCXX_LDRT_X86=1 scripts/pathb-ldrt.rb) && def=$(scripts/pathb-ldrt.rb)
 cc -O1 -o "$tmp/x86" tests/float-to-int/helpers.c "$x86" -lstdc++ -lquadmath -lm -latomic || { echo "FAIL build x86"; exit 1; }
 got=$("$tmp/x86")
 if [ "$got" = "$want" ]; then echo "ok   x86-64 variant"; else echo "FAIL x86-64 variant"; diff <(echo "$want") <(echo "$got"); fail=1; fi

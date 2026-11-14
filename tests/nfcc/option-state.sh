@@ -49,7 +49,7 @@ harness() {
       -e 's|die "QBE not built; run scripts/setup-qbe.sh"|:|' \
       -e 's|die "CIL backend not set up; run scripts/setup-cil.sh"|:|' \
       -e 's|die "Path B not available (scripts/pathb-cc)"|:|' \
-      -e 's|"\$("\$root/scripts/pathb-ldrt")"|"LDRT"|' \
+      -e 's|"\$("\$root/scripts/pathb-ldrt.rb")"|"LDRT"|' \
       -e 's|"\$host" |run_stub "$host" |g' \
       -e 's|exec run_stub "\$host" |exec_stub "$host" |g' \
       -e 's|"\$qcc" |run_stub "$qcc" |g' \

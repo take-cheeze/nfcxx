@@ -1,0 +1,15 @@
+# no archive yet: built with the host cc, archived, printed
+ :: "$S"
+# an archive newer than its source: not rebuilt
+ :: touch "$SB/build/pathb-ldrt/libnfcxxld.a" 2>/dev/null || (mkdir -p "$SB/build/pathb-ldrt" && : > "$SB/build/pathb-ldrt/libnfcxxld.a"); "$S"
+# an archive older than its source: rebuilt
+ :: mkdir -p "$SB/build/pathb-ldrt" && : > "$SB/build/pathb-ldrt/libnfcxxld.a" && touch -d 2001-01-01 "$SB/build/pathb-ldrt/libnfcxxld.a"; touch "$SB/be/nfcxx_ldrt.c"; "$S"
+ :: NFCXX_LDRT_X86=1 "$S"
+ :: NFCXX_LDRT_X86=0 "$S"
+ :: NFCXX_LDRT_X86=1 PATHB_LDRT_OUT="$SB/elsewhere" "$S"
+ :: PATHB_LDRT_OUT="$SB/elsewhere" "$S"
+ :: NFCXX_GCC=/opt/cosmo/bin/cosmocc "$S" @nostderr
+ :: NFCXX_GCC=/opt/cosmo/bin/cosmocc PATHB_LDRT_OUT="$SB/cosmo-out" "$S" @nostderr
+ :: NFCXX_GCC=clang NFCXX_LDRT_X86=1 "$S"
+ :: NFCXX_GCC= "$S"
+ :: NFCXX_STUB_CC_RC=3 "$S"

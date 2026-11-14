@@ -35,7 +35,7 @@
 #   module PATH             PATH declares or imports a C++ module
 #   exists PATH             PATH (relative to WORK) is an existing directory (abs_path of an -I with a slash)
 #   qbe 1                   build/qbe/qbe exists (Path B's code generator; scripts/setup-qbe.sh)
-#   pathb-ldrt PATH         what scripts/pathb-ldrt prints, relative to ROOT (libnfcxxld.a, the long double helpers)
+#   pathb-ldrt PATH         what scripts/pathb-ldrt.rb prints, relative to ROOT (libnfcxxld.a, the long double helpers)
 #   sycl-header DIR         DIR (a -I value) holds sycl/detail/kernel_desc.hpp (the SYCL two-pass check of -c); none here
 #
 # Assumed, not read: the environment (NFCXX_* variables are not set, as the harness runs the bash with none), the
@@ -255,7 +255,7 @@ def pathb_plan(o, facts, env, dialect, gnu)
     end
   else
     ldrt = facts.value("pathb-ldrt")
-    raise Unported, "the output of scripts/pathb-ldrt is not a fact" if ldrt.nil?
+    raise Unported, "the output of scripts/pathb-ldrt.rb is not a fact" if ldrt.nil?
     pobjs = []
     o[:srcs].each_with_index do |f, n|
       obj = "#{TMP}/p#{n}.o"
