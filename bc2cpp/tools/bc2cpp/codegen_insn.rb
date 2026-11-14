@@ -74,7 +74,16 @@ class CodeGen
     "#{@insn_source_file || '?'}:#{@insn_source_line || 0}"
   end
 
+  # DECLARED_ELEMENT_GUARD: a GETIDX/GETIDX0 of a declared element ivar is checked after its read, on every path that
+  # compiles it (the resumable paths call this too).
   def compile_insn_op(insn, irep, owner_def, idx = nil, reg_offset = 0)
+    code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
+    return code unless code.is_a?(String) && %i[GETIDX GETIDX0].include?(insn.op) && idx && irep
+
+    code + declared_element_getidx_guard(insn, irep, owner_def, idx, reg_offset)
+  end
+
+  def compile_insn_op_plain(insn, irep, owner_def, idx = nil, reg_offset = 0)
     if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
       return resumable_code
     end
