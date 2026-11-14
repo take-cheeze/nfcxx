@@ -11,13 +11,13 @@ static VALUE ref_rest(int argc, VALUE *argv, VALUE self) {
 
 static VALUE ref_block(int argc, VALUE *argv, VALUE self) {
     VALUE a, kw;
-    rb_scan_args(argc, argv, "1&", &a, &kw);
+    rb_scan_args(argc, argv, "1*1", &a, &kw);
     return a;
 }
 
 static VALUE ref_used(int argc, VALUE *argv, VALUE self) {
     VALUE a, kw;
-    int n = rb_scan_args(argc, argv, "1&", &a, &kw);
+    int n = rb_scan_args(argc, argv, "1*1", &a, &kw);
     (void)n;
     return a;
 }

@@ -3855,19 +3855,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, 'rb_scan_args', 'rb_scan_args is not called on the argc and argv of its method')
       return
     end
-    fm = /\A"([0-9])([0-9]?)(:?)"\z/.match(psl(text, args[2][0], args[2][1]))
+    # the format: <lead><optional> [*] [:] [&] (required, optional, rest, keyword, block: CRuby's order; no post parts)
+    fm = /\A"([0-9])([0-9]?)(\*?)(:?)(&?)"\z/.match(psl(text, args[2][0], args[2][1]))
     unless fm
       refuse(rel, s, 'rb_scan_args',
              "format #{psl(text, args[2][0], args[2][1])} not supported " \
-             '(only "<lead><optional>" counts, with an optional trailing ":" keyword part: no rest or block parts)')
+             '(only "<lead><optional>[*][:][&]": no post-rest parts)')
       return
     end
     lead = fm[1].to_i
     opt = (fm[2].empty? ? 0 : fm[2].to_i)
-    kw = !fm[3].empty?
+    rest = !fm[3].empty?
+    kw = !fm[4].empty?
+    blk = !fm[5].empty?
+    nout = lead + opt + (rest ? 1 : 0) + (kw ? 1 : 0) + (blk ? 1 : 0)
     outs = args[3..] || []
-    if outs.size != lead + opt + (kw ? 1 : 0)
-      refuse(rel, s, 'rb_scan_args', "format needs #{lead + opt + (kw ? 1 : 0)} output pointer(s), call gives #{outs.size}")
+    if outs.size != nout
+      refuse(rel, s, 'rb_scan_args', "format needs #{nout} output pointer(s), call gives #{outs.size}")
       return
     end
     names = []
@@ -3882,30 +3886,38 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     prev = prev_nonspace(masked, s - 1)
     after = next_nonspace(masked, close + 1)
     # the value is used only in the form (nil-initialised outputs, mrb_get_args(...)): mrb_get_args returns the number of
-    # arguments it consumed, which is the argument count here (no rest part, and extra arguments are an error). The keyword
-    # form's trailing step is a statement, so a used value is refused there.
+    # arguments it consumed, which is the argument count here (no rest part, and extra arguments are an error). A used value
+    # with a keyword part, or with a rest part, takes a statement expression (GNU C, which the mruby build accepts).
     used = (prev >= 0 && !";{}".include?(masked[prev])) || after < 0 || masked[after] != ';'
-    fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (kw ? ':' : '')
-    # the keyword output takes every keyword (an empty table: mrb_kwargs::rest holds the whole keyword hash); CRuby gives nil
-    # when there are no keywords, so an empty hash is replaced by nil
-    kw_name = kw ? names.pop : nil
-    pre = names[lead..].map { |n| "#{n} = mrb_nil_value(), " }.join
+    fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (rest ? '*' : '') + (kw ? ':' : '') + (blk ? '&' : '')
+    # the outputs in mruby's order: the positional ones, then the rest (its array is built from the pointer and length),
+    # the keyword hash (an empty table takes every keyword; CRuby gives nil when there are none), the block
+    pos_names = names[0, lead + opt]
+    rest_name = rest ? names[lead + opt] : nil
+    kw_name = kw ? names[lead + opt + (rest ? 1 : 0)] : nil
+    blk_name = blk ? names[-1] : nil
+    pre = pos_names[lead..].to_a.map { |n| "#{n} = mrb_nil_value(), " }.join
     pre += "#{kw_name} = mrb_nil_value(), " if kw
-    callargs = (['mrb', "\"#{fmt}\""] + names.map { |n| '&' + n }).join(', ')
-    callargs += ", (const mrb_kwargs[]){{0, NULL, NULL, 0, &#{kw_name}}}" if kw
-    tail = kw ? ", #{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()), (void)0" : ''
-    if used && kw
-      # the value is used and there is a keyword part: a statement expression (GNU C, which the mruby build accepts)
-      # takes the mrb_get_args count, then normalises the keyword hash, so the count is the value
-      stmts = names[lead..].map { |n| "#{n} = mrb_nil_value(); " }.join
-      stmts += "#{kw_name} = mrb_nil_value(); " 
-      ed.add(s, close + 1, "({ #{stmts}mrb_int nfcx_n = mrb_get_args(#{callargs}); " \
-                           "#{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()); nfcx_n; })")
+    callargs = ['mrb', "\"#{fmt}\""] + pos_names.map { |n| '&' + n }
+    callargs += ['&nfcx_ra', '&nfcx_rn'] if rest
+    callargs << "(const mrb_kwargs[]){{0, NULL, NULL, 0, &#{kw_name}}}" if kw
+    callargs << "&#{blk_name}" if blk
+    callargs = callargs.join(', ')
+    normalise = kw ? "#{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()); " : ''
+    if rest || (used && kw)
+      stmts = pos_names[lead..].to_a.map { |n| "#{n} = mrb_nil_value(); " }.join
+      stmts += "#{kw_name} = mrb_nil_value(); " if kw
+      stmts += "mrb_value *nfcx_ra; mrb_int nfcx_rn; " if rest
+      rest_build = rest ? "#{rest_name} = mrb_ary_new_from_values(#{mrb_tok(rel, s)}, nfcx_rn, nfcx_ra); " : ''
+      ed.add(s, close + 1, "({ #{stmts}mrb_int nfcx_n = mrb_get_args(#{callargs}); #{rest_build}#{normalise}nfcx_n; })")
     else
+      tail = kw ? ", #{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()), (void)0" : ''
       ed.add(s, close + 1, "(#{pre}mrb_get_args(#{callargs})#{tail})")
     end
     rewrite(rel, s, 'rb_scan_args', "mrb_get_args(mrb, \"#{fmt}\", ...)",
-            'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby; a keyword part takes the trailing Hash (mruby decides keyword-ness by the Hash in the last argument, CRuby 3 by the call site)')
+            'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby; ' \
+            'a rest part is an array built from mruby\'s argument pointer and length; a keyword part takes the trailing Hash; ' \
+            'a block part is the block (nil when there is none)')
   end
 
   # True if the call whose name starts at s and whose ')' is at close is a whole statement: the value is

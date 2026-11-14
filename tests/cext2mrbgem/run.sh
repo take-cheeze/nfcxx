@@ -81,7 +81,7 @@ check grep -qF '(b = mrb_nil_value(), c = mrb_nil_value(), mrb_get_args(mrb, "o|
 rc=0; "$rb" "$conv" --scanner "$scanner" --name scan_args_refused tools/cext2mrbgem/fixtures/scan_args_refused/ext/scan_args_refused "$work/scan_args_refused" > "$work/scan_args_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test "$(grep -c '  rb_scan_args  ' "$work/scan_args_refused/REFUSALS.txt")" -eq 4
-check grep -q 'format "1&" not supported' "$work/scan_args_refused/REFUSALS.txt"
+check grep -q 'format "1\*1" not supported' "$work/scan_args_refused/REFUSALS.txt"
 
 # 2g. rb_define_module_function (singleton and private instance method, mrb_define_module_function) and
 # rb_define_const (mrb_define_const on a tracked module or rb_cObject); a local receiver stays refused
@@ -365,6 +365,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_data_make tools/cext2mrbgem/
 check test "$rc" -eq 0
 check grep -qF 'static const mrb_data_type nfcx_dt_1 = { "DmBox", dm_free, dm_mark };' "$work/api_data_make/src/api_data_make.c"
 check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), (box = (DmBox *)mrb_calloc(mrb, 1, sizeof(DmBox))), &nfcx_dt_1)' "$work/api_data_make/src/api_data_make.c"
+# 2zzz54. rb_scan_args with a rest and a block part ("1*&"): mrb_get_args "o*&", the rest array from the pointer and length.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_rest tools/cext2mrbgem/fixtures/api_scan_rest/ext/api_scan_rest "$work/api_scan_rest" > "$work/api_scan_rest.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_get_args(mrb, "o*&", &first, &nfcx_ra, &nfcx_rn, &blk)' "$work/api_scan_rest/src/api_scan_rest.c"
+check grep -qF 'rest = mrb_ary_new_from_values(mrb, nfcx_rn, nfcx_ra);' "$work/api_scan_rest/src/api_scan_rest.c"
 # 2zzz52. a cast function-pointer table (VALUE (*)(void *))fn of this file: its callbacks run in global mode, and the table's
 # type name (struct ct_funcs) is not a use of the table.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cast_table tools/cext2mrbgem/fixtures/api_cast_table/ext/api_cast_table "$work/api_cast_table" > "$work/api_cast_table.log" 2>&1 || rc=$?
