@@ -1,10 +1,11 @@
 #include <ruby.h>
 
 /* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_str_subseq (mruby's public
- * substr counts characters, the byte form is internal), rb_iv_get and rb_gv_get (mruby takes a symbol, not a C name),
- * rb_sym2str (takes a Symbol VALUE, mruby's mrb_sym_str takes an mrb_sym), rb_cstr_to_inum (no C-string form),
+ * substr counts characters, the byte form is internal), rb_gv_get (mruby takes a symbol, not a C name),
+ * rb_intern3 (takes an encoding),
  * rb_bug (variadic format), StringValue (takes an lvalue it rewrites). */
 static VALUE mApiSkip;
+static const char *gv_name = "$x";
 
 static VALUE api_sub(VALUE self, VALUE s) {
     return rb_str_subseq(s, 0, 1);
@@ -17,7 +18,7 @@ static VALUE api_iv(VALUE self, VALUE o) {
 }
 
 static VALUE api_gv(VALUE self) {
-    return rb_gv_get("$x");
+    return rb_gv_get(gv_name);
 }
 
 static VALUE api_sym(VALUE self, VALUE s) {
@@ -25,7 +26,7 @@ static VALUE api_sym(VALUE self, VALUE s) {
 }
 
 static VALUE api_num(VALUE self) {
-    return rb_cstr_to_inum("12", 10, 0);
+    return rb_intern3("12", 2, NULL);
 }
 
 static VALUE api_bug(VALUE self) {
