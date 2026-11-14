@@ -1997,6 +1997,34 @@
       "requires_block": true,
       "template": "mrb_yield_argv($m, nfcx_block, $0, $1)",
       "caveat": "yields the argc values of argv to the block (as rb_yield_values2); valid only in a registered method (the block is fetched by its wrapper)"
+    },
+    "rb_check_typeddata": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_data_get_ptr($m, $0, $1)",
+      "caveat": "checks the value's data type and returns its pointer (mruby's mrb_data_get_ptr raises on another type), as CRuby's rb_check_typeddata"
+    },
+    "rb_obj_call_init": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "((void)mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"initialize\"), $1, $2))",
+      "caveat": "calls initialize on the object with argc values from argv (CRuby's rb_obj_call_init)"
+    },
+    "rb_int_positive_pow": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_fixnum_value((mrb_int)($0)), mrb_intern_cstr($m, \"**\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "x ** y on Integers (Integer#**), as CRuby's rb_int_positive_pow"
+    },
+    "rb_struct_s_members": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"members\"), 0, NULL)",
+      "caveat": "the struct class's members (mruby-struct's Struct.members), as CRuby's rb_struct_s_members; needs the struct gem"
     }
   },
   "special_arg_positions_class_only": {

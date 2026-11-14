@@ -839,6 +839,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_file_scope tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'mrb_value n = mrb_to_int(mrb, v);' "$work/api_file_scope/src/api_file_scope.c"
 
+# 2zzz13. rb_check_typeddata (mrb_data_get_ptr), rb_int_positive_pow (Integer#**), rb_struct_s_members (Struct.members),
+# rb_obj_call_init (initialize with argv): the output compiles against the fork's headers when NFCX_MRUBY_INCLUDE is set
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_meta_misc tools/cext2mrbgem/fixtures/api_meta_misc/ext/api_meta_misc "$work/api_meta_misc" > "$work/api_meta_misc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_data_get_ptr(mrb, obj, &mm_type)' "$work/api_meta_misc/src/api_meta_misc.c"
+check grep -qF 'mrb_intern_cstr(mrb, "initialize"), 1, argv)' "$work/api_meta_misc/src/api_meta_misc.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
