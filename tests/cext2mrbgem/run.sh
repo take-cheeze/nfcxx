@@ -829,6 +829,11 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_value a = mrb_ary_new_from_values(mrb, 2, (mrb_value[]){x, y});' "$work/api_ary_new3/src/api_ary_new3.c"
 check grep -qF 'mrb_value b = mrb_ary_new_from_values(mrb, 0, NULL);' "$work/api_ary_new3/src/api_ary_new3.c"
 
+# 2zzz11. an enumerator the input defines with a CRuby-looking name (RUBY_TAG_LOCAL): not a CRuby name, not refused
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enum_local tools/cext2mrbgem/fixtures/api_enum_local/ext/api_enum_local "$work/api_enum_local" > "$work/api_enum_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (RUBY_TAG_LOCAL == 3)' "$work/api_enum_local/src/api_enum_local.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

@@ -2257,6 +2257,24 @@ use_problem = lambda do |name, use|
     words.join(' ')
   end
 
+  # the enumerators the input defines (enum { RUBY_VAL = 3, ... }): a name the gem defines is not a CRuby name, and the
+  # enum stays in the output (its header is kept)
+  def local_enumerators
+    @local_enumerators ||= begin
+      names = Set.new
+      @files.each_value do |f|
+        f['masked'].to_enum(:scan, /\benum\b[^{};]*\{([^{}]*)\}/).each do
+          body = Regexp.last_match[1]
+          body.split(',').each do |item|
+            m = /\A\s*([A-Za-z_]\w*)/.match(item)
+            names << m[1] if m
+          end
+        end
+      end
+      names
+    end
+  end
+
   # the member names declared VALUE in every struct of the input that declares them (a name declared with another type
   # anywhere is not VALUE: its comparison stays as it is)
   def value_field_names
@@ -2593,7 +2611,7 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)
