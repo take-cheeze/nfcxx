@@ -501,7 +501,8 @@
       "mruby": "mrb_hash_set",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available"
+      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available",
+      "value_lost": true
     },
     "rb_hash_aref": {
       "kind": "call",
@@ -577,7 +578,8 @@
       "mruby": "mrb_iv_set",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "mruby returns void; the CRuby return value (the value) is not available"
+      "caveat": "mruby returns void; the CRuby return value (the value) is not available",
+      "value_lost": true
     },
     "ID2SYM": {
       "kind": "call",
@@ -1322,7 +1324,8 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "intern_arg": 1,
-      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not"
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not",
+      "value_lost": true
     },
     "rb_protect": {
       "kind": "call",
@@ -1394,7 +1397,8 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "intern_arg": 0,
-      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby"
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby",
+      "value_lost": true
     },
     "rb_reg_nth_match": {
       "kind": "template",

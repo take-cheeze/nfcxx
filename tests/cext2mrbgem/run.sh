@@ -347,6 +347,20 @@ check grep -qF 'if (mrb_str_equal(mrb, s, mrb_str_new_cstr(mrb, "add"))) return 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_freeze tools/cext2mrbgem/fixtures/api_ary_freeze/ext/api_ary_freeze "$work/api_ary_freeze" > "$work/api_ary_freeze.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_freeze(mrb, ary);' "$work/api_ary_freeze/src/api_ary_freeze.c"
+# 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
+# the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?
+if [ "$scanner" = libclang ]; then
+  check test "$rc" -eq 0
+  check grep -qF '#define MC_RUN(m, h, c) mc_call(mrb, m, c, h)' "$work/api_macro_cb/src/api_macro_cb.c"
+else
+  # the regex scan does not thread the callback through the macro: refused (not buildable), never converted silently
+  check test -e "$work/api_macro_cb/NOT_BUILDABLE"
+fi
+# 2zzz48. a value use of a CRuby setter whose mruby function returns void (rb_hash_aset) is refused; a statement use converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_lost tools/cext2mrbgem/fixtures/api_value_lost/ext/api_value_lost "$work/api_value_lost" > "$work/api_value_lost.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_hash_aset  rb_hash_aset returns its value in CRuby' "$work/api_value_lost/REFUSALS.txt"
 # 2zzz46. a function defined in both branches of an #ifdef: the active definition is threaded and converted, the inactive one
 # stays as written (its #ifdef is false in this build), and the registration on a VALUE parameter is unwrapped.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dup_variant tools/cext2mrbgem/fixtures/api_dup_variant/ext/api_dup_variant "$work/api_dup_variant" > "$work/api_dup_variant.log" 2>&1 || rc=$?

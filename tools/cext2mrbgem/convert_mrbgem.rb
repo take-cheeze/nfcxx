@@ -1927,6 +1927,8 @@ end
         'its address is assigned or stored, so the pointer may escape the method context'
       elsif !(before >= 0 && '(,'.include?(masked[before])) || after < 0 || !')'.include?(masked[after]) && masked[after] != ','
         'the pointer is part of an expression, not a plain argument'
+      elsif macro_arg_nonretaining?(rel, s, callee)
+        nil
       elsif STORE_CALL_RE.match?(callee) || @defs.key?(callee) || !@entries.key?(callee)
         "the pointer is passed to #{callee}, which may keep it"
       end
@@ -3055,6 +3057,66 @@ end
     ok
   end
 
+  # The open parenthesis of the innermost call around pos, or nil.
+  def call_open_pos(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      ch = masked[k]
+      if ')]}'.include?(ch)
+        depth += 1
+      elsif '([{'.include?(ch)
+        return k if depth.zero? && ch == '('
+        return nil if depth.zero?
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
+  # A pointer passed as an argument of a file-scope macro (SUBS(str, pat, cb)) escapes only if the macro does: the macro's
+  # body calls a function with that parameter in a position that does not keep it (non_retaining?). The callee's
+  # callback record must be ok (threaded for it), as in non_retaining_use?.
+  def macro_arg_nonretaining?(rel, pos, macro)
+    masked = @files[rel]['masked']
+    return false unless @files.values.any? { |f| f['masked'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(macro)}\(/) }
+    k = call_open_pos(masked, pos)
+    return false if k.nil?
+    close = match_close(masked, k)
+    return false if close <= 0
+    idx = split_args(masked, k, close).index { |a, b| a <= pos && pos < b }
+    return false if idx.nil?
+    dm = nil
+    @files.each do |drel, f|
+      m = /^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(macro)}\(([^)]*)\)/.match(f['masked'])
+      if m
+        dm = [drel, m, f['masked']]
+        break
+      end
+    end
+    return false unless dm
+    _drel, m, dmasked = dm
+    pname = m[1].split(',').map(&:strip)[idx]
+    return false if pname.nil?
+    body_end = logical_line_end(dmasked, m.end(0))
+    body = dmasked[m.end(0)...body_end].to_s
+    body.to_enum(:scan, /([A-Za-z_]\w*)[ \t\n\\]*\(/).each do
+      cm = Regexp.last_match
+      g = cm[1]
+      next unless @defs.key?(g)
+      copen = cm.end(0) - 1
+      cclose = match_close(body, copen)
+      next if cclose <= 0
+      split_args(body, copen, cclose).each_with_index do |(a, b), kk|
+        next unless body[a...b].strip == pname
+        ok_rec = (@fnptr_recs || []).any? { |r| r[:ok] && r[:owner] == g && r[:pidx] == kk }
+        return true if ok_rec && non_retaining?(g, kk)
+      end
+    end
+    false
+  end
+
   def is_param(rel, pos, name)
     # True if name at pos is a parameter of the function (its header, or its body) that encloses pos.
     # A parameter shadows a file-scope class variable of the same name, so it must not be rewritten.
@@ -3216,6 +3278,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
+      end
+      # a mapped call whose mruby function returns void, where CRuby returns the value: a value use is not converted
+      if entry['value_lost']
+        vcp = match_close(@files[rel]['masked'], nxt)
+        unless vcp > 0 && statement_call(rel, s, vcp)
+          refuse(rel, s, name, "#{name} returns its value in CRuby, but mruby's #{entry['mruby']} returns void: a use of the value is not converted")
+          return
+        end
       end
       # a format argument with PRIsVALUE (rb_sprintf): the same conversion as rb_raise's format
       if (fi = entry['format_arg'])
