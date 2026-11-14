@@ -504,6 +504,7 @@ class Converter
     @includes = amap['includes']
     @special_pos = amap['special_arg_positions_class_only']
     @type_check_refused = amap['type_check_refused'] || {}
+    @unmapped_reasons = amap['unmapped_reasons'] || {}
     @files = {}   # rel -> {'text','masked','kind'}
     @edits = {}   # rel -> Edits
     @ignored = []
@@ -3046,7 +3047,7 @@ end
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
-        refuse(rel, s, name, @type_check_refused[name] || 'no entry in api_map.json')
+        refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
         nx = next_nonspace(masked, e)
