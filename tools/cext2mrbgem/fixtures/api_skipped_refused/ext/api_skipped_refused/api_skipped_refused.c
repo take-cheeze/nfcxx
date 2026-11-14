@@ -2,7 +2,7 @@
 
 /* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_obj_method_arity (no mruby equivalent), rb_gv_get (mruby takes a symbol, not a C name),
  * rb_intern3 (takes an encoding),
- * rb_bug (variadic format), rb_require (a Ruby-level load, not in the core mruby API). */
+ * rb_memhash (no mruby equivalent), rb_require (a Ruby-level load, not in the core mruby API). */
 static VALUE mApiSkip;
 static const char *gv_name = "$x";
 
@@ -29,7 +29,7 @@ static VALUE api_num(VALUE self) {
 }
 
 static VALUE api_bug(VALUE self) {
-    rb_bug("never");
+    rb_memhash("never");
     return Qnil;
 }
 

@@ -1777,6 +1777,27 @@
       "needs_mrb": true,
       "template": "((unsigned long long)mrb_int($m, $0))",
       "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "rb_bug": {
+      "kind": "call",
+      "mruby": "mrb_bug",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the format is printed by mruby's formatter; CRuby's PRIsVALUE arguments are not mapped (refused where they appear)"
+    },
+    "rb_sprintf": {
+      "kind": "call",
+      "mruby": "mrb_format",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns a String built by mruby's formatter (see rb_bug for the format)"
+    },
+    "rb_ary_new_from_values": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_from_values",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "copies the n values into a new Array, as CRuby's rb_ary_new_from_values"
     }
   },
   "special_arg_positions_class_only": {
