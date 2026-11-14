@@ -281,6 +281,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rational_args tools/cext2mrb
 check test "$rc" -eq 0
 check grep -qF 'mrb_funcall_argv(mrb, mrb_top_self(mrb), mrb_intern_cstr(mrb, "Rational"), 2, (mrb_value[]){mrb_funcall_argv(mrb, n, mrb_intern_cstr(mrb, "to_i"), 0, NULL), mrb_fixnum_value(3)});' "$work/api_rational_args/src/api_rational_args.c"
 
+# 2zzz28. RB_TYPE_P(v, T_RATIONAL) is a Rational class test (the gem's Rational class is final in CRuby too).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_rational tools/cext2mrbgem/fixtures/api_rb_type_rational/ext/api_rb_type_rational "$work/api_rb_type_rational" > "$work/api_rb_type_rational.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, "Rational")) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_rational/src/api_rb_type_rational.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

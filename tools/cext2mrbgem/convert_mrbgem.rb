@@ -3444,6 +3444,19 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     # nil and false share mruby's MRB_TT_FALSE tag, so their tests are the value predicates: CRuby's RB_TYPE_P(v, T_NIL)
     # is true only for nil, and RB_TYPE_P(v, T_FALSE) only for false (Qfalse)
+    # T_RATIONAL: the fork's rational gem makes Rational objects as data (no exact tag), but CRuby's Rational class has no
+    # subclasses, so the class test is the match. It needs the mruby state, which only a function that has it can pass.
+    if tname.sub(/\ARUBY_/, '') == 'T_RATIONAL'
+      fnr = enclosing_func(rel, s)
+      unless fnr && ((@valid_reg_names || Set.new).include?(fnr['name']) || (@needs || Set.new).include?(fnr['name']))
+        refuse(rel, s, 'RB_TYPE_P', 'T_RATIONAL needs the mruby state (the Rational class test), which this function does not have')
+        return
+      end
+      new = "mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj}, mrb_class_get(#{mrb_tok(rel, s)}, \"Rational\"))"
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, 'RB_TYPE_P', new, 'a Rational test by class (mruby-rational gem: Rational is a data object; CRuby Rational has no subclasses)')
+      return
+    end
     pred = { 'T_NIL' => 'mrb_nil_p', 'T_FALSE' => 'mrb_false_p' }[tname.sub(/\ARUBY_/, '')]
     if pred
       new = "#{pred}(#{obj})"
