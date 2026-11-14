@@ -742,7 +742,7 @@ class Converter
     declarations_by_file.each do |rel, decls|
       f = @files[rel]
       decls.each do |d|
-        next if f['kind'] != 'src' && !d['proto'] # a function body in a header is not converted; its prototypes are
+        next if f['kind'] != 'src' && !d['proto'] && !(d['storage'].split.include?('inline') && d['storage'].split.include?('static')) # a header body is converted only when it is static inline
         next if NON_FUNC_WORDS.include?(d['name']) || NON_FUNC_WORDS.include?(py_split_ws(d['ret']).last)
         unless d['proto']
           (@defs[d['name']] ||= []) << d

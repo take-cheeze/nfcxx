@@ -442,6 +442,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach_refused tools/c
 check test "$rc" -eq 2
 check grep -q '  rb_hash_foreach  not a call of the form' "$work/api_hash_foreach_refused/REFUSALS.txt"
 
+# 2zt. a static inline helper in a header is converted: it takes mrb, and its callers pass it (api_map.json batch N12)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_inline tools/cext2mrbgem/fixtures/api_header_inline/ext/api_header_inline "$work/api_header_inline" > "$work/api_header_inline.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_header_inline/NOT_BUILDABLE"
+check grep -qF 'static inline int ahi_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_inline/include/helper.h"
+check grep -qF 'return mrb_int_value(mrb, ahi_check(mrb, v));' "$work/api_header_inline/src/api_header_inline.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
