@@ -341,6 +341,13 @@ check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->hash_class)' "$work/api_class_
 check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->string_class)' "$work/api_class_exc/src/api_class_exc.c"
 check grep -qF 'mrb_raisef(mrb, E_KEY_ERROR, "missing key");' "$work/api_class_exc/src/api_class_exc.c"
 
+# 2zc. a private registration (api_map.json batch D2): rb_define_private_method takes the rb_define_method path, so the
+# function is wrapped with the mruby signature and registered with mrb_define_private_method
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_private_reg tools/cext2mrbgem/fixtures/api_private_reg/ext/api_private_reg "$work/api_private_reg" > "$work/api_private_reg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_private_reg/NOT_BUILDABLE"
+check grep -qF 'mrb_define_private_method(mrb, cApiPriv, "secret", api_secret, MRB_ARGS_REQ(1));' "$work/api_private_reg/src/api_private_reg.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

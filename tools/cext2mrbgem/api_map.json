@@ -1149,6 +1149,12 @@
       "kind": "expr",
       "mruby": "E_SYNTAX_ERROR",
       "needs_mrb": true
+    },
+    "rb_define_private_method": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true,
+      "caveat": "registers a private method: the same wrapper and argument spec as rb_define_method (mrb_define_private_method has the same shape); the method is callable only without a receiver, as in CRuby"
     }
   },
   "special_arg_positions_class_only": {
@@ -1189,6 +1195,9 @@
     "rb_include_module": [
       0,
       1
+    ],
+    "rb_define_private_method": [
+      0
     ]
   }
 }
