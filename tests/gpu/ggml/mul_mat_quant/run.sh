@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl dmmv.cpp (ggml/src/ggml-sycl/dmmv.cpp, unchanged), compiled as a TU of mul_mat_q8_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real ggml_sycl_op_dequantize_mul_mat_vec (the dmmv path of the ggml-sycl mul_mat
 # dispatch) with a Q8_0 src0 and an F32 src1 vector, no reorder, on ncols 32, 256 and 1024 (rows 5, 64, 37), every output
 # row checked against a double-precision dot product, and 64 guard slots past the output that must stay untouched. Two builds
@@ -50,7 +50,7 @@ fail=0 notrun=0
 # 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3 vflags=$4
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED $vflags \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED $vflags \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_root/include" -I"$ggml_root/src" -I"$ggml_root" \
       "$root/tests/gpu/ggml/mul_mat_quant/mul_mat_q8_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

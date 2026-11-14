@@ -2,7 +2,7 @@
 // that owns the WebGPU device (Chromium's, through Playwright). This is the only place that knows about the transport: a
 // native implementation over webgpu.h (Dawn, wgpu-native) would replace this file and keep the same six operations.
 //
-// Environment: NFCXX_SYCL_IMAGE  path prefix of the files scripts/sycl-build.sh wrote (PREFIX.wgsl, PREFIX.man)
+// Environment: NFCXX_SYCL_IMAGE  path prefix of the files scripts/sycl-build.rb wrote (PREFIX.wgsl, PREFIX.man)
 //              NFCXX_SYCL_SERVER path of server.cjs (default: the NFCXX_SYCL_SERVER_JS macro of the build)
 //              NFCXX_SYCL_NODE   the node executable (default `node`)
 //
@@ -95,7 +95,7 @@ class rt_pipe {
 #endif
     const char *node = std::getenv("NFCXX_SYCL_NODE");
     if (!node) node = "node";
-    if (!prefix || !server) fail("set NFCXX_SYCL_IMAGE (see scripts/sycl-build.sh) and NFCXX_SYCL_SERVER");
+    if (!prefix || !server) fail("set NFCXX_SYCL_IMAGE (see scripts/sycl-build.rb) and NFCXX_SYCL_SERVER");
     std::string wgsl = std::string(prefix) + ".wgsl", man = std::string(prefix) + ".man";
     int to[2], from[2];
     if (pipe(to) || pipe(from)) fail("pipe");

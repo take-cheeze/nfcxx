@@ -24,7 +24,7 @@ grep -q 'l < k - 1' "$out/mut/oneapi/mkl.hpp" && grep -q 'l < gk - 1' "$out/mut/
 # run BACKEND INCDIR NAME: 0 ok, 1 FAIL, 2 SKIP
 run() {
   local b=$1 inc=$2 name=$3 res rc=0
-  if ! "$root/scripts/sycl-build.sh" --backend=$b -I"$inc" -I"$root/lib/sycl-ggml" onemkl.cpp -o "$out/$name" > "$out/$name.log" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend=$b -I"$inc" -I"$root/lib/sycl-ggml" onemkl.cpp -o "$out/$name" > "$out/$name.log" 2>&1; then
     echo "onemkl $name: FAIL (build)"; grep -v prelinker "$out/$name.log" | grep -i -A2 error | head -5; return 1
   fi
   res=$(timeout 300 "$out/$name" 2>&1) || rc=$?

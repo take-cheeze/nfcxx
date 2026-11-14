@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl getrows.cpp (ggml/src/ggml-sycl/getrows.cpp, unchanged), compiled as a TU of get_rows_op.cpp through
-# scripts/sycl-build.sh for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
+# scripts/sycl-build.rb for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
 # the Intel XPU: the public ggml_sycl_op_get_rows for F32 and F16 tables with I32 indices, on shapes 64x5x2 (7 indices) and
 # 128x9x2 (13 indices), every output element compared bit-exactly against the table, 64 guard slots past the output. A mutant
 # (a sed copy of the real getrows.cpp in which the float copy reads the element before the one it writes) must produce wrong
@@ -42,7 +42,7 @@ fail=0 notrun=0
 # 3 FAIL (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/get_rows_op/get_rows_op.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

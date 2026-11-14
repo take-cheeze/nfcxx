@@ -1,6 +1,6 @@
 # Path B: IR-to-IR passes shared by the back ends (docs/notes/pathb-ir-passes.md). Reads the IR text of
 # scripts/pathb-dump --ir and writes the same IR with the passes applied; every back end that reads that text can run
-# them, and the device pass of scripts/sycl-build.sh does so when NFCXX_IR_OPT=inline is set.
+# them, and the device pass of scripts/sycl-build.rb does so when NFCXX_IR_OPT=inline is set.
 #
 # Usage: ruby scripts/pathb-ir-opt.rb [--inline] [--max-depth=N] [--report] [FILE.ir | -] > out.ir
 #

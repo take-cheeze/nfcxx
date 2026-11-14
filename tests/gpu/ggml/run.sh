@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The llama.cpp testbed rung 1 (docs/notes/ggml-sycl.md): ggml-sycl's F32 fill op (fill_kernel.cpp, the kernel and its
-# nd_range launch copied from ggml/src/ggml-sycl/fill.cpp) built with scripts/sycl-build.sh for OpenCL and Level Zero, run
+# nd_range launch copied from ggml/src/ggml-sycl/fill.cpp) built with scripts/sycl-build.rb for OpenCL and Level Zero, run
 # on the Intel XPU over 2069793 elements, with 64 guard slots past the end. A mutant (fill value + 1) must fail. Needs the
 # OpenCL headers (OPENCL_INCLUDE), spirv-val on PATH and the Intel GPU runtime; skips (exit 0) when one is missing, and a
 # backend whose runtime reports no device (exit 70) is skipped.
@@ -20,7 +20,7 @@ fail=0
 # run BACKEND SOURCE NAME: builds and runs one variant; prints the verdict.
 run() {
   local b=$1 src=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" "$src" -o "$out/$name" > "$out/$name.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" "$src" -o "$out/$name" > "$out/$name.build" 2>&1; then
     echo "fill $b $name: FAIL (build)"; grep -v prelinker "$out/$name.build" | head -3; return 1
   fi
   local res rc

@@ -1,0 +1,12 @@
+ | a.c b.c
+ |
+ | -o rep.txt a.c
+NFCC_MEASURE_FLAGS=-Iinc\x20-DX | a.c
+STUB_RC_NFCC=1 | a.c
+STUB_RC_NFCC=1 STUB_OUT_NFCC=SSA\x20route:\x20not\x20emitted:\x20\x22foo\x22\x20at\x20line\x2012\x20in\x20/src/dir/a.c\nerror:\x20x | a.c b.c
+STUB_RC_NFCC=2 STUB_OUT_NFCC=warning:\x20one\nfatal\x20\x27x\x27\x20in\x20a.c\x20line\x203 | a.c
+STUB_RC_NFCC=2 | a.c
+STUB_LOGTEXT_NFCC=gcc\x20a.c:\x20cc1\x20failed\ngcc\x20b.c:\x20cc1\x20fail\x2012 | a.c
+STUB_RC_NFCC=1 STUB_OUT_NFCC=error:\x20aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | a.c
+STUB_RC_NFCC=1 STUB_OUT_NFCC=error:\x20x\x20y | a.c b.c
+ | -o

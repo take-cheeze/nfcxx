@@ -14,7 +14,7 @@ State as of the PRs named below (#976, #977, #980-#983, #989, #992 and the QBE `
 - The workarounds that exist only for cproc: `scripts/quickjs-cproc.patch`, `scripts/lua-cxx-novolatile.patch`,
   `scripts/mruby-cxx-novolatile.patch` (all three and the cproc lines of `scripts/setup-poly*.sh` are gone: `tests/poly` runs on Path B
   and gcc), and the cproc-specific lines of `setup-sqlite.sh`,
-  `setup-mruby.sh`, `mruby-rt-config.rb`, `mruby-tool-config.rb`, `mrustc-nfcc.sh`, `ggml-sycl-lib.sh`, `selfhost-cpfe.sh`.
+  `setup-mruby.sh`, `mruby-rt-config.rb`, `mruby-tool-config.rb`, `mrustc-nfcc.sh`, `ggml-sycl-lib.rb`, `selfhost-cpfe.rb`.
 - The `qbe` backend itself (`--backend=qbe`, `NFCXX_BACKEND=qbe`, `nfcc`'s `qbe` backend) and `docs/notes/cproc-nfcxx.md`.
 - Tests that are about cproc: `tests/mruby/qbe-prep*.sh` and their taps, the `MACOS-XFAIL-qbe` markers of `tests/c`.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl top-k radix kernel (ggml/src/ggml-sycl/topk-radix.cpp, ggml_sycl_top_k_radix, unchanged), compiled as a
-# TU of top_k_real.cpp through scripts/sycl-build.sh for OpenCL, linked against libggml-sycl.so and libggml-base.so from the
+# TU of top_k_real.cpp through scripts/sycl-build.rb for OpenCL, linked against libggml-sycl.so and libggml-base.so from the
 # llama.cpp build, and run on the Intel XPU (F32, two shapes, k < row length in both; see top_k_real.cpp for the shapes, the
 # oracle and the checks). A mutant (a sed copy of topk-radix.cpp in which every emitted index is off by one) must be caught:
 # only a run that completes with wrong results on every check counts as caught.
@@ -44,7 +44,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$here/top_k_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

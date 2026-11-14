@@ -116,8 +116,8 @@ objects).
 `-rdynamic` reaches the executable link (the driver's `ldopts`): without it the program's global symbols are not in `.dynsym`, and a
 `dlopen`ed module cannot bind to them (`Vec3::len2` in the eval host).
 
-## Measuring: `scripts/nfcc-pathb-measure.sh`
+## Measuring: `scripts/nfcc-pathb-measure.rb`
 
-`scripts/nfcc-pathb-measure.sh [-o REPORT] FILE.c...` compiles each file with `nfcc -c` on `pathb` and prints the number
+`scripts/nfcc-pathb-measure.rb [-o REPORT] FILE.c...` compiles each file with `nfcc -c` on `pathb` and prints the number
 built and the refusals grouped by reason (the SSA route's line or the front end's error, with paths, quoted names and
 numbers removed). The result is in docs/notes/linux-kernel.md.

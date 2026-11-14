@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl rope.cpp (ggml/src/ggml-sycl/rope.cpp, unchanged), compiled as a TU of rope_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real ggml_sycl_rope in norm mode (not NEOX, mrope or vision), F32 and F16 inputs with
 # the same F32 or F16 output, on shapes 64x4x2x1 and 128x7x3x2 (ne0 is the head dimension), with the full head dimension
 # and the first half rotated, every element checked against a double-precision rotary embedding at 1e-4 (F32) or 2e-3 (F16)
@@ -45,7 +45,7 @@ fail=0 notrun=0
 # 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/rope/rope_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

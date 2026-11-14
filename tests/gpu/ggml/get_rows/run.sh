@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl getrows.cpp (ggml/src/ggml-sycl/getrows.cpp, unchanged), compiled as a TU of get_rows_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real get_rows_sycl_float launcher for F32 and F16 tables only (the public
 # ggml_sycl_op_get_rows dispatch is blocked by its quantized launchers; see get_rows_real.cpp), I32 indices, on shapes 64x5x2 (7
 # indices) and 128x9x2 (13 indices), every output element compared bit-exactly against the table, 64 guard slots past the
@@ -52,7 +52,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/get_rows/get_rows_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

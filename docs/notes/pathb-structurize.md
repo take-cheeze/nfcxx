@@ -42,7 +42,7 @@ kernels) keep working. Phi copies on an edge are two-phase when there is more th
 
 - `tests/pathb-ssa-structurize/run.sh`: the switch golden converts and parses as IR, and the vecadd program validates through
   the chain (where the nfcxx build and a Vulkan device are present).
-- `scripts/sycl-build.sh` runs the chain when `NFCXX_CFG=structurize` is set, after `NFCXX_IR_OPT`.
+- `scripts/sycl-build.rb` runs the chain when `NFCXX_CFG=structurize` is set, after `NFCXX_IR_OPT`.
 
 - `NFCXX_SSA_OPT=egraph` runs the e-graph pass (docs/notes/pathb-egraph.md) on the SSA before the structurizer. On the
   vecadd module it removes about 10% of the lets (16348 to 14767) and folds 30 branches. It doesn't change the vecadd kernel's

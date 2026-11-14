@@ -2,7 +2,7 @@
 # The llama.cpp testbed for ggml-sycl's unary element-wise ops (ggml/src/ggml-sycl/element_wise.cpp): neg, relu, silu and gelu,
 # F32, each over the flat (contiguous) and the strided path, on two shapes (128x2x2x2 and 5x7x11x13), with 64 guard slots
 # past the output. unary_kernel.cpp holds the op kernels and their launch code copied from element_wise.cpp, built with
-# scripts/sycl-build.sh for OpenCL and Level Zero, run on the Intel XPU, and every element checked against a double-precision
+# scripts/sycl-build.rb for OpenCL and Level Zero, run on the Intel XPU, and every element checked against a double-precision
 # host reference. A mutant (relu uses min instead of max) must fail. Needs the OpenCL headers (OPENCL_INCLUDE), spirv-val on
 # PATH and the Intel GPU runtime; skips (exit 0) when one is missing, and a backend whose runtime reports no device (exit 70)
 # is skipped.
@@ -23,7 +23,7 @@ checks=16
 # run BACKEND SOURCE NAME: builds and runs one variant; prints the verdict.
 run() {
   local b=$1 src=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" "$src" -o "$out/$name" > "$out/$name.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" "$src" -o "$out/$name" > "$out/$name.build" 2>&1; then
     echo "unary $b $name: FAIL (build)"; grep -v prelinker "$out/$name.build" | head -3; return 1
   fi
   local res rc n_ok

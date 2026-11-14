@@ -1,2 +1,2 @@
-// libgreet.so for tests/sycl/linkflags: the host program links it through the -L/-l/-rpath flags of sycl-build.sh
+// libgreet.so for tests/sycl/linkflags: the host program links it through the -L/-l/-rpath flags of sycl-build.rb
 extern "C" int greet(void) { return 42; }

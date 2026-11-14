@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl pad.cpp (ggml/src/ggml-sycl/pad.cpp, unchanged), compiled as a TU of pad_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU (GGML_OP_PAD, F32) for the test_pad and test_pad_ext shapes below, one with strided source
 # rows, with 64 guard slots past the end of the output. A mutant (the padding writes 1 instead of 0; a sed copy of the real
 # file) must fail on every shape. The link uses a version script that makes every symbol of the test executable local (see pad_real.cpp).
@@ -41,7 +41,7 @@ fail=0; notrun=0
 # every shape passes, 2 when the runtime reports no device, 1 otherwise.
 run() {
   local b=$1 srcdir=$2 name=$3 s res rc ok=0
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/pad_real/pad_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

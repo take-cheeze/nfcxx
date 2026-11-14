@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # contract.cpp (a*b - c*d and a*b + c on a million operand sets, every result compared bit for bit with the host's two-rounding
-# values) built with scripts/sycl-build.sh for OpenCL and Level Zero and run on the Intel XPU. Checks the SPIR-V emitter's
+# values) built with scripts/sycl-build.rb for OpenCL and Level Zero and run on the Intel XPU. Checks the SPIR-V emitter's
 # ContractionOff on the kernel: without it the device fuses some products into fused multiply-adds, and the run reports
 # mismatches. Needs spirv-val, the OpenCL headers (OPENCL_INCLUDE) and libOpenCL.so.1; skips (exit 0) when one is missing,
 # and a backend whose runtime reports no device (exit 70) is skipped.
@@ -20,7 +20,7 @@ fail=0
 # run BACKEND: builds contract.cpp for the backend and runs it; prints the verdict.
 run() {
   local b=$1
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" contract.cpp -o "$out/$b" > "$out/$b.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" contract.cpp -o "$out/$b" > "$out/$b.build" 2>&1; then
     echo "contract $b: FAIL (build)"; grep -v prelinker "$out/$b.build" | head -3; return 1
   fi
   local res rc

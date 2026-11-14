@@ -1,0 +1,8 @@
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin STUB_TOUCH_SYCL_BUILD_SH=1 STUB_TOUCH_SYCL_BUILD_RB=1 | -j 1 out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin STUB_TOUCH_SYCL_BUILD_SH=1 STUB_TOUCH_SYCL_BUILD_RB=1 | -j 1 --backend=opencl @SB@/out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin STUB_RC_SYCL_BUILD_SH=1 STUB_RC_SYCL_BUILD_RB=1 STUB_OUT_SYCL_BUILD_SH=error:\x20boom\nmore\x20text\nlast\nlast2 STUB_OUT_SYCL_BUILD_RB=error:\x20boom\nmore\x20text\nlast\nlast2 | -j 1 out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin STUB_TOUCH_SYCL_BUILD_SH=1 STUB_TOUCH_SYCL_BUILD_RB=1 STUB_RC_NFCXX=1 STUB_OUT_NFCXX=prelinker:\x20x\nundefined\x20symbol\x20y | -j 1 out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin | -j 1 --backend=cuda out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin | -j
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin | -x out
+GGML_SRC=@SB@/ggml/src/ggml-sycl GGML_BUILD=@SB@/ggmlbin |

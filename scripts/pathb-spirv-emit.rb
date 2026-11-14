@@ -6,7 +6,7 @@
 # Usage: scripts/mrb scripts/pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv
 #   --kernel-cl     the OpenCL (Kernel) module instead of the Vulkan one
 #   --no-div-trap   a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping
-#   --no-checks     the IR's null-pointer and bounds checks, (nonnull P) and (bounds I N), emit nothing (sycl-build.sh --ndebug)
+#   --no-checks     the IR's null-pointer and bounds checks, (nonnull P) and (bounds I N), emit nothing (sycl-build.rb --ndebug)
 #
 # Exit status: 0 the module was written (binary, to stdout); 3 refused (reason on stderr); 1 malformed IR.
 #

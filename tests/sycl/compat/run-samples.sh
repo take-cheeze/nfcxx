@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile and run real SYCL programs through lib/sycl: the host path (g++) and the WebGPU path (scripts/sycl-build.sh with nfcxx).
+# Compile and run real SYCL programs through lib/sycl: the host path (g++) and the WebGPU path (scripts/sycl-build.rb with nfcxx).
 #   tests/sycl/compat/run-samples.sh DIR LIST OUTDIR
 # DIR is a source tree (untrusted: read the programs before running them), LIST a file of paths relative to DIR (for
 # example the "ok" rows of the sweep.sh results.tsv), each optionally followed by the program's arguments. Writes
@@ -21,7 +21,7 @@ while read -r rel args; do
   # host path
   if [ "${SKIP_HOST:-0}" = 1 ]; then
     h_status=skipped
-  elif "$root/scripts/sycl-build.sh" --cpu $(inc "$d") "$f" -o "$out/$n.host" > "$out/$n.host.log" 2>&1; then
+  elif "$root/scripts/sycl-build.rb" --cpu $(inc "$d") "$f" -o "$out/$n.host" > "$out/$n.host.log" 2>&1; then
     (cd "$out" && timeout "$tmo" "./$n.host" $args < /dev/null > "$n.host.out" 2>&1); rc=$?
     if [ $rc = 124 ]; then h_status=timeout; elif [ $rc = 0 ]; then h_status=ok; else h_status="fail($rc)"; fi
     h_out=$(head -c 300 "$out/$n.host.out" | tr '\n\t' '  ')
@@ -30,7 +30,7 @@ while read -r rel args; do
   fi
   # WebGPU path
   rc=0
-  "$root/scripts/sycl-build.sh" --backend="${SAMPLE_BACKEND:-webgpu}" --cxx="$root/nfcxx" $(inc "$d") "$f" -o "$out/$n.gpu" > "$out/$n.gpu.log" 2>&1 || rc=$?
+  "$root/scripts/sycl-build.rb" --backend="${SAMPLE_BACKEND:-webgpu}" --cxx="$root/nfcxx" $(inc "$d") "$f" -o "$out/$n.gpu" > "$out/$n.gpu.log" 2>&1 || rc=$?
   if [ $rc = 0 ]; then
     (cd "$out" && timeout "$tmo" "./$n.gpu" $args < /dev/null > "$n.gpu.out" 2> "$n.gpu.err"); rc=$?
     if [ $rc = 124 ]; then w_status=timeout; elif [ $rc = 0 ]; then w_status=ok; else w_status="fail($rc)"; fi

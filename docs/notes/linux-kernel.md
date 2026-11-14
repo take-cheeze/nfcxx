@@ -148,7 +148,7 @@ Each option of the kernel's command line is in one of three classes:
 | changes meaning, no Path B equivalent | `-m32`, `-mregparm=3` without `-m16`, `-ftrivial-auto-var-init=pattern`, `-fshort-enums`, `-iquote`, `-imacros`, `-Wa,*` options other than the ones passed on (below), `-mindirect-branch=thunk*`, `-mfunction-return=thunk*`, `-mharden-sls=`(not `none`), `-mstack-protector-guard*` with a stack protector in effect, any `-f`/`-m` option nfcc does not know | **the compile is gcc's**, with every `-f`/`-m` option given in command-line order; never dropped |
 
 `NFCXX_PATHB_LOG=FILE` records `pathb SRC` or `gcc SRC: reason` per compile, the migration's to-do list as `NFCXX_QBE_LOG` is
-for qbe-try. `scripts/nfcc-pathb-measure.sh` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
+for qbe-try. `scripts/nfcc-pathb-measure.rb` counts the gcc compiles apart from the built ones. `tests/nfcc/run.sh` covers
 each option (include path, the signedness and `CHAR_MIN`, `wchar_t`, `__STDC_HOSTED__`, `.cfi`, the `-mno-sse` check, each
 gcc fallback, against gcc's own result).
 
@@ -239,7 +239,7 @@ boot code (`arch/x86/boot`, `-m16`) is Path B's now: next section.
 
 `scripts/pathb-cc --i386 --regparm=3 --m16` (docs/notes/nfcc-pathb.md, "The 32-bit x86 target") builds it; nfcc gives a compile with
 `-m16` to it instead of to gcc. Method: Linux 6.8, tinyconfig, the compile command of the kernel's `REALMODE_CFLAGS` (arch/x86/Makefile) and
-`-D_SETUP`, the include path of `LINUXINCLUDE`, replayed with `scripts/nfcc-pathb-measure.sh` (`NFCC_MEASURE_FLAGS`) on the C files of
+`-D_SETUP`, the include path of `LINUXINCLUDE`, replayed with `scripts/nfcc-pathb-measure.rb` (`NFCC_MEASURE_FLAGS`) on the C files of
 `arch/x86/boot` (21: `apm.c` is compiled although tinyconfig does not build it; `mkcpustr.c` is a host program) and of
 `arch/x86/realmode/rm` (6, built only with `CONFIG_ACPI_SLEEP`: not in this configuration):
 
@@ -270,7 +270,7 @@ QBE keeps a frame pointer in every function and has no size mode; the helpers of
 
 What was measured instead, as the task allows: the C files of `tests/c` (69 files; they cover the GNU C the kernel
 uses: statement expressions, `asm`, `asm goto`, `cleanup`, packed/aligned layouts, `case` ranges, `_Float16`) with
-`scripts/nfcc-pathb-measure.sh tests/c/*.c`. `tests/realworld` holds no C sources of its own (its Lua and
+`scripts/nfcc-pathb-measure.rb tests/c/*.c`. `tests/realworld` holds no C sources of its own (its Lua and
 mruby sources are downloaded by the run scripts), so nothing there was measured.
 
 **52 of 69 build; 17 are refused** (exactly the 17 `XFAIL-pathb` files of `tests/c/run.sh`):

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The SPIR-V emitter of the SYCL path, as scripts/sycl-build.sh and tests/gpu/ggml/sweep.sh run it:
+# The SPIR-V emitter of the SYCL path, as scripts/sycl-build.rb and tests/gpu/ggml/sweep.sh run it:
 #   scripts/spirv-emit [--kernel-cl] --manifest=FILE FILE.ir > out.spv
 # NFCXX_SPIRV_EMITTER picks the implementation (default: cxx when ninja is installed, else ruby):
 #   cxx             build/pathb-spirv-emit, the C++ port (tools/pathb-spirv-emit; built here with ninja when missing or

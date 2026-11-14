@@ -42,7 +42,7 @@ F32 path needs only `nd_range<1>`, `nd_item<1>`, `get_global_id(0)` and `paralle
 Measured with the reference flags (`icpx ... -E -H`): the closure is **762 unique headers** (3365 include lines), expanding to
 **612,722 preprocessed lines**. By origin: 307 under oneAPI's `compiler/include`, 77 under `mkl`, 210 libstdc++, 10 ggml, 3 Level Zero.
 
-`fill_real` (`tests/gpu/ggml/fill_real/`) compiles the real `fill.cpp` as its own TU, unchanged, through `scripts/sycl-build.sh`
+`fill_real` (`tests/gpu/ggml/fill_real/`) compiles the real `fill.cpp` as its own TU, unchanged, through `scripts/sycl-build.rb`
 and links it against the real `libggml-sycl.so` and `libggml-base.so` from the llama.cpp build. It runs on the Arc B60 over
 2,069,793 elements with 64 guard slots. The test has three shims in place of the full closure, all in `lib/sycl-ggml/`:
 `sycl/half_type.hpp` (a minimal `sycl::half`), `oneapi/mkl.hpp` (declarations of the oneMKL BLAS names `dpct` calls; not
@@ -143,7 +143,7 @@ under `/opt/intel/oneapi`), `OPENCL_INCLUDE` (set by `oneapi-env.sh`). `tests/gp
 
 ## 8. Environment
 
-- The oneAPI runtime comes from `scripts/oneapi-env.sh`, which `sycl-build.sh` and the SYCL tests source. It computes the
+- The oneAPI runtime comes from `scripts/oneapi-env.sh`, which `sycl-build.rb` and the SYCL tests source. It computes the
   variables itself and does not source `setvars.sh`.
 - SPIR-V tools: `SPIRV_TOOLS_BIN` or `PATH` (nixpkgs `spirv-tools`).
 - Device: the name is printed by the test (`Intel(R) Arc(TM) Pro B60 Graphics`), read from the device, not hard-coded.

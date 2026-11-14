@@ -1,0 +1,6 @@
+# NFCXX_MACOS_SYSROOT unset or empty: exit 1, nothing run
+ | -c a.c -o a.o
+NFCXX_MACOS_SYSROOT= | -c a.c -o a.o
+NFCXX_MACOS_SYSROOT=/sys | -c a.c -o a.o
+NFCXX_MACOS_SYSROOT=/sys | -fwrapv -fno-strict-aliasing -fkeep-static-functions -fgnu89-inline -O2 -c a.c -o a.o
+NFCXX_MACOS_SYSROOT=/sys | -Wall -fPIC -DX=1 -I"inc dir" -fwrapv a.c

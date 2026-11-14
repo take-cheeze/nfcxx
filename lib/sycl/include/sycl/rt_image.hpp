@@ -1,5 +1,5 @@
 // The device images of a process for the OpenCL and Level Zero runtimes (rt_opencl.hpp, rt_level_zero.hpp). Each TU built by
-// scripts/sycl-build.sh has its own image: PREFIX.cl.spv (the SPIR-V of its kernels) and PREFIX.man (the manifest of
+// scripts/sycl-build.rb has its own image: PREFIX.cl.spv (the SPIR-V of its kernels) and PREFIX.man (the manifest of
 // scripts/pathb-spirv-emit.rb: the kernels by closure type, the stack size, the sub-group size, the statics and their
 // relocations). The TU registers its prefix (NFCXX_SYCL_IMAGE_PREFIX, baked in by the build) from a static initializer at
 // the end of sycl.hpp, so a program linked from several TUs, or a shared library of them, carries every image.
@@ -80,7 +80,7 @@ class image_set {
     } else {
       want = image_registry();
     }
-    if (want.empty()) fail("no device image: the program was not built by scripts/sycl-build.sh (or set NFCXX_SYCL_IMAGE)");
+    if (want.empty()) fail("no device image: the program was not built by scripts/sycl-build.rb (or set NFCXX_SYCL_IMAGE)");
     bool added = false;
     for (; seen_ < want.size(); seen_++) {
       const std::string &prefix = want[seen_];

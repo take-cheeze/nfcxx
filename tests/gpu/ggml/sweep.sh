@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The device pass of every ggml-sycl source (GGML_SRC/*.cpp, unchanged), as scripts/sycl-build.sh --backend=opencl runs it:
+# The device pass of every ggml-sycl source (GGML_SRC/*.cpp, unchanged), as scripts/sycl-build.rb --backend=opencl runs it:
 # the Path B front end (scripts/pathb-dump --ir), the Kernel-capability SPIR-V emitter (pathb-spirv-emit.rb --kernel-cl) and
 # spirv-val. Nothing is linked or run; the sweep says which TUs of the backend the front end and the emitter accept.
 # The macros are the reference build's (compile_commands.json of build-sycl) without GGML_SYCL_SUPPORT_LEVEL_ZERO_API (the

@@ -1,7 +1,7 @@
 // The SPIR-V emitter's release-build lowerings (scripts/pathb-spirv-emit.rb, tools/pathb-spirv-emit), each checked for its
 // results here and for its module shape by run.sh:
 //   - divisions and remainders by constants (no zero or overflow guard), shifts by constants (no count check);
-//   - a bounds-checked local array and pointer dereferences (the checks that --no-checks, sycl-build.sh --ndebug, drops);
+//   - a bounds-checked local array and pointer dereferences (the checks that --no-checks, sycl-build.rb --ndebug, drops);
 //   - a call that survives inlining (a struct parameter) of a function that cannot trap: no dead-flag test after it;
 //   - dpct::dp4a(int, int, int) as ggml-sycl's dpct/helper.hpp spells it (a template over sycl::vec), which the
 //     lib/sycl-ggml overload turns into the intrinsic __nfcxx_sycl_dp4a (OpSDot in the OpenCL module).

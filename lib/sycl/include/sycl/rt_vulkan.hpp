@@ -248,7 +248,7 @@ class vk_rt {
 #ifdef NFCXX_SYCL_IMAGE_PREFIX
     if (!prefix) prefix = NFCXX_SYCL_IMAGE_PREFIX;
 #endif
-    if (!prefix) fail("set NFCXX_SYCL_IMAGE (see scripts/sycl-build.sh)");
+    if (!prefix) fail("set NFCXX_SYCL_IMAGE (see scripts/sycl-build.rb)");
     read_manifest(std::string(prefix) + ".man");
     init_device(std::string(prefix) + ".spv");
   }

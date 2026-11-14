@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The ggml-sycl SUM_ROWS op (ggml_sycl_op_sum_rows, upstream ggml/src/ggml-sycl/ggml-sycl.cpp): sum_rows_real.cpp builds it as
-# its own TU through scripts/sycl-build.sh for OpenCL, links libggml-sycl.so and libggml-base.so from the llama.cpp build, and
+# its own TU through scripts/sycl-build.rb for OpenCL, links libggml-sycl.so and libggml-base.so from the llama.cpp build, and
 # runs it on the Intel XPU for three contiguous F32 shapes with 64 guard slots past the output. The upstream definitions are
 # static or inline inside ggml-sycl.cpp (too large to compile as a TU), so sum_rows_upstream.cpp carries their text verbatim:
 # this script first checks that copy against the upstream file. A mutant (a sed copy of sum_rows_upstream.cpp in which each
@@ -49,7 +49,7 @@ fail=0 notrun=0
 # failed or the run exited nonzero), 2 SKIP (no device), 3 FAIL (build). The run's output is kept in $out/NAME.res.
 run() {
   local srcdir=$1 name=$2 res rc
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$here/sum_rows_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

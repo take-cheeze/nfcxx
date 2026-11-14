@@ -6,8 +6,8 @@ native code built by nfcxx. `tests/sycl/run.sh` is the regression suite; `tests/
 code the library accepts.
 
 ```
-scripts/sycl-build.sh prog.cpp -o prog        # WebGPU: device pass -> WGSL, host side with nfcxx (or $CXX, --cxx=)
-scripts/sycl-build.sh --cpu prog.cpp -o prog  # host path only: kernels are C++ loops, any C++17 compiler
+scripts/sycl-build.rb prog.cpp -o prog        # WebGPU: device pass -> WGSL, host side with nfcxx (or $CXX, --cxx=)
+scripts/sycl-build.rb --cpu prog.cpp -o prog  # host path only: kernels are C++ loops, any C++17 compiler
 ./prog                                        # starts tests/sycl/server.cjs (node + Chromium) when a kernel launches
 ```
 
@@ -41,7 +41,7 @@ prog.cpp --nfcxx (or g++) -DNFCXX_SYCL_WEBGPU-------> prog        (finds prog.wg
   returns with g++ and with this front end; clang mangles lambdas differently and is not supported as the host compiler).
   The host sends the key with every dispatch, and the server refuses a closure whose size differs from the device pass's
   (the two compilers laid the lambda out differently): this caught a real g++/EDG difference (g++ captured a `const int` the
-  other folded). `scripts/sycl-build.sh` therefore builds the host side with nfcxx when it is built; g++ works when the layouts
+  other folded). `scripts/sycl-build.rb` therefore builds the host side with nfcxx when it is built; g++ works when the layouts
   agree, which the server checks by size only.
 - **Launch.** The host copies the closure object's bytes into a 4096-byte uniform buffer and sets the dispatch size; the
   kernel gets the global range from another uniform and the local size from pipeline constants (`WGX/WGY/WGZ`), so one WGSL

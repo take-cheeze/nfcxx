@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl diag.cpp (ggml/src/ggml-sycl/diag.cpp, unchanged), compiled as a TU of diag_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU for three shapes (source {ne0, 1, ne2, ne3}, output {ne0, ne0, ne2, ne3}) with 64 guard
 # slots past the end of the output. A mutant (off-diagonal = src + 1; a sed copy of the real file) must fail on every
 # shape. The link uses a version script that makes every symbol of the test executable local (see diag_real.cpp).
@@ -38,7 +38,7 @@ fail=0; notrun=0
 # every shape passes, 2 when the runtime reports no device, 1 otherwise.
 run() {
   local b=$1 srcdir=$2 name=$3 s res rc ok=0
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/diag_real/diag_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

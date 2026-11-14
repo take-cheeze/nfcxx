@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Link flags for the host pass of scripts/sycl-build.sh (-L, -l, -Wl,..., -rpath dir). The test builds libgreet.so
+# Link flags for the host pass of scripts/sycl-build.rb (-L, -l, -Wl,..., -rpath dir). The test builds libgreet.so
 # (greet.cpp, int greet(void) returns 42) into a temporary lib directory, then:
 #   host       prog.cpp calls greet and prints "linked ok" when it gets 42; built with --cpu and -L/-l/-Wl,-rpath
 #              (and, in a second build, with -rpath dir); the device pass never sees these flags.
@@ -20,13 +20,13 @@ if ! g++ -shared -fPIC -o "$lib/libgreet.so" greet.cpp > "$out/greet.log" 2>&1 |
 fi
 
 # ---- host: -L, -l and -Wl,-rpath, then the same with -rpath dir (the driver's own spelling of the same option)
-if "$root/scripts/sycl-build.sh" --cpu -L"$lib" -lgreet -Wl,-rpath,"$lib" prog.cpp -o "$out/prog" > "$out/prog.log" 2>&1 \
+if "$root/scripts/sycl-build.rb" --cpu -L"$lib" -lgreet -Wl,-rpath,"$lib" prog.cpp -o "$out/prog" > "$out/prog.log" 2>&1 \
    && [ "$("$out/prog" | tail -1)" = "linked ok" ]; then
   echo "linkflags  host -Wl,-rpath: ok"
 else
   echo "linkflags  host -Wl,-rpath: FAIL"; tail -3 "$out/prog.log"; fail=1
 fi
-if "$root/scripts/sycl-build.sh" --cpu -L "$lib" -l greet -rpath "$lib" prog.cpp -o "$out/prog2" > "$out/prog2.log" 2>&1 \
+if "$root/scripts/sycl-build.rb" --cpu -L "$lib" -l greet -rpath "$lib" prog.cpp -o "$out/prog2" > "$out/prog2.log" 2>&1 \
    && [ "$("$out/prog2" | tail -1)" = "linked ok" ]; then
   echo "linkflags  host -rpath: ok"
 else
@@ -36,7 +36,7 @@ fi
 # ---- opencl: the device pass must ignore the link flags (a -l or -L in it fails the device compile)
 cl_inc=${OPENCL_INCLUDE:-}
 if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then
-  if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl -L"$lib" -lgreet -Wl,-rpath,"$lib" ../vecadd.cpp -o "$out/cl_vecadd" > "$out/cl.log" 2>&1; then
+  if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.rb" --backend=opencl -L"$lib" -lgreet -Wl,-rpath,"$lib" ../vecadd.cpp -o "$out/cl_vecadd" > "$out/cl.log" 2>&1; then
     "$out/cl_vecadd" > "$out/cl.out" 2> "$out/cl.err"; rc=$?
     if [ $rc = 70 ] && grep -q "OpenCL runtime" "$out/cl.err"; then
       echo "SKIP: linkflags opencl: no usable OpenCL device ($(head -c 120 "$out/cl.err"))"

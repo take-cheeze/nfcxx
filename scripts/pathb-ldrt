@@ -5,7 +5,7 @@
 # PATHB_LDRT_OUT: build somewhere else (default build/pathb-ldrt).
 # NFCXX_LDRT_X86=1: the x86-64 variant of the checked float-to-integer conversions (saturating, as gcc on x86-64, instead of
 # the abort), built into build/pathb-ldrt-x86 unless PATHB_LDRT_OUT is set. Only the stage-2 front end links it
-# (scripts/selfhost-cpfe.sh); user programs keep the trap.
+# (scripts/selfhost-cpfe.rb); user programs keep the trap.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt}
