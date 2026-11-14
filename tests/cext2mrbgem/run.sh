@@ -808,6 +808,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_funcall tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF 'mrb_value a = mrb_funcall_argv(mrb, v, mrb_intern_cstr(mrb, "to_i"), 0, NULL);' "$work/api_funcall/src/api_funcall.c"
 check grep -qF 'mrb_intern_cstr(mrb, "*"), 1, (mrb_value[]){mrb_fixnum_value(-1)});' "$work/api_funcall/src/api_funcall.c"
+
+# 2zzz3. rb_raise with "%"PRIsVALUE: the token becomes "S" (mruby's %S: a VALUE printed with to_s), and the output compiles
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_raise_pv tools/cext2mrbgem/fixtures/api_raise_pv/ext/api_raise_pv "$work/api_raise_pv" > "$work/api_raise_pv.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_raisef(mrb, E_ARGUMENT_ERROR, "bad value %""S"" here", v);' "$work/api_raise_pv/src/api_raise_pv.c"
 check grep -qF 'mrb_gc_protect(mrb, box.value);' "$work/api_funcall/src/api_funcall.c"
 # 2zzz. a registered method whose return type is VP_EXPORT VALUE, where #define VP_EXPORT static is storage: a registered method
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?

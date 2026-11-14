@@ -2912,8 +2912,20 @@ end
       end
       fmt = psl(text, args[1][0], args[1][1])
       if fmt.include?('PRIsVALUE')
-        refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported')
-        return
+        # CRuby's "%"PRIsVALUE takes a VALUE and prints its to_s: mruby's %S does the same with an mrb_value. The token
+        # becomes "S" (adjacent literals concatenate). A '+' flag (inspect) is not mapped.
+        bad = false
+        fmt.to_enum(:scan, /PRIsVALUE/).each do
+          pm = Regexp.last_match
+          prefix = fmt[[pm.begin(0) - 6, 0].max...pm.begin(0)]
+          bad = true unless prefix.match?(/%"\s*\z/)
+          tok = args[1][0] + pm.begin(0)
+          ed.add(tok, tok + 'PRIsVALUE'.length, '"S"') unless bad
+        end
+        if bad
+          refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE)')
+          return
+        end
       end
       ed.add(s, e, 'mrb_raisef')
       ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
