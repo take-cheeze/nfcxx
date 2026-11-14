@@ -516,6 +516,13 @@ check test ! -e "$work/api_type_alloc/NOT_BUILDABLE"
 check grep -qF 'return mrb_type(v) == MRB_TT_STRING ? mrb_true_value() : mrb_false_value();' "$work/api_type_alloc/src/api_type_alloc.c"
 check grep -qF 'return mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_OBJECT, mrb_class_ptr(klass)));' "$work/api_type_alloc/src/api_type_alloc.c"
 
+# 2zzd. a static (not inline) helper in a header is converted with mrb, like a static inline one: it is local to each includer
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_static tools/cext2mrbgem/fixtures/api_header_static/ext/api_header_static "$work/api_header_static" > "$work/api_header_static.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_header_static/NOT_BUILDABLE"
+check grep -qF 'static int hs_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_static/include/helper.h"
+check grep -qF 'return mrb_int_value(mrb, hs_check(mrb, v));' "$work/api_header_static/src/api_header_static.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
