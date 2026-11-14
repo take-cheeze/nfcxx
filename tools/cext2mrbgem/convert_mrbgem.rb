@@ -2872,23 +2872,32 @@ end
           return
         end
       end
-      # a one-argument template whose argument is a call or another complex expression: only the text around the argument is
-      # rewritten (the head up to the argument, and the tail after it); the argument stays, and the identifier pass converts
-      # its own names and calls (NUM2LL(rb_funcall2(...)) becomes ((long long)mrb_int(mrb, mrb_funcall_argv(...))))
-      if entry['arity'] == 1 && entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? &&
-         entry['template'].scan(/\$0(?!\d)/).size == 1 && !texts[0].match?(/\A&?[#{WC}\s.\->]+\z/)
-        a0, b0 = args[0]
-        head_t, tail_t = entry['template'].split(/\$0(?!\d)/, 2)
-        head = head_t.gsub('$m', mrb_tok(rel, s))
-        tail = tail_t.gsub('$m', mrb_tok(rel, s))
-        if ed.overlaps(s, a0) || ed.overlaps(b0, cp + 1)
-          refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+      # a template whose arguments each appear once, in order, and some argument is a call or another complex expression:
+      # only the text between the arguments is rewritten (head, the separators, and tail); the arguments stay in place and
+      # the identifier pass converts their own names and calls (NUM2LL(rb_funcall2(...)) keeps its inner call converted)
+      tmpl = entry['template']
+      order = tmpl.scan(/\$(\d+)(?!\d)/).flatten.map(&:to_i)
+      if entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? &&
+         order == (0...entry['arity']).to_a && texts.any? { |t| !t.match?(/\A&?[#{WC}\s.\->]+\z/) }
+        pieces = tmpl.split(/(\$\d+(?!\d))/)
+        # pieces alternate: literal, $k, literal, $k, ... ; the literal text has $m replaced
+        literal = ->(x) { x.gsub('$m', mrb_tok(rel, s)) }
+        lits = pieces.each_slice(2).map { |lit, _| literal.call(lit.to_s) }
+        k_pos = pieces.select { |x| x.match?(/\A\$\d+\z/) }
+        if k_pos.size == args.size
+          if ed.overlaps(s, args[0][0]) || ed.overlaps(args[-1][1], cp + 1) ||
+             args.each_cons(2).any? { |(_, b1), (a2, _)| ed.overlaps(b1, a2) }
+            refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+            return
+          end
+          ed.add(s, args[0][0], lits[0])
+          args.each_cons(2).with_index do |((_, b1), (a2, _)), i|
+            ed.add(b1, a2, lits[i + 1])
+          end
+          ed.add(args[-1][1], cp + 1, lits[args.size])
+          rewrite(rel, s, name, tmpl.gsub(/\$\d+/, '…').gsub('$m', mrb_tok(rel, s)), entry['caveat'])
           return
         end
-        ed.add(s, a0, head)
-        ed.add(b0, cp + 1, tail)
-        rewrite(rel, s, name, "#{head}#{texts[0]}#{tail}", entry['caveat'])
-        return
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
