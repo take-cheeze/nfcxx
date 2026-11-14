@@ -1972,6 +1972,31 @@
       "handler": "ary_new3",
       "needs_mrb": true,
       "caveat": "a literal count; the values are an mrb_value array (mrb_ary_new_from_values)"
+    },
+    "rb_to_int": {
+      "kind": "call",
+      "mruby": "mrb_to_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "converts the value to an Integer (to_int), as CRuby's rb_to_int"
+    },
+    "rb_exc_new2": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_exc_new_str($m, $0, mrb_str_new_cstr($m, $1))",
+      "caveat": "a new exception of the class with the message (CRuby's rb_exc_new2); the class must be a tracked class variable"
+    },
+    "rb_yield_values2": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "requires_block": true,
+      "template": "mrb_yield_argv($m, nfcx_block, $0, $1)",
+      "caveat": "yields the argc values of argv to the block (as rb_yield_values2); valid only in a registered method (the block is fetched by its wrapper)"
     }
   },
   "special_arg_positions_class_only": {

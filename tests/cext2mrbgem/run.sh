@@ -834,6 +834,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enum_local tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'if (RUBY_TAG_LOCAL == 3)' "$work/api_enum_local/src/api_enum_local.c"
 
+# 2zzz12. a file-scope variable the input defines (rb_fs_names) is a local name, and rb_to_int converts through to_int
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_file_scope tools/cext2mrbgem/fixtures/api_file_scope/ext/api_file_scope "$work/api_file_scope" > "$work/api_file_scope.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value n = mrb_to_int(mrb, v);' "$work/api_file_scope/src/api_file_scope.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

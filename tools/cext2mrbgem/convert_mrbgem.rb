@@ -2257,6 +2257,20 @@ use_problem = lambda do |name, use|
     words.join(' ')
   end
 
+  # the file-scope variables the input defines (a line starting at column 0 with a declaration and '=' or ';'): the gem's own
+  # names, not CRuby's (rb_redcarpet_method_names is a static array of the gem)
+  def local_file_scope_names
+    @local_file_scope_names ||= begin
+      names = Set.new
+      @files.each_value do |f|
+        f['masked'].to_enum(:scan, /^(?:static|const|extern|volatile|unsigned|signed|struct|[A-Za-z_]\w*)(?:[ \t]+[A-Za-z_*][\w*]*)*[ \t\n*]+\*?[ \t]*([A-Za-z_]\w*)[ \t]*(?:\[[^\]\n]*\][ \t]*)*[=;]/).each do
+          names << Regexp.last_match[1]
+        end
+      end
+      names
+    end
+  end
+
   # the enumerators the input defines (enum { RUBY_VAL = 3, ... }): a name the gem defines is not a CRuby name, and the
   # enum stays in the output (its header is kept)
   def local_enumerators
@@ -2611,7 +2625,7 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     finditer(IDENT_RE, masked).each do |m|
       s, e = m.begin(0), m.end(0)
