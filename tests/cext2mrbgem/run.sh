@@ -796,6 +796,11 @@ check test ! -e "$work/api_value_eq/NOT_BUILDABLE"
 check grep -qF 'mrb_obj_equal(mrb, a, b)' "$work/api_value_eq/src/api_value_eq.c"
 check grep -qF 'mrb_obj_equal(mrb, veq_state.v, w)' "$work/api_value_eq/src/api_value_eq.c"
 
+# 2zzz6. FIXNUM_MAX / FIXNUM_MIN keep CRuby's values (LONG_MAX >> 1, LONG_MIN >> 1): the converted code makes CRuby's Fixnum decisions
+rc=0; "$rb" "$conv" --scanner "$scanner" --name probe_fx tools/cext2mrbgem/fixtures/api_fixnum_bound/ext/api_fixnum_bound "$work/api_fixnum_bound" > "$work/api_fixnum_bound.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (n > (LONG_MAX >> 1) || n < (LONG_MIN >> 1)) return mrb_false_value();' "$work/api_fixnum_bound/src/api_fixnum_bound.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

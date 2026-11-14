@@ -1798,6 +1798,18 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "copies the n values into a new Array, as CRuby's rb_ary_new_from_values"
+    },
+    "FIXNUM_MAX": {
+      "kind": "expr",
+      "mruby": "(LONG_MAX >> 1)",
+      "needs_mrb": false,
+      "caveat": "CRuby's FIXNUM_MAX (2^62-1 on 64-bit): the value is kept, so the converted code makes the same Fixnum/Bignum decisions; the mruby integer is wider, so a value in this range is still an mruby fixnum"
+    },
+    "FIXNUM_MIN": {
+      "kind": "expr",
+      "mruby": "(LONG_MIN >> 1)",
+      "needs_mrb": false,
+      "caveat": "CRuby's FIXNUM_MIN (-2^62 on 64-bit): the value is kept (see FIXNUM_MAX)"
     }
   },
   "special_arg_positions_class_only": {
