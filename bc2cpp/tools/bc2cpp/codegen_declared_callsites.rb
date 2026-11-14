@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require 'delegate'
 require_relative 'codegen_return_classes'
 
 # CodeGen: DECLARED_CALLSITE_CONTRADICTION (TC1018).
@@ -57,13 +56,18 @@ class CodeGen
   # The argument pool flow's oracle with one refinement for this report: a Float or Integer pool literal is that class
   # (NumericOracle#pool_mask). The pools' own oracle leaves literals OTHER, which is right for a pool but would hide
   # `count(1.5)` here.
-  class CallsiteOracle < SimpleDelegator
+  # A plain forwarder, not SimpleDelegator: the self-compiled compiler (bc2cpp/tools/self_compile) binds only mruby's
+  # classes, and `delegate` is CRuby's library.
+  class CallsiteOracle
     def initialize(base, gen)
-      super(base)
+      @base = base
       @gen = gen
     end
 
     def pool_mask(irep, insn) = @gen.numeric_oracle_pool_mask(irep, insn)
+
+    def method_missing(name, *args, &block) = @base.__send__(name, *args, &block)
+    def respond_to_missing?(name, include_private = false) = @base.respond_to?(name, include_private) || super
   end
 
   # return_class_raw_mask under CallsiteOracle: nil when the irep is not modelled or a block may write the register,
