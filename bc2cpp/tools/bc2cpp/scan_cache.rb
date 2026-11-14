@@ -142,7 +142,8 @@ module ScanCache
   # One process hashes a file once (the scans share most of their inputs), keyed by file identity.
   def file_digest(path)
     stat = File.stat(path)
-    (@file_digests ||= {})[[path, stat.mtime, stat.size]] ||= Digest::SHA256.file(path).digest
+    # mtime.to_i: mruby's Time has no hash or eql?, so a Time in the key never hits the memo; integers do.
+    (@file_digests ||= {})[[path, stat.mtime.to_i, stat.size]] ||= Digest::SHA256.file(path).digest
   end
 
   def tools_digest
