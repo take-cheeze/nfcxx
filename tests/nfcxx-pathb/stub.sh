@@ -7,7 +7,7 @@
 #   g++ -E                 the -E exec (exec g++ -E ...): EXEC g++ ARGS, logged; exit 0 (probes such as g++ -v stay silent)
 #   mktemp                 -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   pathb-cc               RUN $0 ARGS, logged; exits with the pathb-status fact of the first argument that has one
-#   pathb-ldrt.rb, ehshim.rb, sret.rb, asan-vla, safeptr-rt
+#   pathb-ldrt.rb, ehshim.rb, asan-vla, safeptr-rt
 #                          print their facts (ROOT stands for the sandbox's repository); nothing when absent
 #   ld.NAME                exists only, for command -v (-fuse-ld=NAME)
 # Environment: NFCXX_FACTS (the facts file), NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP, NFCXX_STUB_ROOT (the sandbox's repository).
@@ -43,9 +43,6 @@ case $name in
   pathb-ldrt.rb|ehshim.rb|asan-vla.rb|safeptr-rt.rb) v=$(fact "${name%.rb}")
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
     [ "$name" != asan-vla.rb ] || [ -n "$v" ] || exit 1
-    exit 0 ;;
-  sret.rb) v=$(fact sret)
-    [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
     exit 0 ;;
   ld.*) exit 0 ;;
   *) echo "stub: no stub for $name" >&2; exit 99 ;;

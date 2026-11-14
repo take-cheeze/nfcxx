@@ -50,7 +50,6 @@
 #   libc-a 1|0                 ROOT/build/edg/lib/libC.a exists (the link names it; the port refuses a link without it)
 #   pathb-ldrt PATH            scripts/pathb-ldrt.rb prints PATH (the long double helper archive)
 #   ehshim PATH                scripts/ehshim.rb prints PATH (absent or empty: it prints nothing, so the link has no EH shim)
-#   sret PATH                  scripts/sret.rb prints PATH (absent or empty: nothing)
 #   asan-vla PATH              scripts/asan-vla.rb prints PATH (the C++ VLA runtime of an ASan link; absent: the port refuses)
 #   safeptr-rt PATH            scripts/safeptr-rt.rb prints PATH (the safe-pointer runtime of a link; absent: the port refuses)
 #   ld NAME                    ld.NAME is on PATH (for -fuse-ld=NAME; the other names pass to cc as they are)
@@ -520,7 +519,7 @@ class Plan
     v
   end
 
-  # The link's cc (the bash's hosted block): the EH shim and the sret objects, and with -fsanitize=address the C++ VLA runtime.
+  # The link's cc (the bash's hosted block): the EH shim, and with -fsanitize=address the C++ VLA runtime.
   # Neither is added to a -shared link or a link with no C++ or object input (the block is not entered).
   def hosted_extras
     return [[], []] if @shared
@@ -528,8 +527,6 @@ class Plan
     shim = []
     eh = @facts.value("ehshim")
     shim << eh if @eh_shim && eh && !eh.empty?
-    sret = @facts.value("sret")
-    shim << sret if sret && !sret.empty?
     vla = @asan ? [fact_path("asan-vla")] : []
     [shim, vla]
   end
