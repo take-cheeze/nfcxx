@@ -2167,6 +2167,54 @@ use_problem = lambda do |name, use|
     @mark_ctx_names = ctx
   end
 
+  # CRuby compares VALUEs with ==, which is identity. mruby's mrb_value is a struct here, so a == b is mrb_obj_equal(mrb, a, b)
+  # (identity too). Both operands must be VALUE names of a function with the mruby state, or a Qnil/Qtrue/Qfalse/Qundef
+  # constant; any other comparison is left as it is (the compile check refuses it when it does not compile).
+  def value_equality_pass
+    qconst = /\AQ(?:nil|true|false|undef)\z/
+    with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}.>])([A-Za-z_]\w*)[ \t\n]*(==|!=)[ \t\n]*([A-Za-z_]\w*)(?![#{WC}(])/).each do
+        m = Regexp.last_match
+        a, op, b = m[1], m[2], m[3]
+        s0, e0 = m.begin(0), m.end(0)
+        fn = enclosing_func(rel, s0)
+        next if fn.nil?
+        value_names = value_names_of(fn)
+        ok_a = value_names.include?(a) || qconst.match?(a)
+        ok_b = value_names.include?(b) || qconst.match?(b)
+        next unless ok_a && ok_b && (value_names.include?(a) || value_names.include?(b) || qconst.match?(a) || qconst.match?(b))
+        if !with_state.include?(fn['name'])
+          refuse(rel, s0, op, 'VALUE comparison in a function without the mruby state (not supported)')
+          next
+        end
+        if @edits[rel].overlaps(s0, e0)
+          refuse(rel, s0, op, 'VALUE comparison inside a rewritten span (not supported)')
+          next
+        end
+        conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
+        expr = "mrb_obj_equal(#{mrb_tok(rel, s0)}, #{conv.call(a)}, #{conv.call(b)})"
+        expr = "!#{expr}" if op == '!='
+        @edits[rel].add(s0, e0, expr)
+      end
+    end
+  end
+
+  # the names declared VALUE (not pointers) in a function: its parameters and its local declarations
+  def value_names_of(fn)
+    names = Set.new
+    (fn['params'] || '').to_s.split(',').each do |p|
+      m = /\bVALUE\s+([A-Za-z_]\w*)\s*\z/.match(p.strip)
+      names << m[1] if m
+    end
+    if fn.key?('brace') && fn.key?('body_end')
+      body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
+      body.scan(/\bVALUE\s+([A-Za-z_]\w*)\s*[;=,)]/) { |m| names << m[0] }
+    end
+    names
+  end
+
   # The state a use inside function or macro position pos gets: the mrb parameter, or the file-scope global for a
   # global-state helper or a global macro body.
   def mrb_tok(rel, pos)
@@ -3187,6 +3235,7 @@ end
     compute_needs
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
+    value_equality_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],
                             "#if 0  /* BC2CPP-MRBGEM: not the extension entry; CRuby never calls it */\n")

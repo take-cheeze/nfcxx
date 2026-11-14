@@ -789,14 +789,16 @@ check test "$rc" -eq 2
 check test -e "$work/api_store_callback_refused/NOT_BUILDABLE"
 check grep -q '  sr_c  helper needs the mruby state threaded in' "$work/api_store_callback_refused/REFUSALS.txt"
 
-# 2zzx. the compile check (NFCX_MRUBY_INCLUDE: the mruby headers, colon-separated): a converted source that does not compile
-# against them is refused at its output line. A CRuby VALUE compared with == is a struct comparison in mruby: refused.
-# Runs only when NFCX_MRUBY_INCLUDE is set (the mruby checkout is not part of the suite).
+# 2zzx. VALUE == VALUE is identity: mrb_obj_equal(mrb, a, b) (value_equality_pass); the compile check (NFCX_MRUBY_INCLUDE: the
+# mruby headers, colon-separated) finds converted sources that do not compile against them and refuses them at their output line.
+# Regression for the rewrite itself, on every run; the compile check part runs only when NFCX_MRUBY_INCLUDE is set.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_eq tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq" > "$work/api_value_eq.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_value_eq/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_equal(mrb, a, b)' "$work/api_value_eq/src/api_value_eq.c"
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
-rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq" > "$work/api_value_eq.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
-check test -e "$work/api_value_eq/NOT_BUILDABLE"
-check grep -q 'compile check  the converted code does not compile: invalid operands to binary ==' "$work/api_value_eq/REFUSALS.txt"
+rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
 fi
 check grep -qF 'mrb_undef_class_method(mrb, cBox, "new");' "$work/api_str_barrier/src/api_str_barrier.c"
 }
