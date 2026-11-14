@@ -990,6 +990,13 @@
       "kind": "refuse",
       "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
     },
+    "rb_copy_generic_ivar": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_iv_copy($m, $0, $1)",
+      "caveat": "copies the instance variables of the second object into the first, as rb_copy_generic_ivar does; the fork's mrb_iv_copy replaces the first object's table"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
