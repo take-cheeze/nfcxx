@@ -36,11 +36,21 @@ eccp_stub() {
   for x in ${CACHE_TEST_RECORDS:-}; do printf 'RECORD %s\n' "$x" > "${out%.*}.$x"; done
   return 0
 }
+pathbcc_stub() {  # the Path B compile of one file (scripts/pathb-cc): the object named after -o
+  local o= prev= x
+  for x in "$@"; do [ "$prev" != -o ] || o=$x; prev=$x; done
+  _out RUN build "$o"
+  printf 'OBJECT %s\n' "$o" > "$o"
+  return 0
+}
 EOF
-  # nfcxx's setup and argument loop, and the setup after it, up to the cache block (the build step stubbed, nfcxx's root)
+  # nfcxx's setup and argument loop, and the setup after it, up to the cache block (the build step stubbed, nfcxx's root).
+  # The Path B compile of a file is stubbed too (the Path B -c block is in this part), and its cache hit is marked as the exit it is.
   head -n "$((first - 1))" "$root/nfcxx" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
-        -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g'
+        -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
+        -e 's|"\$root/scripts/pathb-cc" |pathbcc_stub |g' \
+        -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$root/nfcxx" |
     sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/'

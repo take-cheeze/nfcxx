@@ -1062,12 +1062,85 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   fi
 fi
 
+# Compile cache (opt-in: --cache=DIR, or NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
+# everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
+# object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
+# the driver and its scripts, the EDG and QBE binaries, and the host compilers. A Path B object (--backend=pathb, the default on
+# x86-64 Linux) also has the backend and the Path B front end (PATHB_CPFE, PATHB_BASE) in its key, so the two backends never
+# share an entry. A hit copies the object back with its <stem>.ti and <stem>.ii, which the link reads beside it; a Path B entry
+# has the object only (Path B writes no records). Not cached: .cu (its device images are, in cu_rewrite), C and -E inputs, -MD
+# (its dependency file), several sources in one command, and an -o without an extension. A file name with spaces in the header
+# list is not handled.
+cache_eligible=0
+if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
+   && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
+  cache_eligible=1
+fi
+cache_entry=""
+key_argv=(); for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
+  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
+done
+cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With --cache-log
+  # the whole lookup is logged in one write: the output, the key inputs, the key, and hit or miss.
+  local src=$1 out=$2 deps f pre=() inputs key state
+  for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
+  deps=$("${NFCXX_CXX:-g++}" -M "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} "$src" 2>/dev/null) || return 1
+  deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
+  inputs=$({
+    # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
+    printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
+    # The logs and the trace are diagnostics: they must not change the key.
+    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
+    cache_sha < "$root/nfcxx"
+    find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
+    find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
+    for f in "$root/build/qbe/qbe"; do [ ! -f "$f" ] || cache_sha < "$f"; done
+    cat "$root/tools/weak-symbols/weak_symbols.cpp" | cache_sha   # the weak-symbol tool (built on first use)
+    # The EDG driver: the eccp script and environment that the wrapper (bin/eccp) runs and sources, and the configuration it reads
+    for f in "$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" "$(sed -n 's/^\. "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" \
+             "${EDG_BASE:-$root/build/edg-base}/edg_eccp_config"; do
+      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
+    done
+    "${NFCXX_CXX:-g++}" --version | head -1; cc --version | head -1
+    if [ $backend = pathb ]; then   # a Path B object: the backend, the Path B front end and its base (scripts/pathb-dump)
+      echo "backend: pathb"
+      pbc=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
+      if [ -f "$pbc" ]; then cache_sha < "$pbc"; else echo "missing $pbc"; fi
+      find "${PATHB_BASE:-$root/build/pathb/edg-base}" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 cat | cache_sha
+    fi
+    for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
+  })
+  key=$(printf '%s\n' "$inputs" | cache_sha | cut -c1-40)
+  state=miss; [ ! -f "$cache_dir/objects/$key/obj" ] || state=hit
+  cache_log "== $out ($src)"$'\n'"$inputs"$'\n'"key $key"$'\n'"$state"
+  printf '%s\n' "$key"
+}
+cache_store() {  # cache_store ENTRY OUT [RECORD...]: stores OUT as the object of ENTRY, and each <stem>.RECORD beside OUT that exists.
+  # A whole entry appears at once (it is made under a temporary name and moved into place): a partial copy is never a hit.
+  local entry=$1 out=$2 x ctmp
+  shift 2
+  [ ! -f "$entry/obj" ] || return 0
+  ctmp=$entry.tmp.$$; mkdir -p "$ctmp" "$(dirname "$entry")"
+  cp "$out" "$ctmp/obj"
+  for x in "$@"; do [ ! -f "${out%.*}.$x" ] || cp "${out%.*}.$x" "$ctmp/$x"; done
+  [ -e "$entry" ] || mv "$ctmp" "$entry" 2>/dev/null
+  rm -rf "$ctmp"
+  [ -z "$cache_remote" ] || [ ! -f "$entry/obj" ] || cache_remote_put "${entry##*/}" "$entry"
+}
+
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
 if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   # -c: one object per C++ file, named as the gcc and Path B backends name it (-o FILE for one file, else basename.o)
+  # The compile cache (one source with -o, cache_eligible): a hit copies the object back; a miss stores it once it is made.
+  pb_entry=""
+  if [ $cache_eligible = 1 ] && key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
+    pb_entry=$cache_dir/objects/$key
+    [ -f "$pb_entry/obj" ] || [ -z "$cache_remote" ] || cache_remote_get "$key" "$pb_entry" || true
+    if [ -f "$pb_entry/obj" ]; then cp "$pb_entry/obj" "$out"; exit 0; fi
+  fi
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
@@ -1078,7 +1151,8 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
            [ $default_backend = 1 ] || exit $prc
            echo "nfcxx: Path B did not build $f (status $prc); building the program with the gcc backend, which compiles with C semantics (-fwrapv -fno-strict-aliasing)" >&2
            exec env NFCXX_BACKEND=gcc "$root/nfcxx" "${nfcxx_argv[@]}"
-         fi ;;
+         fi
+         [ -z "$pb_entry" ] || cache_store "$pb_entry" "$dst" ;;
     esac
   done
   exit 0
@@ -1217,48 +1291,7 @@ link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of 
 # to more than one file"), so these records are removed before the link and again once it succeeds (set -e: a failed link
 # exits before the second removal).
 link_records_rm
-# Compile cache (opt-in: --cache=DIR, or NFCXX_CACHE=DIR). A -c compile of one C++ source with -o is kept in DIR/objects under a key of
-# everything that can change the object: the command as given, the absolute output path (the prelinker records it in the
-# object's .ti), the working directory, the source and each header the host preprocessor lists (-M), the NFCXX_* environment,
-# the driver and its scripts, the EDG and QBE binaries, and the host compilers. A hit copies the object back with its
-# <stem>.ti and <stem>.ii, which the link reads beside it. Not cached: .cu (its device images are, in cu_rewrite), C and
-# -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
-# spaces in the header list is not handled.
-cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With --cache-log
-  # the whole lookup is logged in one write: the output, the key inputs, the key, and hit or miss.
-  local src=$1 out=$2 deps f pre=() inputs key state
-  for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-  deps=$("${NFCXX_CXX:-g++}" -M "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} "$src" 2>/dev/null) || return 1
-  deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
-  inputs=$({
-    # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
-    printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
-    # The logs and the trace are diagnostics: they must not change the key.
-    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
-    cache_sha < "$root/nfcxx"
-    find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    for f in "$root/build/qbe/qbe"; do [ ! -f "$f" ] || cache_sha < "$f"; done
-    cat "$root/tools/weak-symbols/weak_symbols.cpp" | cache_sha   # the weak-symbol tool (built on first use)
-    # The EDG driver: the eccp script and environment that the wrapper (bin/eccp) runs and sources, and the configuration it reads
-    for f in "$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" "$(sed -n 's/^\. "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" \
-             "${EDG_BASE:-$root/build/edg-base}/edg_eccp_config"; do
-      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
-    done
-    "${NFCXX_CXX:-g++}" --version | head -1; cc --version | head -1
-    for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
-  })
-  key=$(printf '%s\n' "$inputs" | cache_sha | cut -c1-40)
-  state=miss; [ ! -f "$cache_dir/objects/$key/obj" ] || state=hit
-  cache_log "== $out ($src)"$'\n'"$inputs"$'\n'"key $key"$'\n'"$state"
-  printf '%s\n' "$key"
-}
-cache_entry=""
-key_argv=(); for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-  case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
-done
-if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
-   && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
+if [ $cache_eligible = 1 ]; then
   if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
     cache_entry=$cache_dir/objects/$key
     [ -f "$cache_entry/obj" ] || [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
@@ -1324,14 +1357,7 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi
-if [ -n "$cache_entry" ] && [ ! -f "$cache_entry/obj" ]; then   # a whole entry appears at once: a partial copy is never a hit
-  ctmp=$cache_entry.tmp.$$; mkdir -p "$ctmp" "$(dirname "$cache_entry")"
-  cp "$out" "$ctmp/obj"
-  for x in ti ii; do [ ! -f "${out%.*}.$x" ] || cp "${out%.*}.$x" "$ctmp/$x"; done
-  [ -e "$cache_entry" ] || mv "$ctmp" "$cache_entry" 2>/dev/null
-  rm -rf "$ctmp"
-  [ -z "$cache_remote" ] || [ ! -f "$cache_entry/obj" ] || cache_remote_put "${cache_entry##*/}" "$cache_entry"
-fi
+if [ -n "$cache_entry" ]; then cache_store "$cache_entry" "$out" ti ii; fi
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
   df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
