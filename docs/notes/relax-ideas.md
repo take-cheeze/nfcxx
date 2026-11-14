@@ -35,8 +35,10 @@ attempted.
 Relax compiles only what a program calls. If bc2cpp emits every method in the closed world, emitting only methods
 reachable from the entry points would shrink the output and the C++ build.
 
-Status: not started. Needs the reachability information the closed-world analysis already computes, checked against
-dispatch that can reach methods by name.
+Status: present, verified in code. `MainReachability` (tools/bc2cpp/main_reachability.rb) computes the methods
+reachable from `main`, and `CodeGen#compile_all` (codegen_emit.rb) compiles only the labels in `live_labels`, so the rest stay
+on the VM. Dispatch by name is covered by refusals: a reflection use or another refusal retains the whole program
+(`retain all:` in the build log). Not measured: how many methods a full world drops (the optcarrot run compiles 599).
 
 ### 4. One cache rule: keyed by input hashes (bc2cpp)
 
@@ -69,7 +71,8 @@ Relax type-checks each function before it runs and borrow-checks in the backgrou
 instead. nfcxx's opt-in Path B borrow checker (`docs/notes/pathb-borrowck.md`) could run the same way in an editor or
 watch loop, reporting later.
 
-Status: not started.
+Status: not present, verified in code. Neither `scripts/pathb-borrowck.rb` nor the driver has a background or watch mode; the
+borrow check runs once per invocation (docs/notes/pathb-borrowck.md).
 
 ### 8. Content-hashed per-unit cache (nfcxx)
 
@@ -77,7 +80,9 @@ Relax swaps recompiled functions into a live process; that is a JIT-scale change
 step is a per-function or per-translation-unit cache keyed by hashes of the preprocessed input. It matters most for
 the large-library tests (`tests/realworld`, `tests/llamacpp`, `tests/coreclr-gc`).
 
-Status: not started. Needs a measurement of how much of the build time these tests spend on unchanged units.
+Status: largely present. `nfcxx --cache=DIR` (NFCXX_CACHE) keeps each `-c` compile under a key built from its inputs, and
+`NFCXX_CACHE_REMOTE=gha` shares the objects through the GitHub Actions cache (docs/notes/cxx-driver.md, "Compile cache").
+Not measured: how much of a large library's build time an unchanged unit saves with it.
 
 ## What not to copy
 
