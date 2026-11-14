@@ -2,8 +2,9 @@
 # nfcc: the C driver, in Ruby (stage 8 of docs/notes/driver-port-plan.md). The decisions are scripts/driver-loop.rb's: its option
 # loop, Path B, the compile and link commands, checked against the bash driver by tests/nfcc/loop-state.sh. This file does what
 # the bash does at its start (the environment, the host's answers, the temporary directory, the backend choice) and then runs the
-# commands the decisions name. The bundle and CUDA wrappers (--bundle-*, --cuda-driver=, a libcuda on the link line) are still
-# the bash's: a command line that uses them is run by ./nfcc.
+# commands the decisions name, including the bundle wrapper (--bundle-*: the driver again, then build/nfcbundle) and the CUDA
+# driver wrapper (--cuda-driver=, a libcuda on the link line: the shim). The bash wrappers scripts/bundle-wrap.sh and
+# scripts/cuda-driver-wrap.sh are the reference for those (their decisions are checked by tests/nfcc/loop-state.sh).
 #
 #   ruby scripts/nfcc.rb ARG...
 
@@ -13,7 +14,6 @@ require "tmpdir"
 require_relative "nfcc-args"
 
 ROOT = File.expand_path("..", __dir__)
-BASH_NFCC = File.join(ROOT, "nfcc")
 
 $nfcc_front = true
 require_relative "driver-loop"
@@ -24,13 +24,6 @@ def capture_stdout(argv, err: File::NULL)
   [out, $?.success?]
 rescue SystemCallError
   ["", false]
-end
-
-# the arguments the bash wrappers handle (scripts/bundle-wrap.sh, scripts/cuda-driver-wrap.sh); those command lines are the bash's
-def bash_wrapper_arg?(arg)
-  arg.start_with?("--bundle-") || arg.start_with?("--cuda-driver=") ||
-    ["-lcuda", "-l:libcuda.so", "-l:libcuda.so.1"].include?(arg) ||
-    arg.end_with?("/libcuda.so", "/libcuda.so.1")
 end
 
 # nfcc's start: the environment decides the backend, the host's answers are asked when needed (the version, the host preprocessor)
@@ -98,6 +91,30 @@ def front_setup(config)
 
     File.foreach(wide).any? { |line| line.match?(/(^|[^A-Za-z0-9_"'])L["']/) }
   end
+
+  # the bundle wrapper: the driver it runs again is this file; build/nfcbundle is "missing", "stale" (older than its source) or
+  # "fresh"; when it is not fresh, ninja builds it (ninja_fails: the build failed)
+  env.driver = File.join(ROOT, "scripts/nfcc.rb")
+  tool = File.join(ROOT, "build/nfcbundle")
+  source = File.join(ROOT, "tools/bundle/nfcbundle.cpp")
+  env.bundle_tool = if !File.executable?(tool) then "missing"
+                    elsif File.exist?(source) && File.mtime(source) > File.mtime(tool) then "stale"
+                    else "fresh"
+                    end
+  env.ninja_fails = lambda do
+    !system("ninja", "-C", File.join(ROOT, "tools/bundle"), out: File::NULL)
+  end
+
+  # the CUDA driver wrapper: the environment's home, the machine, and the shim, which scripts/cuda-driver-shim builds for the
+  # headers of the home (the wrapper asks only when its other checks pass)
+  env.cuda_home = ENV["CUDA_HOME"].to_s
+  env.cuda_driver_env = ENV["NFCXX_CUDA_DRIVER"].to_s.empty? ? "auto" : ENV["NFCXX_CUDA_DRIVER"]
+  env.machine = uname[:machine]
+  env.shim = lambda do |include_dir|
+    out, ok = capture_stdout([File.join(ROOT, "scripts/cuda-driver-shim"), include_dir], err: [:child, :out])
+    text = out.sub(/\n+\z/, "")
+    ok ? [text, nil] : [nil, text]
+  end
 end
 
 # nfcc's commands and file operations, run for the decisions of driver-loop.rb
@@ -150,10 +167,6 @@ class NfccEffects
 end
 
 def front_main(argv)
-  # the bash wrappers' command lines go to ./nfcc unchanged (the same arguments, expanded the same way)
-  if NfccArgs.expand_args(argv.dup).any? { |a| bash_wrapper_arg?(a) }
-    Kernel.exec(BASH_NFCC, *argv)
-  end
   main(argv)
 ensure
   FileUtils.rm_rf($nfcc_tmp_dir) if $nfcc_tmp_dir

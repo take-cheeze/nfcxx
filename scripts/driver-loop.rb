@@ -223,6 +223,8 @@ class Env
   # the CUDA driver wrapper's environment and probes (the driver's real run takes them from the shell and the file system)
   attr_accessor :cuda_home, :cuda_driver_env, :cuda_h, :cuda_typedefs, :cudart_version, :lib64, :machine, :shim, :shim_error
   attr_accessor :cuda_header
+  # the driver the bundle wrapper runs again (nil: the bash driver, root/nfcc)
+  attr_accessor :driver
   def initialize
     @root = Dir.pwd
     @tmp = "/tmp/nfcc"
@@ -1032,17 +1034,19 @@ def bundle_wrap(env, args)
   end
   raise BundleExit.new("nfcc: the --bundle-* options need --bundle-libs", 2) unless on
 
-  run_cmd([env.root + "/nfcc", *rest])
+  # the driver again, without the --bundle- options: the real driver runs the Ruby driver (env.driver), the oracle the bash one
+  run_cmd([env.driver || (env.root + "/nfcc"), *rest])
   return 0 unless link
 
   tool = "#{env.root}/build/nfcbundle"
   if env.bundle_tool != "fresh"
-    if env.ninja_fails
+    # ninja builds the tool when it is missing or older than its source (env.ninja_fails: the build failed)
+    if lazy_value(env.ninja_fails)
       raise BundleExit.new("nfcc: cannot build #{tool} (tools/bundle)", 1)
     end
   end
   # bash: exec "$tool" ... (the process is replaced: nothing after it runs)
-  $stdout.write("EXEC #{[tool, *opts, out, "-o", out].join(' ')}\n")
+  exec_cmd([tool, *opts, out, "-o", out])
   0
 end
 
@@ -1081,6 +1085,14 @@ def cudart_version_of(path)
     return line[j, k - j].to_i if k > j
   end
   0
+end
+
+# The CUDA shim for the headers of HOME: [path, nil], or [nil, why it did not build]. nfcc builds it (scripts/cuda-driver-shim) when the
+# checks before it pass; the real driver gives env.shim a probe that does, and the oracle gives the two answers as values.
+def shim_for(env, home)
+  return [env.shim, env.shim_error] unless env.shim.respond_to?(:call)
+
+  env.shim.call("#{home}/include")
 end
 
 def cuda_libcuda?(arg)
@@ -1129,8 +1141,12 @@ def cuda_driver_wrap(env, args, driver_name)
   elsif rtv == 0 || rtv < 12050
     rtv_text = rtv == 0 ? "of unknown version" : rtv.to_s
     why = "libcudart #{rtv_text} is older than 12.5"
-  elsif env.shim_error
-    why = "the shim did not build: #{env.shim_error}"
+  end
+  shim_path = nil
+  if why.empty?
+    # nfcc builds the shim only when the checks above pass
+    shim_path, shim_error = shim_for(env, home)
+    why = "the shim did not build: #{shim_error}" unless shim_error.nil?
   end
   unless why.empty?
     raise CudaExit.new("#{driver_name}: --cuda-driver=cudart: #{why}", 1) if mode == "cudart"
@@ -1140,7 +1156,7 @@ def cuda_driver_wrap(env, args, driver_name)
     return [:args, kept]
   end
 
-  shim = env.shim
+  shim = shim_path
   out = []
   done = false
   kept.each do |a|
