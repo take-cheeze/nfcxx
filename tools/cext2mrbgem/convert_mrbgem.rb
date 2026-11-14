@@ -99,7 +99,7 @@ CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
-UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+)\z/
+UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
 
 GEM_NAME_RE = /\A[A-Za-z][A-Za-z0-9_-]*\n?\z/
 
@@ -525,9 +525,54 @@ class Converter
   end
 
   # ---- stage 1: load -----------------------------------------------------
+  # A static function defined in more than one file is file-local: each file's copy gets a unique name (NAME__STEM) in
+  # that file only, so the converter's name-keyed analysis sees one definition per name. A member name (x.NAME, a struct
+  # member NAME; or an array NAME[]) is not a use of the function and is not renamed.
+  def static_rename(texts)
+    defs = {}
+    texts.each do |base, t|
+      next unless base.end_with?('.c')
+      mask_c(t).scan(/^[ \t]*static\b[^;{}()]*?\b([A-Za-z_]\w*)[ \t\n]*\([^;{}]*\)[ \t\n]*\{/) do
+        (defs[Regexp.last_match(1)] ||= Set.new) << base
+      end
+    end
+    dups = defs.select { |_, fs| fs.size > 1 }
+    return texts if dups.empty?
+    out = {}
+    texts.each do |base, t|
+      mine = dups.keys.select { |n| defs[n].include?(base) }
+      if mine.empty?
+        out[base] = t
+        next
+      end
+      stem = base.sub(/\.[ch]\z/, '').gsub(/\W/, '_')
+      masked = mask_c(t)
+      reps = []
+      mine.each do |n|
+        masked.to_enum(:scan, /(?<![\w.>$])#{n}(?!\w)/).each do
+          m = Regexp.last_match
+          nxt = masked[m.end(0)..][/\A\s*(.)/, 1]
+          next if nxt == ';' || nxt == '['
+          reps << [m.begin(0), m.end(0), "#{n}__#{stem}"]
+        end
+      end
+      s = t.dup
+      reps.sort_by { |a, _, _| -a }.each { |a, b, r| s[a...b] = r }
+      out[base] = s
+    end
+    out
+  end
+
   def load
     abort "error: not a directory: #{@cext_dir}" unless File.directory?(@cext_dir)
     abort "error: cannot derive a gem name from #{@cext_dir}" unless GEM_NAME_RE.match?(@name)
+texts = {}
+Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |tb|
+  tp = File.join(@cext_dir, tb)
+  next if File.directory?(tp)
+  texts[tb] = read_text(tp) if tb.end_with?('.c') || tb.end_with?('.h')
+end
+texts = static_rename(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
       if File.directory?(path)
@@ -538,9 +583,10 @@ class Converter
         @ignored << [base, 'not a C source or header (read by nothing; extconf.rb is never run)']
         next
       end
-      text = read_text(path)
+      text = texts.fetch(base)
       kind = base.end_with?('.c') ? 'src' : 'hdr'
       @files[base] = { 'text' => text, 'masked' => mask_c(text), 'kind' => kind }
+      noreturn_mask(base)
       @edits[base] = Edits.new
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
@@ -742,7 +788,7 @@ class Converter
     declarations_by_file.each do |rel, decls|
       f = @files[rel]
       decls.each do |d|
-        next if f['kind'] != 'src' && !d['proto'] # a function body in a header is not converted; its prototypes are
+        next if f['kind'] != 'src' && !d['proto'] && !(d['storage'].split.include?('inline') && d['storage'].split.include?('static')) # a header body is converted only when it is static inline
         next if NON_FUNC_WORDS.include?(d['name']) || NON_FUNC_WORDS.include?(py_split_ws(d['ret']).last)
         unless d['proto']
           (@defs[d['name']] ||= []) << d
@@ -999,13 +1045,324 @@ class Converter
             'non-static registered method: the name now names the mruby wrapper, so a caller outside the input would need the impl')
   end
 
+# A rb_data_type_t declaration: its initializer's open and close braces, the five top-level element spans, the nested
+# {mark, free, size} spans, and the callback names. Returns a hash with 'error' when the shape is not CRuby's.
+def dtype_parse(rel, m)
+  mk = @files[rel]['masked']
+  tx = @files[rel]['text']
+  open = m.end(0) - 1
+  close = match_close(mk, open)
+  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }
+    if !els.empty? && els.all? { |e| e[2].start_with?('.') }
+      return dtype_designated(rel, m, open, close, els)
+    end
+  return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless els.size == 5 && els[1][2].start_with?('{') && els[1][2].end_with?('}')
+  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+  ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
+  unless nested.size == 3 && ok_fn.call(nested[0][2]) && ok_fn.call(nested[1][2]) && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
+    return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
+  end
+  return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
+  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested[1][2],
+    'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
+end
+
+  # A designated initializer: .wrap_struct_name, .function = {.dmark, .dfree, .dsize}, .parent, .data, .flags (fields in
+  # any order; a field may be left out). The same result as the positional form.
+  def dtype_designated(rel, m, open, close, els)
+    mk = @files[rel]['masked']
+    tx = @files[rel]['text']
+    fields = {}
+    els.each do |a, b, t|
+      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+      return { 'error' => 'an initializer element is not a designated field' } unless mm
+      return { 'error' => "the designated field .#{mm[1]} is repeated" } if fields.key?(mm[1])
+      fields[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+    end
+    return { 'error' => 'the name is not a string literal' } unless fields['wrap_struct_name'] && fields['wrap_struct_name'][2].start_with?('"')
+    fn = fields['function']
+    return { 'error' => 'no .function field' } unless fn
+    return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
+    brace = fn[0] + tx[fn[0]...fn[1]].index('{')
+    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.empty? }
+    sf = {}
+    sub.each do |a, b, t|
+      mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
+      return { 'error' => '.function holds a non-designated element' } unless mm
+      sf[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+    end
+    ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
+    mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
+    free = sf['dfree'] ? sf['dfree'][2] : 'NULL'
+    unless ok_fn.call(mark) && ok_fn.call(free)
+      return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
+    end
+    parent = fields['parent'] ? fields['parent'][2] : '0'
+    data = fields['data'] ? fields['data'][2] : '0'
+    return { 'error' => 'the parent or the data slot is not 0/NULL' } unless %w[0 NULL].include?(parent) && %w[0 NULL].include?(data)
+    { 'error' => nil, 'open' => open, 'close' => close, 'name' => fields['wrap_struct_name'][2], 'mark' => mark, 'free' => free,
+      'mark_pos' => sf['dmark'] ? sf['dmark'][3] : nil, 'free_pos' => sf['dfree'] ? sf['dfree'][3] : nil }
+  end
+
+# the data type declarations of the input, and the callback positions (the mark and free names) they use
+def dtype_decls
+  out = []
+  @files.each do |rel, f|
+    finditer(/\brb_data_type_t[ \t\n]+[A-Za-z_][#{WC}]*[ \t\n]*=[ \t\n]*\{/, f['masked']).each do |m|
+      out << [rel, m, dtype_parse(rel, m)]
+    end
+  end
+  out
+end
+
+  # rb_hash_foreach(h, cb, (VALUE)ptr): the callback is a synchronous callback of mrb_hash_foreach, so it is threaded with
+  # mrb, and its third (VALUE) parameter becomes void * (the pointer it is given). Only a call whose callback is defined in
+  # the input and used only here, and whose argument is an address or a (VALUE) cast of a plain name, is converted.
+# An argument of a template that is a plain expression: identifiers (which are not renamed by the converter), member
+# access, indexing, &, ?:, parentheses and integer literals. A call or any name the converter would rewrite (an API
+# name, a macro, a class variable, mrb) makes it not plain, so it is refused.
+def plain_expr?(t, rel)
+  return false unless t.match?(/\A[\w\s&*.\->\[\]?:()]+\z/)
+  return false if t.match?(/\w\s*\(/) # a call
+  t.scan(/[A-Za-z_]\w*/).all? do |w|
+    next false if w == 'mrb' || @class_vars.include?(w) || @entries.key?(w) || @types.key?(w) || UNKNOWN_RE.match?(w)
+    true
+  end
+end
+
+# NORETURN(decl); is CRuby's no-return prototype wrapper. mruby has no NORETURN, so the wrapper's two tokens are removed
+# from the output, and the masked text (used to scan declarations) has them blanked, so the declaration is a plain prototype.
+# the opening NORETURN( token lies in a prototype that is rewritten as a whole (a helper or a registered method)
+def noreturn_in_rewritten_decl?(rel, start)
+  @decls.any? do |d|
+    d['file'] == rel && d['hstart'] <= start && start < d['hend'] &&
+      ((@helper_names || Set.new).include?(d['name']) || (@valid_reg_names || Set.new).include?(d['name']))
+  end
+end
+
+def noreturn_mask(rel)
+  f = @files[rel]
+  f['noreturn'] = []
+  f['text'].to_enum(:scan, /^[ \t]*NORETURN\(/).each do
+    m = Regexp.last_match
+    open = m.end(0) - 1
+    close = match_close(f['masked'], open)
+    next if close < 0
+    start = m.begin(0) + m[0].index('N')
+    f['noreturn'] << [start, open, close]
+    (start...open + 1).each { |k| f['masked'][k] = ' ' }
+    f['masked'][close] = ' '
+  end
+end
+
+  def hash_foreach_calls
+    out = []
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])rb_hash_foreach#{SS}\(/, masked).each do |m|
+        s = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        args = split_args(masked, open, close).map { |a, b| [a, b, psl(text, a, b)] }
+        next unless args.size == 3
+        h = args[0][2]
+        cb = args[1][2]
+        arg = args[2][2]
+        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
+        cb = cb.delete('&')
+        next unless arg.match?(/\A(?:\(VALUE\)\s*)?&?[A-Za-z_][#{WC}]*\z/)
+        # a static callback defined in this file, with no other use in the file (its definition and this call)
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        next unless d.size == 1 && d[0]['storage'].split.include?('static')
+        next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
+        pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
+        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
+                 cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
+      end
+    end
+    out
+  end
+
+  # A struct field of function-pointer type, RET (*NAME)(PARAMS), in a struct body of this file. Returns the field's
+  # declaration; its assignments and calls are found across the whole input by fnptr_global.
+  def fnptr_decls(rel)
+    masked = @files[rel]['masked']
+    out = []
+    masked.to_enum(:scan, /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+      m = Regexp.last_match
+      open = m.end(0) - 1
+      close = match_close(masked, open)
+      next if close < 0
+      next unless struct_body_before?(masked, m.begin(0))
+      params = psl(masked, open + 1, close).strip
+      next if params.empty? || params == 'void'
+      out << { rel: rel, name: m[1], params_start: open + 1 }
+    end
+    out
+  end
+
+  # The assignments (x.NAME = helper;) and calls (x.NAME(...)) of a field, across every file of the input.
+  def fnptr_global(rec)
+    rec[:assigns] = []
+    rec[:calls] = []
+    @files.each do |frel, f|
+      masked = f['masked']
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*;/).each do
+        am = Regexp.last_match
+        rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
+        cm = Regexp.last_match
+        rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+      end
+    end
+    rec
+  end
+
+  # whether the innermost unclosed brace before pos opens a struct body (struct TAG { or struct {)
+  def struct_body_before?(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        if depth == 0
+          return psl(masked, [k - 40, 0].max, k) =~ /struct\s*\w*\s*\z/ ? true : false
+        end
+        depth -= 1
+      end
+      k -= 1
+    end
+    false
+  end
+
+  # The field type and the calls through a threaded field take mrb (see compute_needs). The decision was made once for
+  # the whole input: every assigned callback is threaded, and every call is in a function with the mruby state.
+  def edit_fnptr_fields(rel)
+    cands = @threaded_cands || Set.new
+    regs = @valid_reg_names || Set.new
+    ed = @edits[rel]
+    (@fnptr_recs || []).each do |r|
+      next unless r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
+      next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
+      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel
+      r[:calls].each do |copen, _, crel|
+        next unless crel == rel
+        masked = @files[rel]['masked']
+        nxt = next_nonspace(masked, copen + 1)
+        ed.add(copen + 1, copen + 1, masked[nxt] == ')' ? 'mrb' : 'mrb, ')
+      end
+    end
+  end
+
+  # A typedef of a function-pointer type, typedef RET (*T)(PARAMS);, declared in this file. Its variables (T v; or
+  # T v[] = {helpers};) hold the callbacks, and their calls are v(...) or v[i](...). fnptr_typed_global collects them.
+  def fnptr_typedefs(rel)
+    masked = @files[rel]['masked']
+    out = []
+    masked.to_enum(:scan, /\btypedef\b[^;{}]*?\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+      m = Regexp.last_match
+      open = m.end(0) - 1
+      close = match_close(masked, open)
+      next if close < 0
+      params = psl(masked, open + 1, close).strip
+      next if params.empty? || params == 'void'
+      out << { rel: rel, name: m[1], params_start: open + 1 }
+    end
+    out
+  end
+
+  # The variables of typedef T and their callbacks and calls, across every file of the input. A variable declared in a
+  # struct body is a member: its calls are member accesses (x.v(...) / x->v(...)), so a function of the same name is not
+  # a call of it. A member name declared with another type anywhere in the input makes the rule refuse.
+  def fnptr_typed_global(rec)
+    rec[:assigns] = []
+    rec[:calls] = []
+    vars = []
+    mvars = []
+    @files.each do |frel, f|
+      masked = f['masked']
+      masked.to_enum(:scan, /\b#{rec[:name]}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*(=|;|,)/).each do
+        dm = Regexp.last_match
+        (struct_body_before?(masked, dm.begin(0)) ? mvars : vars) << dm[1]
+        next unless dm[2] == '='
+        after = next_nonspace(masked, dm.end(0))
+        if masked[after] == '{'
+          close = match_close(masked, after)
+          next if close < 0
+          split_args(masked, after, close).each do |a, b|
+            t = psl(f['text'], a, b).strip
+            rec[:assigns] << [t, frel, a] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+          end
+        elsif (am = masked[after..].match(/\A([A-Za-z_]\w*)\s*;/))
+          rec[:assigns] << [am[1], frel, after]
+        end
+      end
+    end
+    mvars.uniq.each do |v|
+      # any struct member of this name with another type makes the member calls ambiguous: refuse
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /([A-Za-z_]\w*)[ \t*]+#{v}\s*(?:\[[^\]]*\]\s*)*;/).each do
+          tm = Regexp.last_match
+          next if tm[1] == rec[:name]
+          rec[:calls] << [-1, nil, frel]
+        end
+      end
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /(?:\.|->)\s*#{v}\s*(?:\[[^\]]*\]\s*)*\(/).each do
+          cm = Regexp.last_match
+          rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+        end
+      end
+    end
+    vars.uniq.each do |v|
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /(?<![\w.>])#{v}\s*(?:\[[^\]]*\]\s*)*\(/).each do
+          cm = Regexp.last_match
+          rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+        end
+      end
+    end
+    rec
+  end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
       lst.each { |d| (ids[name] ||= Set.new).merge(body_idents(d)) }
     end
     # a split registered method (compute_splits) is forced only through its body: its impl gets mrb when the body needs it
-    forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+    # struct function-pointer fields (fnptr_decls): the callbacks assigned to a field are threaded with mrb, as the field's
+    # type takes mrb (fnptr_global; the edits are in edit_fnptr_fields)
+    @fnptr_recs = []
+    @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
+    @files.keys.each { |frel| fnptr_typedefs(frel).each { |d| @fnptr_recs << fnptr_typed_global(d) } }
+    @fnptr_recs.each do |r|
+      next if r[:assigns].empty?
+      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
+      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) }
+    end
+    @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
+# a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
+@dtype_cb_pos = Set.new
+dtype_decls.each do |rel, _m, info|
+  next if info['error']
+  [[info['mark'], info['mark_pos']], [info['free'], info['free_pos']]].each do |nm, pos|
+    next if nm == 'NULL' || nm == '0' || !@defs.key?(nm)
+    forced << nm
+    @dtype_cb_pos << [rel, pos]
+  end
+end
+    # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
+    @hash_calls = hash_foreach_calls
+    @hash_calls.each { |c| forced << c[:cb] }
+    @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
+    @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] }
@@ -1135,6 +1492,9 @@ end
 
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
+  next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
+  next nil if !direct && @dtype_cb_pos.include?([rel, s])
+  next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -1267,6 +1627,7 @@ use_problem = lambda do |name, use|
     end
     # fail-safe: a call of a threaded helper from a function that gets no mrb and has no refusal of its own
     # would not compile, so it is refused. A global-state helper has the state in scope through the global.
+    @threaded_cands = cands.dup
     mrb_bearing = with_state | gset
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
@@ -1523,7 +1884,12 @@ use_problem = lambda do |name, use|
         hdr = "void mrb_#{@funcname}_gem_init(mrb_state *mrb)"
       elsif @helper_names.include?(name)
         ptxt = py_strip(d['params'])
-        tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
+tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
+if (@hash_cb_names || Set.new).include?(name)
+  # a rb_hash_foreach callback: its third (VALUE) parameter is the pointer it was given (void *)
+  ps = ptxt.split(',').map(&:strip)
+  tail = ', ' + [map_types(ps[0], @types), map_types(ps[1], @types), 'void *' + ps[2].split.last].join(', ')
+end
         hdr = "#{d['storage']}#{map_types(d['ret'], @types)} #{name}(mrb_state *mrb#{tail})"
       end
       if err
@@ -1581,6 +1947,34 @@ use_problem = lambda do |name, use|
         ed.add(s, s + name.length, "#{name}_impl")
         rewrite(rel, s, name, "#{name}_impl")
       end
+    end
+# NORETURN( ) wrappers (noreturn_mask): the two tokens are removed; the declaration inside stays
+(@files[rel]['noreturn'] || []).each do |start, open, close|
+  ed.add(start, open + 1, '') unless noreturn_in_rewritten_decl?(rel, start)
+  ed.add(close, close + 1, '')
+end
+    edit_fnptr_fields(rel)
+    # 4c. a rb_data_type_t initializer is CRuby's {name, {dmark, dfree, dsize}, parent, data, flags}; mruby's
+    # mrb_data_type is {name, dfree, mark} (the fork's mark hook). The whole initializer is one edit, so the identifiers
+    # inside it are not converted again (the identifier pass skips overlapping ranges). The mark and free functions must
+    # be threaded (they take (mrb, data)); the flags are dropped (RUBY_TYPED_* are 0 in mruby, with a caveat).
+    dtype_decls.select { |drel, _dm, _di| drel == rel }.each do |drel, m, info|
+      if info['error']
+        refuse(rel, m.begin(0), 'rb_data_type_t', info['error'])
+        next
+      end
+      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' }
+      unless cbs.all? { |n| @threaded_cands.include?(n) }
+        refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        next
+      end
+      (@dtype_mark_names ||= Set.new) << info['mark'] unless info['mark'] == '0' || info['mark'] == 'NULL'
+      mark = info['mark'] == '0' ? 'NULL' : info['mark']
+      free = info['free'] == '0' ? 'NULL' : info['free']
+      ed.add(m.begin(0), m.begin(0) + 'rb_data_type_t'.length, 'mrb_data_type')
+      ed.add(info['open'], info['close'] + 1, "{ #{info['name']}, #{free}, #{mark} }")
+      rewrite(rel, m.begin(0), 'rb_data_type_t', 'mrb_data_type',
+              'the initializer is reordered to mruby\'s {name, dfree, mark}; RUBY_TYPED_* flags are dropped (0 in mruby)')
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
@@ -1646,6 +2040,8 @@ use_problem = lambda do |name, use|
       special(rel, s, e, name, entry, nxt, called)
     when 'drop'
       # Declaration with no effect in mruby: the call is removed and a warning is printed and recorded.
+      # The name in a #define line is the macro's own definition, not a use: nothing to drop.
+      return if psl(@files[rel]['text'], [s - 12, 0].max, s) =~ /#[ \t]*(?:define|ifn?def|undef)[ \t]+\z/
       unless called
         refuse(rel, s, name, 'used without a call; cannot drop it')
         return
@@ -1658,10 +2054,49 @@ use_problem = lambda do |name, use|
       line = line_of(@files[rel]['text'], s)
       @warnings << { 'file' => rel, 'line' => line, 'api' => name, 'reason' => entry['reason'] }
       warn "warning: #{rel}:#{line} dropped #{name} (#{entry['reason']})"
+    when 'template'
+      # a fixed expression over the call's arguments (api_map.json "template"): $0, $1, ... are the argument texts and
+      # $m is the mruby state. Only plain identifiers and integer literals are substituted, and none is a class variable.
+      unless called
+        refuse(rel, s, name, 'used without a call; cannot map it')
+        return
+      end
+      cp = pyfind(masked, ')', nxt)
+      args = cp > 0 ? split_args(masked, nxt, cp) : []
+      texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
+      if texts.size != entry['arity']
+        refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
+        return
+      end
+      class_args = entry['class_args'] || []
+unless texts.each_with_index.all? { |t, i| (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel)) }
+        refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
+        return
+      end
+      out = entry['template'].gsub(/\$(\d+)|\$m/) { $1 ? texts[$1.to_i] : mrb_tok(rel, s) }
+      ed.add(s, cp + 1, out)
+      rewrite(rel, s, name, out, entry['caveat'])
+    when 'hash_foreach'
+      c = (@hash_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
+      unless c
+        refuse(rel, s, name, 'not a call of the form rb_hash_foreach(hash, callback, (VALUE)pointer) with a callback defined here and used only here')
+        return
+      end
+      ed.add(c[:s], c[:e], "mrb_hash_foreach(#{mrb_tok(rel, s)}, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})")
+      rewrite(rel, s, name, "mrb_hash_foreach(mrb, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})",
+              'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
+      end
+      if entry['gc_mark_context']
+        # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
+        fn = enclosing_func(rel, s)
+        unless fn && (@dtype_mark_names || Set.new).include?(fn['name'])
+          refuse(rel, s, name, 'rb_gc_mark is valid only in a data type mark callback (the runtime calls it during marking)')
+          return
+        end
       end
       if entry['arg_order']
         # the arguments are reordered (rb_class_new_instance(argc, argv, klass) -> mrb_obj_new(mrb, klass, argc, argv)).
@@ -1699,6 +2134,21 @@ end
           return
         end
         ed.add(cp, cp, ', ' + entry['append_args'].join(', '))
+      end
+      if entry['wrap_arg']
+        # text around one argument (a conversion such as mrb_symbol(x)): only insertions at its two ends, so the
+        # argument's own conversion stays exactly as it is
+        w = entry['wrap_arg']
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        if args.size <= w['index']
+          refuse(rel, s, name, "expected at least #{w['index'] + 1} arguments, found #{args.size}")
+          return
+        end
+        a, b = args[w['index']]
+        ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ") if entry['wrap_mrb']
+        ed.add(a, a, w['prefix'])
+        ed.add(b, b, w['suffix'])
       end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")

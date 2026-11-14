@@ -175,7 +175,7 @@ check grep -q '  rb_global_variable  address form' "$work/gc_map_refused/REFUSAL
 check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
-check grep -q '  rb_gc_mark  no mark callback in mruby' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_mark  rb_gc_mark is valid only in a data type mark callback' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
 
 # 2k. String, Hash and Array calls with exact mruby equivalents (api_map.json batch B1; header lines in the commit)
@@ -251,7 +251,7 @@ check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/lo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_reg_nth_match  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_yield  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -375,6 +375,113 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_hash_lookup/NOT_BUILDABLE"
 check grep -qF 'return mrb_hash_fetch(mrb, h, k, mrb_nil_value());' "$work/api_hash_lookup/src/api_hash_lookup.c"
 
+# 2zh. rb_sym2str (api_map.json batch N3): the Symbol argument is wrapped with mrb_symbol(...), and mrb is passed first
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sym_str tools/cext2mrbgem/fixtures/api_sym_str/ext/api_sym_str "$work/api_sym_str" > "$work/api_sym_str.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_sym_str/NOT_BUILDABLE"
+check grep -qF 'return mrb_sym_str(mrb, mrb_symbol(sym));' "$work/api_sym_str/src/api_sym_str.c"
+
+# 2zj. rb_cstr_to_inum (api_map.json batch N5): the C string is wrapped as a String, and mrb_str_to_inum keeps base and badcheck
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cstr_inum tools/cext2mrbgem/fixtures/api_cstr_inum/ext/api_cstr_inum "$work/api_cstr_inum" > "$work/api_cstr_inum.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_cstr_inum/NOT_BUILDABLE"
+check grep -qF 'return mrb_str_to_inum(mrb, mrb_str_new_cstr(mrb, "12"), 10, 0);' "$work/api_cstr_inum/src/api_cstr_inum.c"
+
+# 2zk. global variables named by a string literal (api_map.json batch N6): the name is interned with mrb_intern_cstr
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gv_name tools/cext2mrbgem/fixtures/api_gv_name/ext/api_gv_name "$work/api_gv_name" > "$work/api_gv_name.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gv_name/NOT_BUILDABLE"
+check grep -qF 'return mrb_gv_get(mrb, mrb_intern_cstr(mrb, "$api_count"));' "$work/api_gv_name/src/api_gv_name.c"
+check grep -qF 'mrb_gv_set(mrb, mrb_intern_cstr(mrb, "$api_count"), v);' "$work/api_gv_name/src/api_gv_name.c"
+
+# 2zl. regexp back-references through the onig gem's API (api_map.json batch N7): rb_reg_nth_match is match[nth] with a nil
+# check, rb_backref_get reads $~ (both through a template)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_regexp tools/cext2mrbgem/fixtures/api_regexp/ext/api_regexp "$work/api_regexp" > "$work/api_regexp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_regexp/NOT_BUILDABLE"
+check grep -qF 'return (mrb_nil_p(m) ? mrb_nil_value() : mrb_funcall(mrb, m, "[]", 1, mrb_fixnum_value(1)));' "$work/api_regexp/src/api_regexp.c"
+check grep -qF 'return mrb_gv_get(mrb, mrb_intern_lit(mrb, "$~"));' "$work/api_regexp/src/api_regexp.c"
+
+# 2zm. rb_jump_tag re-raises the exception mrb_protect caught (mrb->exc); rb_match_busy is dropped with a warning (api_map.json batch N8)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_jump_tag tools/cext2mrbgem/fixtures/api_jump_tag/ext/api_jump_tag "$work/api_jump_tag" > "$work/api_jump_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_jump_tag/NOT_BUILDABLE"
+check grep -qF 'mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/api_jump_tag/src/api_jump_tag.c"
+
+# 2zn. RUBY_TYPED_* flags (api_map.json batch N9): mruby has no such flags, so each is 0 (caveated)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_flags tools/cext2mrbgem/fixtures/api_typed_flags/ext/api_typed_flags "$work/api_typed_flags" > "$work/api_typed_flags.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_flags/NOT_BUILDABLE"
+check grep -qF 'int flags = 0 | 0;' "$work/api_typed_flags/src/api_typed_flags.c"
+
+# 2zo. a data type's mark and free callbacks are threaded with mrb; the initializer is reordered to {name, dfree, mark};
+# rb_gc_mark is valid inside the mark callback (api_map.json batch N10)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype tools/cext2mrbgem/fixtures/api_dtype/ext/api_dtype "$work/api_dtype" > "$work/api_dtype.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype/NOT_BUILDABLE"
+check grep -qF 'static void holder_mark(mrb_state *mrb, void *p) {' "$work/api_dtype/src/api_dtype.c"
+check grep -qF 'static const mrb_data_type holder_type = { "holder", holder_free, holder_mark };' "$work/api_dtype/src/api_dtype.c"
+check grep -qF 'mrb_gc_mark_value(mrb, ((holder *)p)->held);' "$work/api_dtype/src/api_dtype.c"
+
+# 2zp. TypedData_ and Data_ macros are unknown names (refused), not silent pass-throughs
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_refused tools/cext2mrbgem/fixtures/api_dtype_refused/ext/api_dtype_refused "$work/api_dtype_refused" > "$work/api_dtype_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_dtype_refused/NOT_BUILDABLE"
+check grep -q "  TypedData_Get_Type  no entry in api_map.json" "$work/api_dtype_refused/REFUSALS.txt"
+
+# 2zq. TypedData_Make_Struct and TypedData_Wrap_Struct map to mrb_data_object_alloc; the struct is allocated with mrb_calloc
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_alloc tools/cext2mrbgem/fixtures/api_typed_alloc/ext/api_typed_alloc "$work/api_typed_alloc" > "$work/api_typed_alloc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_alloc/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_value(mrb_data_object_alloc(mrb, mProbe, (h = (holder *)mrb_calloc(mrb, 1, sizeof(holder))), &holder_type));' "$work/api_typed_alloc/src/api_typed_alloc.c"
+
+# 2zr. rb_hash_foreach (api_map.json batch N11): the callback is threaded with mrb and its VALUE argument becomes void *; ST_CONTINUE and ST_STOP map to 0 and 1
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach tools/cext2mrbgem/fixtures/api_hash_foreach/ext/api_hash_foreach "$work/api_hash_foreach" > "$work/api_hash_foreach.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_foreach/NOT_BUILDABLE"
+check grep -qF 'static int count_cb(mrb_state *mrb, mrb_value key, mrb_value val, void *arg) {' "$work/api_hash_foreach/src/api_hash_foreach.c"
+check grep -qF 'mrb_hash_foreach(mrb, RHASH(h), count_cb, (void *)&c);' "$work/api_hash_foreach/src/api_hash_foreach.c"
+check grep -qF 'return 0;' "$work/api_hash_foreach/src/api_hash_foreach.c"
+
+# 2zs. a non-static rb_hash_foreach callback is refused (another file may call it with a VALUE argument)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach_refused tools/cext2mrbgem/fixtures/api_hash_foreach_refused/ext/api_hash_foreach_refused "$work/api_hash_foreach_refused" > "$work/api_hash_foreach_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_hash_foreach  not a call of the form' "$work/api_hash_foreach_refused/REFUSALS.txt"
+
+# 2zt. a static inline helper in a header is converted: it takes mrb, and its callers pass it (api_map.json batch N12)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_inline tools/cext2mrbgem/fixtures/api_header_inline/ext/api_header_inline "$work/api_header_inline" > "$work/api_header_inline.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_header_inline/NOT_BUILDABLE"
+check grep -qF 'static inline int ahi_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_inline/include/helper.h"
+check grep -qF 'return mrb_int_value(mrb, ahi_check(mrb, v));' "$work/api_header_inline/src/api_header_inline.c"
+
+# 2zu. a CRuby NORETURN(decl); prototype is unwrapped: the declaration is converted as a prototype (api_map.json batch N13)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_noreturn tools/cext2mrbgem/fixtures/api_noreturn/ext/api_noreturn "$work/api_noreturn" > "$work/api_noreturn.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_noreturn/NOT_BUILDABLE"
+check grep -qF 'static void anr_fail(mrb_state *mrb, mrb_value v);' "$work/api_noreturn/src/api_noreturn.c"
+check sh -c "! grep -q 'NORETURN(static' '$work/api_noreturn/src/api_noreturn.c'"
+
+# 2zv. a struct function-pointer field whose callbacks are threaded takes mrb; its calls pass mrb (api_map.json batch N14)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_field tools/cext2mrbgem/fixtures/api_fnptr_field/ext/api_fnptr_field "$work/api_fnptr_field" > "$work/api_fnptr_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_field/NOT_BUILDABLE"
+check grep -qF 'void (*on_value)(mrb_state *mrb, struct afp_parser *p, mrb_value v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
+check grep -qF 'p.on_value(mrb, &p, v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
+
+# 2zw. a typedef'd function-pointer table: its callbacks are threaded and its indexed calls pass mrb (api_map.json batch N15)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_table tools/cext2mrbgem/fixtures/api_fnptr_table/ext/api_fnptr_table "$work/api_fnptr_table" > "$work/api_fnptr_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_table/NOT_BUILDABLE"
+check grep -qF 'typedef void (*atb_dump_fn)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_fnptr_table/src/api_fnptr_table.c"
+check grep -qF 'atb_table[0](mrb, v, 0);' "$work/api_fnptr_table/src/api_fnptr_table.c"
+
+# 2zx. a static helper defined in two files is renamed per file (NAME__STEM): each copy is threaded on its own (api_map.json batch N16)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_static_dup tools/cext2mrbgem/fixtures/api_static_dup/ext/api_static_dup "$work/api_static_dup" > "$work/api_static_dup.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static int sd_check__other(mrb_value v) {' "$work/api_static_dup/src/other.c"
+check grep -qF 'static int sd_check__api_static_dup(mrb_state *mrb, mrb_value v) {' "$work/api_static_dup/src/api_static_dup.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -470,7 +577,7 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 6
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 4
 check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
