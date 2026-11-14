@@ -2025,6 +2025,102 @@
       "needs_mrb": true,
       "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"members\"), 0, NULL)",
       "caveat": "the struct class's members (mruby-struct's Struct.members), as CRuby's rb_struct_s_members; needs the struct gem"
+    },
+    "RB_ALLOC": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, $0))",
+      "caveat": "allocates the bytes with mrb_malloc (raises on failure, as CRuby's xmalloc raises NoMemoryError); the pointer is void * as in CRuby"
+    },
+    "RB_ALLOC_N": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0) * ($1)))",
+      "caveat": "n values of the type, allocated with mrb_malloc (see RB_ALLOC)"
+    },
+    "ALLOC": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, $0))",
+      "caveat": "see RB_ALLOC"
+    },
+    "ALLOC_N": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0) * ($1)))",
+      "caveat": "see RB_ALLOC_N"
+    },
+    "RB_REALLOC_N": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(($0) = (void *)mrb_realloc($m, $0, sizeof($1) * ($2)))",
+      "caveat": "reallocates the variable to n values of the type with mrb_realloc (see RB_ALLOC_N)"
+    },
+    "rb_gc": {
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "((void)mrb_full_gc($m))",
+      "caveat": "a full collection, as CRuby's rb_gc"
+    },
+    "rb_hash": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"hash\"), 0, NULL)",
+      "caveat": "calls hash on the object (Object#hash), as CRuby's rb_hash"
+    },
+    "rb_singleton_class": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_singleton_class($m, $0)",
+      "caveat": "the singleton class of the value, as CRuby's rb_singleton_class (returns a VALUE in both)"
+    },
+    "rb_alias": {
+      "kind": "template",
+      "arity": 3,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "((void)mrb_alias_method($m, $0, $1, $2))",
+      "caveat": "aliases the method of the class (the class must be a tracked class variable; the names are IDs, mrb_sym here)"
+    },
+    "rb_str_to_inum": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_to_inum($m, $0, $1, $2)",
+      "caveat": "parses the string in the base; badcheck as given (CRuby's rb_str_to_inum)"
+    },
+    "RB_FLOAT_TYPE_P": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template_cond": "mrb_float_p($0)",
+      "template": "mrb_bool_value(mrb_float_p($0))",
+      "caveat": "a Float test (mruby's float tag), as CRuby's RB_FLOAT_TYPE_P"
+    },
+    "rb_special_const_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template_cond": "mrb_immediate_p($0)",
+      "template": "mrb_bool_value(mrb_immediate_p($0))",
+      "caveat": "an immediate value (no heap object), as CRuby's special constant test (the immediates differ: mruby's are not CRuby's)"
+    },
+    "RSTRING_GETMEM": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": false,
+      "template": "(($1) = RSTRING_PTR($0), ($2) = RSTRING_LEN($0))",
+      "caveat": "the pointer and length of the string, as CRuby's RSTRING_GETMEM"
     }
   },
   "special_arg_positions_class_only": {

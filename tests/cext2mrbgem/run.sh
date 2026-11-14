@@ -187,6 +187,19 @@ check grep -qF 'mrb_hash_delete_key(mrb, h, k);' "$work/api_str_hash_ary/src/api
 check grep -qF 'mrb_ary_set(mrb, copy, 0, fresh);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 check grep -qF 'mrb_ary_new_capa(mrb, 2);' "$work/api_str_hash_ary/src/api_str_hash_ary.c"
 
+# 2zzz14. allocation, GC, hash, singleton class, alias and string-to-integer calls (api_map.json batch B14). rb_alias maps to
+# mrb_alias_method only when its class argument is a tracked class variable (a plain VALUE parameter is refused).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alloc_alias tools/cext2mrbgem/fixtures/api_alloc_alias/ext/api_alloc_alias "$work/api_alloc_alias" > "$work/api_alloc_alias.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_alloc_alias/NOT_BUILDABLE"
+check grep -qF 'mrb_malloc(mrb, sizeof(char) * (16))' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF 'mrb_funcall_argv(mrb, s, mrb_intern_cstr(mrb, "hash"), 0, NULL)' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF 'mrb_singleton_class(mrb, s)' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF 'mrb_str_to_inum(mrb, s, 10, 0)' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF '((p) = RSTRING_PTR(s), (len) = RSTRING_LEN(s));' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF 'mrb_full_gc(mrb)' "$work/api_alloc_alias/src/api_alloc_alias.c"
+check grep -qF 'mrb_alias_method(mrb, mAl, ia, ib)' "$work/api_alloc_alias/src/api_alloc_alias.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
