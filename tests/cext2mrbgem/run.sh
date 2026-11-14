@@ -977,6 +977,10 @@ check grep -qF 'mrb_intern_cstr(mrb, "*"), 1, (mrb_value[]){mrb_fixnum_value(-1)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_raise_pv tools/cext2mrbgem/fixtures/api_raise_pv/ext/api_raise_pv "$work/api_raise_pv" > "$work/api_raise_pv.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_raisef(mrb, E_ARGUMENT_ERROR, "bad value %""S"" here", v);' "$work/api_raise_pv/src/api_raise_pv.c"
+# 2zzz32. "%+"PRIsVALUE (inspect) becomes "%!"S" (the fork's ! flag: inspect, then S).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_raise_pv_inspect tools/cext2mrbgem/fixtures/api_raise_pv_inspect/ext/api_raise_pv_inspect "$work/api_raise_pv_inspect" > "$work/api_raise_pv_inspect.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_raisef(mrb, E_ARGUMENT_ERROR, "bad value %!""S"" here", v);' "$work/api_raise_pv_inspect/src/api_raise_pv_inspect.c"
 check grep -qF 'mrb_gc_protect(mrb, box.value);' "$work/api_funcall/src/api_funcall.c"
 # 2zzz. a registered method whose return type is VP_EXPORT VALUE, where #define VP_EXPORT static is storage: a registered method
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?

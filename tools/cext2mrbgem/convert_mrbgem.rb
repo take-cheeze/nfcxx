@@ -3255,13 +3255,21 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if fmt.include?('PRIsVALUE')
         # CRuby's "%"PRIsVALUE takes a VALUE and prints its to_s: mruby's %S does the same with an mrb_value. The token
         # becomes "S" (adjacent literals concatenate). A '+' flag (inspect) is not mapped.
+        # "%+"PRIsVALUE (inspect, CRuby's + flag) becomes "%!"S" (mruby's ! flag: inspect, then S)
         bad = false
         fmt.to_enum(:scan, /PRIsVALUE/).each do
           pm = Regexp.last_match
           prefix = fmt[[pm.begin(0) - 6, 0].max...pm.begin(0)]
-          bad = true unless prefix.match?(/%"\s*\z/)
           tok = args[1][0] + pm.begin(0)
-          ed.add(tok, tok + 'PRIsVALUE'.length, '"S"') unless bad
+          if prefix.match?(/%"\s*\z/)
+            ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
+          elsif prefix.match?(/%\+"\s*\z/)
+            plus = tok - (prefix.length - prefix.rindex('+'))
+            ed.add(plus, plus + 1, '!')
+            ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
+          else
+            bad = true
+          end
         end
         if bad
           refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE)')
