@@ -64,6 +64,7 @@ module NativeCoreResultSigsCases
 
     check.call('fresh-array names equal the audited list',
                NativeCoreResultSigs.fresh_array_names == Set[*%w[keys values compact flatten split uniq]])
+    check.call('vetted array overrides equal the marked core.rbs methods', NativeCoreResultSigs.vetted_array_overrides == Set['Array#sort'])
     check.call('fresh-array file rejects a non-Array return', rejects_fresh("class Hash\n  def keys: () -> String\nend\n"))
 
     audited_super = {
