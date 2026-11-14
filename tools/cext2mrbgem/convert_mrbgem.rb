@@ -97,6 +97,9 @@ DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
+# an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
+ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
+ANY_WRITE_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}(?:[-+*\/%&|^]|<<|>>)?=(?!=)/
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
@@ -462,6 +465,7 @@ class Converter
     @refusals = []
     @rewrites = []
     @class_vars = Set.new
+    @id_literals = {}  # ID variable name -> its rb_intern string literal (gem-wide, assigned exactly once)
     @decl_name_pos = Set.new
     @regs = []
     @reg_by_call = {}
@@ -743,11 +747,43 @@ texts = static_rename(texts)
     out
   end
 
+  # An ID variable whose one write in the whole gem is NAME = rb_intern("lit"); and that is never address-taken, never
+  # declared inside a function and never written otherwise always names the literal. A call that passes it can then
+  # use mrb_intern_cstr with the literal (the same symbol the variable holds after the Init function runs).
+  def compute_id_literals
+    lits = {}
+    writes = Hash.new(0)
+    address = Set.new
+    local_decl = Set.new
+    @files.each_value do |f|
+      next unless f['kind'] == 'src'
+      masked, text = f['masked'], f['text']
+      finditer(ID_LIT_ASSIGN_RE, masked).each do |m|
+        lit = /"([^"\\]+)"/.match(text[m.begin(0)...m.end(0)])
+        next unless lit
+        lits[m[1]] = lit[1]
+      end
+      finditer(ANY_WRITE_RE, masked).each { |m| writes[m[1]] += 1 }
+      masked.scan(/&\s*([#{WC}]+)\b/) { address << Regexp.last_match(1) }
+      finditer(/(?<![#{WC}])ID\s+([#{WC}]+)\b/, masked).each do |m|
+        nl = masked.rindex("\n", m.begin(0) - 1)
+        pre = masked[(nl ? nl + 1 : 0)...m.begin(0)]
+        local_decl << m[1] unless pre.match?(/\A(?:extern\s+|static\s+)?\z/)
+      end
+    end
+    lits.each do |name, lit|
+      next unless writes[name] == 1
+      next if address.include?(name) || local_decl.include?(name) || @class_vars.include?(name)
+      @id_literals[name] = lit
+    end
+  end
+
   # ---- stage 2: classes, registrations, definitions -----------------------
   def scan
     @files.each_value do |f|
       finditer(CLASS_ASSIGN_RE, f['masked']).each { |m| @class_vars << m[1] }
     end
+    compute_id_literals
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       text, masked = f['text'], f['masked']
@@ -2961,6 +2997,7 @@ end
       if (m = /\Arb_intern\(\s*"([^"\\]+)"\s*\)\z/.match(id_text)) then m[1]
       elsif (m = /\A'([^'\\])'\z/.match(id_text)) then m[1]
       end
+      name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
     if name.nil?
       refuse(rel, s, 'rb_funcall', "the ID #{id_text} is not rb_intern of a string literal or a character (not supported)")
       return

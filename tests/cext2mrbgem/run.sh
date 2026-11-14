@@ -200,6 +200,14 @@ check grep -qF '((p) = RSTRING_PTR(s), (len) = RSTRING_LEN(s));' "$work/api_allo
 check grep -qF 'mrb_full_gc(mrb)' "$work/api_alloc_alias/src/api_alloc_alias.c"
 check grep -qF 'mrb_alias_method(mrb, mAl, ia, ib)' "$work/api_alloc_alias/src/api_alloc_alias.c"
 
+# 2zzz15. an ID variable written once in the gem from rb_intern of a literal names that literal in a call (mrb_intern_cstr);
+# one written twice is refused, because its value depends on the write order.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_global tools/cext2mrbgem/fixtures/api_id_global/ext/api_id_global "$work/api_id_global" > "$work/api_id_global.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "hello"), 1, (mrb_value[]){arg});' "$work/api_id_global/src/api_id_global.c"
+check grep -qF 'REFUSED: rb_funcall */ rb_funcall(obj, id_twice, 1, arg);' "$work/api_id_global/src/api_id_global.c"
+check grep -qF 'id_twice is not rb_intern of a string literal' "$work/api_id_global/REFUSALS.txt"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
