@@ -331,6 +331,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fn_table tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check grep -qF 'static mrb_value ft_item(mrb_value v) {' "$work/api_fn_table/src/api_fn_table.c"
 check grep -qF 'static FtCallbacks ft_cbs = { ft_item };' "$work/api_fn_table/src/api_fn_table.c"
+# 2zzz40. an inline rb_intern("lit") argument of a template (an ID position) is the literal's symbol (mrb_intern_cstr).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_const_intern tools/cext2mrbgem/fixtures/api_const_intern/ext/api_const_intern "$work/api_const_intern" > "$work/api_const_intern.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_const_get_at(mrb, mrb->object_class, mrb_intern_cstr(mrb, "Comparable"));' "$work/api_const_intern/src/api_const_intern.c"
 # 2zzz37. a mixed declaration: VALUE, a class declarator (with a call), VALUE. The types change at the commas.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_mixed tools/cext2mrbgem/fixtures/api_decl_mixed/ext/api_decl_mixed "$work/api_decl_mixed" > "$work/api_decl_mixed.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
