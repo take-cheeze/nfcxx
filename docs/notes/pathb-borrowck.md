@@ -966,7 +966,7 @@ C++ unit then no longer refuse it (`tests/pathb-borrow/emitted`). It is opt-in b
 require more: Rust rejects a borrow error in a function nothing calls, and the Rust translator marks every
 function `(weak)`.
 
-`scripts/pathb-borrowck-tally.sh` lowers a corpus (by default the C++ programs under `tests/`) and counts the
+`scripts/pathb-borrowck-tally.rb` lowers a corpus (by default the C++ programs under `tests/`) and counts the
 verdicts and first refusal messages in four modes: plain, with `--infer-loan-ends --infer-summaries`, with the
 runtime and libc effects files too, and with `--emitted-only` on top. On 139 lowered programs, before and
 after accepting external projections and external call arguments (and adding `--emitted-only`):
@@ -1022,7 +1022,7 @@ only as described in "C++ destructors"; placement new and storage reuse by the p
 
 ## Rust frontend boundary
 
-Rust programs are checked through mrustc's monomorphised MIR: `scripts/mrustc-borrowck.sh prog.rs`
+Rust programs are checked through mrustc's monomorphised MIR: `scripts/mrustc-borrowck.rb prog.rs`
 runs mrustc, `scripts/monomir-to-pathb.rb --borrow`, and this checker with `--infer-loan-ends` and
 `--infer-summaries`. [mrustc-borrowck.md](mrustc-borrowck.md) describes the facts it emits, the
 verdicts mrustc gives itself, and `tests/mrustc-borrow`, which records rustc's verdict for each

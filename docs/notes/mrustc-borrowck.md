@@ -5,8 +5,8 @@ with nfcxx's Path B checker ([pathb-borrowck.md](pathb-borrowck.md)), reading th
 monomir backend dumps ([mrustc-monomir.md](mrustc-monomir.md)):
 
 ```sh
-scripts/mrustc-borrowck.sh prog.rs          # exit 0 accepted, 1 error, 3 refused, 4 tool failure
-MRUSTC_BORROWCK_KEEP=out scripts/mrustc-borrowck.sh prog.rs   # keeps out/prog.mir and out/prog.ir
+scripts/mrustc-borrowck.rb prog.rs          # exit 0 accepted, 1 error, 3 refused, 4 tool failure
+MRUSTC_BORROWCK_KEEP=out scripts/mrustc-borrowck.rb prog.rs   # keeps out/prog.mir and out/prog.ir
 tests/mrustc-borrow/run.sh
 ```
 

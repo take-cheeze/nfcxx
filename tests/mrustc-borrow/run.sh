@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rust programs borrow-checked through mrustc's MIR and scripts/pathb-borrowck.rb
-# (scripts/mrustc-borrowck.sh, docs/notes/mrustc-borrowck.md). Each case says what rustc does with it
+# (scripts/mrustc-borrowck.rb, docs/notes/mrustc-borrowck.md). Each case says what rustc does with it
 # (`// rustc: ok` or the error code) and what this pipeline must do (`// nfcxx: ok|error|refused`),
 # with optional `// diag: TEXT` lines that must appear in the output. The cases where the two differ
 # are the known gaps. The rustc verdicts are those of rustc 1.99.0. When rustc is installed, its verdict
@@ -14,7 +14,7 @@ for src in tests/mrustc-borrow/cases/*.rs; do
   name=$(basename "$src" .rs)
   want_rustc=$(sed -n 's|^// rustc: \([A-Za-z0-9]*\).*|\1|p' "$src" | head -1)
   want=$(sed -n 's|^// nfcxx: \([a-z]*\).*|\1|p' "$src" | head -1)
-  out=$(scripts/mrustc-borrowck.sh "$src" 2>&1); rc=$?
+  out=$(scripts/mrustc-borrowck.rb "$src" 2>&1); rc=$?
   case $rc in 0) got=ok ;; 1) got=error ;; 3) got=refused ;; *) got="failed($rc)" ;; esac
   ok=1
   [ "$got" = "$want" ] || { echo "FAIL $name: expected $want, got $got"; echo "$out" | sed 's/^/  /' | tail -5; ok=0; }
