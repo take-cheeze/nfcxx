@@ -35,8 +35,9 @@ attempted.
 Relax compiles only what a program calls. If bc2cpp emits every method in the closed world, emitting only methods
 reachable from the entry points would shrink the output and the C++ build.
 
-Status: not started. Needs the reachability information the closed-world analysis already computes, checked against
-dispatch that can reach methods by name.
+Status: partly present. bc2cpp's `MainReachability` (tools/bc2cpp/main_reachability.rb) already computes the
+methods unreachable from `main` (`dead_keys`, reported as `unreachable:` and excluded from the guard checks). Not verified: that
+codegen skips emitting them. Checking that, against dispatch that reaches methods by name, is the next step.
 
 ### 4. One cache rule: keyed by input hashes (bc2cpp)
 
@@ -77,7 +78,9 @@ Relax swaps recompiled functions into a live process; that is a JIT-scale change
 step is a per-function or per-translation-unit cache keyed by hashes of the preprocessed input. It matters most for
 the large-library tests (`tests/realworld`, `tests/llamacpp`, `tests/coreclr-gc`).
 
-Status: not started. Needs a measurement of how much of the build time these tests spend on unchanged units.
+Status: largely present. `nfcxx --cache=DIR` (NFCXX_CACHE) keeps each `-c` compile under a key built from its inputs, and
+`NFCXX_CACHE_REMOTE=gha` shares the objects through the GitHub Actions cache (docs/notes/cxx-driver.md, "Compile cache").
+Not measured: how much of a large library's build time an unchanged unit saves with it.
 
 ## What not to copy
 
