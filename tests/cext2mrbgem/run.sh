@@ -743,6 +743,7 @@ check test ! -e "$work/api_exc_class/NOT_BUILDABLE"
 check grep -qF 'mrb_class_get(mrb, "Numeric")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_exc_get(mrb, "IOError")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_ensure_string_type(mrb, s)' "$work/api_exc_class/src/api_exc_class.c"
+check grep -qF 'mrb_field_write_barrier_value(mrb, mrb_basic_ptr(self), v)' "$work/api_exc_class/src/api_exc_class.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

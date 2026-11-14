@@ -365,6 +365,13 @@
       "kind": "drop",
       "reason": "CRuby warns when a deprecated constant is used; mruby has no constant deprecation, so the call has no effect"
     },
+    "RB_OBJ_WRITE": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "do { *($1) = ($2); mrb_field_write_barrier_value($m, mrb_basic_ptr($0), $2); } while (0)",
+      "caveat": "the object must be a heap value (CRuby's RB_OBJ_WRITE has the same requirement); the write barrier is mruby's field barrier"
+    },
     "StringValue": {
       "kind": "template",
       "arity": 1,

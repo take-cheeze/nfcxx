@@ -8,8 +8,14 @@ static VALUE ec_str(VALUE self, VALUE s) {
     StringValue(s);
     return s;
 }
+static VALUE ec_wr(VALUE self, VALUE v) {
+    VALUE slot = Qnil;
+    RB_OBJ_WRITE(self, &slot, v);
+    return slot;
+}
 void Init_api_exc_class(void) {
     mExcClass = rb_define_module("ExcClass");
     rb_define_module_function(mExcClass, "check", ec_check, 1);
     rb_define_module_function(mExcClass, "str", ec_str, 1);
+    rb_define_module_function(mExcClass, "wr", ec_wr, 1);
 }
