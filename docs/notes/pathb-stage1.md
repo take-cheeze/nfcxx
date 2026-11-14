@@ -14,7 +14,7 @@ lowered to the IR of `pathb-stage2.md`, and the IR is emitted as QBE and execute
 | `be/nfcxx_be.h` | Output format (documentation) and the `back_end` declaration. |
 | `be/nfcxx_names.h` | Name tables for EDG enumerations (operators, expression nodes, statements, dynamic-init kinds, constant kinds). Generated, see below. |
 | `scripts/setup-pathb.sh` | Builds `cpfe` out of tree in `build/pathb` (about 1m45s on 4 cores with GCC 13). |
-| `scripts/pathb-gen-names.sh` | Regenerates `be/nfcxx_names.h` from `3rd/edg/src/il_def.h`. |
+| `scripts/pathb-gen-names.rb` | Regenerates `be/nfcxx_names.h` from `3rd/edg/src/il_def.h`. |
 | `scripts/pathb-dump` | Runs the harness front end on `file.cpp` from the EDG base dir (same flags as `nfcxx --emit-c`) and prints the IL. |
 | `tests/pathb/<name>.il` | Golden dumps for each `tests/cases/<name>.cpp`. |
 | `tests/pathb/run.sh` | Regenerates the dumps of the frozen set (one per existing golden `tests/pathb/<name>.il`, from `tests/cases/<name>.cpp`) and diffs them against the goldens. `--update` rewrites only the existing goldens. New cases are covered by `tests/pathb-ir` (stage 2), not here: the stage 1 printer cannot print the constexpr_if / if_consteval nodes of hosted-header code. The C++17 evaluation-order patch (`docs/notes/eval-order.md`) changed some goldens: new sequencing temporaries. |
@@ -27,7 +27,7 @@ Reproduce from a clean checkout (the submodule must be initialised):
 scripts/setup-pathb.sh          # build/pathb/cmake/bin/cpfe
 scripts/pathb-dump tests/cases/virtual_dispatch.cpp
 tests/pathb/run.sh              # 8 cases, all must print "ok"
-scripts/pathb-gen-names.sh      # only if EDG's enumerators change
+scripts/pathb-gen-names.rb      # only if EDG's enumerators change
 ```
 
 ## How the back-end switch works

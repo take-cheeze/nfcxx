@@ -94,7 +94,7 @@ clang --target=aarch64-linux-gnu -ffreestanding -c prog.c -o prog.o     # the ge
 
 `win64` is EDG's Windows configuration (LLP64). Its own predefined-macro table is Microsoft's and lacks the gcc type macros
 `lib/cstdint` uses, so with MinGW-w64 installed `scripts/setup-edg.sh` replaces that table with MinGW's own `gcc -dM`
-output (`scripts/win-predef.sh`). Without MinGW the table is EDG's, and the generated C does not compile with MinGW.
+output (`scripts/win-predef.rb`). Without MinGW the table is EDG's, and the generated C does not compile with MinGW.
 
 ```
 ./nfcxx --freestanding --emit-c --target=win64 prog.cpp > prog.c

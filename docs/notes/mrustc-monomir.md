@@ -16,7 +16,7 @@ remaining state-byte corruption is unresolved. Clap still fails to link because 
 symbols such as `String::type_id` are missing.
 
 The same translator with `--borrow` writes input for nfcxx's borrow checker instead of code
-(`scripts/mrustc-borrowck.sh`, see `mrustc-borrowck.md`).
+(`scripts/mrustc-borrowck.rb`, see `mrustc-borrowck.md`).
 
 The design below describes the original plan; CIL and unwinding remain future work.
 

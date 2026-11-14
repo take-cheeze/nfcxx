@@ -12,7 +12,7 @@ root=$PWD; work=$root/build/mrustc; src=$work/src
 # thepowersgang/mrustc d85e86b plus nfcxx's fixes, plus the open bug PRs, with the fixes that build mold 3: bugs 22 to 41
 # of NFCXX-FIXES.md, one commit each), bug 41 redone so that lifted statics stay private (nfcxx/lifted-private), the
 # emulated 128-bit multiply from 64-bit halves, and minicargo's OUT_DIR laid out as cargo's. On top of that, branch
-# nfcxx/borrowck-scope-end: scope ends in the monomir dump for scripts/mrustc-borrowck.sh (MRUSTC_MMIR_SCOPE_END=1),
+# nfcxx/borrowck-scope-end: scope ends in the monomir dump for scripts/mrustc-borrowck.rb (MRUSTC_MMIR_SCOPE_END=1),
 # and -Z disable-mir-opt also without inlining after monomorphisation. MRUSTC_REPO overrides the repository.
 url=${MRUSTC_REPO:-https://github.com/take-cheeze/mrustc}
 pin=6c360afd
