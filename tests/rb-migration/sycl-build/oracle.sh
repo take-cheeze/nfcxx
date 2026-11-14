@@ -5,7 +5,7 @@
 #                         [-L dir] [-l lib] [-Wl,...] [-rpath dir] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
-# (scripts/pathb-dump --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
+# (scripts/pathb-dump.rb --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
 # program with -DNFCXX_SYCL_WEBGPU. The WGSL and the kernel table are written next to the output as prog.wgsl and
 # prog.man; at run time the program finds them through NFCXX_SYCL_IMAGE (default: the output path, baked in). The
 # server that executes them is tests/sycl/server.cjs (Node + Playwright's Chromium; see rt_pipe.hpp).
@@ -77,7 +77,7 @@ if [ "$mode" = cpu ]; then
   exec $cxx -std=$std $optflag -I"$inc" "${opts[@]}" "$src" -o "$out" "${link[@]}"
 fi
 absout=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
-"$root/scripts/pathb-dump" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
+"$root/scripts/pathb-dump.rb" --ir -std=$std -D__NFCXX_SYCL_DEVICE__ ${ndebug:+$ndebug} -I"$inc" "${opts[@]}" ${diag[@]+"${diag[@]}"} "$src" > "$absout.dev.ir"
 # NFCXX_IR_OPT=inline (a comma list of passes): the IR-to-IR passes of scripts/pathb-ir-opt.rb before the device emitter
 # (docs/notes/pathb-ir-passes.md). Unset: the IR goes to the emitter as the front end wrote it.
 # Default: strip-eh,inline,sroa (the device has no exceptions: the EH state accesses go; then the inliner, then scalar replacement with constant propagation and counted-loop unrolling). NFCXX_IR_OPT=off

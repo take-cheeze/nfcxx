@@ -1,7 +1,7 @@
 // The wasm explorer's compile pipeline, shared by the local server (server.cjs) and the static build (build-static.cjs).
 // A compile runs, in a fresh temporary directory, a front end to the mid-level IR (docs/notes/pathb-stage2.md), then
 // the emitter. The front end depends on the source language (LANGUAGES):
-//   C++, C      scripts/pathb-dump --ir [-std=...] [mode] prog.cpp|prog.c   (EDG, in C++ or C mode)
+//   C++, C      scripts/pathb-dump.rb --ir [-std=...] [mode] prog.cpp|prog.c   (EDG, in C++ or C mode)
 //   LLVM IR     scripts/mrb scripts/llvm-to-pathb.rb prog.ll                (docs/notes/pathb-llvm.md)
 //   Rust        rustc -C opt-level=1 -C lto=fat -C save-temps ... prog.rs (the module after LTO, with the parts of core
 //               the program uses), llvm-dis of it, then llvm-to-pathb.rb --wasm

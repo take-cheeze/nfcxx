@@ -64,7 +64,7 @@ if [ -x "$cpfe" ]; then
   gen=0
   for f in "$root"/tests/pathb-cil/cases/*.cpp; do
     b=$(basename "$f" .cpp)
-    "$root/scripts/pathb-dump" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue
+    "$root/scripts/pathb-dump.rb" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue
     gen=$((gen + 1))
     cil_both "pathb-cil/cases/$b" full /dev/null "$tmp/ir/$b.ir" OUT
   done

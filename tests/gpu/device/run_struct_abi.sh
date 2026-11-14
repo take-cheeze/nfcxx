@@ -23,7 +23,7 @@ run_env() { LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$@"; }
 kernel=struct_kernel
 
 # 1. The IR matches its golden.
-"$root/scripts/pathb-dump" --ir --freestanding struct_abi.cpp > "$out/struct_abi.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding struct_abi.cpp > "$out/struct_abi.ir"
 if diff -u struct_abi.ir "$out/struct_abi.ir"; then echo "IR struct_abi: ok"; else echo "IR struct_abi: FAIL"; fail=1; fi
 
 # 2. The emitted PTX and nvcc's PTX of the same structs and functions: the same ABI-visible signatures.

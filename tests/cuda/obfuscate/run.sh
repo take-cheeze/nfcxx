@@ -51,7 +51,7 @@ check "off by default" bash -c 'grep -q ob_scale_kernel "$1" && ! grep -q __nfcx
 # 5. Device side: the IR, the PTX entries and the embedded kernel table carry the new names only. The entry of a C++
 # kernel is its mangled name (_Z<len><name>...), as pathb-ptx-emit --embed matches it.
 if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
-  "$root/scripts/pathb-dump" --ir --freestanding "$out/dev_a.cpp" > "$out/a.ir"
+  "$root/scripts/pathb-dump.rb" --ir --freestanding "$out/dev_a.cpp" > "$out/a.ir"
   kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$out/a.kernels"
   "$root/build/pathb-ptx-emit" --emit --sm=75 "${kopts[@]}" "$out/a.ir" > "$out/a.ptx"
   check "IR and PTX free of the names" absent "$names" "$out/a.ir" "$out/a.ptx"

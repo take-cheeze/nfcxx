@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B stage 2 regression: lower each tests/cases/*.cpp to the mid-level IR (scripts/pathb-dump --ir) and diff
+# Path B stage 2 regression: lower each tests/cases/*.cpp to the mid-level IR (scripts/pathb-dump.rb --ir) and diff
 # the text against the golden tests/pathb-ir/<name>.ir. `tests/pathb-ir/run.sh --update` rewrites the goldens after
 # an intended change. The run also reports coverage: how many IL node kinds were lowered and how many were not
 # (NFCXX_PATHB_STATS=1 counts them in the back end). Needs a harness built by scripts/setup-pathb.sh: set
@@ -33,7 +33,7 @@ probes="$probes tests/pathb-qbe/cases/builtin_objsize_global.cpp tests/pathb-qbe
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)
-  if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then
+  if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump.rb --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then
     echo "FAIL (front end) $f"; grep -v '^ir-stat' "$tmp/$n.err" | head -5; fail=1; continue
   fi
   if ! head -1 "$tmp/$n.ir" | grep -q '^(ir-module '; then
@@ -50,7 +50,7 @@ done
 # Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering handled late (VLA, statement
 # expressions, bit-fields, inline asm) and must lower all of them. Its golden has no (unsupported ...) marker; the count must match.
 gap_expected=0   # inline asm is an (asm-block ...) now; VLAs, statement expressions and bit-fields are lowered
-if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir tests/pathb-ir/gaps.cpp > "$tmp/gaps.ir" 2> "$tmp/gaps.err"; then
+if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump.rb --ir tests/pathb-ir/gaps.cpp > "$tmp/gaps.ir" 2> "$tmp/gaps.err"; then
   echo "FAIL (front end) tests/pathb-ir/gaps.cpp"; fail=1
 else
   g=$(grep -c '(unsupported' "$tmp/gaps.ir" || true)
@@ -69,7 +69,7 @@ mrb=scripts/mrb
 for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:refused: statement (asm-block"; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
-  if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
+  if ! scripts/pathb-dump.rb --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
   if [ $update = 1 ]; then ir_norm "$tmp/$n.ir" > "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
   if diff -u <(ir_norm "tests/pathb-ir/$n.ir") <(ir_norm "$tmp/$n.ir") > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
   "$mrb" scripts/pathb-qbe-emit.rb "$tmp/$n.ir" > /dev/null 2> "$tmp/$n.emit"; rc=$?
@@ -88,13 +88,13 @@ fi
 # per struct, so with those removed the output must equal the default output (checked for each program).
 for f in tests/pathb-ir/borrow/*.cpp; do
   n=$(basename "$f" .cpp)
-  if ! NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir "$f" > "$tmp/borrow_$n.ir" 2> "$tmp/borrow_$n.err"; then
+  if ! NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$f" > "$tmp/borrow_$n.ir" 2> "$tmp/borrow_$n.err"; then
     echo "FAIL (front end) $f"; head -5 "$tmp/borrow_$n.err"; fail=1; continue
   fi
   if [ $update = 1 ]; then ir_norm "$tmp/borrow_$n.ir" > "tests/pathb-ir/borrow/$n.ir"; echo "wrote tests/pathb-ir/borrow/$n.ir"; continue; fi
   if diff -u <(ir_norm "tests/pathb-ir/borrow/$n.ir") <(ir_norm "$tmp/borrow_$n.ir") > "$tmp/borrow_$n.diff"; then echo "ok   $f (NFCXX_PATHB_BORROW=1)"
   else echo "DIFF $f (NFCXX_PATHB_BORROW=1)"; head -40 "$tmp/borrow_$n.diff"; fail=1; fi
-  scripts/pathb-dump --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
+  scripts/pathb-dump.rb --ir "$f" > "$tmp/default_$n.ir" 2>/dev/null
   if perl -0pe 's/\s*\((decl|scope-end|rref-arg|drop-obligation|drop-live|drop-state) [^()\n]*\)//g; s/^\(borrow-layout [^\n]*\n//mg' "$tmp/borrow_$n.ir" | cmp -s - "$tmp/default_$n.ir"; then
     echo "ok   $f (without the fact forms: the default output)"
   else echo "FAIL $f: the flag changes more than the fact forms"; fail=1; fi
@@ -102,7 +102,7 @@ done
 # A failed write of the IR (a buffer that cannot grow under a memory cap, a full disk) is an error: the IR would be cut
 # short, and an exit status of 0 with a short IR only fails later, in its reader (llama.cpp's ggml-cuda.cu at 8 GB).
 if [ $update = 0 ] && [ -w /dev/full ]; then
-  if scripts/pathb-dump --ir tests/cases/constexpr_static.cpp > /dev/full 2> "$tmp/full.err"; then
+  if scripts/pathb-dump.rb --ir tests/cases/constexpr_static.cpp > /dev/full 2> "$tmp/full.err"; then
     echo "FAIL the IR written to /dev/full: exit status 0"; fail=1
   elif grep -q 'writing the IR failed' "$tmp/full.err"; then echo "ok   the IR written to /dev/full is an error"
   else echo "FAIL the IR written to /dev/full: not the write error"; head -3 "$tmp/full.err"; fail=1; fi

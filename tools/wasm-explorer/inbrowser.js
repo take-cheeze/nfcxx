@@ -70,7 +70,7 @@
     const scripts = { "/scripts/pathb-wasm-emit.rb": assets.emitter, "/scripts/llvm-to-pathb.rb": assets.llvmToPathb };
     const strip = (s) => s.split(WORK + "/").join("");   // the diagnostics and the IR name prog.c, as the server's
 
-    // pathb-dump --ir, as the pipeline runs it (scripts/pathb-dump): hosted (the GNU version of the server's front end,
+    // pathb-dump --ir, as the pipeline runs it (scripts/pathb-dump.rb): hosted (the GNU version of the server's front end,
     // no system include directories) or, in the emscripten mode, freestanding for EDG's linux_riscv32
     function frontEndArgs(language, std, mode, file) {
       const freestanding = C.MODES[mode].dump.includes("--freestanding");

@@ -10,7 +10,7 @@ node=${NODE:-node}
 command -v "$node" >/dev/null 2>&1 || { echo "wasm-threads: no node" >&2; exit 2; }
 N=${WASM_THREADS:-4}; ITER=${WASM_THREAD_ITER:-2000000}
 
-scripts/pathb-dump --ir tests/wasm-threads/counter.cpp > "$tmp/counter.ir" 2> "$tmp/fe" || { echo "FAIL front end: $(head -1 "$tmp/fe")"; exit 1; }
+scripts/pathb-dump.rb --ir tests/wasm-threads/counter.cpp > "$tmp/counter.ir" 2> "$tmp/fe" || { echo "FAIL front end: $(head -1 "$tmp/fe")"; exit 1; }
 if ! ruby "$root/scripts/pathb-wasm-emit.rb" --threads "$tmp/counter.ir" > "$tmp/counter.wasm" 2> "$tmp/emit"; then
   echo "FAIL emit: $(head -1 "$tmp/emit")"; exit 1
 fi

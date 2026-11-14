@@ -2,7 +2,7 @@
 // the calculate_offset call of norm.cpp:18 (the helper is common.hpp:658, with std::array<int, N> parameters), with int64_t
 // strides. The braced list narrows int64_t to int, so no overload is viable:
 //   error: no instance of function template "calculate_offset" matches the argument list
-// Compile with the Path B front end (scripts/pathb-dump --ir -std=c++17 this_file.cpp). The control, the same call with int
+// Compile with the Path B front end (scripts/pathb-dump.rb --ir -std=c++17 this_file.cpp). The control, the same call with int
 // strides (a function f(int, int, int, int)), compiles.
 #include <array>
 #include <cstdint>

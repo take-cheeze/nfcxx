@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Tally the Path B borrow checker's verdicts over lowered C++ programs (docs/notes/pathb-borrowck.md, "Refusals and
-# limits"): each file is lowered with NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir and checked in four modes:
+# limits"): each file is lowered with NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir and checked in four modes:
 #   plain   no options
 #   infer   --infer-loan-ends --infer-summaries
 #   effects infer, plus --effects scripts/pathb-runtime.effects --effects scripts/pathb-libc.effects
@@ -70,7 +70,7 @@ def tally(out, files)
   failed = 0
   files.each do |f|
     ir = ir_path(out, f)
-    if run({ "NFCXX_PATHB_BORROW" => "1" }, ["scripts/pathb-dump", "--ir", f], out: ir, err: File::NULL) == 0
+    if run({ "NFCXX_PATHB_BORROW" => "1" }, ["scripts/pathb-dump.rb", "--ir", f], out: ir, err: File::NULL) == 0
       lowered += 1
     else
       FileUtils.rm_f(ir)

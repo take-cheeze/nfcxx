@@ -80,7 +80,7 @@ jobs:
       - name: Build the mruby interpreter
         run: scripts/setup-mruby.sh
 
-      # The device pass of a .cu file goes through the Path B front end (scripts/pathb-dump).
+      # The device pass of a .cu file goes through the Path B front end (scripts/pathb-dump.rb).
       - name: Build the Path B front end
         run: scripts/setup-pathb.sh
 

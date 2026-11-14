@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The Path B front end built for the browser (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, run under node by
-# scripts/pathb-dump-wasm.cjs) against the native one (scripts/pathb-dump): for each C and C++ file below, the IR
+# scripts/pathb-dump-wasm.cjs) against the native one (scripts/pathb-dump.rb): for each C and C++ file below, the IR
 # (--ir, with NFCXX_IR_LOC=1) and the exit status must be the same, byte for byte. docs/notes/pathb-wasm-frontend.md.
 #   tests/pathb-wasm-frontend/run.sh [FILE...]   the files below, or these
 # Skips (exit 0) when either front end is not built or node is missing.
@@ -22,7 +22,7 @@ for f in "${files[@]}"; do
   [ -f "$f" ] || continue
   n=${f//\//_}
   is_known=0; grep -qxF "$f" <<< "$known" && is_known=1
-  NFCXX_IR_LOC=1 scripts/pathb-dump --ir "$f" > "$work/$n.native" 2> "$work/$n.native.err"; ns=$?
+  NFCXX_IR_LOC=1 scripts/pathb-dump.rb --ir "$f" > "$work/$n.native" 2> "$work/$n.native.err"; ns=$?
   NFCXX_IR_LOC=1 node scripts/pathb-dump-wasm.cjs --ir "$f" > "$work/$n.wasm" 2> "$work/$n.wasm.err"; ws=$?
   if [ $is_known = 1 ]; then
     if [ $ns = $ws ] && cmp -s "$work/$n.native" "$work/$n.wasm"; then
