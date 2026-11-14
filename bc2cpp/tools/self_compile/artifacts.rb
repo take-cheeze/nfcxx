@@ -119,8 +119,13 @@ module Bc2cppSelfCompile
       end
     RAKE
     skipped = section(diagnostics, 'skipped (unsupported, left on the interpreter)').lines.map(&:strip).reject(&:empty?)
+    # One object per translated method: its entry, owner and name, the shard tier it is compiled at ("default" or the
+    # --shard-cold-opt level), and compile_seconds (null unless BC2CPP_PROFILE_TIMINGS=1 was set for the generation).
+    methods = section(diagnostics, 'compiled method report').lines.map(&:strip).reject(&:empty?).map { |line| JSON.parse(line) }
+    raise 'method report and compiled entry points disagree' unless methods.map { |m| m['entry'] }.to_set == entries
     write_changed(File.join(generation, 'coverage.json'), JSON.pretty_generate(
-      'compiled_methods' => entries.size, 'interpreted_methods' => skipped.size, 'fallbacks' => skipped))
+      'compiled_methods' => entries.size, 'interpreted_methods' => skipped.size, 'fallbacks' => skipped,
+      'methods' => methods))
     entries.size
   end
 end

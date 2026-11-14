@@ -1257,7 +1257,19 @@ class CodeGen
       leaves |= copied
     end
     leaves.select! { |label| live_labels.include?(label) } if live_labels
-    leaves.map { |label| compile_method(label) }
+    leaves.map { |label| compile_timed(label) }
+  end
+
+  # BC2CPP_PROFILE_TIMINGS=1: the seconds compile_method spent on this method, probes it ran included, kept on its
+  # result as compile_seconds for the generation report (bc2cpp.rb). Without timing the result is what compile_method
+  # returned.
+  def compile_timed(label)
+    return compile_method(label) unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    result = compile_method(label)
+    result[:compile_seconds] = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started if result.is_a?(Hash)
+    result
   end
 
   # EMIT_UNIT: Array and StringIO have definitions in both mruby's own

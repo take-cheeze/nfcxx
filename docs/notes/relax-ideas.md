@@ -55,7 +55,10 @@ Relax has `why-slow`, a flight recorder, and per-function version listings. bc2c
 `generation/coverage.json` (translated methods and fallback reasons). Adding per-method tier, compile time and share of
 hot-path samples would make the next optimization decision faster.
 
-Status: partly present (coverage.json). Tier and timing columns not added.
+Status: partly present (coverage.json), tier and timing added. `generation/coverage.json` now has a `methods` array:
+one object per translated method with `entry`, `owner`, `name`, `tier` (the `--shard-cold-opt` level for a method in a
+cold shard, else `"default"`) and `compile_seconds` (under `BC2CPP_PROFILE_TIMINGS=1`, else `null`). bc2cpp writes the
+same objects as a `== compiled method report ==` section at exit. Share of hot-path samples is still not added.
 
 ### 6. Per-phase trace of builds (nfcxx)
 
