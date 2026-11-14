@@ -35,9 +35,10 @@ attempted.
 Relax compiles only what a program calls. If bc2cpp emits every method in the closed world, emitting only methods
 reachable from the entry points would shrink the output and the C++ build.
 
-Status: partly present. bc2cpp's `MainReachability` (tools/bc2cpp/main_reachability.rb) already computes the
-methods unreachable from `main` (`dead_keys`, reported as `unreachable:` and excluded from the guard checks). Not verified: that
-codegen skips emitting them. Checking that, against dispatch that reaches methods by name, is the next step.
+Status: present, verified in code. `MainReachability` (tools/bc2cpp/main_reachability.rb) computes the methods
+reachable from `main`, and `CodeGen#compile_all` (codegen_emit.rb) compiles only the labels in `live_labels`, so the rest stay
+on the VM. Dispatch by name is covered by refusals: a reflection use or another refusal retains the whole program
+(`retain all:` in the build log). Not measured: how many methods a full world drops (the optcarrot run compiles 599).
 
 ### 4. One cache rule: keyed by input hashes (bc2cpp)
 
@@ -70,7 +71,8 @@ Relax type-checks each function before it runs and borrow-checks in the backgrou
 instead. nfcxx's opt-in Path B borrow checker (`docs/notes/pathb-borrowck.md`) could run the same way in an editor or
 watch loop, reporting later.
 
-Status: not started.
+Status: not present, verified in code. Neither `scripts/pathb-borrowck.rb` nor the driver has a background or watch mode; the
+borrow check runs once per invocation (docs/notes/pathb-borrowck.md).
 
 ### 8. Content-hashed per-unit cache (nfcxx)
 
