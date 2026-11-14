@@ -16,7 +16,8 @@
 # The text the bash prints to stderr and its exit status are printed the same way: "nfcxx: ..." on stderr, STATUS N.
 #
 # Facts (--facts=FILE, one fact per line; the test writes them from the sandbox it builds):
-#   file PATH          PATH is a regular file (the bash's [ -f PATH ]), keyed by the string the bash tests
+#   file PATH          PATH is a regular file (the bash's [ -f PATH ]); the names are compared with their empty and . parts
+#                      dropped, as the file system sees them (a doubled slash names the same file)
 #   exec PATH          PATH is executable (the bash's [ -x PATH ])
 #   env NAME VALUE     an environment variable the bash sees (an empty value counts as unset, as ${NAME:-...} does)
 #   cppfront-rc N      the exit status of every cppfront run
@@ -37,11 +38,17 @@
 # its usage errors; the status of the failing step for cppfront and the SYCL passes); 3 for an argument or fact that is
 # not covered by this port: the reason goes to stderr, nothing to stdout.
 #
-# Not covered (exit 3): .cu inputs (their device pre-pass belongs to the CUDA plan), --bundle-* options (the bundle
-# wrapper runs the driver and nfcbundle), a link that names libcuda with a mode other than libcuda (the driver shim),
+# Not covered (exit 3): .cu inputs (their device pre-pass belongs to the CUDA plan), a --bundle-libs link (the bundle
+# wrapper then runs nfcbundle on the output), a link that names libcuda with a mode other than libcuda (the driver shim),
 # a -fsyntax-only compile of a .cpp2 input without -E (its cache key is of a temporary object path), a -I directory
-# that is not a plain path (the file test is by string), an -o, -x, -I-value or -MF option without its value, an
-# empty -o name, --trace/--time-log whose file cannot be written here, and a fact the plan needs that is missing.
+# with a .. part (the test follows the file system's links), an empty -o name, --trace/--time-log whose file cannot be
+# written here, and a fact the plan needs that is missing.
+#
+# Bundle options (scripts/bundle-wrap.sh): without --bundle-libs they are a usage error; with it, a -c or -E command
+# runs the driver again without them, and the pre-pass of that run is the plan.
+#
+# An option whose value is the next argument (-o, -x, -MF, -MT, -MQ, -include, -isystem) with no next argument is an
+# unbound variable under the driver's set -u: the shell exits with status 1 before anything is run.
 require 'digest/sha1'
 
 class Unported < StandardError; end
@@ -58,8 +65,8 @@ class Plan
   attr_reader :lines
 
   def initialize(facts, root, cwd)
-    @files = facts[:file]
-    @execs = facts[:exec]
+    @files = facts[:file].map { |f| canon_path(f) }
+    @execs = facts[:exec].map { |f| canon_path(f) }
     @env = facts[:env]
     @ints = facts[:ints]
     @root = root
@@ -72,11 +79,11 @@ class Plan
   end
 
   def file?(path)
-    @files.include?(path)
+    @files.include?(canon_path(path))
   end
 
   def exec?(path)
-    @execs.include?(path)
+    @execs.include?(canon_path(path))
   end
 
   # ${NAME:-...}: an empty variable is unset
@@ -100,14 +107,22 @@ class Plan
   end
 end
 
+# The path the file system finds for PATH, as far as the names go: empty and . parts are dropped (a//b and a/./b name a/b
+# on Linux, whether or not a is a directory). A .. part is kept: what it names depends on the links, so it is not decided here.
+def canon_path(path)
+  parts = path.split("/").reject { |c| c.empty? || c == "." }
+  (path.start_with?("/") ? "/" : "") + parts.join("/")
+end
+
 # The bash case pattern PAT matches A (a leading dot is matched too, as the shell's * does)
 def glob?(a, pat)
   File.fnmatch?(pat, a, File::FNM_DOTMATCH)
 end
 
-# A -o, -x, -include, ... option takes the next argument; the bash reads $2 (unbound at the end: not covered)
+# A -o, -x, -include, ... option takes the next argument; the bash reads $2, which is unbound at the end (set -u: the
+# shell exits with status 1, and nothing has been run yet: the option loop is first)
 def value_of!(argv, i)
-  raise Unported, "#{argv[i]} without a value" if i + 1 >= argv.size
+  raise Stop.new(1, "nfcxx-prepass: #{argv[i]}: unbound variable $2 (no value)") if i + 1 >= argv.size
   argv[i + 1]
 end
 
@@ -222,7 +237,8 @@ def parse_args(argv)
 end
 
 # sycl_kernel_headers ARG...: a -I directory of the arguments holds sycl/detail/kernel_desc.hpp (the bash's loop, as is).
-# The test is by string, so a directory that is not a plain path (a doubled or trailing slash, a . or .. part) is not covered.
+# The file test is the bash's [ -f ]: a doubled or trailing slash and a . part name the same file (canon_path), so they are
+# decided here; a .. part is not (Unported).
 def sycl_kernel_headers?(plan, argv)
   prev = nil
   argv.each do |a|
@@ -231,8 +247,7 @@ def sycl_kernel_headers?(plan, argv)
     d = a if prev == "-I"
     prev = a
     next if d.nil? || d.empty?
-    plain = !(d.include?("//") || d.end_with?("/") || d.split("/").any? { |c| c == "." || c == ".." })
-    raise Unported, "-I directory #{d.inspect} is not a plain path" unless plain
+    raise Unported, "-I directory #{d.inspect} has a .. part (the file test follows the links)" if d.split("/").include?("..")
     return true if plan.file?("#{d}/sycl/detail/kernel_desc.hpp")
   end
   false
@@ -321,10 +336,40 @@ def cpp2_path(plan, st, tmp_obj)
   end
 end
 
+# bundle_wrap (scripts/bundle-wrap.sh, sourced before the option loop): the --bundle-* options are checked in order, then
+# the driver runs again without them. A link is run and then nfcbundle rewrites the output: not covered.
+NO_LINK_OPTIONS = %w[-c -E -S -M -MM -fsyntax-only --emit-c].freeze
+def bundle_wrap(plan, argv, tmp_obj)
+  return nil unless (" #{argv.join(' ')} ").include?(" --bundle-")
+  on = false
+  link = true
+  args = []
+  argv.each do |a|
+    case
+    when a == "--bundle-libs" then on = true
+    when glob?(a, "--bundle-exclude=*"), glob?(a, "--bundle-only=*"), glob?(a, "--bundle-add=*"),
+         glob?(a, "--bundle-stubs=*"), glob?(a, "--bundle-runpath=*"), glob?(a, "--bundle-rpath=*")
+      nil
+    when glob?(a, "--bundle-*")
+      raise Stop.new(2, "nfcxx: unknown option #{a} (--bundle-libs, --bundle-exclude=, --bundle-only=, --bundle-add=, " \
+                        "--bundle-stubs=, --bundle-runpath=, --bundle-rpath=)")
+    else
+      args << a
+      link = false if NO_LINK_OPTIONS.include?(a)
+    end
+  end
+  raise Stop.new(2, "nfcxx: the --bundle-* options need --bundle-libs") unless on
+  raise Unported, "--bundle-libs on a link: nfcbundle rewrites the output" if link
+  # the driver runs again on ARGS (its own pre-pass is the plan); the wrapper then exits 0
+  run_driver(plan, args, tmp_obj)
+  0
+end
+
 # run_driver: the driver's setup and pre-pass for ARGV. Returns the bash's exit status; raises Stop or Unported.
 def run_driver(plan, argv, tmp_obj)
   return run_fso(plan, argv, tmp_obj) if argv.include?("-fsyntax-only")
-  raise Unported, "--bundle-* options (the bundle wrapper runs the driver again)" if (" #{argv.join(' ')} ").include?(" --bundle-")
+  bundled = bundle_wrap(plan, argv, tmp_obj)
+  return bundled unless bundled.nil?
   argv = cuda_driver_prelude(plan, argv)
   cache_remote = plan.env("NFCXX_CACHE_REMOTE")
   raise Stop.new(2, "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '#{cache_remote}')") if cache_remote && cache_remote != "gha"
@@ -347,7 +392,7 @@ def run_driver(plan, argv, tmp_obj)
     raise Unported, "--time-log file #{time_log}: its directory is not checked here" if time_log && !writable_here?(time_log)
   end
   cpp2_path(plan, st, tmp_obj)
-  0
+  0   # the checks after the pre-pass (a stdin source without -E, -x) belong to the main compile: not planned here
 end
 
 # The -fsyntax-only block: the driver runs itself again without the option (a -E run is an exec of the same arguments; a

@@ -73,3 +73,28 @@ base --trace=x.json hello.cpp2
 base -c -Iinc/ sy.cc
 base -c -Iinc sy.cc --bundle-libs
 base -c hello.cpp2 -x
+# -I directories that are not plain strings (the file test follows the names: // and . parts name the same file)
+base -c -Iinc/ sy.cc
+base -c -I./inc sy.cc
+base -c -Iinc/./ sy.cc
+base -c -I inc/ sy.cc
+base -c -Iother/ sy.cc
+base -c -Iother sy.cc -Iinc/
+# a missing option value: the driver's set -u ends it with status 1, before anything runs
+base -c hello.cpp2 -o
+base -c hello.cpp2 -x
+base -c -MF
+base -c -MT
+base -c -include
+base -c -isystem
+base -fsyntax-only -o
+base -c -x c++ hello.cpp2
+# bundle options: without --bundle-libs an error; with it, a -c or -E run is the driver's plan
+base -c hello.cpp2 --bundle-exclude=x
+base -c hello.cpp2 --bundle-bogus --bundle-libs
+base -c hello.cpp2 --bundle-libs
+base -c --bundle-libs --bundle-only=a,b hello.cpp2
+base -E hello.cpp2 --bundle-libs
+base -c -o out/hello.o hello.cpp2 --bundle-libs
+base -c -Iinc sy.cc --bundle-libs
+base -c nosuch.cpp2 --bundle-libs
