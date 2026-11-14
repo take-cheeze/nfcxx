@@ -1259,6 +1259,35 @@ end
   # state, so H takes mrb, and the callbacks passed for the parameter are threaded (like a struct function-pointer
   # field, fnptr_global). The assigns are the helper names passed as that argument at H's call sites; the calls are the
   # direct NAME( calls in H's body. A call site that does not pass a plain helper name makes the record invalid.
+  # the index of parameter text t in the parameter list of the function-like macro name defined in rel, or nil
+  def macro_param_index(name, rel, t)
+    masked = @files[rel]['masked']
+    m = /^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\(([^)]*)\)/.match(masked)
+    return nil unless m
+    m[1].split(',').map(&:strip).index(t)
+  end
+
+  # for each invocation of macro name (outside any #define), its k-th argument when that is a plain helper name:
+  # [helper, rel, position], or nil when some invocation's argument is not one
+  def macro_invocation_helpers(name, k)
+    out = []
+    (@occ[name] || []).each do |irel, is, ie|
+      next if define_at(irel, is)
+      mk = @files[irel]['masked']
+      nx = next_nonspace(mk, ie)
+      return nil if nx < 0 || mk[nx] != '('
+      close = match_close(mk, nx)
+      args = close > 0 ? split_args(mk, nx, close) : []
+      a = args[k]
+      return nil if a.nil?
+      t = psl(@files[irel]['text'], a[0], a[1]).strip
+      return nil unless t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
+      lead = psl(@files[irel]['text'], a[0], a[1])[/\A\s*/].length
+      out << [t, irel, a[0] + lead]
+    end
+    out
+  end
+
   def fnptr_param_recs
     recs = []
     @defs.each do |hname, lst|
@@ -1304,6 +1333,14 @@ end
         lead = psl(@files[crel]['text'], a[0], a[1])[/\A\s*/].length
         if t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
           rec[:assigns] << [t, crel, a[0] + lead]
+        elsif (dm = define_at(crel, cs)) && (k = macro_param_index(dm[0], crel, t))
+          # the call is in a macro body and passes the macro's k-th parameter: each invocation's k-th argument is the helper
+          inv = macro_invocation_helpers(dm[0], k)
+          if inv.nil?
+            rec[:bad] = true
+            break
+          end
+          inv.each { |h, irel, ipos| rec[:assigns] << [h, irel, ipos] }
         elsif (en = enclosing_func(crel, cs)) && (j = fn_param_names(en).index(t))
           # forwarded: the call passes the enclosing function's own callback parameter j (its record gives the callbacks)
           rec[:assigns] << [:fwd, en['name'], j]
@@ -1579,9 +1616,17 @@ end
     @hash_calls.each { |c| forced << c[:cb] }
     @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
+    # a local macro whose body uses a name that needs the state needs it too: a use of the macro expands that use
+    macro_needs = Set.new
+    @files.each do |_rel, f|
+      f['masked'].to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
+        body = psl(f['masked'], m.end(0), logical_line_end(f['masked'], m.end(0)))
+        macro_needs << m[1] if body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
+      end
+    end
     needs = Set.new(forced)
     ids.each do |name, s|
-      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] }
+      needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) }
     end
     changed = true
     while changed
@@ -1924,7 +1969,14 @@ use_problem = lambda do |name, use|
           body = psl(masked, m.end(0), e)
           # a body that calls a helper which needs the state is handled the same way: its call takes the global
           next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i)) }
-          next if body =~ /(?<![#{WC}])return(?![#{WC}])/
+          # a return in the body skips the state restore of a registered method or Init that expands it: refused there
+          if body =~ /(?<![#{WC}])return(?![#{WC}])/
+            wrapped = (@occ[name] || []).any? do |orel, os, _oe|
+              fnx = enclosing_func(orel, os)
+              fnx && (@valid_reg_names.include?(fnx['name']) || (@init_defs || []).any? { |x| x['name'] == fnx['name'] })
+            end
+            next if wrapped
+          end
           ok = (@occ[name] || []).all? do |orel, os, _oe|
             inside = orel == rel && s <= os && os < e
             next true if inside
