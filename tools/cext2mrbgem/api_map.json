@@ -1178,6 +1178,18 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "the function is called with the mruby state (mrb_func_t: mrb, then the data), so a callback passed here is threaded with an mrb argument (helper threading); the state argument is int * in CRuby but mrb_bool * in mruby, so a caller variable must be declared mrb_bool; only mruby exceptions are caught, and CRuby errinfo is not set"
+    },
+    "rb_class_new_instance": {
+      "kind": "call",
+      "mruby": "mrb_obj_new",
+      "inject_mrb": false,
+      "needs_mrb": true,
+      "arg_order": [
+        2,
+        0,
+        1
+      ],
+      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
     }
   },
   "special_arg_positions_class_only": {
@@ -1221,6 +1233,9 @@
     ],
     "rb_define_private_method": [
       0
+    ],
+    "rb_class_new_instance": [
+      2
     ]
   }
 }
