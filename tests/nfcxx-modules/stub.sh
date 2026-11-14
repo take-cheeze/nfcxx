@@ -8,6 +8,8 @@
 #   eccp          logged (RUN), after ENV when EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS is set (the bash exports it for -shared)
 #   ehshim, sret.sh, asan-vla  print their facts (asan-vla fails when the fact is absent)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
+#   pathb-cc, cc  logged (RUN), not run: Path B's compile and link (cc is also the gcc probes' name, and those are not logged)
+#   qbe           exists; pathb-ldrt prints its fact (the archive's path)
 # Environment: NFCXX_FACTS (the facts file), NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP, NFCXX_STUB_ROOT (the sandbox's
 # repository, which the facts' ROOT stands for).
 name=$(basename "$0")
@@ -37,6 +39,9 @@ case $name in
     exit 0 ;;
   cp) log "CP $*"; exit 0 ;;
   ninja) log "RUN ninja $*"; exit 0 ;;
+  pathb-cc) log "RUN $0 $*"; exit 0 ;;
+  qbe) exit 0 ;;   # build/qbe/qbe exists, so Path B's "QBE not built" refusal does not fire
+  pathb-ldrt) v=$(fact pathb-ldrt); printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
     mkdir -p "$d" && echo "$d"; exit 0 ;;
@@ -50,5 +55,6 @@ case $name in
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
     exit 0 ;;
   ld.*) exit 0 ;;
+  cc) log "RUN cc $*"; exit 0 ;;
   *) echo "stub: no stub for $name" >&2; exit 99 ;;
 esac

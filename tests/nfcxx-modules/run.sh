@@ -7,9 +7,9 @@
 # and at build/edg/bin/eccp): gcc, cc, g++ probes answer from facts.txt, the compiles and links are logged; cp is logged; mktemp
 # -d makes a directory under the sandbox's tmp; eccp is logged. Everything else runs for real. The bash runs under env -i.
 #
-# The comparison is of the module-owned lines: each eccp call of the bash is projected to its module words (the --modules
-# options, the source, the interface and object paths, the -o output and the objects of a link), in the same form the port
-# prints them, then the exit status. The port's facts are the SRC lines, written here by running nfcxx's own module
+# The comparison is of the module-owned lines: each eccp, pathb-cc and cc call of the bash is projected to its module words
+# (the --modules options, the source, the interface and object paths, the -o output and the objects of a link), as ECCP,
+# PATHB or CC lines in the same form the port prints them, then the exit status. The port's facts are the SRC lines, written here by running nfcxx's own module
 # functions (mod_is_module_src, mod_decl_name, mod_imports, mod_check_src) on each source.
 #
 # A case the port does not cover (exit 3) is listed as unported with its reason and is not compared.
@@ -30,6 +30,9 @@ for s in ehshim sret.sh asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; 
 for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
+ln -sf "$here/stub.sh" "$root/scripts/pathb-cc"
+ln -sf "$here/stub.sh" "$root/scripts/pathb-ldrt"
+mkdir -p "$root/build/qbe"; ln -s "$here/stub.sh" "$root/build/qbe/qbe"
 # the sources: the repository's module tests and the port's own (src/)
 cp "$repo"/tests/modules/*.cpp "$repo"/tests/modules/*.cppm "$here"/src/* "$work"/
 cp "$here/facts.txt" "$sb/facts"
@@ -47,14 +50,19 @@ src_fact() {  # src_fact FILE: the SRC line the port reads for a source argument
 (cd "$work" && for f in *.cc *.cpp *.cppm *.ixx; do src_fact "$f"; done) >> "$sb/facts"
 (cd "$work" && find . -mindepth 1 -printf '%P\n' | sort) | sed 's/^/exists /' >> "$sb/facts"
 
-# the projection: the eccp calls of the stub log (sed-normalized on stdin) as "ECCP WORDS". A word is kept when it is a
+# the projection: the eccp, pathb-cc and cc calls of the stub log (sed-normalized on stdin) as "ECCP|PATHB|CC WORDS". A word is kept when it is a
 # module word; a path that is not absolute is under WORK (the bash's -c compile runs in the work directory with relative paths).
 project() {
   ruby -e '
     def norm(x) = x =~ %r{\A(/|WORK(/|\z)|TMP(/|\z))} ? x : "WORK/#{x}"
     STDIN.each_line do |l|
       t = l.split
-      next unless t[0] == "RUN" && t[1] =~ %r{/eccp\z}
+      next unless t[0] == "RUN"
+      tool = if t[1] =~ %r{/eccp\z} then "ECCP"
+             elsif t[1] =~ %r{/pathb-cc\z} then "PATHB"
+             elsif t[1] == "cc" then "CC"
+             end
+      next unless tool
       words = []
       i = 2
       while i < t.size
@@ -65,11 +73,11 @@ project() {
           i += 1
           words << norm(t[i]) if t[i]
         elsif w =~ /\.(cc|cpp|cxx|cppm|ixx)\z/ then words << norm(w)
-        elsif w =~ %r{\ATMP/m\d+\.o\z} then words << w
+        elsif w =~ %r{\ATMP/[mp]\d+\.o\z} then words << w
         end
         i += 1
       end
-      puts "ECCP " + words.join(" ") unless words.empty?
+      puts tool + " " + words.join(" ") unless words.empty?
     end'
 }
 
