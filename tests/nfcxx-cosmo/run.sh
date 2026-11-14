@@ -3,7 +3,7 @@
 #
 # The oracle is the bash: a copy of nfcxx in a sandbox, run to its end. The sandbox has the repository's scripts. ehshim and asan-vla are
 # stubs (ehshim is guarded and its output is unused here; asan-vla is never run by a case, the port leaves that case
-# unported). sret.sh is the real script, which on x86-64 Linux prints nothing and exits 0. The commands on the path are
+# unported). sret.rb is the real script, which on x86-64 Linux prints nothing and exits 0. The commands on the path are
 # stubs (stub.sh, linked under the command names in the sandbox's bin directory and at the cosmocc locations): gcc/cc/g++ probes answer, cosmocc and the
 # C compiles are logged (RUN), cp is logged (CP), and mktemp -d is a directory under the sandbox's tmp (TMP).
 # The bash runs under env -i (the case's NFCXX_* words only) in the sandbox's work directory, whose files are the "exists"
@@ -29,7 +29,7 @@ mkdir -p "$root/build" "$bin" "$work/inc" "$work/sub" "$work/libs" "$tmp"
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim.rb sret.rb asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in gcc cc g++ cp mktemp; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the repository's rewriter is built on first use (ensure_tool, every run): the sandbox's copy counts as built
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

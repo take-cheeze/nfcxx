@@ -691,7 +691,7 @@ jobs:
             - "3rd/qbe"
             - "scripts/setup-qbe.sh"
             - "scripts/qbe-*.patch"
-            - "scripts/pathb-ldrt"
+            - "scripts/pathb-ldrt.rb"
             - "be/nfcxx_*.h"
             - ".github/actions/toolchain/**"
             - ".github/workflows/ci.yml"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Class-returning library functions (scripts/sret.sh): std::filesystem::path results, hosted, both backends.
+# Class-returning library functions (scripts/sret.rb): std::filesystem::path results, hosted, both backends.
 #   NFCXX_BACKEND=pathb|qbe|gcc   (default: pathb and gcc; qbe and gcc off x86-64 Linux)
 cd "$(dirname "$0")/../.."
 pb=pathb; { [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; } || pb=qbe   # Path B is the x86-64 Linux backend; other hosts stay on qbe

@@ -16,7 +16,7 @@ C --cpp--> prep (qbe-prep) --cproc--> QBE IL --qbe2cil.rb--> JSON fragment (.o) 
    --ilasm--> x.dll  +  x.runtimeconfig.json  +  x (launcher: exec dotnet x.dll "$@")
 ```
 
-- `scripts/cil-cc` is the compiler wrapper: it sets `NFCXX_CIL=1` and runs `scripts/qbe-cc`, which does the
+- `scripts/cil-cc.rb` is the compiler wrapper: it sets `NFCXX_CIL=1` and runs `scripts/qbe-cc`, which does the
   preprocessing, `qbe-prep` and cproc as for the QBE backend. With `NFCXX_CIL` set it writes a fragment instead of
   running QBE, and its link step is `cil-link.rb`.
 - `scripts/qbe2cil.rb` (a port of the former `qbe2cil.py`, see `docs/notes/mruby-scripting.md`) turns one translation unit's QBE IL into a fragment: the method bodies as CIL text, the

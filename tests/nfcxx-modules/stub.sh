@@ -6,7 +6,7 @@
 #   ninja         logged (RUN), not run (the repository tools are built before the gcc path)
 #   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   eccp          logged (RUN), after ENV when EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS is set (the bash exports it for -shared)
-#   ehshim, sret.sh, asan-vla  print their facts (asan-vla fails when the fact is absent)
+#   ehshim.rb, sret.rb, asan-vla  print their facts (asan-vla fails when the fact is absent)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
 #   pathb-cc, cc  logged (RUN), not run: Path B's compile and link (cc is also the gcc probes' name, and those are not logged)
 #   qbe           exists; pathb-ldrt prints its fact (the archive's path)
@@ -41,15 +41,15 @@ case $name in
   ninja) log "RUN ninja $*"; exit 0 ;;
   pathb-cc) log "RUN $0 $*"; exit 0 ;;
   qbe) exit 0 ;;   # build/qbe/qbe exists, so Path B's "QBE not built" refusal does not fire
-  pathb-ldrt) v=$(fact pathb-ldrt); printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
+  pathb-ldrt.rb) v=$(fact pathb-ldrt); printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
     mkdir -p "$d" && echo "$d"; exit 0 ;;
   eccp)
     [ -z "${EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS+x}" ] || log "ENV EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=$EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS"
     log "RUN $0 $*"; exit 0 ;;
-  ehshim|sret.sh|asan-vla)
-    key=ehshim; [ "$name" = sret.sh ] && key=sret; [ "$name" = asan-vla ] && key=asan-vla
+  ehshim.rb|sret.rb|asan-vla)
+    key=${name%.rb}; [ "$name" = sret.rb ] && key=sret
     v=$(fact "$key")
     if [ "$name" = asan-vla ] && [ -z "$v" ]; then exit 1; fi
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"

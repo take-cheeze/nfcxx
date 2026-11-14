@@ -3,9 +3,9 @@
 # (scripts/pathb-ssa-build, with scripts/pathb-x87-thunks.rb), link with the long double runtime and the EDG runtime, and
 # return the value their source gives in `// EXPECT:`. The probe pc.c is the checked-operation helper (must not trap).
 #
-#   tests/pathb-ssa-qbe/x87/run.sh      (needs build/edg/lib and build/pathb-ldrt, built by scripts/pathb-ldrt)
+#   tests/pathb-ssa-qbe/x87/run.sh      (needs build/edg/lib and build/pathb-ldrt, built by scripts/pathb-ldrt.rb)
 cd "$(dirname "$0")/../../.." || exit 2
-ldrt=$(scripts/pathb-ldrt) || exit 2
+ldrt=$(scripts/pathb-ldrt.rb) || exit 2
 libdir=${EDG_LIB:-build/edg/lib}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 

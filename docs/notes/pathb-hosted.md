@@ -161,7 +161,7 @@ really calls), `traps/asm_ud2.cpp`; the refusal is in `tests/pathb-ir/gaps.cpp` 
 ## long double
 
 Supported since `docs/notes/pathb-longdouble.md`: a `long double` is a 16-byte object in the x86-64 System V layout, every operation
-is a call of a helper that gcc compiled (`be/nfcxx_ldrt.c`, linked from `libnfcxxld.a`, `scripts/pathb-ldrt`), and the places
+is a call of a helper that gcc compiled (`be/nfcxx_ldrt.c`, linked from `libnfcxxld.a`, `scripts/pathb-ldrt.rb`), and the places
 where the C calling convention differs (results in `st(0)`) go through assembly thunks the emitter writes. libc, libm and
 libstdc++.so are called directly with the right ABI: `printf("%Lf")`, `strtold`, `powl`, `ostream::_M_insert<long double>`,
 `std::to_chars`. What used to be blocked now compiles and matches the gcc backend: `<random>` distributions over

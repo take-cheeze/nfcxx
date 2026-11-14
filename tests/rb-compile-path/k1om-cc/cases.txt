@@ -1,0 +1,11 @@
+# compile (-c, -E, -S): the build/edg/lib arguments stay, no -L
+ :: NFCXX_K1OM_ROOT="$SB/k1om" "$S" -c a.c -std=gnu17 -fdiagnostics-plain-output -o a.o
+ :: NFCXX_K1OM_ROOT="$SB/k1om" "$S" -E a.c -std=c17 -fkeep-static-functions
+ :: NFCXX_K1OM_ROOT="$SB/k1om" "$S" -S a.c -std=c18 -Ibuild/edg/lib/x
+# link: the build/edg/lib arguments are dropped, -L of the k1om library is added
+ :: NFCXX_K1OM_ROOT="$SB/k1om" "$S" a.o -Ibuild/edg/lib/x -std=gnu17 -o prog -lm
+ :: NFCXX_K1OM_ROOT="$SB/k1om" NFCXX_K1OM_LIBDIR=/lib/k1om "$S" a.o -o prog
+ :: NFCXX_K1OM_ROOT="$SB/k1om" NFCXX_K1OM_LIBDIR= "$S" -std=gnu17 -std=c17 -std=c99 -O2 -o prog
+ :: NFCXX_K1OM_ROOT= "$S" -c a.c @nostderr
+ :: NFCXX_K1OM_ROOT="$SB/k1om/" "$S" -c a.c
+ :: NFCXX_K1OM_ROOT="$SB/k1om" "$S"

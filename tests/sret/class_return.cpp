@@ -1,5 +1,5 @@
 // libstdc++ and libc++ export functions that return a class by value (std::filesystem::path and file_status here). On Linux aarch64 and
-// macOS their result goes through x8, and scripts/sret.sh bridges it. Each check returns 1 when it fails.
+// macOS their result goes through x8, and scripts/sret.rb bridges it. Each check returns 1 when it fails.
 #include <filesystem>
 #include <cstdio>
 

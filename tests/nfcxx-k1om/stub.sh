@@ -7,7 +7,7 @@
 #   eccp, cpfe    logged (RUN), then the variables they inherit that are set (ENV), not run: the EDG driver and the
 #                 EDG front end, at ROOT/build/edg/bin; cpfe creates its --gen_c_file_name file (empty)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
-# The k1om GCC (ROOT/build/..., K1OM/bin/k1om-mpss-linux-gcc) is run for real by scripts/k1om-cc; run.sh makes it log
+# The k1om GCC (ROOT/build/..., K1OM/bin/k1om-mpss-linux-gcc) is run for real by scripts/k1om-cc.rb; run.sh makes it log
 # its arguments (RUN k1om-gcc).
 # Environment: NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP (the temporary directories).
 name=$(basename "$0")

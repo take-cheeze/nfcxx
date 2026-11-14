@@ -215,7 +215,7 @@ end
 
 # What the compile stage needs from the environment. The driver's real run takes these from the shell; the port takes them
 # as options (see main): the root and the temporary directory and the working directory (for realpath), the OS (uname -s),
-# the output of scripts/pathb-ldrt, the EDG build directory, and whether the host preprocessor finds a wide literal in the
+# the output of scripts/pathb-ldrt.rb, the EDG build directory, and whether the host preprocessor finds a wide literal in the
 # unit (the -fshort-wchar check, which runs the host preprocessor and greps its output).
 class Env
   attr_accessor :root, :tmp, :cwd, :os, :ldrt, :edg_build, :wide_literal, :pathb_status, :pathb_fallback, :host
@@ -837,7 +837,7 @@ def compile_one(state, env, kind, src, obj)
     pathb_log(env, "gcc #{src}: #{reason}")
     run_cmd(gcc_argv(state, what, csrc, obj, extra))
   elsif state.backend == "cil"
-    qcc = "#{env.root}/scripts/cil-cc"
+    qcc = "#{env.root}/scripts/cil-cc.rb"
     run_cmd([qcc, "--c-input", what, *state.kqf, *state.pp, *state.asf, *extra, csrc, "-o", obj])
   else
     run_cmd(gcc_argv(state, what, csrc, obj, extra))
@@ -879,7 +879,7 @@ def link_mode(state, env)
     edg = env.edg_build || "#{env.root}/build/edg"
     run_cmd([env.host, *objs, *state.ld, "-o", out, env.ldrt, "-L#{edg}/lib", "-lC", *cxx_libs, "-lm", *atomic])
   elsif state.backend == "cil"
-    qcc = "#{env.root}/scripts/cil-cc"
+    qcc = "#{env.root}/scripts/cil-cc.rb"
     run_cmd([qcc, *objs, *state.ld, "-o", out])
   else
     run_cmd(["gcc", *objs, *state.ld, "-o", out])

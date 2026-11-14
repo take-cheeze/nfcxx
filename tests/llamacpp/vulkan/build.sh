@@ -118,9 +118,9 @@ tr '\t' '\n' < "$out/sources" | xargs -d '\n' -n 2 -P "${JOBS:-4}" bash -c 'comp
 [ $fail = 0 ] || { echo "compile failures: see $out/obj/*.log"; exit 1; }
 
 objs=(); while IFS=$'\t' read -r f _; do objs+=("$(objname "$f")"); done < "$out/sources"
-# NFCXX_PATH=b: the object-only link is not Path B's link, so the runtime archive (scripts/pathb-ldrt: _mm_pause and the
+# NFCXX_PATH=b: the object-only link is not Path B's link, so the runtime archive (scripts/pathb-ldrt.rb: _mm_pause and the
 # long double helpers) goes on the line here.
-[ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt")")
+[ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt.rb")")
 if "$root/nfcxx" "${objs[@]}" $omp_link -lvulkan -lm -lpthread -lstdc++ -o "$out/test-backend-ops" > "$out/link.log" 2>&1; then
   echo "linked $out/test-backend-ops (${#objs[@]} objects)"
 else

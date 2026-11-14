@@ -5,7 +5,7 @@ std::float128_t`). That blocked `std::format`: GCC 13's `<format>` instantiates 
 whatever the arguments are (`basic_format_arg` stores a `_Float128`, and the formatter calls `to_chars(char*, char*,
 _Float128)` of libstdc++.so). This note describes the support. It follows `docs/notes/pathb-longdouble.md` and
 `docs/notes/pathb-int128.md`: a 16-byte object in the IR, every operation a call of a helper in `libnfcxxld.a`
-(`be/nfcxx_ldrt.c`, built by `scripts/pathb-ldrt`), and the results are gcc's, because the helpers are gcc-compiled C and
+(`be/nfcxx_ldrt.c`, built by `scripts/pathb-ldrt.rb`), and the results are gcc's, because the helpers are gcc-compiled C and
 gcc lowers `_Float128` arithmetic to libgcc's soft-float routines (`__addtf3`, `__multf3`, `__divtf3`, `__eqtf2`,
 `__fixtfdi`, `__fixtfti`, `__floattitf`, `__trunctfxf2`, `__extendxftf2`, `__extendsftf2`, ...), which are linked from
 `libgcc.a`. Nothing is written by hand.
@@ -137,6 +137,6 @@ member")`): that is a bare `long double` or `_Float128` in a 16-byte struct, as 
 ## 8. Build and link
 
 No new library: the helpers and wrappers are in `be/nfcxx_ldrt.c`, so the `libnfcxxld.a` every Path B link already adds
-(`scripts/pathb-ldrt`) has them. The wrappers name `libstdc++.so` symbols, which the link has (`-lstdc++`), and
+(`scripts/pathb-ldrt.rb`) has them. The wrappers name `libstdc++.so` symbols, which the link has (`-lstdc++`), and
 `fabsf128` is a gcc built-in. The EDG fork needed no change: the pinned `3rd/edg` commit has the `_Float128` front end
 (`fk_float128`, `fk_std_float128`, the host `__float128` value) and the `ignored-routine` fix that `std::format` needs.

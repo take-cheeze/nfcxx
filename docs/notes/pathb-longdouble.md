@@ -142,9 +142,9 @@ Exceptions with a `long double` operand (`throw 1.5L; catch (long double)`) and 
 
 ## 5. Build and link
 
-`scripts/pathb-ldrt` builds `build/pathb-ldrt/libnfcxxld.a` from `be/nfcxx_ldrt.c` (`cc -O2 -fPIC`) on first use and prints
+`scripts/pathb-ldrt.rb` builds `build/pathb-ldrt/libnfcxxld.a` from `be/nfcxx_ldrt.c` (`cc -O2 -fPIC`) on first use and prints
 its path. Every Path B link adds it after the objects: the driver (`nfcxx`, `NFCXX_PATH=b`) and `tests/pathb-qbe/run.sh`.
-`scripts/pathb-cc` produces an object only, so a program that calls it by hand adds `$(scripts/pathb-ldrt)` to its link line.
+`scripts/pathb-cc` produces an object only, so a program that calls it by hand adds `$(scripts/pathb-ldrt.rb)` to its link line.
 A program that never touches a long double does not pull a member out of the archive. The harness (`setup-pathb.sh`) does
 not build or include it. `--long-double=trap` / `NFCXX_LONG_DOUBLE=trap` stay for the IR forms that still mention the scalar
 type (hand-written IR); the doctest build no longer needs them.

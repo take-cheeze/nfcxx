@@ -29,8 +29,8 @@
 #   module PATH             PATH declares or imports a C++ module (the module check reads the source; not ported)
 #   cxx-clang 0|1           the host C++ compiler (g++) is clang
 #   cc-clang 0|1            the C compiler (cc) is clang
-#   ehshim PATH             scripts/ehshim prints PATH (absent: it prints nothing)
-#   sret PATH               scripts/sret.sh prints PATH (absent: nothing)
+#   ehshim PATH             scripts/ehshim.rb prints PATH (absent: it prints nothing)
+#   sret PATH               scripts/sret.rb prints PATH (absent: nothing)
 #   asan-vla PATH           scripts/asan-vla prints PATH (absent: it fails)
 #   eh-tls 1                ${EDG}/../eh-tls exists
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)

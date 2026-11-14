@@ -1,5 +1,5 @@
-# Exported libstdc++ functions that return a std::filesystem::path by value (scripts/sret.sh), the default (__cxx11) ABI.
-# Each name is the Itanium-mangled symbol without any version suffix; scripts/sret.sh checks it against libstdc++.so.6's
+# Exported libstdc++ functions that return a std::filesystem::path by value (scripts/sret.rb), the default (__cxx11) ABI.
+# Each name is the Itanium-mangled symbol without any version suffix; scripts/sret.rb checks it against libstdc++.so.6's
 # export table. The EDG front end emits these names for calls from a program.
 _ZNSt10filesystem12current_pathB5cxx11Ev
 _ZNSt10filesystem12current_pathB5cxx11ERSt10error_code

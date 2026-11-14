@@ -873,7 +873,7 @@ fi
 # --target: the EDG configuration of the generated C (only with --freestanding --emit-c, see the usage above). The host
 # library headers and the host C compiler would be the build host's, so a hosted or compiled build with a target is refused.
 # --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
-# same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc) with the k1om assembler and
+# same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc.rb) with the k1om assembler and
 # runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
 if [ "$target" = linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)" >&2; exit 2; }
@@ -882,7 +882,7 @@ if [ "$target" = linux_k1om ]; then
   k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
   [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
   [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
-  export NFCXX_GCC="$root/scripts/k1om-cc" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om_root"
+  export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om_root"
 fi
 if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
@@ -972,12 +972,12 @@ esac
 shim=(); rtlib=(); vlart=()
 if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
   t=$(trace_start)
-  s=""; [ $eh_shim_on = 0 ] || s=$("$root/scripts/ehshim") || s=""
+  s=""; [ $eh_shim_on = 0 ] || s=$("$root/scripts/ehshim.rb") || s=""
   trace_end "$t" "EH shim" driver
   # cosmo: the shim interoperates with libstdc++.so (its type_info vtables and __cxa layout); cosmo links libc++ only
   [ $cosmo = 1 ] || { [ -z "$s" ] || shim=("$s"); }
-  # macOS and Linux aarch64: the thunks that pass the result of the library's class-returning functions in x8 (scripts/sret.sh)
-  sret_obj=$("$root/scripts/sret.sh"); [ -z "$sret_obj" ] || shim+=("$sret_obj")
+  # macOS and Linux aarch64: the thunks that pass the result of the library's class-returning functions in x8 (scripts/sret.rb)
+  sret_obj=$("$root/scripts/sret.rb"); [ -z "$sret_obj" ] || shim+=("$sret_obj")
   rtlib=("${EDG_BUILD:-$root/build/edg}/lib/libC.a")   # the archive by path: -L -lC breaks libc on Linux aarch64
   if [ $asan = 1 ]; then
     t=$(trace_start)
@@ -1055,7 +1055,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
       # Path B objects: EDG's runtime (libC.a: the VLA and EH entry points), the long double helpers and, with -fsanitize=address, libasan
       # (the C++ VLA runtime too: EDG lowers a C VLA to the same __vla_alloc calls, so each VLA is a malloc block libasan checks)
       cvla=(); [ $asan = 0 ] || cvla=("$("$root/scripts/asan-vla")")
-      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
+      cc ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} ${cvla[@]+"${cvla[@]}"} -o "$out" "$("$root/scripts/pathb-ldrt.rb")" "${EDG_BUILD:-$root/build/edg}/lib/libC.a" $([ "$(uname -s)" = Darwin ] && echo -lc++ || echo -lstdc++) -lm $([ "$(uname -s)" = Darwin ] || echo -latomic)
     else "${NFCXX_GCC:-gcc}" ${asan_c[@]+${asan_c[@]+"${asan_c[@]}"}} ${ldopts[@]+${ldopts[@]+"${ldopts[@]}"}} ${cobjs[@]+"${cobjs[@]}"} ${files[@]+${files[@]+"${files[@]}"}} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
@@ -1107,8 +1107,8 @@ if [ $backend = pathb ]; then
     esac
   done
   t=$(trace_start)
-  # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt, docs/notes/pathb-longdouble.md)
-  ldrt=$("$root/scripts/pathb-ldrt")
+  # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt.rb, docs/notes/pathb-longdouble.md)
+  ldrt=$("$root/scripts/pathb-ldrt.rb")
   # The C++ and atomic libraries of the host: macOS has libc++ (in libSystem's SDK) and no libstdc++, libgcc_s or libatomic.
   if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
   [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }   # no hosted C++ runtime: the program links EDG's runtime and libc

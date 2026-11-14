@@ -2,7 +2,7 @@
 # Compares scripts/nfcxx-modules.rb (the plan printer) with nfcxx's bash for the C++ module build, for each argument list of cases.txt.
 #
 # The oracle is the bash: a copy of nfcxx in a sandbox, run to its end (with the module build's nested calls: mod_build_program
-# runs nfcxx again, and those runs are the bash too). The sandbox has the repository's scripts, except ehshim, sret.sh and
+# runs nfcxx again, and those runs are the bash too). The sandbox has the repository's scripts, except ehshim.rb, sret.rb and
 # asan-vla, which are stubs. The external commands are stubs (stub.sh, linked under their names in the sandbox's bin directory
 # and at build/edg/bin/eccp): gcc, cc, g++ probes answer from facts.txt, the compiles and links are logged; cp is logged; mktemp
 # -d makes a directory under the sandbox's tmp; eccp is logged. Everything else runs for real. The bash runs under env -i.
@@ -26,12 +26,12 @@ mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$bin" "$work" "$tmp" "$roo
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim sret.sh asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim.rb sret.rb asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
 ln -sf "$here/stub.sh" "$root/scripts/pathb-cc"
-ln -sf "$here/stub.sh" "$root/scripts/pathb-ldrt"
+ln -sf "$here/stub.sh" "$root/scripts/pathb-ldrt.rb"
 mkdir -p "$root/build/qbe"; ln -s "$here/stub.sh" "$root/build/qbe/qbe"
 # the sources: the repository's module tests and the port's own (src/)
 cp "$repo"/tests/modules/*.cpp "$repo"/tests/modules/*.cppm "$here"/src/* "$work"/

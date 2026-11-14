@@ -29,5 +29,6 @@ case $name in
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
     mkdir -p "$d" && echo "$d"; exit 0 ;;
+  sret.rb) exit 0 ;;   # x86-64: sret.rb prints nothing (the real script is not run: the sandbox has no ruby on its PATH)
   *) echo "stub: no stub for $name" >&2; exit 99 ;;
 esac

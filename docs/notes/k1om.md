@@ -17,7 +17,7 @@ The toolchain is read from `NFCXX_K1OM_ROOT` (default `/opt/k1om`): `bin/k1om-mp
 - **Front end**: EDG runs on the host, so the program is laid out for LP64 x86-64. k1om is LP64 too, so sizes and
   alignments agree. The predefined macros are the host's (`__x86_64__`, GCC 13's `_Float16`, `__bf16`), which is why
   the target is freestanding: hosted C++ headers come from GCC 13 and use types GCC 5 lacks.
-- **Back end**: the gcc backend (`scripts/gcc-cc`) with `NFCXX_GCC=scripts/k1om-cc`, which is the k1om GCC. It maps
+- **Back end**: the gcc backend (`scripts/gcc-cc`) with `NFCXX_GCC=scripts/k1om-cc.rb`, which is the k1om GCC. It maps
   `-std=gnu17` to `gnu1x` and drops `-fdiagnostics-plain-output` and `-fkeep-static-functions` (newer GCC only).
 - **Assembler**: `gcc-cc` runs `$NFCXX_AS` (default `as`). The target sets it to `scripts/k1om-bin/as`, which passes
   `--march=k1om`: without it, the assembler emits x86-64 objects that the k1om linker rejects.

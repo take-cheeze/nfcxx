@@ -1,0 +1,18 @@
+# x86-64 Linux: nothing
+ :: "$S"
+# Darwin, the libc++ names all exported by the SDK's export table
+ :: NFCXX_STUB_UNAME_S=Darwin NFCXX_STUB_UNAME_M=arm64 NFCXX_STUB_SDK="$SB/sdk" "$S"
+# Darwin, a name the table lacks
+ :: NFCXX_STUB_UNAME_S=Darwin NFCXX_STUB_UNAME_M=arm64 NFCXX_STUB_SDK="$SB/sdk-short" "$S"
+# a built object: not rebuilt
+ :: mkdir -p "$SB/build/sret" && : > "$SB/build/sret/sret.o"; NFCXX_STUB_UNAME_S=Linux NFCXX_STUB_UNAME_M=aarch64 NFCXX_STUB_LIBSTDCXX=/usr/lib/libstdc++.so.6 NFCXX_STUB_NM="$PWD/../nm.txt" "$S"
+# Linux aarch64: the thunks, built with cc
+ :: NFCXX_STUB_UNAME_S=Linux NFCXX_STUB_UNAME_M=aarch64 NFCXX_STUB_LIBSTDCXX=/usr/lib/libstdc++.so.6 NFCXX_STUB_NM="$PWD/../nm.txt" "$S"
+# Linux aarch64 with a name the library does not export (the nm output lacks the first name)
+ :: NFCXX_STUB_UNAME_S=Linux NFCXX_STUB_UNAME_M=aarch64 NFCXX_STUB_LIBSTDCXX=/usr/lib/libstdc++.so.6 NFCXX_STUB_NM="$PWD/../nm-short.txt" "$S"
+# Linux aarch64 with a failing cc
+ :: NFCXX_STUB_CC_RC=4 NFCXX_STUB_UNAME_S=Linux NFCXX_STUB_UNAME_M=aarch64 NFCXX_STUB_LIBSTDCXX=/usr/lib/libstdc++.so.6 NFCXX_STUB_NM="$PWD/../nm.txt" "$S"
+# cross to macOS: the Mach-O thunks with llvm-mc and llvm-ar
+ :: NFCXX_MACOS_SYSROOT=/sdk NFCXX_STUB_UNAME_S=Linux NFCXX_STUB_UNAME_M=x86_64 "$S"
+# FreeBSD: nothing
+ :: NFCXX_STUB_UNAME_S=FreeBSD NFCXX_STUB_UNAME_M=amd64 "$S"
