@@ -355,6 +355,13 @@ check grep -qF 'return reg_split_var_impl((int)nfcx_argc, argv, self);' "$work/r
 check grep -qF 'mrb_define_method(mrb, mRegSplit, "twice", reg_split_twice, MRB_ARGS_REQ(1));' "$work/reg_split/src/reg_split.c"
 check grep -qF 'mrb_define_method(mrb, mRegSplit, "var", reg_split_var, MRB_ARGS_ANY());' "$work/reg_split/src/reg_split.c"
 check sh -c "! grep -q 'reg_split_twice(self, self)\|reg_split_plain(self, a)' '$work/reg_split/src/reg_split.c'"
+# negative: the direct caller has no mruby state (its address is taken), so the impl cannot take mrb: stays refused, with the reason
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_split_refused tools/cext2mrbgem/fixtures/reg_split_refused/ext/reg_split_refused "$work/reg_split_refused" > "$work/reg_split_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/reg_split_refused/NOT_BUILDABLE"
+check grep -qF '  rsr_make  registered method function is also called directly (not supported) (its direct caller rsr_plain_caller has no mruby state in scope' "$work/reg_split_refused/REFUSALS.txt"
+check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_refused.c'"
+
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
