@@ -390,6 +390,14 @@
       "needs_mrb": false,
       "caveat": "TYPE(x) is rb_type: it returns enum mrb_vtype, so compare only with MRB_TT_* values; nil and false both report MRB_TT_FALSE, so T_NIL and T_FALSE are refused"
     },
+    "rb_yield": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "requires_block": true,
+      "template": "mrb_yield($m, nfcx_block, $0)",
+      "caveat": "yields to the block the method was called with (fetched by the registered method's wrapper); only in a registered method's body: a helper has no block to yield to"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",

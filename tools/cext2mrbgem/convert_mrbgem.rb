@@ -1812,6 +1812,14 @@ use_problem = lambda do |name, use|
   def registered_header(d)
     regs = @regs.select { |r| r['error'].nil? && r['func'] == d['name'] }
     n = regs[0]['argc']
+    # the block is fetched by the wrapper when the body yields (rb_yield: the template names nfcx_block)
+    yields = false
+    if d['brace'] && d['body_end'] && @files[d['file']]
+      yields = @files[d['file']]['masked'][d['brace']..d['body_end']].to_s.match?(/\brb_yield\s*\(/)
+    end
+    if yields && n == -1
+      return [nil, nil, 'variadic registered method that yields is not supported']
+    end
     return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if d['ret'] != 'VALUE'
     if n == -1
       p = variadic_params(d)
@@ -1837,7 +1845,13 @@ use_problem = lambda do |name, use|
     end
     hdr = "#{d['storage']}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{names[0]})"
     prologue = ''
-    if n > 0
+    if yields
+      # the block is the last argument of mrb_get_args: "&" takes it as a Proc value (nil when there is none)
+      fmt = 'o' * n + '&'
+      decl = n > 0 ? "mrb_value #{names[1..].join(', ')}, nfcx_block;" : 'mrb_value nfcx_block;'
+      ptrs = (names[1..].map { |x| '&' + x } + ['&nfcx_block']).join(', ')
+      prologue = "\n  #{decl}\n  mrb_get_args(mrb, \"#{fmt}\", #{ptrs});"
+    elsif n > 0
       prologue = "\n  mrb_value #{names[1..].join(', ')};\n  mrb_get_args(mrb, \"#{'o' * n}\", #{names[1..].map { |x| '&' + x }.join(', ')});"
     end
     [hdr, prologue, nil]
@@ -2087,6 +2101,14 @@ end
         return
       end
       class_args = entry['class_args'] || []
+      # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
+      if entry['requires_block']
+        fnb = enclosing_func(rel, s)
+        unless fnb && @valid_reg_names.include?(fnb['name'])
+          refuse(rel, s, name, 'rb_yield is supported only in the body of a registered method (the wrapper fetches the block)')
+          return
+        end
+      end
 unless texts.each_with_index.all? { |t, i| (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel)) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return

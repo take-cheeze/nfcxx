@@ -251,7 +251,7 @@ check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/lo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_yield  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -537,6 +537,17 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_shadow_local/NOT_BUILDABLE"
 check grep -qF 'mrb_value sl_check = mrb_false_value();' "$work/api_shadow_local/src/api_shadow_local.c"
 check grep -qF 'return sl_check(mrb, v);' "$work/api_shadow_local/src/api_shadow_local.c"
+
+# 2zzg. rb_yield in a registered method's body: the wrapper fetches the block ("o&") and the yield passes it to mrb_yield
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield tools/cext2mrbgem/fixtures/api_yield/ext/api_yield "$work/api_yield" > "$work/api_yield.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_yield/NOT_BUILDABLE"
+check grep -qF 'mrb_get_args(mrb, "o&", &v, &nfcx_block);' "$work/api_yield/src/api_yield.c"
+check grep -qF 'return mrb_yield(mrb, nfcx_block, v);' "$work/api_yield/src/api_yield.c"
+# 2zzh. rb_yield in a helper is refused: a helper has no block to yield to
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield_refused tools/cext2mrbgem/fixtures/api_yield_refused/ext/api_yield_refused "$work/api_yield_refused" > "$work/api_yield_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -qF 'rb_yield is supported only in the body of a registered method' "$work/api_yield_refused/REFUSALS.txt"
 
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
