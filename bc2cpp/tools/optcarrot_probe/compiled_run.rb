@@ -22,6 +22,8 @@ PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 # --shard-cold-opt=LEVEL and --shard-hot-owners=FILE (shard_output.rb): the shard tier, given to the compiled code's bc2cpp run.
 SHARD_TIER_ARGS = ARGV.select { |arg| arg.start_with?('--shard-') }
 ARGV.reject! { |arg| arg.start_with?('--shard-') }
+TIER_OWNERS_FILE = ARGV.find { |arg| arg.start_with?('--tier-owners=') }&.delete_prefix('--tier-owners=')
+ARGV.reject! { |arg| arg.start_with?('--tier-owners=') }
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
@@ -188,6 +190,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   end.uniq
   # The core bodies are emitted only by a run whose owners cover every core owner (CodeGen#emit_unit_allows?).
   owners |= BC2CPP_CORE_OWNERS unless core_sources.empty?
+  # --tier-owners=FILE (idea 1, docs/notes/bc2cpp-tiered-selection.md): compile only the listed owners (plus the core
+  # owners the bodies need); every other method stays on the mruby VM, which runs the same program.
+  if (tier_file = TIER_OWNERS_FILE)
+    hot = File.read(tier_file).split("\n").map(&:strip).reject { |n| n.empty? || n.start_with?('#') }
+    owners = owners.select { |o| hot.include?(o) || BC2CPP_CORE_OWNERS.include?(o) }
+    warn "== tier selection: #{owners.size} owners compiled, the rest on the VM =="
+  end
   compiled_env = scan_env.merge('OUT_DIR' => temp, 'ONLY_OWNERS' => owners.join(','))
   compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env, SHARD_TIER_ARGS)
   File.write(File.join(generated_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
