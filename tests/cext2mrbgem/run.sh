@@ -105,8 +105,11 @@ check test ! -e "$work/const_get/NOT_BUILDABLE"
 check grep -qF 'return mrb_const_get(mrb, mrb_obj_value(mCG), id);' "$work/const_get/src/const_get.c"
 check grep -qF 'mrb_const_get(mrb, mrb_obj_value(mrb->object_class), mrb_intern_cstr(mrb, "String"));' "$work/const_get/src/const_get.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name const_get_at tools/cext2mrbgem/fixtures/const_get_at/ext/const_get_at "$work/const_get_at" > "$work/const_get_at.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_const_get_at(mrb, mCGA, version);' "$work/const_get_at/src/const_get_at.c"
+rc=0; "$rb" "$conv" --scanner "$scanner" --name const_get_at_value tools/cext2mrbgem/fixtures/const_get_at_value/ext/const_get_at_value "$work/const_get_at_value" > "$work/const_get_at_value.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
-check grep -q '  rb_const_get_at  no exact mruby equivalent' "$work/const_get_at/REFUSALS.txt"
+check grep -q '  rb_const_get_at  the arguments are not all plain identifiers' "$work/const_get_at_value/REFUSALS.txt"
 
 # 2i. helper threading: a helper with a header declaration, called from another file and from a registered
 # method, is threaded everywhere (declaration, definition, calls) with a caveat; a helper taken as a value and a

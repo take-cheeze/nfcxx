@@ -121,8 +121,14 @@
       "needs_mrb": true
     },
     "rb_const_get_at": {
-      "kind": "refuse",
-      "reason": "no exact mruby equivalent: mrb_const_get also searches the superclass chain, rb_const_get_at looks only in the receiver"
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "class_args": [
+        0
+      ],
+      "template": "mrb_const_get_at($m, $0, $1)",
+      "caveat": "the receiver's own constant table only (the fork's mrb_const_get_at, branch claude/const-get-at); a missing constant goes to const_missing, which raises NameError, as in CRuby. The receiver must be a tracked class or a mapped class constant"
     },
     "rb_scan_args": {
       "kind": "special",
