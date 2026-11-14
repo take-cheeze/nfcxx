@@ -1072,6 +1072,18 @@ end
   # rb_hash_foreach(h, cb, (VALUE)ptr): the callback is a synchronous callback of mrb_hash_foreach, so it is threaded with
   # mrb, and its third (VALUE) parameter becomes void * (the pointer it is given). Only a call whose callback is defined in
   # the input and used only here, and whose argument is an address or a (VALUE) cast of a plain name, is converted.
+# An argument of a template that is a plain expression: identifiers (which are not renamed by the converter), member
+# access, indexing, &, ?:, parentheses and integer literals. A call or any name the converter would rewrite (an API
+# name, a macro, a class variable, mrb) makes it not plain, so it is refused.
+def plain_expr?(t, rel)
+  return false unless t.match?(/\A[\w\s&*.\->\[\]?:()]+\z/)
+  return false if t.match?(/\w\s*\(/) # a call
+  t.scan(/[A-Za-z_]\w*/).all? do |w|
+    next false if w == 'mrb' || @class_vars.include?(w) || @entries.key?(w) || @types.key?(w) || UNKNOWN_RE.match?(w)
+    true
+  end
+end
+
   def hash_foreach_calls
     out = []
     @files.each do |rel, f|
@@ -1821,7 +1833,7 @@ end
         return
       end
       class_args = entry['class_args'] || []
-unless texts.each_with_index.all? { |t, i| t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) }
+unless texts.each_with_index.all? { |t, i| (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel)) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
