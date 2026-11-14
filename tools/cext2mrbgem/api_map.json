@@ -1340,6 +1340,10 @@
       "mruby": "1",
       "needs_mrb": false,
       "caveat": "mrb_hash_foreach breaks on any non-zero result, so ST_STOP (1) stops the loop as in CRuby"
+    },
+    "RBIMPL_ATTR_NORETURN": {
+      "kind": "drop",
+      "reason": "a no-return attribute: a hint for the compiler that mruby does not need; the declaration has the same meaning without it"
     }
   },
   "special_arg_positions_class_only": {

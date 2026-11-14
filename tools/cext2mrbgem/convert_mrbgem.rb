@@ -1837,6 +1837,8 @@ end
       special(rel, s, e, name, entry, nxt, called)
     when 'drop'
       # Declaration with no effect in mruby: the call is removed and a warning is printed and recorded.
+      # The name in a #define line is the macro's own definition, not a use: nothing to drop.
+      return if psl(@files[rel]['text'], [s - 12, 0].max, s) =~ /#[ \t]*(?:define|ifn?def|undef)[ \t]+\z/
       unless called
         refuse(rel, s, name, 'used without a call; cannot drop it')
         return
