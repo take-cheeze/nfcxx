@@ -1,0 +1,9 @@
+exec ROOT/build/cppfront
+file ROOT/build/cppfront-src/include/cpp2util.h
+file inc/sycl/detail/kernel_desc.hpp
+env NFCXX_CU_CACHE CACHE
+env HOME SB/home
+cppfront-rc 0
+sycl-dump 2
+sycl-header-rc 0
+sycl-pass2-rc 5
