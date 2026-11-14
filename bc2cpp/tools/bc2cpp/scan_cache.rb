@@ -154,7 +154,8 @@ module ScanCache
   def file_digest(path)
     stat = File.stat(path)
     memo = (@file_digests ||= {})
-    identity = [path, stat.mtime, stat.size]
+    # mtime.to_i: mruby's Time has no hash or eql?, so a Time in the key never hits the memo; integers do.
+    identity = [path, stat.mtime.to_i, stat.size]
     return memo[identity] if memo.key?(identity)
 
     digest = Digest::SHA256.file(path).digest
