@@ -23,7 +23,11 @@ arrays="files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc s
 fso_stubs='_out() { local tag=$1 s x; shift; s=$tag; for x in "$@"; do x=${x//$root/ROOT}; x=${x//"${fso_dir-}"/TMP}; s+=" $x"; done; printf "%s\n" "$s"; }
 run_stub() { _out RUN "$@"; return 0; }
 exec_stub() { _out EXEC "$@"; exit 0; }
-ninja() { return 0; }'
+ninja() { return 0; }
+# the CUDA driver wrap (scripts/cuda-driver-wrap.sh, the copy below): the shim is stub_shim (CUDA_TEST_SHIM=ok, or error:TEXT
+# for a shim that fails with TEXT), and uname -m is CUDA_TEST_MACHINE (default x86_64); the driver call prints EXEC.
+stub_shim() { case ${CUDA_TEST_SHIM:-ok} in error:*) echo "${CUDA_TEST_SHIM#error:}"; return 1 ;; *) echo "$root/build/cuda-driver/SHIM/libnfcxx_cudrv.a" ;; esac; }
+cuda_test_machine() { echo "${CUDA_TEST_MACHINE:-x86_64}"; }'
 
 harness() {
   echo "$fso_stubs"
@@ -32,11 +36,15 @@ harness() {
   # the bundle step, as a copy that prints its runs (the driver and the bundler) instead of running them
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
       "$root/scripts/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
+  # the CUDA driver wrap, as a copy whose driver call prints EXEC and whose shim and uname -m are stubs (see fso_stubs)
+  sed -e 's|exec "\$driver" |exec_stub "$driver" |g' -e 's|"\$root/scripts/cuda-driver-shim" |stub_shim |g' \
+      -e 's|\$(uname -m)|$(cuda_test_machine)|g' "$root/scripts/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   # nfcxx's setup and loop: up to the loop's closing "done"
   awk 'seen && /^done$/ { print; exit } /^while \[ \$# -gt 0 \]; do$/ { seen = 1 } { print }' "$root/nfcxx" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
-        -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|"
+        -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|" \
+        -e "s|source \"\\\$root/scripts/cuda-driver-wrap.sh\"|source \"$tmp/cuda-driver-wrap.sh\"|"
   echo 'dump_arr() { declare -p "$1" >/dev/null 2>&1 || return 0; local -n r=$1; [ ${#r[@]} -eq 0 ] && return 0; local x; for x in "${r[@]}"; do printf "%s+=%s\n" "$1" "$x"; done; }'
   for v in $scalars; do echo "printf '%s=%s\\n' $v \"\${$v-}\""; done
   for v in $arrays; do echo "dump_arr $v"; done

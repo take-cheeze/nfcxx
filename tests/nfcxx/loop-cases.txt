@@ -113,3 +113,40 @@ x.cpp --bundle-exclude=a
 --bundle-libs --bundle-only=a,,b x.cpp
 --bundle-libs --bundle-exclude= x.cpp
 --bundle-libs -o out.bin x.cpp -fsyntax-only
+# --cuda-driver= and a link that names libcuda (scripts/cuda-driver-wrap.sh, docs/notes/cuda-driver.md)
+--cuda-driver=cudart a.cpp -o p -lm
+--cuda-driver=libcuda -c a.cpp -lm
+NFCXX_CUDA_DRIVER=cudart -c a.cpp -lm
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lm -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures -c a.cpp -lcuda
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+NFCXX_CUDA_DRIVER=libcuda CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp --cuda-driver=auto -lcuda -o p
+NFCXX_CUDA_DRIVER= CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=libcuda a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=cudart a.cpp -l:libcuda.so.1 -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -l:libcuda.so.1 -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -l:libcuda.so -o p
+a.cpp -lcuda -o p
+--cuda-driver=bogus a.cpp -lcuda
+NFCXX_CUDA_DRIVER=bogus a.cpp
+--cuda-driver= a.cpp
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/old a.cpp -lcuda -o p
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/old a.cpp -lcuda
+tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so a.cpp -o p
+--cuda-driver=cudart a.cpp -o p tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so
+--cuda-driver=libcuda a.cpp tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so -o p
+CUDA_TEST_MACHINE=aarch64 CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_MACHINE=aarch64 --cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_SHIM=error:shim_failed CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_SHIM=error:shim_failed CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=cudart a.cpp -lcuda
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/partial a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/partial a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/partial CUDA_TEST_SHIM=ok a.cpp -lcuda -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+a.cpp -lcuda -o p

@@ -5,12 +5,22 @@
 # and loop with the build step (ensure_tool) stubbed out (tests/nfcxx/option-state.sh).
 #
 # -fsyntax-only (the re-run before the setup) prints the command the bash would run instead of the state (syntax_only_plan).
-# --bundle-* (the re-run before the setup) prints the commands it runs (bundle_plan). Not covered in this slice (refused as
-# "unported", exit 3): --cuda-driver= (its wrapper runs the driver again), -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
+# --bundle-* (the re-run before the setup) prints the commands it runs (bundle_plan). --cuda-driver= and a link that names
+# libcuda (the wrap of scripts/cuda-driver-wrap.sh, after the bundle re-run) prints the driver's re-run, or a note or an
+# error, or goes on without --cuda-driver= (cuda_driver_step). Not covered in this slice (refused as "unported", exit 3):
+# -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
 # variables that are not in the apply_environment list.
 #
 #   ruby scripts/nfcxx-loop.rb ARG...   prints the state the loop leaves, one line per variable
 #   --ld-available=NAME,...             the ld.NAME programs that exist (for -fuse-ld=NAME)
+#   --nfcxx-env=NAME=VALUE              the environment (NFCXX_CUDA_DRIVER, CUDA_HOME, and the NFCXX_* state variables)
+#   --nfcxx-machine=M                   uname -m (default x86_64)
+#   --nfcxx-cuda-file=PATH              PATH is an existing file (repeated; the headers the wrap tests)
+#   --nfcxx-cuda-dir=PATH               PATH is an existing directory (repeated; $home/lib64)
+#   --nfcxx-cuda-rtv=PATH=N             CUDART_VERSION of the header at PATH (absent when the file has no such line)
+#   --nfcxx-shim=ok|error:TEXT          the shim's result: ok (the archive path is ROOT/build/cuda-driver/SHIM/libnfcxx_cudrv.a,
+#                                       a stand-in for the hashed path), or it did not build, with the text it printed
+#   The facts are the files the bash tests: tests/nfcxx/loop-state.sh gives the port the real ones for the toolkits it uses.
 
 class NfcxxUnported < StandardError
 end
@@ -387,11 +397,150 @@ def bundle_plan(argv)
   plan
 end
 
+# ============================================================================================================================
+# --cuda-driver= (scripts/cuda-driver-wrap.sh, cuda_driver_wrap; docs/notes/cuda-driver.md). The bash is sourced after the
+# bundle re-run and before the setup, and it sees every argument: a link that names libcuda (-lcuda, -l:libcuda.so[.1], a
+# path ending in libcuda.so[.1]) is run again through the shim and libcudart (EXEC), and otherwise the arguments go on
+# without --cuda-driver=*. The toolkit's files and the machine are the facts the bash reads (CudaFacts, the options above).
+# ============================================================================================================================
+
+CUDA_LIBCUDA_PATTERNS = ["-lcuda", "-l:libcuda.so", "-l:libcuda.so.1", "*/libcuda.so", "*/libcuda.so.1"].freeze
+CUDA_STATIC_PATTERNS = ["-lcudart_static", "*/libcudart_static.a"].freeze
+CUDA_SHIM_ARCHIVE = "ROOT/build/cuda-driver/SHIM/libnfcxx_cudrv.a".freeze
+
+# a bash case pattern: * matches a slash and a leading dot
+def cuda_glob?(text, patterns)
+  patterns.any? { |pattern| File.fnmatch(pattern, text, File::FNM_DOTMATCH) }
+end
+
+# The facts the bash reads from the machine and the filesystem. take(option) records one --nfcxx-* option of this section.
+class CudaFacts
+  attr_accessor :machine, :shim
+
+  def initialize
+    @machine = "x86_64"
+    @shim = "ok"
+    @files = []
+    @dirs = []
+    @rtv = {}
+  end
+
+  def file?(path)
+    @files.include?(path)
+  end
+
+  def dir?(path)
+    @dirs.include?(path)
+  end
+
+  def rtv(path)
+    @rtv[path]
+  end
+
+  def take(option)
+    if option.start_with?("--nfcxx-machine=") then @machine = option.delete_prefix("--nfcxx-machine=")
+    elsif option.start_with?("--nfcxx-shim=") then @shim = option.delete_prefix("--nfcxx-shim=")
+    elsif option.start_with?("--nfcxx-cuda-file=") then @files << option.delete_prefix("--nfcxx-cuda-file=")
+    elsif option.start_with?("--nfcxx-cuda-dir=") then @dirs << option.delete_prefix("--nfcxx-cuda-dir=")
+    elsif option.start_with?("--nfcxx-cuda-rtv=")
+      path, version = option.delete_prefix("--nfcxx-cuda-rtv=").split("=", 2)
+      @rtv[path] = version.to_s
+    else
+      return false
+    end
+    true
+  end
+end
+
+# cuda_driver_wrap on argv (the arguments after the bundle re-run). Returns [plan, args]: plan is the commands the bash runs
+# (the driver again, as EXEC), or nil when the link goes on with args (argv minus --cuda-driver=*). An error raises NfcxxExit
+# with the bash's message and status; a note goes to stderr.
+def cuda_driver_step(argv, env, facts)
+  mode = env["NFCXX_CUDA_DRIVER"].to_s
+  mode = "auto" if mode.empty?
+  found = nil
+  static = nil
+  args = []
+  argv.each do |a|
+    if a.start_with?("--cuda-driver=")
+      mode = a.delete_prefix("--cuda-driver=")
+    elsif cuda_glob?(a, CUDA_LIBCUDA_PATTERNS)
+      found = a
+      args << a
+    else
+      static = a if cuda_glob?(a, CUDA_STATIC_PATTERNS)
+      args << a
+    end
+  end
+  unless %w[auto cudart libcuda].include?(mode)
+    raise NfcxxExit.new("nfcxx: --cuda-driver=#{mode}: auto, cudart or libcuda", 2)
+  end
+  return [nil, args] if found.nil? || mode == "libcuda"
+
+  # the toolkit: $CUDA_HOME, else the one the libcuda path is in, else /usr/local/cuda
+  home = env["CUDA_HOME"].to_s
+  if home.empty?
+    if cuda_glob?(found, ["*/lib64/stubs/libcuda.so*", "*/lib64/libcuda.so*"])
+      home = found[0...found.rindex("/lib64/")]
+    elsif cuda_glob?(found, ["*/targets/*/lib/stubs/libcuda.so*"])
+      home = found[0...found.rindex("/lib/stubs/")]
+    end
+    home = "/usr/local/cuda" unless !home.empty? && facts.file?("#{home}/include/cuda.h")
+  end
+
+  # The bash reads the version through a pipeline (sed | head) under set -euo pipefail (nfcxx's line 75): a missing
+  # cuda_runtime_api.h ends nfcxx there with status 2 and no message, before the machine is looked at. The port does the same
+  # (a bug of cuda-driver-wrap.sh: the fallback note and the cudart error are never reached when the header is missing).
+  header = "#{home}/include/cuda_runtime_api.h"
+  raise NfcxxExit.new("", 2) unless facts.file?(header)
+
+  rtv = facts.rtv(header)
+  why = if facts.machine != "x86_64"
+          "the shim is x86-64 only"
+        elsif !facts.file?("#{home}/include/cuda.h") || !facts.file?("#{home}/include/cudaTypedefs.h")
+          "no cuda.h and cudaTypedefs.h in #{home}/include"
+        elsif rtv.nil? || rtv.empty? || rtv.to_i < 12050
+          "libcudart #{rtv.to_s.empty? ? "of unknown version" : rtv} is older than 12.5"
+        elsif facts.shim.start_with?("error:")
+          "the shim did not build: #{facts.shim.delete_prefix("error:")}"
+        end
+  if why
+    raise NfcxxExit.new("nfcxx: --cuda-driver=cudart: #{why}", 1) if mode == "cudart"
+    $stdout.flush
+    $stderr.write("nfcxx: note: linking the CUDA driver library #{found} as named (#{why}; docs/notes/cuda-driver.md)\n")
+    return [nil, args]
+  end
+
+  # every mention of libcuda goes; the first becomes the shim (and the static runtime, if the link has it, else -lcudart
+  # with the toolkit's lib64 as a run path, when that directory exists)
+  lib64 = "#{home}/lib64"
+  replaced = []
+  shimmed = false
+  args.each do |a|
+    unless cuda_glob?(a, CUDA_LIBCUDA_PATTERNS)
+      replaced << a
+      next
+    end
+    next if shimmed
+
+    shimmed = true
+    replaced << CUDA_SHIM_ARCHIVE
+    if static
+      replaced << static
+    else
+      replaced.push("-L#{lib64}", "-Wl,-rpath,#{lib64}") if facts.dir?(lib64)
+      replaced << "-lcudart"
+    end
+  end
+  [[["EXEC", ["ROOT/nfcxx", *replaced]]], args]
+end
+
 def main(argv)
   ld_available = []
   env = {}
   uid = "0"
   tmpdir = ""
+  cuda_facts = CudaFacts.new
   # the configuration first: --ld-available=, --nfcxx-env=NAME=VALUE (repeated), --nfcxx-uid=, --nfcxx-tmpdir=
   while argv.first && argv.first.start_with?("--ld-available=", "--nfcxx-")
     option = argv.shift
@@ -404,6 +553,7 @@ def main(argv)
       uid = option[12..]
     elsif option.start_with?("--nfcxx-tmpdir=")
       tmpdir = option[15..]
+    elsif cuda_facts.take(option) then nil
     else
       raise NfcxxUnported, option
     end
@@ -411,12 +561,10 @@ def main(argv)
   plan = syntax_only_plan(argv)
   plan = [plan] if plan
   plan ||= bundle_plan(argv)
+  plan, argv = cuda_driver_step(argv, env, cuda_facts) unless plan
   if plan
     plan.each { |kind, cmd| $stdout.write("#{kind} #{cmd.join(" ")}\n") }
     return 0
-  end
-  argv.each do |a|
-    raise NfcxxUnported, a if a.start_with?("--cuda-driver=")
   end
   state = LoopState.new
   apply_environment(state, env, uid, tmpdir)
@@ -425,7 +573,7 @@ def main(argv)
   0
 rescue NfcxxExit => e
   $stdout.flush
-  $stderr.write("#{e.message}\n")
+  $stderr.write("#{e.message}\n") unless e.message.empty?
   e.status
 rescue NfcxxUnported => e
   $stdout.flush
