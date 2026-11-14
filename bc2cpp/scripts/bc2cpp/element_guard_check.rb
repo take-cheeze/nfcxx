@@ -116,6 +116,11 @@ THING_SOURCE = <<~RUBY
     def first_ok
       @things[0].ok?
     end
+
+    def put(i, v)
+      @things[i] = v
+      nil
+    end
   end
 RUBY
 
@@ -134,6 +139,12 @@ THING_DRIVER = <<~'RUBY'
   rescue => e
     puts "raised #{e.class}"
   end
+  begin
+    c.put(1, Other.new)
+    puts 'stored'
+  rescue => e
+    puts "store raised #{e.class}"
+  end
   puts 'end'
 RUBY
 
@@ -150,6 +161,7 @@ Dir.mktmpdir('element_guard_thing_sig') do |sig_dir|
     check.call('the good program element reads the same in both runs', interpreted && compiled && interpreted[0] == compiled[0])
     check.call('the interpreted run returns the wrong-class element', interpreted&.include?('Other'))
     check.call('the compiled run raises the declaration violation', compiled&.any? { |l| l.start_with?('raised') })
+    check.call('a wrong-class store raises before it writes (compiled), and stores (interpreted)', interpreted&.include?('stored') && compiled&.include?('store raised BC2cppDeclarationViolation'))
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')

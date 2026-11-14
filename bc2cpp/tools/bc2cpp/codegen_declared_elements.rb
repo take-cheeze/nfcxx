@@ -91,7 +91,23 @@ class CodeGen
     entry = declared_element_receiver(irep, idx, receiver, owner_def&.owner)
     return '' unless entry
 
-    var = RegName[insn.regs.first]
+    # The read result is nil past the end, so nil is allowed here.
+    element_guard_statement(entry, RegName[insn.regs.first], nil_ok: true, verb: 'read')
+  end
+
+  # DECLARED_ELEMENT_GUARD on a store: `@items[i] = v` tests the stored value before the store writes it. nil is not an
+  # allowed element (only a read past the end yields nil), so a nil store raises too.
+  def declared_element_setidx_guard(insn, irep, owner_def, idx, reg_offset)
+    return '' unless insn.op == :SETIDX
+
+    entry = declared_element_receiver(irep, idx, insn.regs.first, owner_def&.owner)
+    return '' unless entry
+
+    element_guard_statement(entry, RegName[insn.regs[2]], nil_ok: false, verb: 'assigned')
+  end
+
+  # The C statement raising when `var` (an mrb_value) is not the declared element kind (and not nil, when nil_ok).
+  def element_guard_statement(entry, var, nil_ok:, verb:)
     quote = ->(text) { text.gsub(/["\\]/) { |c| "\\#{c}" } }
     cond = case entry[:kind]
            when :float then "mrb_float_p(#{var})"
@@ -100,9 +116,10 @@ class CodeGen
            when :string then "mrb_string_p(#{var})"
            when :class then exact_class_guard(owner_class_ptr_expr(entry[:klass]), var)
            end
-    "  if (mrb_unlikely(!(mrb_nil_p(#{var}) || (#{cond})))) " \
+    ok = nil_ok ? "mrb_nil_p(#{var}) || (#{cond})" : cond
+    "  if (mrb_unlikely(!(#{ok}))) " \
       "bc2cpp_declared_ivar_violation(M, #{var}, \"#{quote.call("#{entry[:owner]}#@#{entry[:name]}[]")}\", " \
-      "\"#{quote.call(entry[:text])}\"); /* DECLARED_ELEMENT_GUARD #{entry[:owner]}##{entry[:name]} */\n"
+      "\"#{quote.call(entry[:text])}\"); /* DECLARED_ELEMENT_GUARD #{entry[:owner]}##{entry[:name]} #{verb} */\n"
   end
 
   # DECLARED_ELEMENT_MASK: the class set of a GETIDX/GETIDX0 result the flow may use: the declared element's class and
