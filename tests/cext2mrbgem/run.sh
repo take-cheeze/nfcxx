@@ -143,13 +143,11 @@ check grep -qF 'static mrb_value htr_dispatch(mrb_state *mrb, mrb_value s) {' "$
 rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global tools/cext2mrbgem/fixtures/helper_global/ext/helper_global "$work/helper_global" > "$work/helper_global.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/helper_global/NOT_BUILDABLE"
-check grep -qF 'struct mrb_state *helper_global_bc2_mrb = NULL;' "$work/helper_global/src/helper_global.c"
+# the macro HG_MAKE expands in registered methods, which have mrb: the expansion passes that mrb (threaded), so no file-scope state
 check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s) {' "$work/helper_global/src/helper_global.c"
 check grep -qF 'return mrb_str_new_cstr(mrb, "made");' "$work/helper_global/src/helper_global.c"
-check grep -qF '#define HG_MAKE(x) hg_make(helper_global_bc2_mrb, x)' "$work/helper_global/src/helper_global.c"
-check grep -qF '  mrb_state *nfcx_bc2_old = helper_global_bc2_mrb;' "$work/helper_global/src/helper_global.c"
-check test "$(grep -c 'helper_global_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/helper_global/src/helper_global.c")" -eq 3
-check grep -qF ' helper_global_bc2_mrb = nfcx_bc2_old; }' "$work/helper_global/src/helper_global.c"
+check grep -qF '#define HG_MAKE(x) hg_make(mrb, x)' "$work/helper_global/src/helper_global.c"
+check sh -c "! grep -q helper_global_bc2_mrb '$work/helper_global/src/helper_global.c'"
 check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s)' "$work/helper_global/conversion_log.json"
 
 # 2l. global state refused: a helper whose address sits in a file-scope initializer may run with no method context
@@ -818,6 +816,12 @@ check grep -qF 'mrb_gc_protect(mrb, box.value);' "$work/api_funcall/src/api_func
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_value vp_hello(mrb_state *mrb, mrb_value self)' "$work/api_storage_macro/src/api_storage_macro.c"
+
+# 2zzz4. a macro whose body returns and calls a threaded helper, expanded in a registered method: the expansion passes the method's
+# mrb (no global state, no refusal); the output compiles against the fork's headers when NFCX_MRUBY_INCLUDE is set
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_return tools/cext2mrbgem/fixtures/api_macro_return/ext/api_macro_return "$work/api_macro_return" > "$work/api_macro_return.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mret_make(mrb, s);' "$work/api_macro_return/src/api_macro_return.c"
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

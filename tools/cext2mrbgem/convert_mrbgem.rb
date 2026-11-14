@@ -1775,6 +1775,11 @@ use_problem = lambda do |name, use|
       if fn.nil? && direct && in_global_macro?(rel, s)
         next nil # a macro that expands in a function with the state
       end
+      # a threaded helper called from a macro body: the macro's expansions are all in functions with the state, so the
+      # expansion passes the mrb of its function (mrb_tok gives mrb outside the global macros)
+      if fn.nil? && direct && (dm = define_at(rel, s)) && macro_expansions_ok(dm, cands | (@valid_reg_names || Set.new) | (init_first ? Set[init_first] : Set.new))
+        next nil
+      end
       if fn.nil?
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
               'converter recognises (a macro-decorated definition, or file scope) (not supported)')
@@ -1935,6 +1940,7 @@ use_problem = lambda do |name, use|
     end
     compute_global_macros(with_state | gset)
     @global_wrap = !gset.empty? || @global_macro_spans.any? { |_r, l| !l.empty? }
+    warn "DBGW gset=#{gset.to_a} spans=#{@global_macro_spans.values.map(&:size)} threaded=#{(@threaded_cands||Set.new).to_a}" if ENV['NR_DEBUG']
     if @global_wrap
       # a macro that expands a return skips the restore of a registered method or Init that expands it (wrap_returns
       # only sees return statements written in the body). Such a use is refused; the macro's own body is not changed.
@@ -1974,7 +1980,10 @@ use_problem = lambda do |name, use|
           next if (accepted[rel] || []).include?([s, e])
           body = psl(masked, m.end(0), e)
           # a body that calls a helper which needs the state is handled the same way: its call takes the global
-          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i)) }
+          # a macro is a global macro only when its body calls the global state: a macro that calls only threaded helpers
+          # expands with the mrb of its function (mrb_tok), so it is not on the global path
+          threaded = @threaded_cands || Set.new
+          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) }
           # a return in the body skips the state restore of a registered method or Init that expands it: refused there
           if body =~ /(?<![#{WC}])return(?![#{WC}])/
             wrapped = (@occ[name] || []).any? do |orel, os, _oe|
@@ -2032,8 +2041,6 @@ use_problem = lambda do |name, use|
   # function with the state (ctx). Checked again as the set of global-state helpers changes (its fixpoint).
   def macro_expansions_ok(macro, ctx)
     name, a, b, rel = macro
-    body = psl(@files[rel]['masked'], a, b)
-    return false if body =~ /(?<![#{WC}])return(?![#{WC}])/
     (@occ[name] || []).all? do |orel, os, _oe|
       next true if rel == orel && a <= os && os < b
       fn = enclosing_func(orel, os)
