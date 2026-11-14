@@ -437,6 +437,11 @@ check grep -qF 'static int count_cb(mrb_state *mrb, mrb_value key, mrb_value val
 check grep -qF 'mrb_hash_foreach(mrb, RHASH(h), count_cb, (void *)&c);' "$work/api_hash_foreach/src/api_hash_foreach.c"
 check grep -qF 'return 0;' "$work/api_hash_foreach/src/api_hash_foreach.c"
 
+# 2zs. a non-static rb_hash_foreach callback is refused (another file may call it with a VALUE argument)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach_refused tools/cext2mrbgem/fixtures/api_hash_foreach_refused/ext/api_hash_foreach_refused "$work/api_hash_foreach_refused" > "$work/api_hash_foreach_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check grep -q '  rb_hash_foreach  not a call of the form' "$work/api_hash_foreach_refused/REFUSALS.txt"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

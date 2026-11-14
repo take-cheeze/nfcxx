@@ -1087,15 +1087,14 @@ end
         h = args[0][2]
         cb = args[1][2]
         arg = args[2][2]
-        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/) && @defs.key?(cb.delete('&'))
+        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
         cb = cb.delete('&')
         next unless arg.match?(/\A(?:\(VALUE\)\s*)?&?[A-Za-z_][#{WC}]*\z/)
-        d = @defs[cb]
-        next unless d.size == 1
-        uses = (@occ[cb] || []).size
-        next unless uses == 2 # the definition and this call
-        pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a, b| [a, b, psl(@files[d[0]['file']]['text'], a, b)] }
-        next unless pars.size == 3 && pars[2][2].start_with?('VALUE')
+        # a static callback defined in this file, with no other use in the file (its definition and this call)
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        next unless d.size == 1 && d[0]['storage'].split.include?('static')
+        next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
+        pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
                  cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
       end
