@@ -3372,8 +3372,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     prev = prev_nonspace(masked, s - 1)
     after = next_nonspace(masked, close + 1)
-    if (prev >= 0 && !";{}".include?(masked[prev])) || after < 0 || masked[after] != ';'
-      refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used (mruby returns a different count)')
+    # the value is used only in the form (nil-initialised outputs, mrb_get_args(...)): mrb_get_args returns the number of
+    # arguments it consumed, which is the argument count here (no rest part, and extra arguments are an error). The keyword
+    # form's trailing step is a statement, so a used value is refused there.
+    used = (prev >= 0 && !";{}".include?(masked[prev])) || after < 0 || masked[after] != ';'
+    if used && kw
+      refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used with a keyword part (mruby returns a different count)')
       return
     end
     fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (kw ? ':' : '')
