@@ -6,7 +6,7 @@
 #   ninja         logged (RUN), not run (the repository tools are built before the gcc path)
 #   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   eccp          logged (RUN), after ENV when EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS is set (the bash exports it for -shared)
-#   ehshim, sret.sh, asan-vla  print their facts (asan-vla fails when the fact is absent)
+#   ehshim.rb, sret.rb, asan-vla  print their facts (asan-vla fails when the fact is absent)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
 #   uname -m      the fact machine (other uname calls run for real)
 #   cuda-cub      prints the fact cuda-cub (absent: it fails, as the script does without a CUDA archive)
@@ -46,8 +46,8 @@ case $name in
   eccp)
     [ -z "${EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS+x}" ] || log "ENV EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=$EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS"
     log "RUN $0 $*"; exit 0 ;;
-  ehshim|sret.sh|asan-vla)
-    key=ehshim; [ "$name" = sret.sh ] && key=sret; [ "$name" = asan-vla ] && key=asan-vla
+  ehshim.rb|sret.rb|asan-vla)
+    key=${name%.rb}; [ "$name" = sret.rb ] && key=sret
     v=$(fact "$key")
     if [ "$name" = asan-vla ] && [ -z "$v" ]; then exit 1; fi
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"

@@ -10,7 +10,7 @@
    unused 6 bytes zeroed), operands are passed by pointer, predicates and integer results are returned in eax/rax,
    float and double travel in xmm registers. None of this is visible to other code.
 
-   Build: scripts/pathb-ldrt (gcc -O2 -c, archived as libnfcxxld.a, linked by every Path B link step). */
+   Build: scripts/pathb-ldrt.rb (gcc -O2 -c, archived as libnfcxxld.a, linked by every Path B link step). */
 /* The x87 layout is x86-64 only; the long double and _Float128 helpers below are guarded by their layout (x87 or binary128). */
 /* __int128 helpers that need no x87 layout: built on any host with a 128-bit integer type (clang on arm64 too). */
 #if defined(__SIZEOF_INT128__)
@@ -26,7 +26,7 @@
    conversion, and the wrapping of + - * is the two's complement one. Operands are pointers to the objects; a result is
    written through the first pointer (all 16 bytes); predicates return int; the checked conversions from a floating type
    abort on a NaN or a value that does not fit, like the IR's cf2i on the other integer types. Objects are read and written
-   with memcpy, so no alignment is assumed of them. Build: the same archive (scripts/pathb-ldrt). */
+   with memcpy, so no alignment is assumed of them. Build: the same archive (scripts/pathb-ldrt.rb). */
 typedef unsigned __int128 u128;
 typedef __int128 s128;
 

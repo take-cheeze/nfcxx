@@ -35,7 +35,7 @@ setup() {
   stubs_in "$sb/bin" clang file mktemp cp git ninja ld64.lld spirv-val fakeruby fakecxx
   stubs_in "$sb" nfcxx nfcc
   stubs_in "$sb/scripts" pathb-dump pathb-ir-opt.rb pathb-ssa.rb pathb-egraph.rb pathb-ssa-structurize.rb \
-    spirv-emit mrb pathb-wgsl-emit.rb pathb-ldrt sycl-build.sh sycl-build.rb
+    spirv-emit mrb pathb-wgsl-emit.rb pathb-ldrt.rb sycl-build.sh sycl-build.rb
   rm -f "$sb/scripts/oneapi-env.sh"; cp "$repo/scripts/oneapi-env.sh" "$sb/scripts/oneapi-env.sh"
   stubs_in "$sb/build/edg/bin" cpfe
   : > "$sb/tests/sycl/server.cjs"

@@ -56,7 +56,7 @@ cproc) is ours to vendor.
 
 Stage 2 was checked against stage 1: the 22 cases of `tests/run.sh` (qbe) pass with either front end (0 failures); `--emit-c` output matches on 41 inputs after normalising timestamps and temporary names; the object files match on 36 of 37 sources compiled, and the one difference (`tests/cases/qbe_gnu_forms.cpp`) also differs between two runs of stage 1.
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
-| `./nfcxx`, `./nfcc` with the qbe backend (`scripts/qbe-cc`) | EDG, QBE, cproc built; `tools/qbe-prep` and `tools/weak-symbols` (built on first use with the C++ compiler and ninja); the **mruby interpreter** only where `scripts/sret.sh` applies (macOS, Linux aarch64: `strip-atomic.rb`) and for the CIL back end (built on first use by `scripts/mrb`, which then needs ruby and ninja) | none after the setup |
+| `./nfcxx`, `./nfcc` with the qbe backend (`scripts/qbe-cc`) | EDG, QBE, cproc built; `tools/qbe-prep` and `tools/weak-symbols` (built on first use with the C++ compiler and ninja); the **mruby interpreter** only where `scripts/sret.rb` applies (macOS, Linux aarch64: `strip-atomic.rb`) and for the CIL back end (built on first use by `scripts/mrb`, which then needs ruby and ninja) | none after the setup |
 | C-only inputs (`nfcxx x.c`, `nfcc`) | no EDG; the same QBE chain for the qbe backend | none |
 | `tests/run.sh`, `tests/lib`, `tests/builtins`, `tests/c`, `tests/eval` | the above | none |
 | `tests/trace/run.sh` | python3 | none |
@@ -153,7 +153,7 @@ The stage-2 front end (`scripts/selfhost-cpfe.rb` with `FRONT_END` set to the st
 `__float128` or `long double` to integer conversion. EDG folds such a constant in its own code, and that code calls the
 checked runtime helper (`__nfcxx_f128_to_s` in `be/nfcxx_ldrt.c`). Stage 1 is built by gcc, so it gave the x86-64 result.
 
-The stage-2 link now uses the x86-64 variant of the runtime (`NFCXX_LDRT_X86=1 scripts/pathb-ldrt`, compiled with
+The stage-2 link now uses the x86-64 variant of the runtime (`NFCXX_LDRT_X86=1 scripts/pathb-ldrt.rb`, compiled with
 `-DNFCXX_FLOAT_TO_INT_X86`). It saturates like gcc on x86-64 (a `__float128` value above the maximum gives the maximum,
 below the minimum the minimum, NaN the maximum), and a `long double` value that does not fit gives the x87 integer
 indefinite. User programs still link the default archive, which traps. `tests/float-to-int/run.sh` checks both.

@@ -3,7 +3,7 @@
 # case of cases.txt.
 #
 # The oracle is the bash: a copy of nfcxx in a sandbox, run to its end. The sandbox has the repository's scripts, except
-# pathb-cc, pathb-ldrt, ehshim, sret.sh, asan-vla and safeptr-rt, which are stubs (stub.sh). The commands of the Path B path are stubs too
+# pathb-cc, pathb-ldrt.rb, ehshim.rb, sret.rb, asan-vla and safeptr-rt, which are stubs (stub.sh). The commands of the Path B path are stubs too
 # (stub.sh, linked under the command names in the sandbox's bin directory and at build/edg/bin/eccp):
 #   cc                  the link: logged (RUN), not run
 #   pathb-cc            logged (RUN ROOT/scripts/pathb-cc ARGS); its status is the facts' pathb-status
@@ -31,7 +31,7 @@ cp -r "$repo/scripts" "$root/scripts"
 # the copy of nfcxx, unchanged
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim sret.sh asan-vla safeptr-rt pathb-cc pathb-ldrt; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim.rb sret.rb asan-vla safeptr-rt pathb-cc pathb-ldrt.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in cc g++ gcc cp mktemp ninja env; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the tools the driver checks for: built (ensure_tool finds them fresh), QBE and EDG's driver are present, libC.a exists
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

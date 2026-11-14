@@ -16,6 +16,6 @@ if [ -x "$tmp/a" ] && [ "$("$tmp/a")" = "$want_a" ]; then echo "ok   pathb calls
 # 2. gcc main calls the Path B functions
 ./nfcxx -c $d/lib_qbe.c -o "$tmp/lib.o" > "$tmp/b.log" 2>&1 || { echo "FAIL build pathb lib"; head -3 "$tmp/b.log"; fail=1; }
 if grep -q 'did not build\|refused' "$tmp/b.log"; then echo "FAIL pathb lib: Path B refused it"; head -3 "$tmp/b.log"; fail=1; fi
-if [ -f "$tmp/lib.o" ] && gcc -w -o "$tmp/b" $d/main_gcc.c "$tmp/lib.o" $d/gcc_side.c "$(scripts/pathb-ldrt)" -lm -lstdc++ -latomic 2>/dev/null && [ "$("$tmp/b")" = "$want_b" ]; then echo "ok   gcc calls pathb"; else echo "FAIL gcc calls pathb"; fail=1; fi
+if [ -f "$tmp/lib.o" ] && gcc -w -o "$tmp/b" $d/main_gcc.c "$tmp/lib.o" $d/gcc_side.c "$(scripts/pathb-ldrt.rb)" -lm -lstdc++ -latomic 2>/dev/null && [ "$("$tmp/b")" = "$want_b" ]; then echo "ok   gcc calls pathb"; else echo "FAIL gcc calls pathb"; fail=1; fi
 echo "$fail failures"
 exit $fail

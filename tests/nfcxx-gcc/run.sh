@@ -2,13 +2,13 @@
 # Compares scripts/nfcxx-gcc-plan.rb (the port) with nfcxx's bash on the gcc backend, for each argument list of the case sets.
 #
 # The oracle is the bash: a copy of nfcxx in a sandbox, run to its end. The sandbox has the repository's scripts, except
-# ehshim, sret.sh, asan-vla, cuda-cub and cuda-driver-shim, which are stubs. Commands on the gcc path are stubs (stub.sh,
+# ehshim.rb, sret.rb, asan-vla, cuda-cub and cuda-driver-shim, which are stubs. Commands on the gcc path are stubs (stub.sh,
 # linked under the command names in the sandbox's bin directory and at build/edg/bin/eccp):
 #   gcc, cc, g++  probes answer from facts.txt; the compiles and links, and nfcxx's exec of g++ -E, are logged, not run
 #   cp            logged (CP), not copied
 #   mktemp -d     a directory under the sandbox's tmp, printed as TMP
 #   eccp          logged (RUN), with ENV for EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS
-#   ehshim, sret.sh, asan-vla, cuda-cub, cuda-driver-shim: the facts' values; uname -m: the fact machine
+#   ehshim.rb, sret.rb, asan-vla, cuda-cub, cuda-driver-shim: the facts' values; uname -m: the fact machine
 #   ninja         logged (RUN); a repository tool is built on first use, and the sandbox's copy counts as built
 # Everything else (rm, sed, awk, grep, cuda-driver-wrap.sh, ...) runs for real. The bash runs under env -i (no NFCXX_*
 # variables; CUDA_HOME only when the facts have a cuda-home line) in the sandbox's work directory, whose files and
@@ -39,7 +39,7 @@ run_set() {
   # run as they do; with the cache off and no CUDA input they print nothing, except the depmode step, which is ported
   cp "$repo/nfcxx" "$root/nfcxx"
   chmod +x "$root/nfcxx"
-  for s in ehshim sret.sh asan-vla cuda-cub cuda-driver-shim; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+  for s in ehshim.rb sret.rb asan-vla cuda-cub cuda-driver-shim; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
   for c in gcc cc g++ cp mktemp ninja uname; do ln -s "$here/stub.sh" "$bin/$c"; done
   # the repository's tools are built (ensure_tool finds them fresh: no ninja run); the sandbox has no tool sources
   : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

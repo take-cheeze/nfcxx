@@ -1,0 +1,29 @@
+# a compile of one file: Path B's stub writes the fragment
+ :: "$S" -c a.c -o a.o
+ :: NFCXX_CIL_VERBOSE=1 "$S" -c a.c -o a.o
+ :: NFCXX_CIL_VERBOSE= "$S" -c a.c -o a.o
+ :: NFCXX_CIL_VERBOSE=1 "$S" -c b.cc -o b.o -std=c++17 -DA -D B=2 -DC -I inc -Iinc2 -U Z -UY -I
+ :: "$S" -c a.c -O2 -g -Wall -w -fPIC -fpic -fno-PIC -fwrapv -m64 -pipe -fno-common -fno-builtin -fomit-frame-pointer --c-input --eh-unwind -o a.o
+ :: "$S" -c a.c -o
+ :: "$S" -c a.c
+ :: "$S" -c a.c b.cc -o x.o
+ :: "$S" -c -o a.o
+ :: "$S" -c a.c -foo -o a.o
+ :: "$S" -c a.c -E
+ :: "$S" -c notes.txt -o n.o
+ :: "$S" -c x.cpp -o x.o
+ :: "$S" -c s.cxx -o s.o
+ :: NFCXX_STUB_PATHB_RC=1 NFCXX_STUB_PATHB_ERR='boom\nsecond line' "$S" -c a.c -o a.o
+ :: NFCXX_STUB_PATHB_RC=1 NFCXX_STUB_PATHB_ERR='variadic definitions (va_start) are not supported by the CIL backend' "$S" -c a.c -o a.o
+ :: NFCXX_STUB_PATHB_RC=2 NFCXX_STUB_PATHB_ERR='x\ny' "$S" -c a.c -o a.o
+ :: NFCXX_STUB_PATHB_RC=1 NFCXX_STUB_PATHB_ERR="$(printf 'z%.0s' $(seq 1 400))" "$S" -c a.c -o a.o
+ :: touch out.o; NFCXX_STUB_PATHB_RC=1 NFCXX_STUB_PATHB_ERR='nope' "$S" -c a.c -o out.o
+# the link of fragments
+ :: "$S" f1.o f2.o -o out.bin
+ :: NFCXX_KEEP_IL=1 ILASM=/x/ilasm CC=gcc "$S" f1.o -o out
+ :: NFCXX_KEEP_IL= ILASM= CC= "$S" f1.o
+ :: "$S" f1.o a.c
+ :: "$S" -o out
+ :: "$S" bad.o f1.o -o out
+ :: "$S" empty.o -o out
+ :: "$S" f1.o -o

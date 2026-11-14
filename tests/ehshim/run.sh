@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The EH shim (lib/ehshim, scripts/ehshim, docs/notes/eh-shim.md) on programs that the common runners cannot compile on
+# The EH shim (lib/ehshim, scripts/ehshim.rb, docs/notes/eh-shim.md) on programs that the common runners cannot compile on
 # every backend (<future> and <regex> need std::atomic_flag and builtins that cproc and Path B lack).
 #
 # For each tests/ehshim/*.cpp (foreign/ at the end): `// BACKENDS: gcc pathb` lists the backends that build it (default: gcc); `// EXPECT: N`

@@ -691,7 +691,8 @@ jobs:
             - "3rd/qbe"
             - "scripts/setup-qbe.sh"
             - "scripts/qbe-*.patch"
-            - "scripts/pathb-ldrt"
+            # a glob, as the bash name was: scope_check.rb lists plain .rb paths, and this one is not compiled by a bc2cpp world
+            - "scripts/pathb-ldrt*"
             - "be/nfcxx_*.h"
             - ".github/actions/toolchain/**"
             - ".github/workflows/ci.yml"

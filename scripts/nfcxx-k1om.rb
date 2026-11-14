@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # nfcxx's driver for --target=linux_k1om, ported from the bash in nfcxx: the argument checks, the commands the k1om
-# build runs (the k1om GCC through scripts/k1om-cc, EDG's eccp, the EDG front end for --emit-c) and the -E line, which
+# build runs (the k1om GCC through scripts/k1om-cc.rb, EDG's eccp, the EDG front end for --emit-c) and the -E line, which
 # runs the host g++ whatever the target. See docs/notes/k1om.md.
 #
 #   ruby scripts/nfcxx-k1om.rb --facts=FILE ARG...
@@ -327,7 +327,7 @@ class Driver
     run_cmd("g++", args)
   end
 
-  # the k1om GCC through scripts/k1om-cc: its own mapping of the options, then -L of the runtime when it links
+  # the k1om GCC through scripts/k1om-cc.rb: its own mapping of the options, then -L of the runtime when it links
   def k1om_cc(args)
     link = args.none? { |a| %w[-c -E -S].include?(a) }
     out = []
@@ -367,7 +367,7 @@ class Driver
     @lines << "ENV EDG_CPFE_DEFAULT_OPTIONS=#{gnu_opts.join(' ')} " unless gnu_opts.empty?
     @lines << "ENV NFCXX_AS=#{root}/scripts/k1om-bin/as" if @k1om
     @lines << "ENV NFCXX_CC=#{root}/scripts/gcc-cc" if eccp
-    @lines << "ENV NFCXX_GCC=#{root}/scripts/k1om-cc" if @k1om
+    @lines << "ENV NFCXX_GCC=#{root}/scripts/k1om-cc.rb" if @k1om
     @lines << "ENV NFCXX_K1OM_ROOT=#{k1om_root}"
   end
 
