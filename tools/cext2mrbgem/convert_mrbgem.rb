@@ -3029,7 +3029,8 @@ end
         rewrite(rel, s, name, @types[name])
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
-        refuse(rel, s, name, 'no entry in api_map.json')
+        # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
+        refuse(rel, s, name, @type_check_refused[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
         nx = next_nonspace(masked, e)

@@ -396,6 +396,10 @@ check grep -qF 'isdigit((unsigned char)' "$work/api_ctype/src/api_ctype.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_errinfo tools/cext2mrbgem/fixtures/api_errinfo/ext/api_errinfo "$work/api_errinfo" > "$work/api_errinfo.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/api_errinfo/src/api_errinfo.c"
+# 2zzz63. T_BIGNUM is a recorded stuck point (the fork has no Bignum): the refusal carries that reason.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_stuck tools/cext2mrbgem/fixtures/api_bignum_stuck/ext/api_bignum_stuck "$work/api_bignum_stuck" > "$work/api_bignum_stuck.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -qF 'stuck point: the fork has no Bignum' "$work/api_bignum_stuck/REFUSALS.txt"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
