@@ -398,6 +398,22 @@
       "template": "mrb_yield($m, nfcx_block, $0)",
       "caveat": "yields to the block the method was called with (fetched by the registered method's wrapper); only in a registered method's body: a helper has no block to yield to"
     },
+    "rb_enc_str_new": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [2],
+      "template": "mrb_str_new($m, $0, $1)",
+      "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged"
+    },
+    "rb_enc_associate": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "ignored_args": [1],
+      "template": "$0",
+      "caveat": "the encoding is dropped: mruby strings carry no encoding; the object is returned unchanged"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",

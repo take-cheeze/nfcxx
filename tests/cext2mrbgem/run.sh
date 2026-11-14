@@ -596,6 +596,13 @@ check test ! -e "$work/api_switch_type/NOT_BUILDABLE"
 check grep -qF 'switch ((mrb_nil_p(v) ? 1000 : mrb_type(v))) {' "$work/api_switch_type/src/api_switch_type.c"
 check grep -qF 'case 1000 /* nil */: return mrb_str_new_cstr(mrb, "nil");' "$work/api_switch_type/src/api_switch_type.c"
 
+# 2zzn. rb_enc_str_new and rb_enc_associate drop their encoding argument (a pure encoding getter is accepted there): mruby strings carry no encoding
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_drop tools/cext2mrbgem/fixtures/api_enc_drop/ext/api_enc_drop "$work/api_enc_drop" > "$work/api_enc_drop.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
+check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
+check grep -qF 'return s;' "$work/api_enc_drop/src/api_enc_drop.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
