@@ -320,6 +320,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_helper tools/cext2mrbge
 check test "$rc" -eq 0
 check grep -qF 'struct RClass *mod, *eng;' "$work/api_init_helper/src/api_init_helper.c"
 check sh -c "! grep -q '#if 0' '$work/api_init_helper/src/api_init_helper.c'"
+# 2zzz38. K&R-style prototypes with the _(( )) compatibility macro are ordinary prototypes: the helper is threaded, not refused
+# as used at file scope.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kr_proto tools/cext2mrbgem/fixtures/api_kr_proto/ext/api_kr_proto "$work/api_kr_proto" > "$work/api_kr_proto.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return kp_helper(mrb, v);' "$work/api_kr_proto/src/api_kr_proto.c"
 # 2zzz37. a mixed declaration: VALUE, a class declarator (with a call), VALUE. The types change at the commas.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_mixed tools/cext2mrbgem/fixtures/api_decl_mixed/ext/api_decl_mixed "$work/api_decl_mixed" > "$work/api_decl_mixed.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

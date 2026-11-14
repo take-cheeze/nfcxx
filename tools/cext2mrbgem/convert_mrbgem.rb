@@ -448,6 +448,42 @@ class Edits
   end
 end
 
+# K&R-style prototypes with the old compatibility macro: name _((params)) and name _(params). The macro _ is a space,
+# and the outer parentheses of the double form are spaces (name  (params) ), so every position stays the same and the
+# declaration is an ordinary prototype for the scanners. Only a standalone _ followed by ( is changed.
+def kr_normalize(src)
+  s = src.dup
+  starts = []
+  s.to_enum(:scan, /(?<![\w$])_[ \t]*\(/).each { starts << Regexp.last_match.begin(0) }
+  starts.reverse_each do |st|
+    m = /_[ \t]*\(/.match(s, st)
+    op = m.end(0) - 1
+    if s[op + 1] == '('
+      depth = 0
+      close = nil
+      i = op
+      while i < s.length
+        if s[i] == '(' then depth += 1
+        elsif s[i] == ')'
+          depth -= 1
+          if depth.zero?
+            close = i
+            break
+          end
+        end
+        i += 1
+      end
+      next if close.nil?
+      s[st] = ' '
+      s[op] = ' '
+      s[close] = ' '
+    else
+      s[st] = ' '
+    end
+  end
+  s
+end
+
 class Converter
   def initialize(cext_dir, out_dir, name = nil, scanner_mode = 'auto', defines = [])
     @scanner_mode = scanner_mode  # auto, libclang or regex
@@ -605,6 +641,7 @@ Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |tb|
   next if File.directory?(tp)
   texts[tb] = read_text(tp) if tb.end_with?('.c') || tb.end_with?('.h')
 end
+texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
       path = File.join(@cext_dir, base)
