@@ -31,7 +31,7 @@ while IFS= read -r line; do
   root=$sb/root; work=$sb/work; bin=$sb/bin; tmp=$sb/tmp; cache=$sb/cache
   mkdir -p "$root/build" "$work" "$bin" "$tmp" "$sb/home" "$sb/xdg"
   cp -r "$repo/scripts" "$root/scripts"
-  ln -sf "$here/stub.sh" "$root/scripts/sycl-integration-header.sh"
+  ln -sf "$here/stub.sh" "$root/scripts/sycl-integration-header.rb"
   # the driver, cut after its cpp2_prepare call; its nested self-runs go to the stub
   # the nested runs of the SYCL passes (the lines with NFCXX_SYCL_PASS) go to the stub; the wrappers keep the driver's name
   awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$repo/nfcxx" \

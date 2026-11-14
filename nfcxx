@@ -644,7 +644,7 @@ if [ "${emit_hip:-0}" = 1 ]; then
 fi
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
 # headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
-# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.sh
+# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
 # turns them into KernelInfoData specializations; pass 2 compiles a wrapper that includes sycl.hpp, that header and the source,
 # with __SYCL_UNNAMED_LAMBDA__ defined as the real toolchain defines it. Other sources are unchanged.
 sycl_kernel_headers() {  # sycl_kernel_headers ARG...: TRUE when a -I directory of the arguments has the oneAPI kernel header
@@ -669,7 +669,7 @@ if [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 
     cat "$sy_tmp/pass1.log" >&2; rm -rf "$sy_tmp"
     echo "nfcxx: the SYCL pre-pass recorded no kernels" >&2; exit 2
   fi
-  "$root/scripts/sycl-integration-header.sh" "$sy_tmp/dump" > "$sy_tmp/integration.hpp" || { rm -rf "$sy_tmp"; exit 2; }
+  "$root/scripts/sycl-integration-header.rb" "$sy_tmp/dump" > "$sy_tmp/integration.hpp" || { rm -rf "$sy_tmp"; exit 2; }
   printf '#include <sycl/sycl.hpp>\n#include "%s"\n#include "%s"\n' "$sy_tmp/integration.hpp" "$sy_src" > "$sy_tmp/wrapper.cpp"
   sy_args=()
   for a in "${args0[@]}"; do
