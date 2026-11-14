@@ -28,9 +28,14 @@ for d in /usr/include /usr/include/x86_64-linux-gnu /usr/lib/gcc/x86_64-linux-gn
   for e in "$d"/*; do n=$(basename "$e"); [ "$n" = libc ] || [ -e "$fake/include/$n" ] || ln -s "$e" "$fake/include/$n"; done
 done
 mkdir -p "$fake/include/libc/integral"; : > "$fake/include/libc/integral/normalize.inc"
-sb=$work/sb; mkdir -p "$sb/scripts"; cp "$repo/tests/cosmo-libc/oracle.sh" "$sb/scripts/cosmo-libc.sh"
-cp -r "$repo/3rd" "$sb/3rd" 2>/dev/null || true
-ln -s "$repo/build" "$sb/build" 2>/dev/null || true
+# the oracle's sandbox: the repository's scripts (the bash cosmo-libc is the oracle, and the bash gcc-cc of origin/main is
+# its C compiler), with tools, 3rd and build as the repository's
+sb=$work/sb; mkdir -p "$sb/scripts"
+for f in "$repo"/scripts/*; do ln -s "$f" "$sb/scripts/"; done
+rm -f "$sb/scripts/cosmo-libc.rb"; cp "$repo/tests/cosmo-libc/oracle.sh" "$sb/scripts/cosmo-libc.sh"; chmod +x "$sb/scripts/cosmo-libc.sh"
+rm -f "$sb/scripts/gcc-cc.rb"
+git -C "$repo" show origin/main:scripts/gcc-cc > "$sb/scripts/gcc-cc" && chmod +x "$sb/scripts/gcc-cc"
+ln -s "$repo/tools" "$sb/tools"; ln -s "$repo/3rd" "$sb/3rd"; ln -s "$repo/build" "$sb/build"
 
 NFCXX_COSMOCC=$fake/bin/cosmocc COSMO_LIBC_OUT=$work/bash bash "$sb/scripts/cosmo-libc.sh" > "$work/bash.log" 2>&1 || { echo "FAIL: bash build"; tail -3 "$work/bash.log"; exit 1; }
 NFCXX_COSMOCC=$fake/bin/cosmocc COSMO_LIBC_OUT=$work/ruby ruby "$repo/scripts/cosmo-libc.rb" > "$work/ruby.log" 2>&1 || { echo "FAIL: ruby build"; tail -3 "$work/ruby.log"; exit 1; }
