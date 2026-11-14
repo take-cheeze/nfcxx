@@ -1253,6 +1253,17 @@
       "needs_mrb": true,
       "template": "mrb_gv_set($m, mrb_intern_lit($m, \"$~\"), $0)",
       "caveat": "writes $~ (the onig gem reads it back through its last-match variable); the value is the match, as CRuby stores it"
+    },
+    "rb_match_busy": {
+      "kind": "drop",
+      "reason": "a hint that keeps a match object from being reused; mruby has no match cache to keep, so the call has no effect"
+    },
+    "rb_jump_tag": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_exc_raise($m, mrb_obj_value($m->exc))",
+      "caveat": "re-raises the exception that mrb_protect caught (mrb->exc); CRuby's state argument is not needed, and the state is ignored"
     }
   },
   "special_arg_positions_class_only": {

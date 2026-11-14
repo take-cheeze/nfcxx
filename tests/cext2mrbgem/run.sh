@@ -396,6 +396,12 @@ check test ! -e "$work/api_regexp/NOT_BUILDABLE"
 check grep -qF 'return (mrb_nil_p(m) ? mrb_nil_value() : mrb_funcall(mrb, m, "[]", 1, mrb_fixnum_value(1)));' "$work/api_regexp/src/api_regexp.c"
 check grep -qF 'return mrb_gv_get(mrb, mrb_intern_lit(mrb, "$~"));' "$work/api_regexp/src/api_regexp.c"
 
+# 2zm. rb_jump_tag re-raises the exception mrb_protect caught (mrb->exc); rb_match_busy is dropped with a warning (api_map.json batch N8)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_jump_tag tools/cext2mrbgem/fixtures/api_jump_tag/ext/api_jump_tag "$work/api_jump_tag" > "$work/api_jump_tag.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_jump_tag/NOT_BUILDABLE"
+check grep -qF 'mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/api_jump_tag/src/api_jump_tag.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
