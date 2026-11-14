@@ -27,8 +27,8 @@ fi
 vk=$llama/ggml/src/ggml-vulkan
 mkdir -p "$out/obj" "$out/gen/vk" "$out/spv" "$out/tmp"
 export NFCXX_BACKEND=gcc TMPDIR=$out/tmp
-# NFCXX_PATH=b (Path B for the C++): the C files go through gcc too (qbe-cc has no _Atomic, which ggml-cpu.c uses).
-[ "${NFCXX_PATH:-}" != b ] || export NFCXX_PATHB_C=gcc
+# NFCXX_PATH=b (Path B for the C++ and the C files: the C route compiles ggml.c, ggml-alloc.c, ggml-quants.c and the
+# CPU backend's C files, with _Atomic (ggml-cpu.c)). Set NFCXX_PATHB_C=gcc to send the C files through gcc instead.
 sed 's/@GGML_VERSION@/0.0.0/; s/@GGML_BUILD_COMMIT@/test/' "$llama/ggml/src/ggml-version.h.in" > "$out/gen/ggml-version.h"
 
 # The glslc extension probes of ggml-vulkan/CMakeLists.txt (test_shader_extension_support): a definition for each
