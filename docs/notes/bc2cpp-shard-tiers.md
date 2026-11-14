@@ -25,10 +25,21 @@ warning-free at `-O2 -Werror`, links, and prints what the untiered split prints.
 lives in the rpg-maker-clone world. `shard_output_check.rb` passes 29 checks here (15 existing, 14 tier); its
 generated-code part needs a host mrbc.
 
+Measured on the optcarrot world (180 frames, Ruby 4.0.9 from nix, Linux, shared host; `tools/optcarrot_probe/compiled_run.rb`):
+
+- Hot owners from one gprof run: `Optcarrot::PPU` and `Optcarrot::CPU` (`--shard-hot-owners`). The profile is coarse
+  (about 0.36 s of samples). The tier applied as designed: PPU and CPU in the main file, APU in a shard at -O1.
+- Sealed build (rake, -j4), three interleaved pairs, seconds: baseline 96.6, 95.8, 94.6; tiered (`--shard-cold-opt=O1`)
+  104.0, 100.6, 100.1. The tiered build was about 6% slower to compile, outside the range of the baseline runs.
+- Hot-path fps, mruby + bc2cpp (sealed): baseline 373, 366, 427; tiered 360, 378, 350. The spread is wider than the
+  difference of the medians (373 vs 360), so no runtime change is established.
+- Checksum 59662 (180 frames) and 38895 (18 frames) on every run of both configurations.
+
+So the first tier does not pay off on this world: cold code is too small a share of the work to save compile time, and
+the extra shard preludes cost more than the -O1 saves. Per-shard levels may still matter on a larger closed world.
+
 Not done, and why:
-- No profile yet. The hot list is the caller's. Producing it from a gprof or prof_stream run of the optcarrot world is
-  the next step.
-- No measurement of compile time or run time on the optcarrot world. Its runner needs Ruby 4.0 (the probe's README and
-  `tests/bc2cpp/run_optcarrot.sh` skip without it), and the local host has Ruby 3.3.6.
-- rpg-maker-clone's rake build (`tools/bc2cpp/compiled_gems.rb`) does not change. The pragma carries the level inside the
+- A hot list from a finer profile (the gprof run has too few samples to rank owners reliably) or from prof_stream.
+- Per-function levels (`#[relax(O3)]`-style): not attempted.
+- The rpg-maker-clone rake build (`tools/bc2cpp/compiled_gems.rb`) does not change. The pragma carries the level inside the
   generated file, so the rake rules need no per-object flags.
