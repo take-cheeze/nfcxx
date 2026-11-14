@@ -4,10 +4,10 @@
 #   - the existence checks for build/qbe, build/cil and scripts/pathb-cc are stubbed out (they only guard the compile);
 #   - every host, toolchain and gcc command prints "RUN argv..." instead of running (the root and the temporary directory
 #     show as ROOT and TMP), cp and cat print CP and CAT, a symlink prints "RUN LN -s ..", and pathb-ldrt's output is LDRT;
-#   - exec (the query options, -E, -M, -fsyntax-only, the qbe-try wrapper) prints "EXEC argv..." and stops.
+#   - exec (the query options, -E, -M, -fsyntax-only) prints "EXEC argv..." and stops.
 # The state is dumped between the post-loop checks and the compile-only path, so the compile is checked after the state.
 # The backend and the other settings come from the environment, as nfcc reads them: NFCXX_BACKEND (default gcc),
-# NFCXX_GCC_PASSTHROUGH, NFCXX_QBE_KERNEL, NFCXX_QBE_TRY and NFCXX_PATHB_FALLBACK; STUB_PATHB_STATUS is the status
+# NFCXX_GCC_PASSTHROUGH and NFCXX_PATHB_FALLBACK; STUB_PATHB_STATUS is the status
 # scripts/pathb-cc returns in this harness (default 0); STUB_WIDE_LITERAL=1 makes the host preprocessor show a wide literal;
 # the host's -dumpfullversion is 13.3.0 and its --version first line is "cc (stub) 0"; the CUDA shim is SHIM, or STUB_SHIM_ERROR's text
 # when that is set and the shim fails. The host is cc; the shell's gcc --version decides -fno-crossjumping.
@@ -52,7 +52,6 @@ harness() {
       -e 's|"\$("\$root/scripts/pathb-ldrt")"|"LDRT"|' \
       -e 's|"\$host" |run_stub "$host" |g' \
       -e 's|exec run_stub "\$host" |exec_stub "$host" |g' \
-      -e 's|exec "\$root/scripts/qbe-try" |exec_stub qbe-try |g' \
       -e 's|"\$qcc" |run_stub "$qcc" |g' \
       -e 's|^\( *\)"\$root/scripts/pathb-cc" |\1run_stub "$root/scripts/pathb-cc" |' \
       -e 's|PATHB_KEEP=\$keep "\$root/scripts/pathb-cc" |PATHB_KEEP=$keep run_stub "$root/scripts/pathb-cc" |' \
