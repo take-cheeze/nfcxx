@@ -80,7 +80,7 @@ class CodeGen
     code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
     return code unless code.is_a?(String) && idx && irep
 
-    if insn.op == :SEND && insn.sym.to_s == '<<'
+    if insn.op == :SEND && %w[<< push unshift].include?(insn.sym.to_s)
       # DECLARED_ELEMENT_GUARD on a native push: the argument is tested before the push runs.
       return declared_element_push_guard(insn, irep, owner_def, idx) + code
     end
