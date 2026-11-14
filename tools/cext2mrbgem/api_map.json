@@ -326,6 +326,44 @@
       "kind": "drop",
       "reason": "ractor declaration; mruby has no ractors, so the declaration has no effect"
     },
+    "rb_ary_pop": {
+      "kind": "call",
+      "mruby": "mrb_ary_pop",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns the last element, or nil for an empty array, as CRuby does"
+    },
+    "rb_str_subseq": {
+      "kind": "call",
+      "mruby": "mrb_str_substr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns a new String of len bytes from beg; mruby strings carry no encoding, so the result is not re-encoded"
+    },
+    "rb_intern3": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_intern($m, $0, $1)",
+      "caveat": "the encoding argument is dropped: mruby symbols carry no encoding"
+    },
+    "RB_UNUSED_VAR": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "$0",
+      "caveat": "CRuby marks a parameter or variable as unused (a compiler attribute); the name is kept and the attribute is dropped"
+    },
+    "RUBY_TYPED_FROZEN_SHAREABLE": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "rb_deprecate_constant": {
+      "kind": "drop",
+      "reason": "CRuby warns when a deprecated constant is used; mruby has no constant deprecation, so the call has no effect"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",

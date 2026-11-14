@@ -482,6 +482,18 @@ check test "$rc" -eq 0
 check grep -qF 'static int sd_check__other(mrb_value v) {' "$work/api_static_dup/src/other.c"
 check grep -qF 'static int sd_check__api_static_dup(mrb_state *mrb, mrb_value v) {' "$work/api_static_dup/src/api_static_dup.c"
 
+# 2zy. batch N17 (api_map.json): rb_ary_pop and rb_str_subseq are direct calls with mrb; rb_intern3 drops its encoding argument;
+# rb_deprecate_constant is dropped (no-op in mruby); RB_UNUSED_VAR keeps the name, but a parameter in that form is refused (not a plain VALUE)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_batch_n17 tools/cext2mrbgem/fixtures/api_batch_n17/ext/api_batch_n17 "$work/api_batch_n17" > "$work/api_batch_n17.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_batch_n17/NOT_BUILDABLE"
+check grep -qF 'b_unused  ' "$work/api_batch_n17/REFUSALS.txt"
+check grep -qF 'return mrb_ary_pop(mrb, ary);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'return mrb_str_substr(mrb, str, 1, 2);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'mrb_sym id = mrb_intern(mrb, p, 4);' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'return 0;' "$work/api_batch_n17/src/api_batch_n17.c"
+check grep -qF 'dropped: rb_deprecate_constant' "$work/api_batch_n17/src/api_batch_n17.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -577,8 +589,8 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 4
-check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 3
+check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
