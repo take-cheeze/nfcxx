@@ -1323,6 +1323,23 @@
       "needs_mrb": true,
       "template": "($3 = ($1 *)mrb_data_get_ptr($m, $0, $2))",
       "caveat": "reads the data pointer with mrb_data_get_ptr, which raises TypeError on a mismatched type, as CRuby does"
+    },
+    "rb_hash_foreach": {
+      "kind": "hash_foreach",
+      "needs_mrb": true,
+      "caveat": "the callback gets (mrb, key, value, void *): its third VALUE parameter is the pointer it is given; a callback result of 0 continues and non-zero breaks (ST_CONTINUE and ST_STOP); ST_DELETE is refused because mruby would break the loop on it"
+    },
+    "ST_CONTINUE": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mrb_hash_foreach continues while the callback returns 0"
+    },
+    "ST_STOP": {
+      "kind": "expr",
+      "mruby": "1",
+      "needs_mrb": false,
+      "caveat": "mrb_hash_foreach breaks on any non-zero result, so ST_STOP (1) stops the loop as in CRuby"
     }
   },
   "special_arg_positions_class_only": {

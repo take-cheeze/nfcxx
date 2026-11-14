@@ -429,6 +429,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_typed_alloc/NOT_BUILDABLE"
 check grep -qF 'mrb_obj_value(mrb_data_object_alloc(mrb, mProbe, (h = (holder *)mrb_calloc(mrb, 1, sizeof(holder))), &holder_type));' "$work/api_typed_alloc/src/api_typed_alloc.c"
 
+# 2zr. rb_hash_foreach (api_map.json batch N11): the callback is threaded with mrb and its VALUE argument becomes void *; ST_CONTINUE and ST_STOP map to 0 and 1
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_foreach tools/cext2mrbgem/fixtures/api_hash_foreach/ext/api_hash_foreach "$work/api_hash_foreach" > "$work/api_hash_foreach.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_foreach/NOT_BUILDABLE"
+check grep -qF 'static int count_cb(mrb_state *mrb, mrb_value key, mrb_value val, void *arg) {' "$work/api_hash_foreach/src/api_hash_foreach.c"
+check grep -qF 'mrb_hash_foreach(mrb, RHASH(h), count_cb, (void *)&c);' "$work/api_hash_foreach/src/api_hash_foreach.c"
+check grep -qF 'return 0;' "$work/api_hash_foreach/src/api_hash_foreach.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

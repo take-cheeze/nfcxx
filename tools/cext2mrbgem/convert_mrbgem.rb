@@ -1069,6 +1069,40 @@ def dtype_decls
   out
 end
 
+  # rb_hash_foreach(h, cb, (VALUE)ptr): the callback is a synchronous callback of mrb_hash_foreach, so it is threaded with
+  # mrb, and its third (VALUE) parameter becomes void * (the pointer it is given). Only a call whose callback is defined in
+  # the input and used only here, and whose argument is an address or a (VALUE) cast of a plain name, is converted.
+  def hash_foreach_calls
+    out = []
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])rb_hash_foreach#{SS}\(/, masked).each do |m|
+        s = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        args = split_args(masked, open, close).map { |a, b| [a, b, psl(text, a, b)] }
+        next unless args.size == 3
+        h = args[0][2]
+        cb = args[1][2]
+        arg = args[2][2]
+        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/) && @defs.key?(cb.delete('&'))
+        cb = cb.delete('&')
+        next unless arg.match?(/\A(?:\(VALUE\)\s*)?&?[A-Za-z_][#{WC}]*\z/)
+        d = @defs[cb]
+        next unless d.size == 1
+        uses = (@occ[cb] || []).size
+        next unless uses == 2 # the definition and this call
+        pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a, b| [a, b, psl(@files[d[0]['file']]['text'], a, b)] }
+        next unless pars.size == 3 && pars[2][2].start_with?('VALUE')
+        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
+                 cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
+      end
+    end
+    out
+  end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
@@ -1086,6 +1120,11 @@ dtype_decls.each do |rel, _m, info|
     @dtype_cb_pos << [rel, pos]
   end
 end
+    # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
+    @hash_calls = hash_foreach_calls
+    @hash_calls.each { |c| forced << c[:cb] }
+    @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
+    @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] }
@@ -1216,6 +1255,7 @@ end
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
+  next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -1605,7 +1645,12 @@ use_problem = lambda do |name, use|
         hdr = "void mrb_#{@funcname}_gem_init(mrb_state *mrb)"
       elsif @helper_names.include?(name)
         ptxt = py_strip(d['params'])
-        tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
+tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
+if (@hash_cb_names || Set.new).include?(name)
+  # a rb_hash_foreach callback: its third (VALUE) parameter is the pointer it was given (void *)
+  ps = ptxt.split(',').map(&:strip)
+  tail = ', ' + [map_types(ps[0], @types), map_types(ps[1], @types), 'void *' + ps[2].split.last].join(', ')
+end
         hdr = "#{d['storage']}#{map_types(d['ret'], @types)} #{name}(mrb_state *mrb#{tail})"
       end
       if err
@@ -1784,6 +1829,15 @@ unless texts.each_with_index.all? { |t, i| t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d
       out = entry['template'].gsub(/\$(\d+)|\$m/) { $1 ? texts[$1.to_i] : mrb_tok(rel, s) }
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])
+    when 'hash_foreach'
+      c = (@hash_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
+      unless c
+        refuse(rel, s, name, 'not a call of the form rb_hash_foreach(hash, callback, (VALUE)pointer) with a callback defined here and used only here')
+        return
+      end
+      ed.add(c[:s], c[:e], "mrb_hash_foreach(#{mrb_tok(rel, s)}, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})")
+      rewrite(rel, s, name, "mrb_hash_foreach(mrb, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})",
+              'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
