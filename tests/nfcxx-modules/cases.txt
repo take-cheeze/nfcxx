@@ -39,7 +39,7 @@
 --backend=gcc geom.cppm header.cpp -o prog
 --backend=gcc geom.cppm std_import.cpp -o prog
 --backend=gcc geom.cppm main.cpp -c -o prog
-# not covered: the unchanged path, the default backend, pathb, an option outside the list
+# the plain path (no module source) on the gcc backend: the unchanged path, and its options
 --backend=gcc bare.cc -o prog
 --backend=gcc geom.cppm main.cpp -fPIC -o prog
 geom.cppm main.cpp -o prog
@@ -97,7 +97,76 @@ geom.cppm main.cpp ix.ixx -o prog -DX=1 -fPIC
 --backend=pathb -c geom.cppm main.cpp -o x.o
 --backend=pathb geom.cppm main.cpp -c -o prog
 geom.cppm header.cpp -o prog
-# not covered: options outside the list (-shared, -E, a sanitizer), and an object with a source (no module)
+# an object with a source (no module) is planned with the source (the objects are not module-owned)
 --backend=gcc -shared geom.cppm main.cpp -o prog
 --backend=pathb -fsanitize=address geom.cppm main.cpp -o prog
 --backend=gcc geom.cppm main.cpp -E -o prog
+# -E: the host preprocessor runs before the modules and the backend: no module line, the status of the preprocessor
+-E geom.cppm
+--backend=gcc geom.cppm main.cpp -E -o prog
+-std=c++17 geom.cppm -E
+--backend=pathb -c geom.cppm -E -o x.o
+-E bare.cc -o out.i
+--backend=gcc --emit-c -E bare.cc
+# -shared: the gcc backend by default (Path B is not the default for a shared object); the words are the gcc backend's
+-shared geom.cppm main.cpp -o prog
+--backend=gcc -shared geom.cppm main.cpp -o prog
+--backend=pathb -shared geom.cppm main.cpp -o prog
+-shared -fPIC geom.cppm main.cpp -o out/prog
+-shared -c geom.cppm -o build/geom.o
+-shared -c geom.cppm
+-shared bare.cc -o libbare.so
+-shared -c bare.cc
+-shared -std=c++17 geom.cppm main.cpp -o prog
+-shared geom.cppm cycle_a.cppm cycle_b.cppm -o prog
+-shared --module-dir=mods geom.cppm main.cpp -o prog
+# -fsanitize=address: the same words (libasan is linked and the checks are compile options)
+-fsanitize=address geom.cppm main.cpp -o prog
+--backend=pathb -fsanitize=address geom.cppm main.cpp -o prog
+--backend=gcc -fsanitize=address geom.cppm main.cpp -o prog
+-fsanitize=address -fno-omit-frame-pointer geom.cppm main.cpp -o prog
+-fsanitize=address -c geom.cppm -o build/geom.o
+-fsanitize=address bare.cc -o prog
+-fsanitize=address -c bare.cc
+--backend=gcc -fsanitize=address bare.cc -o prog
+-fno-sanitize=address bare.cc -o prog
+-fsanitize=address -shared geom.cppm main.cpp -o prog
+# objects with a plain source: the objects are not module-owned, so the words are those of the source
+bare.cc side.o -o prog
+--backend=gcc bare.cc side.o -o prog
+--backend=pathb -c bare.cc side.o
+--backend=gcc -c bare.cc side.o -o x.o
+# several plain sources: one eccp call on gcc; one Path B build per source and one cc link on Path B
+--backend=gcc bare.cc pbfail.cc -o prog
+bare.cc pbfail.cc -o prog
+--backend=pathb bare.cc pbfail.cc -o prog
+--backend=gcc bare.cc side.cc -o prog
+--backend=pathb -c bare.cc side.cc -o build/geom.o
+-c bare.cc side.cc
+# C sources with a plain source: Path B compiles the C source to TMP/0.o (gcc's C compile is not a module-owned line)
+bare.cc csrc.c -o prog
+--backend=gcc bare.cc csrc.c -o prog
+--backend=pathb bare.cc csrc.c -o prog
+--backend=pathb -c bare.cc csrc.c
+-shared bare.cc csrc.c -o prog
+# Path B's failure on the default backend: the lines so far, then the whole command again with gcc
+pbfail.cc -o prog
+-c pbfail.cc
+-c -o build/pbfail.o pbfail.cc
+bare.cc pbfail.cc -o prog
+pbfail.cc csrc.c -o prog
+csrc.c pbfail.cc -o prog
+pbfail.cc bare.cc -o prog
+# the same on a module build: the failing nested compile is the gcc run (its line after its Path B line), the rest is unchanged
+pbfail_mod.cppm main.cpp -o prog
+pbfail_mod.cppm geom.cppm main.cpp -o prog
+-c pbfail_mod.cppm -o build/pbfail_mod.o
+-c pbfail_mod.cppm
+pbfail_mod.cppm main.cpp -fsanitize=address -o prog
+# not covered (the port exits 3): an explicit --backend=pathb with a failing file (its exit is the Path B status); --emit-c on the plain path
+--backend=pathb pbfail.cc -o prog
+--backend=pathb pbfail_mod.cppm main.cpp -o prog
+--backend=gcc --emit-c bare.cc
+--emit-c bare.cc
+--backend=gcc -c bare.cc side.cc
+--backend=gcc -c bare.cc side.cc -o x.o

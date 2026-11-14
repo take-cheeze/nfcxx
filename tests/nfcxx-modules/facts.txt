@@ -1,6 +1,7 @@
 # The facts the bash reads from the machine and its helper scripts (the module build of nfcxx). Read by the stubs (stub.sh)
 # and by the port (scripts/nfcxx-modules.rb --facts=). run.sh appends the SRC lines (the module functions of nfcxx, run on
-# each source) and one "exists" line per file and directory of the work directory.
+# each source) and one "exists" line per file and directory of the work directory. pathb-fail ARG RC: Path B's build of ARG
+# as given exits with RC (the fallback to gcc); preprocess RC: the host preprocessor's status (nfcxx -E).
 cxx-clang 0
 cc-clang 0
 host-sys /fx/include/c++/13
@@ -11,3 +12,6 @@ ld mold
 ehshim ROOT/build/ehshim.o
 asan-vla ROOT/build/asan/vla.o
 pathb-ldrt ROOT/build/pathb-ldrt/libnfcxxld.a
+preprocess 0
+pathb-fail pbfail.cc 3
+pathb-fail pbfail_mod.cppm 3

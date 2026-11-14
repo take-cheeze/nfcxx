@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # Plan printer for nfcxx's C++ module build (docs/notes/modules.md): the modules block of nfcxx (the refusals, the
 # module options of a compile) and mod_build_program (the order of the interface units, the nested compiles, the link).
-# A program with no module source takes the plain path (one source, planned here too).
+# A program with no module source takes the plain path (one or more sources, planned here too).
 #
 #   ruby scripts/nfcxx-modules.rb --facts=FILE [--cwd=DIR] ARGS...
 #
@@ -14,21 +14,31 @@
 #   --modules --modules_directory DIR [--create_module_interface DIR/NAME.eifc] SOURCE -o OUT
 # and those of a plain compile are SOURCE -o OUT. Paths are absolute: relative ones are taken under --cwd. TMP is the
 # bash's mktemp -d directory (mdir when --module-dir is not given), TMP/mN.o the objects of the nested compiles of a
-# module build, and TMP/p0.o the object of a plain Path B link.
+# module build, TMP/pN.o the objects of a plain Path B build and TMP/N.o the objects of its C sources.
+#
+# The backend: --backend= as given; else gcc for -shared (Path B is the default otherwise). -E is the host C++ compiler's
+# preprocessing, which the bash runs before anything else: no module or backend line, and the status is the host's.
+# -fsanitize=address and -fno-omit-frame-pointer change only options the port does not print (the libasan link and the
+# checks), so they are planned as the same words.
+#
+# Path B's fallback: a Path B build that fails on a file (a pathb-fail fact, status nonzero) on the default backend makes
+# the bash run the command again with NFCXX_BACKEND=gcc. The output is then the lines so far (the failed Path B line
+# included) and the gcc run's. In a module build the fallback is per nested compile (each nested run is this driver
+# again), and the link is unchanged. An explicit --backend=pathb that fails exits with the Path B status: not modelled.
 #
 # Exit status: 0 planned; 2 the bash refuses (its message on stderr, STATUS 2 on stdout); 3 not covered (unported, the
-# reason on stderr). Not covered: several plain sources or objects on the command line, C sources, --emit-c on the plain
-# path, options outside the list below (-E, -M, -shared, --cosmo, --target, --freestanding, -fsanitize, -m*, ...), CUDA
-# and cpp2 inputs. The port assumes every step succeeds: Path B's fallback to gcc on a failing file (the default backend)
-# is not modelled, and neither is the QBE check. The environment has no NFCXX_* variables and build/qbe/qbe exists
-# (run.sh's sandbox); the default backend is Path B for every module or plain build the port plans (the options that
-# choose gcc or another driver are refused or not covered).
+# reason on stderr). Not covered: --emit-c on the plain path (EDG's front end cpfe is not built in the sandbox), an explicit
+# --backend=pathb with a failing file, options outside the list below (-M, --cosmo, --target, --freestanding, -m*, ...),
+# -fsanitize other than address, CUDA and cpp2 inputs. The port assumes every step succeeds except the failures the facts
+# give. The environment has no NFCXX_* variables and build/qbe/qbe exists (run.sh's sandbox).
 #
-# FACTS (--facts=FILE): one line per source argument, tab-separated:
-#   SRC PATH MODULE(0|1) DECL(- if none) IMPORTS(- or a comma list) RC MESSAGE(- if none)
-# What the bash reads from the source: mod_is_module_src, mod_decl_name, mod_imports and mod_check_src (RC and MESSAGE
-# are its exit status and output). Other lines are ignored. tests/nfcxx-modules/run.sh writes the file by running those
-# functions from nfcxx.
+# FACTS (--facts=FILE): SRC lines and the other "key value" lines are read; the others are ignored.
+#   SRC PATH MODULE(0|1) DECL(- if none) IMPORTS(- or a comma list) RC MESSAGE(- if none)   tab-separated
+#     What the bash reads from the source: mod_is_module_src, mod_decl_name, mod_imports and mod_check_src (RC and MESSAGE
+#     are its exit status and output). tests/nfcxx-modules/run.sh writes these by running those functions from nfcxx.
+#   pathb-fail ARG RC   the status of Path B's build of the argument ARG as given (stub.sh's pathb-cc exits with it); 0 or
+#                       absent: it builds
+#   preprocess RC       the status of the host preprocessor (stub.sh's g++ -E)
 require "pathname"
 require "set"
 
@@ -43,6 +53,17 @@ class Refused < StandardError
   end
 end
 
+# a Path B build that failed on the default backend: the bash runs the command again with gcc, so the output is the
+# lines so far (LINES, the failed Path B line included) and then the gcc run's
+class Fallback < StandardError
+  attr_reader :lines
+
+  def initialize(lines)
+    super("Path B did not build a file")
+    @lines = lines
+  end
+end
+
 Fact = Struct.new(:modsrc, :decl, :imports, :rc, :msg)
 
 # nfcxx's module check: C++ modules need C++20 or later (--c++NN is the name nfcxx gives the standard)
@@ -52,12 +73,19 @@ OLD_STANDARDS = %w[--c++98 --c++03 --c++11 --c++14 --c++17].freeze
 PLAIN_FLAG = /\A(-O[0-3sg]?|-g|-Wall|-Wextra|-pthread|-D.+|-I.+|-l.+|-L.+|-Wl,.+|-fPIC|-fpic|-fPIE|-fpie|-pie|-rdynamic|-pipe|-fexceptions|-fwrapv|-fno-strict-aliasing|-W\S*|-w|-fvisibility=\S+|-fvisibility-inlines-hidden)\z/
 
 def load_facts(path)
-  facts = {}
+  facts = { pathb: {}, preprocess: 0 }
   File.foreach(path) do |line|
     f = line.chomp.split("\t", -1)
-    next unless f[0] == "SRC"
-    facts[f[1]] = Fact.new(f[2] == "1", f[3] == "-" ? nil : f[3], f[4] == "-" ? [] : f[4].split(","),
-                           Integer(f[5], 10), f[6] == "-" ? nil : f[6])
+    if f[0] == "SRC"
+      facts[f[1]] = Fact.new(f[2] == "1", f[3] == "-" ? nil : f[3], f[4] == "-" ? [] : f[4].split(","),
+                             Integer(f[5], 10), f[6] == "-" ? nil : f[6])
+      next
+    end
+    k, a, b = line.split
+    case k
+    when "pathb-fail" then facts[:pathb][a] = Integer(b, 10)
+    when "preprocess" then facts[:preprocess] = Integer(a, 10)
+    end
   end
   facts
 end
@@ -65,7 +93,7 @@ end
 # the command line, as the bash's parser reads it (the cases it does not model raise Unported)
 def parse(args)
   opt = { std: "--c++23", out: "a.out", outset: false, compile: false, emit_c: false, moddir: nil,
-          backend: nil, srcs: [], cfiles: [], objs: [] }
+          backend: nil, shared: false, preprocess: false, srcs: [], cfiles: [], objs: [] }
   i = 0
   while i < args.size
     a = args[i]
@@ -78,6 +106,9 @@ def parse(args)
       opt[:outset] = true
     when /\A-std=(?:gnu\+\+|c\+\+)(.+)\z/ then opt[:std] = "--c++#{Regexp.last_match(1)}"
     when "--emit-c" then opt[:emit_c] = true
+    when "-E" then opt[:preprocess] = true
+    when "-shared" then opt[:shared] = true
+    when "-fsanitize=address", "-fno-sanitize=address", "-fno-omit-frame-pointer", "-fomit-frame-pointer" then nil
     when /\A--module-dir=(.*)\z/
       dir = Regexp.last_match(1)
       opt[:moddir] = dir.empty? ? nil : dir
@@ -103,6 +134,18 @@ end
 
 def decl_of(facts, src)
   facts[src].decl
+end
+
+# the backend the bash builds with: --backend= as given; else gcc for -shared (the default is Path B otherwise)
+def backend_of(opt)
+  return opt[:backend] if opt[:backend]
+
+  opt[:shared] ? "gcc" : "pathb"
+end
+
+# the default backend (no --backend=): a Path B failure on a file falls back to gcc
+def default_backend?(opt)
+  opt[:backend].nil? && !opt[:shared]
 end
 
 # mod_build_program's order: the interface units in dependency order (a unit goes once every unit it imports is done),
@@ -139,48 +182,83 @@ def module_words(dir, decl, src)
   words + [src]
 end
 
-# the tool of a compile or a link: eccp for the gcc backend; Path B (pathb-cc, then cc) for the default and --backend=pathb
-def tool(opt)
-  opt[:backend] == "gcc" ? "ECCP" : "PATHB"
-end
-
 # the output of a compile with -c: the -o file; without one, gcc's compile names it a.out and Path B's names it
 # after the source (basename.o, in the directory of the command)
-def compile_out(opt, src)
-  return opt[:out] if opt[:outset] || opt[:backend] == "gcc"
+def compile_out(opt, src, backend)
+  return opt[:out] if opt[:outset] || backend == "gcc"
+
   File.basename(src).sub(/\.[^.]*\z/, "") + ".o"
 end
 
 # the link of the objects: eccp takes them before -o; Path B's cc takes -o first, then the objects
 def link_line(opt, objs, cwd)
-  return ["ECCP", *objs, "-o", abs(opt[:out], cwd)] if opt[:backend] == "gcc"
+  return ["ECCP", *objs, "-o", abs(opt[:out], cwd)] if backend_of(opt) == "gcc"
+
   ["CC", "-o", abs(opt[:out], cwd), *objs]
 end
 
-# a program with no module source: the unchanged path, one source. eccp for the gcc backend; Path B compiles the
-# source to TMP/p0.o and cc links it (the program's link is the same as a module build's)
-def plain_plan(opt, cwd)
-  raise Unported, "no source" if opt[:srcs].empty?
-  raise Unported, "more than one source with no module source is not ported" unless opt[:srcs].size == 1
-  raise Unported, "C sources with a C++ source are not ported" unless opt[:cfiles].empty?
-  raise Unported, "objects with a source and no module are not ported" unless opt[:objs].empty?
-  raise Unported, "--emit-c is not ported" if opt[:emit_c]
-  src = opt[:srcs][0]
-  lines = if opt[:compile]
-            [[tool(opt), abs(src, cwd), "-o", abs(compile_out(opt, src), cwd)]]
-          elsif opt[:backend] == "gcc"
-            [["ECCP", abs(src, cwd), "-o", abs(opt[:out], cwd)]]
-          else
-            [["PATHB", abs(src, cwd), "-o", "TMP/p0.o"], link_line(opt, ["TMP/p0.o"], cwd)]
-          end
-  lines.map { |l| l.join(" ") } + ["STATUS 0"]
+# one Path B call (its line is pushed to LINES). KEY is the argument as given (the facts name it). A failing build on the
+# default backend raises Fallback; an explicit --backend=pathb is not modelled past its failure.
+def pathb_call(opt, facts, lines, key, words)
+  lines << ["PATHB", *words]
+  return if facts[:pathb].fetch(key, 0).zero?
+  raise Unported, "--backend=pathb: a failing Path B build of #{key} exits with its status (not modelled)" unless default_backend?(opt)
+
+  raise Fallback, lines
 end
 
-def plan(args, facts, cwd)
-  opt = parse(args)
-  opt[:srcs].each { |s| raise Unported, "no fact for #{s}" unless facts[s] }
-  return plain_plan(opt, cwd) unless opt[:srcs].any? { |s| facts[s].modsrc }
+# one compile of a source in a module build (a nested run, or the -c run): the backend's line; on the default backend,
+# a failing Path B build is followed by the gcc run (the same words, GCC_OUT the output it names)
+def compile_run(opt, facts, key, words, pb_out, gcc_out)
+  return [["ECCP", *words, "-o", gcc_out]] if backend_of(opt) == "gcc"
 
+  lines = []
+  begin
+    pathb_call(opt, facts, lines, key, [*words, "-o", pb_out])
+  rescue Fallback => e
+    return e.lines + [["ECCP", *words, "-o", gcc_out]]
+  end
+  lines
+end
+
+# a program with no module source: the unchanged path. The gcc backend's eccp call compiles and links all the sources; Path B
+# compiles each to TMP/pN.o and cc links them (the C sources to TMP/N.o, linked with them and not projected)
+def plain_pathb(opt, facts, cwd, lines)
+  opt[:cfiles].each_with_index do |c, n|
+    pathb_call(opt, facts, lines, c, ["-o", "TMP/#{n}.o"])
+  end
+  if opt[:compile]
+    opt[:srcs].each do |s|
+      pathb_call(opt, facts, lines, s, [abs(s, cwd), "-o", abs(compile_out(opt, s, "pathb"), cwd)])
+    end
+    lines
+  else
+    objs = opt[:srcs].each_with_index.map do |s, n|
+      pathb_call(opt, facts, lines, s, [abs(s, cwd), "-o", "TMP/p#{n}.o"])
+      "TMP/p#{n}.o"
+    end
+    lines << link_line(opt, objs, cwd)
+  end
+end
+
+# gcc: one eccp call compiles (-c) or compiles and links all the sources, to the -o file (a.out without one)
+def plain_gcc(opt, cwd)
+  [["ECCP", *opt[:srcs].map { |s| abs(s, cwd) }, "-o", abs(opt[:out], cwd)]]
+end
+
+def plain_plan(opt, facts, cwd)
+  raise Unported, "--emit-c on the plain path: EDG's front end (cpfe) is not built in the sandbox" if opt[:emit_c]
+  return plain_gcc(opt, cwd) if backend_of(opt) == "gcc"
+
+  lines = []
+  begin
+    plain_pathb(opt, facts, cwd, lines)
+  rescue Fallback => e
+    e.lines + plain_gcc(opt, cwd)
+  end
+end
+
+def module_plan(opt, facts, cwd)
   # the modules block of nfcxx (before the backend is chosen)
   raise Refused.new(2, "nfcxx: C++ modules need -std=c++20 or later") if OLD_STANDARDS.include?(opt[:std])
   if opt[:emit_c]
@@ -194,16 +272,18 @@ def plan(args, facts, cwd)
     raise Refused.new(f.rc, f.msg) unless f.rc.zero?
   end
 
-  lines = []
   if opt[:compile]
     raise Refused.new(2, "nfcxx: -c with C++ modules takes one source") unless opt[:srcs].size == 1
+
+    s = opt[:srcs][0]
     dir = abs(opt[:moddir] || File.dirname(opt[:out]), cwd)
-    words = module_words(dir, decl_of(facts, opt[:srcs][0]), abs(opt[:srcs][0], cwd))
-    lines << [tool(opt), *words, "-o", abs(compile_out(opt, opt[:srcs][0]), cwd)]
+    words = module_words(dir, decl_of(facts, s), abs(s, cwd))
+    compile_run(opt, facts, s, words, abs(compile_out(opt, s, "pathb"), cwd), abs(compile_out(opt, s, "gcc"), cwd))
   else
     order = build_order(opt[:srcs], facts)
     # mod_build_program: each compile is this driver again (-c, the interface directory, the other options)
     nested_dir = opt[:moddir] ? abs(opt[:moddir], cwd) : "TMP"
+    lines = []
     order.each_with_index do |s, n|
       # a nested compile of a source with no module statement is the unchanged path: no module words
       words = if facts[s].modsrc
@@ -211,11 +291,29 @@ def plan(args, facts, cwd)
               else
                 [abs(s, cwd)]
               end
-      lines << [tool(opt), *words, "-o", "TMP/m#{n}.o"]
+      lines.concat compile_run(opt, facts, s, words, "TMP/m#{n}.o", "TMP/m#{n}.o")
     end
     objs = (0...order.size).map { |n| "TMP/m#{n}.o" }
     lines << link_line(opt, objs, cwd)
   end
+end
+
+def plan(args, facts, cwd)
+  opt = parse(args)
+  if opt[:preprocess]
+    # -E runs first, before any check of the modules or the backend: the host preprocessor's status is the bash's
+    raise Unported, "-E with no input file" if opt[:srcs].empty? && opt[:cfiles].empty? && opt[:objs].empty?
+    raise Unported, "-E: the host preprocessor exits nonzero (not modelled)" unless facts[:preprocess].zero?
+
+    return ["STATUS 0"]
+  end
+  opt[:srcs].each { |s| raise Unported, "no fact for #{s}" unless facts[s] }
+  raise Unported, "no source" if opt[:srcs].empty?
+  lines = if opt[:srcs].any? { |s| facts[s].modsrc }
+            module_plan(opt, facts, cwd)
+          else
+            plain_plan(opt, facts, cwd)
+          end
   lines.map { |l| l.join(" ") } + ["STATUS 0"]
 end
 
