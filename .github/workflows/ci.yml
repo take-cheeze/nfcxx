@@ -67,6 +67,10 @@ jobs:
       - name: Native upstream harness self-test
         run: python3 tests/upstream/nightly-self-test.py
 
+      # The cext2mrbgem converter: its regression suite (fixtures under tools/cext2mrbgem/fixtures); Ruby only.
+      - name: cext2mrbgem converter suite
+        run: bash tests/cext2mrbgem/run.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats
