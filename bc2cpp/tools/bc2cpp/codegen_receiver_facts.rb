@@ -1077,8 +1077,14 @@ class CodeGen
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
     # unobservable (no caller scan needed, unlike SUPER_NO_CALLER_BLOCK).
     # super_reaches_superclass? rules out an included module in between.
-    superclass = @superclass_of[owner_def.owner]
+    # A class method (`def self.new`, owner `K.singleton`) reaches the superclass's singleton. A module the class `extend`s
+    # answers before that, and the superclass map does not record extends, so such a program is refused (zsuper_extends?).
+    singleton = owner_def.owner.end_with?('.singleton')
+    class_owner = singleton ? owner_def.owner.delete_suffix('.singleton') : owner_def.owner
+    superclass = @superclass_of[class_owner]
+    superclass = "#{superclass}.singleton" if singleton && superclass.is_a?(String)
     return nil unless superclass.is_a?(String)
+    return nil if singleton && zsuper_extends?
     return nil unless super_reaches_superclass?(owner_def)
 
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
@@ -1120,6 +1126,20 @@ class CodeGen
     regs = {}
     irep.each_with_op(:KARG) { |insn, _index| regs[insn.sym_token.to_s] ||= insn.reg.to_i }
     regs
+  end
+
+  # Whether any irep of the compiled program calls `extend`. The superclass map records superclasses and includes but not
+  # extends, so a singleton zsuper cannot know whether a module it reaches first is extended in. Computed once per run.
+  def zsuper_extends?
+    return @zsuper_extends if defined?(@zsuper_extends)
+
+    @zsuper_extends = @ireps.each_value.any? do |irep|
+      found = false
+      irep.each_with_op(:SEND, :SEND0, :SENDB, :SSEND, :SSEND0, :SSENDB) do |insn, _index|
+        found ||= insn.sym_token.to_s == 'extend'
+      end
+      found
+    end
   end
 
   # [mandatory, optional] when an irep's ENTER takes nothing else, else nil.

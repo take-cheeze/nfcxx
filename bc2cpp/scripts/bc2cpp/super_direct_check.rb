@@ -166,4 +166,59 @@ check.call('that site keeps the by-name zsuper call, which passes the block at r
 check.call('a keyword set the superclass does not name stays out of the direct call',
            !zsuper_mismatch.match?(/OtherBase_initialize_impl\(M, self, r1, r3/) && zsuper_mismatch.include?('#error'))
 
+# ZSUPER_SINGLETON: a class method's zsuper (`def self.new ... super`, owner K.singleton) reaches the superclass's singleton.
+# A program that calls `extend` may put a module first, so the forwarding is refused there.
+SINGLETON_SOURCE = <<~'RUBY'
+  class SBase
+    def self.new(enum = nil, key_type: 1, &block)
+      key_type
+    end
+  end
+
+  class SSub < SBase
+    def self.new(enum = nil, key_type: Integer, &block)
+      super
+    end
+  end
+RUBY
+
+SINGLETON_EXTEND_SOURCE = <<~'RUBY'
+  module Ext
+    def new(enum = nil, key_type: 1, &block)
+      super
+    end
+  end
+
+  class SBase
+    def self.new(enum = nil, key_type: 1, &block)
+      key_type
+    end
+  end
+
+  class SSub < SBase
+    extend Ext
+
+    def self.new(enum = nil, key_type: Integer, &block)
+      super
+    end
+  end
+RUBY
+
+singleton_code = lambda do |source|
+  suite.compile(source) do |ireps, root|
+    registry, superclass_of, container_constants, included, prepended = build_registry(ireps, root)
+    gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, container_constants, {}, Set.new,
+                      nil, nil, nil, included, prepended)
+    method = registry.fetch('new').find { |d| d.owner == 'SSub.singleton' }
+    gen.compile_method(method.irep).fetch(:code)
+  end
+end
+
+singleton_plain = singleton_code.call(SINGLETON_SOURCE)
+singleton_extended = singleton_code.call(SINGLETON_EXTEND_SOURCE)
+check.call('a class method zsuper with keyword and block forwards to the superclass singleton',
+           singleton_plain.match?(/_impl\(M, self, r1, r3, 1, r\d+, 1\);/))
+check.call('a program that calls extend keeps the class method zsuper out of the direct call',
+           !singleton_extended.match?(/_impl\(M, self, r1, r3, 1, r\d+, 1\);/))
+
 suite.finish!
