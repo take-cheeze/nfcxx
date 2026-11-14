@@ -1658,6 +1658,27 @@ use_problem = lambda do |name, use|
       line = line_of(@files[rel]['text'], s)
       @warnings << { 'file' => rel, 'line' => line, 'api' => name, 'reason' => entry['reason'] }
       warn "warning: #{rel}:#{line} dropped #{name} (#{entry['reason']})"
+    when 'template'
+      # a fixed expression over the call's arguments (api_map.json "template"): $0, $1, ... are the argument texts and
+      # $m is the mruby state. Only plain identifiers and integer literals are substituted, and none is a class variable.
+      unless called
+        refuse(rel, s, name, 'used without a call; cannot map it')
+        return
+      end
+      cp = pyfind(masked, ')', nxt)
+      args = cp > 0 ? split_args(masked, nxt, cp) : []
+      texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
+      if texts.size != entry['arity']
+        refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
+        return
+      end
+      unless texts.all? { |t| t.match?(/\A(?:[A-Za-z_][#{WC}]*|\d+)\z/) && t != 'mrb' && !@class_vars.include?(t) }
+        refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
+        return
+      end
+      out = entry['template'].gsub(/\$(\d+)|\$m/) { $1 ? texts[$1.to_i] : mrb_tok(rel, s) }
+      ed.add(s, cp + 1, out)
+      rewrite(rel, s, name, out, entry['caveat'])
     when 'call'
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')

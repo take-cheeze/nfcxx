@@ -1232,6 +1232,27 @@
       "needs_mrb": true,
       "intern_arg": 0,
       "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby"
+    },
+    "rb_reg_nth_match": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "(mrb_nil_p($1) ? mrb_nil_value() : mrb_funcall($m, $1, \"[]\", 1, mrb_fixnum_value($0)))",
+      "caveat": "match[nth] on the OnigMatchData of the gem (api_map: onig regexp API), nil for a nil match, as CRuby does; the match is an OnigMatchData, not a MatchData"
+    },
+    "rb_backref_get": {
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "mrb_gv_get($m, mrb_intern_lit($m, \"$~\"))",
+      "caveat": "reads $~, which the onig gem sets when its @set_global_variables flag is on; otherwise it is nil"
+    },
+    "rb_backref_set": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_gv_set($m, mrb_intern_lit($m, \"$~\"), $0)",
+      "caveat": "writes $~ (the onig gem reads it back through its last-match variable); the value is the match, as CRuby stores it"
     }
   },
   "special_arg_positions_class_only": {

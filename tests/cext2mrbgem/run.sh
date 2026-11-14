@@ -251,7 +251,7 @@ check grep -qF 'return mrb_int_value(mrb, LN_ANSWER);' "$work/local_names/src/lo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_reg_nth_match  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_yield  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -387,6 +387,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_gv_name/NOT_BUILDABLE"
 check grep -qF 'return mrb_gv_get(mrb, mrb_intern_cstr(mrb, "$api_count"));' "$work/api_gv_name/src/api_gv_name.c"
 check grep -qF 'mrb_gv_set(mrb, mrb_intern_cstr(mrb, "$api_count"), v);' "$work/api_gv_name/src/api_gv_name.c"
+
+# 2zl. regexp back-references through the onig gem's API (api_map.json batch N7): rb_reg_nth_match is match[nth] with a nil
+# check, rb_backref_get reads $~ (both through a template)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_regexp tools/cext2mrbgem/fixtures/api_regexp/ext/api_regexp "$work/api_regexp" > "$work/api_regexp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_regexp/NOT_BUILDABLE"
+check grep -qF 'return (mrb_nil_p(m) ? mrb_nil_value() : mrb_funcall(mrb, m, "[]", 1, mrb_fixnum_value(1)));' "$work/api_regexp/src/api_regexp.c"
+check grep -qF 'return mrb_gv_get(mrb, mrb_intern_lit(mrb, "$~"));' "$work/api_regexp/src/api_regexp.c"
 
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
