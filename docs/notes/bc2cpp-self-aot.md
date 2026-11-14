@@ -31,8 +31,10 @@ The executable path is printed on stdout; progress goes to stderr and detailed l
 `BC2CPP_BUILD_JOBS` defaults to 8; `BC2CPP_SELF_CXX` defaults to this repository's `nfcxx`.
 Use separate build directories when changing the C++ compiler, backend or ABI flags.
 
-Generation is cached by the host Ruby version, source and header contents, configured runtime defines and explicit
-self-build settings. The input program's owner filters and optimization controls are isolated from self-generation.
+Generation is cached by the host Ruby version, the Prism and RBS versions, source and header contents (and every bc2cpp
+tool source), configured runtime defines, the explicit self-build settings, and the interpreter and front-end variables
+the generator inherits (`RUBYOPT`, `NFCXX_AST_DUMP`, `LIBCLANG_EDG_CPFE`); `docs/notes/bc2cpp-cache-keys.md` has the
+audit. The input program's owner filters and optimization controls are isolated from self-generation.
 Identical generated files retain their timestamps so warm setup does not rebuild every translation unit.
 `generation/host.json` records the actual Ruby version, YJIT state and inputs. `generation/coverage.json` records
 translated methods and the exact fallback reasons.

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'digest'
 require 'fileutils'
 require 'json'
 require 'set'
@@ -10,6 +11,9 @@ module Bc2cppSelfCompile
     BC2CPP_CONSTANT_PROOF_OUT BC2CPP_SELF_STATS BC2CPP_MRUBY_RUNNER BC2CPP_RUBY BC2CPP_MRUBY
     BC2CPP_RUNNER_LIBRARY BC2CPP_REQUIRE_SELF_AOT BC2CPP_RUNNER_MRBC_MODE BC2CPP_KEEP_DIR
     BC2CPP_MRUBY_CORE BC2CPP_MRUBY_FULL BC2CPP_SCCACHE BC2CPP_CXXFLAGS].freeze
+  # Caller variables that are not BC2CPP_* but reach the generator unchanged (it is started with the caller's
+  # environment): the interpreter options it loads under, and the nfcxx front end that native analyses may parse with.
+  INHERITED_KEYS = %w[RUBYOPT RUBYLIB NFCXX_AST_DUMP LIBCLANG_EDG_CPFE].freeze
 
   module_function
 
@@ -20,7 +24,17 @@ module Bc2cppSelfCompile
     env = base.merge(keys.uniq.reject { |key| base.key?(key) }.to_h { |key| [key, nil] })
     selectors = %w[BC2CPP_HOST_RUBY BC2CPP_SELF_BUILD_DIR BC2CPP_SELF_CXX BC2CPP_SELF_SHARDS BC2CPP_BUILD_JOBS]
     controls = caller_env.select { |key, _| selectors.include?(key) }.sort.to_h
-    [env, controls]
+    inherited = INHERITED_KEYS.to_h { |key| [key, caller_env[key]] }
+    [env, controls.merge(inherited)]
+  end
+
+  # The key of one generation (build.rb keeps it in generation/fingerprint and host.json): the toolchain (Ruby, Prism,
+  # RBS; Toolchain.versions), the environment the generator runs with, the controls it reads from the caller, the
+  # runtime defines, and the digest of every file it reads. +dependencies+ is [[path, sha256], ...]. Any change to one of
+  # them makes the generation run again.
+  def generation_fingerprint(toolchain:, env:, controls:, defines:, dependencies:)
+    Digest::SHA256.hexdigest(JSON.generate([toolchain, env.reject { |_, value| value.nil? }, controls, defines,
+                                            dependencies.sort]))
   end
 
   def write_changed(path, contents)

@@ -1,17 +1,24 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Check ScanCache: the disk memo of the scans that read only the
-# outside-world sources. A stored result must be returned only for the exact inputs and scanner sources it was
-# computed from, must never change what the scan returns, and every cache fault (an unreadable entry, an entry stored
-# under another key, a value or directory that cannot be stored) must stop the run. It is always on; the checks turn
-# it off with ScanCache.bypass. Run by the `ruby-checks` job; needs no mruby build.
+# Check the bc2cpp disk caches and their keys: ScanCache (the memo of the scans that read only the outside-world sources),
+# IrepCache (the decoded RITE trees) and the self-generation fingerprint (tools/self_compile/artifacts.rb). A stored
+# result must be returned only for the exact inputs, toolchain and tool sources it was computed from, must never change
+# what the scan returns, and every cache fault (an unreadable entry, an entry stored under another key, a value or
+# directory that cannot be stored) must stop the run. ScanCache is always on; the checks turn it off with
+# ScanCache.bypass. The key checks run without a world; the real-scanner checks need 3rd/mruby. Run by the `ruby-checks`
+# job; needs no mruby build.
 
 require_relative '../../tools/bc2cpp/world_root'
 require 'tmpdir'
 require 'fileutils'
 require 'stringio'
-require_relative '../../tools/bc2cpp/bc2cpp'
+require 'rbconfig'
+require_relative '../../tools/bc2cpp/scan_cache'
+require_relative '../../tools/bc2cpp/irep_cache'
+require_relative '../../tools/bc2cpp/insn_decoder'
+require_relative '../../tools/bc2cpp/toolchain'
+require_relative '../../tools/self_compile/artifacts'
 
 failures = []
 check = lambda do |what, condition|
@@ -123,7 +130,119 @@ Dir.mktmpdir do |tmp|
   check.call('four processes storing one key leave a single whole entry',
              Dir[File.join(cache, 'race-*')].size == 1 && run_scan([one, two], name: 'race').first.zero?)
 
+  puts '-- the key covers the toolchain (Ruby, Prism, RBS)'
+  with_toolchain = lambda do |versions, &block|
+    saved = Toolchain.instance_variable_get(:@versions)
+    Toolchain.instance_variable_set(:@versions, versions.freeze)
+    block.call
+  ensure
+    Toolchain.instance_variable_set(:@versions, saved)
+  end
+  base_versions = Toolchain.versions
+  base_key = ScanCache.key_for('toolchain', [one], true)
+  check.call('the toolchain is Ruby, Prism and RBS versions, with RBS known in every process',
+             base_versions.size == 3 && base_versions[0] == RUBY_DESCRIPTION && base_versions[1] == Prism::VERSION &&
+             base_versions[2] == RBS::VERSION)
+  base_versions.each_index do |index|
+    changed = base_versions.dup
+    changed[index] = "#{base_versions[index]}-other"
+    gem = %w[Ruby Prism RBS][index]
+    check.call("a different #{gem} version is a different key", with_toolchain.call(changed) { ScanCache.key_for('toolchain', [one], true) } != base_key)
+  end
+  check.call('the toolchain is restored after the key checks', ScanCache.key_for('toolchain', [one], true) == base_key)
+
+  puts '-- the key covers every bc2cpp tool source (tools/bc2cpp and tools/mrbc_rb)'
+  sources = ScanCache.tools_sources
+  check.call('the tool sources include the mrbc_rb sources the generator loads and the tools data file',
+             sources.any? { |file| file.end_with?('/tools/mrbc_rb/snapshot.rb') } &&
+             sources.any? { |file| file.end_with?('/tools/bc2cpp/compiled_gems.yml') })
+  # The generator's own require closure (bake_sources.rb follows require_relative) must lie inside the digested sources,
+  # so a file it loads can never change without changing the key.
+  closure_code = <<~RUBY
+    require "#{File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bake_sources')}"
+    puts bake("tools/bc2cpp/bc2cpp.rb").keys
+  RUBY
+  closure = IO.popen([RbConfig.ruby, '-e', closure_code], err: File::NULL, &:read).split("\n")
+  loaded = closure.select { |name| name.start_with?('tools/') }.map { |name| File.join(BC2CPP_TREE_ROOT, "#{name}.rb") }
+  check.call("the generator's require closure (#{loaded.size} tool files) is inside the tool sources",
+             loaded.size > 300 && (loaded - sources).empty?)
+  check.call('the tools digest is the digest of those sources', ScanCache.tools_digest.size == 64)
+
+  puts '-- a file digest is reused only for a file that is not racily timed'
+  racy = File.join(tmp, 'racy.c')
+  File.write(racy, 'aaaa')
+  fresh_mtime = File.mtime(racy)
+  racy_first = ScanCache.key_for('racy', [racy], true)
+  File.write(racy, 'bbbb')
+  File.utime(fresh_mtime, fresh_mtime, racy)
+  check.call('a same-size rewrite that keeps the mtime of a just-written file is hashed again',
+             ScanCache.key_for('racy', [racy], true) != racy_first)
+  settled = File.join(tmp, 'settled.c')
+  File.write(settled, 'cccc')
+  old_mtime = Time.now - 60
+  File.utime(old_mtime, old_mtime, settled)
+  ScanCache.key_for('settled', [settled], true)
+  check.call('a file older than the racy window is remembered in the process',
+             ScanCache.instance_variable_get(:@file_digests).key?([settled, File.mtime(settled), File.size(settled)]))
+
+  puts '-- the decoded-tree cache (IrepCache) covers every tool source'
+  irep_dir = File.join(tmp, 'irep')
+  decoded = 0
+  decode = lambda do
+    decoded += 1
+    [{}, {}]
+  end
+  first_tree = IrepCache.fetch('RITE0300 fixture', irep_dir, &decode)
+  check.call('a decoded tree is computed once and then loaded', IrepCache.fetch('RITE0300 fixture', irep_dir, &decode) == first_tree && decoded == 1)
+  check.call('the decoder fingerprint names the decoder sources the decode follows',
+             ScanCache.tools_sources.any? { |file| file.end_with?('/tools/bc2cpp/bytecode_ir_ops.rb') })
+  saved_fingerprint = IrepCache.instance_variable_get(:@fingerprint)
+  saved_tools = ScanCache.instance_variable_get(:@tools_digest)
+  ScanCache.instance_variable_set(:@tools_digest, 'a changed decoder source')
+  IrepCache.instance_variable_set(:@fingerprint, nil)
+  changed_fingerprint = IrepCache.fingerprint
+  ScanCache.instance_variable_set(:@tools_digest, saved_tools)
+  IrepCache.instance_variable_set(:@fingerprint, saved_fingerprint)
+  check.call('a changed decoder source is a different fingerprint', changed_fingerprint != saved_fingerprint)
+  IrepCache.instance_variable_set(:@fingerprint, changed_fingerprint)
+  check.call('a changed decoder source decodes again', IrepCache.fetch('RITE0300 fixture', irep_dir, &decode) == first_tree && decoded == 2)
+  IrepCache.instance_variable_set(:@fingerprint, saved_fingerprint)
+
+  puts '-- the self-generation fingerprint covers its toolchain, environment, controls, defines and sources'
+  generation = {
+    toolchain: ['ruby 3.4.0', 'prism 1.0.0', 'rbs 3.4.0'],
+    env: { 'BC2CPP_PROBE_DEPTH' => '4', 'MRBC' => '/opt/mrbc', 'FIXNUM_NIL_IVARS' => nil },
+    controls: { 'BC2CPP_SELF_SHARDS' => '16', 'RUBYOPT' => nil, 'ast_producer' => 'clang' },
+    defines: ['BC2CPP_FIXTURE=1'],
+    dependencies: [['tools/a.rb', 'd1'], ['tools/b.rb', 'd2']]
+  }
+  fingerprint = ->(**changes) { Bc2cppSelfCompile.generation_fingerprint(**generation.merge(changes)) }
+  check.call('the same generation inputs give the same fingerprint, whatever the order of the dependencies',
+             fingerprint.call == fingerprint.call(dependencies: generation[:dependencies].reverse))
+  check.call('a different Prism version is a different fingerprint',
+             fingerprint.call(toolchain: ['ruby 3.4.0', 'prism 1.0.1', 'rbs 3.4.0']) != fingerprint.call)
+  check.call('a different RBS version is a different fingerprint',
+             fingerprint.call(toolchain: ['ruby 3.4.0', 'prism 1.0.0', 'rbs 3.4.1']) != fingerprint.call)
+  check.call('a different interpreter option (RUBYOPT) is a different fingerprint',
+             fingerprint.call(controls: generation[:controls].merge('RUBYOPT' => '-rpreload')) != fingerprint.call)
+  check.call('a different AST producer is a different fingerprint',
+             fingerprint.call(controls: generation[:controls].merge('ast_producer' => 'nfcxx')) != fingerprint.call)
+  check.call('a different generator environment value is a different fingerprint',
+             fingerprint.call(env: generation[:env].merge('BC2CPP_PROBE_DEPTH' => '5')) != fingerprint.call)
+  check.call('a different runtime define is a different fingerprint',
+             fingerprint.call(defines: ['BC2CPP_FIXTURE=2']) != fingerprint.call)
+  check.call('a changed source the generator reads is a different fingerprint',
+             fingerprint.call(dependencies: [['tools/a.rb', 'd1'], ['tools/b.rb', 'd3']]) != fingerprint.call)
+  inherited_env, inherited_controls = Bc2cppSelfCompile.generation_environment({},
+                                                                              { 'RUBYOPT' => '-rx', 'BC2CPP_PROBE_DEPTH' => '3',
+                                                                                'BC2CPP_SELF_SHARDS' => '8' })
+  check.call('the generation inherits RUBYOPT into its controls, and unsets the caller BC2CPP_* settings it does not select',
+             inherited_controls['RUBYOPT'] == '-rx' && inherited_controls['BC2CPP_SELF_SHARDS'] == '8' &&
+             inherited_env.key?('BC2CPP_PROBE_DEPTH') && inherited_env['BC2CPP_PROBE_DEPTH'].nil?)
+
   puts '-- the real scanners'
+  # The scanners need the whole compiler (its world-level sig and registry loads); the key checks above do not.
+  require_relative '../../tools/bc2cpp/bc2cpp'
   root = BC2CPP_WORLD_ROOT
   natives = Dir[File.join(root, '3rd/mruby/src/*.c')] + Dir[File.join(root, '3rd/mruby/mrbgems/*/src/*.c')]
   if natives.empty?
