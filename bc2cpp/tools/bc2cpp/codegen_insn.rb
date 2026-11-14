@@ -80,6 +80,10 @@ class CodeGen
     code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
     return code unless code.is_a?(String) && idx && irep
 
+    if insn.op == :SEND && insn.sym.to_s == '<<'
+      # DECLARED_ELEMENT_GUARD on a native push: the argument is tested before the push runs.
+      return declared_element_push_guard(insn, irep, owner_def, idx) + code
+    end
     if insn.op == :SETIDX
       # DECLARED_ELEMENT_GUARD on a store runs before the store writes the element.
       return declared_element_setidx_guard(insn, irep, owner_def, idx, reg_offset) + code
