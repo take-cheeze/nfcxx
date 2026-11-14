@@ -131,8 +131,12 @@ class Cache
 
     out = var("out", "a.out")
     srcs = @srcs
-    removals_before_compile(srcs, out)
-    link_records_rm
+    # A Path B compile (backend=pathb) has no removals before the compile and none after it: it writes no records.
+    pathb = backend == "pathb"
+    unless pathb
+      removals_before_compile(srcs, out)
+      link_records_rm
+    end
     cache_entry = nil
     key = nil
     if eligible?(cache_dir, out, srcs)
@@ -142,17 +146,21 @@ class Cache
         cache_entry = entry
         remote_hit = !remote.empty? && !File.file?("#{entry}/obj") && remote_get(key, entry)
         if File.file?("#{entry}/obj") || remote_hit
-          hit(out, entry)
+          hit(out, entry, pathb)
           return
         end
       end
     end
     puts "RUN build #{out}"
-    link_records_rm
-    store(out, cache_entry, key, remote) if cache_entry && !File.file?("#{cache_entry}/obj")
+    link_records_rm unless pathb
+    store(out, cache_entry, key, remote, pathb ? [] : @records) if cache_entry && !File.file?("#{cache_entry}/obj")
   end
 
   private
+
+  def backend
+    var("backend", "gcc")
+  end
 
   def env_value(name, default = "")
     value = @env[name]
@@ -267,10 +275,20 @@ class Cache
       line = first_line_of(c)
       lines << line if line
     end
+    lines.concat(pathb_lines) if backend == "pathb"
     header_list.each do |f|
       lines << "#{f} #{File.file?(f) ? sha_line(File.binread(f)) : 'missing'}"
     end
     lines.join("\n").sub(/\n+\z/, "")
+  end
+
+  # a Path B object's key: the backend, the Path B front end (PATHB_CPFE) and its base files (PATHB_BASE)
+  def pathb_lines
+    cpfe = env_value("PATHB_CPFE", File.join(ROOT, "build/pathb/cmake/bin/cpfe"))
+    base = env_value("PATHB_BASE", File.join(ROOT, "build/pathb/edg-base"))
+    ["backend: pathb",
+     File.file?(cpfe) ? sha_line(File.binread(cpfe)) : "missing #{cpfe}",
+     sha_line(concat_files(regular_files_directly_in(base)))]
   end
 
   # the remote tier on a local miss: the helper's get into a temporary entry, moved into place on a hit
@@ -287,20 +305,20 @@ class Cache
     hit
   end
 
-  # the hit: the object and its records go back beside the output
-  def hit(out, entry)
+  # the hit: the object and its records go back beside the output (a Path B entry has the object only)
+  def hit(out, entry, pathb)
     stem = strip_ext(out)
-    puts "RUN rm -f #{stem}.ti #{stem}.ii"
+    puts "RUN rm -f #{stem}.ti #{stem}.ii" unless pathb
     puts "CP #{entry}/obj #{out}"
-    %w[ti ii].each { |x| puts "CP #{entry}/#{x} #{stem}.#{x}" if File.file?("#{entry}/#{x}") }
+    %w[ti ii].each { |x| puts "CP #{entry}/#{x} #{stem}.#{x}" if !pathb && File.file?("#{entry}/#{x}") }
     puts "EXIT 0"
   end
 
   # the store: the entry appears at once (it is made under a temporary name and moved into place)
-  def store(out, entry, key, remote)
+  def store(out, entry, key, remote, records)
     stem = strip_ext(out)
     tmp = "#{entry}.tmp.#{Process.pid}"
-    recs = %w[ti ii].select { |x| @records.include?(x) }
+    recs = %w[ti ii].select { |x| records.include?(x) }
     puts "RUN mkdir -p #{tmp} #{File.dirname(entry)}"
     puts "CP #{out} #{tmp}/obj"
     recs.each { |x| puts "CP #{stem}.#{x} #{tmp}/#{x}" }

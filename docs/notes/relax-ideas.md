@@ -84,6 +84,15 @@ Status: largely present. `nfcxx --cache=DIR` (NFCXX_CACHE) keeps each `-c` compi
 `NFCXX_CACHE_REMOTE=gha` shares the objects through the GitHub Actions cache (docs/notes/cxx-driver.md, "Compile cache").
 Not measured: how much of a large library's build time an unchanged unit saves with it.
 
+Gap found, and fixed on `claude/pathb-cache`: the default Path B route (`nfcxx -c x.cpp -o x.o` on x86-64 Linux) never
+reached the cache. Its `-c` block exits before the cache code, so `--cache` worked only with `--backend=gcc`. The lookup
+and the store now run on that route too. A Path B key adds `backend: pathb` and the Path B front end (cpfe and its
+edg-base files), so the two backends never share an entry. The gcc route's key lists the same inputs as before, but the
+key hashes nfcxx itself, so this change invalidates the existing entries on both routes (the old objects stay on disk
+and are never hit). Measured on tinyxml2.cpp, one unit on Path B: cold 4.49 s, hit 0.31 s, edited miss 4.91 s. The hit
+is byte-identical to the cold object and to an uncached compile. `tests/nfcxx-cache/run.sh` now has 16 cases, 5 of them
+on Path B.
+
 ## What not to copy
 
 - A JIT for steady-state speed. Relax's own numbers show its generated code is slower than release builds. nfcxx's

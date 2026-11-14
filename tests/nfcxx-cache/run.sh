@@ -20,8 +20,8 @@ trap 'cp "$backup" "$port" 2>/dev/null; rm -rf "$work" "$scratch"' EXIT
 # A stand-in EDG build: nfcxx's setup needs bin/eccp (the build itself is stubbed). The key lists its files on both sides.
 mkdir -p "$scratch/edg/bin" && printf '#!/bin/sh\nexit 1\n' > "$scratch/edg/bin/eccp" && chmod +x "$scratch/edg/bin/eccp"
 base_env=("EDG_BUILD=$scratch/edg")
-# The gcc backend (the Path B one needs a QBE build); the argument is part of the key on both sides.
-common=(--backend=gcc)
+# The backend of a case is CASE_BACKEND (set_case: gcc, or pathb with the stubbed Path B compile); it is passed as --backend=
+# on both sides, so it is part of the key on both sides.
 
 norm() { sed -e "s#$work#SANDBOX#g" -e "s#$root#ROOT#g" -e 's/\.\(tmp\|remote\)\.[0-9][0-9]*/.\1.PID/g'; }
 
@@ -37,14 +37,15 @@ run_port() {  # run_port: the port's output for the case, in the sandbox (the -M
   for v in compile_only=1 ncpp=1 outset=1 nobj=0 modules=0 preprocess=0 stdin_src=0 depmode= cfiles_n=0 cu_n=0 cpp2_n=0 "out=$CASE_OUT"; do
     opts+=("--var=$v")
   done
-  for a in "${common[@]}" "${CASE_ARGS[@]}"; do opts+=("--arg=$a"); done
+  opts+=("--var=backend=$CASE_BACKEND")
+  for a in "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}"; do opts+=("--arg=$a"); done
   opts+=("--src=$CASE_SRC")
   (cd "$work" && env -i PATH="$PATH" ruby "$port" "${opts[@]}" "${CASE_PORT[@]}")
 }
 
 run_bash() {  # run_bash: the bash's output for the case, in the sandbox
   (cd "$work" && env -i PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "${CASE_TEST[@]}" \
-     bash "$oracle" "${common[@]}" "${CASE_ARGS[@]}")
+     bash "$oracle" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}")
 }
 
 prepare() {  # prepare: the sandbox as the case starts (the fixtures, then PRE and MUTATE)
@@ -81,7 +82,7 @@ run_case() {  # run_case: runs the case set up by set_case, and prints ok or FAI
 
 # set_case NAME SRC OUT: a case with no environment, no extra options and no checks; the case then sets what it needs.
 set_case() {
-  CASE=$1; CASE_SRC=$2; CASE_OUT=$3; CASE_ARGS=(-c "$2" -o "$3"); CASE_ENV=(); CASE_TEST=(); CASE_PORT=()
+  CASE=$1; CASE_SRC=$2; CASE_OUT=$3; CASE_ARGS=(-c "$2" -o "$3"); CASE_ENV=(); CASE_TEST=(); CASE_PORT=(); CASE_BACKEND=gcc
   CASE_LOG=0; PRE=""; MUTATE=""; CHECK=""; EXPECT=""
 }
 
@@ -112,6 +113,25 @@ check_bad_remote() {
   grep -qF "nfcxx: NFCXX_CACHE_REMOTE takes gha (got 's3')" "$scratch/port.err" && [ "$PORT_RC" = 2 ] \
     || bad "the port did not refuse the remote value"
 }
+# The Path B route (CASE_BACKEND=pathb): its entry is the object alone, and its key differs from the gcc key of the same command.
+pre_hit_pathb() {  # an entry under the Path B key: the object only
+  local dir; dir=$(entry_dir "$(port_key)"); mkdir -p "$dir"; printf 'CACHED\n' > "$dir/obj"
+}
+check_hit_pathb() {  # the bash copied the object back, and no records (Path B writes none)
+  grep -qx CACHED "$work/main.o" && [ ! -e "$work/main.ti" ] && [ ! -e "$work/main.ii" ] \
+    || bad "the bash did not copy the Path B entry back"
+}
+check_stored_pathb() {  # the bash stored the object under the Path B key the port gives, and no records
+  local dir; dir=$(entry_dir "$PORT_KEY")
+  [ -n "$PORT_KEY" ] && grep -qx 'OBJECT main.o' "$dir/obj" && [ ! -e "$dir/ti" ] && [ ! -e "$dir/ii" ] \
+    || bad "no Path B entry under the port's key $PORT_KEY"
+}
+pre_gcc_entry() {  # an entry under the key of the same command on the gcc backend: a Path B compile must not take it
+  local keep=$CASE_BACKEND k dir
+  CASE_BACKEND=gcc; k=$(port_key); CASE_BACKEND=$keep
+  dir=$(entry_dir "$k"); mkdir -p "$dir"; printf 'GCC\n' > "$dir/obj"
+}
+check_not_gcc() { grep -qx GCC "$work/main.o" && bad "the Path B compile took the gcc entry" || true; }
 
 run_all() {
   pass=0; fail=0
@@ -143,6 +163,20 @@ run_all() {
   run_case
 
   set_case no-cache main.cpp main.o; EXPECT="RUN build main.o"; run_case
+
+  set_case pathb-miss main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache"); EXPECT="RUN build main.o"; run_case
+
+  set_case pathb-stored main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache")
+  CHECK=check_stored_pathb; EXPECT="RUN mv"; run_case
+
+  set_case pathb-hit main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache"); PRE=pre_hit_pathb
+  CHECK=check_hit_pathb; EXPECT="EXIT 0"; run_case
+
+  set_case pathb-not-gcc main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache"); PRE=pre_gcc_entry
+  CHECK=check_not_gcc; EXPECT="RUN build main.o"; run_case
+
+  set_case pathb-changed-header main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache")
+  PRE=pre_old_entry; MUTATE=mutate_header; CHECK=check_key_changed; EXPECT="RUN build main.o"; run_case
 
   echo "$pass passed, $fail failed"
   [ "$fail" = 0 ]
