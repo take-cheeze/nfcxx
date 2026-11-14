@@ -572,7 +572,7 @@ while [ $# -gt 0 ]; do
     -fsafe-pointers) safeptr=1 ;;
     -fno-safe-pointers) safeptr=0 ;;
     -fno-sanitize=address) asan=0 ;;
-    -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
+    -fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
     -fno-omit-frame-pointer|-fomit-frame-pointer) asanopts+=("$1") ;;   # asan's usual companions; they go to the C compile
     --dialect=*) dialect=${1#--dialect=}; dialect_asked=1 ;;
     --gnu-version=*) gnu=${1#--gnu-version=}; gnu_user=$gnu ;;
