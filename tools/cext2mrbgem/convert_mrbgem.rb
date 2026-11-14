@@ -517,6 +517,23 @@ class Converter
     @rewrites.any? { |r| r['to'] == 'nfcx_thread_call_without_gvl' }
   end
 
+  # the position of the innermost '{' that is still open at pos, or nil
+  def enclosing_open_brace(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        return k if depth == 0
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
   def rewrite(rel, pos, src, dst, caveat = nil)
     text = @files[rel]['text']
     rec = { 'file' => rel, 'line' => line_of(text, pos), 'from' => src, 'to' => dst }
@@ -552,7 +569,8 @@ class Converter
         masked.to_enum(:scan, /(?<![\w.>$])#{n}(?!\w)/).each do
           m = Regexp.last_match
           nxt = masked[m.end(0)..][/\A\s*(.)/, 1]
-          next if nxt == ';' || nxt == '['
+          # a name followed by ';' is a value use (a prototype is followed by '('); an array declaration is followed by '['
+          next if nxt == '['
           reps << [m.begin(0), m.end(0), "#{n}__#{stem}"]
         end
       end
@@ -788,7 +806,7 @@ texts = static_rename(texts)
     declarations_by_file.each do |rel, decls|
       f = @files[rel]
       decls.each do |d|
-        next if f['kind'] != 'src' && !d['proto'] && !(d['storage'].split.include?('inline') && d['storage'].split.include?('static')) # a header body is converted only when it is static inline
+        next if f['kind'] != 'src' && !d['proto'] && !d['storage'].split.include?('static') # a header body is converted only when it is static (inline or not): it is local to each includer
         next if NON_FUNC_WORDS.include?(d['name']) || NON_FUNC_WORDS.include?(py_split_ws(d['ret']).last)
         unless d['proto']
           (@defs[d['name']] ||= []) << d
@@ -862,6 +880,13 @@ texts = static_rename(texts)
     extra = text_decls.select { |d| d['proto'] && names.include?(d['name']) && !listed.include?(d['po']) }
     # a definition the text has and the front end does not list is excluded by its #if (or is not a definition)
     text_decls.each { |d| @excluded_defs << d['name'] if !d['proto'] && !names.include?(d['name']) }
+    # the body of such a definition is not compiled (its #if is false in this build): its spans are kept, so a use inside
+    # them is dead code, not a file-scope use (see the identifier pass)
+    text_decls.each do |d|
+      next if d['proto'] || names.include?(d['name']) || d['brace'].nil? || d['body_end'].nil?
+      (@excluded_spans ||= {})[rel] ||= []
+      @excluded_spans[rel] << [d['brace'], d['body_end']]
+    end
     [(recs + extra).sort_by { |d| d['hstart'] }, skipped]
   end
 
@@ -1052,18 +1077,20 @@ def dtype_parse(rel, m)
   tx = @files[rel]['text']
   open = m.end(0) - 1
   close = match_close(mk, open)
-  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }
+  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
     if !els.empty? && els.all? { |e| e[2].start_with?('.') }
       return dtype_designated(rel, m, open, close, els)
     end
   return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless els.size == 5 && els[1][2].start_with?('{') && els[1][2].end_with?('}')
-  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
   ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
-  unless nested.size == 3 && ok_fn.call(nested[0][2]) && ok_fn.call(nested[1][2]) && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
+  # RUBY_TYPED_DEFAULT_FREE frees with CRuby's allocator: mruby's dfree takes (mrb, data), and mrb_free has that shape
+  nested_free = nested[1] && nested[1][2] == 'RUBY_TYPED_DEFAULT_FREE' ? 'mrb_free' : (nested[1] && nested[1][2])
+  unless (nested.size == 2 || nested.size == 3) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
     return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
   end
   return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
-  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested[1][2],
+  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested_free,
     'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
 end
 
@@ -1094,6 +1121,7 @@ end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
     free = sf['dfree'] ? sf['dfree'][2] : 'NULL'
+    free = 'mrb_free' if free == 'RUBY_TYPED_DEFAULT_FREE'
     unless ok_fn.call(mark) && ok_fn.call(free)
       return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
     end
@@ -1187,6 +1215,25 @@ end
 
   # A struct field of function-pointer type, RET (*NAME)(PARAMS), in a struct body of this file. Returns the field's
   # declaration; its assignments and calls are found across the whole input by fnptr_global.
+  # the '{' that opens the innermost struct body containing pos (struct TAG { or struct {), or nil
+  def struct_body_open(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        if depth == 0
+          return psl(masked, [k - 40, 0].max, k) =~ /struct\s*\w*\s*\z/ ? k : nil
+        end
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
   def fnptr_decls(rel)
     masked = @files[rel]['masked']
     out = []
@@ -1198,20 +1245,153 @@ end
       next unless struct_body_before?(masked, m.begin(0))
       params = psl(masked, open + 1, close).strip
       next if params.empty? || params == 'void'
-      out << { rel: rel, name: m[1], params_start: open + 1 }
+      # the member index and the struct tag, for a positional initializer (struct TAG var = { h1, h2, ... })
+      bo = struct_body_open(masked, m.begin(0))
+      tag = bo && psl(masked, [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
+      index = bo ? masked[(bo + 1)...m.begin(0)].to_s.count(';') : nil
+      out << { rel: rel, name: m[1], params_start: open + 1, tag: tag, index: index }
     end
     out
   end
 
   # The assignments (x.NAME = helper;) and calls (x.NAME(...)) of a field, across every file of the input.
+  # Parameters of function-pointer type, RET (*NAME)(PARAMS), of a helper H defined here. H calls them with the mruby
+  # state, so H takes mrb, and the callbacks passed for the parameter are threaded (like a struct function-pointer
+  # field, fnptr_global). The assigns are the helper names passed as that argument at H's call sites; the calls are the
+  # direct NAME( calls in H's body. A call site that does not pass a plain helper name makes the record invalid.
+  def fnptr_param_recs
+    recs = []
+    @defs.each do |hname, lst|
+      bodies = lst.reject { |x| x['proto'] }
+      next unless bodies.size == 1
+      d = bodies[0]
+      next unless d['po'] && d['pc'] && d['brace'] && d['body_end'] && d['file']
+      rel = d['file']
+      masked = @files[rel]['masked']
+      psub = masked[(d['po'] + 1)...d['pc']].to_s
+      m = /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/.match(psub)
+      next unless m
+      cname = m[1]
+      pidx = psub[0...m.begin(0)].count(',')
+      rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false, pidx: pidx }
+      body = masked[d['brace']..d['body_end']].to_s
+      body.to_enum(:scan, /(?<![#{WC}.>])#{cname}\s*\(/).each do
+        cm = Regexp.last_match
+        rec[:calls] << [d['brace'] + cm.end(0) - 1, hname, rel]
+      end
+      (@occ[hname] || []).each do |crel, cs, ce|
+        next if @decls.any? { |dd| dd['name'] == hname && dd['file'] == crel && dd['hstart'] <= cs && cs < dd['hend'] }
+        next if crel == rel && cs >= d['hstart'] && cs < d['hend']
+        mk = @files[crel]['masked']
+        nx = next_nonspace(mk, ce)
+        if nx < 0 || mk[nx] != '('
+          rec[:bad] = true
+          break
+        end
+        close = match_close(mk, nx)
+        # a prototype (name(...);) is a declaration, not a call
+        ns = next_nonspace(mk, close + 1)
+        before = psl(mk, [ce - 0 - 80, 0].max, cs)[/(\w+)[ \t\n*]*\z/, 1]
+        next if close > 0 && ns >= 0 && mk[ns] == ';' && before && before != 'return' && before != 'else'
+        args = close > 0 ? split_args(mk, nx, close) : []
+        a = args[pidx]
+        if a.nil?
+          rec[:bad] = true
+          break
+        end
+        t = psl(@files[crel]['text'], a[0], a[1]).strip
+        lead = psl(@files[crel]['text'], a[0], a[1])[/\A\s*/].length
+        if t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
+          rec[:assigns] << [t, crel, a[0] + lead]
+        elsif (en = enclosing_func(crel, cs)) && (j = fn_param_names(en).index(t))
+          # forwarded: the call passes the enclosing function's own callback parameter j (its record gives the callbacks)
+          rec[:assigns] << [:fwd, en['name'], j]
+        else
+          rec[:bad] = true
+          break
+        end
+      end
+      next if rec[:bad] || rec[:assigns].empty?
+      recs << rec
+    end
+    # resolve forwarded assigns through the records of the enclosing functions' parameters (bounded depth)
+    by_key = {}
+    recs.each { |r| by_key[[r[:owner], r[:pidx]]] = r }
+    resolve = lambda do |r, depth|
+      return nil if depth > 8
+      out = []
+      r[:assigns].each do |x|
+        if x[0] == :fwd
+          src = by_key[[x[1], x[2]]]
+          sub = src && resolve.call(src, depth + 1)
+          return nil if sub.nil?
+          out.concat(sub)
+        else
+          out << x
+        end
+      end
+      out
+    end
+    recs.each do |r|
+      res = resolve.call(r, 0)
+      if res.nil?
+        r[:bad] = true
+      else
+        r[:assigns] = res
+      end
+    end
+    recs.reject { |r| r[:bad] || r[:assigns].empty? }
+  end
+
+  # the parameter names of a function definition (a callback parameter's name is the one in (*NAME))
+  def fn_param_names(en)
+    en['params'].to_s.split(',').map do |p|
+      p.strip[/\(\s*\*\s*(\w+)\s*\)/, 1] || p.strip[/([A-Za-z_]\w*)\s*\z/, 1]
+    end
+  end
+
   def fnptr_global(rec)
     rec[:assigns] = []
     rec[:calls] = []
     @files.each do |frel, f|
       masked = f['masked']
-      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*;/).each do
+      # the field may also be stored as an address (x.NAME = &helper;)
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*&?\s*([A-Za-z_]\w*)\s*;/).each do
         am = Regexp.last_match
         rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
+      # a designated initializer of the field (.NAME = helper inside a braced initializer) is an assignment too
+      masked.to_enum(:scan, /\.\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*(?=[,}])/).each do
+        am = Regexp.last_match
+        rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
+      # a positional initializer of a struct of the tag: struct TAG var = { h1, h2, ... }: the member at index is the helper
+      if rec[:tag] && rec[:index]
+        masked.to_enum(:scan, /\bstruct\s+#{rec[:tag]}\s+\w+\s*(?:\[[^\]]*\])?\s*=\s*\{/).each do
+          im = Regexp.last_match
+          bo = im.end(0) - 1
+          bc = match_close(masked, bo)
+          next if bc < 0
+          text = @files[frel]['text']
+          # an array of structs (struct TAG arr[] = { {...}, {...} }): the field is inside each braced element
+          elems = split_args(masked, bo, bc)
+          groups = elems.select { |a, _b| masked[a + (masked[a..].to_s[/\A\s*/].length)] == '{' }
+          fields = if !groups.empty?
+                     groups.map do |ga, gb|
+                       ob = ga + masked[ga..].to_s[/\A\s*/].length
+                       cb = match_close(masked, ob)
+                       cb < 0 ? nil : split_args(masked, ob, cb)[rec[:index]]
+                     end
+                   else
+                     [elems[rec[:index]]]
+                   end
+          fields.compact.each do |a|
+            t = psl(text, a[0], a[1]).strip
+            lead = psl(text, a[0], a[1])[/\A\s*/].length
+            # NULL is no callback: the entry leaves the field unset, so it is not an assign
+            rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+          end
+        end
       end
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
         cm = Regexp.last_match
@@ -1242,6 +1422,20 @@ end
 
   # The field type and the calls through a threaded field take mrb (see compute_needs). The decision was made once for
   # the whole input: every assigned callback is threaded, and every call is in a function with the mruby state.
+  # The parameter text of helper name with the mruby state added to each active function-pointer parameter (see
+  # fnptr_param_recs): the callback type takes mrb first, as its threaded callbacks do. The same predicate as
+  # edit_fnptr_fields decides the call sites, so the header and the calls agree.
+  def fnptr_param_text(name, ptxt)
+    cands = @threaded_cands || Set.new
+    regs = @valid_reg_names || Set.new
+    (@fnptr_recs || []).each do |r|
+      next unless r[:owner] == name && r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
+      next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
+      ptxt = ptxt.sub(/\(\s*\*\s*#{Regexp.escape(r[:name])}\s*\)\s*\(/) { |m| m + 'mrb_state *mrb, ' }
+    end
+    ptxt
+  end
+
   def edit_fnptr_fields(rel)
     cands = @threaded_cands || Set.new
     regs = @valid_reg_names || Set.new
@@ -1249,7 +1443,7 @@ end
     (@fnptr_recs || []).each do |r|
       next unless r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
       next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
-      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel
+      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel && r[:owner].nil?
       r[:calls].each do |copen, _, crel|
         next unless crel == rel
         masked = @files[rel]['masked']
@@ -1327,6 +1521,22 @@ end
         end
       end
     end
+    # Members of this typedef's type (struct TAG { T NAME; }): their assigns are the members' positional initializer entries
+    # (struct TAG var = { ..., helper, ... }) and statement assigns (x.NAME = helper;), as for a function-pointer field
+    # (fnptr_global). The member's struct tag and index come from the declaration.
+    @files.each do |frel, f|
+      f['masked'].to_enum(:scan, /\b#{rec[:name]}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*;/).each do
+        md = Regexp.last_match
+        next unless struct_body_before?(f['masked'], md.begin(0))
+        bo = struct_body_open(f['masked'], md.begin(0))
+        next unless bo
+        tag = psl(f['masked'], [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
+        next unless tag
+        pseudo = { name: md[1], tag: tag, index: f['masked'][(bo + 1)...md.begin(0)].to_s.count(';'), assigns: [], calls: [] }
+        fnptr_global(pseudo)
+        rec[:assigns].concat(pseudo[:assigns])
+      end
+    end
     rec
   end
 
@@ -1342,10 +1552,15 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     @fnptr_recs = []
     @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
     @files.keys.each { |frel| fnptr_typedefs(frel).each { |d| @fnptr_recs << fnptr_typed_global(d) } }
+    @fnptr_recs.concat(fnptr_param_recs)
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
       r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
-      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) }
+      # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
+      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
+      forced << r[:owner] if r[:ok] && r[:owner]
+      # the function that calls an ok field passes it the state (edit_fnptr_fields): it needs the state too
+      r[:calls].each { |_, cfn, _| forced << cfn if r[:ok] && cfn && @defs.key?(cfn) }
     end
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
@@ -1492,6 +1707,8 @@ end
 
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
+  # a name that a local shadows in this function, used without a call, is that local (not the helper): no use
+  next nil if fn && !direct && shadowed.call(name, fn)
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
@@ -1502,6 +1719,9 @@ use_problem = lambda do |name, use|
         # the address is kept or passed on, so the helper's signature cannot gain mrb; the reason says how
         why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
         next "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
+      end
+      if fn.nil? && direct && in_global_macro?(rel, s)
+        next nil # a macro that expands in a function with the state
       end
       if fn.nil?
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
@@ -1515,15 +1735,39 @@ use_problem = lambda do |name, use|
 
     uses = {}
     cands.each { |name| uses[name] = helper_uses.call(name) }
-    cands.to_a.sort.each do |name|
-      why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
-      next unless why
-      cands.delete(name)
-      next unless @split_names.include?(name)
-      # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
-      @split_names.delete(name)
-      @split_reason[name] = why
-      refuse_direct_uses(name)
+    # A function-pointer field or parameter is rewritten (its type takes mrb, its calls pass it) only when every call of it
+    # is in a function that has the state (edit_fnptr_fields). Its callbacks must then be threaded too, so a record whose
+    # calls fail is dropped: its callbacks leave the threaded set and each one is refused where it is stored.
+    fn_regs = @valid_reg_names || Set.new
+    (@fnptr_recs || []).each do |r|
+      next unless r[:ok] && r[:assigns].any? { |h, _, _| cands.include?(h) }
+      next if r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || fn_regs.include?(fn)) }
+      r[:assigns].each do |h, frel, pos|
+        next unless cands.include?(h)
+        cands.delete(h)
+        refuse(frel, pos, h, 'a function-pointer field or parameter it is stored in is called from a function without the mruby state (not supported)')
+      end
+      r[:ok] = false
+    end
+    # The macro decision needs the threaded set, and the threaded set needs the macro decision (a direct call from a
+    # macro body is a use only when the macro expands in a function with the state). Greatest fixpoint: start from the
+    # set of candidates, record which macros expand in it, prune the candidates whose uses fail, and repeat. The spans
+    # only grow with the context, so the final macro decision keeps every position this pass allowed.
+    loop do
+      compute_global_macros(@valid_reg_names | (init_first ? Set[init_first] : Set.new) | cands, false)
+      changed = false
+      cands.to_a.sort.each do |name|
+        why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
+        next unless why
+        changed = true
+        cands.delete(name)
+        next unless @split_names.include?(name)
+        # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
+        @split_names.delete(name)
+        @split_reason[name] = why
+        refuse_direct_uses(name)
+      end
+      break unless changed
     end
     # A split method that takes mrb needs every direct caller to have the mruby state in scope: a method or Init, or a
     # threaded helper. A caller without it (a refused helper, or a function with no state) would pass a state that is
@@ -1577,6 +1821,8 @@ use_problem = lambda do |name, use|
           'helper needs the mruby state threaded in, but is used outside a direct call (not supported): ' \
           'its address is in a file-scope initializer, so it may run with no method context'
         end
+      elsif !direct && fn && shadowed.call(name, fn)
+        nil # a local of this name, not a use of the helper
       elsif shadowed.call(name, fn)
         'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
       elsif !(with_state.include?(fn['name']) || members.include?(fn['name']))
@@ -1660,28 +1906,48 @@ use_problem = lambda do |name, use|
   # expansion is in a function with the state (a with_state or global-state function, mrb_tok) and the body has no
   # return (a return would skip the restore). Their mrb argument is then the global. A use in a preprocessor line
   # or in a file-scope initializer keeps the macro refused. Conservative: a macro that calls a helper is not handled.
-  def compute_global_macros(ctx)
-    @global_macro_spans = {}
-    @files.each do |rel, f|
-      masked = f['masked']
-      masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
-        name = m[1]
-        s = m.begin(0)
-        e = logical_line_end(masked, m.end(0))
-        body = psl(masked, m.end(0), e)
-        next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
-        next if body =~ /(?<![#{WC}])return(?![#{WC}])/
-        ok = (@occ[name] || []).all? do |orel, os, _oe|
-          inside = orel == rel && s <= os && os < e
-          if inside
-            true
-          else
+  def compute_global_macros(ctx, record = true)
+    # A use of a macro is fine in a function with the state, or inside another macro body accepted in an earlier round
+    # (the outer macro's expansions are checked the same way). Rounds repeat until no macro is added.
+    accepted = {}   # rel -> [[start, end]] of the accepted macros
+    names = {}      # rel -> { start => macro name }
+    loop do
+      added = false
+      @files.each do |rel, f|
+        masked = f['masked']
+        masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
+          name = m[1]
+          s = m.begin(0)
+          e = logical_line_end(masked, m.end(0))
+          next if (accepted[rel] || []).include?([s, e])
+          body = psl(masked, m.end(0), e)
+          # a body that calls a helper which needs the state is handled the same way: its call takes the global
+          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i)) }
+          next if body =~ /(?<![#{WC}])return(?![#{WC}])/
+          ok = (@occ[name] || []).all? do |orel, os, _oe|
+            inside = orel == rel && s <= os && os < e
+            next true if inside
             fn = enclosing_func(orel, os)
-            !fn.nil? && ctx.include?(fn['name'])
+            if fn.nil?
+              (accepted[orel] || []).any? { |a, z| a < os && os < z }
+            else
+              ctx.include?(fn['name'])
+            end
           end
+          next unless ok
+          (accepted[rel] ||= []) << [s, e]
+          (names[rel] ||= {})[s] = name
+          added = true
         end
-        next unless ok
-        (@global_macro_spans[rel] ||= []) << [s, e]
+      end
+      break unless added
+    end
+    @global_macro_spans = accepted
+    return unless record
+    accepted.each do |rel, spans|
+      f = @files[rel]
+      spans.each do |s, _e|
+        name = names[rel][s]
         @rewrites << { 'file' => rel, 'line' => line_of(f['text'], s), 'from' => name, 'to' => "#{name} (mrb = #{@global_name})" }
       end
     end
@@ -1796,6 +2062,14 @@ use_problem = lambda do |name, use|
   def registered_header(d)
     regs = @regs.select { |r| r['error'].nil? && r['func'] == d['name'] }
     n = regs[0]['argc']
+    # the block is fetched by the wrapper when the body yields (rb_yield: the template names nfcx_block)
+    yields = false
+    if d['brace'] && d['body_end'] && @files[d['file']]
+      yields = @files[d['file']]['masked'][d['brace']..d['body_end']].to_s.match?(/\brb_yield\s*\(/)
+    end
+    if yields && n == -1
+      return [nil, nil, 'variadic registered method that yields is not supported']
+    end
     return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if d['ret'] != 'VALUE'
     if n == -1
       p = variadic_params(d)
@@ -1821,7 +2095,13 @@ use_problem = lambda do |name, use|
     end
     hdr = "#{d['storage']}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{names[0]})"
     prologue = ''
-    if n > 0
+    if yields
+      # the block is the last argument of mrb_get_args: "&" takes it as a Proc value (nil when there is none)
+      fmt = 'o' * n + '&'
+      decl = n > 0 ? "mrb_value #{names[1..].join(', ')}, nfcx_block;" : 'mrb_value nfcx_block;'
+      ptrs = (names[1..].map { |x| '&' + x } + ['&nfcx_block']).join(', ')
+      prologue = "\n  #{decl}\n  mrb_get_args(mrb, \"#{fmt}\", #{ptrs});"
+    elsif n > 0
       prologue = "\n  mrb_value #{names[1..].join(', ')};\n  mrb_get_args(mrb, \"#{'o' * n}\", #{names[1..].map { |x| '&' + x }.join(', ')});"
     end
     [hdr, prologue, nil]
@@ -1883,7 +2163,7 @@ use_problem = lambda do |name, use|
       elsif d['name'] == (@init_defs.empty? ? nil : @init_defs[0]['name']) && !d['proto']
         hdr = "void mrb_#{@funcname}_gem_init(mrb_state *mrb)"
       elsif @helper_names.include?(name)
-        ptxt = py_strip(d['params'])
+        ptxt = fnptr_param_text(name, py_strip(d['params']))
 tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
 if (@hash_cb_names || Set.new).include?(name)
   # a rb_hash_foreach callback: its third (VALUE) parameter is the pointer it was given (void *)
@@ -1963,7 +2243,8 @@ end
         refuse(rel, m.begin(0), 'rb_data_type_t', info['error'])
         next
       end
-      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' }
+      # mrb_free is mruby's library free, already (mrb, data): it needs no threading
+      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' || n == 'mrb_free' }
       unless cbs.all? { |n| @threaded_cands.include?(n) }
         refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
         next
@@ -1984,9 +2265,46 @@ end
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      # TYPE(v) == T_NIL (or !=) is a nil test: mruby has no nil type tag (nil and false share MRB_TT_FALSE), so the whole
+      # comparison is rewritten to mrb_nil_p, and the T_NIL token inside that edit is not refused
+      if name == 'TYPE' && (tn = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)\s*(==|!=)\s*(T_NIL|T_FALSE)(?![#{WC}])/.match(masked[e..(e + 80)].to_s)) &&
+         !@entries.key?(tn[1]) && !@class_vars.include?(tn[1])
+        neg = tn[2] == '!=' ? '!' : ''
+        pred = tn[3] == 'T_NIL' ? 'mrb_nil_p' : 'mrb_false_p'
+        new_text = "#{neg}#{pred}(#{tn[1]})"
+        ed.add(s, e + tn.end(0), new_text)
+        rewrite(rel, s, 'TYPE', new_text, "TYPE(v) == #{tn[3]} is a value test: nil and false share MRB_TT_FALSE, so #{pred} (which checks the value) is used")
+        next
+      end
       next if @local_var_occ.include?([rel, s])
+      # switch (TYPE(x)) with case T_NIL / T_FALSE labels: nil is a value test, so the switch is on
+      # (mrb_nil_p(x) ? 1000 : mrb_type(x)) (1000 stands for nil; no other tag is 1000) and the labels follow:
+      # case T_NIL: is case 1000:, case T_FALSE: is case MRB_TT_FALSE: (false only, nil is routed to 1000)
+      if name == 'TYPE' && (sh = masked[[s - 40, 0].max...s].to_s =~ /switch\s*\(\s*\z/) &&
+         (tm = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)/.match(masked[e..(e + 40)].to_s)) && !@entries.key?(tm[1]) &&
+         !@class_vars.include?(tm[1])
+        rest = masked[(e + tm.end(0))..(e + tm.end(0) + 12)].to_s
+        if rest.match?(/\A\s*\)/)
+          new_text = "(mrb_nil_p(#{tm[1]}) ? 1000 : mrb_type(#{tm[1]}))"
+          ed.add(s, e + tm.end(0), new_text)
+          rewrite(rel, s, 'TYPE', new_text, 'switch (TYPE(v)): nil is routed to case 1000, so the cases below test values')
+          next
+        end
+      end
+      if %w[T_NIL T_FALSE].include?(name) && masked[[s - 6, 0].max...s].to_s =~ /case\s+\z/
+        open = enclosing_open_brace(masked, s)
+        head = open ? masked[[open - 120, 0].max...open].to_s : ''
+        if open && head.match?(/switch\s*\(\s*TYPE\(\s*[A-Za-z_][#{WC}]*\s*\)\s*\)\s*\z/)
+          repl = name == 'T_NIL' ? '1000 /* nil */' : 'MRB_TT_FALSE /* false only: nil is case 1000 */'
+          ed.add(s, e, repl)
+          rewrite(rel, s, name, repl, 'a case label of a switch on TYPE(v): nil is the value test in case 1000')
+          next
+        end
+      end
       entry = @entries[name]
       if !entry.nil?
+        excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
+        next if excluded && entry['needs_mrb']
         if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b } && !in_global_macro?(rel, s)
           refuse(rel, s, name, 'needs the mruby state, which is not in scope at file scope')
           next
@@ -2061,7 +2379,7 @@ end
         refuse(rel, s, name, 'used without a call; cannot map it')
         return
       end
-      cp = pyfind(masked, ')', nxt)
+      cp = match_close(masked, nxt)   # the matching parenthesis: an argument may hold calls
       args = cp > 0 ? split_args(masked, nxt, cp) : []
       texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
       if texts.size != entry['arity']
@@ -2069,7 +2387,17 @@ end
         return
       end
       class_args = entry['class_args'] || []
-unless texts.each_with_index.all? { |t, i| (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel)) }
+      # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
+      if entry['requires_block']
+        fnb = enclosing_func(rel, s)
+        unless fnb && @valid_reg_names.include?(fnb['name'])
+          refuse(rel, s, name, 'rb_yield is supported only in the body of a registered method (the wrapper fetches the block)')
+          return
+        end
+      end
+ignored = entry['ignored_args'] || []
+# an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : ((t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end

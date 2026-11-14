@@ -11,6 +11,11 @@ static VALUE htr_cb(VALUE s) {
 struct htr_entry { const char *name; VALUE (*fn)(VALUE); };
 static struct htr_entry htr_table[] = { { "cb", htr_cb } };
 
+/* the table is read here, by a helper with no method context: the call through the field keeps its address refused */
+static VALUE htr_dispatch(VALUE s) {
+    return htr_table[0].fn(s);
+}
+
 static VALUE htr_run(VALUE self, VALUE s) {
     return htr_cb(s);
 }

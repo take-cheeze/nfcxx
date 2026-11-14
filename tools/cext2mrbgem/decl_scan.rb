@@ -257,6 +257,19 @@ module DeclScan
   # the front end's -I and -D options. Raises Error when libclang-edg cannot parse the file.
   def scan_file(path, rel, text, masked, hdr, include_dirs, defines = [])
     options = include_dirs.map { |d| "-I#{d}" } + defines.map { |d| "-D#{d}" }
+    # CRuby's ruby.h defines NDEBUG, so the front end drops code under #ifndef NDEBUG (dead in a CRuby build). The mruby
+    # output keeps that guard, so the code is live there: the scan reads a copy in which each such guard is true. The
+    # copy has the same length (positions are unchanged) and sits beside the file, so relative includes resolve.
+    if text.match?(/#[ \t]*ifndef[ \t]+NDEBUG\b/)
+      scan_text = text.gsub(/#[ \t]*ifndef[ \t]+NDEBUG\b/) { |m| '#if' + ' ' * (m.length - 4) + '1' }
+      tmp = File.join(File.dirname(path), ".#{File.basename(path)}.ndebug-scan")
+      begin
+        File.write(tmp, scan_text)
+        return records(rel, text, masked, hdr, function_positions(tmp, options))
+      ensure
+        File.delete(tmp) if File.exist?(tmp)
+      end
+    end
     records(rel, text, masked, hdr, function_positions(path, options))
   end
 end

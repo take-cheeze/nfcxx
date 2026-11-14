@@ -326,6 +326,94 @@
       "kind": "drop",
       "reason": "ractor declaration; mruby has no ractors, so the declaration has no effect"
     },
+    "rb_ary_pop": {
+      "kind": "call",
+      "mruby": "mrb_ary_pop",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns the last element, or nil for an empty array, as CRuby does"
+    },
+    "rb_str_subseq": {
+      "kind": "call",
+      "mruby": "mrb_str_substr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns a new String of len bytes from beg; mruby strings carry no encoding, so the result is not re-encoded"
+    },
+    "rb_intern3": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_intern($m, $0, $1)",
+      "caveat": "the encoding argument is dropped: mruby symbols carry no encoding"
+    },
+    "RB_UNUSED_VAR": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "$0",
+      "caveat": "CRuby marks a parameter or variable as unused (a compiler attribute); the name is kept and the attribute is dropped"
+    },
+    "RUBY_TYPED_FROZEN_SHAREABLE": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "rb_deprecate_constant": {
+      "kind": "drop",
+      "reason": "CRuby warns when a deprecated constant is used; mruby has no constant deprecation, so the call has no effect"
+    },
+    "RSTRING_END": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "(RSTRING_PTR($0) + RSTRING_LEN($0))",
+      "caveat": "the end of the string's bytes; the argument must be a plain identifier that is already a String (no to_str conversion)"
+    },
+    "RARRAY_CONST_PTR": {
+      "kind": "macro",
+      "mruby": "RARRAY_PTR",
+      "caveat": "mruby has no read-only element pointer: the same pointer as RARRAY_PTR, so writes through it are not refused"
+    },
+    "rb_obj_alloc": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_obj_value(mrb_obj_alloc($m, MRB_TT_OBJECT, mrb_class_ptr($0)))",
+      "caveat": "allocates a plain object of the class without calling initialize, as CRuby does; only plain-object instances: a class whose instances need a data type or string storage is not handled"
+    },
+    "TYPE": {
+      "kind": "call",
+      "mruby": "mrb_type",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "TYPE(x) is rb_type: it returns enum mrb_vtype, so compare only with MRB_TT_* values; nil and false both report MRB_TT_FALSE, so T_NIL and T_FALSE are refused"
+    },
+    "rb_yield": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "requires_block": true,
+      "template": "mrb_yield($m, nfcx_block, $0)",
+      "caveat": "yields to the block the method was called with (fetched by the registered method's wrapper); only in a registered method's body: a helper has no block to yield to"
+    },
+    "rb_enc_str_new": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [2],
+      "template": "mrb_str_new($m, $0, $1)",
+      "caveat": "the encoding argument is dropped: mruby strings carry no encoding, so the bytes are kept and the result is not tagged"
+    },
+    "rb_enc_associate": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "ignored_args": [1],
+      "template": "$0",
+      "caveat": "the encoding is dropped: mruby strings carry no encoding; the object is returned unchanged"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",
