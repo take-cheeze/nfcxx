@@ -870,8 +870,11 @@
       "needs_mrb": false
     },
     "rb_block_given_p": {
-      "kind": "refuse",
-      "reason": "mruby's block presence is not a public API in this fork (no mrb_block_given_p): the block is fetched with the \"&\" argument of a registered method (rb_yield)"
+      "kind": "call",
+      "mruby": "mrb_block_given_p",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the block slot of the current call frame (the fork's mrb_block_given_p, branch claude/block-given-p; mrb_get_args reads the same slot with &); it is false in a method called without a block"
     },
     "rb_exc_raise": {
       "kind": "call",

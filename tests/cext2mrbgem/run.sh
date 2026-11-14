@@ -268,6 +268,11 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_get_args(mrb, "o|o:", &a, &b, (const mrb_kwargs[]){{0, NULL, NULL, 0, &kw}})' "$work/api_scan_kw/src/api_scan_kw.c"
 check grep -qF 'kw = (mrb_hash_size(mrb, kw) ? kw : mrb_nil_value())' "$work/api_scan_kw/src/api_scan_kw.c"
 
+# 2zzz26. rb_block_given_p is the fork's mrb_block_given_p (branch claude/block-given-p).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_block_given tools/cext2mrbgem/fixtures/api_block_given/ext/api_block_given "$work/api_block_given" > "$work/api_block_given.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_block_given_p(mrb) ? mrb_true_value() : mrb_false_value();' "$work/api_block_given/src/api_block_given.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
