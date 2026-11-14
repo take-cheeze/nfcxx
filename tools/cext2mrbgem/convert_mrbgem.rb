@@ -3284,11 +3284,34 @@ end
       # the identifier pass converts their own names and calls (NUM2LL(rb_funcall2(...)) keeps its inner call converted)
       tmpl = entry['template']
       order = tmpl.scan(/\$(\d+)(?!\d)/).flatten.map(&:to_i)
+      # an encoding (or any argument the template drops) is removed with the text between the used arguments: a dropped
+      # argument is a plain name or a pure encoding getter, so no rewrite is lost
+      dropped = entry['ignored_args'] || []
+      if !dropped.empty? && entry['template_cond'].nil? && class_args.empty? && str_args.empty? &&
+         texts.none? { |t| t.match?(/\Arb_intern\(/) } && texts.each_with_index.all? { |t, i| !dropped.include?(i) || t.match?(/\A(?:[A-Za-z_][#{WC}]*|rb_utf8_encoding\(\)|rb_ascii8bit_encoding\(\)|rb_usascii_encoding\(\))\z/) } &&
+         order == (0...args.size).reject { |i| dropped.include?(i) }
+        used_args = order.map { |i| args[i] }
+        pieces = tmpl.split(/(\$\d+(?!\d))/, -1)
+        literal = ->(x) { x.gsub('$m', mrb_tok(rel, s)) }
+        lits = pieces.each_slice(2).map { |lit, _| literal.call(lit.to_s) }
+        if pieces.count { |x| x.match?(/\A\$\d+\z/) } == used_args.size && !used_args.empty?
+          spans = [[s, used_args[0][0]]] + used_args.each_cons(2).map { |(_, b1), (a2, _)| [b1, a2] } + [[used_args[-1][1], cp + 1]]
+          if spans.any? { |a, b| ed.overlaps(a, b) }
+            refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+            return
+          end
+          ed.add(s, used_args[0][0], lits[0])
+          used_args.each_cons(2).with_index { |((_, b1), (a2, _)), j| ed.add(b1, a2, lits[j + 1]) }
+          ed.add(used_args[-1][1], cp + 1, lits[used_args.size])
+          rewrite(rel, s, name, tmpl.gsub(/\$\d+/, '\u2026').gsub('$m', mrb_tok(rel, s)), entry['caveat'])
+          return
+        end
+      end
       # (an argument with a special form, a string literal or rb_intern, is substituted by the general path below)
       if entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? && str_args.empty? &&
          texts.none? { |t| t.match?(/\Arb_intern\(/) } &&
          order == (0...entry['arity']).to_a && texts.any? { |t| !t.match?(/\A&?[#{WC}\s.\->]+\z/) }
-        pieces = tmpl.split(/(\$\d+(?!\d))/)
+        pieces = tmpl.split(/(\$\d+(?!\d))/, -1)
         # pieces alternate: literal, $k, literal, $k, ... ; the literal text has $m replaced
         literal = ->(x) { x.gsub('$m', mrb_tok(rel, s)) }
         lits = pieces.each_slice(2).map { |lit, _| literal.call(lit.to_s) }

@@ -382,6 +382,9 @@
       "arity": 3,
       "needs_mrb": true,
       "template": "mrb_intern($m, $0, $1)",
+      "ignored_args": [
+        2
+      ],
       "caveat": "the encoding argument is dropped: mruby symbols carry no encoding"
     },
     "RB_UNUSED_VAR": {

@@ -369,6 +369,10 @@ check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), (box = (DmBox *
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_rest tools/cext2mrbgem/fixtures/api_scan_rest/ext/api_scan_rest "$work/api_scan_rest" > "$work/api_scan_rest.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_get_args(mrb, "o*&", &first, &nfcx_ra, &nfcx_rn, &blk)' "$work/api_scan_rest/src/api_scan_rest.c"
+# 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_intern(mrb, RSTRING_PTR(v) + 1, ((long)mrb_int(mrb, n)) + 1)' "$work/api_intern3/src/api_intern3.c"
 # 2zzz55. Check_Type(v, T_CLASS): a class or singleton class (MRB_TT_CLASS or MRB_TT_SCLASS), TypeError otherwise.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_check_class tools/cext2mrbgem/fixtures/api_check_class/ext/api_check_class "$work/api_check_class" > "$work/api_check_class.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
