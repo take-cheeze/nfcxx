@@ -110,3 +110,256 @@ x.c x.s a.o
 -fno-stack-protector -fstack-protector-strong -fPIC -c x.c
 -fdiagnostics-color=auto -fmessage-length=0 x.c
 -fsigned-char -fno-signed-char x.c
+-Wl,--as-needed -Wl,-z,relro x.c
+-static -rdynamic -pie -no-pie -s x.c
+-nostdlib -nostartfiles -nodefaultlibs -static-libgcc -shared-libgcc -pthread x.c
+-Bstatic -Bdynamic -symbolic -r x.c
+-fuse-ld=gold x.c
+-Xlinker --gc-sections x.c
+-Xlinker
+-z now x.c
+-u foo -T link.ld x.c
+-z
+-shared -o lib.so x.c
+-nostdinc -undef --sysroot=/sysroot -I inc x.c
+-std=c99 -ansi x.c
+-std=c++17 x.c
+-std=gnu++14 x.c
+-c -std=gnu11 x.c
+-Wp,-DX x.c
+-Wp,-DFOO=1 x.c
+-Wp,-DFOO x.c
+-Wp,-D x.c
+-Wp,-UFOO x.c
+-Wp,-U x.c
+-Wp,-I/usr/include x.c
+-Wp,-I x.c
+-Wp,-isystem,/sys/include x.c
+-Wp,-isystem x.c
+-Wp,-iquote,q x.c
+-Wp,-idirafter,d x.c
+-Wp,-include,a.h,-imacros,b.h x.c
+-Wp,-include x.c
+-Wp,-imacros x.c
+-Wp,-MD,dep.d x.c
+-Wp,-MMD,dep.d x.c
+-Wp,-MD x.c
+-Wp,-MMD,-MP x.c
+-Wp,-MD,-MP x.c
+-Wp,-MF,x.d x.c
+-Wp,-MF x.c
+-Wp,-MP x.c
+-Wp,-MP,-MP x.c
+-Wp,-MT,tgt x.c
+-Wp,-MQ,q x.c
+-Wp,-MT x.c
+-Wp,-MD,dep.d,-MT,tgt,-MQ,q x.c
+-Wp,-MD,a,-MD,b x.c
+-Wp,-MD,a,-MF,b x.c
+-Wp,-MF,a,-MD,b,-MP x.c
+-Wp,-DX,-DY,-foo x.c
+-Wp,-isystem,-DX x.c
+-Wp,-x x.c
+-Wp, x.c
+-Wp,,-DA x.c
+-Wp,-DA, x.c
+-Wp,-DA,,-DB x.c
+-Wp,, x.c
+-Wp,,, x.c
+-Wp,-DA,, x.c
+-Wp,-D=x x.c
+-Wp,-DA\,B x.c
+-Wp,-DA\\B x.c
+-Wp,-I\"x x.c
+-Wp,-I"x y" x.c
+-Wp,-DA B x.c
+-Wp,-MF, x.c
+-Wp,-MD,, x.c
+-Wp,-MD,-DX x.c
+-Wp,-MT,, x.c
+-Wp,-Dx,-Ux,-Ix,-I, x.c
+-Wp,-foo x.c
+-Wp,-DX,-foo x.c
+-Wp,-MD,a,-zz x.c
+@tests/nfcc/response/ws.rsp -c
+@tests/nfcc/response/quotes.rsp
+@tests/nfcc/response/nest1.rsp x.c
+@tests/nfcc/response/backslash.rsp
+@tests/nfcc/response/loop.rsp
+@tests/nfcc/response/nope.rsp -c x.c
+@tests/nfcc/response/dir.rsp x.c
+@tests/nfcc/response/unterm.rsp
+@tests/nfcc/response/crlf.rsp -c x.c
+@tests/nfcc/response/dbl.rsp
+@tests/nfcc/response/empty.rsp -c x.c
+@tests/nfcc/response/emptyquotes.rsp -c x.c
+@tests/nfcc/response/tailbs.rsp
+@tests/nfcc/response/utf8.rsp x.c
+-c @tests/nfcc/response/ws.rsp @tests/nfcc/response/inner.rsp -o out @tests/nfcc/response/quotes.rsp
+NFCXX_BACKEND=pathb -c x.c -funsigned-char -fshort-wchar -m16 -mregparm=3 -mno-sse -fno-asynchronous-unwind-tables -fno-PIC -ffreestanding -ftrivial-auto-var-init=zero x.c
+NFCXX_BACKEND=pathb -fno-stack-check -mno-avx512f x.c
+NFCXX_BACKEND=pathb -ftrivial-auto-var-init=pattern x.c
+NFCXX_BACKEND=pathb -m32 -march=native x.c
+NFCXX_BACKEND=pathb -fPIC -fPIE -fno-jump-tables -fwrapv x.c
+NFCXX_BACKEND=pathb -mindirect-branch=thunk x.c
+NFCXX_BACKEND=pathb -fstack-protector-strong -mstack-protector-guard=tls x.c
+NFCXX_BACKEND=pathb -fsanitize=address x.c
+NFCXX_BACKEND=pathb -fdiagnostics-color=auto -fsigned-char x.c
+NFCXX_BACKEND=pathb -fno-stack-protector -fPIC -c x.c
+NFCXX_BACKEND=pathb -mregparm=3 -c x.c
+NFCXX_BACKEND=pathb -m16 -mregparm=3 -fno-crossjumping -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -funsigned-char -fno-stack-protector -mno-red-zone -mcmodel=kernel -m64 -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -fno-jump-tables -march=i386 -mregparm=3 -m16 -c x.c
+NFCXX_BACKEND=qbe -funsigned-char -m64 x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -mno-sse -msoft-float -fno-PIC -falign-jumps=4 x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -ffreestanding -fshort-wchar -ftrivial-auto-var-init=zero x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -fsanitize=address x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -m32 -funsigned-char -fsigned-char -mcmodel=kernel -fno-PIC -march=native -mtune=generic -fwrapv -ffast-math -fsanitize=address x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -fPIC -fstack-protector-strong -fno-stack-protector --param max-inline-insns-single=200 -fno-crossjumping -c x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -ffreestanding -fno-jump-tables -Wa,--32 -c x.c
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -mindirect-branch=thunk -mstack-protector-guard=tls -fstack-protector x.c
+NFCXX_BACKEND=gcc NFCXX_QBE_TRY=1 -c x.c
+NFCXX_BACKEND=qbe NFCXX_QBE_TRY=1 -c x.c
+-E x.c
+-M x.c -MD
+-fsyntax-only x.c
+-dumpmachine
+-print-file-name=x x.c
+-v
+x.c -v
+-c @tests/nfcc/response/nope.rsp
+NFCXX_BACKEND=bogus x.c
+-S x.c -o a.s
+-c x.a b.c -o out
+-MD x.c
+-MF d.d x.c
+-MD -c x.c -o x.o -MF d.d
+-fstack-protector-strong -mstack-protector-guard=tls x.c
+-mstack-protector-guard=tls x.c
+-c
+-S -c x.c
+-x assembler -S x.c
+-c x.c -o x.o -MD -MF x.d -MT x.o -MP
+-c x.c -MMD -MQ q -MT t -o x.o
+-c x.c -MD -MT tgt
+-c x.c -MMD
+-c x.s -o x.o
+-S x.c -o out.s
+-S x.c -o -
+-c -S x.S -o x.s
+-S x.s -o x.out
+-x assembler-with-cpp -c x.S
+-x assembler -c x.s
+-S -x assembler-with-cpp x.S -MD -MF d.d
+-c x.c y.c
+-c x.c y.c -o out
+-c x.c -o x.o -MD -MT t
+-c -o out.o x.c -I inc -iquote q -include a.h -std=c99 -D_X
+-c x.c -std=gnu11 -ansi
+-c x.c -std=iso9899:2011 -std=c17
+-c x.c -std=c89 -std=gnu89
+NFCXX_BACKEND=pathb -c x.c -std=c99 -include a.h -isystem /s -nostdinc -I inc
+NFCXX_BACKEND=pathb -c x.c -Wa,--noexecstack -Wa,--fatal-warnings
+NFCXX_BACKEND=pathb -c x.c -Wa,--32
+NFCXX_BACKEND=pathb -c x.c -Wa,
+NFCXX_BACKEND=pathb -S x.c -o out.s
+NFCXX_BACKEND=pathb -S x.c -o -
+NFCXX_BACKEND=pathb -c x.c -o x.o -MD -MF d.d
+NFCXX_BACKEND=pathb -c x.c -std=c++17
+NFCXX_BACKEND=pathb -c x.c -fshort-wchar
+NFCXX_BACKEND=pathb -c x.c -fshort-wchar -fno-PIE -mno-sse
+NFCXX_BACKEND=pathb -fno-PIE -mno-sse -c x.c
+NFCXX_BACKEND=pathb -c x.c -m16 -mregparm=3 -std=gnu99
+NFCXX_BACKEND=pathb -c x.c -DFOO=1 -UBAR -Ifoo -include b.h -std=c23
+NFCXX_BACKEND=pathb -c x.c -std=c11 -std=c18 -fPIC
+NFCXX_BACKEND=pathb -c x.c -std=gnu17
+NFCXX_BACKEND=pathb -c x.c -std=c90
+NFCXX_BACKEND=pathb x.c -o prog -lm -L/usr/lib
+NFCXX_BACKEND=pathb x.c y.o -o prog -Wl,--as-needed -static
+NFCXX_BACKEND=pathb x.c -m32
+NFCXX_BACKEND=pathb -c x.s
+NFCXX_BACKEND=pathb -S x.S -o out.s
+NFCXX_BACKEND=pathb -c x.c -include?a
+NFCXX_BACKEND=qbe -c x.c -o x.o -funsigned-char
+NFCXX_BACKEND=qbe x.c y.o -o prog -lm
+NFCXX_BACKEND=qbe -S x.c -o out.s
+NFCXX_BACKEND=qbe NFCXX_QBE_KERNEL=1 -c x.c -mno-red-zone -mcmodel=kernel
+NFCXX_BACKEND=cil -c x.c -o x.o
+NFCXX_BACKEND=cil x.c -o prog
+NFCXX_BACKEND=gcc NFCXX_GCC_PASSTHROUGH=1 -c x.c -o x.o -m32
+NFCXX_BACKEND=gcc x.c y.o -o prog -shared -fPIC
+x.o y.o -o prog -static
+x.c -o prog -pthread -lm
+-c -x c x.c
+-c -o x.o -
+-c x.c -x none
+-c ./sub/x.c
+-c /abs/x.c
+-c x.c -o sub/y.o
+-c x.c -o sub/
+-c -I inc -o x.o x.c -DA=1 -MD -MF deps/x.d
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -S x.c -o o.s
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -S x.c -o -
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb x.c -o prog
+STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb x.c -o prog
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=pathb -c x.c -m32
+NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+STUB_PATHB_STATUS=2 NFCXX_BACKEND=gcc -c x.c
+STUB_PATHB_STATUS=3 NFCXX_BACKEND=pathb -S x.s
+--bundle-libs x.c
+--bundle-only=libc x.c -o prog
+-lcuda x.c
+--cuda-driver=auto x.c
+-lcudart_static x.c
+/usr/lib/libcuda.so x.c
+NFCC_HOST_CC=clang -c x.c
+NFCC_HOST_CC=clang x.c -o prog
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c
+STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -fshort-wchar -c x.c
+STUB_WIDE_LITERAL=1 NFCXX_BACKEND=pathb -c x.c
+--version
+-c x.c --version
+-dumpmachine --version
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb x.c -o prog
+NFCXX_PATHB_LOG=/dev/null STUB_PATHB_STATUS=2 NFCXX_PATHB_FALLBACK=gcc NFCXX_BACKEND=pathb -c x.c
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=pathb -c x.c -m32
+NFCXX_PATHB_LOG=/dev/null NFCXX_BACKEND=gcc -c x.c
+--bundle-libs x.c -o prog
+--bundle-libs -c x.c
+--bundle-libs -E x.c
+--bundle-libs -S x.c -o out.s
+--bundle-libs --bundle-only=libm,libc x.c -o prog -L/opt
+--bundle-libs --bundle-exclude=libc x.c -o prog -L/opt -Lmore
+--bundle-libs --bundle-add=libfoo x.c -o out -L lib
+--bundle-libs --bundle-stubs=dir --bundle-runpath=/x --bundle-rpath=/y x.c -o prog
+--bundle-exclude=libc x.c
+--bundle-bogus x.c --bundle-libs
+STUB_NINJA_STATUS=1 --bundle-libs x.c -o prog
+CUDA_HOME=tests/nfcc/cuda-home -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=libcuda -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-none -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-none --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-old -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-old --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcuda -lcudart_static x.c
+CUDA_HOME=tests/nfcc/cuda-home /usr/lib/libcuda.so -lm x.c
+CUDA_HOME=tests/nfcc/cuda-home STUB_SHIM_ERROR=boom -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home STUB_SHIM_ERROR=boom --cuda-driver=cudart -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home --cuda-driver=bogus -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcuda -l:libcuda.so.1 x.c -o prog
+NFCXX_CUDA_DRIVER=libcuda CUDA_HOME=tests/nfcc/cuda-home -lcuda x.c
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcc/cuda-none -lcuda x.c
+CUDA_HOME=tests/nfcc/cuda-home -lcudart_static x.c
+-lcuda tests/nfcc/cuda-home/lib64/stubs/libcuda.so x.c
+-lcuda tests/nfcc/cuda-old/lib64/libcuda.so x.c
+--cuda-driver=cudart tests/nfcc/cuda-none/lib64/libcuda.so x.c
+-lcuda /usr/lib/libcuda.so x.c
+-lcuda -c x.c
+--cuda-driver=auto
+--cuda-driver=auto x.c
+--cuda-driver=libcuda -lcuda x.c
+-c "" x.c
