@@ -1322,6 +1322,43 @@ end
 
   # rb_ensure(body, data1, ensure, data2): both callbacks are static functions of this file, each used only by this call
   # and each VALUE f(VALUE); they are threaded (mrb, mrb_value) for mrb_ensure. The data arguments are VALUE names or Q constants.
+  # The functions a per-class allocator (rb_define_alloc_func) reaches, directly or through calls and macro bodies:
+  # an allocator is called by the VM with no mruby state argument, so a helper it reaches cannot take the state.
+  def alloc_reach
+    @alloc_reach ||= begin
+      seeds = Set.new
+      @files.each_value do |f|
+        f['text'].scan(/rb_define_alloc_func[ \t\n]*\([ \t\n]*[A-Za-z_]\w*[ \t\n]*,[ \t\n]*([A-Za-z_]\w*)[ \t\n]*\)/) { seeds << $1 }
+      end
+      # every #define body in the gem, by macro name (a macro may be defined in several conditional branches)
+      macro_bodies = Hash.new { |h, k| h[k] = [] }
+      @files.each do |rel, f|
+        define_spans(rel).each do |mname, a, b|
+          macro_bodies[mname] << psl(f['masked'], a, b)
+        end
+      end
+      reach = Set.new(seeds)
+      todo = seeds.to_a
+      until todo.empty?
+        f = todo.shift
+        bodies = []
+        (@defs[f] || []).each do |d|
+          next unless d['brace'] && d['body_end']
+          bodies << @files[d['file']]['masked'][d['brace']..d['body_end']].to_s
+        end
+        bodies.concat(macro_bodies[f]) if macro_bodies.key?(f)
+        bodies.each do |b|
+          b.scan(IDENT_RE).each do |i|
+            next if reach.include?(i) || !(@defs.key?(i) || macro_bodies.key?(i))
+            reach << i
+            todo << i
+          end
+        end
+      end
+      reach
+    end
+  end
+
   def ensure_calls
     cands = []
     raw_refs = Hash.new(0)   # every rb_ensure call's callbacks, candidate or not: a callback is referenced by all of them
@@ -2099,6 +2136,10 @@ use_problem = lambda do |name, use|
         next nil
       end
       if fn.nil?
+        # a macro body that a per-class allocator reaches: the allocator has no state argument (accepted stuck point)
+        if (dm = define_at(rel, s)) && alloc_reach.include?(dm[0])
+          next 'stuck point (per-class allocator): the macro that calls the helper is expanded in an allocator, which has no state argument in the fork'
+        end
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
               'converter recognises (a macro-decorated definition, or file scope) (not supported)')
       end
@@ -2194,6 +2235,8 @@ use_problem = lambda do |name, use|
           nil
         elsif direct && macro && macro_expansions_ok(macro, with_state | members)
           nil
+        elsif direct && macro && alloc_reach.include?(macro[0])
+          'stuck point (per-class allocator): the macro that calls the helper is expanded in an allocator, which has no state argument in the fork'
         elsif direct
           'helper needs the mruby state threaded in, but the call is not in a function definition the converter ' \
           'recognises (a macro-decorated definition, or file scope) (not supported)'
@@ -2246,8 +2289,13 @@ use_problem = lambda do |name, use|
         end
       end
       @defs[name].each do |d0|
-        refuse(d0['file'], d0['hstart'], name, ctx_why ? "helper needs mruby state; threading refused: #{ctx_why}" :
-                                               'helper needs mruby state; threading refused')
+        if alloc_reach.include?(name)
+          refuse(d0['file'], d0['hstart'], name, 'stuck point (per-class allocator): the helper needs the mruby state and is reached from a ' \
+                                                  'per-class allocator (rb_define_alloc_func), which has no state argument in the fork (accepted stuck point)')
+        else
+          refuse(d0['file'], d0['hstart'], name, ctx_why ? "helper needs mruby state; threading refused: #{ctx_why}" :
+                                                 'helper needs mruby state; threading refused')
+        end
       end
       refused_defs << name
     end
