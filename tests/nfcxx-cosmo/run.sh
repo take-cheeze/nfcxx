@@ -1,12 +1,17 @@
 #!/bin/bash
 # Compares scripts/nfcxx-cosmo.rb (the port) with nfcxx's bash on the --cosmo C path, for each argument list of cases.txt.
 #
-# The oracle is the bash: a copy of nfcxx in a sandbox, run to its end. The sandbox has the repository's scripts (ehshim,
-# sret.sh and asan-vla are stubs; this path does not reach them). The commands on the path are stubs (stub.sh, linked under
-# the command names in the sandbox's bin directory and at the cosmocc locations): gcc/cc/g++ probes answer, cosmocc and the
+# The oracle is the bash: a copy of nfcxx in a sandbox, run to its end. The sandbox has the repository's scripts. ehshim and asan-vla are
+# stubs (ehshim is guarded and its output is unused here; asan-vla is never run by a case, the port leaves that case
+# unported). sret.sh is the real script, which on x86-64 Linux prints nothing and exits 0. The commands on the path are
+# stubs (stub.sh, linked under the command names in the sandbox's bin directory and at the cosmocc locations): gcc/cc/g++ probes answer, cosmocc and the
 # C compiles are logged (RUN), cp is logged (CP), and mktemp -d is a directory under the sandbox's tmp (TMP).
 # The bash runs under env -i (the case's NFCXX_* words only) in the sandbox's work directory, whose files are the "exists"
 # facts. In the output the sandbox's repository is ROOT, its work directory WORK, its temporary directories TMP.
+#
+# A word SB/REL in a case's environment names REL under the sandbox's host directory (SB/outside/cosmocc is a stand-in for a
+# cosmocc outside the repository). facts.txt names such files the same way (host-exec, host-file, host-absent); run.sh creates
+# them, and prints the directory as SB in the oracle's lines.
 #
 # The port gets the same facts (facts.txt, the host's uname and the exists lines are not needed: the port reads uname from
 # the facts too) and the same arguments and environment. A case the port refuses (exit 3) is listed as unported with its
@@ -24,7 +29,7 @@ mkdir -p "$root/build" "$bin" "$work/inc" "$work/sub" "$work/libs" "$tmp"
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim sret.sh asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in gcc cc g++ cp mktemp; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the repository's rewriter is built on first use (ensure_tool, every run): the sandbox's copy counts as built
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
@@ -34,6 +39,8 @@ while read -r kind rel; do
   case $kind in
     root-exec) mkdir -p "$(dirname "$root/$rel")"; ln -sf "$here/stub.sh" "$root/$rel" ;;
     root-file) mkdir -p "$(dirname "$root/$rel")"; : > "$root/$rel" ;;
+    host-exec) mkdir -p "$(dirname "$sb/${rel#SB/}")"; ln -sf "$here/stub.sh" "$sb/${rel#SB/}" ;;
+    host-file) mkdir -p "$(dirname "$sb/${rel#SB/}")"; : > "$sb/${rel#SB/}" ;;
   esac
 done < "$sb/facts"
 printf 'uname-s %s\nuname-m %s\n' "$(uname -s)" "$(uname -m)" >> "$sb/facts"
@@ -51,6 +58,7 @@ while IFS= read -r line; do
       penv+=("$t")
       k=${t%%=*}; v=${t#*=}
       if [[ $v == ROOT/* ]]; then v=$root/${v#ROOT/}; fi
+      if [[ $v == SB/* ]]; then v=$sb/${v#SB/}; fi
       oenv+=("$k=$v")
     else
       args+=("$t")
@@ -66,7 +74,7 @@ while IFS= read -r line; do
   : > "$sb/stublog"
   (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
      ${oenv[@]+"${oenv[@]}"} bash "$root/nfcxx" ${args[@]+"${args[@]}"} >/dev/null 2>"$sb/oerr"); orc=$?
-  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" "$sb/stublog"; echo "STATUS $orc")
+  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb/#SB/#g" "$sb/stublog"; echo "STATUS $orc")
   if [ "$port_out" = "$oracle_out" ]; then
     pass=$((pass + 1))
   else
