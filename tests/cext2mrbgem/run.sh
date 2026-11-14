@@ -421,6 +421,10 @@ check grep -qF 'dn_today_impl(0, (mrb_value *)0, mrb_obj_value(mDirectNull))' "$
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_copy_ivar tools/cext2mrbgem/fixtures/api_copy_ivar/ext/api_copy_ivar "$work/api_copy_ivar" > "$work/api_copy_ivar.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_iv_copy(mrb, dst, src)' "$work/api_copy_ivar/src/api_copy_ivar.c"
+# 2zzz69. rb_check_arity(argc, min, max) raises ArgumentError outside min..max and yields argc.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_check_arity tools/cext2mrbgem/fixtures/api_check_arity/ext/api_check_arity "$work/api_check_arity" > "$work/api_check_arity.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_argnum_error(mrb, argc, 0, 1)' "$work/api_check_arity/src/api_check_arity.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?

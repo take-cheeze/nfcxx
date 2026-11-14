@@ -997,6 +997,13 @@
       "template": "mrb_iv_copy($m, $0, $1)",
       "caveat": "copies the instance variables of the second object into the first, as rb_copy_generic_ivar does; the fork's mrb_iv_copy replaces the first object's table"
     },
+    "rb_check_arity": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(($0 < $1 || $0 > $2) ? (mrb_argnum_error($m, $0, $1, $2), $0) : $0)",
+      "caveat": "raises ArgumentError (mrb_argnum_error) when the count is outside min..max and returns the count, as rb_check_arity does; the count is a plain identifier, so repeating it has no effect"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
