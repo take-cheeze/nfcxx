@@ -1020,16 +1020,30 @@ class CodeGen
     # (1) The adjacent ARGARY + SUPER pair (`SUPER R(a)` + `ARGARY R(a+1)`). An
     # interposed EXT declines.
     argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
+    # Entered from the SUPER, with the block-register LOADNIL (below) between it and the ARGARY.
+    argary_idx -= 1 if argary_idx.positive? && program.source_at(argary_idx)&.op == :LOADNIL &&
+                       program.source_at(argary_idx + 1)&.op == :SUPER
     return nil if argary_idx.negative?
 
     argary = program.source_at(argary_idx)
-    super_insn = program.source_at(argary_idx + 1)
+    # A zsuper in a method without a block parameter puts `LOADNIL` for the SUPER's block register between the two (mruby
+    # emits it there). It must write exactly that register, which is SUPER's destination + 3, and it is then skipped.
+    super_at = argary_idx + 1
+    blank = program.source_at(super_at)
+    blank_block = blank&.op == :LOADNIL
+    super_at += 1 if blank_block
+    super_insn = program.source_at(super_at)
+    if blank_block
+      return nil unless super_insn&.op == :SUPER && super_insn.reg && blank.reg.to_i == super_insn.reg.to_i + 3
+    end
     return nil unless argary && super_insn
     return nil unless argary.op == :ARGARY && super_insn.op == :SUPER
 
-    # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
-    # keyword `nk=` variant.
-    return nil unless super_insn.pure_splat?
+    # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape. Either without keywords (pure_splat?), or
+    # `n=*|nk=*`, the zsuper of a method with keyword parameters: its keyword hash is checked against the caller's
+    # keywords in (5), and the forwarding below passes the keyword values instead of the hash.
+    argc = super_insn.argc_operand
+    return nil unless argc && argc[0].nil? && (argc[2] || argc[1].nil?)
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
