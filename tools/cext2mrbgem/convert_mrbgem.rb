@@ -1689,6 +1689,17 @@ end
         rewrite(rel, s, name, entry['mruby'], entry['caveat'])
         return
       end
+      if entry['append_args']
+        # extra trailing arguments (a literal default): the call's own arguments are not moved, only the closing
+        # parenthesis gets the text (rb_hash_lookup -> mrb_hash_fetch(mrb, hash, key, mrb_nil_value()))
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        if args.size != entry['append_arity']
+          refuse(rel, s, name, "expected #{entry['append_arity']} arguments, found #{args.size}")
+          return
+        end
+        ed.add(cp, cp, ', ' + entry['append_args'].join(', '))
+      end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
         cp = pyfind(masked, ')', nxt)
