@@ -208,6 +208,13 @@ check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "hello"), 1, (mr
 check grep -qF 'REFUSED: rb_funcall */ rb_funcall(obj, id_twice, 1, arg);' "$work/api_id_global/src/api_id_global.c"
 check grep -qF 'id_twice is not rb_intern of a string literal' "$work/api_id_global/REFUSALS.txt"
 
+# 2zzz16. a comparison with Qundef inside a condition that also has NIL_P: the Qundef rewrite is part of the comparison,
+# so the comparison is converted (mrb_obj_equal with mrb_undef_value()), not refused as overlapping a rewrite.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_qundef_eq tools/cext2mrbgem/fixtures/api_qundef_eq/ext/api_qundef_eq "$work/api_qundef_eq" > "$work/api_qundef_eq.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_obj_equal(mrb, mode, mrb_undef_value()) || mrb_nil_p(mode))' "$work/api_qundef_eq/src/api_qundef_eq.c"
+check grep -qF 'if (!mrb_obj_equal(mrb, mode, mrb_true_value()))' "$work/api_qundef_eq/src/api_qundef_eq.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

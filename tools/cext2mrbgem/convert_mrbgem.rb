@@ -420,6 +420,15 @@ class Edits
     @items.any? { |a, b, _| a < e && s < b }
   end
 
+  # the edits that overlap [s, e), as [start, end, text]
+  def overlapping(s, e)
+    @items.select { |a, b, _| a < e && s < b }
+  end
+
+  def drop(items)
+    @items -= items
+  end
+
   def apply(text)
     # stable sort: edits at the same position keep their insertion order, as Python's sorted() does
     items = @items.each_with_index.sort_by { |(s, e, _), i| [s, e, i] }.map(&:first)
@@ -2270,11 +2279,23 @@ use_problem = lambda do |name, use|
           refuse(rel, s0, op, 'VALUE comparison in a function without the mruby state (not supported)')
           next
         end
-        if @edits[rel].overlaps(s0, e0)
-          refuse(rel, s0, op, 'VALUE comparison inside a rewritten span (not supported)')
-          next
-        end
         conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
+        # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
+        # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
+        if @edits[rel].overlaps(s0, e0)
+          operand_spans = []
+          operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a)
+          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b)
+          inner = @edits[rel].overlapping(s0, e0)
+          own = inner.select do |x, y, t|
+            operand_spans.any? { |os, oe, name| x >= os && y <= oe && t == conv.call(name) }
+          end
+          unless own.size == inner.size
+            refuse(rel, s0, op, 'VALUE comparison inside a rewritten span (not supported)')
+            next
+          end
+          @edits[rel].drop(own)
+        end
         expr = "mrb_obj_equal(#{mrb_tok(rel, s0)}, #{conv.call(a)}, #{conv.call(b)})"
         expr = "!#{expr}" if op == '!='
         @edits[rel].add(s0, e0, expr)
