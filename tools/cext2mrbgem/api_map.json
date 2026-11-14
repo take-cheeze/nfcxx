@@ -1190,6 +1190,24 @@
         1
       ],
       "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+    },
+    "RUBY_TYPED_FREE_IMMEDIATELY": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "RUBY_TYPED_WB_PROTECTED": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "RUBY_TYPED_EMBEDDABLE": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
     }
   },
   "special_arg_positions_class_only": {
