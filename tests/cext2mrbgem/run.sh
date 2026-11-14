@@ -723,7 +723,7 @@ check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
 check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 3
 check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
-check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_require  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
 # 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?
@@ -742,6 +742,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_exc_class/NOT_BUILDABLE"
 check grep -qF 'mrb_class_get(mrb, "Numeric")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_exc_get(mrb, "IOError")' "$work/api_exc_class/src/api_exc_class.c"
+check grep -qF 'mrb_ensure_string_type(mrb, s)' "$work/api_exc_class/src/api_exc_class.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
