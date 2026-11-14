@@ -610,6 +610,13 @@ check test ! -e "$work/api_fnptr_null/NOT_BUILDABLE"
 check grep -qF 'void (*store)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_null/src/api_fnptr_null.c"
 check grep -qF 'ops->store = &fn_store;' "$work/api_fnptr_null/src/api_fnptr_null.c"
 
+# 2zzp. a static helper defined in two files is renamed where it is used as a value too (followed by ';'): a prototype is followed by '(', not ';'
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_static_value tools/cext2mrbgem/fixtures/api_static_value/ext/api_static_value "$work/api_static_value" > "$work/api_static_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_static_value/NOT_BUILDABLE"
+check grep -qF 'sv_table.fn = sv_dup__api_static_value;' "$work/api_static_value/src/api_static_value.c"
+check grep -qF 'return sv_dup__other(v);' "$work/api_static_value/src/other.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

@@ -569,7 +569,8 @@ class Converter
         masked.to_enum(:scan, /(?<![\w.>$])#{n}(?!\w)/).each do
           m = Regexp.last_match
           nxt = masked[m.end(0)..][/\A\s*(.)/, 1]
-          next if nxt == ';' || nxt == '['
+          # a name followed by ';' is a value use (a prototype is followed by '('); an array declaration is followed by '['
+          next if nxt == '['
           reps << [m.begin(0), m.end(0), "#{n}__#{stem}"]
         end
       end
