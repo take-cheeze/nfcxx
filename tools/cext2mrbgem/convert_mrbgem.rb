@@ -3334,18 +3334,19 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, 'rb_scan_args', 'rb_scan_args is not called on the argc and argv of its method')
       return
     end
-    fm = /\A"([0-9])([0-9]?)"\z/.match(psl(text, args[2][0], args[2][1]))
+    fm = /\A"([0-9])([0-9]?)(:?)"\z/.match(psl(text, args[2][0], args[2][1]))
     unless fm
       refuse(rel, s, 'rb_scan_args',
              "format #{psl(text, args[2][0], args[2][1])} not supported " \
-             '(only "<lead><optional>" counts: no rest, keyword or block parts)')
+             '(only "<lead><optional>" counts, with an optional trailing ":" keyword part: no rest or block parts)')
       return
     end
     lead = fm[1].to_i
     opt = (fm[2].empty? ? 0 : fm[2].to_i)
+    kw = !fm[3].empty?
     outs = args[3..] || []
-    if outs.size != lead + opt
-      refuse(rel, s, 'rb_scan_args', "format needs #{lead + opt} output pointer(s), call gives #{outs.size}")
+    if outs.size != lead + opt + (kw ? 1 : 0)
+      refuse(rel, s, 'rb_scan_args', "format needs #{lead + opt + (kw ? 1 : 0)} output pointer(s), call gives #{outs.size}")
       return
     end
     names = []
@@ -3363,12 +3364,18 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, 'rb_scan_args', 'the return value of rb_scan_args is used (mruby returns a different count)')
       return
     end
-    fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '')
+    fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (kw ? ':' : '')
+    # the keyword output takes every keyword (an empty table: mrb_kwargs::rest holds the whole keyword hash); CRuby gives nil
+    # when there are no keywords, so an empty hash is replaced by nil
+    kw_name = kw ? names.pop : nil
     pre = names[lead..].map { |n| "#{n} = mrb_nil_value(), " }.join
+    pre += "#{kw_name} = mrb_nil_value(), " if kw
     callargs = (['mrb', "\"#{fmt}\""] + names.map { |n| '&' + n }).join(', ')
-    ed.add(s, close + 1, "(#{pre}mrb_get_args(#{callargs}))")
+    callargs += ", (const mrb_kwargs[]){{0, NULL, NULL, 0, &#{kw_name}}}" if kw
+    tail = kw ? ", #{kw_name} = (mrb_hash_size(mrb, #{kw_name}) ? #{kw_name} : mrb_nil_value()), (void)0" : ''
+    ed.add(s, close + 1, "(#{pre}mrb_get_args(#{callargs})#{tail})")
     rewrite(rel, s, 'rb_scan_args', "mrb_get_args(mrb, \"#{fmt}\", ...)",
-            'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby')
+            'optional outputs are set to nil first (as rb_scan_args does); mruby arity errors are ArgumentError as in CRuby; a keyword part takes the trailing Hash (mruby decides keyword-ness by the Hash in the last argument, CRuby 3 by the call site)')
   end
 
   # True if the call whose name starts at s and whose ')' is at close is a whole statement: the value is

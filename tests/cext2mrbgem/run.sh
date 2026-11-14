@@ -261,6 +261,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_of_target tools/cext2m
 check test "$rc" -eq 0
 check grep -qF 'mrb_define_private_method(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(cCot))), "helper", cot_helper, MRB_ARGS_NONE());' "$work/api_class_of_target/src/api_class_of_target.c"
 
+# 2zzz25. rb_scan_args with a keyword part ("11:"): the trailing Hash is taken by mrb_kwargs (empty table, so rest holds the
+# whole hash), and an empty result is nil as CRuby gives.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_kw tools/cext2mrbgem/fixtures/api_scan_kw/ext/api_scan_kw "$work/api_scan_kw" > "$work/api_scan_kw.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_get_args(mrb, "o|o:", &a, &b, (const mrb_kwargs[]){{0, NULL, NULL, 0, &kw}})' "$work/api_scan_kw/src/api_scan_kw.c"
+check grep -qF 'kw = (mrb_hash_size(mrb, kw) ? kw : mrb_nil_value())' "$work/api_scan_kw/src/api_scan_kw.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
