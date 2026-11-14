@@ -24,7 +24,8 @@ Relax's `#[relax(O3)]` lets a function ask for a level, and the attribute is a n
 cold code at a lower level and raise only hot kernels. Compile time is a visible cost: about 5.5 s warm for the
 optcarrot compiler run, plus the C++ build.
 
-Status: first step done. `--shard-cold-opt` and `--shard-hot-owners` (command-line flags) place a GCC optimize pragma in shards
+Status: first step done, and measured on optcarrot: no compile-time gain (the tiered build was about 6% slower in three interleaved runs) and no runtime gain established. See docs/notes/bc2cpp-shard-tiers.md.
+Earlier wording: first step done. `--shard-cold-opt` and `--shard-hot-owners` (command-line flags) place a GCC optimize pragma in shards
 other than the main file, and keep caller-named hot owners in the main file (`docs/notes/bc2cpp-shard-tiers.md`,
 `bc2cpp/scripts/bc2cpp/shard_output_check.rb`, its tier section). Not profiled, not measured on optcarrot. Per-function levels are not
 attempted.
@@ -87,6 +88,6 @@ Status: not started. Needs a measurement of how much of the build time these tes
 ## Next steps, in order
 
 1. Profile the optcarrot world (needs Ruby 4.0) and generate a hot-owner list for idea 2.
-2. Measure compile time with and without `--shard-cold-opt` on that world.
+2. Measure compile time with and without `--shard-cold-opt` on that world. Done: no gain, see docs/notes/bc2cpp-shard-tiers.md.
 3. Add the build phase timings to `--trace` (idea 6).
 4. Audit the bc2cpp cache keys against their inputs (idea 4).
