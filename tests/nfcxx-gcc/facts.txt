@@ -1,0 +1,12 @@
+# The facts the bash reads from the machine and its helper scripts. Read by the stubs (stub.sh) and by the port
+# (scripts/nfcxx-gcc-plan.rb --facts=). run.sh appends one "exists" line per file and directory of the work directory.
+cxx-clang 0
+cc-clang 0
+host-sys /fx/include/c++/13
+host-sys /fx/include/x86_64-linux-gnu/c++/13
+host-sys /fx/include
+isa -mavx2 __AVX2__ 1
+ld mold
+ehshim ROOT/build/ehshim.o
+asan-vla ROOT/build/asan/vla.o
+module mod.cc
