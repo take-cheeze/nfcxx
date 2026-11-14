@@ -1171,6 +1171,13 @@
       "needs_mrb": true,
       "intern_arg": 1,
       "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not"
+    },
+    "rb_protect": {
+      "kind": "call",
+      "mruby": "mrb_protect",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the function is called with the mruby state (mrb_func_t: mrb, then the data), so a callback passed here is threaded with an mrb argument (helper threading); the state argument is int * in CRuby but mrb_bool * in mruby, so a caller variable must be declared mrb_bool; only mruby exceptions are caught, and CRuby errinfo is not set"
     }
   },
   "special_arg_positions_class_only": {
