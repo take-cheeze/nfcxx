@@ -17,7 +17,9 @@ module Toolchain
       rescue LoadError
         nil
       end
-      [RUBY_DESCRIPTION, Prism::VERSION, rbs].freeze
+      # mruby (the self-compiled compiler) has no RUBY_DESCRIPTION; its key is a fixed name, which still changes with the
+      # Ruby that compiled the tools, since the tool sources are keyed separately.
+      [defined?(RUBY_DESCRIPTION) ? RUBY_DESCRIPTION : 'mruby', Prism::VERSION, rbs].freeze
     end
   end
 end
