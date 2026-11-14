@@ -757,6 +757,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_mark_helper/NOT_BUILDABLE"
 check grep -qF 'mrb_gc_mark_value(mrb, h->a);' "$work/api_mark_helper/src/api_mark_helper.c"
 check grep -qF 'mrb_data_object_alloc(mrb, cHolder,' "$work/api_mark_helper/src/api_mark_helper.c"
+
+# 2zzu. rb_str_cat2 / rb_str_cat_cstr append a C string (mrb_str_cat_cstr); rb_undef_alloc_func undefines the class's new
+# (tracked class variable); RB_OBJ_WRITTEN is the field write barrier. The output compiles against the fork's headers.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_barrier tools/cext2mrbgem/fixtures/api_str_barrier/ext/api_str_barrier "$work/api_str_barrier" > "$work/api_str_barrier.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_str_barrier/NOT_BUILDABLE"
+check grep -qF 'mrb_str_cat_cstr(mrb, s, "!");' "$work/api_str_barrier/src/api_str_barrier.c"
+check grep -qF 'mrb_undef_class_method(mrb, cBox, "new");' "$work/api_str_barrier/src/api_str_barrier.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

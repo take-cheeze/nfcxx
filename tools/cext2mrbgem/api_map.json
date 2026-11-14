@@ -1608,6 +1608,37 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "rb_str_cat2": {
+      "kind": "call",
+      "mruby": "mrb_str_cat_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
+    },
+    "rb_str_cat_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_cat_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
+    },
+    "rb_undef_alloc_func": {
+      "kind": "template",
+      "arity": 1,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_undef_class_method($m, $0, \"new\")",
+      "caveat": "mruby has no separate allocator: the class's new is undefined, so Klass.new raises NoMethodError where CRuby raises TypeError (allocator undefined); the argument must be a tracked class variable"
+    },
+    "RB_OBJ_WRITTEN": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "do { mrb_field_write_barrier_value($m, mrb_basic_ptr($0), $2); } while (0)",
+      "caveat": "the object must be a heap value; the old value is not needed by mruby's field barrier, as CRuby's write barrier does not need it"
     }
   },
   "special_arg_positions_class_only": {
