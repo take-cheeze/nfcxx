@@ -2865,6 +2865,24 @@ end
           return
         end
       end
+      # a one-argument template whose argument is a call or another complex expression: only the text around the argument is
+      # rewritten (the head up to the argument, and the tail after it); the argument stays, and the identifier pass converts
+      # its own names and calls (NUM2LL(rb_funcall2(...)) becomes ((long long)mrb_int(mrb, mrb_funcall_argv(...))))
+      if entry['arity'] == 1 && entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? &&
+         entry['template'].scan(/\$0(?!\d)/).size == 1 && !texts[0].match?(/\A&?[#{WC}\s.\->]+\z/)
+        a0, b0 = args[0]
+        head_t, tail_t = entry['template'].split(/\$0(?!\d)/, 2)
+        head = head_t.gsub('$m', mrb_tok(rel, s))
+        tail = tail_t.gsub('$m', mrb_tok(rel, s))
+        if ed.overlaps(s, a0) || ed.overlaps(b0, cp + 1)
+          refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+          return
+        end
+        ed.add(s, a0, head)
+        ed.add(b0, cp + 1, tail)
+        rewrite(rel, s, name, "#{head}#{texts[0]}#{tail}", entry['caveat'])
+        return
+      end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
 unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&'))) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }

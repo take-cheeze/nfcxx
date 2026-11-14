@@ -239,6 +239,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_pp_feature tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF '#ifdef RSTRUCT_LEN' "$work/api_pp_feature/src/api_pp_feature.c"
 
+# 2zzz21. a one-argument conversion whose argument is a call: only the text around the argument is rewritten, so the call
+# inside it is converted by its own mapping (rb_funcall2 -> mrb_funcall_argv) and the outer NUM2LL keeps its template.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_call_arg tools/cext2mrbgem/fixtures/api_num_call_arg/ext/api_num_call_arg "$work/api_num_call_arg" > "$work/api_num_call_arg.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'long long sec = ((long long)mrb_int(mrb, mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "tv_sec"), 0, 0)));' "$work/api_num_call_arg/src/api_num_call_arg.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
