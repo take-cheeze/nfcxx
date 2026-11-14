@@ -1,0 +1,10 @@
+# CUDA_HOME is cuda (set in the environment): the toolkit is CUDA_HOME, and -lcudart takes its lib64 as the run path
+--backend=gcc -lcuda a.cc -o prog
+--backend=gcc -lcuda -lcudart_static a.cc -o prog
+--backend=gcc -c -lcuda a.cc -o a.o
+--backend=gcc -lcudart a.cc -o prog
+--backend=gcc -c -lcudart a.cc -o a.o
+--backend=gcc --cuda-driver=cudart cuda/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc --cuda-driver=libcuda -lcuda a.cc -o prog
+--backend=gcc --cuda-driver=cudart oldtk/lib64/stubs/libcuda.so a.cc -o prog
+--backend=gcc -fsyntax-only -lcuda a.cc
