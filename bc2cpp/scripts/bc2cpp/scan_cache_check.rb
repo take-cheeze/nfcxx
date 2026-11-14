@@ -183,7 +183,7 @@ Dir.mktmpdir do |tmp|
   File.utime(old_mtime, old_mtime, settled)
   ScanCache.key_for('settled', [settled], true)
   check.call('a file older than the racy window is remembered in the process',
-             ScanCache.instance_variable_get(:@file_digests).key?([settled, File.mtime(settled), File.size(settled)]))
+             ScanCache.instance_variable_get(:@file_digests).key?([settled, File.mtime(settled).to_i, File.size(settled)]))
 
   puts '-- the decoded-tree cache (IrepCache) covers every tool source'
   irep_dir = File.join(tmp, 'irep')
