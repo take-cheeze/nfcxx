@@ -1490,6 +1490,8 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
       # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]
+      # the function that calls an ok field passes it the state (edit_fnptr_fields): it needs the state too
+      r[:calls].each { |_, cfn, _| forced << cfn if r[:ok] && cfn && @defs.key?(cfn) }
     end
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
@@ -1664,6 +1666,20 @@ use_problem = lambda do |name, use|
 
     uses = {}
     cands.each { |name| uses[name] = helper_uses.call(name) }
+    # A function-pointer field or parameter is rewritten (its type takes mrb, its calls pass it) only when every call of it
+    # is in a function that has the state (edit_fnptr_fields). Its callbacks must then be threaded too, so a record whose
+    # calls fail is dropped: its callbacks leave the threaded set and each one is refused where it is stored.
+    fn_regs = @valid_reg_names || Set.new
+    (@fnptr_recs || []).each do |r|
+      next unless r[:ok] && r[:assigns].any? { |h, _, _| cands.include?(h) }
+      next if r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || fn_regs.include?(fn)) }
+      r[:assigns].each do |h, frel, pos|
+        next unless cands.include?(h)
+        cands.delete(h)
+        refuse(frel, pos, h, 'a function-pointer field or parameter it is stored in is called from a function without the mruby state (not supported)')
+      end
+      r[:ok] = false
+    end
     # The macro decision needs the threaded set, and the threaded set needs the macro decision (a direct call from a
     # macro body is a use only when the macro expands in a function with the state). Greatest fixpoint: start from the
     # set of candidates, record which macros expand in it, prune the candidates whose uses fail, and repeat. The spans
