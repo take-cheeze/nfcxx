@@ -858,12 +858,154 @@ class Converter
     Set.new(psl(masked, d['brace'], d['body_end'] + 1).scan(IDENT_RE))
   end
 
+  # A registered method that is also called directly from C is split: its body becomes <name>_impl with the original
+  # C parameters, direct calls go to the impl, and the registration keeps <name> for a generated wrapper with the
+  # mruby signature (wrapper_def). The split needs the arity and argument types (registered_header), a single
+  # definition in a source file, and only direct calls (no address, no header body, no rb_scan_args in a variadic
+  # body: its arguments would come from the mruby call frame). The impl takes mrb when check_refs threads it into
+  # the body's direct callers; a method that fails there is unsplit and keeps its refusal. @split_reason records why.
+  def compute_splits
+    @split_names = Set.new
+    @split_reason = {}
+    @regs.select { |r| r['error'].nil? }.map { |r| r['func'] }.uniq.sort.each do |name|
+      next unless @defs.key?(name)
+      uses = (@occ[name] || []).reject do |rel, s, _e|
+        @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] } ||
+          @decls.any? { |d| d['name'] == name && d['file'] == rel && d['hstart'] <= s && s < d['hend'] }
+      end
+      next if uses.empty?
+      why = split_problem(name, uses)
+      if why
+        @split_reason[name] = why
+      else
+        @split_names << name
+      end
+    end
+  end
+
+  # the refusal of the direct calls of a registered method that is not split, with the reason recorded for it
+  def refuse_direct_uses(name)
+    msg = 'registered method function is also called directly (not supported)'
+    msg += " (#{@split_reason[name]})" if @split_reason[name]
+    (@occ[name] || []).each do |rel, s, _e|
+      next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
+      next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+      refuse(rel, s, name, msg)
+    end
+  end
+
+  # a parameter or local of the enclosing function fn with the name hides a function of that name there
+  def shadowed_in?(name, fn)
+    return true if param_names(fn).include?(name)
+    n = Regexp.escape(name)
+    body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
+    !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
+  end
+
+  def split_problem(name, uses)
+    return 'it has more than one definition' if @defs[name].size != 1
+    return "the name #{name}_impl is already used in the input" if @occ.key?("#{name}_impl")
+    d0 = @defs[name][0]
+    _hdr, _pro, err = registered_header(d0)
+    return "its arguments are not known to the converter: #{err}" if err
+    return 'a parameter is named mrb, which the wrapper uses' if param_names(d0).include?('mrb')
+    if split_arity(name) == -1
+      masked = @files[d0['file']]['masked']
+      if psl(masked, d0['brace'], d0['body_end'] + 1) =~ /(?<![#{WC}])rb_scan_args(?![#{WC}])/
+        return 'its body calls rb_scan_args, which would read the arguments from the mruby call frame'
+      end
+    end
+    uses.each do |rel, s, e|
+      next if in_dead_init(rel, s)
+      return "it is used in #{rel}, a header, whose function bodies are not converted" if @files[rel]['kind'] != 'src'
+      masked = @files[rel]['masked']
+      nx = next_nonspace(masked, e)
+      return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('
+      fn = enclosing_func(rel, s)
+      return 'its name is shadowed in a function that calls it' if fn && shadowed_in?(name, fn)
+    end
+    nil
+  end
+
+  def split_arity(name)
+    @regs.find { |r| r['error'].nil? && r['func'] == name }['argc']
+  end
+
+  def split_fixed_names(d0)
+    d0['params'].split(',', -1).map { |p| py_strip(p)[/\AVALUE#{SS1}([A-Za-z_][#{WC}]*)\z/, 1] }
+  end
+
+  # the impl: the original C parameters (mapped), with mrb first when check_refs threaded it
+  def split_impl_hdr(d0)
+    mrb_arg = @helper_names.include?(d0['name']) ? 'mrb_state *mrb, ' : ''
+    params = map_types(py_strip(d0['params']), @types)
+    "#{d0['storage']}#{map_types(d0['ret'], @types)} #{d0['name']}_impl(#{mrb_arg}#{params})"
+  end
+
+  def split_self(d0)
+    split_arity(d0['name']) == -1 ? variadic_params(d0)[2] : split_fixed_names(d0)[0]
+  end
+
+  def split_wrapper_hdr(d0)
+    "#{d0['storage']}mrb_value #{d0['name']}(mrb_state *mrb, mrb_value #{split_self(d0)})"
+  end
+
+  # the wrapper: the mruby signature, the arguments read as registered_header reads them, then the impl call
+  def split_wrapper_def(d0)
+    name = d0['name']
+    argc = split_arity(name)
+    lines = ['(void)mrb;']
+    if argc == -1
+      _ac, av, sv = variadic_params(d0)
+      lines << "mrb_int nfcx_argc;" << "mrb_value *#{av};" << "mrb_get_args(mrb, \"*\", &#{av}, &nfcx_argc);"
+      args = ['(int)nfcx_argc', av, sv]
+    else
+      names = split_fixed_names(d0)
+      locals = names[1..]
+      if argc > 0
+        lines << "mrb_value #{locals.join(', ')};"
+        lines << "mrb_get_args(mrb, \"#{'o' * argc}\", #{locals.map { |x| '&' + x }.join(', ')});"
+      end
+      args = [names[0]] + locals
+    end
+    args.unshift('mrb') if @helper_names.include?(name)
+    call = "#{name}_impl(#{args.join(', ')})"
+    if @global_wrap
+      # as a registered method: the global state is set on entry and restored on return (wrap_returns)
+      g = @global_name
+      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "#{g} = mrb;")
+      lines += ["mrb_value nfcx_bc2_ret = #{call};", "#{g} = nfcx_bc2_old;", 'return nfcx_bc2_ret;']
+    else
+      lines << "return #{call};"
+    end
+    "#{split_wrapper_hdr(d0)} {\n" + lines.map { |l| "  #{l}" }.join("\n") + "\n}"
+  end
+
+  # The declarations of a split method: a prototype gets the impl and wrapper prototypes (the original ';' ends the
+  # last one); the definition becomes the impl, and the wrapper follows its body.
+  def split_decl(rel, d)
+    ed = @edits[rel]
+    d0 = @defs[d['name']][0]
+    if d['proto']
+      ed.add(d['hstart'], d['hend'], "#{split_impl_hdr(d0)};\n#{split_wrapper_hdr(d0)}")
+      return
+    end
+    ed.add(d['hstart'], d['hend'], split_impl_hdr(d0) + ' ')
+    ed.add(d['body_end'] + 1, d['body_end'] + 1, "\n\n#{split_wrapper_def(d0)}\n")
+    rewrite(rel, d['hstart'], "#{d['name']}(...)", split_impl_hdr(d0),
+            'registered method also called directly: the body is the impl, and the registration uses the wrapper after it')
+    return if d0['storage'].split.include?('static')
+    rewrite(rel, d['hstart'], d['name'], "wrapper #{d['name']}",
+            'non-static registered method: the name now names the mruby wrapper, so a caller outside the input would need the impl')
+  end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
       lst.each { |d| (ids[name] ||= Set.new).merge(body_idents(d)) }
     end
-    forced = @reg_names | Set.new(@init_defs.map { |d| d['name'] })
+    # a split registered method (compute_splits) is forced only through its body: its impl gets mrb when the body needs it
+    forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] }
@@ -931,12 +1073,10 @@ class Converter
       @variadic[r['func']] = p if p
     end
     # Python iterated a set here; sorted, so the refusals come out in the same order on every run
+    # A split method (compute_splits) is not refused here: its direct calls are renamed to its impl (process). A method
+    # that is not split keeps the refusal, with the reason compute_splits or the threading check recorded.
     @reg_names.to_a.sort.each do |name|
-      (@occ[name] || []).each do |rel, s, _e|
-        next if valid_reg.any? { |r| rel == r['file'] && r['open'] <= s && s <= r['close'] }
-        next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
-        refuse(rel, s, name, 'registered method function is also called directly (not supported)')
-      end
+      refuse_direct_uses(name) unless @split_names.include?(name)
     end
     # helper functions that need the mruby state are threaded: the mrb argument is added to the definition, to
     # every prototype (in the .c and .h files, which are scanned) and to every call site. A use is safe when it
@@ -947,7 +1087,7 @@ class Converter
     # its own; the check after the loop makes that explicit.
     cands = Set.new
     @needs.to_a.sort.each do |name|
-      next if @reg_names.include?(name) || name == init_first || !@defs.key?(name)
+      next if (@reg_names - @split_names).include?(name) || name == init_first || !@defs.key?(name)
       cands << name if @defs[name].size == 1
     end
 
@@ -955,6 +1095,8 @@ class Converter
       out = []
       (@occ[name] || []).each do |rel, s, e|
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        # a split method's registration names it as the wrapper, which is not a use of the impl
+        next if valid_reg.any? { |r| rel == r['file'] && r['open'] <= s && s <= r['close'] }
         next if in_dead_init(rel, s)
         masked = @files[rel]['masked']
         nx = next_nonspace(masked, e)
@@ -964,13 +1106,7 @@ class Converter
       out
     end
 
-    shadowed = lambda do |name, fn|
-      # a parameter or local of the enclosing function with the helper's name hides the helper there
-      next true if param_names(fn).include?(name)
-      n = Regexp.escape(name)
-      body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
-      !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
-    end
+    shadowed = lambda { |name, fn| shadowed_in?(name, fn) }
 
     # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
     value_problem = lambda do |rel, s, name|
@@ -1007,10 +1143,36 @@ class Converter
     uses = {}
     cands.each { |name| uses[name] = helper_uses.call(name) }
     cands.to_a.sort.each do |name|
-      cands.delete(name) if uses[name].any? { |u| use_problem.call(name, u) }
+      why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
+      next unless why
+      cands.delete(name)
+      next unless @split_names.include?(name)
+      # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
+      @split_names.delete(name)
+      @split_reason[name] = why
+      refuse_direct_uses(name)
+    end
+    # A split method that takes mrb needs every direct caller to have the mruby state in scope: a method or Init, or a
+    # threaded helper. A caller without it (a refused helper, or a function with no state) would pass a state that is
+    # not there, so the method is not split. Removing one method can leave another's caller without state: repeat.
+    loop do
+      mrb_fn = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
+      bad = @split_names.to_a.sort.filter_map do |name|
+        next unless cands.include?(name)
+        _rel, _s, _d, fn = uses[name].find { |u| u[3] && !mrb_fn.include?(u[3]['name']) }
+        [name, fn['name']] if fn
+      end
+      break if bad.empty?
+      bad.each do |name, caller|
+        @split_names.delete(name)
+        cands.delete(name)
+        @split_reason[name] = "its direct caller #{caller} has no mruby state in scope (not a method, Init or threaded helper)"
+        refuse_direct_uses(name)
+      end
     end
     @helper_names = cands
     cands.to_a.sort.each do |name|
+      next if @split_names.include?(name)
       d0 = @defs[name][0]
       next if d0['storage'].split.include?('static')
       rewrite(d0['file'], d0['hstart'], name, "mrb-threaded #{name}",
@@ -1334,6 +1496,10 @@ class Converter
     @decls.each do |d|
       next if d['file'] != rel
       name = d['name']
+      if @split_names.include?(name)
+        split_decl(rel, d)
+        next
+      end
       hdr, pro, err = nil, '', nil
       # Only a function with a surviving registration gets the method signature. A refused registration
       # (e.g. no definition in the input) leaves its prototype as is; the refusal is already recorded.
@@ -1391,6 +1557,16 @@ class Converter
         pa = next_nonspace(masked, po + 1)
         t = mrb_tok(rel, s)
         ed.add(po + 1, po + 1, masked[pa] == ')' ? t : "#{t}, ")
+      end
+    end
+    # 4b. a direct call of a split registered method calls its impl (the mrb argument, if any, is added above). A
+    # use inside a registration is the wrapper's name, and stays.
+    @split_names.to_a.sort.each do |name|
+      (@occ[name] || []).each do |orel, s, _e|
+        next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
+        next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
+        ed.add(s, s + name.length, "#{name}_impl")
+        rewrite(rel, s, name, "#{name}_impl")
       end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
@@ -1936,6 +2112,7 @@ class Converter
     scan
     build_occurrences
     scan_local_names
+    compute_splits
     compute_needs
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
