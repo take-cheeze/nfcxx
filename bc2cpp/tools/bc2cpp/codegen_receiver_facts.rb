@@ -1038,7 +1038,11 @@ class CodeGen
 
     argary_dest = argary.reg
     m = spec[0]
-    return nil unless spec[1..].all?(&:zero?) && argary.paren_int.to_i.zero?
+    # The spec is m1, r, m2, kd (vm.c OP_ARGARY). kd is set exactly when the caller has keyword parameters: mruby then
+    # builds the keyword hash that step (5) checks and the forwarding below replaces with the keyword values.
+    return nil unless spec[1..2].all?(&:zero?) && argary.paren_int.to_i.zero?
+    kd = spec[3]
+    return nil unless kd == 0 || kd == 1
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
@@ -1049,8 +1053,11 @@ class CodeGen
     # (5) ENTER is mandatory and optional parameters only, m of them in all (REQ:OPT:REST:POST:KEY:KDICT:BLOCK:
     # NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument list, defaults already filled in, and there is
     # no block parameter.
-    em = enter_shape(irep)
-    return nil unless em && em[0] + em[1] == m
+    caller = zsuper_enter_shape(irep)
+    return nil unless caller && caller[:mand] + caller[:opt] == m
+    return nil unless kd == (caller[:kw].positive? ? 1 : 0)
+    kw_regs = zsuper_keyword_regs(irep)
+    return nil unless kw_regs.size == caller[:kw]
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
@@ -1064,10 +1071,41 @@ class CodeGen
     return nil unless target_def && target_def.irep && compiles_clean?(target_def.irep)
 
     # (7) The target takes m arguments: as many mandatory ones or fewer, the rest optional.
-    tm, topt = enter_shape(@ireps.fetch(target_def.irep))
-    return nil unless tm && tm <= m && m <= tm + topt
+    target_irep = @ireps.fetch(target_def.irep)
+    target = zsuper_enter_shape(target_irep)
+    return nil unless target && target[:mand] <= m && m <= target[:mand] + target[:opt]
 
-    { target_def: target_def, m: m, target_mand: tm, target_opt: topt }
+    # (8) Keywords and block. zsuper forwards every keyword of the caller with its current value (the keyword hash
+    # above), and the block. The target must name the same keywords and take a block exactly when the caller does.
+    target_kw = target[:kw].zero? ? [] : keyword_arg_table(target_irep, rest_block: true)
+    return nil unless target_kw && target_kw.size == target[:kw]
+    return nil unless target_kw.map { |k| k[:name].to_s }.sort == kw_regs.keys.map(&:to_s).sort
+    return nil unless target[:block] == caller[:block]
+
+    { target_def: target_def, m: m, target_mand: target[:mand], target_opt: target[:opt],
+      target_kw: target_kw, kw_regs: kw_regs, target_block: target[:block] == 1,
+      block: caller[:block] == 1 ? "r#{caller[:block_reg]}" : nil }
+  end
+
+  # The caller's ENTER as zsuper forwarding reads it: mandatory and optional positionals, the keyword count, and whether a
+  # block parameter is present, with the register that holds it (ENTER's register layout: positionals, then the keyword
+  # hash, then the block). A rest, post or keyword-rest parameter is not forwarded, so the shape is nil.
+  def zsuper_enter_shape(irep)
+    em = irep.enter&.enter_fields
+    return nil unless em && em.length >= 7
+
+    mand, opt, rest, mand2, kw, kwrest, block = em
+    return nil unless rest.zero? && mand2.zero? && kwrest.zero? && block <= 1
+
+    { mand: mand, opt: opt, kw: kw, block: block, block_reg: mand + opt + (kw.positive? ? 1 : 0) + 1 }
+  end
+
+  # Keyword name => the register holding its value, from each KARG (KEY_P/KARG translate in place, so the register is the
+  # keyword's local at the zsuper).
+  def zsuper_keyword_regs(irep)
+    regs = {}
+    irep.each_with_op(:KARG) { |insn, _index| regs[insn.sym_token.to_s] ||= insn.reg.to_i }
+    regs
   end
 
   # [mandatory, optional] when an irep's ENTER takes nothing else, else nil.
@@ -1085,7 +1123,14 @@ class CodeGen
     args = (1..plan[:m]).map { |i| "r#{i}" }
     if plan[:target_opt].positive?
       args += Array.new(plan[:target_mand] + plan[:target_opt] - plan[:m], 'mrb_nil_value()')
-      args << (plan[:m] - plan[:target_mand]).to_s
+    end
+    # The `_impl` order (codegen_method.rb): positionals, the block, the given count of the optionals, then each keyword's
+    # value with a given flag for an optional one. Every caller keyword is forwarded, so each is given.
+    args << (plan[:block] || 'mrb_nil_value()') if plan[:target_block]
+    args << (plan[:m] - plan[:target_mand]).to_s if plan[:target_opt].positive?
+    plan[:target_kw].each do |kw|
+      args << "r#{plan[:kw_regs][kw[:name].to_s]}"
+      args << '1' unless kw[:required]
     end
     "  r#{d_reg} = #{cpp_name(plan[:target_def].owner, plan[:target_def].name)}_impl(M, self#{args.map { |a| ", #{a}" }.join});\n"
   end
