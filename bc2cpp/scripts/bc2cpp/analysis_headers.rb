@@ -71,10 +71,11 @@ module AnalysisHeaders
     MRuby::Presym.new(Struct.new(:build_dir).new(closed_build)).read_list
   end
 
-  # The member is a pure function of the tarball's bytes, so the extraction is keyed on the tarball's digest
-  # (ScanCache); a changed tarball is a new key.
+  # The member is a pure function of the tarball's bytes and of the member's name, so the extraction is keyed on the
+  # tarball's digest (ScanCache) and on the member name (in the scan's name, since the block's text is not in the key);
+  # a changed tarball or member is a new key.
   def onigmo_header
-    ScanCache.fetch('analysis_headers.onigmo_h', [ONIGMO_TARBALL]) do
+    ScanCache.fetch("analysis_headers.onigmo_h.#{ONIGMO_MEMBER}", [ONIGMO_TARBALL]) do
       onigmo = Open3.capture2('tar', '-xzOf', ONIGMO_TARBALL, ONIGMO_MEMBER)
       raise "tar failed reading #{ONIGMO_TARBALL}" unless onigmo.last.success?
 

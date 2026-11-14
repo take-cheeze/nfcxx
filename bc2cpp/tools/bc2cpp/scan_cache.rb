@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'world_root'
+require_relative 'toolchain'
 require 'digest'
 require 'fileutils'
 
@@ -10,10 +11,11 @@ require 'fileutils'
 # environment switch: the entries live in DEFAULT_DIR (the repository's own git-ignored build/ directory). A check
 # that needs its own directory sets ScanCache.directory_override from Ruby.
 #
-# The key covers the scan's name, the digest of every tools/bc2cpp source (so a changed or mutated scanner never sees
-# an older result), the Ruby version and Marshal format, and the digest of each input file. An input that does not
-# exist is part of the key too (a scan that skips it gives the same answer every time), unless the scan reports it:
-# those pass cache_absent: false and are computed.
+# The key covers the scan's name, the digest of every bc2cpp tool source (ScanCache.tools_sources: the .rb and .yml
+# files under tools/bc2cpp and tools/mrbc_rb, which the generator loads, so a changed or mutated scanner never sees an
+# older result), the toolchain (Ruby, Prism and RBS versions; Toolchain), the Marshal format, and the digest of each
+# input file. An input that does not exist is part of the key too (a scan that skips it gives the same answer every
+# time), unless the scan reports it: those pass cache_absent: false and are computed.
 #
 # A miss computes and stores. Anything else that goes wrong is a hard failure (ScanCache::Error): an entry that does not
 # load, an entry whose stored key is not the key it was read under, a value that cannot be stored, a directory that
@@ -21,9 +23,14 @@ require 'fileutils'
 #
 # Entries are Marshal dumps, so the cache directory must be one only this user writes.
 module ScanCache
-  VERSION = 4
+  VERSION = 5
   DEFAULT_DIR = File.join(BC2CPP_WORLD_ROOT, "build/bc2cpp-cache")
   MAGIC = 'bc2cpp-scan-cache'
+  # The tools directory (tools/), whose subtrees hold the sources tools_sources digests.
+  TOOLS_ROOT = File.expand_path('..', __dir__)
+  TOOL_DIRS = [__dir__, File.join(TOOLS_ROOT, 'mrbc_rb')].freeze
+  # A file digest is reused only once the file is this many seconds older than the hash (see file_digest).
+  RACY_SECONDS = 2
 
   class Error < RuntimeError; end
 
@@ -124,7 +131,8 @@ module ScanCache
   # nil when the scan cannot be keyed (an input is a directory, or is absent and the scan reports that).
   def key_for(name, inputs, cache_absent)
     digest = Digest::SHA256.new
-    digest << "#{VERSION}\0#{RUBY_VERSION}\0#{RUBY_PLATFORM}\0#{Marshal::MAJOR_VERSION}.#{Marshal::MINOR_VERSION}\0"
+    digest << "#{VERSION}\0#{Toolchain.versions.map(&:to_s).join("\0")}\0#{RUBY_PLATFORM}\0"
+    digest << "#{Marshal::MAJOR_VERSION}.#{Marshal::MINOR_VERSION}\0"
     digest << "#{name}\0#{tools_digest}\0"
     Array(inputs).each do |input|
       digest << "#{input}\0"
@@ -139,18 +147,33 @@ module ScanCache
     digest.hexdigest
   end
 
-  # One process hashes a file once (the scans share most of their inputs), keyed by file identity.
+  # One process hashes a file once (the scans share most of their inputs), keyed by file identity. The identity is
+  # [path, mtime, size], and a rewrite within the mtime's timestamp tick with the same size keeps all three, so a digest
+  # is remembered only when the file was already older than RACY_SECONDS when it was hashed. A newer file is hashed
+  # again on the next lookup (the same rule git applies to its index).
   def file_digest(path)
     stat = File.stat(path)
-    (@file_digests ||= {})[[path, stat.mtime, stat.size]] ||= Digest::SHA256.file(path).digest
+    memo = (@file_digests ||= {})
+    identity = [path, stat.mtime, stat.size]
+    return memo[identity] if memo.key?(identity)
+
+    digest = Digest::SHA256.file(path).digest
+    memo[identity] = digest if Time.now - stat.mtime > RACY_SECONDS
+    digest
   end
 
+  # Every source the generator can load: the .rb and .yml files under tools/bc2cpp and tools/mrbc_rb (irep.rb requires
+  # mrbc_rb), named relative to tools/. A test checks that the generator's own require closure stays inside this list.
+  def tools_sources
+    @tools_sources ||= TOOL_DIRS.flat_map { |dir| Dir[File.join(dir, '**', '*.{rb,yml}')] }.sort
+  end
+
+  # The digest of tools_sources and their names, computed once per process.
   def tools_digest
     @tools_digest ||= begin
       digest = Digest::SHA256.new
-      Dir.entries(__dir__).select { |name| name.end_with?('.rb') }.sort.each do |name|
-        file = File.join(__dir__, name)
-        digest << "#{File.basename(file)}\0"
+      tools_sources.each do |file|
+        digest << "#{file.delete_prefix("#{TOOLS_ROOT}/")}\0"
         digest << Digest::SHA256.file(file).digest
       end
       digest.hexdigest

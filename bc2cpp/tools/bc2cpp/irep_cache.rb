@@ -1,17 +1,19 @@
 # frozen_string_literal: true
 
 require_relative 'world_root'
+require_relative 'scan_cache'
+require_relative 'toolchain'
 require 'digest'
 require 'fileutils'
 require 'tempfile'
 
 module IrepCache
-  SOURCES = %w[irep_cache.rb irep.rb insn_decoder.rb insn_operands.rb irep_scans.rb operand_schema.rb rite_binary.rb].freeze
-
   module_function
 
+  # The decoder's sources and its toolchain. The decode follows require_relative chains (insn_decoder.rb loads
+  # bytecode_ir_ops.rb, for one), so the fingerprint is ScanCache's digest of every tool source, not a list of files.
   def fingerprint
-    @fingerprint ||= Digest::SHA256.hexdigest(SOURCES.map { |name| File.binread(File.join(__dir__, name)) }.join("\0"))
+    @fingerprint ||= Digest::SHA256.hexdigest([ScanCache.tools_digest, *Toolchain.versions].join("\0"))
   end
 
   # Temporary fixture filenames make unique RITE images, so retaining their trees adds work without reuse.

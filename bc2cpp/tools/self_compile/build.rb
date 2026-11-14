@@ -13,6 +13,9 @@ require 'rbconfig'
 require 'shellwords'
 require_relative '../bc2cpp/world_root'
 require_relative '../bc2cpp/bake_sources'
+require_relative '../bc2cpp/scan_cache'
+require_relative '../bc2cpp/toolchain'
+require_relative '../bc2cpp/native_ast_source'
 require_relative '../../host-libs/mruby-bc2cpp-runner/mrblib/runner'
 require_relative 'artifacts'
 
@@ -74,9 +77,15 @@ env = {
 # These describe the caller's input program, not the compiler being built.
 # In particular ONLY_OWNERS must not filter every compiler method out.
 env, controls = Bc2cppSelfCompile.generation_environment(env)
-dependencies = (files + manifest.fetch('native') + manifest.fetch('ruby') + manifest.fetch('headers')).uniq.sort
-fingerprint = Digest::SHA256.hexdigest(JSON.generate([RUBY_DESCRIPTION, env.reject { |_, value| value.nil? }, controls, manifest.fetch('defines'),
-  dependencies.map { |path| [path, Digest::SHA256.file(path).hexdigest] }]))
+# The generation runs without BC2CPP_AST_PRODUCER, so it parses with the producer that auto selection picks here.
+controls = controls.merge('ast_producer' => NativeAstSource.available?('nfcxx') ? 'nfcxx' : 'clang')
+# Every tool source (ScanCache.tools_sources) is a dependency, not only the ones baked into the generator's input: the
+# .yml data and the mrbc_rb sources the generator loads are read too.
+dependencies = (files + manifest.fetch('native') + manifest.fetch('ruby') + manifest.fetch('headers') +
+                ScanCache.tools_sources).uniq.sort
+fingerprint = Bc2cppSelfCompile.generation_fingerprint(
+  toolchain: Toolchain.versions, env: env, controls: controls, defines: manifest.fetch('defines'),
+  dependencies: dependencies.map { |path| [path, Digest::SHA256.file(path).hexdigest] })
 stamp = File.join(generation, 'fingerprint')
 main = File.join(generation, 'bc2cpp_self_gen.cpp')
 outputs = [main, File.join(generation, 'bc2cpp_self_decls.h'), File.join(generation, 'bc2cpp_self_entry.h')]
