@@ -589,6 +589,13 @@ check test ! -e "$work/api_ndebug_guard/NOT_BUILDABLE"
 check grep -qF 'static mrb_value ng_guarded(mrb_state *mrb, mrb_value self) {' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
 check grep -qF 'mrb_define_module_function(mrb, mNG, "guarded", ng_guarded, MRB_ARGS_REQ(1));' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
 
+# 2zzm. switch (TYPE(v)) with case T_NIL / T_FALSE: nil is routed to case 1000 (a value test), so the false label is MRB_TT_FALSE only
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_switch_type tools/cext2mrbgem/fixtures/api_switch_type/ext/api_switch_type "$work/api_switch_type" > "$work/api_switch_type.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_switch_type/NOT_BUILDABLE"
+check grep -qF 'switch ((mrb_nil_p(v) ? 1000 : mrb_type(v))) {' "$work/api_switch_type/src/api_switch_type.c"
+check grep -qF 'case 1000 /* nil */: return mrb_str_new_cstr(mrb, "nil");' "$work/api_switch_type/src/api_switch_type.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

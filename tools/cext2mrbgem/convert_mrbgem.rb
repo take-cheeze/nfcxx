@@ -517,6 +517,23 @@ class Converter
     @rewrites.any? { |r| r['to'] == 'nfcx_thread_call_without_gvl' }
   end
 
+  # the position of the innermost '{' that is still open at pos, or nil
+  def enclosing_open_brace(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        return k if depth == 0
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
   def rewrite(rel, pos, src, dst, caveat = nil)
     text = @files[rel]['text']
     rec = { 'file' => rel, 'line' => line_of(text, pos), 'from' => src, 'to' => dst }
@@ -2139,7 +2156,8 @@ end
         refuse(rel, m.begin(0), 'rb_data_type_t', info['error'])
         next
       end
-      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' }
+      # mrb_free is mruby's library free, already (mrb, data): it needs no threading
+      cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' || n == 'mrb_free' }
       unless cbs.all? { |n| @threaded_cands.include?(n) }
         refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
         next
@@ -2172,6 +2190,30 @@ end
         next
       end
       next if @local_var_occ.include?([rel, s])
+      # switch (TYPE(x)) with case T_NIL / T_FALSE labels: nil is a value test, so the switch is on
+      # (mrb_nil_p(x) ? 1000 : mrb_type(x)) (1000 stands for nil; no other tag is 1000) and the labels follow:
+      # case T_NIL: is case 1000:, case T_FALSE: is case MRB_TT_FALSE: (false only, nil is routed to 1000)
+      if name == 'TYPE' && (sh = masked[[s - 40, 0].max...s].to_s =~ /switch\s*\(\s*\z/) &&
+         (tm = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)/.match(masked[e..(e + 40)].to_s)) && !@entries.key?(tm[1]) &&
+         !@class_vars.include?(tm[1])
+        rest = masked[(e + tm.end(0))..(e + tm.end(0) + 12)].to_s
+        if rest.match?(/\A\s*\)/)
+          new_text = "(mrb_nil_p(#{tm[1]}) ? 1000 : mrb_type(#{tm[1]}))"
+          ed.add(s, e + tm.end(0), new_text)
+          rewrite(rel, s, 'TYPE', new_text, 'switch (TYPE(v)): nil is routed to case 1000, so the cases below test values')
+          next
+        end
+      end
+      if %w[T_NIL T_FALSE].include?(name) && masked[[s - 6, 0].max...s].to_s =~ /case\s+\z/
+        open = enclosing_open_brace(masked, s)
+        head = open ? masked[[open - 120, 0].max...open].to_s : ''
+        if open && head.match?(/switch\s*\(\s*TYPE\(\s*[A-Za-z_][#{WC}]*\s*\)\s*\)\s*\z/)
+          repl = name == 'T_NIL' ? '1000 /* nil */' : 'MRB_TT_FALSE /* false only: nil is case 1000 */'
+          ed.add(s, e, repl)
+          rewrite(rel, s, name, repl, 'a case label of a switch on TYPE(v): nil is the value test in case 1000')
+          next
+        end
+      end
       entry = @entries[name]
       if !entry.nil?
         excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
