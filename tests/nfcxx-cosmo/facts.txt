@@ -2,3 +2,7 @@
 root-exec build/cosmocc/bin/cosmocc
 root-exec alt/cosmocc
 root-file notexec
+# files outside the repository, named by the cases as SB/... (run.sh creates them in the sandbox's host directory)
+host-exec SB/outside/cosmocc
+host-file SB/outside/notexec
+host-absent SB/outside/missing
