@@ -355,6 +355,14 @@ check test ! -e "$work/api_ivar_name/NOT_BUILDABLE"
 check grep -qF 'mrb_iv_get(mrb, obj, mrb_intern_cstr(mrb, "@count"))' "$work/api_ivar_name/src/api_ivar_name.c"
 check grep -qF 'mrb_iv_set(mrb, obj, mrb_intern_cstr(mrb, "@count"), v);' "$work/api_ivar_name/src/api_ivar_name.c"
 
+# 2ze. rb_protect (api_map.json batch P1): the callback is the first argument, called as mrb_func_t (mrb, data), so it is
+# threaded with mrb and passed to mrb_protect; the state argument's type is a caveat
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_protect tools/cext2mrbgem/fixtures/api_protect/ext/api_protect "$work/api_protect" > "$work/api_protect.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_protect/NOT_BUILDABLE"
+check grep -qF 'static mrb_value protect_body(mrb_state *mrb, mrb_value arg) {' "$work/api_protect/src/api_protect.c"
+check grep -qF 'mrb_protect(mrb, protect_body, mrb_nil_value(), &state);' "$work/api_protect/src/api_protect.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

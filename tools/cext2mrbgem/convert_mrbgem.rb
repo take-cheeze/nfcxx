@@ -1108,7 +1108,15 @@ class Converter
       out
     end
 
-    shadowed = lambda { |name, fn| shadowed_in?(name, fn) }
+shadowed = lambda { |name, fn| shadowed_in?(name, fn) }
+
+# true when the use is the first argument of a call to rb_protect
+protect_callback_use = lambda do |rel, s|
+  masked = @files[rel]['masked']
+  open, callee = innermost_open(masked, s)
+  prev = prev_nonspace(masked, s - 1)
+  open == '(' && callee == 'rb_protect' && prev >= 0 && masked[prev] == '('
+end
 
     # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
     value_problem = lambda do |rel, s, name|
@@ -1125,9 +1133,12 @@ class Converter
       end
     end
 
-    use_problem = lambda do |name, use|
-      rel, s, direct, fn = use
-      if !direct
+use_problem = lambda do |name, use|
+  rel, s, direct, fn = use
+  # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
+  # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
+  next nil if !direct && protect_callback_use.call(rel, s)
+  if !direct
         # the address is kept or passed on, so the helper's signature cannot gain mrb; the reason says how
         why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
         next "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
