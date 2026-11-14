@@ -1203,6 +1203,19 @@
         "suffix": ")"
       },
       "caveat": "the Symbol VALUE is converted with mrb_symbol; mruby does not promise a frozen result, as CRuby does"
+    },
+    "rb_cstr_to_inum": {
+      "kind": "call",
+      "mruby": "mrb_str_to_inum",
+      "inject_mrb": false,
+      "wrap_mrb": true,
+      "needs_mrb": true,
+      "wrap_arg": {
+        "index": 0,
+        "prefix": "mrb_str_new_cstr(mrb, ",
+        "suffix": ")"
+      },
+      "caveat": "the C string becomes a String (mrb_str_new_cstr) and mrb_str_to_inum parses it; base and badcheck keep their order; the result is an Integer VALUE"
     }
   },
   "special_arg_positions_class_only": {

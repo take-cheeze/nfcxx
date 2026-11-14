@@ -2,7 +2,7 @@
 
 /* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_str_subseq (mruby's public
  * substr counts characters, the byte form is internal), rb_gv_get (mruby takes a symbol, not a C name),
- * rb_cstr_to_inum (no C-string form),
+ * rb_intern3 (takes an encoding),
  * rb_bug (variadic format), StringValue (takes an lvalue it rewrites). */
 static VALUE mApiSkip;
 
@@ -25,7 +25,7 @@ static VALUE api_sym(VALUE self, VALUE s) {
 }
 
 static VALUE api_num(VALUE self) {
-    return rb_cstr_to_inum("12", 10, 0);
+    return rb_intern3("12", 2, NULL);
 }
 
 static VALUE api_bug(VALUE self) {

@@ -375,6 +375,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_sym_str/NOT_BUILDABLE"
 check grep -qF 'return mrb_sym_str(mrb, mrb_symbol(sym));' "$work/api_sym_str/src/api_sym_str.c"
 
+# 2zj. rb_cstr_to_inum (api_map.json batch N5): the C string is wrapped as a String, and mrb_str_to_inum keeps base and badcheck
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cstr_inum tools/cext2mrbgem/fixtures/api_cstr_inum/ext/api_cstr_inum "$work/api_cstr_inum" > "$work/api_cstr_inum.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_cstr_inum/NOT_BUILDABLE"
+check grep -qF 'return mrb_str_to_inum(mrb, mrb_str_new_cstr(mrb, "12"), 10, 0);' "$work/api_cstr_inum/src/api_cstr_inum.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
