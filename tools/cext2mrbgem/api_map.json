@@ -364,6 +364,18 @@
       "kind": "drop",
       "reason": "CRuby warns when a deprecated constant is used; mruby has no constant deprecation, so the call has no effect"
     },
+    "RSTRING_END": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "(RSTRING_PTR($0) + RSTRING_LEN($0))",
+      "caveat": "the end of the string's bytes; the argument must be a plain identifier that is already a String (no to_str conversion)"
+    },
+    "RARRAY_CONST_PTR": {
+      "kind": "macro",
+      "mruby": "RARRAY_PTR",
+      "caveat": "mruby has no read-only element pointer: the same pointer as RARRAY_PTR, so writes through it are not refused"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",

@@ -494,6 +494,14 @@ check grep -qF 'mrb_sym id = mrb_intern(mrb, p, 4);' "$work/api_batch_n17/src/ap
 check grep -qF 'return 0;' "$work/api_batch_n17/src/api_batch_n17.c"
 check grep -qF 'dropped: rb_deprecate_constant' "$work/api_batch_n17/src/api_batch_n17.c"
 
+# 2zz. batch N18 (api_map.json): RSTRING_END is the end pointer of a String (a template over RSTRING_PTR and RSTRING_LEN);
+# RARRAY_CONST_PTR maps to the mruby RARRAY_PTR macro
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_batch_n18 tools/cext2mrbgem/fixtures/api_batch_n18/ext/api_batch_n18 "$work/api_batch_n18" > "$work/api_batch_n18.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_batch_n18/NOT_BUILDABLE"
+check grep -qF 'char *e = (RSTRING_PTR(str) + RSTRING_LEN(str));' "$work/api_batch_n18/src/api_batch_n18.c"
+check grep -qF 'const mrb_value *items = RARRAY_PTR(ary);' "$work/api_batch_n18/src/api_batch_n18.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
