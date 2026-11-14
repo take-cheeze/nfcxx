@@ -84,3 +84,35 @@ default --cache=cache -c a.cc
 default --cache=cache --cache-log=log.txt a.cc -o prog
 default --time-log=t.log a.cc -o prog
 default --trace=t.json -c a.cc
+# -M and -MM (not depfile options: the bash's -* case passes them on, so the default backend is Path B; -M goes to the link's cc)
+default -M a.cc -o prog
+default -MM -c a.cc
+pathb -c -M -MM a.cc
+default -c -MF a.d -M a.cc
+default -E -M a.cc
+default -M c.c a.cc
+default -M -c c.c
+# --freestanding (Path B: pathb-cc gets --freestanding, --eh-runtime, --gnu-version and -Ilib; the link has no hosted C++ runtime)
+default --freestanding -c a.cc
+default --freestanding a.cc -o prog
+pathb --freestanding -c a.cc
+pathb --freestanding a.cc -o prog
+default --freestanding --gnu-version=130000 -c a.cc
+default --freestanding --dialect=clang -Iinc -c a.cc
+default --freestanding -include pre.h -c a.cc
+default --freestanding c.c a.cc -o prog
+default --freestanding -c c.c
+default --freestanding -c a.cc fail.cc
+default --freestanding fail.cc -o prog
+pathb --freestanding fail.cc -o prog
+pathb --freestanding -shared a.cc -o libx.so
+pathb --freestanding -rdynamic -fuse-ld=mold a.cc -o prog
+default --freestanding -fuse-ld=mold a.cc -o prog
+default --freestanding -fsanitize=address a.cc -o prog
+# --target (refused: it needs --freestanding and --emit-c; linux_k1om with an explicit pathb is refused as the k1om GCC's)
+default --target=linux_aarch64 a.cc -o prog
+default --freestanding --target=linux_aarch64 -c a.cc
+pathb --target=linux_aarch64 -c a.cc
+default --target=linux_k1om a.cc -o prog
+pathb --freestanding --target=linux_k1om a.cc -o prog
+default --freestanding --target=linux_k1om a.cc -o prog

@@ -33,15 +33,19 @@
 # options -MP, -MF, -MT, -MQ with -c, and -MD and -MMD with -c and an explicit --backend=pathb (the bash writes no depfile on
 # the Path B compile: its -c path returns before the depfile). --cache, --cache-log, --time-log and --trace have no plan line
 # of their own (the cache and the Path B paths return before the cache; the trace and time log write files, not commands).
+# --freestanding (Path B with lib/ as the include directory: pathb-cc gets --freestanding, --eh-runtime, --gnu-version and
+# -Ilib, and the link has no host C++ runtime or EH shim). --target is refused with exit 2 as the bash refuses it: it needs
+# --freestanding and --emit-c (linux_k1om also needs the gcc backend). -M and -MM, and the other -M options that are not the
+# depfile family, are not depfile options in the bash: its -* case passes them on, so they keep the default Path B choice and
+# go to the link's cc (the bash's header comment says -M takes the gcc backend; the code does not, so the port follows the code).
 #
-# Not covered (exit 3): the gcc backend (the default with -shared, or with -MD or -MMD and no -fsafe-pointers, and the
-# --backend=gcc choice); .cu and .cpp2 inputs (CUDA and cppfront: the rewriter, the device units and the prelinker) and the
-# CUDA options; C++ modules; SYCL (a -I directory with the oneAPI kernel header); --freestanding, --cosmo, --target, --emit-c,
-# --emit-hip, --bundle-libs, --cuda-driver, --module-dir, --instantiate, --keep-intermediates, and any other --option; -M and
-# -MM and the other -M options that are not the depfile family (the bash passes -M and -MM on to cc or drops them, while its
-# header comment says -M takes the gcc backend: the two disagree, so the port does not choose); -MD with -c of a file -fsafe-
-# and -MMD with the default backend and no -fsafe-pointers (the default takes gcc for them); -c with no C++ or C source; -x
-# with a language other than c++; -fsanitize=undefined and the other -fsanitize values (the bash exits 2 for them: refused).
+# Not covered (exit 3): the gcc backend (the default with -shared, with --cosmo, or with -MD or -MMD and no -fsafe-pointers,
+# and the --backend=gcc choice); .cu and .cpp2 inputs (CUDA and cppfront: the rewriter, the device units and the prelinker) and
+# the CUDA options; C++ modules; SYCL (a -I directory with the oneAPI kernel header); --cosmo; --emit-c (the EDG front end, with
+# the host's include directories and the eh-tls marker); --target=linux_k1om with the default backend (the k1om toolchain);
+# --freestanding with -fsanitize=address or -fsafe-pointers; --emit-hip, --bundle-libs, --cuda-driver, --module-dir,
+# --instantiate, --keep-intermediates, and any other --option; -c with no C++ or C source; -x with a language other than c++;
+# -fsanitize=undefined and the other -fsanitize values (the bash exits 2 for them: refused).
 #
 # FILE holds the facts the bash reads from the machine and from its helper scripts (tests/nfcxx-pathb/run.sh writes it):
 #   host linux-x86_64          the host is x86-64 Linux (the link libraries and the QBE target are that host's)
@@ -223,6 +227,8 @@ class Plan
     @ld_name = nil
     @eh_shim = true
     @default_backend = false
+    @freestanding = false
+    @target = nil  # --target=V (an empty value is not given, as the bash's -z test says)
   end
 
   def run
@@ -266,6 +272,10 @@ class Plan
         @dialect_asked = true
       elsif x.start_with?("--gnu-version=")
         @gnu_user = x.delete_prefix("--gnu-version=")
+      elsif x == "--freestanding"
+        @freestanding = true
+      elsif x.start_with?("--target=")
+        @target = x.delete_prefix("--target=")
       elsif x.start_with?("--")
         unported(x)
       elsif x.start_with?("-fuse-ld=")
@@ -339,7 +349,7 @@ class Plan
         unported("#{x} with no file") if nxt.nil?
         i += 1
       elsif x.start_with?("-M")
-        unported("#{x} (dependency options the port does not model)")
+        @files << x # not a depfile option (the bash's -* case): it goes to the link's cc, or is dropped with -c
       elsif x == "-include"
         unported("-include with no file") if nxt.nil?
         @preinc << nxt
@@ -379,7 +389,21 @@ class Plan
   # The backend choice of the bash: default (Path B unless -shared or a depfile is asked for), or pathb. -fsafe-pointers takes
   # Path B whatever the choice. A default-selected build may fall back to gcc on a failure; the other Path B builds may not.
   def default_selected?
-    @choice == "default" && !@shared && @depmode.nil?
+    @choice == "default" && !@shared && @depmode.nil? && @target.to_s.empty?
+  end
+
+  # The --target block of the bash (after the backend choice, before the link): --target=linux_k1om needs --freestanding and
+  # an explicit --backend=pathb is refused (the k1om GCC); the other targets need --freestanding and --emit-c, which is not
+  # ported, so they are refused. The k1om toolchain and runtime are files the port does not read: unported.
+  def target_checks
+    return if @target.to_s.empty?
+
+    if @target == "linux_k1om"
+      exit_with("nfcxx: --target=linux_k1om needs --freestanding (the host's C++ headers are GCC 13's, not k1om's)", 2) unless @freestanding
+      exit_with("nfcxx: --target=linux_k1om uses the gcc backend (the k1om GCC)", 2) if @choice == "pathb"
+      unported("--target=linux_k1om (the k1om toolchain and runtime are files the port does not read)")
+    end
+    exit_with("nfcxx: --target needs --freestanding and --emit-c (the generated C is for the target)", 2)
   end
 
   # The checks the bash makes before the Path B section, in its order (only those that can print or end the plan).
@@ -396,11 +420,13 @@ class Plan
       unported("SYCL pre-pass (an -I directory has sycl/detail/kernel_desc.hpp)")
     end
     unported("-c with no C++ or C source (the bash links the objects with -c ignored)") if @compile_only && @ncpp.zero? && @cfiles.empty?
+    target_checks
     unported("the gcc backend (scripts/nfcxx-gcc-plan.rb)") if @choice == "gcc"
     unported("the gcc backend: the default is gcc for -shared and for -MD or -MMD (scripts/nfcxx-gcc-plan.rb)") unless
       @choice == "pathb" || @safeptr || default_selected?
     @default_backend = @choice == "default" && default_selected?
     exit_with("nfcxx: -fsanitize=address and -fsafe-pointers both replace malloc; use one", 2) if @asan && @safeptr
+    unported("--freestanding with -fsanitize=address or -fsafe-pointers (the bash's asan and runtime links for it are not ported)") if @freestanding && (@asan || @safeptr)
     unported("host is not x86-64 Linux") unless @facts.value("host") == "linux-x86_64"
     exit_with("nfcxx: QBE not built; run scripts/setup-qbe.sh", 2) unless @facts.flag?("qbe")
   end
@@ -445,7 +471,13 @@ class Plan
     f << "--pic" if @pic
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
-    f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?
+    if @freestanding
+      # the bash's freestanding flags (its --gnu-version is the user's, or GCC 13's 130000 when none was given); the host is x86-64 Linux
+      gnu = @gnu_user.to_s.empty? ? "130000" : @gnu_user
+      f.concat(["--freestanding", "--eh-runtime", "--gnu-version=#{gnu}", "-IROOT/lib"])
+    elsif @gnu_user && !@gnu_user.empty?
+      f << "--gnu-version=#{@gnu_user}"
+    end
     f
   end
 
@@ -523,7 +555,7 @@ class Plan
   # The link's cc (the bash's hosted block): the EH shim and the sret objects, and with -fsanitize=address the C++ VLA runtime.
   # Neither is added to a -shared link or a link with no C++ or object input (the block is not entered).
   def hosted_extras
-    return [[], []] if @shared
+    return [[], []] if @shared || @freestanding
 
     shim = []
     eh = @facts.value("ehshim")
@@ -561,8 +593,11 @@ class Plan
         pobjs << o
       end
     end
+    # the hosted C++ runtime and atomic library are not on a freestanding link (the bash's pb_cxx_libs and pb_atomic_lib)
+    host_libs = @freestanding ? [] : ["-lstdc++", "-lgcc_s"]
+    atomic = @freestanding ? [] : ["-latomic"]
     argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *pobjs, *plink, ldrt, *shim, *vla,
-            LIBC, "-lstdc++", "-lgcc_s", "-lpthread", "-lm", "-latomic"]
+            LIBC, *host_libs, "-lpthread", "-lm", *atomic]
     @lines << "RUN #{argv.join(' ')}"
   end
 
