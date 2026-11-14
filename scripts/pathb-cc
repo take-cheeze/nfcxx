@@ -50,7 +50,7 @@ passes_given=0; [ -z "${NFCXX_IR_OPT+x}" ] || passes_given=1
 pic=(); nopie=(); asopt=()
 i386=0; regparm=0; m16=0
 emitter=${NFCXX_PATHB_EMITTER:-ssa}
-nofp=0; nounwind=0; trapchk=0; trapimp=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
+nofp=0; nounwind=0; vectorize=0; trapchk=0; trapimp=0; uchar=0; ld_trap=0; [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ld_trap=1
 keep=${PATHB_KEEP:-}
 timeout_s=${NFCXX_PATHB_TIMEOUT:-300}
 dump_opts=()
@@ -77,6 +77,7 @@ while [ $# -gt 0 ]; do
     --no-fp) nofp=1 ;;          # -mno-sse: qbe -n, and the assembly is refused when it uses SSE or x87 (status 5)
     --as-opt=*) asopt+=("${1#--as-opt=}") ;;   # an option of the assembler step (nfcc's -Wa,*): the host cc assembling QBE's output gets it
     --no-unwind) nounwind=1 ;;  # -fno-asynchronous-unwind-tables: qbe -U, no .cfi directives
+    --vectorize) vectorize=1 ;;  # -ftree-vectorize: qbe -V, the loop vectorizer (3rd/qbe vec.c; amd64_sysv only)
     -funsigned-char|-fno-signed-char) uchar=1; opts+=("$1") ;;   # gcc's options, read by pathb-dump; plain char is then unsigned_char in the IR
     -fsigned-char|-fno-unsigned-char) uchar=0; opts+=("$1") ;;
     -nostdinc|-ffreestanding) trapimp=1; opts+=("$1") ;;
@@ -162,10 +163,11 @@ fi
 ldopt=(); [ $ld_trap = 0 ] || ldopt=(--long-double=trap)
 [ $nofp = 0 ] || ldopt+=(--no-fp)
 [ $nounwind = 0 ] || ldopt+=(--no-unwind)
+[ $vectorize = 0 ] || ldopt+=(--vectorize)
 [ $nofp = 0 ] || trapimp=1
 [ $trapchk = 0 ] && { [ $trapimp = 0 ] || [ "$emitter" != ssa ]; } || ldopt+=(--trap-checks)   # the mruby emitter has no such mode: only the flag itself is an error
-if [ $nofp = 1 ] || [ $nounwind = 1 ] || [ $trapchk = 1 ]; then
-  [ "$emitter" = ssa ] || { echo "pathb-cc: --no-fp, --no-unwind and --trap-checks need the SSA emitter (--emitter=ssa)" >&2; exit 2; }
+if [ $nofp = 1 ] || [ $nounwind = 1 ] || [ $trapchk = 1 ] || [ $vectorize = 1 ]; then
+  [ "$emitter" = ssa ] || { echo "pathb-cc: --no-fp, --no-unwind, --trap-checks and --vectorize need the SSA emitter (--emitter=ssa)" >&2; exit 2; }
 fi
 # The mruby emitter only: on Darwin an extern data object is read through the GOT (see pathb-qbe-emit.rb, --extern-data-got).
 emitopt=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emitopt=(--extern-data-got)
