@@ -63,8 +63,13 @@ ls "$vk"/vulkan-shaders/*.comp | xargs -P "$(nproc)" -n 1 bash -c 'gen_one "$0"'
 
 inc="-I$llama/ggml/include -I$llama/ggml/src -I$llama/ggml/src/ggml-cpu -I$out/gen -D_GNU_SOURCE"
 export root inc vkdefs
-export cpuflags="-DGGML_CPU_GENERIC"
-export cpuxxflags="-DGGML_CPU_GENERIC -U__SSE__ -U__SSE2__ -U__SSE3__ -U__SSSE3__"
+# OpenMP for the ggml CPU backend, as llama.cpp's CMake builds it by default (GGML_OPENMP=ON): with it the CPU workers are
+# OpenMP threads that sleep when idle. Without it ggml runs its own thread pool, whose workers busy-wait between graphs
+# (about 60% of a core each in a decode run). NFCXX_OPENMP=0 builds without it.
+if [ "${NFCXX_OPENMP:-1}" != 0 ]; then cpu_omp="-fopenmp -DGGML_USE_OPENMP"; omp_link="-fopenmp -lgomp"
+else cpu_omp=""; omp_link=""; fi
+export cpuflags="-DGGML_CPU_GENERIC $cpu_omp"
+export cpuxxflags="-DGGML_CPU_GENERIC -U__SSE__ -U__SSE2__ -U__SSE3__ -U__SSSE3__ $cpu_omp"
 
 # One line per source: SOURCE<TAB>KIND. The object name is the path under llama.cpp (or OUT) with / as _.
 {
@@ -116,7 +121,7 @@ objs=(); while IFS=$'\t' read -r f _; do objs+=("$(objname "$f")"); done < "$out
 # NFCXX_PATH=b: the object-only link is not Path B's link, so the runtime archive (scripts/pathb-ldrt: _mm_pause and the
 # long double helpers) goes on the line here.
 [ "${NFCXX_PATH:-}" != b ] || objs+=("$("$root/scripts/pathb-ldrt")")
-if "$root/nfcxx" "${objs[@]}" -lvulkan -lm -lpthread -lstdc++ -o "$out/test-backend-ops" > "$out/link.log" 2>&1; then
+if "$root/nfcxx" "${objs[@]}" $omp_link -lvulkan -lm -lpthread -lstdc++ -o "$out/test-backend-ops" > "$out/link.log" 2>&1; then
   echo "linked $out/test-backend-ops (${#objs[@]} objects)"
 else
   echo "FAIL link: $(grep -m3 'undefined\|error' "$out/link.log" | cut -c1-200)"; exit 1
