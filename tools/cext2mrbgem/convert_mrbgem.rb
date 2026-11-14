@@ -1272,7 +1272,7 @@ end
       next unless m
       cname = m[1]
       pidx = psub[0...m.begin(0)].count(',')
-      rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false }
+      rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false, pidx: pidx }
       body = masked[d['brace']..d['body_end']].to_s
       body.to_enum(:scan, /(?<![#{WC}.>])#{cname}\s*\(/).each do
         cm = Regexp.last_match
@@ -1299,17 +1299,54 @@ end
           break
         end
         t = psl(@files[crel]['text'], a[0], a[1]).strip
-        unless t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
+        lead = psl(@files[crel]['text'], a[0], a[1])[/\A\s*/].length
+        if t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
+          rec[:assigns] << [t, crel, a[0] + lead]
+        elsif (en = enclosing_func(crel, cs)) && (j = fn_param_names(en).index(t))
+          # forwarded: the call passes the enclosing function's own callback parameter j (its record gives the callbacks)
+          rec[:assigns] << [:fwd, en['name'], j]
+        else
           rec[:bad] = true
           break
         end
-        lead = psl(@files[crel]['text'], a[0], a[1])[/\A\s*/].length
-        rec[:assigns] << [t, crel, a[0] + lead]
       end
-      next if rec[:bad] || rec[:assigns].empty? || rec[:calls].empty?
+      next if rec[:bad] || rec[:assigns].empty?
       recs << rec
     end
-    recs
+    # resolve forwarded assigns through the records of the enclosing functions' parameters (bounded depth)
+    by_key = {}
+    recs.each { |r| by_key[[r[:owner], r[:pidx]]] = r }
+    resolve = lambda do |r, depth|
+      return nil if depth > 8
+      out = []
+      r[:assigns].each do |x|
+        if x[0] == :fwd
+          src = by_key[[x[1], x[2]]]
+          sub = src && resolve.call(src, depth + 1)
+          return nil if sub.nil?
+          out.concat(sub)
+        else
+          out << x
+        end
+      end
+      out
+    end
+    recs.each do |r|
+      res = resolve.call(r, 0)
+      if res.nil?
+        r[:bad] = true
+      else
+        r[:assigns] = res
+      end
+    end
+    recs.reject { |r| r[:bad] || r[:assigns].empty? }
+  end
+
+  # the parameter names of a function definition (a callback parameter's name is the one in (*NAME))
+  def fn_param_names(en)
+    en['params'].to_s.split(',').map do |p|
+      p.strip[/\(\s*\*\s*(\w+)\s*\)/, 1] || p.strip[/([A-Za-z_]\w*)\s*\z/, 1]
+    end
   end
 
   def fnptr_global(rec)
