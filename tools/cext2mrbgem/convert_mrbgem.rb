@@ -1934,7 +1934,8 @@ use_problem = lambda do |name, use|
     mrb_bearing = with_state | gset
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
-        next unless fn && !mrb_bearing.include?(fn['name']) && !refused_defs.include?(fn['name'])
+        # a refused definition is still emitted: its calls of threaded helpers would pass an mrb that is not in scope
+        next unless fn && !mrb_bearing.include?(fn['name'])
         refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
       end
     end
