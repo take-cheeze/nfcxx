@@ -3041,8 +3041,8 @@ end
         names.each do |n|
           next if set.include?(n)
           uses = (@occ[n] || []).reject do |orel, os, _oe|
-            # a definition header in the text is not a use
-            @files[orel]['masked'][_oe..].to_s.match?(/\A[ \t\n]*\([^()]*\)[ \t\n]*\{/)
+            # a definition header or a prototype in the text (name (params) { or name (params) ;) is not a use
+            @files[orel]['masked'][_oe..].to_s.match?(/\A[ \t\n]*\((?:[^()]|\([^()]*\))*\)[ \t\n]*[{;]/)
           end
           next if uses.empty?
           if uses.all? { |orel, os, _oe| (f = enclosing_func(orel, os)) && set.include?(f['name']) }
