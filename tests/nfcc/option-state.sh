@@ -60,7 +60,7 @@ harness() {
       -e 's|\bln -s |run_stub LN -s |g' \
       -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|" \
       -e "s|source \"\\\$root/scripts/cuda-driver-wrap.sh\"|source \"$tmp/cuda-driver-wrap.sh\"|" \
-      "$root/nfcc" > "$nfcc_sed"
+      "$root/nfcc-bash" > "$nfcc_sed"
   # the compile-only dispatch: the "if" line before the line that sets suffix (the post-loop checks have an "if" of their own)
   local at
   at=$(grep -n '^  suffix=\.o; ' "$nfcc_sed" | head -1 | cut -d: -f1)
