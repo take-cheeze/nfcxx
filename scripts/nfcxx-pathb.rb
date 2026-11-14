@@ -298,6 +298,8 @@ class Plan
         @asanopts << x
       elsif x == "-fPIC" || x == "-fpic"
         @pic = true
+      elsif x == "-ftree-vectorize"
+        @vectorize = true   # the QBE loop vectorizer: pathb-cc --vectorize, qbe -V (3rd/qbe vec.c)
       elsif x == "-rdynamic"
         @rdynamic = true
       elsif x == "-shared"
@@ -450,6 +452,7 @@ class Plan
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
     f << "--pic" if @pic
+    f << "--vectorize" if @vectorize
     f.concat(@diag)
     f << "--dialect=clang" if @dialect == "clang" && @dialect_asked
     f << "--gnu-version=#{@gnu_user}" if @gnu_user && !@gnu_user.empty?
