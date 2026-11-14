@@ -175,7 +175,7 @@ check grep -q '  rb_global_variable  address form' "$work/gc_map_refused/REFUSAL
 check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
-check grep -q '  rb_gc_mark  no mark callback in mruby' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_mark  rb_gc_mark is valid only in a data type mark callback' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
 
 # 2k. String, Hash and Array calls with exact mruby equivalents (api_map.json batch B1; header lines in the commit)
@@ -401,6 +401,33 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_jump_tag tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_jump_tag/NOT_BUILDABLE"
 check grep -qF 'mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));' "$work/api_jump_tag/src/api_jump_tag.c"
+
+# 2zn. RUBY_TYPED_* flags (api_map.json batch N9): mruby has no such flags, so each is 0 (caveated)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_flags tools/cext2mrbgem/fixtures/api_typed_flags/ext/api_typed_flags "$work/api_typed_flags" > "$work/api_typed_flags.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_flags/NOT_BUILDABLE"
+check grep -qF 'int flags = 0 | 0;' "$work/api_typed_flags/src/api_typed_flags.c"
+
+# 2zo. a data type's mark and free callbacks are threaded with mrb; the initializer is reordered to {name, dfree, mark};
+# rb_gc_mark is valid inside the mark callback (api_map.json batch N10)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype tools/cext2mrbgem/fixtures/api_dtype/ext/api_dtype "$work/api_dtype" > "$work/api_dtype.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype/NOT_BUILDABLE"
+check grep -qF 'static void holder_mark(mrb_state *mrb, void *p) {' "$work/api_dtype/src/api_dtype.c"
+check grep -qF 'static const mrb_data_type holder_type = { "holder", holder_free, holder_mark };' "$work/api_dtype/src/api_dtype.c"
+check grep -qF 'mrb_gc_mark_value(mrb, ((holder *)p)->held);' "$work/api_dtype/src/api_dtype.c"
+
+# 2zp. TypedData_ and Data_ macros are unknown names (refused), not silent pass-throughs
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_refused tools/cext2mrbgem/fixtures/api_dtype_refused/ext/api_dtype_refused "$work/api_dtype_refused" > "$work/api_dtype_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_dtype_refused/NOT_BUILDABLE"
+check grep -q "  TypedData_Get_Type  no entry in api_map.json" "$work/api_dtype_refused/REFUSALS.txt"
+
+# 2zq. TypedData_Make_Struct and TypedData_Wrap_Struct map to mrb_data_object_alloc; the struct is allocated with mrb_calloc
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_alloc tools/cext2mrbgem/fixtures/api_typed_alloc/ext/api_typed_alloc "$work/api_typed_alloc" > "$work/api_typed_alloc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_alloc/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_value(mrb_data_object_alloc(mrb, mProbe, (h = (holder *)mrb_calloc(mrb, 1, sizeof(holder))), &holder_type));' "$work/api_typed_alloc/src/api_typed_alloc.c"
 
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do

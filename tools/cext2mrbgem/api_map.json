@@ -239,8 +239,12 @@
       "caveat": "mrb_gc_register keeps the value in mruby's root table (src/gc.c:564) for the life of the state; CRuby never unregisters it either. Immediate values need no root and are ignored by mrb_gc_register"
     },
     "rb_gc_mark": {
-      "kind": "refuse",
-      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run"
+      "kind": "call",
+      "mruby": "mrb_gc_mark_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "gc_mark_context": true,
+      "caveat": "valid only inside a data type mark callback (the runtime passes the state); refused elsewhere"
     },
     "rb_gc_mark_movable": {
       "kind": "refuse",
@@ -1264,6 +1268,61 @@
       "needs_mrb": true,
       "template": "mrb_exc_raise($m, mrb_obj_value($m->exc))",
       "caveat": "re-raises the exception that mrb_protect caught (mrb->exc); CRuby's state argument is not needed, and the state is ignored"
+    },
+    "RUBY_TYPED_FREE_IMMEDIATELY": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "RUBY_TYPED_WB_PROTECTED": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "RUBY_TYPED_EMBEDDABLE": {
+      "kind": "expr",
+      "mruby": "0",
+      "needs_mrb": false,
+      "caveat": "mruby has no typed-data flags: free timing and the write-barrier flag are not represented; 0 keeps the initializer shape"
+    },
+    "rb_data_typed_object_wrap": {
+      "kind": "template",
+      "arity": 3,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_obj_value(mrb_data_object_alloc($m, $0, $1, $2))",
+      "caveat": "wraps the C pointer in a data object of the given mrb_data_type; the class must be a tracked class variable (struct RClass *)"
+    },
+    "TypedData_Wrap_Struct": {
+      "kind": "template",
+      "arity": 3,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_obj_value(mrb_data_object_alloc($m, $0, $2, $1))",
+      "caveat": "CRuby TypedData_Wrap_Struct(klass, type, sval) reordered to mrb_data_object_alloc(mrb, klass, sval, type)"
+    },
+    "TypedData_Make_Struct": {
+      "kind": "template",
+      "arity": 4,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_obj_value(mrb_data_object_alloc($m, $0, ($3 = ($1 *)mrb_calloc($m, 1, sizeof($1))), $2))",
+      "caveat": "allocates a zeroed struct with mrb_calloc (freed by the type dfree), as CRuby does; the struct pointer is assigned to the last argument"
+    },
+    "TypedData_Get_Struct": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "template": "($3 = ($1 *)mrb_data_get_ptr($m, $0, $2))",
+      "caveat": "reads the data pointer with mrb_data_get_ptr, which raises TypeError on a mismatched type, as CRuby does"
     }
   },
   "special_arg_positions_class_only": {
