@@ -113,7 +113,7 @@ sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
-asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0; vectorize=0
+asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0; vectorize=0; avx2=0
 dialect=${NFCXX_DIALECT:-$(host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
 path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
@@ -571,6 +571,7 @@ while [ $# -gt 0 ]; do
     -fsanitize=address) asan=1 ;;
     -fsafe-pointers) safeptr=1 ;;
     -fno-safe-pointers) safeptr=0 ;;
+    -mavx2) avx2=1; isa+=("$1") ;;               # with -ftree-vectorize on Path B: the 256-bit loops (qbe -Y, AVX2)
     -ftree-vectorize) vectorize=1 ;;      # the loop vectorizer of the QBE back end (Path B; 3rd/qbe doc/vectorize.md)
     -fno-tree-vectorize) vectorize=0 ;;
     -fno-sanitize=address) asan=0 ;;
@@ -947,6 +948,7 @@ fi
 [ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
 [ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc --pic reads a preemptible symbol's address through the GOT
 [ $vectorize = 0 ] || [ $backend != pathb ] || pb_flags+=(--vectorize)   # -ftree-vectorize: qbe -V (the gcc backend keeps its own flags)
+[ $vectorize = 0 ] || [ $avx2 = 0 ] || [ $backend != pathb ] || pb_flags+=(--avx2)   # -mavx2 too: qbe -Y, the 256-bit loops
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
 # Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.
