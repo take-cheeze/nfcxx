@@ -1275,7 +1275,8 @@ end
       pidx = psub[0...m.begin(0)].count(',')
       rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false, pidx: pidx }
       body = masked[d['brace']..d['body_end']].to_s
-      body.to_enum(:scan, /(?<![#{WC}.>])#{cname}\s*\(/).each do
+      # a call is cname(...) or, through the parameter's own dereference, (*cname)(...)
+      body.to_enum(:scan, /(?:\(\s*\*\s*#{cname}\s*\)|(?<![#{WC}.>])#{cname})\s*\(/).each do
         cm = Regexp.last_match
         rec[:calls] << [d['brace'] + cm.end(0) - 1, hname, rel]
       end
