@@ -381,6 +381,13 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_cstr_inum/NOT_BUILDABLE"
 check grep -qF 'return mrb_str_to_inum(mrb, mrb_str_new_cstr(mrb, "12"), 10, 0);' "$work/api_cstr_inum/src/api_cstr_inum.c"
 
+# 2zk. global variables named by a string literal (api_map.json batch N6): the name is interned with mrb_intern_cstr
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gv_name tools/cext2mrbgem/fixtures/api_gv_name/ext/api_gv_name "$work/api_gv_name" > "$work/api_gv_name.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gv_name/NOT_BUILDABLE"
+check grep -qF 'return mrb_gv_get(mrb, mrb_intern_cstr(mrb, "$api_count"));' "$work/api_gv_name/src/api_gv_name.c"
+check grep -qF 'mrb_gv_set(mrb, mrb_intern_cstr(mrb, "$api_count"), v);' "$work/api_gv_name/src/api_gv_name.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -476,7 +483,7 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 5
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 4
 check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"

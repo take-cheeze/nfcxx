@@ -1216,6 +1216,22 @@
         "suffix": ")"
       },
       "caveat": "the C string becomes a String (mrb_str_new_cstr) and mrb_str_to_inum parses it; base and badcheck keep their order; the result is an Integer VALUE"
+    },
+    "rb_gv_get": {
+      "kind": "call",
+      "mruby": "mrb_gv_get",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "intern_arg": 0,
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby"
+    },
+    "rb_gv_set": {
+      "kind": "call",
+      "mruby": "mrb_gv_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "intern_arg": 0,
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby"
     }
   },
   "special_arg_positions_class_only": {

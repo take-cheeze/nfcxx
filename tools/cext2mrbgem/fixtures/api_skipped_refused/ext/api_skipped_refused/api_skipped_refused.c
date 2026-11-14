@@ -5,6 +5,7 @@
  * rb_intern3 (takes an encoding),
  * rb_bug (variadic format), StringValue (takes an lvalue it rewrites). */
 static VALUE mApiSkip;
+static const char *gv_name = "$x";
 
 static VALUE api_sub(VALUE self, VALUE s) {
     return rb_str_subseq(s, 0, 1);
@@ -17,7 +18,7 @@ static VALUE api_iv(VALUE self, VALUE o) {
 }
 
 static VALUE api_gv(VALUE self) {
-    return rb_gv_get("$x");
+    return rb_gv_get(gv_name);
 }
 
 static VALUE api_sym(VALUE self, VALUE s) {
