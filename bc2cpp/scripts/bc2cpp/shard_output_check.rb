@@ -143,8 +143,121 @@ else
   puts '  SKIP: no C++ compiler'
 end
 
+# The shard tier flags (docs/notes/bc2cpp-shard-tiers.md): a GCC optimize pragma on the shards other than the main
+# file, and the hot owners kept in the main file. The flags are --shard-cold-opt= and --shard-hot-owners=.
+TIER_PRELUDE = <<~'CPP'
+  #include <stdio.h>
+  static int tier_counter = 0;
+  static int tier_bump(void) { return ++tier_counter; }
+CPP
+
+def tier_program_text
+  text = String.new(TIER_PRELUDE)
+  [['A', 'hot_a', 'return x * 3 + tier_bump();'], ['B', 'hot_b', 'return x * 5 + tier_bump();'],
+   ['C', 'cold_c', 'return x - 7 + tier_bump();'], ['D', 'cold_d', 'return (x ^ 11) + tier_bump();']].each do |owner, name, body|
+    text << ShardOutput.unit_mark(owner) << "int #{name}(int x) { #{body} }\n"
+  end
+  text << ShardOutput::HOOKS_MARK << "/* hooks */\n"
+end
+
+# BC2CPP_SHARD_MIN_BYTES (the existing knob) lowers the threshold so the small fixture splits.
+def tier_split(tier, hot, shards = 3)
+  tier_with_env('BC2CPP_SHARD_MIN_BYTES' => '1') { ShardOutput.split(tier_program_text, 'chk', shards, tier, hot) }
+end
+
+def tier_with_env(pairs)
+  saved = pairs.keys.to_h { |k| [k, ENV.fetch(k, nil)] }
+  pairs.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  yield
+ensure
+  saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+end
+
+puts '-- tiers'
+Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
+  hot_file = File.join(dir, 'hot.txt')
+  File.write(hot_file, "# profile hot owners\nA\nB\n")
+  hot_set = Set.new(%w[A B])
+
+  plain_main, plain_files = tier_split(nil, nil)
+  suite.check('without a tier there is no pragma', plain_files.none? { |t| t.include?('#pragma GCC optimize') })
+  ignored_main, ignored_files = tier_split(nil, hot_set)
+  suite.check('without a tier the hot owners are ignored',
+              ignored_main == plain_main && ignored_files == plain_files)
+
+  argv = ['x.rb', '--shard-cold-opt=O1', "--shard-hot-owners=#{hot_file}", 'y.rb']
+  flags = ShardOutput.take_argv!(argv)
+  suite.check('the flags come out of argv and the sources stay',
+              argv == ['x.rb', 'y.rb'] && flags[:tier] == 'O1' && flags[:hot] == hot_set)
+  suite.check('no flags give no tier and no hot owners',
+              ShardOutput.take_argv!(['x.rb']) == { tier: nil, hot: Set.new })
+
+  refused = lambda do |args|
+    ShardOutput.take_argv!(args)
+    false
+  rescue ShardOutput::Error
+    true
+  end
+  suite.check('a hot-owners flag without a cold level is refused', refused.call(["--shard-hot-owners=#{hot_file}"]))
+  suite.check('a bad cold level is refused', refused.call(['--shard-cold-opt=fast']))
+
+  tier_main, tier_files = tier_split('O1', nil)
+  nonempty = tier_files.select { |t| t.include?('#define BC2CPP_SHARD_PRELUDE_ONLY') }
+  guarded = "#if defined(__GNUC__) && !defined(__clang__)\n#pragma GCC optimize (\"O1\")\n#endif\n"
+  suite.check('a tier puts the GCC-only pragma at the top of every non-empty shard',
+              !nonempty.empty? && nonempty.all? { |t| t.start_with?(guarded) })
+  suite.check('the main file gets no pragma', !tier_main.include?('#pragma GCC optimize'))
+
+  hot_main, hot_files = tier_split('O1', hot_set)
+  suite.check('hot owners are defined in the main file',
+              hot_main.include?('int hot_a(') && hot_main.include?('int hot_b('))
+  suite.check('no shard defines a hot owner',
+              hot_files.none? { |t| t.include?('int hot_a(') || t.include?('int hot_b(') })
+  suite.check('cold owners are in the shards',
+              hot_files.any? { |t| t.include?('int cold_c(') } && hot_files.any? { |t| t.include?('int cold_d(') })
+  suite.check('the main file keeps the hooks', hot_main.include?('/* hooks */'))
+
+  if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
+    tiered = File.join(dir, 'tiered')
+    untiered = File.join(dir, 'untiered')
+    [[tiered, hot_main, hot_files], [untiered, plain_main, plain_files]].each do |d, main_text, files|
+      FileUtils.mkdir_p(d)
+      File.write(File.join(d, 'chk_gen.cpp'), main_text)
+      files.each_with_index { |t, i| File.write(ShardOutput.shard_path(d, 'chk', i + 1), t) }
+      File.write(File.join(d, 'driver.cpp'), <<~'CPP')
+        #include <cstdio>
+        int hot_a(int); int hot_b(int); int cold_c(int); int cold_d(int);
+        int main() {
+          int a = hot_a(2); int b = hot_b(2); int c = cold_c(2); int d = cold_d(2);
+          std::printf("%d %d %d %d\n", a, b, c, d);
+          return 0;
+        }
+      CPP
+    end
+    run_split = lambda do |d, files|
+      sources = [File.join(d, 'chk_gen.cpp'), *files.each_index.map { |i| ShardOutput.shard_path(d, 'chk', i + 1) },
+                 File.join(d, 'driver.cpp')]
+      bin = File.join(d, 'prog')
+      _out, err, status = Bc2cppCxx.capture3('-std=c++17', '-O2', '-Wall', '-Werror', *sources, '-o', bin)
+      puts err.lines.first(20).join unless status.success?
+      status.success? ? bin : nil
+    end
+    tiered_bin = run_split.call(tiered, hot_files)
+    untiered_bin = run_split.call(untiered, plain_files)
+    suite.check('the tiered split compiles warning-free at -O2 and links', !tiered_bin.nil?)
+    if tiered_bin && untiered_bin
+      tiered_out, = Open3.capture2(tiered_bin)
+      untiered_out, = Open3.capture2(untiered_bin)
+      suite.check("the tiered program prints what the untiered one prints (#{tiered_out.strip})",
+                  tiered_out == untiered_out && !tiered_out.strip.empty?)
+    end
+  else
+    puts '  SKIP: no C++ compiler'
+  end
+end
+
 puts '-- generated code'
-mrbc = ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) }
+mrbc =ENV['MRBC'] || ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).map { |d| File.join(d, 'mrbc') }.find { |p| File.executable?(p) }
 if mrbc.nil?
   puts '  SKIP: no host mrbc (set MRBC)'
   suite.finish!

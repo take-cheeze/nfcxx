@@ -32,6 +32,7 @@
 #endif
 #ifdef TEST_GO
 #include <csignal>
+#include <cstdlib>
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -1530,20 +1531,43 @@ struct Late {  // registered after a function that mentions it (go_tests)
 static const char* g_self = "/proc/self/exe";  // this binary, for the child process of the goroutine test (main sets it from argv[0])
 
 // Runs `go_child` (below) in a child process of this binary and returns its exit status (-1, -2: the spawn or the wait failed,
-// 128 + the signal when a signal ended it). Its stderr goes to /dev/null: the Go runtime prints a fatal panic and a trace there.
+// 128 + the signal when a signal ended it). The child's stderr goes to a temporary file: the Go runtime prints a fatal panic and
+// a trace there, and a sanitizer reports there too. When the child does not exit with 0 (the afterfunc mode exits by design),
+// the last lines of that file are printed, so a failed check says what the child died of.
 static int go_child_status(const char* mode) {
+  char errpath[] = "/tmp/nfcpoly-go-child-XXXXXX";
+  int errfd = mkstemp(errpath);
+  if (errfd < 0) return -1;
   pid_t pid = 0;
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
-  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_adddup2(&fa, errfd, 2);
   char arg0[] = "host", arg1[] = "--go-child";
   char* argv[] = {arg0, arg1, const_cast<char*>(mode), nullptr};
   int rc = posix_spawn(&pid, g_self, &fa, nullptr, argv, environ);
   posix_spawn_file_actions_destroy(&fa);
-  if (rc != 0) return -1;
+  close(errfd);
+  if (rc != 0) {
+    unlink(errpath);
+    return -1;
+  }
   int st = 0;
-  if (waitpid(pid, &st, 0) != pid) return -2;
-  return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+  if (waitpid(pid, &st, 0) != pid) {
+    unlink(errpath);
+    return -2;
+  }
+  const int status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+  if (status != 0 && std::string(mode) != "afterfunc") {
+    std::printf("  go child \"%s\" exited with %d; its stderr (last lines):\n", mode, status);
+    std::ifstream in(errpath);
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);) lines.push_back(line);
+    const size_t from = lines.size() > 40 ? lines.size() - 40 : 0;
+    for (size_t i = from; i < lines.size(); i++) std::printf("    %s\n", lines[i].c_str());
+    if (lines.empty()) std::printf("    (no output)\n");
+  }
+  unlink(errpath);
+  return status;
 }
 
 static void go_tests() {

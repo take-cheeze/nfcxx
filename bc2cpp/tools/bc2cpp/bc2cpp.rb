@@ -224,6 +224,8 @@ BC2CPP_MAIN = lambda do
   # --annotated keeps the generated C++'s `//` proof and dispatch comments (the checks that read them pass it);
   # without it they are stripped from stdout, the only default.
   annotated = !ARGV.delete(ANNOTATED_FLAG).nil?
+  # --shard-cold-opt=LEVEL and --shard-hot-owners=FILE (shard_output.rb): the shard tier, taken out of ARGV here.
+  shard_tier = ShardOutput.take_argv!(ARGV)
   type_check_only = ENV['BC2CPP_TYPE_CHECK_ONLY'] == '1'
   abort 'bc2cpp: --type-check-variants requires report-only mode' if type_check_variants && !type_check_only
   if type_check_only && ENV['BC2CPP_TYPE_FACTS'].to_s.empty?
@@ -1590,7 +1592,7 @@ BC2CPP_MAIN = lambda do
     (1...shards).each { |k| File.write(ShardOutput.shard_path(out_dir, symbol, k), ShardOutput.empty_shard(symbol, k, shards)) }
     shards = 1
   end
-  ShardOutput.capture_stdout(symbol, out_dir, shards) if shards > 1
+  ShardOutput.capture_stdout(symbol, out_dir, shards, shard_tier[:tier], shard_tier[:hot]) if shards > 1
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated

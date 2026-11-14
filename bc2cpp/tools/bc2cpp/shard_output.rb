@@ -47,6 +47,45 @@ module ShardOutput
     n
   end
 
+  # The shard tier (docs/notes/bc2cpp-shard-tiers.md), set by flags on the bc2cpp command line:
+  #   --shard-cold-opt=LEVEL  the shards other than the main file are compiled at this optimization level (a GCC
+  #                           `#pragma GCC optimize` at the top of each; GCC only, other compilers ignore it);
+  #   --shard-hot-owners=FILE owners (one per line, `#` comments) whose methods stay in the main file, which keeps the
+  #                           build's own flags. Needs --shard-cold-opt. The list is the profile's, supplied by the caller.
+  COLD_OPT_FLAG = '--shard-cold-opt='
+  HOT_OWNERS_FLAG = '--shard-hot-owners='
+  COLD_OPT = /\AO[0-3sz]\z/
+
+  # Takes the tier flags out of argv (in place) and returns { tier: level or nil, hot: Set of owners }.
+  def take_argv!(argv)
+    tier = nil
+    hot_path = nil
+    argv.dup.each do |arg|
+      if arg.start_with?(COLD_OPT_FLAG)
+        tier = arg.delete_prefix(COLD_OPT_FLAG)
+        argv.delete(arg)
+      elsif arg.start_with?(HOT_OWNERS_FLAG)
+        hot_path = arg.delete_prefix(HOT_OWNERS_FLAG)
+        argv.delete(arg)
+      end
+    end
+    tier = valid_tier(tier) if tier
+    raise Error, "#{HOT_OWNERS_FLAG.chomp('=')} needs #{COLD_OPT_FLAG.chomp('=')}" if hot_path && tier.nil?
+
+    { tier: tier, hot: hot_path ? owners_file(hot_path) : Set.new }
+  end
+
+  def valid_tier(level)
+    raise Error, "#{COLD_OPT_FLAG.chomp('=')} must be O0, O1, O2, O3, Os or Oz, got #{level.inspect}" unless level =~ COLD_OPT
+
+    level
+  end
+
+  def owners_file(path)
+    names = File.read(path).split("\n").map(&:strip)
+    names.reject { |name| name.empty? || name[0] == '#' }.to_set
+  end
+
   def unit_mark(owner)
     "#{UNIT_MARK}#{owner} */\n"
   end
@@ -56,7 +95,7 @@ module ShardOutput
   end
 
   # Register before every other stdout rewriter: at_exit runs last-in first-out, so this splits their final text.
-  def capture_stdout(symbol, out_dir, shards)
+  def capture_stdout(symbol, out_dir, shards, tier = nil, hot = nil)
     original = $stdout
     buffer = StringIO.new
     $stdout = buffer
@@ -64,22 +103,25 @@ module ShardOutput
       $stdout = original
       next if $!
 
-      main, files = split(buffer.string, symbol, shards)
+      main, files = split(buffer.string, symbol, shards, tier, hot)
       files.each_with_index { |text, i| File.write(shard_path(out_dir, symbol, i + 1), text) }
       original.write(main)
     end
   end
 
   # [main text, the texts of shards 1...shards-1].
-  def split(text, symbol, shards)
+  def split(text, symbol, shards, tier = nil, hot = nil)
+    tier = valid_tier(tier) if tier
+    # Owners are kept in the main file only under a tier; without one the split is the default.
+    hot = tier ? (hot || Set.new) : Set.new
     prelude, units, hooks = sections(text)
-    groups = assign(units, shards)
+    groups = assign(units, shards, hot)
     if groups.count { |g| !g.empty? } <= 1
       plain = prelude + units.map { |u| u[:code] }.join + hooks
       return [plain, Array.new(shards - 1) { |i| empty_shard(symbol, i + 1, shards) }]
     end
 
-    rewrite(symbol, shards, prelude, groups, hooks)
+    rewrite(symbol, shards, prelude, groups, hooks, tier)
   end
 
   def empty_shard(symbol, index, shards)
@@ -101,7 +143,7 @@ module ShardOutput
 
   # An owner's methods stay together (they call each other most); owners go largest first onto the lightest shard.
   # `shards` lists of units, each in print order.
-  def assign(units, shards)
+  def assign(units, shards, hot = Set.new)
     by_owner = units.each_with_index.group_by { |u, _| u[:owner] }
     size = ->(list) { list.sum { |u, _| u[:code].bytesize } }
     total = units.sum { |u| u[:code].bytesize }
@@ -109,7 +151,13 @@ module ShardOutput
     wanted = [[shards, by_owner.size, (total / min_bytes.to_f).ceil].min, 1].max
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
-    by_owner.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
+    # Hot owners all go to the main file (shard 0), before the cold ones are spread over the lightest shards.
+    hot_part, cold_part = by_owner.partition { |owner, _| hot.include?(owner) }
+    hot_part.each do |_, list|
+      loads[0] += size.call(list)
+      placed[0].concat(list)
+    end
+    cold_part.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
       i = loads.index(loads.min)
       loads[i] += size.call(list)
       placed[i].concat(list)
@@ -117,7 +165,7 @@ module ShardOutput
     placed.map { |list| list.sort_by(&:last).map(&:first) } + Array.new(shards - wanted) { [] }
   end
 
-  def rewrite(symbol, shards, prelude, groups, hooks)
+  def rewrite(symbol, shards, prelude, groups, hooks, tier)
     texts = groups.each_with_index.map { |g, i| g.map { |u| u[:code] }.join + (i.zero? ? hooks : '') }
     items = texts.map { |t| top_level_items(t.lines) }
     defined = {}
@@ -152,7 +200,10 @@ module ShardOutput
     files = bodies.drop(1).each_with_index.map do |body, i|
       next empty_shard(symbol, i + 1, shards) if groups[i + 1].empty?
 
-      "// #{symbol}_gen_shard#{i + 1}.cpp: shard #{i + 1} of #{shards} (docs/bc2cpp-shards.md).\n" \
+      # A pragma before the include covers the prelude and the methods of this translation unit (docs/notes/bc2cpp-shard-tiers.md).
+      # GCC only: clang has no such pragma, and -Wunknown-pragmas under -Werror would fail its build.
+      head = tier ? "#if defined(__GNUC__) && !defined(__clang__)\n#pragma GCC optimize (\"#{tier}\")\n#endif\n" : ''
+      "#{head}// #{symbol}_gen_shard#{i + 1}.cpp: shard #{i + 1} of #{shards} (docs/bc2cpp-shards.md).\n" \
         "#define #{PRELUDE_ONLY}\n#include \"#{symbol}_gen.cpp\"\n#{body}"
     end
     [main, files]

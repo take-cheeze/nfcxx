@@ -19,6 +19,9 @@ require 'tmpdir'
 ROOT = BC2CPP_WORLD_ROOT
 MRUBY = File.join(ROOT, '3rd/mruby')
 PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
+# --shard-cold-opt=LEVEL and --shard-hot-owners=FILE (shard_output.rb): the shard tier, given to the compiled code's bc2cpp run.
+SHARD_TIER_ARGS = ARGV.select { |arg| arg.start_with?('--shard-') }
+ARGV.reject! { |arg| arg.start_with?('--shard-') }
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
@@ -44,7 +47,7 @@ extend OptcarrotRegister
 # BC2CPP_SHARDS (docs/bc2cpp-shards.md): the generated code in this many translation units, compiled in parallel.
 PROBE_SHARDS = ShardOutput.count(ENV.to_h.merge('BC2CPP_SHARDS' => ENV.fetch('BC2CPP_SHARDS', '4')))
 
-def run_bc2cpp(sources, env)
+def run_bc2cpp(sources, env, extra = [])
   # BC2CPP_MRUBY_RUNNER (opt-in): the bc2cpp executable (host-libs/mruby-bc2cpp-runner) generates the code instead of
   # CRuby; unset, the command is the same as before.
   runner = ENV['BC2CPP_MRUBY_RUNNER']
@@ -53,7 +56,7 @@ def run_bc2cpp(sources, env)
              else
                [RbConfig.ruby, File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/bc2cpp.rb')]
              end
-  command = [*launcher, '--annotated', *sources]
+  command = [*launcher, '--annotated', *extra, *sources]
   stdout, stderr, status = Open3.capture3(env, *command)
   raise "bc2cpp failed (#{status.exitstatus}):\n#{stderr[-4000..] || stderr}" unless status.success?
 
@@ -186,7 +189,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # The core bodies are emitted only by a run whose owners cover every core owner (CodeGen#emit_unit_allows?).
   owners |= BC2CPP_CORE_OWNERS unless core_sources.empty?
   compiled_env = scan_env.merge('OUT_DIR' => temp, 'ONLY_OWNERS' => owners.join(','))
-  compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env)
+  compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env, SHARD_TIER_ARGS)
   File.write(File.join(generated_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
   FileUtils.cp(File.join(temp, 'optcarrot_probe_decls.h'), generated_dir)
   # BC2CPP_SHARDS (docs/bc2cpp-shards.md): each further shard is a translation unit of its own, so it goes to src/.
@@ -334,8 +337,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   rake_env['LD'] = rake_env['CC'] || 'cc'
   tasks = %w[verify_optcarrot_world link_optcarrot]
   # -m: without it rake runs every file task one after another and -j has nothing to schedule.
+  build_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   output, status = Open3.capture2e(rake_env, 'rake', '-m', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
+  build_seconds = Process.clock_gettime(Process::CLOCK_MONOTONIC) - build_started
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
+
+  # Compile time of the generated code and the link, for comparing shard tiers (docs/notes/bc2cpp-shard-tiers.md).
+  puts format('sealed build (rake, -j%d): %.2f s', Etc.nprocessors, build_seconds)
 
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
 
