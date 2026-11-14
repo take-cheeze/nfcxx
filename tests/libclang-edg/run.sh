@@ -13,7 +13,7 @@ work=$root/build/libclang-edg/test
 mkdir -p "$work"
 
 [ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-libclang-edg.sh
-scripts/build-libclang-edg.sh >/dev/null
+scripts/build-libclang-edg.rb >/dev/null
 cc=${CC:-cc}
 
 oracle=${LIBCLANG_ORACLE:-}

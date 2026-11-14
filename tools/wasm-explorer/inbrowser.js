@@ -1,6 +1,6 @@
 // The wasm explorer's compile without a server (docs/notes/pathb-wasm-frontend.md): the Path B front end built with
 // Emscripten (cpfe.wasm, PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh) and the mruby interpreter built with it
-// (mruby.wasm, scripts/setup-mruby-wasm.sh) running scripts/llvm-to-pathb.rb and scripts/pathb-wasm-emit.rb. It is
+// (mruby.wasm, scripts/setup-mruby-wasm.rb) running scripts/llvm-to-pathb.rb and scripts/pathb-wasm-emit.rb. It is
 // pipeline.cjs's compile, step for step, for the languages whose front end runs here: C++, C, LLVM IR and the IR (Rust
 // and Go need their compilers, so the server only). The C library and C++ library headers are not here: a program
 // that includes one compiles on the server only. It runs in the page's worker (index.html) and under node

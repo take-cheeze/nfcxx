@@ -8,7 +8,7 @@ bundled onnx and the system protobuf 3.21.12 (their CMake build, which needs ONN
 * `graph_grad_test` (extended by 0001), `qat_graph_builder_test`, `graph_grad_templates_test`: all pass with 0001 applied;
 * `graph_grad_model_test` (new in 0002): passes with 0001 + 0002.
 
-Status at the pin (onnxsim master `21f95fd1`, which `scripts/setup-onnxsim.sh` fetches by commit; the sdist and `scripts/onnxsim/patches/`
+Status at the pin (onnxsim master `21f95fd1`, which `scripts/setup-onnxsim.rb` fetches by commit; the sdist and `scripts/onnxsim/patches/`
 are no longer used): 0001 is upstream as commit `60b3e4e0` ("GraphBuilder: configurable floating-point element type for constants and
 masks") and is in the history of the pin, so our build applies no patch. 0002 is not upstream; our shim `scripts/onnxsim/nfc_onnxsim.cpp`
 does the same job in our tree. No onnxsim source is kept in the repository.

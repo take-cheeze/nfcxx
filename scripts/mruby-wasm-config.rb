@@ -1,4 +1,4 @@
-# Build configuration for scripts/setup-mruby-wasm.sh: the interpreter of scripts/mrb (scripts/mruby-tool-config.rb)
+# Build configuration for scripts/setup-mruby-wasm.rb: the interpreter of scripts/mrb (scripts/mruby-tool-config.rb)
 # built with Emscripten for the browser, so that the wasm explorer's page can run scripts/pathb-wasm-emit.rb itself
 # (docs/notes/pathb-wasm-frontend.md). The gems are the tool's, without the regexp and JSON gems (no script that runs
 # in the page uses them) and the socket and task HALs. The host build only makes mrbc, which compiles mrblib.

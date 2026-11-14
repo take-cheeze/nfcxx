@@ -1,5 +1,5 @@
 // nfcuop::hir::gradients_via_onnxsim: reverse-mode automatic differentiation by onnxsim's ONNX-level autograd
-// (onnxsim at the commit of scripts/setup-onnxsim.sh, graph_grad), not by rules of our own. The sub-graph of the loss is exported with Graph::to_onnx, onnxsim
+// (onnxsim at the commit of scripts/setup-onnxsim.rb, graph_grad), not by rules of our own. The sub-graph of the loss is exported with Graph::to_onnx, onnxsim
 // appends the gradient as ordinary ONNX nodes, and the result is merged back into the same graph (Graph::merge_onnx): the
 // gradients are values of `g` like any other, lowered and evaluated by both back ends and exported next to the loss.
 //
@@ -7,7 +7,7 @@
 //   std::vector<int> d = hir::gradients_via_onnxsim(g, loss, {w1, b1});   // d[k] has the shape and dtype of wrt[k]
 //
 // Two ways to reach onnxsim, tried in this order (docs/notes/uop-autodiff.md):
-//   1. libnfconnxsim.so, built by scripts/setup-onnxsim.sh from onnxsim's C++ sources and loaded with dlopen on first use
+//   1. libnfconnxsim.so, built by scripts/setup-onnxsim.rb from onnxsim's C++ sources and loaded with dlopen on first use
 //      (path: $NFCUOP_ONNXSIM, else build/onnxsim/ relative to the working directory or to this file's repository);
 //   2. the Python package: `$NFCUOP_PYTHON scripts/onnx_grad.py` (default python3; the script: $NFCUOP_ONNX_GRAD or
 //      scripts/onnx_grad.py) as a subprocess with temporary files, which needs `pip install onnx onnxsim==0.8.1`.

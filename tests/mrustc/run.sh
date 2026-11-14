@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A Rust program built by mrustc runs when its C goes through nfcxx's C pipeline (cproc -> QBE, scripts/qbe-cc).
-# The standard library is mrustc's gcc-built one. Needs scripts/setup-mrustc.sh first. See docs/notes/mrustc-frontend.md.
+# The standard library is mrustc's gcc-built one. Needs scripts/setup-mrustc.rb first. See docs/notes/mrustc-frontend.md.
 cd "$(dirname "$0")/../.."
 root=$PWD
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

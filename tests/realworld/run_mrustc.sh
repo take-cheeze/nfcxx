@@ -3,7 +3,7 @@
 # holds a program (src/main.rs), its Cargo.toml and Cargo.lock (the lock pins the versions mrustc compiles, and every entry
 # under [dependencies] is a crate it uses), and expected.txt: what rustc prints for the program. The dependency
 # tree is built by mrustc's minicargo from a `cargo vendor` of the lock, and the program and every crate of its link are
-# compiled by scripts/mrustc-nfcc.sh with MRUSTC_NFCC_CRATES=all. Needs scripts/setup-mrustc.sh, cargo (cargo vendor
+# compiled by scripts/mrustc-nfcc.sh with MRUSTC_NFCC_CRATES=all. Needs scripts/setup-mrustc.rb, cargo (cargo vendor
 # downloads the crates) and network access. With --monomir, the program and reachable generics
 # use Path B and QBE; remaining dependency functions link against mrustc's gcc-built objects.
 #   tests/realworld/run_mrustc.sh [--monomir] [case...]     (default: every case)

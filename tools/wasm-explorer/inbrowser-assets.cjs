@@ -1,5 +1,5 @@
 // The assets of the in-browser compile (inbrowser.js) from this checkout's builds: the front end
-// (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh: build/pathb-wasm), the interpreter (scripts/setup-mruby-wasm.sh:
+// (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh: build/pathb-wasm), the interpreter (scripts/setup-mruby-wasm.rb:
 // build/mruby-wasm), EDG's base directory, the two scripts and the GNU version. load() gives them as inbrowser.js's
 // makeCompiler takes them (under node); write(dir) writes them as the page loads them (build-static.cjs).
 const fs = require("fs");

@@ -56,7 +56,7 @@ float64 model is differentiated in float64. That setter is upstream commit `60b3
 not have it (see [onnxsim-upstream/README.md](onnxsim-upstream/README.md)). Without it the gradients of a float64 model would not even
 type-check, and a mean's `1/N` would be off by 2e-8. (The Python driver converts the emitted constants itself.)
 
-**The build** (`scripts/setup-onnxsim.sh`, about 3 minutes, needs `cmake g++ protobuf-compiler libprotobuf-dev git`): fetches onnxsim
+**The build** (`scripts/setup-onnxsim.rb`, about 3 minutes, needs `cmake g++ protobuf-compiler libprotobuf-dev git`): fetches onnxsim
 at commit `21f95fd13fae374827e6cdd836987eeff32ebfea` (the merge of onnxsim PR #2162, on onnxsim's master) and its onnx submodule at
 `281e5e6accfd6113fd57d819ce47f32a937bb106`, both by commit hash; each fetched commit is checked by `git rev-parse` against its hash, so
 the hash is the pin. No sdist and no patch is applied. It builds onnx, onnxsim's `graph_grad.cpp` and `qat_graph_builder.cpp` and the shim

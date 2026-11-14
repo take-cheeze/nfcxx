@@ -1,5 +1,5 @@
 // A C ABI around onnxsim's C++ reverse-mode differentiator (graph_grad.cpp, qat_graph_builder.cpp), for lib/uop to dlopen
-// (lib/uop/nfcuop_onnxgrad.cpp, docs/notes/uop-autodiff.md). Built by scripts/setup-onnxsim.sh into libnfconnxsim.so with
+// (lib/uop/nfcuop_onnxgrad.cpp, docs/notes/uop-autodiff.md). Built by scripts/setup-onnxsim.rb into libnfconnxsim.so with
 // onnx and protobuf; nothing of this is linked into nfcuop itself.
 //
 // nfc_onnxsim_gradients takes the bytes of a forward ModelProto (the sub-graph of a scalar float loss), the loss and the

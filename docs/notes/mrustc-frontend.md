@@ -25,7 +25,7 @@ the program, and each crate of MRUSTC_NFCC_CRATES (cached as build/mrustc/nfcxx/
 
 `scripts/mrustc-nfcc.sh prog.rs -o prog` builds the program. `MRUSTC_NFCC_CRATES` names the crates to compile through
 nfcxx (`core alloc std`, or `all`); `MRUSTC_NFCC_CORE=1` is `core` alone. A crate is rebuilt when its C file or the
-rewrite scripts are newer than its object. `scripts/setup-mrustc.sh` builds mrustc and the 1.90 standard library into
+rewrite scripts are newer than its object. `scripts/setup-mrustc.rb` builds mrustc and the 1.90 standard library into
 `build/mrustc/src` (pinned commit `2945c54b` on take-cheeze/mrustc branch `nfcxx/mold3-followups`: upstream `d85e86b` plus the
 fixes in that branch's `NFCXX-FIXES.md`, rows 22 to 41 being the ones mold 3 needed, section 7; from the mrustc
 `build-1.90.0.sh` steps, with `MRUSTC_REPO` to override the repository). The census and the rewrites were re-run on this
@@ -101,7 +101,7 @@ The assembly tail and the helpers are ELF and x86-64 only. The driver therefore 
   Each expected output was also produced by mrustc's gcc-built standard library, and checked against Rust's semantics.
   Two results mrustc gets wrong are left out (section 4).
 
-  Needs `scripts/setup-mrustc.sh`.
+  Needs `scripts/setup-mrustc.rb`.
 - Also checked by hand, on the gcc-std build and the all-crates build alike: `std::env::args` sees its arguments (the
   `.init_array` rewrite); stdin is read line by line; `is_x86_feature_detected!` reports `sse2` and `avx2` on this host;
   a panic prints its message and aborts with 134 (mrustc's `panic_abort` default); with `-C panic=unwind`,

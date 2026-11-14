@@ -30,7 +30,7 @@
 #   - tests/uop/test_grad.cpp   reverse-mode autodiff by onnxsim (nfcuop_onnxgrad.hpp, docs/notes/uop-autodiff.md): finite differences in
 #                               float64 (also of the forward operators Gemm, Gather, Erf, Conv, pooling and the normalizations of hir), exact gradients, second derivatives, the operators without a rule, errors, gradients on the C
 #                               backend equal to the interpreter bit for bit; it also writes models (a loss and its gradients) for
-#                               onnx_check.py. Needs onnxsim (build/onnxsim/libnfconnxsim.so from scripts/setup-onnxsim.sh, else python3
+#                               onnx_check.py. Needs onnxsim (build/onnxsim/libnfconnxsim.so from scripts/setup-onnxsim.rb, else python3
 #                               with onnx and onnxsim==0.8.1) and prints SKIP without it
 #   - tests/uop/test_cgen.cpp   C rendering (nfcuop_cgen.hpp): fusion, and generated C equal bit for bit to the interpreter on random
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.

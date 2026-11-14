@@ -9,7 +9,7 @@
 #                                      reads. EDG rejects those lists together with IL lowering.
 #   src/nfcxx-so/                      the same front end and back end again, as position-independent code with
 #                                      EDG_MAIN=nfcxx_edg_main (EDG's callable front end, basics.h) and the entry point
-#                                      be/nfcxx_edg_entry.c: the archive libedgfe-pic.a that scripts/build-libclang-edg.sh
+#                                      be/nfcxx_edg_entry.c: the archive libedgfe-pic.a that scripts/build-libclang-edg.rb
 #                                      links into libclang-edg.so, which then runs the front end in-process.
 # Result: build/libclang-edg/cmake/bin/cpfe (scripts/libclang-cursors runs it; lib/libclang-edg runs that when it is
 # built without the archive) and build/libclang-edg/cmake/src/nfcxx-so/libedgfe-pic.a.

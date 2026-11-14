@@ -9,7 +9,7 @@
 #   - with the real libcudart (CUDA_HOME/lib64): the program needs no libcuda.so.1; without a driver cuInit returns
 #     CUDA_ERROR_NO_DEVICE, with one (nvidia-smi) it succeeds; the same bundled (--bundle-libs), and with
 #     libcudart_static when the toolkit has it (then only glibc is needed).
-# Needs cuda.h and cudaTypedefs.h in CUDA_HOME/include (CUDA 12.5 or later; scripts/fetch-cuda-libs.sh gives them).
+# Needs cuda.h and cudaTypedefs.h in CUDA_HOME/include (CUDA 12.5 or later; scripts/fetch-cuda-libs.rb gives them).
 #   NFCXX_BACKEND=gcc|qbe   (default: both, for the nfcc and nfcxx cases)
 cd "$(dirname "$0")/../../.."
 cuda=${CUDA_HOME:-/usr/local/cuda}

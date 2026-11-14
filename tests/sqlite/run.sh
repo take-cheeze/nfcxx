@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SQLite as a build product (scripts/setup-sqlite.sh) and lib/sqlcache on top of it: tests/sqlite/cache_test.cpp built with
+# SQLite as a build product (scripts/setup-sqlite.rb) and lib/sqlcache on top of it: tests/sqlite/cache_test.cpp built with
 # nfcxx against build/sqlite/<backend>/libsqlite3.a, once per backend, and run.
 #   NFCXX_BACKEND=pathb|qbe|gcc   (default: pathb and gcc)
 cd "$(dirname "$0")/../.."
@@ -9,7 +9,7 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 for be in $backends; do
   lib=build/sqlite/$be/libsqlite3.a
-  [ -f "$lib" ] || { NFCXX_BACKEND=$be scripts/setup-sqlite.sh || { echo "FAIL $be: setup-sqlite"; fail=1; continue; }; }
+  [ -f "$lib" ] || { NFCXX_BACKEND=$be scripts/setup-sqlite.rb || { echo "FAIL $be: setup-sqlite"; fail=1; continue; }; }
   # Links the bundle the way a program does: -L for its directory, -lsqlite3 for the archive, with its MANIFEST checked.
   grep -q '^name: sqlite$' "build/sqlite/$be/MANIFEST" || { echo "FAIL $be: no MANIFEST in the bundle"; fail=1; continue; }
   if ! out=$(NFCXX_BACKEND=$be ./nfcxx tests/sqlite/cache_test.cpp lib/sqlcache/sqlcache.cpp -Ibuild/sqlite/$be -Lbuild/sqlite/$be -lsqlite3 -o "$tmp/cache-$be" 2>&1); then

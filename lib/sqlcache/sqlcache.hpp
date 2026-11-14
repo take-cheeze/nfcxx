@@ -1,5 +1,5 @@
 // sqlcache: a string-keyed cache kept in one SQLite file. It backs run-time caches of tools built by nfcxx
-// (scripts/setup-sqlite.sh builds SQLite; tests/sqlite/run.sh covers the library).
+// (scripts/setup-sqlite.rb builds SQLite; tests/sqlite/run.sh covers the library).
 //
 //   nfcxx::SqlCache cache("cache.db");
 //   cache.put("key", "value", /*ttl_seconds=*/3600);   // 0 keeps the entry until erase()

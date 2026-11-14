@@ -13,7 +13,7 @@ tests/mrustc-borrow/run.sh
 The pipeline is:
 
 1. **mrustc** with `MRUSTC_MMIR_SCOPE_END=1` and `-Z disable-mir-opt`, writing the monomir dump.
-   The pinned mrustc (`scripts/setup-mrustc.sh`, branch `nfcxx/borrowck-scope-end`) has two changes
+   The pinned mrustc (`scripts/setup-mrustc.rb`, branch `nfcxx/borrowck-scope-end`) has two changes
    for it. The MIR builder emits `ScopeEnd` statements again (their emission was disabled), and the
    dump prints them as `SCOPEEND var3 var4;`: the points where locals' storage ends. And
    `-Z disable-mir-opt` also turns off the inlining and optimisation after monomorphisation, which

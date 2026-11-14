@@ -4,7 +4,7 @@ Status: **builds and matches the native front end.** `PATHB_EMSCRIPTEN=1 scripts
 harness (EDG with `be/nfcxx_be.c` and `be/nfcxx_ir.c`, `docs/notes/pathb-stage1.md`) as a WebAssembly module. On the
 151 C and C++ files of `tests/pathb-wasm-frontend/run.sh` its IR is byte for byte the native front end's on 149, and
 the other two are known differences where the browser build is the correct one (below). With mruby built with
-Emscripten too (`scripts/setup-mruby-wasm.sh`, for the emitter), the wasm explorer's static site compiles C, C++, LLVM
+Emscripten too (`scripts/setup-mruby-wasm.rb`, for the emitter), the wasm explorer's static site compiles C, C++, LLVM
 IR and the IR in the page, with the server's result byte for byte (`docs/notes/wasm-explorer.md`, "Static build").
 
 ## Build and run
@@ -70,7 +70,7 @@ wasm32, which every browser runs. SoftFloat is needed either way: wasm64's `long
 
 ## mruby for the browser
 
-`scripts/setup-mruby-wasm.sh` builds the interpreter of `scripts/mrb` with Emscripten (mruby's own `emscripten`
+`scripts/setup-mruby-wasm.rb` builds the interpreter of `scripts/mrb` with Emscripten (mruby's own `emscripten`
 toolchain, wasm exceptions for its `setjmp`), `createMruby` like `createCpfe`: `build/mruby-wasm/out/wasm/bin/mruby.js`
 and `mruby.wasm` (0.9 MB, 0.3 MB gzip). Its `Integer` is 64-bit (`MRB_INT64`, with `MRB_NO_BOXING`, which mruby needs
 for it on a 32-bit target): mruby's default on wasm32 is 32-bit, and with it the emitter's output changed (a LEB128

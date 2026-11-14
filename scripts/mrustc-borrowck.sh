@@ -22,7 +22,7 @@ for a in "$@"; do
 done
 [ -n "$src" ] || { echo "usage: scripts/mrustc-borrowck.sh prog.rs [mrustc flags...]" >&2; exit 4; }
 case $src in /*) ;; *) src=$start/$src ;; esac
-[ -x "$mrustc" ] && [ -f "$std/libstd.rlib.o" ] || { echo "mrustc-borrowck: no mrustc or standard library; run scripts/setup-mrustc.sh" >&2; exit 4; }
+[ -x "$mrustc" ] && [ -f "$std/libstd.rlib.o" ] || { echo "mrustc-borrowck: no mrustc or standard library; run scripts/setup-mrustc.rb" >&2; exit 4; }
 
 if [ -n "${MRUSTC_BORROWCK_KEEP:-}" ]; then
   tmp=$MRUSTC_BORROWCK_KEEP; mkdir -p "$tmp"

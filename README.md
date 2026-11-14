@@ -45,10 +45,10 @@ scripts/setup-pathb.sh    # Path B harness (own back end on EDG's IL); then test
 ./nfcxx -c a.cpp -o a.o; ./nfcxx a.o b.o -o x # separate compilation (docs/notes/multi-tu.md)
 tests/multi-tu/run.sh     # several translation units sharing libstdc++ templates (both backends)
 tests/ehshim/run.sh       # exceptions thrown by libstdc++ and std::exception_ptr (lib/ehshim, docs/notes/eh-shim.md)
-scripts/setup-sqlite.sh    # SQLite 3.54.1 built with nfcc into build/sqlite (docs/notes/sqlite.md)
+scripts/setup-sqlite.rb    # SQLite 3.54.1 built with nfcc into build/sqlite (docs/notes/sqlite.md)
 tests/sqlite/run.sh       # lib/sqlcache (a TTL key-value cache on SQLite) built with nfcxx on both backends
 scripts/setup-libclang-edg.sh # libclang's C API on the EDG front end: cpfe that lists declarations (docs/notes/libclang-edg.md)
-scripts/build-libclang-edg.sh # build/libclang-edg/libclang-edg.so, a libclang-compatible shared library
+scripts/build-libclang-edg.rb # build/libclang-edg/libclang-edg.so, a libclang-compatible shared library
 tests/libclang-edg/run.sh # the library against the system libclang, through the C API and clang.cindex
 ```
 

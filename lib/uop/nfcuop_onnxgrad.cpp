@@ -97,7 +97,7 @@ Library& library() {
       l.path = p;
       return l;
     }
-    l.why = "libnfconnxsim.so not found (looked for " + tried + "; build it with scripts/setup-onnxsim.sh or set NFCUOP_ONNXSIM)";
+    l.why = "libnfconnxsim.so not found (looked for " + tried + "; build it with scripts/setup-onnxsim.rb or set NFCUOP_ONNXSIM)";
     return l;
   }();
   return lib;

@@ -12,7 +12,7 @@ const byExt = { ".cpp": "c++", ".c": "c", ".ll": "llvm", ".ir": "ir" };
 async function main() {
   if (!assets.available()) {
     console.log("skip: the browser tools are not built " +
-      "(PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, scripts/setup-mruby-wasm.sh)");
+      "(PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, scripts/setup-mruby-wasm.rb)");
     return;
   }
   const browser = makeCompiler(assets.load());

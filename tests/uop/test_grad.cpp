@@ -632,7 +632,7 @@ static int missing_child(const char* mode) {
   std::printf("%s\n", msg.c_str());
   bool ok = msg.find("onnxsim is not available") != std::string::npos && msg.find("docs/notes/uop-autodiff.md") != std::string::npos;
   if (std::strcmp(mode, "python") == 0) ok = ok && msg.find("python is not available") != std::string::npos;
-  if (std::strcmp(mode, "library") == 0) ok = ok && msg.find("/nonexistent/libnfconnxsim.so") != std::string::npos && msg.find("scripts/setup-onnxsim.sh") != std::string::npos;
+  if (std::strcmp(mode, "library") == 0) ok = ok && msg.find("/nonexistent/libnfconnxsim.so") != std::string::npos && msg.find("scripts/setup-onnxsim.rb") != std::string::npos;
   if (std::strcmp(mode, "scriptless") == 0) ok = ok && msg.find("scripts/onnx_grad.py not found") != std::string::npos;
   return ok ? 0 : 1;
 }

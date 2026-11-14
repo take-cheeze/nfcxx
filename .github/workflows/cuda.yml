@@ -2,7 +2,7 @@ name: CUDA
 
 # CUDA library checks (docs/notes/gpu.md): a .cu file that includes cuBLAS and cuDNN is compiled through nfcxx and
 # nfcxx-cuda and linked with -lcublas -lcudnn -lcudart (tests/cuda/libs/run.sh). The libraries come from NVIDIA's
-# PyPI wheels (scripts/fetch-cuda-libs.sh); and the driver API through cudart (tests/cuda/driver/run.sh,
+# PyPI wheels (scripts/fetch-cuda-libs.rb); and the driver API through cudart (tests/cuda/driver/run.sh,
 # docs/notes/cuda-driver.md). Nothing runs on a GPU. Runs only when a change can affect the CUDA path:
 # the CUDA sources, the rewriters, the device pass and its harness, the driver, or the workflow itself.
 # Runs on demand too (workflow_dispatch).
@@ -17,7 +17,7 @@ on:
       - "tools/pathb-ptx-emit/**"
       - "scripts/pathb-*"
       - "scripts/setup-pathb.sh"
-      - "scripts/fetch-cuda-libs.sh"
+      - "scripts/fetch-cuda-libs.rb"
       - "scripts/fetch-cudart-wheel.sh"
       - "scripts/cuda-driver-shim"
       - "scripts/cuda-driver-wrap.sh"
@@ -39,7 +39,7 @@ on:
       - "tools/pathb-ptx-emit/**"
       - "scripts/pathb-*"
       - "scripts/setup-pathb.sh"
-      - "scripts/fetch-cuda-libs.sh"
+      - "scripts/fetch-cuda-libs.rb"
       - "scripts/fetch-cudart-wheel.sh"
       - "scripts/cuda-driver-shim"
       - "scripts/cuda-driver-wrap.sh"
@@ -86,7 +86,7 @@ jobs:
 
       - name: Fetch the CUDA libraries (cudart, cccl, nvcc's ptxas and headers, cuBLAS, cuDNN)
         run: |
-          home=$(scripts/fetch-cuda-libs.sh "$RUNNER_TEMP/cuda-libs" | sed -n 's/^cuda-home: //p')
+          home=$(scripts/fetch-cuda-libs.rb "$RUNNER_TEMP/cuda-libs" | sed -n 's/^cuda-home: //p')
           echo "CUDA_HOME=$home" >> "$GITHUB_ENV"
           echo "NFCXX_PTXAS=$home/bin/ptxas" >> "$GITHUB_ENV"
 

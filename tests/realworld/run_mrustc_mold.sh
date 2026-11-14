@@ -2,7 +2,7 @@
 # mold 3 (the Rust linker, rui314/mold v3.0.0) built by mrustc's minicargo, then used as the linker of a C program.
 # minicargo builds mold-cli for x86_64 only (`--no-default-features --features x86_64`) from a `cargo vendor` of mold's
 # lock file, every crate's C through gcc (mrustc's own backend). The binary must report its version and link a program
-# that prints the expected output. Needs scripts/setup-mrustc.sh, cargo (cargo vendor) and network access; a cold run
+# that prints the expected output. Needs scripts/setup-mrustc.rb, cargo (cargo vendor) and network access; a cold run
 # takes about an hour on 4 cores (mold's two crates are most of it). docs/notes/mrustc-frontend.md, "mold 3".
 # With --pipeline, mold is then built again with every crate through nfcxx's pipeline (scripts/mrustc-nfcc.sh, cproc
 # and QBE, the inline asm outlined; about 7 minutes more, needs scripts/setup-qbe.sh),

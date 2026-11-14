@@ -151,7 +151,7 @@ jobs:
           done
 
       # tests/uop/run.sh differentiates with onnxsim and checks models with onnx and onnxruntime (docs/notes/uop-autodiff.md); without
-      # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
+      # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.rb builds onnxsim 0.8.1's sources, pinned
       # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
       - name: Python test dependencies (onnx, onnxruntime, numpy, onnxsim)
         if: matrix.onnx
@@ -167,11 +167,11 @@ jobs:
           path: |
             build/onnxsim/libnfconnxsim.so
             build/onnxsim/built-*
-          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
+          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.rb', 'scripts/onnxsim/**') }}
 
       - name: Build libnfconnxsim.so
         if: matrix.onnx && steps.onnxsim.outputs.cache-hit != 'true'
-        run: scripts/setup-onnxsim.sh
+        run: scripts/setup-onnxsim.rb
 
       # The nfcpoly and nfcuop test programs. tests/poly/run.sh and tests/uop/run.sh keep each program they compile in
       # TEST_BIN_CACHE, named by a hash of its command line, and run it on every run. The key holds the sources those
@@ -683,7 +683,7 @@ jobs:
             - "be/nfcxx_*.c"
             - "scripts/nfcxx-*"
             - "scripts/setup-libclang-edg.sh"
-            - "scripts/build-libclang-edg.sh"
+            - "scripts/build-libclang-edg.rb"
             - "scripts/setup-edg.sh"
             # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
             # of EDG or QBE, or a change to their setup, must re-run the parity check.
@@ -1011,7 +1011,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/libclang-edg
-          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.rb', 'scripts/setup-edg.sh') }}
 
       - name: Build the AST front end
         if: steps.libclang-edg.outputs.cache-hit != 'true'

@@ -123,14 +123,14 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-wasm
-          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
+          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.rb', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
 
       - name: Build the in-browser compiler
         if: steps.pathbwasm.outputs.cache-hit != 'true' || steps.mrubywasm.outputs.cache-hit != 'true'
         run: |
           source build/emsdk/emsdk_env.sh
           [ "${{ steps.pathbwasm.outputs.cache-hit }}" = true ] || PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh
-          [ "${{ steps.mrubywasm.outputs.cache-hit }}" = true ] || scripts/setup-mruby-wasm.sh
+          [ "${{ steps.mrubywasm.outputs.cache-hit }}" = true ] || scripts/setup-mruby-wasm.rb
 
       - name: Check the in-browser front end against the native one
         run: tests/pathb-wasm-frontend/run.sh

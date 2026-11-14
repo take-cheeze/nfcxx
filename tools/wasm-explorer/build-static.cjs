@@ -80,7 +80,7 @@ async function main() {
     const bytes = inbrowser.write(path.join(out, "inbrowser"));
     console.log(`in-browser compiler: inbrowser/, ${(bytes / 1048576).toFixed(1)} MB`);
   } else if (args.includes("--require-inbrowser")) {
-    throw new Error("the in-browser compiler is not built (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, scripts/setup-mruby-wasm.sh)");
+    throw new Error("the in-browser compiler is not built (PATHB_EMSCRIPTEN=1 scripts/setup-pathb.sh, scripts/setup-mruby-wasm.rb)");
   } else {
     console.log("in-browser compiler: not built, so the site compiles the examples only");
   }
