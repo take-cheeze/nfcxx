@@ -256,6 +256,11 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_define_method(mrb, mrb->string_class, "shout", ccr_shout, MRB_ARGS_NONE());' "$work/api_core_class_reg/src/api_core_class_reg.c"
 check grep -qF 'mrb_define_const(mrb, mrb->string_class, "CCR_LIMIT", mrb_fixnum_value(5));' "$work/api_core_class_reg/src/api_core_class_reg.c"
 
+# 2zzz24. a registration on CLASS_OF(cls) of a tracked class targets its singleton class.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_of_target tools/cext2mrbgem/fixtures/api_class_of_target/ext/api_class_of_target "$work/api_class_of_target" > "$work/api_class_of_target.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_define_private_method(mrb, mrb_class_ptr(mrb_singleton_class(mrb, mrb_obj_value(cCot))), "helper", cot_helper, MRB_ARGS_NONE());' "$work/api_class_of_target/src/api_class_of_target.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

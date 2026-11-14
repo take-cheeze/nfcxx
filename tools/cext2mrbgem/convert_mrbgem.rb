@@ -818,6 +818,7 @@ texts = static_rename(texts)
           else
             (ts, te), (ns, ne), (fs, fe), (as_, ae) = args
             rec['target'] = py_strip(psl(text, ts, te))
+            rec['target_span'] = [ts, te]
             nm = /\A"([^"\\\n]*)"\z/.match(py_strip(psl(text, ns, ne)))
             fm = /\A(?:\(#{SS}VALUE#{SS}\(#{SS}\*#{SS}\)#{SS}\(#{SS}ANYARGS#{SS}\)#{SS}\)#{SS})?([A-Za-z_][#{WC}]*)\z/
                  .match(py_strip(psl(text, fs, fe)))
@@ -3184,8 +3185,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       tgt = rec['target']
+      # CLASS_OF(cls) of a tracked class is its singleton class (CRuby creates it with the class): the target becomes
+      # mrb_class_ptr(mrb_singleton_class(...)); the identifier pass skips the CLASS_OF token inside that edit
+      if (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
+        tgt_new = "mrb_class_ptr(mrb_singleton_class(#{mrb_tok(rel, s)}, mrb_obj_value(#{co[1]})))"
+        ed.add(*rec['target_span'], tgt_new)
+        tgt = tgt_new
       # a tracked class variable, or a CRuby class constant with a mruby class expression (rb_cString -> mrb->string_class)
-      if !@class_vars.include?(tgt) && tgt != 'rb_cObject' && !class_expr_ok.call(tgt)
+      elsif !@class_vars.include?(tgt) && tgt != 'rb_cObject' && !class_expr_ok.call(tgt)
         refuse(rel, s, name, "target #{py_repr(tgt)} is not a tracked class or module variable")
         return
       end
