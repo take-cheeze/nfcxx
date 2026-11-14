@@ -974,6 +974,18 @@
       "template": "mrb_funcall_argv($m, $0, $1, RARRAY_LEN($2), RARRAY_PTR($2))",
       "caveat": "rb_apply(recv, mid, args) calls mid with the elements of the array args, as rb_funcallv does; the array is read, not retained"
     },
+    "rb_reg_new": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
+    "rb_reg_regcomp": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
+    "RREGEXP_PTR": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
