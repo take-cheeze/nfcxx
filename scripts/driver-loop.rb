@@ -1189,7 +1189,8 @@ def main(argv)
   return bundled unless bundled.nil?
   kind, list = cuda_driver_wrap(config[:env], args, "nfcc")
   if kind == :exec
-    $stdout.write("EXEC #{(["#{config[:env].root}/nfcc"] + list).join(' ')}\n")
+    # the driver again with the rewritten arguments (the shim in place of libcuda): the process is replaced, as bash's exec
+    exec_cmd([config[:env].driver || "#{config[:env].root}/nfcc", *list])
     return 0
   end
   args = list
