@@ -1,5 +1,5 @@
 // nfcpoly Go backend: Go source evaluated by yaegi (a Go interpreter written in Go), built into a cgo shared library
-// (lib/poly/go, scripts/setup-poly-go.sh). See docs/notes/poly.md, "Go".
+// (lib/poly/go, scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). See docs/notes/poly.md, "Go".
 //
 // Go is statically typed, so a bound function cannot be a function of "some arguments": the script-side function is
 // written down in Go with the C++ parameter and result types (Callable::signature) and defined in the interpreter as

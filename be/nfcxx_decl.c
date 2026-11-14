@@ -3,7 +3,7 @@ nfcxx_decl.c -- libclang-edg: a back end for the EDG front end that lists the de
 primary source file as tab-separated records, for the libclang shim (lib/libclang-edg).
 
 The front end calls back_end() (cfe.c) once the file-scope IL is complete. This file replaces the C++-generating
-back end's back_end() in cpfe (scripts/setup-libclang-edg.sh). That configuration keeps the source sequence and the
+back end's back_end() in cpfe (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). That configuration keeps the source sequence and the
 class member-declaration lists this file reads, and has no IL lowering.
 
 One record per declaration:

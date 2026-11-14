@@ -18,7 +18,7 @@ require_relative '../../tools/bc2cpp/native_ast_source'
 require_relative '../../tools/bc2cpp/main_roots'
 
 # Every producer available here is checked against the same expectations (clang, and nfcxx once
-# scripts/setup-libclang-edg.sh has built its front end); BC2CPP_AST_PRODUCER=clang|nfcxx limits it to one.
+# scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb has built its front end); BC2CPP_AST_PRODUCER=clang|nfcxx limits it to one.
 producers = ENV['BC2CPP_AST_PRODUCER'] ? [ENV['BC2CPP_AST_PRODUCER']] : NativeAstSource::PRODUCERS
 producers = producers.select { |name| NativeAstSource.available?(name) }
 if producers.empty?

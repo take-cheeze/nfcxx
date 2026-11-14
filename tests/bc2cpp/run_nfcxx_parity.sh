@@ -10,7 +10,7 @@
 #   2. Preprocessor: BaseRbsNative.preprocess + scan with BC2CPP_PREPROCESSOR=clang against =nfcxx (scripts/nfcxx-cpp),
 #      over a fixed list of mruby sources; the registrations found must be identical.
 #   3. cxx_fiber_check.rb with CXX=nfcxx (NFCXX_PARITY_FIBER=1; builds a full-core libmruby, minutes).
-# Needs clang, the EDG front end (scripts/setup-edg.sh), the AST front end (scripts/setup-libclang-edg.sh) and, for step 3,
+# Needs clang, the EDG front end (scripts/setup-edg.sh), the AST front end (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb) and, for step 3,
 # QBE (scripts/setup-qbe.sh). Ruby 4.0 and the root Gemfile's gems.
 #   BC2CPP_RPG_DIR=dir      an existing rpg-maker-clone checkout (tests/bc2cpp/fetch.sh)
 #   NFCXX_PARITY_FIBER=1    also step 3 (default: off)
@@ -23,7 +23,7 @@ export BC2CPP_WORLD_ROOT=$bc2cpp_root LANG=C.UTF-8
 run_ruby() { if command -v bundle >/dev/null 2>&1 && [ -f Gemfile.lock ]; then bundle exec ruby "$@"; else ruby "$@"; fi; }
 
 for need in build/edg/bin/cpfe build/libclang-edg/cmake/bin/cpfe; do
-  [ -x "$need" ] || { echo "FAIL nfcxx_parity: $need is missing (scripts/setup-edg.sh, scripts/setup-libclang-edg.sh)"; exit 1; }
+  [ -x "$need" ] || { echo "FAIL nfcxx_parity: $need is missing (scripts/setup-edg.sh, scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)"; exit 1; }
 done
 command -v clang >/dev/null || { echo "FAIL nfcxx_parity: clang is not installed"; exit 1; }
 

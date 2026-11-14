@@ -12,7 +12,7 @@
 # The usage is `pathb-cil-emit FILE.ir OUT.json` (or `-` for stdin); the fragment goes to OUT.json.
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle; here=$root/tests/mruby/pathb-cil-edge
-[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP pathb-cil-emit: no mruby (scripts/setup-mruby.sh)"; exit 0; }
+[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP pathb-cil-emit: no mruby (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)"; exit 0; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; runs=0; emitted=0; refused=0; errors=0; bytes=0
 

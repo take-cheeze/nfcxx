@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 seeds=${1:-30}; nf=${2:-10}; first=${3:-1}
 lua=${LUA:-}
 if [ -z "$lua" ]; then
-  [ -d build/poly-lua/src ] || { echo "fuzz_tier: no Lua source; run scripts/setup-poly-lua.sh, or pass LUA=/path/to/lua" >&2; exit 1; }
+  [ -d build/poly-lua/src ] || { echo "fuzz_tier: no Lua source; run scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb, or pass LUA=/path/to/lua" >&2; exit 1; }
   mkdir -p build/ast-ref; lua=build/ast-ref/lua
   [ -x "$lua" ] || (cd build/poly-lua/src && cc -O2 -DLUA_USE_LINUX -o ../../ast-ref/lua $(ls l*.c | grep -v -E '^(luac|onelua|ltests)\.c$') -lm -ldl) || exit 1
 fi

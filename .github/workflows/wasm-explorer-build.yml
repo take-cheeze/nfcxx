@@ -66,11 +66,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
 
       - name: Build the mruby interpreter
         if: steps.mruby.outputs.cache-hit != 'true'
-        run: scripts/setup-mruby.sh
+        run: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 
       # The Rust examples: rustc's LLVM IR, which llvm-to-pathb.rb reads, changes between releases, so the version is
       # pinned (the runner's rustup installs it), with llvm-tools for the llvm-dis of the module after LTO.
@@ -123,7 +123,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-wasm
-          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
+          key: mruby-wasm-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/setup-mruby-wasm.sh', 'scripts/mruby-wasm-config.rb', 'scripts/setup-emsdk.sh') }}
 
       - name: Build the in-browser compiler
         if: steps.pathbwasm.outputs.cache-hit != 'true' || steps.mrubywasm.outputs.cache-hit != 'true'

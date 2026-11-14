@@ -182,7 +182,7 @@ class Ffi {
 
   // The functions declared in FILE and in the headers it includes (with their signatures), in the order the front end
   // lists them. CXX reads the file as C++ (overloads come out flagged); the default reads it as C. Reads the front end of the
-  // libclang shim: build with scripts/setup-libclang-edg.sh. Throws Error when the tool cannot be run, CompileError when the
+  // libclang shim: build with scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb. Throws Error when the tool cannot be run, CompileError when the
   // file does not parse.
   std::vector<Declaration> declarations(const std::string& file, Dialect dialect = Dialect::C) const;
 

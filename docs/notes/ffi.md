@@ -84,7 +84,7 @@ for (const nfcffi::Declaration& d : ffi.declarations("/usr/include/string.h")) {
 - **Tests.** `tests/ffi/host.cpp` checks the spellings of `tests/ffi/decls.h` (qualifiers, arrays, function pointers,
   typedef and enum names, `_Bool`, variadic, empty prototypes), the C library's headers (`strlen`, `qsort`, `div`,
   `snprintf`), an overload set in C++ mode, a header that does not parse, and a missing tool. `tests/ffi/run.sh` builds
-  the front end when it is missing (`scripts/setup-libclang-edg.sh`, a few minutes).
+  the front end when it is missing (`scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`, a few minutes).
 
 ## Calls by name (Milestone 3)
 

@@ -577,7 +577,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   upvalues read and written; arguments of every type, with metamethods; recursion, mutual recursion, runaway recursion and a deep
   legal one; chains of calls deeper than the inliner goes; methods, inheritance, receivers of different classes at one site;
   bodies with locals, `if` chains, assignments, no result and several; allocation for the collector). Each `.out` file next to
-  them is the output of a real Lua 5.4.9 (`tests/ast/regen.sh`, built from the pin of `setup-poly-lua.sh`), and
+  them is the output of a real Lua 5.4.9 (`tests/ast/regen.sh`, built from the pin of `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`), and
   `tests/ast/run.sh` requires the same stdout from nfcast on both back ends, with inlining as it is by default, with a site
   rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and with inlining off (`NFCAST_INLINE=0`); and with the tier on
   and every function compiled at its first call (`NFCAST_TIER=sync`, `NFCAST_TIER_THRESHOLD=1`), normally and with early

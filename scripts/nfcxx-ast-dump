@@ -4,7 +4,7 @@
 # per file, on stdout; the front end's diagnostics on stderr, a non-zero status when it rejects the file).
 # Takes clang's spelling of the options: -x c|c++, -std=gnuNN|cNN|gnu++NN|c++NN, -I, -isystem, -D, -U, -include; other
 # options (-W*, -f*, -O*, -m*, -MD, -MF f ...) are ignored. A .c file is C unless -x c++ says otherwise.
-# The front end is build/libclang-edg/cmake/bin/cpfe (scripts/setup-libclang-edg.sh; LIBCLANG_EDG_IN_PROCESS=0 is
+# The front end is build/libclang-edg/cmake/bin/cpfe (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb; LIBCLANG_EDG_IN_PROCESS=0 is
 # enough), run from its base dir with the host's library headers and GNU version (scripts/host-sys.sh), in EDG's gcc / g++
 # dialect: like clang's gnuNN modes, the C library's default feature macros stay on (unlike scripts/libclang-cursors,
 # which defines _POSIX_SOURCE for the declaration listing).
@@ -12,7 +12,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cpfe=${LIBCLANG_EDG_CPFE:-$root/build/libclang-edg/cmake/bin/cpfe}
 base=${LIBCLANG_EDG_BASE:-$root/build/libclang-edg/edg-base}
-[ -x "$cpfe" ] || { echo "nfcxx-ast-dump: front end not built; run scripts/setup-libclang-edg.sh" >&2; exit 2; }
+[ -x "$cpfe" ] || { echo "nfcxx-ast-dump: front end not built; run scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb" >&2; exit 2; }
 source "$root/scripts/host-sys.sh"
 
 opts=(); lang=""; files=(); std=""; depfile=""

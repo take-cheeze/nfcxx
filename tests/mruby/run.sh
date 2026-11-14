@@ -27,7 +27,7 @@ fail=0; pass=0; skip=0
 
 if [ ! -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ]; then
   command -v ruby >/dev/null || { echo "SKIP mruby: ruby (needed to build mruby) not installed"; exit 0; }
-  "$root/scripts/setup-mruby.sh" || { echo "FAIL mruby: setup-mruby.sh failed"; exit 1; }
+  "$root/scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb" || { echo "FAIL mruby: setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb failed"; exit 1; }
 fi
 mrb=$root/scripts/mrb
 

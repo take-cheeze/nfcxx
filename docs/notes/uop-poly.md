@@ -152,13 +152,13 @@ in the `nfcpoly` job on both nfcxx back ends). Everything runs once per language
 ### Running it here
 
 ```
-UOP_HOST=1 tests/uop/run_poly.sh        # host g++, no nfcxx: the interpreters come from scripts/setup-poly-host.sh
+UOP_HOST=1 tests/uop/run_poly.sh        # host g++, no nfcxx: the interpreters come from scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 ```
 
-`scripts/setup-poly-host.sh ruby|lua|js` builds mruby 4.0.0 (C++ exceptions, `scripts/mruby-rt-config.rb`), Lua 5.4.9 (`ldo.c` as
+`scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb ruby|lua|js` builds mruby 4.0.0 (C++ exceptions, `scripts/mruby-rt-config.rb`), Lua 5.4.9 (`ldo.c` as
 C++) and QuickJS-NG v0.17.0 with gcc and g++ under `build/poly-host/` (sources: GitHub's tarball of the pin, else the Ubuntu
 archive's source tarball with a checked sha256; QuickJS file by file from raw.githubusercontent.com at the commit of the tag);
-Go is `scripts/setup-poly-go.sh` (host Go >= 1.24, gcc, the module proxy), Python the system CPython (`python3-config --embed`). A
+Go is `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` (host Go >= 1.24, gcc, the module proxy), Python the system CPython (`python3-config --embed`). A
 language whose engine cannot be built or downloaded is skipped with a `SKIP` line (exit status 3 of the setup script). With nfcxx
 built, `tests/uop/run_poly.sh` uses the engines of `tests/poly/run.sh` for each back end (`NFCXX_BACKEND`, `POLY_LANGS`).
 

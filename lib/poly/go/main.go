@@ -1,5 +1,5 @@
 // libnfcgo: the Go interpreter (yaegi) of nfcpoly's Go backend, as a C shared library. The C API (nfcgo.h) is a handful
-// of functions; lib/poly/nfcpoly_go.cpp is its only client. Built by scripts/setup-poly-go.sh.
+// of functions; lib/poly/nfcpoly_go.cpp is its only client. Built by scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb.
 //
 // A C++ exception must never unwind through Go frames, so no Go function here lets a Go panic out either, and the host
 // catches everything its functions throw before it returns to this library (nfcpoly_go.cpp, host_dispatch).

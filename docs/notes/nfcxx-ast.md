@@ -3,7 +3,7 @@
 bc2cpp reads a translation unit's AST to compute facts about native (C/C++) functions. It used clang's JSON AST dump.
 `scripts/nfcxx-ast-dump` produces the same facts' input from the nfcxx front end (EDG): one JSON document per file with
 the function definitions, complete record definitions and file-scope variables, and every function body's statements and
-expressions. It is the default producer wherever the front end is built (`scripts/setup-libclang-edg.sh`), clang the fallback;
+expressions. It is the default producer wherever the front end is built (`scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`), clang the fallback;
 `BC2CPP_AST_PRODUCER=clang` opts out (`tools/bc2cpp/native_ast_source.rb`).
 
 ## What the consumers need (the information model)
@@ -31,7 +31,7 @@ lowering), so macros are expanded, enumerators keep their names (a folded consta
 and a local's initializer, a separate `stmk_init` in the IL, is merged into its `DeclStmt`. IL artifacts that clang does
 not have are removed: the function-scope block around the body, compiler-generated blocks around `if` / loops, class copy
 constructor calls (a `return` of a class value is its source expression). It ships with the libclang-edg build
-(`scripts/setup-libclang-edg.sh`; `LIBCLANG_EDG_IN_PROCESS=0` is enough).
+(`scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`; `LIBCLANG_EDG_IN_PROCESS=0` is enough).
 
 `scripts/nfcxx-ast-dump [clang options] FILE...` runs that `cpfe` in EDG's gcc / g++ dialect with the host's library headers
 and clang's option spelling (`-x`, `-std=gnuNN`, `-I`, `-isystem`, `-D`, `-U`, `-include`). `tools/bc2cpp/native_ast_source.rb`
@@ -39,7 +39,7 @@ and clang's option spelling (`-x`, `-std=gnuNN`, `-I`, `-isystem`, `-D`, `-U`, `
 
 ## Verifying against clang
 
-    scripts/setup-libclang-edg.sh                    # builds the front end (3rd/edg: git submodule update --init --depth 1 3rd/edg)
+    scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb                    # builds the front end (3rd/edg: git submodule update --init --depth 1 3rd/edg)
     ruby bc2cpp/scripts/bc2cpp/native_ast_returns_check.rb       # the fixture, both producers
     BC2CPP_WORLD_ROOT=.../rpg-maker-clone LANG=C.UTF-8 ruby bc2cpp/scripts/bc2cpp/native_ast_producers_diff.rb --closed=CLOSED_BUILD --world
 

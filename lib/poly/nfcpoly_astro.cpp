@@ -1,5 +1,5 @@
 // nfcpoly "astro" backend: ASTro's luastro (sample/luastro of ko1/astro), a Lua 5.4 subset on a generated AST interpreter, built as
-// a library by scripts/setup-poly-astro.sh around lib/poly/nfcpoly_astro_shim.c. See docs/notes/poly.md and docs/notes/astro.md.
+// a library by scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb around lib/poly/nfcpoly_astro_shim.c. See docs/notes/poly.md and docs/notes/astro.md.
 //
 // What luastro's value model has: nil, booleans, 63-bit integers, doubles, strings, tables, Lua functions and C functions. No
 // userdata, no light userdata, no finalizers, no metatable hook on the global table. So this backend has plain values, arrays

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Generic mrbgem.rake support of scripts/mruby-ninja.rb. A gem whose build step generates a header: its file task runs
 # as a ninja edge and the interpreter gets the value. A gem with a rake call the generator refuses (rule): the
-# generation fails with that message. Needs the mruby checkout of scripts/setup-mruby.sh (MRUBY_SRC, default
+# generation fails with that message. Needs the mruby checkout of scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (MRUBY_SRC, default
 # build/mruby-tool/src); builds into a temporary directory.
 cd "$(dirname "$0")/../.."
 root=$PWD
 src=${MRUBY_SRC:-$root/build/mruby-tool/src}
-[ -d "$src/mrbgems" ] || { echo "run.sh: no mruby checkout at $src (run scripts/setup-mruby.sh)" >&2; exit 2; }
+[ -d "$src/mrbgems" ] || { echo "run.sh: no mruby checkout at $src (run scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 

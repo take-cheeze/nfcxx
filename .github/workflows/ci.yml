@@ -113,14 +113,14 @@ jobs:
           echo "go=$(go env GOVERSION 2>/dev/null)" >> "$GITHUB_OUTPUT"
 
       # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
-      # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
+      # first use. setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb only checks that the executable exists, so the key holds the script, its config and mrb.
       - name: Restore the mruby tool
         uses: actions/cache@v6
         with:
           path: build/mruby-tool/bin/mruby
-          key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
+          key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
 
-      # The nfcpoly interpreters (scripts/setup-poly.sh, setup-poly-lua.sh, setup-poly-js.sh) for one back end. Their inputs are
+      # The nfcpoly interpreters (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb, setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb, setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb) for one back end. Their inputs are
       # the scripts, the patches and the pins in them, the compiler (nfcxx, nfcc, be/, the runtime files of lib/ that the
       # driver adds) and the toolchain.
       - name: Restore the nfcpoly interpreters
@@ -133,13 +133,13 @@ jobs:
             build/poly-js/${{ matrix.backend }}
           key: nfcpoly-interp-${{ runner.os }}-${{ matrix.backend }}-${{ hashFiles('scripts/**', 'tools/weak-symbols/**', 'nfcxx', 'nfcc', 'be/**', 'lib/cuda/**', 'lib/ehshim/**', 'lib/asan/**') }}-${{ steps.key.outputs.toolchain }}-${{ steps.key.outputs.host }}
 
-      # The Go library (scripts/setup-poly-go.sh: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
+      # The Go library (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb: yaegi in a cgo library, built by the host's Go and gcc, shared by both back ends).
       - name: Restore the nfcpoly Go library
         if: matrix.go
         uses: actions/cache@v6
         with:
           path: build/poly-go
-          key: nfcpoly-go-${{ runner.os }}-${{ hashFiles('scripts/setup-poly-go.sh', 'lib/poly/go/**') }}-${{ steps.key.outputs.go }}-${{ steps.key.outputs.host }}
+          key: nfcpoly-go-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'lib/poly/go/**') }}-${{ steps.key.outputs.go }}-${{ steps.key.outputs.host }}
 
       # actions/cache restores files with the modification times they were saved with (GNU tar keeps them), which are older
       # than the checkout just made, and the setup scripts rebuild an output that is not newer than its inputs. The key already
@@ -458,11 +458,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
 
       - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
         if: steps.mruby.outputs.cache-hit != 'true'
-        run: scripts/setup-mruby.sh
+        run: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 
       - name: sccache stats
         if: always()
@@ -538,7 +538,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
           fail-on-cache-miss: true
 
       - name: ${{ matrix.name }}
@@ -682,7 +682,7 @@ jobs:
             - "tests/pathb-borrow/**"
             - "be/nfcxx_*.c"
             - "scripts/nfcxx-*"
-            - "scripts/setup-libclang-edg.sh"
+            - "scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb"
             - "scripts/build-libclang-edg.sh"
             - "scripts/setup-edg.sh"
             # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
@@ -970,7 +970,7 @@ jobs:
   # nfcxx (the EDG front end) against clang inside bc2cpp: both AST producers (return kinds, and the host program's main_ast roots) and both
   # preprocessors (and the analysis headers' presym ids) on the pinned world's mruby, and the C++ Fiber check compiled with nfcxx (tests/bc2cpp/run_nfcxx_parity.sh, docs/notes/nfcxx-ast.md). The
   # toolchain action restores build/edg and build/qbe from the cache that ci.yml's build job saves (same keys,
-  # so the checkout path must stay the same). The AST front end (scripts/setup-libclang-edg.sh) is a separate EDG
+  # so the checkout path must stay the same). The AST front end (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb) is a separate EDG
   # configuration, cached below. The checkout takes only the submodules those need.
   nfcxx-clang-parity:
     needs: bc2cpp-changes
@@ -1011,11 +1011,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/libclang-edg
-          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
 
       - name: Build the AST front end
         if: steps.libclang-edg.outputs.cache-hit != 'true'
-        run: LIBCLANG_EDG_IN_PROCESS=0 scripts/setup-libclang-edg.sh
+        run: LIBCLANG_EDG_IN_PROCESS=0 scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 
       - name: nfcxx against clang (AST producers, main_ast, preprocessors, C++ Fiber)
         run: tests/bc2cpp/run_nfcxx_parity.sh

@@ -4,7 +4,7 @@
 #   clang  `clang -fsyntax-only -Xclang -ast-dump=json` (the original producer; the fallback when nfcxx is not built);
 #   nfcxx  scripts/nfcxx-ast-dump: the nfcxx (EDG) front end's own dump of function bodies, records and file-scope
 #          variables, in the subset of clang's JSON that these consumers read (be/nfcxx_ast.c, docs/notes/nfcxx-ast.md).
-# nfcxx is the default when its front end is built (scripts/setup-libclang-edg.sh), else clang; BC2CPP_AST_PRODUCER=clang opts
+# nfcxx is the default when its front end is built (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb), else clang; BC2CPP_AST_PRODUCER=clang opts
 # out, =nfcxx insists. Both give the same hash shape, so the analyses are unchanged.
 #
 # NativeAstSource.dump(path, flags, lang: :c | :cxx, std: nil) -> [json_text, stderr, status]
@@ -29,7 +29,7 @@ module NativeAstSource
     ENV.fetch('NFCXX_AST_DUMP') { File.join(REPO_ROOT, 'scripts/nfcxx-ast-dump') }
   end
 
-  # Whether the producer can run here: clang on PATH, or the nfcxx front end built (scripts/setup-libclang-edg.sh).
+  # Whether the producer can run here: clang on PATH, or the nfcxx front end built (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb).
   def available?(name = producer)
     case name
     when 'clang' then system('clang --version', out: File::NULL, err: File::NULL) ? true : false

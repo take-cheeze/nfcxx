@@ -14,9 +14,9 @@ runs:
     - uses: actions/cache@v6
       with:
         path: build/mruby-tool
-        key: nightly-mruby-ubuntu26-v1-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+        key: nightly-mruby-ubuntu26-v1-${{ hashFiles('scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
     - shell: bash
-      run: scripts/setup-mruby.sh
+      run: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
     - name: EDG cache identity
       id: key
       shell: bash

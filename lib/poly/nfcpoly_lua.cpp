@@ -1,4 +1,4 @@
-// nfcpoly Lua backend: Lua 5.4 with ldo.c built as C++ (scripts/setup-poly-lua.sh). See docs/notes/poly.md.
+// nfcpoly Lua backend: Lua 5.4 with ldo.c built as C++ (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). See docs/notes/poly.md.
 //
 // A Lua error in this liblua is a C++ `throw` of a pointer to ldo.c's private struct lua_longjmp, on the same exception
 // runtime as every C++ `throw` of the host. So a Lua error unwinds the C++ frames it crosses and runs their destructors,

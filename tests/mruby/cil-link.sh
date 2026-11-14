@@ -13,7 +13,7 @@
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle/cil-link.rb; here=$root/tests/mruby/cil-link
 ilasm=${ILASM:-$root/build/cil/ilasm}
-[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP cil-link: no mruby (scripts/setup-mruby.sh)"; exit 0; }
+[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP cil-link: no mruby (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)"; exit 0; }
 [ -x "$ilasm" ] || { echo "SKIP cil-link: scripts/setup-cil.sh has not run"; exit 0; }
 dotnet=$(command -v dotnet || true)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

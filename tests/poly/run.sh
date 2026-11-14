@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # nfcpoly: build the host test (tests/poly/host.cpp with lib/poly/nfcpoly.cpp and the language backends) with nfcxx and run
-# it, per back end. The languages' interpreters are built per back end, unpatched, by scripts/setup-poly.sh (mruby with C++
-# exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
+# it, per back end. The languages' interpreters are built per back end, unpatched, by scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (mruby with C++
+# exceptions), scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (Lua with ldo.c as C++) and scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (QuickJS, plain C); Python is the
 # system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. Go is yaegi in a cgo
-# shared library built by scripts/setup-poly-go.sh (one library for both back ends), skipped with a SKIP line when Go or the
-# module proxy is missing. ASTro's luastro is built by scripts/setup-poly-astro.sh (ASTroGen is Ruby, the source comes from GitHub:
+# shared library built by scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (one library for both back ends), skipped with a SKIP line when Go or the
+# module proxy is missing. ASTro's luastro is built by scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (ASTroGen is Ruby, the source comes from GitHub:
 # a SKIP line when either is missing). See docs/notes/poly.md. Path B needs its harness (scripts/setup-pathb.sh).
 #   NFCXX_BACKEND=pathb|gcc        (default: both)
 #   POLY_LANGS="ruby lua python ast js go astro"   (default: all seven; ast is the nfcast engine, lib/ast, which needs nothing built)
-#   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
+#   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 #   TEST_BIN_CACHE=DIR             keep the compiled hosts in DIR and reuse one whose command line is the same (tests/bin-cache.sh; CI)
 cd "$(dirname "$0")/../.."
@@ -21,13 +21,13 @@ for be in $backends; do
   for l in $langs; do
     case $l in
       ruby)
-        if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly.sh 2>&1); then echo "FAIL $be poly ruby (mruby build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $be poly ruby (mruby build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_RUBY); incs+=(-I build/poly/$be/include); srcs+=(lib/poly/nfcpoly_mruby.cpp); libs+=(build/poly/$be/lib/libmruby.a); built+=(ruby) ;;
       lua)
-        if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-lua.sh 2>&1); then echo "FAIL $be poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $be poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_LUA); incs+=(-I build/poly-lua/$be/include); srcs+=(lib/poly/nfcpoly_lua.cpp); libs+=(build/poly-lua/$be/lib/liblua.a); built+=(lua) ;;
       js)
-        if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-js.sh 2>&1); then echo "FAIL $be poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $be poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_JS); [ $be != pathb ] || defs+=(-DNFCPOLY_JS_STACK_SIZE=$((6 * 1024 * 1024))); incs+=(-I build/poly-js/$be/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=(build/poly-js/$be/lib/libquickjs.a); built+=(js) ;;
       python)
         if command -v python3-config >/dev/null && pyinc=$(python3-config --includes 2>/dev/null) && pylib=$(python3-config --ldflags --embed 2>/dev/null) &&
@@ -39,12 +39,12 @@ for be in $backends; do
       ast)
         defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp); built+=(ast) ;;
       astro)
-        out=$(NFCXX_BACKEND=$be scripts/setup-poly-astro.sh 2>&1); rc=$?
+        out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $be poly astro: $(tail -1 <<<"$out" | sed 's/^setup-poly-astro: //')"; continue
         elif [ $rc != 0 ]; then echo "FAIL $be poly astro (luastro build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_ASTRO); incs+=(-I build/poly-astro/$be/include); srcs+=(lib/poly/nfcpoly_astro.cpp); libs+=(build/poly-astro/$be/lib/libluastro.a -ldl -lm -lpthread); built+=(astro) ;;
       go)
-        out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
+        out=$(scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $be poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue
         elif [ $rc != 0 ]; then echo "FAIL $be poly go (libnfcgo build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); godir=${POLY_GO_DIR:-$PWD/build/poly-go}; libs+=(-L"$godir" -lnfcgo "-Wl,-rpath,$godir"); built+=(go) ;;

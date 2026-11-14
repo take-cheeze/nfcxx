@@ -9,7 +9,7 @@
 //   Swift       swiftfe emit-c --bindings prog.swift (tools/swiftfe: LLVM-free, its C), then the C route below
 //   nfcxx IR    none: the source is the IR
 //   then        scripts/mrb scripts/pathb-wasm-emit.rb [mode] prog.ir        the wasm module, in the binary format
-// They need the Path B harness and the mruby tool (scripts/setup-pathb.sh, scripts/setup-mruby.sh). The compiler is a
+// They need the Path B harness and the mruby tool (scripts/setup-pathb.sh, scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). The compiler is a
 // native program: it runs where this module runs, and the module it returns runs in the browser.
 const fs = require("fs");
 const os = require("os");

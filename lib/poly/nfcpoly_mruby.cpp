@@ -1,4 +1,4 @@
-// nfcpoly Ruby backend: mruby built with C++ exceptions (scripts/setup-poly.sh). See docs/notes/poly.md.
+// nfcpoly Ruby backend: mruby built with C++ exceptions (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). See docs/notes/poly.md.
 //
 // A script raise in this libmruby is `throw (mrb_jmpbuf*)` on the same exception runtime as every C++ `throw` of the
 // host, so the rules of nfcpoly_lang.hpp have one consequence specific to this backend: the destructors of the C++

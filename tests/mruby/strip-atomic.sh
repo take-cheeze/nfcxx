@@ -4,7 +4,7 @@
 # identifiers that contain the keyword, CRLF line ends, the keyword at end of file and an empty input.
 cd "$(dirname "$0")/../.."
 root=$PWD; here=$root/tests/mruby/strip-atomic
-[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP strip-atomic: no mruby (scripts/setup-mruby.sh)"; exit 0; }
+[ -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ] || { echo "SKIP strip-atomic: no mruby (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb)"; exit 0; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 for f in "$here"/*.c; do

@@ -23,7 +23,7 @@ on:
       - "scripts/cuda-driver-wrap.sh"
       - "nfcc"
       - "scripts/mrb"
-      - "scripts/setup-mruby.sh"
+      - "scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb"
       - "scripts/mruby-tool-config.rb"
       - "nfcxx"
       - "be/**"
@@ -45,7 +45,7 @@ on:
       - "scripts/cuda-driver-wrap.sh"
       - "nfcc"
       - "scripts/mrb"
-      - "scripts/setup-mruby.sh"
+      - "scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb"
       - "scripts/mruby-tool-config.rb"
       - "nfcxx"
       - "be/**"
@@ -78,7 +78,7 @@ jobs:
           packages: ruby rake python3-pip
 
       - name: Build the mruby interpreter
-        run: scripts/setup-mruby.sh
+        run: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 
       # The device pass of a .cu file goes through the Path B front end (scripts/pathb-dump).
       - name: Build the Path B front end

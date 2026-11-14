@@ -8,7 +8,7 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 
 | Piece | What it is |
 | --- | --- |
-| `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, generates a ninja build file with `scripts/mruby-ninja.rb` (no rake) and builds it with ninja, then installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
+| `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, generates a ninja build file with `scripts/mruby-ninja.rb` (no rake) and builds it with ninja, then installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
 | `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bigint` (stage 3), `mruby-bin-mruby`; and the define `MRB_ARY_LENGTH_MAX=0`, because mruby caps an `Array` at 131072 entries by default (`array size too big`) and the token list of a big translation unit is longer (stage 3). Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
 | `scripts/mrb` | `scripts/mrb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
 | `scripts/weak-symbols` | Was `weak-symbols.rb` (the port of `weak-symbols.py`); now the C++ tool `tools/weak-symbols` behind this wrapper, used by `scripts/qbe-cc` and `scripts/gcc-cc`. The mruby script took 292 s on the 48 MB of C that ggml-cuda's binbcast.cu gives (character positions in a large string cost a scan in mruby); the tool takes under 2 s. The oracle stays. |
@@ -29,7 +29,7 @@ What the test compares:
   must refuse (`SKIP-undef`), a non-ELF file and a missing entry symbol; compared are the output image,
   the stderr text and the exit status. Both parts skip when EDG/QBE/hexagon clang are missing.
   The test also passes with the interpreter built by nfcc (gcc back end):
-  `NFCXX_BACKEND=gcc MRUBY_CC=$PWD/nfcc scripts/setup-mruby.sh`, then `MRB=build/mruby-tool/bin/mruby-nfcc tests/mruby/run.sh`.
+  `NFCXX_BACKEND=gcc MRUBY_CC=$PWD/nfcc scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`, then `MRB=build/mruby-tool/bin/mruby-nfcc tests/mruby/run.sh`.
 - pathb-qbe-emit: the QBE IL, the stderr text and the exit status of the Python original and the port over every
   `tests/pathb-ir/*.ir`, the 130 hand-written IR files in `tests/mruby/pathb-edge/` (every refusal and error
   message, 64-bit unsigned constants, float constants and `cf2i` bounds, data initializers, switch/loop/goto,
@@ -266,7 +266,7 @@ original does, and the `x_*` inputs of the test compare only the status for them
 
 ## Bootstrap caveat
 
-Building mruby needs a CRuby (stdlib only) and ninja; the rake gem is not needed. `setup-mruby.sh` runs
+Building mruby needs a CRuby (stdlib only) and ninja; the rake gem is not needed. `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` runs
 `scripts/mruby-ninja.rb generate`, which evaluates the build config (`scripts/mruby-tool-config.rb`) and each gem's
 `mrbgem.rake` against a small stub of the rake DSL, then writes `build.ninja`; ninja builds it. The generator
 refuses any mrbgem.rake call it does not model, so a gem it cannot handle fails the setup rather than building
@@ -291,6 +291,6 @@ The gems under `3rd/` (`mruby-json`, `mruby-onig-regexp`) need the submodules in
 (`git submodule update --init 3rd/mruby-json 3rd/mruby-onig-regexp`). `mruby-onig-regexp` bundles Onigmo 6.2.0
 and builds it itself unless a system Onigmo or Oniguruma header is found. That build runs `sh` (its `configure`
 ships in the tarball, so autotools are not needed), `make`, `ar` (also used to archive the objects), `gzip` and
-`tar` (to unpack the tarball), and the C compiler (`cc`, or the `MRUBY_CC` given). `setup-mruby.sh` checks for
+`tar` (to unpack the tarball), and the C compiler (`cc`, or the `MRUBY_CC` given). `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` checks for
 `cc`, `make`, `ar`, `gzip` and `tar` before the build starts and names each missing one with its package
 (`apt-get install binutils` for `ar`, `build-essential` for the compiler). `sh` is not checked: every POSIX host has it.

@@ -3,7 +3,7 @@
 # (walk.c) and the same sources (cases/). The outputs must match except for the differences in known/, which are
 # the documented gaps (docs/notes/libclang-edg.md): parameters of declarations without a body, an alias-declaration
 # reported as a typedef, and a reopened namespace.
-# Needs: scripts/setup-libclang-edg.sh (the front end), a C compiler, and a libclang.so for the reference
+# Needs: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (the front end), a C compiler, and a libclang.so for the reference
 # (LIBCLANG_ORACLE, or /usr/lib/llvm-*/lib/libclang.so.* ; without one only the EDG side runs and is checked
 # against expected/).
 set -euo pipefail
@@ -12,7 +12,7 @@ cd "$root"
 work=$root/build/libclang-edg/test
 mkdir -p "$work"
 
-[ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-libclang-edg.sh
+[ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 scripts/build-libclang-edg.sh >/dev/null
 cc=${CC:-cc}
 

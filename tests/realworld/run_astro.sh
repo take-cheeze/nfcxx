@@ -36,7 +36,7 @@ exec 3>&2
 have_ruby=1; command -v ruby >/dev/null || have_ruby=0
 if [ "${ASTRO_GEN:-ruby}" = mruby ]; then
   gen_mruby=1
-  [ -x "$root/build/mruby-tool/bin/mruby" ] || "$root/scripts/setup-mruby.sh" >/dev/null || { echo "SKIP astro: no mruby"; exit 0; }
+  [ -x "$root/build/mruby-tool/bin/mruby" ] || "$root/scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb" >/dev/null || { echo "SKIP astro: no mruby"; exit 0; }
 else
   gen_mruby=0
   [ $have_ruby = 1 ] || { echo "SKIP astro: no ruby (ASTroGen is a Ruby program; ASTRO_GEN=mruby uses the repo's mruby)"; exit 0; }

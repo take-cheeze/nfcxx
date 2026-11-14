@@ -12,7 +12,7 @@ declarations with the same result.
 | --- | --- |
 | `be/nfcxx_decl.c` | The back end. `back_end()` lists the declarations of the main file as tab-separated records (format in the file's header), to stdout or to the stream `nfcxx_decl_out`. |
 | `be/nfcxx_edg_entry.c` | `nfcxx_edg_run(argc, argv, out)`: one compilation of the front end built as a library (EDG's callable front end), with the records written to `out`. |
-| `scripts/setup-libclang-edg.sh` | Builds `build/libclang-edg/cmake/bin/cpfe`: EDG with `nfcxx_decl.c` as its back end, and the same front end as position-independent objects with the entry point, `build/libclang-edg/cmake/src/nfcxx-so/libedgfe-pic.a` (`LIBCLANG_EDG_IN_PROCESS=0`: cpfe only). `3rd/edg` is not modified. |
+| `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` | Builds `build/libclang-edg/cmake/bin/cpfe`: EDG with `nfcxx_decl.c` as its back end, and the same front end as position-independent objects with the entry point, `build/libclang-edg/cmake/src/nfcxx-so/libedgfe-pic.a` (`LIBCLANG_EDG_IN_PROCESS=0`: cpfe only). `3rd/edg` is not modified. |
 | `scripts/libclang-cursors` | Runs that `cpfe` on one file with the host's library options (as `scripts/pathb-dump` does) and prints the records. |
 | `lib/libclang-edg/clang_edg.c` | The C API: parses by calling the front end linked into the library (or by running `libclang-cursors`), builds a tree of cursors, serves the API from it. |
 | `lib/libclang-edg/include/clang-c/Index.h` | The types, enum values and the hand-written prototypes of the implemented functions (libclang's ABI). |
@@ -20,7 +20,7 @@ declarations with the same result.
 | `scripts/build-libclang-edg.sh` | Builds `build/libclang-edg/libclang-edg.so`: with the archive, the front end inside it and the options of `libclang-cursors` fixed in `build/libclang-edg/edg_args.h`; without it, a library that runs `libclang-cursors`. |
 | `tests/libclang-edg/run.sh` | Differential test: `walk.c` (C API only) and `cindex_walk.py` (the binding) run on `cases/*.cpp` against the system libclang; the differences must be the ones in `known/`. |
 
-Run: `scripts/setup-libclang-edg.sh && scripts/build-libclang-edg.sh`, then `tests/libclang-edg/run.sh`. The
+Run: `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb && scripts/build-libclang-edg.sh`, then `tests/libclang-edg/run.sh`. The
 reference is the first `libclang.so` found under `/usr/lib/llvm-*` (or `LIBCLANG_ORACLE`). The Python part needs the
 binding (`pip install clang==18.1.8`, or `LIBCLANG_EDG_PYTHON=DIR` for a directory holding the `clang/` package).
 `LIBCLANG_EDG_RUNNER` at run time makes the library run that `libclang-cursors` (a separate process) instead of the
@@ -30,7 +30,7 @@ front end it holds, or the one it was built with.
 
 - **The front end is in the library.** EDG's front end is callable when it is built with `EDG_MAIN` defined
   (`MAKE_FRONT_END_CALLABLE`, `basics.h`): `EDG_MAIN` returns the exit status, a catastrophic error longjmps back to
-  it, and `fe_cleanup` frees the compilation, so it can be called again. `setup-libclang-edg.sh` builds that front end
+  it, and `fe_cleanup` frees the compilation, so it can be called again. `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` builds that front end
   (`EDG_MAIN=nfcxx_edg_main`, `-fPIC`, hidden visibility, cpfe's macro configuration) with `nfcxx_decl.c` and
   `nfcxx_edg_entry.c` into an archive, and `build-libclang-edg.sh` links it into `libclang-edg.so`, which exports the
   C API and nothing of EDG. `clang_parseTranslationUnit` calls `nfcxx_edg_run` with the command line of

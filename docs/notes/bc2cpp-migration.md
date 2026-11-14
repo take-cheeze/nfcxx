@@ -59,7 +59,7 @@ Both repositories are MIT and owned by the same person. CI here already installs
 
 1. **The mruby fork.** bc2cpp needs take-cheeze/mruby, not upstream mruby. It depends on ROM method tables,
    `MRB_CORE_CLASS_UNITS`, the frames-only link and found-method calls. 56 bc2cpp files name `3rd/mruby`, and the audits
-   pin digests of fork sources: `NativeClassResults::FILES` and `codegen_sort_array_cmp`. Here, `scripts/setup-mruby.sh`
+   pin digests of fork sources: `NativeClassResults::FILES` and `codegen_sort_array_cmp`. Here, `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`
    pins upstream 4.0.0 for the helper scripts, which is a different mruby.
    - Plan: one variable, `BC2CPP_MRUBY_ROOT`, replaces the hard-coded path.
    - bc2cpp gets its own fork pin here.

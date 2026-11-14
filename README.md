@@ -7,7 +7,7 @@ indexes the notes and gives the current status and known limitations, test by te
 git submodule update --init --depth 1   # fetch 3rd/edg
 scripts/setup-edg.sh      # build EDG (3rd/edg submodule) into build/edg (~3 min)
 scripts/setup-qbe.sh      # build QBE (3rd/qbe) into build/ (the code generator of Path B)
-scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (needs ruby + rake once); built on first use otherwise
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb    # the mruby interpreter that runs the helper scripts (needs ruby + rake once); built on first use otherwise
 scripts/setup-cppfront.sh # cppfront v0.8.2 (Cpp2 to C++1) into build/, for .cpp2 inputs (experimental; docs/notes/cpp2.md)
 ./nfcxx hello.cpp2 -o hello  # Cpp2: cppfront translates it, then the C++ pipeline above (experimental)
 tests/cpp2/run.sh         # Cpp2 inputs: build, -c and link, mixed with .cpp, includes, a syntax error (experimental)
@@ -31,10 +31,10 @@ tests/bundle/run.sh       # nfcbundle: bundled executables and shared objects ru
 LIBTORCH=dir tests/bundle/torch.sh # libtorch with CUDA bundled into one 2.4 GB program, plugins through --bundle-stubs (by hand)
 ./nfcc app.c -lcuda -o app   # -lcuda (or CMake's CUDA::cuda_driver) goes through libcudart: no libcuda.so.1 to link or start (docs/notes/cuda-driver.md)
 tests/cuda/driver/run.sh  # the driver shim against a stand-in libcudart and the real one (needs CUDA_HOME headers)
-scripts/setup-poly.sh     # mruby built with C++ exceptions for lib/poly (NFCXX_BACKEND=gcc|pathb; needs ruby + rake once)
-scripts/setup-poly-lua.sh # Lua 5.4 built with C++ exceptions for lib/poly (Python uses the system python3-dev)
-scripts/setup-poly-js.sh  # QuickJS-NG (plain C) for lib/poly
-scripts/setup-poly-go.sh  # yaegi, a Go interpreter, in a cgo shared library for lib/poly (needs Go >= 1.24 and the Go module proxy; one library for both back ends)
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb     # mruby built with C++ exceptions for lib/poly (NFCXX_BACKEND=gcc|pathb; needs ruby + rake once)
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb # Lua 5.4 built with C++ exceptions for lib/poly (Python uses the system python3-dev)
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb  # QuickJS-NG (plain C) for lib/poly
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb  # yaegi, a Go interpreter, in a cgo shared library for lib/poly (needs Go >= 1.24 and the Go module proxy; one library for both back ends)
 tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript, Go and ast from C++ with bound host objects, exceptions across the boundary (Path B and gcc; docs/notes/poly.md)
 tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter with inlining of small functions and a tier for hot numeric kernels, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
 scripts/sycl-build.sh prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
@@ -47,7 +47,7 @@ tests/multi-tu/run.sh     # several translation units sharing libstdc++ template
 tests/ehshim/run.sh       # exceptions thrown by libstdc++ and std::exception_ptr (lib/ehshim, docs/notes/eh-shim.md)
 scripts/setup-sqlite.sh    # SQLite 3.54.1 built with nfcc into build/sqlite (docs/notes/sqlite.md)
 tests/sqlite/run.sh       # lib/sqlcache (a TTL key-value cache on SQLite) built with nfcxx on both backends
-scripts/setup-libclang-edg.sh # libclang's C API on the EDG front end: cpfe that lists declarations (docs/notes/libclang-edg.md)
+scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb # libclang's C API on the EDG front end: cpfe that lists declarations (docs/notes/libclang-edg.md)
 scripts/build-libclang-edg.sh # build/libclang-edg/libclang-edg.so, a libclang-compatible shared library
 tests/libclang-edg/run.sh # the library against the system libclang, through the C API and clang.cindex
 ```

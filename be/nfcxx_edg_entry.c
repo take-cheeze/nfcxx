@@ -1,6 +1,6 @@
 /*
 nfcxx_edg_entry.c -- libclang-edg: the entry point of the EDG front end when it is linked into libclang-edg.so
-instead of running as cpfe (scripts/setup-libclang-edg.sh builds it, with the front end, into libedgfe-pic.a).
+instead of running as cpfe (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds it, with the front end, into libedgfe-pic.a).
 
 The front end is built with EDG_MAIN=nfcxx_edg_main, so it is callable (MAKE_FRONT_END_CALLABLE, basics.h): EDG_MAIN
 returns the exit status instead of exiting, a catastrophic error longjmps back to it, and fe_cleanup frees the

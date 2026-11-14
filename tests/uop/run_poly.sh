@@ -5,8 +5,8 @@
 # the setup scripts of tests/poly/run.sh.
 #   NFCXX_BACKEND=gcc|pathb   (default: both; the interpreters of the setup scripts are built by Path B or gcc, not qbe)
 #   POLY_LANGS="ruby lua python js go"   (default: all five; one that cannot be built here is skipped with a SKIP line)
-#   UOP_HOST=1              build with the host g++ and the interpreters of scripts/setup-poly-host.sh (mruby, Lua and QuickJS built
-#                           with gcc; Go as scripts/setup-poly-go.sh builds it; the system CPython), for a machine where nfcxx is
+#   UOP_HOST=1              build with the host g++ and the interpreters of scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb (mruby, Lua and QuickJS built
+#                           with gcc; Go as scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds it; the system CPython), for a machine where nfcxx is
 #                           not built. No sanitizers: the interpreters are not clean under them.
 #   UOP_POLY_OUT=DIR        keep the test program as DIR/test_poly-<label>
 # The model that test writes (model.onnx and model.json, built by the first language) is checked by tests/uop/onnx_check.py when numpy, onnx and
@@ -27,34 +27,34 @@ run_with() {
     case $l in
       ruby)
         if [ "$be" = host ]; then
-          out=$(scripts/setup-poly-host.sh ruby 2>&1); rc=$?
+          out=$(scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb ruby 2>&1); rc=$?
           if [ $rc = 3 ]; then echo "SKIP $label uop/poly ruby: $(tail -1 <<<"$out" | sed 's/^setup-poly-host: //')"; continue
           elif [ $rc != 0 ]; then echo "FAIL $label uop/poly ruby (mruby build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly-host/ruby
         else
-          if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly.sh 2>&1); then echo "FAIL $label uop/poly ruby (mruby build)"; tail -20 <<<"$out"; bad=1; continue; fi
+          if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $label uop/poly ruby (mruby build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly/$be
         fi
         defs+=(-DTEST_RUBY); incs+=(-I $dir/include); srcs+=(lib/poly/nfcpoly_mruby.cpp); libs+=($dir/lib/libmruby.a); built+=(ruby) ;;
       lua)
         if [ "$be" = host ]; then
-          out=$(scripts/setup-poly-host.sh lua 2>&1); rc=$?
+          out=$(scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb lua 2>&1); rc=$?
           if [ $rc = 3 ]; then echo "SKIP $label uop/poly lua: $(tail -1 <<<"$out" | sed 's/^setup-poly-host: //')"; continue
           elif [ $rc != 0 ]; then echo "FAIL $label uop/poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly-host/lua
         else
-          if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-lua.sh 2>&1); then echo "FAIL $label uop/poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
+          if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $label uop/poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly-lua/$be
         fi
         defs+=(-DTEST_LUA); incs+=(-I $dir/include); srcs+=(lib/poly/nfcpoly_lua.cpp); libs+=($dir/lib/liblua.a); built+=(lua) ;;
       js)
         if [ "$be" = host ]; then
-          out=$(scripts/setup-poly-host.sh js 2>&1); rc=$?
+          out=$(scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb js 2>&1); rc=$?
           if [ $rc = 3 ]; then echo "SKIP $label uop/poly js: $(tail -1 <<<"$out" | sed 's/^setup-poly-host: //')"; continue
           elif [ $rc != 0 ]; then echo "FAIL $label uop/poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly-host/js
         else
-          if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-js.sh 2>&1); then echo "FAIL $label uop/poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
+          if ! out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then echo "FAIL $label uop/poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
           dir=build/poly-js/$be
         fi
         defs+=(-DTEST_JS); incs+=(-I $dir/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=($dir/lib/libquickjs.a); built+=(js) ;;
@@ -66,7 +66,7 @@ run_with() {
           echo "SKIP $label uop/poly python: python3-config or Python.h not found (apt-get install python3-dev)"
         fi ;;
       go)
-        out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
+        out=$(scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $label uop/poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue
         elif [ $rc != 0 ]; then echo "FAIL $label uop/poly go (libnfcgo build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); libs+=(-Lbuild/poly-go -lnfcgo "-Wl,-rpath,$PWD/build/poly-go"); built+=(go) ;;

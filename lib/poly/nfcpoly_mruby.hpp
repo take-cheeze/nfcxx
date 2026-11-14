@@ -1,5 +1,5 @@
 // Raw access to the Ruby backend (mruby), for code that needs the mruby API next to nfcpoly. Link nfcpoly_mruby.cpp and
-// the libmruby that scripts/setup-poly.sh builds; add -I build/poly/<backend>/include.
+// the libmruby that scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds; add -I build/poly/<backend>/include.
 #pragma once
 #include <mruby.h>
 

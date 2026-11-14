@@ -297,7 +297,7 @@ if NativeAstSource.available?(NativeAstSource.producer)
     end
   end
 else
-  puts '  SKIP native equivalence: neither the nfcxx front end (scripts/setup-libclang-edg.sh) nor clang is available'
+  puts '  SKIP native equivalence: neither the nfcxx front end (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb) nor clang is available'
 end
 
 if failures.empty?

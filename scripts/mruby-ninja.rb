@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Generates the ninja build file for mruby, so that mruby can be built without rake. scripts/setup-mruby.sh runs
+# Generates the ninja build file for mruby, so that mruby can be built without rake. scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb runs
 # `generate`, then ninja. It reads the same inputs as mruby's own rake build: a build config (a MRuby::Build block,
 # e.g. scripts/mruby-tool-config.rb) and the mrbgem.rake of each gem in the config's dependency closure. Those
 # files are evaluated against the small DSL below instead of rake, and any call this script does not model raises,

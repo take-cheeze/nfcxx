@@ -1,5 +1,5 @@
 // Raw access to the Lua backend, for code that needs the Lua API next to nfcpoly. Link nfcpoly_lua.cpp and the liblua that
-// scripts/setup-poly-lua.sh builds; add -I build/poly-lua/<backend>/include.
+// scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds; add -I build/poly-lua/<backend>/include.
 #pragma once
 extern "C" {
 #include <lua.h>

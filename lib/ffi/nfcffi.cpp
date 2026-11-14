@@ -119,7 +119,7 @@ std::vector<Declaration> Ffi::declarations(const std::string& file, Dialect dial
   if (status != 0) {
     if (status == 2 || status == 127 || status == -2)
       throw Error("nfcffi: cannot run the declaration tool '" + decl_tool_ +
-                  "' (build it with scripts/setup-libclang-edg.sh): " + out);
+                  "' (build it with scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb): " + out);
     throw CompileError("nfcffi: " + file + " does not parse\n" + out);
   }
 

@@ -3,7 +3,7 @@
 //
 // luastro has no embedding API: its main.c #includes the tokenizer, parser, runtime and standard library (they share static
 // state) and drives them from a command line. This file is that main.c without the command line: the same declarations and
-// includes, then the entry points of nfcpoly_astro_shim.h. scripts/setup-poly-astro.sh compiles it with -I at a patched copy
+// includes, then the entry points of nfcpoly_astro_shim.h. scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb compiles it with -I at a patched copy
 // of the luastro directory (the evaluator is generated there) and archives it with node.c as libluastro.a. Nothing of luastro
 // is edited; the code store (SD_* specialization, dlopen of all.so) is off (OPTION.no_compiled_code), so scripts run in the
 // interpreter and nothing is written to the current directory.

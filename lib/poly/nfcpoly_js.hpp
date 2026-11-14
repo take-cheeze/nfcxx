@@ -1,5 +1,5 @@
 // Raw access to the JavaScript backend, for code that needs the QuickJS API next to nfcpoly. Link nfcpoly_js.cpp and the
-// libquickjs that scripts/setup-poly-js.sh builds; add -I build/poly-js/<backend>/include.
+// libquickjs that scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds; add -I build/poly-js/<backend>/include.
 #pragma once
 // quickjs.h marks its printf-style functions with a `gnu_printf` format attribute, which EDG does not know (one warning per
 // function): leave the marker empty unless the program has chosen its own.

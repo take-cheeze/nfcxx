@@ -11,7 +11,7 @@ It runs in two ways:
   compiled ahead of time in CI, and their results are checked against the expected values before the site is deployed.
 
 ```
-scripts/setup-pathb.sh && scripts/setup-mruby.sh    # the harness and the mruby tool (once)
+scripts/setup-pathb.sh && scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb    # the harness and the mruby tool (once)
 scripts/setup-tinygo.sh                              # Go: TinyGo (pinned), which runs go (1.22 to 1.25); Rust: rustc on PATH
 node tools/wasm-explorer/server.cjs                  # live: http://127.0.0.1:8080/ (--port, --host)
 node tools/wasm-explorer/build-static.cjs            # static: _site/, the examples built and checked

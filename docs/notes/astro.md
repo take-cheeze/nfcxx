@@ -272,7 +272,7 @@ end to end (calc and luastro need none; Prism's templates and the node.def patch
 ## luastro as an nfcpoly language
 
 `tests/poly/run.sh` (POLY_LANGS=astro) evaluates scripts of luastro from a C++ program compiled with nfcxx, the way it does for Lua,
-Ruby or Python (`poly.md`, "astro: ASTro's luastro behind a C shim"). `scripts/setup-poly-astro.sh` fetches the same pin, applies the
+Ruby or Python (`poly.md`, "astro: ASTro's luastro behind a C shim"). `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` fetches the same pin, applies the
 same two patches to a copy, runs ASTroGen and compiles with nfcc, per back end, `lib/poly/nfcpoly_astro_shim.c` (luastro's `main.c`
 without its command line) and the generated `node.c` into `libluastro.a`, which `lib/poly/nfcpoly_astro.cpp` and the C++ host link.
 Scripts run in the interpreter; the Code Store is off.

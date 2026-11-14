@@ -31,13 +31,13 @@ linked in), plus that language's library:
 
 | Language | backend | library | built by |
 | --- | --- | --- | --- |
-| Ruby (`"ruby"`, `"mruby"`) | `nfcpoly_mruby.cpp` | `build/poly/<backend>/lib/libmruby.a` | `scripts/setup-poly.sh` |
-| Lua (`"lua"`) | `nfcpoly_lua.cpp` | `build/poly-lua/<backend>/lib/liblua.a` | `scripts/setup-poly-lua.sh` |
+| Ruby (`"ruby"`, `"mruby"`) | `nfcpoly_mruby.cpp` | `build/poly/<backend>/lib/libmruby.a` | `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` |
+| Lua (`"lua"`) | `nfcpoly_lua.cpp` | `build/poly-lua/<backend>/lib/liblua.a` | `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` |
 | Python (`"python"`, `"python3"`, `"py"`) | `nfcpoly_python.cpp` | the system libpython (`python3-config --ldflags --embed`) | `apt-get install python3-dev` |
-| JavaScript (`"js"`, `"javascript"`, `"quickjs"`) | `nfcpoly_js.cpp` | `build/poly-js/<backend>/lib/libquickjs.a` | `scripts/setup-poly-js.sh` |
+| JavaScript (`"js"`, `"javascript"`, `"quickjs"`) | `nfcpoly_js.cpp` | `build/poly-js/<backend>/lib/libquickjs.a` | `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` |
 | ast (`"ast"`, `"nfcast"`) | `nfcpoly_ast.cpp` | the six `lib/ast/nfcast_*.cpp` files (`-I lib/ast`) | nothing to build |
-| Go (`"go"`, `"golang"`) | `nfcpoly_go.cpp` | `build/poly-go/libnfcgo.so`: yaegi and the bridge of `lib/poly/go`, a cgo shared library | `scripts/setup-poly-go.sh` (Go >= 1.24 and the Go module proxy) |
-| astro (`"astro"`, `"luastro"`) | `nfcpoly_astro.cpp` | `build/poly-astro/<backend>/lib/libluastro.a`: `nfcpoly_astro_shim.c` and the evaluator ASTroGen generates for ASTro's `sample/luastro`, with `-ldl -lm -lpthread` | `scripts/setup-poly-astro.sh` (`ruby` and GitHub) |
+| Go (`"go"`, `"golang"`) | `nfcpoly_go.cpp` | `build/poly-go/libnfcgo.so`: yaegi and the bridge of `lib/poly/go`, a cgo shared library | `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` (Go >= 1.24 and the Go module proxy) |
+| astro (`"astro"`, `"luastro"`) | `nfcpoly_astro.cpp` | `build/poly-astro/<backend>/lib/libluastro.a`: `nfcpoly_astro_shim.c` and the evaluator ASTroGen generates for ASTro's `sample/luastro`, with `-ldl -lm -lpthread` | `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` (`ruby` and GitHub) |
 
 `tests/poly/run.sh` builds all seven for Path B (`pathb`) and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
 with a `SKIP` line when `python3-config` or `Python.h` is missing, Go when Go (>= 1.24, from `$GO`, `PATH` or
@@ -75,7 +75,7 @@ state, to define a native function with `JS_NewCFunction` and to build a `Value`
 
 All five that need building are checked on both back ends (Go: one library for both); the `ast` engine is C++ and is compiled with the host.
 
-**Ruby: mruby with C++ exceptions.** `scripts/setup-poly.sh` builds mruby 4.0.0 (the pin of `scripts/setup-mruby.sh`) with
+**Ruby: mruby with C++ exceptions.** `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` builds mruby 4.0.0 (the pin of `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`) with
 its own rake build (`scripts/mruby-rt-config.rb`): `nfcc` is the C compiler, `nfcxx` the C++ compiler and the linker, and
 `conf.enable_cxx_exception` is on. In that mode mruby's `MRB_THROW` is a C++ `throw` of an `mrb_jmpbuf*`, and mruby compiles
 `src/vm.c`, `error.c`, `gc.c` and the compiler gem's parser and code generator as C++ through generated `*-cxx.cxx`
@@ -86,7 +86,7 @@ mruby's `const void *` computed-goto table when `vm.c` is compiled as C++, `cxx-
 Path B and gcc (the `volatile` patch the qbe back end needed is gone). The gems are the compiler, sprintf, the `*-ext` gems, `mruby-set`,
 `-error`, `-metaprog`, `-math`, `-bigint`, `-struct`: no `mruby-io`, `-exit`, `-time` or `-sleep`.
 
-**Lua: ldo.c as C++.** `scripts/setup-poly-lua.sh` builds Lua 5.4.9 (the pin of `tests/realworld/run_lua.sh`) into
+**Lua: ldo.c as C++.** `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` builds Lua 5.4.9 (the pin of `tests/realworld/run_lua.sh`) into
 `liblua.a`. Lua raises an error with `longjmp`, or, when the file is compiled as C++, with `throw`; `ldo.c` is the only file
 that does either, so it is built by nfcxx as C++ (in a generated wrapper that includes it inside `extern "C"`) and every
 other file by nfcc as C. Checked with `nm`: only `ldo.o` references `__throw`. The source is built as it is (the qbe back end needed a patch
@@ -96,7 +96,7 @@ that dropped two `volatile` members). The libraries a script gets are base (with
 **astro: ASTro's luastro behind a C shim.** [ASTro](https://github.com/ko1/astro) is a framework that generates an AST
 interpreter from a `node.def` (`astro.md`); its `sample/luastro` is a Lua 5.4 subset (74 node types, tables with metatables,
 closures, `pcall`, a small standard library). It has a command line and no embedding API: `main.c` `#include`s the tokenizer,
-parser, runtime and standard library (they share `static` state) and drives them from `argv`. `scripts/setup-poly-astro.sh`
+parser, runtime and standard library (they share `static` state) and drives them from `argv`. `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`
 fetches ko1/astro at the pin of `tests/realworld/run_astro.sh`, applies that script's two patches to a copy (Ruby 3.4's `it`
 becomes `_1`; the `;;` ASTroGen writes between allocator declarations becomes a newline, which cproc needs), runs ASTroGen
 (Ruby) on `node.def`, and compiles with nfcc, per back end, two files into `libluastro.a`: the generated `node.c` and
@@ -131,7 +131,7 @@ coroutines. No userdata and no light userdata, no finalizers, no metatable hook 
   (a runaway recursion overflows the C stack: luastro runs on a 4 GB thread for that, the shim does not), and `collectgarbage()` is
   the only collection: handles are roots, so it is safe, but nothing runs a collection by itself.
 
-**JavaScript: QuickJS-NG in plain C.** `scripts/setup-poly-js.sh` builds QuickJS-NG v0.17.0 (the commit of tag `v0.17.0` is
+**JavaScript: QuickJS-NG in plain C.** `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` builds QuickJS-NG v0.17.0 (the commit of tag `v0.17.0` is
 the pin) into `libquickjs.a` from `quickjs.c`, `dtoa.c`, `libregexp.c` and `libunicode.c`, all as C by `nfcc`. QuickJS reports
 errors as return values (`JS_EXCEPTION`), so no C++ build is needed (checked with `nm`: neither archive references `setjmp`,
 `longjmp`, `__throw` or `_Unwind_*`). Not built: `quickjs-libc.c`, `qjs.c`, `qjsc.c`, so a script has no `std`, no `os`, no
@@ -178,13 +178,13 @@ on the types they see, host-object members cached per class, and a tree that lat
 
 **Go: yaegi in a cgo shared library.** Go has no C++-exception-compatible runtime to rebuild, so the interpreter stays what it is, Go
 code, and the host reaches it through a plain C API. `lib/poly/go` is a Go module (the bridge, and yaegi v0.16.1, a Go interpreter
-written in Go, pinned by `go.mod` and `go.sum`); `scripts/setup-poly-go.sh` builds it with `go build -buildmode=c-shared` into
+written in Go, pinned by `go.mod` and `go.sum`); `scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` builds it with `go build -buildmode=c-shared` into
 `build/poly-go/libnfcgo.so` (about 30 MB; about 50 s on a cold build cache here, a few seconds when only the bridge changed) and
 checks that the hand-written `lib/poly/go/nfcgo.h` declares exactly the functions the library exports (`nfcgo_set_host`,
 `nfcgo_open`, `nfcgo_close`, `nfcgo_do`). One library serves both back ends: the host, compiled by nfcxx on qbe or gcc, links
 `-Lbuild/poly-go -lnfcgo -Wl,-rpath,<that directory>` and only calls into it (a C++ `throw` and `catch` with RAII still work with the
 Go runtime loaded, `tests/poly/host.cpp`). It needs Go >= 1.24 (weak pointers make the collector exact), a C compiler for cgo and,
-for the first build, the Go module proxy; without any of them `setup-poly-go.sh` exits with status 3 and `tests/poly/run.sh` prints a
+for the first build, the Go module proxy; without any of them `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` exits with status 3 and `tests/poly/run.sh` prints a
 `SKIP` line (checked by hand for each case, not part of the suite). The Go runtime starts when the library is loaded: a process that
 links the backend has 2 threads and 9 MB resident at the start of `main`, and 7 threads and 29 MB after the first Go context
 (measured with a scratch program, not tested).
@@ -616,8 +616,8 @@ None of these is covered by a test unless stated.
 - Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `pathb-ptx-emit --embed` does for GPU
   images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep` handles it for C inputs only, which is
   why mruby and Lua are patched).
-- `setup-poly.sh`, `setup-poly-lua.sh` and `setup-poly-js.sh` fetch mruby, Lua and QuickJS-NG from GitHub at their pins (mruby also
-  needs `ruby` + `rake` once), like `setup-mruby.sh` and `run_lua.sh`; `setup-poly-astro.sh` fetches ko1/astro and needs `ruby` for
+- `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb`, `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` and `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` fetch mruby, Lua and QuickJS-NG from GitHub at their pins (mruby also
+  needs `ruby` + `rake` once), like `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` and `run_lua.sh`; `setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb` fetches ko1/astro and needs `ruby` for
   ASTroGen on every build.
 - astro: no registered classes, 63-bit integers, no `...` expansion, one `Context` at a time, no bound-function arity count; see
   "astro: ASTro's luastro". luastro is a young sample: besides the `pcall` crash above, `f(x) ~= nil` on a multiple-result call

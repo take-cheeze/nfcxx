@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # libclang-edg: build lib/libclang-edg/clang_edg.c and the generated stubs into build/libclang-edg/libclang-edg.so, a
 # shared library with libclang's C API: the functions clang.cindex uses (lib/libclang-edg/include/clang-c/). Needs the
-# front end built first (scripts/setup-libclang-edg.sh).
+# front end built first (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb).
 #
 # When the front-end archive is there (build/libclang-edg/cmake/src/nfcxx-so/libedgfe-pic.a), the front end is linked
 # into the library and runs in-process, with the options scripts/libclang-cursors gives cpfe fixed now

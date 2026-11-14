@@ -1,5 +1,5 @@
 // The C side of the astro backend (nfcpoly_astro_shim.c): the part of ASTro's sample/luastro that nfcpoly needs, behind plain C.
-// luastro has a CLI main() and no embedding API, so scripts/setup-poly-astro.sh compiles the shim, which includes luastro's own
+// luastro has a CLI main() and no embedding API, so scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb compiles the shim, which includes luastro's own
 // sources the way its main.c does, next to the generated evaluator and puts the result in libluastro.a. A value is luastro's
 // LuaValue (a tagged 64-bit word: nil, boolean, 63-bit integer, double, or a pointer to a string / table / function).
 #pragma once

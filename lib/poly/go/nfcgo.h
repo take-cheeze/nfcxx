@@ -1,6 +1,6 @@
 /* libnfcgo: the Go interpreter (yaegi) of nfcpoly's Go backend, as a C shared library. lib/poly/nfcpoly_go.cpp is its only
  * client; the wire format of the messages is described in lib/poly/go/codec.go. The functions are exported by main.go
- * (cgo); scripts/setup-poly-go.sh checks that they match the header cgo generates. This header is written by hand
+ * (cgo); scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb checks that they match the header cgo generates. This header is written by hand
  * because cgo's own mentions _Complex and its own string type.
  *
  * Threads: a function of this library must be called from the thread that owns the interpreter (one thread per

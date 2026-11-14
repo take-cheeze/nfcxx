@@ -5,14 +5,14 @@
 # error paths. See docs/notes/ffi.md.
 # The ABI integration: abi_gcc.c, built by the system C compiler, and abi_host.cpp, built by nfcxx, print the same lines for
 # the functions of abi.h. Their output must match.
-#   NFCXX_BACKEND=gcc|pathb|qbe   (default: pathb and gcc; the poly part (the mruby build of scripts/setup-poly.sh) is Path B or gcc only)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: pathb and gcc; the poly part (the mruby build of scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb) is Path B or gcc only)
 cd "$(dirname "$0")/../.."
 root=$PWD
 backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 # The declaration reader (Ffi::declarations) runs the libclang-edg front end: build it once if it is missing.
-[ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-libclang-edg.sh > "$tmp/setup-libclang-edg.log" 2>&1 || {
+[ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb > "$tmp/setup-libclang-edg.log" 2>&1 || {
   echo "FAIL setup-libclang-edg"; tail -20 "$tmp/setup-libclang-edg.log"; exit 1; }
 # The gcc side of the ABI integration (see above), built once.
 if out=$(${CC:-cc} -std=c11 -Wall -Werror -I tests/ffi tests/ffi/abi_gcc.c -o "$tmp/abi-gcc" 2>&1); then
@@ -41,9 +41,9 @@ for be in $backends; do
     echo "FAIL $be abi (host build)"; head -20 <<<"$out"; fail=1
   fi
   # The same through nfcpoly scripts: mruby (Ruby) always, and Python when the CPython development files are installed
-  # (lib/ffi/nfcffi_poly.hpp). The mruby build is scripts/setup-poly.sh, once per back end.
+  # (lib/ffi/nfcffi_poly.hpp). The mruby build is scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb, once per back end.
   defs=(-DTEST_RUBY); incs=(); libs=(); srcs=(lib/poly/nfcpoly_mruby.cpp)
-  if out=$(NFCXX_BACKEND=$be scripts/setup-poly.sh 2>&1); then
+  if out=$(NFCXX_BACKEND=$be scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb 2>&1); then
     incs+=(-I build/poly/$be/include); libs+=(build/poly/$be/lib/libmruby.a)
   else
     echo "FAIL $be ffi poly (mruby build)"; tail -10 <<<"$out"; fail=1; continue

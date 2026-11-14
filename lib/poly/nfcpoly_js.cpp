@@ -1,4 +1,4 @@
-// nfcpoly JavaScript backend: QuickJS-NG, embedded (scripts/setup-poly-js.sh). See docs/notes/poly.md.
+// nfcpoly JavaScript backend: QuickJS-NG, embedded (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb). See docs/notes/poly.md.
 //
 // QuickJS reports errors through return values (JS_EXCEPTION and JS_GetException), never by unwinding, so a C++ exception
 // must not cross a QuickJS frame and none does: the trampolines catch what bound code throws and throw a JavaScript

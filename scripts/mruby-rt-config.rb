@@ -1,4 +1,4 @@
-# Build configuration for scripts/setup-poly.sh: the mruby that lib/poly (nfcpoly) embeds. Unlike
+# Build configuration for scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb: the mruby that lib/poly (nfcpoly) embeds. Unlike
 # scripts/mruby-tool-config.rb (a standalone interpreter for the build's own scripts), this one builds only
 # the library and its host tool mrbc, and it turns C++ exceptions on:
 #

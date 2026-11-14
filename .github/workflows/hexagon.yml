@@ -14,7 +14,7 @@ on:
       - "scripts/setup-edg.sh"
       - "scripts/gen-c-target.sh"
       - "scripts/mrb"
-      - "scripts/setup-mruby.sh"
+      - "scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb"
       - "scripts/mruby-tool-config.rb"
       - "tests/hexagon/**"
       - "tests/cases/**"
@@ -25,7 +25,7 @@ on:
       - "scripts/setup-edg.sh"
       - "scripts/gen-c-target.sh"
       - "scripts/mrb"
-      - "scripts/setup-mruby.sh"
+      - "scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb"
       - "scripts/mruby-tool-config.rb"
       - "tests/hexagon/**"
       - "tests/cases/**"
@@ -49,14 +49,14 @@ jobs:
         with:
           submodules: true
 
-      # ruby and rake only bootstrap the mruby build (scripts/setup-mruby.sh); python3 is not needed here.
+      # ruby and rake only bootstrap the mruby build (scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb); python3 is not needed here.
       - uses: ./.github/actions/toolchain
         with:
           packages: ruby rake
           qbe: "false"
 
       - name: Build the mruby interpreter (runs tests/hexagon/flatlink.rb)
-        run: scripts/setup-mruby.sh
+        run: scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb
 
       - name: Install clang-19 and qemu-user (Hexagon)
         run: sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static

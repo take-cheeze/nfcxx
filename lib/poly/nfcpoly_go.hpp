@@ -1,5 +1,5 @@
 // Raw access to the Go backend, for code that needs the interpreter's state next to nfcpoly. Link nfcpoly_go.cpp and the
-// libnfcgo that scripts/setup-poly-go.sh builds (-L build/poly-go -lnfcgo, and the run-time path of the library).
+// libnfcgo that scripts/setup-(mruby|poly|poly-host|poly-js|poly-lua|poly-go|poly-astro|libclang-edg).rb builds (-L build/poly-go -lnfcgo, and the run-time path of the library).
 #pragma once
 #include "nfcpoly.hpp"
 
