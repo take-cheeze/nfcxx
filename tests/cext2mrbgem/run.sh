@@ -360,6 +360,11 @@ check grep -qF '#define tf_neg(x) mrb_funcall_argv(api_macro_twofile_bc2_mrb' "$
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_direct_scan tools/cext2mrbgem/fixtures/api_direct_scan/ext/api_direct_scan "$work/api_direct_scan" > "$work/api_direct_scan.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return mrb_funcall_argv(mrb, self, mrb_intern_cstr(mrb, "inner"), 0, NULL);' "$work/api_direct_scan/src/api_direct_scan.c"
+# 2zzz52. a cast function-pointer table (VALUE (*)(void *))fn of this file: its callbacks run in global mode, and the table's
+# type name (struct ct_funcs) is not a use of the table.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cast_table tools/cext2mrbgem/fixtures/api_cast_table/ext/api_cast_table "$work/api_cast_table" > "$work/api_cast_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '(mrb_value (*)(void *))ct_secs,' "$work/api_cast_table/src/api_cast_table.c"
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?

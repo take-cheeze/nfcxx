@@ -3051,6 +3051,8 @@ end
   def table_used_in_methods?(tbl, rel, s)
     mo = method_only_functions
     (@occ[tbl] || []).all? do |orel, os, _oe|
+      # a type name (struct tbl) is not a use of the table
+      next true if @files[orel]['masked'][[os - 12, 0].max...os].to_s.match?(/\b(?:struct|union|enum)[ \t\n]+\z/)
       # the table's own declaration: a file-scope occurrence that opens its initializer
       if enclosing_func(orel, os).nil? && @files[orel]['masked'][_oe..].to_s.match?(/\A(?:[ \t\n]*\[[^\]\n]*\])?[ \t\n]*=[ \t\n]*\{/)
         next true
