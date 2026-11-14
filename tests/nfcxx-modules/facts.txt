@@ -1,0 +1,12 @@
+# The facts the bash reads from the machine and its helper scripts (the module build of nfcxx). Read by the stubs (stub.sh)
+# and by the port (scripts/nfcxx-modules.rb --facts=). run.sh appends the SRC lines (the module functions of nfcxx, run on
+# each source) and one "exists" line per file and directory of the work directory.
+cxx-clang 0
+cc-clang 0
+host-sys /fx/include/c++/13
+host-sys /fx/include/x86_64-linux-gnu/c++/13
+host-sys /fx/include
+isa -mavx2 __AVX2__ 1
+ld mold
+ehshim ROOT/build/ehshim.o
+asan-vla ROOT/build/asan/vla.o

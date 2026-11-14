@@ -1,0 +1,39 @@
+# One argument list per line. A leading !TOKEN removes part of the toolchain for that case: !nogcc (the k1om
+# GCC), !nolibc (build/k1om/libC.a), !noeccp (the EDG driver). Blank and # lines are skipped.
+# The target gate: linux_k1om (the k1om block of nfcxx)
+--target=linux_k1om --freestanding a.cc
+--target=linux_k1om a.cc
+--target=linux_k1om --freestanding --backend=pathb a.cc
+--target=linux_k1om --freestanding --backend=qbe a.cc
+--target=linux_k1om --freestanding --backend=gcc a.cc
+--target=linux_k1om --freestanding --backend=gcc -c a.cc
+--target=linux_k1om --freestanding --emit-c a.cc
+--freestanding --emit-c --target=linux_k1om --backend=pathb a.cc
+--target=linux_k1om --freestanding --gnu-version=130000 -std=c++17 -O2 -DNDEBUG a.cc -o prog
+--target=linux_k1om --freestanding a.cc b.o
+--target=linux_k1om --freestanding libq.a
+--target=linux_k1om --freestanding -o prog
+--target=linux_k1om --freestanding a.cc -D
+--target=linux_k1om --freestanding -D a.cc
+--target=linux_k1om --freestanding -fsanitize=address a.cc
+--target=linux_k1om --freestanding --dialect=clang a.cc
+--target=linux_k1om --freestanding --dialect=g++ c.c
+--target=linux_k1om --freestanding a.cc -I inc
+--target=linux_k1om --freestanding
+!nogcc --target=linux_k1om --freestanding a.cc
+!nolibc --target=linux_k1om --freestanding a.cc
+!nogcc !nolibc --target=linux_k1om --freestanding a.cc
+!noeccp --target=linux_k1om --freestanding a.cc
+--target=linux_k1om --freestanding --backend=gcc --target=linux_aarch64 a.cc
+--target= --freestanding --emit-c a.cc
+# the other targets (the EDG tables present: linux_aarch64, win64)
+--freestanding --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=linux_armv7 a.cc
+--emit-c --target=linux_aarch64 a.cc
+--freestanding --emit-c --target=win64 a.cc
+--freestanding --emit-c --target=win32 a.cc
+--freestanding --emit-c --target=linux_i686 a.cc
+!noeccp --freestanding --emit-c --target=win64 a.cc
+# no target: not this gate, so unported
+--emit-c a.cc

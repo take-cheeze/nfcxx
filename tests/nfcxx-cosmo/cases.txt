@@ -1,0 +1,49 @@
+# One argument list per line. Leading NFCXX_*=VALUE words are environment for both the port and the bash; a value starting with
+# ROOT/ names a file under the sandbox's repository. Lines starting with # are comments.
+# compile and link (C only)
+--cosmo a.c -o a.com
+--cosmo a.c
+--cosmo a.c b.c -o p
+--cosmo --backend=gcc a.c -o p
+--cosmo -I inc -DFOO=1 -UBAR a.c -o p
+--cosmo -Iinc -DFOO=1 a.c -o p
+--cosmo -O2 -g -std=c11 a.c -o p
+--cosmo -Wall -Wl,--gc-sections -fwrapv a.c -o p
+--cosmo -Llibs -lq a.c libq.a -o p
+--cosmo -o p a.c
+--cosmo -w -pipe -fno-strict-aliasing a.c b.c -o p
+# -c
+--cosmo -c a.c
+--cosmo -c a.c -o x.o
+--cosmo -c -O2 sub/x.c
+--cosmo -c a.c b.c
+--cosmo -c -I inc -DX=2 a.c
+--cosmo -c a.c b.c -o x.o
+# the cosmocc location and environment
+NFCXX_COSMOCC=ROOT/alt/cosmocc --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/alt/cosmocc --cosmo -c a.c
+NFCXX_COSMOCC= --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/missing --cosmo a.c -o p
+NFCXX_COSMOCC=ROOT/notexec --cosmo a.c -o p
+NFCXX_PATH=x --cosmo a.c -o p
+# errors the bash makes
+--cosmo
+--cosmo -c
+--cosmo -I
+--cosmo --backend=qbe a.c
+# unported
+a.c -o p
+--cosmo a.cpp
+--cosmo a.c b.o
+--cosmo -fPIC a.c
+--cosmo -m64 a.c
+--cosmo -pthread a.c
+--cosmo -E a.c
+--cosmo -shared a.c
+--cosmo -fsanitize=address a.c
+--cosmo a.c -L libs
+--cosmo -Wno-narrowing a.c
+--cosmo --backend=pathb a.c
+NFCXX_PATH=b --cosmo a.c -o p
+NFCXX_BACKEND=gcc --cosmo a.c
+NFCXX_COSMOCC=/usr/bin/cc --cosmo a.c

@@ -1,0 +1,41 @@
+# facts-name, then the driver's argument list
+base hello.cpp2
+base -c hello.cpp2
+base -c hello.cpp2 -o out/hello.o
+base -c -std=c++20 -O2 -DX=1 -I inc hello.cpp2
+base -c sub/x.cpp2
+base hello.cpp2 plain.cc
+base -c a.cpp2 b.cpp2
+base a.cpp2 b.cpp2
+base plain.cc
+base -c plain.cc
+base -c -Iinc plain.cc
+base -c -Iinc sy.cc
+base -c -Iinc sy.cc -o sy.o
+base -c -I inc sy.cc
+base -c -Iinc ./sy.cc
+base -c -Iinc sy.cpp2
+base -c -Iother sy.cc
+base -c -Iinc
+base -I
+base -c
+base -c missing.cpp2
+base hello.cpp2 missing.cpp2
+base nosuch.cpp2 -o x
+nocppfront hello.cpp2
+noutil hello.cpp2
+noutil plain.cc
+rc4 -c hello.cpp2
+rc4 hello.cpp2
+xdg -c hello.cpp2
+dump0 -c -Iinc sy.cc
+hdr3 -c -Iinc sy.cc
+pass2_5 -c -Iinc sy.cc -o sy.o
+nohdr -c -Iinc sy.cc
+nosycl -c -Iinc sy.cc
+nosycl -c -Iinc plain.cc
+base --trace=x.json hello.cpp2
+base -fsyntax-only hello.cpp2
+base -E hello.cpp2
+base -c -foo hello.cpp2
+base -c hello.cu
