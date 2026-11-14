@@ -2,7 +2,7 @@
 # nfcc, ported from the bash in nfcc: its option handling and its compile stage. Covered: the @file expansion; the pre-loop
 # decisions that run the host compiler (-E, -M, -MM, -MG, -fsyntax-only, -dumpmachine and friends, -print-*, -v), printed as
 # "EXEC"; every option of the loop's case statement, with the Path B helper (pathb_option), the QBE
-# kernel helper (qbekernel) and the gcc-only and passthrough rules, and the -fno-crossjumping host check; the post-loop
+# gcc-only and passthrough rules, and the -fno-crossjumping host check; the post-loop
 # checks; the Path B reason checks (pathb_reason, with the -fshort-wchar answer as an input); the compile of each input
 # (compile_one: the Path B command, its -S copy, the gcc fallback, the qbe and cil commands, the dependency commands) and the
 # link. The commands are printed as "RUN argv..." (copies as CP, CAT, LN) and not run; tests/nfcc/option-state.sh runs nfcc's
@@ -17,8 +17,7 @@
 # home nfcc derives from the library path (the port reads the home's files itself). The remaining exits are nfcc's own.
 #
 # Configuration, which nfcc reads from its environment: --nfcc-backend=cil|gcc|pathb (default gcc),
-# --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL, now unused: nfcc has no QBE
-# backend), --nfcc-qbe-try=0|1 (NFCXX_QBE_TRY, unused likewise) and --nfcc-host-gnu-gcc=0|1. They come first on the command line.
+# --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH) and --nfcc-host-gnu-gcc=0|1. They come first on the command line.
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -153,17 +152,6 @@ FOK_PATTERNS = %w[
 ].freeze
 
 
-QBE_KERNEL_PATTERNS = %w[
-  -funsigned-char -fshort-wchar -ftrivial-auto-var-init=zero -ffreestanding -fno-PIE -fno-pie -fno-PIC
-  -fno-pic -fno-stack-protector -fno-jump-tables -fno-delete-null-pointer-checks -fno-strict-overflow
-  -fno-strict-aliasing -fwrapv -fcf-protection=none -fno-asynchronous-unwind-tables -fconserve-stack
-  -fno-common -falign-functions=* -falign-jumps=* -falign-loops=* -falign-labels=* -fno-stack-check
-  -fno-stack-clash-protection -fno-allow-store-data-races -fno-optimize-sibling-calls
-  -foptimize-sibling-calls -fno-function-sections -fno-data-sections -fstrict-flex-arrays=*
-  -fomit-frame-pointer -fno-omit-frame-pointer -fmacro-prefix-map=* -m64 -mcmodel=kernel -mno-red-zone
-  -mtune=* -mpreferred-stack-boundary=3 -mskip-rax-setup -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mno-avx
-  -mno-80387 -mno-fp-ret-in-387 -msoft-float -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2
-].freeze
 
 # Path B (backend pathb) options, bash's pathb_option: flags with an effect, the options with no effect on QBE's code.
 PATHB_PBF_FLAGS = %w[-funsigned-char -fno-signed-char -fsigned-char -fno-unsigned-char -ffreestanding].freeze
@@ -175,15 +163,15 @@ PATHB_NO_EFFECT = %w[-fno-stack-check -fno-stack-clash-protection -fno-allow-sto
                      -falign-labels=* -mno-mmx -mno-3dnow -mno-avx -mno-avx2 -mno-avx512* -mno-ssse3 -mno-sse3 -mno-sse4*
                      -mno-fma -mno-bmi* -mno-popcnt -mno-fp-ret-in-387 -mskip-rax-setup -mno-red-zone -mred-zone].freeze
 
-# The loop's state, and the configuration nfcc reads from the environment (backend, passthrough, qbe_kernel, host_gnu_gcc).
+# The loop's state, and the configuration nfcc reads from the environment (backend, passthrough, host_gnu_gcc).
 class LoopState
   attr_accessor :mode, :asm, :out, :sawout, :lang, :depmode, :dfile, :dp, :optlvl, :spon, :pathb_pic, :pathb_pie
   attr_accessor :pb_m16, :pb_regparm, :nofp, :nounwind, :wchar16
-  attr_accessor :backend, :passthrough, :qbe_kernel, :host_gnu_gcc
+  attr_accessor :backend, :passthrough, :host_gnu_gcc
   attr_accessor :k, :pb_std, :pb_gnu, :pb_opts, :pb_reason
   attr_reader :pp, :ld, :inputs, :dts, :dbg, :asf, :isa, :picf, :spguard, :gccf, :kqf, :pbf, :needgcc
 
-  def initialize(backend, passthrough, qbe_kernel, host_gnu_gcc)
+  def initialize(backend, passthrough, host_gnu_gcc)
     @mode = "link"
     @asm = 0
     @out = ""
@@ -203,7 +191,6 @@ class LoopState
     @wchar16 = 0
     @backend = backend
     @passthrough = passthrough
-    @qbe_kernel = qbe_kernel
     @host_gnu_gcc = host_gnu_gcc
     @pp = []
     @ld = []
@@ -313,15 +300,6 @@ def gcconly(state, arg)
   ok = state.backend == "gcc" && state.passthrough
   state.gccf << arg if ok
   ok
-end
-
-# nfcc's qbekernel: the Linux kernel's options the qbe backend honours, when NFCXX_QBE_KERNEL is set.
-def qbekernel(state, arg)
-  return false unless state.backend == "qbe" && state.qbe_kernel
-  return false unless matches_any?(arg, QBE_KERNEL_PATTERNS)
-
-  state.kqf << arg
-  true
 end
 
 # nfcc's pathb_option (the pathb backend only): true when the option is handled here; the loop then skips its own case.
@@ -472,7 +450,7 @@ def run_loop(args, state)
   i = 0
   while i < n
     a = args[i]
-    if qbekernel(state, a) || (state.backend == "pathb" && pathb_option(state, a))
+    if state.backend == "pathb" && pathb_option(state, a)
       i += 1
       next
     end
@@ -910,20 +888,18 @@ end
 
 # The leading --nfcc-* options carry what nfcc reads from its environment; nothing else starts with --nfcc-.
 def take_config(argv)
-  config = { backend: "gcc", passthrough: false, qbe_kernel: false, host_gnu_gcc: false, qbe_try: false, env: Env.new }
+  config = { backend: "gcc", passthrough: false, host_gnu_gcc: false, env: Env.new }
   env = config[:env]
   while argv.first && argv.first.start_with?("--nfcc-")
     option = argv.shift
     name, value = option.split("=", 2)
     value = "" if value.nil?
-    flag = %w[--nfcc-passthrough --nfcc-qbe-kernel --nfcc-host-gnu-gcc --nfcc-qbe-try --nfcc-wide-literal --nfcc-pathb-fallback]
+    flag = %w[--nfcc-passthrough --nfcc-host-gnu-gcc --nfcc-wide-literal --nfcc-pathb-fallback]
     die("#{name} takes 0 or 1") if flag.include?(name) && value != "0" && value != "1"
     case name
     when "--nfcc-backend" then config[:backend] = value
     when "--nfcc-passthrough" then config[:passthrough] = value == "1"
-    when "--nfcc-qbe-kernel" then config[:qbe_kernel] = value == "1"
     when "--nfcc-host-gnu-gcc" then config[:host_gnu_gcc] = value == "1"
-    when "--nfcc-qbe-try" then config[:qbe_try] = value == "1"
     when "--nfcc-root" then env.root = value
     when "--nfcc-tmp" then env.tmp = value
     when "--nfcc-cwd" then env.cwd = value
@@ -1156,7 +1132,7 @@ def main(argv)
     $stdout.write("EXEC #{command.join(' ')}\n")
     return 0
   end
-  state = LoopState.new(config[:backend], config[:passthrough], config[:qbe_kernel], config[:host_gnu_gcc])
+  state = LoopState.new(config[:backend], config[:passthrough], config[:host_gnu_gcc])
   emit(run_loop(args, state))
   if state.mode == "compile"
     compile_mode(state, config[:env])

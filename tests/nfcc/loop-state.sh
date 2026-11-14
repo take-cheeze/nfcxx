@@ -2,7 +2,7 @@
 # The Ruby port of nfcc's option handling (scripts/driver-loop.rb) must leave the same state, and fail or exec the same way,
 # as the bash (tests/nfcc/option-state.sh runs nfcc's own code) for every argument list of tests/nfcc/loop-cases.txt.
 # A line may start with NAME=VALUE words: they are the environment nfcc reads (NFCXX_BACKEND, NFCXX_GCC_PASSTHROUGH,
-# NFCXX_QBE_KERNEL, NFCXX_QBE_TRY); both sides get them, and the port gets them as its --nfcc-* options.
+# both sides get them, and the port gets them as its --nfcc-* options.
 # A case the port refuses as "unported" is counted, not compared.
 cd "$(dirname "$0")/../.."
 pass=0; fail=0; skipped=0
@@ -18,13 +18,11 @@ while IFS= read -r line; do
   for w in "${words[@]}"; do
     if [ ${#args[@]} -eq 0 ] && [[ $w =~ ^[A-Z_]+=.* ]]; then envs+=("$w"); else args+=("$w"); fi
   done
-  backend=gcc; pt=0; qk=0; qt=0; fb=0; pbst=0; host=cc; logf=0; edg=ROOT/build/edg; wide=$wide_default
+  backend=gcc; pt=0; fb=0; pbst=0; host=cc; logf=0; edg=ROOT/build/edg; wide=$wide_default
   for e in "${envs[@]+"${envs[@]}"}"; do
     case $e in
       NFCXX_BACKEND=*) backend=${e#NFCXX_BACKEND=} ;;
       NFCXX_GCC_PASSTHROUGH=*) pt=1 ;;
-      NFCXX_QBE_KERNEL=*) qk=1 ;;
-      NFCXX_QBE_TRY=*) qt=1 ;;
       NFCXX_PATHB_FALLBACK=gcc) fb=1 ;;
       STUB_PATHB_STATUS=*) pbst=${e#STUB_PATHB_STATUS=} ;;
       NFCC_HOST_CC=*) host=${e#NFCC_HOST_CC=} ;;
@@ -54,8 +52,8 @@ while IFS= read -r line; do
   fi
   # the repository path is ROOT in the port's output; messages that bash prints itself get the same placeholder here
   oracle=$(env "${oenvs[@]+"${oenvs[@]}"}" tests/nfcc/option-state.sh "${args[@]}" 2>&1 | sed "s|$PWD|ROOT|g")
-  port=$(ruby scripts/driver-loop.rb --nfcc-backend="$backend" --nfcc-passthrough=$pt --nfcc-qbe-kernel=$qk \
-           --nfcc-host-gnu-gcc=$host_gnu --nfcc-qbe-try=$qt --nfcc-root=ROOT --nfcc-tmp=TMP --nfcc-cwd=ROOT \
+  port=$(ruby scripts/driver-loop.rb --nfcc-backend="$backend" --nfcc-passthrough=$pt \
+           --nfcc-host-gnu-gcc=$host_gnu --nfcc-root=ROOT --nfcc-tmp=TMP --nfcc-cwd=ROOT \
            --nfcc-pathb-fallback=$fb --nfcc-pathb-status=$pbst \
            --nfcc-host=$host --nfcc-pathb-log="$logB" \
            --nfcc-bundle-tool=$bst --nfcc-ninja-fails=$nf \
