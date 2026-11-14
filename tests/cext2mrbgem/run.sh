@@ -338,6 +338,23 @@ for d in "$work"/*/; do
   if [ "$scanner" = libclang ]; then check sh -c "! grep -q scanner_fallback '$d/conversion_log.json'"; fi
 done
 
+# 2x. a registered method that is also called directly is split: the body is <name>_impl (the direct calls go to it),
+# the registration keeps <name> for a wrapper with the mruby signature. The impl takes mrb when its body needs it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name reg_split tools/cext2mrbgem/fixtures/reg_split/ext/reg_split "$work/reg_split" > "$work/reg_split.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/reg_split/NOT_BUILDABLE"
+check grep -qF 'static mrb_value reg_split_twice_impl(mrb_state *mrb, mrb_value self, mrb_value x) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_twice(mrb_state *mrb, mrb_value self) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'return reg_split_twice_impl(mrb, self, x);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value a = reg_split_twice_impl(mrb, self, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_plain_impl(mrb_value self, mrb_value x) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value b = reg_split_plain_impl(self, a);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'static mrb_value reg_split_var_impl(int argc, mrb_value *argv, mrb_value self) {' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_value c = reg_split_var_impl(0, NULL, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'return reg_split_var_impl((int)nfcx_argc, argv, self);' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_define_method(mrb, mRegSplit, "twice", reg_split_twice, MRB_ARGS_REQ(1));' "$work/reg_split/src/reg_split.c"
+check grep -qF 'mrb_define_method(mrb, mRegSplit, "var", reg_split_var, MRB_ARGS_ANY());' "$work/reg_split/src/reg_split.c"
+check sh -c "! grep -q 'reg_split_twice(self, self)\|reg_split_plain(self, a)' '$work/reg_split/src/reg_split.c'"
 # 2j. lowercase CRuby APIs (st_*, ruby_*) are refused, not passed silently
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
