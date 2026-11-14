@@ -383,6 +383,11 @@ check grep -qF 'case 1000 /* nil */:' "$work/api_rb_type_member/src/api_rb_type_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kind_args tools/cext2mrbgem/fixtures/api_kind_args/ext/api_kind_args "$work/api_kind_args" > "$work/api_kind_args.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_is_kind_of(mrb, p.val, mrb_exc_get(mrb, "Exception"))' "$work/api_kind_args/src/api_kind_args.c"
+# 2zzz60. rb_ensure with pointer data (VALUE)&arg: the data is mrb_cptr_value, and each callback casts mrb_cptr(a).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_ptr tools/cext2mrbgem/fixtures/api_ensure_ptr/ext/api_ensure_ptr "$work/api_ensure_ptr" > "$work/api_ensure_ptr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_ensure(mrb, ensure_body, mrb_cptr_value(mrb, &arg), ensure_done, mrb_cptr_value(mrb, &arg))' "$work/api_ensure_ptr/src/api_ensure_ptr.c"
+check grep -qF '(struct EnsureArg *)mrb_cptr(a)' "$work/api_ensure_ptr/src/api_ensure_ptr.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

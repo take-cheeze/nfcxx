@@ -1314,7 +1314,8 @@ end
   # rb_ensure(body, data1, ensure, data2): both callbacks are static functions of this file, each used only by this call
   # and each VALUE f(VALUE); they are threaded (mrb, mrb_value) for mrb_ensure. The data arguments are VALUE names or Q constants.
   def ensure_calls
-    out = []
+    cands = []
+    raw_refs = Hash.new(0)   # every rb_ensure call's callbacks, candidate or not: a callback is referenced by all of them
     @files.each do |rel, f|
       masked = f['masked']
       text = f['text']
@@ -1328,19 +1329,60 @@ end
         next unless args.size == 4
         b_cb, d1, e_cb, d2 = args
         next unless b_cb.match?(/\A[A-Za-z_][#{WC}]*\z/) && e_cb.match?(/\A[A-Za-z_][#{WC}]*\z/)
-        next unless [d1, d2].all? { |d| d.match?(/\A[A-Za-z_][#{WC}]*\z/) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
-        ok = [b_cb, e_cb].all? do |cb|
-          d = (@defs[cb] || []).select { |x| x['file'] == rel }
-          d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
-            psl(text, d[0]['po'], d[0]['pc']).match?(/\A\(?\s*VALUE\s+[A-Za-z_][#{WC}]*\s*\)?\z/) &&
-            (@occ[cb] || []).count { |r, _, _| r == rel } == 2
-        end
-        next unless ok
-        out << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
-                 bpos: args_pos[0], epos: args_pos[2] }
+        raw_refs[[rel, b_cb]] += 1
+        raw_refs[[rel, e_cb]] += 1
+        # a data argument is a VALUE name or Q constant, or a pointer to a local: (VALUE)&x (carried as mrb_cptr_value;
+        # the callbacks must use it only in pointer casts, checked below)
+        data_ok = ->(d) { d.match?(/\A[A-Za-z_][#{WC}]*\z/) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
+        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*&[A-Za-z_][#{WC}]*\z/) }
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
+        cands << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
+                   bpos: args_pos[0], epos: args_pos[2] }
       end
     end
+    # a callback is used only by rb_ensure calls: its definition plus one reference per call (a callback may serve two calls)
+    refs = raw_refs
+    out = []
+    cands.each do |c|
+      rel = c[:rel]
+      f = @files[rel]
+      text = f['text']
+      masked = f['masked']
+      cb_ok = [c[:b], c[:ecb]].all? do |cb|
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
+          psl(text, d[0]['po'], d[0]['pc']).match?(/\A\(?\s*VALUE\s+[A-Za-z_][#{WC}]*\s*\)?\z/) &&
+          (@occ[cb] || []).count { |r, _, _| r == rel } == 1 + refs[[rel, cb]]
+      end
+      next unless cb_ok
+      cast_pos = []
+      ptr_ok = [[c[:b], c[:d1]], [c[:ecb], c[:d2]]].all? do |cb, dd|
+        next true unless /\A\(VALUE\)\s*&/.match?(dd)
+        d = (@defs[cb] || []).find { |x| x['file'] == rel }
+        pos = ptr_cast_uses(rel, d, text, masked)
+        cast_pos.concat(pos) unless pos.nil?
+        !pos.nil?
+      end
+      next unless ptr_ok
+      out << c.merge(cast_pos: cast_pos.uniq)
+    end
     out
+  end
+
+  def ptr_cast_uses(rel, d, text, masked)
+    return nil if d.nil? || !d.key?('brace')
+    pars = split_args(masked, d['po'], d['pc']).map { |a2, b2| psl(text, a2, b2).strip }
+    return nil unless pars.size == 1
+    pname = pars[0][/([A-Za-z_]\w*)\z/, 1]
+    return nil if pname.nil?
+    body = masked[d['brace']...d['body_end']].to_s
+    uses = []
+    body.to_enum(:scan, /(?<![#{WC}$.>])#{Regexp.escape(pname)}(?![#{WC}])/).map { Regexp.last_match }.each do |m|
+      pre = body[0...m.begin(0)]
+      return nil unless pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/)
+      uses << (d['brace'] + m.begin(0))
+    end
+    uses.map { |u| [rel, u, u + pname.size] }
   end
 
   def hash_foreach_calls
@@ -3378,9 +3420,24 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
         return
       end
-      conv = ->(x) { x.match?(/\AQ(?:nil|undef|true|false)\z/) ? @entries[x]['mruby'] : x }
+      conv = lambda do |x|
+        if (pm = /\A\(VALUE\)\s*&([A-Za-z_][#{WC}]*)\z/.match(x))
+          "mrb_cptr_value(#{mrb_tok(rel, s)}, &#{pm[1]})"
+        elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
+          @entries[x]['mruby']
+        else
+          x
+        end
+      end
       new = "mrb_ensure(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{c[:ecb]}, #{conv.call(c[:d2])})"
       ed.add(c[:s], c[:e], new)
+      # a callback that serves two calls gets each cast edit once
+      @ptr_cast_applied ||= Set.new
+      (c[:cast_pos] || []).each do |_r, u0, u1|
+        next if @ptr_cast_applied.include?([rel, u0])
+        @ptr_cast_applied << [rel, u0]
+        ed.add(u0, u1, "mrb_cptr(#{@files[rel]['text'][u0...u1]})")
+      end
       rewrite(rel, s, name, new, 'the body and the ensure callback run under mrb_ensure: the ensure runs, then the exception (if any) is re-raised, as CRuby')
     when 'hash_foreach'
       c = (@hash_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
