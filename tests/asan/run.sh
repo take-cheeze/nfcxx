@@ -91,8 +91,10 @@ elif grep -q "unknown backend" "$tmp/err"; then ok "--backend=qbe is refused"; e
 # -fsafe-pointers and -fsanitize=address both replace malloc: refused together
 if "$nfcxx" -fsafe-pointers -fsanitize=address tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsafe-pointers with asan refused" "compiled"
 elif grep -q "replace malloc" "$tmp/err"; then ok "-fsafe-pointers with asan refused"; else bad "-fsafe-pointers with asan refused" "$(head -2 "$tmp/err")"; fi
-if "$nfcxx" -fsanitize=undefined tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsanitize=undefined refused" "compiled"
-elif grep -q "not supported" "$tmp/err"; then ok "-fsanitize=undefined refused"; else bad "-fsanitize=undefined refused" "$(head -2 "$tmp/err")"; fi
+# -fsanitize=undefined is accepted (the UBSan checks, Path B); an unknown check name is refused by the post-loop validation
+if "$nfcxx" -fsanitize=undefined tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then ok "-fsanitize=undefined accepted"; else bad "-fsanitize=undefined accepted" "$(head -2 "$tmp/err")"; fi
+if "$nfcxx" -fsanitize=bogus tests/asan/cases/clean.cpp -o "$tmp/x" 2>"$tmp/err"; then bad "-fsanitize=bogus refused" "compiled"
+elif grep -q "not supported" "$tmp/err"; then ok "-fsanitize=bogus refused"; else bad "-fsanitize=bogus refused" "$(head -2 "$tmp/err")"; fi
 
 # Separate compilation: instrumented objects linked by a second command
 "$nfcxx" --backend=$B -fsanitize=address -c tests/asan/cases/heap_overflow.cpp -o "$tmp/g.o" 2>/dev/null \

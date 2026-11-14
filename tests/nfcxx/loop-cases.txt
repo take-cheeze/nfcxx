@@ -159,6 +159,12 @@ CUDA_HOME=tests/nfcxx/cuda-fixtures/partial a.cpp -lcuda -o p
 CUDA_HOME=tests/nfcxx/cuda-fixtures/partial CUDA_TEST_SHIM=ok a.cpp -lcuda -lcudart_static -o p
 CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
 a.cpp -lcuda -o p
+-fsanitize=undefined,signed-integer-overflow -c a.cpp
+-fsanitize=undefined -fsanitize=bounds -c a.cpp
+-fsanitize=null --backend=gcc -c a.cpp
+-fsanitize=address,undefined -c a.cpp
+-fsanitize-recover=undefined -c a.cpp
+-fno-sanitize=undefined -c a.cpp
 # a toolkit with cuda.h and cudaTypedefs.h but no cuda_runtime_api.h: the version is unknown (no silent exit)
 CUDA_HOME=tests/nfcxx/cuda-fixtures/noruntime a.cpp -lcuda -o p
 CUDA_HOME=tests/nfcxx/cuda-fixtures/noruntime --cuda-driver=cudart a.cpp -lcuda -o p
