@@ -636,14 +636,13 @@ EXEC_PREFIXES = %w[-dumpmachine -dumpversion -dumpfullversion -dumpspecs -V -qve
 EXEC_TOOLS = %w[-E -M -MM -MG -fsyntax-only].freeze
 
 # The decisions nfcc makes before its loop: a version query (not ported: raises Unported), a query or -E/-M/-fsyntax-only that
-# runs the host compiler, and the qbe-try wrapper. Returns the command that exec runs, or nil to carry on.
-def pre_loop_exec(args, host, qbe_try, banner_backend = nil, env = nil)
+# runs the host compiler. Returns the command that exec runs, or nil to carry on.
+def pre_loop_exec(args, host, banner_backend = nil, env = nil)
   args.each do |a|
     return [:banner, banner_backend, env] if a == "--version"
     return [host] + args if EXEC_PREFIXES.include?(a) || a.start_with?("-print-")
   end
   return [host, "-v"] if args == ["-v"]
-  return ["qbe-try"] + args if qbe_try
   args.each { |a| return [host] + args if EXEC_TOOLS.include?(a) }
   nil
 end
@@ -1131,7 +1130,7 @@ end
 
 def main(argv)
   config = take_config(argv)
-  die("unknown NFCXX_BACKEND '#{config[:backend]}' (qbe, cil, gcc or pathb)") unless %w[qbe cil gcc pathb].include?(config[:backend])
+  die("unknown NFCXX_BACKEND '#{config[:backend]}' (gcc, pathb or cil)") unless %w[cil gcc pathb].include?(config[:backend])
   args = expand_response_args(argv)
   # nfcc's bundle_wrap and cuda_driver_wrap: with no --bundle- option and no libcuda, they change nothing; the others run a
   # second driver or build a shim, which the port does not do.
@@ -1145,12 +1144,11 @@ def main(argv)
   args = list
   die("no input files") if args.empty?
 
-  command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc",
-                          config[:backend], config[:env])
+  command = pre_loop_exec(args, config[:env].host, config[:backend], config[:env])
   if command && command[0] == :banner
     env = command[2]
     $stdout.write("nfcc (nfcxx C driver 0.1, backend #{command[1]}) #{env.dumpfullversion}\n")
-    $stdout.write("gcc-compatible driver over cproc/QBE; the host compiler is #{env.host_version_line}\n")
+    $stdout.write("gcc-compatible driver over Path B and gcc; the host compiler is #{env.host_version_line}\n")
     return 0
   end
   if command
