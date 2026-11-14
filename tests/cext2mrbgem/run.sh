@@ -356,6 +356,10 @@ mkdir -p tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_twofile tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile "$work/api_macro_twofile" > "$work/api_macro_twofile.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '#define tf_neg(x) mrb_funcall_argv(api_macro_twofile_bc2_mrb' "$work/api_macro_twofile/src/tf_other.c"
+# 2zzz51. a direct call of a method that reads its arguments from the call frame (rb_scan_args) is a call through its name.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_direct_scan tools/cext2mrbgem/fixtures/api_direct_scan/ext/api_direct_scan "$work/api_direct_scan" > "$work/api_direct_scan.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_funcall_argv(mrb, self, mrb_intern_cstr(mrb, "inner"), 0, NULL);' "$work/api_direct_scan/src/api_direct_scan.c"
 # 2zzz47. a callback passed as an argument of a file-scope macro: the macro escapes the pointer only if its body does, and here
 # the body passes it to a helper that calls it and keeps nothing; the callback is threaded and the macro call converted.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_cb tools/cext2mrbgem/fixtures/api_macro_cb/ext/api_macro_cb "$work/api_macro_cb" > "$work/api_macro_cb.log" 2>&1 || rc=$?

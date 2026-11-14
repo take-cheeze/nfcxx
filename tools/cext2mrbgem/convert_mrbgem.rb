@@ -1050,9 +1050,33 @@ texts = static_rename(texts)
   def refuse_direct_uses(name)
     msg = 'registered method function is also called directly (not supported)'
     msg += " (#{@split_reason[name]})" if @split_reason[name]
-    (@occ[name] || []).each do |rel, s, _e|
-      next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
-      next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+    uses = (@occ[name] || []).reject do |rel, s, _e|
+      @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] } ||
+        @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+    end
+    # A method whose body reads its arguments from the call frame (rb_scan_args) cannot be called directly: the direct
+    # call F(n, NULL, self) would read the caller's frame. Called through its name (mrb_funcall_argv) it runs in its own
+    # frame with the same arguments; the calls of that form are rewritten, and any other direct use still refuses.
+    if @split_reason[name].to_s.include?('rb_scan_args') && !uses.empty?
+      reg = @regs.find { |r| r['error'].nil? && r['func'] == name }
+      rewrites = uses.map do |rel, s, _e|
+        masked = @files[rel]['masked']
+        m = /#{Regexp.escape(name)}[ \t\n]*\([ \t\n]*(\d+)[ \t\n]*,[ \t\n]*(?:\([ \t\n]*VALUE[ \t\n]*\*[ \t\n]*\)[ \t\n]*)?NULL[ \t\n]*,[ \t\n]*([A-Za-z_][#{WC}]*)[ \t\n]*\)/.match(masked[s..].to_s)
+        fn = enclosing_func(rel, s)
+        ok = m && m.begin(0) == 0 && reg && fn && (@valid_reg_names.include?(fn['name']) || (@needs || Set.new).include?(fn['name']))
+        [rel, s, m, ok]
+      end
+      if rewrites.all? { |_r, _s, _m, ok| ok }
+        rewrites.each do |rel, s, m, _ok|
+          tok = mrb_tok(rel, s)
+          new = "mrb_funcall_argv(#{tok}, #{m[2]}, mrb_intern_cstr(#{tok}, \"#{reg['name']}\"), #{m[1]}, NULL)"
+          @edits[rel].add(s, s + m[0].length, new)
+          rewrite(rel, s, name, new, 'a direct call of a method whose arguments are read from the call frame is a call through the method name: the method runs in its own frame (Ruby method dispatch, so a redefinition of the method is seen)')
+        end
+        return
+      end
+    end
+    uses.each do |rel, s, _e|
       refuse(rel, s, name, msg)
     end
   end
@@ -2563,7 +2587,7 @@ use_problem = lambda do |name, use|
   end
 
   def in_global_macro?(rel, pos)
-    (@global_macro_spans[rel] || []).any? { |a, b| a < pos && pos < b }
+    ((@global_macro_spans || {})[rel] || []).any? { |a, b| a < pos && pos < b }
   end
 
   # A registered method or Init with a global-state user saves the previous value on entry and restores it on each
