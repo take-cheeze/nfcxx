@@ -894,6 +894,14 @@ class Converter
     end
   end
 
+  # a parameter or local of the enclosing function fn with the name hides a function of that name there
+  def shadowed_in?(name, fn)
+    return true if param_names(fn).include?(name)
+    n = Regexp.escape(name)
+    body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
+    !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
+  end
+
   def split_problem(name, uses)
     return 'it has more than one definition' if @defs[name].size != 1
     return "the name #{name}_impl is already used in the input" if @occ.key?("#{name}_impl")
@@ -913,6 +921,8 @@ class Converter
       masked = @files[rel]['masked']
       nx = next_nonspace(masked, e)
       return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('
+      fn = enclosing_func(rel, s)
+      return 'its name is shadowed in a function that calls it' if fn && shadowed_in?(name, fn)
     end
     nil
   end
@@ -1096,13 +1106,7 @@ class Converter
       out
     end
 
-    shadowed = lambda do |name, fn|
-      # a parameter or local of the enclosing function with the helper's name hides the helper there
-      next true if param_names(fn).include?(name)
-      n = Regexp.escape(name)
-      body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
-      !(body =~ /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+#{n}#{SS}[=;,\[)]|\(#{SS}\*#{SS}#{n}#{SS}\)/).nil?
-    end
+    shadowed = lambda { |name, fn| shadowed_in?(name, fn) }
 
     # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
     value_problem = lambda do |rel, s, name|
