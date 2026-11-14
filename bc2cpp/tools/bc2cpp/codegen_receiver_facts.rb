@@ -961,7 +961,13 @@ class CodeGen
   # translation. BC2CPP_SUPER_LOOKUP=0 keeps the `#error`.
   def zsuper_lookup_plan(owner_def, irep, idx)
     return nil unless owner_def && irep && idx && ENV.fetch('BC2CPP_SUPER_LOOKUP', '1') == '1'
-    return nil if owner_def.owner.end_with?('.singleton') || !@superclass_of[owner_def.owner].is_a?(String)
+    # A class method (owner K.singleton) is looked up from K's singleton. A module it extends answers first, and the
+    # superclass map does not record extends, so zsuper_extends? refuses such a program.
+    singleton = owner_def.owner.end_with?('.singleton')
+    class_owner = singleton ? owner_def.owner.delete_suffix('.singleton') : owner_def.owner
+    superclass = @superclass_of[class_owner]
+    return nil unless superclass.is_a?(String) || (singleton && superclass == :none)
+    return nil if singleton && zsuper_extends?
 
     program = BytecodeIR.for(irep)
     argary_idx = program.source_at(idx)&.op == :ARGARY ? idx : idx - 1
@@ -969,19 +975,28 @@ class CodeGen
 
     argary = program.source_at(argary_idx)
     super_insn = program.source_at(argary_idx + 1)
-    return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER && super_insn.pure_splat?
+    return nil unless argary&.op == :ARGARY && super_insn&.op == :SUPER
+    # SUPER is `n=*`, with keywords (`nk=*`, the keyword hash the caller's ENTER keyword slot holds) or without.
+    argc = super_insn.argc_operand
+    return nil unless argc && argc[0].nil? && (argc[2] || argc[1].nil?)
     return nil unless argary.reg && super_insn.reg && argary.reg.to_i == super_insn.reg.to_i + 1
 
     spec = argary.argary_spec
     return nil unless spec && spec.size == 4 && argary.paren_int.to_i.zero?
 
     m1, rest, m2, kd = spec
-    return nil unless kd.zero?
+    # ENTER: mandatory, optional, rest, post, keywords, keyword rest, block. The keyword hash is the register after the
+    # positionals, rest and post (regs run from 1: self is r0).
+    enter = irep.enter&.enter_fields
+    return nil unless enter && enter.length >= 7
+    mand, opt, rest_count, post, kw_count = enter
+    return nil unless kd == (kw_count.positive? ? 1 : 0)
+    kdict = kw_count.positive? ? "r#{mand + opt + rest_count + post + 1}" : nil
 
     block = super_block_arg(owner_def, irep) || (super_direct_call_allowed?(owner_def) ? 'mrb_nil_value()' : nil)
     return nil unless block
 
-    { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name }
+    { m1: m1, rest: rest.positive?, m2: m2, block: block, owner: owner_def.owner, name: owner_def.name, kdict: kdict }
   end
 
   # ZSUPER_LOOKUP: SUPER's half (`d_reg` is its destination), with the argument list built as OP_ARGARY builds it.
@@ -996,9 +1011,16 @@ class CodeGen
       out << "    if (mrb_array_p(#{rest})) mrb_ary_concat(M, bc2cpp_zsuper_args, #{rest});\n"
     end
     post.each { |r| out << "    mrb_ary_push(M, bc2cpp_zsuper_args, #{r});\n" }
-    out << "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
-           "mrb_intern_lit(M, #{plan[:name].inspect}), RARRAY_LEN(bc2cpp_zsuper_args), " \
-           "RARRAY_PTR(bc2cpp_zsuper_args), #{plan[:block]});\n"
+    if plan[:kdict]
+      # SUPER_KEYWORD_LOOKUP: the keyword hash goes through as keywords (bc2cpp_super_call_kw).
+      out << "    r#{d_reg} = bc2cpp_super_call_kw(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
+             "mrb_intern_lit(M, #{plan[:name].inspect}), RARRAY_LEN(bc2cpp_zsuper_args), " \
+             "RARRAY_PTR(bc2cpp_zsuper_args), #{plan[:kdict]}, #{plan[:block]});\n"
+    else
+      out << "    r#{d_reg} = bc2cpp_super_call(M, self, #{owner_class_ptr_expr(plan[:owner])}, " \
+             "mrb_intern_lit(M, #{plan[:name].inspect}), RARRAY_LEN(bc2cpp_zsuper_args), " \
+             "RARRAY_PTR(bc2cpp_zsuper_args), #{plan[:block]});\n"
+    end
     out << "  }\n"
   end
 

@@ -2825,6 +2825,26 @@ BC2CPP_MAIN = lambda do
       return bc2cpp_keep_call(M, [&] { return mrb_funcall_with_method(M, self, mid, &m, c, argc, argv, blk); });
     }
   CPP
+  # SUPER_KEYWORD_LOOKUP: a by-name `super` whose arguments include keywords (kdict, a Hash of the caller's keyword locals,
+  # forwarded as keywords). The target is found as bc2cpp_super_call finds it, then called with the keywords through
+  # mrb_funcall_send_with_method (mruby's keyword-aware call of an already-found method, as OP_SUPER makes it).
+  puts 'extern "C" mrb_value mrb_funcall_send_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value, mrb_value);'
+  puts <<~CPP
+    [[maybe_unused]] static mrb_value bc2cpp_super_call_kw(mrb_state* M, mrb_value self, struct RClass* owner, mrb_sym mid,
+                                                           mrb_int argc, const mrb_value* argv, mrb_value kdict, mrb_value blk) {
+      struct RClass* c = owner;
+      MRB_CLASS_ORIGIN(c);
+      if (c->tt == MRB_TT_MODULE) {
+        for (struct RClass* k = mrb_class(M, self); k; k = k->super) {
+          if (k->tt == MRB_TT_ICLASS && k->c == c) { c = k; break; }
+        }
+      }
+      c = c->super;
+      mrb_method_t m = bc2cpp_find_method(M, &c, mid);
+      if (MRB_METHOD_UNDEF_P(m)) mrb_method_missing(M, mid, self, mrb_ary_new_from_values(M, argc, argv));
+      return bc2cpp_keep_call(M, [&] { return mrb_funcall_send_with_method(M, self, mid, &m, c, argc, argv, kdict, blk); });
+    }
+  CPP
   # BLOCK_KEYWORD_CALL: a by-name call with a keyword Hash and a block (mrb_funcall_with_block carries no keywords).
   puts 'extern "C" mrb_value mrb_funcall_send(mrb_state*, mrb_value, mrb_sym, mrb_int, const mrb_value*, mrb_value, mrb_value);'
   puts <<~CPP

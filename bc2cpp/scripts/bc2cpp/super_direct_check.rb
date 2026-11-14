@@ -164,7 +164,9 @@ check.call('a block on only one side is not forwarded to the superclass _impl di
 check.call('that site keeps the by-name zsuper call, which passes the block at run time',
            zsuper_block_only.include?('bc2cpp_super_call(M, self'))
 check.call('a keyword set the superclass does not name stays out of the direct call',
-           !zsuper_mismatch.match?(/OtherBase_initialize_impl\(M, self, r1, r3/) && zsuper_mismatch.include?('#error'))
+           !zsuper_mismatch.match?(/OtherBase_initialize_impl\(M, self, r1, r3/))
+check.call('and that site is the by-name keyword call at run time, which names the keywords it has',
+           zsuper_mismatch.include?('bc2cpp_super_call_kw(M, self, '))
 
 # ZSUPER_SINGLETON: a class method's zsuper (`def self.new ... super`, owner K.singleton) reaches the superclass's singleton.
 # A program that calls `extend` may put a module first, so the forwarding is refused there.
@@ -220,5 +222,30 @@ check.call('a class method zsuper with keyword and block forwards to the supercl
            singleton_plain.match?(/_impl\(M, self, r1, r3, 1, r\d+, 1\);/))
 check.call('a program that calls extend keeps the class method zsuper out of the direct call',
            !singleton_extended.match?(/_impl\(M, self, r1, r3, 1, r\d+, 1\);/))
+
+# SUPER_KEYWORD_LOOKUP: a class method with keywords and a block whose super reaches a native `new` (no explicit superclass,
+# so the target is Class#new) goes through the by-name keyword call, with the caller's keyword hash (its ENTER keyword slot).
+NATIVE_NEW_SOURCE = <<~'RUBY'
+  class KSet
+    def self.new(enum = nil, key_type: Integer, &block)
+      super
+    end
+  end
+RUBY
+
+native_new_code = lambda do
+  suite.compile(NATIVE_NEW_SOURCE) do |ireps, root|
+    registry, superclass_of, container_constants, included, prepended = build_registry(ireps, root)
+    gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, container_constants, {}, Set.new,
+                      nil, nil, nil, included, prepended)
+    method = registry.fetch('new').find { |d| d.owner == 'KSet.singleton' }
+    gen.compile_method(method.irep).fetch(:code)
+  end
+end
+
+native_new = native_new_code.call
+check.call('a class method zsuper to a native new passes the keyword hash to the by-name keyword call',
+           native_new.match?(/bc2cpp_super_call_kw\(M, self, [^,]+, mrb_intern_lit\(M, "new"\), RARRAY_LEN\(bc2cpp_zsuper_args\), RARRAY_PTR\(bc2cpp_zsuper_args\), r2, bc2cpp_blk\);/))
+check.call('that site leaves no SUPER or ARGARY #error', !native_new.include?('#error unhandled opcode SUPER') && !native_new.include?('#error unhandled opcode ARGARY'))
 
 suite.finish!
