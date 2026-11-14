@@ -363,6 +363,12 @@ check test ! -e "$work/api_protect/NOT_BUILDABLE"
 check grep -qF 'static mrb_value protect_body(mrb_state *mrb, mrb_value arg) {' "$work/api_protect/src/api_protect.c"
 check grep -qF 'mrb_protect(mrb, protect_body, mrb_nil_value(), &state);' "$work/api_protect/src/api_protect.c"
 
+# 2zf. rb_class_new_instance (api_map.json batch N1): the arguments are reordered to mrb_obj_new(mrb, klass, argc, argv)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_new_inst tools/cext2mrbgem/fixtures/api_new_inst/ext/api_new_inst "$work/api_new_inst" > "$work/api_new_inst.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_new_inst/NOT_BUILDABLE"
+check grep -qF 'return mrb_obj_new(mrb, cApiNew, argc, argv);' "$work/api_new_inst/src/api_new_inst.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

@@ -1663,6 +1663,32 @@ use_problem = lambda do |name, use|
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
       end
+      if entry['arg_order']
+        # the arguments are reordered (rb_class_new_instance(argc, argv, klass) -> mrb_obj_new(mrb, klass, argc, argv)).
+        # Only plain identifiers are moved: their text is copied as it is, so nothing inside them is converted. The
+        # class argument must be a tracked class variable (passed as struct RClass *, unwrapped).
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        ord = entry['arg_order']
+        texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
+        klass_i = ord.first
+simple = texts.each_with_index.all? do |t, i|
+  t.match?(/\A[A-Za-z_][#{WC}]*\z/) && t != 'mrb' && (i == klass_i || !@class_vars.include?(t))
+end
+        if args.size != ord.size || !simple
+          refuse(rel, s, name, 'the arguments are not all plain identifiers (only plain identifiers are reordered)')
+          return
+        end
+        klass_arg = texts[ord.first]
+        unless @class_vars.include?(klass_arg)
+          refuse(rel, s, name, 'the class argument is not a tracked class or module variable (mrb_obj_new takes a struct RClass *)')
+          return
+        end
+        ed.add(nxt + 1, cp, "#{mrb_tok(rel, s)}, " + ord.map { |i| texts[i] }.join(', '))
+        ed.add(s, e, entry['mruby'])
+        rewrite(rel, s, name, entry['mruby'], entry['caveat'])
+        return
+      end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
         cp = pyfind(masked, ')', nxt)
