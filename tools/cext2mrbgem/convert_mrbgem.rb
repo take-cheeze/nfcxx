@@ -1372,14 +1372,25 @@ end
           bo = im.end(0) - 1
           bc = match_close(masked, bo)
           next if bc < 0
-          a = split_args(masked, bo, bc)[rec[:index]]
-          next if a.nil?
           text = @files[frel]['text']
-          t = psl(text, a[0], a[1]).strip
-          lead = psl(text, a[0], a[1])[/\A\s*/].length
-          # NULL is no callback: the entry leaves the field unset, so it is not an assign
-          rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
-          rec[:assigns] << [t, frel, a[0] + lead] if false
+          # an array of structs (struct TAG arr[] = { {...}, {...} }): the field is inside each braced element
+          elems = split_args(masked, bo, bc)
+          groups = elems.select { |a, _b| masked[a + (masked[a..].to_s[/\A\s*/].length)] == '{' }
+          fields = if !groups.empty?
+                     groups.map do |ga, gb|
+                       ob = ga + masked[ga..].to_s[/\A\s*/].length
+                       cb = match_close(masked, ob)
+                       cb < 0 ? nil : split_args(masked, ob, cb)[rec[:index]]
+                     end
+                   else
+                     [elems[rec[:index]]]
+                   end
+          fields.compact.each do |a|
+            t = psl(text, a[0], a[1]).strip
+            lead = psl(text, a[0], a[1])[/\A\s*/].length
+            # NULL is no callback: the entry leaves the field unset, so it is not an assign
+            rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
+          end
         end
       end
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
@@ -1508,6 +1519,22 @@ end
           cm = Regexp.last_match
           rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
         end
+      end
+    end
+    # Members of this typedef's type (struct TAG { T NAME; }): their assigns are the members' positional initializer entries
+    # (struct TAG var = { ..., helper, ... }) and statement assigns (x.NAME = helper;), as for a function-pointer field
+    # (fnptr_global). The member's struct tag and index come from the declaration.
+    @files.each do |frel, f|
+      f['masked'].to_enum(:scan, /\b#{rec[:name]}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*;/).each do
+        md = Regexp.last_match
+        next unless struct_body_before?(f['masked'], md.begin(0))
+        bo = struct_body_open(f['masked'], md.begin(0))
+        next unless bo
+        tag = psl(f['masked'], [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
+        next unless tag
+        pseudo = { name: md[1], tag: tag, index: f['masked'][(bo + 1)...md.begin(0)].to_s.count(';'), assigns: [], calls: [] }
+        fnptr_global(pseudo)
+        rec[:assigns].concat(pseudo[:assigns])
       end
     end
     rec

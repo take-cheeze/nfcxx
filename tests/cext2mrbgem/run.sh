@@ -133,9 +133,9 @@ check grep -qF 'return tm_isdst(mrb, s);' "$work/helper_member_thread/src/helper
 check grep -qF 't.tm_isdst = 0;' "$work/helper_member_thread/src/helper_member_thread.c"
 # negative: a helper whose address is stored in a static table (a file-scope initializer) stays refused, with the reason
 rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_table_refused tools/cext2mrbgem/fixtures/helper_table_refused/ext/helper_table_refused "$work/helper_table_refused" > "$work/helper_table_refused.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
-check test -e "$work/helper_table_refused/NOT_BUILDABLE"
-check grep -q '  htr_cb  helper needs the mruby state threaded in, but is used outside a direct call' "$work/helper_table_refused/REFUSALS.txt"
+check test "$rc" -eq 0
+check test ! -e "$work/helper_table_refused/NOT_BUILDABLE"
+check grep -qF 'static mrb_value htr_dispatch(mrb_state *mrb, mrb_value s) {' "$work/helper_table_refused/src/helper_table_refused.c"
 
 # 2k. global state (no mrb argument): a helper whose only uses are direct calls through a macro expanded in two registered
 # methods is not threaded: it uses the file-scope state, defined once in Init's file and declared in the others. Each
@@ -616,6 +616,14 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_static_value/NOT_BUILDABLE"
 check grep -qF 'sv_table.fn = sv_dup__api_static_value;' "$work/api_static_value/src/api_static_value.c"
 check grep -qF 'return sv_dup__other(v);' "$work/api_static_value/src/other.c"
+
+# 2zzq. a struct member of a typedef'd function-pointer type, filled by a positional table of structs (array of struct TAG at file scope):
+# the typedef takes mrb and the table entries are threaded; the call through the member passes mrb (fnptr_typed_global members, arrays of structs)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_table tools/cext2mrbgem/fixtures/api_typed_table/ext/api_typed_table "$work/api_typed_table" > "$work/api_typed_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_table/NOT_BUILDABLE"
+check grep -qF 'return tt_codes[0].handler(mrb, v);' "$work/api_typed_table/src/api_typed_table.c"
+check grep -qF '{"first", tt_first},' "$work/api_typed_table/src/api_typed_table.c"
 
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
