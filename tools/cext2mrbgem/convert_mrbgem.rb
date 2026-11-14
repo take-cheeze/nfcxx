@@ -1313,7 +1313,8 @@ end
     rec[:calls] = []
     @files.each do |frel, f|
       masked = f['masked']
-      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*;/).each do
+      # the field may also be stored as an address (x.NAME = &helper;)
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*&?\s*([A-Za-z_]\w*)\s*;/).each do
         am = Regexp.last_match
         rec[:assigns] << [am[1], frel, am.begin(1)]
       end
@@ -1334,7 +1335,8 @@ end
           text = @files[frel]['text']
           t = psl(text, a[0], a[1]).strip
           lead = psl(text, a[0], a[1])[/\A\s*/].length
-          rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/)
+          # NULL is no callback: the entry leaves the field unset, so it is not an assign
+          rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/) && t != 'NULL'
           rec[:assigns] << [t, frel, a[0] + lead] if false
         end
       end

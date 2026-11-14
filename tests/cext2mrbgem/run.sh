@@ -603,6 +603,13 @@ check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
 check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
 check grep -qF 'return s;' "$work/api_enc_drop/src/api_enc_drop.c"
 
+# 2zzo. a positional callback table with a NULL entry, and a callback stored by address (x.NAME = &helper;): both are read by the field rule
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_null tools/cext2mrbgem/fixtures/api_fnptr_null/ext/api_fnptr_null "$work/api_fnptr_null" > "$work/api_fnptr_null.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_null/NOT_BUILDABLE"
+check grep -qF 'void (*store)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_null/src/api_fnptr_null.c"
+check grep -qF 'ops->store = &fn_store;' "$work/api_fnptr_null/src/api_fnptr_null.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
