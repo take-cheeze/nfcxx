@@ -1135,7 +1135,8 @@ def dtype_parse(rel, m)
     if !els.empty? && els.all? { |e| e[2].start_with?('.') }
       return dtype_designated(rel, m, open, close, els)
     end
-  return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless els.size == 5 && els[1][2].start_with?('{') && els[1][2].end_with?('}')
+  # flags may be left out (CRuby's initializer ends after data): 4 or 5 top-level members
+  return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless (els.size == 4 || els.size == 5) && els[1][2].start_with?('{') && els[1][2].end_with?('}')
   nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
   ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
   # RUBY_TYPED_DEFAULT_FREE frees with CRuby's allocator: mruby's dfree takes (mrb, data), and mrb_free has that shape

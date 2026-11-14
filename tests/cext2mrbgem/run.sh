@@ -301,6 +301,10 @@ check grep -qF 'return mrb_module_p(v) ? mrb_true_value() : mrb_false_value();' 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_ifdef tools/cext2mrbgem/fixtures/api_dtype_ifdef/ext/api_dtype_ifdef "$work/api_dtype_ifdef" > "$work/api_dtype_ifdef.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'static const mrb_data_type dt_type = { "DtBox", dt_free, dt_mark };' "$work/api_dtype_ifdef/src/api_dtype_ifdef.c"
+# 2zzz33. a data type declared in another file, with a mark function from a third file, and an initializer that leaves out flags.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_xfile tools/cext2mrbgem/fixtures/api_dtype_xfile/ext/api_dtype_xfile "$work/api_dtype_xfile" > "$work/api_dtype_xfile.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'const mrb_data_type xf_type = { "Xf", xf_free, xf_mark };' "$work/api_dtype_xfile/src/xfile_cache.c"
 
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
