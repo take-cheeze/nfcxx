@@ -94,7 +94,7 @@ IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 # across lines (`static VALUE` then `name(...)` on the next line, as bigdecimal and date write them).
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(([^()]*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
-REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
+REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
@@ -1076,6 +1076,8 @@ class Converter
     # A split method (compute_splits) is not refused here: its direct calls are renamed to its impl (process). A method
     # that is not split keeps the refusal, with the reason compute_splits or the threading check recorded.
     @reg_names.to_a.sort.each do |name|
+      # only a registration that is active (no error) makes the function a mruby method; an excluded one leaves it plain C
+      next unless @regs.any? { |r| r['error'].nil? && r['func'] == name }
       refuse_direct_uses(name) unless @split_names.include?(name)
     end
     # helper functions that need the mruby state are threaded: the mrb argument is added to the definition, to
@@ -1705,7 +1707,7 @@ class Converter
       return
     end
     case name
-    when 'rb_define_method', 'rb_define_singleton_method', 'rb_define_module_function'
+    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function'
       rec = @reg_by_call[[rel, s]]
       if rec.nil? || !called || nxt != rec['open']
         refuse(rel, s, name, 'used without a registration call')
@@ -1720,7 +1722,8 @@ class Converter
         refuse(rel, s, name, "target #{py_repr(tgt)} is not a tracked class or module variable")
         return
       end
-      new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_singleton_method' => 'mrb_define_class_method',
+      new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_private_method',
+              'rb_define_singleton_method' => 'mrb_define_class_method',
               'rb_define_module_function' => 'mrb_define_module_function' }[name]
       ed.add(s, e, new)
       ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
