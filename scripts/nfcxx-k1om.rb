@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
-# nfcxx's driver for --target=linux_k1om, ported from the bash in nfcxx: the argument checks, the commands the k1om
-# build runs (the k1om GCC through scripts/k1om-cc, EDG's eccp, the EDG front end for --emit-c) and the -E line, which
-# runs the host g++ whatever the target. See docs/notes/k1om.md.
+# nfcxx's driver for --target=linux_k1om, ported from the bash in nfcxx: the argument checks, the commands the k1om build runs
+# (the k1om GCC through scripts/k1om-cc, EDG's eccp, the EDG front end for --emit-c) and the -E line, which runs the host g++
+# whatever the target. See docs/notes/k1om.md.
 #
 #   ruby scripts/nfcxx-k1om.rb --facts=FILE ARG...
 #
@@ -13,18 +13,21 @@
 # list the port does not cover exits 3 with "unported: ..." on stderr and prints nothing: the bash must not refuse it.
 #
 # Accepted options: --freestanding, --emit-c, --backend=NAME, --target=NAME (the last one wins), --dialect=g++|clang,
-# --gnu-version=N, --instantiate=auto|used, --keep-intermediates, --no-eh-unwind, --no-eh-shim, -c, -o FILE, -E,
+# --gnu-version=N, --instantiate=auto|used, --keep-intermediates, --no-eh-unwind, --no-eh-shim, -c, -o FILE, -E, -x LANG,
 # -std=c++NN|gnu++NN, -DX, -UX (also -D X, -U X), -WX, -w, -pipe, -O[0-3s], -g, -fwrapv, -fexceptions,
 # -fno-strict-aliasing, -pthread, -fsanitize=address, -fno-sanitize=address, -fno-sanitize=all, -fno-omit-frame-pointer,
 # -fomit-frame-pointer, -fsafe-pointers, -fno-safe-pointers, -Wno-narrowing, -lNAME (not cuda), -IDIR.
-# Inputs: .cc, .cpp, .cxx sources, .c sources, .o objects, .a and .so (link inputs, not counted as inputs).
+# Inputs: any other argument that is not an option (sources: .cc, .cpp, .cxx, .s and the rest, as the bash's default case),
+# .c sources, .o objects, .a and .so (link inputs, not counted as inputs).
 # Refused by the bash at parse time (status 2): -fsanitize=CHECK other than address, -fno-sanitize=CHECK other than
-# address and all, -fsanitize-*, and -D, -U, -I without an argument; -fsafe-pointers refuses in the build (not --emit-c).
-# Refused as unported (the bash may do something the port does not model): every other option and input (-x, -P, -MD,
-# -include, -isystem, -m*, -shared, -fPIC, -rdynamic, -Wl,, -fuse-ld, --cache, --trace, --time-log, --cosmo,
-# --eh-unwind, --ir-opt, inputs other than the listed suffixes, such as .s), the no-target builds that are not --emit-c of a
-# freestanding program (Path B by default, and the host's include directories), the other EDG targets past their gate,
-# and -c of one source with a -I directory (the SYCL pre-pass reads the -I directories and the source).
+# address and all, -fsanitize-*, and -D, -U, -I without an argument; -fsafe-pointers refuses in the build (not --emit-c);
+# -x LANG other than c++ or none, for a compile or link (-E passes -x to the host g++ as given).
+# Refused as unported (the bash may do something the port does not model): every other option and input (-P, -MD,
+# -include, -isystem, -m*, -shared, -fPIC, -rdynamic, -Wl,, -fuse-ld, --cache, --trace, --time-log, --cosmo, --eh-unwind,
+# --ir-opt, -x without a value, -, an empty argument, an option that ends in a source or object suffix, .cu and .cpp2
+# inputs), the no-target builds that are not --emit-c of a freestanding program (Path B by default, and the host build),
+# the SYCL pre-pass (a -I directory holds sycl/detail/kernel_desc.hpp and the source includes sycl/: its dump is the
+# front end's), and a directory name the port cannot resolve (an absolute name, or one with . or .. or an empty component).
 #
 # FILE holds the facts the bash reads from the machine (tests/nfcxx-k1om/run.sh writes it):
 #   root DIR             the repository root (the bash's $root)
@@ -36,10 +39,16 @@
 #   eh-tls 0|1           ROOT/build/edg/eh-tls exists (the EDG runtime has per-thread EH state)
 #   edg-table NAME       ROOT/build/edg-base/lib_NAME is a directory (one line per table)
 #   module PATH          PATH declares or imports a C++ module (the module check reads the source; not ported)
+#   dir NAME             NAME, a directory relative to the cwd, exists (one line per directory, at any depth): abs_path of
+#                        NAME/FILE is then the physical directory
+#   sycl-header DIR      DIR/sycl/detail/kernel_desc.hpp is a file (DIR absolute): the bash's SYCL test (sycl_kernel_headers)
+#   host-gnu N           host_gnu_version prints N (empty: it prints nothing)
+#   host-include DIR     host_sys_includes prints DIR (one line per directory, in order)
 #
 # Assumed, not read: the host is Linux, and its g++ is GCC 13 (not clang), so the dialect is g++ and host_clang_version
-# prints nothing; NFCXX_* variables other than NFCXX_K1OM_ROOT are unset; the k1om GCC's --version is not clang; the
-# temporary directories the bash makes are printed as TMP (mktemp's names are not modelled).
+# prints nothing; NFCXX_* variables other than NFCXX_K1OM_ROOT are unset (NFCXX_CXX, NFCXX_SYS_INCLUDES, NFCXX_SYCL_PASS),
+# EDG_BASE is unset, and the source named by --emit-c exists (the bash's realpath); the k1om GCC's --version is not clang;
+# the temporary directories the bash makes are printed as TMP (mktemp's names are not modelled).
 
 require "pathname"
 
@@ -65,18 +74,24 @@ def refuse(message)
 end
 
 class Facts
-  attr_reader :tables, :modules
+  attr_reader :tables, :modules, :dirs, :sycl_headers, :host_includes
 
-  def initialize(values, tables, modules)
+  def initialize(values, tables, modules, dirs, sycl_headers, host_includes)
     @values = values
     @tables = tables
     @modules = modules
+    @dirs = dirs
+    @sycl_headers = sycl_headers
+    @host_includes = host_includes
   end
 
   def self.load(path)
     values = {}
     tables = []
     modules = []
+    dirs = []
+    sycl_headers = []
+    host_includes = []
     File.foreach(path) do |line|
       line = line.chomp
       next if line.empty? || line.start_with?("#")
@@ -85,10 +100,13 @@ class Facts
       case key
       when "edg-table" then tables << rest.to_s
       when "module" then modules << Pathname.new(rest.to_s).cleanpath.to_s
+      when "dir" then dirs << rest.to_s
+      when "sycl-header" then sycl_headers << Pathname.new(rest.to_s).cleanpath.to_s
+      when "host-include" then host_includes << rest.to_s
       else values[key] = rest.to_s
       end
     end
-    new(values, tables, modules)
+    new(values, tables, modules, dirs, sycl_headers, host_includes)
   end
 
   def flag?(key)
@@ -106,6 +124,7 @@ class Driver
   def initialize(facts)
     @facts = facts
     @lines = []
+    @argv = []
     @std = "--c++23"
     @dialect = "g++"
     @freestanding = false
@@ -114,6 +133,7 @@ class Driver
     @backend_explicit = false
     @target = ""
     @gnu = nil
+    @xlang = nil
     @out = "a.out"
     @outset = false
     @compile_only = false
@@ -133,14 +153,15 @@ class Driver
   end
 
   def run(argv)
+    @argv = argv
     parse(argv)
     refuse("no input files") if @srcs.size + @nobj + @cfiles.size == 0
-    if @compile_only && @srcs.size == 1 && @nobj == 0 && @cfiles.empty? && !@preprocess && !@emit_c &&
-       @cflags.any? { |f| f.start_with?("-I") }
-      unported("-c of one source with -I: the SYCL pre-pass depends on the -I directories and the source's includes")
+    if @compile_only && @srcs.size == 1 && @nobj == 0 && @cfiles.empty? && !@preprocess && !@emit_c && sycl_pre_pass?
+      unported("the SYCL pre-pass: a -I directory holds sycl/detail/kernel_desc.hpp and the source includes sycl/ (its dump is the front end's)")
     end
     return preprocess if @preprocess
 
+    refuse("-x #{@xlang}: only C++ sources (use nfcc for C)") unless [nil, "", "c++", "none"].include?(@xlang)
     refuse("EDG not built; run scripts/setup-edg.sh") if needs_eccp? && !@facts.flag?("eccp")
     refuse("--instantiate (NFCXX_INSTANTIATE) is auto or used (got #{@instantiate})") unless %w[auto used].include?(@instantiate)
     @srcs.each do |s|
@@ -154,9 +175,6 @@ class Driver
     if @emit_c
       refuse("--emit-c does not apply to .c inputs (they skip the front end)") unless @cfiles.empty?
       unported("--emit-c without a source") if @srcs.empty?
-      unless @k1om || (@target.empty? && @freestanding && !@asan)
-        unported("--emit-c on the host (no --target, no --freestanding): the host's include directories and GNU version")
-      end
       return emit_c
     end
     unported("no --target: the default backend (Path B) and the host build are not ported") unless @k1om
@@ -199,10 +217,17 @@ class Driver
       when /\A-std=c\+\+(.*)\z/, /\A-std=gnu\+\+(.*)\z/
         @std = "--c++#{Regexp.last_match(1)}"
       when "-E" then @preprocess = true
+      when "-x"
+        unported("-x without a value") if i + 1 >= argv.size
+        @xlang = argv[i + 1]
+        i += 1
       when "-pthread" then @pthread = true
       when "-fexceptions", "-fwrapv", "-fno-strict-aliasing", "-pipe", "-w" then nil
       when "-Wno-narrowing" then @diag << "--diag_warning=narrowing_conversion"
+      when /\A-Wl,/ then unported("#{a}: a link option (not ported)")
       when /\A-W/ then nil
+      # an option that ends in a source or object suffix: the bash's case order decides what it is (-DX=a.c is a C input)
+      when /\A-.*\.(c|o|a|so|cu|cpp2|cc|cpp|cxx)\z/ then unported("#{a}: an option that ends in a suffix (not ported)")
       when "-I", "-D", "-U"
         refuse("#{a} needs an argument") if i + 1 >= argv.size
         @cflags << a + argv[i + 1]
@@ -215,16 +240,19 @@ class Driver
       when /\A-l(.+)\z/
         unported("-l of cuda") if Regexp.last_match(1).include?("cuda")
         @files << a
-      when /\A.+\.o\z/
+      when /\A.*\.o\z/
         @files << a
         @nobj += 1
-      when /\A.+\.(a|so)\z/ then @files << a
+      when /\A.*\.(a|so)\z/ then @files << a
       when /\A.+\.(cc|cpp|cxx)\z/
         @files << a
         @srcs << a
-      when /\A.+\.c\z/ then @cfiles << a
+      when /\A.*\.c\z/ then @cfiles << a
       else
-        unported("option or input #{a}")
+        # the bash's default case: any other input is a C++ source (.s included)
+        unported("option or input #{a}") if a.empty? || a.start_with?("-") || a.end_with?(".cu", ".cpp2")
+        @files << a
+        @srcs << a
       end
       i += 1
     end
@@ -234,11 +262,35 @@ class Driver
     !@srcs.empty? || @emit_c || (@nobj > 0 && @cfiles.empty?)
   end
 
+  # the bash's SYCL test (sycl_kernel_headers, then the first source includes sycl/): true when a -I directory of the arguments
+  # holds the oneAPI kernel header (the directory is resolved against the cwd, as the bash's -f test is)
+  def sycl_pre_pass?
+    return false unless sycl_kernel_headers?
+
+    src = Pathname.new(cwd).join(@srcs[0]).to_s
+    return false unless File.file?(src)
+
+    File.binread(src).match?(/#[[:space:]]*include[[:space:]]*[<"]sycl\//)
+  end
+
+  def sycl_kernel_headers?
+    prev = nil
+    @argv.each do |a|
+      d = a.match?(/\A-I./) ? a[2..] : nil
+      d = a if prev == "-I"
+      prev = a
+      next if d.nil? || d.empty?
+
+      unported("#{d}: a -I directory with ~ or .. (not ported)") if d.start_with?("~") || d.split("/").include?("..")
+      return true if @facts.sycl_headers.include?(Pathname.new(cwd).join(d).cleanpath.to_s)
+    end
+    false
+  end
+
   def other_target_gate
     refuse("--target needs --freestanding (the host's library headers are the host target's)") unless @freestanding
     refuse("--target needs --emit-c (the generated C is for the target; compile it with a cross compiler)") unless @emit_c
     refuse("no EDG target '#{@target}' (lib_* tables: #{@facts.tables.join(' ')})") unless @facts.tables.include?(@target)
-    unported("EDG target #{@target} passes the gate; its --emit-c front-end run is not ported")
   end
 
   def k1om_gate
@@ -310,8 +362,14 @@ class Driver
     env_lines(eccp: true)
   end
 
+  # --emit-c: the front end alone. Freestanding: the lib/ headers. Hosted (no target): the host's include directories
+  # and the EDG base's include; then the -I directories of the command line, in front.
   def emit_c
-    inc = ["-I#{root}/lib"]
+    inc = if @freestanding
+            ["-I#{root}/lib"]
+          else
+            @facts.host_includes.map { |d| "--sys_include=#{d}" } + ["--sys_include=#{root}/build/edg-base/include"]
+          end
     @files.each { |f| inc.unshift("-I#{abs(Regexp.last_match(1))}") if f =~ /\A-I(.+)\z/ }
     argv = ["-D_POSIX_SOURCE", "-D__CHAR_BIT__=8", @std, "--#{@dialect}", *eh_tls, *gnu_opts, *@diag, *inc,
             "--gen_c_file_name=TMP/out.c", abs(@srcs[0])]
@@ -320,7 +378,9 @@ class Driver
   end
 
   def preprocess
-    args = ["-E", "-std=#{@std.delete_prefix('--')}", *@cflags, *@srcs]
+    args = ["-E", "-std=#{@std.delete_prefix('--')}"]
+    args += ["-x", @xlang] unless @xlang.nil? || @xlang.empty?
+    args += [*@cflags, *@srcs]
     args += ["-o", @out] if @outset
     run_cmd("g++", args)
   end
@@ -343,10 +403,26 @@ class Driver
     run_cmd("k1om-gcc", ["-B#{root}/scripts/k1om-bin/", *out])
   end
 
+  # the bash's gnu_opts: the GNU version (clang's version is the host's, which prints nothing here), then an EDG target's
+  # --target and its unsigned chars. The GNU version: the user's, else GCC 13's for a freestanding program, else the host's.
   def gnu_opts
-    return [] if @dialect == "clang"
+    opts = []
+    if @dialect != "clang"
+      g = gnu_version
+      opts << "--gnu_version=#{g}" unless g.empty?
+    end
+    unless @target.empty? || @target == "linux_k1om"
+      opts += ["--target", @target]
+      opts << "--unsigned_chars" if %w[linux_aarch64 linux_armv7 linux_riscv32 linux_riscv64].include?(@target)
+    end
+    opts
+  end
 
-    ["--gnu_version=#{@gnu || '130000'}"]
+  def gnu_version
+    return @gnu if @gnu
+    return "130000" if @freestanding
+
+    @facts.value("host-gnu")
   end
 
   def inst_opts
@@ -379,10 +455,15 @@ class Driver
     abs(arg)
   end
 
-  # abs_path of a name: the directory is the working directory when the name has none (a name with a directory
-  # needs the directory to exist, which the port does not read)
+  # abs_path of a name: the physical directory and the base name when the directory exists here, else the name as given.
+  # A name without a directory is printed under the cwd. Names the port cannot resolve the same way are unported.
   def abs(name)
-    unported("#{name}: a path with a directory (abs_path needs the directory)") if name.include?("/")
+    return "#{cwd}/#{name}" unless name.include?("/")
+
+    unported("#{name}: an absolute name or one with an empty, . or .. component (not ported)") if name.start_with?("/") ||
+      name.end_with?("/") || name.include?("//") || name.split("/").any? { |c| c == "." || c == ".." }
+    return name unless @facts.dirs.include?(File.dirname(name))
+
     "#{cwd}/#{name}"
   end
 

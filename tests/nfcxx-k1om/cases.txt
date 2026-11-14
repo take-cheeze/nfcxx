@@ -114,3 +114,24 @@
 -E
 -E a.cc -o pre.ii -DNDEBUG
 -E -x c++ a.cc
+# this port's cases: -x (a language other than C++ is refused for a build, passed to -E), a source by its suffix (.s), the
+# -o directory (inc, out and sy exist; nodir does not), the SYCL test with a header present and no sycl include, the host
+# and freestanding --emit-c with an option or the GNU version
+--target=linux_k1om --freestanding -x c a.cc
+--target=linux_k1om --freestanding -c -x c++ a.cc
+-E -x c a.cc
+--target=linux_k1om --freestanding a.cc -o nodir/prog
+--target=linux_k1om --freestanding a.cc -o out/prog
+--target=linux_k1om --freestanding -c a.cc -o out/a.o
+--target=linux_k1om --freestanding -c -I sy a.cc
+--target=linux_k1om --freestanding -c -Isy a.cc
+--target=linux_k1om --freestanding -c a.s
+--target=linux_k1om --freestanding a.s a.cc -o prog
+--freestanding --emit-c -I sy a.cc
+--freestanding --emit-c --target=win64 -I sy a.cc
+--emit-c a.cc
+--emit-c -I inc -DX=1 a.cc
+--emit-c --gnu-version=120000 a.cc
+--emit-c --dialect=clang a.cc
+!nogcc --emit-c a.cc
+--freestanding --emit-c -fsanitize=address -I inc a.cc

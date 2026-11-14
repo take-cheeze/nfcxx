@@ -37,8 +37,10 @@ ln -s "$here/stub.sh" "$bin/ld.mold"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
 ln -s "$here/stub.sh" "$root/build/edg/bin/cpfe"
 # the sources the cases name (empty: the gate reads no source)
-for f in a.cc b.o c.c libq.a; do : > "$work/$f"; done
-mkdir -p "$work/inc"
+for f in a.cc b.o c.c libq.a a.s; do : > "$work/$f"; done
+# directories: inc and out exist; sy holds the oneAPI kernel header (the SYCL test of -c finds it, the source does not include sycl/)
+mkdir -p "$work/inc" "$work/out" "$work/sy/sycl/detail"
+: > "$work/sy/sycl/detail/kernel_desc.hpp"
 
 # set_state TOKENS...: the files the case's tokens remove or restore
 set_state() {
@@ -67,6 +69,16 @@ write_facts() {
     if [ -f "$root/build/k1om/libC.a" ]; then echo "k1om-libc 1"; else echo "k1om-libc 0"; fi
     if [ -f "$root/build/edg/eh-tls" ]; then echo "eh-tls 1"; else echo "eh-tls 0"; fi
     for d in "$root"/build/edg-base/lib_*; do [ -d "$d" ] && echo "edg-table ${d##*/lib_}"; done
+    # the directories under the work directory (abs_path resolves those that exist)
+    while IFS= read -r d; do echo "dir ${d#./}"; done < <(cd "$work" && find . -mindepth 1 -type d)
+    # the SYCL test's header, by its directory (the bash tests DIR/sycl/detail/kernel_desc.hpp with -f)
+    while IFS= read -r f; do echo "sycl-header ${f%/sycl/detail/kernel_desc.hpp}"; done \
+      < <(find "$work" -path '*/sycl/detail/kernel_desc.hpp' -type f)
+    # the host probes: host_gnu_version and host_sys_includes of scripts/host-sys.sh, run as the bash runs them (the stub g++)
+    hg=$(env -i PATH="$bin:/usr/bin:/bin" bash -c 'source "$1"; host_gnu_version' _ "$root/scripts/host-sys.sh" 2>/dev/null)
+    echo "host-gnu $hg"
+    env -i PATH="$bin:/usr/bin:/bin" bash -c 'source "$1"; host_sys_includes' _ "$root/scripts/host-sys.sh" 2>/dev/null |
+      while IFS= read -r d; do [ -n "$d" ] && echo "host-include $d"; done
   } > "$sb/facts"
 }
 
