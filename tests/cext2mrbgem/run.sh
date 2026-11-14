@@ -144,12 +144,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global tools/cext2mrbgem/
 check test "$rc" -eq 0
 check test ! -e "$work/helper_global/NOT_BUILDABLE"
 check grep -qF 'struct mrb_state *helper_global_bc2_mrb = NULL;' "$work/helper_global/src/helper_global.c"
-check grep -qF 'static mrb_value hg_make(mrb_value s) {' "$work/helper_global/src/helper_global.c"
-check grep -qF 'return mrb_str_new_cstr(helper_global_bc2_mrb, "made");' "$work/helper_global/src/helper_global.c"
+check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s) {' "$work/helper_global/src/helper_global.c"
+check grep -qF 'return mrb_str_new_cstr(mrb, "made");' "$work/helper_global/src/helper_global.c"
+check grep -qF '#define HG_MAKE(x) hg_make(helper_global_bc2_mrb, x)' "$work/helper_global/src/helper_global.c"
 check grep -qF '  mrb_state *nfcx_bc2_old = helper_global_bc2_mrb;' "$work/helper_global/src/helper_global.c"
 check test "$(grep -c 'helper_global_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/helper_global/src/helper_global.c")" -eq 3
 check grep -qF ' helper_global_bc2_mrb = nfcx_bc2_old; }' "$work/helper_global/src/helper_global.c"
-check grep -q 'global-state hg_make' "$work/helper_global/conversion_log.json"
+check grep -qF 'static mrb_value hg_make(mrb_state *mrb, mrb_value s)' "$work/helper_global/conversion_log.json"
 
 # 2l. global state refused: a helper whose address sits in a file-scope initializer may run with no method context
 rc=0; "$rb" "$conv" --scanner "$scanner" --name helper_global_refused tools/cext2mrbgem/fixtures/helper_global_refused/ext/helper_global_refused "$work/helper_global_refused" > "$work/helper_global_refused.log" 2>&1 || rc=$?

@@ -1517,6 +1517,9 @@ use_problem = lambda do |name, use|
         why = value_problem.call(rel, s, name) || 'the pointer is passed as a value, and the helper would gain an argument'
         next "helper needs the mruby state threaded in, but is used outside a direct call (not supported): #{why}"
       end
+      if fn.nil? && direct && in_global_macro?(rel, s)
+        next nil # a macro that expands in a function with the state
+      end
       if fn.nil?
         next ('helper needs the mruby state threaded in, but the call is not in a function definition the ' \
               'converter recognises (a macro-decorated definition, or file scope) (not supported)')
@@ -1529,15 +1532,25 @@ use_problem = lambda do |name, use|
 
     uses = {}
     cands.each { |name| uses[name] = helper_uses.call(name) }
-    cands.to_a.sort.each do |name|
-      why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
-      next unless why
-      cands.delete(name)
-      next unless @split_names.include?(name)
-      # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
-      @split_names.delete(name)
-      @split_reason[name] = why
-      refuse_direct_uses(name)
+    # The macro decision needs the threaded set, and the threaded set needs the macro decision (a direct call from a
+    # macro body is a use only when the macro expands in a function with the state). Greatest fixpoint: start from the
+    # set of candidates, record which macros expand in it, prune the candidates whose uses fail, and repeat. The spans
+    # only grow with the context, so the final macro decision keeps every position this pass allowed.
+    loop do
+      compute_global_macros(@valid_reg_names | (init_first ? Set[init_first] : Set.new) | cands, false)
+      changed = false
+      cands.to_a.sort.each do |name|
+        why = uses[name].map { |u| use_problem.call(name, u) }.compact.first
+        next unless why
+        changed = true
+        cands.delete(name)
+        next unless @split_names.include?(name)
+        # the impl cannot take mrb from every direct caller: the method is not split, and its calls keep the refusal
+        @split_names.delete(name)
+        @split_reason[name] = why
+        refuse_direct_uses(name)
+      end
+      break unless changed
     end
     # A split method that takes mrb needs every direct caller to have the mruby state in scope: a method or Init, or a
     # threaded helper. A caller without it (a refused helper, or a function with no state) would pass a state that is
@@ -1676,28 +1689,48 @@ use_problem = lambda do |name, use|
   # expansion is in a function with the state (a with_state or global-state function, mrb_tok) and the body has no
   # return (a return would skip the restore). Their mrb argument is then the global. A use in a preprocessor line
   # or in a file-scope initializer keeps the macro refused. Conservative: a macro that calls a helper is not handled.
-  def compute_global_macros(ctx)
-    @global_macro_spans = {}
-    @files.each do |rel, f|
-      masked = f['masked']
-      masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
-        name = m[1]
-        s = m.begin(0)
-        e = logical_line_end(masked, m.end(0))
-        body = psl(masked, m.end(0), e)
-        next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
-        next if body =~ /(?<![#{WC}])return(?![#{WC}])/
-        ok = (@occ[name] || []).all? do |orel, os, _oe|
-          inside = orel == rel && s <= os && os < e
-          if inside
-            true
-          else
+  def compute_global_macros(ctx, record = true)
+    # A use of a macro is fine in a function with the state, or inside another macro body accepted in an earlier round
+    # (the outer macro's expansions are checked the same way). Rounds repeat until no macro is added.
+    accepted = {}   # rel -> [[start, end]] of the accepted macros
+    names = {}      # rel -> { start => macro name }
+    loop do
+      added = false
+      @files.each do |rel, f|
+        masked = f['masked']
+        masked.to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
+          name = m[1]
+          s = m.begin(0)
+          e = logical_line_end(masked, m.end(0))
+          next if (accepted[rel] || []).include?([s, e])
+          body = psl(masked, m.end(0), e)
+          # a body that calls a helper which needs the state is handled the same way: its call takes the global
+          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i)) }
+          next if body =~ /(?<![#{WC}])return(?![#{WC}])/
+          ok = (@occ[name] || []).all? do |orel, os, _oe|
+            inside = orel == rel && s <= os && os < e
+            next true if inside
             fn = enclosing_func(orel, os)
-            !fn.nil? && ctx.include?(fn['name'])
+            if fn.nil?
+              (accepted[orel] || []).any? { |a, z| a < os && os < z }
+            else
+              ctx.include?(fn['name'])
+            end
           end
+          next unless ok
+          (accepted[rel] ||= []) << [s, e]
+          (names[rel] ||= {})[s] = name
+          added = true
         end
-        next unless ok
-        (@global_macro_spans[rel] ||= []) << [s, e]
+      end
+      break unless added
+    end
+    @global_macro_spans = accepted
+    return unless record
+    accepted.each do |rel, spans|
+      f = @files[rel]
+      spans.each do |s, _e|
+        name = names[rel][s]
         @rewrites << { 'file' => rel, 'line' => line_of(f['text'], s), 'from' => name, 'to' => "#{name} (mrb = #{@global_name})" }
       end
     end
