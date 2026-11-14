@@ -27,14 +27,21 @@
 # is listed as a file fact (the facts list what exists). The input sources are read from the disk, relative to the
 # working directory: their existence, their directory, their full path (realpath) and whether they include <sycl/...>.
 #
+# The option loop is the driver's, in the driver's case order: a pattern earlier in the loop wins (so -Ifoo.c is a .c
+# input, and -foo.o an object). Options the loop only passes on (-fPIC, -MD, -Wl,..., the back-end flags) change nothing
+# here. The driver's setup before the loop is modelled too: -fsyntax-only (the driver runs itself again: the port runs
+# the same plan for that run), the wrappers (--cuda-driver= is taken out; a --bundle-* option is not covered), and
+# NFCXX_CACHE_REMOTE. The host probes and the cuda-rewrite tool are assumed to succeed.
+#
 # Exit status: 0 when the pre-pass completes (the main compile is not planned here), otherwise the bash's status (2 for
 # its usage errors; the status of the failing step for cppfront and the SYCL passes); 3 for an argument or fact that is
 # not covered by this port: the reason goes to stderr, nothing to stdout.
 #
-# Not covered (exit 3): every option parse_args does not list (-E, -M*, -x, -fsyntax-only, --emit-c, --trace, --cache,
-# -fsanitize, and the rest), .cu and .c inputs, - (stdin), any other input extension, -o without a file, and a fact the
-# plan needs that is missing. The driver's setup before the pre-pass (the host probes, the wrappers, the cuda-rewrite
-# tool) is assumed to succeed. The port does not read the driver's text: its rules are restated here and tested by run.sh.
+# Not covered (exit 3): .cu inputs (their device pre-pass belongs to the CUDA plan), --bundle-* options (the bundle
+# wrapper runs the driver and nfcbundle), a link that names libcuda with a mode other than libcuda (the driver shim),
+# a -fsyntax-only compile of a .cpp2 input without -E (its cache key is of a temporary object path), a -I directory
+# that is not a plain path (the file test is by string), an -o, -x, -I-value or -MF option without its value, an
+# empty -o name, --trace/--time-log whose file cannot be written here, and a fact the plan needs that is missing.
 require 'digest/sha1'
 
 class Unported < StandardError; end
@@ -93,46 +100,129 @@ class Plan
   end
 end
 
-# parse_args: the driver's option loop, for the options this port covers. Returns the state the pre-pass reads.
+# The bash case pattern PAT matches A (a leading dot is matched too, as the shell's * does)
+def glob?(a, pat)
+  File.fnmatch?(pat, a, File::FNM_DOTMATCH)
+end
+
+# A -o, -x, -include, ... option takes the next argument; the bash reads $2 (unbound at the end: not covered)
+def value_of!(argv, i)
+  raise Unported, "#{argv[i]} without a value" if i + 1 >= argv.size
+  argv[i + 1]
+end
+
+# onoff FLAG VALUE (the driver's): on|1 and off|0 are the values. Run in $(...) and assigned, so its exit 2 ends the driver.
+def onoff!(flag, val)
+  return if %w[on 1 off 0].include?(val)
+  raise Stop.new(2, "nfcxx: #{flag} takes on or off (got '#{val}')")
+end
+
+# The file a trace or time log writes must be in an existing directory and not be a directory (abs_path, then '>')
+def writable_here?(path)
+  File.directory?(File.dirname(path)) && !File.directory?(path)
+end
+
+# The driver's --cuda-driver handling (scripts/cuda-driver-wrap.sh), before the option loop: the option is taken out,
+# and its mode is checked. A libcuda link that the wrapper replaces (the shim) is not covered.
+def cuda_driver_prelude(plan, argv)
+  mode = plan.env("NFCXX_CUDA_DRIVER") || "auto"
+  found = false
+  out = []
+  argv.each do |a|
+    if a.start_with?("--cuda-driver=")
+      mode = a.delete_prefix("--cuda-driver=")
+    else
+      if %w[-lcuda -l:libcuda.so -l:libcuda.so.1].include?(a) || glob?(a, "*/libcuda.so") || glob?(a, "*/libcuda.so.1")
+        found = true
+      end
+      out << a
+    end
+  end
+  unless %w[auto cudart libcuda].include?(mode)
+    raise Stop.new(2, "nfcxx: --cuda-driver=#{mode}: auto, cudart or libcuda")
+  end
+  raise Unported, "a link that names libcuda is replaced by the driver shim" if found && mode != "libcuda"
+  out
+end
+
+# The option loop (nfcxx, the while loop over the arguments), for the parts that can change the pre-pass. The case
+# arms are in the driver's order; the first one that matches wins. Returns the state the pre-pass reads.
 def parse_args(argv)
-  st = { compile_only: false, out: "a.out", outset: false, srcs: [], cpp2: [], ncpp: 0, nobj: 0 }
+  st = { compile_only: false, out: "a.out", outset: false, srcs: [], cpp2: [], ncpp: 0, nobj: 0, ncfiles: 0,
+         stdin: false, preprocess: false, emit_c: false, emit_hip: false, trace: nil, time_log: nil }
   i = 0
   while i < argv.size
     a = argv[i]
-    case a
-    when "-c" then st[:compile_only] = true
-    when "-o"
-      raise Unported, "-o without a file" if i + 1 >= argv.size
-      st[:out] = argv[i + 1]
+    case
+    when a == "--emit-c" then st[:emit_c] = true
+    when a == "--emit-hip" then st[:emit_hip] = true
+    when glob?(a, "--backend=*"), glob?(a, "--ir-opt=*"), a == "--eh-unwind", a == "--no-eh-unwind",
+         a == "--no-eh-shim", glob?(a, "--cache=*"), glob?(a, "--cache-log=*"), a == "--keep-intermediates"
+      nil
+    when glob?(a, "--time-log=*") then st[:time_log] = a.delete_prefix("--time-log=")
+    when glob?(a, "--instantiate=*") then nil
+    when glob?(a, "--promote-slots=*") then onoff!("--promote-slots", a.delete_prefix("--promote-slots="))
+    when glob?(a, "--unroll=*") then onoff!("--unroll", a.delete_prefix("--unroll="))
+    when glob?(a, "--struct-slots=*") then onoff!("--struct-slots", a.delete_prefix("--struct-slots="))
+    when glob?(a, "--pathb-c=*"), glob?(a, "-fuse-ld=*"), a == "--obfuscate-kernels" then nil
+    when a == "-fsanitize=address", a == "-fsafe-pointers", a == "-fno-safe-pointers", a == "-fno-sanitize=address"
+      nil
+    when glob?(a, "-fsanitize=*"), glob?(a, "-fsanitize-*")
+      raise Stop.new(2, "nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)")
+    when a == "-fno-omit-frame-pointer", a == "-fomit-frame-pointer" then nil
+    when glob?(a, "--dialect=*"), glob?(a, "--gnu-version=*"), a == "--freestanding", a == "--cosmo",
+         glob?(a, "--target=*"), glob?(a, "--module-dir=*")
+      nil
+    when glob?(a, "--trace=*") then st[:trace] = a.delete_prefix("--trace=")
+    when a == "-shared", a == "-fPIC", a == "-fpic", a == "-rdynamic" then nil
+    when a == "-c" then st[:compile_only] = true
+    when a == "-o"
+      out = value_of!(argv, i)
+      raise Unported, "-o with an empty name" if out.empty?
+      st[:out] = out
       st[:outset] = true
       i += 1
-    when "-I", "-D", "-U"
+    when glob?(a, "-std=c++*"), glob?(a, "-std=gnu++*") then nil
+    when a == "-E" then st[:preprocess] = true
+    when a == "-P" then nil
+    when a == "-x" then value_of!(argv, i); i += 1
+    when a == "-" then st[:stdin] = true
+    when a == "-pthread", a == "-fexceptions", a == "-fwrapv", a == "-fno-strict-aliasing", a == "-fno-sanitize=all",
+         a == "-pipe"
+      nil
+    when glob?(a, "-fno-sanitize=*")
+      raise Stop.new(2, "nfcxx: #{a} is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)")
+    when glob?(a, "-fvisibility=*"), a == "-fvisibility-inlines-hidden", a == "-fPIE", a == "-fpie", a == "-pie"
+      nil
+    when glob?(a, "-Wl,*"), glob?(a, "-l?*"), a == "-Wno-narrowing", glob?(a, "-W*"), a == "-w", glob?(a, "-m*")
+      nil
+    when a == "-MD", a == "-MMD", a == "-MP" then nil
+    when a == "-MF", a == "-MT", a == "-MQ" then value_of!(argv, i); i += 1
+    when a == "-include", a == "-isystem" then value_of!(argv, i); i += 1
+    when glob?(a, "-isystem?*") then nil
+    when glob?(a, "*.c") then st[:ncfiles] += 1
+    when glob?(a, "-I?*"), glob?(a, "-D?*"), glob?(a, "-U?*") then nil
+    when a == "-I", a == "-D", a == "-U"
       raise Stop.new(2, "nfcxx: #{a} needs an argument") if i + 1 >= argv.size
       i += 1
-    when /\A-[IDU]./ then nil
-    when /\A-std=(c\+\+|gnu\+\+)\d+\z/ then nil
-    when /\A-W/, "-w", "-pipe", /\A-O[0-3sg]?\z/, /\A-g\d?\z/, "-fPIC", "-fpic", "-pthread",
-         "-fexceptions", "-fwrapv", "-fno-strict-aliasing"
-      nil
-    when /\A-l./ then nil
-    when /\.o\z/
-      st[:nobj] += 1
-    when /\.cpp2\z/
+    when glob?(a, "*.o") then st[:nobj] += 1
+    when glob?(a, "-*"), glob?(a, "*.a"), glob?(a, "*.so") then nil
+    when glob?(a, "*.cu") then raise Unported, ".cu input: its device pre-pass belongs to the CUDA plan"
+    when glob?(a, "*.cpp2")
       st[:cpp2] << a
       st[:srcs] << a
       st[:ncpp] += 1
-    when /\.(cc|cpp|cxx|C|ii)\z/
+    else
       st[:srcs] << a
       st[:ncpp] += 1
-    else
-      raise Unported, "argument #{a.inspect} is not covered"
     end
     i += 1
   end
   st
 end
 
-# sycl_kernel_headers ARG...: a -I directory of the arguments holds sycl/detail/kernel_desc.hpp (the bash's loop, as is)
+# sycl_kernel_headers ARG...: a -I directory of the arguments holds sycl/detail/kernel_desc.hpp (the bash's loop, as is).
+# The test is by string, so a directory that is not a plain path (a doubled or trailing slash, a . or .. part) is not covered.
 def sycl_kernel_headers?(plan, argv)
   prev = nil
   argv.each do |a|
@@ -140,15 +230,18 @@ def sycl_kernel_headers?(plan, argv)
     d = a[2..] if a.start_with?("-I") && a.length > 2
     d = a if prev == "-I"
     prev = a
-    return true if d && !d.empty? && plan.file?("#{d}/sycl/detail/kernel_desc.hpp")
+    next if d.nil? || d.empty?
+    plain = !(d.include?("//") || d.end_with?("/") || d.split("/").any? { |c| c == "." || c == ".." })
+    raise Unported, "-I directory #{d.inspect} is not a plain path" unless plain
+    return true if plan.file?("#{d}/sycl/detail/kernel_desc.hpp")
   end
   false
 end
 
-# grep -Eq '#[[:space:]]*include[[:space:]]*[<"]sycl/' FILE (line by line, as grep matches)
+# grep -Eq '#[[:space:]]*include[[:space:]]*[<"]sycl/' FILE (line by line, as grep matches; bytes, as grep reads them)
 def sycl_include?(path)
   return false unless File.file?(path)
-  File.foreach(path).any? { |l| l =~ /#[[:space:]]*include[[:space:]]*[<"]sycl\// }
+  File.open(path, "rb") { |f| f.each_line.any? { |l| l =~ /#[[:space:]]*include[[:space:]]*[<"]sycl\// } }
 rescue StandardError
   false
 end
@@ -193,8 +286,9 @@ def sycl_path(plan, st, argv)
   raise Stop.new(rc) unless rc == 0
 end
 
-# cpp2_prepare: each .cpp2 input is translated by cppfront into the cache (-c) or a temporary directory
-def cpp2_path(plan, st)
+# cpp2_prepare: each .cpp2 input is translated by cppfront into the cache (-c) or a temporary directory.
+# tmp_obj: the object is a temporary path of a -fsyntax-only run, so the cache key is not known here.
+def cpp2_path(plan, st, tmp_obj)
   return if st[:cpp2].empty?
   root = plan.root
   cppfront_src = plan.env("CPPFRONT_SRC") || "#{root}/build/cppfront-src"
@@ -206,6 +300,7 @@ def cpp2_path(plan, st)
   end
   dir =
     if st[:compile_only]
+      raise Unported, "-fsyntax-only of a .cpp2 input: its cache key is of a temporary object" if tmp_obj
       obj = st[:outset] ? st[:out] : "#{File.basename(st[:cpp2][0], '.cpp2')}.o"
       key = Digest::SHA1.hexdigest(File.expand_path(obj, plan.cwd) + "\n")[0, 16]
       cache = plan.env("NFCXX_CU_CACHE") ||
@@ -226,19 +321,56 @@ def cpp2_path(plan, st)
   end
 end
 
-# run: the pre-pass for ARGV. Returns the bash's exit status; raises Stop or Unported.
-def run_prepass(plan, argv)
+# run_driver: the driver's setup and pre-pass for ARGV. Returns the bash's exit status; raises Stop or Unported.
+def run_driver(plan, argv, tmp_obj)
+  return run_fso(plan, argv, tmp_obj) if argv.include?("-fsyntax-only")
+  raise Unported, "--bundle-* options (the bundle wrapper runs the driver again)" if (" #{argv.join(' ')} ").include?(" --bundle-")
+  argv = cuda_driver_prelude(plan, argv)
+  cache_remote = plan.env("NFCXX_CACHE_REMOTE")
+  raise Stop.new(2, "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '#{cache_remote}')") if cache_remote && cache_remote != "gha"
   st = parse_args(argv)
-  if st[:ncpp] + st[:nobj] == 0
+  if st[:ncpp] + st[:nobj] + st[:ncfiles] + (st[:stdin] ? 1 : 0) == 0
     raise Stop.new(2, "nfcxx: no input files")
   end
-  if st[:compile_only] && st[:ncpp] == 1 && st[:nobj] == 0 && !plan.env("NFCXX_SYCL_PASS") &&
-     sycl_kernel_headers?(plan, argv) && sycl_include?(st[:srcs][0])
+  # the .cu inputs are not covered, so none is here
+  raise Stop.new(2, "nfcxx: --emit-hip takes one .cu file") if st[:emit_hip]
+  if st[:compile_only] && st[:ncpp] == 1 && st[:nobj] == 0 && st[:ncfiles] == 0 && !st[:preprocess] && !st[:emit_c] &&
+     !plan.env("NFCXX_SYCL_PASS") && sycl_kernel_headers?(plan, argv) && sycl_include?(st[:srcs][0])
     sycl_path(plan, st, argv)
     return 0
   end
-  cpp2_path(plan, st)
+  # the trace (--trace or NFCXX_TRACE) is opened here, before the translation; its file is written at once
+  trace = st[:trace].nil? ? plan.env("NFCXX_TRACE") : st[:trace]
+  time_log = st[:time_log].nil? ? plan.env("NFCXX_TIME_LOG") : st[:time_log]
+  unless trace.to_s.empty?
+    raise Unported, "--trace file #{trace}: its directory is not checked here" unless writable_here?(trace)
+    raise Unported, "--time-log file #{time_log}: its directory is not checked here" if time_log && !writable_here?(time_log)
+  end
+  cpp2_path(plan, st, tmp_obj)
   0
+end
+
+# The -fsyntax-only block: the driver runs itself again without the option (a -E run is an exec of the same arguments; a
+# type check is a -c run with a temporary object, which the SYCL path names but the cpp2 cache key does not allow).
+def run_fso(plan, argv, tmp_obj)
+  rest = argv.reject { |b| b == "-fsyntax-only" }
+  return run_driver(plan, rest, false) if rest.include?("-E")
+  if rest.include?("-o")
+    new_args = []
+    skip = false
+    rest.each do |b|
+      if skip
+        skip = false
+        new_args << "#{WRAPPER_TMP}/x.o"
+        next
+      end
+      skip = true if b == "-o"
+      new_args << b
+    end
+    run_driver(plan, ["-c"] + new_args, true)
+  else
+    run_driver(plan, ["-c"] + rest + ["-o", "#{WRAPPER_TMP}/x.o"], true)
+  end
 end
 
 def read_facts(path)
@@ -274,7 +406,7 @@ if $PROGRAM_NAME == __FILE__
     plan = Plan.new(read_facts(facts_path), root, Dir.pwd)
     status = 0
     begin
-      status = run_prepass(plan, argv)
+      status = run_driver(plan, argv, false)
     rescue Stop => e
       $stderr.puts e.message if e.message
       status = e.status
