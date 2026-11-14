@@ -32,6 +32,11 @@ runs (the QBE steps) log under its source too. Rank the stages, or sum them per 
     sort -rn time.log | head
     awk -F'\t' '{ split($3, a, ":"); t[a[1]] += $1 } END { for (k in t) printf "%8.1f %s\n", t[k], k }' time.log | sort -rn
 
+A closed-world bc2cpp run (`bc2cpp/`) adds its phases to the same file when `NFCXX_TIME_LOG` is set, as lines
+`SECONDS<Tab>bc2cpp<Tab>PHASE<Tab>UNIT`, one per phase of `profile_phase` in `bc2cpp/tools/bc2cpp/bc2cpp.rb`. The
+phase's time is the time since the previous phase, and UNIT is `NFCXX_TRACE_UNIT` (the driver's source). Only the time log gets
+them; the `--trace` JSON does not. `BC2CPP_PROFILE_TIMINGS=1` still prints its own `BC2CPP_TIME` lines to stderr.
+
 ## Format and limits
 
 - The file is a JSON array of complete (`"ph":"X"`) events, plus one instant event `trace_end`.
