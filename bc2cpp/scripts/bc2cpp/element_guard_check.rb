@@ -26,7 +26,7 @@ SOURCE = <<~RUBY
     end
 
     def poison
-      @items << "a"
+      @items.push("a")
       nil
     end
   end
@@ -109,7 +109,7 @@ THING_SOURCE = <<~RUBY
     end
 
     def poison
-      @things << Other.new
+      @things.push(Other.new)
       nil
     end
 
@@ -119,6 +119,11 @@ THING_SOURCE = <<~RUBY
 
     def put(i, v)
       @things[i] = v
+      nil
+    end
+
+    def add(v)
+      @things << v
       nil
     end
   end
@@ -145,6 +150,12 @@ THING_DRIVER = <<~'RUBY'
   rescue => e
     puts "store raised #{e.class}"
   end
+  begin
+    c.add(Other.new)
+    puts 'pushed'
+  rescue => e
+    puts "push raised #{e.class}"
+  end
   puts 'end'
 RUBY
 
@@ -162,6 +173,7 @@ Dir.mktmpdir('element_guard_thing_sig') do |sig_dir|
     check.call('the interpreted run returns the wrong-class element', interpreted&.include?('Other'))
     check.call('the compiled run raises the declaration violation', compiled&.any? { |l| l.start_with?('raised') })
     check.call('a wrong-class store raises before it writes (compiled), and stores (interpreted)', interpreted&.include?('stored') && compiled&.include?('store raised BC2cppDeclarationViolation'))
+    check.call('a wrong-class push raises before it runs (compiled), and pushes (interpreted)', interpreted&.include?('pushed') && compiled&.include?('push raised BC2cppDeclarationViolation'))
   end
 ensure
   ENV.delete('BC2CPP_SIG_DIRS')

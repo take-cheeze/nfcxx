@@ -106,6 +106,17 @@ class CodeGen
     element_guard_statement(entry, RegName[insn.regs[2]], nil_ok: false, verb: 'assigned')
   end
 
+  # DECLARED_ELEMENT_GUARD on a native store: `@items << v` (a one-argument `<<` on a declared element receiver) tests
+  # the argument before the push. Only that form: other stores that run a native mutator are not checked here.
+  def declared_element_push_guard(insn, irep, owner_def, idx)
+    return '' unless insn.op == :SEND && insn.sym.to_s == '<<' && insn.argc == 1 && !insn.keyword_argc.to_i.positive?
+
+    entry = declared_element_receiver(irep, idx, insn.reg, owner_def&.owner)
+    return '' unless entry
+
+    element_guard_statement(entry, RegName[insn.reg + 1], nil_ok: false, verb: 'assigned')
+  end
+
   # The C statement raising when `var` (an mrb_value) is not the declared element kind (and not nil, when nil_ok).
   def element_guard_statement(entry, var, nil_ok:, verb:)
     quote = ->(text) { text.gsub(/["\\]/) { |c| "\\#{c}" } }
