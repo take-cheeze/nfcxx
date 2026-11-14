@@ -1231,16 +1231,19 @@ end
     out
   end
 
-  # The variables of typedef T and their callbacks and calls, across every file of the input.
+  # The variables of typedef T and their callbacks and calls, across every file of the input. A variable declared in a
+  # struct body is a member: its calls are member accesses (x.v(...) / x->v(...)), so a function of the same name is not
+  # a call of it. A member name declared with another type anywhere in the input makes the rule refuse.
   def fnptr_typed_global(rec)
     rec[:assigns] = []
     rec[:calls] = []
     vars = []
+    mvars = []
     @files.each do |frel, f|
       masked = f['masked']
       masked.to_enum(:scan, /\b#{rec[:name]}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*(=|;|,)/).each do
         dm = Regexp.last_match
-        vars << dm[1]
+        (struct_body_before?(masked, dm.begin(0)) ? mvars : vars) << dm[1]
         next unless dm[2] == '='
         after = next_nonspace(masked, dm.end(0))
         if masked[after] == '{'
@@ -1252,6 +1255,22 @@ end
           end
         elsif (am = masked[after..].match(/\A([A-Za-z_]\w*)\s*;/))
           rec[:assigns] << [am[1], frel, after]
+        end
+      end
+    end
+    mvars.uniq.each do |v|
+      # any struct member of this name with another type makes the member calls ambiguous: refuse
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /([A-Za-z_]\w*)[ \t*]+#{v}\s*(?:\[[^\]]*\]\s*)*;/).each do
+          tm = Regexp.last_match
+          next if tm[1] == rec[:name]
+          rec[:calls] << [-1, nil, frel]
+        end
+      end
+      @files.each do |frel, f|
+        f['masked'].to_enum(:scan, /(?:\.|->)\s*#{v}\s*(?:\[[^\]]*\]\s*)*\(/).each do
+          cm = Regexp.last_match
+          rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
         end
       end
     end
