@@ -24,14 +24,16 @@
       "headers": [
         "mruby.h",
         "mruby/string.h",
-        "mruby/numeric.h"
+        "mruby/numeric.h",
+        "mruby/hash.h"
       ]
     },
     "ruby/ruby.h": {
       "headers": [
         "mruby.h",
         "mruby/string.h",
-        "mruby/numeric.h"
+        "mruby/numeric.h",
+        "mruby/hash.h"
       ]
     },
     "ruby/re.h": {
@@ -904,6 +906,75 @@
       "kind": "special",
       "handler": "type_p",
       "needs_mrb": false
+    },
+    "rb_hash_lookup2": {
+      "kind": "call",
+      "mruby": "mrb_hash_fetch",
+      "inject_mrb": true,
+      "needs_mrb": true
+    },
+    "rb_str_buf_cat": {
+      "kind": "call",
+      "mruby": "mrb_str_cat",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's rb_str_buf_cat is an alias of rb_str_cat (ruby/internal/intern/string.h:1680); the length is not checked for sign: a negative length becomes a large size_t"
+    },
+    "rb_usascii_str_new": {
+      "kind": "call",
+      "mruby": "mrb_str_new",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and US-ASCII is not recorded"
+    },
+    "rb_usascii_str_new_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and US-ASCII is not recorded"
+    },
+    "rb_usascii_str_new2": {
+      "kind": "call",
+      "mruby": "mrb_str_new_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's rb_usascii_str_new2 is an alias of rb_usascii_str_new_cstr (ruby/internal/intern/string.h:1679); mruby strings carry no encoding, so US-ASCII is not recorded"
+    },
+    "rb_ll2inum": {
+      "kind": "call",
+      "mruby": "mrb_int_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+    },
+    "NUM2UINT": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "signed conversion: the unsigned int range is not checked, and the result is mrb_int, not unsigned int"
+    },
+    "NUM2SIZET": {
+      "kind": "call",
+      "mruby": "mrb_as_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "signed conversion: the size_t range is not checked, and the result is mrb_int, not size_t"
+    },
+    "FIX2ULONG": {
+      "kind": "call",
+      "mruby": "mrb_fixnum",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "no check that the value is a fixnum; the result is mrb_int, not unsigned long"
+    },
+    "OBJ_FREEZE": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's OBJ_FREEZE (rb_obj_freeze_inline, ruby/internal/fl_type.h:911) returns void; mruby's mrb_obj_freeze returns the object, which a statement use discards"
     }
   },
   "special_arg_positions_class_only": {

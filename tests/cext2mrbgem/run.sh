@@ -389,6 +389,24 @@ check grep -q "spec.add_dependency 'mruby-uv'" "$work/bcrypt/mrbgem.rake"
 check grep -q '#if 0' "$work/bcrypt/src/crypt.c"
 check test "$(grep -c '^warning' "$work/bcrypt.log")" -eq 2
 
+# 4. api_map.json batch A1 (rb_hash_lookup2, rb_str_buf_cat, rb_usascii_str_new*, rb_ll2inum, NUM2UINT, NUM2SIZET,
+# FIX2ULONG, OBJ_FREEZE): each name maps with no refusal, the hash mapping adds mruby/hash.h, and caveats are logged
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fetch_num_str tools/cext2mrbgem/fixtures/api_fetch_num_str/ext/api_fetch_num_str "$work/api_fetch_num_str" > "$work/api_fetch_num_str.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fetch_num_str/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_fetch_num_str/REFUSALS.txt"
+check grep -qF '#include <mruby/hash.h>' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_hash_fetch(mrb, h, k, dflt);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_str_cat(mrb, dst, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_str_new(mrb, RSTRING_PTR(src), RSTRING_LEN(src));' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_str_new_cstr(mrb, "ok");' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'return mrb_int_value(mrb, big);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'unsigned int u = mrb_as_int(mrb, a);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'size_t s = mrb_as_int(mrb, b);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'unsigned long ul = mrb_fixnum(v);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -qF 'mrb_obj_freeze(mrb, str);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
+check grep -q 'rb_obj_freeze_inline, ruby/internal/fl_type.h:911' "$work/api_fetch_num_str/conversion_log.json"
+
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
