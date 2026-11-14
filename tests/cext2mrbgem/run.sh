@@ -369,6 +369,11 @@ check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), (box = (DmBox *
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_rest tools/cext2mrbgem/fixtures/api_scan_rest/ext/api_scan_rest "$work/api_scan_rest" > "$work/api_scan_rest.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_get_args(mrb, "o*&", &first, &nfcx_ra, &nfcx_rn, &blk)' "$work/api_scan_rest/src/api_scan_rest.c"
+# 2zzz57. switch (rb_type(v)) with case T_NIL: the switch is on (nil test ? 1000 : mrb_type), nil is case 1000.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_switch tools/cext2mrbgem/fixtures/api_rb_type_switch/ext/api_rb_type_switch "$work/api_rb_type_switch" > "$work/api_rb_type_switch.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'switch ((mrb_nil_p(v) ? 1000 : mrb_type(v))) {' "$work/api_rb_type_switch/src/api_rb_type_switch.c"
+check grep -qF 'case 1000 /* nil */: return mrb_str_new_cstr(mrb, "nil");' "$work/api_rb_type_switch/src/api_rb_type_switch.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
