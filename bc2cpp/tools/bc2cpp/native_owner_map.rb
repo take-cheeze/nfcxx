@@ -307,10 +307,15 @@ module NativeOwnerMap
     byte_open = text.ascii_only? ? open : text[0, open].bytesize
     depth = 0
     i = byte_open
-    while (i = text.byteindex(/[{}]/, i))
-      depth += text.getbyte(i) == 0x7b ? 1 : -1
-      if depth.zero?
-        return text.byteslice(byte_open + 1, i - byte_open - 1).force_encoding(text.encoding)
+    size = text.bytesize
+    # Byte by byte: mruby's byteindex takes no Regexp (the self-compiled compiler runs on mruby).
+    while i < size
+      byte = text.getbyte(i)
+      if byte == 0x7b || byte == 0x7d
+        depth += byte == 0x7b ? 1 : -1
+        if depth.zero?
+          return text.byteslice(byte_open + 1, i - byte_open - 1).force_encoding(text.encoding)
+        end
       end
       i += 1
     end
