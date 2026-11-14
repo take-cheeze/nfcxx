@@ -1810,6 +1810,76 @@
       "mruby": "(LONG_MIN >> 1)",
       "needs_mrb": false,
       "caveat": "CRuby's FIXNUM_MIN (-2^62 on 64-bit): the value is kept (see FIXNUM_MAX)"
+    },
+    "rb_rational_new2": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_Rational": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_new1": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 1, (mrb_value[]){$0})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_Rational1": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 1, (mrb_value[]){$0})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_num": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"numerator\"), 0, NULL)",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_den": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"denominator\"), 0, NULL)",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_struct_aref": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"[]\"), 1, (mrb_value[]){$1})",
+      "caveat": "needs the mruby-struct gem (Struct#[] and Struct#size); the call raises at run time if the gem is not in the build"
+    },
+    "RSTRUCT_GET": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"[]\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "needs the mruby-struct gem (Struct#[]); the index is a C integer here (CRuby's RSTRUCT_GET takes a long), so it is converted to an Integer value"
+    },
+    "RSTRUCT_LEN": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_int($m, mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"size\"), 0, NULL))",
+      "caveat": "needs the mruby-struct gem (Struct#[] and Struct#size); the call raises at run time if the gem is not in the build; the length is an mrb_int (as CRuby's long)"
     }
   },
   "special_arg_positions_class_only": {

@@ -801,6 +801,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name probe_fx tools/cext2mrbgem/fixtu
 check test "$rc" -eq 0
 check grep -qF 'if (n > (LONG_MAX >> 1) || n < (LONG_MIN >> 1)) return mrb_false_value();' "$work/api_fixnum_bound/src/api_fixnum_bound.c"
 
+# 2zzz7. gem values through method calls (the rational and struct gems of the fork): Rational(n, d) on the top self, its
+# numerator, Struct#[] with an Integer index; the output compiles against the fork's headers when NFCX_MRUBY_INCLUDE is set
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gem_values tools/cext2mrbgem/fixtures/api_gem_values/ext/api_gem_values "$work/api_gem_values" > "$work/api_gem_values.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_funcall_argv(mrb, mrb_top_self(mrb), mrb_intern_cstr(mrb, "Rational"), 2, (mrb_value[]){n, d})' "$work/api_gem_values/src/api_gem_values.c"
+check grep -qF 'mrb_intern_cstr(mrb, "[]"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)(0))})' "$work/api_gem_values/src/api_gem_values.c"
+
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
