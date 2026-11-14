@@ -11,7 +11,7 @@ while IFS= read -r line; do
   # leading NAME=VALUE words are the environment of the line (the variables nfcxx's setup reads): both sides get them
   envs=(); args=()
   for w in "${words[@]}"; do
-    if [ ${#args[@]} -eq 0 ] && [[ $w =~ ^(NFCXX_[A-Z_]+|TMPDIR)= ]]; then envs+=("$w"); else args+=("$w"); fi
+    if [ ${#args[@]} -eq 0 ] && [[ $w =~ ^(NFCXX_[A-Z_]+|TMPDIR|CUDA_HOME|ROCM)= ]]; then envs+=("$w"); else args+=("$w"); fi
   done
   nenv=(); for e in "${envs[@]+"${envs[@]}"}"; do nenv+=("--nfcxx-env=$e"); done
   tmpdir=${TMPDIR-}; for e in "${envs[@]+"${envs[@]}"}"; do case $e in TMPDIR=*) tmpdir=${e#TMPDIR=} ;; esac; done

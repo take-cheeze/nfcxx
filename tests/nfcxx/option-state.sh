@@ -39,6 +39,8 @@ harness() {
         -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|"
   echo 'dump_arr() { declare -p "$1" >/dev/null 2>&1 || return 0; local -n r=$1; [ ${#r[@]} -eq 0 ] && return 0; local x; for x in "${r[@]}"; do printf "%s+=%s\n" "$1" "$x"; done; }'
   for v in $scalars; do echo "printf '%s=%s\\n' $v \"\${$v-}\""; done
+  # NFCXX_SYSTEM_PATHS is exported by setup, not a loop variable: dumped as the tools after the loop read it (the repository as ROOT)
+  echo "sp=\${NFCXX_SYSTEM_PATHS-}; printf 'system_paths=%s\\n' \"\${sp//\"$root\"/ROOT}\""
   for v in $arrays; do echo "dump_arr $v"; done
 }
 harness > "$tmp/harness.sh"

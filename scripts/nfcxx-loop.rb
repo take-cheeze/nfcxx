@@ -30,7 +30,7 @@ class LoopState
   attr_accessor :promote_slots, :unroll, :struct_slots, :pathb_c, :ld_name, :obfuscate, :dialect, :dialect_asked
   attr_accessor :gnu, :gnu_user, :freestanding, :cosmo, :target, :trace, :moddir, :asan, :safeptr, :sanitize
   attr_accessor :shared, :pic, :rdynamic, :compile_only, :pthread, :preprocess, :xlang, :stdin_src
-  attr_accessor :depmode, :dfile, :dtarget, :depphony, :ncpp, :nobj
+  attr_accessor :depmode, :dfile, :dtarget, :depphony, :ncpp, :nobj, :system_paths
   attr_reader :files, :cflags, :cfiles, :cu_inputs, :cpp2_inputs, :srcs, :ppflags, :pie_opts, :preinc, :sysdirs
   attr_reader :isa, :diag_opts, :asanopts
 
@@ -84,6 +84,7 @@ class LoopState
     @depphony = ""
     @ncpp = 0
     @nobj = 0
+    @system_paths = ""
     @files = []
     @cflags = []
     @cfiles = []
@@ -147,6 +148,24 @@ def apply_environment(state, env, uid, tmpdir)
     end
   end
   state.trace = env["NFCXX_TRACE"] if env.key?("NFCXX_TRACE")
+  apply_system_paths(state, env)
+end
+
+# nfcxx's setup exports NFCXX_SYSTEM_PATHS (the directories the rewriter treats as system directories): CUDA_HOME is put
+# first when set, and with NFCXX_CUDA_TARGET=amdgpu lib/hip and ROCm's include directory go before it. ROOT stands for the
+# repository. The result is the variable the tools after the loop read.
+def apply_system_paths(state, env)
+  sys = env.fetch("NFCXX_SYSTEM_PATHS", "")
+  cuda = env.fetch("CUDA_HOME", "")
+  sys = cuda + (sys.empty? ? "" : ":#{sys}") unless cuda.empty?
+  target = env.fetch("NFCXX_CUDA_TARGET", "")
+  target = "nvidia" if target.empty?
+  if target == "amdgpu"
+    rocm = env.fetch("ROCM", "")
+    rocm = "/opt/rocm" if rocm.empty?
+    sys = "ROOT/lib/hip:#{rocm}/include" + (sys.empty? ? "" : ":#{sys}")
+  end
+  state.system_paths = sys
 end
 
 def onoff(flag, value)
@@ -304,7 +323,7 @@ def emit(state)
                cache_dir cache_log_file keep_intermediates time_log instantiate promote_slots unroll struct_slots pathb_c
                ld_name obfuscate dialect dialect_asked gnu gnu_user freestanding cosmo target trace moddir asan safeptr
                sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
-               ncpp nobj]
+               ncpp nobj system_paths]
   scalars.each { |name| $stdout.write("#{name}=#{state.public_send(name)}\n") }
   %w[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].each do |name|
     state.public_send(name).each { |x| $stdout.write("#{name}+=#{x}\n") }

@@ -113,3 +113,12 @@ x.cpp --bundle-exclude=a
 --bundle-libs --bundle-only=a,,b x.cpp
 --bundle-libs --bundle-exclude= x.cpp
 --bundle-libs -o out.bin x.cpp -fsyntax-only
+x.cpp
+CUDA_HOME=/opt/cuda x.cpp
+CUDA_HOME= x.cpp
+NFCXX_SYSTEM_PATHS=/a:/b x.cpp
+CUDA_HOME=/opt/cuda NFCXX_SYSTEM_PATHS=/a x.cpp
+NFCXX_CUDA_TARGET=amdgpu x.cpp
+NFCXX_CUDA_TARGET=amdgpu ROCM=/r CUDA_HOME=/c NFCXX_SYSTEM_PATHS=/s x.cpp
+NFCXX_CUDA_TARGET=nvidia NFCXX_SYSTEM_PATHS=/s x.cpp
+NFCXX_CUDA_TARGET= ROCM= x.cpp
