@@ -17,7 +17,7 @@ const path = require("path");
 const { execFile } = require("child_process");
 
 const root = path.resolve(__dirname, "..", "..");
-const pathbDump = path.join(root, "scripts", "pathb-dump");
+const pathbDump = path.join(root, "scripts", "pathb-dump.rb");
 const mrb = path.join(root, "scripts", "mrb");
 const emitter = path.join(root, "scripts", "pathb-wasm-emit.rb");
 const flatOpt = path.join(root, "scripts", "pathb-flat-opt");
