@@ -2992,14 +2992,41 @@ end
 
   # every use of the table is inside its own initializer or in a registered method or Init function
   def table_used_in_methods?(tbl, rel, s)
-    inits = (@init_defs || []).map { |d| d['name'] }
+    mo = method_only_functions
     (@occ[tbl] || []).all? do |orel, os, _oe|
       # the table's own declaration: a file-scope occurrence that opens its initializer
       if enclosing_func(orel, os).nil? && @files[orel]['masked'][_oe..].to_s.match?(/\A(?:[ \t\n]*\[[^\]\n]*\])?[ \t\n]*=[ \t\n]*\{/)
         next true
       end
       f = enclosing_func(orel, os)
-      f && ((@valid_reg_names || Set.new).include?(f['name']) || inits.include?(f['name']))
+      f && mo.include?(f['name'])
+    end
+  end
+
+  # The functions that run only inside a registered method or Init (their dynamic extent has the global state): the
+  # registered methods and Init, and every function all of whose uses are in such functions (a use at file scope, such as
+  # an entry of a function-pointer table, is not in one, so the function is not in the set). A fixpoint.
+  def method_only_functions
+    @method_only ||= begin
+      set = Set.new(@valid_reg_names.to_a + (@init_defs || []).map { |d| d['name'] })
+      names = @defs.keys
+      changed = true
+      while changed
+        changed = false
+        names.each do |n|
+          next if set.include?(n)
+          uses = (@occ[n] || []).reject do |orel, os, _oe|
+            # a definition header in the text is not a use
+            @files[orel]['masked'][_oe..].to_s.match?(/\A[ \t\n]*\([^()]*\)[ \t\n]*\{/)
+          end
+          next if uses.empty?
+          if uses.all? { |orel, os, _oe| (f = enclosing_func(orel, os)) && set.include?(f['name']) }
+            set << n
+            changed = true
+          end
+        end
+      end
+      set
     end
   end
 
