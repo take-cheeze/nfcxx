@@ -1642,11 +1642,12 @@ class CodeGen
       end
 
       # A literal-block send (compile_direct_block_send) is a SENDB at the site.
-      # NATIVE_FIBER_CURRENT (codegen_constant_object.rb): a direct call to the fiber runtime's Fiber.current.
-      if fiber_current_send?(name, n, self_implicit, irep, constant_site_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset))
-        return "  // NATIVE_FIBER_CURRENT :current -> Fiber.singleton (sig/bc2cpp/core.rbs native_singletons), " \
+      # NATIVE_SINGLETON_DIRECT (codegen_constant_object.rb): a declared native singleton method called directly.
+      if (direct_fn = native_singleton_direct_fn(name, n, self_implicit, irep, constant_site_idx,
+                                                 unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)))
+        return "  // NATIVE_SINGLETON_DIRECT :#{name} -> #{direct_fn} (sig/bc2cpp/core.rbs native_singletons), " \
                "direct C call without by-name send.\n" \
-               "  r#{d} = #{CodeGen::FIBER_CURRENT_C}(M, #{recv});\n"
+               "  r#{d} = #{direct_fn}(M, #{recv});\n"
       end
       constant_ops = @call_block_expr ? %i[SEND0 SEND SSEND0 SSEND SENDB SSENDB] : %i[SEND0 SEND SSEND0 SSEND]
       if !self_implicit && irep && constant_site_idx && @closed_world &&

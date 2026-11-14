@@ -270,3 +270,25 @@ module NativeSigs
     lines[(first - 1)..(last - 1)].to_a.join
   end
 end
+
+# NATIVE_SINGLETON_DIRECT: the C function a declared native singleton method calls, from the `bc2cpp-c: <fn>` comment
+# above it in sig/bc2cpp/core.rbs (native_singletons). nil unless the method has exactly one overload that takes no
+# arguments and such a comment names the function.
+module NativeSingletons
+  C_FUNCTION = /^bc2cpp-c: (\w+)$/.freeze
+
+  module_function
+
+  def c_function(class_name, method_name)
+    decl = NativeSigs.decls(NativeSigs.table('native_singletons')).find { |d| d.name.name.to_s == class_name }
+    return nil unless decl
+
+    member = decl.members.find { |m| m.is_a?(RBS::AST::Members::MethodDefinition) && m.kind == :singleton && m.name.to_s == method_name }
+    return nil unless member && member.overloads.size == 1
+
+    type = member.overloads.first.method_type.type
+    return nil unless type.required_positionals.empty? && type.optional_positionals.empty? && type.rest_positionals.nil?
+
+    member.comment&.string&.[](C_FUNCTION, 1)
+  end
+end

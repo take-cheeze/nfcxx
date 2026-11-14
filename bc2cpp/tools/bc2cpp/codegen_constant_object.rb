@@ -206,20 +206,18 @@ class CodeGen
       "  mrb_argnum_error(M, #{n}, #{min}, #{min});\n" \
       "  r#{d} = mrb_nil_value();\n"
   end
-  # NATIVE_FIBER_CURRENT: `Fiber.current` with a zero-argument send on the Fiber constant (core Ruby's
-  # Enumerator#next_values, which the closed-world proofs leave outside). The C function is the fiber runtime's
-  # bc2cpp_fiber_s_current; it is declared on Fiber's singleton in sig/bc2cpp/core.rbs (native_singletons). It is
-  # used only when UniqueClassNames proves that `Fiber` is the one binding of that name, and no program definition
-  # of `current` sits on Fiber's singleton.
-  FIBER_CURRENT_C = 'bc2cpp_fiber_s_current'
+  # NATIVE_SINGLETON_DIRECT: a zero-argument send `Const.m` on a constant whose bare name has one binding
+  # (UniqueClassNames), where no program defines m on Const's singleton and sig/bc2cpp/core.rbs declares m there with
+  # a C function (NativeSingletons.c_function). The constant is still read first, so a missing constant raises
+  # NameError as before. Returns the C function's name, or nil.
+  def native_singleton_direct_fn(name, n, self_implicit, irep, idx, reg)
+    return nil unless n.zero? && !self_implicit && irep && idx
+    return nil unless %i[SEND0 SSEND0].include?(BytecodeIR.for(irep).source_at(idx).op)
 
-  def fiber_current_send?(name, n, self_implicit, irep, idx, reg)
-    return false unless name == 'current' && n.zero? && !self_implicit && irep && idx
-    return false unless %i[SEND0 SSEND0].include?(BytecodeIR.for(irep).source_at(idx).op)
-    return false unless straight_line_constant_name(irep, idx, reg) == 'Fiber'
-    return false unless UniqueClassNames.table&.value?('Fiber')
-    return false if (@registry['current'] || []).any? { |definition| definition.owner == 'Fiber.singleton' }
+    class_name = straight_line_constant_name(irep, idx, reg)
+    return nil unless class_name && UniqueClassNames.table&.value?(class_name)
+    return nil if (@registry[name] || []).any? { |definition| definition.owner == "#{class_name}.singleton" }
 
-    NativeSigs.decls(NativeSigs.table('native_singletons')).any? { |decl| decl.name.to_s.end_with?('Fiber') }
+    NativeSingletons.c_function(class_name, name)
   end
 end
