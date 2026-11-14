@@ -2310,7 +2310,7 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : ((t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : ((t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
