@@ -523,6 +523,14 @@ check test ! -e "$work/api_header_static/NOT_BUILDABLE"
 check grep -qF 'static int hs_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_static/include/helper.h"
 check grep -qF 'return mrb_int_value(mrb, hs_check(mrb, v));' "$work/api_header_static/src/api_header_static.c"
 
+# 2zze. a struct function-pointer field whose entries are designated initializers at file scope (.func = handler) is threaded
+# like an assigned field: the field takes mrb, the handlers take it, and the call through the field passes it
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_init tools/cext2mrbgem/fixtures/api_fnptr_init/ext/api_fnptr_init "$work/api_fnptr_init" > "$work/api_fnptr_init.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_init/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*func)(mrb_state *mrb, mrb_value self, mrb_value value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
+check grep -qF 'return op->func(mrb, self, value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

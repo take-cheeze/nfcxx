@@ -1220,6 +1220,11 @@ end
         am = Regexp.last_match
         rec[:assigns] << [am[1], frel, am.begin(1)]
       end
+      # a designated initializer of the field (.NAME = helper inside a braced initializer) is an assignment too
+      masked.to_enum(:scan, /\.\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*(?=[,}])/).each do
+        am = Regexp.last_match
+        rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
         cm = Regexp.last_match
         rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
