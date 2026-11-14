@@ -4039,6 +4039,21 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, name, 'type argument is not a literal T_ constant')
       return
     end
+    # T_CLASS: mruby's MRB_TT_CLASS and MRB_TT_SCLASS (a singleton class, CRuby's T_CLASS); T_MODULE: MRB_TT_MODULE. The
+    # object is evaluated twice in the test, so it must be a plain name.
+    cls_tags = { 'T_CLASS' => 'MRB_TT_CLASS || mrb_type(OBJ) == MRB_TT_SCLASS', 'T_MODULE' => 'MRB_TT_MODULE' }[tname.sub(/\ARUBY_/, '')]
+    if cls_tags
+      obj = psl(text, args[0][0], args[0][1]).strip
+      unless obj.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        refuse(rel, s, name, 'the object of a class check is not a plain name (it is evaluated twice)')
+        return
+      end
+      test = "mrb_type(#{obj}) == #{cls_tags.gsub('OBJ', obj)}"
+      new = "(#{test} ? (void)0 : mrb_raise(#{mrb_tok(rel, s)}, E_TYPE_ERROR, \"wrong argument type (expected Class or Module)\"))"
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, name, new, 'a class or module check by tag (singleton classes are CRuby T_CLASS and mruby MRB_TT_SCLASS); the message is generic')
+      return
+    end
     ent = @entries[tname]
     if !@type_check_refused[tname].nil? || ent.nil? || !%w[exact caveat].include?(ent['type_check']) ||
        !(ent['mruby'] || '').start_with?('MRB_TT_')

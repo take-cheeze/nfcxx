@@ -369,6 +369,10 @@ check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), (box = (DmBox *
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_rest tools/cext2mrbgem/fixtures/api_scan_rest/ext/api_scan_rest "$work/api_scan_rest" > "$work/api_scan_rest.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_get_args(mrb, "o*&", &first, &nfcx_ra, &nfcx_rn, &blk)' "$work/api_scan_rest/src/api_scan_rest.c"
+# 2zzz55. Check_Type(v, T_CLASS): a class or singleton class (MRB_TT_CLASS or MRB_TT_SCLASS), TypeError otherwise.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_check_class tools/cext2mrbgem/fixtures/api_check_class/ext/api_check_class "$work/api_check_class" > "$work/api_check_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_type(v) == MRB_TT_CLASS || mrb_type(v) == MRB_TT_SCLASS ? (void)0' "$work/api_check_class/src/api_check_class.c"
 check grep -qF 'rest = mrb_ary_new_from_values(mrb, nfcx_rn, nfcx_ra);' "$work/api_scan_rest/src/api_scan_rest.c"
 # 2zzz52. a cast function-pointer table (VALUE (*)(void *))fn of this file: its callbacks run in global mode, and the table's
 # type name (struct ct_funcs) is not a use of the table.
@@ -545,7 +549,7 @@ check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")"
 check test "$(grep -c '  rb_check_type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
 check grep -q '  Check_Type  mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
 check grep -q '  rb_check_type  nil and false share' "$work/check_type_refused/REFUSALS.txt"
-check grep -q 'MRB_TT_CLASS does not match' "$work/check_type_refused/REFUSALS.txt"
+check grep -q 'MRB_TT_OBJECT does not match' "$work/check_type_refused/REFUSALS.txt"
 check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
 check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
 
