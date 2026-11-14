@@ -531,6 +531,13 @@ check test ! -e "$work/api_fnptr_init/NOT_BUILDABLE"
 check grep -qF 'mrb_value (*func)(mrb_state *mrb, mrb_value self, mrb_value value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
 check grep -qF 'return op->func(mrb, self, value);' "$work/api_fnptr_init/src/api_fnptr_init.c"
 
+# 2zzf. a local named like a helper, used without a call, is that local: the helper converts (a direct call in another function threads mrb)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_shadow_local tools/cext2mrbgem/fixtures/api_shadow_local/ext/api_shadow_local "$work/api_shadow_local" > "$work/api_shadow_local.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_shadow_local/NOT_BUILDABLE"
+check grep -qF 'mrb_value sl_check = mrb_false_value();' "$work/api_shadow_local/src/api_shadow_local.c"
+check grep -qF 'return sl_check(mrb, v);' "$work/api_shadow_local/src/api_shadow_local.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

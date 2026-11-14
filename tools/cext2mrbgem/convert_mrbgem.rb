@@ -1504,6 +1504,8 @@ end
 
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
+  # a name that a local shadows in this function, used without a call, is that local (not the helper): no use
+  next nil if fn && !direct && shadowed.call(name, fn)
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
@@ -1589,6 +1591,8 @@ use_problem = lambda do |name, use|
           'helper needs the mruby state threaded in, but is used outside a direct call (not supported): ' \
           'its address is in a file-scope initializer, so it may run with no method context'
         end
+      elsif !direct && fn && shadowed.call(name, fn)
+        nil # a local of this name, not a use of the helper
       elsif shadowed.call(name, fn)
         'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
       elsif !(with_state.include?(fn['name']) || members.include?(fn['name']))
