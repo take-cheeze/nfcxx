@@ -1,0 +1,45 @@
+# One case per line: the backend (default, or pathb for --backend=pathb), then the arguments (words separated by spaces; no
+# quoting). The bash is nfcxx with the arguments (and --backend=pathb for pathb) and the facts of facts.txt; the port is
+# scripts/nfcxx-pathb.rb. Lines starting with # are skipped. Work files: a.cc b.cc fail.cc bad.cc mod.cc sub/x.cc .hidden.cc
+# noext x.o y.o libq.a pre.h (see run.sh).
+# link
+default a.cc -o prog
+default a.cc b.cc -o prog
+default x.o y.o -o prog
+default a.cc x.o libq.a -o prog
+default -Wl,-rpath,/x -lm -O2 a.cc -o prog
+default -rdynamic -fuse-ld=mold a.cc -o prog
+default -fuse-ld=nonesuch a.cc -o prog
+default --no-eh-shim a.cc -o prog
+pathb a.cc -o prog
+default a.cc fail.cc -o prog
+pathb a.cc fail.cc -o prog
+# -c
+default -c a.cc
+default -c a.cc -o out.o
+default -c -o out.o a.cc b.cc
+default -c sub/x.cc
+default -c .hidden.cc
+default -c noext
+default -std=gnu++20 -O2 -c a.cc
+default -c -I inc -D bar -U baz a.cc
+default -Iinc -Dfoo=1 -include pre.h -c a.cc
+default -c -isystem inc -Wno-narrowing a.cc
+default --dialect=clang -c a.cc
+default --dialect=g++ -c a.cc
+default --gnu-version=130000 --ir-opt=inline -c a.cc
+default -c -fPIC -mavx2 -pthread -fexceptions a.cc
+default -c a.cc fail.cc
+default -c bad.cc
+pathb -c bad.cc
+default -c a.cc x.o
+# refusals and the driver's own errors
+default -c -x c a.cc
+default -c
+default -fsanitize=undefined a.cc -o prog
+default -fsanitize=address -c a.cc
+default --cosmo -c a.cc
+default -E a.cc
+default c.c a.cc
+default -c mod.cc
+gcc a.cc -o prog
