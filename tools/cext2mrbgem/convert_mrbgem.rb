@@ -1194,6 +1194,25 @@ end
 
   # A struct field of function-pointer type, RET (*NAME)(PARAMS), in a struct body of this file. Returns the field's
   # declaration; its assignments and calls are found across the whole input by fnptr_global.
+  # the '{' that opens the innermost struct body containing pos (struct TAG { or struct {), or nil
+  def struct_body_open(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        if depth == 0
+          return psl(masked, [k - 40, 0].max, k) =~ /struct\s*\w*\s*\z/ ? k : nil
+        end
+        depth -= 1
+      end
+      k -= 1
+    end
+    nil
+  end
+
   def fnptr_decls(rel)
     masked = @files[rel]['masked']
     out = []
@@ -1205,7 +1224,11 @@ end
       next unless struct_body_before?(masked, m.begin(0))
       params = psl(masked, open + 1, close).strip
       next if params.empty? || params == 'void'
-      out << { rel: rel, name: m[1], params_start: open + 1 }
+      # the member index and the struct tag, for a positional initializer (struct TAG var = { h1, h2, ... })
+      bo = struct_body_open(masked, m.begin(0))
+      tag = bo && psl(masked, [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
+      index = bo ? masked[(bo + 1)...m.begin(0)].to_s.count(';') : nil
+      out << { rel: rel, name: m[1], params_start: open + 1, tag: tag, index: index }
     end
     out
   end
@@ -1278,6 +1301,22 @@ end
       masked.to_enum(:scan, /\.\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*(?=[,}])/).each do
         am = Regexp.last_match
         rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
+      # a positional initializer of a struct of the tag: struct TAG var = { h1, h2, ... }: the member at index is the helper
+      if rec[:tag] && rec[:index]
+        masked.to_enum(:scan, /\bstruct\s+#{rec[:tag]}\s+\w+\s*(?:\[[^\]]*\])?\s*=\s*\{/).each do
+          im = Regexp.last_match
+          bo = im.end(0) - 1
+          bc = match_close(masked, bo)
+          next if bc < 0
+          a = split_args(masked, bo, bc)[rec[:index]]
+          next if a.nil?
+          text = @files[frel]['text']
+          t = psl(text, a[0], a[1]).strip
+          lead = psl(text, a[0], a[1])[/\A\s*/].length
+          rec[:assigns] << [t, frel, a[0] + lead] if t.match?(/\A[A-Za-z_]\w*\z/)
+          rec[:assigns] << [t, frel, a[0] + lead] if false
+        end
       end
       masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
         cm = Regexp.last_match
@@ -1426,7 +1465,8 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
       r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
-      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) }
+      # only a record that is ok forces its callbacks: a refused field must not make its callbacks need the state
+      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) && r[:ok] }
       forced << r[:owner] if r[:ok] && r[:owner]
     end
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })

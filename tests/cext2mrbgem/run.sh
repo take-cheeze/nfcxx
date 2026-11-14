@@ -567,6 +567,14 @@ check test -e "$work/api_fnptr_param/NOT_BUILDABLE"
 check grep -q '  fp_cb  ' "$work/api_fnptr_param/REFUSALS.txt"
 fi
 
+# 2zzj. a struct function-pointer field filled by a positional initializer (struct TAG var = { h1, h2, ... }): the member index
+# gives the field; the helper there is threaded like an assigned field, and calls through the field pass mrb
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_positional tools/cext2mrbgem/fixtures/api_fnptr_positional/ext/api_fnptr_positional "$work/api_fnptr_positional" > "$work/api_fnptr_positional.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_positional/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*on_second)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
+check grep -qF 'return ops->on_second(mrb, ops->on_first(mrb, v));' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
