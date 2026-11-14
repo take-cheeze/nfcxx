@@ -40,9 +40,11 @@ cuda_driver_wrap() {
     esac
     [ -n "$home" ] && [ -f "$home/include/cuda.h" ] || home=/usr/local/cuda
   fi
-  rtv=$(sed -nE 's/^#define[ \t]+CUDART_VERSION[ \t]+([0-9]+).*/\1/p' "$home/include/cuda_runtime_api.h" 2>/dev/null | head -1)
+  # a missing header makes sed fail, and under set -eo pipefail that would end nfcxx here with no message: the version is then unknown
+  rtv=$(sed -nE 's/^#define[ \t]+CUDART_VERSION[ \t]+([0-9]+).*/\1/p' "$home/include/cuda_runtime_api.h" 2>/dev/null | head -1) || rtv=
   if [ "$(uname -m)" != x86_64 ]; then why="the shim is x86-64 only"
   elif [ ! -f "$home/include/cuda.h" ] || [ ! -f "$home/include/cudaTypedefs.h" ]; then why="no cuda.h and cudaTypedefs.h in $home/include"
+  elif [ ! -f "$home/include/cuda_runtime_api.h" ]; then why="no cuda_runtime_api.h in $home/include"
   elif [ -z "$rtv" ] || [ "$rtv" -lt 12050 ]; then why="libcudart ${rtv:-of unknown version} is older than 12.5"
   elif ! shim=$("$root/scripts/cuda-driver-shim" "$home/include" 2>&1); then why="the shim did not build: $shim"
   fi
