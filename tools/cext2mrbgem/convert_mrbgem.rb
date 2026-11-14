@@ -1689,6 +1689,20 @@ end
         rewrite(rel, s, name, entry['mruby'], entry['caveat'])
         return
       end
+      if entry['assign_arg']
+        # StringValue(x) assigns the converted value back to x: (x = mrb_ensure_string_type(mrb, x)). Only a plain local
+        # identifier is handled (its text is copied, and it is not a class variable); the value is the expression's value.
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        x = args.size == 1 ? psl(@files[rel]['text'], args[0][0], args[0][1]) : ''
+        unless x.match?(/\A[A-Za-z_][#{WC}]*\z/) && x != 'mrb' && !@class_vars.include?(x)
+          refuse(rel, s, name, 'the argument is not a plain local identifier (only a plain identifier is assigned back)')
+          return
+        end
+        ed.add(s, cp + 1, "(#{x} = #{entry['mruby']}(#{mrb_tok(rel, s)}, #{x}))")
+        rewrite(rel, s, name, "(#{x} = #{entry['mruby']}(mrb, #{x}))", entry['caveat'])
+        return
+      end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
         cp = pyfind(masked, ')', nxt)

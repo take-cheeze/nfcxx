@@ -1190,6 +1190,14 @@
         1
       ],
       "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+    },
+    "StringValue": {
+      "kind": "call",
+      "mruby": "mrb_ensure_string_type",
+      "inject_mrb": false,
+      "needs_mrb": true,
+      "assign_arg": true,
+      "caveat": "converts the argument to a String with to_str, as CRuby does (TypeError when it fails), and assigns the result back to the identifier"
     }
   },
   "special_arg_positions_class_only": {

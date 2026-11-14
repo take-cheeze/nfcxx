@@ -369,6 +369,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_new_inst/NOT_BUILDABLE"
 check grep -qF 'return mrb_obj_new(mrb, cApiNew, argc, argv);' "$work/api_new_inst/src/api_new_inst.c"
 
+# 2zi. StringValue (api_map.json batch N4): a plain identifier is assigned back the converted String
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_string_value tools/cext2mrbgem/fixtures/api_string_value/ext/api_string_value "$work/api_string_value" > "$work/api_string_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_string_value/NOT_BUILDABLE"
+check grep -qF '(s = mrb_ensure_string_type(mrb, s));' "$work/api_string_value/src/api_string_value.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -464,10 +470,10 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 6
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 5
 check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
-check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q "  StringValue  the argument is not a plain local identifier" "$work/api_skipped_refused/REFUSALS.txt"
 
 # 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?
