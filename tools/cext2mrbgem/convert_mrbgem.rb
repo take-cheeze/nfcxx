@@ -2951,7 +2951,7 @@ end
       # (mrb_nil_p(x) ? 1000 : mrb_type(x)) (1000 stands for nil; no other tag is 1000) and the labels follow:
       # case T_NIL: is case 1000:, case T_FALSE: is case MRB_TT_FALSE: (false only, nil is routed to 1000)
       if %w[TYPE rb_type].include?(name) && (sh = masked[[s - 40, 0].max...s].to_s =~ /switch\s*\(\s*\z/) &&
-         (tm = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)/.match(masked[e..(e + 40)].to_s)) && !@entries.key?(tm[1]) &&
+         (tm = /\A\(\s*([A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*)\s*\)/.match(masked[e..(e + 40)].to_s)) && !@entries.key?(tm[1]) &&
          !@class_vars.include?(tm[1])
         rest = masked[(e + tm.end(0))..(e + tm.end(0) + 12)].to_s
         if rest.match?(/\A\s*\)/)
@@ -2964,7 +2964,7 @@ end
       if %w[T_NIL T_FALSE].include?(name) && masked[[s - 6, 0].max...s].to_s =~ /case\s+\z/
         open = enclosing_open_brace(masked, s)
         head = open ? masked[[open - 120, 0].max...open].to_s : ''
-        if open && head.match?(/switch\s*\(\s*(?:TYPE|rb_type)\(\s*[A-Za-z_][#{WC}]*\s*\)\s*\)\s*\z/)
+        if open && head.match?(/switch\s*\(\s*(?:TYPE|rb_type)\(\s*[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*\s*\)\s*\)\s*\z/)
           repl = name == 'T_NIL' ? '1000 /* nil */' : 'MRB_TT_FALSE /* false only: nil is case 1000 */'
           ed.add(s, e, repl)
           rewrite(rel, s, name, repl, 'a case label of a switch on TYPE(v): nil is the value test in case 1000')

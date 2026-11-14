@@ -374,6 +374,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_switch tools/cext2mr
 check test "$rc" -eq 0
 check grep -qF 'switch ((mrb_nil_p(v) ? 1000 : mrb_type(v))) {' "$work/api_rb_type_switch/src/api_rb_type_switch.c"
 check grep -qF 'case 1000 /* nil */: return mrb_str_new_cstr(mrb, "nil");' "$work/api_rb_type_switch/src/api_rb_type_switch.c"
+# 2zzz58. switch (rb_type(p->field)): a member-chain subject is side-effect free, so nil is still case 1000.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_member tools/cext2mrbgem/fixtures/api_rb_type_member/ext/api_rb_type_member "$work/api_rb_type_member" > "$work/api_rb_type_member.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'switch ((mrb_nil_p(parent->val) ? 1000 : mrb_type(parent->val))) {' "$work/api_rb_type_member/src/api_rb_type_member.c"
+check grep -qF 'case 1000 /* nil */:' "$work/api_rb_type_member/src/api_rb_type_member.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
