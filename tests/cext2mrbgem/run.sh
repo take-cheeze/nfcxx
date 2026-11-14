@@ -247,7 +247,7 @@ check grep -qF 'return mrb_fixnum_value(LN_ANSWER);' "$work/local_names/src/loca
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_memhash  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -724,7 +724,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2m
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
 check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 3
-check grep -q '  rb_obj_method_arity  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_memhash  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  rb_require  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
@@ -814,6 +814,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_time tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check grep -qF 'if (1) return r;' "$work/api_enc_time/src/api_enc_time.c"
 check grep -qF 'mrb_intern_cstr(mrb, "at"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)(sec)), mrb_fixnum_value((mrb_int)(nsec) / 1000)})' "$work/api_enc_time/src/api_enc_time.c"
+
+# 2zzz9. Method#arity (the method gem, as an int), Integer#to_s (rb_big2str), the string-to-Integer parse (rb_cstr2inum), the
+# fixnum from a st value (ST2FIX), IO#write (rb_io_write); the output compiles against the fork's headers
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_method_str tools/cext2mrbgem/fixtures/api_method_str/ext/api_method_str "$work/api_method_str" > "$work/api_method_str.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'int ar = ' "$work/api_method_str/src/api_method_str.c"
+check grep -qF 'mrb_intern_cstr(mrb, "write"), 1, (mrb_value[]){big})' "$work/api_method_str/src/api_method_str.c"
 
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?

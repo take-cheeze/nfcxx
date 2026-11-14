@@ -1910,6 +1910,62 @@
       "template": "mrb_true_value()",
       "caveat": "mruby strings are byte strings with no encoding, so every string is taken as ASCII-compatible; a CRuby string in a non-ASCII-compatible encoding (UTF-16) has no mruby form",
       "template_cond": "1"
+    },
+    "rb_obj_method_arity": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((int)mrb_int($m, mrb_funcall_argv($m, mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"method\"), 1, (mrb_value[]){mrb_symbol_value($1)}), mrb_intern_cstr($m, \"arity\"), 0, NULL)))",
+      "caveat": "needs the mruby-method gem (Object#method and Method#arity); the call raises at run time if the gem is not in the build; the arity is a C int (CRuby's rb_obj_method_arity returns int)"
+    },
+    "rb_big2str": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"to_s\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "calls to_s with the base (Integer#to_s), as CRuby's rb_big2str"
+    },
+    "rb_cstr2inum": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_cstr_to_inum($m, $0, $1, 0)",
+      "caveat": "parses the C string in the base without the badcheck (CRuby's rb_cstr2inum with badcheck off)"
+    },
+    "ST2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "a st_data_t / st_index_t value is a fixnum here (as INT2FIX); the value must fit mruby's integer"
+    },
+    "RB_ST2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "see ST2FIX"
+    },
+    "rb_io_write": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"write\"), 1, (mrb_value[]){$1})",
+      "caveat": "calls write on the IO (mruby-io), as CRuby's rb_io_write"
+    },
+    "rb_enc_copy": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "((void)($0), (void)($1))",
+      "caveat": "mruby strings carry no encoding, so copying one's encoding to another does nothing"
+    },
+    "rb_must_asciicompat": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "((void)($0))",
+      "caveat": "every mruby string is ASCII-compatible (see rb_enc_str_asciicompat_p), so the check always passes"
     }
   },
   "special_arg_positions_class_only": {
