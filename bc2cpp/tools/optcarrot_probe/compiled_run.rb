@@ -337,8 +337,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   rake_env['LD'] = rake_env['CC'] || 'cc'
   tasks = %w[verify_optcarrot_world link_optcarrot]
   # -m: without it rake runs every file task one after another and -j has nothing to schedule.
+  build_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   output, status = Open3.capture2e(rake_env, 'rake', '-m', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
+  build_seconds = Process.clock_gettime(Process::CLOCK_MONOTONIC) - build_started
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
+
+  # Compile time of the generated code and the link, for comparing shard tiers (docs/notes/bc2cpp-shard-tiers.md).
+  puts format('sealed build (rake, -j%d): %.2f s', Etc.nprocessors, build_seconds)
 
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
 
