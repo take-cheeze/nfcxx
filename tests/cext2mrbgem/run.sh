@@ -339,6 +339,10 @@ check grep -qF 'static FtCallbacks ft_cbs = { ft_item };' "$work/api_fn_table/sr
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_const_intern tools/cext2mrbgem/fixtures/api_const_intern/ext/api_const_intern "$work/api_const_intern" > "$work/api_const_intern.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return mrb_const_get_at(mrb, mrb->object_class, mrb_intern_cstr(mrb, "Comparable"));' "$work/api_const_intern/src/api_const_intern.c"
+# 2zzz43. rb_streql_lit(s, "add"): the literal is a mruby String (mrb_str_new_cstr) for the mapping's string argument.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_streql_lit tools/cext2mrbgem/fixtures/api_streql_lit/ext/api_streql_lit "$work/api_streql_lit" > "$work/api_streql_lit.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_str_equal(mrb, s, mrb_str_new_cstr(mrb, "add"))) return mrb_true_value();' "$work/api_streql_lit/src/api_streql_lit.c"
 # 2zzz41. a VALUE comparison in a function without the mruby state is mrb_value_identical (the fork's stateless identity).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_eq_stateless tools/cext2mrbgem/fixtures/api_eq_stateless/ext/api_eq_stateless "$work/api_eq_stateless" > "$work/api_eq_stateless.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

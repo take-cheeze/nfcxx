@@ -220,6 +220,16 @@
       "mruby": "E_TYPE_ERROR",
       "needs_mrb": true
     },
+    "rb_streql_lit": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "str_args": [
+        1
+      ],
+      "template": "mrb_str_equal($m, $0, $1)",
+      "caveat": "the second argument is a string literal, made a mruby String; mrb_str_equal compares the bytes, as CRuby's rb_streql_lit (length and memcmp)"
+    },
     "rb_ensure": {
       "kind": "ensure_call",
       "needs_mrb": true,

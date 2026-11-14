@@ -3033,6 +3033,7 @@ end
         return
       end
       class_args = entry['class_args'] || []
+      str_args = entry['str_args'] || []
       value_class_arg = lambda do |t, at|
         fnc = enclosing_func(rel, at)
         vn = fnc ? value_names_of(fnc) : Set.new
@@ -3053,7 +3054,9 @@ end
       # the identifier pass converts their own names and calls (NUM2LL(rb_funcall2(...)) keeps its inner call converted)
       tmpl = entry['template']
       order = tmpl.scan(/\$(\d+)(?!\d)/).flatten.map(&:to_i)
-      if entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? &&
+      # (an argument with a special form, a string literal or rb_intern, is substituted by the general path below)
+      if entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? && str_args.empty? &&
+         texts.none? { |t| t.match?(/\Arb_intern\(/) } &&
          order == (0...entry['arity']).to_a && texts.any? { |t| !t.match?(/\A&?[#{WC}\s.\->]+\z/) }
         pieces = tmpl.split(/(\$\d+(?!\d))/)
         # pieces alternate: literal, $k, literal, $k, ... ; the literal text has $m replaced
@@ -3077,7 +3080,7 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -3099,6 +3102,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           @entries[t]['mruby']
         elsif class_args.include?(k) && value_class.call(t)
           "mrb_class_ptr(#{t})"
+        elsif str_args.include?(k) && texts[k].strip.match?(/\A"[^"\\]*"\z/)
+          # a string literal where the map says it is a string: a mruby String value
+          "mrb_str_new_cstr(#{mrb_tok(rel, s)}, #{texts[k].strip})"
         elsif (idl = /\Arb_intern\(\s*"([^"\\]*)"\s*\)\z/.match(texts[k].strip))
           # an ID argument written inline: the symbol of the literal (rb_intern("lit") -> mrb_intern_cstr)
           "mrb_intern_cstr(#{mrb_tok(rel, s)}, \"#{idl[1]}\")"
