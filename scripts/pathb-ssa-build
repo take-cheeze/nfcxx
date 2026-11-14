@@ -88,7 +88,7 @@ EXIT_PARTIAL = 3
 EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
 
 def usage_exit
-  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
+  warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--vectorize] [--avx2] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
   exit EXIT_USAGE
 end
 
@@ -476,6 +476,8 @@ while args.first&.start_with?("-") && args.first != "-"
   when "--long-double=trap" then ld_trap = true
   when "--no-fp" then no_fp = true; $qbe_flags << "-n"
   when "--no-unwind" then $qbe_flags << "-U"
+  when "--vectorize" then $qbe_flags << "-V"
+  when "--avx2" then $qbe_flags << "-Y"
   when "--safe" then safe = true
   when "--asan" then asan = true
   when "--pic" then pic = true
