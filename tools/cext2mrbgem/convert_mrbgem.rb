@@ -2980,6 +2980,31 @@ end
     end
   end
 
+  # A format string (the adjacent literals of one argument, span [a, b)) with PRIsVALUE: "%"PRIsVALUE becomes "%S" (a VALUE
+  # printed with to_s), and "%+"PRIsVALUE becomes "%!"S" (the fork's inspect flag). The token is replaced; adjacent literals
+  # concatenate. Returns false when a PRIsVALUE is in another form (refused by the caller).
+  def prsvalue_edits(rel, a, b)
+    text = @files[rel]['text']
+    ed = @edits[rel]
+    fmt = psl(text, a, b)
+    ok = true
+    fmt.to_enum(:scan, /PRIsVALUE/).each do
+      pm = Regexp.last_match
+      prefix = fmt[[pm.begin(0) - 6, 0].max...pm.begin(0)]
+      tok = a + pm.begin(0)
+      if prefix.match?(/%"\s*\z/)
+        ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
+      elsif prefix.match?(/%\+"\s*\z/)
+        plus = tok - (prefix.length - prefix.rindex('+'))
+        ed.add(plus, plus + 1, '!')
+        ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
+      else
+        ok = false
+      end
+    end
+    ok
+  end
+
   def is_param(rel, pos, name)
     # True if name at pos is a parameter of the function (its header, or its body) that encloses pos.
     # A parameter shadows a file-scope class variable of the same name, so it must not be rewritten.
@@ -3141,6 +3166,17 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
+      end
+      # a format argument with PRIsVALUE (rb_sprintf): the same conversion as rb_raise's format
+      if (fi = entry['format_arg'])
+        fcp = match_close(@files[rel]['masked'], nxt)
+        fargs = fcp > 0 ? split_args(@files[rel]['masked'], nxt, fcp) : []
+        if fargs[fi] && psl(@files[rel]['text'], fargs[fi][0], fargs[fi][1]).include?('PRIsVALUE')
+          unless prsvalue_edits(rel, fargs[fi][0], fargs[fi][1])
+            refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE and "%+"PRIsVALUE)')
+            return
+          end
+        end
       end
       # a class position that holds a VALUE name of the function (a class value, not a tracked class variable) is unwrapped
       # with mrb_class_ptr; the call's name is the only other edit, so this one does not overlap it
@@ -3464,29 +3500,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       fmt = psl(text, args[1][0], args[1][1])
-      if fmt.include?('PRIsVALUE')
-        # CRuby's "%"PRIsVALUE takes a VALUE and prints its to_s: mruby's %S does the same with an mrb_value. The token
-        # becomes "S" (adjacent literals concatenate). A '+' flag (inspect) is not mapped.
-        # "%+"PRIsVALUE (inspect, CRuby's + flag) becomes "%!"S" (mruby's ! flag: inspect, then S)
-        bad = false
-        fmt.to_enum(:scan, /PRIsVALUE/).each do
-          pm = Regexp.last_match
-          prefix = fmt[[pm.begin(0) - 6, 0].max...pm.begin(0)]
-          tok = args[1][0] + pm.begin(0)
-          if prefix.match?(/%"\s*\z/)
-            ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
-          elsif prefix.match?(/%\+"\s*\z/)
-            plus = tok - (prefix.length - prefix.rindex('+'))
-            ed.add(plus, plus + 1, '!')
-            ed.add(tok, tok + 'PRIsVALUE'.length, '"S"')
-          else
-            bad = true
-          end
-        end
-        if bad
-          refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE)')
-          return
-        end
+      if fmt.include?('PRIsVALUE') && !prsvalue_edits(rel, args[1][0], args[1][1])
+        refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE and "%+"PRIsVALUE)')
+        return
       end
       ed.add(s, e, 'mrb_raisef')
       ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")

@@ -343,6 +343,14 @@ check grep -qF 'return mrb_const_get_at(mrb, mrb->object_class, mrb_intern_cstr(
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_streql_lit tools/cext2mrbgem/fixtures/api_streql_lit/ext/api_streql_lit "$work/api_streql_lit" > "$work/api_streql_lit.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'if (mrb_str_equal(mrb, s, mrb_str_new_cstr(mrb, "add"))) return mrb_true_value();' "$work/api_streql_lit/src/api_streql_lit.c"
+# 2zzz44. rb_ary_freeze is mrb_obj_freeze (an array is an object).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_freeze tools/cext2mrbgem/fixtures/api_ary_freeze/ext/api_ary_freeze "$work/api_ary_freeze" > "$work/api_ary_freeze.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_obj_freeze(mrb, ary);' "$work/api_ary_freeze/src/api_ary_freeze.c"
+# 2zzz45. PRIsVALUE in an rb_sprintf format: %S and %!S (the same conversion as in rb_raise).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sprintf_pv tools/cext2mrbgem/fixtures/api_sprintf_pv/ext/api_sprintf_pv "$work/api_sprintf_pv" > "$work/api_sprintf_pv.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_format(mrb, "#<%""S"" value=%!""S"">", mrb_obj_value(mrb_obj_class(mrb, v)), v);' "$work/api_sprintf_pv/src/api_sprintf_pv.c"
 # 2zzz41. a VALUE comparison in a function without the mruby state is mrb_value_identical (the fork's stateless identity).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_eq_stateless tools/cext2mrbgem/fixtures/api_eq_stateless/ext/api_eq_stateless "$work/api_eq_stateless" > "$work/api_eq_stateless.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

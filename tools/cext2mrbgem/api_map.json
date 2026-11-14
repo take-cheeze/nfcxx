@@ -757,6 +757,13 @@
       "kind": "macro",
       "mruby": "mrb_float"
     },
+    "rb_ary_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "an array is an object: its freeze is mrb_obj_freeze (the same frozen flag)"
+    },
     "rb_obj_freeze": {
       "kind": "call",
       "mruby": "mrb_obj_freeze",
@@ -1810,7 +1817,8 @@
       "mruby": "mrb_format",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "returns a String built by mruby's formatter (see rb_bug for the format)"
+      "format_arg": 0,
+      "caveat": "returns a String built by mruby's formatter (see rb_bug for the format); PRIsVALUE in the format becomes %S (%!S for the + flag)"
     },
     "rb_ary_new_from_values": {
       "kind": "call",
