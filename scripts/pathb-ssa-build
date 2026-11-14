@@ -668,10 +668,10 @@ else
   $stdout.write(asm)
 end
 # --safe (-fsafe-pointers, docs/notes/safe-pointers.md): the runtime is linked first, as scripts/pathb-cc does with
-# $(scripts/safeptr-rt). The driver does not link; it writes the object's path to OUT.link for the caller's link line.
+# $(scripts/safeptr-rt.rb). The driver does not link; it writes the object's path to OUT.link for the caller's link line.
 # Slice 1: the assembly is unchanged by --safe (the per-access checks come in a later slice).
 if safe
-  rt_out, rt_err, rt_st = Open3.capture3(File.join(ROOT_DIR, "scripts", "safeptr-rt"))
+  rt_out, rt_err, rt_st = Open3.capture3(File.join(ROOT_DIR, "scripts", "safeptr-rt.rb"))
   error_exit("safeptr-rt failed: #{rt_err.lines.first&.strip}") unless rt_st.success?
   File.write("#{output}.link", rt_out.strip + "\n")
 end

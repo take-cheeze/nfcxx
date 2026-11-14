@@ -34,7 +34,7 @@
 #
 # Not covered (exit 3, "unported: ..." on stderr): an argument list without --cosmo; the EDG path when EDG is built (a C++
 # source, or an object with C sources: eccp's command lines are not modeled); the Path B C compile when QBE is built (scripts/
-# pathb-cc), -fsanitize=address with an object and no -c or -shared (the shim block builds the VLA runtime, scripts/asan-vla),
+# pathb-cc), -fsanitize=address with an object and no -c or -shared (the shim block builds the VLA runtime, scripts/asan-vla.rb),
 # and the Path B cosmo link (ape.lds, fixupobj, apelink), which only runs after the EDG path; -m options (the bash
 # runs the host gcc probes concurrently, so their log order is not fixed); NFCXX_BACKEND; NFCXX_* variables other than
 # NFCXX_COSMOCC, NFCXX_GCC, NFCXX_SYS_INCLUDES, NFCXX_PATH and NFCXX_BACKEND; EDG_BUILD; a host other than Linux x86_64 (the bash adds
@@ -251,10 +251,10 @@ def build(args, env, facts, lines)
   end
 
   asan_c = st[:asan] ? ["-fsanitize=address", "-fno-omit-frame-pointer", *st[:asanopts]] : []
-  # the shim block: with an object and -fsanitize=address, scripts/asan-vla builds the C++ VLA runtime before the link; that
+  # the shim block: with an object and -fsanitize=address, scripts/asan-vla.rb builds the C++ VLA runtime before the link; that
   # build is not run by this port (its success is not known here)
   if st[:asan] && !st[:compile_only] && !st[:shared] && st[:objs].any?
-    raise Unported, "-fsanitize=address with an object: the shim block builds the VLA runtime (scripts/asan-vla)"
+    raise Unported, "-fsanitize=address with an object: the shim block builds the VLA runtime (scripts/asan-vla.rb)"
   end
 
   cflags = st[:cflags] + COSMO_DEFINES

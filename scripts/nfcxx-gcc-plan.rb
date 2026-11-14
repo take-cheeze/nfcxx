@@ -33,7 +33,7 @@
 #   cc-clang 0|1            the C compiler (cc) is clang
 #   ehshim PATH             scripts/ehshim prints PATH (absent: it prints nothing)
 #   sret PATH               scripts/sret.sh prints PATH (absent: nothing)
-#   asan-vla PATH           scripts/asan-vla prints PATH (absent: it fails)
+#   asan-vla PATH           scripts/asan-vla.rb prints PATH (absent: it fails)
 #   eh-tls 1                ${EDG}/../eh-tls exists
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
 #   machine M               uname -m
@@ -293,7 +293,7 @@ class LiveFacts < Facts
     when "eh-tls" then File.file?(File.join(@root, "build", "edg", "eh-tls")) ? "1" : nil
     when "ehshim" then script_output("scripts/ehshim", require_success: true)
     when "sret" then script_output("scripts/sret.sh", require_success: false)
-    when "asan-vla" then script_output("scripts/asan-vla", require_success: true)
+    when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
     when "machine" then Open3.capture2("uname", "-m", err: File::NULL).first.chomp
     when "cuda-home" then nil
     when "gnu-version" then host_gnu_version
@@ -694,7 +694,7 @@ class Plan
     rtlib = [LIBC]
     if @asan
       v = @facts.value("asan-vla").to_s
-      raise NfcxxExit.new("nfcxx: cannot build the C++ VLA runtime for -fsanitize=address (scripts/asan-vla)", 2) if v.empty?
+      raise NfcxxExit.new("nfcxx: cannot build the C++ VLA runtime for -fsanitize=address (scripts/asan-vla.rb)", 2) if v.empty?
 
       vlart = [v]
     end

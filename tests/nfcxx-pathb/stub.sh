@@ -40,9 +40,9 @@ case $name in
       if [ -n "$v" ]; then exit "$v"; fi
     done
     exit 0 ;;
-  pathb-ldrt|ehshim|asan-vla|safeptr-rt) v=$(fact "$name")
+  pathb-ldrt|ehshim|asan-vla.rb|safeptr-rt.rb) v=$(fact "${name%.rb}")
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
-    [ "$name" != asan-vla ] || [ -n "$v" ] || exit 1
+    [ "${name%.rb}" != asan-vla ] || [ -n "$v" ] || exit 1
     exit 0 ;;
   sret.sh) v=$(fact sret)
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"

@@ -51,8 +51,8 @@
 #   pathb-ldrt PATH            scripts/pathb-ldrt prints PATH (the long double helper archive)
 #   ehshim PATH                scripts/ehshim prints PATH (absent or empty: it prints nothing, so the link has no EH shim)
 #   sret PATH                  scripts/sret.sh prints PATH (absent or empty: nothing)
-#   asan-vla PATH              scripts/asan-vla prints PATH (the C++ VLA runtime of an ASan link; absent: the port refuses)
-#   safeptr-rt PATH            scripts/safeptr-rt prints PATH (the safe-pointer runtime of a link; absent: the port refuses)
+#   asan-vla PATH              scripts/asan-vla.rb prints PATH (the C++ VLA runtime of an ASan link; absent: the port refuses)
+#   safeptr-rt PATH            scripts/safeptr-rt.rb prints PATH (the safe-pointer runtime of a link; absent: the port refuses)
 #   ld NAME                    ld.NAME is on PATH (for -fuse-ld=NAME; the other names pass to cc as they are)
 #   module PATH                PATH declares or imports a C++ module (the bash reads the source; not ported)
 #   exists PATH                PATH (relative to WORK) exists (the SYCL pre-pass test reads an -I directory's header)
@@ -654,8 +654,8 @@ class LiveFacts < Facts
     when "pathb-ldrt" then script_output("scripts/pathb-ldrt", require_success: true)
     when "ehshim" then script_output("scripts/ehshim", require_success: true)
     when "sret" then script_output("scripts/sret.sh", require_success: false)
-    when "asan-vla" then script_output("scripts/asan-vla", require_success: true)
-    when "safeptr-rt" then script_output("scripts/safeptr-rt", require_success: false)
+    when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
+    when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
     else unported("#{key} is not in the live facts")
     end
   end

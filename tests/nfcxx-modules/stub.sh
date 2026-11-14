@@ -48,10 +48,10 @@ case $name in
   eccp)
     [ -z "${EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS+x}" ] || log "ENV EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=$EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS"
     log "RUN $0 $*"; exit 0 ;;
-  ehshim|sret.sh|asan-vla)
-    key=ehshim; [ "$name" = sret.sh ] && key=sret; [ "$name" = asan-vla ] && key=asan-vla
+  ehshim|sret.sh|asan-vla.rb)
+    key=ehshim; [ "$name" = sret.sh ] && key=sret; [ "$name" = asan-vla.rb ] && key=asan-vla
     v=$(fact "$key")
-    if [ "$name" = asan-vla ] && [ -z "$v" ]; then exit 1; fi
+    if [ "$name" = asan-vla.rb ] && [ -z "$v" ]; then exit 1; fi
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
     exit 0 ;;
   ld.*) exit 0 ;;

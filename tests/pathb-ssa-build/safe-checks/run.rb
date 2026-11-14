@@ -17,7 +17,7 @@ failures = []
 ok = ->(msg) { puts "ok   #{msg}" }
 bad = ->(msg) { failures << msg; puts "FAIL #{msg}" }
 
-runtime, _, st = Open3.capture3("bash", File.join(ROOT, "scripts", "safeptr-rt"))
+runtime, _, st = Open3.capture3(File.join(ROOT, "scripts", "safeptr-rt.rb"))
 abort "safeptr-rt failed" unless st.success?
 runtime = runtime.strip
 

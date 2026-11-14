@@ -26,7 +26,7 @@ mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$bin" "$work" "$tmp" "$roo
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim sret.sh asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim sret.sh asan-vla.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"

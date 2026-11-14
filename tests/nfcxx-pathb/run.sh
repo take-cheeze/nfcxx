@@ -31,7 +31,7 @@ cp -r "$repo/scripts" "$root/scripts"
 # the copy of nfcxx, unchanged
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim sret.sh asan-vla safeptr-rt pathb-cc pathb-ldrt; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim sret.sh asan-vla.rb safeptr-rt.rb pathb-cc pathb-ldrt; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in cc g++ gcc cp mktemp ninja env; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the tools the driver checks for: built (ensure_tool finds them fresh), QBE and EDG's driver are present, libC.a exists
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

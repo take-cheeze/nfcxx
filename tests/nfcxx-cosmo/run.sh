@@ -29,7 +29,7 @@ mkdir -p "$root/build" "$bin" "$work/inc" "$work/sub" "$work/libs" "$tmp"
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim asan-vla; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim asan-vla.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in gcc cc g++ cp mktemp; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the repository's rewriter is built on first use (ensure_tool, every run): the sandbox's copy counts as built
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

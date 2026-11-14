@@ -3,7 +3,7 @@
 #
 # Slice 1 of --safe on the SSA route (docs/notes/safe-pointers.md): `pathb-ssa-build --safe` writes the same assembly as
 # the default build (the checks come in a later slice), writes the runtime's path to OUT.link for the caller's link
-# line (scripts/pathb-cc puts $(scripts/safeptr-rt) first), and the program built with that runtime runs and returns the
+# line (scripts/pathb-cc puts $(scripts/safeptr-rt.rb) first), and the program built with that runtime runs and returns the
 # values of the default build. The runtime must also define every __nfcxx_sp_* symbol the existing emitter's --safe
 # output needs, so the object the link line names is the one the existing --safe build depends on.
 
@@ -19,7 +19,7 @@ failures = []
 ok = ->(msg) { puts "ok   #{msg}" }
 bad = ->(msg) { failures << msg; puts "FAIL #{msg}" }
 
-runtime, _, st = Open3.capture3("bash", File.join(ROOT, "scripts", "safeptr-rt"))
+runtime, _, st = Open3.capture3(File.join(ROOT, "scripts", "safeptr-rt.rb"))
 abort "safeptr-rt failed" unless st.success?
 runtime = runtime.strip
 
@@ -41,7 +41,7 @@ Dir.mktmpdir("pathb-ssa-safe") do |dir|
 
   link_file = "#{safe_s}.link"
   if File.exist?(link_file) && File.read(link_file).strip == runtime && File.exist?(runtime)
-    ok.call("OUT.link names the runtime that scripts/safeptr-rt builds (#{File.basename(runtime)})")
+    ok.call("OUT.link names the runtime that scripts/safeptr-rt.rb builds (#{File.basename(runtime)})")
   else
     bad.call("OUT.link: #{File.exist?(link_file) ? File.read(link_file).inspect : 'missing'}, want #{runtime}")
   end
