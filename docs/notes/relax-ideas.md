@@ -26,7 +26,7 @@ optcarrot compiler run, plus the C++ build.
 
 Status: first step done. `BC2CPP_SHARD_COLD_OPT` and `BC2CPP_SHARD_HOT_OWNERS` place a GCC optimize pragma in shards
 other than the main file, and keep caller-named hot owners in the main file (`docs/notes/bc2cpp-shard-tiers.md`,
-`bc2cpp/scripts/bc2cpp/shard_tiers_check.rb`). Not profiled, not measured on optcarrot. Per-function levels are not
+`bc2cpp/scripts/bc2cpp/shard_output_check.rb`, its tier section). Not profiled, not measured on optcarrot. Per-function levels are not
 attempted.
 
 ### 3. Lazy codegen (bc2cpp)

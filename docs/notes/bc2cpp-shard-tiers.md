@@ -12,10 +12,10 @@ level, and which owners must stay at the build's own level.
   file, which keeps the build's flags. Read only when a tier is set, so the default split is unchanged.
 - Placement: hot owners first into shard 0, then the cold owners spread over the lightest shards, as before.
 
-Checked: `scripts/bc2cpp/shard_tiers_check.rb` (11 checks). Without a tier there is no pragma and the hot list is
+Checked: the `-- tiers` section of `scripts/bc2cpp/shard_output_check.rb` (11 checks; folded in because the CI check registry requires every `*_check.rb` to be classified, and that classification lives in the rpg-maker-clone world). Without a tier there is no pragma and the hot list is
 ignored; with a tier, the pragma heads every non-empty shard but the main file, hot owners are defined only in the main
 file, and a split program compiles warning-free at `-O2 -Werror`, links, and prints what the untiered split prints.
-`scripts/bc2cpp/shard_output_check.rb` still passes (15 checks; the generated-code part needs a host mrbc).
+`scripts/bc2cpp/shard_output_check.rb` passes 26 checks here (15 existing, 11 tier); its generated-code part needs a host mrbc.
 
 Not done, and why:
 - No profile yet. The hot list is the caller's. Producing it from a gprof or prof_stream run of the optcarrot world is
