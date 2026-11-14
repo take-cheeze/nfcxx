@@ -1211,6 +1211,60 @@ end
   end
 
   # The assignments (x.NAME = helper;) and calls (x.NAME(...)) of a field, across every file of the input.
+  # Parameters of function-pointer type, RET (*NAME)(PARAMS), of a helper H defined here. H calls them with the mruby
+  # state, so H takes mrb, and the callbacks passed for the parameter are threaded (like a struct function-pointer
+  # field, fnptr_global). The assigns are the helper names passed as that argument at H's call sites; the calls are the
+  # direct NAME( calls in H's body. A call site that does not pass a plain helper name makes the record invalid.
+  def fnptr_param_recs
+    recs = []
+    @defs.each do |hname, lst|
+      bodies = lst.reject { |x| x['proto'] }
+      next unless bodies.size == 1
+      d = bodies[0]
+      next unless d['po'] && d['pc'] && d['brace'] && d['body_end'] && d['file']
+      rel = d['file']
+      masked = @files[rel]['masked']
+      psub = masked[(d['po'] + 1)...d['pc']].to_s
+      m = /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/.match(psub)
+      next unless m
+      cname = m[1]
+      pidx = psub[0...m.begin(0)].count(',')
+      rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false }
+      body = masked[d['brace']..d['body_end']].to_s
+      body.to_enum(:scan, /(?<![#{WC}.>])#{cname}\s*\(/).each do
+        cm = Regexp.last_match
+        rec[:calls] << [d['brace'] + cm.end(0) - 1, hname, rel]
+      end
+      (@occ[hname] || []).each do |crel, cs, ce|
+        next if @decls.any? { |dd| dd['name'] == hname && dd['file'] == crel && dd['hstart'] <= cs && cs < dd['hend'] }
+        next if crel == rel && cs >= d['hstart'] && cs < d['hend']
+        mk = @files[crel]['masked']
+        nx = next_nonspace(mk, ce)
+        if nx < 0 || mk[nx] != '('
+          rec[:bad] = true
+          break
+        end
+        close = match_close(mk, nx)
+        args = close > 0 ? split_args(mk, nx, close) : []
+        a = args[pidx]
+        if a.nil?
+          rec[:bad] = true
+          break
+        end
+        t = psl(@files[crel]['text'], a[0], a[1]).strip
+        unless t.match?(/\A[A-Za-z_]\w*\z/) && @defs.key?(t)
+          rec[:bad] = true
+          break
+        end
+        lead = psl(@files[crel]['text'], a[0], a[1])[/\A\s*/].length
+        rec[:assigns] << [t, crel, a[0] + lead]
+      end
+      next if rec[:bad] || rec[:assigns].empty? || rec[:calls].empty?
+      recs << rec
+    end
+    recs
+  end
+
   def fnptr_global(rec)
     rec[:assigns] = []
     rec[:calls] = []
@@ -1254,6 +1308,20 @@ end
 
   # The field type and the calls through a threaded field take mrb (see compute_needs). The decision was made once for
   # the whole input: every assigned callback is threaded, and every call is in a function with the mruby state.
+  # The parameter text of helper name with the mruby state added to each active function-pointer parameter (see
+  # fnptr_param_recs): the callback type takes mrb first, as its threaded callbacks do. The same predicate as
+  # edit_fnptr_fields decides the call sites, so the header and the calls agree.
+  def fnptr_param_text(name, ptxt)
+    cands = @threaded_cands || Set.new
+    regs = @valid_reg_names || Set.new
+    (@fnptr_recs || []).each do |r|
+      next unless r[:owner] == name && r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
+      next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
+      ptxt = ptxt.sub(/\(\s*\*\s*#{Regexp.escape(r[:name])}\s*\)\s*\(/) { |m| m + 'mrb_state *mrb, ' }
+    end
+    ptxt
+  end
+
   def edit_fnptr_fields(rel)
     cands = @threaded_cands || Set.new
     regs = @valid_reg_names || Set.new
@@ -1261,7 +1329,7 @@ end
     (@fnptr_recs || []).each do |r|
       next unless r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
       next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
-      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel
+      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel && r[:owner].nil?
       r[:calls].each do |copen, _, crel|
         next unless crel == rel
         masked = @files[rel]['masked']
@@ -1354,10 +1422,12 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
     @fnptr_recs = []
     @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
     @files.keys.each { |frel| fnptr_typedefs(frel).each { |d| @fnptr_recs << fnptr_typed_global(d) } }
+    @fnptr_recs.concat(fnptr_param_recs)
     @fnptr_recs.each do |r|
       next if r[:assigns].empty?
       r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
       r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) }
+      forced << r[:owner] if r[:ok] && r[:owner]
     end
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
@@ -1946,7 +2016,7 @@ use_problem = lambda do |name, use|
       elsif d['name'] == (@init_defs.empty? ? nil : @init_defs[0]['name']) && !d['proto']
         hdr = "void mrb_#{@funcname}_gem_init(mrb_state *mrb)"
       elsif @helper_names.include?(name)
-        ptxt = py_strip(d['params'])
+        ptxt = fnptr_param_text(name, py_strip(d['params']))
 tail = ['', 'void'].include?(ptxt) ? '' : ', ' + map_types(ptxt, @types)
 if (@hash_cb_names || Set.new).include?(name)
   # a rb_hash_foreach callback: its third (VALUE) parameter is the pointer it was given (void *)

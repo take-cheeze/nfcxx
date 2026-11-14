@@ -550,6 +550,23 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield_refused tools/cext2mrb
 check test "$rc" -eq 2
 check grep -qF 'rb_yield is supported only in the body of a registered method' "$work/api_yield_refused/REFUSALS.txt"
 
+# 2zzi. a helper's function-pointer parameter, RET (*NAME)(PARAMS), is called with the mruby state: the helper takes mrb, the
+# callback type takes mrb first, the callbacks passed for it are threaded, and the call through it passes mrb (fnptr_param_recs).
+# The regex scanner cannot read a parameter with nested parentheses (DEF_RE), so there the callback stays refused: the
+# output is NOT_BUILDABLE with the refusal of fp_cb (the libclang scanner reads the definition).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_param tools/cext2mrbgem/fixtures/api_fnptr_param/ext/api_fnptr_param "$work/api_fnptr_param" > "$work/api_fnptr_param.log" 2>&1 || rc=$?
+if [ "$scanner" = libclang ]; then
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_param/NOT_BUILDABLE"
+check grep -qF 'static mrb_value fp_each(mrb_state *mrb, mrb_value (*cb)(mrb_state *mrb, mrb_value, mrb_value), mrb_value v, mrb_value hash) {' "$work/api_fnptr_param/src/api_fnptr_param.c"
+check grep -qF 'return cb(mrb, v, hash);' "$work/api_fnptr_param/src/api_fnptr_param.c"
+check grep -qF 'return fp_each(mrb, fp_cb, v, mrb_nil_value());' "$work/api_fnptr_param/src/api_fnptr_param.c"
+else
+check test "$rc" -eq 2
+check test -e "$work/api_fnptr_param/NOT_BUILDABLE"
+check grep -q '  fp_cb  ' "$work/api_fnptr_param/REFUSALS.txt"
+fi
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
