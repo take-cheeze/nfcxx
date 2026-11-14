@@ -998,10 +998,11 @@ module StaticDispatchRegistrations
   # INERT_STRING_ARGS (closed only): a string literal that is the whole of one of these arguments is read, never
   # interned: mrb_get_args' format, an operator-table key (cdump.c's OPERATOR_SYMBOL names the operator
   # MRB_OPSYM(key) stands for), a strcmp-family operand (compared with a name, not looked up) and the generated
-  # code's send-count label (bc2cpp.rb's BC2CPP_SEND_HIT, a counter key). A position of nil
-  # is every argument. mrb_sys_fail's message is not here: it reaches SystemCallError._sys_fail when that class
+  # code's send-count label (bc2cpp.rb's BC2CPP_SEND_HIT, a counter key), and the trace event name profiler.cxx's
+  # trace_complete writes out as JSON (never interned). A position of nil is every argument.
+  # mrb_sys_fail's message is not here: it reaches SystemCallError._sys_fail when that class
   # exists, so CoreNativeCandidates decides it (only while nothing makes SystemCallError).
-  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil, 'BC2CPP_SEND_HIT' => 1 }.freeze
+  INERT_STRING_ARGS = { 'mrb_get_args' => 1, 'OPERATOR_SYMBOL' => 1, 'strcmp' => nil, 'strncmp' => nil, 'BC2CPP_SEND_HIT' => 1, 'trace_complete' => 0 }.freeze
   INERT_CALL = /(?<![\w.>])(?:std::)?(#{INERT_STRING_ARGS.keys.join('|')})\s*\(/
   STRING_ARG = /\A"(?:[^"\\\n]|\\.)*"\z/
 
