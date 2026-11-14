@@ -657,7 +657,7 @@ check sh -c "! grep -q 'rsr_make_impl' '$work/reg_split_refused/src/reg_split_re
 ruby tools/cext2mrbgem/convert_mrbgem.rb --name lowercase_api_refused tools/cext2mrbgem/fixtures/lowercase_api_refused/ext/lowercase_api_refused "$work/lowercase_api_refused" > "$work/lowercase_api_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -q "st_init_numtable  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
-check grep -q "ruby_xmalloc  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
+check grep -q "ruby_xmalloc2_unmapped  no entry in api_map.json" "$work/lowercase_api_refused/REFUSALS.txt"
 
 # 3. bcrypt-ruby at a pinned commit
 bcrypt_sha=deb496eaba56077e84bd95ac9bbcca40b6d5d685
@@ -749,6 +749,14 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_address tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_gc_address/NOT_BUILDABLE"
 check grep -qF 'mrb_gc_register_address(mrb, &g_keep);' "$work/api_gc_address/src/api_gc_address.c"
+
+# 2zzt. rb_gc_mark in a helper that only the data type mark callback calls: the helper is in the mark context (mark_context_names),
+# so the mark is mrb_gc_mark_value in it; the allocation takes a tracked class variable; the output compiles against the fork's headers
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_mark_helper tools/cext2mrbgem/fixtures/api_mark_helper/ext/api_mark_helper "$work/api_mark_helper" > "$work/api_mark_helper.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_mark_helper/NOT_BUILDABLE"
+check grep -qF 'mrb_gc_mark_value(mrb, h->a);' "$work/api_mark_helper/src/api_mark_helper.c"
+check grep -qF 'mrb_data_object_alloc(mrb, cHolder,' "$work/api_mark_helper/src/api_mark_helper.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

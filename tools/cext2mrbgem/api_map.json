@@ -253,8 +253,12 @@
       "caveat": "valid only inside a data type mark callback (the runtime passes the state); refused elsewhere"
     },
     "rb_gc_mark_movable": {
-      "kind": "refuse",
-      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run (movable marking has no mruby form either)"
+      "kind": "call",
+      "mruby": "mrb_gc_mark_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "gc_mark_context": true,
+      "caveat": "valid only inside a data type mark callback, as rb_gc_mark; mruby does not compact, so a movable mark is the same mark (the mark hook is the fork's mrb_data_type.mark, branch claude/markable-data-type)"
     },
     "rb_gc_enable": {
       "kind": "refuse",
@@ -1548,6 +1552,62 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered"
+    },
+    "xmalloc": {
+      "kind": "call",
+      "mruby": "mrb_malloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xcalloc": {
+      "kind": "call",
+      "mruby": "mrb_calloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xrealloc": {
+      "kind": "call",
+      "mruby": "mrb_realloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xfree": {
+      "kind": "call",
+      "mruby": "mrb_free",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xmalloc": {
+      "kind": "call",
+      "mruby": "mrb_malloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xcalloc": {
+      "kind": "call",
+      "mruby": "mrb_calloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xrealloc": {
+      "kind": "call",
+      "mruby": "mrb_realloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xfree": {
+      "kind": "call",
+      "mruby": "mrb_free",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
     }
   },
   "special_arg_positions_class_only": {

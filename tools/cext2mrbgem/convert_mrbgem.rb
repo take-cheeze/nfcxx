@@ -99,7 +99,7 @@ CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
 # CRuby-looking identifiers that are not in api_map.json are refused.
-UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
+UNKNOWN_RE = /\A(?:rb_[#{WC}]+|st_[#{WC}]+|ruby_[#{WC}]+|x(?:malloc|calloc|realloc|free)|RB_[#{WC}]+|RUBY_[#{WC}]+|R[A-Z]{2,}_[#{WC}]+|RTEST|RBASIC[#{WC}]*|Q(?:nil|true|false|undef)|(?:NUM2|INT2|LONG2|ULONG2|UINT2|DBL2|FIX2|FIXNUM_|ID2|SYM2|CHR2|LL2|ULL2)[#{WC}]*|SYMBOL_P|NIL_P|NIL_OR_UNDEF_P|Check_[#{WC}]+|StringValue[#{WC}]*|T_[A-Z]+|ANYARGS|PRIsVALUE|CLASS_OF|SPECIAL_CONST_P|FL_[#{WC}]+|OBJ_[#{WC}]+|TypedData_[#{WC}]+|Data_[#{WC}]+|rb_data_[#{WC}]*)\z/
 
 GEM_NAME_RE = /\A[A-Za-z][A-Za-z0-9_-]*\n?\z/
 
@@ -2035,6 +2035,31 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # The functions the runtime calls while it marks: the data type mark callbacks, and the helpers every call of which is
+  # in such a function (transitively). rb_gc_mark is valid in these. A definition header or a prototype is not a call.
+  def mark_context_names
+    return @mark_ctx_names if @mark_ctx_names
+    ctx = (@dtype_mark_names || Set.new).dup
+    in_header = lambda do |name, orel, os|
+      (@defs[name] || []).any? { |dd| dd['file'] == orel && dd['hstart'] && dd['hend'] && dd['hstart'] <= os && os < dd['hend'] } ||
+        (@decls || []).any? { |dd| dd['name'] == name && dd['file'] == orel && dd['hstart'] && dd['hend'] && dd['hstart'] <= os && os < dd['hend'] }
+    end
+    changed = true
+    while changed
+      changed = false
+      @defs.each_key do |name|
+        next if ctx.include?(name)
+        occs = (@occ[name] || []).reject { |orel, os, _oe| in_header.call(name, orel, os) }
+        next if occs.empty?
+        if occs.all? { |orel, os, _oe| (f = enclosing_func(orel, os)) && ctx.include?(f['name']) }
+          ctx << name
+          changed = true
+        end
+      end
+    end
+    @mark_ctx_names = ctx
+  end
+
   # The state a use inside function or macro position pos gets: the mrb parameter, or the file-scope global for a
   # global-state helper or a global macro body.
   def mrb_tok(rel, pos)
@@ -2450,7 +2475,7 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : ((t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (class_args.include?(i) || !@class_vars.include?(t.delete('&'))) || plain_expr?(t, rel))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? @class_vars.include?(t.delete('&')) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -2474,7 +2499,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if entry['gc_mark_context']
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
-        unless fn && (@dtype_mark_names || Set.new).include?(fn['name'])
+        unless fn && mark_context_names.include?(fn['name'])
           refuse(rel, s, name, 'rb_gc_mark is valid only in a data type mark callback (the runtime calls it during marking)')
           return
         end
