@@ -10,3 +10,4 @@ isa -mavx2 __AVX2__ 1
 ld mold
 ehshim ROOT/build/ehshim.o
 asan-vla ROOT/build/asan/vla.o
+pathb-ldrt ROOT/build/pathb-ldrt/libnfcxxld.a
