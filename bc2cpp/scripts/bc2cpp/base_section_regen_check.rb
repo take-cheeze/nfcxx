@@ -149,6 +149,17 @@ Dir.mktmpdir('base-section-regen') do |gen|
   check.call('a gem outside the tag table is compared, not refused',
              BaseSection.generated_ruby_decls(gen) == ["class Unlisted\n  def y: () -> untyped\nend\n"])
 end
+puts 'a stub whose method the hand sections declare is left out; a native declaration does not count as one'
+hand_text = "class Box\n  def fill: () -> String\n  def self.make: () -> Box\nend\n" \
+            "# bc2cpp-native: core_results\nclass Native\n  def keep: () -> String\nend\n"
+hand = BaseSection.method_keys([hand_text])
+check.call('hand keys hold the instance and singleton methods of each class',
+           hand == Set[['Box', 'fill', false], ['Box', 'make', true]])
+check.call('the native declaration is not a hand key', !hand.include?(['Native', 'keep', false]))
+stub = "class Box < Base\n  def fill: () -> untyped\n  def other: (untyped) -> untyped\n  def self.make: () -> untyped\nend\n"
+check.call('a hand-declared stub is removed, the others and the class line stay',
+           BaseSection.without_hand_methods(stub, hand) == "class Box < Base\n  def other: (untyped) -> untyped\nend\n")
+check.call('no hand keys leaves a stub as it is', BaseSection.without_hand_methods(stub, nil) == stub)
 require_relative '../../scripts/bc2cpp/base_rbs_all'
 abort 'base section regen check: 3rd/mruby is missing; the gem list needs it' unless File.directory?(File.join(ROOT, '3rd/mruby'))
 untagged = BaseRbsAll.gems.select { |gem| !BaseRbsAll.ruby_sources(gem).empty? }.map { |gem| File.basename(gem) }

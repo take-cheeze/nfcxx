@@ -5,7 +5,6 @@ class Array
   def bsearch: () -> untyped
   def bsearch_index: () -> untyped
   def combination: (untyped) -> untyped
-  def delete_if: () -> untyped
   def dig: (untyped, *untyped) -> untyped
   def fetch: (untyped, ?untyped) -> untyped
   def fetch_values: (*untyped) -> untyped
@@ -22,7 +21,6 @@ class Array
   def select!: () -> untyped
   def to_h: () -> untyped
   def transpose: () -> untyped
-  def uniq: () -> untyped
   def uniq!: () -> untyped
 end
 
@@ -314,20 +312,13 @@ end
 # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
 # bc2cpp-native: base_numeric
 class Integer
-  def allbits?: (untyped) -> untyped
-  def anybits?: (untyped) -> untyped
   def ceildiv: (untyped) -> untyped
-  def integer?: () -> untyped
-  def nobits?: (untyped) -> untyped
 end
 
 # Base RBS (scripts/bc2cpp/base_rbs.rb): shapes from the AST, no types.
 # bc2cpp-native: base_numeric
 class Numeric
-  def integer?: () -> untyped
-  def negative?: () -> untyped
   def nonzero?: () -> untyped
-  def positive?: () -> untyped
   def zero?: () -> untyped
 end
 
@@ -383,7 +374,6 @@ class Range
   def last: (*untyped) -> untyped
   def max: () -> untyped
   def min: () -> untyped
-  def overlap?: (untyped) -> untyped
 end
 
 # Native base RBS (scripts/bc2cpp/base_rbs_native.rb): mrb_define_* registrations, arity untyped.

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require_relative 'native_sigs'
 
 # BaseSection: the base-stub part of sig/bc2cpp/declarations.rbs, from the generators' output. The part runs from the top
 # of the file to `# ---- block_types.rbs`. Its native blocks (a `# Native base RBS` header) are regenerated per tag by
@@ -172,19 +173,52 @@ module BaseSection
 
   # The Ruby declarations the generator writes, one per top-level class or module. No tag is needed to compare them, so a
   # gem outside TAGS cannot fail the check; only the writer needs a tag (regenerate_ruby_by_tag).
-  def self.generated_ruby_decls(gen_dir)
+  # With +hand+ (method_keys of the hand-written declarations), a stub whose method the hand sections already declare is
+  # left out: the loader folds the two the same way, so the stub only repeats the declaration.
+  def self.generated_ruby_decls(gen_dir, hand = nil)
     Dir[File.join(gen_dir, '*', 'ruby', '*.rbs')].sort.flat_map do |path|
-      File.read(path).scan(DECL).map { |d| d.strip + "\n" }
+      File.read(path).scan(DECL).map { |d| without_hand_methods(d.strip + "\n", hand) }
     end.sort
+  end
+
+  # Method keys [owner, name, singleton] declared by the given signature texts (a class or module's methods, by owner).
+  # A native declaration (a `# bc2cpp-native:` table member) is not one: the loader folds it into the stub's entry, and
+  # without the stub the method would be lost, so the stub stays.
+  def self.method_keys(texts)
+    require 'rbs'
+    texts.each_with_object(Set.new) do |text, keys|
+      _buffer, _directives, decls = RBS::Parser.parse_signature(RBS::Buffer.new(name: 'hand', content: text))
+      decls.each do |decl|
+        next unless decl.is_a?(RBS::AST::Declarations::Class) || decl.is_a?(RBS::AST::Declarations::Module)
+
+        owner = decl.name.to_s.delete_prefix('::')
+        decl.members.each do |m|
+          next unless m.is_a?(RBS::AST::Members::MethodDefinition) && !NativeSigs.native?(m, [decl])
+
+          keys << [owner, m.name.to_s, m.kind == :singleton]
+        end
+      end
+    end
+  end
+
+  # A generated declaration without the methods in +hand+ (method_keys). Its class line stays, so the superclass does too.
+  def self.without_hand_methods(decl, hand)
+    return decl unless hand
+
+    owner = decl[/\A(?:class|module) (\S+)/, 1].to_s.delete_prefix('::')
+    decl.lines.reject do |line|
+      m = line.match(/\A  def (self\.)?(\S+?):/)
+      m && hand.include?([owner, m[2], !m[1].nil?])
+    end.join
   end
 
   # The same declarations grouped by their table tag. The tag is what a committed declaration carries as its marker, so
   # a regenerated one is written under the marker it would have had: unmarked, it would count as a program declaration.
-  def self.generated_ruby_by_tag(gen_dir)
+  def self.generated_ruby_by_tag(gen_dir, hand = nil)
     by_tag = Hash.new { |h, k| h[k] = [] }
     Dir[File.join(gen_dir, '*', 'ruby', '*.rbs')].sort.each do |path|
       tag = tag_of(File.basename(File.dirname(File.dirname(path))))
-      File.read(path).scan(DECL).each { |d| by_tag[tag] << d.strip + "\n" }
+      File.read(path).scan(DECL).each { |d| by_tag[tag] << without_hand_methods(d.strip + "\n", hand) }
     end
     by_tag
   end
