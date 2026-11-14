@@ -541,6 +541,7 @@ class Converter
       text = read_text(path)
       kind = base.end_with?('.c') ? 'src' : 'hdr'
       @files[base] = { 'text' => text, 'masked' => mask_c(text), 'kind' => kind }
+      noreturn_mask(base)
       @edits[base] = Edits.new
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
@@ -1081,6 +1082,31 @@ def plain_expr?(t, rel)
   t.scan(/[A-Za-z_]\w*/).all? do |w|
     next false if w == 'mrb' || @class_vars.include?(w) || @entries.key?(w) || @types.key?(w) || UNKNOWN_RE.match?(w)
     true
+  end
+end
+
+# NORETURN(decl); is CRuby's no-return prototype wrapper. mruby has no NORETURN, so the wrapper's two tokens are removed
+# from the output, and the masked text (used to scan declarations) has them blanked, so the declaration is a plain prototype.
+# the opening NORETURN( token lies in a prototype that is rewritten as a whole (a helper or a registered method)
+def noreturn_in_rewritten_decl?(rel, start)
+  @decls.any? do |d|
+    d['file'] == rel && d['hstart'] <= start && start < d['hend'] &&
+      ((@helper_names || Set.new).include?(d['name']) || (@valid_reg_names || Set.new).include?(d['name']))
+  end
+end
+
+def noreturn_mask(rel)
+  f = @files[rel]
+  f['noreturn'] = []
+  f['text'].to_enum(:scan, /^[ \t]*NORETURN\(/).each do
+    m = Regexp.last_match
+    open = m.end(0) - 1
+    close = match_close(f['masked'], open)
+    next if close < 0
+    start = m.begin(0) + m[0].index('N')
+    f['noreturn'] << [start, open, close]
+    (start...open + 1).each { |k| f['masked'][k] = ' ' }
+    f['masked'][close] = ' '
   end
 end
 
@@ -1720,6 +1746,11 @@ end
         rewrite(rel, s, name, "#{name}_impl")
       end
     end
+# NORETURN( ) wrappers (noreturn_mask): the two tokens are removed; the declaration inside stays
+(@files[rel]['noreturn'] || []).each do |start, open, close|
+  ed.add(start, open + 1, '') unless noreturn_in_rewritten_decl?(rel, start)
+  ed.add(close, close + 1, '')
+end
     # 4c. a rb_data_type_t initializer is CRuby's {name, {dmark, dfree, dsize}, parent, data, flags}; mruby's
     # mrb_data_type is {name, dfree, mark} (the fork's mark hook). The whole initializer is one edit, so the identifiers
     # inside it are not converted again (the identifier pass skips overlapping ranges). The mark and free functions must

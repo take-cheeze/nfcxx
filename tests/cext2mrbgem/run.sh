@@ -449,6 +449,13 @@ check test ! -e "$work/api_header_inline/NOT_BUILDABLE"
 check grep -qF 'static inline int ahi_check(mrb_state *mrb, mrb_value v) {' "$work/api_header_inline/include/helper.h"
 check grep -qF 'return mrb_int_value(mrb, ahi_check(mrb, v));' "$work/api_header_inline/src/api_header_inline.c"
 
+# 2zu. a CRuby NORETURN(decl); prototype is unwrapped: the declaration is converted as a prototype (api_map.json batch N13)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_noreturn tools/cext2mrbgem/fixtures/api_noreturn/ext/api_noreturn "$work/api_noreturn" > "$work/api_noreturn.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_noreturn/NOT_BUILDABLE"
+check grep -qF 'static void anr_fail(mrb_state *mrb, mrb_value v);' "$work/api_noreturn/src/api_noreturn.c"
+check sh -c "! grep -q 'NORETURN(static' '$work/api_noreturn/src/api_noreturn.c'"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
