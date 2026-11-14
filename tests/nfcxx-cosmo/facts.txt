@@ -1,0 +1,4 @@
+# the files under ROOT that run.sh creates: root-exec is an executable stand-in for cosmocc, named cosmocc
+root-exec build/cosmocc/bin/cosmocc
+root-exec alt/cosmocc
+root-file notexec
