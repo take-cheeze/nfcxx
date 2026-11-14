@@ -379,6 +379,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_member tools/cext2mr
 check test "$rc" -eq 0
 check grep -qF 'switch ((mrb_nil_p(parent->val) ? 1000 : mrb_type(parent->val))) {' "$work/api_rb_type_member/src/api_rb_type_member.c"
 check grep -qF 'case 1000 /* nil */:' "$work/api_rb_type_member/src/api_rb_type_member.c"
+# 2zzz59. rb_obj_is_kind_of(member chain, rb_eException): the exception class is mrb_exc_get, and a member chain is substituted.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kind_args tools/cext2mrbgem/fixtures/api_kind_args/ext/api_kind_args "$work/api_kind_args" > "$work/api_kind_args.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_obj_is_kind_of(mrb, p.val, mrb_exc_get(mrb, "Exception"))' "$work/api_kind_args/src/api_kind_args.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
