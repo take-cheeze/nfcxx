@@ -26,7 +26,8 @@
         "mruby/string.h",
         "mruby/numeric.h",
         "mruby/hash.h",
-        "mruby/class.h"
+        "mruby/class.h",
+        "mruby/data.h"
       ]
     },
     "ruby/ruby.h": {
@@ -35,7 +36,8 @@
         "mruby/string.h",
         "mruby/numeric.h",
         "mruby/hash.h",
-        "mruby/class.h"
+        "mruby/class.h",
+        "mruby/data.h"
       ]
     },
     "ruby/re.h": {
@@ -1018,6 +1020,13 @@
       "mruby": "E_FROZEN_ERROR",
       "needs_mrb": true,
       "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "RTYPEDDATA_DATA": {
+      "kind": "call",
+      "mruby": "DATA_PTR",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "both read the data field of a VALUE and are lvalues. mruby has no typed/untyped split: the object must be an mruby data object (mrb_data_type), and the type is not checked, as in CRuby"
     },
     "RB_INTEGER_TYPE_P": {
       "kind": "call",

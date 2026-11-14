@@ -432,6 +432,15 @@ check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_ref
 check grep -q '  rb_iv_get  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 
+# 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_typed_ptr/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_typed_ptr/REFUSALS.txt"
+check grep -qF '#include <mruby/data.h>' "$work/api_typed_ptr/src/api_typed_ptr.c"
+check grep -qF 'void *p = DATA_PTR(obj);' "$work/api_typed_ptr/src/api_typed_ptr.c"
+check grep -qF 'DATA_PTR(obj) = NULL;' "$work/api_typed_ptr/src/api_typed_ptr.c"
+
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
