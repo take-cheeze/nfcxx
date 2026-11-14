@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # C++ front-end checks: the prelinker and the link of EDG's output, and the --emit-c driver options.
 #   1. std::filesystem::directory_iterator holds a shared_ptr<_Dir>, whose complete-object destructor (D1) must be
-#      emitted (gcc backend: scripts/gcc-cc makes it weak; qbe: its link already works).
+#      emitted (gcc backend: scripts/gcc-cc.rb makes it weak; qbe: its link already works).
 #   2. Two or three units that use the same destructor link to one copy of each (gcc: the .weak step of gcc-cc).
 #   3. std::make_shared on the qbe backend: the <memory> include pulls in std::numbers' _Float16 variables.
 #   4. --emit-c takes the user's -I directories.
