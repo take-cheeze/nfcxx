@@ -18,18 +18,25 @@ arrays="files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc s
 
 # The re-runs of nfcxx itself (the -fsyntax-only block, before the loop): a run prints RUN, an exec prints EXEC and stops.
 # The temporary directory of the block shows as TMP.
+# The bundle step (scripts/bundle-wrap.sh) runs the driver again and then the bundler: both print, and ninja (which builds the
+# bundler) is silent and succeeds.
 fso_stubs='_out() { local tag=$1 s x; shift; s=$tag; for x in "$@"; do x=${x//$root/ROOT}; x=${x//"${fso_dir-}"/TMP}; s+=" $x"; done; printf "%s\n" "$s"; }
 run_stub() { _out RUN "$@"; return 0; }
-exec_stub() { _out EXEC "$@"; exit 0; }'
+exec_stub() { _out EXEC "$@"; exit 0; }
+ninja() { return 0; }'
 
 harness() {
   echo "$fso_stubs"
   # the stub of the tool build (the body of ensure_tool is kept, under another name, for nothing else to call)
   echo 'ensure_tool() { return 0; }'
+  # the bundle step, as a copy that prints its runs (the driver and the bundler) instead of running them
+  sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
+      "$root/scripts/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
   # nfcxx's setup and loop: up to the loop's closing "done"
   awk 'seen && /^done$/ { print; exit } /^while \[ \$# -gt 0 \]; do$/ { seen = 1 } { print }' "$root/nfcxx" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
-        -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g'
+        -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
+        -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|"
   echo 'dump_arr() { declare -p "$1" >/dev/null 2>&1 || return 0; local -n r=$1; [ ${#r[@]} -eq 0 ] && return 0; local x; for x in "${r[@]}"; do printf "%s+=%s\n" "$1" "$x"; done; }'
   for v in $scalars; do echo "printf '%s=%s\\n' $v \"\${$v-}\""; done
   for v in $arrays; do echo "dump_arr $v"; done

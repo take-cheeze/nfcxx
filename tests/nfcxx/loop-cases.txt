@@ -100,3 +100,16 @@ NFCXX_BACKEND=qbe NFCXX_PATH=b NFCXX_EHSHIM=0 NFCXX_CACHE=/tmp/c --backend=pathb
 -fsyntax-only -fuse-ld=gold -std=c++20 x.cpp
 NFCXX_BACKEND=qbe -fsyntax-only x.cpp
 NFCXX_CACHE_REMOTE=nope -fsyntax-only x.cpp
+-c x.cpp --bundle-libs
+x.cpp --bundle-libs
+-o prog x.cpp --bundle-libs --bundle-exclude=libfoo.so,libbar
+--bundle-only=libstdc++ -o p x.cpp --bundle-libs
+--bundle-libs --bundle-add=libtorch_cuda.so -Lfoo -L bar x.cpp
+--bundle-stubs=lib/stubs --bundle-runpath=lib/run x.cpp --bundle-libs
+--bundle-rpath=lib x.cpp --bundle-libs
+--bundle-libs --bundle-bogus x.cpp
+x.cpp --bundle-exclude=a
+--bundle-libs -E x.cpp
+--bundle-libs --bundle-only=a,,b x.cpp
+--bundle-libs --bundle-exclude= x.cpp
+--bundle-libs -o out.bin x.cpp -fsyntax-only

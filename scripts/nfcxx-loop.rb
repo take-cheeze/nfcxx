@@ -5,8 +5,8 @@
 # and loop with the build step (ensure_tool) stubbed out (tests/nfcxx/option-state.sh).
 #
 # -fsyntax-only (the re-run before the setup) prints the command the bash would run instead of the state (syntax_only_plan).
-# Not covered in this slice (refused as "unported", exit 3): --bundle- and --cuda-driver (their wrappers run the driver
-# again), -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
+# --bundle-* (the re-run before the setup) prints the commands it runs (bundle_plan). Not covered in this slice (refused as
+# "unported", exit 3): --cuda-driver= (its wrapper runs the driver again), -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
 # variables that are not in the apply_environment list.
 #
 #   ruby scripts/nfcxx-loop.rb ARG...   prints the state the loop leaves, one line per variable
@@ -336,6 +336,57 @@ def syntax_only_plan(argv)
   ["RUN", ["nfcxx", "-c", *args, "-o", "TMP/x.o"]]
 end
 
+# nfcxx's --bundle-* options (scripts/bundle-wrap.sh, before its setup): the driver runs again on the arguments without them,
+# and a link then goes through the bundler. Returns the commands the bash runs as [kind, argv] (RUN, EXEC), or nil when
+# no --bundle- option is given. ROOT stands for the repository. The bundler's build (ninja) is taken to succeed.
+BUNDLE_NO_LINK = %w[-c -E -S -M -MM -fsyntax-only --emit-c].freeze
+
+# the list of a --bundle-*=a,b option: read splits on the commas, and the empty field after a last comma is dropped
+def bundle_list(value)
+  parts = value.split(",", -1)
+  parts.pop if parts.last == ""
+  parts
+end
+
+def bundle_plan(argv)
+  return nil unless (" " + argv.join(" ") + " ").include?(" --bundle-")
+  driver = "ROOT/nfcxx"
+  on = false
+  link = true
+  out = "a.out"
+  prev = nil
+  opts = []
+  args = []
+  argv.each do |a|
+    out = a if prev == "-o"
+    opts.push("-L", a) if prev == "-L"
+    if a == "--bundle-libs"
+      on = true
+    elsif a.start_with?("--bundle-exclude=", "--bundle-only=", "--bundle-add=")
+      flag = if a.start_with?("--bundle-exclude=") then "--exclude"
+             elsif a.start_with?("--bundle-add=") then "--add"
+             else "--only"
+             end
+      bundle_list(a.split("=", 2)[1]).each { |x| opts.push(flag, x) }
+    elsif a.start_with?("--bundle-stubs=") then opts.push("--stubs", a[15..])
+    elsif a.start_with?("--bundle-runpath=") then opts.push("--runpath", a[17..])
+    elsif a.start_with?("--bundle-rpath=") then opts.push("--rpath", a[15..])
+    elsif a.start_with?("--bundle-")
+      raise NfcxxExit.new("nfcxx: unknown option #{a} (--bundle-libs, --bundle-exclude=, --bundle-only=, --bundle-add=, --bundle-stubs=, --bundle-runpath=, --bundle-rpath=)", 2)
+    else
+      args << a
+      link = false if BUNDLE_NO_LINK.include?(a)
+      opts.push("-L", a[2..]) if a.start_with?("-L") && a.length > 2
+    end
+    prev = a
+  end
+  raise NfcxxExit.new("nfcxx: the --bundle-* options need --bundle-libs", 2) unless on
+  plan = [["RUN", [driver, *args]]]
+  return plan unless link
+  plan << ["EXEC", ["ROOT/build/nfcbundle", *opts, out, "-o", out]]
+  plan
+end
+
 def main(argv)
   ld_available = []
   env = {}
@@ -358,14 +409,14 @@ def main(argv)
     end
   end
   plan = syntax_only_plan(argv)
+  plan = [plan] if plan
+  plan ||= bundle_plan(argv)
   if plan
-    $stdout.write("#{plan[0]} #{plan[1].join(" ")}\n")
+    plan.each { |kind, cmd| $stdout.write("#{kind} #{cmd.join(" ")}\n") }
     return 0
   end
   argv.each do |a|
-    if a.start_with?("--bundle-") || a.start_with?("--cuda-driver=")
-      raise NfcxxUnported, a
-    end
+    raise NfcxxUnported, a if a.start_with?("--cuda-driver=")
   end
   state = LoopState.new
   apply_environment(state, env, uid, tmpdir)
