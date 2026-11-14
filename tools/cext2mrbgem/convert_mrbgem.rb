@@ -1756,7 +1756,26 @@ end
       want = "Init_#{entry.split('/', -1).last}"
       chosen = @init_defs.select { |d| d['name'] == want }
       if !chosen.empty?
-        @dead_inits = @init_defs.reject { |d| d.equal?(chosen[0]) }
+        # an Init_ function that the entry (or a live function) calls is a helper, not dead code: it stays in the
+        # output as an ordinary function. Only the others are kept under #if 0.
+        others = @init_defs.reject { |d| d.equal?(chosen[0]) }
+        live_names = Set[chosen[0]['name']]
+        changed = true
+        while changed
+          changed = false
+          others.each do |d|
+            next if live_names.include?(d['name'])
+            called = (@occ[d['name']] || []).any? do |orel, os, _oe|
+              f = enclosing_func(orel, os)
+              f && live_names.include?(f['name'])
+            end
+            if called
+              live_names << d['name']
+              changed = true
+            end
+          end
+        end
+        @dead_inits = others.reject { |d| live_names.include?(d['name']) }
         @init_defs = chosen
         @dead_inits.each do |d|
           @ignored << [d['file'], "Init_ function #{d['name']} is not the entry (create_makefile names #{entry}): kept under #if 0"]
@@ -2674,16 +2693,28 @@ end
     # 3. class variable declarations become struct RClass *
     # A VALUE parameter that has a class variable's name is an ordinary parameter (it shadows the class
     # variable in its function) and is left alone.
-    @class_vars.to_a.sort.each do |c|
-      finditer(/(?<![#{WC}])VALUE(?![#{WC}])#{SS1}#{Regexp.escape(c)}(?![#{WC}])(?=#{SS}[=;,\[])/, masked).each do |m|
-        next if is_param(rel, m.begin(0), c)
-        ed.add(m.begin(0), m.begin(0) + 'VALUE'.length, 'struct RClass *')
-        rewrite(rel, m.begin(0), "VALUE #{c}", "struct RClass * #{c}")
+    # A VALUE declaration statement (VALUE a, b = f(x), c;) with a tracked class variable among its declarators: the class
+    # declarators get a * (struct RClass *name), a leading VALUE becomes struct RClass when its declarator is a class, and a
+    # change of type between two declarators is a ';' with the new type in place of the comma. The initializers keep their
+    # text, so their calls are converted by the passes that own them. A declarator that is a VALUE parameter shadows the
+    # class variable and stays VALUE.
+    value_decl_statements(masked).each do |st, kw_end, decls|
+      next if decls.none? { |d| d[:name] && @class_vars.include?(d[:name]) && !is_param(rel, d[:start], d[:name]) }
+      next if decls.any? { |d| d[:name].nil? || d[:fn] }
+      cls = decls.map { |d| d[:name] && @class_vars.include?(d[:name]) && !is_param(rel, d[:start], d[:name]) }
+      next if decls.zip(cls).any? { |d, c| c && d[:ptr] }
+      ed.add(st, kw_end, 'struct RClass') if cls[0]
+      decls.each_with_index do |d, i|
+        ed.add(d[:start], d[:start], '*') if cls[i]
+        next if i == 0
+        if cls[i] != cls[i - 1]
+          ed.add(d[:comma], d[:comma] + 1, cls[i] ? '; struct RClass' : '; mrb_value')
+        end
       end
-      finditer(/(?<![#{WC}])VALUE(?![#{WC}])[^;(){}]*,#{SS}#{Regexp.escape(c)}(?![#{WC}])/, masked).each do |mm|
-        next if is_param(rel, mm.begin(0), c)
-        refuse(rel, mm.begin(0), c, 'multi-declarator class variable declaration not supported')
-        break
+      decls.each_with_index do |d, i|
+        next unless cls[i]
+        @decl_name_pos << [rel, d[:start]]
+        rewrite(rel, d[:start], "VALUE #{d[:name]}", "struct RClass *#{d[:name]}")
       end
     end
     # 4. helper call sites get the mrb argument
@@ -2815,6 +2846,63 @@ end
       mm = /(?<![#{WC}])mrb(?![#{WC}])/.match(masked)
       refuse(rel, mm.begin(0), 'mrb', 'source already uses the identifier mrb (clashes with the state parameter)') if mm
     end
+  end
+
+  # The VALUE declaration statements of a masked text: [start of VALUE, end of VALUE, declarators], where a declarator is
+  # {start:, name:, ptr:, fn:, comma:} (comma: the position of the comma before it, nil for the first). A statement ends
+  # at its ';' at depth 0; a '{', '}' or unbalanced ')' first means it is not a declaration (a parameter list, a body).
+  def value_decl_statements(masked)
+    out = []
+    masked.to_enum(:scan, /(?<![#{WC}])VALUE(?![#{WC}])/).each do
+      st = Regexp.last_match.begin(0)
+      kw_end = Regexp.last_match.end(0)
+      # the words before the type, with preprocessor lines blanked (they are not statements)
+      ctx = masked[[st - 60, 0].max...st].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
+      next unless ctx.match?(/(?:\A|[;{}])\s*(?:(?:static|const|extern|register|volatile)\s+)*\z/)
+      depth = 0
+      i = kw_end
+      semi = nil
+      while i < masked.length
+        c = masked[i]
+        if c == '(' || c == '[' then depth += 1
+        elsif c == ')' || c == ']'
+          depth -= 1
+          break if depth < 0
+        elsif depth.zero? && (c == '{' || c == '}')
+          break
+        elsif depth.zero? && c == ';'
+          semi = i
+          break
+        end
+        i += 1
+      end
+      next unless semi
+      # split the declarators at the commas of depth 0
+      pieces = []
+      depth = 0
+      from = kw_end
+      commas = []
+      (from...semi).each do |j|
+        c = masked[j]
+        if c == '(' || c == '[' then depth += 1
+        elsif c == ')' || c == ']' then depth -= 1
+        elsif c == ',' && depth.zero?
+          commas << j
+        end
+      end
+      bounds = [from] + commas.map { |j| j + 1 } 
+      ends = commas + [semi]
+      bounds.each_with_index do |b, k|
+        seg = masked[b...ends[k]]
+        lead = seg[/\A\s*/].size
+        nm = seg[/\A\s*([A-Za-z_][#{WC}]*)/, 1]
+        after = seg[lead + nm.to_s.size..].to_s if nm
+        pieces << { start: b + lead, name: nm, ptr: seg.lstrip.start_with?('*'),
+                    fn: !nm.nil? && after.to_s.match?(/\A\s*\(/), comma: k.zero? ? nil : commas[k - 1] }
+      end
+      out << [st, kw_end, pieces]
+    end
+    out
   end
 
   def is_param(rel, pos, name)
@@ -2969,6 +3057,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       unless called
         refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         return
+      end
+      # a class position that holds a VALUE name of the function (a class value, not a tracked class variable) is unwrapped
+      # with mrb_class_ptr; the call's name is the only other edit, so this one does not overlap it
+      # (an entry with arg_order rewrites its whole argument list, and handles its class argument itself)
+      if !entry['arg_order'] && (positions = (@special_pos || {})[name]) && !positions.empty?
+        cpc = match_close(@files[rel]['masked'], nxt)
+        cargs = cpc > 0 ? split_args(@files[rel]['masked'], nxt, cpc) : []
+        fnc = enclosing_func(rel, s)
+        vnc = fnc ? value_names_of(fnc) : Set.new
+        positions.each do |pi|
+          next unless cargs[pi]
+          ca, cb = cargs[pi]
+          at = psl(@files[rel]['text'], ca, cb).strip
+          # a VALUE parameter that shadows a class variable of the same name is a value (is_param)
+          next unless at.match?(/\A[A-Za-z_][#{WC}]*\z/) && vnc.include?(at) && (!@class_vars.include?(at) || is_param(rel, ca, at))
+          ed.add(ca, cb, "mrb_class_ptr(#{at})")
+        end
       end
       if entry['gc_mark_context']
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls

@@ -47,7 +47,7 @@ check test "$rc" -eq 0
 check sh -c "! grep -q 'overlapping\\|Traceback' '$work/shadow_param.log'"
 check grep -qF 'static mrb_value dump_it(mrb_state *mrb, mrb_value obj, mrb_value klass, int depth) {' "$work/shadow_param/src/shadow_param.c"
 check grep -qF 'if (mrb_nil_p(klass))' "$work/shadow_param/src/shadow_param.c"
-check grep -qF 'static struct RClass * klass;' "$work/shadow_param/src/shadow_param.c"
+check grep -qF 'static struct RClass *klass;' "$work/shadow_param/src/shadow_param.c"
 
 # 2d. definitions whose return type or name is on another line are found (no false "no definition" refusal)
 rc=0; "$rb" "$conv" --scanner "$scanner" --name split_return tools/cext2mrbgem/fixtures/split_return/ext/split_return "$work/split_return" > "$work/split_return.log" 2>&1 || rc=$?
@@ -313,6 +313,17 @@ check grep -qF 'mrb_obj_is_kind_of(mrb, x, mrb_class_ptr(c))' "$work/api_kind_va
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_mark_sw tools/cext2mrbgem/fixtures/api_mark_sw/ext/api_mark_sw "$work/api_mark_sw" > "$work/api_mark_sw.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_gc_mark_value(mrb, sw->stream);' "$work/api_mark_sw/src/api_mark_sw.c"
+
+# 2zzz36. a class variable declared with others in one statement (VALUE mod, eng;) is typed per declarator, and a helper Init
+# function the entry calls is live (it is not kept under #if 0).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_init_helper tools/cext2mrbgem/fixtures/api_init_helper/ext/api_init_helper "$work/api_init_helper" > "$work/api_init_helper.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'struct RClass *mod, *eng;' "$work/api_init_helper/src/api_init_helper.c"
+check sh -c "! grep -q '#if 0' '$work/api_init_helper/src/api_init_helper.c'"
+# 2zzz37. a mixed declaration: VALUE, a class declarator (with a call), VALUE. The types change at the commas.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_mixed tools/cext2mrbgem/fixtures/api_decl_mixed/ext/api_decl_mixed "$work/api_decl_mixed" > "$work/api_decl_mixed.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value a = mrb_nil_value(); struct RClass *eng = mrb_define_class(mrb, "DeclMixed", mrb->object_class); mrb_value b = mrb_nil_value();' "$work/api_decl_mixed/src/api_decl_mixed.c"
 
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
