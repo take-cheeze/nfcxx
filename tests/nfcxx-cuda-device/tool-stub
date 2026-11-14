@@ -1,0 +1,12 @@
+#!/bin/sh
+# The stand-in of a built tool for tests/nfcxx-cuda-device (run.sh copies it to each tool's path; oracle.sh copies it when
+# ensure_tool builds a missing one). It logs its command line to CU_TEST_LOG, and makes the files the tool makes for the
+# case: the rewriter's kernel list (--kernels=FILE, the names in CU_TEST_KERNELS) and the emitter's group files
+# (--groups-dir=DIR, the names in CU_TEST_GROUPS). Its stdout is what the bash redirects to a file, so it prints nothing there.
+echo "RUN $0 $*" >> "$CU_TEST_LOG"
+for a do
+  case $a in
+    --kernels=*) for k in $CU_TEST_KERNELS; do echo "$k"; done > "${a#--kernels=}" ;;
+    --groups-dir=*) mkdir -p "${a#--groups-dir=}"; for g in $CU_TEST_GROUPS; do : > "${a#--groups-dir=}/$g"; done ;;
+  esac
+done
