@@ -3769,6 +3769,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     after = next_nonspace(masked, close + 1)
     return false if after < 0 || masked[after] != ';'
     return true if prev < 0 || ";{})".include?(masked[prev])
+    # after a case label or default: (a statement starts there)
+    return true if masked[prev] == ':' && !(psl(masked, [prev - 120, 0].max, prev + 1) =~ /(?:\bcase\b[^;{}]*|\bdefault)#{SS}:\z/).nil?
     !(psl(masked, 0, s) =~ /(?<![#{WC}])(?:else|do)#{SS}\z/).nil?
   end
 
