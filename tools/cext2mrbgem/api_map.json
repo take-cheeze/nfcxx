@@ -945,6 +945,13 @@
       "template": "islower((unsigned char)$0)",
       "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
     },
+    "rb_errinfo": {
+      "kind": "template",
+      "arity": 0,
+      "template": "(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())",
+      "needs_mrb": true,
+      "caveat": "mruby's mrb->exc is the exception being handled (nil when none); CRuby's $! is the same notion for a rescue body"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",

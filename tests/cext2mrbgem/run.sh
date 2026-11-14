@@ -392,6 +392,10 @@ check grep -qF '(struct EnsureArg *)mrb_cptr(a)' "$work/api_ensure_ptr/src/api_e
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ctype tools/cext2mrbgem/fixtures/api_ctype/ext/api_ctype "$work/api_ctype" > "$work/api_ctype.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'isdigit((unsigned char)' "$work/api_ctype/src/api_ctype.c"
+# 2zzz62. rb_errinfo is mrb->exc with a nil guard (no exception: nil).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_errinfo tools/cext2mrbgem/fixtures/api_errinfo/ext/api_errinfo "$work/api_errinfo" > "$work/api_errinfo.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/api_errinfo/src/api_errinfo.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
