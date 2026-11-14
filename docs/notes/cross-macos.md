@@ -83,7 +83,7 @@ The 7 C files that compile but do not link:
 - **The front end on Darwin types.** EDG defines `__linux__` internally and lays out types for its Linux build host
   (for example 128-bit `long double`). No flag removes that, so the C++ check runs clang's preprocessor for the Darwin
   target first. The 20 passing C++ sources therefore do not show that nfcxx's own preprocessing handles Darwin headers.
-- **sret thunks.** `qbe-cc` skips the class-return thunks on the macOS path, since they need Apple's export list.
+- **Class returns.** There are no x8 thunks any more: EDG's C generator casts calls to library class-returning functions (see `docs/notes/aarch64-class-return.md`).
 - **Blocks.** Apple's `^` syntax is off (`-fno-blocks`), as it is for EDG.
 
 ## Known failures

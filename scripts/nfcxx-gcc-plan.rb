@@ -30,7 +30,6 @@
 #   cxx-clang 0|1           the host C++ compiler (g++) is clang
 #   cc-clang 0|1            the C compiler (cc) is clang
 #   ehshim PATH             scripts/ehshim.rb prints PATH (absent: it prints nothing)
-#   sret PATH               scripts/sret.rb prints PATH (absent: nothing)
 #   asan-vla PATH           scripts/asan-vla prints PATH (absent: it fails)
 #   eh-tls 1                ${EDG}/../eh-tls exists
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
@@ -478,8 +477,6 @@ class Plan
 
     s = @eh_shim_on ? @facts.value("ehshim").to_s : ""
     shim << s unless s.empty?
-    sret = @facts.value("sret").to_s
-    shim << sret unless sret.empty?
     rtlib = [LIBC]
     if @asan
       v = @facts.value("asan-vla").to_s

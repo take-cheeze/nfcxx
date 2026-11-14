@@ -6,7 +6,7 @@
 #   ninja         logged (RUN), not run (the repository tools are built before the gcc path)
 #   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   eccp          logged (RUN), after ENV when EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS is set (the bash exports it for -shared)
-#   ehshim.rb, sret.rb, asan-vla  print their facts (asan-vla fails when the fact is absent)
+#   ehshim.rb, asan-vla  print their facts (asan-vla fails when the fact is absent)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
 #   pathb-cc, cc  logged (RUN), not run: Path B's compile and link (cc is also the gcc probes' name, and those are not logged)
 #   qbe           exists; pathb-ldrt prints its fact (the archive's path)
@@ -48,8 +48,8 @@ case $name in
   eccp)
     [ -z "${EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS+x}" ] || log "ENV EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=$EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS"
     log "RUN $0 $*"; exit 0 ;;
-  ehshim.rb|sret.rb|asan-vla)
-    key=${name%.rb}; [ "$name" = sret.rb ] && key=sret
+  ehshim.rb|asan-vla)
+    key=${name%.rb}
     v=$(fact "$key")
     if [ "$name" = asan-vla ] && [ -z "$v" ]; then exit 1; fi
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
