@@ -369,6 +369,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_new_inst/NOT_BUILDABLE"
 check grep -qF 'return mrb_obj_new(mrb, cApiNew, argc, argv);' "$work/api_new_inst/src/api_new_inst.c"
 
+# 2zg. rb_hash_lookup (api_map.json batch N2): mrb_hash_fetch with a nil default appended to the closing parenthesis
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_lookup tools/cext2mrbgem/fixtures/api_hash_lookup/ext/api_hash_lookup "$work/api_hash_lookup" > "$work/api_hash_lookup.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_hash_lookup/NOT_BUILDABLE"
+check grep -qF 'return mrb_hash_fetch(mrb, h, k, mrb_nil_value());' "$work/api_hash_lookup/src/api_hash_lookup.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

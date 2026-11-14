@@ -1190,6 +1190,17 @@
         1
       ],
       "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+    },
+    "rb_hash_lookup": {
+      "kind": "call",
+      "mruby": "mrb_hash_fetch",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "append_args": [
+        "mrb_nil_value()"
+      ],
+      "append_arity": 2,
+      "caveat": "returns nil when the key is missing (mrb_hash_fetch with a nil default), as CRuby does; the hash must be a Hash VALUE"
     }
   },
   "special_arg_positions_class_only": {
