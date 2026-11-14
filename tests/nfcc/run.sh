@@ -275,7 +275,7 @@ check "-mregparm=3 alone compiles with gcc" pb -c -mregparm=3 "$tmp/int.c" -o "$
 used gcc int.c && tail -1 "$tmp/log" | grep -q "mregparm=3 without -m16" && ok "-mregparm=3 without -m16: gcc's, and the log says why" || bad "-mregparm=3 without -m16" "$(tail -1 "$tmp/log")"
 file -b "$tmp/m32.o" | grep -q 'ELF 32-bit' && ok "-m32: the object is i386 (the option reached gcc)" || bad "-m32: the object is i386" "$(file -b "$tmp/m32.o")"
 
-# -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2, the kernel's real-mode boot code: Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# -m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2, the kernel's real-mode boot code: Path B's 32-bit x86 target (scripts/pathb-cc.rb --i386
 # --regparm=3 --m16). ILP32 (long and pointers are 4 bytes), QBE's i386_regparm3, a 32-bit object whose code is 16-bit code (.code16gcc: the
 # operand size prefixes are in the bytes, objdump -m i8086 shows them), the host's 64-bit headers are not read (freestanding).
 cat > "$tmp/rm.c" <<'EOF2'
@@ -328,7 +328,7 @@ if pb -O2 "$avi" -o "$tmp/noavi" >/dev/null 2>&1 && "$tmp/noavi" >/dev/null 2>&1
 check "-iquote compiles with gcc" pb -c -iquote "$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/iq.o"
 used gcc a.c && ok "-iquote went to gcc" || bad "-iquote went to gcc" "$(tail -1 "$tmp/log")"
 # -Wa,*: options of the assembler step. Path B assembles QBE's output with the host cc, so the ones that mean the same for it are
-# passed on to that step (scripts/pathb-cc --as-opt) and the compile stays Path B's; any other is gcc's.
+# passed on to that step (scripts/pathb-cc.rb --as-opt) and the compile stays Path B's; any other is gcc's.
 printf 'extern int ext;\nint rd(void) { return ext; }\n' > "$tmp/rl.c"
 check "-Wa,--fatal-warnings --noexecstack builds" pb -c -Wa,--fatal-warnings -Wa,--noexecstack -I"$tmp/inc" -DEXTRA=1 "$tmp/a.c" -o "$tmp/wa.o"
 used pathb a.c && ok "-Wa,--fatal-warnings stays on Path B" || bad "-Wa,--fatal-warnings stays on Path B" "$(tail -1 "$tmp/log")"

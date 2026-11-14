@@ -6,7 +6,7 @@
 # pathb-cc, pathb-ldrt.rb, ehshim.rb, asan-vla and safeptr-rt, which are stubs (stub.sh). The commands of the Path B path are stubs too
 # (stub.sh, linked under the command names in the sandbox's bin directory and at build/edg/bin/eccp):
 #   cc                  the link: logged (RUN), not run
-#   pathb-cc            logged (RUN ROOT/scripts/pathb-cc ARGS); its status is the facts' pathb-status
+#   pathb-cc            logged (RUN ROOT/scripts/pathb-cc.rb ARGS); its status is the facts' pathb-status
 #   env                 the gcc fallback's exec: logged (EXEC); the bash is replaced, so no STATUS line follows it
 #   mktemp -d           a directory under the sandbox's tmp, printed as TMP
 #   g++, gcc            probes answer; no others run here
@@ -31,7 +31,7 @@ cp -r "$repo/scripts" "$root/scripts"
 # the copy of nfcxx, unchanged
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for s in ehshim.rb asan-vla.rb safeptr-rt.rb pathb-cc pathb-ldrt.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+for s in ehshim.rb asan-vla.rb safeptr-rt.rb pathb-cc.rb pathb-ldrt.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
 for c in cc g++ gcc cp mktemp ninja env; do ln -s "$here/stub.sh" "$bin/$c"; done
 # the tools the driver checks for: built (ensure_tool finds them fresh), QBE and EDG's driver are present, libC.a exists
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

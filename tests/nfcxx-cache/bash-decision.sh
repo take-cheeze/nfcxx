@@ -36,7 +36,7 @@ eccp_stub() {
   for x in ${CACHE_TEST_RECORDS:-}; do printf 'RECORD %s\n' "$x" > "${out%.*}.$x"; done
   return 0
 }
-pathbcc_stub() {  # the Path B compile of one file (scripts/pathb-cc): the object named after -o
+pathbcc_stub() {  # the Path B compile of one file (scripts/pathb-cc.rb): the object named after -o
   local o= prev= x
   for x in "$@"; do [ "$prev" != -o ] || o=$x; prev=$x; done
   _out RUN build "$o"
@@ -49,7 +49,7 @@ EOF
   head -n "$((first - 1))" "$root/nfcxx" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
-        -e 's|"\$root/scripts/pathb-cc" |pathbcc_stub |g' \
+        -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
         -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$root/nfcxx" |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B's real-mode code (scripts/pathb-cc --i386 --regparm=3 --m16: .code16gcc) run in real mode under qemu-system-i386.
+# Path B's real-mode code (scripts/pathb-cc.rb --i386 --regparm=3 --m16: .code16gcc) run in real mode under qemu-system-i386.
 # Each tests/pathb-i386/realmode/cases/*.c defines `int pb_main(void)`; it is built by Path B and by `gcc -m16 -march=i386 -mregparm=3`
 # (the kernel's REALMODE_CFLAGS), linked at 0x7e00 with stage2.S (pb_putc: a debug console write, the exit device) and rt16.c (memcpy and
 # the libgcc functions), put behind a boot sector (boot.S) that loads it with int $0x13, and booted. Both images must write the same
@@ -43,7 +43,7 @@ for f in "${cases[@]}"; do
   # shellcheck disable=SC2086
   if ! gcc "${rm16[@]}" ${REALMODE_EXTRA:-} -c "$f" -o "$tmp/gcc.o" 2>"$tmp/err"; then echo "FAIL $n: gcc: $(head -3 "$tmp/err")"; fail=1; continue; fi
   # shellcheck disable=SC2086
-  if ! scripts/pathb-cc --i386 --regparm=3 --m16 ${REALMODE_EXTRA:-} "$f" -o "$tmp/pb.o" 2>"$tmp/err"; then echo "FAIL $n: Path B: $(head -3 "$tmp/err")"; fail=1; continue; fi
+  if ! scripts/pathb-cc.rb --i386 --regparm=3 --m16 ${REALMODE_EXTRA:-} "$f" -o "$tmp/pb.o" 2>"$tmp/err"; then echo "FAIL $n: Path B: $(head -3 "$tmp/err")"; fail=1; continue; fi
   # REALMODE_SRCS: more C files, built the same way by both compilers (the kernel's string.c and printf.c)
   gobj=("$tmp/gcc.o") pobj=("$tmp/pb.o") x=0
   for src in ${REALMODE_SRCS:-}; do
@@ -51,7 +51,7 @@ for f in "${cases[@]}"; do
     # shellcheck disable=SC2086
     gcc "${rm16[@]}" ${REALMODE_EXTRA:-} -c "$src" -o "$tmp/gcc.x$x.o" 2>"$tmp/err" || { echo "FAIL $n: gcc $src: $(grep -m1 error "$tmp/err")"; fail=1; continue 2; }
     # shellcheck disable=SC2086
-    scripts/pathb-cc --i386 --regparm=3 --m16 ${REALMODE_EXTRA:-} "$src" -o "$tmp/pb.x$x.o" 2>"$tmp/err" || { echo "FAIL $n: Path B $src: $(head -2 "$tmp/err")"; fail=1; continue 2; }
+    scripts/pathb-cc.rb --i386 --regparm=3 --m16 ${REALMODE_EXTRA:-} "$src" -o "$tmp/pb.x$x.o" 2>"$tmp/err" || { echo "FAIL $n: Path B $src: $(head -2 "$tmp/err")"; fail=1; continue 2; }
     gobj+=("$tmp/gcc.x$x.o"); pobj+=("$tmp/pb.x$x.o")
   done
   image gcc "${gobj[@]}" > "$tmp/msg" 2>&1 || { echo "FAIL $n: gcc image: $(cat "$tmp/msg")"; fail=1; continue; }

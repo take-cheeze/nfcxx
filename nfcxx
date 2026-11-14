@@ -132,7 +132,7 @@ instantiate=${NFCXX_INSTANTIATE:-used}                                  # --inst
 promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots=${NFCXX_STRUCT_SLOTS:-1}   # --promote-slots= ...
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
-pb_flags=()   # the options scripts/pathb-cc gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
+pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
 onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
   case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
 }
@@ -757,7 +757,7 @@ if [ -z "$backend" ]; then
 fi
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
-# libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
+# libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
@@ -928,7 +928,7 @@ if [ -n "$sanitize" ]; then
     esac
   done
   [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc: the front end's checks (NFCXX_IR_SANITIZE)
+  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
   backend=pathb
 fi
 if [ $safeptr = 1 ]; then
@@ -942,8 +942,8 @@ fi
 # build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
 [ $path_b = 0 ] || { backend=pathb; default_backend=0; }
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
-[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
-[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc --pic reads a preemptible symbol's address through the GOT
+[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
+[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
 # EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump.rb --eh-runtime).
 # Hosted Path B: scripts/pathb-dump.rb takes the host's GNU version unless the command line gave one.
@@ -1022,7 +1022,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend = pathb ]; then
       # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route).
       prc=0
-      "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
+      "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
       if [ $prc != 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
@@ -1060,7 +1060,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   fi
 fi
 
-# Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
+# Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
@@ -1070,7 +1070,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -1091,7 +1091,7 @@ if [ $backend = pathb ]; then
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
          prc=0
-         "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
+         "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):

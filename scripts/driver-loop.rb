@@ -748,10 +748,10 @@ def pathb_reason(state, env, extra)
   ""
 end
 
-# nfcc's pathb_compile: runs scripts/pathb-cc; with -S, the assembly is copied to obj (or written to stdout for -).
-# Returns the status of scripts/pathb-cc (env.pathb_status, from the caller: the driver's real run has it from the tool).
+# nfcc's pathb_compile: runs scripts/pathb-cc.rb; with -S, the assembly is copied to obj (or written to stdout for -).
+# Returns the status of scripts/pathb-cc.rb (env.pathb_status, from the caller: the driver's real run has it from the tool).
 def pathb_compile(state, env, what, csrc, obj)
-  root_cc = "#{env.root}/scripts/pathb-cc"
+  root_cc = "#{env.root}/scripts/pathb-cc.rb"
   if what == "-S"
     keep = "#{env.tmp}/keep#{state.k}"
     run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", "#{env.tmp}/pb#{state.k}.o"])

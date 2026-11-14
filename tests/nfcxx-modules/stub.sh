@@ -39,7 +39,7 @@ case $name in
     exit 0 ;;
   cp) log "CP $*"; exit 0 ;;
   ninja) log "RUN ninja $*"; exit 0 ;;
-  pathb-cc) log "RUN $0 $*"; exit 0 ;;
+  pathb-cc.rb) log "RUN $0 $*"; exit 0 ;;
   qbe) exit 0 ;;   # build/qbe/qbe exists, so Path B's "QBE not built" refusal does not fire
   pathb-ldrt.rb) v=$(fact pathb-ldrt); printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
   mktemp)

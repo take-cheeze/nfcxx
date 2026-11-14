@@ -3,7 +3,7 @@
 #
 # Slice 1 of --safe on the SSA route (docs/notes/safe-pointers.md): `pathb-ssa-build --safe` writes the same assembly as
 # the default build (the checks come in a later slice), writes the runtime's path to OUT.link for the caller's link
-# line (scripts/pathb-cc puts $(scripts/safeptr-rt.rb) first), and the program built with that runtime runs and returns the
+# line (scripts/pathb-cc.rb puts $(scripts/safeptr-rt.rb) first), and the program built with that runtime runs and returns the
 # values of the default build. The runtime must also define every __nfcxx_sp_* symbol the existing emitter's --safe
 # output needs, so the object the link line names is the one the existing --safe build depends on.
 

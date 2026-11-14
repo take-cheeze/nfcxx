@@ -58,6 +58,16 @@ module HostSys
     (maj.to_i * 10000 + min.to_i * 100 + pat.to_i).to_s
   end
 
+  # host_qbe_target: QBE's default target for this host (arm64_apple, arm64, amd64_apple or amd64_sysv)
+  def qbe_target
+    m = IO.popen(["uname", "-m"], &:read).chomp
+    s = IO.popen(["uname", "-s"], &:read).chomp
+    case m
+    when "arm64", "aarch64" then s == "Darwin" ? "arm64_apple" : "arm64"
+    else s == "Darwin" ? "amd64_apple" : "amd64_sysv"
+    end
+  end
+
   # the include directories of the host compiler's search list, one per entry (NFCXX_SYS_INCLUDES overrides them)
   def sys_includes(lang = "c++")
     if !ENV["NFCXX_SYS_INCLUDES"].to_s.empty?

@@ -33,7 +33,7 @@ case $name in
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
     mkdir -p "$d" && echo "$d"; exit 0 ;;
-  pathb-cc)
+  pathb-cc.rb)
     log "RUN $0 $*"
     for a in "$@"; do
       v=$(awk -v n="$a" '$1 == "pathb-status" && $2 == n { print $3; exit }' "$NFCXX_FACTS")

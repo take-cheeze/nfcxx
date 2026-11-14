@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # nfcxx's Path B compile and link of hosted C and C++ sources, ported from the bash in nfcxx: the backend choice, the argument
-# loop for the options of this slice, the -fsyntax-only rewrite, the -E exec, the scripts/pathb-cc calls of a compile (C
+# loop for the options of this slice, the -fsyntax-only rewrite, the -E exec, the scripts/pathb-cc.rb calls of a compile (C
 # sources, then C++ files), the cp of a C-only -c, the link (one per source, then the cc link with EDG's runtime, the EH shim,
 # the ASan VLA runtime and the safe-pointer runtime), and the fallback to the gcc backend that a default-selected Path B build
 # takes when pathb-cc fails on a file. The argument loop is the one of nfcxx, for these options only (scripts/nfcxx-gcc-plan.rb
@@ -14,7 +14,7 @@
 # the bash gets, without --backend (an --backend in ARG... is refused).
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the status the bash ends with):
-#   RUN PROGRAM ARG...     a program the driver runs: ROOT/scripts/pathb-cc (one source to an object), cp (a C-only -c) or
+#   RUN PROGRAM ARG...     a program the driver runs: ROOT/scripts/pathb-cc.rb (one source to an object), cp (a C-only -c) or
 #                          cc (the link)
 #   EXEC PROGRAM ARG...    the driver is replaced: the gcc fallback (exec env NFCXX_BACKEND=gcc ROOT/nfcxx ARG...), or the
 #                          -E preprocess (exec g++ -E ...). The bash does not return from it, so no STATUS line follows; the
@@ -55,7 +55,7 @@
 #   ld NAME                    ld.NAME is on PATH (for -fuse-ld=NAME; the other names pass to cc as they are)
 #   module PATH                PATH declares or imports a C++ module (the bash reads the source; not ported)
 #   exists PATH                PATH (relative to WORK) exists (the SYCL pre-pass test reads an -I directory's header)
-#   pathb-status PATH CODE     scripts/pathb-cc exits with CODE on the source PATH (absent: 0)
+#   pathb-status PATH CODE     scripts/pathb-cc.rb exits with CODE on the source PATH (absent: 0)
 #
 # Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none), the
 # repository tools (ensure_tool finds them fresh), the build of pathb-cc itself (its harness is inside pathb-cc: its status
@@ -83,7 +83,7 @@ class PlanExec < StandardError
 end
 
 DRIVER = "ROOT/nfcxx".freeze
-PATHB_CC = "ROOT/scripts/pathb-cc".freeze
+PATHB_CC = "ROOT/scripts/pathb-cc.rb".freeze
 LIBC = "ROOT/build/edg/lib/libC.a".freeze
 CHOICES = %w[default pathb gcc].freeze
 FSO_OBJECT = "TMP/x.o".freeze # the object of -fsyntax-only (its temporary directory's x.o)
@@ -441,7 +441,7 @@ class Plan
     raise PlanExec
   end
 
-  # The options scripts/pathb-cc gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
+  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
   # B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
