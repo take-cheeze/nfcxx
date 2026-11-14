@@ -1,0 +1,58 @@
+# One argument list per line (words separated by spaces; no quoting). A line starting with "clang " runs with the
+# clang host (facts-clang.txt: the host C++ compiler is clang), the rest with facts.txt. Lines starting with # are skipped.
+# hosted --emit-c
+--emit-c a.cc
+--emit-c a.cc b.cc
+--emit-c -o out.c a.cc
+--emit-c -std=c++17 a.cc
+--emit-c -std=gnu++20 a.cc
+--emit-c -Iinc a.cc
+--emit-c -I inc -Isub a.cc
+--emit-c -Isub/x a.cc
+--emit-c -I. a.cc
+--emit-c --gnu-version=120000 a.cc
+--emit-c --dialect=clang a.cc
+--emit-c -Wno-narrowing -Wall -fwrapv a.cc
+clang --emit-c a.cc
+clang --emit-c --dialect=g++ a.cc
+# freestanding --emit-c
+--freestanding --emit-c a.cc
+--freestanding --emit-c --gnu-version=140000 -Iinc a.cc
+--emit-c --freestanding -Iinc -Isub a.cc
+--emit-c --freestanding -DFOO=1 -U BAR a.cc
+clang --freestanding --emit-c a.cc
+clang --freestanding --emit-c --dialect=g++ a.cc
+# --target
+--emit-c --freestanding --target=linux_aarch64 a.cc
+--emit-c --freestanding --target=linux_armv7 a.cc
+--emit-c --freestanding --target=win64 a.cc
+--emit-c --freestanding --target=nosuch a.cc
+--emit-c --target=linux_aarch64 a.cc
+--freestanding --target=linux_aarch64 a.cc
+--target=linux_aarch64 a.cc
+--emit-c --freestanding --target=linux_k1om a.cc
+# refusals before the run
+--emit-c c.c
+--emit-c c.c a.cc
+--emit-c mod.cc
+--emit-c --dialect=bogus a.cc
+--emit-hip
+# --emit-hip
+--emit-hip x.cu
+--emit-hip -Iinc -DFOO=2 x.cu
+--emit-hip -I inc -D FOO x.cu
+--emit-hip --freestanding -std=c++17 x.cu
+--emit-hip a.cc
+--emit-hip x.cu y.cu
+# the compile and link path
+a.cc -o prog
+--freestanding a.cc
+--backend=gcc --freestanding a.cc
+-c a.cc
+--emit-c -E a.cc
+--emit-c -x c++ a.cc
+--emit-c -Isub/../x a.cc
+--emit-c -I../x a.cc
+--emit-c a.cc x.o
+--emit-c -fsanitize=address a.cc
+--emit-c -fsanitize=foo a.cc
