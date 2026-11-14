@@ -215,6 +215,12 @@ check test "$rc" -eq 0
 check grep -qF 'if (mrb_obj_equal(mrb, mode, mrb_undef_value()) || mrb_nil_p(mode))' "$work/api_qundef_eq/src/api_qundef_eq.c"
 check grep -qF 'if (!mrb_obj_equal(mrb, mode, mrb_true_value()))' "$work/api_qundef_eq/src/api_qundef_eq.c"
 
+# 2zzz17. RB_TYPE_P of T_NIL and T_FALSE is the value test (nil and false share mruby's MRB_TT_FALSE tag), not a tag compare.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_p_nil tools/cext2mrbgem/fixtures/api_rb_type_p_nil/ext/api_rb_type_p_nil "$work/api_rb_type_p_nil" > "$work/api_rb_type_p_nil.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (mrb_nil_p(v)) return mrb_true_value();' "$work/api_rb_type_p_nil/src/api_rb_type_p_nil.c"
+check grep -qF 'if (mrb_false_p(v)) return mrb_fixnum_value(0);' "$work/api_rb_type_p_nil/src/api_rb_type_p_nil.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
@@ -235,7 +241,7 @@ check test -e "$work/api_type_refused/NOT_BUILDABLE"
 check grep -q '  RB_TYPE_P  T_DATA has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 check grep -q "  RB_TYPE_P  object 'rb_ary_entry(a, 0)' is not a plain local variable" "$work/api_type_refused/REFUSALS.txt"
 check grep -q '  RB_TYPE_P  T_FIXNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
-check grep -q '  RB_TYPE_P  T_NIL has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
+check grep -q '  RB_TYPE_P  T_BIGNUM has no exact mruby type' "$work/api_type_refused/REFUSALS.txt"
 
 # 2m. class-name and method-undef calls (api_map.json batch C1): the class variable is passed as a struct RClass * (not
 # wrapped in mrb_obj_value, which the mruby functions do not take)

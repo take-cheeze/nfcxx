@@ -3318,6 +3318,15 @@ end
       refuse(rel, s, 'RB_TYPE_P', "object #{py_repr(obj)} is not a plain local variable (nested names would not be mapped)")
       return
     end
+    # nil and false share mruby's MRB_TT_FALSE tag, so their tests are the value predicates: CRuby's RB_TYPE_P(v, T_NIL)
+    # is true only for nil, and RB_TYPE_P(v, T_FALSE) only for false (Qfalse)
+    pred = { 'T_NIL' => 'mrb_nil_p', 'T_FALSE' => 'mrb_false_p' }[tname.sub(/\ARUBY_/, '')]
+    if pred
+      new = "#{pred}(#{obj})"
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, 'RB_TYPE_P', new, 'nil and false are told apart by value (mrb_nil_p, mrb_false_p), not by tag')
+      return
+    end
     ent = @entries[tname]
     if ent.nil? || ent.empty? || ent['kind'] != 'expr' || !(ent['mruby'] || '').start_with?('MRB_TT_') || ent.key?('caveat')
       refuse(rel, s, 'RB_TYPE_P', "#{tname} has no exact mruby type to compare with")
