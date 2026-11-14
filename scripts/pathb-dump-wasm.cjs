@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// scripts/pathb-dump-wasm.cjs: scripts/pathb-dump, with the front end built for the browser (PATHB_EMSCRIPTEN=1
+// scripts/pathb-dump-wasm.cjs: scripts/pathb-dump.rb, with the front end built for the browser (PATHB_EMSCRIPTEN=1
 // scripts/setup-pathb.sh: build/pathb-wasm/cmake/bin/cpfe.js and cpfe.wasm) run under node. The options are
 // pathb-dump's (--ir, --freestanding, --target, -std=, -I, -D, -U, --diag_*), and so is the output: the IR (or the IL
 // listing) on stdout, the diagnostics on stderr, the front end's exit status. tests/pathb-wasm-frontend/run.sh compares

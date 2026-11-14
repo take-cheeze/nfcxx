@@ -8,7 +8,7 @@
 # ARGS are nfcxx's arguments. The output is one line per tool call the bash makes for the build, then "STATUS N" (the
 # bash's exit status). The tools:
 #   ECCP WORDS    the gcc backend's EDG call (eccp): a compile, or the link of the objects
-#   PATHB WORDS   Path B's compile (scripts/pathb-cc), the default backend or --backend=pathb
+#   PATHB WORDS   Path B's compile (scripts/pathb-cc.rb), the default backend or --backend=pathb
 #   CC WORDS      Path B's link (cc -o OUT OBJECTS ...): the objects and -o OUT
 # The words of a module compile are
 #   --modules --modules_directory DIR [--create_module_interface DIR/NAME.eifc] SOURCE -o OUT

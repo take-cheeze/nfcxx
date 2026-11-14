@@ -22,7 +22,7 @@ emit() { "$root/build/pathb-ptx-emit" --emit "$@"; }
 run_env() { LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$@"; }
 
 # 1. The IR matches its golden.
-"$root/scripts/pathb-dump" --ir --freestanding helper.cpp > "$out/helper.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding helper.cpp > "$out/helper.ir"
 if diff -u helper.ir "$out/helper.ir"; then echo "IR helper: ok"; else echo "IR helper: FAIL"; fail=1; fi
 
 # 2. Without flags: the callees become .func, the kernels run. With --kernel: the same result.
@@ -38,7 +38,7 @@ for v in helper helper_k; do
     cat "$out/$v.log"; echo "run $v: FAIL"; fail=1
   fi
 done
-rc=0; "$root/scripts/pathb-dump" --ir --freestanding refuse_struct.cpp > "$out/refuse_struct.ir" 2>/dev/null && emit "$out/refuse_struct.ir" > /dev/null 2>&1 || rc=$?
+rc=0; "$root/scripts/pathb-dump.rb" --ir --freestanding refuse_struct.cpp > "$out/refuse_struct.ir" 2>/dev/null && emit "$out/refuse_struct.ir" > /dev/null 2>&1 || rc=$?
 if [ "$rc" = 0 ]; then echo "struct by value lowers: ok"; else echo "struct by value lowers: FAIL (exit $rc)"; fail=1; fi
 
 # 3. A mutant (the helper adds 2, not 1) must be caught.
@@ -52,7 +52,7 @@ fi
 
 # 4. Refusals (exit 3): a recursive helper. A struct-by-value helper lowers (both emitters accept it), so it must not be refused.
 for f in refuse_recursive; do
-  rc=0; "$root/scripts/pathb-dump" --ir --freestanding "$f.cpp" > "$out/$f.ir" 2>/dev/null && emit "$out/$f.ir" > /dev/null 2>&1 || rc=$?
+  rc=0; "$root/scripts/pathb-dump.rb" --ir --freestanding "$f.cpp" > "$out/$f.ir" 2>/dev/null && emit "$out/$f.ir" > /dev/null 2>&1 || rc=$?
   if [ "$rc" = 3 ]; then echo "refused $f: ok"; else echo "refused $f: FAIL (exit $rc)"; fail=1; fi
 done
 

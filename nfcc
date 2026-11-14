@@ -2,7 +2,7 @@
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
 #   NFCXX_BACKEND=gcc|pathb|cil   (default: pathb on x86-64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
 #              else gcc; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc), docs/notes/nfcc-pathb.md;
+#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc.rb), docs/notes/nfcc-pathb.md;
 #              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
 #              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
 #              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
@@ -45,7 +45,7 @@ host=${NFCC_HOST_CC:-cc}
 # Anywhere else, or without the harness, it is gcc. NFCXX_BACKEND=gcc|pathb|cil chooses one.
 if [ -n "${NFCXX_BACKEND:-}" ]; then backend=$NFCXX_BACKEND
 elif [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = x86_64 ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } &&
-     [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc" ]; then
+     [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc.rb" ]; then
   backend=pathb; export NFCXX_PATHB_FALLBACK=${NFCXX_PATHB_FALLBACK:-gcc}
 else backend=gcc; fi
 version=0.1
@@ -55,41 +55,19 @@ die() { echo "nfcc: error: $*" >&2; exit 1; }
 case $backend in
   cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
        qcc=$root/scripts/cil-cc.rb ;;
-  pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
+  pathb) [ -x "$root/scripts/pathb-cc.rb" ] || die "Path B not available (scripts/pathb-cc.rb)"
          [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;
   gcc) ;;
   *) die "unknown NFCXX_BACKEND '$backend' (gcc, pathb or cil)" ;;
 esac
 
-# Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
-# whitespace; single or double quotes group (and are removed); a backslash makes the next character literal, even
-# inside quotes; @file inside a response file is expanded again. A file that cannot be read stays an "@file"
-# argument (gcc does the same) and is rejected below.
+# Response files (@file), expanded by scripts/nfcc-args.rb with gcc's (libiberty buildargv) rules: whitespace, quotes,
+# backslashes, nested @file (see that script). A file that cannot be read stays an "@file" argument and is rejected below.
+rsp=$(mktemp)
+ruby "$root/scripts/nfcc-args.rb" "$@" > "$rsp" || { rm -f "$rsp"; exit 1; }
 expanded=()
-add_arg() {   # add_arg ARG DEPTH: ARG, or the arguments in the response file it names
-  local f=${1:1} text len j ch q="" have=0 cur="" parsed=() k
-  if [ "${1:0:1}" != @ ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then expanded+=("$1"); return; fi
-  [ "$2" -lt 32 ] || die "response files nested too deeply (a loop?): $f"
-  text=$(cat -- "$f"; echo x); text=${text%x}; len=${#text}
-  for ((j = 0; j < len; j++)); do
-    ch=${text:j:1}
-    if [ "$ch" = "\\" ]; then
-      j=$((j + 1)); [ $j -lt $len ] || break
-      cur+=${text:j:1}; have=1
-    elif [ -n "$q" ]; then
-      if [ "$ch" = "$q" ]; then q=""; else cur+=$ch; fi
-    else
-      case $ch in
-        "'"|'"') q=$ch; have=1 ;;
-        ' '|$'\t'|$'\n'|$'\r'|$'\f'|$'\v') if [ $have = 1 ]; then parsed+=("$cur"); fi; cur=""; have=0 ;;
-        *) cur+=$ch; have=1 ;;
-      esac
-    fi
-  done
-  if [ $have = 1 ]; then parsed+=("$cur"); fi
-  for k in "${parsed[@]+"${parsed[@]}"}"; do add_arg "$k" $(($2 + 1)); done
-}
-for a in "$@"; do add_arg "$a" 0; done
+while IFS= read -r -d '' x; do expanded+=("$x"); done < "$rsp"
+rm -f "$rsp"
 set -- "${expanded[@]+"${expanded[@]}"}"
 source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
 source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcc" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
@@ -126,7 +104,7 @@ ld=()        # link options, in order
 inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
 picf=()
 pathb_pie=0   # -fPIE: with -mno-sse (the kernel's boot decompressor) the compile is gcc's, see pathb_reason
-pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc --pic)
+pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc.rb --pic)
 dts=()       # -MT / -MQ pairs
 dp=0
 asm=0        # -S
@@ -157,11 +135,11 @@ gcconly() {
 }
 gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ]; }; } || return 1; gccf+=("$1"); }
 # NFCXX_BACKEND=pathb: the kernel's option set (docs/notes/nfcc-pathb.md, docs/notes/linux-kernel.md). The options Path B honours go to
-# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -ftrivial-auto-var-init=zero, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
+# scripts/pathb-cc.rb (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -ftrivial-auto-var-init=zero, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
 # front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
 # any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
 pbf=() nofp=0 nounwind=0 wchar16=0
-# The real-mode boot code's options (-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2): Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# The real-mode boot code's options (-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2): Path B's 32-bit x86 target (scripts/pathb-cc.rb --i386
 # --regparm=3 --m16: ILP32, QBE's i386_regparm3, a 32-bit object with .code16gcc code), decided in pathb_reason when the whole command line is known.
 # -mregparm=3 without -m16 is not honoured (a 32-bit hosted compile is gcc's); -march=i386 and -mpreferred-stack-boundary=2 change nothing
 # on QBE's i386 code (it uses 386 instructions only and keeps 4-byte stack alignment). All of them are kept for a gcc compile (gccf).
@@ -332,11 +310,11 @@ if [ -n "$dfile" ] && [ -z "$depmode" ]; then die "-MF needs -MD or -MMD with -c
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 k=0
 
-# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
+# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc.rb takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
 # -fshort-wchar, -ffreestanding, -m16 (with -mregparm=3: the 32-bit x86 target), and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
 # changes meaning and that Path B cannot honour (-m32, -fshort-enums, -ftrivial-auto-var-init=pattern, -iquote, -Wa,*, ...) is made by gcc with
 # the options as given (pb_reason says why); it is not dropped and not an error. NFCXX_PATHB_LOG=FILE appends one line per compile:
-# "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc refuses (inline asm it
+# "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc.rb refuses (inline asm it
 # cannot emit, a unit with SSE code under -mno-sse) to gcc, as the nfcxx driver does; without it that compile fails.
 pb_opts=() pb_std=-std=c11 pb_reason=
 pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_opts, pb_std set, when Path B can compile CSRC
@@ -353,7 +331,7 @@ pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_op
     # the inliner grows the code (a third more on the boot code)
     pb_opts+=(--i386 --m16 --ir-opt=none); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)
   fi
-  # -Wa,*: options of the assembler step, which is the host cc assembling QBE's output (scripts/pathb-cc --as-opt). The ones the
+  # -Wa,*: options of the assembler step, which is the host cc assembling QBE's output (scripts/pathb-cc.rb --as-opt). The ones the
   # assembler takes the same for QBE's assembly are given to that step; any other (--32, --defsym, -march=, ...) could change the
   # object's meaning, so that compile is gcc's.
   for o in "${asf[@]+"${asf[@]}"}"; do
@@ -397,12 +375,12 @@ pathb_compile() {
   local what=$1 csrc=$2 obj=$3 keep rc=0
   if [ "$what" = -S ]; then
     keep=$tmp/keep$k
-    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
+    PATHB_KEEP=$keep "$root/scripts/pathb-cc.rb" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
     if [ $rc = 0 ]; then
       if [ "$obj" = - ]; then cat "$keep/$(basename "${csrc%.*}").s"; else cp "$keep/$(basename "${csrc%.*}").s" "$obj"; fi   # -S -o -: stdout, as gcc
     fi
   else
-    "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$obj" || rc=$?
+    "$root/scripts/pathb-cc.rb" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$obj" || rc=$?
   fi
   return $rc
 }

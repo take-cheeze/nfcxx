@@ -41,7 +41,7 @@ case $name in
     log "RUN $0 $*"
     for a in "$@"; do case $a in --gen_c_file_name=*) printf '/* stub */\n' > "${a#--gen_c_file_name=}" ;; esac; done
     exit 0 ;;
-  pathb-cc) envlog; log "RUN $0 $*"; exit 0 ;;
+  pathb-cc.rb) envlog; log "RUN $0 $*"; exit 0 ;;
   pathb-ldrt.rb) echo "$(dirname "$(dirname "$0")")/$(fact pathb-ldrt)"; exit 0 ;;
   uname)
     case $1 in

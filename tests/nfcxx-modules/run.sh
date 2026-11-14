@@ -30,7 +30,7 @@ for s in ehshim.rb asan-vla.rb; do ln -sf "$here/stub.sh" "$root/scripts/$s"; do
 for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
-ln -sf "$here/stub.sh" "$root/scripts/pathb-cc"
+ln -sf "$here/stub.sh" "$root/scripts/pathb-cc.rb"
 ln -sf "$here/stub.sh" "$root/scripts/pathb-ldrt.rb"
 mkdir -p "$root/build/qbe"; ln -s "$here/stub.sh" "$root/build/qbe/qbe"
 # the sources: the repository's module tests and the port's own (src/)
@@ -59,7 +59,7 @@ project() {
       t = l.split
       next unless t[0] == "RUN"
       tool = if t[1] =~ %r{/eccp\z} then "ECCP"
-             elsif t[1] =~ %r{/pathb-cc\z} then "PATHB"
+             elsif t[1] =~ %r{/pathb-cc(\.rb)?\z} then "PATHB"
              elsif t[1] == "cc" then "CC"
              end
       next unless tool

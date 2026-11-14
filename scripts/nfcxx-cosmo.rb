@@ -247,7 +247,7 @@ def build(args, env, facts, lines)
   if backend == "pathb"
     raise Failed, "nfcxx: QBE not built; run scripts/setup-qbe.sh" unless facts.root_exec?(QBE_TOOL)
 
-    raise Unported, "Path B C compile (scripts/pathb-cc) with QBE built: not modeled"
+    raise Unported, "Path B C compile (scripts/pathb-cc.rb) with QBE built: not modeled"
   end
 
   asan_c = st[:asan] ? ["-fsanitize=address", "-fno-omit-frame-pointer", *st[:asanopts]] : []

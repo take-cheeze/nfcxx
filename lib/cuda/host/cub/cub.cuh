@@ -3,7 +3,7 @@
 // inline asm constraints), and the host copy never runs device code, so the classes the device unit lowers
 // (CUB_DEF in tools/cuda-rewrite/cuda_rewrite.cpp) are declared here with host bodies that return their input.
 // The device-wide algorithms ggml-cuda calls are overloads for its types, forwarding to lib/cuda/cub/device.cu (built
-// by scripts/cuda-cub and linked with -lcudart). The others are declared only, so a call of one fails at link time.
+// by scripts/cuda-cub.rb and linked with -lcudart). The others are declared only, so a call of one fails at link time.
 #pragma once
 #include <stddef.h>
 

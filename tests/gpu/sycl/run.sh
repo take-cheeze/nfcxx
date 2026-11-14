@@ -25,7 +25,7 @@ mrb() { "$root/scripts/mrb" "$@"; }
 # 1. The rewrite of the SYCL source matches its golden; the device source is lowered to IR (golden).
 mrb "$root/scripts/sycl-rewrite.rb" vecadd.cpp > "$out/vecadd_device.cpp"
 if diff -u vecadd_device.cpp "$out/vecadd_device.cpp"; then echo "rewrite vecadd: ok"; else echo "rewrite vecadd: FAIL"; fail=1; fi
-(cd "$out" && "$root/scripts/pathb-dump" --ir --freestanding vecadd_device.cpp > vecadd_device.ir)
+(cd "$out" && "$root/scripts/pathb-dump.rb" --ir --freestanding vecadd_device.cpp > vecadd_device.ir)
 if diff -u vecadd_device.ir "$out/vecadd_device.ir"; then echo "IR vecadd: ok"; else echo "IR vecadd: FAIL"; fail=1; fi
 
 # 2. The SPIR-V emitter lowers it to the golden assembly; it assembles and validates.
@@ -48,7 +48,7 @@ if [ $rc = 0 ]; then echo "run vecadd: ok"; else echo "run vecadd: FAIL"; fail=1
 # 4. A mutant SYCL source (+ -> -) must fail the same run.
 sed 's/ra\[i\] + rb\[i\]/ra[i] - rb[i]/' vecadd.cpp > "$out/mut.cpp"
 mrb "$root/scripts/sycl-rewrite.rb" "$out/mut.cpp" > "$out/mut_device.cpp"
-(cd "$out" && "$root/scripts/pathb-dump" --ir --freestanding mut_device.cpp > mut_device.ir)
+(cd "$out" && "$root/scripts/pathb-dump.rb" --ir --freestanding mut_device.cpp > mut_device.ir)
 mrb "$root/scripts/pathb-spirv-emit.rb" "$out/mut_device.ir" > "$out/mut.spvasm"
 spirv-as --target-env spv1.1 "$out/mut.spvasm" -o "$out/mut.spv"
 if "$out/launch" "$out/mut.spv" __nfcxx_sycl_k0 >/dev/null 2>&1; then

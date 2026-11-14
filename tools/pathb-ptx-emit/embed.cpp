@@ -3,7 +3,7 @@
 // lib/cuda/nfcxx_cuda.h loads the image when the program starts.
 // Usage: pathb-ptx-emit --embed FILE.cubin FILE.ir FILE.kernels [FILE.kernels.addr] > tail.cpp
 //        pathb-ptx-emit --embed --groups=DIR --ext=cubin|ptx FILE.ir FILE.kernels [FILE.kernels.addr] > tail.cpp
-//   FILE.ir        the device IR (scripts/pathb-dump --ir); its function names are the entry names
+//   FILE.ir        the device IR (scripts/pathb-dump.rb --ir); its function names are the entry names
 //   FILE.kernels   one kernel name per line (cuda-rewrite --device --kernels)
 //   DIR            the emitter's groups (--groups-dir): groups.txt has one line per module, "gNNNN.ptx" and the IR names of
 //                  its kernels; the module image is DIR/gNNNN.EXT. Each module gets its own image and table.

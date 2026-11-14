@@ -36,7 +36,7 @@ ln -s "$here/stub.sh" "$root/build/edg/bin/cpfe"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
 ln -s "$here/stub.sh" "$root/build/cuda-rewrite"
 # the Path B compile and the long double archive are stubs too (the real ones build C or need a QBE build)
-ln -sf "$here/stub.sh" "$root/scripts/pathb-cc"
+ln -sf "$here/stub.sh" "$root/scripts/pathb-cc.rb"
 ln -sf "$here/stub.sh" "$root/scripts/pathb-ldrt.rb"
 # the EDG base's target tables (--target=NAME checks lib_NAME) and the eh-tls marker (--nfcxx_eh_thread_local)
 awk '$1 == "target-table" { print $2 }' "$here/facts.txt" | while read -r t; do mkdir -p "$root/build/edg-base/lib_$t"; done

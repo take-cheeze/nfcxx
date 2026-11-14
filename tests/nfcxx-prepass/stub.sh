@@ -1,11 +1,11 @@
 #!/bin/bash
 # Stub for the commands the pre-pass runs (tests/nfcxx-prepass/run.sh links it under each name, and the sandbox's
-# nfcxx-nested, cppfront and sycl-integration-header.sh):
+# nfcxx-nested, cppfront and sycl-integration-header.rb):
 #   gcc, cc, g++  the host probes (--version, -dumpfullversion, -dM, -v, -E) answer silently; any other call is logged (RUN)
 #   mktemp -d     a fresh directory under $NFCXX_STUB_TMP, printed
 #   mkdir, cat    logged (RUN, CAT for pass1.log), then run for real
 #   cppfront      logged (RUN cwd=...), exit status from the facts (cppfront-rc)
-#   sycl-integration-header.sh   logged (RUN) and its stdout's file (WRITE); exit status from the facts (sycl-header-rc)
+#   sycl-integration-header.rb   logged (RUN) and its stdout's file (WRITE); exit status from the facts (sycl-header-rc)
 #   nfcxx-nested  the driver's own nested runs, with the SYCL variables (EXEC). Pass 1 writes sycl-dump records to the dump
 #                 file; pass 2 logs the wrapper it is given (WRITE, "| " lines) and exits with sycl-pass2-rc.
 # Environment: NFCXX_FACTS, NFCXX_STUB_LOG, NFCXX_STUB_TMP, NFCXX_STUB_ROOT (the sandbox's repository).
@@ -33,8 +33,8 @@ case $name in
   cppfront)
     log "RUN cwd=$(pwd -P) $NFCXX_STUB_ROOT/build/cppfront $*"
     exit "$(fact cppfront-rc)" ;;
-  sycl-integration-header.sh)
-    log "RUN $NFCXX_STUB_ROOT/scripts/sycl-integration-header.sh $*"
+  sycl-integration-header.rb)
+    log "RUN $NFCXX_STUB_ROOT/scripts/sycl-integration-header.rb $*"
     log "WRITE $(readlink /proc/$$/fd/1)"
     exit "$(fact sycl-header-rc)" ;;
   nfcxx-nested)

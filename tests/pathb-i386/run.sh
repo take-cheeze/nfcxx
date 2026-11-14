@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B on the 32-bit x86 target (scripts/pathb-cc --i386; docs/notes/nfcc-pathb.md): each tests/pathb-i386/cases/*.c defines
+# Path B on the 32-bit x86 target (scripts/pathb-cc.rb --i386; docs/notes/nfcc-pathb.md): each tests/pathb-i386/cases/*.c defines
 # `int pb_main(void)`, is built by Path B and by `gcc -m32`, linked with tests/pathb-i386/rt.c (built by gcc: its output
 # helpers, the libgcc division functions and the block functions, so the calls go both ways between gcc's code and QBE's), and run as a
 # 32-bit Linux program (a static one, no libc; int $0x80). Both must print the same and exit with the same status: the
@@ -31,7 +31,7 @@ for conv in cdecl regparm; do
   for f in tests/pathb-i386/cases/*.c; do
     n=$(basename "$f" .c)
     norun=0; head -1 "$f" | grep -q '^// NO-RUN' && norun=1
-    if ! scripts/pathb-cc "${pf[@]}" "$f" -o "$tmp/pb.o" 2>"$tmp/err"; then
+    if ! scripts/pathb-cc.rb "${pf[@]}" "$f" -o "$tmp/pb.o" 2>"$tmp/err"; then
       echo "FAIL $n ($conv): Path B: $(head -3 "$tmp/err")"; fail=1; continue
     fi
     if ! file "$tmp/pb.o" | grep -q 'ELF 32-bit'; then echo "FAIL $n ($conv): the object is not ELF32"; fail=1; continue; fi
@@ -52,7 +52,7 @@ done
 # real mode: .code16gcc, built and read back
 for f in tests/pathb-i386/cases/*.c; do
   n=$(basename "$f" .c)
-  if ! scripts/pathb-cc --i386 --regparm=3 --m16 "$f" -o "$tmp/pb16.o" 2>"$tmp/err"; then
+  if ! scripts/pathb-cc.rb --i386 --regparm=3 --m16 "$f" -o "$tmp/pb16.o" 2>"$tmp/err"; then
     echo "FAIL $n (m16): Path B: $(head -3 "$tmp/err")"; fail=1; continue
   fi
   if objdump -d -m i8086 "$tmp/pb16.o" | grep -q '	66 55 '; then echo "ok   $n (m16: 16-bit code)"; else echo "FAIL $n (m16): no operand size prefix in the code"; fail=1; fi

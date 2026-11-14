@@ -2,7 +2,7 @@
 # scripts/cil-link.{py,rb}: the mruby port must give the same output as the Python original (the oracle in
 # tests/mruby/oracle/cil-link.py) for the fragments the current toolchain writes:
 #   1. every tests/cil/cases/*.c, compiled by nfcc with NFCXX_BACKEND=cil (the qbe2cil.py route);
-#   2. every tests/pathb-cil/cases/*.cpp, through scripts/pathb-dump --ir and scripts/pathb-cil-emit.rb (the Path B route).
+#   2. every tests/pathb-cil/cases/*.cpp, through scripts/pathb-dump.rb --ir and scripts/pathb-cil-emit.rb (the Path B route).
 # Both versions link the same fragments with the IL kept. Compared: the CIL text, the exit status, and the output of
 # the linked programs (exit status and stdout, against the program's EXPECT line and its .out file when it has them).
 # Then the hand-written fragments of tests/mruby/cil-link: a fragment that makes ilasm fail (OUT.failed.il), 64-bit
@@ -95,7 +95,7 @@ if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
   for f in "$root"/tests/pathb-cil/cases/*.cpp; do
     n=$(basename "$f" .cpp)
     grep -q '^// EXPECT-REFUSED' "$f" && continue  # the emitter refuses these: no fragment
-    if ! "$root/scripts/pathb-dump" --ir "$f" >"$tmp/frag/pb-$n.ir" 2>/dev/null ||
+    if ! "$root/scripts/pathb-dump.rb" --ir "$f" >"$tmp/frag/pb-$n.ir" 2>/dev/null ||
        ! "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/frag/pb-$n.ir" "$tmp/frag/pb-$n.json" 2>/dev/null; then
       echo "FAIL cil-link: no fragment for pathb-cil/$n"; fail=1; continue
     fi

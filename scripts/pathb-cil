@@ -20,7 +20,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 frags=(); i=0
 for f in "${files[@]}"; do
   i=$((i + 1)); std=(); case $f in *.c) std=(-std=c11 -D_DEFAULT_SOURCE) ;; esac   # a -std given on the command line follows and wins
-  "$root/scripts/pathb-dump" --ir ${std[@]+"${std[@]}"} ${fl[@]+"${fl[@]}"} "$f" > "$tmp/ir$i" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
+  "$root/scripts/pathb-dump.rb" --ir ${std[@]+"${std[@]}"} ${fl[@]+"${fl[@]}"} "$f" > "$tmp/ir$i" 2> "$tmp/dump.err" || { cat "$tmp/dump.err" >&2; exit 1; }
   # The unit name of the fragment: the file's basename, as scripts/qbe-cc names it (a static name of the unit is name@UNIT).
   tu=$(basename "$f"); tu=${tu%.*}; tu=$(printf %s "$tu" | tr -c 'A-Za-z0-9_.-' _); [ $only_c = 1 ] || tu=$tu.$i
   "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/ir$i" "$tmp/frag$i.json" "$tu"

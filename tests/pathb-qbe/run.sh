@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb).
 #
-# For each program: scripts/pathb-dump --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
+# For each program: scripts/pathb-dump.rb --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
 # cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lC -lstdc++ -lgcc_s -lpthread -lm -latomic; libC.a first, so EDG's EH runtime and operator new/delete win) -> run.
 # The exit code must equal the // EXPECT: value. The gcc backend (NFCXX_BACKEND=gcc ./nfcxx) must agree with it.
 #
@@ -124,15 +124,15 @@ run_one() {
   # docs/notes/ubsan.md): signed overflow is checked and a failing check reports its place on stderr before it aborts.
   san=$(sed -n 's#^// \(TRAP-\)\{0,1\}SANITIZE: *\([a-z,-]*\).*#\2#p' "$f" | head -1)
   if [ -n "$san" ]; then
-    NFCXX_IR_SANITIZE=$san scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    NFCXX_IR_SANITIZE=$san scripts/pathb-dump.rb --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   elif [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
     # (`// TRAP-IR: default` keeps the wrapping arithmetic: a checked 64-bit signed multiply, which the lowering of a
     # variable-length array contains, is refused in trap mode.)
-    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump.rb --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   else
-    scripts/pathb-dump --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    scripts/pathb-dump.rb --ir $std $flags "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
   "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
@@ -250,7 +250,7 @@ run_multi() {
   n=$(basename "$d"); name=${d#tests/}; exe=$tmp/multi_$n.exe
   for f in "$d"/*.cpp; do
     b=multi_${n}_$(basename "$f" .cpp); obj=$tmp/$b.o; srcs+=("$f")
-    scripts/pathb-dump --ir "$f" > "$tmp/$b.ir" 2> "$tmp/$b.fe" || {
+    scripts/pathb-dump.rb --ir "$f" > "$tmp/$b.ir" 2> "$tmp/$b.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end ($f): $(head -1 "$tmp/$b.fe")"); return; }
     "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
     if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$b.emit")"); return; fi
@@ -317,7 +317,7 @@ run_multi() {
 
 # Probe the harness: a stage 2 harness has no sizes on slots and the emitter says so.
 probe=$(ls tests/cases/*.cpp | head -1)
-scripts/pathb-dump --ir "$probe" > "$tmp/probe.ir" 2>/dev/null
+scripts/pathb-dump.rb --ir "$probe" > "$tmp/probe.ir" 2>/dev/null
 "$mrb" "$emit" ${emit_opts[@]+"${emit_opts[@]}"} "$tmp/probe.ir" > /dev/null 2> "$tmp/probe.err"; prc=$?
 if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2

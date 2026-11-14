@@ -10,7 +10,7 @@
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the exit status the bash ends with):
 #   ENV NAME=VALUE         a variable the bash exports for the programs that follow (EDG_CPFE_DEFAULT_OPTIONS): printed
 #                          before each RUN line it applies to, as the stub logs it
-#   RUN PROGRAM ARG...     a program the driver runs (ROOT/build/edg/bin/cpfe, ROOT/scripts/pathb-cc, cc); its output is
+#   RUN PROGRAM ARG...     a program the driver runs (ROOT/build/edg/bin/cpfe, ROOT/scripts/pathb-cc.rb, cc); its output is
 #                          not part of the plan
 #   EXEC PROGRAM ARG...    the program replaces nfcxx (--emit-hip: ROOT/build/cuda-rewrite; -E: g++). No STATUS line: the
 #                          exit status is the program's.
@@ -251,7 +251,7 @@ def pathb_plan(o, facts, env, dialect, gnu)
   if o[:compile_only]
     o[:srcs].each do |f|
       dst = o[:outset] ? o[:out] : File.basename(f).sub(/\.[^.]*\z/, "") + ".o"
-      lines += run_lines(env, "#{ROOT}/scripts/pathb-cc", common + [f, "-o", dst])
+      lines += run_lines(env, "#{ROOT}/scripts/pathb-cc.rb", common + [f, "-o", dst])
     end
   else
     ldrt = facts.value("pathb-ldrt")
@@ -259,7 +259,7 @@ def pathb_plan(o, facts, env, dialect, gnu)
     pobjs = []
     o[:srcs].each_with_index do |f, n|
       obj = "#{TMP}/p#{n}.o"
-      lines += run_lines(env, "#{ROOT}/scripts/pathb-cc", common + [f, "-o", obj])
+      lines += run_lines(env, "#{ROOT}/scripts/pathb-cc.rb", common + [f, "-o", obj])
       pobjs << obj
     end
     link = ["-o", o[:out]] + pobjs + ["#{ROOT}/#{ldrt}", EDG_LIBC, "-lpthread", "-lm"]

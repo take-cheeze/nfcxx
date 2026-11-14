@@ -85,7 +85,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_PARTIAL = 3
-EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc does not retry this one)
+EXIT_NOFP = 5   # --no-fp: the code QBE wrote uses SSE or x87 (nfcc's -mno-sse; scripts/pathb-cc.rb does not retry this one)
 
 def usage_exit
   warn "usage: pathb-ssa-build [-o OUT.s] [--qbe=PATH] [--no-opt] [--no-fp] [--no-unwind] [--vectorize] [--avx2] [--trap-checks] [--no-pie] [--safe | --asan] [--pic] [--target=i386|i386_regparm3] [--m16] FILE.ir"
@@ -669,7 +669,7 @@ if output
 else
   $stdout.write(asm)
 end
-# --safe (-fsafe-pointers, docs/notes/safe-pointers.md): the runtime is linked first, as scripts/pathb-cc does with
+# --safe (-fsafe-pointers, docs/notes/safe-pointers.md): the runtime is linked first, as scripts/pathb-cc.rb does with
 # $(scripts/safeptr-rt.rb). The driver does not link; it writes the object's path to OUT.link for the caller's link line.
 # Slice 1: the assembly is unchanged by --safe (the per-access checks come in a later slice).
 if safe

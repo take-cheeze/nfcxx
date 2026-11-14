@@ -18,7 +18,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 export LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu"
 lower() { # lower SRC.cpp OUT: front end, emitter, ptxas; OUT.ptx and OUT.cubin
-  "$root/scripts/pathb-dump" --ir --freestanding "$1" > "$2.ir" \
+  "$root/scripts/pathb-dump.rb" --ir --freestanding "$1" > "$2.ir" \
     && "$root/build/pathb-ptx-emit" --emit "$2.ir" > "$2.ptx" \
     && "$cuda/bin/ptxas" -arch=sm_75 "$2.ptx" -o "$2.cubin"
 }

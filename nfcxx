@@ -11,7 +11,7 @@
 #   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux and arm64 macOS.
 #                  A program it does not build is built with the gcc backend instead (docs/notes/pathb-default.md).
-#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc)
+#   gcc (default elsewhere, and for the options above): EDG's generated C through the host compiler (scripts/gcc-cc.rb)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
@@ -132,7 +132,7 @@ instantiate=${NFCXX_INSTANTIATE:-used}                                  # --inst
 promote_slots=${NFCXX_PROMOTE_SLOTS:-1}; unroll=${NFCXX_UNROLL:-1}; struct_slots=${NFCXX_STRUCT_SLOTS:-1}   # --promote-slots= ...
 ld_name=${NFCXX_LD:-}                                  # -fuse-ld=NAME
 pathb_c=${NFCXX_PATHB_C:-}                                              # --pathb-c=gcc
-pb_flags=()   # the options scripts/pathb-cc gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
+pb_flags=()   # the options scripts/pathb-cc.rb gets (--asan, --safe-pointers, --sanitize=, --ir-opt=): flags, not exported variables
 onoff() {  # onoff FLAG VALUE: on|1 -> 1, off|0 -> 0; anything else is an error
   case $2 in on|1) echo 1 ;; off|0) echo 0 ;; *) echo "nfcxx: $1 takes on or off (got '$2')" >&2; exit 2 ;; esac
 }
@@ -148,7 +148,7 @@ sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); 
 # directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
 cudatmp=""
 # Device code of a .cu file: its __global__ and __device__ functions go through the Path B front end
-# (scripts/pathb-dump), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
+# (scripts/pathb-dump.rb), the IR-to-PTX emitter (tools/pathb-ptx-emit) and ptxas for NFCXX_SM (default 75). The kernels
 # are split into modules within NFCXX_CUDA_MAX_CONST_BYTES (65536: ptxas's limit on constant data) and
 # NFCXX_CUDA_MAX_PTX_LINES; each module is one cubin (a file that fits has one). The cubins are embedded at the end of
 # the host copy with a registration tail (pathb-ptx-emit --embed), so the one object holds the host code and its device
@@ -370,7 +370,7 @@ cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFC
   arch=$(amdgpu_arch) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)" >&2; exit 2; }
   clang=$(amdgpu_clang) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)" >&2; exit 2; }
   ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1
-  "$root/scripts/pathb-dump" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  "$root/scripts/pathb-dump.rb" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   ir_opt_device "$dev.ir"
   local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
@@ -389,7 +389,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
     printf 'struct-slots %s\n' "$struct_slots"
     if [ $ir_opt_set = 1 ]; then printf 'ir-opt %s\n' "$ir_opt"; else printf 'ir-opt inline,sroa\n'; fi; cache_sha < "$root/scripts/pathb-ir-opt.rb"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
-    cache_sha < "$root/scripts/pathb-dump"; cache_sha < "$root/scripts/host-sys.sh"
+    cache_sha < "$root/scripts/pathb-dump.rb"; cache_sha < "$root/scripts/host-sys.sh"
     for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
       if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
     done
@@ -400,7 +400,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
 cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DEV.ir and the module images in GROUPS
   local src=$1 dev=$2 groups=$3 sm=$4 ptxas=$5 ext=$6 t k; shift 6
   t=$(trace_start)
-  "$root/scripts/pathb-dump" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+  "$root/scripts/pathb-dump.rb" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
   ir_opt_device "$dev.ir"
   trace_end "$t" "pathb-dump --ir (device front end): $(basename "$src")" cuda
@@ -644,7 +644,7 @@ if [ "${emit_hip:-0}" = 1 ]; then
 fi
 # SYCL kernel integration (docs/notes/sycl-kernel-builtins.md). A -c compile of one C++ source that includes the oneAPI SYCL
 # headers (a -I directory holding sycl/detail/kernel_desc.hpp) runs in two passes, as the real toolchain's integration headers
-# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.sh
+# do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
 # turns them into KernelInfoData specializations; pass 2 compiles a wrapper that includes sycl.hpp, that header and the source,
 # with __SYCL_UNNAMED_LAMBDA__ defined as the real toolchain defines it. Other sources are unchanged.
 sycl_kernel_headers() {  # sycl_kernel_headers ARG...: TRUE when a -I directory of the arguments has the oneAPI kernel header
@@ -669,7 +669,7 @@ if [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 
     cat "$sy_tmp/pass1.log" >&2; rm -rf "$sy_tmp"
     echo "nfcxx: the SYCL pre-pass recorded no kernels" >&2; exit 2
   fi
-  "$root/scripts/sycl-integration-header.sh" "$sy_tmp/dump" > "$sy_tmp/integration.hpp" || { rm -rf "$sy_tmp"; exit 2; }
+  "$root/scripts/sycl-integration-header.rb" "$sy_tmp/dump" > "$sy_tmp/integration.hpp" || { rm -rf "$sy_tmp"; exit 2; }
   printf '#include <sycl/sycl.hpp>\n#include "%s"\n#include "%s"\n' "$sy_tmp/integration.hpp" "$sy_src" > "$sy_tmp/wrapper.cpp"
   sy_args=()
   for a in "${args0[@]}"; do
@@ -757,7 +757,7 @@ if [ -z "$backend" ]; then
 fi
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
-# libasan's checks before each access (scripts/pathb-cc --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
+# libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   case $backend in
@@ -782,7 +782,7 @@ fi
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
-source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shared with scripts/pathb-dump)
+source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shared with scripts/pathb-dump.rb)
 extra=()
 sys_inc=()
 hosted_libs=()
@@ -858,7 +858,7 @@ done
 # the only ABI knob of that config that changes the object. Darwin arm64 only: x86-64 Macs keep the old layout.
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && cflags+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
 # Hosted Path B on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64
-# target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump does the same).
+# target) does not have; lib/pathb/linux-aarch64-include/bits/math-vector.h stands in for it (scripts/pathb-dump.rb does the same).
 [ $backend = pathb ] && [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && cflags+=(-I "$root/lib/pathb/linux-aarch64-include")
 # Hosted Linux aarch64 (either backend): the front end's predefined macros have __aarch64__ but not __AARCH64EL__, which gcc
 # defines there. glibc's and CPython's multiarch headers (python3.12's pyconfig.h) choose their directory by both, so without
@@ -882,7 +882,7 @@ if [ "$target" = linux_k1om ]; then
   k1om_root=${NFCXX_K1OM_ROOT:-/opt/k1om}
   [ -x "$k1om_root/bin/k1om-mpss-linux-gcc" ] || { echo "nfcxx: no k1om toolchain at $k1om_root (NFCXX_K1OM_ROOT; docs/notes/k1om.md)" >&2; exit 2; }
   [ -f "$root/build/k1om/libC.a" ] || { echo "nfcxx: no k1om runtime at $root/build/k1om/libC.a (run scripts/setup-k1om.sh)" >&2; exit 2; }
-  export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_AS="$root/scripts/k1om-bin/as" NFCXX_K1OM_ROOT="$k1om_root"
+  export NFCXX_GCC="$root/scripts/k1om-cc.rb" NFCXX_AS="$root/scripts/k1om-bin/as.rb" NFCXX_K1OM_ROOT="$k1om_root"
 fi
 if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
@@ -928,7 +928,7 @@ if [ -n "$sanitize" ]; then
     esac
   done
   [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
-  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc: the front end's checks (NFCXX_IR_SANITIZE)
+  pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
   backend=pathb
 fi
 if [ $safeptr = 1 ]; then
@@ -942,23 +942,23 @@ fi
 # build is an error, not a fallback to gcc (the fallback re-run would also take NFCXX_PATH=b back to Path B).
 [ $path_b = 0 ] || { backend=pathb; default_backend=0; }
 [ $ir_opt_set = 0 ] || pb_flags+=(--ir-opt="$ir_opt")
-[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc)
-[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc --pic reads a preemptible symbol's address through the GOT
+[ $asan = 0 ] || [ $backend != pathb ] || pb_flags+=(--asan)   # the SSA emitter's __asan_load/store checks (scripts/pathb-cc.rb)
+[ $pic = 0 ] || pb_flags+=(--pic)   # -shared / -fPIC: scripts/pathb-cc.rb --pic reads a preemptible symbol's address through the GOT
 # Freestanding: the front end reads only lib/ (the old harness, which has no host headers), emulates GNU $gnu, and the program links
-# EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump --eh-runtime).
-# Hosted Path B: scripts/pathb-dump takes the host's GNU version unless the command line gave one.
-pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-narrowing), for scripts/pathb-dump
+# EDG's runtime, so its exception handling state is declared as that runtime has it (scripts/pathb-dump.rb --eh-runtime).
+# Hosted Path B: scripts/pathb-dump.rb takes the host's GNU version unless the command line gave one.
+pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-narrowing), for scripts/pathb-dump.rb
 # EDG's clang mode on Path B only when asked for (--dialect=clang, NFCXX_DIALECT), not for a clang host's default: Path B on macOS stays in g++ mode
 # with lib/pathb/clang_macros.h, since libc++ needs __BYTE_ORDER__, which the clang mode does not define.
-[ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump
+[ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump.rb
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
 case $backend in
   pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
            { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux and arm64 macOS only" >&2; exit 2; }
        [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/gcc-cc ;;
-  gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
+       export NFCXX_CC=$root/scripts/gcc-cc.rb ;;
+  gcc) export NFCXX_CC=$root/scripts/gcc-cc.rb ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 
@@ -1022,7 +1022,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend = pathb ]; then
       # A C source takes the Path B front end in C mode (EDG's C front end, the same IR and QBE route).
       prc=0
-      "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
+      "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} -std=c11 ${cflags[@]+${cflags[@]+"${cflags[@]}"}} "$c" -o "$o" || prc=$?
       if [ $prc != 0 ]; then
         # as for a C++ file: the default backend failed on this one (status 3: a construct Path B refuses), so the whole
         # program is built again with gcc, which reports its own errors if it fails too. An explicit backend is an error.
@@ -1060,7 +1060,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   fi
 fi
 
-# Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
+# Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 # The forced includes (a .cu input's nfcxx_cuda.h, and -include) reach pathb-cc as -include, as they reach EDG's preinclude.
 pb_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pb_pre+=(-include "$f"); done
@@ -1070,7 +1070,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
     case $f in
       -I*|-D*|-U*|-*|*.o|*.a|*.so) ;;
       *) b=$(basename "$f"); dst=${b%.*}.o; [ $outset = 1 ] && dst=$out
-         prc=0; "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
+         prc=0; "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} ${modopts[@]+"${modopts[@]}"} "$f" -o "$dst" || prc=$?
          if [ $prc != 0 ]; then
            # the default backend failed on this file: the object is built again with gcc, which reports its own errors
            [ $default_backend = 1 ] || exit $prc
@@ -1091,7 +1091,7 @@ if [ $backend = pathb ]; then
       *) o=$ptmp/p$n.o; n=$((n + 1))
          t=$(trace_start)
          prc=0
-         "$root/scripts/pathb-cc" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
+         "$root/scripts/pathb-cc.rb" ${pb_flags[@]+"${pb_flags[@]}"} "-std=c++${std#--c++}" ${cflags[@]+${cflags[@]+"${cflags[@]}"}} ${pb_pre[@]+"${pb_pre[@]}"} ${cuda_opts[@]+"${cuda_opts[@]}"} "$f" -o "$o" || prc=$?
          trace_end "$t" "Path B: $f" pathb
          if [ $prc != 0 ] && [ $default_backend = 1 ]; then
            # the default backend failed on this file (status 3: a construct Path B refuses; otherwise a Path B fault):
@@ -1116,7 +1116,7 @@ if [ $backend = pathb ]; then
     # cosmocc's fat link (an aarch64 companion per input) is not used: the x86_64 driver links the objects with cosmo's
     # startup code (ape.o, crt.o), linker script and libraries, as cosmocc's x86_64 link does (bin/cosmocc).
     cosmo_lib=$cosmo_root/x86_64-linux-cosmo/lib
-    cosmo_libc=$("$root/scripts/cosmo-libc.sh")   # EDG's runtime for cosmo (libC.a, built from the host member list)
+    cosmo_libc=$("$root/scripts/cosmo-libc.rb")   # EDG's runtime for cosmo (libC.a, built from the host member list)
     # The ELF is then fixed up (zip sections: tools/cosmo/fixupobj.c) and packaged as APE, as cosmocc's link does.
     cosmo_elf=$ptmp/cosmo.elf
     "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$cosmo_elf" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"$cosmo_libc" -lC -lcxx -lc -lcosmo -lm
@@ -1154,10 +1154,10 @@ for f in ${files[@]+${files[@]+"${files[@]}"}}; do
     # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
     -lcudart)
       [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
-      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub): an archive, ahead of
+      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub.rb): an archive, ahead of
       # libcudart, so only a program that calls them links them.
       if [ $compile_only = 0 ]; then
-        cub_lib=$("$root/scripts/cuda-cub") || cub_lib=""
+        cub_lib=$("$root/scripts/cuda-cub.rb") || cub_lib=""
         [ -z "$cub_lib" ] || eflist+=("$cub_lib")
       fi
       eflist+=("--c_to_obj_lib=cudart") ;;

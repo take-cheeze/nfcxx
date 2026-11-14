@@ -365,8 +365,8 @@ class Driver
   # the variables the bash exports (or the harness gives it) that the EDG driver and front end inherit
   def env_lines(eccp:)
     @lines << "ENV EDG_CPFE_DEFAULT_OPTIONS=#{gnu_opts.join(' ')} " unless gnu_opts.empty?
-    @lines << "ENV NFCXX_AS=#{root}/scripts/k1om-bin/as" if @k1om
-    @lines << "ENV NFCXX_CC=#{root}/scripts/gcc-cc" if eccp
+    @lines << "ENV NFCXX_AS=#{root}/scripts/k1om-bin/as.rb" if @k1om
+    @lines << "ENV NFCXX_CC=#{root}/scripts/gcc-cc.rb" if eccp
     @lines << "ENV NFCXX_GCC=#{root}/scripts/k1om-cc.rb" if @k1om
     @lines << "ENV NFCXX_K1OM_ROOT=#{k1om_root}"
   end

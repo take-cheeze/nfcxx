@@ -17,7 +17,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 K=_Z7atomicsPKiPiPfS1_S1_S1_S1_i
 
-"$root/scripts/pathb-dump" --ir --freestanding atomics.cpp > "$out/atomics.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding atomics.cpp > "$out/atomics.ir"
 if diff -u atomics.ir "$out/atomics.ir"; then echo "IR atomics: ok"; else echo "IR atomics: FAIL (golden differs)"; fail=1; fi
 
 "$root/build/pathb-ptx-emit" --emit "$out/atomics.ir" > "$out/atomics.ptx"

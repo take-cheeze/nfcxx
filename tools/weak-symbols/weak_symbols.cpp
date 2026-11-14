@@ -5,7 +5,7 @@
 // EDG puts COMDAT functions (inline and template instantiations) in every translation unit that uses them (and COMDAT
 // data: variable templates, static data members of templates, local statics of inline functions), marked __weak__.
 // GCC honours the attribute so the link merges the copies; cproc drops attributes, so QBE emits them as strong symbols
-// and the link fails with "multiple definition". The gcc back end needs it too (scripts/gcc-cc): a non-extern
+// and the link fails with "multiple definition". The gcc back end needs it too (scripts/gcc-cc.rb): a non-extern
 // `__inline__` member is an external definition under gnu89.
 // Usage: weak-symbols [--c-input] [--sym-prefix=P] [--marked=FILE] PREPROCESSED_C ASSEMBLY  (appends to ASSEMBLY)
 #include <algorithm>

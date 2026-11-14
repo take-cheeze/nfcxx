@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The device pass of every ggml-sycl source (GGML_SRC/*.cpp, unchanged), as scripts/sycl-build.rb --backend=opencl runs it:
-# the Path B front end (scripts/pathb-dump --ir), the Kernel-capability SPIR-V emitter (pathb-spirv-emit.rb --kernel-cl) and
+# the Path B front end (scripts/pathb-dump.rb --ir), the Kernel-capability SPIR-V emitter (pathb-spirv-emit.rb --kernel-cl) and
 # spirv-val. Nothing is linked or run; the sweep says which TUs of the backend the front end and the emitter accept.
 # The macros are the reference build's (compile_commands.json of build-sycl) without GGML_SYCL_SUPPORT_LEVEL_ZERO_API (the
 # lib/sycl runtime reports the OpenCL backend, so ggml's Level Zero calls are not reached) and without GGML_SYCL_GRAPH (lib/sycl
@@ -32,7 +32,7 @@ trap 'rm -rf "$out"' EXIT
 one() {
   local f=$1 b
   b=$(basename "$f" .cpp)
-  if ! "$root/scripts/pathb-dump" --ir -std=c++17 -D__NFCXX_SYCL_DEVICE__ -DNDEBUG --diag_warning=narrowing_conversion \
+  if ! "$root/scripts/pathb-dump.rb" --ir -std=c++17 -D__NFCXX_SYCL_DEVICE__ -DNDEBUG --diag_warning=narrowing_conversion \
       -I"$root/lib/sycl/include" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED \
       -DGGML_SCHED_MAX_COPIES=4 -DGGML_SYCL_DNNL=0 -DGGML_SYCL_F16 -DGGML_SYCL_HAS_BF16 -DGGML_SYCL_DMMV_HAS_BF16 -DGGML_SYCL_HOST_MEM_FALLBACK \
       -D_GNU_SOURCE -D_XOPEN_SOURCE=600 -Dggml_sycl_EXPORTS \

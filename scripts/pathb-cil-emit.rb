@@ -1,4 +1,4 @@
-# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump --ir) -> a JSON fragment for scripts/cil-link.rb, the CIL spike of the
+# pathb-cil-emit.rb: Path B IR (scripts/pathb-dump.rb --ir) -> a JSON fragment for scripts/cil-link.rb, the CIL spike of the
 # Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.rb: pointers are int64 addresses, frame slots are
 # one localloc per call, globals are the linker's addr_<name> fields.
 #

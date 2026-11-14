@@ -1,6 +1,6 @@
 // The device-wide CUB algorithms that ggml-cuda calls (sum.cu and mean.cu: DeviceReduce::Sum; cumsum.cu:
 // DeviceScan::InclusiveSum; argsort.cu: DeviceRadixSort, DeviceSegmentedRadixSort and DeviceSegmentedSort SortPairs),
-// built by the nfcxx driver itself (scripts/cuda-cub) and linked into hosted links that name -lcudart. The host shim
+// built by the nfcxx driver itself (scripts/cuda-cub.rb) and linked into hosted links that name -lcudart. The host shim
 // (lib/cuda/host/cub/cub.cuh) forwards its overloads to the C functions here. CUB's protocol is kept: a call with a
 // null temporary storage only sets the size it needs; the second call does the work, on the given stream.
 //

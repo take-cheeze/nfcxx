@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Device memory constructs from C++ source (memory2.cpp): a bool in memory and in registers, a function-local
 # __shared__ array with a barrier, a __device__ global array, and a struct field behind a pointer. The source goes through the Path B front end
-# (scripts/pathb-dump --ir), the emitter, ptxas for sm_75, and the runtime (launch_memory2.c). Each kernel also has a
+# (scripts/pathb-dump.rb --ir), the emitter, ptxas for sm_75, and the runtime (launch_memory2.c). Each kernel also has a
 # source mutant that must fail. Needs the Path B harness, ptxas, cuda_runtime.h, libcudart and an NVIDIA GPU; skips
 # (exit 0) when one is missing (CUDA_HOME, default /usr/local/cuda).
 set -euo pipefail
@@ -21,13 +21,13 @@ run_env=(env LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu")
 
 # build SRC NAME: lowers SRC to PTX and cubin under $out/NAME.*
 build() {
-  "$root/scripts/pathb-dump" --ir --freestanding "$1" > "$out/$2.ir"
+  "$root/scripts/pathb-dump.rb" --ir --freestanding "$1" > "$out/$2.ir"
   "$root/build/pathb-ptx-emit" --emit "$out/$2.ir" > "$out/$2.ptx"
   "$cuda/bin/ptxas" -arch=sm_75 "$out/$2.ptx" -o "$out/$2.cubin"
 }
 
 # 1. The IR matches its golden, and the PTX has the forms the test is about.
-"$root/scripts/pathb-dump" --ir --freestanding memory2.cpp > "$out/memory2.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding memory2.cpp > "$out/memory2.ir"
 if diff -u memory2.ir "$out/memory2.ir"; then echo "IR memory2: ok"; else echo "IR memory2: FAIL"; fail=1; fi
 build memory2.cpp memory2
 for want in ".shared .align 4 .b8 tile" ".global .align 4 .b8 g_table" "st.u8" "ld.u8" "selp.u32" "bar.sync 0" "add.s64"; do

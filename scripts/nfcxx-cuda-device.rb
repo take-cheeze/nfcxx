@@ -94,7 +94,7 @@ class CudaDevicePlan
   end
 
   def rewriter = "#{@root}/build/cuda-rewrite"
-  def pathb_dump = "#{@root}/scripts/pathb-dump"
+  def pathb_dump = "#{@root}/scripts/pathb-dump.rb"
   def ptx_emit = "#{@root}/build/pathb-ptx-emit"
 
   def ensure_tool(dir, out)

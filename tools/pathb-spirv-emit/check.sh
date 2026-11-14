@@ -17,7 +17,7 @@ if [ ${#irs[@]} = 0 ]; then
   dump() {
     local t=$1 b
     b=$(basename "$t" .cpp)
-    (cd "$root/tests/sycl" && "$root/scripts/pathb-dump" --ir -std=c++17 -D__NFCXX_SYCL_DEVICE__ -I"$root/lib/sycl/include" \
+    (cd "$root/tests/sycl" && "$root/scripts/pathb-dump.rb" --ir -std=c++17 -D__NFCXX_SYCL_DEVICE__ -I"$root/lib/sycl/include" \
       "$t" > "$out/$b.ir" 2> "$out/$b.dump.err") || rm -f "$out/$b.ir"
   }
   export -f dump

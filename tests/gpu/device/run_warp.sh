@@ -17,7 +17,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 K=_Z8warp_opsPKiPiPfPjS1_i
 
-"$root/scripts/pathb-dump" --ir --freestanding warp.cpp > "$out/warp.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding warp.cpp > "$out/warp.ir"
 if diff -u warp.ir "$out/warp.ir"; then echo "IR warp: ok"; else echo "IR warp: FAIL (golden differs)"; fail=1; fi
 
 "$root/build/pathb-ptx-emit" --emit "$out/warp.ir" > "$out/warp.ptx"
@@ -52,7 +52,7 @@ cat > "$out/refuse_mask.cpp" <<'CPP'
 extern "C" int __nfcxx_shfl_xor_sync_i(unsigned mask, int v, int lane);
 void k(int *o, unsigned m) { o[0] = __nfcxx_shfl_xor_sync_i(m, 1, 2); }
 CPP
-rc=0; "$root/scripts/pathb-dump" --ir --freestanding "$out/refuse_mask.cpp" > "$out/refuse.ir" 2>/dev/null \
+rc=0; "$root/scripts/pathb-dump.rb" --ir --freestanding "$out/refuse_mask.cpp" > "$out/refuse.ir" 2>/dev/null \
   && "$root/build/pathb-ptx-emit" --emit "$out/refuse.ir" > /dev/null 2>&1 || rc=$?
 if [ "$rc" = 3 ]; then echo "refused shuffle with a variable mask: ok"; else echo "refused shuffle with a variable mask: FAIL (exit $rc)"; fail=1; fi
 exit $fail

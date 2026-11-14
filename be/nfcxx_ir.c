@@ -2,7 +2,7 @@
 nfcxx_ir.c -- Path B stage 2: lowers the lowered EDG IL to the nfcxx mid-level IR and prints it.
 The spec is docs/notes/pathb-stage2.md, which also describes the text form.
 
-back_end() (nfcxx_be.c) calls nfcxx_ir_back_end() when NFCXX_PATHB_MODE=ir (scripts/pathb-dump --ir).
+back_end() (nfcxx_be.c) calls nfcxx_ir_back_end() when NFCXX_PATHB_MODE=ir (scripts/pathb-dump.rb --ir).
 The IR is built in one pass from the in-memory lowered IL. Expression lowering prints the instructions
 it needs before the statement that uses their results, so the printed order is the evaluation order.
 

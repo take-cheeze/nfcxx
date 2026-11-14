@@ -15,7 +15,7 @@ fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-"$root/scripts/pathb-dump" --ir --freestanding switch.cpp > "$out/switch.ir"
+"$root/scripts/pathb-dump.rb" --ir --freestanding switch.cpp > "$out/switch.ir"
 if diff -u switch.ir "$out/switch.ir"; then echo "IR switch: ok"; else echo "IR switch: FAIL (golden differs)"; fail=1; fi
 
 "$root/build/pathb-ptx-emit" --emit "$out/switch.ir" > "$out/switch.ptx"
@@ -40,7 +40,7 @@ fi
 cat > "$out/refuse.cpp" <<'CPP'
 void k(const char *in, int *out) { switch (in[0]) { case 1: out[0] = 1; break; default: out[0] = 2; } }
 CPP
-rc=0; "$root/scripts/pathb-dump" --ir --freestanding "$out/refuse.cpp" > "$out/refuse.ir" 2>/dev/null \
+rc=0; "$root/scripts/pathb-dump.rb" --ir --freestanding "$out/refuse.cpp" > "$out/refuse.ir" 2>/dev/null \
   && "$root/build/pathb-ptx-emit" --emit "$out/refuse.ir" > /dev/null 2>&1 || rc=$?
 if [ "$rc" = 0 ]; then echo "switch on a char lowers: ok"; else echo "switch on a char lowers: FAIL (exit $rc)"; fail=1; fi
 exit $fail

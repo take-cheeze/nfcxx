@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # nfcxx's Path B compile and link of hosted C and C++ sources, ported from the bash in nfcxx: the backend choice, the argument
-# loop for the options of this slice, the -fsyntax-only rewrite, the -E exec, the scripts/pathb-cc calls of a compile (C
+# loop for the options of this slice, the -fsyntax-only rewrite, the -E exec, the scripts/pathb-cc.rb calls of a compile (C
 # sources, then C++ files), the cp of a C-only -c, the link (one per source, then the cc link with EDG's runtime, the EH shim,
 # the ASan VLA runtime and the safe-pointer runtime), and the fallback to the gcc backend that a default-selected Path B build
 # takes when pathb-cc fails on a file. The argument loop is the one of nfcxx, for these options only (scripts/nfcxx-gcc-plan.rb
@@ -14,7 +14,7 @@
 # the bash gets, without --backend (an --backend in ARG... is refused).
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the status the bash ends with):
-#   RUN PROGRAM ARG...     a program the driver runs: ROOT/scripts/pathb-cc (one source to an object), cp (a C-only -c) or
+#   RUN PROGRAM ARG...     a program the driver runs: ROOT/scripts/pathb-cc.rb (one source to an object), cp (a C-only -c) or
 #                          cc (the link)
 #   EXEC PROGRAM ARG...    the driver is replaced: the gcc fallback (exec env NFCXX_BACKEND=gcc ROOT/nfcxx ARG...), or the
 #                          -E preprocess (exec g++ -E ...). The bash does not return from it, so no STATUS line follows; the
@@ -55,12 +55,13 @@
 #   ld NAME                    ld.NAME is on PATH (for -fuse-ld=NAME; the other names pass to cc as they are)
 #   module PATH                PATH declares or imports a C++ module (the bash reads the source; not ported)
 #   exists PATH                PATH (relative to WORK) exists (the SYCL pre-pass test reads an -I directory's header)
-#   pathb-status PATH CODE     scripts/pathb-cc exits with CODE on the source PATH (absent: 0)
+#   pathb-status PATH CODE     scripts/pathb-cc.rb exits with CODE on the source PATH (absent: 0)
 #
 # Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none), the
 # repository tools (ensure_tool finds them fresh), the build of pathb-cc itself (its harness is inside pathb-cc: its status
 # is the pathb-status fact), and the host GNU version and dialect (only an explicit --dialect reaches the command line).
 
+require "open3"
 require "pathname"
 
 # A construct the port does not cover (exit 3): the bash may do anything with it, so nothing is guessed.
@@ -82,7 +83,7 @@ class PlanExec < StandardError
 end
 
 DRIVER = "ROOT/nfcxx".freeze
-PATHB_CC = "ROOT/scripts/pathb-cc".freeze
+PATHB_CC = "ROOT/scripts/pathb-cc.rb".freeze
 LIBC = "ROOT/build/edg/lib/libC.a".freeze
 CHOICES = %w[default pathb gcc].freeze
 FSO_OBJECT = "TMP/x.o".freeze # the object of -fsyntax-only (its temporary directory's x.o)
@@ -177,6 +178,11 @@ class Facts
     @exists.include?(path)
   end
 
+  # a source the plan may compile (the test facts list the sources they use: true there)
+  def source_ok?(_path)
+    true
+  end
+
   def status(name)
     @statuses.fetch(name, 0)
   end
@@ -227,6 +233,7 @@ class Plan
   def run
     parse
     exit_with("nfcxx: no input files", 2) if @ncpp + @nobj + @cfiles.size + (@stdin_src ? 1 : 0) == 0
+    (@srcs + @cfiles).each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
     preprocess_exec if @preprocess
     checks
     @pb_pre = @preinc.flat_map { |h| ["-include", h] }
@@ -430,11 +437,11 @@ class Plan
     argv += @srcs
     argv << "-" if @stdin_src
     argv += ["-o", @out] if @outset
-    @lines << "EXEC g++ #{argv.join(' ')}"
+    @lines << ["EXEC", "g++", *argv]
     raise PlanExec
   end
 
-  # The options scripts/pathb-cc gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
+  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
   # B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
@@ -451,7 +458,7 @@ class Plan
   # One pathb-cc call on a C++ source; returns its status (the pathb-status fact).
   def pathb_cc(source, dst)
     argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, source, "-o", dst]
-    @lines << "RUN #{argv.join(' ')}"
+    @lines << ["RUN", *argv]
     @facts.status(source)
   end
 
@@ -462,7 +469,7 @@ class Plan
     exit_with("nfcxx: pathb-cc status #{status} on #{source}", status) unless @default_backend
     warn "nfcxx: Path B did not build #{source} (status #{status}); building the program with the gcc backend, which " \
          "compiles with C semantics (-fwrapv -fno-strict-aliasing)"
-    @lines << "EXEC env NFCXX_BACKEND=gcc #{DRIVER} #{@args.join(' ')}".rstrip
+    @lines << ["EXEC", "env", "NFCXX_BACKEND=gcc", DRIVER, *@args]
     raise PlanExec
   end
 
@@ -472,7 +479,7 @@ class Plan
     @cfiles.each_with_index do |c, n|
       dst = "TMP/#{n}.o"
       argv = [PATHB_CC, *@pb_flags, "-std=c11", *@cflags, c, "-o", dst]
-      @lines << "RUN #{argv.join(' ')}"
+      @lines << ["RUN", *argv]
       check_status(c, @facts.status(c))
       @c_objs << dst
     end
@@ -483,7 +490,7 @@ class Plan
     exit_with("nfcxx: -c with -o needs exactly one source", 2) if @outset && @c_objs.size != 1
     @cfiles.each_with_index do |c, i|
       dst = @outset ? @out : "#{File.basename(c).sub(/\.c\z/, '')}.o"
-      @lines << "RUN cp #{@c_objs[i]} #{dst}"
+      @lines << ["RUN", "cp", @c_objs[i], dst]
     end
   end
 
@@ -519,7 +526,7 @@ class Plan
     v
   end
 
-  # The link's cc (the bash's hosted block): the EH shim, and with -fsanitize=address the C++ VLA runtime.
+  # The link's cc (the bash's hosted block): the EH shim and the sret objects, and with -fsanitize=address the C++ VLA runtime.
   # Neither is added to a -shared link or a link with no C++ or object input (the block is not entered).
   def hosted_extras
     return [[], []] if @shared
@@ -560,7 +567,7 @@ class Plan
     end
     argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *pobjs, *plink, ldrt, *shim, *vla,
             LIBC, "-lstdc++", "-lgcc_s", "-lpthread", "-lm", "-latomic"]
-    @lines << "RUN #{argv.join(' ')}"
+    @lines << ["RUN", *argv]
   end
 
   # The link of C sources alone (or with object files when eccp is not built): cc with the C objects, every link option of the
@@ -570,18 +577,109 @@ class Plan
     ldrt = fact_path("pathb-ldrt")
     cvla = @asan ? [fact_path("asan-vla")] : []
     argv = ["cc", *asan_c, *ldopts, *@c_objs, *@files, *cvla, "-o", @out, ldrt, LIBC, "-lstdc++", "-lm", "-latomic"]
-    @lines << "RUN #{argv.join(' ')}"
+    @lines << ["RUN", *argv]
+  end
+end
+
+# The facts of this machine (--live=ROOT): each one is probed when the port asks for it, with the commands the bash runs.
+# Path B's status is not a fact here: every pathb-cc call is planned as succeeding, and the driver (scripts/nfcxx.rb) builds the
+# program again with the bash when one fails. Anything the live facts do not model is unported.
+class LiveFacts < Facts
+  def initialize(root, cwd)
+    super()
+    @root = root
+    @cwd = cwd
+    @probes = {}
+    ENV.each_key do |name|
+      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
+                  %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+
+      unported("environment #{name} (the live facts do not read it)")
+    end
+  end
+
+  def real(path)
+    return @root if path == "ROOT"
+    return File.join(@root, path[5..]) if path.start_with?("ROOT/")
+    return path if path.start_with?("/")
+
+    File.join(@cwd, path)
+  end
+
+  def value(key)
+    @probes.fetch(key) { @probes[key] = probe(key) }
+  end
+
+  def flag?(key)
+    value(key) == "1"
+  end
+
+  def ld?(name)
+    ENV.fetch("PATH", "").split(":").any? do |d|
+      f = File.join(d, "ld.#{name}")
+      File.file?(f) && File.executable?(f)
+    end
+  end
+
+  def module?(path)
+    f = real(path)
+    return false unless File.file?(f)
+
+    File.foreach(f, mode: "rb").any? { |l| l.match?(/\A[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]/n) }
+  end
+
+  def exists?(path)
+    File.exist?(real(path))
+  end
+
+  def source_ok?(path)
+    File.file?(real(path))
+  end
+
+  def status(_name)
+    0
+  end
+
+  private
+
+  def probe(key)
+    case key
+    when "host" then `uname -s`.chomp == "Linux" && `uname -m`.chomp == "x86_64" ? "linux-x86_64" : "other"
+    when "eccp" then File.executable?(File.join(@root, "build/edg/bin/eccp")) ? "1" : "0"
+    when "qbe" then File.executable?(File.join(@root, "build/qbe/qbe")) ? "1" : "0"
+    when "libc-a" then File.file?(File.join(@root, "build/edg/lib/libC.a")) ? "1" : "0"
+    when "pathb-ldrt" then script_output("scripts/pathb-ldrt.rb", require_success: true)
+    when "ehshim" then script_output("scripts/ehshim.rb", require_success: true)
+    when "asan-vla" then script_output("scripts/asan-vla.rb", require_success: true)
+    when "safeptr-rt" then script_output("scripts/safeptr-rt.rb", require_success: false)
+    else unported("#{key} is not in the live facts")
+    end
+  end
+
+  def script_output(script, require_success:)
+    out, status = Open3.capture2(File.join(@root, script), err: File::NULL)
+    return nil if require_success && !status.success?
+
+    out.chomp
+  rescue SystemCallError
+    nil
   end
 end
 
 def main(argv)
   facts_path = nil
   choice = "default"
+  tabs = false
+  live = nil
   i = 0
   while i < argv.size && argv[i] != "--"
     a = argv[i]
     if a.start_with?("--facts=")
       facts_path = a.delete_prefix("--facts=")
+    elsif a.start_with?("--live=")
+      live = a.delete_prefix("--live=")
+    elsif a == "--tabs"
+      tabs = true
     elsif a.start_with?("--backend=")
       choice = a.delete_prefix("--backend=")
     else
@@ -591,22 +689,23 @@ def main(argv)
     i += 1
   end
   args = argv[(i + 1)..] || []
-  unless facts_path && CHOICES.include?(choice)
+  unless (facts_path || live) && CHOICES.include?(choice)
     warn "usage: nfcxx-pathb.rb --facts=FILE --backend=default|pathb -- ARG..."
     return 2
   end
 
   begin
-    plan = Plan.new(Facts.load(facts_path), choice, fsyntax_only_args(args))
+    facts = live ? LiveFacts.new(live, Dir.pwd) : Facts.load(facts_path)
+    plan = Plan.new(facts, choice, fsyntax_only_args(args))
     plan.run
-    plan.lines.each { |l| puts l }
-    puts "STATUS 0"
+    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
+    puts "STATUS 0" unless tabs
   rescue PlanExec
-    plan.lines.each { |l| puts l }
+    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
   rescue NfcxxExit => e
-    plan.lines.each { |l| puts l }
+    plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
     warn e.message unless e.message.empty?
-    puts "STATUS #{e.status}"
+    puts "STATUS #{e.status}" unless tabs
   rescue NfcxxUnported => e
     warn "unported: #{e.message}"
     return 3

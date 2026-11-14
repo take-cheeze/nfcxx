@@ -199,8 +199,8 @@ if [ -x "$cpfe" ]; then
     case $(basename "$f") in qbe_*) continue ;; esac
     b=$(echo "${f#$root/tests/}" | tr / _)
     case $f in
-      */traps/*) NFCXX_IR_OVERFLOW=trap "$root/scripts/pathb-dump" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
-      *) "$root/scripts/pathb-dump" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
+      */traps/*) NFCXX_IR_OVERFLOW=trap "$root/scripts/pathb-dump.rb" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
+      *) "$root/scripts/pathb-dump.rb" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
     esac
     gen=$((gen + 1))
     emit_file "${f#$root/tests/}" "$tmp/ir/$b.ir"

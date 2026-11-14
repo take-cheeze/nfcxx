@@ -5,7 +5,7 @@
 #                         [-L dir] [-l lib] [-Wl,...] [-rpath dir] prog.cpp -o prog
 #
 # WebGPU (the default): a device pass compiles prog.cpp with -D__NFCXX_SYCL_DEVICE__ through the Path B front end
-# (scripts/pathb-dump --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
+# (scripts/pathb-dump.rb --ir), scripts/pathb-wgsl-emit.rb lowers every kernel to WGSL, and the host pass compiles the
 # program with -DNFCXX_SYCL_WEBGPU. The WGSL and the kernel table are written next to the output as prog.wgsl and
 # prog.man; at run time the program finds them through NFCXX_SYCL_IMAGE (default: the output path, baked in). The
 # server that executes them is tests/sycl/server.cjs (Node + Playwright's Chromium; see rt_pipe.hpp).
@@ -191,7 +191,7 @@ dev_ir = "#{absout}.dev.ir"
 pathb = ->(name) { File.join(ROOT, "scripts", name) }
 rb = envd("RUBY", "ruby")
 
-st = run_status({}, [pathb.call("pathb-dump")] + ["--ir", "-std=#{std}", "-D__NFCXX_SYCL_DEVICE__"] +
+st = run_status({}, [pathb.call("pathb-dump.rb")] + ["--ir", "-std=#{std}", "-D__NFCXX_SYCL_DEVICE__"] +
                     (ndebug ? [ndebug] : []) + ["-I#{inc}"] + opts + diag + [src], out: dev_ir)
 exit st unless st.zero?
 

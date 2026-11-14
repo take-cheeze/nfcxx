@@ -666,8 +666,49 @@ PB_STD_C89 = %w[-ansi -std=c90 -std=iso9899:1990].freeze
 PB_PP_FLAGS = %w[-D -U -I -include -isystem -idirafter].freeze
 PB_PP_JOINED_PREFIXES = %w[-D -U -I -isystem -idirafter].freeze
 
-def run_cmd(argv)
-  $stdout.write("RUN #{argv.join(' ')}\n")
+# The driver's effects. Run as a script, the oracle (tests/nfcc/option-state.sh) prints them; scripts/nfcc.rb sets $nfcc_effects,
+# which runs them. A failing command ends the driver with its status when check is set (bash's set -e). environment: variables
+# for that command.
+def run_cmd(argv, check = true, environment = nil)
+  unless $nfcc_effects
+    $stdout.write("RUN #{argv.join(' ')}\n")
+    return 0
+  end
+  status = $nfcc_effects.run(argv, environment)
+  raise PathbExit.new(status) if check && status != 0
+
+  status
+end
+
+# nfcc's cp, cat and ln -s (the oracle prints CP, CAT and "RUN LN -s", the real driver does the copy)
+def file_copy(from, to)
+  return $stdout.write("CP #{from} #{to}\n") unless $nfcc_effects
+
+  $nfcc_effects.copy(from, to)
+end
+
+def file_cat(path)
+  return $stdout.write("CAT #{path}\n") unless $nfcc_effects
+
+  $nfcc_effects.cat(path)
+end
+
+def file_symlink(target, path)
+  return $stdout.write("RUN LN -s #{target} #{path}\n") unless $nfcc_effects
+
+  $nfcc_effects.symlink(target, path)
+end
+
+# nfcc's exec of a command that replaces the process (the oracle prints EXEC)
+def exec_cmd(argv)
+  return $stdout.write("EXEC #{argv.join(' ')}\n") unless $nfcc_effects
+
+  $nfcc_effects.exec(argv)
+end
+
+# a setting that is a value, or a probe the real driver makes when it is needed (called with the arguments it names)
+def lazy_value(value, *args)
+  value.respond_to?(:call) ? value.call(*args) : value
 end
 
 # nfcc's pathb_log: NFCXX_PATHB_LOG, when set, gets the line appended.
@@ -689,7 +730,7 @@ def base_name_no_ext(path)
 end
 
 # nfcc's pathb_reason: sets state.pb_opts and state.pb_std; returns the reason the unit cannot go to Path B, or "" when it can.
-def pathb_reason(state, env, extra)
+def pathb_reason(state, env, extra, csrc = nil)
   state.pb_opts = []
   state.pb_std = "-std=c11"
   state.pb_gnu = 1
@@ -744,29 +785,38 @@ def pathb_reason(state, env, extra)
   end
   state.pb_opts.unshift("-D_DEFAULT_SOURCE") if state.pb_gnu != 0
   state.pb_opts << "--pic" if state.pathb_pic != 0
-  return "-fshort-wchar: a wide character or string literal" if state.wchar16 == 1 && env.wide_literal
+  if state.wchar16 == 1
+    # the probe answers true (a wide literal), false, or :failed (the host preprocessor failed: bash's reason for that)
+    wide = lazy_value(env.wide_literal, state, csrc)
+    return "-fshort-wchar: preprocessing failed" if wide == :failed
+    return "-fshort-wchar: a wide character or string literal" if wide == true
+  end
   ""
 end
 
-# nfcc's pathb_compile: runs scripts/pathb-cc; with -S, the assembly is copied to obj (or written to stdout for -).
-# Returns the status of scripts/pathb-cc (env.pathb_status, from the caller: the driver's real run has it from the tool).
+# nfcc's pathb_compile: runs scripts/pathb-cc.rb; with -S, the assembly is copied to obj (or written to stdout for -).
+# Returns the status of scripts/pathb-cc.rb (env.pathb_status, from the caller: the driver's real run has it from the tool).
 def pathb_compile(state, env, what, csrc, obj)
-  root_cc = "#{env.root}/scripts/pathb-cc"
+  root_cc = "#{env.root}/scripts/pathb-cc.rb"
+  # the oracle's status is env.pathb_status; the real driver has the status of the command it ran
   if what == "-S"
     keep = "#{env.tmp}/keep#{state.k}"
-    run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", "#{env.tmp}/pb#{state.k}.o"])
-    if env.pathb_status == 0
+    status = run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", "#{env.tmp}/pb#{state.k}.o"], false,
+                     { "PATHB_KEEP" => keep })
+    status = env.pathb_status unless $nfcc_effects
+    if status == 0
       base = base_name_no_ext(csrc)
       if obj == "-"
-        $stdout.write("CAT #{keep}/#{base}.s\n")
+        file_cat("#{keep}/#{base}.s")
       else
-        $stdout.write("CP #{keep}/#{base}.s #{obj}\n")
+        file_copy("#{keep}/#{base}.s", obj)
       end
     end
   else
-    run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", obj])
+    status = run_cmd([root_cc, state.pb_std, *state.pbf, *state.pb_opts, csrc, "-o", obj], false)
+    status = env.pathb_status unless $nfcc_effects
   end
-  env.pathb_status
+  status
 end
 
 def gcc_argv(state, what, csrc, obj, extra)
@@ -799,6 +849,7 @@ def compile_one(state, env, kind, src, obj)
   extra = []
   if src == "-"
     csrc = "#{env.tmp}/stdin#{state.k}.c"
+    $nfcc_effects.stdin_to(csrc) if $nfcc_effects   # nfcc's cat > csrc (the oracle has no standard input)
   elsif !src.end_with?(".c")
     csrc = "#{env.tmp}/src#{state.k}.c"
     # realpath of an empty name fails with its own message (on stderr), and ln gets an empty target
@@ -809,7 +860,7 @@ def compile_one(state, env, kind, src, obj)
     else
       real = src.start_with?("/") ? src : "#{env.cwd}/#{src}"
     end
-    run_cmd(["LN", "-s", real, csrc])
+    file_symlink(real, csrc)
     extra = ["-iquote", File.dirname(src)]
   end
   state.k += 1
@@ -825,7 +876,7 @@ def compile_one(state, env, kind, src, obj)
   end
   what = state.asm == 0 ? "-c" : "-S"
   if state.backend == "pathb"
-    reason = pathb_reason(state, env, extra)
+    reason = pathb_reason(state, env, extra, csrc)
     if reason.empty?
       status = pathb_compile(state, env, what, csrc, obj)
       if status == 0
@@ -838,7 +889,8 @@ def compile_one(state, env, kind, src, obj)
       reason = "Path B refused it (status #{status})"
     end
     pathb_log(env, "gcc #{src}: #{reason}")
-    run_cmd(gcc_argv(state, what, csrc, obj, extra))
+    status = run_cmd(gcc_argv(state, what, csrc, obj, extra), false)
+    die("#{src}: gcc, the Path B fallback for #{reason}, failed") unless status == 0
   elsif state.backend == "cil"
     qcc = "#{env.root}/scripts/cil-cc.rb"
     run_cmd([qcc, "--c-input", what, *state.kqf, *state.pp, *state.asf, *extra, csrc, "-o", obj])
@@ -880,7 +932,7 @@ def link_mode(state, env)
       atomic = ["-latomic"]
     end
     edg = env.edg_build || "#{env.root}/build/edg"
-    run_cmd([env.host, *objs, *state.ld, "-o", out, env.ldrt, "-L#{edg}/lib", "-lC", *cxx_libs, "-lm", *atomic])
+    run_cmd([env.host, *objs, *state.ld, "-o", out, lazy_value(env.ldrt), "-L#{edg}/lib", "-lC", *cxx_libs, "-lm", *atomic])
   elsif state.backend == "cil"
     qcc = "#{env.root}/scripts/cil-cc.rb"
     run_cmd([qcc, *objs, *state.ld, "-o", out])
@@ -893,6 +945,8 @@ end
 def take_config(argv)
   config = { backend: "gcc", passthrough: false, host_gnu_gcc: false, env: Env.new }
   env = config[:env]
+  # scripts/nfcc.rb reads the environment and the file system here, as the bash reads them at its start
+  $nfcc_setup.call(config) if $nfcc_setup
   while argv.first && argv.first.start_with?("--nfcc-")
     option = argv.shift
     name, value = option.split("=", 2)
@@ -1127,16 +1181,17 @@ def main(argv)
   command = pre_loop_exec(args, config[:env].host, config[:backend], config[:env])
   if command && command[0] == :banner
     env = command[2]
-    $stdout.write("nfcc (nfcxx C driver 0.1, backend #{command[1]}) #{env.dumpfullversion}\n")
-    $stdout.write("gcc-compatible driver over Path B and gcc; the host compiler is #{env.host_version_line}\n")
+    $stdout.write("nfcc (nfcxx C driver 0.1, backend #{command[1]}) #{lazy_value(env.dumpfullversion)}\n")
+    $stdout.write("gcc-compatible driver over Path B and gcc; the host compiler is #{lazy_value(env.host_version_line)}\n")
     return 0
   end
   if command
-    $stdout.write("EXEC #{command.join(' ')}\n")
+    exec_cmd(command)
     return 0
   end
   state = LoopState.new(config[:backend], config[:passthrough], config[:host_gnu_gcc])
-  emit(run_loop(args, state))
+  run_loop(args, state)
+  emit(state) unless $nfcc_effects # the state is the oracle's output (tests/nfcc/loop-state.sh)
   if state.mode == "compile"
     compile_mode(state, config[:env])
   else
@@ -1164,5 +1219,8 @@ rescue Unported => e
   3
 end
 
-rc = main(ARGV)
-exit(rc) if rc != 0
+# scripts/nfcc.rb loads this file for its functions and runs main itself
+unless $nfcc_front
+  rc = main(ARGV)
+  exit(rc) if rc != 0
+end

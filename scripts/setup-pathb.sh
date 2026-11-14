@@ -7,7 +7,7 @@
 #   src/nfcxx_be.{c,h}, nfcxx_names.h   copies of be/ (the new back end and its name tables)
 ##   cmake/macro-conf/nfcxx-pathb/  macro config: BACK_END_IS_C_GEN_BE=0, DO_IL_LOWERING=1, everything else as
 #                                  linux-gcc-release (so the IL is lowered exactly as the C generator sees it)
-# Result: build/pathb/cmake/bin/cpfe. scripts/pathb-dump runs it from build/pathb/edg-base like the driver does.
+# Result: build/pathb/cmake/bin/cpfe. scripts/pathb-dump.rb runs it from build/pathb/edg-base like the driver does.
 # Reruns refresh the tree and rebuild only what changed (build/pathb/cmake is kept).
 #   PATHB_EMSCRIPTEN=1   build the same cpfe for the browser with Emscripten (emcc on PATH: scripts/setup-emsdk.sh) into
 #                        build/pathb-wasm: cmake/bin/cpfe.js and cpfe.wasm, a module (createCpfe) whose callMain runs one
