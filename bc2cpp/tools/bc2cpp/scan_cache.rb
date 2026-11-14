@@ -203,7 +203,9 @@ module ScanCache
   def store_entry(dir, path, value)
     key = File.basename(path, '.bin').split('-').last
     begin
-      FileUtils.mkdir_p(dir)
+      # The entry's own directory: a scan name may contain a slash (`analysis_headers.onigmo_h.onigmo-6.2.0/onigmo.h`),
+      # so `dir` alone is not where the entry sits on a cold cache.
+      FileUtils.mkdir_p(File.dirname(path))
       temp = "#{path}.#{Process.pid}.#{rand(0x1_0000_0000)}.tmp"
       File.binwrite(temp, Marshal.dump([MAGIC, key, value]))
       File.rename(temp, path)
