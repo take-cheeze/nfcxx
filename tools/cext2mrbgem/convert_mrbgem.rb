@@ -2201,6 +2201,17 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # a return type with leading words that are object-like macros defined in the input as a storage class (VP_EXPORT is
+  # #define VP_EXPORT static): those words are storage, not the type, so VP_EXPORT VALUE is VALUE
+  def value_ret_after_storage_macros(d)
+    words = d['ret'].to_s.split
+    storage_macro = lambda do |w|
+      @files.values.any? { |f| f['masked'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(w)}[ \t]+(?:static|extern|inline)\b/) }
+    end
+    words.shift while !words.empty? && storage_macro.call(words.first)
+    words.join(' ')
+  end
+
   # the names declared VALUE (not pointers) in a function: its parameters and its local declarations
   def value_names_of(fn)
     names = Set.new
@@ -2303,7 +2314,7 @@ use_problem = lambda do |name, use|
     if yields && n == -1
       return [nil, nil, 'variadic registered method that yields is not supported']
     end
-    return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if d['ret'] != 'VALUE'
+    return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if value_ret_after_storage_macros(d) != 'VALUE'
     if n == -1
       p = variadic_params(d)
       if p.nil?

@@ -801,6 +801,10 @@ check grep -qF 'mrb_obj_equal(mrb, a, b)' "$work/api_value_eq/src/api_value_eq.c
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'static Real * rp_ptr(mrb_state *mrb, mrb_value obj) {' "$work/api_ret_pointer/src/api_ret_pointer.c"
+# 2zzz. a registered method whose return type is VP_EXPORT VALUE, where #define VP_EXPORT static is storage: a registered method
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value vp_hello(mrb_state *mrb, mrb_value self)' "$work/api_storage_macro/src/api_storage_macro.c"
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
