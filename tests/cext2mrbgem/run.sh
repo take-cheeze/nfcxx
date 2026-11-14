@@ -815,7 +815,7 @@ check grep -qF 'mrb_gc_protect(mrb, box.value);' "$work/api_funcall/src/api_func
 # 2zzz. a registered method whose return type is VP_EXPORT VALUE, where #define VP_EXPORT static is storage: a registered method
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_storage_macro tools/cext2mrbgem/fixtures/api_storage_macro/ext/api_storage_macro "$work/api_storage_macro" > "$work/api_storage_macro.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'mrb_value vp_hello(mrb_state *mrb, mrb_value self)' "$work/api_storage_macro/src/api_storage_macro.c"
+check grep -qF 'static mrb_value vp_hello(mrb_state *mrb, mrb_value self) {' "$work/api_storage_macro/src/api_storage_macro.c"
 
 # 2zzz4. a macro whose body returns and calls a threaded helper, expanded in a registered method: the expansion passes the method's
 # mrb (no global state, no refusal); the output compiles against the fork's headers when NFCX_MRUBY_INCLUDE is set

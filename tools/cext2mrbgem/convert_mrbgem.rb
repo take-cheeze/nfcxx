@@ -2339,6 +2339,27 @@ use_problem = lambda do |name, use|
   end
 
   # returns [hdr, prologue, err]
+  # the storage class of a declaration: its keywords, and the storage a leading object-like macro expands to (VP_EXPORT is
+  # static): "static " or ""
+  def storage_of(d)
+    words = d['ret'].to_s.split
+    macro_storage = []
+    while !words.empty? && storage_macro_word(words.first)
+      macro_storage << storage_macro_word(words.shift)
+    end
+    st = d['storage'].to_s
+    st = "#{st.strip} " unless st.strip.empty?
+    st + (macro_storage.empty? ? '' : macro_storage.join(' ') + ' ')
+  end
+
+  def storage_macro_word(w)
+    @files.each_value do |f|
+      m = f['masked'].match(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(w)}[ \t]+((?:static|extern|inline))\b/)
+      return m[1] if m
+    end
+    nil
+  end
+
   def registered_header(d)
     regs = @regs.select { |r| r['error'].nil? && r['func'] == d['name'] }
     n = regs[0]['argc']
@@ -2358,7 +2379,7 @@ use_problem = lambda do |name, use|
                           " (found #{py_repr(py_strip(d['params']))})"]
       end
       argc_n, argv_n, self_n = p
-      hdr = "#{d['storage']}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{self_n})"
+      hdr = "#{storage_of(d)}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{self_n})"
       prologue = "\n  mrb_int nfcx_argc;\n  mrb_value *#{argv_n};\n  mrb_get_args(mrb, \"*\", &#{argv_n}, &nfcx_argc);" \
                  "\n  int #{argc_n} = (int)nfcx_argc;"
       return [hdr, prologue, nil]
@@ -2373,7 +2394,7 @@ use_problem = lambda do |name, use|
       return [nil, nil, "parameter #{py_repr(p)} is not a plain VALUE"] unless mm
       names << mm[1]
     end
-    hdr = "#{d['storage']}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{names[0]})"
+    hdr = "#{storage_of(d)}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{names[0]})"
     prologue = ''
     if yields
       # the block is the last argument of mrb_get_args: "&" takes it as a Proc value (nil when there is none)
