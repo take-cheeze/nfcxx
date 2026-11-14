@@ -2206,6 +2206,8 @@ use_problem = lambda do |name, use|
           ok = (@occ[name] || []).all? do |orel, os, _oe|
             inside = orel == rel && s <= os && os < e
             next true if inside
+            # a macro is local to its file: a same-named macro of another file is another definition, not a use
+            next true if orel != rel
             fn = enclosing_func(orel, os)
             if fn.nil?
               (accepted[orel] || []).any? { |a, z| a < os && os < z }
@@ -2254,6 +2256,8 @@ use_problem = lambda do |name, use|
     name, a, b, rel = macro
     (@occ[name] || []).all? do |orel, os, _oe|
       next true if rel == orel && a <= os && os < b
+      # a same-named macro of another file is another definition
+      next true if orel != rel
       # an expansion in an inactive definition (its #if is false in this build) is dead code
       next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
       fn = enclosing_func(orel, os)
