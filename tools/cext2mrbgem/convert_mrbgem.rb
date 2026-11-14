@@ -1709,6 +1709,8 @@ dtype_decls.each do |rel, _m, info|
     next if nm == 'NULL' || nm == '0' || !@defs.key?(nm)
     forced << nm
     @dtype_cb_pos << [rel, pos]
+    # the mark function is a mark-context name from the start: mark_context_names is memoized on its first use
+    (@dtype_mark_names ||= Set.new) << nm if nm == info['mark']
   end
 end
     # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions

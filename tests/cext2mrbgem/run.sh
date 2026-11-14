@@ -309,6 +309,10 @@ check grep -qF 'const mrb_data_type xf_type = { "Xf", xf_free, xf_mark };' "$wor
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kind_value tools/cext2mrbgem/fixtures/api_kind_value/ext/api_kind_value "$work/api_kind_value" > "$work/api_kind_value.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_is_kind_of(mrb, x, mrb_class_ptr(c))' "$work/api_kind_value/src/api_kind_value.c"
+# 2zzz35. a data type with a trailing comma in its braces (mark, free, NULL,): its mark function may call rb_gc_mark.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_mark_sw tools/cext2mrbgem/fixtures/api_mark_sw/ext/api_mark_sw "$work/api_mark_sw" > "$work/api_mark_sw.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_gc_mark_value(mrb, sw->stream);' "$work/api_mark_sw/src/api_mark_sw.c"
 
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
