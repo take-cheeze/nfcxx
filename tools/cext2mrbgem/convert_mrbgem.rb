@@ -2210,18 +2210,26 @@ use_problem = lambda do |name, use|
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
+    vfields = value_field_names
     @files.each_key do |rel|
       masked = @files[rel]['masked']
-      masked.to_enum(:scan, /(?<![#{WC}.>])([A-Za-z_]\w*)[ \t\n]*(==|!=)[ \t\n]*([A-Za-z_]\w*)(?![#{WC}(])/).each do
+      operand = '[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*'
+      masked.to_enum(:scan, /(?<![#{WC}.>])(#{operand})[ \t\n]*(==|!=)[ \t\n]*(#{operand})(?![#{WC}(])/).each do
         m = Regexp.last_match
         a, op, b = m[1], m[2], m[3]
         s0, e0 = m.begin(0), m.end(0)
         fn = enclosing_func(rel, s0)
         next if fn.nil?
         value_names = value_names_of(fn)
-        ok_a = value_names.include?(a) || qconst.match?(a)
-        ok_b = value_names.include?(b) || qconst.match?(b)
-        next unless ok_a && ok_b && (value_names.include?(a) || value_names.include?(b) || qconst.match?(a) || qconst.match?(b))
+        is_value = lambda do |x|
+          next true if qconst.match?(x)
+          next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
+          # a member path is VALUE when its last member is declared VALUE in every struct that declares that name
+          x.match?(/(?:->|\.)([A-Za-z_]\w*)\z/) && vfields.include?(x[/([A-Za-z_]\w*)\z/])
+        end
+        ok_a = is_value.call(a)
+        ok_b = is_value.call(b)
+        next unless ok_a && ok_b
         if !with_state.include?(fn['name'])
           refuse(rel, s0, op, 'VALUE comparison in a function without the mruby state (not supported)')
           next
@@ -2247,6 +2255,30 @@ use_problem = lambda do |name, use|
     end
     words.shift while !words.empty? && storage_macro.call(words.first)
     words.join(' ')
+  end
+
+  # the member names declared VALUE in every struct of the input that declares them (a name declared with another type
+  # anywhere is not VALUE: its comparison stays as it is)
+  def value_field_names
+    return @value_fields if @value_fields
+    value = Set.new
+    other = Set.new
+    @files.each_value do |f|
+      masked = f['masked']
+      masked.to_enum(:scan, /struct[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\{([^{}]*)\}/).each do
+        body = Regexp.last_match[1]
+        body.split(';').each do |decl|
+          m = /\A\s*((?:(?:const|volatile|unsigned|signed|static)\s+)*[A-Za-z_]\w*(?:\s*\*)?)\s*\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\z/.match(decl)
+          next unless m
+          if m[1].strip == 'VALUE' && !decl.include?('*')
+            value << m[2]
+          else
+            other << m[2]
+          end
+        end
+      end
+    end
+    @value_fields = value - other
   end
 
   # the names declared VALUE (not pointers) in a function: its parameters and its local declarations

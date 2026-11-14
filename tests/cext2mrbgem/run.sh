@@ -794,6 +794,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_eq tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_value_eq/NOT_BUILDABLE"
 check grep -qF 'mrb_obj_equal(mrb, a, b)' "$work/api_value_eq/src/api_value_eq.c"
+check grep -qF 'mrb_obj_equal(mrb, veq_state.v, w)' "$work/api_value_eq/src/api_value_eq.c"
 
 # 2zzy. a helper that returns a pointer (Real *) and needs the state: the header keeps the star (decl_scan's return type), and
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ret_pointer tools/cext2mrbgem/fixtures/api_ret_pointer/ext/api_ret_pointer "$work/api_ret_pointer" > "$work/api_ret_pointer.log" 2>&1 || rc=$?
