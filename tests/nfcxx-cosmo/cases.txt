@@ -87,9 +87,28 @@ NFCXX_COSMOCC=SB/outside/cosmocc --cosmo -c a.c
 NFCXX_COSMOCC=SB/outside/cosmocc --cosmo -fPIC -shared a.c b.o
 NFCXX_COSMOCC=SB/outside/notexec --cosmo a.c
 NFCXX_COSMOCC=SB/outside/missing --cosmo a.c
+# -fsanitize and -fno-sanitize: the bash refuses any value but address in its argument loop (status 2, no lines)
+--cosmo -fsanitize=undefined a.c
+--cosmo -fsanitize=address,undefined a.c
+--cosmo -fsanitize-recover=all a.c -o p
+--cosmo -fno-sanitize=undefined a.c
+# -fno-sanitize=all does nothing; -fno-sanitize=address takes the address check off again
+--cosmo -fno-sanitize=all a.c -o p
+--cosmo -fsanitize=address -fno-sanitize=address a.c -o p
+--cosmo -fsanitize=address -fno-sanitize=address a.c b.o
+--cosmo -fsanitize=address -c a.c b.o
+--cosmo -fsanitize=address -fPIC -shared a.c b.o
+# -m options: the host gcc probes them (the bash's two probe lines are sorted by run.sh), and the macros the probe adds go to the link
+--cosmo -m64 a.c
+--cosmo -m64 a.c -o p
+--cosmo -mavx2 -c a.c
+--cosmo -m64 -mavx2 a.c b.c -o p
+--cosmo -march=x86-64 a.c b.o
+--cosmo -mavx2 a.c b.o -o p
+--cosmo -m64 -c a.c b.c -o x.o
+--cosmo -mavx2 -E a.c
+NFCXX_PATH=b --cosmo -m64 a.c
 # unported
 a.c -o p
---cosmo -m64 a.c
 --cosmo -fsanitize=address a.c b.o
---cosmo -fsanitize=undefined a.c
 NFCXX_COSMOCC=/usr/bin/cc --cosmo a.c

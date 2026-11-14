@@ -16,7 +16,13 @@ case $name in
         -dumpfullversion) echo 13.3.0; exit 0 ;;
       esac
     done
-    log "RUN $name $*"; exit 0 ;;
+    log "RUN $name $*"
+    # the -dM probe prints predefined macros: one always, and two more with -mavx2 (the -m block's comm and sed read them)
+    case " $* " in
+      *" -dM "*) echo '#define __x86_64__ 1'
+                 case " $* " in *" -mavx2 "*) echo '#define __AVX2__ 1'; echo '#define __AVX__ 1' ;; esac ;;
+    esac
+    exit 0 ;;
   cosmocc)
     for a in "$@"; do
       case $a in

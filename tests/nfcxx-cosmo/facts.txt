@@ -6,3 +6,8 @@ root-file notexec
 host-exec SB/outside/cosmocc
 host-file SB/outside/notexec
 host-absent SB/outside/missing
+# the -dM probe of the -m block: the macros it adds for the -m options (the stub prints these; see stub.sh)
+isa-probe -m64 |
+isa-probe -march=x86-64 |
+isa-probe -mavx2 | -D__AVX2__=1 -D__AVX__=1
+isa-probe -m64 -mavx2 | -D__AVX2__=1 -D__AVX__=1

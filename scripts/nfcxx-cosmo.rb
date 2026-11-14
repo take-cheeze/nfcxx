@@ -24,22 +24,26 @@
 # (link options, as the bash's -* case gives them: the next word is then a source), -Wl,..., -O*, -g[N], -std=cN, -std=c++NN and
 # -std=gnu++NN (the -E line only), -W* (ignored), -w, -fwrapv, -fno-strict-aliasing, -fexceptions, -pipe, -pthread, -fPIE, -fpie,
 # -pie, -Wno-narrowing, -fvisibility=* (no effect on the C path), -fPIC, -fpic, -shared (implies -fPIC), -rdynamic,
-# -fsanitize=address with -fno-omit-frame-pointer and -fomit-frame-pointer, *.a and *.so (link inputs), *.o (link inputs),
+# -fsanitize=address with -fno-omit-frame-pointer and -fomit-frame-pointer, -fno-sanitize=address, -fno-sanitize=all (no
+# effect), -m options (the host gcc's -dM probes; the macros they add are the isa-probe facts), *.a and *.so (link inputs),
+# *.o (link inputs),
 # *.c inputs, and any other word that is not an option (a C++ source: the EDG path, see below).
 #
 # Refused, with the bash's status and message: no input files (status 2); the EDG path without EDG built (a C++ source, or an
 # object with no C source: status 2, "EDG not built"); the cosmo backend checks (--backend other than gcc or pathb, status 2);
 # cosmocc not installed (status 2); QBE not built for the Path B backend (status 2); -c with -o and more than one source
-# (status 2, after the compiles).
+# (status 2, after the compiles); any other -fsanitize= or -fno-sanitize= value, and -fsanitize-* (status 2, in the bash's
+# argument loop, so before any other step).
 #
-# Not covered (exit 3, "unported: ..." on stderr): an argument list without --cosmo; the EDG path when EDG is built (a C++
-# source, or an object with C sources: eccp's command lines are not modeled); the Path B C compile when QBE is built (scripts/
-# pathb-cc), -fsanitize=address with an object and no -c or -shared (the shim block builds the VLA runtime, scripts/asan-vla),
-# and the Path B cosmo link (ape.lds, fixupobj, apelink), which only runs after the EDG path; -m options (the bash
-# runs the host gcc probes concurrently, so their log order is not fixed); NFCXX_BACKEND; NFCXX_* variables other than
-# NFCXX_COSMOCC, NFCXX_GCC, NFCXX_SYS_INCLUDES, NFCXX_PATH and NFCXX_BACKEND; EDG_BUILD; a host other than Linux x86_64 (the bash adds
-# -D__AARCH64EL__ on aarch64); a NFCXX_COSMOCC path that is neither under ROOT nor named by a host fact (the port cannot see
-# other files); a relative NFCXX_COSMOCC; and the other options.
+# Not covered (exit 3, "unported: ..." on stderr): an argument list without --cosmo (the non-cosmo backend choice is another
+# printer's); the EDG path when EDG is built (a C++ source, or an object with C sources: eccp's command lines are not modeled);
+# the Path B C compile when QBE is built (scripts/pathb-cc); -fsanitize=address with an object and no -c or -shared (the shim
+# block runs scripts/asan-vla, which compiles the VLA runtime into build/asan when it is missing or stale: that build is not
+# modeled); the Path B cosmo link (ape.lds, fixupobj, apelink), which only runs after the EDG path; -m options with no
+# isa-probe fact; NFCXX_BACKEND; NFCXX_* variables other than NFCXX_COSMOCC, NFCXX_GCC, NFCXX_SYS_INCLUDES, NFCXX_PATH and
+# NFCXX_BACKEND; EDG_BUILD; a host other than Linux x86_64 (the bash adds -D__AARCH64EL__ on aarch64); a NFCXX_COSMOCC path that
+# is neither under ROOT nor named by a host fact (the port cannot see other files; the bash would run a host file such as
+# /usr/bin/cc itself, and the harness has no stub for that); a relative NFCXX_COSMOCC; and the other options.
 #
 # FILE holds the facts the bash reads from the machine (tests/nfcxx-cosmo/run.sh writes it):
 #   root-exec REL          ROOT/REL is an executable file (the cosmocc stand-in, or the EDG and QBE tools when present); an
@@ -49,6 +53,8 @@
 #   host-absent PATH       PATH does not exist
 #   uname-s NAME           uname -s of the host
 #   uname-m NAME           uname -m of the host
+#   isa-probe OPTS | DEFS  the -D words (DEFS, possibly none) that the host gcc's -dM probe adds to the link for the -m options
+#                          OPTS (every -m word, in order): the bash's comm and sed output, as -D words
 # Environment: NFCXX_COSMOCC (empty: the default), NFCXX_GCC, NFCXX_SYS_INCLUDES (both overwritten by the cosmo block),
 # NFCXX_PATH (b asks for Path B), NFCXX_BACKEND (the initial backend; a value other than pathb becomes gcc under --cosmo).
 #
@@ -84,6 +90,7 @@ class Facts
     @root_exec = []
     @host = {}
     @uname = {}
+    @isa = {}
     File.foreach(path) do |line|
       key, value = line.chomp.split(" ", 2)
       case key
@@ -92,6 +99,9 @@ class Facts
       when "host-file" then @host[value] = :file
       when "host-absent" then @host[value] = :absent
       when "uname-s", "uname-m" then @uname[key] = value
+      when "isa-probe"
+        opts, defs = value.match(/\A(.*) \|(.*)\z/).captures
+        @isa[opts] = defs.split
       end
     end
   end
@@ -107,6 +117,11 @@ class Facts
 
   def uname(key)
     @uname[key]
+  end
+
+  # the -D words the -dM probe adds for the -m options (all of them, in order), or nil when no fact says
+  def isa_defines(opts)
+    @isa[opts.join(" ")]
   end
 end
 
@@ -154,12 +169,18 @@ def parse(args, st)
       st[:rdynamic] = true
     elsif a == "-fsanitize=address"
       st[:asan] = true
+    elsif a == "-fno-sanitize=address"
+      st[:asan] = false
+    elsif a == "-fno-sanitize=all"
+      nil
+    elsif a.start_with?("-fsanitize=", "-fsanitize-", "-fno-sanitize=")
+      raise Failed, "nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)"
     elsif a == "-fno-omit-frame-pointer" || a == "-fomit-frame-pointer"
       st[:asanopts] << a
     elsif (m = a.match(/\A-std=(?:gnu\+\+|c\+\+)(.*)\z/m))
       st[:std] = "c++#{m[1]}"
     elsif a.match?(/\A-m/)
-      raise Unported, "#{a}: the bash runs the host gcc probes concurrently, so their log order is not fixed"
+      st[:isa] << a
     elsif a.match?(/\A-fvisibility=/) || NO_EFFECT.include?(a) || (a.start_with?("-W") && !a.start_with?("-Wl,"))
       nil
     elsif a.start_with?("-Wl,") || a.match?(/\A-l./) || a.match?(/\A-L./) || a == "-L" || a == "-l" ||
@@ -210,7 +231,7 @@ end
 def build(args, env, facts, lines)
   st = { cosmo: false, backend: nil, backend_explicit: false, out: "a.out", outset: false, compile_only: false,
          preprocess: false, std: "c++23", cfiles: [], srcs: [], objs: [], files: [], cflags: [], ppflags: [],
-         shared: false, pic: false, rdynamic: false, asan: false, asanopts: [] }
+         shared: false, pic: false, rdynamic: false, asan: false, asanopts: [], isa: [] }
   parse(args, st)
   raise Unported, "no --cosmo: the other backends are not this port" unless st[:cosmo]
 
@@ -262,6 +283,17 @@ def build(args, env, facts, lines)
   ldopts = []
   ldopts << "-shared" if st[:shared]
   ldopts << "-rdynamic" if st[:rdynamic]
+  # the -m block (after the backend, before the C compiles): two host probes, gcc -dM -E without and with the -m options
+  # (run concurrently by the bash, so their log lines are unordered; run.sh sorts them). Their -D words go to the link,
+  # after the other files, as the bash's files array takes them.
+  unless st[:isa].empty?
+    defs = facts.isa_defines(st[:isa])
+    raise Unported, "-m options #{st[:isa].join(" ")}: no isa-probe fact says which macros the host gcc probe adds" if defs.nil?
+
+    lines << "RUN gcc -dM -E -x c /dev/null"
+    lines << ["RUN", "gcc", *st[:isa], "-dM", "-E", "-x", "c", "/dev/null"].join(" ")
+    st[:files].concat(defs)
+  end
   cobjs = []
   st[:cfiles].each_with_index do |c, n|
     obj = "TMP/#{n}.o"

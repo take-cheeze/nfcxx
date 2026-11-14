@@ -17,8 +17,24 @@
 # the facts too) and the same arguments and environment. A case the port refuses (exit 3) is listed as unported with its
 # reason and not compared; every other case must print the same lines and exit status as the bash (stderr is not compared).
 #
+# The -m block's two host probes (gcc -dM -E -x c /dev/null, without and with the -m options) run concurrently in the bash, so
+# the order of their two log lines is not fixed. Both outputs sort each run of consecutive probe lines (sort_probes), and the
+# port prints them in a fixed order; the commands themselves must match.
+#
 #   bash tests/nfcxx-cosmo/run.sh [CASES]     CASES defaults to tests/nfcxx-cosmo/cases.txt
 set -u
+# sorts each run of consecutive -dM probe lines of the stub's log (or of the port's output): the probes' order is not fixed
+sort_probes() {
+  awk '
+    function flush(   i, j, t) {
+      for (i = 2; i <= n; i++) { t = buf[i]; for (j = i - 1; j >= 1 && buf[j] > t; j--) buf[j + 1] = buf[j]; buf[j + 1] = t }
+      for (i = 1; i <= n; i++) print buf[i]
+      n = 0
+    }
+    /^RUN gcc (-[^ ]+ )*-dM -E -x c \/dev\/null$/ { buf[++n] = $0; next }
+    { flush(); print }
+    END { flush() }'
+}
 here=$(cd "$(dirname "$0")" && pwd -P)
 repo=$(cd "$here/../.." && pwd -P)
 cases=${1:-$here/cases.txt}
@@ -64,7 +80,8 @@ while IFS= read -r line; do
       args+=("$t")
     fi
   done
-  port_out=$(env -i PATH="$PATH" ${penv[@]+"${penv[@]}"} ruby "$repo/scripts/nfcxx-cosmo.rb" --facts="$sb/facts" ${args[@]+"${args[@]}"} 2>"$sb/perr"); rc=$?
+  port_raw=$(env -i PATH="$PATH" ${penv[@]+"${penv[@]}"} ruby "$repo/scripts/nfcxx-cosmo.rb" --facts="$sb/facts" ${args[@]+"${args[@]}"} 2>"$sb/perr"); rc=$?
+  port_out=$(printf '%s\n' "$port_raw" | sort_probes)
   if [ $rc = 3 ]; then
     unp=$((unp + 1)); unported_list+="  $line
       $(head -1 "$sb/perr")
@@ -74,7 +91,7 @@ while IFS= read -r line; do
   : > "$sb/stublog"
   (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
      ${oenv[@]+"${oenv[@]}"} bash "$root/nfcxx" ${args[@]+"${args[@]}"} >/dev/null 2>"$sb/oerr"); orc=$?
-  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb/#SB/#g" "$sb/stublog"; echo "STATUS $orc")
+  oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb/#SB/#g" "$sb/stublog" | sort_probes; echo "STATUS $orc")
   if [ "$port_out" = "$oracle_out" ]; then
     pass=$((pass + 1))
   else
