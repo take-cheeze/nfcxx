@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # SQLite as a build product (scripts/setup-sqlite.sh) and lib/sqlcache on top of it: tests/sqlite/cache_test.cpp built with
 # nfcxx against build/sqlite/<backend>/libsqlite3.a, once per backend, and run.
-#   NFCXX_BACKEND=qbe|gcc   (default: both)
+#   NFCXX_BACKEND=pathb|qbe|gcc   (default: pathb and gcc)
 cd "$(dirname "$0")/../.."
 root=$PWD
-# QBE-ONLY: Path B does not build sqlite3.c yet: QBE rejects the module ("invalid type for first operand %v18 in add", the QBE
-# xadd issue of Path B stage 3), so the suite stays on qbe and gcc (NFCXX_BACKEND=pathb: "FAIL pathb: setup-sqlite").
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 unset NFCXX
 for be in $backends; do
@@ -14,7 +12,7 @@ for be in $backends; do
   [ -f "$lib" ] || { NFCXX_BACKEND=$be scripts/setup-sqlite.sh || { echo "FAIL $be: setup-sqlite"; fail=1; continue; }; }
   # Links the bundle the way a program does: -L for its directory, -lsqlite3 for the archive, with its MANIFEST checked.
   grep -q '^name: sqlite$' "build/sqlite/$be/MANIFEST" || { echo "FAIL $be: no MANIFEST in the bundle"; fail=1; continue; }
-  if ! out=$(NFCXX_BACKEND=$be ./nfcxx tests/sqlite/cache_test.cpp lib/sqlcache/sqlcache.cpp -Lbuild/sqlite/$be -lsqlite3 -o "$tmp/cache-$be" 2>&1); then
+  if ! out=$(NFCXX_BACKEND=$be ./nfcxx tests/sqlite/cache_test.cpp lib/sqlcache/sqlcache.cpp -Ibuild/sqlite/$be -Lbuild/sqlite/$be -lsqlite3 -o "$tmp/cache-$be" 2>&1); then
     echo "FAIL $be: compile"; head -10 <<<"$out"; fail=1; continue
   fi
   if got=$("$tmp/cache-$be" 2>&1); then

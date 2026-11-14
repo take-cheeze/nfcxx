@@ -174,17 +174,22 @@ Each is a refusal at compile or link time or a documented difference; none gives
   libstdc++ can call what Path B made, and Path B can call what they made. Two refusals remain, named in the IR:
   `(unsupported variadic function returning long double)` for the address of a variadic routine defined here (it has no
   C-convention entry), and `(unsupported call through a pointer to a variadic function returning long double)` (nothing can
-  follow `...` in the indirect call). A variadic routine defined elsewhere keeps its refusal at a direct call
-  (`call of a variadic function returning long double defined elsewhere`); its address is its C symbol.
+  follow `...` in the indirect call). A direct call of a variadic routine defined elsewhere goes through a thunk of the call's shape (next item); its
+  address is its C symbol.
   `tests/pathb-qbe/multi/ldr_ptr` (C calls Path B's pointers and the reverse) and `cases/ldr_ptr_ir.cpp`.
 - **Signatures the thunks cannot describe.** The thunks know integers, pointers, float, double, long double and structs
   larger than 16 bytes as parameters (`ir_x87_param`). A parameter that is a struct of at most 16 bytes (classified into
   registers by its members) makes a call of a long double function defined elsewhere an IR gap ("call of a function
   returning long double with a small aggregate argument") and a definition get no C-convention entry thunk, so only Path B
   code can call it.
-- **Variadic functions** returning long double: Path B can define and call them (result pointer first); one defined elsewhere
-  cannot be called (`call of a variadic function returning long double defined elsewhere`) and a Path B one has no
-  C-convention entry. Taking and passing long doubles through `...` is fully supported.
+- **Variadic functions** returning long double: Path B can define and call them (result pointer first); a Path B one has no
+  C-convention entry. One defined elsewhere (`g_sum(3, a, b, c)`, `tests/long-double-abi`) is called through
+  `(x87-thunk callv "F" INTS STACK SSE)`, which defines `__nfcxx_x87cv_F_I<INTS>S<STACK>V<SSE>(args..., dst)`: the "..."
+  arguments differ per call, so the thunk is made for the call's whole argument list (the same classification as the
+  other call thunks, `callvc` for `_Complex`), copies the stack arguments, sets `%al` to SSE, the number of vector
+  registers the arguments use, which a variadic callee reads, calls F and stores `st(0)`. The QBE call of the thunk is not
+  marked variadic. Taking and passing long doubles through `...` is fully supported (`va_arg` of a long double reads the
+  16-aligned overflow area). A call through a pointer to such a function is still refused.
 - **Structs of at most 16 bytes that contain a long double.** A struct (or class, nested) of 16 bytes whose only member is a
   long double is class X87: passed in memory, returned in `st(0)`. It is treated exactly as a long double (`ir_is_x87_agg`,
   `ir_x87_mem`): the `(byval (struct "__nfcxx_ld") ...)` argument, the trailing result pointer, the same thunks. gcc agrees on
@@ -211,3 +216,126 @@ Each is a refusal at compile or link time or a documented difference; none gives
   by 16 bytes per operation).
 - **Targets.** x86-64 only: the emitter checks that `(layout (long_double 16))` is the module's layout and refuses another
   size (`tests/mruby/pathb-edge/r_layout_ld.ir`); Hexagon's 8-byte `long double` and 32-bit layouts are not Path B targets.
+
+## 8. Linux aarch64
+
+On Linux aarch64 `long double` is IEEE binary128 (`__LDBL_MANT_DIG__` 113, 16 bytes, little endian), and the C convention is
+AAPCS64, not the System V one of sections 3 and 7. This section describes the AArch64 path. **It is opt-in**:
+`NFCXX_LONG_DOUBLE_ABI=aarch64` turns it on, and without it a program that needs the C convention is refused by name
+(`(unsupported long double calling convention on aarch64 ...)` in the IR, or the existing x86 form refusal) and the driver
+builds it with gcc, as before. The reason is in 8.6: EDG's long double model is the x86 one, so the opt-in path is not
+gcc-exact yet, and the default must not trade a fallback for silent differences.
+
+### 8.1 What is always on (no opt-in)
+
+- **The representation.** The layout is the target's (16 bytes, binary128 bits in memory). The helpers of `be/nfcxx_ldrt.c`
+  already use the full long double on this host (`NFCXX_LD_BYTES` 16), so arithmetic, comparisons and conversions are
+  gcc's.
+- **Constants.** EDG hands over a long double constant in its 80-bit x87 form (sign and exponent, a 64-bit significand with
+  the explicit integer bit). `ir_x87_bytes` converts it to binary128 on this target: the same sign and exponent, the integer
+  bit dropped, the 63-bit fraction shifted up by 49. Before this, the 80-bit bytes were stored as if they were binary128,
+  so `long double a[3] = {1.5L, ...}` read back as garbage on Path B (a silent wrong result for every program with a
+  long double constant, with or without a call).
+
+### 8.2 The classes
+
+A parameter or result is described by one class letter in the **C view** (AAPCS64): `i` integer, pointer, reference or an
+aggregate of more than 16 bytes (its address, the C caller copies it); `d` double; `f` float; `L` long double or a struct
+whose only member is one (one SIMD&FP quad, or 16 bytes of stack, 16-aligned); `C` `_Complex long double` (a homogeneous
+pair of quads: `q(n)`, `q(n+1)`; gcc passes `struct {long double; long double;}` the same way); `T` `__int128` (an even
+register pair); `S` an integer aggregate of 1 to 8 bytes and `U` one of 9 to 16 bytes, alignment at most 8 (one or two general
+registers, no even rule). Floating aggregates of at most 16 bytes (HFA-like), `_Float128`, and aggregates of alignment above
+8 are not described: a signature with one is refused.
+
+The **internal view** is what Path B passes to QBE on arm64, and it differs for the memory-class types: QBE passes a
+`(byval (struct "__nfcxx_ld"))` by address (`isdark` is the memory class, `typclass` in `3rd/qbe/arm64/abi.c`), so `L` and
+`C` are a pointer to a copy in one general register (or an 8-byte stack slot), written `P`. `T` and the small integer
+aggregates are general-register pairs as in the C view, but with QBE's rules: a pair starts at an even register only when
+its alignment is 16, and when the registers run out the whole object goes to the stack with `NGRN` set to 8. The result
+`L`/`C` is written through a trailing pointer, as on x86 (section 3); the other results are not moved (see 8.4).
+
+### 8.3 The thunks
+
+`scripts/pathb-a64-thunks.rb` generates them from the class strings. Every thunk saves x0 to x7 and q0 to q7 in its frame
+first, so each move reads only memory: the sources and destinations can overlap in registers without a hazard. Scratch
+registers are x9 (a pointer to a copy), x10/x11 (copies), x12/x13 (large offsets), and x16 (the callee of an indirect call).
+x8 and the result registers are not touched, so an indirect result (x8) and an integer, double or aggregate result (x0, x1,
+d0, v0) pass through unchanged.
+
+| form (IR) | symbol | what it does |
+| --- | --- | --- |
+| `(x87-thunk entry "F" LINK "CLASSES" R)` | `F` | C calls F: moves the C view to the internal view, calls `__nfcxx_ldr_F`, returns q0 (and q1) for `R` = `L`, `C` |
+| `(x87-thunk call "F" "CLASSES" R)` | `__nfcxx_x87c_F` | Path B calls F: internal view in, C view out, stores q0/q1 at the trailing pointer |
+| `(x87-thunk callv "F" "CLASSES" R)` | `__nfcxx_x87cv_F_A<CLASSES>R<R>` | one variadic call shape: the arguments of that call (AAPCS64 on Linux gives variadic arguments the named registers) |
+| `(x87-thunk icall "A<CLASSES>R<R>" "CLASSES" R)` | `__nfcxx_x87i_A<CLASSES>R<R>` | a call through a C function pointer: the callee is the register after the parameters and the result pointer, in x16 for the `blr` |
+
+A routine with an `L` or `C` parameter or result is **thunked**: `ir_a64_rout` (be/nfcxx_ir.c) is true for it, its
+definition is `__nfcxx_ldr_F` with the trailing pointer for an `L`/`C` result, its C symbol is the entry thunk, and a call
+from Path B goes through `__nfcxx_x87c_F` (or `__nfcxx_x87i_` through a pointer, or the `callv` of its shape). A routine
+without one keeps its own name and convention (its ordinary calls are already AAPCS64 with QBE's internal view for the
+scalars, aggregates and results it has).
+
+### 8.4 Results and variadic calls
+
+- A result other than `L`/`C` is left where the callee put it: the thunks do not touch the result registers, so a
+  `to_chars_result` of two words (x0, x1) or an aggregate through x8 works without a class for it.
+- A variadic callee defined elsewhere with a `long double` argument or result (`printf("%Lf", x)`) is called through its
+  `callv` thunk, which carries the classes of that call's arguments (`ir_a64_vthunk`).
+- A variadic function **defined here** has no C-convention entry on this target, so a call of it that passes or returns a
+  `long double` through `...` is refused by name (`call of a variadic function defined here with a long double argument`,
+  or `... that returns long double`). The x86 path has no such refusal: its variadic results go through a leading pointer.
+
+### 8.5 The pruner and the IR optimizer
+
+An x87 thunk names the function it reaches (`F`, `__nfcxx_ldr_F`, `__nfcxx_x87c_F`, `__nfcxx_x87cv_F_A...`), and once the
+calls to a small function are inlined nothing else names it. `prune_pass` (`scripts/pathb-ir-opt.rb`) therefore follows
+these names, so the function a thunk calls survives. This is not AArch64-specific: on x86 it changes only a module that
+would otherwise link with an undefined symbol.
+
+### 8.6 Why it is opt-in: EDG's long double model
+
+EDG is configured with the x86 target model (`linux-gcc-release` for the `nfcxx-pathb` build), so its predefined
+long double macros (`__LDBL_MANT_DIG__` etc.) are the x86 values, and its constant folding keeps long double values with a
+64-bit significand. Measured on aarch64 (the same program through Path B and through gcc):
+
+- `0.1L` prints `0x1.999999999999999ap-4` through Path B and `0x1.999999999999999999999999999ap-4` through gcc;
+- `std::numeric_limits<long double>::epsilon()` is `1.0842021724855044340e-19` (the x87 value; the aarch64 one is
+  `2^-112`), so `tests/pathb-qbe/cases/longdouble_cmath.cpp` passes its EXPECT on Path B and fails 2 checks on gcc;
+- `longdouble_ops`, `longdouble_mem` and `longdouble_random` differ from gcc in the low bits of their literals.
+
+Runtime arithmetic on values that are exact (`one / 3.0L` with `3.0L` exact) matches gcc bit for bit. The fix is in EDG's
+target model (`3rd/edg`, not changed here): the binary128 macros and a binary128 constant folder for `linux-aarch64`.
+Until then the opt-in is for checking the convention, not for claiming gcc-exact output.
+
+### 8.7 Verified on Linux aarch64 (Ubuntu 24.04 in an Apple `container` VM)
+
+Each result was produced by the driver or the test binary in the VM with the opt-in set (`NFCXX_LONG_DOUBLE_ABI=aarch64`), with Path B forced (`NFCXX_PATH=b`, which makes a
+Path B failure an error instead of a gcc fallback) and the C side compiled by gcc (`NFCXX_PATHB_C=gcc`):
+
+- `tests/pathb-qbe/multi/abi_ld` (`a.cpp` by Path B, `c.c` by gcc, both directions: long double with double, float and
+  integer arguments, long double arguments past the six integer registers, `_Complex long double` arguments and results,
+  and `std::complex<long double>` `*` through EDG's runtime): exit 0, 0 failed checks, with
+  `NFCXX_LONG_DOUBLE_ABI=aarch64`. Without it: refused by name, gcc builds it.
+- a minimal Path B/gcc pair with `long double`, `double`, `float`, `int` and pointer arguments and results, a `_Complex`
+  argument and result, and `printf` of a long double: the values reach gcc's callee and come back unchanged.
+- `tests/pathb-qbe/cases/x87_struct.cpp`: output identical to the gcc backend.
+- `tests/pathb-qbe/cases/longdouble_cmath.cpp`: builds and runs (its values differ from gcc, see 8.6).
+- `tests/pathb-qbe/cases/longdouble_call.cpp`: refused by name (a variadic function defined here returns `long double`),
+  so the driver builds it with gcc.
+- `tests/pathb-qbe/cases/longdouble_io.cpp`: refused by name with the opt-in (a variadic function defined here, the
+  `__to_xstring` instance, is called with a `long double` through `...`), and by the gate without it. Its `_Float128`
+  builtins (`nanf128`, `huge_valf128`) are refused on every target by the existing `_Float128` gap, not by this change.
+- `tests/pathb-qbe/cases/longdouble_complex.cpp`: builds and runs (its EXPECT is checked; the gcc backend cannot build it).
+
+The QBE translation-validation harness `tests/pathb-qbe/run.sh` (`scripts/pathb-qbe-emit.rb`, the mruby emitter) does not
+know the AArch64 forms and refuses them (`expected an integer`); it is not used by the driver's SSA route.
+
+### 8.8 Not done
+
+- EDG's binary128 model (8.6): the largest remaining difference.
+- Variadic functions defined here with a long double return or a named long double parameter: refused at their calls.
+  A C caller of such a function is not checked, since the definition is not refused by itself.
+- Floating aggregates of at most 16 bytes, `_Float128` parameters and results, aggregates of alignment above 8 in a
+  thunked signature: refused by name.
+- The `tests/pathb-qbe/run.sh` route (the mruby emitter) and the WebAssembly and CIL emitters: they do not read the AArch64
+  forms.

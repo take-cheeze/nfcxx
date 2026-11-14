@@ -97,21 +97,6 @@ module BaseRbs
     out
   end
 
-  # Attribute readers whose stored value the program always sets to one class (mruby-rgss/mrblib/lib.rb).
-  ATTR_RETURNS = {
-    ['RGSS::Plane', 'ox'] => 'Integer', ['RGSS::Plane', 'oy'] => 'Integer',
-    ['RGSS::Tilemap', 'ox'] => 'Integer', ['RGSS::Tilemap', 'oy'] => 'Integer',
-    ['RGSS::Window', 'ox'] => 'Integer', ['RGSS::Window', 'oy'] => 'Integer',
-    ['RGSS::Window', 'contents'] => 'RGSS::Bitmap'
-  }.freeze
-
-  # Signatures written by hand where the source's own return depends on an argument. IO.open without a block is
-  # `self.new(*args)` (mruby-io's io.rb), an IO; with a block it returns the block's value (io.rb: `return io unless
-  # block`), so the two forms are separate overloads.
-  SIGNATURE_OVERRIDES = {
-    ['IO', 'open'] => 'def self.open: (*untyped) -> IO | (*untyped) { (IO | File) -> untyped } -> untyped'
-  }.freeze
-
   def method_line(name, shape, singleton: false)
     positional = []
     shape.each do |kind, _|
@@ -149,13 +134,11 @@ module BaseRbs
              end
       body = []
       d.accessors.each do |attr, kind|
-        body << "def #{attr}: () -> #{ATTR_RETURNS.fetch([d.name, attr], 'untyped')}" if %w[attr_reader attr_accessor].include?(kind)
+        body << "def #{attr}: () -> untyped" if %w[attr_reader attr_accessor].include?(kind)
         body << "def #{attr}=: (untyped) -> untyped" if %w[attr_writer attr_accessor].include?(kind)
       end
       d.methods.uniq { |m, _| m }.sort_by { |m, _| m }.each { |m, shape| body << method_line(m, shape) }
-      d.singletons.uniq { |m, _| m }.sort_by { |m, _| m }.each do |m, shape|
-        body << SIGNATURE_OVERRIDES.fetch([d.name, m]) { method_line(m, shape, singleton: true) }
-      end
+      d.singletons.uniq { |m, _| m }.sort_by { |m, _| m }.each { |m, shape| body << method_line(m, shape, singleton: true) }
       body = body.select { |line| valid_member?(line) }
       "#{head}\n#{body.map { |l| "  #{l}\n" }.join}end\n"
     end

@@ -1,0 +1,35 @@
+// The megakernel of arXiv:2611.04447, section 4.2: two threads take tickets from an atomic counter and write
+// x = 1 (ticket 0) or y = 2 (ticket 1). Every schedule must end with (x, y, counter) = (1, 2, 2).
+.version 8.0
+.target sm_75
+.address_size 64
+
+.visible .entry megakernel(
+  .param .u64 counter_param,
+  .param .u64 x_param,
+  .param .u64 y_param
+)
+{
+  .reg .b32 %r<3>;
+  .reg .b64 %rd<3>;
+  .reg .pred %p<2>;
+
+  ld.param.u64 %rd0, [counter_param];
+  ld.param.u64 %rd1, [x_param];
+  ld.param.u64 %rd2, [y_param];
+  atom.global.relaxed.gpu.add.u32 %r0, [%rd0], 1;
+  setp.eq.u32 %p0, %r0, 0;
+  @%p0 bra ITEM_A;
+  setp.eq.u32 %p1, %r0, 1;
+  @%p1 bra ITEM_B;
+  bra DONE;
+ITEM_A:
+  mov.u32 %r1, 1;
+  st.global.u32 [%rd1], %r1;
+  bra DONE;
+ITEM_B:
+  mov.u32 %r2, 2;
+  st.global.u32 [%rd2], %r2;
+DONE:
+  ret;
+}

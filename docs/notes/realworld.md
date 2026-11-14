@@ -350,7 +350,7 @@ concatenated in load order with `shims.rb` and `runner_tail.rb`).
 
 Patches used: `tests/realworld/optcarrot/mruby-module-function-scope.patch` (bare `module_function`, a no-op in mruby 4.0.0),
 `tests/realworld/optcarrot/mruby-onig-regexp-no-chdir.patch` (the gem's `Dir.chdir` blocks clash under `rake -j`), and
-`scripts/cproc-unprototyped-fnptr.patch`, applied to cproc by `scripts/setup-qbe.sh`: cproc rejected assigning a prototyped
+cproc (its patch `scripts/cproc-unprototyped-fnptr.patch` is removed: the fix is a commit of the cproc fork, not applied here any more) rejected assigning a prototyped
 function to an unprototyped function pointer, `int (*compare)()`, which C 6.7.6.3p15 allows and which Onigmo's
 `st_hash_type` uses. Of rpg-maker-clone's other mruby patches (`patches/`) only these are needed; the rest are for bc2cpp
 output, the PSP build or bugs optcarrot does not hit.

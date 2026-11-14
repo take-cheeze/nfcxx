@@ -991,9 +991,10 @@ class CodeGen
     # The element is used after the by-name call on it, so it is rooted for the whole call (ELEMENT_READ_ROOTS).
     out << "      bc2cpp_keep(M, bc2cpp_sym_e_#{region[:sym_addr]});\n"
     if meth == 'each'
-      out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
+      out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}", irep.nregs)}\n"
     else
-      out << "      #{sym_call_value(sym, "bc2cpp_sym_e_#{region[:sym_addr]}", "bc2cpp_sym_r_#{region[:sym_addr]}")}\n"
+      out << "      #{sym_call_value(sym, "bc2cpp_sym_e_#{region[:sym_addr]}", "bc2cpp_sym_r_#{region[:sym_addr]}",
+                                    irep.nregs)}\n"
       case meth
       when 'map'
         out << "      mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_r_#{region[:sym_addr]});\n"
@@ -1043,16 +1044,18 @@ class CodeGen
   # two helpers.
   # Sound: the mrb_funcall fallback is exactly Symbol#to_proc (no closure to
   # lose); MONO needs no guard (one def); each POLY branch guards exact class.
-  def sym_call_value(sym, elem_expr, result_var)
+  def sym_call_value(sym, elem_expr, result_var, tmp_reg)
     kind, target = sym_call_target(sym) || [nil, nil]
-    fallback = sym_call_fallback(sym, elem_expr)
-    return "mrb_value #{result_var} = #{fallback};" unless kind
-
     if kind == :mono
       impl = cpp_name(target.owner, target.name) + '_impl'
       return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
              "      mrb_value #{result_var} = #{impl}(M, #{elem_expr});"
     end
+    chain = sym_call_chain(sym, elem_expr, tmp_reg)
+    return "mrb_value #{result_var};\n      #{chain}      #{result_var} = r#{tmp_reg};\n      }" if chain
+
+    fallback = sym_call_fallback(sym, elem_expr)
+    return "mrb_value #{result_var} = #{fallback};" unless kind
 
     out = String.new
     out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"
@@ -1068,6 +1071,27 @@ class CodeGen
     out
   end
 
+  # SYM_CALL_CHAIN: the per-element call as an ordinary send of `sym` to a receiver of unknown class
+  # (compile_poly_dispatch: POLY_SMALL_N / POLY_TABLE and their closed-world else). Symbol#to_proc sends with
+  # __send__ semantics (symbol.c sym_proc_call), so the site is not an explicit-receiver one: private arms join and
+  # the else's owner call is level 0, as in sym_call_fallback. Returns the opening of a scope holding the result in
+  # `r<tmp_reg>` (the caller closes it), or nil. Each line is indented past the loop's closing brace, which
+  # covered_block_sites reads as the end of the loop body.
+  def sym_call_chain(sym, elem_expr, tmp_reg)
+    return nil if ENV['BC2CPP_SYM_CALL_CHAIN'] == '0' || @call_block_expr
+
+    saved = @explicit_visibility_site
+    @explicit_visibility_site = nil
+    site = closed_world_site(elem_expr, nil, nil, nil)
+    code = compile_poly_dispatch(sym, tmp_reg, elem_expr, [], 0, closed_world_site: site)
+    return nil unless code
+
+    body = code.each_line.map { |line| line.strip.empty? ? line : "        #{line}" }.join
+    "// SYM_CALL_CHAIN &:#{sym}\n      {\n        mrb_value r#{tmp_reg} = mrb_nil_value();\n#{body}"
+  ensure
+    @explicit_visibility_site = saved
+  end
+
   # The per-element call for an element no arm takes: Symbol#to_proc's own send (no visibility check), or, when the
   # closed world names every class answering `sym` (NAME_OWNER_SET), the owner call over them at check level 0.
   def sym_call_fallback(sym, elem_expr)
@@ -1079,16 +1103,18 @@ class CodeGen
       "/* CLOSED_WORLD owner-call: #{sym} */"
   end
 
-  def sym_call_line(sym, elem_expr)
+  def sym_call_line(sym, elem_expr, tmp_reg)
     kind, target = sym_call_target(sym) || [nil, nil]
-    fallback = "#{sym_call_fallback(sym, elem_expr)};"
-    return fallback unless kind
-
     if kind == :mono
       impl = cpp_name(target.owner, target.name) + '_impl'
       return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no by-name send)\n" \
              "      #{impl}(M, #{elem_expr});"
     end
+    chain = sym_call_chain(sym, elem_expr, tmp_reg)
+    return "#{chain}      }" if chain
+
+    fallback = "#{sym_call_fallback(sym, elem_expr)};"
+    return fallback unless kind
 
     out = String.new
     out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, by-name send fallback\n"

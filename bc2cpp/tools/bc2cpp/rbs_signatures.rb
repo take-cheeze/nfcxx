@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'set'
+require 'shellwords'
 require_relative 'annotations'
 require_relative 'bytecode_ir_ops'
 require_relative 'core_fact_sigs'
@@ -46,7 +47,7 @@ module RbsSignatures
   # kind: :int :sym :array :hash :class :other ; cls: class name (:class), element: class name for Array[C]/Hash[K, C]
   # optional: for `T?`, T's own Type; the `T?` Type itself stays kind :other.
   Type = Struct.new(:kind, :cls, :element, :text, :value_classes, :self_return, :element_classes, :optional,
-                    keyword_init: true)
+                    :value, keyword_init: true)
   Loaded = Struct.new(:methods, :ivars, :diagnostics, :files, :supers, keyword_init: true)
   # SUBTREE_DISPATCH: a `class C < S` declaration, checked against the program's own superclass.
   SuperDecl = Struct.new(:name, :super_name, :scope, :loc, keyword_init: true)
@@ -90,7 +91,9 @@ module RbsSignatures
     value = ENV['BC2CPP_BUILD_GEMS']
     return false if value.nil? || value.strip.empty?
 
-    gems = value.split(/\s+/).map { |kv| kv.split('=', 2).first }
+    # The gem list is written with shell escapes (Shellwords.join escapes the `=`), so split it the way bc2cpp.rb's
+    # build_gems parse does; a plain split leaves `mruby-rpg2k\` and reads the game as absent.
+    gems = Shellwords.split(value).map { |kv| kv.split('=', 2).first }
     !gems.include?('mruby-rpg2k')
   end
 
@@ -273,8 +276,8 @@ module RbsSignatures
       name = t.name.to_s.delete_prefix('::')
       args = t.args
       case name
-      when 'Integer' then args.empty? ? Type.new(kind: :int, text: text) : Type.new(kind: :other, text: text)
-      when 'Symbol' then Type.new(kind: :sym, text: text)
+      when 'Integer' then args.empty? ? Type.new(kind: :int, text: text, value: :integer) : Type.new(kind: :other, text: text)
+      when 'Symbol' then Type.new(kind: :sym, text: text, value: :symbol)
       when 'Array'
         elem = args.size == 1 ? class_name_of(args.first) : nil
         Type.new(kind: :array, element: elem, text: text)
@@ -282,9 +285,12 @@ module RbsSignatures
         elem = args.size == 2 ? class_name_of(args.last) : nil
         Type.new(kind: :hash, element: elem, text: text)
       else
-        args.empty? ? Type.new(kind: :class, cls: name, text: text) : Type.new(kind: :other, text: text)
+        # VALUE_KIND: `Float` is a core class with no program hint; `value` carries it to the parameter guard and seed.
+        args.empty? ? Type.new(kind: :class, cls: name, text: text, value: (name == 'Float' ? :float : nil)) : Type.new(kind: :other, text: text)
       end
     else
+      # `bool` stays an unchecked, hint-free type: callers rely on truthiness (an implicit conversion), so a declared
+      # `bool` is neither guarded nor trusted by the seed.
       Type.new(kind: :other, text: text)
     end
   end

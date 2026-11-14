@@ -56,3 +56,4 @@ int main() {
 
     return fails;
 }
+// MACOS-XFAIL-pathb: Path B's volatile helpers call __atomic_*_fetch_N, which the Linux link gets from libatomic; the macOS toolchain has no libatomic, so the link fails (___atomic_add_fetch_4)

@@ -8,10 +8,14 @@
 //
 // Buffers (all float, the caller owns them):
 //   A   M x K, row-major        B   K x N, row-major
-//   C   the GEMM result, in the layout the model gives it: row-major M x N for VecN (lanes on N),
-//       column-major (C[n*M + m]) for VecM (lanes on M)
+//   C   the GEMM result, in the layout the model gives it: row-major M x N for VecN (lanes on N).
+//       For VecM (lanes on M) it depends on the storage:
+//         Strided  (default): column-major, C[n*M + m]
+//         Blocked8:           8-row blocks, each N x 8 with the rows inside a block contiguous:
+//                             C[(m - m%8)*N + n*8 + m%8]
 //   R   M, the row sums of C
-//   At  M x K scratch: VecM reads A transposed (the repair the model charges), so the kernel writes it first
+//   At  M x K scratch: VecM reads A transposed (the repair the model charges), so the kernel writes it first.
+//       Strided: At[k*M + m]. Blocked8: 8-row blocks, At[(m - m%8)*K + k*8 + m%8].
 //
 // Shapes: VecN needs N % 8 == 0, VecM needs M % 8 == 0 (the lanes are full ymm vectors). The row sum is the same
 // computation as the model's: VecN adds the N/8 vectors of a row, then one horizontal sum; VecM adds the N columns
@@ -23,11 +27,36 @@
 #include <cstdint>
 #include <string>
 
+#include "nfcuop_layout.hpp"
+
 namespace nfcuop::layout {
 
 enum class GemmVariant : uint8_t { VecN, VecM };
 
+// Storage (nfcuop_layout.hpp) of VecM's lanes-on-M data: A transposed and the result C. Blocked8 is the layout that the
+// experiments in docs/notes/uop-layout.md found to remove the M-vectorized penalty; VecN ignores it.
+
 // The C source of nfc_gemm_rowsum for the given shape. Throws std::invalid_argument when the shape does not fit the variant.
-std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose = true);
+std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose = true,
+                               Storage storage = Storage::Strided);
+
+// The register-blocked VecN kernel: a 4-row by 16-column tile with B packed into contiguous 16-column panels, so the
+// inner loop reads B with unit stride. C is row-major M x N and R the row sums, as for VecN. The kernel signature is
+//   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp);
+// where Bp is scratch of K * N floats (the packed B). mr is the row tile, 4 or 6: requires M % mr == 0, N % 16 == 0.
+// The packing is the layout repair of the model: the cost of the packing pass is M-independent and O(K*N).
+std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr = 4);
+// The same kernel with the row tiles split across threads (pthreads; compile with -pthread). The signature is
+//   void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp, int nthreads);
+// B is packed once, then each thread runs the tile loop over its own rows. nthreads is clamped to [1, min(64, tiles)].
+std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr = 6);
+
+// The kernel a solver plan describes: the chosen GEMM variant and rowsum variant, and the storages the plan holds. Maps
+//   avx2-vec-n + reduce-horizontal         -> emit_gemm_rowsum_c(VecN)
+//   avx2-vec-m + reduce-vertical           -> emit_gemm_rowsum_c(VecM, storage of C; A must match)
+//   avx2-packed-n + reduce-horizontal      -> emit_gemm_rowsum_packed_mt_c (B must be Panel)
+// and throws std::invalid_argument for any other plan (no emitter for that combination, or storages the emitter cannot
+// mix). The shape must be one the plan was solved for.
+std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K);
 
 }  // namespace nfcuop::layout

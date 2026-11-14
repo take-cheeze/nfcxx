@@ -1,0 +1,70 @@
+# One argument list per line (words separated by spaces; no quoting). The bash is nfcxx with these arguments and the
+# facts of facts.txt; the port is scripts/nfcxx-gcc-plan.rb. Lines starting with # are skipped.
+# compile and link
+--backend=gcc a.cc -o prog
+--backend=gcc a.cc b.cc -o prog
+--backend=gcc a.cc
+--backend=gcc a.cc x.o -o prog
+--backend=gcc x.o y.o -o prog
+--backend=gcc --dialect=clang a.cc -o prog
+--backend=gcc -isystem inc a.cc -o prog
+--backend=gcc -include pre.h a.cc -o prog
+--backend=gcc -Dfoo=1 -Iinc a.cc -o prog
+--backend=gcc -O3 -std=gnu++20 a.cc -o prog
+--backend=gcc -std=c++17 -O0 a.cc -o prog
+--backend=gcc -std=c++11 a.cc b.cc -o prog
+-x c++ --backend=gcc a.cc -o prog
+# -c, -S, -E
+--backend=gcc -c a.cc -o a.o
+--backend=gcc -c a.cc
+--backend=gcc -c -o out.o a.cc b.cc
+--backend=gcc -c -MD -MF deps.d -MT tgt a.cc -o a.o
+--backend=gcc -S a.cc -o a.s
+a.cc -E
+-E -x c++ -P a.cc -o pp.ii
+# C inputs
+--backend=gcc c.c -o prog
+--backend=gcc c.c d.c -o prog
+--backend=gcc c.c a.cc -o prog
+--backend=gcc -c c.c
+--backend=gcc -c c.c -o out.o
+# shared, PIC, pthread, rdynamic, pie
+-shared a.cc -o libx.so
+--backend=gcc -shared -fPIC a.cc -o libx.so
+--backend=gcc -fPIC -c a.cc -o a.o
+--backend=gcc -pthread a.cc -o prog
+--backend=gcc -rdynamic a.cc -o prog
+--backend=gcc -fPIE -pie a.cc -o prog
+# link options
+--backend=gcc a.cc -Llibs -lq -o prog
+--backend=gcc a.cc -Wl,-rpath,/opt/x -o prog
+--backend=gcc a.cc -Wl,--no-as-needed -lq -Wl,--as-needed -o prog
+--backend=gcc a.cc -Wl,--whole-archive libq.a -Wl,--no-whole-archive -o prog
+--backend=gcc a.cc -Wno-narrowing -o prog
+# ISA, asan, ld, eh, instantiate
+--backend=gcc -mavx2 a.cc -o prog
+--backend=gcc -mavx2 -fPIC a.cc -o prog
+--backend=gcc -fsanitize=address a.cc -o prog
+--backend=gcc -fsanitize=address -fno-omit-frame-pointer c.c -o prog
+--backend=gcc -fuse-ld=mold a.cc -o prog
+--backend=gcc -fuse-ld=mold a.cc -o prog
+--backend=gcc -fuse-ld=nosuchld a.cc -o prog
+--backend=gcc --eh-unwind a.cc -o prog
+--backend=gcc --no-eh-shim a.cc -o prog
+--backend=gcc --instantiate=auto a.cc -o prog
+# dependency files
+--backend=gcc -MD a.cc
+# errors and refusals
+--backend=gcc -fsanitize=thread a.cc -o prog
+--backend=gcc -o prog
+--backend=gcc -x c a.cc
+--backend=gcc -I
+--backend=bogus a.cc
+a.cc -o prog
+--backend=pathb a.cc -o prog
+--backend=gcc --cosmo a.cc -o prog
+--backend=gcc --cache=cachedir a.cc -o prog
+--backend=gcc mod.cc -o prog
+--backend=gcc --freestanding a.cc -o prog
+--backend=gcc -lcuda a.cc -o prog
+--backend=gcc -fsyntax-only a.cc

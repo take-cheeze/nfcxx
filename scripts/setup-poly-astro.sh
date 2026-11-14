@@ -6,16 +6,16 @@
 #                      -ldl -lm -lpthread after the library
 # The evaluator is generated from node.def by ASTroGen (Ruby), the same way tests/realworld/run_astro.sh does it, with the same two
 # patches, applied to a copy (the clone stays at the pin): Ruby 3.4's implicit `it` becomes `_1` (the host may have Ruby 3.3), and the
-# `;;` that ASTroGen writes between allocator declarations (not ISO C; cproc rejects it) becomes a newline. docs/notes/astro.md.
-#   NFCXX_BACKEND=qbe|gcc   back end of the C compiler (default qbe); one build tree per back end
+# `;;` that ASTroGen writes between allocator declarations (not ISO C) becomes a newline. docs/notes/astro.md.
+#   NFCXX_BACKEND=pathb|gcc   back end of the C compiler (default pathb); one build tree per back end
 #   FORCE=1                 rebuild even if the library is newer than this script and the shim
 # Exit status: 0 built (or up to date); 3 cannot be built here (no ruby, ko1/astro cannot be fetched): tests/poly/run.sh reports a
-# SKIP; 1 the build failed. Needs EDG's nfcc toolchain (scripts/setup-qbe.sh for the qbe back end).
+# SKIP; 1 the build failed. Needs EDG's nfcc toolchain (scripts/setup-pathb.sh for the pathb back end).
 self=$(realpath "$0")
 cd "$(dirname "$0")/.."
 root=$PWD; work=$root/build/poly-astro
-be=${NFCXX_BACKEND:-qbe}
-case $be in qbe|gcc) ;; *) echo "setup-poly-astro: NFCXX_BACKEND must be qbe or gcc, not '$be'" >&2; exit 1 ;; esac
+be=${NFCXX_BACKEND:-pathb}
+case $be in gcc|pathb) ;; *) echo "setup-poly-astro: NFCXX_BACKEND must be pathb or gcc, not '$be'" >&2; exit 1 ;; esac
 pin=68f15d81b8cc378053c78c2a087b691851bdc2ac   # ko1/astro main, same pin as tests/realworld/run_astro.sh
 src=$work/src; out=$work/out-$be; dest=$work/$be
 skip() { echo "setup-poly-astro: $*" >&2; exit 3; }

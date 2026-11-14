@@ -54,11 +54,13 @@ cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"
 # 1b. SYCL kernel attributes: [[sycl::reqd_sub_group_size(N)]] is a known attribute (namespace sycl, one integral
 # constant argument, evaluated in the template instance), so the back end can read N (be/nfcxx_ir.c: ir_kernel_attrs).
 # ggml-sycl's flash-attention tile kernels need 32-lane sub-groups; without the entry EDG drops the attribute.
+# Likewise gcc's __attribute__((uninitialized)), the opt-out of -ftrivial-auto-var-init (be/nfcxx_ir.c: ir_decl_zero).
 rm -f "$tree/src/attribute.c"   # a symlink into the EDG checkout: the patched table must be a file of its own
 sed -e 's/^  "_Clang",$/  "_Clang",\n  "sycl",/' \
     -e 's/^  { "carries_dependency", "", "c+", ak_carries_dependency },$/&\n  { "reqd_sub_group_size", "(ci)", "c+[sycl]", ak_unrecognized },/' \
+    -e 's/^  { "unused", "", "gx", ak_unused },$/&\n  { "uninitialized", "", "gx", ak_unrecognized },/' \
   "$src/src/attribute.c" > "$tree/src/attribute.c"
-grep -q '"reqd_sub_group_size", "(ci)"' "$tree/src/attribute.c" && grep -q '^  "sycl",$' "$tree/src/attribute.c" ||
+grep -q '"reqd_sub_group_size", "(ci)"' "$tree/src/attribute.c" && grep -q '"uninitialized", ""' "$tree/src/attribute.c" && grep -q '^  "sycl",$' "$tree/src/attribute.c" ||
   { echo "setup-pathb: attribute table patch failed" >&2; exit 1; }
 
 # 2. Macro config. Same lowering options as linux-gcc-release, but the C back end (and its C++ sibling) off.
@@ -200,6 +202,14 @@ else
     -DEDG_MACRO_CONF=nfcxx-pathb -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ >"$out/configure.log" 2>&1 \
     || { tail -30 "$out/configure.log" >&2; exit 1; }
   target=bin/cpfe
+fi
+# glibc's aarch64 jmp_buf is 312 bytes (39 longs); the front end's cmake defines carry the x86-64 size (25 longs) for every
+# Linux target, so setjmp in the EH code it generates writes past the EH stack entry and throws abort (the same patch
+# as scripts/setup-edg.sh for the eccp build). Native Linux builds on aarch64 hosts only (macOS is unchanged).
+if [ "$emscripten" != 1 ] && [ "$(uname -s)" = Linux ]; then
+  case "$(uname -m)" in
+    aarch64|arm64) sed -i.bak 's/^#define TARG_JMP_BUF_NUM_ELEMENTS 25$/#define TARG_JMP_BUF_NUM_ELEMENTS 39/' "$out/cmake/src/includes/cmake_defines.h" && rm -f "$out/cmake/src/includes/cmake_defines.h.bak" ;;
+  esac
 fi
 cd "$out/cmake"
 ninja ${PATHB_JOBS:+-j$PATHB_JOBS} $target >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }

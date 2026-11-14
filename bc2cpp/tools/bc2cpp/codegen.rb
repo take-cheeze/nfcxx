@@ -325,7 +325,7 @@ class CodeGen
   # The probes of drop_unsafe_embeddings compile methods against the raw layout, and a block step (or a resumable variant) is
   # compiled once and kept: its text would read a slot as the type the final layout no longer gives it, or a struct it dropped.
   def forget_layout_probe_code
-    @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = nil
+    @block_steps = @block_step_emitted = @block_step_names = @rsm_variants = @step_super_targets = nil
   end
 
   def const_lookup_helper_used?
@@ -355,6 +355,11 @@ class CodeGen
   # callers still need pure arity because they call `_impl` directly, bypassing
   # the entry wrapper.)
   def drop_unsafe_embeddings(ivar_layout)
+    # The self-hosted command installs methods after loading its source graph.
+    # Objects and module singletons created during that load already use Ruby
+    # ivar storage; changing their layout at installation would corrupt them.
+    return {} if ENV['BC2CPP_BUILD_NAME'] == 'bc2cpp-self'
+
     demote_typed_ivars_foreign_writable(
       demote_typed_ivars_maybe_unassigned(demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout)))
     )

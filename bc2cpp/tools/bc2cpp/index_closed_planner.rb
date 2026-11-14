@@ -75,7 +75,7 @@ class IndexClosedPlanner
                           'mrb_nil_value()); }'],
                   also: { 'src/vm.c' => ['return funcall_with_block_m(mrb, self, mid, argc, argv, NULL, FALSE, blk, m, owner);',
                                          'if (fixed) { m = *fixed; ci->u.target_class = fixed_owner; } else { ' \
-                                         'm = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, mid); }'] } }
+                                         'm = mrb_vm_find_method_rows(mrb, ci->u.target_class, &ci->u.target_class, mid); }'] } }
     },
     '[]=' => {
       'Array' => { file: 'src/array.c', gem: nil, mt: 'mrb_ary_aset', test: 'mrb_array_p(recv)',

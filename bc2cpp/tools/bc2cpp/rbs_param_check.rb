@@ -16,6 +16,9 @@ require_relative 'scan_cache'
 # declared parameter is a ClassAnnotations fact for the method's own body; the compiled body checks it on entry
 # (DECLARED_PARAM_GUARD) and raises BC2cppDeclarationViolation for another class.
 module RbsParamCheck
+  # VALUE_KIND: the value kinds a parameter declaration can name besides a program class, and the class each stands for.
+  VALUE_CLASSES = { float: 'Float', integer: 'Integer', symbol: 'Symbol' }.freeze
+
   # IS_A_GUARD's two closed-world answers for NilNarrowing (CodeGen#is_a_guard_class, #raise_never_returns?).
   IsAGuard = Struct.new(:gen) do
     def is_a_class(irep, idx) = gen.is_a_guard_class(irep, idx)
@@ -45,17 +48,47 @@ module RbsParamCheck
     # RBS only: every declared parameter class is trusted as written, so no caller is proven against it. The compiled
     # body checks it at entry instead (DECLARED_PARAM_GUARD): guards is label => [[position, class, key, text], ...].
     found = targets(ctx)
-    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, _cls| [d.irep, pos] } }.to_set
+    trusted = found.flat_map { |_sig, d, positions| positions.map { |pos, *| [d.irep, pos] } }.to_set
     guards = found.to_h do |sig, d, positions|
-      [d.irep, positions.map { |pos, cls| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text] }]
+      [d.irep, positions.map { |pos, cls, kind, nilable| [pos, cls, "#{sig.owner}##{sig.name}", sig.args[pos].text, kind, nilable] }]
     end
     [[], trusted, guards]
+  end
+
+  # DECLARED_IVAR_GUARD: one `@x: T` declaration the compiled stores check. kind is :float, :integer, :symbol or :class
+  # (the exact program class cls); nilable admits nil too (`T?`).
+  IvarGuard = Struct.new(:owner, :name, :cls, :kind, :nilable, :key, :text)
+
+  # { [owner, name without @] => IvarGuard } of the instance-variable declarations (`@x: T`, `attr_reader x: T`) of a
+  # program class whose type is Integer, Float, Symbol or an exact program class, or the same with `?`. A program class
+  # with a subclass is left out (the guard is the exact-class test, and a subclass instance is a legal value), like a
+  # nilable class parameter; `bool` stays unchecked by design, as for parameters and returns.
+  def ivar_guards(loaded, superclass_of)
+    classes = superclass_of.keys.to_set
+    subclassed = superclass_of.values.grep(String).to_set
+    loaded.ivars.each_value.with_object({}) do |iv, out|
+      next if iv.owner.end_with?('.singleton') || !classes.include?(iv.owner)
+
+      inner = iv.type.optional
+      t = inner || iv.type
+      nilable = !inner.nil?
+      kind = VALUE_CLASSES.key?(t.value) ? t.value : nil
+      cls = kind ? VALUE_CLASSES[kind] : t.cls
+      unless kind
+        next unless t.kind == :class && classes.include?(t.cls) && !subclassed.include?(t.cls)
+
+        kind = :class
+      end
+      name = iv.name.delete_prefix('@')
+      out[[iv.owner, name]] = IvarGuard.new(iv.owner, name, cls, kind, nilable, "#{iv.owner}##{iv.name}", iv.type.text)
+    end
   end
 
   # The tables every query reads: method owners (`self_of` only for def bodies, never blocks, whose self an
   # instance_exec may change; `owner_of` also for blocks, for lexical constant lookup) and the signature of each body.
   def context(loaded, ireps, registry, superclass_of)
     ctx = { ireps: ireps, registry: registry, subclassed: superclass_of.values.grep(String).to_set,
+            classes: superclass_of.keys.to_set,
             dynamic: DynamicNames.universe(ireps), self_of: {}, method_name: {}, owner_of: {}, sig_of: {}, def_of: {},
             aliased: alias_names(ireps), parent: {} }
     defs_by = {}
@@ -103,10 +136,26 @@ module RbsParamCheck
       d = ctx[:def_of][label]
       ann = ctx[:class_annotations][label]
       positions = sig.args.each_with_index.filter_map do |type, i|
-        next unless type.kind == :class && ann && ann.args[i] == type.cls
         next if ctx[:comment_class_args][label]&.[](i)
 
-        [i, type.cls]
+        inner = type.optional # `T?`: T or nil
+        t = inner || type
+        nilable = !inner.nil?
+        if (kind = t.value) && VALUE_CLASSES.key?(kind)
+          # VALUE_KIND: Float, Integer (fixnum) and Symbol parameters are guarded by their kind, not by a program class
+          # annotation; `T?` also admits nil.
+          next [i, VALUE_CLASSES[kind], kind, nilable]
+        end
+        if nilable
+          # A nilable program class gives no hint, so no annotation names it: take the class itself when it is a class
+          # the program defines and nothing subclasses (the guard is the exact-class test).
+          next unless t.kind == :class && ctx[:classes].include?(t.cls) && !ctx[:subclassed].include?(t.cls)
+
+          next [i, t.cls, :class, true]
+        end
+        next unless type.kind == :class && ann && ann.args[i] == type.cls
+
+        [i, type.cls, :class, false]
       end
       out << [sig, d, positions] unless positions.empty?
     end

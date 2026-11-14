@@ -27,11 +27,17 @@ A phi names one predecessor block per incoming edge. A tree sends several jumps 
 several leaves reach. Such a target that has a phi is entered through one trampoline block (`.jN`), which jumps on, so
 the phi keeps a single predecessor.
 
+## Jump tables
+
+A dense switch (a 32-bit operand, at least five case labels, a span of at most eight entries per label, at most 1024
+entries) lowers to QBE's `jtab`: `jtab (x - lo)` with one block per slot. Each slot jumps to one shared block per target,
+so a target has one predecessor in the IL and a phi names that block. Holes and out-of-range values go to the default.
+QBE checks the count and dispatches through a relocated table (amd64, `.data.rel.ro`); other targets refuse `jtab`.
+
 ## Not done
 
-- **Jump tables.** GCC emits an indirect `jmp` through a table of block addresses for dense case sets. QBE has no
-  indirect jump and no data that can name block labels, so this needs a change to the QBE fork (`3rd/qbe`) first.
 - **Probability-weighted splits.** GCC balances its decision tree by profile probability; ours balances by item count.
+- **Non-32-bit jump tables.** A `long` switch keeps the tree; a jump table needs a 32-bit index.
 
 ## Tests
 

@@ -12,7 +12,10 @@
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 cd "$(dirname "$0")/../.."
 root=$PWD; dir=$root/tests/c
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="gcc pathb" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 pass=0; fail=0; xfail=0
 for b in $backends; do
@@ -25,6 +28,8 @@ for b in $backends; do
     xf=$(sed -n "s,^// XFAIL-$b: *,,p" "$f" | head -1)   # anchored: MACOS-XFAIL- is a different marker
     # MACOS-XFAIL-$b: a documented limit on macOS only (the test passes elsewhere, so it is not an XFAIL there).
     if [ "$(uname -s)" = Darwin ] && [ -z "$xf" ]; then xf=$(sed -n "s,^// MACOS-XFAIL-$b: *,,p" "$f" | head -1); fi
+    # ARM64-XFAIL-$b: a documented limit on arm64 only (the test passes on x86-64, so it is not an XFAIL there).
+    case $(uname -m) in aarch64|arm64) [ -n "$xf" ] || xf=$(sed -n "s,^// ARM64-XFAIL-$b: *,,p" "$f" | head -1) ;; esac
     x86only=$({ sed -n 's,^// X86-ONLY: *,,p' "$f"; sed -n "s,^// X86-ONLY-$b: *,,p" "$f"; } | head -1)
     if [ -n "$x86only" ] && [ "$(uname -m)" != x86_64 ]; then echo "skip $b $n (x86-64 only: $x86only)"; continue; fi
     elfonly=$(sed -n 's,^// ELF-ONLY: *,,p' "$f" | head -1)

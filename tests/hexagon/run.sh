@@ -4,6 +4,7 @@
 #   2. clang --target=hexagon compiles it (-fwrapv -fno-strict-aliasing, as the gcc backend does).
 #   3. If qemu-hexagon (Linux user mode) is installed, the object is flattened (flatlink.rb,
 #      since no Hexagon linker exists here), run, and its exit code compared with `// EXPECT:`.
+# `// NO-HEXAGON: reason` in a case skips it here with the reason (the hexagon C setjmp does not keep locals that a try modifies).
 # Cases that throw get tests/hexagon/eh_rt.c appended. Cases needing relocations or libc that flatlink.rb lacks, and template
 # instantiation (edg_prelink), are reported as SKIP with the reason. Exits 0 with SKIP when clang
 # has no Hexagon backend.
@@ -26,13 +27,17 @@ for f in "$root"/tests/cases/*.cpp; do
   n=$(basename "$f" .cpp)
   want=$(sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$f" | head -1)
   # Same marker as tests/run.sh: a case that depends on the x86-64 target (an x86 builtin) has no hexagon form.
+  # A case marked `// NO-HEXAGON: reason` has no hexagon form for a reason of this target's C (reported, not hidden).
+  if nohex=$(sed -n 's,^// NO-HEXAGON: *\(.*\),\1,p' "$f" | head -1) && [ -n "$nohex" ]; then
+    echo "skip $n: NO-HEXAGON ($nohex)"; skip=$((skip+1)); continue
+  fi
   if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1) && [ -n "$x86only" ]; then
     echo "skip $n: x86-64 only ($x86only)"; skip=$((skip+1)); continue
   fi
   if ! "$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/$n.c" "$f" 2>"$tmp/$n.edg"; then
     # The target configuration has no hosted C++ headers, so a case that includes <cstdint>, <map>,
     # etc. cannot be generated for it. That is a limit of this check, not a failure of the case.
-    if grep -q "cannot open source file" "$tmp/$n.edg"; then
+    if tr -s " \n" "  " < "$tmp/$n.edg" | grep -q "cannot open source file"; then   # EDG wraps the message after "cannot open"
       echo "skip $n: SKIP-headers: $target has no hosted C++ headers"; skip=$((skip+1)); continue
     fi
     echo "FAIL (edg) $n"; head -3 "$tmp/$n.edg"; fail=1; continue

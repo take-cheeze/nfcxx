@@ -83,7 +83,7 @@ with (args.positive / "manifest.tsv").open() as source:
 if len(positive_rows) != len(expected) * 4 or len({(row["id"], row["route"]) for row in positive_rows}) != len(positive_rows):
     raise SystemExit("GCC positive survey incomplete or duplicate cells")
 positive = {route: dict(Counter(row["status"] for row in positive_rows if row["route"] == route))
-            for route in ("host", "qbe", "gcc", "pathb")}
+            for route in ("host", "gcc", "pathb")}
 results["gcc_positive"] = {"sources": len(expected), "routes": positive}
 if args.json:
     args.json.write_text(json.dumps(results, indent=2) + "\n")

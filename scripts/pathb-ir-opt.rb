@@ -8,8 +8,8 @@
 #                of the module is replaced by f's body. f's ids become fresh ids of the caller, its slots become caller
 #                slots with new names (hoisted to the caller's header), its parameters are bound to the arguments, and
 #                its final return becomes (let %D T OPERAND). A callee is inlined only when its returns are all in tail
-#                position (none, or the last statement); refused callees are: constructors and destructors, sret, byval
-#                and ellipsis parameters, struct or array results, struct or bool parameters, printf, recursion, goto and
+#                position (none, or the last statement); refused callees are: constructors and destructors, sret, hidden-result, byval
+#                and ellipsis parameters, struct or array results, struct parameters, printf, recursion, goto and
 #                label, and work-group statics (the emitters key those by their function). Rounds repeat for nested calls,
 #                up to --max-depth (default 4, the device inliner's depth in pathb-ptx-emit).
 #   --report     the number of calls inlined and the refusal reasons, on stderr.
@@ -49,7 +49,7 @@ class IdentityMap
 end
 
 
-HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline"]
+HEADER_HEADS = ["ret", "params", "slot", "static", "weak", "constructor", "destructor", "noinline", "used", "section", "always-inline"]
 
 # Tokens: "(", ")", and atoms as their raw text. A string keeps its quotes; $"x" and &"x" keep their prefix.
 def tokenize(text)
@@ -209,8 +209,12 @@ end
 # Caps on inlining (docs/notes/pathb-ir-passes.md). A callee of more than $inline_max_callee nodes is not inlined, and the
 # module is not inlined past $inline_max_growth times its size on entry (each inlined copy is a full copy of the callee, and
 # the callees grow with each round). 0 turns a cap off.
-$inline_max_callee = 400
+$inline_max_callee = 150
 $inline_max_growth = 2.0
+$inline_cost = :weighted
+$inline_tiers = [16, 40]   # --tiers=A,B: callee cost caps of the first rounds; the last round takes --max-callee (empty: one round set)
+$inline_tiny = 16   # --max-tiny: a callee this cheap is inlined even past --max-growth (0: none)
+$scope_facts = false   # --scope-facts: each inlined body brackets its slots with (life-start) and (life-end), for the stack-slot sharing of the SSA emitter
 
 def node_count(x)
   return 0 unless x.is_a?(Array)
@@ -219,15 +223,108 @@ def node_count(x)
   n
 end
 
+# The size of a form for the caps, weighted by what a node costs after code generation (--cost=weighted, the default; --cost=nodes
+# counts every node as 1). Declarations, constants, casts and address arithmetic cost nothing (a slot is a frame offset, an
+# offset or bitcast folds into an addressing mode); a call costs most (argument moves, the call, the result); a branch, loop
+# or switch more than a load or store; a load or store of a local slot costs nothing (promotion makes it a register); any other
+# node is 1. The caps stay in the same unit, so a callee that is mostly
+# declarations and address arithmetic (a wrapper around one call) counts for what it is.
+NODE_WEIGHT = Hash.new(1).merge(
+  "function" => 0, "slot" => 0, "params" => 0, "param" => 0, "ret" => 0, "weak" => 0, "const" => 0, "type" => 0,
+  "ptr" => 0, "volatile" => 0, "struct" => 0, "array" => 0, "union" => 0, "enum" => 0, "func" => 0,   # type forms
+  "block" => 0, "then" => 0, "else" => 0, "body" => 0, "step" => 0, "let" => 0, "addr" => 0, "offset" => 0, "bitcast" => 0,
+  "decl" => 0, "scope-end" => 0, "life-start" => 0, "life-end" => 0,
+  "call" => 4, "if" => 2, "switch" => 2, "loop" => 3, "break" => 1, "continue" => 1
+).freeze
+
+def node_cost(x)
+  return 0 unless x.is_a?(Array)
+  return node_count(x) if $inline_cost == :nodes
+  n = NODE_WEIGHT[x[0]]
+  # A load or store of a local slot (an atom $"name") is a register after promotion: free.
+  # The EH stack top (@"__curr_eh_stack_entry") too: an inlined body shares its caller's frame.
+  n = 0 if (x[0] == "load" || x[0] == "store") && x[2].is_a?(String) && (x[2][0, 2] == "$\"" || x[2] == "@\"__curr_eh_stack_entry\"")
+  n = 6 if x[0] == "call" && !(x[2].is_a?(String) && x[2][0, 2] == "&\"")   # an indirect call
+  x.each { |y| n += node_cost(y) }
+  n
+end
+
+# __attribute__((always_inline)) (the function's (always-inline) head): inlined whatever its size and the module's growth.
+def always_inline?(fn)
+  fn.any? { |f| head(f) == "always-inline" }
+end
+
+# The section a function is placed in (__attribute__((section("S"))): the kernel's __init, __head, noinstr), or nil. The body of a
+# callee in a section is inlined only into a caller of the same section: into another it would leave its section.
+def section_of(fn)
+  s = fn.find { |f| head(f) == "section" }
+  s && s[1].to_s
+end
+
+# A function that does nothing: its statements are the stores of its parameters to their slots and a bare return. noinline does
+# not keep it out of line (gcc's IPA drops its unused arguments, and the references they carry: the kernel's
+# `static void __init_or_module noinline apply_retpolines(s32 *start, s32 *end) { }` stub names __retpoline_sites, which the
+# linker script does not define without CONFIG_RETPOLINE).
+def empty_body?(fn)
+  fn.drop(2).all? do |f|
+    h = head(f)
+    HEADER_HEADS.include?(h) || h == "slot" ||
+      (h == "store" && f[2].is_a?(String) && f[2].start_with?("$\"")) ||
+      (h == "return" && f.length == 1)
+  end
+end
+
+# The static functions that exactly one reference names in the module (a direct call: gcc's -finline-functions-called-once): inlined
+# whatever their size and the module's growth, as the body then exists once, and the constants of the one call site reach it
+# (the kernel's `static inline bool __fpu_restore_sig(..., bool ia32_fxstate)`, called with false where the code that sets it is
+# compiled out: gcc's constant propagation removes the call of convert_to_fxsr, which this build does not define).
+$inline_once = {}
+
+def count_refs(x, counts)
+  if x.is_a?(Array)
+    x.each { |y| count_refs(y, counts) }
+  elsif x.is_a?(String) && x.length > 2 && x[0] == "&" && x[1] == "\""
+    counts[unq(x)] += 1
+  end
+end
+
+def find_called_once(forms)
+  counts = Hash.new(0)
+  forms.each { |f| count_refs(f, counts) }
+  once = {}
+  forms.each do |f|
+    next unless head(f) == "function"
+    attrs = f.drop(2).select { |c| c.is_a?(Array) }
+    next unless attrs.any? { |c| c[0] == "static" && c.length == 1 }
+    next if external_root?(f)
+    name = unq(f[1])
+    once[name] = true if counts[name] == 1
+  end
+  once
+end
+
+# Whether a function has an inline asm operand that only a constant argument makes valid: an immv or symv (the "i" operand of
+# `asm goto` in an __always_inline function, as the kernel's _static_cpu_has has, be/nfcxx_ir.c). The function cannot be
+# emitted alone (the SSA route refuses it), so it is inlined whatever its size and whatever the module's growth.
+def asm_needs_constant?(x)
+  return false unless x.is_a?(Array)
+  return true if x[0] == "opnd" && (x[1] == "immv" || x[1] == "symv")
+  x.any? { |y| asm_needs_constant?(y) }
+end
+
 def refusal(fn, name)
-  return "callee over --max-callee" if $inline_max_callee > 0 && node_count(fn) > $inline_max_callee
+  return "callee over --max-callee" if $inline_max_callee > 0 && node_cost(fn) > $inline_max_callee && !always_inline?(fn) && !$inline_once[name] && !asm_needs_constant?(fn)
   return "ctor/dtor" if fn.any? { |f| head(f) == "constructor" || head(f) == "destructor" }
-  return "noinline" if fn.any? { |f| head(f) == "noinline" }
+  return "noinline" if fn.any? { |f| head(f) == "noinline" } && !empty_body?(fn)
+  return "weak attr" if fn.any? { |f| head(f) == "weak" && f.length == 2 }   # __attribute__((weak)): another object may define the callee
   params = fn.find { |f| head(f) == "params" }
   if params
     params.drop(1).each do |p|
       return "ellipsis" if head(p) == "ellipsis"
-      return "struct/bool parameter" if head(p) == "param" && (head(p[3]) == "struct" || p[3] == "bool")
+      # A bool parameter is no obstacle: the argument is the front end's converted bool value (0 or 1), so the parameter is the
+      # argument (the kernel's helpers with a `bool` flag that callers pass as a constant, such as thp_vma_allowable_order, whose
+      # inlined `return false` is what removes the branches that call functions the build does not define).
+      return "struct parameter" if head(p) == "param" && head(p[3]) == "struct"
     end
   end
   ret = fn.find { |f| head(f) == "ret" }
@@ -239,7 +336,7 @@ def refusal(fn, name)
   scan = lambda do |x|
     h = x[0]
     if h.is_a?(String)
-      facts[:frame] = true if h == "retaddr" || h == "frameaddr"   # the caller's frame is read: the body must stay in its own
+      facts[:frame] = true if h == "retaddr" || h == "frameaddr" || h == "sp"   # the caller's frame is read: the body must stay in its own
       facts[:jumps] += 1 if h == "goto" || h == "label"
       facts[:rets] += 1 if h == "return"
     end
@@ -257,7 +354,7 @@ def refusal(fn, name)
   return "frame address" if facts[:frame]
   return "printf" if facts[:printf]
   return "recursion" if facts[:self]
-  return "goto/label" if facts[:jumps] > 0
+  # goto and label are inlined: expand_call gives each copy's labels a suffix of its own (subst)
   return "work-group static" if fn.any? { |f| head(f) == "slot" && contains_wgs?(f) }
   rets = facts[:rets]
   return nil if rets == 0 || (rets == 1 && head(splice_tail_blocks(body).last) == "return")
@@ -364,6 +461,18 @@ def expand_call(s, fns, st)
     st[:refused][reason] = (st[:refused][reason] || 0) + 1
     return nil
   end
+  csec = section_of(fn)
+  if csec && csec != st[:section]
+    st[:refused]["section"] = (st[:refused]["section"] || 0) + 1
+    return nil
+  end
+  # Past the module's growth budget only a tiny callee is inlined (an accessor or wrapper: its call costs about what its body does).
+  if st[:over] && $inline_tiny > 0 && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > $inline_tiny && !always_inline?(fn) && !$inline_once[cname] && !asm_needs_constant?(fn)
+    st[:refused]["module over --max-growth"] = (st[:refused]["module over --max-growth"] || 0) + 1
+    return nil
+  end
+  # A tier of the pass takes only callees up to its cap: the small ones are inlined everywhere before the budget goes to big ones.
+  return nil if st[:cap] && st[:tc].fetch(fn) { st[:tc][fn] = node_cost(fn) } > st[:cap]
   info = st[:ic].fetch(cname) { st[:ic][cname] = callee_info(fn) }
   rtype = info[:ret][1]
   return nil unless show(call[1]) == info[:rtext]
@@ -374,12 +483,15 @@ def expand_call(s, fns, st)
 
   st[:k] += 1
   k = st[:k]
-  map = {}
+  map = { label_k: k }
   # A byval parameter is the address of the callee's own copy of the argument object: a slot of the caller that holds the copy
   # (the size and alignment come from the parameter's form, be/nfcxx_ir.c), made by a copy from the argument's address.
   byval_pre = []
   byval_slots = []
   params.each_with_index do |p, i|
+    # A class result EDG lowered into the first parameter (AArch64, marked (hidden-result)): its call passes (hidden-dest ...) and
+    # goes through a thunk that takes the object in x8 (scripts/pathb-ssa-qbe.rb). Not inlined: the binding below does not know it.
+    return nil if p.drop(4).any? { |x| head(x) == "hidden-result" }
     if head(p) == "sret"
       # the result object of a struct-returning callee: the call passes (sret TYPE ADDR), and the callee's stores go to ADDR
       # (the caller copies the result from there after the call, as before the inline)
@@ -431,19 +543,35 @@ def expand_call(s, fns, st)
     hoisted += hoisted_ret if dest
     st[:inlined] += 1
     st[:attr_from] << cname if st[:attrs].key?(cname)
-    return [hoisted, out]
+    return [hoisted, scope_slots(hoisted, out)]
   end
   return nil if dest && ret_op.nil?
   out = byval_pre + stmts.map { |x| subst(x, map, st) }
   out << ["let", dest, dtype, subst(ret_op, map, st)] if dest
   st[:inlined] += 1
   st[:attr_from] << cname if st[:attrs].key?(cname)
-  [hoisted, out]
+  [hoisted, scope_slots(hoisted, out)]
+end
+
+# --scope-facts: the slots of an inlined body live exactly as long as its statements (the callee's frame), so the copy is bracketed by
+# (life-start $"x") before and (life-end $"x") after, for each slot it hoists. The SSA emitter (scripts/pathb-ssa-qbe.rb) lays out
+# slots whose lifetimes never overlap at one address: two inlined calls one after the other share a frame, as two calls do.
+# (Not decl and scope-end, a source scope's facts for AddressSanitizer: the e-graph pass counts a slot named by those as escaping.)
+def scope_slots(hoisted, out)
+  return out if !$scope_facts || hoisted.empty?
+  hoisted.map { |h| ["life-start", "$" + h[1]] } + out + hoisted.reverse.map { |h| ["life-end", "$" + h[1]] }
 end
 
 # The callee's form with its parameters, slots and fresh ids substituted.
 def subst(x, map, st)
   if x.is_a?(Array)
+    # a label and the goto, asm goto label of it: the name gets the copy's suffix, so two copies (or the caller) never share one
+    if (x[0] == "label" || x[0] == "goto") && x.length == 2 && x[1].is_a?(String) && x[1][0] == "\"" && map.key?(:label_k)
+      return [x[0], "\"#{unq(x[1])}.i#{map[:label_k]}\""]
+    end
+    # the (label NAME) operands of an asm-block are the names its template uses (%l[NAME]): they keep their spelling, and the
+    # (goto) after the block is what jumps
+    return x.map { |y| x[0] == "asm-block" && y.is_a?(Array) && y[0] == "label" ? copy_form(y) : subst(y, map, st) } if x[0] == "asm-block"
     return x.map { |y| subst(y, map, st) }
   end
   return copy_form(map[x]) if map.key?(x)
@@ -497,6 +625,7 @@ def inline_pass(forms, max_depth, report)
   inlined = 0
   counter = { k: 0 }
   reasons = {}   # callee name -> refusal reason (nil: inlinable); see expand_call
+  tiny_costs = IdentityMap.new   # callee form -> its node_cost, for the tiny test past the budget
   infos = {}     # callee name -> callee_info; dropped with the reason when the callee changes
   # A function's [[sycl::reqd_sub_group_size(N)]] is a top-level sycl-kernel-attr form that the emitter reads for the functions a
   # kernel reaches. A callee that carries one is inlined into its caller, so the caller gets the same attr (else the kernel
@@ -508,20 +637,25 @@ def inline_pass(forms, max_depth, report)
   # of a function of the module at all (a function without one is never changed and counts no refusal, so its walk is skipped).
   ids = IdentityMap.new
   calls = IdentityMap.new
-  total = node_count(forms)
+  total = node_count(forms)   # the budget bounds the size of the IR (every node), the callee cap weighs the code
   budget = $inline_max_growth > 0 ? total * $inline_max_growth : nil
+  caps = $inline_tiers.select { |c| c > 0 && ($inline_max_callee <= 0 || c < $inline_max_callee) } + [nil]
+  caps.each do |cap|
   max_depth.times do
     round = 0
+    $inline_once = find_called_once(forms)   # a round's inlining can add call sites: counted again each round
+    reasons.clear
     forms.each_with_index do |f, i|
       next unless head(f) == "function"
       next unless calls.fetch(f) { calls[f] = calls_module_function?(f, fns) }
-      if budget && total > budget
+      over = budget && total > budget
+      if over && $inline_tiny <= 0
         refused["module over --max-growth"] = (refused["module over --max-growth"] || 0) + 1
         next
       end
       name = unq(f[1])
       st = { next: ids.fetch(f) { ids[f] = max_id(f) } + 1, k: counter[:k], hoist: [], inlined: 0, refused: refused, rc: reasons,
-             ic: infos, attrs: attrs, attr_from: [] }
+             ic: infos, attrs: attrs, attr_from: [], over: over, tc: tiny_costs, cap: cap, section: section_of(f) }
       children = rewrite(f.drop(2), fns, st)
       counter[:k] = st[:k]
       next if st[:inlined] == 0
@@ -541,10 +675,14 @@ def inline_pass(forms, max_depth, report)
     inlined += round
     break if round == 0
   end
+  end
   forms.concat(extra)
   if report
     $stderr.write("pathb-ir-opt: inlined #{inlined} calls\n")
     refused.keys.each { |r| $stderr.write("pathb-ir-opt: refused #{refused[r]} call(s): #{r}\n") }
+    if ENV["PATHB_IR_OPT_CALLEES"]
+      reasons.each { |n, r| $stderr.write("pathb-ir-opt: callee #{n}: #{r}\n") if r }
+    end
   end
   forms
 end
@@ -1347,6 +1485,13 @@ def has_jump?(x, in_switch = false)
   x.any? { |y| has_jump?(y, in_switch) }
 end
 
+def has_label?(x)
+  return false unless x.is_a?(Array)
+  return true if head(x) == "label"
+
+  x.any? { |y| has_label?(y) }
+end
+
 def rename_copy(stmts, counter)
   defined = {}
   all_forms(stmts).each { |sf| defined[sf[1]] = true if head(sf) == "let" && sf[1].is_a?(String) }
@@ -1427,6 +1572,8 @@ def try_unroll(list, i, counter, escaped = {})
   prefix = body[0...j]
   suffix = body[(j + 1)..-1]
   return unroll_no(2) if has_jump?(prefix) || has_jump?(suffix) || has_jump?(step)
+  # a label in the body would be defined once per copy (a `goto fail` into the loop from its own error path, QuickJS)
+  return unroll_no(2) if has_label?(prefix) || has_label?(suffix) || has_label?(step)
   cond = body[j][1]
   cdef = prefix.find { |x| head(x) == "let" && x[1] == cond }
   return unroll_no(3) unless cdef && cdef.length == 4 && UNROLL_CMP.key?(head(cdef[3])) && cdef[3].length == 4 &&
@@ -1669,16 +1816,128 @@ def strip_eh_pass(forms, report)
   forms
 end
 
-# ---- EH frames of leaf functions (--strip-leaf-eh) ------------------------------------------------------------------------
-# A function with no call has nothing that can throw, so the EH stack entry it pushes (a noexcept guard, kind 6, or a
-# cleanup frame) is never read: only a throw walks the stack. libstdc++'s accessors (shared_ptr::get, vector::size, ...) are
-# such functions, and each pushes and pops a 240-byte entry on thread-local state. The pass drops the entry's slot, its
-# initialisation, the push and the pop, and the writes of __eh_curr_region. It leaves a function unchanged when anything
-# else reads the entry (every register and slot it removes must be gone from what remains), so a leaf that does use its
-# frame, or that the front end shaped otherwise, is kept as it was. Run before --inline, the inliner copies the lean callee.
+# ---- EH frames of functions that cannot throw (--strip-leaf-eh) ----------------------------------------------------------
+# Only a throw walks the EH stack, so the entry a function pushes (a noexcept guard, kind 6, or a cleanup frame) is never read
+# when nothing the function calls can throw. libstdc++'s accessors and shared_ptr members are such functions, and each pushes and
+# pops a 240-byte entry on thread-local state (and each body inlined into a caller does the same). The pass drops the entry's
+# slot, its initialisation, the push and the pop, and the writes of __eh_curr_region, of every function whose calls all go to
+# functions that cannot let an exception out (throwing_functions below). It leaves a function unchanged when anything else
+# reads the entry (every register and slot it removes must be gone from what remains). Run before --inline the inliner copies
+# the lean callee, and after it the functions whose calls were all inlined lose the frames of the bodies copied into them.
 
-def leaf_eh_function(f)
-  return [f, 0] if count_heads(f, "call") > 0
+# Which functions can let an exception out (the nothrow analysis of --strip-leaf-eh). A function cannot when it is guarded (a
+# noexcept function or a destructor: its entry of kind 6 makes a throw through it terminate) or when every call it makes goes
+# to a function that cannot, to an atomic builtin (__atomic_fetch_add_4 ...: a locked instruction or a libatomic call) or to one
+# of the few libc routines that never throw. An indirect call, a call of a function the module does not define (operator new,
+# __cxa_throw ...) can. Computed as the least set of the functions that can, from those with such a call, through their
+# unguarded callers.
+# (a name that never returns, such as an assertion failure, lets no exception out either: it ends the process)
+NOTHROW_EXTERN = %w[memcpy memmove memset memcmp memchr strlen strcmp strncmp strchr strrchr strstr strcpy strncpy
+                    malloc calloc realloc free snprintf vsnprintf printf fprintf puts fputs fwrite fflush getenv
+                    pthread_mutex_lock pthread_mutex_unlock pthread_mutex_trylock pthread_self __errno_location
+                    clock_gettime _setjmp setjmp _mm_pause
+                    abort _exit __assert_fail __assert_perror_fail __stack_chk_fail _ZSt21__glibcxx_assert_failPKciS0_S0_ _ZSt9terminatev
+                    _ZdlPv _ZdlPvm _ZdaPv _ZdaPvm _ZdlPvSt11align_val_t _ZdlPvmSt11align_val_t _ZdaPvSt11align_val_t
+                    _ZdaPvmSt11align_val_t].freeze
+# --nothrow-extern=NAME,NAME: more functions the module does not define that let no exception out (a project's own abort).
+$nothrow_extra = []
+
+def nothrow_extern?(name)
+  return true if name.start_with?("__atomic_") || NOTHROW_EXTERN.include?(name) || $nothrow_extra.include?(name)
+  # a destructor (D0Ev, D1Ev, D2Ev) is noexcept unless declared otherwise, which is rare: an exception out of one terminates
+  name.start_with?("_Z") && (name.end_with?("D0Ev") || name.end_with?("D1Ev") || name.end_with?("D2Ev"))
+end
+
+def guarded_function?(f)
+  frame = f.find { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
+  return false unless frame
+  # the entry's kind byte is stored at offset 8: (let %r (ptr unsigned_char) (offset $"frame" 8)) (store unsigned_char %r (const unsigned_char 6))
+  regs = {}
+  f.each do |c|
+    next unless head(c) == "let" && head(c[3]) == "offset" && c[3][1] == "$" + frame[1] && c[3][2].to_s == "8"
+    regs[c[1]] = true
+  end
+  f.any? { |c| head(c) == "store" && regs[c[2]] && head(c[3]) == "const" && c[3][2].to_s == "6" }
+end
+
+def direct_callees(x, out, unknown)
+  return unless x.is_a?(Array)
+  if head(x) == "call"
+    callee = x[2]
+    if callee.is_a?(String) && callee.start_with?("&\"")
+      out << unq(callee)
+    else
+      unknown[0] = true
+    end
+  end
+  x.each { |y| direct_callees(y, out, unknown) }
+end
+
+def throwing_functions(forms)
+  defs = {}
+  forms.each { |f| defs[unq(f[1])] = f if head(f) == "function" }
+  bad = {}
+  callers = Hash.new { |h, k| h[k] = [] }
+  work = []
+  defs.each do |name, f|
+    next if guarded_function?(f)
+    callees = []
+    unknown = [false]
+    direct_callees(f, callees, unknown)
+    risky = unknown[0]
+    callees.uniq.each do |c|
+      if defs.key?(c)
+        callers[c] << name
+      elsif !nothrow_extern?(c)
+        risky = true
+      end
+    end
+    if risky
+      bad[name] = true
+      work << name
+    end
+  end
+  until work.empty?
+    c = work.pop
+    callers[c].each do |name|
+      next if bad[name]
+      bad[name] = true
+      work << name
+    end
+  end
+  bad
+end
+
+# The calls of x that can throw: those of functions in bad (throwing_functions), and any other not listed as safe.
+def throwing_calls(x, bad)
+  return 0 unless x.is_a?(Array)
+  n = 0
+  if head(x) == "call"
+    callee = x[2]
+    if !(callee.is_a?(String) && callee.start_with?("&\""))
+      n = 1
+    else
+      name = unq(callee)
+      safe = nothrow_extern?(name) || ($leaf_defs.key?(name) && !bad.key?(name))
+      n = 1 unless safe
+    end
+  end
+  x.each { |y| n += throwing_calls(y, bad) }
+  n
+end
+
+# Whether e (the value of a let) is computed from the address of one of the frames or from a register already removed: an
+# offset, bitcast or index of it, or a load through it.
+def derived_of_removed?(e, fnames, removed_regs)
+  base = case head(e)
+         when "offset", "index" then e[1]
+         when "bitcast", "load" then e[2]
+         end
+  base.is_a?(String) && (fnames.include?(base) || removed_regs.key?(base))
+end
+
+def leaf_eh_function(f, bad)
+  return [f, 0] if throwing_calls(f, bad) > 0
   frames = f.select { |c| head(c) == "slot" && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200 }
   return [f, 0] if frames.empty?
   fnames = frames.map { |c| "$" + c[1] }
@@ -1695,6 +1954,8 @@ def leaf_eh_function(f)
       drop = false
       if h == "slot" && fnames.include?("$" + c[1].to_s)
         drop = true
+      elsif (h == "life-start" || h == "life-end") && fnames.include?(c[1])
+        drop = true   # the lifetime facts of a frame (--scope-facts) go with it
       elsif h == "store" && c[2].is_a?(String) && EH_GLOBALS.include?(c[2])
         drop = true
       elsif h == "store" && (fnames.include?(c[2]) || removed_regs.key?(c[2]))
@@ -1703,6 +1964,11 @@ def leaf_eh_function(f)
         removed_regs[c[1]] = true
         drop = true
       elsif h == "let" && head(c[3]) == "offset" && fnames.include?(c[3][1])
+        removed_regs[c[1]] = true
+        drop = true
+      elsif h == "let" && derived_of_removed?(c[3], fnames, removed_regs)
+        # an address or a value read through the frame's address: the cleanup frame's fields (the region table, the objects'
+        # addresses, the saved region number) are set up and read back through chains of offsets
         removed_regs[c[1]] = true
         drop = true
       end
@@ -1722,13 +1988,115 @@ end
 
 def strip_leaf_eh_pass(forms, report)
   total = 0
+  $leaf_defs = {}
+  forms.each { |f| $leaf_defs[unq(f[1])] = true if head(f) == "function" }
+  bad = throwing_functions(forms)
   forms = forms.map do |f|
     next f unless head(f) == "function"
-    g, n = leaf_eh_function(f)
+    g, n = leaf_eh_function(f, bad)
     total += n
     g
   end
-  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of leaf functions\n") if report
+  $stderr.write("pathb-ir-opt: dropped #{total} EH frame statement(s) of functions that cannot throw\n") if report
+  forms
+end
+
+# ---- the size of EH frames (--shrink-eh-frames) --------------------------------------------------------------------------------
+# Every EH stack entry is a slot of the front end's 240-byte struct, whatever its kind (a try block's entry holds a 200-byte jmp_buf
+# at its variant). A function's entry (kind 1: next, kind, the region table, the object table, the array table and the saved region
+# number) ends at byte 42, and a noexcept function's (kind 6) at byte 9, and the runtime reads only the fields the compiled code
+# wrote. So a frame whose every use is a store or a load at a constant offset (through offset and bitcast of its address), or the
+# push of its address on the EH stack top, needs only the bytes it accesses, rounded up to 8: its slot size is cut to that. A try
+# block's entry passes the address of its jmp_buf to _setjmp, which the pass does not follow: it stays whole.
+EH_CONTAINERS = %w[block then else body step loop if switch].freeze
+
+def digits?(s)
+  s.is_a?(String) && !s.empty? && s.chars.all? { |c| c >= "0" && c <= "9" }
+end
+
+# The byte extent of the accesses to the frame slot whose atom is `atom` in the function form f, or nil when some use is not one
+# of those above.
+def eh_frame_extent(f, atom)
+  regs = {}   # register => byte offset from the frame's address (offset and bitcast chains)
+  extent = 16
+  ok = true
+  mentioned = lambda do |x|
+    atoms_flat(x).any? { |a| a == atom || regs.key?(a) }
+  end
+  walk = lambda do |x|
+    next unless ok && x.is_a?(Array)
+    h = head(x)
+    if EH_CONTAINERS.include?(h)
+      x.each { |y| walk.call(y) }
+      next
+    end
+    base = nil
+    k = nil
+    if h == "let" && x.length == 4 && x[3].is_a?(Array)
+      rv = x[3]
+      if head(rv) == "offset" && rv.length == 3
+        base = rv[1]
+        k = rv[2]
+      elsif head(rv) == "bitcast" && rv.length == 3
+        base = rv[2]
+        k = "0"
+      end
+    end
+    if base && (base == atom || regs.key?(base))
+      if digits?(k)
+        regs[x[1]] = (base == atom ? 0 : regs[base]) + k.to_i
+      else
+        ok = false
+      end
+    elsif h == "let" && x.length == 4 && head(x[3]) == "load" && x[3].length == 3 && (x[3][2] == atom || regs.key?(x[3][2]))
+      size = scalar_size_of(x[3][1])
+      if size
+        extent = [extent, (x[3][2] == atom ? 0 : regs[x[3][2]]) + size].max
+      else
+        ok = false
+      end
+    elsif (h == "life-start" || h == "life-end") && x[1] == atom
+      nil   # a lifetime fact (--scope-facts) names the frame without using it
+    elsif h == "store" && x.length == 4 && x[2] == "@\"__curr_eh_stack_entry\"" && x[3] == atom
+      nil   # the push of the entry on the EH stack
+    elsif h == "store" && x.length == 4 && (x[2] == atom || regs.key?(x[2]))
+      size = scalar_size_of(x[1])
+      if size && !mentioned.call(x[3])
+        extent = [extent, (x[2] == atom ? 0 : regs[x[2]]) + size].max
+      else
+        ok = false
+      end
+    elsif mentioned.call(x)
+      ok = false
+    end
+  end
+  f.each { |c| walk.call(c) unless head(c) == "slot" }
+  ok ? extent : nil
+end
+
+def shrink_eh_frames_pass(forms, report)
+  saved = 0
+  forms = forms.map do |f|
+    next f unless head(f) == "function"
+    changed = false
+    children = f.map do |c|
+      if head(c) == "slot" && c.length >= 5 && head(c[2]) == "struct" && c[2][1].to_s.start_with?("\"__C") && c[3].to_i >= 200
+        e = eh_frame_extent(f, "$" + c[1])
+        size = e && (e + 7) / 8 * 8
+        if size && size < c[3].to_i
+          saved += c[3].to_i - size
+          changed = true
+          c[0, 3] + [size.to_s] + c[4..-1]
+        else
+          c
+        end
+      else
+        c
+      end
+    end
+    changed ? children : f
+  end
+  $stderr.write("pathb-ir-opt: cut #{saved} byte(s) off the EH frames\n") if report
   forms
 end
 
@@ -1748,10 +2116,28 @@ UNUSED_ROOTS = "\0unused"
 
 def external_root?(f)
   return false if head(f) == "data"
+  # the other units to refer to it (the object it names is kept by the same rule as its functions).
   attrs = f.drop(2).select { |c| c.is_a?(Array) && c[0].is_a?(String) }.map { |c| c[0] }
   return true if attrs.include?("constructor") || attrs.include?("destructor") || attrs.include?("thread") || attrs.include?("used")
+  # (weak attr), __attribute__((weak)) on a definition, is an interface symbol that another object may override or use: a root, unlike
+  # the plain (weak) of an inline or template copy.
+  return true if f.drop(2).any? { |c| c.is_a?(Array) && c[0] == "weak" && c.length == 2 }
   return false if attrs.include?("weak") || attrs.include?("static")
   true   # a definition (or declaration) of external linkage
+end
+
+# A vtable (_ZTV...) is a root when its class has a function of external linkage defined in this unit: the class's key
+# function, or another member. EDG marks such a vtable COMDAT even in the key function's unit, where gcc emits it strong for
+# the other units; a vtable of a class defined elsewhere is not kept. A local class (_ZTVZ...) is used only in its own unit.
+def vtable_roots(nodes)
+  defined = nodes.keys.select { |n| head(nodes[n]) == "function" && external_root?(nodes[n]) }
+  nodes.keys.select do |n|
+    next false unless n.start_with?("_ZTV") && !n.start_with?("_ZTVZ")
+    body = n[4..]
+    inner = body.start_with?("N") && body.end_with?("E") ? body[1..-2] : body
+    pres = ["_ZN#{inner}", "_ZNK#{inner}"]
+    defined.any? { |fn| pres.any? { |pre| fn.start_with?(pre) } }
+  end
 end
 
 # The quoted names in x: the "...", $"...", &"..." and @"..." atoms (a local slot, a function, a global), in order.
@@ -1771,17 +2157,43 @@ end
 def prune_pass(forms, substr, report)
   nodes = {}
   forms.each { |f| nodes[unq(f[1])] = f if %w[function global data].include?(head(f)) }
+  # The x87 thunks are not nodes, but they name the functions they reach: an entry thunk (x87-thunk entry|entryc "F" ...)
+  # is the C-convention symbol F of the long double function __nfcxx_ldr_F, and a call thunk (call|callc "F", callv|callvc
+  # "F") is the symbol of a call of F (scripts/pathb-x87-thunks.rb). Once a call is inlined, nothing else names F or
+  # __nfcxx_ldr_F, so the thunk's name keeps them: entries maps a thunk symbol to the nodes it reaches.
+  entries = {}
+  forms.each do |f|
+    next unless head(f) == "x87-thunk"
+    k = f[1].to_s
+    if %w[entry entryc].include?(k)
+      entries[unq(f[2])] = ["__nfcxx_ldr_" + unq(f[2])]
+    elsif %w[call callc].include?(k)
+      entries["__nfcxx_x87c_" + unq(f[2])] = [unq(f[2])]
+    elsif %w[callv callvc].include?(k)
+      tail = f[3].is_a?(String) && f[3].start_with?("\"") ? "_A" + unq(f[3]) + "R" + f[4].to_s : "_I#{f[3]}S#{f[4]}V#{f[5]}"
+      entries["__nfcxx_x87cv_" + unq(f[2]) + tail] = [unq(f[2])]
+    end
+  end
   queue = if substr == UNUSED_ROOTS
-            nodes.keys.select { |n| external_root?(nodes[n]) }
+            # An alias (the kernel's SYSCALL_DEFINE0: `long __x64_sys_getpid(...) __alias(__do_sys_getpid)`, the target a static
+            # function) is emitted, so its target is a root: (alias NAME TARGET KIND).
+            targets = forms.select { |f| head(f) == "alias" && f[2].is_a?(String) }.map { |f| unq(f[2]) }
+            nodes.keys.select { |n| external_root?(nodes[n]) || targets.include?(n) } + vtable_roots(nodes)
           else
             nodes.keys.select { |n| head(nodes[n]) == "function" && n.include?(substr) }
           end
+  # An alias form (the GNU alias attribute, (alias NAME TARGET KIND [weak])) is kept whatever the pruning (pathb-ssa-build's
+  # alias markers), so its target is reached: a static function that only an alias names is still defined for it.
+  forms.each { |f| queue << unq(f[2]) if head(f) == "alias" && f[2] }
   seen = {}
   until queue.empty?
     n = queue.pop
     next if seen[n]
     seen[n] = true
-    quoted_names(nodes[n].drop(2), []).each { |c| queue << c if nodes.key?(c) && !seen[c] }
+    if nodes.key?(n)
+      quoted_names(nodes[n].drop(2), []).each { |c| queue << c if (nodes.key?(c) || entries.key?(c)) && !seen[c] }
+    end
+    (entries[n] || []).each { |t| queue << t unless seen[t] }
   end
   out = forms.select { |f| !%w[function global data].include?(head(f)) || seen[unq(f[1])] }
   $stderr.write("pathb-ir-opt: kept #{seen.size} of #{nodes.size} functions and objects (reachable from #{substr})\n") if report
@@ -1805,6 +2217,7 @@ def main(argv)
   forward = false
   strip_eh = false
   strip_leaf = false
+  shrink_eh = false
   prune = nil
   jobs = default_jobs
   file = nil
@@ -1830,8 +2243,16 @@ def main(argv)
       max_depth = a[12..-1].to_i
     elsif a.start_with?("--max-callee=")
       $inline_max_callee = a[13..-1].to_i
+    elsif a.start_with?("--tiers=")
+      $inline_tiers = a[8..-1].split(",").map(&:to_i)
+    elsif a.start_with?("--max-tiny=")
+      $inline_tiny = a[11..-1].to_i
+    elsif a.start_with?("--cost=")
+      $inline_cost = a[7..-1] == "nodes" ? :nodes : :weighted
     elsif a.start_with?("--max-growth=")
       $inline_max_growth = a[13..-1].to_f
+    elsif a == "--scope-facts"
+      $scope_facts = true
     elsif a == "--report"
       report = true
     elsif a == "--forward"
@@ -1840,6 +2261,10 @@ def main(argv)
       strip_eh = true
     elsif a == "--strip-leaf-eh"
       strip_leaf = true
+    elsif a == "--shrink-eh-frames"
+      shrink_eh = true
+    elsif a.start_with?("--nothrow-extern=")
+      $nothrow_extra.concat(a[17..-1].split(","))
     elsif a.start_with?("--jobs=")
       jobs = a[7..-1].to_i
     elsif a.start_with?("--prune-unreachable=")
@@ -1856,7 +2281,7 @@ def main(argv)
     end
   end
   $sroa_debug = report
-  unless inline || sroa || forward || strip_eh || strip_leaf || prune
+  unless inline || sroa || forward || strip_eh || strip_leaf || shrink_eh || prune
     $stderr.write("pathb-ir-opt: no pass selected (--prune-unreachable=S, --strip-eh, --inline, --sroa, --forward)\n")
     return 1
   end
@@ -1872,8 +2297,11 @@ def main(argv)
     forms = strip_eh_pass(forms, report) if strip_eh
     forms = strip_leaf_eh_pass(forms, report) if strip_leaf
     forms = inline_pass(forms, max_depth, report) if inline
+    # a function whose calls were all inlined (or are atomics) is a leaf now: its frames, and those of the bodies copied into it
+    forms = strip_leaf_eh_pass(forms, report) if strip_leaf && inline
     # the callees that the inliner copied into every caller are not reached any more
     forms = prune_pass(forms, prune, report) if prune && inline
+    forms = shrink_eh_frames_pass(forms, report) if shrink_eh
     forms = sroa_pass(forms, jobs) if sroa
     # a worker's function comes back as its text; a later pass reads forms
     forms = forms.map { |f| f.is_a?(String) ? parse(tokenize(f))[0] : f } if forward

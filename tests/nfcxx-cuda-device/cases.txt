@@ -1,0 +1,39 @@
+# The cases of run.sh: name | NAME=VALUE (the case's environment, over HOME and CUDA_HOME) | trees that exist (ptx-emit,
+# amd-emit, cache-hit) | kernels | group files | the port's options (also the oracle's). "-" is empty; @W@ is the case's tree.
+default-sm75 | - | ptx-emit | mul2 | g0000.ptx | -
+sm-80 | NFCXX_SM=80 | ptx-emit | mul2 | g0000.ptx | -
+sm-empty-is-75 | NFCXX_SM= | ptx-emit | mul2 | g0000.ptx | -
+ptxas-jobs-2 | NFCXX_PTXAS_JOBS=2 | ptx-emit | mul2 | g0000.ptx,g0001.ptx,g0002.ptx | -
+ptxas-jobs-default-4 | - | ptx-emit | mul2,add | g0000.ptx,g0001.ptx,g0002.ptx | -
+groups-glob-order | - | ptx-emit | mul2 | g0002.ptx,g0000.ptx,g0001.ptx | -
+one-group | - | ptx-emit | mul2 | g0000.ptx | -
+ptxas-path-env | NFCXX_PTXAS=@W@/cuda/bin/ptxas-alt | ptx-emit | mul2 | g0000.ptx | -
+jit-ptx | NFCXX_CUDA_JIT=1 | ptx-emit | mul2 | g0000.ptx | -
+jit-0-is-cubin | NFCXX_CUDA_JIT=0 | ptx-emit | mul2 | g0000.ptx | -
+host-symbols | NFCXX_CUDA_HOST_SYMBOLS=@W@/tmp/host.syms | ptx-emit | mul2 | g0000.ptx | -
+keep-device-ir | NFCXX_KEEP_DEVICE_IR=@W@/tmp/keep.ir | ptx-emit | mul2 | g0000.ptx | -
+ir-opt-off | - | ptx-emit | mul2 | g0000.ptx | --ir-opt=off
+ir-opt-inline | - | ptx-emit | mul2 | g0000.ptx | --ir-opt=inline
+inline-device-0 | NFCXX_INLINE_DEVICE=0 | ptx-emit | mul2 | g0000.ptx | -
+promote-unroll-struct-0 | NFCXX_PROMOTE_SLOTS=0 NFCXX_UNROLL=0 NFCXX_STRUCT_SLOTS=0 | ptx-emit | mul2 | g0000.ptx | -
+module-budgets | NFCXX_CUDA_MAX_CONST_BYTES=32768 NFCXX_CUDA_MAX_PTX_LINES=500 | ptx-emit | mul2 | g0000.ptx | -
+no-kernels-no-image | - | ptx-emit | - | - | -
+edg-launch-0 | NFCXX_CUDA_EDG_LAUNCH=0 | ptx-emit | mul2 | g0000.ptx | -
+defines-passed-on | - | ptx-emit | mul2 | g0000.ptx | --cflag=-DFOO=1 --cflag=-UBAR
+rt-version-defined | - | ptx-emit | mul2 | g0000.ptx | --cflag=-DCUDART_VERSION=7
+inc-dir-first-header | - | ptx-emit | mul2 | g0000.ptx | --cflag=-I@W@/inc
+no-cuda-headers | CUDA_HOME=@W@/nocuda | ptx-emit | mul2 | g0000.ptx | -
+obfuscate-seed | NFCXX_OBFUSCATE_KERNELS=1 NFCXX_OBFUSCATE_SEED=00ff | ptx-emit | mul2 | g0000.ptx | -
+obfuscate-0-is-off | NFCXX_OBFUSCATE_KERNELS=0 NFCXX_OBFUSCATE_SEED=00ff | ptx-emit | mul2 | g0000.ptx | -
+ensure-ptx-emit-missing | - | - | mul2 | g0000.ptx | -
+compile-cache-env | NFCXX_CU_CACHE=@W@/cache | ptx-emit | mul2 | g0000.ptx | --compile --out=/work/obj/mul2.o
+compile-xdg-cache | XDG_CACHE_HOME=@W@/xdg | ptx-emit | mul2 | g0000.ptx | --compile
+compile-home-cache | - | ptx-emit | mul2 | g0000.ptx | --compile --out=/work/obj/mul2.o
+device-cache-hit | - | ptx-emit cache-hit | mul2 | g0000.ptx | --cache-dir=@W@/cache --cache-key=abc123
+device-cache-miss | - | ptx-emit | mul2 | g0000.ptx | --cache-dir=@W@/cache --cache-key=def456
+amdgpu-one-kernel | NFCXX_CUDA_TARGET=amdgpu NFCXX_AMDGPU_ARCH=gfx1151 NFCXX_AMDGPU_CLANG=@W@/root/bin/clang | ptx-emit amd-emit | mul2 | - | -
+amdgpu-ensure-missing | NFCXX_CUDA_TARGET=amdgpu NFCXX_AMDGPU_ARCH=gfx1151 NFCXX_AMDGPU_CLANG=@W@/root/bin/clang | ptx-emit | mul2 | - | -
+amdgpu-two-kernels | NFCXX_CUDA_TARGET=amdgpu NFCXX_AMDGPU_ARCH=gfx1100 NFCXX_AMDGPU_CLANG=@W@/root/bin/clang | ptx-emit amd-emit | mul2,add | - | -
+kernel-order-kept | - | ptx-emit | add,mul2 | g0000.ptx | -
+amdgpu-no-arch-unported | NFCXX_CUDA_TARGET=amdgpu NFCXX_AMDGPU_CLANG=@W@/root/bin/clang | amd-emit | mul2 | - | -
+cache-key-missing-unported | - | ptx-emit | mul2 | g0000.ptx | --cache-dir=@W@/cache

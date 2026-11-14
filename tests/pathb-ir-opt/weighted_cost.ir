@@ -1,0 +1,22 @@
+(ir-module "weighted.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "decls"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (slot "c" int 4 4)
+  (slot "d" int 4 4)
+  (slot "e" int 4 4)
+  (slot "f" int 4 4)
+  (slot "g" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (return %1))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %1 int (call int &"decls" (const int 7)))
+  (return %1))

@@ -1,6 +1,8 @@
 // nfcuop layout, AVX2 emitter: see nfcuop_layout_avx2.hpp.
 #include "nfcuop_layout_avx2.hpp"
 
+#include "nfcuop_layout_avx512.hpp"
+
 #include <sstream>
 #include <stdexcept>
 
@@ -49,7 +51,7 @@ const char* kTranspose8 =
 
 }  // namespace
 
-std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose) {
+std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, bool simd_transpose, Storage storage) {
   if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_c: sizes must be positive");
   std::ostringstream o;
   o << kPrologue << kHsum;
@@ -72,29 +74,46 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
       << "  }\n";
   } else {
     if (M % 8 != 0) throw std::invalid_argument("emit_gemm_rowsum_c: VecM needs M % 8 == 0");
-    // The repair: A transposed into At (K x M), so that for fixed k the eight lanes are eight consecutive rows of A.
+    const bool blk = storage == Storage::Blocked8;
+    // Index of A^T (At) for column k and row m. Strided: k*M + m. Blocked8: the 8-row block starts at m - m%8,
+    // with its k-th group of 8 contiguous: (m - m%8)*K + k*8 + m%8.
+    auto at_index = [&](const std::string& k, const std::string& m) {
+      if (!blk) return "At[" + k + " * " + std::to_string(M) + " + " + m + "]";
+      return "At[(" + m + " - " + m + " % 8) * " + std::to_string(K) + " + " + k + " * 8 + " + m + " % 8]";
+    };
+    // The repair: A transposed into At, so that for fixed k the eight lanes are eight consecutive rows of A.
     if (simd_transpose) {
       // 8x8 blocks while k + 8 <= K, then the scalar columns K - K % 8 .. K - 1.
-      o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
-        << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
-        << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[k * " << M << " + m], " << M << ");\n"
-        << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
+      if (!blk) {
+        o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
+          << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
+          << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[k * " << M << " + m], " << M << ");\n";
+      } else {
+        // The 8x8 block of rows m..m+7, columns k..k+7 goes to the block at m*K: its row k+c is 8 contiguous floats.
+        o << "  for (int64_t m = 0; m < " << M << "; m += 8)\n"
+          << "    for (int64_t k = 0; k + 8 <= " << K << "; k += 8)\n"
+          << "      nfc_tr8(&A[m * " << K << " + k], " << K << ", &At[m * " << K << " + k * 8], 8);\n";
+      }
+      o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
         << "    for (int64_t k = " << (K - K % 8) << "; k < " << K << "; ++k)\n"
-        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+        << "      " << at_index("k", "m") << " = A[m * " << K << " + k];\n";
     } else {
       o << "  for (int64_t m = 0; m < " << M << "; ++m)\n"
         << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
-        << "      At[k * " << M << " + m] = A[m * " << K << " + k];\n";
+        << "      " << at_index("k", "m") << " = A[m * " << K << " + k];\n";
     }
-      // Lanes on M: C is written column-major (C[n*M + m]), the row sum adds the N columns vertically.
-      o << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
+    // Lanes on M. Strided: C is written column-major (C[n*M + m]). Blocked8: the 8 rows of a block are contiguous
+    // for each n, the block at m*N (m a multiple of 8). The row sum adds the N columns vertically in both.
+    const std::string c_store = blk ? "&C[m * " + std::to_string(N) + " + n * 8]" : "&C[n * " + std::to_string(M) + " + m]";
+    const std::string at_load = blk ? "&At[m * " + std::to_string(K) + " + k * 8]" : "&At[k * " + std::to_string(M) + " + m]";
+    o << "  for (int64_t m = 0; m < " << M << "; m += 8) {\n"
       << "    __m256 rs = _mm256_setzero_ps();\n"
       << "    for (int64_t n = 0; n < " << N << "; ++n) {\n"
       << "      __m256 acc = _mm256_setzero_ps();\n"
       << "      for (int64_t k = 0; k < " << K << "; ++k)\n"
-      << "        acc = _mm256_fmadd_ps(_mm256_loadu_ps(&At[k * " << M << " + m]),\n"
+      << "        acc = _mm256_fmadd_ps(_mm256_loadu_ps(" << at_load << "),\n"
       << "                              _mm256_broadcast_ss(&B[k * " << N << " + n]), acc);\n"
-      << "      _mm256_storeu_ps(&C[n * " << M << " + m], acc);\n"
+      << "      _mm256_storeu_ps(" << c_store << ", acc);\n"
       << "      rs = _mm256_add_ps(rs, acc);\n"
       << "    }\n"
       << "    _mm256_storeu_ps(&R[m], rs);\n"
@@ -102,6 +121,148 @@ std::string emit_gemm_rowsum_c(GemmVariant v, int64_t M, int64_t N, int64_t K, b
   }
   o << "}\n";
   return o.str();
+}
+
+std::string emit_gemm_rowsum_packed_c(int64_t M, int64_t N, int64_t K, int mr) {
+  if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_packed_c: sizes must be positive");
+  if (mr != 4 && mr != 6) throw std::invalid_argument("emit_gemm_rowsum_packed_c: the row tile is 4 or 6");
+  if (M % mr != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs M % mr == 0");
+  if (N % 16 != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_c: needs N % 16 == 0");
+  std::ostringstream o;
+  o << kPrologue << kHsum;
+  o << "void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp) {\n"
+    << "  /* pack B: panel p (16 columns) holds K rows of 16 contiguous floats at Bp[p*K*16 + k*16 + j] */\n"
+    << "  for (int64_t p = 0; p < " << (N / 16) << "; ++p)\n"
+    << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
+    << "      for (int64_t j = 0; j < 16; ++j) Bp[p * " << K * 16 << " + k * 16 + j] = B[k * " << N << " + p * 16 + j];\n"
+    << "  for (int64_t i = 0; i < " << M << "; i += " << mr << ") {\n";
+  for (int r = 0; r < mr; ++r) o << "    __m256 rs" << r << " = _mm256_setzero_ps();\n";
+  o << "    for (int64_t n = 0; n < " << N << "; n += 16) {\n"
+    << "      const float* bn = Bp + (n / 16) * " << K * 16 << ";\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      __m256 c" << r << "0 = _mm256_setzero_ps(), c" << r << "1 = _mm256_setzero_ps();\n";
+  o << "      for (int64_t k = 0; k < " << K << "; ++k) {\n"
+    << "        __m256 b0 = _mm256_loadu_ps(bn + k * 16), b1 = _mm256_loadu_ps(bn + k * 16 + 8), x;\n";
+  for (int r = 0; r < mr; ++r)
+    o << "        x = _mm256_broadcast_ss(&A[(i + " << r << ") * " << K << " + k]); c" << r
+      << "0 = _mm256_fmadd_ps(x, b0, c" << r << "0); c" << r << "1 = _mm256_fmadd_ps(x, b1, c" << r << "1);\n";
+  o << "      }\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      _mm256_storeu_ps(&C[(i + " << r << ") * " << N << " + n], c" << r << "0); _mm256_storeu_ps(&C[(i + " << r
+      << ") * " << N << " + n + 8], c" << r << "1);\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      rs" << r << " = _mm256_add_ps(rs" << r << ", _mm256_add_ps(c" << r << "0, c" << r << "1));\n";
+  o << "    }\n";
+  for (int r = 0; r < mr; ++r) o << "    R[i + " << r << "] = nfc_hsum(rs" << r << ");\n";
+  o << "  }\n"
+    << "}\n";
+  return o.str();
+}
+
+// The packed kernel of emit_gemm_rowsum_packed_c, with the row tiles split across threads. B is packed once by the
+// calling thread; each thread then runs the tile loop over its own rows (row tiles are independent: each writes its
+// own rows of C and R). The thread count is clamped to the number of row tiles and to 64.
+std::string emit_gemm_rowsum_packed_mt_c(int64_t M, int64_t N, int64_t K, int mr) {
+  if (M < 1 || N < 1 || K < 1) throw std::invalid_argument("emit_gemm_rowsum_packed_mt_c: sizes must be positive");
+  if (mr != 4 && mr != 6) throw std::invalid_argument("emit_gemm_rowsum_packed_mt_c: the row tile is 4 or 6");
+  if (M % mr != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_mt_c: needs M % mr == 0");
+  if (N % 16 != 0) throw std::invalid_argument("emit_gemm_rowsum_packed_mt_c: needs N % 16 == 0");
+  std::ostringstream o;
+  o << kPrologue << "#include <pthread.h>\n" << kHsum;
+  // Each job packs a range of panels (phase 1) and runs a range of row tiles (phase 2). The two phases are separate
+  // thread launches, so no barrier is needed (pthread_barrier_t is not on macOS).
+  o << "typedef struct { const float* A; const float* B; float* C; float* R; float* Bp; int64_t p0, p1, i0, i1; } nfc_job;\n"
+    << "static void* nfc_pack(void* arg) {\n"
+    << "  nfc_job* j = (nfc_job*)arg;\n"
+    << "  for (int64_t p = j->p0; p < j->p1; ++p)\n"
+    << "    for (int64_t k = 0; k < " << K << "; ++k)\n"
+    << "      for (int64_t q = 0; q < 16; ++q) j->Bp[p * " << K * 16 << " + k * 16 + q] = j->B[k * " << N << " + p * 16 + q];\n"
+    << "  return 0;\n"
+    << "}\n"
+    << "static void* nfc_tiles(void* arg) {\n"
+    << "  nfc_job* j = (nfc_job*)arg;\n"
+    << "  const float* A = j->A; const float* Bp = j->Bp; float* C = j->C; float* R = j->R;\n"
+    << "  for (int64_t i = j->i0; i < j->i1; i += " << mr << ") {\n";
+  for (int r = 0; r < mr; ++r) o << "    __m256 rs" << r << " = _mm256_setzero_ps();\n";
+  o << "    for (int64_t n = 0; n < " << N << "; n += 16) {\n"
+    << "      const float* bn = Bp + (n / 16) * " << K * 16 << ";\n";
+  for (int r = 0; r < mr; ++r) o << "      __m256 c" << r << "0 = _mm256_setzero_ps(), c" << r << "1 = _mm256_setzero_ps();\n";
+  o << "      for (int64_t k = 0; k < " << K << "; ++k) {\n"
+    << "        __m256 b0 = _mm256_loadu_ps(bn + k * 16), b1 = _mm256_loadu_ps(bn + k * 16 + 8), x;\n";
+  for (int r = 0; r < mr; ++r)
+    o << "        x = _mm256_broadcast_ss(&A[(i + " << r << ") * " << K << " + k]); c" << r
+      << "0 = _mm256_fmadd_ps(x, b0, c" << r << "0); c" << r << "1 = _mm256_fmadd_ps(x, b1, c" << r << "1);\n";
+  o << "      }\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      _mm256_storeu_ps(&C[(i + " << r << ") * " << N << " + n], c" << r << "0); _mm256_storeu_ps(&C[(i + " << r
+      << ") * " << N << " + n + 8], c" << r << "1);\n";
+  for (int r = 0; r < mr; ++r)
+    o << "      rs" << r << " = _mm256_add_ps(rs" << r << ", _mm256_add_ps(c" << r << "0, c" << r << "1));\n";
+  o << "    }\n";
+  for (int r = 0; r < mr; ++r) o << "    R[i + " << r << "] = nfc_hsum(rs" << r << ");\n";
+  o << "  }\n"
+    << "  return 0;\n"
+    << "}\n";
+  o << "void nfc_gemm_rowsum(const float* A, const float* B, float* C, float* R, float* Bp, int nthreads) {\n"
+    << "  int64_t panels = " << (N / 16) << ", tiles = " << (M / mr) << ";\n"
+    << "  if (nthreads < 1) nthreads = 1;\n"
+    << "  if (nthreads > 64) nthreads = 64;\n"
+    << "  if (nthreads > tiles) nthreads = (int)tiles;\n"
+    << "  if (nthreads > panels) nthreads = (int)panels;\n"
+    << "  nfc_job jobs[64];\n"
+    << "  pthread_t th[64];\n"
+    << "  int started[64];\n"
+    << "  for (int t = 0; t < nthreads; ++t) {\n"
+    << "    jobs[t].A = A; jobs[t].B = B; jobs[t].C = C; jobs[t].R = R; jobs[t].Bp = Bp;\n"
+    << "    jobs[t].p0 = panels * t / nthreads; jobs[t].p1 = panels * (t + 1) / nthreads;\n"
+    << "    jobs[t].i0 = (tiles * t / nthreads) * " << mr << "; jobs[t].i1 = (tiles * (t + 1) / nthreads) * " << mr << ";\n"
+    << "  }\n"
+    << "  /* phase 1: pack B, one range of panels per thread */\n"
+    << "  for (int t = 1; t < nthreads; ++t) started[t] = pthread_create(&th[t], 0, nfc_pack, &jobs[t]) == 0;\n"
+    << "  nfc_pack(&jobs[0]);\n"
+    << "  for (int t = 1; t < nthreads; ++t) {\n"
+    << "    if (started[t]) pthread_join(th[t], 0);\n"
+    << "    else nfc_pack(&jobs[t]);\n"
+    << "  }\n"
+    << "  /* phase 2: the row tiles, one range per thread */\n"
+    << "  for (int t = 1; t < nthreads; ++t) started[t] = pthread_create(&th[t], 0, nfc_tiles, &jobs[t]) == 0;\n"
+    << "  nfc_tiles(&jobs[0]);\n"
+    << "  for (int t = 1; t < nthreads; ++t) {\n"
+    << "    if (started[t]) pthread_join(th[t], 0);\n"
+    << "    else nfc_tiles(&jobs[t]);\n"
+    << "  }\n"
+    << "}\n";
+  return o.str();
+}
+
+std::string emit_for_solution(const Solution& s, int64_t M, int64_t N, int64_t K) {
+  if (!s.feasible || s.variant.size() != 2)
+    throw std::invalid_argument("emit_for_solution: the plan is not a feasible gemm_rowsum plan");
+  auto storage_of = [&](const char* name) {
+    auto it = s.storage.find(name);
+    return it == s.storage.end() ? Storage::Strided : it->second;
+  };
+  const std::string& gemm = s.variant[0];
+  const std::string& rowsum = s.variant[1];
+  if (gemm == "avx2-vec-n" && rowsum == "reduce-horizontal") return emit_gemm_rowsum_c(GemmVariant::VecN, M, N, K);
+  if (gemm == "avx2-vec-m" && rowsum == "reduce-vertical") {
+    const Storage st = storage_of("C");
+    if (storage_of("A") != st)
+      throw std::invalid_argument("emit_for_solution: VecM needs A^T and C in one storage; the plan has them apart");
+    if (st == Storage::Panel) throw std::invalid_argument("emit_for_solution: VecM has no Panel storage");
+    return emit_gemm_rowsum_c(GemmVariant::VecM, M, N, K, true, st);
+  }
+  if (gemm == "avx2-packed-n" && rowsum == "reduce-horizontal") {
+    if (storage_of("B") != Storage::Panel)
+      throw std::invalid_argument("emit_for_solution: the packed kernel needs B in Panel");
+    return emit_gemm_rowsum_packed_mt_c(M, N, K, 6);
+  }
+  if (gemm == "avx512-packed-n" && rowsum == "reduce-horizontal") {
+    if (storage_of("B") != Storage::Panel)
+      throw std::invalid_argument("emit_for_solution: the packed AVX-512 kernel needs B in Panel");
+    return emit_gemm_rowsum_packed512_c(M, N, K, 6);  // single-threaded: the plan's threads are not used on AVX-512
+  }
+  throw std::invalid_argument("emit_for_solution: no emitter for the plan (" + gemm + ", " + rowsum + ")");
 }
 
 }  // namespace nfcuop::layout

@@ -4,7 +4,7 @@
 # tools/optcarrot_probe (its interpreted-mruby configuration; the bc2cpp compiled configurations stay there).
 # The check is the video checksum of the 180-frame run on examples/Lan_Master.nes: 59662, equal to CRuby's.
 # Sources are cloned into build/realworld at the pins below, not vendored; mruby is the pin of run_mruby.sh.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|pathb|qbe   (default: gcc pathb)
 #   OPTCARROT_FRAMES=N      frames to run (default 180; the checksum is checked only for 180)
 #   OPTCARROT_CONTROL=1     also build mruby with plain host gcc first, as a control
 # Needs ruby, rake, make and a shell for Onigmo's ./configure. Prints the frames per second of each run.
@@ -12,8 +12,6 @@
 # (bare `module_function`, which mruby 4.0.0 still treats as a no-op). Of rpg-maker-clone's other mruby patches only
 # mruby-onig-regexp-no-chdir.patch (parallel rake) is used: the rest are for bc2cpp output, the PSP build or bugs
 # optcarrot does not hit (checked: checksum 59662 without them).
-# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) cannot build the mruby this script bootstraps: it
-# refuses mruby's tools/mrbc/mrbc.c ("SSA route: pathb-ssa-build: not emitted: parse_args: operator unsupported"); the suite stays on qbe.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld; here=$root/tests/realworld/optcarrot
 mruby_pin=831da26b9021de0369d17b71b5667e2941a1a32d    # mruby/mruby tag 4.0.0, as run_mruby.sh
@@ -52,7 +50,7 @@ patch -d "$src" -p1 -N -s < "$here/mruby-module-function-scope.patch" || { echo 
 git -C "$work/mruby-onig-regexp" checkout -q -f "$onig_pin"
 patch -d "$work/mruby-onig-regexp" -p1 -N -s < "$here/mruby-onig-regexp-no-chdir.patch" || { echo "FAIL optcarrot: the onig-regexp no-chdir patch does not apply"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 [ -z "${OPTCARROT_CONTROL:-}" ] || backends="control $backends"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ruby "$here/build_bundle.rb" "$work/optcarrot" "$tmp/optcarrot_bundle.rb" || { echo "FAIL optcarrot: bundle"; exit 1; }

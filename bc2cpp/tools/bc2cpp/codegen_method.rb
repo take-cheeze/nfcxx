@@ -149,6 +149,10 @@ class CodeGen
     # variant is compiled first, so the guard can name it.
     if !@rsm_variant && rsm_dual?(label, d)
       budget = @ir_inline_remaining
+      # STEP_SUPER_STATIC: the variant's `super` target is resolved here, outside the variant's compile (whose probe of
+      # the target would compile it as a variant too). The probe may restore an older table, so it is read afterwards.
+      target = step_super_target(label, d)
+      (@step_super_targets ||= {})[label] = target
       @rsm_variants ||= {}
       @rsm_variants[label] = compile_rsm_variant(label, d)
       @ir_inline_remaining = budget
@@ -1210,18 +1214,20 @@ class CodeGen
   end
 
   def compile_rsm_variant(label, d)
-    saved = [@rsm_variant, @entry_spec_suffix, @core_program_world]
+    saved = [@rsm_variant, @entry_spec_suffix, @core_program_world, @rsm_owner_world]
     @rsm_variant = true
     @entry_spec_suffix = RSM_SUFFIX
     # The program-wide facts a core body binds statically (its owner of length, [] ...) are withheld: the variant
     # dispatches the receiver's methods by name, as the interpreter does, so a subclass's own definition is run.
+    # The owner call keeps the world (RSM_OWNER_CALL, OutsideOwnerCall#owner_call_world).
+    @rsm_owner_world = @core_program_world || @rsm_owner_world
     @core_program_world = nil
     # The block steps the variant compiled travel in its code: when the variant is dropped they are gone with it.
     steps_before = [@block_steps&.dup, @block_step_emitted&.dup]
     begin
       result = compile_method(label)
     ensure
-      @rsm_variant, @entry_spec_suffix, @core_program_world = saved
+      @rsm_variant, @entry_spec_suffix, @core_program_world, @rsm_owner_world = saved
     end
     if result[:unsupported] || result[:code].include?('#error') || !result[:resumable]
       @block_steps, @block_step_emitted = steps_before

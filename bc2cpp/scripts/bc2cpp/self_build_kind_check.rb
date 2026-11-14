@@ -35,10 +35,11 @@ runner_gems = (listed - %w[mruby-bin-mruby mruby-bin-mrbc mruby-compiler mruby-b
 
 suite.check('the self kind is a closed-world build', BC2CPP_CLOSED_WORLD_BUILDS.include?(KIND))
 suite.check('the existing kinds are still listed', %w[closed optcarrot-probe wio].all? { |k| BC2CPP_CLOSED_WORLD_BUILDS.include?(k) })
-# mruby-env is not listed in the runner's build_config: mruby-bc2cpp-sources depends on it.
+# mruby-env is a dependency of mruby-bc2cpp-sources. The runner's build_config also lists it (through File.expand_path), so the
+# expected list is the union of the two, not a sum that would count it twice.
 DEPENDENCY_ONLY = %w[mruby-env].freeze
 suite.check('BC2CPP_SELF_GEMS is the runner build_config minus its build-time gems, plus its dependency-only gems',
-            BC2CPP_SELF_GEMS.sort == (runner_gems + DEPENDENCY_ONLY).sort)
+            BC2CPP_SELF_GEMS.sort == (runner_gems | DEPENDENCY_ONLY).sort)
 suite.check('the dependency-only gems are declared by mruby-bc2cpp-sources',
             DEPENDENCY_ONLY.all? { |g| File.read(File.join(BC2CPP_TREE_ROOT, 'host-libs/mruby-bc2cpp-sources/mrbgem.rake')).include?("'#{g}'") })
 

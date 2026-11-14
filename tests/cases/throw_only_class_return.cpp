@@ -1,5 +1,4 @@
 // EXPECT: 1
-// X86-ONLY-LINUX: the throw in get() is caught in main after crossing a call frame; the Linux aarch64 EH runtime aborts (134) on
 // that, with both backends (the same as exceptions.cpp); macOS arm64 runs it
 // A class-returning routine whose body only throws (no return statement) is inlined by the front end, and the expansion
 // of its missing return value used to be an lvalue comma that the caller's initialization rejected (an internal error in
@@ -24,3 +23,4 @@ int main() {
   }
   return 0;
 }
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md

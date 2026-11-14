@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."
 export PATH=/usr/bin:/bin:$PATH
 export SURVEY_ROOT=$PWD
 base=$PWD/build/testsuite-snapshots
-routes=${SURVEY_ROUTES:-'qbe gcc pathb'}
+routes=${SURVEY_ROUTES:-'gcc pathb'}
 for route in $routes; do case $route in qbe|gcc|pathb) ;; *) exit 1 ;; esac; done
 out=${SURVEY_OUT:-$base/microsoft-stl-route-survey}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -16,7 +16,7 @@ printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in host $routes; do
   compiler=$PWD/nfcxx; flags=("--backend=$route" -c)
   if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; flags=(-fsyntax-only); fi
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 2 "${SURVEY_TIMEOUT:-60}" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 2 "${SURVEY_TIMEOUT:-60}" "$compiler" "${flags[@]}" \
     -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke.o" > "$out/preflight-$route.log" 2>&1
 done
 export SURVEY_INCLUDE=$base/microsoft-stl/tests/std/include

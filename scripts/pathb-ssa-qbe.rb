@@ -172,8 +172,11 @@ module Qbe
   # or a string, which the safe-pointers constructor registers (slice 3); a function that makes a memory access in such a
   # module is refused until then, as is one with a stack slot (its frame registration is slice 3 too).
   class << self
+    # pic: the object goes into a shared object (-fPIC): the address of an object or function that another object may
+    # interpose (not static) is read through the GOT or a pointer cell, never as a PC-relative reference, which ld rejects for
+    # a symbol of a shared object (R_X86_64_PC32 "can not be used when making a shared object").
     # darwin: the module is for a Darwin target (the builder sets it from the host; a closed script world has no RbConfig).
-    attr_accessor :safe, :asan, :darwin, :module_has_data, :sp_objects, :sp_funcs, :asan_objects
+    attr_accessor :ptr32, :regparm3, :xadd, :cmpxchg, :jtab, :safe, :asan, :darwin, :got_extern, :pic, :module_has_data, :sp_objects, :sp_funcs, :asan_objects, :aarch64, :hidden_thunks, :trap_checks, :no_pie
   end
   # --asan, milestone 2: the redzone on each side of a slot that stays in memory (poisoned at the function's entry, unpoisoned
   # before its return). 32 bytes, as the qbe backend's (docs/notes/asan.md).
@@ -184,6 +187,10 @@ module Qbe
   # the argument indices, the length being argument 2.
   SP_MEMFN = { "memcpy" => [0, 1], "memmove" => [0, 1], "memset" => [0], "memcmp" => [0, 1], "bcmp" => [0, 1] }.freeze
   self.safe = false
+  # --i386 (the 32-bit targets, i386 and i386_regparm3): pointers are 32-bit, of class w; `long` is read as `int` by the driver
+  # (scripts/pathb-ssa-build renames the IR's tokens), long long stays class l. docs/notes/nfcc-pathb.md, 3rd/qbe/doc/i386.txt.
+  self.ptr32 = false
+  self.regparm3 = false   # the 32-bit target passes the first three word arguments in registers (-mregparm=3)
   # --asan (NFCXX_PATHB_ASAN=1, docs/notes/asan-plan.md): a call of libasan's check before each access through a computed address.
   self.asan = false
   self.module_has_data = false
@@ -194,6 +201,12 @@ module Qbe
   module_function
 
   def float?(t) = FLOAT_TYPES.key?(unqual(t))
+
+  # The class and the byte size of a pointer, and its load and store operations: w and 4 on a 32-bit target, else l and 8.
+  def kp = ptr32 ? "w" : "l"
+  def kz = ptr32 ? 4 : 8
+  def kload = ptr32 ? "loadw" : "loadl"
+  def kstore = ptr32 ? "storew" : "storel"
 
   # _Float16 (std::float16_t): QBE has no half type. A value is its binary16 pattern, zero-extended, in a w register; every
   # operation is a call of a __nfcxx_f16_* helper of be/nfcxx_ldrt.c (libnfcxxld.a), which rounds to half after each
@@ -209,7 +222,7 @@ module Qbe
   # float and double.
   def cls(t)
     t = unqual(t)
-    return "l" if head(t) == "ptr"
+    return kp if head(t) == "ptr"
     return "w" if INT_W.include?(t)
     return "l" if INT_L.include?(t)
     return "s" if t == "float"
@@ -222,7 +235,7 @@ module Qbe
   def size(t)
     t = unqual(t)
     return size(t[1]) if head(t) == "volatile"
-    return 8 if head(t) == "ptr"
+    return kz if head(t) == "ptr"
     if head(t) == "array"
       # (array COUNT ELEM): a variable-length array's count is a register, which has no size here: refused.
       return size(t[2]) * int_lit(t[1])
@@ -233,14 +246,14 @@ module Qbe
 
   def load_op(t)
     t = unqual(t)
-    return "loadl" if head(t) == "ptr"
+    return kload if head(t) == "ptr"
 
     LOAD.fetch(t) { raise QbeUnsupported, "load of #{sx(t)}" }
   end
 
   def store_op(t)
     t = unqual(t)
-    return "storel" if head(t) == "ptr"
+    return kstore if head(t) == "ptr"
 
     STORE.fetch(t) { raise QbeUnsupported, "store of #{sx(t)}" }
   end
@@ -390,11 +403,26 @@ module Qbe
   def global_data(g, by_name, state)
     name = g[1].raw
     if state.key?(name)
-      return state[name] == :busy ? nil : state[name]
+      # A global that is being built is reached again through a cycle of addresses (serial8250_reg and univ8250_console
+      # point at each other): its address is a link-time symbol, so the reference stands, and is withdrawn below if the
+      # global turns out not to be emitted.
+      return state[name] == :busy ? true : state[name]
     end
 
     state[name] = :busy
     state[name] = build_data(g, by_name, state)
+    withdraw_users(name, state) if state[name].nil?
+    state[name]
+  end
+
+  # The globals whose data names the address of `name` (state[[:users, name]]) lose theirs when `name` is not emitted.
+  def withdraw_users(name, state)
+    (state.delete([:users, name]) || []).each do |user|
+      next if state[user].nil?
+
+      state[user] = nil
+      withdraw_users(user, state)
+    end
   end
 
   def global_flags(g) = g.map { |x| x.is_a?(Array) ? head(x) : x }
@@ -462,7 +490,7 @@ module Qbe
         if target.is_a?(Ref) && target.sigil == "&"
           # A function's address is its symbol, a link-time constant (as pathb-qbe-emit.rb writes it).
           suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
-          items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+          items << [int_lit(off), kz, "#{kp} $#{symbol(target.raw)}#{suffix}"]
           next
         end
         return nil unless target.is_a?(Ref) && target.sigil == "@" && by_name.key?(target.raw)
@@ -471,8 +499,9 @@ module Qbe
         # A global may point into itself; a longer cycle of addresses is left out (global_data returns nil for it).
         return nil unless target.raw == g[1].raw || global_data(by_name[target.raw], by_name, state)
 
+        (state[[:users, target.raw]] ||= []) << g[1].raw unless target.raw == g[1].raw
         suffix = int_lit(add).zero? ? "" : " + #{int_lit(add)}"
-        items << [int_lit(off), 8, "l $#{symbol(target.raw)}#{suffix}"]
+        items << [int_lit(off), kz, "#{kp} $#{symbol(target.raw)}#{suffix}"]
       else return nil
       end
     end
@@ -528,10 +557,12 @@ module Qbe
       @params = form.find { |x| head(x) == "params" }.drop(1)
       @sret = nil      # the AbiInfo of an aggregate result (the function returns its buffer, the C convention)
       @alias = {}      # a register that names another value: the sret parameter names the result buffer
+      @tls_cache = {}  # a thread-local global (raw name) => the temporary that holds its address (hoist_tls)
       @empty_bufs = [] # the buffers of the empty by-value parameters (their registers name them)
       @slots = form.select { |x| head(x) == "slot" }
       @blocks = form.select { |x| head(x) == "bb" }
       @lines = []
+      @zeroed = {}     # a local slot that a bit-field access reads before any store: zeroed (see zero_slot_once)
       @temps = 0
       @types = {}
       @params_set = {}
@@ -550,6 +581,7 @@ module Qbe
     end
 
     def emit
+      split_wide_phis
       header
       allocs
       escape_slots if returns_twice?(@blocks)
@@ -577,10 +609,21 @@ module Qbe
 
     def header
       sig = []
+      @ints = 0             # integer argument registers taken so far (AArch64)
+      @ints_unknown = false
+      @hidden_name = nil
+      @variadic = false
       @params.each_with_index do |p, i|
         case head(p)
         when "param"
-          if head(p[3]) == "byval"
+          if Qbe.aarch64 && p.drop(4).any? { |x| head(x) == "hidden-result" }
+            # EDG's class result (a void function with a result pointer first). On AArch64 the pointer arrives in x8, so the body
+            # takes it after the integer arguments; the entry (pathb-hidden-entry, scripts/pathb-ssa-build) moves x8 there.
+            raise QbeUnsupported, "more than one hidden result" if @hidden_name
+            @hidden_name = p[1][1..]
+            @types[p[1]] = p[3]
+            @params_set[p[1]] = true
+          elsif head(p[3]) == "byval"
             info = aggregate_info(p[3][1], "passed")
             @types[p[1]] = ["ptr", "void"]
             if info.shape == "empty"
@@ -589,7 +632,13 @@ module Qbe
               @empty_bufs << "%ebuf#{i}"
             else
               # A by-value aggregate is passed as its QBE aggregate type; the register is the address of that copy.
+              if even_pad?(info, @ints)
+                sig << "l %ppad#{i}"   # the register AAPCS64 skips before the 16-byte aligned aggregate (even_pad?)
+                @ints += 1
+              end
               sig << "#{info.tn} %p#{p[1][1..]}"
+              @ints += info.ints || 0
+              @ints_unknown ||= info.ints.nil?
               @params_set[p[1]] = true
               @sp_objs << ["%p#{p[1][1..]}", info.size + Qbe::SP_NOPAD] if Qbe.safe
             end
@@ -602,6 +651,7 @@ module Qbe
           else
             @types[p[1]] = p[3]
             sig << "#{Qbe.cls(p[3])} %p#{p[1][1..]}"
+            @ints += 1 unless %w[s d].include?(Qbe.cls(p[3]))
             @params_set[p[1]] = true
           end
         when "sret"
@@ -612,8 +662,16 @@ module Qbe
         when "ellipsis"
           # A variadic function: the `...` follows the named parameters (its arguments are read with vastart/vaarg).
           sig << "..."
+          @variadic = true
         else raise QbeUnsupported, "#{head(p)} parameter"
         end
+      end
+      if @hidden_name
+        raise QbeUnsupported, "hidden result of a variadic function" if @variadic
+        raise QbeUnsupported, "hidden result after an aggregate of an unknown integer size" if @ints_unknown
+        raise QbeUnsupported, "hidden result after #{@ints} integer arguments (x8 entry needs x#{@ints} free)" if @ints > 7
+        sig << "l %p#{@hidden_name}"
+        @hidden_ints = @ints
       end
       ret = if @sret && @sret.shape != "empty" then "#{@sret.tn} "
             elsif @sret || @ret[1] == "void" then ""
@@ -621,8 +679,22 @@ module Qbe
             end
       # A (weak) function (an inline or template instance) is weak in the object file, as the IR says: the driver writes
       # the .weak directive for the marker.
-      @lines << "# pathb-weak #{@name}" if @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" && p.length == 1 }
-      @lines << "export function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      # (weak attr), __attribute__((weak)) on a definition, is the same: a weak symbol that is also an interface symbol.
+      weak = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "weak" }
+      @lines << "# pathb-weak #{@name}" if weak
+      # A static function has internal linkage: without `export` the symbol is local to the object (two units with a static
+      # inline `read32le` each, TinyCC's, otherwise collide at link time).
+      static = @form.drop(2).any? { |p| p.is_a?(Array) && head(p) == "static" }
+      # (section "S"): __attribute__((section("S"))) on the function, allocated and executable (the kernel's __init: .init.text).
+      sec = @form.drop(2).find { |p| p.is_a?(Array) && head(p) == "section" }
+      secl = sec ? "section #{sec[1].raw} \"ax\" " : ""
+      if @hidden_name
+        # The entry (NAME, the AAPCS64 symbol, assembled by scripts/pathb-ssa-build) is global unless static or weak.
+        @lines << "# pathb-hidden-entry #{@name} #{@hidden_ints} #{static ? "local" : (weak ? "weak" : "global")}"
+        @lines << "#{secl}function #{ret}$#{@name}.nfcxxhid(#{sig.join(", ")}) {"
+      else
+        @lines << "#{static ? "" : "export "}#{secl}function #{ret}$#{@name}(#{sig.join(", ")}) {"
+      end
       @lines << "@start"
       @f16_params.each { |n| f16_from_sse("%h#{n}", "%p#{n}") }
     end
@@ -641,18 +713,247 @@ module Qbe
       info
     end
 
+    # [size, alignment] of a slot's object: the slot's own (slot NAME TYPE SIZE ALIGN), or a scalar's type size.
+    def slot_size_align(s)
+      size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
+      [size, s.size > 4 ? Qbe.int_lit(s[4]) : size]
+    end
+
+    # Stack slots whose lifetimes never overlap share one object, so a function that inlined a callee (or a dozen) has the frame of
+    # the largest, not of all of them (QBE gives each alloc a frame offset of its own). The lifetimes are the facts that the inliner
+    # puts around each inlined body (scripts/pathb-ir-opt.rb --scope-facts): (life-start $"x") where the callee's frame is entered and
+    # (life-end $"x") where it is left. A slot is in scope from a life-start along every path to a life-end; two slots conflict when
+    # one starts while the other is in scope on some path, and a slot with no facts conflicts with all (it is not shared). A slot
+    # that is named outside its scope (a direct use the facts do not cover) is not shared either: only addresses derived from
+    # inside the scope are trusted to die with it, as the language requires. Returns { index of a slot => index of the first slot
+    # of its group }; a slot that does not share is not a key. --asan and --safe register every slot as an object of its own.
+    def share_slots
+      return {} if Qbe.asan || Qbe.safe
+
+      index = {}
+      @slots.each_with_index { |s, i| index["$#{s[1].raw}"] = i }
+      return {} unless @blocks.any? { |b| b[2..].any? { |it| head(it) == "life-start" } }
+
+      by_num = {}
+      @blocks.each { |b| by_num[b[1].to_s] = b }
+      succs = {}
+      @blocks.each { |b| succs[b[1].to_s] = block_successors(b[2..].last) }
+      scope_in = {}
+      @blocks.each { |b| scope_in[b[1].to_s] = {} }
+      work = @blocks.map { |b| b[1].to_s }
+      queued = {}
+      work.each { |n| queued[n] = true }
+      until work.empty?
+        n = work.shift
+        queued[n] = false
+        cur = scope_in[n].dup
+        by_num[n][2..].each { |it| scope_step(it, index, cur, nil, nil) }
+        succs[n].each do |s|
+          next unless scope_in[s]
+
+          grew = false
+          cur.each_key do |k|
+            next if scope_in[s][k]
+
+            scope_in[s][k] = true
+            grew = true
+          end
+          next if !grew || queued[s]
+
+          queued[s] = true
+          work << s
+        end
+      end
+      conflict = {}
+      rogue = {}
+      @derived = derived_slots(index)
+      return {} if @derived.nil?
+      @blocks.each do |b|
+        cur = scope_in[b[1].to_s].dup
+        b[2..].each { |it| scope_step(it, index, cur, conflict, rogue) }
+      end
+      share = {}
+      members = {}   # representative => its members' indexes (itself included)
+      @slots.each_index do |i|
+        next if rogue[i] || !conflict.key?(i)   # no (life-start) of its own: no facts, or one that was never entered
+
+        rep = members.keys.find { |r| members[r].none? { |m| conflict[i][m] } }
+        if rep
+          share[i] = rep
+          members[rep] << i
+        else
+          members[i] = [i]
+        end
+      end
+      share
+    end
+
+    # The slots a statement or terminator names: [index, ...] of the slot atoms inside it, and of the registers that hold an address
+    # derived from a slot (derived_slots).
+    def slots_named(x, index, out)
+      if x.is_a?(Ref)
+        out << index["$#{x.raw}"] if x.sigil == "$" && index.key?("$#{x.raw}")
+      elsif x.is_a?(String)
+        @derived[x].each { |i| out << i } if @derived && @derived.key?(x)
+      elsif x.is_a?(Array)
+        x.each { |y| slots_named(y, index, out) }
+      end
+      out
+    end
+
+    # Registers that hold an address derived from slots (a slot's own address, an offset, index or bitcast of it, a select, a phi or a
+    # copy of those, and the pointer a call returns when it is given one): register => the indexes of the slots. A use of such a
+    # register outside a slot's scope counts as naming the slot there, so a slot whose address is still in a register after its scope
+    # has ended is not shared (the facts say where the language puts the end; the address may outlive it by a mistake of the facts).
+    DERIVING = %w[offset index bitcast addr select p2i i2p].freeze
+    DERIVED_LIMIT = 256
+    DERIVED_WORK = 40
+
+    def derived_slots(index)
+      derived = {}
+      items = []
+      users = {}   # register => the indexes of the items that read it
+      @blocks.each do |b|
+        b[2..].each do |it|
+          next unless head(it) == "let" || head(it) == "phi"
+
+          items << it
+          reads = []
+          collect_register_reads(it[3..], reads)
+          reads.each { |r| (users[r] ||= []) << (items.size - 1) }
+        end
+      end
+      # A worklist, not passes over the whole function until nothing changes: an item is looked at again only when a register it
+      # reads got a new set of slots (prism.c's parse_expression has 400,000 of them, and a pass is a pass too many).
+      work = (0...items.size).to_a
+      queued = Array.new(items.size, true)
+      pos = 0
+      while pos < work.size
+        k = work[pos]
+        pos += 1
+        queued[k] = false
+        it = items[k]
+        src = []
+        if head(it) == "phi"
+          it[3..].each { |_pred, v| slots_of_operand(v, index, derived, src) }
+        elsif it[3].is_a?(Array) && head(it[3]) == "call"
+          slots_of_call(it, index, derived, src)
+        else
+          slots_of_operand(it[3], index, derived, src)
+        end
+        next if src.empty? || derived[it[1]] == src
+        # A register derived from hundreds of slots, or a worklist that keeps going: a function that big (prism.c's parse_expression:
+        # thousands of slots, phis that merge them) has no frame worth sharing, and the sets make this quadratic. Not shared.
+        return nil if src.size > DERIVED_LIMIT || pos > DERIVED_WORK * items.size
+
+        derived[it[1]] = src
+        (users[it[1]] || []).each do |u|
+          next if queued[u]
+
+          queued[u] = true
+          work << u
+        end
+      end
+      derived
+    end
+
+    # The registers (strings) inside an item's operands.
+    def collect_register_reads(x, out)
+      if x.is_a?(String)
+        out << x
+      elsif x.is_a?(Array)
+        x.each { |y| collect_register_reads(y, out) }
+      end
+    end
+
+    # Adds to out the slots an operand or an address expression derives from.
+    def slots_of_operand(v, index, derived, out)
+      if v.is_a?(Ref)
+        i = v.sigil == "$" ? index["$#{v.raw}"] : nil
+        out << i if i && !out.include?(i)
+      elsif v.is_a?(String)
+        (derived[v] || []).each { |i| out << i unless out.include?(i) }
+      elsif v.is_a?(Array) && DERIVING.include?(head(v))
+        v.each { |y| slots_of_operand(y, index, derived, out) if y.is_a?(Ref) || y.is_a?(String) || y.is_a?(Array) }
+      end
+      out
+    end
+
+    # A call that returns a pointer (let R (ptr ...) (call ...)) may return one of its arguments.
+    def slots_of_call(it, index, derived, out)
+      return out unless it[2].is_a?(Array) && head(it[2]) == "ptr"
+
+      it[3][3..].each { |a| slots_of_operand(a, index, derived, out) }
+      out
+    end
+
+    # One statement of a block, run on the set `cur` of the slots in scope (indexes). With `conflict` and `rogue` (the last pass, on
+    # the sets that the fixpoint found) it also records which slots overlap and which are named outside their scope.
+    def scope_step(it, index, cur, conflict, rogue)
+      case head(it)
+      when "life-start"
+        i = index[it[1].is_a?(Ref) ? "$#{it[1].raw}" : ""]
+        return unless i
+
+        if conflict
+          conflict[i] ||= {}
+          cur.each_key do |o|
+            next if o == i
+
+            conflict[i][o] = true
+            (conflict[o] ||= {})[i] = true
+          end
+        end
+        cur[i] = true
+      when "life-end"
+        i = index[it[1].is_a?(Ref) ? "$#{it[1].raw}" : ""]
+        cur.delete(i) if i
+      else
+        return unless rogue
+
+        slots_named(it, index, []).each { |i| rogue[i] = true unless cur[i] }
+      end
+    end
+
+    # The block numbers a terminator jumps to.
+    def block_successors(term)
+      case head(term)
+      when "br" then [term[1].to_s]
+      when "condbr" then [term[2].to_s, term[3].to_s]
+      when "switch" then term[2..].select { |c| head(c) == "case" || head(c) == "default" }.map { |c| c.last.to_s }
+      else []
+      end
+    end
+
+    # AArch64 (AAPCS64 C.8): an aggregate with 16-byte alignment that is passed in integer registers starts at an even one,
+    # so a call or a definition with `ints` integer registers used before it skips one. QBE's arm64 ABI does skip it, but
+    # leaves the skipped register live through the call (spill.c: the register set at a block end is not rglob, an assertion).
+    # The emitter takes the skipped register itself instead: a zero integer argument before the aggregate, and an unused
+    # integer parameter before it in the definition. The aggregate then starts at the same register AAPCS64 gives it.
+    def even_pad?(info, ints)
+      Qbe.aarch64 && info.shape == "leaves" && info.align == 16 && info.ints.to_i > 0 && ints.odd? && ints + info.ints <= 8
+    end
+
     def allocs
-      @lines << "  %sretbuf =l alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
+      @lines << "  %sretbuf =#{Qbe.kp} alloc#{@sret.align >= 16 ? 16 : 8} #{[@sret.size, 1].max}" if @sret
       @sp_objs << ["%sretbuf", @sret.size + Qbe::SP_NOPAD] if @sret && @sret.size > 0 && Qbe.safe
       @empty_bufs.each do |name|
-        @lines << "  #{name} =l alloc8 8"
+        @lines << "  #{name} =#{Qbe.kp} alloc8 8"
         @sp_objs << [name, 8 + Qbe::SP_NOPAD] if Qbe.safe
       end
+      @share = share_slots
+      group = {}   # a representative's index => [size, align] of its group's object: the largest of its members
+      @share.each do |m, r|
+        group[r] ||= slot_size_align(@slots[r])
+        sz, al = slot_size_align(@slots[m])
+        group[r] = [[group[r][0], sz].max, [group[r][1], al].max]
+      end
       @slots.each_with_index do |s, i|
-        @slot["$#{s[1].raw}"] = "%o#{i}"
+        @slot["$#{s[1].raw}"] = "%o#{@share[i] || i}"
+        next if @share.key?(i)   # a member of a group: its representative's object
+
         # A slot carries its own size and alignment (slot NAME TYPE SIZE ALIGN); a scalar's size is also its type's.
-        size = s.size > 4 ? Qbe.int_lit(s[3]) : Qbe.size(s[2])
-        align = s.size > 4 ? Qbe.int_lit(s[4]) : size
+        size, align = group[i] || slot_size_align(s)
         a = [16, 8, 4, 2].find { |k| align >= k } || 1
         if Qbe.asan
           @asan_ssz["$#{s[1].raw}"] = size
@@ -665,11 +966,11 @@ module Qbe
         if align > 16
   # QBE's alloc has no alignment past 16: take the object from a 16-aligned block with align - 16 bytes spare,
   # and round its address up (as pathb-qbe-emit.rb does for an over-aligned slot).
-  @lines << "  %o#{i}r =l alloc16 #{[size, 1].max + pad + align}"
-  @lines << "  %o#{i}a =l add %o#{i}r, #{align - 1}"
-  @lines << "  %o#{i} =l and %o#{i}a, #{-align}"
+  @lines << "  %o#{i}r =#{Qbe.kp} alloc16 #{[size, 1].max + pad + align}"
+  @lines << "  %o#{i}a =#{Qbe.kp} add %o#{i}r, #{align - 1}"
+  @lines << "  %o#{i} =#{Qbe.kp} and %o#{i}a, #{-align}"
 else
-  @lines << "  %o#{i} =l alloc#{a} #{[size, 1].max + pad}"
+  @lines << "  %o#{i} =#{Qbe.kp} alloc#{a} #{[size, 1].max + pad}"
 end
       end
       unless @sp_objs.empty?
@@ -682,6 +983,55 @@ end
       end
       asan_poison
       @blocks.each { |b| b[2..].each { |it| note_type(it) } }
+      hoist_tls
+    end
+
+    # The address of a thread-local object, in a temporary. On -fPIC x86-64 Linux it is the general-dynamic model: a call to
+    # the helper __pathb_tlsaddr_SYM (scripts/pathb-ssa-build appends it), which calls __tls_get_addr. The initial-exec form
+    # (the thread pointer plus an offset from the GOT, the only TLS form QBE has) makes the linker mark a shared object
+    # DF_STATIC_TLS, and dlopen then fails once the static TLS surplus is used up ("cannot allocate memory in static TLS
+    # block", tests/eval). An executable keeps initial-exec, which the linker resolves for any module.
+    def tls_address(raw)
+      sym = Qbe.symbol(raw)
+      t = fresh
+      if Qbe.pic && !Qbe.aarch64 && !Qbe.darwin && !Qbe.ptr32 && sym.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+        helper = "tlsaddr:#{sym}"
+        asm_helpers << helper unless asm_helpers.include?(helper)
+        @lines << "  #{t} =l call $__pathb_tlsaddr_#{sym}()"
+      else
+        @lines << "  #{t} =l copy extern thread $#{sym}"
+      end
+      t
+    end
+
+    # Whether op() addresses x (a @ref) as a thread-local object: the thread pointer plus the object's offset.
+    def tls_global?(x)
+      info = @globals[x.raw]
+      return false unless info && info[:thread]
+      return false if info[:weak] && info[:extern]
+      return false if info[:extern] && Qbe.darwin
+
+      true
+    end
+
+    # A thread-local object's address is `mov %fs:0, r; add sym@gottpoff(%rip), r` at every reference, and QBE does not share
+    # them. The EH stack top and the current region (__curr_eh_stack_entry, __eh_curr_region) are read and written at every
+    # push and pop of every frame. A global the function names three times or more has its address computed once, in the entry block,
+    # and shared (as GCC does: a function runs on one thread, so the address does not change under it).
+    def hoist_tls
+      counts = {}
+      walk = lambda do |x|
+        if x.is_a?(Ref)
+          counts[x.raw] = (counts[x.raw] || 0) + 1 if x.sigil == "@" && tls_global?(x)
+        elsif x.is_a?(Array)
+          x.each { |y| walk.call(y) }
+        end
+      end
+      @blocks.each { |b| walk.call(b[2..]) }
+      counts.each do |raw, n|
+        next if n < 3
+        @tls_cache[raw] = tls_address(raw)
+      end
     end
 
     # --asan: the slot as [left redzone | object | right redzone]. The object keeps its alignment (a 16-aligned block with
@@ -820,6 +1170,35 @@ end
     # (asm-block "HEX" (opnd KIND "CODE" SIZE ARG)...): a general x86 template (be/nfcxx_ir.c). The operand block holds eight
     # bytes per operand: an input's value (zero-extended to 64 bits), a memory operand's address. The helper
     # (Qbe.asm_block) reads them, runs the template and writes the outputs back; they are stored to their addresses here.
+    # The symbol and constant offset an address register stands for ([Ref, offset]), through the (bitcast), (offset) and
+    # (index) lets that built it from an object's address; nil when it is anything else.
+    def asm_symbol_of(x, depth = 0)
+      return [x, 0] if x.is_a?(Ref) && x.sigil == "@"
+      return nil unless x.is_a?(String) && depth < 16
+
+      rv = @ptr_defs && @ptr_defs[x]
+      return nil if rv.nil?
+
+      case head(rv)
+      when "bitcast"
+        asm_symbol_of(rv[2], depth + 1)
+      when "offset", "index"
+        # (offset BASE BYTES) has its byte count as a literal; (index BASE N SCALE) an operand that must have folded to a const
+        # (an inlined parameter: `&((const char *)boot_cpu_data.x86_capability)[bit >> 3]` is an offset and then an index).
+        if head(rv) == "offset"
+          step = rv[2]
+        else
+          return nil unless head(rv[2]) == "const"
+
+          step = Qbe.int_lit(rv[2][2]) * Qbe.int_lit(rv[3])
+        end
+        base, off = asm_symbol_of(rv[1], depth + 1)
+        return nil if base.nil?
+
+        [base, off + Qbe.int_lit(step)]
+      end
+    end
+
     def asm_block_lines(item)
       ops = []
       clobbers = []
@@ -836,20 +1215,59 @@ end
           raise QbeUnsupported, "asm-block: an operand that is not opnd"
         end
       end
+      # immv / symv: an immediate that the front end could not fold ("i"(1 << (bit & 7)) of an inlined parameter): the
+      # operand's value, after the folding of the e-graph, must be an integer constant or a symbol plus a constant offset.
+      ops.each do |o|
+        if o[:kind] == "immv"
+          raise QbeUnsupported, "asm: an immediate operand that is not a constant" unless head(o[:arg]) == "const"
+
+          o[:kind] = "imm"
+          o[:arg] = ["const", Qbe.ptr32 ? "int" : "long", Qbe.int_lit(o[:arg][2]).to_s]
+        elsif o[:kind] == "symv"
+          base, off = asm_symbol_of(o[:arg])
+          raise QbeUnsupported, "asm: an address operand that is not a symbol and a constant offset" if base.nil?
+
+          o[:kind] = "sym"
+          o[:arg] = base
+          o[:off] = off
+        end
+      end
+      # A memory operand on a global object ("m"(startup_gdt_descr), the kernel's lgdt of head64.c) is the object itself, `sym(%rip)`, as
+      # gcc writes it: the pointer that the operand block would carry is an absolute address in a .head.text unit (qbe -A), and the code
+      # runs identity-mapped there, before the page tables that map that address.
+      ops.each do |o|
+        next unless o[:kind] == "mem" && o[:code] == "m" && o[:arg].is_a?(Ref) && o[:arg].sigil == "@" && !Qbe.pic
+
+        info = @globals[o[:arg].raw]
+        next if info.nil? || info[:thread] || info[:weak]
+
+        o[:kind] = "msym"
+        o[:sym] = Qbe.symbol(o[:arg].raw)
+      end
       ops.each { |o| o[:sym] = Qbe.symbol(o[:arg].raw) if o[:kind] == "sym" }
       ops.each { |o| o[:imm] = Qbe.int_lit(o[:arg][2]) if o[:kind] == "imm" }
-      name, text = Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels)
+      # A helper that names a symbol (a memory operand on a global, an "i" address) goes into the section of the function that calls it:
+      # the kernel's modpost refuses a reference from .text to an __init object, which the helper of head64.c's `lgdt %0` of
+      # startup_gdt_descr (.init.data) would be in .text.
+      fsec = @form.drop(2).find { |p| p.is_a?(Array) && head(p) == "section" }
+      sect = fsec && ops.any? { |o| %w[sym msym].include?(o[:kind]) } ? fsec[1].raw.delete('"') : nil
+      name, text = Qbe.ptr32 ? Qbe.asm_block32(item[1].raw.delete('"'), ops, clobbers, labels) : Qbe.asm_block(item[1].raw.delete('"'), ops, clobbers, labels, sect)
       (@link[:asm_texts] ||= {})[name] ||= text
+      # The operand block: a cell for each operand, of the machine's word (8 bytes; 4 on the 32-bit targets, where an operand of
+      # 8 bytes, a register pair, is refused).
+      ws = Qbe.kz
+      kp = Qbe.kp
+      raise QbeUnsupported, "asm-block operand of 8 bytes on a 32-bit target" if Qbe.ptr32 && ops.any? { |o| o[:size] == 8 }
       blk = fresh
-      @lines << "  #{blk} =l alloc8 #{8 * [ops.size, 1].max}"
+      @lines << "  #{blk} =#{kp} alloc#{ws} #{ws * [ops.size, 1].max}"
       addrs = {}
       ops.each_with_index do |o, i|
         slot = fresh
-        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
-        if o[:kind] == "sym"
+        @lines << "  #{slot} =#{kp} add #{blk}, #{ws * i}"
+        if o[:kind] == "sym" || o[:kind] == "msym"
           # The symbol's address goes into the cell although the template names the symbol: the reference keeps a static
           # object that only the asm uses from being pruned.
-          @lines << "  storel #{op(o[:arg])}, #{slot}"
+          @lines << "  store#{kp} #{op(o[:arg])}, #{slot}"
         elsif %w[in inout mem].include?(o[:kind])
           v = op(o[:arg])
           val = v
@@ -863,7 +1281,8 @@ end
             val = fresh
             @lines << "  #{val} =#{cls} #{ld} #{v}"
           elsif o[:kind] == "in"
-            cls = Qbe.cls(operand_type(o[:arg]))
+            # the address of a local or a global (the front end names the slot or the object: "D"(&val)) is a pointer
+            cls = o[:arg].is_a?(Ref) ? "l" : Qbe.cls(operand_type(o[:arg]))
             if cls == "s" || cls == "d"
               bits = fresh
               @lines << "  #{bits} =#{cls == "s" ? "w" : "l"} cast #{v}"
@@ -873,21 +1292,21 @@ end
             end
             raise QbeUnsupported, "asm-block input of class #{cls}" unless %w[w l].include?(cls)
           end
-          if cls == "w"
+          if cls == "w" && !Qbe.ptr32
             ext = fresh
             @lines << "  #{ext} =l extuw #{val}"
             val = ext
           end
-          @lines << "  storel #{val}, #{slot}"
+          @lines << "  store#{kp} #{val}, #{slot}"
         end
         addrs[i] = op(o[:arg]) if %w[out inout flag gsel].include?(o[:kind])
       end
-      @lines << "  call $#{name}(l #{blk})"
+      @lines << "  call $#{name}(#{kp} #{blk})"
       ops.each_with_index do |o, i|
         next unless %w[out inout flag gsel].include?(o[:kind])
 
         slot = fresh
-        @lines << "  #{slot} =l add #{blk}, #{8 * i}"
+        @lines << "  #{slot} =#{kp} add #{blk}, #{ws * i}"
         load, store = { 1 => %w[loadub storeb], 2 => %w[loaduh storeh], 4 => %w[loaduw storew], 8 => %w[loadl storel] }
                       .fetch(o[:size]) { raise QbeUnsupported, "asm-block output of #{o[:size]} bytes" }
         t = fresh
@@ -916,6 +1335,58 @@ end
 
     def block_label(num) = "b#{num}"
 
+    # QBE reads at most 63 predecessors in a phi ("too many arguments"). A block that has more (the join of the dispatch
+    # switches of a computed-goto interpreter: Lua's lvm.c has 83 `goto *` and a label every one of them reaches) gets
+    # its predecessors in groups of PHI_GROUP: each group jumps to a block of its own that merges the group's values with a
+    # phi and jumps on, and the phi of the block reads one value per group.
+    PHI_GROUP = 48
+
+    def split_wide_phis
+      extra = []
+      next_num = @blocks.map { |b| b[1].to_s.to_i }.max.to_i + 1
+      @blocks.each do |b|
+        phis = b[2..].select { |it| head(it) == "phi" }
+        next if phis.empty? || phis[0].size - 3 <= PHI_GROUP
+
+        preds = phis[0][3..].map { |pr, _| pr }
+        groups = []
+        preds.each_slice(PHI_GROUP) { |g| groups << g }
+        names = groups.each_index.map { |k| b[1].is_a?(Integer) ? next_num + k : (next_num + k).to_s }
+        next_num += groups.size
+        route = {}
+        groups.each_with_index { |g, k| g.each { |pr| route[pr.to_s] = names[k] } }
+        groups.each_with_index do |g, k|
+          merged = phis.map do |ph|
+            ["phi", "%wp#{ph[1][1..]}_#{k}", ph[2]] + ph[3..].select { |pr, _| route[pr.to_s] == names[k] }
+          end
+          extra << (["bb", names[k]] + merged + [["br", b[1]]])
+        end
+        target = b[1].to_s
+        @blocks.each do |pb|
+          next unless route.key?(pb[1].to_s)
+
+          term = pb[-1]
+          pb[-1] = retarget_term(term, target, route[pb[1].to_s]) if %w[br condbr switch].include?(head(term))
+        end
+        b.map! do |it|
+          next it unless head(it) == "phi"
+
+          ["phi", it[1], it[2]] + names.each_index.map { |k| [names[k], "%wp#{it[1][1..]}_#{k}"] }
+        end
+      end
+      @blocks.concat(extra)
+    end
+
+    def retarget_term(term, target, to)
+      return term unless to
+
+      case term[0]
+      when "br" then term[1].to_s == target ? ["br", to] : term
+      when "condbr" then ["condbr", term[1], term[2].to_s == target ? to : term[2], term[3].to_s == target ? to : term[3]]
+      else ["switch", term[1], term[2].map { |v, bl| [v, bl.to_s == target ? to : bl] }, term[3].to_s == target ? to : term[3]]
+      end
+    end
+
     # Checks that need no emission: a switch's targets may not repeat where a phi reads them, and a phi operand that is an
     # expression is computed at the end of its predecessor, so the phi reads a temporary.
     def plan_phis
@@ -941,7 +1412,7 @@ end
           next unless head(it) == "phi"
 
           it[3..].each do |pred, v|
-            next unless expression?(v)
+            next unless phi_computed?(v)
 
             name = "%pe#{it[1][1..]}_#{pred}"
             @pending[pred.to_s] << [name, v]
@@ -971,8 +1442,43 @@ end
 
     def expression?(v) = v.is_a?(Array) && !%w[const null].include?(head(v))
 
+    # The cell of a pointer constant that does not fit in 32 bits (module_context), else nil.
+    def wide_pointer_cell(v)
+      return nil unless v.is_a?(Array) && @link[:wides]
+      return @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2]), v[1])] if head(v) == "const" && head(v[1]) == "ptr" && v[2].is_a?(String)
+      return nil unless head(v) == "i2p" && head(v[2]) == "const" && v[2][2].is_a?(String)
+
+      @link[:wides][Qbe.wrap_lit(Qbe.int_lit(v[2][2]), v[1])]
+    end
+
+    # A phi operand that takes instructions: an expression, or the address of a function this module does not define
+    # (loaded from its pointer cell, see op). QBE wants nothing but phis at the top of a block, and the operand must be
+    # defined where its edge starts, so the predecessor computes it (pending_phi_operands).
+    def phi_computed?(v)
+      return true if expression?(v)
+      return true if v.is_a?(Ref) && v.sigil == "@" && global_copy?(v.raw)
+
+      v.is_a?(Ref) && v.sigil == "&" && !Qbe.ptr32 && @link.key?(:funcs) && !@link[:funcs].include?(Qbe.symbol(v.raw))
+    end
+
+    # A global whose address op reads through a `copy extern` line (a weak undefined object, the GOT, a thread-local): the
+    # line is an instruction, so a phi operand that is such a global is computed by its predecessor too (see op). Its line
+    # would otherwise come between the phis at the top of the block (QBE: "unexpected phi instruction").
+    def global_copy?(raw)
+      info = @globals[raw]
+      return false unless info
+
+      (info[:weak] && info[:extern]) || info[:thread] ||
+        (info[:extern] && Qbe.got_extern) || (Qbe.pic && !info[:static])
+    end
+
     def pending_phi_operands(num)
       @pending.fetch(num, []).each do |name, v|
+        if v.is_a?(Ref)
+          @lines << "  #{reg(name)} =#{Qbe.kp} copy #{op(v)}"
+          @types[name] = ["ptr", "void"]
+          next
+        end
         let_lines(name, v[1], v)
         @types[name] = v[1]
       end
@@ -987,7 +1493,7 @@ end
     # The type of an operand: a constant's or an expression's own type, or the declared type of a register.
     def switch_operand_type(x)
       return x[1] if x.is_a?(Array) && head(x) == "const"
-      return "ptr" if x.is_a?(Array) && head(x) == "null"
+      return(x[1].is_a?(Array) ? x[1] : ["ptr", "void"]) if x.is_a?(Array) && head(x) == "null"
       return Qbe.expr_type(x) if expression?(x)
 
       @types.fetch(x) { raise QbeUnsupported, "operand #{sx(x)} has no declared type" }
@@ -1019,11 +1525,48 @@ end
       # so labels with one body share a target and can form a bit test.
       tree_cases = cases.map { |value, target| [value, switch_forward(target)] }
       tree_default = switch_forward(default)
-      items = switch_items(switch_ranges(tree_cases), cls)
+      ranges = switch_ranges(tree_cases)
+      # Dense: a jump table (QBE's jtab), GCC's rule of 8 table entries per case label, from five labels up (docs/notes/
+      # pathb-switch.md). 32-bit operands only: the index is the operand less the lowest value, a 32-bit value.
+      span = ranges.empty? ? 0 : ranges[-1][1] - ranges[0][0] + 1
+      if Qbe.jtab && !Qbe.ptr32 && cls == "w" && cases.size >= 5 && span <= 8 * cases.size && span <= 1024
+        switch_jtab_lines(operand, ranges, tree_default)
+        return
+      end
+      items = switch_items(ranges, cls)
       if items.any? { |it| it[0] == :bits } || items.size >= 4
         switch_tree_lines(operand, cls, Qbe.signed?(switch_operand_type(opnd)), items, tree_default)
       else
         switch_chain_lines(operand, cls, cases, default)
+      end
+    end
+
+    # A jump table: the index x - lo below the span jumps to its slot (jtab), any other value to the default. Each slot is
+    # its own block (jtab's targets are distinct) and jumps to one shared block per target, so a target has one
+    # predecessor in the IL and a phi there names that block (the jumper, as the chain and the tree do). Holes go to the
+    # default. QBE checks the index against the count itself (amd64 emit).
+    def switch_jtab_lines(operand, ranges, default)
+      lo = ranges[0][0]
+      span = ranges[-1][1] - lo + 1
+      slot_target = Array.new(span, default)
+      ranges.each { |a, b, t| (a..b).each { |v| slot_target[v - lo] = t } }
+      shared = {}
+      shared_label = lambda do |t|
+        shared[t] = "#{block_label(@cur)}.S#{t}" unless shared[t]
+        shared[t]
+      end
+      idx = "%swi#{@cur}"
+      @lines << "  #{idx} =w sub #{operand}, #{lo}"
+      slots = (0...span).map { |k| "#{block_label(@cur)}.E#{k}" }
+      @lines << "  jtab #{idx}, @#{shared_label.call(default)}, " + slots.map { |l| "@#{l}" }.join(", ")
+      slots.each_with_index do |label, k|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{shared_label.call(slot_target[k])}"
+      end
+      shared.each do |t, label|
+        @lines << "@#{label}"
+        @lines << "  jmp @#{block_label(t)}"
+        @jumper[[t, @cur]] = label if @phi_blocks[t.to_s]
       end
     end
 
@@ -1235,7 +1778,8 @@ end
           info = @globals.fetch(x.raw) { raise QbeUnsupported, "global #{x.raw}" }
           # A weak undefined object is loaded through the GOT in the existing emitter; that is not modelled here.
           # A weak undefined object is read through the GOT (`copy extern`), so an absent definition reads as null.
-          if info[:weak] && info[:extern]
+          raise QbeUnsupported, "a thread-local object on a 32-bit target" if info[:thread] && Qbe.ptr32
+          if info[:weak] && info[:extern] && !Qbe.ptr32   # the 32-bit targets are not position independent: a direct reference
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -1243,7 +1787,10 @@ end
           # On Darwin an extern object is usually in a dylib (libc++'s vtable or typeinfo for std::length_error): the
           # adrp/add pair to its @page is a relocation ld64 cannot resolve for an imported data symbol ("does not have
           # address"), so its address is read through the GOT, as clang does (QBE's extern on an Apple target).
-          if info[:extern] && Qbe.darwin
+          # -fPIC: an object that another object of the shared object's process may interpose goes through the GOT as well.
+          # A thread-local extern (the EH shim's __curr_eh_stack_entry) is not read through the GOT off Darwin: its TLS
+          # reference must match the shim's TLS definition, and a GOT copy is a non-TLS reference the linker rejects.
+          if !Qbe.ptr32 && ((info[:extern] && Qbe.got_extern && !(info[:thread] && !Qbe.darwin)) || (Qbe.pic && !info[:static] && !info[:thread]))
             t = fresh
             @lines << "  #{t} =l copy extern $#{Qbe.symbol(x.raw)}"
             return t
@@ -1251,9 +1798,9 @@ end
           # A thread-local object: its address is the thread pointer plus the object's offset (initial-exec, as the
           # existing emitter does it).
           if info[:thread]
-            t = fresh
-            @lines << "  #{t} =l copy extern thread $#{Qbe.symbol(x.raw)}"
-            return t
+            return @tls_cache[x.raw] if @tls_cache.key?(x.raw)
+
+            return tls_address(x.raw)
           end
           return "$#{Qbe.symbol(x.raw)}"
         end
@@ -1262,7 +1809,7 @@ end
 # does: `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared library.
 if x.sigil == "&"
   sym = Qbe.symbol(x.raw)
-  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym)
+  return "$#{sym}" if !@link.key?(:funcs) || @link[:funcs].include?(sym) || Qbe.no_pie || Qbe.ptr32
   t = fresh
   @lines << "  #{t} =l loadl $pathb_got.#{sym}"
   return t
@@ -1303,7 +1850,7 @@ end
       case head(item)
       when "phi"
         pairs = item[3..].map do |pred, v|
-          text = expression?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
+          text = phi_computed?(v) ? reg(@phi_expr.fetch([@cur, pred.to_s, item[1]])) : op(v)
           "#{phi_placeholder(@cur, pred)} #{text}"
         end.join(", ")
         @lines << "  #{reg(item[1])} =#{Qbe.cls(item[2])} phi #{pairs}"
@@ -1348,7 +1895,7 @@ end
         dst = op(item[2])
         safe_check(item[2], dst, n)
         asan_check(item[2], dst, n, "store")
-        @lines << "  call $memset(l #{dst}, w 0, l #{n})" unless n.to_i.zero?
+        @lines << "  call $memset(#{Qbe.kp} #{dst}, w 0, #{Qbe.kp} #{n})" unless n.to_i.zero?
       when "br"
         jump_to(item[1])
         @lines << "  jmp @#{block_label(item[1])}"
@@ -1367,6 +1914,14 @@ end
           atomic_fetch_lines(fresh, nil, item[1])
           return
         end
+        if atomic_store?(item[1])
+          atomic_store_lines(item[1])
+          return
+        end
+        if atomic_cas?(item[1])
+          atomic_cas_lines(fresh, item[1])
+          return
+        end
 
         sret, dest, sym, args = call_parts(item[1])
         if sret.nil? || sret.shape == "empty"
@@ -1375,7 +1930,10 @@ end
           # The callee returns the aggregate in its own buffer; it is copied to the destination the caller named.
           t = fresh
           @lines << "  #{t} =#{sret.tn} call #{sym}(#{args.join(', ')})"
-          @lines << "  call $memmove(l #{dest}, l #{t}, l #{sret.size})"
+          # A blit, not a call: QBE reads a blit's operands as loads and stores, so the slot that held the result is not
+          # an escaping address and slots of calls in different blocks share one frame location (QuickJS's JS_CallInternal
+          # had 800 of them, a 14 KB frame). The result and the destination are distinct objects.
+          @lines << (sret.size.to_i <= 4096 ? "  blit #{t}, #{dest}, #{sret.size}" : "  call $memmove(#{Qbe.kp} #{dest}, #{Qbe.kp} #{t}, #{Qbe.kp} #{sret.size})")
         end
       when "condbr"
         cond = op(item[1])
@@ -1398,6 +1956,7 @@ end
       when "loc" then set_loc(item)
       when "decl" then asan_scope(item, true)
       when "scope-end" then asan_scope(item, false)
+      when "life-start", "life-end" then nil   # the inliner's lifetime facts: only share_slots reads them
       when "bfstore", "bfstore.v" then bfstore_lines(item)
       when "nonnull" then nonnull_lines(item[1])
       when "bounds" then bounds_lines(item[1], item[2])
@@ -1436,7 +1995,7 @@ end
 
     def escape_slots
       asm_helpers << "escape"
-      @slots.each_index { |i| @lines << "  call $__pathb_escape(l %o#{i})" }
+      @slots.each_index { |i| @lines << "  call $__pathb_escape(#{Qbe.kp} %o#{i})" unless @share.key?(i) }
     end
 
 # `pathb_check(cond, code)`: a check that traps when cond is nonzero. The module names the `check` helper, which
@@ -1444,13 +2003,19 @@ end
 # The call is out of the flow: a `jnz` to a trap block of its own (the call, then hlt: the helper does not return),
 # and the operation goes on in the block after it. A call in the hot path cost about 40% of token generation.
     def check_call(cond, code)
-      asm_helpers << "check" unless asm_helpers.include?("check")
+      # The 32-bit targets (the kernel's real-mode code) run bare: no runtime to trap into, and gcc makes no such checks. The
+      # hardware's own traps (#DE) and shift count masking are the behaviour of the code gcc makes.
+      return if Qbe.ptr32
+
+      # Qbe.trap_checks (a unit with no hosted libc: the kernel's -mno-sse, -ffreestanding, -nostdinc): the trap block is
+      # the trap instruction alone (hlt is ud2 on x86-64, as __builtin_trap), with no helper and so no reference to abort.
+      asm_helpers << "check" unless Qbe.trap_checks || asm_helpers.include?("check")
       @temps += 1
       trap = "ckt#{@temps}"
       ok = "cko#{@temps}"
       @lines << "  jnz #{cond}, @#{trap}, @#{ok}"
       @lines << "@#{trap}"
-      @lines << "  call $pathb_check(w 1, w #{code})"
+      @lines << "  call $pathb_check(w 1, w #{code})" unless Qbe.trap_checks
       @lines << "  hlt"
       @lines << "@#{ok}"
       @label = ok # a jump out of the split block is the one that the phi of its target names
@@ -1468,6 +2033,7 @@ end
 
     def let_lines(r, t, rv)
       dst = reg(r)
+      (@ptr_defs ||= {})[r] = rv if %w[offset bitcast index].include?(head(rv))
       if Qbe.asan && %w[offset bitcast].include?(head(rv)) && (k = asan_slot_addr(rv))
         @asan_known[r] = k
       end
@@ -1481,7 +2047,16 @@ end
           @lines << "  #{raw} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
           canon_lines(dst, t, raw)
         else
-          @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
+          a = op(rv[2])
+          b = op(rv[3])
+          # `x + CONST` of 64 bits whose constant does not fit in a displacement: see index_lines (`__va(x)` of the kernel).
+          if head(rv) == "wadd" && c == "l" && wide_literal?(b)
+            @lines << "  #{dst} =l sub #{a}, #{-b.to_i}"
+          elsif head(rv) == "wadd" && c == "l" && wide_literal?(a)
+            @lines << "  #{dst} =l sub #{b}, #{-a.to_i}"
+          else
+            @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{a}, #{b}"
+          end
         end
       when *Qbe::BIN.keys
         @lines << "  #{dst} =#{c} #{Qbe::BIN[head(rv)]} #{op(rv[2])}, #{op(rv[3])}"
@@ -1512,20 +2087,37 @@ end
         @lines << "  #{dst} =w #{Qbe::FCMP[head(rv)]}#{oc} #{op(rv[2])}, #{op(rv[3])}"
       when "iconv" then conv_lines(dst, t, rv[2])
       # An integer to pointer conversion widens the integer as an iconv to a 64-bit type does (pathb-qbe-emit.rb's i2p).
-      when "i2p" then conv_lines(dst, t, rv[2])
+      when "i2p"
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+        else
+          conv_lines(dst, t, rv[2])
+        end
       when "i2f", "u2f" then int_to_float_lines(dst, t, rv[2])
       when "fconv" then float_conv_lines(dst, t, rv[2])
       when "cf2i" then float_to_int_lines(dst, t, rv[2])
       when "call"
         if atomic_fetch?(rv)
           atomic_fetch_lines(dst, c, rv)
+        elsif atomic_cas?(rv)
+          atomic_cas_lines(dst, rv)
         elsif Qbe.f16?(rv[1])
           # The result is the low 16 bits of xmm0.
           raw = fresh
           @lines << "  #{raw} =s #{call_text(rv)}"
           f16_from_sse(dst, raw)
         elsif atomic_load?(rv)
-          @lines << "  #{dst} =#{rv[2].raw.end_with?('4"') ? 'w loadw' : 'l loadl'} #{op(rv[3])}"
+          @lines << "  #{dst} =#{ATOMIC_LOAD_OP[rv[2].raw.delete('"')[-1]]} #{op(rv[3])}"
+        elsif atomic_small_result?(rv)
+          # A 1- or 2-byte __atomic_* result is defined in its low bits only (the ABI): extend it to the object's type.
+          raw = fresh
+          @lines << "  #{raw} =w #{call_text(rv)}"
+          ext = if unqual(rv[1]).include?("unsigned") || unqual(rv[1]) == "bool"
+                  rv[2].raw.delete('"')[-1] == "1" ? "extub" : "extuh"
+                else
+                  rv[2].raw.delete('"')[-1] == "1" ? "extsb" : "extsh"
+                end
+          @lines << "  #{dst} =w #{ext} #{raw}"
         # A bool result is defined in its low byte only (the ABI sets %al): take that byte, then normalise it to 0 or 1.
         elsif unqual(rv[1]) == "bool"
           raw = fresh
@@ -1550,7 +2142,7 @@ end
         # QBE does not know that vaarg writes the va_list: a load of it after this read would reuse an earlier load.
         # The barrier call is a memory clobber for QBE.
         barrier_lines
-      when "addr" then @lines << "  #{dst} =l copy #{op(rv)}"
+      when "addr" then @lines << "  #{dst} =#{Qbe.kp} copy #{op(rv)}"
       # `(not T A)`: a bitwise complement of an integer, or a logical negation of a bool. The complement is narrowed to
       # the type's canonical form. Floats are not integers and are refused.
       when "not"
@@ -1571,6 +2163,13 @@ end
         @lines << "  #{dst} =l call $__pathb_rdtsc()"
       # `(retaddr)`, `(frameaddr)`: __builtin_return_address(0) and __builtin_frame_address(0). QBE gives each function a frame
       # pointer, so the helper the driver appends reads this function's frame (%rbp on x86-64, x29 on arm64: the frame record).
+      # `(sp)`: the stack pointer register (a global register variable bound to rsp, the kernel's current_stack_pointer): the
+      # helper returns its caller's %rsp (x86-64 only).
+      when "sp"
+        asm_helpers << "sp"
+        asm_helpers << "barrier" unless asm_helpers.include?("barrier")
+        @lines << "  #{dst} =l call $__pathb_sp()"
+        @lines << "  call $__pathb_barrier()"
       when "retaddr", "frameaddr"
         # The empty call after it keeps QBE from turning `return __builtin_return_address(0);` into a tail call (`leave; jmp`),
         # which would run the helper in the caller's frame.
@@ -1587,7 +2186,7 @@ end
           @lines << "  #{sum} =l add #{base}, #{Qbe.int_lit(rv[2])}"
           @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
         else
-          @lines << "  #{dst} =l add #{base}, #{Qbe.int_lit(rv[2])}"
+          @lines << "  #{dst} =#{Qbe.kp} add #{base}, #{Qbe.int_lit(rv[2])}"
         end
       when "index" then index_lines(dst, rv)
       when "alloca" then alloca_lines(dst, rv)
@@ -1608,6 +2207,10 @@ end
         end
       when "const", "null", nil
         # A bare slot address (a Ref): the inliner's copies of an argument's slot (an SSA rewrite can leave one as a let's value).
+        if (cell = wide_pointer_cell(rv))
+          @lines << "  #{dst} =l loadl $#{cell}"
+          return
+        end
         @lines << "  #{dst} =#{c} copy #{op(rv)}" if rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
         raise QbeUnsupported, "let of #{sx(rv)}" unless rv.is_a?(Array) || rv.is_a?(String) || rv.is_a?(Ref)
       else raise QbeUnsupported, "operator #{head(rv) || sx(rv)}"
@@ -1618,21 +2221,36 @@ end
     # with zero; a conversion to a narrower type sign- or zero-extends the low bits.
     def conv_lines(dst, t, x)
       src = x.is_a?(Array) && head(x) == "const" ? x[1] : @types[x]
+      src = ["ptr", "void"] if src.nil? && x.is_a?(Ref) # a function's or an object's address (an inlined cast of &fn to an integer)
       raise QbeUnsupported, "conversion of an untyped operand #{sx(x)}" unless src
       raise QbeUnsupported, "float to integer by iconv" if float_type?(src)
 
       dc = Qbe.cls(t)
       sc = Qbe.cls(src)
+      xo = op(x)
+      if x.is_a?(Ref) && Qbe::EXT.key?(t)
+        # A symbol is an address constant, which an extension cannot take as its operand (`movzwl $buf, %eax`): the narrowing is a
+        # mask, or a shift pair, of the address
+        bits = { "sb" => 24, "ub" => 24, "sh" => 16, "uh" => 16 }.fetch(Qbe::EXT[t])
+        if Qbe::EXT[t][0] == "u"
+          @lines << "  #{dst} =w and #{xo}, #{(1 << (32 - bits)) - 1}"
+        else
+          up = fresh
+          @lines << "  #{up} =w shl #{xo}, #{bits}"
+          @lines << "  #{dst} =w sar #{up}, #{bits}"
+        end
+        return
+      end
       if dc == "l" && sc == "w"
-        @lines << "  #{dst} =l #{Qbe.signed?(src) ? 'extsw' : 'extuw'} #{op(x)}"
+        @lines << "  #{dst} =l #{Qbe.signed?(src) ? 'extsw' : 'extuw'} #{xo}"
       elsif dc == "w" && sc == "l" && t != "bool" && !Qbe::EXT.key?(t)
-        @lines << "  #{dst} =w copy #{op(x)}"
+        @lines << "  #{dst} =w copy #{xo}"
       elsif t == "bool"
-        @lines << "  #{dst} =w cne#{sc} #{op(x)}, 0"
+        @lines << "  #{dst} =w cne#{sc} #{xo}, 0"
       elsif Qbe::EXT.key?(t)
-        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{op(x)}"
+        @lines << "  #{dst} =w ext#{Qbe::EXT[t]} #{xo}"
       else
-        @lines << "  #{dst} =#{dc} copy #{op(x)}"
+        @lines << "  #{dst} =#{dc} copy #{xo}"
       end
     end
 
@@ -1648,7 +2266,7 @@ end
       t = operand_type(n)
       Qbe.signed?(t) # refuses a size that is not an integer
       size = op(n)
-      if Qbe.cls(t) == "w"
+      if Qbe.cls(t) == "w" && !Qbe.ptr32
         wide = fresh
         @lines << "  #{wide} =l extuw #{size}"
         size = wide
@@ -1668,7 +2286,7 @@ end
         @lines << "  #{dst} =l add #{blk}, #{Qbe::ASAN_RZ}"
         return
       end
-      @lines << "  #{dst} =l alloc16 #{size}"
+      @lines << "  #{dst} =#{Qbe.kp} alloc16 #{size}"
     end
 
     def memory_access?(x)
@@ -1683,7 +2301,7 @@ end
       a = op(rv[2])
       safe_check(rv[2], a, Qbe.size(rv[1]))
       asan_check(rv[2], a, Qbe.size(rv[1]), "load")
-      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(l #{a})"
+      @lines << "  #{dst} =#{Qbe.cls(rv[1])} call $#{Qbe.volatile_name("ld", op_name)}(#{Qbe.kp} #{a})"
     end
 
     def volatile_store_lines(item)
@@ -1692,7 +2310,7 @@ end
       v = op(item[3])
       safe_check(item[2], a, Qbe.size(item[1]))
       asan_check(item[2], a, Qbe.size(item[1]), "store")
-      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(l #{a}, #{Qbe.store_class(op_name)} #{v})"
+      @lines << "  call $#{Qbe.volatile_name("st", op_name)}(#{Qbe.kp} #{a}, #{Qbe.store_class(op_name)} #{v})"
     end
 
     # --safe (-fsafe-pointers): the check of an access of `bytes` bytes at `addr` (the text of the IR operand `x`), which
@@ -1757,21 +2375,42 @@ end
       idx = rv[2]
       signed = Qbe.signed?(operand_type(idx))
       i = op(idx)
-      if Qbe.cls(operand_type(idx)) == "w"
+      kp = Qbe.kp
+      if Qbe.cls(operand_type(idx)) == "w" && !Qbe.ptr32
         wide = fresh
         @lines << "  #{wide} =l #{signed ? 'extsw' : 'extuw'} #{i}"
         i = wide
+      elsif Qbe.cls(operand_type(idx)) == "l" && Qbe.ptr32
+        narrow = fresh   # a long long index: its low word
+        @lines << "  #{narrow} =w copy #{i}"
+        i = narrow
       end
       scaled = fresh
-      @lines << "  #{scaled} =l mul #{i}, #{Qbe.int_lit(rv[3])}"
+      @lines << "  #{scaled} =#{kp} mul #{i}, #{Qbe.int_lit(rv[3])}"
       if Qbe.safe
         # --safe: the derived address must stay in base's object (sp_derive in pathb-qbe-emit.rb).
         sum = fresh
         @lines << "  #{sum} =l add #{base}, #{scaled}"
         @lines << "  #{dst} =l call $__nfcxx_sp_derive(l #{base}, l #{sum}, #{sp_where})"
+      elsif wide_literal?(base) && !Qbe.ptr32
+        # QBE folds `add CONST, x` into the displacement of the load or store that uses it, without checking that the
+        # constant fits in 32 bits (the assembler: "out of range of signed 32bit displacement", for the kernel's
+        # `((long *)0xffff888000000000)[i]`). `sub x, -CONST` is not folded; the constant goes to a register.
+        @lines << "  #{dst} =l sub #{scaled}, #{-base.to_i}"
       else
-        @lines << "  #{dst} =l add #{base}, #{scaled}"
+        @lines << "  #{dst} =#{kp} add #{base}, #{scaled}"
       end
+    end
+
+    # An integer literal operand that does not fit in a signed 32-bit displacement.
+    def wide_literal?(text)
+      return false unless text.is_a?(String)
+
+      digits = text.start_with?("-") ? text[1..] : text
+      return false if digits.nil? || digits.empty? || !digits.each_char.all? { |c| DIGITS.include?(c) }
+
+      v = text.to_i
+      v < -2**31 || v >= 2**31
     end
 
     # Bit-fields, with pathb-qbe-emit.rb's rules: `(bfload T UNIT ADDR BOFF WIDTH)` reads the whole UNIT-byte unit and
@@ -1794,10 +2433,37 @@ end
       raise QbeUnsupported, "bit-field of type #{sx(ty)}" unless Qbe::INT_W.include?(ty) || Qbe::INT_L.include?(ty)
     end
 
+    # A bit-field access reads its storage unit before the first store (a read-modify-write, or a read of a field that the
+    # object never set). QBE's slot promotion rejects a read before any store as "used undefined", so a local slot that
+    # a bit-field access reaches is zeroed right after its alloc: a memset of the whole slot (its address escapes, so the
+    # promotion leaves it in memory). Only the local slots (%oN); a slot that is already zeroed is not zeroed again.
+    # "%oN": a local slot of the function. Plain string tests: the bundled script runs under mruby, which has no regexps.
+    def local_slot_name?(addr)
+      return false unless addr.is_a?(String) && addr.length > 2 && addr[0, 2] == "%o"
+      i = 2
+      while i < addr.length
+        c = addr[i]
+        return false unless c >= "0" && c <= "9"
+        i += 1
+      end
+      true
+    end
+
+    def zero_slot_once(addr)
+      return unless local_slot_name?(addr)
+      return if @zeroed[addr]
+      @zeroed[addr] = true
+      idx = @lines.index { |l| l.start_with?("  #{addr} =#{Qbe.kp} alloc") }
+      return unless idx
+      size = @lines[idx].split.last.to_i
+      @lines.insert(idx + 1, "  call $memset(#{Qbe.kp} #{addr}, w 0, #{Qbe.kp} #{size})")
+    end
+
     def bfload_lines(dst, rv)
       ty = rv[1]
       bf_type!(ty)
       unit, boff, width = bf_args(rv, 6)
+      zero_slot_once(op(rv[3]))
       uc = unit == 8 ? "l" : "w"
       # The field goes to the top of the register (32 or 64 bits), not of the storage unit: a 1- or 2-byte unit then
       # sign-extends from its own top bit.
@@ -1835,6 +2501,7 @@ end
       raise QbeUnsupported, "bit-field store of a value of another class" unless Qbe.cls(operand_type(x[6])) == tc
 
       addr = op(x[3])
+      zero_slot_once(addr)
       v = op(x[6])
       if tc != uc
         t2 = fresh
@@ -1891,13 +2558,13 @@ end
                 (src.is_a?(Array) && %w[null addr].include?(head(src)))
       raise QbeUnsupported, "bitcast of #{sx(src)}" unless pointer
 
-      @lines << "  #{dst} =l copy #{op(src)}"
+      @lines << "  #{dst} =#{Qbe.kp} copy #{op(src)}"
     end
 
     # `(pdiff A B SIZE)`: (A - B) / SIZE, signed, in the 64-bit pointer difference type (docs/notes/pathb-stage2.md).
     # A VLA element size is a register, which is not a constant here, so it is refused.
     def pdiff_lines(dst, t, rv)
-      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == "l"
+      raise QbeUnsupported, "pdiff of type #{sx(t)}" unless Qbe.cls(t) == Qbe.kp
 
       n = begin
         Qbe.int_lit(rv[3])
@@ -1909,12 +2576,22 @@ end
       a = op(rv[1])
       b = op(rv[2])
       d = fresh
-      @lines << "  #{d} =l sub #{a}, #{b}"
-      @lines << "  #{dst} =l div #{d}, #{n}"
+      @lines << "  #{d} =#{Qbe.kp} sub #{a}, #{b}"
+      if Qbe.ptr32 && n == 1
+        @lines << "  #{dst} =#{Qbe.kp} copy #{d}"   # no division of a byte count (the image of the real-mode code is size limited)
+      elsif Qbe.ptr32 && n > 0 && (n & (n - 1)).zero?
+        shift = 0
+        shift += 1 while (1 << shift) < n
+        @lines << "  #{dst} =#{Qbe.kp} sar #{d}, #{shift}"   # the difference of two pointers into one object is a multiple of n
+      else
+        @lines << "  #{dst} =#{Qbe.kp} div #{d}, #{n}"
+      end
     end
 
     # `(nonnull P)`: a null pointer traps (code 5).
     def nonnull_lines(p)
+      return if Qbe.ptr32   # no checks on the 32-bit targets (check_call)
+
       cond = fresh
       @lines << "  #{cond} =w ceql #{op(p)}, 0"
       check_call(cond, 5)
@@ -1926,7 +2603,7 @@ end
       # (lib/asan/nfcxx_vla_asan.c), and stack and global arrays have redzones (milestones 2 and 3 of docs/notes/asan-plan.md), so
       # libasan reports an access past the end, and the trap would hide that report. As with gcc's ASan, an overflow that stays
       # inside the enclosing object (an array member of a struct) is not reported.
-      return if Qbe.asan
+      return if Qbe.asan || Qbe.ptr32
 
       c = Qbe.cls(operand_type(idx))
       i = op(idx)
@@ -2199,6 +2876,10 @@ end
 
       sret = nil
       dest = nil
+      hdest = nil     # the result object of a hidden-result call (AArch64): passed last, in x8 through a thunk
+      ints = 0        # integer argument registers of the arguments (the hidden result's register follows them)
+      pad_slots = []  # the positions in args of the integer padding arguments (even_pad?)
+  ints_unknown = false
       args = []
       nfixed = nil
       c[3..].each do |a|
@@ -2208,22 +2889,67 @@ end
 
           sret = aggregate_info(a[1], "returned")
           dest = op(a[2])
+        when "hidden-dest"
+          raise QbeUnsupported, "hidden-dest argument is not first" unless args.empty? && hdest.nil?
+
+          aggregate_info(a[1], "returned")
+          hdest = op(a[2])
         when "byval"
           info = aggregate_info(a[1], "passed")
           # An empty class is passed as nothing (its argument is dropped, as the callee does not take it).
-          args << "#{info.tn} #{op(a[2])}" unless info.shape == "empty"
+          unless info.shape == "empty"
+            if even_pad?(info, ints)
+              # the register AAPCS64 skips before the 16-byte aligned aggregate (even_pad?); a variadic call on Darwin passes
+              # the aggregate on the stack (no register is skipped there), so the pad is refused in that case
+              raise QbeUnsupported, "variadic call on Darwin with a 16-byte aligned aggregate after an odd number of integer arguments" if nfixed && Qbe.darwin
+              pad_slots << args.size
+              args << "l 0"
+              ints += 1
+            end
+            args << "#{info.tn} #{op(a[2])}"
+            ints += info.ints || 0
+            ints_unknown ||= info.ints.nil?
+          end
         when "variadic"
           # (variadic N): the first N arguments are named; QBE takes "..." after them (as pathb-qbe-emit.rb does).
           nfixed = Qbe.int_lit(a[1])
-        else args << (Qbe.f16?(arg_type(a)) ? f16_to_sse(op(a)) : "#{arg_cls(a)} #{op(a)}")
+        else
+          args << (Qbe.f16?(arg_type(a)) ? f16_to_sse(op(a)) : "#{arg_cls(a)} #{op(a)}")
+          ints += 1 unless %w[s d].include?(arg_cls(a)) || Qbe.f16?(arg_type(a))
         end
       end
       if nfixed
+        # (variadic N) counts the hidden result pointer among the leading arguments (be/nfcxx_ir.c); `args` does not hold it.
+        nfixed -= 1 if sret || hdest
         raise QbeUnsupported, "variadic call with #{nfixed} named arguments but #{args.size}" if nfixed > args.size
 
+        # a padding argument before the "..." boundary is a named argument: the boundary moves past it
+        pad_slots.each { |sl| nfixed += 1 if sl < nfixed }
         args.insert(nfixed, "...")
       end
       callee = f.is_a?(Ref) && f.sigil == "&" ? "$#{Qbe.symbol(f.raw)}" : op(f)
+      if hdest
+        # AAPCS64 (Qbe.aarch64): the callee takes its result object in x8. A thunk moves the register after the integer
+        # arguments into x8 and branches to the callee's entry (scripts/pathb-ssa-build assembles it). A call through a
+        # pointer goes through a thunk that also takes the pointer (in the register after the result) and branches via x16.
+        raise QbeUnsupported, "hidden result with --safe" if Qbe.safe
+        raise QbeUnsupported, "hidden result after an aggregate of an unknown integer size" if ints_unknown
+        raise QbeUnsupported, "hidden result with #{ints} integer arguments" if ints > 7
+        Qbe.hidden_thunks ||= {}
+        if f.is_a?(Ref) && f.sigil == "&"
+          sym = Qbe.symbol(f.raw)
+          Qbe.hidden_thunks[["direct", sym, ints]] = true
+          args << "l #{hdest}"
+          callee = "$#{sym}.nfcxxx8"
+        else
+          raise QbeUnsupported, "hidden result through a pointer with #{ints} integer arguments" if ints > 6
+          Qbe.hidden_thunks[["ind", nil, ints]] = true
+          args << "l #{hdest}" << "l #{callee}"
+          callee = "$nfcxxx8.ind#{ints}"
+        end
+        sret = nil
+        dest = nil
+      end
       sp_call_checks(c, f, sret, callee, args) if Qbe.safe
       [sret, dest, callee, args]
     end
@@ -2265,13 +2991,13 @@ end
       [op, size]
     end
 
-    # Off: the amd64 xadd isel (3rd/qbe 9688fb7) leaves the old value in the register of the copy, not of the result, so
-    # an inlined fetch-add with order 5 reads a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp).
-    # Until that is fixed in the fork, the calls to libatomic are emitted as before.
-    ATOMIC_XADD = false
+    # On with the fork's xadd of 3rd/qbe a5fa6c2 or later: the old value is in the result's register (the isel), a load is not forwarded
+    # across the locked add (load.c), and the add is kept when its old value is unused (a shared_ptr's count). Before them the
+    # lowering read a stale register (tests/cases/qbe_atomics.cpp, tests/pathb-qbe/cases/gaps_atomic.cpp), and was off.
+    ATOMIC_XADD = true
 
     def atomic_fetch?(c)
-      return false unless ATOMIC_XADD
+      return false unless ATOMIC_XADD && Qbe.xadd
       return false unless atomic_fetch_kind(c)
       order = c[5]
       # Any memory order: a locked xadd is a full barrier, so it satisfies relaxed, acquire, release, acq_rel and seq_cst alike
@@ -2279,16 +3005,117 @@ end
       head(order) == "const" && %w[0 1 2 3 4 5].include?(order[2].to_s)
     end
 
-    # __atomic_load_N (N = 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
-    # locked stores and exchanges the lowering uses). Only without --safe.
-    ATOMIC_LOAD = %w[__atomic_load_4 __atomic_load_8].freeze
+    # A call of __atomic_*_1 or __atomic_*_2 (fetch, exchange, compare-exchange): its result is an integer of 1 or 2 bytes.
+    def atomic_small_result?(c)
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&"
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_") && (name.end_with?("_1") || name.end_with?("_2"))
+      return false if name.start_with?("__atomic_load_") || name.start_with?("__atomic_store_")
+
+      true
+    end
+
+    # __atomic_load_N (N = 1, 2, 4 or 8): a plain load, which on x86 is already acquire (and sequentially consistent with the
+    # locked stores and exchanges the lowering uses), whatever the memory order: a load has no order that x86 must fence. The
+    # order is not evaluated then, so it must have no call in it (a std::atomic::load with a runtime order passes a variable).
+    # Only without --safe.
+    ATOMIC_LOAD = %w[__atomic_load_1 __atomic_load_2 __atomic_load_4 __atomic_load_8].freeze
+    ATOMIC_LOAD_OP = { "1" => "w loadub", "2" => "w loaduh", "4" => "w loadw", "8" => "l loadl" }.freeze
 
     def atomic_load?(c)
       f = c[2]
       return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&"
       return false unless ATOMIC_LOAD.include?(f.raw.delete('"')) && c.length == 5
 
-      head(c[4]) == "const" && %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+      # A load is plain for every order (x86 loads are acquire), so a non-constant order (a std::atomic member function
+      # emitted out of line, whose order is a parameter) is a plain load too, unless the order holds a call: the order is not
+      # evaluated, so a call in it would lose its effects.
+      return !contains_call?(c[4]) unless head(c[4]) == "const"
+      %w[0 1 2 3 4 5].include?(c[4][2].to_s)
+    end
+
+    # Whether a form (an operand or an expression) holds a call, which may have effects that dropping the call would lose.
+    def contains_call?(x)
+      return false unless x.is_a?(Array)
+      return true if head(x) == "call"
+
+      x.any? { |y| contains_call?(y) }
+    end
+
+    # __atomic_store_N (N = 1, 2, 4, 8) with a constant order: a plain store, which on x86 is already a release store. A
+    # sequentially consistent store (order 5) needs a full barrier after it: a locked add of 0 (xadd) on the object, or for 1 and
+    # 2 bytes on the aligned 4-byte word that holds it (adding 0 changes no byte; the word is in the object's page).
+    ATOMIC_STORE_OP = { "1" => "storeb", "2" => "storeh", "4" => "storew", "8" => "storel" }.freeze
+
+    def atomic_store?(c)
+      f = c[2]
+      return false unless ATOMIC_XADD && Qbe.xadd
+      return false if Qbe.safe || !f.is_a?(Ref) || f.sigil != "&" || c.length != 6
+
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_store_") && ATOMIC_STORE_OP.key?(name[-1])
+
+      # A non-constant order is taken as sequentially consistent (the strongest: the barrier below), since the order is
+      # a parameter of an out-of-line member function.
+      return true unless head(c[5]) == "const"
+      o = c[5][2].to_s
+      return true if o == "0" || o == "3"
+
+      o == "5"
+    end
+
+    def atomic_store_seq_cst?(c)
+      head(c[5]) != "const" || c[5][2].to_s == "5"
+    end
+
+    def atomic_store_lines(c)
+      size = c[2].raw.delete('"')[-1]
+      addr = op(c[3])
+      @lines << "  #{ATOMIC_STORE_OP[size]} #{op(c[4])}, #{addr}"
+      return unless atomic_store_seq_cst?(c)
+
+      if size == "1" || size == "2"
+        word = fresh
+        @lines << "  #{word} =l and #{addr}, -4"
+        @lines << "  #{fresh} =w xadd #{word}, 0"
+      else
+        @lines << "  #{fresh} =#{size == "4" ? "w" : "l"} xadd #{addr}, 0"
+      end
+    end
+
+    # __atomic_compare_exchange_N (N = 4 or 8; the call has the pointer, the expected pointer, the desired value, weak, and the
+    # two orders): a locked compare-exchange (QBE's cmpxchg0/cmpxchg1 pair, amd64 lock cmpxchg), a full barrier, so every
+    # constant order is the same. Only without --safe, and only where the fork has the pair (Qbe.cmpxchg).
+    CAS_SIZES = %w[4 8].freeze
+
+    def atomic_cas?(c)
+      return false unless ATOMIC_XADD && Qbe.cmpxchg && !Qbe.safe
+      f = c[2]
+      return false unless f.is_a?(Ref) && f.sigil == "&" && c.length == 9
+      name = f.raw.delete('"')
+      return false unless name.start_with?("__atomic_compare_exchange_") && CAS_SIZES.include?(name[-1])
+      return false unless name.length == "__atomic_compare_exchange_".length + 1
+
+      [7, 8].all? { |i| head(c[i]) == "const" && %w[0 1 2 3 4 5].include?(c[i][2].to_s) }
+    end
+
+    # The expected value is loaded, the exchange is made on the object, and the old value is stored back to the expected
+    # object (on success it is the same value, on failure it is what the object held). The result is old == expected.
+    def atomic_cas_lines(dst, c)
+      size = c[2].raw.delete('"')[-1]
+      k = size == "4" ? "w" : "l"
+      addr = op(c[3])
+      exp = op(c[4])
+      des = op(c[5])
+      ev = fresh
+      @lines << "  #{ev} =#{k} load#{k} #{exp}"
+      h = fresh
+      @lines << "  #{h} =#{k} cmpxchg0 #{addr}, #{ev}"
+      old = fresh
+      @lines << "  #{old} =#{k} cmpxchg1 #{h}, #{des}"
+      @lines << "  store#{k} #{old}, #{exp}"
+      @lines << "  #{dst} =w ceq#{k} #{old}, #{ev}"
     end
 
     def atomic_fetch_lines(dst, cls, c)
@@ -2346,11 +3173,11 @@ end
 
     def arg_cls(a)
       case a
-      when Ref then "l"
+      when Ref then Qbe.kp
       when String then Qbe.cls(@types.fetch(a) { raise QbeUnsupported, "argument #{a} has no declared type" })
       when Array
         case head(a)
-        when "addr", "null" then "l"
+        when "addr", "null" then Qbe.kp
         when "const" then Qbe.cls(a[1])
         else Qbe.cls(Qbe.expr_type(a))
         end
@@ -2471,7 +3298,7 @@ end
     end
   end
 
-  AbiInfo = Struct.new(:tn, :size, :align, :shape, :why)
+  AbiInfo = Struct.new(:tn, :size, :align, :shape, :why, :ints)   # ints: the integer argument registers it takes (AArch64), or nil
   LEAF_BYTES = { "b" => 1, "h" => 2, "w" => 4, "l" => 8, "s" => 4, "d" => 8 }.freeze
 
   def name_of(x) = x.is_a?(Ref) ? x.raw : x.to_s
@@ -2495,19 +3322,27 @@ end
       case head(spec)
       when "memory"
         decls << "type #{tn} = align #{align} { #{size} }"
-        abi[name] = AbiInfo.new(tn, size, align, "memory", nil)
+        abi[name] = AbiInfo.new(tn, size, align, "memory", nil, 1)   # passed as a pointer to a copy: one integer register
       when "empty"
-        abi[name] = AbiInfo.new(tn, size, align, "empty", nil)
+        abi[name] = AbiInfo.new(tn, size, align, "empty", nil, 0)
       when "unsupported"
         abi[name] = AbiInfo.new(tn, size, align, "unsupported", name_of(spec[1]).delete('"'))
       when "leaf"
         parts = []
         cur = 0
+        leaves = []
         f.drop(4).each do |lf|
           raise QbeUnsupported, "abi-type #{name}: bad leaf" unless head(lf) == "leaf" && lf.length == 3
 
-          off = int_lit(lf[1])
-          k = lf[2]
+          if ptr32 && %w[l d s].include?(lf[2])
+            # C's i386 layout puts a long long or a double on 4: it is spelled with words, low first (3rd/qbe/doc/i386.txt).
+            leaves << [int_lit(lf[1]), "w"]
+            leaves << [int_lit(lf[1]) + 4, "w"] unless lf[2] == "s"
+          else
+            leaves << [int_lit(lf[1]), lf[2]]
+          end
+        end
+        leaves.each do |off, k|
           raise QbeUnsupported, "abi-type #{name}: leaf kind" unless k.is_a?(String) && LEAF_BYTES.key?(k)
 
           ks = LEAF_BYTES[k]
@@ -2522,7 +3357,11 @@ end
 
         parts << "b #{size - cur}" if size > cur
         decls << "type #{tn} = align #{align} { #{parts.join(", ")} }"
-        abi[name] = AbiInfo.new(tn, size, align, "leaves", nil)
+        # AArch64 (QBE's arm64 ABI): a homogeneous float aggregate of up to four members takes FP registers; any other that fits
+        # in 16 bytes takes size/8 integer registers. A size that is not a multiple of 8 has no count (nil: a hidden-result use refuses it).
+        floats = f.drop(4).all? { |lf| %w[s d].include?(lf[2]) } && f.length - 4 <= 4
+        ints = floats ? 0 : (size % 8 == 0 ? size / 8 : nil)
+        abi[name] = AbiInfo.new(tn, size, align, "leaves", nil, ints)
       else raise QbeUnsupported, "abi-type #{name}: unknown shape"
       end
     end
@@ -2560,7 +3399,7 @@ end
   def self.tied_code?(code) = code.size == 1 && DIGITS.include?(code)
 
   ASM_FLAG_CONDS = %w[a ae b be c e z g ge l le o p s na nae nb nbe nc ne ng nge nl nle no np ns nz pe po].freeze
-  ASM_NOREG = %w[imm sym].freeze
+  ASM_NOREG = %w[imm sym msym].freeze
 
   # An operand's text in the template: letter is the modifier (b w k q c P n a, or empty).
   def self.asm_operand_text(o, reg, letter)
@@ -2575,6 +3414,10 @@ end
       return txt if letter == "c" || letter == "P"
 
       return "$#{txt}"
+    when "msym"
+      raise QbeUnsupported, "asm: modifier %#{letter} on a memory operand" if letter == "c" || letter == "P" || letter == "n"
+
+      return "#{o[:sym]}(%rip)"
     when "flag"
       raise QbeUnsupported, "asm: a flag output named in the template"
     end
@@ -2587,7 +3430,208 @@ end
     "%#{ASM_REGS.fetch(reg)[slot]}"
   end
 
-  def self.asm_block(hex, ops, clobbers = [], labels = [])
+  # ---- the 32-bit (i386) helper of an asm template: the same contract as asm_block, with the 32-bit registers ----------------
+  # The operand block is a pointer in %eax (regparm: Qbe.regparm3, the first argument) or at 4(%esp) (cdecl); each operand is a
+  # 4-byte cell. %ebp holds the block while the template runs (so a template that names %ebp is refused), and the helper saves
+  # %ebx, %esi, %edi and %ebp. The register of an operand is one of eax ecx edx ebx esi edi; an operand of one byte takes
+  # one of the first four, which have a byte register.
+  I386_REGS = {
+    "eax" => %w[eax ax al], "ebx" => %w[ebx bx bl], "ecx" => %w[ecx cx cl], "edx" => %w[edx dx dl],
+    "esi" => %w[esi si], "edi" => %w[edi di]
+  }.freeze
+  I386_FIXED = { "a" => "eax", "b" => "ebx", "c" => "ecx", "d" => "edx", "S" => "esi", "D" => "edi" }.freeze
+  I386_POOL = %w[eax ecx edx ebx esi edi].freeze
+  I386_BYTE_POOL = %w[eax ecx edx ebx].freeze
+  I386_SAVED = %w[ebp ebx esi edi].freeze
+
+  def self.asm_operand_text32(o, reg, letter)
+    case o[:kind]
+    when "imm"
+      raise QbeUnsupported, "asm: modifier %#{letter} on an immediate" if letter == "a"
+
+      return (letter == "c" || letter == "P" ? o[:imm].to_s : letter == "n" ? (-o[:imm]).to_s : "$#{o[:imm]}")
+    when "sym"
+      txt = o[:off].zero? ? o[:sym] : "#{o[:sym]}#{o[:off] > 0 ? "+" : ""}#{o[:off]}"
+      return txt if letter == "c" || letter == "P" || letter == "a"
+
+      return "$#{txt}"
+    when "flag"
+      raise QbeUnsupported, "asm: a flag output named in the template"
+    end
+    return "(%#{reg})" if o[:code] == "m" || letter == "a"
+    raise QbeUnsupported, "asm: modifier %#{letter} on a register" if letter == "c" || letter == "P" || letter == "n"
+
+    size = { "b" => 1, "w" => 2, "k" => 4 }.fetch(letter) { o[:size] }
+    slot = { 4 => 0, 2 => 1, 1 => 2 }.fetch(size) { raise QbeUnsupported, "asm: operand size #{size}" }
+    names = I386_REGS.fetch(reg)
+    raise QbeUnsupported, "asm: no #{size * 8}-bit register #{reg}" if names[slot].nil?
+
+    "%#{names[slot]}"
+  end
+
+  def self.asm_block32(hex, ops, clobbers = [], labels = [])
+    tpl = [hex].pack("H*")
+    raise QbeUnsupported, "asm: a template that names %ebp" if tpl.include?("%ebp") || tpl.include?("%bp")
+    regs = Array.new(ops.size)
+    used = {}
+    clob = {}
+    clobbers.each do |c|
+      r = { "ax" => "eax", "bx" => "ebx", "cx" => "ecx", "dx" => "edx", "si" => "esi", "di" => "edi" }.fetch(c, c)
+      raise QbeUnsupported, "asm: clobber of #{c}" unless I386_REGS.key?(r)
+
+      clob[r] = true
+    end
+    ops.each_with_index do |o, i|
+      next unless (r = I386_FIXED[o[:code]])
+
+      regs[i] = r
+      used[r] = true
+    end
+    ops.each_with_index do |o, i|
+      raise QbeUnsupported, "asm: an SSE operand on a 32-bit target" if o[:code] == "x"
+      next if regs[i] || tied_code?(o[:code]) || ASM_NOREG.include?(o[:kind])
+
+      byte = o[:size] == 1 || o[:kind] == "flag"
+      free = (byte ? I386_BYTE_POOL : I386_POOL).reject { |r| used[r] || clob[r] }
+      raise QbeUnsupported, "asm: more operands than registers" if free.empty?
+
+      regs[i] = o[:kind] == "flag" ? free.last : free.first
+      used[regs[i]] = true
+    end
+    ops.each_with_index do |o, i|
+      next unless tied_code?(o[:code])
+
+      src = o[:code].to_i
+      raise QbeUnsupported, "asm: a tied operand names operand #{src}" if src >= ops.size || src == i
+      raise QbeUnsupported, "asm: a tied operand names an operand with no register" if regs[src].nil?
+
+      regs[i] = regs[src]
+    end
+    ops.each do |o|
+      raise QbeUnsupported, "asm: flag condition #{o[:code]}" if o[:kind] == "flag" && !ASM_FLAG_CONDS.include?(o[:code])
+    end
+    nreal = ops.count { |o| o[:kind] != "gsel" }
+    parts = []
+    body = +""
+    i = 0
+    while i < tpl.size
+      if tpl[i] != "%"
+        body << tpl[i]
+        i += 1
+        next
+      end
+      if tpl[i + 1] == "%"
+        body << "%"
+        i += 2
+        next
+      end
+      if tpl[i + 1] == "="
+        body << "0"
+        i += 2
+        next
+      end
+      j = i + 1
+      letter = %w[b w k c P n a l].include?(tpl[j]) ? tpl[j] : ""
+      j += letter.size
+      idx = nil
+      if tpl[j] == "["
+        close = j + 1
+        close += 1 while close < tpl.size && tpl[close] != "]"
+        raise QbeUnsupported, "asm template: an unterminated %[name]" if close >= tpl.size
+
+        nm = tpl[j + 1...close]
+        if letter == "l"
+          idx = labels.index(nm)
+          raise QbeUnsupported, "asm template: no label named #{nm}" if idx.nil? || nm.empty?
+
+          idx += nreal
+        else
+          idx = ops.index { |o| o[:name] == nm }
+          raise QbeUnsupported, "asm template: no operand named #{nm}" if idx.nil? || nm.empty?
+        end
+
+        k = close + 1
+      else
+        k = j
+        k += 1 while k < tpl.size && DIGITS.include?(tpl[k])
+        raise QbeUnsupported, "asm template: a % that is not an operand (#{tpl[i, 3].inspect})" if k == j
+
+        idx = tpl[j...k].to_i
+      end
+      if letter == "l"
+        raise QbeUnsupported, "asm template: label #{idx - nreal} of #{labels.size}" if idx < nreal || idx - nreal >= labels.size
+
+        parts << body << [idx - nreal + 1]
+        body = +""
+        i = k
+        next
+      end
+      raise QbeUnsupported, "asm template: operand #{idx} of #{nreal}" if idx >= nreal
+
+      body << asm_operand_text32(ops[idx], regs[idx], letter)
+      i = k
+    end
+    parts << body
+    # %esp in the template is the caller's: the helper has saved four registers and has the return address (and in cdecl the block
+    # argument is the caller's), 20 bytes on. An address (%esp) or N(%esp) is moved by that much; any other use of %esp is refused.
+    parts = parts.map do |x|
+      next x if x.is_a?(Array) || !x.include?("%esp")
+
+      raise QbeUnsupported, "asm: %esp other than as an address base" if x.split("(%esp)").join.include?("%esp")
+
+      adj = 4 * I386_SAVED.size + 4
+      out = +""
+      k = 0
+      while k < x.size
+        if x[k, 6] == "(%esp)"
+          prev = out[-1]
+          glue = !prev.nil? && (DIGITS.include?(prev) || prev == ")" || prev == "_" || prev == "." || (prev >= "a" && prev <= "z") || (prev >= "A" && prev <= "Z"))
+          out << (glue ? "+" : "") << "#{adj}(%esp)"
+          k += 6
+        else
+          out << x[k]
+          k += 1
+        end
+      end
+      out
+    end
+    flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
+    digest = sha1_hex("32|#{regparm3}|#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
+    sym = "__pathb_asm_#{digest}"
+    body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
+    lines = [".section .text.#{sym},\"axG\",@progbits,#{sym},comdat", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:"]
+    I386_SAVED.each { |r| lines << "\tpushl %#{r}" }
+    # the block: in %eax with -mregparm=3, else the first argument, above the return address and the four saved registers
+    lines << (regparm3 ? "\tmovl %eax, %ebp" : "\tmovl #{4 * I386_SAVED.size + 4}(%esp), %ebp")
+    ops.each_with_index do |o, i|
+      lines << "\tmovl #{4 * i}(%ebp), %#{regs[i]}" if %w[in inout mem].include?(o[:kind])
+    end
+    ops.each_with_index do |o, i|
+      lines << "\tmovl $0, %#{regs[i]}" if o[:kind] == "gsel"
+    end
+    lines << body.chomp
+    ops.each_with_index do |o, i|
+      next unless o[:kind] == "flag"
+
+      lines << "\tset#{o[:code]} %#{I386_REGS.fetch(regs[i])[2]}" << "\tmovzbl %#{I386_REGS.fetch(regs[i])[2]}, %#{regs[i]}"
+    end
+    lines << ".L#{sym}_exit:" unless labels.empty?
+    ops.each_with_index do |o, i|
+      next unless %w[out inout flag gsel].include?(o[:kind])
+
+      lines << "\tmovl %#{regs[i]}, #{4 * i}(%ebp)"
+    end
+    lines.concat(I386_SAVED.reverse.map { |r| "\tpopl %#{r}" })
+    lines << "\tret"
+    gi = ops.index { |o| o[:kind] == "gsel" }
+    labels.each_with_index do |_, li|
+      lines << ".L#{sym}_#{li + 1}:" << "\tmovl $#{li + 1}, %#{regs[gi]}" << "\tjmp .L#{sym}_exit"
+    end
+    lines << ".size #{sym}, .-#{sym}"
+    [sym, lines.join("\n") + "\n"]
+  end
+
+  def self.asm_block(hex, ops, clobbers = [], labels = [], section = nil)
     tpl = [hex].pack("H*")
     regs = Array.new(ops.size)
     used = {}
@@ -2696,10 +3740,10 @@ end
     end
     parts << body
     flat = parts.map { |x| x.is_a?(Array) ? "<L#{x[0]}>" : x }.join
-    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}")[0, 12]
+    digest = sha1_hex("#{hex}|#{ops.map { |o| [o[:kind], o[:code], o[:size]].join(",") }.join(";")}|#{clobbers.join(",")}|#{labels.join(",")}|#{flat}|#{section}")[0, 12]
     sym = "__pathb_asm_#{digest}"
     body = parts.map { |x| x.is_a?(Array) ? ".L#{sym}_#{x[0]}" : x }.join
-    lines = [".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
+    lines = [section ? ".section #{section},\"ax\",@progbits" : ".text", ".weak #{sym}", ".type #{sym}, @function", "#{sym}:", "\tpushq %rbp", "\tmovq %rsp, %rbp"]
     ASM_SAVED.each { |r| lines << "\tpushq %#{r}" }
     # 6 pushes and the return address leave %rsp 8 mod 16: 24 more bytes make it 16-aligned for a call in the template.
     lines << "\tsubq $24, %rsp" << "\tmovq %rdi, -48(%rbp)" << "\tmovq -48(%rbp), %r11"
@@ -2742,9 +3786,14 @@ end
 
   def module_il(forms)
     ctx = module_context(forms)
+    Qbe.hidden_thunks = {}
     emitted = forms.select { |f| head(f) == "ssa-function" }.map { |f| Fn.new(f, ctx[:refs], ctx[:abi], ctx[:link]).emit }
     helpers = emitted.flat_map(&:asm_helpers).uniq.map { |h| "# pathb-asm #{h}" }
-    (ctx[:data] + helpers + emitted.map { |fn| (fn.dbg_file ? "dbgfile #{fn.dbg_file.inspect}\n\n" : "") + fn.lines.join("\n") } + ubfile_data(ctx[:link]) + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
+    # the thunks of the hidden-result calls (AArch64), assembled by scripts/pathb-ssa-build
+    hidden_thunk_lines = (Qbe.hidden_thunks || {}).keys.map do |kind, sym, n|
+      kind == "direct" ? "# pathb-hidden-thunk #{sym} #{n}" : "# pathb-hidden-ind #{n}"
+    end
+    (ctx[:data] + helpers + emitted.map { |fn| (fn.dbg_file ? "dbgfile #{fn.dbg_file.inspect}\n\n" : "") + fn.lines.join("\n") } + ubfile_data(ctx[:link]) + hidden_thunk_lines + [Qbe.asm_text_markers(ctx[:link])]).join("\n\n") + "\n"
   end
 
   # The part of a module that every function shares: the data of its globals and the references a function may make
@@ -2769,18 +3818,38 @@ end
     { "storel" => "l", "stores" => "s", "stored" => "d" }.fetch(op_name, "w")
   end
 
-  # The helpers' text, emitted once in a module that has a volatile access.
-  def volatile_helpers
-    loads = VOLATILE_LOADS.flat_map do |op_name|
+  # The helpers' text, emitted once in a module that has a volatile access: those of the operations the module uses.
+  # (All of them would put SSE loads of float and double into every unit, which -mno-sse refuses.)
+  def volatile_helpers(forms)
+    used = volatile_ops(forms)
+    loads = VOLATILE_LOADS.select { |op_name| used.include?("ld " + op_name) && !(ptr32 && %w[loads loadd].include?(op_name)) }.flat_map do |op_name|
       cls = { "loadl" => "l", "loads" => "s", "loadd" => "d" }.fetch(op_name, "w")
-      ["function #{cls} $#{volatile_name("ld", op_name)}(l %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
+      ["function #{cls} $#{volatile_name("ld", op_name)}(#{kp} %p) {", "@start", "\t%v =#{cls} #{op_name} %p",
        "\tret %v", "}", ""]
     end
-    stores = VOLATILE_STORES.flat_map do |op_name|
+    stores = VOLATILE_STORES.select { |op_name| used.include?("st " + op_name) && !(ptr32 && %w[stores stored].include?(op_name)) }.flat_map do |op_name|
       cls = store_class(op_name)
-      ["function $#{volatile_name("st", op_name)}(l %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
+      ["function $#{volatile_name("st", op_name)}(#{kp} %p, #{cls} %v) {", "@start", "\t#{op_name} %v, %p", "\tret", "}", ""]
     end
     (loads + stores).join("\n")
+  end
+
+  # The operations of a module's volatile accesses, as "ld loadl" / "st storew" (the helpers they call).
+  def volatile_ops(forms)
+    used = []
+    walk = lambda do |x|
+      next unless x.is_a?(Array)
+
+      begin
+        used << ("ld " + load_op(x[1])) if head(x) == "load.v"
+        used << ("st " + store_op(x[1])) if head(x) == "store.v"
+      rescue QbeUnsupported
+        nil # the function that has it is refused when it is emitted
+      end
+      x.each { |y| walk.call(y) }
+    end
+    forms.each { |f| walk.call(f) }
+    used
   end
 
   # Whether a module has a volatile access (a load.v or store.v, or a volatile type): then its helpers are emitted.
@@ -2881,7 +3950,7 @@ end
       d if d.is_a?(String)
     end
     data = type_decls + string_decls + global_decls
-    data << volatile_helpers if uses_volatile?(forms)
+    data << volatile_helpers(forms) if uses_volatile?(forms)
     data.concat(sp_constructor) if Qbe.safe && !(Qbe.sp_objects.empty? && Qbe.sp_funcs.empty?)
     data.concat(asan_constructor) if Qbe.asan && !Qbe.asan_objects.empty?
     # What a function may reference: an emitted global, or an extern one (its symbol is linked in).
@@ -2890,39 +3959,56 @@ end
     flags.each do |name, f|
       next unless state[name].is_a?(String) || state[name] == :extern
 
-      refs[name] = { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern") }
+      refs[name] = { thread: f.include?("thread"), weak: f.include?("weak"), extern: f.include?("extern"), static: f.include?("static") }
     end
     strs.each do |d|
       name = d[1].raw
-      refs[name] = { thread: false, weak: false, extern: false } if state[name].is_a?(String)
+      refs[name] = { thread: false, weak: false, extern: false, static: true } if state[name].is_a?(String)
     end
 # The functions this module defines, and the external functions it takes the address of as a value (not a direct
 # call, which goes through the PLT): each gets one pointer cell, defined once here.
 funcs = {}   # a Hash (symbol => true): every & reference looks it up, and a list was searched linearly
-forms.each { |f| funcs[Qbe.symbol(f[1].raw)] = true if head(f) == "ssa-function" }
+# With -fPIC only a static function (local to the object file) is addressed by its symbol: any other function is exported, so a
+# PC-relative reference to it is one to a preemptible symbol, which a shared object does not allow. Its address is read from a cell.
+forms.each do |f|
+  next unless head(f) == "ssa-function"
+  next if Qbe.pic && f.none? { |x| x.is_a?(Array) && head(x) == "static" && x.length == 1 }
+
+  funcs[Qbe.symbol(f[1].raw)] = true
+end
 cells = []
 cell_seen = {}
+wides = {}   # wide pointer constant => the name of its cell
 collect = lambda do |x|
   next unless x.is_a?(Array) || x.is_a?(Ref)
   if x.is_a?(Ref)
     if x.sigil == "&"
       sym = Qbe.symbol(x.raw)
-      unless funcs.key?(sym) || cell_seen.key?(sym)
+      unless Qbe.no_pie || funcs.key?(sym) || cell_seen.key?(sym)
         cell_seen[sym] = true
         cells << sym
       end
     end
     next
   end
-  if head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
+  # (a `(const (ptr T))` with no value is a qualified type, not a constant)
+  if (head(x) == "const" && head(x[1]) == "ptr" && x[2].is_a?(String)) || (head(x) == "i2p" && head(x[2]) == "const" && x[2][2].is_a?(String))
+    # A pointer constant that does not fit in a 32-bit displacement: QBE propagates it through copies and phis into the
+    # displacement of the access that uses it, unchecked (Fn#wide_pointer_cell). It is loaded from a cell instead.
+    k = head(x) == "i2p" ? Qbe.wrap_lit(Qbe.int_lit(x[2][2]), x[1]) : Qbe.wrap_lit(Qbe.int_lit(x[2]), x[1])
+    unless Qbe.ptr32 || (-2**31...2**31).cover?(k) || wides.key?(k)
+      wides[k] = "pathb_wide#{wides.size}"
+    end
+  elsif head(x) == "call" && x[2].is_a?(Ref) && x[2].sigil == "&"
     x[3..].each { |a| collect.call(a) }
   else
     x.each { |y| collect.call(y) }
   end
 end
 forms.select { |f| head(f) == "ssa-function" }.each { |f| collect.call(f) }
-data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" }
-{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, ubfiles: {} } }
+data += cells.map { |sym| "data $pathb_got.#{sym} = align 8 { l $#{sym} }" } unless Qbe.ptr32   # 32-bit: no cells, a direct reference
+data += wides.map { |k, name| "data $#{name} = align 8 { l #{k} }" }
+{ data: data, refs: refs, abi: abi, link: { funcs: funcs, cells: cells, wides: wides, ubfiles: {} } }
   end
 
   # --safe: the table of the module's globals and strings, and the constructor that registers them (pathb-qbe-emit.rb's

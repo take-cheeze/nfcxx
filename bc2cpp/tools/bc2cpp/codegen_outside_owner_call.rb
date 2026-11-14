@@ -90,8 +90,16 @@ module OutsideOwnerCall
   # The world whose definers the owner set names. A core body (`@closed_world` withheld, CodeGen#compile_method) runs
   # in the same program, so the program's world names every class its receivers can have; the owner call binds no
   # body statically, it checks the one lookup finds against that list.
+  # RSM_OWNER_CALL: a core body's resumable variant (compile_rsm_variant) withholds the program world's static
+  # bindings, but the owner call binds nothing, so the variant's by-name sends become it too.
   def owner_call_world
-    @closed_world || @core_program_world
+    @closed_world || @core_program_world || (ENV['BC2CPP_RSM_OWNER_CALL'] == '0' ? nil : @rsm_owner_world)
+  end
+
+  # RSM_GETIDX: a variant's `recv[i]` calls the shared index helper like the plain body's untyped site, whose
+  # tail is the closed `[]` switch; a runtime-installed `[]` keeps the by-name send.
+  def rsm_getidx_helper?
+    owner_call_world && ENV['BC2CPP_RSM_GETIDX'] != '0' && !devirt_blocked_name?('[]')
   end
 
   OWNER_PATH = /\A[A-Z]\w*(?:::[A-Z]\w*)*(?:\.singleton)?\z/

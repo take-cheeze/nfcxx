@@ -39,9 +39,9 @@ end
   end
 end
 
-%w[scripts/pathb-qbe-emit.rb scripts/new-helper be/a.cpp 3rd/edg 3rd/qbe 3rd/cproc
+%w[scripts/pathb-qbe-emit.rb scripts/new-helper be/a.cpp 3rd/edg 3rd/qbe
    nfcxx nfcc/driver.c lib/new.c tests/run.sh tests/pathb-ir/a.ir tests/cases/a.cpp
-   tests/mruby/a.sh .github/actions/toolchain/action.yml tools/qbe-prep/main.cpp
+   tests/mruby/a.sh .github/actions/toolchain/action.yml
    .github/workflows/ci.yml .github/ci-test-matrix.yml].each do |path|
   check.call("Path B dependency: #{path}") do
     CiScope.select('pull_request', [path]) == { 'full_ci' => 'true', 'changed' => 'true' }
@@ -94,38 +94,40 @@ repo = File.expand_path('../..', __dir__)
 world_scripts = Dir[File.join(repo, 'tests/bc2cpp/run_*.sh')].flat_map do |file|
   File.read(file).scan(%r{(?<![\w/.-])scripts/([A-Za-z0-9_-]+\.rb)}).flatten
 end.uniq.select { |name| File.file?(File.join(repo, 'scripts', name)) }.sort
-bc2cpp = YAML.safe_load(File.read(File.join(repo, '.github/workflows/bc2cpp.yml')))
-bc2cpp_on = bc2cpp.fetch(true) { bc2cpp.fetch('on') } # YAML 1.1 reads the key `on` as true
+ci_workflow = YAML.safe_load(workflow)
+bc2cpp_filter = YAML.safe_load(ci_workflow.fetch('jobs').fetch('bc2cpp-changes').fetch('steps')
+                                          .map { |step| step.fetch('with', {})['filters'] }.compact.first)
+listed = bc2cpp_filter.fetch('bc2cpp').grep(%r{\Ascripts/[^*/]+\.rb\z}).map { |path| path.delete_prefix('scripts/') }
 check.call('bc2cpp worlds name scripts') { world_scripts.length > 10 }
-%w[push pull_request].each do |event|
-  listed = bc2cpp_on.fetch(event).fetch('paths').grep(%r{\Ascripts/[^*/]+\.rb\z}).map { |path| path.delete_prefix('scripts/') }
-  check.call("bc2cpp #{event} paths include every script a world compiles (#{(world_scripts - listed).join(' ')})") { (world_scripts - listed).empty? }
-  check.call("bc2cpp #{event} paths name only scripts a world compiles (#{(listed - world_scripts).join(' ')})") { (listed - world_scripts).empty? }
-end
+check.call("bc2cpp paths include every script a world compiles (#{(world_scripts - listed).join(' ')})") { (world_scripts - listed).empty? }
+check.call("bc2cpp paths name only scripts a world compiles (#{(listed - world_scripts).join(' ')})") { (listed - world_scripts).empty? }
 
 LEGS = ['cases (QBE and gcc backends)', 'uop core and numpy (QBE backend)'].freeze
 
-def outcomes(full, pathb)
+def outcomes(full, pathb, bc2cpp = false)
   needs = { 'pathb-changes' => { 'result' => 'success', 'outputs' => {
     'full_ci' => full.to_s, 'changed' => pathb.to_s,
     'test_matrix' => JSON.generate(LEGS.map { |name| { 'name' => name, 'run' => 'true' } })
-  } } }
-  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb]].each do |names, enabled|
+  } },
+            'bc2cpp-changes' => { 'result' => 'success', 'outputs' => { 'changed' => bc2cpp.to_s } } }
+  [[CiScope::FULL_JOBS, full], [CiScope::PATHB_JOBS, pathb], [CiScope::BC2CPP_JOBS, bc2cpp]].each do |names, enabled|
     names.each { |name| needs[name] = { 'result' => enabled ? 'success' : 'skipped' } }
   end
   needs
 end
 
-[[true, true], [true, false], [false, false]].each do |full, pathb|
-  original = outcomes(full, pathb)
-  check.call("valid gate #{full}/#{pathb}") { CiScope.validate(original); true }
+# The third value is bc2cpp-changes: false + true is a change to bc2cpp/ alone, where only the bc2cpp jobs are selected.
+[[true, true, true], [true, true, false], [true, false, true], [true, false, false], [false, false, true], [false, false, false]]
+  .each do |full, pathb, bc2cpp|
+  original = outcomes(full, pathb, bc2cpp)
+  check.call("valid gate #{full}/#{pathb}/#{bc2cpp}") { CiScope.validate(original); true }
   original.each_key do |name|
     ['failure', 'cancelled', 'skipped', 'success', nil].each do |status|
       next if status == original[name]['result']
 
       needs = Marshal.load(Marshal.dump(original))
       needs[name]['result'] = status
-      rejects.call("gate #{full}/#{pathb}: #{name} #{status.inspect}") { CiScope.validate(needs) }
+      rejects.call("gate #{full}/#{pathb}/#{bc2cpp}: #{name} #{status.inspect}") { CiScope.validate(needs) }
     end
     needs = Marshal.load(Marshal.dump(original))
     needs.delete(name)
@@ -139,6 +141,11 @@ end
     needs['pathb-changes']['outputs'][key] = value
     rejects.call("invalid #{key}=#{value.inspect}") { CiScope.validate(needs) }
   end
+end
+['', 'unknown', nil, true].each do |value|
+  needs = outcomes(true, true, true)
+  needs['bc2cpp-changes']['outputs']['changed'] = value
+  rejects.call("invalid bc2cpp changed=#{value.inspect}") { CiScope.validate(needs) }
 end
 rejects.call('inconsistent selection') { CiScope.validate(outcomes(false, true)) }
 

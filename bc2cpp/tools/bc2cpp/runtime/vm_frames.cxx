@@ -481,7 +481,9 @@ static mrb_method_t prepare_missing(mrb_state* mrb,
   if (mid != missing) {
     ci->u.target_class = mrb_class(mrb, recv);
   }
-  m = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, missing);
+  // A C by-name lookup finds a row where its entry would be (mrb_vm_find_method_rows), as vm.c's does.
+  m = mrb_vm_find_method_rows(mrb, ci->u.target_class, &ci->u.target_class,
+                              missing);
   if (MRB_METHOD_UNDEF_P(m))
     goto method_missing; /* just in case */
   stack_extend(mrb, 4);
@@ -608,7 +610,8 @@ static mrb_value funcall_with_block_m(mrb_state* mrb,
       m = *fixed;
       ci->u.target_class = fixed_owner;
     } else {
-      m = mrb_vm_find_method(mrb, ci->u.target_class, &ci->u.target_class, mid);
+      m = mrb_vm_find_method_rows(mrb, ci->u.target_class,
+                                  &ci->u.target_class, mid);
     }
     if (MRB_METHOD_UNDEF_P(m)) {
       m = prepare_missing(mrb, ci, self, mid, mrb_nil_value(), FALSE);

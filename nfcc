@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc|pathb   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
-#              pathb, opt-in: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc, no cproc), docs/notes/nfcc-pathb.md)
+#   NFCXX_BACKEND=gcc|pathb|cil   (default: pathb on x86-64 Linux when the Path B harness is built (a unit it cannot take is made by gcc),
+#              else gcc; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise;
+#              pathb: EDG's C front end -> typed IR -> QBE (scripts/pathb-cc), docs/notes/nfcc-pathb.md;
+#              the Linux kernel's options are accepted there: -nostdinc, -isystem, -idirafter, -funsigned-char, -fshort-wchar,
+#              -ffreestanding and -mno-sse (checked) are honoured, codegen options without effect on QBE's output are dropped, and a
+#              compile with another option that changes meaning (-m16, -fshort-enums, -iquote, an unknown -Wa,* ...) is made by gcc, never
+#              dropped. NFCXX_PATHB_LOG=FILE: which one made each compile. NFCXX_PATHB_FALLBACK=gcc: also gcc for a unit Path B refuses)
 #   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
 #
 #   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
 #   nfcc a.o b.o -lm -o prog  link; .c inputs are compiled to temporary objects first
 #   nfcc -E ... / -M ... / -fsyntax-only   preprocess / dependency query / syntax check: host compiler, unchanged
 #   nfcc --version, -v, -dumpmachine, -dumpversion, -print-*: answered like gcc (the host compiler answers)
-#   nfcc -S a.c [-o a.s]      emit assembly (qbe: QBE's output; gcc: the host compiler's), one .s per source
+#   nfcc -S a.c [-o a.s]      emit assembly (pathb: QBE's output; gcc: the host compiler's), one .s per source
 #   @file                     response files are expanded first with gcc's rules (quotes, backslash, nested @file)
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
@@ -20,10 +25,10 @@
 #              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
 #              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
-#              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
-#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (qbe: ignored)
-#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (qbe: ignored)
-#   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
+#              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (pathb: ignored)
+#              gcc backend: --param name=value and --param=name=value (optimiser tuning), given to the C compile (pathb: ignored)
+#              gcc backend: -fno-jump-tables, and -fno-crossjumping when the host gcc is GNU gcc, given to the C compile (pathb: ignored)
+#   ignored:   -O* and -g* on the pathb backend (QBE has no optimisation levels and writes no debug info);
 #              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
 #   rejected with an error: -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -Ofast,
@@ -35,21 +40,25 @@ set -euo pipefail
 shopt -s extglob
 root=$(cd "$(dirname "$0")" && pwd)
 host=${NFCC_HOST_CC:-cc}
-backend=${NFCXX_BACKEND:-qbe}
+# The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux, and then a unit Path B cannot
+# take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the environment sets it).
+# Anywhere else, or without the harness, it is gcc. NFCXX_BACKEND=gcc|pathb|cil chooses one.
+if [ -n "${NFCXX_BACKEND:-}" ]; then backend=$NFCXX_BACKEND
+elif [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = x86_64 ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } &&
+     [ -x "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/scripts/pathb-cc" ]; then
+  backend=pathb; export NFCXX_PATHB_FALLBACK=${NFCXX_PATHB_FALLBACK:-gcc}
+else backend=gcc; fi
 version=0.1
 
 die() { echo "nfcc: error: $*" >&2; exit 1; }
 
 case $backend in
-  qbe) [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ] ||
-         die "QBE not built; run scripts/setup-qbe.sh"
-       qcc=$root/scripts/qbe-cc ;;
   cil) [ -x "$root/build/cil/ilasm" ] || die "CIL backend not set up; run scripts/setup-cil.sh"
        qcc=$root/scripts/cil-cc ;;
   pathb) [ -x "$root/scripts/pathb-cc" ] || die "Path B not available (scripts/pathb-cc)"
          [ -x "$root/build/qbe/qbe" ] || die "QBE not built; run scripts/setup-qbe.sh" ;;
   gcc) ;;
-  *) die "unknown NFCXX_BACKEND '$backend' (qbe, cil, gcc or pathb)" ;;
+  *) die "unknown NFCXX_BACKEND '$backend' (gcc, pathb or cil)" ;;
 esac
 
 # Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
@@ -92,7 +101,7 @@ for a in "$@"; do
   case $a in
     --version)
       echo "nfcc (nfcxx C driver $version, backend $backend) $("$host" -dumpfullversion 2>/dev/null || echo 0)"
-      echo "gcc-compatible driver over cproc/QBE; the host compiler is $("$host" --version | head -1)"
+      echo "gcc-compatible driver over Path B and gcc; the host compiler is $("$host" --version | head -1)"
       exit 0 ;;
     -dumpmachine|-dumpversion|-dumpfullversion|-dumpspecs|-print-*|-V|-qversion|--help|--target-help)
       exec "$host" "$@" ;;
@@ -104,9 +113,6 @@ if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
 # understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
 # -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
 # header search path): the host front end answers it.
-# NFCXX_QBE_TRY (gcc backend): scripts/qbe-try runs the compile, then moves it to the qbe backend when the qbe object
-# matches the gcc one (docs/notes/linux-kernel.md)
-if [ -n "${NFCXX_QBE_TRY:-}" ] && [ "$backend" = gcc ]; then exec "$root/scripts/qbe-try" "$@"; fi
 for a in "$@"; do
   case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
 done
@@ -119,9 +125,12 @@ pp=()        # preprocessor options (-D -I -std ...), given to cc -E / cc -M and
 ld=()        # link options, in order
 inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
 picf=()
+pathb_pie=0   # -fPIE: with -mno-sse (the kernel's boot decompressor) the compile is gcc's, see pathb_reason
+pathb_pic=0   # -fPIC or -shared: Path B reads the address of a preemptible symbol through the GOT (scripts/pathb-cc --pic)
 dts=()       # -MT / -MQ pairs
 dp=0
 asm=0        # -S
+spon=0 spguard=()   # a stack protector is in effect (last of -fstack-protector*, -fno-stack-protector); the -mstack-protector-guard* options
 asf=()       # -Wa,* (assembler options)
 optlvl=-O2      # gcc backend: last -O option (-O2 when none)
 dbg=()       # gcc backend: -g options, in order
@@ -137,31 +146,63 @@ isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...),
 # program that builds on one builds on the other. The Linux kernel's build needs it (-mcmodel=kernel, -mno-red-zone,
 # -mno-sse, ...): docs/notes/linux-kernel.md.
 gccf=()
-# NFCXX_QBE_KERNEL=1 with the qbe backend: the Linux kernel's options that the qbe path honours are accepted and given
-# to qbe-cc (kqf), the rest are still refused. Honoured by cproc: -funsigned-char, -fshort-wchar,
-# -ftrivial-auto-var-init=zero; by construction (QBE has no stack protector, jump tables, red-zone use, null-check or
-# overflow assumptions, and writes PIC code that a non-PIE link takes): the rest of the list. -mno-sse and the other
-# no-floating-point options are checked: qbe-cc refuses a translation unit whose QBE code touches SSE or x87 registers.
-# docs/notes/linux-kernel.md.
-kqf=()
-qbekernel() {
-  [ "$backend" = qbe ] && [ -n "${NFCXX_QBE_KERNEL:-}" ] || return 1
+# gcconly OPT: an option that changes meaning or code generation in a way QBE cannot honour. gcc backend with NFCXX_GCC_PASSTHROUGH:
+# given to gcc. Path B: kept for the compile that falls back to gcc (needgcc: that compile goes to gcc, see pathb_reason). Otherwise
+# refused by the caller. gccplain OPT: an option with no effect on QBE's output (nothing the program means or QBE can honour is lost
+# by dropping it) that gcc still wants, given to gcc by the passthrough mode and kept for Path B's gcc fallback.
+needgcc=()
+gcconly() {
+  if [ "$backend" = pathb ]; then gccf+=("$1"); needgcc+=("$1"); return 0; fi
+  [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1")
+}
+gccplain() { { [ "$backend" = pathb ] || { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ]; }; } || return 1; gccf+=("$1"); }
+# NFCXX_BACKEND=pathb: the kernel's option set (docs/notes/nfcc-pathb.md, docs/notes/linux-kernel.md). The options Path B honours go to
+# scripts/pathb-cc (pbf: -funsigned-char, -fshort-wchar, -ffreestanding, -ftrivial-auto-var-init=zero, -mno-sse's check, -fno-asynchronous-unwind-tables) or to the
+# front end (-nostdinc, -isystem, -idirafter: pathb_reason); the ones with no effect on QBE's code are dropped (-mno-red-zone, ...);
+# any other option that changes meaning sends that compile to gcc (needgcc), with every -f and -m option given in command-line order.
+pbf=() nofp=0 nounwind=0 wchar16=0
+# The real-mode boot code's options (-m16 -march=i386 -mregparm=3 -mpreferred-stack-boundary=2): Path B's 32-bit x86 target (scripts/pathb-cc --i386
+# --regparm=3 --m16: ILP32, QBE's i386_regparm3, a 32-bit object with .code16gcc code), decided in pathb_reason when the whole command line is known.
+# -mregparm=3 without -m16 is not honoured (a 32-bit hosted compile is gcc's); -march=i386 and -mpreferred-stack-boundary=2 change nothing
+# on QBE's i386 code (it uses 386 instructions only and keeps 4-byte stack alignment). All of them are kept for a gcc compile (gccf).
+pb_m16=0 pb_regparm=0
+pathb_option() {   # 0: handled here
   case $1 in
-    -funsigned-char|-fshort-wchar|-ftrivial-auto-var-init=zero|-ffreestanding|-fno-PIE|-fno-pie|-fno-PIC|-fno-pic|\
-    -fno-stack-protector|-fno-jump-tables|-fno-delete-null-pointer-checks|-fno-strict-overflow|-fno-strict-aliasing|-fwrapv|\
-    -fcf-protection=none|-fno-asynchronous-unwind-tables|-fconserve-stack|-fno-common|-falign-functions=*|-falign-jumps=*|\
-    -falign-loops=*|-falign-labels=*|-fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
-    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|-fomit-frame-pointer|-fno-omit-frame-pointer|-fmacro-prefix-map=*|\
-    -m64|-mcmodel=kernel|-mno-red-zone|-mtune=*|-mpreferred-stack-boundary=3|-mskip-rax-setup|-mno-sse|-mno-sse2|-mno-mmx|\
-    -mno-3dnow|-mno-avx|-mno-80387|-mno-fp-ret-in-387|-msoft-float|\
-    -m16|-march=i386|-mregparm=3|-mpreferred-stack-boundary=2) kqf+=("$1") ;;
+    -m16) pb_m16=1 ;;
+    -mregparm=3) pb_regparm=1 ;;
+    -funsigned-char|-fno-signed-char|-fsigned-char|-fno-unsigned-char|-ffreestanding) pbf+=("$1") ;;
+    -ftrivial-auto-var-init=zero|-ftrivial-auto-var-init=uninitialized) pbf+=("$1") ;;   # =pattern is gcc's (needgcc)
+    -fshort-wchar) pbf+=("$1"); wchar16=1 ;;
+    -mno-sse|-mno-sse2|-mno-80387|-msoft-float) pbf+=(--no-fp); nofp=1 ;;
+    -fno-asynchronous-unwind-tables) pbf+=(--no-unwind); nounwind=1 ;;
+    -fno-PIE|-fno-pie|-fno-PIC|-fno-pic) pbf+=(--no-pie) ;;   # no GOT-like cells for function addresses (a -fPIC given too wins)
+    -fno-stack-check|-fno-stack-clash-protection|-fno-allow-store-data-races|\
+    -fno-optimize-sibling-calls|-foptimize-sibling-calls|-fno-function-sections|-fno-data-sections|-fstrict-flex-arrays=*|\
+    -fconserve-stack|-falign-labels=*|-mno-mmx|-mno-3dnow|-mno-avx|-mno-avx2|-mno-avx512*|-mno-ssse3|-mno-sse3|-mno-sse4*|\
+    -mno-fma|-mno-bmi*|-mno-popcnt|-mno-fp-ret-in-387|-mskip-rax-setup|-mno-red-zone|-mred-zone) ;;
     *) return 1 ;;
   esac
+  gccf+=("$1")
 }
-gcconly() { [ "$backend" = gcc ] && [ -n "${NFCXX_GCC_PASSTHROUGH:-}" ] || return 1; gccf+=("$1"); }
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
+# The same option parsed by the sealed scripts/driver-options.rb (build/driver-options, made by tests/bc2cpp/run_driver_options.sh):
+# its output lines set the same variables. Used when that file exists; the bash below is the fallback.
+wp_option_sealed() {
+  local out line rest
+  out=$("$root/build/driver-options" "$1") || exit 1
+  while IFS= read -r line; do
+    case $line in
+      "pp "*) pp+=("${line#pp }") ;;
+      "depmode "*) depmode=${line#depmode } ;;
+      "dfile "*) dfile=${line#dfile } ;;
+      "dt "*) rest=${line#dt }; dts+=("${rest%% *}" "${rest#* }") ;;
+      "dp 1") dp=1 ;;
+    esac
+  done <<<"$out"
+}
 wp_option() {
+  if [ -x "$root/build/driver-options" ]; then wp_option_sealed "$1"; return; fi
   local w j x
   IFS=, read -ra w <<<"${1#-Wp,}"
   for ((j = 0; j < ${#w[@]}; j++)); do
@@ -183,7 +224,7 @@ n=${#args[@]}
 need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
 for ((i = 0; i < n; i++)); do
   a=${args[i]}
-  qbekernel "$a" && continue
+  [ "$backend" != pathb ] || ! pathb_option "$a" || continue
   case $a in
     -c) mode=compile ;;
     -S) asm=1 ;;
@@ -209,7 +250,8 @@ for ((i = 0; i < n; i++)); do
     -l|-L) need; ld+=("$a" "${args[++i]}") ;;
     -l?*|-L?*) ld+=("$a") ;;
     -Xlinker|-z|-u|-T) need; ld+=("$a" "${args[++i]}") ;;
-    -Wl,*|-shared|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
+    -shared) pathb_pic=1; ld+=("$a") ;;
+    -Wl,*|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
     -Wp,*) wp_option "$a" ;;
     -Wa,*) asf+=("$a") ;;
     -w|-W*) ;;
@@ -220,11 +262,23 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     # QBE output is already PIC (GOT-relative); gcc needs the flag, in command-line order with the other codegen options
     # (gcc takes the last of -fno-PIE ... -fPIC, as the kernel's vDSO build relies on)
-    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); gcconly "$a" || picf+=("$a") ;;
-    -m32|-mx32|-m16|-miamcu) gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
+    # -fstack-protector*: noted for -mstack-protector-guard-* (below); the option itself goes where it did (gcc: given; Path B: ignored)
+    -fstack-protector|-fstack-protector-strong|-fstack-protector-all|-fstack-protector-explicit) spon=1; gccplain "$a" || : ;;
+    -fno-stack-protector) spon=0; gccplain "$a" || : ;;
+    # the guard options only say where the canary lives: with no stack protector in effect (the last of -fstack-protector* and
+    # -fno-stack-protector decides) they change nothing; with one, Path B has none to place, so that compile is gcc's. Decided after the loop.
+    -mstack-protector-guard*) spguard+=("$a") ;;
+    # -mindirect-branch=thunk* (retpolines), -mfunction-return=thunk* and -mharden-sls=* other than none change the code; QBE has no
+    # such thunks, so those are gcc's. =keep / =none ask for the plain code, which is what QBE writes.
+    -mindirect-branch=keep|-mfunction-return=keep|-mharden-sls=none|-mbranch-protection=none) gccplain "$a" || : ;;
+    -mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || die "$a is not supported" ;;
+    -fPIC|-fpic) pathb_pic=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
+    -fPIE|-fpie) pathb_pie=1; ld+=("$a"); gccplain "$a" || picf+=("$a") ;;
+    -m32|-mx32|-m16|-miamcu) [ "$(uname -m)" = x86_64 ] || die "$a is not supported (x86-64 only)"
+                              gcconly "$a" || die "$a is not supported (x86-64 only)" ;;   # gcc: the kernel's real-mode boot code
     # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
     # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
-    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gcconly "$a" || isa+=("$a") ;;
+    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) gccplain "$a" || isa+=("$a") ;;
     # --param name=value: gcc's inlining and optimisation tuning knobs (ASTro's code store passes early-inlining-insns). They
     # change no meaning, only how hard gcc optimises, so the gcc backend gets them and QBE, which has no such knobs, ignores them.
     --param=*) isa+=("$a") ;;
@@ -234,9 +288,9 @@ for ((i = 0; i < n; i++)); do
     -fno-jump-tables) isa+=("$a") ;;
     -fno-crossjumping) host_is_gnu_gcc && isa+=("$a") ;;
     --param) need; isa+=("$a" "${args[++i]}") ;;
-    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) gcconly "$a" || : ;;
+    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone) gccplain "$a" || : ;;
     -m*) gcconly "$a" || die "$a is not supported" ;;
-    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gcconly "$a" || : ;;
+    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) gccplain "$a" || : ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
     -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) gcconly "$a" || die "$a is not supported (changes floating-point semantics)" ;;
     -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
@@ -245,7 +299,7 @@ for ((i = 0; i < n; i++)); do
         # With NFCXX_GCC_PASSTHROUGH every -f option goes to gcc, the harmless ones too: gcc's own defaults (a
         # distribution's -fstack-protector-strong, -fPIE, -fcf-protection) would otherwise stand where the build turned
         # them off.
-        if [[ ${a#-f} == @($fok) ]]; then gcconly "$a" || :; else gcconly "$a" || die "$a is not supported (not in nfcc's list of harmless -f options)"; fi ;;
+        if [[ ${a#-f} == @($fok) ]]; then gccplain "$a" || :; else gcconly "$a" || die "$a is not supported (not in nfcc's list of harmless -f options)"; fi ;;
     @*) die "response files ($a) are not supported" ;;
     -) inputs+=("c:-") ;;
     --param=*) gcconly "$a" || die "$a is not supported" ;;
@@ -262,6 +316,9 @@ for ((i = 0; i < n; i++)); do
   esac
 done
 
+for a in "${spguard[@]+"${spguard[@]}"}"; do
+  if [ $spon = 1 ]; then gcconly "$a" || die "$a is not supported"; else gccplain "$a" || :; fi
+done
 [ ${#inputs[@]} -gt 0 ] || die "no input files"
 [ $asm = 0 ] || mode=compile   # -S stops after code generation, with or without -c
 if [ "$mode" = compile ]; then
@@ -275,37 +332,81 @@ if [ -n "$dfile" ] && [ -z "$depmode" ]; then die "-MF needs -MD or -MMD with -c
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 k=0
 
-# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include and a C standard; it ignores other options. So
-# nothing else may reach it: the options it cannot honour are refused here, with their names, not dropped.
-pathb_compile() {   # pathb_compile -c|-S SOURCE OUTPUT [-iquote DIR]
-  local what=$1 csrc=$2 obj=$3 o k2=0 pbo=() std=-std=c11 keep rc=0
-  shift 3
-  [ ${#asf[@]} = 0 ] || die "-Wa,*: assembler options cannot be given to the pathb backend (it assembles with the host cc)"
+# Path B (NFCXX_BACKEND=pathb): scripts/pathb-cc takes -I -D -U -include, a C standard, -nostdinc, -isystem, -idirafter, -funsigned-char,
+# -fshort-wchar, -ffreestanding, -m16 (with -mregparm=3: the 32-bit x86 target), and (--no-fp, --no-unwind) -mno-sse and -fno-asynchronous-unwind-tables. A compile with an option that
+# changes meaning and that Path B cannot honour (-m32, -fshort-enums, -ftrivial-auto-var-init=pattern, -iquote, -Wa,*, ...) is made by gcc with
+# the options as given (pb_reason says why); it is not dropped and not an error. NFCXX_PATHB_LOG=FILE appends one line per compile:
+# "pathb SOURCE" or "gcc SOURCE: reason". NFCXX_PATHB_FALLBACK=gcc also moves a compile that scripts/pathb-cc refuses (inline asm it
+# cannot emit, a unit with SSE code under -mno-sse) to gcc, as the nfcxx driver does; without it that compile fails.
+pb_opts=() pb_std=-std=c11 pb_reason=
+pathb_reason() {   # pathb_reason CSRC [-iquote DIR]: pb_reason empty, and pb_opts, pb_std set, when Path B can compile CSRC
+  local csrc=$1 o k2=0 w
+  shift
+  pb_reason=; pb_opts=(); pb_std=-std=c11; pb_gnu=1
+  if [ ${#needgcc[@]} -gt 0 ]; then pb_reason="${needgcc[*]}: not honoured by Path B"; return; fi
+  # -fPIE in a freestanding unit (-mno-sse: the kernel's boot decompressor, which relocates itself and links with no run-time
+  # relocations allowed): Path B's pointer cells and tables are absolute relocations, so that compile is gcc's.
+  if [ $pathb_pie = 1 ] && [ $nofp = 1 ]; then pb_reason="-fPIE with -mno-sse: Path B's data is absolute relocations a position-independent boot image cannot carry"; return; fi
+  if [ $pb_regparm = 1 ] && [ $pb_m16 = 0 ]; then pb_reason="-mregparm=3 without -m16: not honoured by Path B"; return; fi
+  if [ $pb_m16 = 1 ]; then
+    # freestanding: pathb-cc gives the front end --target=linux_i686 --freestanding. No inlining: the real-mode image is size limited (the kernel builds it -Os), and
+    # the inliner grows the code (a third more on the boot code)
+    pb_opts+=(--i386 --m16 --ir-opt=none); [ $pb_regparm = 0 ] || pb_opts+=(--regparm=3)
+  fi
+  # -Wa,*: options of the assembler step, which is the host cc assembling QBE's output (scripts/pathb-cc --as-opt). The ones the
+  # assembler takes the same for QBE's assembly are given to that step; any other (--32, --defsym, -march=, ...) could change the
+  # object's meaning, so that compile is gcc's.
+  for o in "${asf[@]+"${asf[@]}"}"; do
+    IFS=, read -ra w <<<"${o#-Wa,}"
+    for x in "${w[@]}"; do
+      case $x in
+        --fatal-warnings|--noexecstack|-W|--no-warn|-mrelax-relocations=yes|-mrelax-relocations=no|-mx86-used-note=yes|-mx86-used-note=no) pb_opts+=("--as-opt=$x") ;;
+        *) pb_reason="$o: assembler option Path B does not pass on"; return ;;
+      esac
+    done
+  done
   while [ $k2 -lt ${#pp[@]} ]; do
     o=${pp[k2]}
     case $o in
-      -D|-U|-I|-include) pbo+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
-      -D?*|-U?*|-I?*) pbo+=("$o") ;;
-      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) std=$o ;;
-      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
-      -ansi|-std=c90|-std=iso9899:1990) std=-std=c89 ;;
-      -std=iso9899:2011) std=-std=c11 ;;
-      -isystem|-iquote|-idirafter|-imacros|-isystem?*|-iquote?*|-idirafter?*|-imacros?*|-nostdinc|-undef|--sysroot=*)
-        die "$o: not supported by the pathb backend (scripts/pathb-cc takes -I -D -U -include and -std only)" ;;
-      *) die "$o: not supported by the pathb backend" ;;
+      -D|-U|-I|-include|-isystem|-idirafter) pb_opts+=("$o" "${pp[k2 + 1]}"); k2=$((k2 + 1)) ;;
+      -D?*|-U?*|-I?*|-isystem?*|-idirafter?*|-nostdinc) pb_opts+=("$o") ;;
+      -include?*) pb_opts+=(-include "${o#-include}") ;;
+      -std=c89|-std=c99|-std=c11|-std=c17|-std=c18|-std=c23) pb_std=$o; pb_gnu=0 ;;
+      -std=gnu89|-std=gnu99|-std=gnu11|-std=gnu17|-std=gnu18|-std=gnu23) pb_std=-std=c${o#-std=gnu} ;;   # EDG's gcc mode takes the GNU extensions in every C standard
+      -ansi|-std=c90|-std=iso9899:1990) pb_std=-std=c89; pb_gnu=0 ;;
+      -std=iso9899:2011) pb_std=-std=c11; pb_gnu=0 ;;
+      *) pb_reason="$o: not honoured by Path B"; return ;;
     esac
     k2=$((k2 + 1))
   done
-  while [ $# -gt 0 ]; do pbo+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
-  if [ "$what" = -S ]; then
-    keep=$tmp/keep$k
-    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
-    [ $rc = 0 ] || exit $rc
-    cp "$keep/$(basename "${csrc%.*}").s" "$obj"
-  else
-    "$root/scripts/pathb-cc" "$std" "${pbo[@]+"${pbo[@]}"}" "$csrc" -o "$obj" || exit $?
+  while [ $# -gt 0 ]; do pb_opts+=(-I "$2"); shift 2; done   # -iquote DIR of a non-.c source: its directory, as -I
+  # EDG's gcc mode defines __STRICT_ANSI__ in every C standard, which makes glibc hide POSIX (struct stat's st_atim, ...). gcc's
+  # gnu modes (the default, -std=gnu99, ...) do not, and glibc then turns on _DEFAULT_SOURCE: do the same.
+  [ $pb_gnu = 0 ] || pb_opts=(-D_DEFAULT_SOURCE "${pb_opts[@]+"${pb_opts[@]}"}")
+  [ $pathb_pic = 0 ] || pb_opts+=(--pic)   # -fPIC: the object goes into a shared object (scripts/pathb-ssa-qbe.rb, Qbe.pic)
+  if [ $wchar16 = 1 ]; then
+    # -fshort-wchar: the headers' wchar_t is unsigned short (pathb-dump), but EDG types a wide literal as the target's int, so a unit that
+    # has one goes to gcc. The host preprocessor (same options) shows the literals of the headers and macros too.
+    w=$tmp/wide$k.i
+    "$host" -E -P "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" "$@" -x c "$csrc" > "$w" 2>/dev/null || { pb_reason="-fshort-wchar: preprocessing failed"; return; }
+    if grep -Eq "(^|[^A-Za-z0-9_\"'])L[\"']" "$w"; then pb_reason="-fshort-wchar: a wide character or string literal"; return; fi
   fi
 }
+# pathb_compile -c|-S SOURCE OUTPUT: pb_opts and pb_std as pathb_reason set them
+pathb_compile() {
+  local what=$1 csrc=$2 obj=$3 keep rc=0
+  if [ "$what" = -S ]; then
+    keep=$tmp/keep$k
+    PATHB_KEEP=$keep "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$tmp/pb$k.o" || rc=$?
+    if [ $rc = 0 ]; then
+      if [ "$obj" = - ]; then cat "$keep/$(basename "${csrc%.*}").s"; else cp "$keep/$(basename "${csrc%.*}").s" "$obj"; fi   # -S -o -: stdout, as gcc
+    fi
+  else
+    "$root/scripts/pathb-cc" "$pb_std" "${pbf[@]+"${pbf[@]}"}" "${pb_opts[@]+"${pb_opts[@]}"}" "$csrc" -o "$obj" || rc=$?
+  fi
+  return $rc
+}
+pathb_log() { [ -z "${NFCXX_PATHB_LOG:-}" ] || echo "$1" >> "$NFCXX_PATHB_LOG"; }
 
 # compile_one KIND SOURCE OBJECT
 compile_one() {
@@ -349,9 +450,20 @@ compile_one() {
   fi
   local what=-c; [ $asm = 0 ] || what=-S
   if [ $backend = pathb ]; then
-    pathb_compile "$what" "$csrc" "$obj" "${extra[@]+"${extra[@]}"}"
-  elif [ $backend = qbe ] || [ $backend = cil ]; then
-    "$qcc" --c-input $what "${kqf[@]+"${kqf[@]}"}" "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+    local rc=0
+    pathb_reason "$csrc" "${extra[@]+"${extra[@]}"}"
+    if [ -z "$pb_reason" ]; then
+      pathb_compile "$what" "$csrc" "$obj" || rc=$?
+      if [ $rc = 0 ]; then pathb_log "pathb $src"; return 0; fi
+      [ "${NFCXX_PATHB_FALLBACK:-}" = gcc ] || exit $rc
+      pb_reason="Path B refused it (status $rc)"
+    fi
+    pathb_log "gcc $src: $pb_reason"
+    # gcc's own error is printed first; the nfcc line says which option sent the unit to gcc (the cc-mode checks match it)
+    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
+        "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj" || die "$src: gcc, the Path B fallback for $pb_reason, failed"
+  elif [ $backend = cil ]; then
+    "$qcc" --c-input $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
     gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${gccf[@]+"${gccf[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
@@ -380,10 +492,11 @@ done
 [ "$sawout" = 1 ] || out=a.out
 if [ $backend = pathb ]; then
   # Path B objects link with EDG's runtime (libC.a), the long double helpers and libatomic, as nfcxx links them
-  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lm -latomic
-elif [ $backend = qbe ] || [ $backend = cil ]; then
-  # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits); the cil
-  # backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
+  # The C++ and atomic libraries of the host, as the nfcxx driver links them: macOS has libc++ and no libstdc++, libgcc_s or libatomic.
+  if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
+  "$host" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out" "$("$root/scripts/pathb-ldrt")" -L"${EDG_BUILD:-$root/build/edg}/lib" -lC $pb_cxx_libs -lm $pb_atomic_lib
+elif [ $backend = cil ]; then
+  # the cil backend's link is cil-link.rb (the wrapper sets NFCXX_CIL).
   "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
 else
   gcc "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"

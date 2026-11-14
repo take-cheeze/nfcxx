@@ -9,12 +9,13 @@
 #                            without early inlining; and with the tier compiling in the background (NFCAST_TIER=async), where
 #                            which calls run as native code depends on timing and the output must not. The collector runs at its
 #                            default; its forced-collection stress (NFCAST_GC_STRESS=1) is covered by engine.cpp and tier.cpp, not here
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
-# QBE-ONLY: Path B (NFCXX_BACKEND=pathb) builds and links all three programs, but engine.cpp aborts (SIGABRT, no message) in its
-# "inlining of small functions" section; gcc and qbe pass. The suite stays on qbe until that is fixed.
+#   NFCXX_BACKEND=pathb|gcc|qbe   (default: pathb and gcc)
+#                            cases/inline_loops.lua ends in a deep recursion (pcall of an infinite one) that the engine cuts at
+#                            State::max_depth = 1500 levels, a depth it sizes for about 1 KB of C++ stack per level: on Path B it needs
+#                            the stack of the frames of the SSA route (docs/notes/pathb-ssa-qbe.md, "Frames"), not gcc's
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
 cd "$(dirname "$0")/../.."
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"pathb gcc"}
 srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp)
 unset NFCAST_TIER NFCAST_TIER_THRESHOLD NFCAST_TIER_DEBUG NFCAST_GC_STRESS NFCAST_INLINE NFCAST_INLINE_WARM
 export NFCXX="$PWD/nfcxx"   # the tier finds the driver itself, but the cases run from another directory

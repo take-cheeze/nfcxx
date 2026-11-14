@@ -8,10 +8,23 @@ module BC2CPPRunner
   DEBUG_MODULES = %w[EscapeReport ChaSelfReport GuardHintReport InterfaceTableReport SendRootReport SiteOriginTable RefineReport
                      NativeArmsReport ProvableErrorReport ElementSiteReport ReceiverProofReport ParamTrace ElseTrace
                      RecvTrace].freeze
+  SELF_DYNAMIC_OPTIONS = %w[BC2CPP_ESCAPE_REPORT BC2CPP_CHA_REPORT BC2CPP_GUARD_HINT_REPORT BC2CPP_ITAB_REPORT
+                            BC2CPP_SEND_ROOT_REPORT BC2CPP_POOL_DROP_REPORT BC2CPP_SITE_ORIGIN_TABLE BC2CPP_REFINE_REPORT
+                            BC2CPP_NATIVE_ARMS_REPORT BC2CPP_PROVABLE_ERROR_REPORT BC2CPP_ELEMENT_REPORT
+                            BC2CPP_RECEIVER_PROOF_REPORT BC2CPP_PARAM_TRACE BC2CPP_ELSE_TRACE BC2CPP_RECV_TRACE].freeze
+
+  def self.validate_self_options!
+    dynamic = SELF_DYNAMIC_OPTIONS.select { |key| ENV[key] }
+    dynamic << 'BC2CPP_STRICT_KEYS=0' if ENV['BC2CPP_STRICT_KEYS'] == '0'
+    unless dynamic.empty?
+      raise "bc2cpp-self: #{dynamic.join(', ')} changes the fixed compiler definition graph; use the bootstrap runner"
+    end
+  end
 
   def self.run
     $PROGRAM_NAME = ENTRY
     if respond_to?(:register_compiled)
+      validate_self_options!
       # A host that linked bc2cpp's compiled code (docs/bc2cpp-self-compile.md): load the baked sources, replace their methods
       # with the compiled bodies, then run the command.
       Object.const_set(:BC2CPP_DEFER_MAIN, true)
@@ -28,6 +41,9 @@ module BC2CPPRunner
       require ENTRY
     end
   ensure
+    if ENV['BC2CPP_SELF_STATS'] && respond_to?(:compiled_calls)
+      $stderr.puts "BC2CPP_SELF_AOT methods=#{AOT_METHOD_COUNT} calls=#{compiled_calls}"
+    end
     # bc2cpp writes its generated code from at_exit handlers (ShardOutput, CompactOutput capture stdout and emit at exit).
     ExitHandlers.run
   end

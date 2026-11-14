@@ -13,10 +13,13 @@ require 'set'
 require 'optparse'
 require 'json'
 
-options = { entries: false, entries_out: nil, main_report: nil }
+options = { entries: false, entries_out: nil, main_report: nil, all: false }
 parser = OptionParser.new do |opts|
-  opts.banner = "Usage: #{$PROGRAM_NAME} [--entries] [--entries-out PATH]"
+  opts.banner = "Usage: #{$PROGRAM_NAME} [--entries] [--all-reasons] [--entries-out PATH]"
   opts.on('--entries', 'Print entry rows instead of the summary') { options[:entries] = true }
+  opts.on('--all-reasons', 'Give every source that keeps a name, not only the first (an entry leaves only when all go)') do
+    options[:all] = true
+  end
   opts.on('--entries-out PATH', 'Also write entry rows from this analysis to PATH') { |path| options[:entries_out] = path }
   opts.on('--main-report PATH', 'Summarize a BC2CPP_MAIN_REPORT JSON file without rerunning generation') { |path| options[:main_report] = path }
 end
@@ -55,6 +58,7 @@ require_relative '../../tools/bc2cpp/static_dispatch_registrations'
 sdr = StaticDispatchRegistrations
 root = BC2CPP_WORLD_ROOT
 sdr.why = {}
+sdr.why_all = {} if options[:all]
 # The report is of the state the build is in, so it reads the lists the build was given.
 lists = StaticDispatchLists.current(required: true)
 analysis = sdr.analyze(root, ENV.fetch('MRBC', 'mrbc'), lists: lists, lists_path: ENV.fetch(StaticDispatchLists::PATH_ENV),
@@ -64,8 +68,12 @@ eligible = sdr.eligible(analysis).to_set { |m| [m[:owner], m[:name]] }
 re = sdr.owner_re(true)
 kept = analysis[:registered].select { |m| m[:owner].match?(re) && !eligible.include?([m[:owner], m[:name]]) }
                             .uniq { |m| [m[:owner], m[:name]] }
+# ENGINE_ROWS: a row is no table entry, so it is reported apart.
+engine_rows = (analysis[:engine_rows] || Set.new).to_set
+row_kept, kept = kept.partition { |m| engine_rows.include?("#{m[:owner]}##{m[:name]}") }
 
 reason = lambda do |name|
+  next sdr.why_all[name].join(' || ') if options[:all] && sdr.why_all[name]
   next why[name] if why[name]
 
   base = name[0..-2]
@@ -90,6 +98,7 @@ else
   # A source's kind: the reason without the name that varies per site.
   kind = ->(r) { r.sub(/ in .*\z/, ' in ...').sub(/\Asent by .*, which/, 'sent by ..., which').sub(/`[^`]*`/, '`...`') }
   puts "kept entries: #{rows.size} (eligible: #{eligible.size})"
+  puts "engine rows: #{row_kept.size}" unless row_kept.empty?
   puts "\nby kind of source:"
   rows.group_by { |_, _, r| kind.call(r) }.sort_by { |_, v| -v.size }.each { |k, v| puts format('%6d  %s', v.size, k) }
   puts "\ntop sources:"

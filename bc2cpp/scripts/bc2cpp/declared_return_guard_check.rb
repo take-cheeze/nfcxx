@@ -78,9 +78,9 @@ CodeGen.declared_returns = hints
 gen = GuardHarness.new(defs, ireps)
 
 puts '-- the compiled body checks every return (host)'
-body = lambda do |impl|
+body = lambda do |impl, ptype = 'mrb_int'|
   "// Foo#m (compiled from irep L, 3 insns)\n" \
-    "mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_int n) {\n  mrb_value r1 = self;\n  if (n) return r1;\n" \
+    "mrb_value #{impl}(mrb_state* M, mrb_value self, #{ptype} n) {\n  mrb_value r1 = self;\n  if (n) return r1;\n" \
     "  return mrb_nil_value();\n}\n\n" \
     "static mrb_value Foo_m(mrb_state* M, mrb_value self) {\n" \
     "  mrb_int n;\n  mrb_get_args(M, \"i\", &n);\n  return #{impl}(M, self, n);\n}\n\n"
@@ -200,16 +200,20 @@ core_plain.instance_variable_set(:@declared_return_entries, plain_entries)
 check.call('a plain core declaration is refused (error) like a hinted one: it may run interpreted',
            core_plain.declared_return_refusal('count')&.first == 'error')
 CodeGen.declared_params = { 'L1' => [[0, 'Bar', 'Foo#count', 'Bar']] }
-param_code = plain_gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl'), 'Foo_count_impl')
+param_code = plain_gen.declared_return_guard_wrap('L1', body.call('Foo_count_impl', 'mrb_value'), 'Foo_count_impl')
 check.call('a declared parameter class is checked on entry, with the method, position and type named',
            param_code.match?(/if \(mrb_unlikely\(!\(bc2cpp_class_is\(M, n, bc2cpp_owner_class_\d+\(M\)\)\)\)\) /) &&
              param_code.include?('bc2cpp_declared_param_violation(M, n, "Foo#count", 1, "Bar");') &&
              param_code.index('bc2cpp_declared_param_violation') < param_code.index('Foo_count_impl_unguarded(M, self, n)'))
 CodeGen.declared_params = { 'L9' => [[0, 'Bar', 'Foo#x', 'Bar']] }
-only_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl'), 'Foo_x_impl')
+only_param = plain_gen.declared_return_guard_wrap('L9', body.call('Foo_x_impl', 'mrb_value'), 'Foo_x_impl')
 check.call('a method with a parameter class and no return declaration is wrapped for the parameter only',
            only_param.include?('Foo_x_impl_unguarded') && only_param.include?('bc2cpp_declared_param_violation(M, n, "Foo#x", 1, "Bar");') &&
              !only_param.include?('bc2cpp_declared_return_violation'))
+CodeGen.declared_params = { 'L8' => [[0, 'Integer', 'Foo#y', 'Integer', :integer, false]] }
+unboxed = plain_gen.declared_return_guard_wrap('L8', body.call('Foo_y_impl'), 'Foo_y_impl')
+check.call('an unboxed (mrb_int) specialization is not re-checked: its kind is in its C++ type',
+           unboxed == body.call('Foo_y_impl'))
 CodeGen.declared_params = nil
 
 puts '-- refusals (host)'

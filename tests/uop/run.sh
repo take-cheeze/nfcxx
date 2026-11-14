@@ -43,9 +43,7 @@
 #                               JavaScript and Go, equal to the C++ API in values and in the bytes of the ONNX file; operators, errors,
 #                               dtypes, the C backend. Languages that cannot be built here are skipped with a SKIP line
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
-# QBE-ONLY: Path B refuses lib/uop/nfcuop_lower.cpp ("pathb-ssa-build: QBE failed: unexpected phi instruction"), so the suite
-# stays on qbe and gcc.
+#   NFCXX_BACKEND=pathb|gcc|qbe   (default: pathb and gcc; tests/uop/run_poly.sh below keeps its own default)
 #   UOP_JOBS=N              the library objects are compiled N at a time (default: the CPU count)
 #   UOP_ONLY="test_np np_compat"  run only these programs (CI runs the suite as parallel groups, see .github/workflows/ci.yml);
 #                           the ONNX models and the Python checks run on the models the selected programs wrote, and the
@@ -54,9 +52,9 @@
 #                           where nfcxx is not built (CI does not use it)
 cd "$(dirname "$0")/../.."
 . tests/bin-cache.sh   # TEST_BIN_CACHE: the compiled programs are kept between CI runs (tests/bin-cache.sh)
-backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp lib/uop/nfcuop_layout.cpp lib/uop/nfcuop_layout_avx2.cpp)
-tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen test_layout test_layout_avx2 np_compat)
+backends=${NFCXX_BACKEND:-"pathb gcc"}
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_shaping.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_arena.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_ort.cpp lib/uop/nfcuop_tinygrad.cpp lib/uop/nfcuop_layout.cpp lib/uop/nfcuop_layout_avx2.cpp lib/uop/nfcuop_layout_avx512.cpp)
+tests=(test test_ut test_np test_nn test_onnx test_sym test_ort test_tinygrad test_shaping test_grad test_cgen test_layout test_layout_avx2 test_layout_avx512 np_compat)
 [ -n "${UOP_ONLY:-}" ] && read -ra tests <<<"$UOP_ONLY"
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # The library is compiled once per back end: each lib source becomes an object, and every test program of the back end links

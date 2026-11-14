@@ -9,7 +9,7 @@ case $scope in language) suffix= ;; all) suffix=-all ;; *) exit 1 ;; esac
 inventory=$PWD/build/testsuite-snapshots/$suite$suffix-inventory.tsv
 test -f "$inventory"
 out=${SURVEY_OUT:-$PWD/build/testsuite-snapshots/$suite-$scope-survey}
-routes=${SURVEY_ROUTES-'qbe gcc pathb'}
+routes=${SURVEY_ROUTES-'gcc pathb'}
 limit=${SURVEY_TIMEOUT:-20}; jobs=${SURVEY_JOBS:-8}
 [[ $jobs =~ ^[1-9][0-9]*$ && $limit =~ ^[1-9][0-9]*$ ]] || exit 1
 for route in $routes; do case $route in qbe|gcc|pathb) ;; *) exit 1 ;; esac; done
@@ -23,7 +23,7 @@ printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in host $routes; do
   compiler=$PWD/nfcxx; flags=("--backend=$route" -c)
   if [ "$route" = host ]; then compiler=${HOST_CXX:-g++}; flags=(-fsyntax-only); fi
-  env NFCXX_PATH=a NFCXX_BACKEND=qbe timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
+  env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
     -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke.o" > "$out/$route-smoke.log" 2>&1
 done
 n=0

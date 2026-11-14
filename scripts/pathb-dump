@@ -24,10 +24,23 @@
 #                     that runtime has it (thread-local when scripts/setup-edg.sh built it that way); hosted mode always does
 #   --cuda-device     (NFCXX_PATHB_CUDA=1)   a .cu file's device unit: the front end reads it as CUDA, without exceptions
 #   --modules, --modules_directory DIR, --create_module_interface FILE   C++ modules: EDG's options, as nfcxx gives eccp
+# gcc's own options, as nfcc's Path B route passes them (docs/notes/nfcc-pathb.md):
+#   -funsigned-char / -fno-signed-char, -fsigned-char / -fno-unsigned-char   the signedness of plain char (EDG's --unsigned_chars,
+#                     --signed_chars; -funsigned-char also defines __CHAR_UNSIGNED__ as gcc does)
+#   -ftrivial-auto-var-init=zero   (--ir; NFCXX_IR_AUTO_INIT=zero) an automatic variable without an initializer, padding included, is
+#                     zeroed where it is declared (not a VLA, not one with __attribute__((uninitialized))); =uninitialized turns it off
+#   -nostdinc         no host system include directories (hosted mode); only the -isystem and -idirafter ones, and EDG's own
+#   -isystem DIR      a system include directory, searched before the host's; -idirafter DIR after them
+#   -fshort-wchar     wchar_t of the headers (__WCHAR_TYPE__, __WCHAR_MAX__, __SIZEOF_WCHAR_T__ ...) is unsigned short, as gcc's. EDG has no such
+#                     option: the type of a wide literal L"x" stays the target's int, so nfcc sends a unit with one to gcc
+#   -ffreestanding    __STDC_HOSTED__ is 0 (the host headers are still read: give -nostdinc and -isystem to choose them)
 # --target=linux_riscv32 (or --target NAME): the sizes and predefined macros of an EDG target (EDG's own tables; the
 # IR's (layout ...) header carries them), with plain char signed. linux_riscv32 is ILP32, the data model of Emscripten's
 # wasm32 (its plain char is unsigned in EDG's table, so --signed_chars is passed). It needs --freestanding: the host's C
 # and C++ library headers are the host target's. Without it the IR is as before.
+# --target=linux_i686 is the same for 32-bit x86 (the kernel's real-mode boot code, scripts/pathb-cc --i386): ILP32 with long long 8 aligned
+# on 4, and va_list is `char *`, the pointer to the next argument, so the back end reads and writes it through the object's address
+# (NFCXX_IR_VALIST_PTR=1, set here; the other targets keep the System V tag). Its IR is for scripts/pathb-ssa-build --target=i386[_regparm3].
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
@@ -35,8 +48,9 @@ base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
 source "$root/scripts/host-sys.sh"
-std=""; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
+std=""; user_gnu=(); fe_dialect=g++; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}; target=""; eh_runtime=0
 cuda_device=0; [ -z "${NFCXX_PATHB_CUDA:-}" ] || cuda_device=1
+nostdinc=0; isys=(); idafter=()
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   arg=${args[$i]}
@@ -64,12 +78,27 @@ while [ $i -lt ${#args[@]} ]; do
     --modules_directory|--create_module_interface)
       i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: $arg needs a path" >&2; exit 2; }
       user_opts+=("$arg" "$(abs_path "${args[$i]}")") ;;     # the front end runs in another directory
+    -funsigned-char|-fno-signed-char) user_opts+=(--unsigned_chars -U__CHAR_UNSIGNED__ -D__CHAR_UNSIGNED__=1) ;;
+    -fsigned-char|-fno-unsigned-char) user_opts+=(--signed_chars -U__CHAR_UNSIGNED__) ;;
+    -nostdinc) nostdinc=1 ;;
+    -ftrivial-auto-var-init=zero) export NFCXX_IR_AUTO_INIT=zero ;;   # --ir: an automatic variable without an initializer is zeroed at its declaration
+    -ftrivial-auto-var-init=uninitialized) unset NFCXX_IR_AUTO_INIT ;;
+    -isystem|-idirafter)
+      i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: $arg needs a directory" >&2; exit 2; }
+      if [ "$arg" = -isystem ]; then isys+=("--sys_include=$(abs_path "${args[$i]}")"); else idafter+=("--sys_include=$(abs_path "${args[$i]}")"); fi ;;
+    -isystem?*) isys+=("--sys_include=$(abs_path "${arg#-isystem}")") ;;
+    -idirafter?*) idafter+=("--sys_include=$(abs_path "${arg#-idirafter}")") ;;
+    -fshort-wchar) user_opts+=(--diag_suppress=predef_macro_redefined "-D__WCHAR_TYPE__=short unsigned int" -D__WCHAR_MAX__=0xffff
+                               -D__WCHAR_MIN__=0 -D__WCHAR_WIDTH__=16 -D__SIZEOF_WCHAR_T__=2) ;;   # the macros gcc's <stddef.h> reads
+    -ffreestanding) user_opts+=(--diag_suppress=predef_macro_redefined -D__STDC_HOSTED__=0) ;;
     --diag_*) user_opts+=("$arg") ;;                         # EDG front-end diagnostic options reach cpfe
     -include) i=$((i + 1)); [ $i -lt ${#args[@]} ] || { echo "pathb-dump: -include needs a file" >&2; exit 2; }
               user_opts+=(--preinclude "$(abs_path "${args[$i]}")") ;;   # as nfcxx: EDG's --preinclude (cosmo's c.inc)
-    --gnu-version=*|--gnu_version=*) user_opts+=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
+    --gnu-version=*|--gnu_version=*) user_gnu=("--gnu_version=${arg#*=}") ;;   # as nfcxx: after the host's GNU version
     -Wno-narrowing) user_opts+=(--diag_warning=narrowing_conversion) ;;   # as nfcxx: a narrowing is a warning
-    --dialect=*) ;;                                          # clang's dialect is not modelled: the harness is EDG's g++ mode
+    --dialect=g++) fe_dialect=g++ ;;
+    --dialect=clang) fe_dialect=clang ;;                     # EDG's clang mode (cpfe --clang --clang_version=N), as nfcxx's qbe path
+    --dialect=*) echo "pathb-dump: unknown dialect ${arg#--dialect=}" >&2; exit 2 ;;
     -W*) ;;                                                  # other warnings do not change the object code
     *) files+=("$arg") ;;
   esac
@@ -81,24 +110,37 @@ if [ -z "$std" ]; then
   case ${files[0]} in *.c) std=--c17 ;; *) std=--c++23 ;; esac
 fi
 case $std in --c++*) lang=c++; dialect=--g++ ;; *) lang=c; dialect=--gcc ;; esac
+# --dialect=clang (C++ only): EDG's clang mode, __make_integer_seq and __type_pack_element among its builtins. As nfcxx, the
+# front end gets --clang_version=N (the host clang's, capped at 20; host_clang_version) instead of the GNU version.
+clang_opts=()
+if [ "$fe_dialect" = clang ] && [ $lang = c++ ]; then
+  dialect=--clang; cv=$(host_clang_version); [ -z "$cv" ] || clang_opts=(--clang_version="$cv")
+fi
 target_opts=()
 if [ -n "$target" ]; then
   [ "$hosted" = 0 ] || { echo "pathb-dump: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
   [ -d "$base/lib_$target" ] || { echo "pathb-dump: no predefined macros for target '$target' in $base" >&2; exit 2; }
   # plain char is signed, as on the x86-64 host and in wasm32: EDG's linux_riscv32 table has it unsigned
   target_opts=(--target "$target" --signed_chars)
+  # linux_i686: va_list is `char *` (the i386 ABI), which the IR back end reads and writes through the object's address (NFCXX_IR_VALIST_PTR)
+  [ "$target" != linux_i686 ] || export NFCXX_IR_VALIST_PTR=1
 fi
 
-sys_inc=(); gnu_opts=()
+sys_inc=(${isys[@]+"${isys[@]}"}); gnu_opts=()
 cuda_device_opts=(); [ $cuda_device = 0 ] || cuda_device_opts=(--cuda --no_exceptions)
 # Hosted, or --eh-runtime: the program links EDG's runtime; when its exception handling state is per thread (RUNTIME_EH_TLS, the eh-tls
 # marker of scripts/setup-edg.sh), the EH variables of the IR are thread-local too, as the nfcxx driver has them.
 eh_tls=()
 if { [ "$hosted" != 0 ] || [ "$eh_runtime" = 1 ]; } && [ -f "${EDG_BUILD:-$root/build/edg}/eh-tls" ]; then eh_tls=(--nfcxx_eh_thread_local); fi
 if [ "$hosted" != 0 ]; then
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
+  if [ $nostdinc = 0 ]; then
+    while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes "$lang")
+  fi
   gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
 fi
+# clang mode: the clang version replaces the host's GNU version (and --gnu-version, as nfcxx's qbe path has it)
+if [ ${#clang_opts[@]} -gt 0 ]; then gnu_opts=("${clang_opts[@]}"); elif [ ${#user_gnu[@]} -gt 0 ]; then user_opts+=("${user_gnu[@]}"); fi
+sys_inc+=(${idafter[@]+"${idafter[@]}"})
 
 # The feature-test macros of the host's C library, as the driver's --emit-c branch and the macOS EDG base set them: on
 # Darwin _DARWIN_C_SOURCE (the SDK's stdlib.h declares at_quick_exit and quick_exit only then, and libc++'s <cstdlib>
@@ -111,6 +153,14 @@ darwin_opts=()
 if [ "$hosted" != 0 ] && [ "$(uname -s)" = Darwin ]; then
   posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)
   darwin_opts=(--preinclude "$root/lib/pathb/clang_macros.h" -I "$root/lib/pathb/darwin-include")
+  # Darwin arm64: the alternate libc++ string layout (the nfcxx driver's comment says why)
+  [ "$(uname -m)" = arm64 ] && darwin_opts+=(-D_LIBCPP_ABI_ALTERNATE_STRING_LAYOUT)
+fi
+# Hosted on Linux aarch64: the host's <bits/math-vector.h> uses GCC's AdvSIMD/SVE vector types, which EDG (x86-64 target)
+# does not have. lib/pathb/linux-aarch64-include/bits/math-vector.h replaces it with an empty one (no vector declarations, as
+# the x86-64 header has without -ffast-math).
+if [ "$hosted" != 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; }; then
+  darwin_opts+=(-I "$root/lib/pathb/linux-aarch64-include")
 fi
 export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
 # The IR back end keeps the module's functions in a file in TMPDIR; the front end runs in the base dir, so make it absolute.

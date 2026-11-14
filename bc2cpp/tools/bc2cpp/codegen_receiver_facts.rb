@@ -730,7 +730,7 @@ class CodeGen
   # target is called WITH this frame's block (super_block_arg), never with the
   # nil a compiled `_impl` has no way to invent. `super` with no block in
   # flight therefore forwards nil, which is what the interpreter does too.
-  def module_super_target(owner_def)
+  def module_super_target(owner_def, usable: method(:module_super_body_usable?))
     return nil unless owner_def
 
     name = owner_def.name
@@ -744,13 +744,13 @@ class CodeGen
       found = module_super_lookup(name, mod)
       return nil if found == :ambiguous || (found && !found.irep)
 
-      return found if found&.irep && module_super_body_usable?(found.irep)
+      return found if found&.irep && usable.call(found.irep)
     end
     superclass = @superclass_of[owner_def.owner]
     return nil unless superclass.is_a?(String) && seen.add?(superclass)
 
     found = module_super_lookup(name, superclass)
-    return nil unless found&.irep && module_super_body_usable?(found.irep)
+    return nil unless found&.irep && usable.call(found.irep)
 
     found
   end
@@ -808,7 +808,8 @@ class CodeGen
   # last, and picking either by name alone would be a guess.
   def module_super_lookup(name, owner)
     defs = Array(@registry[name]).select { |d| d.owner == owner }
-    defs += Array(block_core_index[[owner, name]])
+    # block_core_index also lists the core definitions the registry keeps: one definition, not two.
+    defs = (defs + Array(block_core_index[[owner, name]])).uniq
     return nil if defs.empty?
     return :ambiguous unless defs.one?
 

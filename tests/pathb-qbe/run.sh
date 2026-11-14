@@ -8,6 +8,7 @@
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
 #                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
+#                                 `// GCC-SKIP-AARCH64: reason` is the same only on hosts with `uname -m` = aarch64 (Linux arm64).
 #                                 A probe with a `// GCC-SKIP: reason` line uses something the host gcc lacks (its reason is
 #                                 printed): only EXPECT is checked, gcc is not compared.
 #                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
@@ -28,6 +29,9 @@
 #                                 `// TRAP-SANITIZE: undefined` builds with the sanitizer instead (a `// SANITIZE:` line does the
 #                                 same for a probe in cases/ that must run clean and agree with gcc; docs/notes/ubsan.md).
 #                                 `// TRAP-EXIT: 132` expects another signal (128 + 4, SIGILL: __builtin_trap, asm ud2);
+#                                 `// TRAP-EXIT-AARCH64: 133` replaces it on Linux aarch64 only (SIGTRAP: brk);
+#                                 `// TRAP-SKIP-AARCH64: reason` on Linux aarch64: no trap expected there (the host does not trap);
+#                                 the program must exit as the gcc backend's build does on that host (counted as n/a);
 #                                 `// TRAP-IR: default` builds without NFCXX_IR_OVERFLOW=trap (VLA lowering contains a
 #                                 checked 64-bit signed multiply, which trap mode refuses).
 #
@@ -59,12 +63,17 @@ export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
 # Darwin: extern data through the GOT (pathb-cc does the same; pathb-qbe-emit.rb, --extern-data-got).
-emit_opts=(); [ "$(uname -s)" = Darwin ] && emit_opts=(--extern-data-got)
+emit_opts=(); { [ "$(uname -s)" = Darwin ] || [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && emit_opts=(--extern-data-got)
+# arm64: the AAPCS64 even-register rule for 16-byte aligned aggregates is applied by the emitter (pathb-qbe-emit.rb, even_pad?)
+case $(uname -s)/$(uname -m) in
+  Linux/aarch64) emit_opts+=(--arm64-abi) ;;
+  Darwin/arm64) emit_opts+=(--arm64-abi --arm64-abi-apple) ;;   # Apple: a variadic aggregate is on the stack
+esac
 mrb=$root/scripts/mrb
 ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
+total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0; na=0
 lines=()
 
 expect_of() { sed -n 's,^// EXPECT: *\(-*[0-9]*\).*,\1,p' "$1" | head -1; }
@@ -157,12 +166,31 @@ run_one() {
   sh -c "${tmo}"'"$0" > "$1" 2> "$2"; exit $?' "$exe" "$tmp/$n.stdout" "$tmp/$n.rt"; got=$?
   ran=$((ran + 1))
   if [ "$mode" = trap ]; then
+    # `// TRAP-SKIP-AARCH64: reason` on Linux aarch64: the trap is not what this host does (the reason says why). The
+    # program must then exit as the gcc backend's build of it does on this host (checked here, not assumed): the
+    # trap expectation is not applied.
+    skipa=$(sed -n 's,^// TRAP-SKIP-AARCH64: *,,p' "$f" | head -1)
+    if [ -n "$skipa" ] && [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ]; then
+      gcc_rc=compile-error
+      if NFCXX_BACKEND=gcc ./nfcxx $std "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
+        sh -c "${tmo}"'"$0" > /dev/null 2>&1; exit $?' "$tmp/$n.gcc"; gcc_rc=$?
+      fi
+      if [ "$got" = "$gcc_rc" ]; then na=$((na + 1)); lines+=("n/a      $name: exit $got on aarch64, as the gcc backend ($skipa)")
+      else failed=$((failed + 1)); lines+=("FAIL     $name: aarch64 exit $got, gcc backend $gcc_rc ($skipa)"); fi
+      return
+    fi
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
     # another reason (a broken unwinder, say) is not taken for the trap it is testing.
     want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
     # `// TRAP-EXIT: 132` names another fatal signal (128 + signal): __builtin_trap and ud2 are SIGILL, not SIGABRT.
     wsig=$(sed -n 's,^// TRAP-EXIT: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1); wsig=${wsig:-134}
-    case $wsig in 134) sname=SIGABRT ;; 132) sname=SIGILL ;; *) sname="signal $((wsig - 128))" ;; esac
+    # `// TRAP-EXIT-AARCH64: 133` replaces TRAP-EXIT on Linux aarch64 only: there an illegal instruction (ud2, __builtin_trap)
+    # is reported as SIGTRAP (brk), not SIGILL. The x86-64 expectation is unchanged.
+    if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ]; then
+      wa=$(sed -n 's,^// TRAP-EXIT-AARCH64: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1)
+      [ -n "$wa" ] && wsig=$wa
+    fi
+    case $wsig in 134) sname=SIGABRT ;; 132) sname=SIGILL ;; 133) sname=SIGTRAP ;; *) sname="signal $((wsig - 128))" ;; esac
     if [ $got != $wsig ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap ($wsig)")
     elif [ -n "$want" ] && ! grep -qF "$want" "$tmp/$n.rt"; then
       failed=$((failed + 1)); lines+=("FAIL     $name: aborted, but stderr lacks '$want'")
@@ -173,6 +201,8 @@ run_one() {
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
   gcc_rc=n/a
   skip=$(sed -n 's,^// GCC-SKIP: *,,p' "$f" | head -1)
+  # `// GCC-SKIP-AARCH64: reason` is the same on aarch64 only (the x86-64 comparison is kept)
+  if [ -z "$skip" ] && [ "$(uname -m)" = aarch64 ]; then skip=$(sed -n 's,^// GCC-SKIP-AARCH64: *,,p' "$f" | head -1); fi
   if [ -n "$skip" ] || grep -q '^// GCC: undefined' "$f"; then
     # The program relies on a case C++ leaves undefined (a bool holding 2): gcc is not compared.
     if [ $((got & 255)) -ne $((want & 255)) ]; then
@@ -303,6 +333,6 @@ for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && selected "$d" && run_multi 
 
 for l in "${lines[@]}"; do echo "$l"; done
 echo
-echo "pathb-qbe: $total programs: $built built, $ran ran, $match match EXPECT, $trapped trapped as required, $refused refused, $failed failed"
+echo "pathb-qbe: $total programs: $built built, $ran ran, $match match EXPECT, $trapped trapped as required, $na not applicable on this host, $refused refused, $failed failed"
 [ $failed = 0 ] || { echo "pathb-qbe: FAILED"; exit 1; }
 echo "pathb-qbe: ok"

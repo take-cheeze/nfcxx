@@ -280,4 +280,4 @@ int main()
   std::printf("bad=%d\n", bad);
   return bad;
 }
-// X86-ONLY-LINUX: exits with SIGSEGV (139) on Linux aarch64 with both backends; macOS arm64 runs it
+// MACOS-XFAIL-pathb: Path B's EH runtime on macOS (EDG's libC.a and the libstdc++ shim) does not catch the C++ exceptions of libc++, which macOS links, so a throw terminates (134); see docs/notes/eh-shim.md

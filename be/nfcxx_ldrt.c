@@ -11,7 +11,7 @@
    float and double travel in xmm registers. None of this is visible to other code.
 
    Build: scripts/pathb-ldrt (gcc -O2 -c, archived as libnfcxxld.a, linked by every Path B link step). */
-/* Only x86-64 has the x87 layout these helpers implement; elsewhere the archive is built empty (scripts/pathb-ldrt). */
+/* The x87 layout is x86-64 only; the long double and _Float128 helpers below are guarded by their layout (x87 or binary128). */
 /* __int128 helpers that need no x87 layout: built on any host with a 128-bit integer type (clang on arm64 too). */
 #if defined(__SIZEOF_INT128__)
 #include <stdio.h>
@@ -192,7 +192,11 @@ void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 #endif /* defined(__SIZEOF_INT128__) */
 
-#if defined(__x86_64__)
+/* ---- long double arithmetic, comparison and conversion (x87 or binary128 layout) ----
+   Built where long double is the x87 extended format (x86-64, NFCXX_LD_BYTES = 10) or IEEE binary128 (__LDBL_MANT_DIG__ ==
+   113, e.g. aarch64 Linux, NFCXX_LD_BYTES = 16). Was x86-64 only; the binary128 case is needed for the same helper names.
+   Not built where long double is a double (Apple arm64), so that archive is unchanged. */
+#if defined(__SIZEOF_INT128__) && (defined(__x86_64__) || __LDBL_MANT_DIG__ == 113)
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -201,9 +205,10 @@ void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 typedef long double ld;
 
+#if defined(__x86_64__)
 /* The x87 register of a long double result (SysV: class X87, returned in st(0)). Path A (cproc) calls the push helper
    before a return and the pop helper after a call of a function that returns a long double; nothing else touches the
-   x87 stack in between. x86-64 only, like the rest of the runtime's long double support. */
+   x87 stack in between. x86-64 only: there is no x87 stack on other targets. */
 __asm__(".text\n"
         ".globl __nfcxx_ld_push\n"
         "__nfcxx_ld_push:\n"
@@ -213,10 +218,11 @@ __asm__(".text\n"
         "__nfcxx_ld_pop:\n"
         "\tfstpt (%rdi)\n"
         "\tret\n");
+#endif
 
-/* the 10 x87 bytes are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops the memset of the
-   6 padding bytes and leaves them unwritten */
-#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, 10); } while (0)
+/* the NFCXX_LD_BYTES bytes of the value are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops
+   the memset of the padding bytes and leaves them unwritten. The bytes are the x87 ones (10) or the binary128 ones (16). */
+#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, NFCXX_LD_BYTES); } while (0)
 
 void __nfcxx_ld_add(ld *d, const ld *a, const ld *b) { PUT(d, *a + *b); }
 void __nfcxx_ld_sub(ld *d, const ld *a, const ld *b) { PUT(d, *a - *b); }
@@ -286,8 +292,11 @@ void __nfcxx_ld_vaarg(ld *d, va_list ap) { PUT(d, va_arg(ap, ld)); }
 int __nfcxx_ld_fpclassify(const ld *a) { return fpclassify(*a); }
 int __nfcxx_ld_isnormal(const ld *a) { return isnormal(*a); }
 int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b); }
+#endif /* long double helpers */
 
 /* ---- _Float128 (docs/notes/pathb-float128.md) ----
+   Built where long double is x87 (x86-64) or binary128 (__LDBL_MANT_DIG__ == 113, e.g. aarch64 Linux): the conversions
+   to and from a long double object use NFCXX_LD_BYTES. Moved out of the x86-64 block; only the C-ABI wrappers stay x86-64.
 
    The same scheme again: a _Float128 is a 16-byte object in memory, the IEEE binary128 bits that gcc and EDG use, and every
    operation on one is a call of a function here, compiled by gcc. gcc has no hardware quad precision on x86-64, so
@@ -296,6 +305,7 @@ int __nfcxx_ld_isunordered(const ld *a, const ld *b) { return isunordered(*a, *b
    pointer (all 16 bytes), predicates return int, and the checked conversions abort on a NaN or a value that does not fit
    (the cf2i rule of the IR). The only C-ABI code is the wrappers at the end (__nfcxx_f128w_*), the one place a _Float128
    goes through an SSE register. */
+#if defined(__SIZEOF_INT128__) && (defined(__x86_64__) || (__LDBL_MANT_DIG__ == 113 && defined(__FLT128_MANT_DIG__)))
 typedef _Float128 f128;
 
 static f128 f128_rd(const void *p) { f128 v; memcpy(&v, p, sizeof v); return v; }
@@ -323,25 +333,26 @@ void __nfcxx_f128_from_s128(void *d, const void *a) { f128_wr(d, (f128)(s128)i12
 void __nfcxx_f128_from_u128(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
 void __nfcxx_f128_from_f32(void *d, float v) { f128_wr(d, (f128)v); }
 void __nfcxx_f128_from_f64(void *d, double v) { f128_wr(d, (f128)v); }
-/* from and to a long double object (16 bytes, x87 layout in the low 10): libgcc's __extendxftf2 and __trunctfxf2 */
+/* from and to a long double object (NFCXX_LD_BYTES of it: x87 layout in the low 10 on x86-64, else all 16): libgcc's
+   __extendxftf2 and __trunctfxf2 on x86-64, and the identity on a binary128 long double */
 void __nfcxx_f128_from_ld(void *d, const void *a)
 {
   ld x = 0;
-  memcpy(&x, a, 10);
+  memcpy(&x, a, NFCXX_LD_BYTES);
   f128_wr(d, (f128)x);
 }
 void __nfcxx_f128_to_ld(void *d, const void *a)
 {
   ld v = (ld)f128_rd(a);
   memset(d, 0, 16);
-  memcpy(d, &v, 10);
+  memcpy(d, &v, NFCXX_LD_BYTES);
 }
 /* from a _Float128 to a long double object (libgcc's __trunctfxf2): the conversion cproc emits between the two soft types */
 void __nfcxx_ld_from_f128(void *d, const void *a)
 {
   ld v = (ld)f128_rd(a);
   memset(d, 0, 16);
-  memcpy(d, &v, 10);
+  memcpy(d, &v, NFCXX_LD_BYTES);
 }
 float __nfcxx_f128_to_f32(const void *a) { return (float)f128_rd(a); }
 double __nfcxx_f128_to_f64(const void *a) { return (double)f128_rd(a); }
@@ -430,7 +441,10 @@ int __nfcxx_f128_isfinite(const void *a) { return __builtin_isfinite(f128_rd(a))
 int __nfcxx_f128_signbit(const void *a) { return __builtin_signbit(f128_rd(a)) != 0; }
 int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_isunordered(f128_rd(a), f128_rd(b)); }
 
+#if defined(__x86_64__) || defined(__aarch64__)
 /* ---- C-ABI wrappers for _Float128 (docs/notes/pathb-float128.md, "Calls of C functions").
+   x86-64 and aarch64 (Linux): the convention they work around is the one that passes a _Float128 in a vector register
+   (xmm0 on x86-64, q0 on aarch64, which QBE cannot express).
 
    A _Float128 is passed in one SSE register and returned in xmm0 by the C convention, which QBE cannot express. A call from
    Path B of a routine defined elsewhere with a _Float128 in its signature goes to __nfcxx_f128w_ + the routine's linkage
@@ -440,15 +454,41 @@ int __nfcxx_f128_isunordered(const void *a, const void *b) { return __builtin_is
    returns it (rax:rdx), with no pointer.
    The wrapper calls the routine through a declaration with the same linkage name (__asm__ label). Only the routines listed
    in the IR (be/nfcxx_ir.c, ir_f128_wrapped) have one. */
-typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
-f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
-f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
-f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 /* std::abs(_Float128) of <cmath> reaches fabsf128 (a built-in: gcc inlines it as a sign-bit clear). A memory-class result
    is returned in rax as well as written through the hidden pointer, as the C convention of a struct requires. */
 void *__nfcxx_f128w_fabsf128(void *ret, const void *a) { f128_wr(ret, __builtin_fabsf128(f128_rd(a))); return ret; }
 
-/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them) */
+/* The NaN and infinity built-ins that <limits> and <cmath> reach for _Float128 (nanf128, nansf128, nansq, huge_valf128). No
+   libc or libquadmath function of these names is there to call, so the wrapper builds the value: the binary128 bits (the
+   f128 of this file is IEEE binary128, little-endian: the low 64 bits first). A tag is the payload of the NaN, read as an
+   integer by strtoull (base 0), as glibc's nan reads its n-char-sequence; an empty or unparsable tag is payload 0. A quiet
+   NaN has the top mantissa bit set; a signaling NaN must have a nonzero mantissa, so its payload 0 becomes 1. */
+static void f128_bits_wr(void *d, unsigned long long hi, unsigned long long lo)
+{
+  memcpy(d, &lo, sizeof lo);
+  memcpy((char *)d + 8, &hi, sizeof hi);
+}
+static void *f128_nan_wr(void *ret, const char *tag, int signaling)
+{
+  unsigned long long payload = tag != NULL ? strtoull(tag, NULL, 0) : 0;
+  unsigned long long hi = 0x7fff000000000000ULL;   /* exponent all ones */
+  if (!signaling) hi |= 0x0000800000000000ULL;     /* the quiet bit: the top mantissa bit */
+  else if (payload == 0) payload = 1;
+  f128_bits_wr(ret, hi, payload);
+  return ret;
+}
+void *__nfcxx_f128w_nanf128(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 0); }
+void *__nfcxx_f128w_nansf128(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 1); }
+void *__nfcxx_f128w_nansq(void *ret, const char *tag) { return f128_nan_wr(ret, tag, 1); }
+void *__nfcxx_f128w_huge_valf128(void *ret) { f128_bits_wr(ret, 0x7fff000000000000ULL, 0); return ret; }
+
+#if defined(__x86_64__)
+/* std::to_chars(char*, char*, _Float128) and its two overloads of libstdc++.so (the formatter of <format> calls them).
+   x86-64 only: the aarch64 libstdc++ has no _Float128 overloads of to_chars. */
+typedef struct { char *ptr; int ec; } f128_tcres; /* std::to_chars_result: returned in rax:rdx */
+f128_tcres f128_tc2(char *f, char *l, f128 v) __asm__("_ZSt8to_charsPcS_DF128_");
+f128_tcres f128_tc3(char *f, char *l, f128 v, int fmt) __asm__("_ZSt8to_charsPcS_DF128_St12chars_format");
+f128_tcres f128_tc4(char *f, char *l, f128 v, int fmt, int prec) __asm__("_ZSt8to_charsPcS_DF128_St12chars_formati");
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_(char *f, char *l, const void *v) { return f128_tc2(f, l, f128_rd(v)); }
 f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_format(char *f, char *l, const void *v, int fmt)
 {
@@ -458,8 +498,10 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
 {
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
+#endif /* defined(__x86_64__): to_chars */
 
-#endif /* defined(__x86_64__): the _Float128 helpers above */
+#endif /* defined(__x86_64__) || defined(__aarch64__): the C-ABI wrappers */
+#endif /* _Float128 helpers */
 
 /* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
 
@@ -688,4 +730,28 @@ void nfcxx_mm_pause(void) { __builtin_ia32_pause(); }
 void _mm_pause(void) { nfcxx_mm_pause(); }
 /* a C++ caller names the mangled symbol (the header's function is in the C++ namespace, _Z9_mm_pausev) */
 __asm__(".globl _Z9_mm_pausev\n.set _Z9_mm_pausev, nfcxx_mm_pause");
+#endif
+
+/* __builtin_cpu_init() and __builtin_cpu_supports("feature") (x86; be/nfcxx_ir.c ir_builtin_call): the IR has no libgcc __cpu_model
+   to read, so the call goes to these helpers, which ask the host compiler's own built-ins (cpuid through libgcc). The feature
+   names are the ones gcc has accepted since version 6 (the argument is a string literal for gcc, a runtime string here); a name
+   not listed reads as absent. Where the host is not x86 the answer is always 0. */
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__) && !defined(__clang__)
+void __nfcxx_cpu_init(void) { __builtin_cpu_init(); }
+int __nfcxx_cpu_supports(const char *name)
+{
+#define NFCXX_CPU_FEATURE(f) if (strcmp(name, f) == 0) return __builtin_cpu_supports(f) != 0;
+  __builtin_cpu_init();
+  NFCXX_CPU_FEATURE("cmov") NFCXX_CPU_FEATURE("mmx") NFCXX_CPU_FEATURE("popcnt") NFCXX_CPU_FEATURE("sse")
+  NFCXX_CPU_FEATURE("sse2") NFCXX_CPU_FEATURE("sse3") NFCXX_CPU_FEATURE("ssse3") NFCXX_CPU_FEATURE("sse4.1")
+  NFCXX_CPU_FEATURE("sse4.2") NFCXX_CPU_FEATURE("avx") NFCXX_CPU_FEATURE("avx2") NFCXX_CPU_FEATURE("sse4a")
+  NFCXX_CPU_FEATURE("fma4") NFCXX_CPU_FEATURE("xop") NFCXX_CPU_FEATURE("fma") NFCXX_CPU_FEATURE("avx512f")
+  NFCXX_CPU_FEATURE("bmi") NFCXX_CPU_FEATURE("bmi2") NFCXX_CPU_FEATURE("aes") NFCXX_CPU_FEATURE("pclmul")
+  NFCXX_CPU_FEATURE("avx512vl") NFCXX_CPU_FEATURE("avx512bw") NFCXX_CPU_FEATURE("avx512dq") NFCXX_CPU_FEATURE("avx512cd")
+#undef NFCXX_CPU_FEATURE
+  return 0;
+}
+#else
+void __nfcxx_cpu_init(void) {}
+int __nfcxx_cpu_supports(const char *name) { (void)name; return 0; }
 #endif

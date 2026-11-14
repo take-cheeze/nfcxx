@@ -2,7 +2,7 @@
 # Real-world check: ASTro (https://github.com/ko1/astro), a framework that generates an AST interpreter from a node.def
 # with ASTroGen (Ruby) and specializes it into C compiled at run time with $(CC). The source is cloned into
 # build/realworld at a pinned commit, not vendored. docs/notes/astro.md.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
+#   NFCXX_BACKEND=gcc|qbe|pathb   (default: all three)
 # Per backend, with nfcc as the C compiler:
 #   - sample/calc and sample/luastro built from the generated C (the interpreters themselves);
 #   - calc run with its Code Store compiling the specialized SD_*.c files through nfcc (CC=nfcc): the result is
@@ -13,8 +13,10 @@
 #     thing on Ruby >= 2.7 (the host here may have 3.3);
 #   - lib/astrogen.rb emits "NODE *ALLOC_x(...);;" (an empty declaration at file scope, which ISO C forbids and gcc
 #     accepts); cproc rejects it. The patch joins the declarations with "\n".
-# QBE-ONLY: Path B (nfcc with NFCXX_BACKEND=pathb) does not pass the ASTro checks: calc's code store is not
-# produced, libprism does not link, and koruby_precise stops at a front-end error in runtime/precise_gc/gc.h:321; the suite stays on qbe.
+# Path B (NFCXX_BACKEND=pathb: EDG's C front end -> typed IR -> QBE, no cproc) passes every check below. Four Path B gaps had to be
+# closed for it (docs/notes/astro.md, "Path B"): the code store and libprism are shared objects (-fPIC: addresses of exported
+# functions and objects through the GOT), luastro's alloca without <alloca.h> (implicit int), baruby's `sp - params_cnt` with
+# an unsigned 32-bit count, koruby's calls of a variadic function returning a struct, and static functions that were exported.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=68f15d81b8cc378053c78c2a087b691851bdc2ac   # ko1/astro main, 2026-10-24
@@ -55,7 +57,7 @@ astrogen() {
 }
 
 export LC_ALL=C.UTF-8   # node.def holds non-ASCII text; the generator reads it as UTF-8
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-"gcc pathb"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # One patched copy per backend: the generated files and the code store live in it.
@@ -107,11 +109,12 @@ for b in $backends; do
   [ $ok = 1 ] && echo "ok   $b astro luastro: built; hello.lua, fib(30)=832040 and $(ls "$d"/test/test_*.lua | wc -l) test scripts ran"
 done
 
-# luastro's tests have no .expected files (its runner uses a system lua5.4); the two builds must agree instead.
-if [ -s "$tmp/lua-gcc.out" ] && [ -s "$tmp/lua-qbe.out" ]; then
-  if cmp -s "$tmp/lua-gcc.out" "$tmp/lua-qbe.out"; then echo "ok   astro luastro: gcc and qbe builds print the same for every test script"
-  else echo "FAIL astro luastro: gcc and qbe builds differ:"; diff "$tmp/lua-gcc.out" "$tmp/lua-qbe.out" | head -10; fail=1; fi
-fi
+# luastro's tests have no .expected files (its runner uses a system lua5.4); the builds must agree with the gcc build instead.
+for b in $backends; do
+  [ $b != gcc ] && [ -s "$tmp/lua-gcc.out" ] && [ -s "$tmp/lua-$b.out" ] || continue
+  if cmp -s "$tmp/lua-gcc.out" "$tmp/lua-$b.out"; then echo "ok   astro luastro: gcc and $b builds print the same for every test script"
+  else echo "FAIL astro luastro: gcc and $b builds differ:"; diff "$tmp/lua-gcc.out" "$tmp/lua-$b.out" | head -10; fail=1; fi
+done
 
 [ $have_ruby = 1 ] || { echo "SKIP astro baruby_precise, koruby_precise: CRuby is needed for Prism's templates and the patches"; exit $fail; }
 # ---- baruby_precise: Ruby subset on a precise GC, needs Prism (the Ruby parser, C). ----

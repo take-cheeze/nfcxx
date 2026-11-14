@@ -8,7 +8,7 @@
 require_relative '../../bc2cpp/scripts/bc2cpp/fixture_runtime'
 
 runner = File.expand_path(ENV.fetch('BC2CPP_MRUBY_RUNNER'))
-library = File.dirname(File.dirname(runner))
+library = ENV.fetch('BC2CPP_RUNNER_LIBRARY', File.dirname(File.dirname(runner)))
 ENV['BC2CPP_SIG_DIRS'] = ''
 ENV['BC2CPP_MRBC_RB'] = ENV.fetch('BC2CPP_RUNNER_MRBC_MODE', '0')
 ENV['BC2CPP_TREE_ROOT'] = BC2CPP_TREE_ROOT
@@ -23,6 +23,9 @@ source = <<~RUBY
     def quotient(x)
       12 / x
     end
+    def binary
+      "\\0a\\0\\xff".b.bytes
+    end
   end
 RUBY
 runtime = Bc2cppFixtureRuntime
@@ -30,11 +33,17 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
   code, = runtime.generate(source, dir, only_owners: ['RunnerSmoke'])
   bytecode = File.binread(File.join(dir, 'fixture.mrb'))
   runtime.define_singleton_method(:generator_run) do |env, argv|
+    env = env.merge('BC2CPP_SELF_STATS' => '1') if ENV['BC2CPP_REQUIRE_SELF_AOT'] == '1'
     Open3.capture3(env.merge('BC2CPP_MRUBY' => runner,
                             'BC2CPP_RUBY' => File.join(BC2CPP_TREE_ROOT, 'tools/bc2cpp/mruby-ruby')),
                    runner, '--annotated', *argv)
   end
   actual, diagnostics = runtime.generate(source, dir, only_owners: ['RunnerSmoke'])
+  if ENV['BC2CPP_REQUIRE_SELF_AOT'] == '1'
+    stats = diagnostics.match(/BC2CPP_SELF_AOT methods=(\d+) calls=(\d+)/)
+    abort 'the compiler did not execute translated methods' unless stats && stats[1].to_i.positive? && stats[2].to_i.positive?
+    puts stats[0]
+  end
   unless code == actual
     if ENV['BC2CPP_KEEP_DIR']
       File.write(File.join(dir, 'cruby.cpp'), code)
@@ -45,13 +54,14 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
     abort 'runner generated different C++'
   end
   abort 'runner generated different bytecode' unless bytecode == File.binread(File.join(dir, 'fixture.mrb'))
-  abort 'fixture methods were not all compiled' unless runtime.registrations(diagnostics, ['RunnerSmoke']).size == 3
+  abort 'fixture methods were not all compiled' unless runtime.registrations(diagnostics, ['RunnerSmoke']).size == 4
   body = <<~CPP
     static int scenario(mrb_state* M) {
       mrb_value obj = mrb_obj_new(M, mrb_class_get(M, "RunnerSmoke"), 0, nullptr);
       mrb_value n = mrb_int_value(M, 7);
       call(M, "answer", obj, "answer", 1, &n);
       call(M, "label", obj, "label");
+      call(M, "binary", obj, "binary");
       n = mrb_int_value(M, 0);
       call(M, "division", obj, "quotient", 1, &n);
       mrb_value file = mrb_obj_value(mrb_class_get(M, "File"));
@@ -69,6 +79,7 @@ Dir.mktmpdir('bc2cpp-runner') do |dir|
   sections = runtime.sections(output).transform_values { |lines| lines.reject { |line| line.start_with?('  dispatches=') } }
   abort output unless sections.fetch('compiled') == sections.fetch('interpreted') &&
                       output.include?('answer => 22') && output.include?('division => raised ZeroDivisionError') &&
+                      output.include?('binary => [0, 97, 0, 255]') &&
                       output.include?('executable => true') && output.include?('missing => false') &&
                       output.include?('non-executable => false')
 end

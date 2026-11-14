@@ -1,0 +1,161 @@
+-c a.cpp
+-c a.cpp -o a.o
+-c a.cpp -O2 -DX=1 -Iinc
+-c a.cpp -DX -UY -I inc -D Z=1
+-c -I
+-c a.cpp -std=c++17
+-c a.cpp -std=gnu++20
+-std=c++14 a.cpp -o prog
+a.cpp -o prog -lm -L/opt -pthread
+a.cpp b.o c.a d.so -rdynamic
+-shared a.cpp -o lib.so -fPIC
+-fPIC -c a.cpp
+-fpic -c a.cpp
+-pie a.cpp -o p -fPIE
+-fPIE -c a.cpp
+-c --emit-c a.cpp
+-c --emit-hip a.cu
+--emit-c a.cpp
+--backend=pathb -c a.cpp
+--backend=qbe a.cpp -o p
+--backend=gcc -c a.cpp
+--ir-opt=inline,sroa -c a.cpp
+--eh-unwind --no-eh-unwind --no-eh-shim -c a.cpp
+--cache=/tmp/c --cache-log=/tmp/l -c a.cpp
+--keep-intermediates --time-log=t.json -c a.cpp
+--instantiate=auto -c a.cpp
+--instantiate=bogus -c a.cpp
+--promote-slots=on --unroll=off --struct-slots=0 -c a.cpp
+--promote-slots=maybe -c a.cpp
+--unroll=yes -c a.cpp
+--pathb-c=gcc -c a.c
+--dialect=clang -c a.cpp
+--gnu-version=130000 -c a.cpp
+--freestanding --cosmo --target=linux_i686 --emit-c a.c
+--trace=t.json -c a.cpp
+--module-dir=mods -c a.cpp
+--obfuscate-kernels -c a.cu
+-fsanitize=address a.cpp -o p
+-fsafe-pointers -fno-safe-pointers -c a.cpp
+-fno-sanitize=address -fsanitize=address -c a.cpp
+-fsanitize=undefined -c a.cpp
+-fno-sanitize=all -c a.cpp
+-fno-sanitize=thread -c a.cpp
+-fno-omit-frame-pointer -fomit-frame-pointer -c a.cpp
+-fexceptions -fwrapv -fno-strict-aliasing -pipe -c a.cpp
+-fvisibility=hidden -fvisibility-inlines-hidden -c a.cpp
+-Wl,--as-needed -Wall -w -Wno-narrowing -c a.cpp
+-m64 -march=native -mavx2 -c a.cpp
+-MD -MP -MF d.d -MT t -c a.cpp
+-MMD -MQ q -c a.cpp
+-include h.h -isystem /s -isystem/t -c a.cpp
+-E a.cpp
+-P -E a.cpp
+-x c++ -c -
+- -E
+-x c -c a.c
+-O3 -g -fopenmp a.cpp
+-c a.cu b.cpp2 c.c d.o
+-c a.cu -o b.o
+NFCXX_BACKEND=qbe -c a.cpp
+NFCXX_BACKEND= -c a.cpp
+NFCXX_BACKEND=pathb -c a.cpp --backend=gcc
+NFCXX_PATH=b -c a.cpp
+NFCXX_PATH=c -c a.cpp
+NFCXX_IR_OPT=inline,sroa -c a.cpp
+NFCXX_IR_OPT= -c a.cpp
+NFCXX_EH_UNWIND=1 -c a.cpp
+NFCXX_EH_UNWIND=0 -c a.cpp
+NFCXX_EHSHIM=0 -c a.cpp
+NFCXX_EHSHIM=1 -c a.cpp
+NFCXX_CACHE=/tmp/c -c a.cpp
+NFCXX_CACHE_LOG=/tmp/l -c a.cpp
+NFCXX_CACHE_REMOTE=gha TMPDIR=/tmp -c a.cpp
+NFCXX_CACHE_REMOTE=gha NFCXX_CACHE=/tmp/c -c a.cpp
+NFCXX_CACHE_REMOTE=bogus -c a.cpp
+NFCXX_CACHE_REMOTE= -c a.cpp
+NFCXX_KEEP_INTERMEDIATES=1 -c a.cpp
+NFCXX_KEEP_INTERMEDIATES=yes -c a.cpp
+NFCXX_TIME_LOG=t.json -c a.cpp
+NFCXX_INSTANTIATE=auto -c a.cpp
+NFCXX_INSTANTIATE= -c a.cpp
+NFCXX_PROMOTE_SLOTS=off NFCXX_UNROLL=0 NFCXX_STRUCT_SLOTS= -c a.cpp
+NFCXX_LD=gold -c a.cpp
+NFCXX_PATHB_C=gcc -c a.c
+NFCXX_OBFUSCATE_KERNELS=1 -c a.cu
+NFCXX_OBFUSCATE_KERNELS=0 -c a.cu
+NFCXX_OBFUSCATE_KERNELS= -c a.cu
+NFCXX_DIALECT=clang -c a.cpp
+NFCXX_DIALECT= -c a.cpp
+NFCXX_TRACE=t.json -c a.cpp
+NFCXX_BACKEND=qbe NFCXX_PATH=b NFCXX_EHSHIM=0 NFCXX_CACHE=/tmp/c --backend=pathb -c a.cpp
+-fsyntax-only x.cpp
+-c x.cpp -fsyntax-only -o out.o
+-fsyntax-only -E x.cpp
+-fsyntax-only -o
+-fsyntax-only -DA=1 -O2 -fsyntax-only x.cpp
+-fsyntax-only --bundle-libs x.cpp
+-fsyntax-only --cuda-driver=libcuda x.cpp
+-fsyntax-only --bogus-option x.cpp
+-fsyntax-only -fuse-ld=gold -std=c++20 x.cpp
+NFCXX_BACKEND=qbe -fsyntax-only x.cpp
+NFCXX_CACHE_REMOTE=nope -fsyntax-only x.cpp
+-c x.cpp --bundle-libs
+x.cpp --bundle-libs
+-o prog x.cpp --bundle-libs --bundle-exclude=libfoo.so,libbar
+--bundle-only=libstdc++ -o p x.cpp --bundle-libs
+--bundle-libs --bundle-add=libtorch_cuda.so -Lfoo -L bar x.cpp
+--bundle-stubs=lib/stubs --bundle-runpath=lib/run x.cpp --bundle-libs
+--bundle-rpath=lib x.cpp --bundle-libs
+--bundle-libs --bundle-bogus x.cpp
+x.cpp --bundle-exclude=a
+--bundle-libs -E x.cpp
+--bundle-libs --bundle-only=a,,b x.cpp
+--bundle-libs --bundle-exclude= x.cpp
+--bundle-libs -o out.bin x.cpp -fsyntax-only
+x.cpp
+CUDA_HOME=/opt/cuda x.cpp
+CUDA_HOME= x.cpp
+NFCXX_SYSTEM_PATHS=/a:/b x.cpp
+CUDA_HOME=/opt/cuda NFCXX_SYSTEM_PATHS=/a x.cpp
+NFCXX_CUDA_TARGET=amdgpu x.cpp
+NFCXX_CUDA_TARGET=amdgpu ROCM=/r CUDA_HOME=/c NFCXX_SYSTEM_PATHS=/s x.cpp
+NFCXX_CUDA_TARGET=nvidia NFCXX_SYSTEM_PATHS=/s x.cpp
+NFCXX_CUDA_TARGET= ROCM= x.cpp
+# --cuda-driver= and a link that names libcuda (scripts/cuda-driver-wrap.sh, docs/notes/cuda-driver.md)
+--cuda-driver=cudart a.cpp -o p -lm
+--cuda-driver=libcuda -c a.cpp -lm
+NFCXX_CUDA_DRIVER=cudart -c a.cpp -lm
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lm -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures -c a.cpp -lcuda
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+NFCXX_CUDA_DRIVER=libcuda CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -o p
+NFCXX_CUDA_DRIVER=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp --cuda-driver=auto -lcuda -o p
+NFCXX_CUDA_DRIVER= CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=libcuda a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=cudart a.cpp -l:libcuda.so.1 -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda -l:libcuda.so.1 -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -l:libcuda.so -o p
+a.cpp -lcuda -o p
+--cuda-driver=bogus a.cpp -lcuda
+NFCXX_CUDA_DRIVER=bogus a.cpp
+--cuda-driver= a.cpp
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/old a.cpp -lcuda -o p
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/old a.cpp -lcuda
+tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so a.cpp -o p
+--cuda-driver=cudart a.cpp -o p tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so
+--cuda-driver=libcuda a.cpp tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none tests/nfcxx/cuda-fixtures/lib64/stubs/libcuda.so -o p
+CUDA_TEST_MACHINE=aarch64 CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_MACHINE=aarch64 --cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_SHIM=error:shim_failed CUDA_HOME=tests/nfcxx/cuda-fixtures a.cpp -lcuda
+CUDA_TEST_SHIM=error:shim_failed CUDA_HOME=tests/nfcxx/cuda-fixtures --cuda-driver=cudart a.cpp -lcuda
+--cuda-driver=cudart CUDA_HOME=tests/nfcxx/cuda-fixtures/partial a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/partial a.cpp -lcuda -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/partial CUDA_TEST_SHIM=ok a.cpp -lcuda -lcudart_static -o p
+CUDA_HOME=tests/nfcxx/cuda-fixtures/none a.cpp -lcuda -o p
+a.cpp -lcuda -o p

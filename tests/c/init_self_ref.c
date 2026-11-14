@@ -17,3 +17,4 @@ int main(void) {
 	struct work w = { { &w.n, &w.n }, (*({ init(&w.done); &w.done; })) };
 	return w.n.next == &w.n && w.done == 7 ? 42 : 1;
 }
+// MACOS-XFAIL-pathb: the Mach-O relocation format cannot carry the address offset of the initializer ("addend too big for relocation"); Linux accepts it

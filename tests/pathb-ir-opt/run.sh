@@ -11,6 +11,21 @@ fail=0
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline helper.ir > "$out/helper_inline.ir" || fail=1
 if diff -u helper_inline.golden.ir "$out/helper_inline.ir"; then echo "inline helper: ok"; else echo "inline helper: FAIL"; fail=1; fi
 if grep -q '(call int &"square"' "$out/helper_inline.ir"; then echo "inline helper: FAIL (square still called)"; fail=1; fi
+# The caps count weighted nodes (--cost=weighted, the default): slots and other declarations are free, so a callee that is mostly
+# declarations is inlined under a small --max-callee, and the plain node count (--cost=nodes) refuses it.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 weighted_cost.ir > "$out/wc_w.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-callee=12 --cost=nodes weighted_cost.ir > "$out/wc_n.ir" || fail=1
+if ! grep -q '(call int &"decls"' "$out/wc_w.ir" && grep -q '(call int &"decls"' "$out/wc_n.ir"; then echo "weighted cost: ok"; else echo "weighted cost: FAIL"; fail=1; fi
+# Past --max-growth only a tiny callee (--max-tiny, default 16) is still inlined: with a budget of half the module, the tiny
+# callee goes in and, with --max-tiny=0, it stays a call.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 weighted_cost.ir > "$out/tiny_on.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=0.5 --max-tiny=0 weighted_cost.ir > "$out/tiny_off.ir" || fail=1
+if ! grep -q '(call int &"decls"' "$out/tiny_on.ir" && grep -q '(call int &"decls"' "$out/tiny_off.ir"; then echo "tiny callee: ok"; else echo "tiny callee: FAIL"; fail=1; fi
+# Tiers: the small callees go in before the budget is spent on big ones. "first" calls a 100-op callee and "second" a 25-op one;
+# with a tight budget the big inline would use it up before "second" is reached, so without tiers "second" stays a call.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=1.3 tiers.ir > "$out/tiers_on.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --max-growth=1.3 --tiers= tiers.ir > "$out/tiers_off.ir" || fail=1
+if ! grep -q '(call int &"mid"' "$out/tiers_on.ir" && grep -q '(call int &"mid"' "$out/tiers_off.ir"; then echo "inline tiers: ok"; else echo "inline tiers: FAIL"; fail=1; fi
 # The same file through the whole pipeline (inline, then scalar replacement with constant propagation and unrolling): the
 # golden tests/pathb-ir-opt/helper_sroa.golden.ir.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --sroa helper.ir > "$out/helper_sroa.ir" || fail=1
@@ -89,6 +104,20 @@ if ! grep '(function' "$out/strip_eh.ir" | grep -q 'eh_' && grep -q '(let %1 (pt
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_leaf_eh.ir > "$out/strip_leaf_eh.ir" || fail=1
 if ! grep '^(function "_ZNK1A3getEv"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
    && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '(slot "tmp.1" (struct "__C8")'; then echo "strip leaf eh: ok"; else echo "strip leaf eh: FAIL"; fail=1; fi
+# A function whose calls all go to functions that cannot throw (here one that only makes an atomic call) loses its frame too;
+# the one that calls an unknown external function (withcall) keeps it.
+if ! grep '^(function "vialeaf"' "$out/strip_leaf_eh.ir" | grep -q '__C8' && ! grep '^(function "leafonly"' "$out/strip_leaf_eh.ir" | grep -q '__C8' \
+   && grep '^(function "withcall"' "$out/strip_leaf_eh.ir" | grep -q '__C8'; then echo "strip nothrow callers: ok"; else echo "strip nothrow callers: FAIL"; fail=1; fi
+# A cleanup frame (kind 1) is set up and read back through chains of offsets of its address: those go with it. A destructor whose
+# only call is to a guarded (noexcept) function loses both of its frames; the guarded function, which calls an unknown one, keeps its own.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh strip_kind1.ir > "$out/strip_kind1.ir" || fail=1
+if ! grep '^(function "dtor_like"' "$out/strip_kind1.ir" | grep -q '__C9\|__eh_curr_region' \
+   && grep '^(function "guarded_member"' "$out/strip_kind1.ir" | grep -q '(slot "tmp.1" (struct "__C9")'; then echo "strip kind 1 frame: ok"; else echo "strip kind 1 frame: FAIL"; fail=1; fi
+# A call of a function that never returns (an assertion failure) lets nothing out; an unknown project function does, unless
+# --nothrow-extern names it.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --strip-leaf-eh --nothrow-extern=proj_abort strip_kind1.ir > "$out/strip_kind1b.ir" || fail=1
+if ! grep '^(function "asserter"' "$out/strip_kind1.ir" | grep -q '__C9' && grep '^(function "projabort"' "$out/strip_kind1.ir" | grep -q '__C9' \
+   && ! grep '^(function "projabort"' "$out/strip_kind1b.ir" | grep -q '__C9'; then echo "nothrow externs: ok"; else echo "nothrow externs: FAIL"; fail=1; fi
 # Scalar replacement through a `this` slot: a pointer slot stored twice with one array's address reads as that address, a memcpy
 # of a constant size is a copy, and the arrays become scalar slots.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --sroa sroa_this.ir > "$out/sroa_this.ir" || fail=1
@@ -97,4 +126,27 @@ if grep -q '(slot "v.f4" int 4 4)' "$out/sroa_this.ir" && grep -q '(slot "w.f4" 
 # Store-to-load forwarding: the load after the store takes the stored value; the load after the call does not.
 "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward forward.ir > "$out/forward.ir" || fail=1
 if grep -q '(let %1 int %0)' "$out/forward.ir" && grep -q '(let %2 int (load int $"x"))' "$out/forward.ir"; then echo "forward: ok"; else echo "forward: FAIL"; fail=1; fi
+# --shrink-eh-frames: an EH entry whose uses are loads and stores at constant offsets (and the push on the EH stack top) is cut to
+# the bytes written: 16 for a noexcept function's (next, kind), 48 for a function's (the region table ends at byte 42). A try
+# block's entry, whose jmp_buf address goes to _setjmp, and a frame that is copied stay whole.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --shrink-eh-frames strip_kind1.ir > "$out/shrink_kind1.ir" || fail=1
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --shrink-eh-frames shrink_eh.ir > "$out/shrink_eh.ir" || fail=1
+if grep '^(function "dtor_like"' "$out/shrink_kind1.ir" | grep -q '(slot "tmp.1" (struct "__C9") 16 8) (slot "tmp.2" (struct "__C9") 48 8)' \
+   && grep '^(function "tryfn"' "$out/shrink_eh.ir" | grep -q '(slot "tmp.1" (struct "__C9") 240 8)' \
+   && grep '^(function "copied"' "$out/shrink_eh.ir" | grep -q '(slot "tmp.1" (struct "__C9") 240 8) (slot "tmp.2" (struct "__C9") 240 8)'; then
+  echo "shrink eh frames: ok"; else echo "shrink eh frames: FAIL"; fail=1; fi
+# --scope-facts: each inlined body is bracketed by (life-start $"x.iK") and (life-end $"x.iK") for the slots it hoists, and nothing
+# is added without the flag.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline --scope-facts early_return.ir > "$out/early_facts.ir" || fail=1
+if grep -q '(life-start $"ret.i1")' "$out/early_facts.ir" && grep -q '(life-end $"ret.i1")' "$out/early_facts.ir" \
+   && ! grep -q 'life-' "$out/early_return.ir"; then echo "scope facts: ok"; else echo "scope facts: FAIL"; fail=1; fi
+# A callee with a goto and a label is inlined, and each copy's labels get a suffix of their own: two calls of it leave no call
+# and two different label names (the asm goto of the kernel's static_cpu_has is such a callee).
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --inline goto_inline.ir > "$out/goto_inline.ir" || fail=1
+if ! grep -q '(call' "$out/goto_inline.ir" && [ "$(grep -o '(label "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ] \
+   && [ "$(grep -o '(goto "yes\.i[0-9]*")' "$out/goto_inline.ir" | sort -u | wc -l)" = 2 ]; then echo "goto and label inline: ok"; else echo "goto and label inline: FAIL"; fail=1; fi
+# A counted loop whose body holds a label is not unrolled (every copy would define the label: "terminated twice" in the SSA
+# converter; QuickJS's js_create_resolving_functions jumps to `fail` from inside its own loop): one label, the loop stays.
+"${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --no-prune --sroa unroll_label.ir > "$out/unroll_label.ir" || fail=1
+if [ "$(grep -o '(label "fail")' "$out/unroll_label.ir" | wc -l)" = 1 ] && [ "$(grep -o '(loop' "$out/unroll_label.ir" | wc -l)" = 1 ]; then echo "no unroll over a label: ok"; else echo "no unroll over a label: FAIL"; fail=1; fi
 exit $fail

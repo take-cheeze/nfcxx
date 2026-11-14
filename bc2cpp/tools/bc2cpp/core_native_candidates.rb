@@ -37,6 +37,7 @@ require_relative 'bytecode_ir_containers'
 require_relative 'diagnostics'
 require_relative 'alias_sites'
 require_relative 'core_defs'
+require_relative 'c_call_rows'
 
 module CoreNativeCandidates
   # CTOR_ROWS (static_dispatch_registrations.rb): the names a constructor row may carry.
@@ -129,6 +130,7 @@ module CoreNativeCandidates
 
   # An operator's table name is the operator, not the identifier: MRB_OPSYM(div) is `/`, and cdump's table row
   # OPERATOR_SYMBOL("/", "div") formats it. Neither looks up a method called `div`.
+  PRESYM_HEADER = %r{/include/mruby/presym(?:\.h|/)}
   OPERATOR_NAMES_TEXT = [
     /\bMRB_OPSYM\s*\(\s*\w+\s*\)/,
     /\bOPERATOR_SYMBOL\s*\(\s*"[^"\n]*"\s*,\s*"\w+"\s*\)/
@@ -293,7 +295,7 @@ module CoreNativeCandidates
         next unless mt_class
 
         line.scan(ENTRY) do |fn, kind, cname|
-          name = kind == 'OPSYM' ? (operator_names ? OPERATOR_NAMES[cname] : nil) : cname + SUFFIX.fetch(kind)
+          name = kind == 'OPSYM' ? (operator_names ? OPSYM_TO_RUBY[cname] : nil) : cname + SUFFIX.fetch(kind)
           out << { mt_class: mt_class, kind: kind, cname: cname, name: name, fn: fn, path: path,
                    installed: own_table?(owners[table], mt_class) ? mt_class : nil }
         end
@@ -311,11 +313,13 @@ module CoreNativeCandidates
   # CoreEnumeratorFree's verdict, or a callable that makes it (asked only when a native has a ENUM_SYMBOL_CALL).
   # +engine_names+ (CORE_ROWS, core_rows.rb) stands for what the engine's ireps look up, read from them otherwise.
   def reachable(ireps, native_paths, generated, core: [], lookup: method(:lookup_names), strip: nil, strip_generated: nil,
-                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil)
+                exact_impls: false, diagnostic_literals: false, enumerator_free: false, names: Set.new, engine_names: nil,
+                compiled_core: nil, operators: false, row_calls: false)
     # Closed (VM-free) only: no protocol name seeds +names+ (see StaticDispatchRegistrations#analyze).
     # A +names+ that answers `note` is told where each name comes from (scripts/bc2cpp/core_kept_report.rb).
     note = ->(label) { names.note(label) if names.respond_to?(:note) }
     fragments = Set.new
+    undef_names = Set.new
     sites, aliases = settled_aliases(core)
     previous = CoreNativeCandidates.settled_sites
     CoreNativeCandidates.settled_sites = sites
@@ -330,14 +334,26 @@ module CoreNativeCandidates
     macros = StaticDispatchRegistrations.naming_macros(native_paths)
     helpers = diagnostic_literals ? verified_label_helpers(native_paths, ireps, core, generated) : Set.new
     hook_names = diagnostic_literals ? verified_hook_names(native_paths) : {}
+    # C_CALL_ROWS (c_call_rows.rb; the rows run only): a name only C calls that see rows take reaches no entry.
+    sinks = row_calls ? CCallRows.sinks(native_paths.to_h { |p| [p, StaticDispatchRegistrations.strip_c_comments(File.read(p, encoding: 'BINARY'))] }) : nil
+    row_blank = ->(t, path) { sinks ? CCallRows.blank(StaticDispatchRegistrations.strip_c_comments(t), sinks, cxx: path.match?(CCallRows::CXX), proven: diagnostic_literals) : t }
     native_paths.each do |path|
       note.call("native #{path}")
       text = File.read(path, encoding: 'BINARY').gsub(ENTRY_NAME) { "#{Regexp.last_match(1)}#{' ' * Regexp.last_match(2).size}" }
       text = strip.call(text) if strip
+      # OPERATOR_ROWS: the rows run admits operators, so an operator a native names is a lookup of it.
+      # The presym headers define the macro for every operator, which looks nothing up (their macro definitions are
+      # blanked in the rows run, which admits operators).
+      if operators
+        text = text.gsub(/^[ \t]*#[ \t]*define\b(?:[^\n]*\\\n)*[^\n]*$/) { |m| m.gsub(/[^\n]/, ' ') } if path.match?(PRESYM_HEADER)
+        row_blank.call(text, path).gsub(/^[ \t]*#[ \t]*define\b.*$/, '').scan(/\bMRB_OPSYM\s*\(\s*(\w+)\s*\)/) { |(c)| names << OPSYM_TO_RUBY.fetch(c, c) }
+      end
       text = strip_label_calls(strip_operator_names(text), helpers)
       text = strip_hook_calls(text, hook_names) if diagnostic_literals
       text = strip_enumerator_symbols(text, enumerator_free)
       text = strip_diagnostic_literals(text) if diagnostic_literals && path.end_with?('/mruby-math/src/math.c')
+      text = StaticDispatchRegistrations.blank_undef_names(text, undef_names)
+      text = row_blank.call(text, path)
       StaticDispatchRegistrations.native_name_tokens(text, names, macros)
     end
     note.call('generated code literal')
@@ -345,10 +361,21 @@ module CoreNativeCandidates
       src = strip_generated.call(src) if strip_generated
       src.scan(StaticDispatchRegistrations::STRING_LITERAL) { |(s)| names << StaticDispatchRegistrations.unescape(s) }
     end
-    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases)
-    [names, fragments]
+    # UNDEF_LEFT_OUT: an undef call's existence check is a lookup like any other for what it keeps; only the names
+    # nothing else reaches, and no core Ruby mentions, are reported (the third value).
+    undef_only = undef_names.reject { |name| names.include?(name) || core_mentions?(core, name) }.to_set
+    note.call('undef call (an existence check at init)')
+    names.merge(undef_names)
+    live_core(core, generated, names, fragments, lookup: lookup, exact_impls: exact_impls, aliases: aliases, compiled: compiled_core)
+    [names, fragments, undef_only]
   ensure
     CoreNativeCandidates.settled_sites = previous if previous
+  end
+
+  # Whether any core Ruby irep (each file's `ireps` holds every one of them by label) has `name` as a symbol: a body
+  # live_core may count would look it up (UNDEF_LEFT_OUT).
+  def core_mentions?(core, name)
+    core.any? { |file| Hash(file[:ireps]).each_value.any? { |irep| irep.syms.any? { |sym| sym.to_s == name } } }
   end
 
   # SETTLED_ALIASES: a core class body's `alias new old` or `alias_method :new, :old` whose source is the owner's one
@@ -449,10 +476,14 @@ module CoreNativeCandidates
   # `Kernel_print_impl`), so `RGSS__ErrorReport__Tee_print_impl` calls Tee#print and `IO_singleton_open_impl` calls
   # IO.open, neither a lookup of `print` or `open` nor a call of Kernel's. A body whose owner the file does not give
   # (`owner_of`) is read by name alone, as without the flag.
-  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {})
+  # +compiled+ (CORE_ROWS_COMPILED): the "Owner#name" bodies the core gem's generation compiles, whose lookups +generated+
+  # holds (the core generation is one of its sources), so their ireps are not read again.
+  def live_core(core, generated, names, fragments, lookup: method(:lookup_names), exact_impls: false, aliases: {}, compiled: nil)
     impls = Set.new
     # `$` is the mangling's escape (`Array_include$3f_impl`).
     generated.each { |src| src.scan(/[\w$]+_impl\b/) { |t| impls << t } }
+    # STEP_SUPER_STATIC: a step's static `super` calls the target's entry, which runs its body as its `_impl` does.
+    generated.each { |src| src.scan(/\bbc2cpp_dyn_super_static\(M, self, ([\w$]+),/) { |(entry)| impls << "#{entry}_impl" } }
     pending = Hash.new { |h, k| h[k] = [] }
     core.each do |file|
       parent = {}
@@ -462,7 +493,10 @@ module CoreNativeCandidates
         up = parent[up] until up.nil? || file[:body_of].key?(up)
         own = up && file[:body_of][up]
         if own
-          pending[own] << [irep, file[:owner_of]&.dig(up)]
+          owner = file[:owner_of]&.dig(up)
+          next if compiled && owner && compiled.include?("#{owner}##{own}")
+
+          pending[own] << [irep, owner]
         else
           names.note("core root or class body #{File.basename(file[:path].to_s)}") if names.respond_to?(:note)
           lookup.call(irep, nil, names, fragments)
@@ -517,10 +551,14 @@ module CoreNativeCandidates
   end
 
   # The listed keys, "MtClass#name" sorted: every entry of the key a candidate, its name unreachable.
-  def candidates(entries, names, fragments, proven = {})
+  # +operators+ (OPERATOR_ROWS, the rows run only): an operator is a candidate once nothing reaches its name; no
+  # fragment builds one.
+  def candidates(entries, names, fragments, proven = {}, operators: false)
     entries.group_by { |e| [e[:mt_class], e[:name]] }.filter_map do |(mt_class, name), group|
-      next unless (name&.match?(NAME) || proven[name]) && group.all? { |e| e[:installed] }
-      next if !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
+      operator = operators && name && !name.match?(NAME) && OPSYM_TO_RUBY.value?(name)
+      next unless (name&.match?(NAME) || proven[name] || operator) && group.all? { |e| e[:installed] }
+      next if operator && names.include?(name)
+      next if !operator && !proven[name] && StaticDispatchRegistrations.dynamic_name?(name, names, fragments)
 
       "#{mt_class}##{name}"
     end.sort
@@ -557,6 +595,27 @@ module CoreNativeCandidates
       end
     end
     (definitions + aliases).uniq.sort
+  end
+
+  # UNDEF_LEFT_OUT: the core undef entries (mrb_undef_*, NativeOwnerMap#undefs), as "Owner#name" sorted, that the closed
+  # build removes after init. Removing one makes the inherited method visible on that owner, so a name qualifies only
+  # when nothing but undef calls looks it up (`undef_only`, from reachable), it is no dynamic name, and nothing lists
+  # methods (a listing would gain it). An undef call itself only checks that its name exists, which stays true.
+  LISTING_NAMES = %w[methods public_methods private_methods protected_methods singleton_methods instance_methods
+                     public_instance_methods private_instance_methods protected_instance_methods].freeze
+
+  def undef_candidates(map, names, fragments, undef_only)
+    return [] if LISTING_NAMES.any? { |name| names.include?(name) }
+
+    # `names` holds the undef calls' names too (they keep their definitions); the rest is what else looks names up.
+    others = names.to_set - undef_only
+    Array(map.undefs).filter_map do |owner, name|
+      next unless owner.is_a?(String) && name&.match?(NAME) && undef_only.include?(name)
+      next if owner.match?(StaticDispatchRegistrations::CLOSED_OWNER_RE) || map.computed.include?(owner)
+      next if StaticDispatchRegistrations.dynamic_name?(name, others, fragments)
+
+      "#{owner}##{name}"
+    end.uniq.sort
   end
 
   # CORE_RAM_CANDIDATES: the core registrations made at run time (mrb_define_method and the other defining calls,
@@ -602,8 +661,10 @@ module CoreNativeCandidates
   end
 
   # The exclusion header's text for `keys` (MRB_MT_EXCLUDE_HEADER, include/mruby/class.h), for `engine_keys` the
-  # engine ROM entries (engine_entries) among `engine`, and for `rows` the core entries kept as rows (CORE_ROWS: 2).
-  def header(keys, entries, engine_keys = [], engine = [], rows: [])
+  # engine ROM entries (engine_entries) among `engine`, for `rows` the core entries kept as rows (CORE_ROWS: 2), and
+  # for `engine_rows` the engine ROM entries kept as rows (ENGINE_ROWS: 2). A caller that passes no engine_rows keeps
+  # those entries in the table, which every lookup finds.
+  def header(keys, entries, engine_keys = [], engine = [], rows: [], engine_rows: [])
     by_key = entries.group_by { |e| "#{e[:mt_class]}##{e[:name]}" }
     lines = keys.flat_map do |key|
       by_key.fetch(key).map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 1" }
@@ -618,6 +679,9 @@ module CoreNativeCandidates
                          value = CTOR_ROW_NAMES.include?(e[:name]) ? 2 : 1
                          "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} #{value}"
                        end)
+    row_keys = engine_rows.to_set - wanted
+    lines.concat(engine.select { |e| row_keys.include?("#{e[:owner]}##{e[:name]}") }
+                       .map { |e| "#define MRB_MT_EXCLUDE_#{e[:mt_class]}_#{e[:kind]}__#{e[:cname]} 2" })
     "/* Generated by build_config.rb from the static dispatch lists (tools/bc2cpp/core_native_candidates.rb). */\n" \
       "#{lines.uniq.join("\n")}\n"
   end

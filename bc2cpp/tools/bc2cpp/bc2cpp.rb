@@ -120,6 +120,7 @@ require_relative 'ivar_slot_assured'
 require_relative 'ivar_slot_assured_args'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
+require_relative 'codegen_declared_callsites'
 require_relative 'codegen_entry_specialize'
 require_relative 'codegen_constructor_pools'
 require_relative 'codegen_entry_seeds'
@@ -209,6 +210,7 @@ require_relative 'codegen_stack_tuples'
 require_relative 'codegen_string_eq'
 require_relative 'codegen_chr_append'
 require_relative 'codegen_call_inline'
+require_relative 'codegen_respond_to_fold'
 require_relative 'owner_call_direct'
 
 # The main block is a lambda: its ~250 locals do not fit the one irep a top-level block gets when every file is compiled as
@@ -627,6 +629,8 @@ BC2CPP_MAIN = lambda do
                                                               superclass_of: superclass_of, display_root: sig_root, applied: sig_applied,
                                                               declared_returns: CodeGen.declared_returns)
     CodeGen.declared_params = DeclaredReturns.guard? ? param_guards : {}
+    # DECLARED_IVAR_GUARD: an `@x: T` declaration of Integer, Float, Symbol or a program class is checked on every store.
+    CodeGen.declared_ivars = DeclaredReturns.guard? ? RbsParamCheck.ivar_guards(sig_loaded, superclass_of) : {}
     sig_applied.diagnostics.concat(param_diags)
     param_diags.each { |d| warn "  #{d.file}:#{d.line}:#{d.col}: #{d.severity}: #{d.message} [#{d.code}]" }
     # An unproven parameter type is not trusted, so its argument stays `any` (an mrb_value): it is reported, not fatal.
@@ -1503,6 +1507,13 @@ BC2CPP_MAIN = lambda do
     abort "\n[bc2cpp] DECLARED_RETURN_GUARD: #{guard_failures.size} runtime-checked return declaration(s) " \
           "without their compiled check:\n  #{guard_failures.join("\n  ")}"
   end
+  # DECLARED_IVAR_PROOF: a declared slot seeded as its declared kind is trusted only because every store to it is
+  # checked; abort unless each method that stores to one compiled with its guard.
+  ivar_failures = gen.declared_ivar_writer_failures(compiled, only_owners, other_owners, live: main_reach&.labels)
+  unless ivar_failures.empty?
+    abort "\n[bc2cpp] DECLARED_IVAR_PROOF: #{ivar_failures.size} declared instance variable(s) with an unchecked store " \
+          "(BC2CPP_DECLARED_IVAR_PROOF=0 keeps the store checks and drops the proof):\n  #{ivar_failures.join("\n  ")}"
+  end
   # EMBED_INIT_GUARD: an embedding owner this run emits must get the compiled #initialize that builds its storage.
   embed_failures = EmbedInitGuard.failures(gen.embedding_initializers, compiled, only_owners)
   unless embed_failures.empty?
@@ -1513,6 +1524,9 @@ BC2CPP_MAIN = lambda do
   if type_facts_path
     require_relative 'type_facts'
     TypeFacts.append_nilable_index(type_facts_path, gen.unguarded_index_sites, ENV['BC2CPP_TYPE_FACTS_ROOT'])
+    # TC1018: a declared parameter a call site provably contradicts (DECLARED_CALLSITE_CONTRADICTION).
+    sig_at = (sig_loaded&.methods || {}).each_value.to_h { |sig| ["#{sig.owner}##{sig.name}", [sig.loc.file, sig.loc.line]] }
+    TypeFacts.append_declared_callsites(type_facts_path, gen, ENV['BC2CPP_TYPE_FACTS_ROOT'], ->(key) { sig_at[key] })
   end
 
   # Report diagnostics depend on real method compilation, guard checks and TC1005 above,
@@ -2015,6 +2029,14 @@ BC2CPP_MAIN = lambda do
       abort();
     #endif
       bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s argument %d is %T, declared %s", method, position, value, declared));
+    }
+    [[maybe_unused, noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_declared_ivar_violation(mrb_state* M, mrb_value value, const char* ivar, const char* declared) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: declared instance variable violated: %s was assigned %s, declared %s\n", ivar, mrb_obj_classname(M, value), declared);
+      fflush(stderr);
+      abort();
+    #endif
+      bc2cpp_declaration_violation(M, mrb_format(M, "declaration violation: %s was assigned %T, declared %s", ivar, value, declared));
     }
     // Kernel#lambda flags a copy of the RProc strict after the block was built.
     static inline bool bc2cpp_proc_strict_p(mrb_state* M) {
@@ -2942,6 +2964,15 @@ BC2CPP_MAIN = lambda do
   warn "== declared return guards (DECLARED_RETURN_GUARD): #{guard_sites.size} bc2cpp_declared_return_violation =="
   guard_sites.uniq.sort.each { |k| warn "  DECLARED_RETURN_GUARD_SITE #{k}" }
   warn ''
+  # DECLARED_IVAR_GUARD: the declared slots, and the checked (or proven-away) stores in this run's compiled code.
+  ivar_report = gen.declared_ivar_report
+  unless ivar_report.empty?
+    ivar_marks = compiled.flat_map { |m| m[:code].to_s.scan(%r{/\* DECLARED_IVAR_(GUARD|PROVEN) (\S+) \*/}) }
+    warn "== declared instance variables (DECLARED_IVAR_GUARD): #{ivar_report.size}, " \
+         "#{ivar_marks.count { |kind, _| kind == 'GUARD' }} checked stores, #{ivar_marks.count { |kind, _| kind == 'PROVEN' }} proven stores =="
+    ivar_report.each { |line| warn line }
+    warn ''
+  end
   CoreCFacts.report(gen)
   miss_sites = ProvenMiss.sites(compiled)
   warn "== closed world proven-class miss sites: #{miss_sites.size} =="
@@ -2993,7 +3024,8 @@ BC2CPP_MAIN = lambda do
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache(used), symbol_table)
   const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers(used + const_site_cache_code), symbol_table)
   print OwnerCallDirect.native_prototypes
-  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free)
+  print NativeFrameUse.wrappers_source(StaticDispatchLists.current(required: false).frame_free,
+                                       NativeFrameUse.reader_entries(compiled))
   print SymbolCache.emit(symbol_table)
   print SymbolCache.rewrite(gen.emit_to_enum_helper(compiled), symbol_table)
   print const_scope_code

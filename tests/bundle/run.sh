@@ -12,7 +12,10 @@
 cd "$(dirname "$0")/../.."
 root=$PWD
 d=tests/bundle
-backends=${NFCXX_BACKEND:-"qbe gcc"}
+backends=${NFCXX_BACKEND:-"gcc"}
+if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
+  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
+fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ninja -C tools/bundle >/dev/null || exit 1
 B=$root/build/nfcbundle

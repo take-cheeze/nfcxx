@@ -154,6 +154,7 @@ class CodeGen
     natives = left_out_natives(compiled, unregistered)
     core_rom = left_out_core_rom
     core_ram = left_out_core_ram
+    core_undef = left_out_core_undef
     engine_rom = left_out_engine_rom
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
@@ -185,7 +186,7 @@ class CodeGen
     # under its name, so a lookup the proof missed aborts naming the method instead of raising a NoMethodError far
     # from its cause. Any other build removes what the gem's mrblib defined there (bytecode, or an attr accessor),
     # which the stub would have replaced, and a closed build records it for RESPOND_TO_PHANTOM (bc2cpp.rb).
-    if [accessors, natives, core_rom, core_ram, engine_rom].any?(&:any?) ||
+    if [accessors, natives, core_rom, core_ram, core_undef, engine_rom].any?(&:any?) ||
        compiled.any? do |m|
          names = [m[:name], *Array(self.class.core_aliases&.dig([m[:owner], m[:name]]))]
          names.any? { |name| unregistered.include?("#{m[:owner]}##{name}") }
@@ -228,6 +229,25 @@ class CodeGen
         #endif
         #endif
         }
+        // UNDEF_LEFT_OUT: removes the owner's own undef entry for `name` (CoreNativeCandidates.undef_candidates), so the
+        // inherited method shows; nothing else is touched. A verify build stubs the name instead, as bc2cpp_left_out does.
+        [[maybe_unused]] static int bc2cpp_own_undef_cb(mrb_state*, mrb_sym id, mrb_method_t m, void* p) {
+          mrb_sym* want = static_cast<mrb_sym*>(p);
+          if (id != *want) return 0;
+          *want = MRB_METHOD_UNDEF_P(m) ? 0 : id;
+          return 1;
+        }
+        [[maybe_unused]] static void bc2cpp_left_out_undef(mrb_state* M, struct RClass* c, const char* name, mrb_bool singleton) {
+        #if defined(BC2CPP_UNREGISTERED_VERIFY)
+          bc2cpp_left_out(M, c, name, singleton);
+        #else
+          struct RClass* owner = singleton ? mrb_class_ptr(mrb_singleton_class(M, mrb_obj_value(c))) : c;
+          mrb_sym id = mrb_intern_cstr(M, name);
+          mrb_sym found = id;
+          mrb_mt_foreach(M, owner, bc2cpp_own_undef_cb, &found);
+          if (found == 0) mrb_remove_method(M, owner, id);
+        #endif
+        }
       CPP
     end
     # REGISTRATION_SPLIT: the `core_owners` half resolves only classes that exist before any program class body
@@ -249,6 +269,7 @@ class CodeGen
         out << "#endif\n"
       end
       emit_left_out_native_lines(out, core_ram) if part == 'core'
+      emit_left_out_native_lines(out, core_undef, call: 'bc2cpp_left_out_undef') if part == 'core'
       if part == 'program'
         emit_left_out_accessor_lines(out, accessors)
         emit_left_out_native_lines(out, natives)
@@ -361,9 +382,13 @@ class CodeGen
     "  bc2cpp_mt_install(M, #{var}, #{table}, (int)(sizeof(#{table}) / sizeof(#{table}[0])), #{singleton});\n"
   end
 
-  # CTOR_ROWS: the compiled entries this closed build keeps as constructor rows.
+  # CTOR_ROWS, ENGINE_ROWS: the compiled entries this closed build keeps as rows of their table.
   def ctor_row_keys
-    @ctor_row_keys ||= ENV['BC2CPP_BUILD_NAME'] == 'closed' ? (static_dispatch_lists.ctor_rows || Set.new) : Set.new
+    @ctor_row_keys ||= if ENV['BC2CPP_BUILD_NAME'] == 'closed'
+                         (static_dispatch_lists.ctor_rows || Set.new) | (static_dispatch_lists.engine_rows || Set.new)
+                       else
+                         Set.new
+                       end
   end
 
   def presym_key(name)
@@ -414,14 +439,14 @@ class CodeGen
 
   # The removal of each listed native (left_out_natives), in the program half. A native's class may be missing from a
   # build that does not link its source.
-  def emit_left_out_native_lines(out, natives)
+  def emit_left_out_native_lines(out, natives, call: 'bc2cpp_left_out')
     natives.group_by(&:first).each do |owner, entries|
       path = lexical_scope_path(owner).map { |seg| c_string_literal(seg) }
       out << "  {\n    static const char* const path[] = {#{path.join(', ')}};\n"
       out << "    if (struct RClass* c = bc2cpp_native_owner(M, path, #{path.size})) {\n"
       entries.each do |_, name|
         out << "      // #{owner}##{name} (native) left unregistered: statically dispatched only (docs/adr/0203).\n"
-        out << "      bc2cpp_left_out(M, c, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
+        out << "      #{call}(M, c, #{c_string_literal(name)}, #{owner.end_with?('.singleton')});\n"
       end
       out << "    }\n  }\n"
     end
@@ -462,6 +487,15 @@ class CodeGen
                      ENV['BC2CPP_BUILD_NAME'] == 'closed'
 
     static_dispatch_lists.core_left_out.map { |key| key.split('#', 2) }.sort
+  end
+
+  # UNDEF_LEFT_OUT: [owner, name] of each core undef entry the closed build removes after init
+  # (StaticDispatchLists#core_undef_left_out), from the core gem's core half.
+  def left_out_core_undef
+    return [] unless ENV['OUT_SYMBOL'] == BC2CPP_COMPILED_GEMS.fetch('mruby-core-compiled')[:out_symbol] &&
+                     ENV['BC2CPP_BUILD_NAME'] == 'closed'
+
+    static_dispatch_lists.core_undef_left_out.map { |key| key.split('#', 2) }.sort
   end
 
   # ENGINE_ROM: [owner, name] of each engine ROM entry of this gem's owners that the closed build leaves out of its tables

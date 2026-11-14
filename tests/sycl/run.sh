@@ -143,7 +143,7 @@ if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] &&
 if [ $lz_ok = 1 ]; then
   lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
-  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class usm_align compute_units partial_subgroup slab_inner slab_wide dispatch_cost big_tables kernel_properties bf16_to_half wgs_disjoint wgs_fnptr subgroup32; do
+  for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class usm_align compute_units partial_subgroup slab_inner slab_wide dispatch_cost big_tables kernel_properties bf16_to_half wgs_disjoint wgs_fnptr subgroup32 big_usm; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
     "$out/lz_$t" > "$out/lz_$t.out" 2> "$out/lz_$t.err"; rc=$?
     if [ $rc = 70 ] && grep -q "Level Zero runtime" "$out/lz_$t.err"; then lzprobe=0; break; fi
