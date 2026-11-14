@@ -231,8 +231,11 @@
       "needs_mrb": true
     },
     "rb_gc_register_address": {
-      "kind": "refuse",
-      "reason": "address form (VALUE *): mruby has no address root. mrb_gc_register roots a value, so a later store through the address would not be rooted; the rooting must be designed by hand"
+      "kind": "call",
+      "mruby": "mrb_gc_register_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered"
     },
     "rb_gc_register_mark_object": {
       "kind": "call",
@@ -278,11 +281,11 @@
       "needs_mrb": false
     },
     "StringValuePtr": {
-      "kind": "call",
-      "mruby": "RSTRING_PTR",
-      "inject_mrb": false,
-      "needs_mrb": false,
-      "caveat": "argument must already be a String: no implicit to_str conversion"
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "RSTRING_PTR(($0) = mrb_ensure_string_type($m, $0))",
+      "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "StringValueCStr": {
       "kind": "call",
@@ -377,13 +380,6 @@
       "arity": 1,
       "needs_mrb": true,
       "template": "(($0) = mrb_ensure_string_type($m, $0))",
-      "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
-    },
-    "StringValuePtr": {
-      "kind": "template",
-      "arity": 1,
-      "needs_mrb": true,
-      "template": "RSTRING_PTR(($0) = mrb_ensure_string_type($m, $0))",
       "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "RSTRING_END": {
@@ -655,8 +651,11 @@
       "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
     },
     "rb_global_variable": {
-      "kind": "refuse",
-      "reason": "address form (VALUE *), as rb_gc_register_address: no mruby equivalent (mrb_gc_register roots a value, not a variable)"
+      "kind": "call",
+      "mruby": "mrb_gc_register_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered; CRuby's rb_global_variable never unregisters the address, and neither does this"
     },
     "rb_str_cat": {
       "kind": "call",
@@ -1542,6 +1541,13 @@
       "mruby": "mrb_class_get(mrb, \"Rational\")",
       "needs_mrb": true,
       "caveat": "Rational is defined by a mruby gem"
+    },
+    "rb_gc_unregister_address": {
+      "kind": "call",
+      "mruby": "mrb_gc_unregister_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered"
     }
   },
   "special_arg_positions_class_only": {

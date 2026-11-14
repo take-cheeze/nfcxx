@@ -171,8 +171,6 @@ check grep -qF 'do { if (!mrb_immediate_p(self)) mrb_field_write_barrier_value(m
 rc=0; "$rb" "$conv" --scanner "$scanner" --name gc_map_refused tools/cext2mrbgem/fixtures/gc_map_refused/ext/gc_map_refused "$work/gc_map_refused" > "$work/gc_map_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/gc_map_refused/NOT_BUILDABLE"
-check grep -q '  rb_gc_register_address  address form (VALUE \*)' "$work/gc_map_refused/REFUSALS.txt"
-check grep -q '  rb_global_variable  address form' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
@@ -744,6 +742,13 @@ check grep -qF 'mrb_class_get(mrb, "Numeric")' "$work/api_exc_class/src/api_exc_
 check grep -qF 'mrb_exc_get(mrb, "IOError")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_ensure_string_type(mrb, s)' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_field_write_barrier_value(mrb, mrb_basic_ptr(self), v)' "$work/api_exc_class/src/api_exc_class.c"
+
+# 2zzs. CRuby address roots (rb_gc_register_address, rb_global_variable: a VALUE the GC must keep through a variable):
+# mapped to the fork's mrb_gc_register_address (fork branch claude/gc-address-roots); the output compiles against the fork headers
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_address tools/cext2mrbgem/fixtures/api_gc_address/ext/api_gc_address "$work/api_gc_address" > "$work/api_gc_address.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gc_address/NOT_BUILDABLE"
+check grep -qF 'mrb_gc_register_address(mrb, &g_keep);' "$work/api_gc_address/src/api_gc_address.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
