@@ -249,7 +249,7 @@ double __nfcxx_ld_to_f64(const ld *a) { return (double)*a; }
 /* Checked conversion to an integer type of BITS bits, like the `cf2i` operation of the IR on float and double: it traps
    (abort) on a NaN and when the truncated value does not fit. */
 #ifdef NFCXX_FLOAT_TO_INT_X86
-/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.sh): a value that does not fit, or a
+/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.rb): a value that does not fit, or a
    NaN, gives what the x87 `fistp` gives, the "integer indefinite" (the minimum of the type; for unsigned, its low bits). */
 long __nfcxx_ld_to_s(const ld *a, int bits)
 {
@@ -361,7 +361,7 @@ double __nfcxx_f128_to_f64(const void *a) { return (double)f128_rd(a); }
    The bounds are exact in _Float128 (hi is a power of two below 2^65). For the signed case the test is x > -hi - 1 (or
    x >= -hi, which covers -2^127 exactly in the 128-bit variant below). */
 #ifdef NFCXX_FLOAT_TO_INT_X86
-/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.sh): the libgcc conversions
+/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.rb): the libgcc conversions
    saturate. A NaN or a value above the maximum gives the maximum, a value below the minimum the minimum; for unsigned, a
    negative value gives 0 and a NaN or a value above the maximum gives the maximum. Checked against gcc on x86-64. */
 long __nfcxx_f128_to_s(const void *a, int bits)

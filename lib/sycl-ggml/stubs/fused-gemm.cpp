@@ -1,4 +1,4 @@
-// In place of ggml-sycl's fused-gemm.cpp for a libggml-sycl built by nfcxx (scripts/ggml-sycl-lib.sh): the fused and
+// In place of ggml-sycl's fused-gemm.cpp for a libggml-sycl built by nfcxx (scripts/ggml-sycl-lib.rb): the fused and
 // grouped dequantizing GEMMs are joint_matrix kernels, which lib/sycl does not have. Both entry points decline (false),
 // and the caller takes its unfused path, as it does for a shape the fused kernels do not take.
 #include "fused-gemm.hpp"

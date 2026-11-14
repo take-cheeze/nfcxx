@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Driver for the per-op directories under tests/gpu/ggml/elementwise/: ew_run.sh OP runs the real ggml-sycl element_wise.cpp
-# entry point of OP (ggml_sycl_OP), unchanged, compiled as a TU of ew_real.cpp through scripts/sycl-build.sh for OpenCL,
+# entry point of OP (ggml_sycl_OP), unchanged, compiled as a TU of ew_real.cpp through scripts/sycl-build.rb for OpenCL,
 # linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on the Intel XPU (F32, flat and
 # strided where the upstream launcher supports strided input, two shapes, 64 guard slots). A mutant (a sed-style copy of the
 # real element_wise.cpp in which the op's returned value is off by one) must produce wrong results: it is caught only by a run
@@ -110,7 +110,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED $layouts \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED $layouts \
       -DEW_ID="$id" -DEW_OPNAME="$op" -DEW_CALL="$call" -DEW_LO="$lo" -DEW_HI="$hi" -DEW_P0="$p0" -DEW_P1="$p1" \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$here/ew_real.cpp" -o "$out/$name" \

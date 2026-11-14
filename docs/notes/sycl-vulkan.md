@@ -5,7 +5,7 @@ Status: **working** for the SYCL subset of `docs/notes/sycl-webgpu.md`, checked 
 the refusals behaving the same. Not yet run on a real GPU; the Intel Arc B60 is the next target (see "Next").
 
 ```
-scripts/sycl-build.sh --backend=vulkan prog.cpp -o prog   # the device pass -> SPIR-V (checked by spirv-val), host side with nfcxx
+scripts/sycl-build.rb --backend=vulkan prog.cpp -o prog   # the device pass -> SPIR-V (checked by spirv-val), host side with nfcxx
 ./prog                                                    # loads prog.spv / prog.man next to it
 ```
 
@@ -116,7 +116,7 @@ bytes each. The rest are the samples' own usage errors and deliberate bugs. The 
   OpenCL, through `ze_api.h` and `libze_loader.so.1`: the first Intel GPU, a module per local size (`ze_module_constants_t`
   for ids 0, 1, 2), the heap in one `zeMemAllocShared` allocation (atomic access checked), one immediate command list.
   `tests/gpu/level-zero/run.sh` runs the vecAdd kernel standalone on the B60 (50000 elements, a mutant is caught).
-- **Several TUs with kernels, OpenCL and Level Zero: done** (`rt_image.hpp`). `scripts/sycl-build.sh -c [-fPIC]` writes an
+- **Several TUs with kernels, OpenCL and Level Zero: done** (`rt_image.hpp`). `scripts/sycl-build.rb -c [-fPIC]` writes an
   object and its image (`obj.o.cl.spv`, `obj.o.man`); the object registers the image from a TU-local static, and the runtime
   loads every registered image (again on a kernel miss, for a library opened later). Each image keeps its own statics and
   is built per local size on its own; a closure type found in two images runs from the first. `tests/sycl/multi_tu/run.sh`

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl fill.cpp (ggml/src/ggml-sycl/fill.cpp, unchanged), compiled as a TU of fill_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU over 2069793 elements with 64 guard slots past the end. A mutant (fill value + 1; a sed
 # copy of the real file) must fail. The link uses a version script that makes every symbol of the test executable local,
 # so the test TU's own dpct helper copies do not interpose libggml-sycl's (see fill_real.cpp).
@@ -36,7 +36,7 @@ fail=0
 # run BACKEND SRCDIR NAME: builds and runs one variant (SRCDIR holds the fill.cpp to include); prints the verdict.
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/fill_real/fill_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

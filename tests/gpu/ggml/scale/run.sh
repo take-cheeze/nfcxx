@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The ggml-sycl SCALE op (ggml_sycl_op_scale, upstream ggml/src/ggml-sycl/ggml-sycl.cpp): scale_real.cpp builds it as its own
-# TU through scripts/sycl-build.sh for OpenCL, links libggml-sycl.so and libggml-base.so from the llama.cpp build, and runs it
+# TU through scripts/sycl-build.rb for OpenCL, links libggml-sycl.so and libggml-base.so from the llama.cpp build, and runs it
 # on the Intel XPU for two contiguous F32 shapes with 64 guard slots past the output. The upstream definitions are static or
 # inline inside ggml-sycl.cpp (too large to compile as a TU), so scale_upstream.cpp carries their text verbatim: this script
 # first checks that copy against the upstream file. A mutant (a sed copy of scale_upstream.cpp in which the output is
@@ -49,7 +49,7 @@ fail=0 notrun=0
 # or the run exited nonzero), 2 SKIP (no device), 3 FAIL (build). The run's output is kept in $out/NAME.res.
 run() {
   local srcdir=$1 name=$2 res rc
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl --ndebug -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$here/scale_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

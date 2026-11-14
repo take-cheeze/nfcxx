@@ -111,7 +111,7 @@ is kept, as a host unit of libstdc++ and vulkan.hpp is mostly unused template in
 129 MB of IR, 8248 and 48 MB after; the inliner then takes about 30 s). The environment variables `NFCXX_IR_OPT` and `NFCXX_IR_OPT_MAX` still work as fallbacks. The device
 passes below still read `NFCXX_IR_OPT`.
 
-`NFCXX_IR_OPT=inline` makes `scripts/sycl-build.sh` run the pass on the device IR before the SPIR-V emitter (any list of passes
+`NFCXX_IR_OPT=inline` makes `scripts/sycl-build.rb` run the pass on the device IR before the SPIR-V emitter (any list of passes
 separated by commas). Unset, the IR is unchanged.
 
 Checks: `tests/pathb-ir-opt/run.sh` (the golden output for `tests/gpu/device/helper.ir`); the Vulkan SYCL programs of
@@ -240,7 +240,7 @@ Bugs found on the way and fixed:
 - Ruled out: the SSA and e-graph stages (the failure remains with them off), and the C++ and Ruby SPIR-V emitters (both fail). The
   two pass outputs are semantically equivalent, and both modules have the same 19 barriers and validate with `spirv-val`.
 - Not a code-size effect: the 13th unroll removes 14 function-storage variables from `groups`, and the vecadd benchmark is unchanged.
-- Workaround (`scripts/sycl-build.sh`, Vulkan default): `unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12`. The cap counts only
+- Workaround (`scripts/sycl-build.rb`, Vulkan default): `unroll-cap-in=nfcxx_sycl_entry,unroll-limit=12`. The cap counts only
   unrolls in entry kernels, so other functions keep their unrolls. A global cap was tried first and removed vecadd's unrolls, because
   earlier functions used up the count. `--unroll-min-trip=2` was also tried and removed the vecadd unrolls too.
 - Verified on lavapipe: the full `tests/sycl/run.sh` Vulkan section passes (98 ok). The WebGPU section was skipped in that environment.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Differential check of the C++ SPIR-V emitter (build/pathb-spirv-emit) against scripts/pathb-spirv-emit.rb, with no GPU:
-# the device IR of every SYCL test program (as scripts/sycl-build.sh makes it), emitted in both modes (Vulkan and
+# the device IR of every SYCL test program (as scripts/sycl-build.rb makes it), emitted in both modes (Vulkan and
 # --kernel-cl), must give the same module, manifest, exit status and message from both. Extra IR files may be named.
 #   tools/pathb-spirv-emit/check.sh [-j N] [FILE.ir ...]
 set -u
@@ -13,7 +13,7 @@ trap 'rm -rf "$out"' EXIT
 export root out
 irs=("$@")
 if [ ${#irs[@]} = 0 ]; then
-  # the device pass of each test (sycl-build.sh: pathb-dump --ir with __NFCXX_SYCL_DEVICE__ and the runtime's headers)
+  # the device pass of each test (sycl-build.rb: pathb-dump --ir with __NFCXX_SYCL_DEVICE__ and the runtime's headers)
   dump() {
     local t=$1 b
     b=$(basename "$t" .cpp)
@@ -27,7 +27,7 @@ fi
 one() {
   local ir=$1 b mode tag rc
   b=$(basename "$ir" .ir)
-  # the two modules, and each with the options of a release build (sycl-build.sh --ndebug --no-div-trap)
+  # the two modules, and each with the options of a release build (sycl-build.rb --ndebug --no-div-trap)
   for mode in "" --kernel-cl "--no-checks --no-div-trap" "--kernel-cl --no-checks --no-div-trap"; do
     case $mode in "") tag= ;; --kernel-cl) tag=-cl ;; --kernel-cl*) tag=-cl-nc ;; *) tag=-nc ;; esac
     NFCXX_SPIRV_EMITTER=check "$root/scripts/spirv-emit" $mode --manifest="$out/$b$tag.man" "$ir" > /dev/null 2> "$out/$b$tag.err"

@@ -52,10 +52,10 @@ if [ "$(uname -s)" = Darwin ] || [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
   # the default parser rejects the template-info objects ("invalid input format").
   sed -i.bak 's|"nm -og 2>/dev/null" |"nm -og 2>/dev/null" -fMacOSX64 |' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
   if [ "${NFCXX_EDG_TARGET:-}" = macos-arm64 ]; then
-    # The cross runtime is C for arm64 Darwin: scripts/cross-macos-cc.sh (clang for the Darwin target, Mach-O objects)
+    # The cross runtime is C for arm64 Darwin: scripts/cross-macos-cc.rb (clang for the Darwin target, Mach-O objects)
     # compiles it, against the clean-room headers. Its long double is IEEE double (the Apple ABI), which the macOS
     # platform config does not state, so the target values the front end reads are set here, in the generated defines.
-    root_cc=$root/scripts/cross-macos-cc.sh
+    root_cc=$root/scripts/cross-macos-cc.rb
     sed -i.bak "s|^EDG_C_TO_OBJ_COMPILER=.*|EDG_C_TO_OBJ_COMPILER=\${NFCXX_CC:-$root_cc}|" "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
     export NFCXX_MACOS_SYSROOT=${NFCXX_MACOS_SYSROOT:-$root/tests/macos-sysroot/include}
   fi

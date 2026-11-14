@@ -1,0 +1,5 @@
+ | src.cpp out/x -I inc -DX=1
+ | src.cpp out.bin
+ | 
+ | nope/src.cpp out
+NFCXX_LINK_DIALECT=@SB@/bin/fakecxx | src.cpp out/deep/x -DNAME=VALUE

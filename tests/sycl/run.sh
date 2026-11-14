@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SYCL tests (lib/sycl, docs/notes/sycl-webgpu.md).
 #   host path     each program builds with g++ and with nfcxx (--cpu) and prints its "ok" line.
-#   OpenCL path   scripts/sycl-build.sh --backend=opencl: the Kernel-capability SPIR-V on an Intel GPU (rt_opencl.hpp).
-#   Level Zero    scripts/sycl-build.sh --backend=level-zero: the same SPIR-V through the Level Zero API (rt_level_zero.hpp).
-#   WebGPU path   scripts/sycl-build.sh compiles the device pass (WGSL) and the host side with nfcxx; the program runs the
+#   OpenCL path   scripts/sycl-build.rb --backend=opencl: the Kernel-capability SPIR-V on an Intel GPU (rt_opencl.hpp).
+#   Level Zero    scripts/sycl-build.rb --backend=level-zero: the same SPIR-V through the Level Zero API (rt_level_zero.hpp).
+#   WebGPU path   scripts/sycl-build.rb compiles the device pass (WGSL) and the host side with nfcxx; the program runs the
 #                 kernels through tests/sycl/server.cjs (Chromium's WebGPU: a GPU, or SwiftShader without one).
 #                 Needs the Path B harness (scripts/setup-pathb.sh), the nfcxx build (setup-edg.sh, setup-qbe.sh), node,
 #                 Playwright and a Chromium with WebGPU. The WebGPU part skips (exit 0) when one is missing.
@@ -22,14 +22,14 @@ have_nfcxx=0
 # ---- host path
 for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fattn_shim fnptr_constexpr vec_array_init host_only_reach usm_align big_tables kernel_properties bf16_to_half; do
   want="$t ok"
-  if "$root/scripts/sycl-build.sh" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
+  if "$root/scripts/sycl-build.rb" --cpu "$t.cpp" -o "$out/$t.g++" > "$out/$t.log" 2>&1 && [ "$("$out/$t.g++" | tail -1)" = "$want" ]; then
     echo "host g++   $t: ok"
   else
     echo "host g++   $t: FAIL"; tail -3 "$out/$t.log"; fail=1
   fi
   # redcustom has a volatile store in a kernel: the qbe backend cannot compile it for the host path (cproc), the WebGPU path never does
   if [ $have_nfcxx = 1 ] && [ "$t" != redcustom ]; then
-    if "$root/scripts/sycl-build.sh" --cpu --cxx="$nfcxx" "$t.cpp" -o "$out/$t.nfcxx" > "$out/$t.log" 2>&1 && [ "$("$out/$t.nfcxx" | tail -1)" = "$want" ]; then
+    if "$root/scripts/sycl-build.rb" --cpu --cxx="$nfcxx" "$t.cpp" -o "$out/$t.nfcxx" > "$out/$t.log" 2>&1 && [ "$("$out/$t.nfcxx" | tail -1)" = "$want" ]; then
       echo "host nfcxx $t: ok"
     else
       echo "host nfcxx $t: FAIL"; tail -3 "$out/$t.log"; fail=1
@@ -44,7 +44,7 @@ vk_ok=0
 libvk=$(ldconfig -p 2>/dev/null | grep libvulkan || true)
 if [ $have_nfcxx = 1 ] && command -v spirv-val >/dev/null && [ -n "$libvk" ]; then vk_ok=1; fi
 if [ $vk_ok = 1 ]; then
-  vkbuild() { "$root/scripts/sycl-build.sh" --backend=vulkan --cxx="$nfcxx" "$1.cpp" -o "$out/vk_$1" > "$out/vk_$1.log" 2>&1; }
+  vkbuild() { "$root/scripts/sycl-build.rb" --backend=vulkan --cxx="$nfcxx" "$1.cpp" -o "$out/vk_$1" > "$out/vk_$1.log" 2>&1; }
   vkprobe=1
   for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array bool_to_float static_closure vulkan_slab calculate_offset usm_align slab_inner slab_wide big_tables; do
     if ! vkbuild $t; then echo "vulkan     $t: FAIL (build)"; grep -v prelinker "$out/vk_$t.log" | head -3; fail=1; continue; fi
@@ -72,7 +72,7 @@ cl_inc=${OPENCL_INCLUDE:-}
 cl_ok=0
 if command -v spirv-val >/dev/null && [ -f "$cl_inc/CL/cl.h" ] && [ -e /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 ]; then cl_ok=1; fi
 if [ $cl_ok = 1 ]; then
-  clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
+  clbuild() { OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.rb" --backend=opencl "$1.cpp" -o "$out/cl_$1" > "$out/cl_$1.log" 2>&1; }
   clprobe=1
   for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class fence usm_align compute_units partial_subgroup slab_inner slab_wide dispatch_cost big_tables kernel_properties bf16_to_half wgs_disjoint wgs_fnptr subgroup32; do
     if ! clbuild $t; then echo "opencl    $t: FAIL (build)"; grep -v prelinker "$out/cl_$t.log" | head -3; fail=1; continue; fi
@@ -88,7 +88,7 @@ if [ $cl_ok = 1 ]; then
   else echo "opencl    trap_div: FAIL (build)"; fail=1; fi
   # --no-div-trap: the same division runs to the end (the divisor is 1 where it is undefined, as on a GPU)
   if [ $clprobe = 1 ]; then
-    if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl --no-div-trap trap_div.cpp -o "$out/cl_ndt" > "$out/cl_ndt.log" 2>&1 &&
+    if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.rb" --backend=opencl --no-div-trap trap_div.cpp -o "$out/cl_ndt" > "$out/cl_ndt.log" 2>&1 &&
        [ "$("$out/cl_ndt" 2>&1 | tail -1)" = "trap_div finished" ]; then echo "opencl    trap_div --no-div-trap: ok"
     else echo "opencl    trap_div --no-div-trap: FAIL"; tail -3 "$out/cl_ndt.log"; fail=1; fi
   fi
@@ -123,7 +123,7 @@ fi
 # name the closure alike. Needs GGML_SRC (the llama.cpp ggml-sycl source directory, which holds dpct/helper.hpp); skips without it.
 ggml_src=${GGML_SRC:-/home/takecheeze/dev/llm/llama.cpp/ggml/src/ggml-sycl}
 if [ $cl_ok = 1 ] && [ -f "$ggml_src/dpct/helper.hpp" ]; then
-  if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.sh" --backend=opencl -DCLOSURE_NAME_DPCT -I"$ggml_src" -I"$root/lib/sycl-ggml" \
+  if OPENCL_INCLUDE=$cl_inc "$root/scripts/sycl-build.rb" --backend=opencl -DCLOSURE_NAME_DPCT -I"$ggml_src" -I"$root/lib/sycl-ggml" \
       closure_name.cpp -o "$out/cl_closure_name" > "$out/cl_closure_name.log" 2>&1 \
      && [ "$("$out/cl_closure_name" | tail -1)" = "closure_name ok" ]; then
     echo "opencl    closure_name: ok"
@@ -141,7 +141,7 @@ fi
 lz_ok=0
 if command -v spirv-val >/dev/null && [ -f /usr/include/level_zero/ze_api.h ] && [ -e /usr/lib/x86_64-linux-gnu/libze_loader.so.1 ]; then lz_ok=1; fi
 if [ $lz_ok = 1 ]; then
-  lzbuild() { "$root/scripts/sycl-build.sh" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
+  lzbuild() { "$root/scripts/sycl-build.rb" --backend=level-zero "$1.cpp" -o "$out/lz_$1" > "$out/lz_$1.log" 2>&1; }
   lzprobe=1
   for t in vecadd saxpy2d reduce bytes chain matmul usm usm_ptr tables libm groups barvar atomics redcustom double copysign slices mulhi std_array subgroup_xor bool_to_float static_closure calculate_offset vec_half half2_ops fnptr_template_arg this_work_item math_extra math_extra_f64 fnptr_constexpr vec_array_init host_only_reach wgs_share subgroup_reduce_logical local_id_2d fattn_denominator_single_key sg_barrier_scope wgs_storage_class usm_align compute_units partial_subgroup slab_inner slab_wide dispatch_cost big_tables kernel_properties bf16_to_half wgs_disjoint wgs_fnptr subgroup32 big_usm; do
     if ! lzbuild $t; then echo "level-zero $t: FAIL (build)"; grep -v prelinker "$out/lz_$t.log" | head -3; fail=1; continue; fi
@@ -156,7 +156,7 @@ if [ $lz_ok = 1 ]; then
     if [ $rc = 71 ] && grep -q "division by zero" "$out/lz_trap_div.err"; then echo "level-zero trap_div: trapped (exit 71)"; else echo "level-zero trap_div: FAIL (exit $rc)"; cat "$out/lz_trap_div.err"; fail=1; fi
   else echo "level-zero trap_div: FAIL (build)"; fail=1; fi
   if [ $lzprobe = 1 ]; then
-    if "$root/scripts/sycl-build.sh" --backend=level-zero --no-div-trap trap_div.cpp -o "$out/lz_ndt" > "$out/lz_ndt.log" 2>&1 &&
+    if "$root/scripts/sycl-build.rb" --backend=level-zero --no-div-trap trap_div.cpp -o "$out/lz_ndt" > "$out/lz_ndt.log" 2>&1 &&
        [ "$("$out/lz_ndt" 2>&1 | tail -1)" = "trap_div finished" ]; then echo "level-zero trap_div --no-div-trap: ok"
     else echo "level-zero trap_div --no-div-trap: FAIL"; tail -3 "$out/lz_ndt.log"; fail=1; fi
   fi
@@ -170,7 +170,7 @@ if [ ! -x "$root/build/pathb/cmake/bin/cpfe" ] || [ $have_nfcxx = 0 ] || ! comma
   exit $fail
 fi
 export NFCXX_SYCL_NODE=${NFCXX_SYCL_NODE:-node}
-build() { "$root/scripts/sycl-build.sh" --cxx="$nfcxx" "$1.cpp" -o "$out/$1" > "$out/$1.log" 2>&1; }
+build() { "$root/scripts/sycl-build.rb" --cxx="$nfcxx" "$1.cpp" -o "$out/$1" > "$out/$1.log" 2>&1; }
 for t in vecadd saxpy2d reduce bytes chain matmul usm tables libm groups barvar atomics redcustom slices; do
   if build $t && [ "$("$out/$t" 2>"$out/$t.err" | tail -1)" = "$t ok" ]; then
     echo "webgpu     $t: ok"
@@ -184,12 +184,12 @@ if build trap_div; then
   if [ $rc = 71 ] && grep -q "division by zero" "$out/trap_div.err"; then echo "webgpu     trap_div: trapped (exit 71)"; else echo "webgpu     trap_div: FAIL (exit $rc)"; cat "$out/trap_div.err"; fail=1; fi
 else echo "webgpu     trap_div: FAIL (build)"; tail -3 "$out/trap_div.log"; fail=1; fi
 # a refusal: double (WebGPU core has no f64; Vulkan has it, see double.cpp)
-rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
+rc=0; "$root/scripts/sycl-build.rb" --cxx="$nfcxx" refuse_double.cpp -o "$out/refuse_double" > "$out/refuse.log" 2>&1 || rc=$?
 if [ $rc = 3 ] && grep -q "double" "$out/refuse.log"; then echo "webgpu     refuse_double: refused (exit 3)"; else echo "webgpu     refuse_double: FAIL (exit $rc)"; cat "$out/refuse.log"; fail=1; fi
 # the reproducer of the constexpr function-pointer local (from a template selector) called in a kernel body that a
 # function-pointer template argument reaches (fattn-vec.hpp's vec_dot_KQ): the device pass used to refuse the address of the
 # selected function ("refused: address of function"); the device emitters fold the stored address into the direct call, so
 # the device compile must now succeed (its run is fnptr_constexpr, above).
-rc=0; "$root/scripts/sycl-build.sh" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/fnptr_repro" > "$out/fnptr_repro.log" 2>&1 || rc=$?
+rc=0; "$root/scripts/sycl-build.rb" --cxx="$nfcxx" refuse_fnptr_constexpr.cpp -o "$out/fnptr_repro" > "$out/fnptr_repro.log" 2>&1 || rc=$?
 if [ $rc = 0 ]; then echo "webgpu     refuse_fnptr_constexpr: device pass accepted"; else echo "webgpu     refuse_fnptr_constexpr: FAIL (exit $rc)"; cat "$out/fnptr_repro.log"; fail=1; fi
 exit $fail

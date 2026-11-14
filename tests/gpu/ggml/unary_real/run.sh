@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl element_wise.cpp (ggml/src/ggml-sycl/element_wise.cpp, unchanged), compiled as a TU of unary_real.cpp
-# through scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# through scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real ggml_sycl_op_neg / _relu / _silu / _gelu, F32, flat and strided, two shapes, 64
 # guard slots past the output, 1e-5 relative tolerance. A mutant (relu takes the minimum; a sed copy of the real file) must
 # fail. The link uses a version script that makes every symbol of the test executable local, so the test TU's own dpct
@@ -41,7 +41,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_SYCL_HAS_BF16 \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED -DGGML_SYCL_HAS_BF16 \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/unary_real/unary_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

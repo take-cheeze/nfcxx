@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Driver for the per-op directories under tests/gpu/ggml/binary/: bin_run.sh OP runs the real ggml-sycl binbcast.cpp entry
-# point of OP (ggml_sycl_OP: add, sub, mul, div), unchanged, compiled as a TU of bin_real.cpp through scripts/sycl-build.sh
+# point of OP (ggml_sycl_OP: add, sub, mul, div), unchanged, compiled as a TU of bin_real.cpp through scripts/sycl-build.rb
 # for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on the Intel XPU (F32,
 # contiguous; a same-shape case and a broadcast case). A mutant (a copy of binbcast.hpp in which the op's one return line
 # is off by one) must produce wrong results: it is caught only by a run that completes with a checks line reporting
@@ -62,7 +62,7 @@ fail=0 notrun=0
 # keeps the run's output in $out/NAME.res. Returns 0 ok, 1 FAIL (checks or exit status), 2 SKIP (no device), 3 FAIL (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -DBIN_ID="$id" -DBIN_OPNAME="$op" -DBIN_CALL="$call" -DBIN_LO0="$lo0" -DBIN_HI0="$hi0" -DBIN_LO1="$lo1" -DBIN_HI1="$hi1" \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$here/bin_real.cpp" -o "$out/$name" \

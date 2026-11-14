@@ -9,7 +9,7 @@
 // kernels take F by const reference (a by-value empty functor passed into a nested call is lowered to a static object the
 // front end refuses). fastdiv's mul_hi is the plain 64-bit product (see mulhi32). The host side is a main in the style of
 // fill_kernel.cpp: USM, a double-precision reference, and 64 guard slots past the output.
-// Build: scripts/sycl-build.sh --backend=opencl unary_kernel.cpp -o unary_kernel && ./unary_kernel
+// Build: scripts/sycl-build.rb --backend=opencl unary_kernel.cpp -o unary_kernel && ./unary_kernel
 #include <sycl/sycl.hpp>
 #include <algorithm>
 #include <cmath>

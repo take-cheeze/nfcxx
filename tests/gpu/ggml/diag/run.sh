@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The llama.cpp testbed (docs/notes/ggml-sycl.md): ggml-sycl's F32 diag op (diag_kernel.cpp, the kernel and its nd_range
-# launch copied from ggml/src/ggml-sycl/diag.cpp) built with scripts/sycl-build.sh for OpenCL and Level Zero, run on the
+# launch copied from ggml/src/ggml-sycl/diag.cpp) built with scripts/sycl-build.rb for OpenCL and Level Zero, run on the
 # Intel XPU for three shapes, with 64 guard slots past the end of the output. A mutant (off-diagonal = src value + 1) must
 # fail on every shape. Needs the OpenCL headers (OPENCL_INCLUDE), spirv-val on PATH and the Intel GPU runtime; skips
 # (exit 0) when one is missing, and a backend whose runtime reports no device (exit 70) is skipped.
@@ -41,7 +41,7 @@ check() {
 }
 
 for b in opencl level-zero; do
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" diag_kernel.cpp -o "$out/$b" > "$out/$b.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" diag_kernel.cpp -o "$out/$b" > "$out/$b.build" 2>&1; then
     echo "diag $b: FAIL (build)"; grep -v prelinker "$out/$b.build" | head -3; fail=1; continue
   fi
   rc=0; check $b "$out/$b" || rc=$?
@@ -49,7 +49,7 @@ for b in opencl level-zero; do
 
   # the mutant: the off-diagonal writes src + 1, which the check must catch on every shape
   sed 's/dst\[dst_idx\] = T(0);/dst[dst_idx] = src[((i3 * ne2 + i2) * ne0) + i0] + T(1);/' diag_kernel.cpp > "$out/$b.mut.cpp"
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" "$out/$b.mut.cpp" -o "$out/$b.mut" > "$out/$b.mut.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" "$out/$b.mut.cpp" -o "$out/$b.mut" > "$out/$b.mut.build" 2>&1; then
     echo "mutant diag $b: FAIL (build)"; fail=1; continue
   fi
   mrc=0

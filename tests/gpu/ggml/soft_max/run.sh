@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl softmax.cpp (ggml/src/ggml-sycl/softmax.cpp, unchanged), compiled as a TU of soft_max_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU: the real ggml_sycl_op_soft_max, F32, scale 1.0, without and with an F32 mask, on shapes
 # 64x4x2x1 and 128x7x3x2 (ne0 is the softmax dimension), 64 guard slots past the output, every element checked against a
 # double-precision reference at 1e-5 relative tolerance. A mutant (the row max is not taken; a sed copy of the real file)
@@ -44,7 +44,7 @@ fail=0 notrun=0
 # device), 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/soft_max/soft_max_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

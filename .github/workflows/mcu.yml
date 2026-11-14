@@ -64,12 +64,12 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/espressif-qemu/build/qemu-system-riscv32
-          key: espressif-qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/mcu-qemu.sh') }}
+          key: espressif-qemu-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/mcu-qemu.rb') }}
 
-      # Espressif's QEMU fork (hw/riscv/esp32c3.c) at the commit pinned in scripts/mcu-qemu.sh.
+      # Espressif's QEMU fork (hw/riscv/esp32c3.c) at the commit pinned in scripts/mcu-qemu.rb.
       - name: Build the ESP32-C3 emulator
         if: steps.qemu.outputs.cache-hit != 'true'
-        run: scripts/mcu-qemu.sh build/espressif-qemu
+        run: scripts/mcu-qemu.rb build/espressif-qemu
 
       - name: ESP32-C3 checks (layout, compile, and run under the emulator)
         run: tests/mcu/run.sh

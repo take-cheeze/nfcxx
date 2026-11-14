@@ -1,0 +1,8 @@
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c\nc++\x20-c\x20/src/b.c\nc++\x20-c\x20/src/mk_errinfo.c\nnot\x20a\x20compile\n | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c STUB_OUT_PATHB_LDRT=/x86rt.a | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c\nc++\x20-c\x20/src/b.c STUB_RC_NFCXX=1 | 
+JOBS=1 STUB_OUT_NINJA=nothing\x20here | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c FRONT_END=@SB@/build/edg/bin/cpfe | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c FRONT_END=@SB@/nope | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c STUB_RC_PATHB_LDRT=4 | 
+JOBS=1 STUB_OUT_NINJA=c++\x20-c\x20/src/a.c STUB_RC_NFCXX=0 | 

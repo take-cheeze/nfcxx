@@ -1,0 +1,10 @@
+ | -o out.bin x.o -L/lib -lfoo -lstdc++ -lc -Wl,-rpath,/x -O2 -c -shared -fPIC -pipe -g3 -Wall -mcpu=x
+ | -o out.bin a.o libz.a -rpath /r -lm -ldl -lpthread -lgcc_s
+ | host.o m.o -lC
+ | -obin.o m.o
+ | -L /lib -lq m.o
+ | -o
+ | m.o
+NFCXX_MACOS_RT=@SB@/nope.a | -o z m.o
+NFCXX_MACOS_LIBCXX_BUILT=@SB@/nope.a NFCXX_MACOS_LIBC=@SB@/nope.a | m.o
+NFCXX_MACOS_LIBC=@SB@/build/macos-rt/libC-darwin.a | -o q m.o -lc++ -l

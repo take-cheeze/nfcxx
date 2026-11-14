@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl norm.cpp (ggml/src/ggml-sycl/norm.cpp, unchanged), compiled as a TU of rms_norm_real.cpp through
-# scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
+# scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so from the llama.cpp
 # build, and run on the Intel XPU for two shapes (64x4x2x1 and 128x7x3x2, ne0 reduced, eps 1e-6) with every element checked
 # against a double-precision reference and 64 guard slots past the output. A mutant (eps left out of the rsqrt; a sed copy
 # of the real file) must fail. The link uses a version script that makes every symbol of the test executable local (see
@@ -38,7 +38,7 @@ fail=0
 # pass, 2 when the runtime reports no device, 1 otherwise (a build failure prints NOT RUN (build)).
 run() {
   local b=$1 srcdir=$2 name=$3 res rc
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/rms_norm/rms_norm_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

@@ -1,0 +1,40 @@
+ | prog.cpp -o prog
+ | --cpu prog.cpp -o prog
+ | --cpu -std=c++20 -O2 prog.cpp -o prog
+ | --backend=vulkan prog.cpp -o prog
+STUB_OUT_SPIRV_EMIT=SPV STUB_RC_SPIRV_VAL=1 | --backend=vulkan prog.cpp -o prog
+STUB_OUT_SPIRV_EMIT=SPV | --backend=vulkan prog.cpp -o prog
+STUB_RC_SPIRV_EMIT=3 | --backend=vulkan prog.cpp -o prog
+ | --backend=opencl prog.cpp -o prog
+ONEAPI_ROOT=@SB@/oneapi | --backend=opencl prog.cpp -o prog
+ONEAPI_ROOT=@SB@/oneapi OPENCL_INCLUDE=@SB@/mine | --backend=opencl -DX=1 prog.cpp -o prog
+ | --backend=opencl -c -fPIC prog.cpp -o prog.o
+ | --backend=level-zero prog.cpp -o prog
+ | --backend=level-zero -c prog.cpp -o prog.o
+STUB_OUT_SPIRV_EMIT=CL STUB_RC_SPIRV_VAL=2 | --backend=level-zero prog.cpp -o prog
+STUB_RC_PATHB_DUMP=1 | prog.cpp -o prog
+STUB_RC_MRB=3 | prog.cpp -o prog
+STUB_RC_MRB=3 | --backend=opencl prog.cpp -o prog
+NFCXX_IR_OPT=off | prog.cpp -o prog
+NFCXX_IR_OPT= | prog.cpp -o prog
+NFCXX_IR_OPT=inline,sroa | prog.cpp -o prog
+STUB_RC_PATHB_IR_OPT_RB=1 | prog.cpp -o prog
+NFCXX_CFG=off | prog.cpp -o prog
+NFCXX_SSA_OPT=off | prog.cpp -o prog
+STUB_RC_PATHB_SSA_RB=1 | prog.cpp -o prog
+STUB_RC_PATHB_EGRAPH_RB=1 | prog.cpp -o prog
+STUB_RC_PATHB_SSA_STRUCTURIZE_RB=1 | prog.cpp -o prog
+NFCXX_FORWARD=off | prog.cpp -o prog
+ | --cxx=fakecxx -O3 -I inc -DX=1 -Wl,--as-needed -L lib -l foo -rpath /r -shared --diag_warning=x prog.cpp -o prog
+ | --cxx=fakecxx --ndebug --no-div-trap -std=c++20 prog.cpp -o prog
+ | --keep-ir prog.cpp -o prog
+ | --cxx="fakecxx -x" prog.cpp -o prog
+ | prog.cpp
+ | -o prog
+ | -L lib prog.cpp -o prog
+ | -rpath
+ | --backend=bogus prog.cpp
+ | --bogus prog.cpp
+ | -c prog.cpp -o prog
+ |
+ | -I

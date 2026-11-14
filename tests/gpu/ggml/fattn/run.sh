@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl vector flash-attention kernel (ggml/src/ggml-sycl/fattn-vec.hpp, unchanged), compiled as a TU of
-# fattn_real.cpp through scripts/sycl-build.sh for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so
+# fattn_real.cpp through scripts/sycl-build.rb for OpenCL and Level Zero, linked against libggml-sycl.so and libggml-base.so
 # from the llama.cpp build, and run on the Intel XPU: ggml_sycl_flash_attn_ext_vec_case<64, F16, F16> (the vec kernel the
 # fattn.cpp dispatcher runs for F16 K and V at head size 64), no mask, four shapes (grouped and ungrouped query heads, one to
 # three tokens, 77 to 300 keys), every output element checked against a double-precision softmax(QK^T scale)V at 2e-2 absolute
@@ -46,7 +46,7 @@ fail=0 notrun=0
 # 3 FAIL (build).
 run() {
   local b=$1 srcdir=$2 name=$3
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SYCL_F16 -DGGML_SHARED --ndebug \
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" -DGGML_SYCL_WARP_SIZE=16 -DGGML_SYCL_F16 -DGGML_SHARED --ndebug \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/fattn/fattn_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

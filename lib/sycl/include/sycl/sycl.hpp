@@ -2,7 +2,7 @@
 // Two execution paths share this header:
 //
 //   host (default)   the kernel is an ordinary C++ loop on the CPU. Any C++17 compiler builds and runs the program.
-//   WebGPU           -DNFCXX_SYCL_WEBGPU. scripts/sycl-build.sh compiles the same source a second time with
+//   WebGPU           -DNFCXX_SYCL_WEBGPU. scripts/sycl-build.rb compiles the same source a second time with
 //                    -D__NFCXX_SYCL_DEVICE__ (the "device pass"), lowers each kernel's closure `operator()` and
 //                    everything it calls to WGSL (scripts/pathb-wgsl-emit.rb), and lib/sycl/rt_pipe.hpp runs the WGSL
 //                    through WebGPU. The host copies the closure object's bytes to the GPU as the kernel's arguments, so
@@ -24,7 +24,7 @@
 
 // A device backend is in use: NFCXX_SYCL_GPU (WebGPU: -DNFCXX_SYCL_WEBGPU, rt_pipe.hpp; Vulkan: -DNFCXX_SYCL_VULKAN,
 // rt_vulkan.hpp; OpenCL: -DNFCXX_SYCL_OPENCL, rt_opencl.hpp; Level Zero: -DNFCXX_SYCL_LEVEL_ZERO, rt_level_zero.hpp).
-// The SPIR-V or WGSL image comes from scripts/sycl-build.sh.
+// The SPIR-V or WGSL image comes from scripts/sycl-build.rb.
 #if defined(NFCXX_SYCL_WEBGPU) || defined(NFCXX_SYCL_VULKAN) || defined(NFCXX_SYCL_OPENCL) || defined(NFCXX_SYCL_LEVEL_ZERO)
 #define NFCXX_SYCL_GPU 1
 #endif

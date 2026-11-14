@@ -51,8 +51,8 @@ cproc) is ours to vendor.
 | `scripts/setup-qbe.sh` (QBE and cproc from the fork, and cproc's stage 2 in `build/cproc/stage2`) | make, patch, git (submodules `3rd/qbe`, `3rd/cproc`), libgcc and libstdc++ for the stage-2 link | submodule fetch only |
 | `scripts/setup-mruby.sh` (the interpreter that runs the helper scripts) | ruby, ninja, git, flock | one shallow fetch of `mruby/mruby` at the pinned commit |
 | `scripts/setup-pathb.sh` (Path B harness `cpfe`, `build/pathb`) | cmake, ninja, git (the `3rd/edg` submodule) | submodule fetch only |
-| `scripts/selfhost-cpfe.sh` (cpfe built by nfcxx's qbe backend, `build/selfhost/cpfe`) | ninja (reads the source list from `build/edg`), gcc/g++, after `setup-edg.sh` and `setup-qbe.sh` | none |
-| `FRONT_END=build/selfhost/cpfe SELFHOST_OUT=build/selfhost/stage2 scripts/selfhost-cpfe.sh` (stage 2: the nfcxx-built cpfe compiles and links the same sources) | as above | none |
+| `scripts/selfhost-cpfe.rb` (cpfe built by nfcxx's qbe backend, `build/selfhost/cpfe`) | ninja (reads the source list from `build/edg`), gcc/g++, after `setup-edg.sh` and `setup-qbe.sh` | none |
+| `FRONT_END=build/selfhost/cpfe SELFHOST_OUT=build/selfhost/stage2 scripts/selfhost-cpfe.rb` (stage 2: the nfcxx-built cpfe compiles and links the same sources) | as above | none |
 
 Stage 2 was checked against stage 1: the 22 cases of `tests/run.sh` (qbe) pass with either front end (0 failures); `--emit-c` output matches on 41 inputs after normalising timestamps and temporary names; the object files match on 36 of 37 sources compiled, and the one difference (`tests/cases/qbe_gnu_forms.cpp`) also differs between two runs of stage 1.
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
@@ -149,7 +149,7 @@ Notes from the checks:
 
 ## Float-to-integer in the stage-2 front end
 
-The stage-2 front end (`scripts/selfhost-cpfe.sh` with `FRONT_END` set to the stage-1 `cpfe`) aborted on an out-of-range
+The stage-2 front end (`scripts/selfhost-cpfe.rb` with `FRONT_END` set to the stage-1 `cpfe`) aborted on an out-of-range
 `__float128` or `long double` to integer conversion. EDG folds such a constant in its own code, and that code calls the
 checked runtime helper (`__nfcxx_f128_to_s` in `be/nfcxx_ldrt.c`). Stage 1 is built by gcc, so it gave the x86-64 result.
 

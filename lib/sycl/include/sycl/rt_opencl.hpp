@@ -17,7 +17,7 @@
 // build; a program is built once per local size (the same cache as the Vulkan pipelines). Each dispatch is waited for before
 // the next, and the flag is read after it.
 //
-// Images. Every TU built by scripts/sycl-build.sh registers its image; the runtime loads them all (rt_image.hpp), and each
+// Images. Every TU built by scripts/sycl-build.rb registers its image; the runtime loads them all (rt_image.hpp), and each
 // keeps its own statics. Environment: NFCXX_SYCL_IMAGE (a colon-separated list of prefixes in place of the registered ones).
 #ifndef NFCXX_SYCL_RT_OPENCL_HPP
 #define NFCXX_SYCL_RT_OPENCL_HPP

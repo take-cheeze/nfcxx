@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl cpy.cpp (ggml/src/ggml-sycl/cpy.cpp, unchanged), compiled as a TU of cpy_real.cpp through
-# scripts/sycl-build.sh for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
+# scripts/sycl-build.rb for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
 # the Intel XPU: the real ggml_sycl_cpy for F32 -> F16 (flat and strided F32 sources, two shapes, four checks), each F16
 # element compared with its F32 input to within the half rounding error, 64 guard slots past the destination untouched. A
 # mutant (a sed copy of the real cpy.cpp in which the F32 value is doubled before the conversion) must produce wrong results:
@@ -42,7 +42,7 @@ fail=0 notrun=0
 # (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/cpy_f32_f16/cpy_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

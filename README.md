@@ -37,7 +37,7 @@ scripts/setup-poly-js.sh  # QuickJS-NG (plain C) for lib/poly
 scripts/setup-poly-go.sh  # yaegi, a Go interpreter, in a cgo shared library for lib/poly (needs Go >= 1.24 and the Go module proxy; one library for both back ends)
 tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript, Go and ast from C++ with bound host objects, exceptions across the boundary (Path B and gcc; docs/notes/poly.md)
 tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter with inlining of small functions and a tier for hot numeric kernels, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
-scripts/sycl-build.sh prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
+scripts/sycl-build.rb prog.cpp -o prog  # SYCL 2020 subset (lib/sycl): kernels to WGSL, run through WebGPU; --cpu for plain loops (docs/notes/sycl-webgpu.md)
 tests/sycl/run.sh         # SYCL programs on the host path and on WebGPU (Chromium/SwiftShader through Playwright), traps and refusals
 scripts/linux-qemu.sh     # minimal x86_64 Linux 6.8 (tinyconfig) + busybox initramfs, booted under qemu-system-x86_64; KCC=nfcc builds it with nfcc (docs/notes/linux-kernel.md)
 ./nfcxx --cosmo hello.c -o hello.com # Cosmopolitan: cosmocc (APE binary, runs on several OSes) via scripts/setup-cosmo.sh; C only so far (docs/notes/cosmo.md)

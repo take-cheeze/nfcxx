@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# emitopts.cpp built with scripts/sycl-build.sh for Level Zero and OpenCL, as a debug build and as a release build (--ndebug
+# emitopts.cpp built with scripts/sycl-build.rb for Level Zero and OpenCL, as a debug build and as a release build (--ndebug
 # --no-div-trap, as the ggml-sycl library is built), run on the Intel XPU, and the release module checked with spirv-dis:
 #   - no trap at all (OpAtomicUMax on the flag): --no-checks drops the null-pointer and bounds checks, a division or shift by
 #     a constant has no guard;
@@ -25,7 +25,7 @@ fail=0
 # run BACKEND NAME OPTIONS...: builds emitopts.cpp with the options and runs it
 run() {
   local b=$1 n=$2; shift 2
-  if ! "$root/scripts/sycl-build.sh" --backend="$b" "$@" -I"$root/lib/sycl-ggml" emitopts.cpp -o "$out/$n" > "$out/$n.build" 2>&1; then
+  if ! "$root/scripts/sycl-build.rb" --backend="$b" "$@" -I"$root/lib/sycl-ggml" emitopts.cpp -o "$out/$n" > "$out/$n.build" 2>&1; then
     echo "emitopts $n: FAIL (build)"; grep -v prelinker "$out/$n.build" | head -3; return 1
   fi
   local res rc

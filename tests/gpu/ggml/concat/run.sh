@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real ggml-sycl concat.cpp (ggml/src/ggml-sycl/concat.cpp, unchanged), compiled as a TU of concat_real.cpp through
-# scripts/sycl-build.sh for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
+# scripts/sycl-build.rb for OpenCL, linked against libggml-sycl.so and libggml-base.so from the llama.cpp build, and run on
 # the Intel XPU: the real ggml_sycl_op_concat for F32 along dims 0, 1 and 2 (two shapes, six checks), each output element
 # compared bit-exactly against the inputs, 64 guard slots past the output. A mutant (a sed copy of the real concat.cpp in
 # which the src1 element of the dim-0, dim-1 and dim-2 kernels is off by one) must produce wrong results: it is caught only
@@ -41,7 +41,7 @@ fail=0 notrun=0
 # 3 FAIL (build).
 run() {
   local srcdir=$1 name=$2
-  if ! "$root/scripts/sycl-build.sh" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
+  if ! "$root/scripts/sycl-build.rb" --backend=opencl -DGGML_SYCL_WARP_SIZE=16 -DGGML_SHARED \
       -I"$srcdir" -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." \
       "$root/tests/gpu/ggml/concat/concat_real.cpp" -o "$out/$name" \
       -L"$ggml_build" -lggml-sycl -lggml-base -Wl,-rpath,"$ggml_build" -L"$oneapi_lib" -Wl,-rpath,"$oneapi_lib" \

@@ -21,7 +21,7 @@
 // backend_wait (queue and event waits, host tasks), when the arena or the heap is full, and at exit. A trap is reported
 // at that wait. NFCXX_SYCL_SYNC=1 waits after every launch (a trap is then reported by the dispatch that caused it).
 //
-// Images. Every TU built by scripts/sycl-build.sh registers its image; the runtime loads them all (rt_image.hpp), and each
+// Images. Every TU built by scripts/sycl-build.rb registers its image; the runtime loads them all (rt_image.hpp), and each
 // keeps its own statics. Environment: NFCXX_SYCL_IMAGE (a colon-separated list of prefixes in place of the registered ones).
 #ifndef NFCXX_SYCL_RT_LEVEL_ZERO_HPP
 #define NFCXX_SYCL_RT_LEVEL_ZERO_HPP

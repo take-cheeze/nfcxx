@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Several TUs with kernels in one program (lib/sycl/include/sycl/rt_image.hpp): scale.cpp, shift.cpp and main.cpp are each
-# compiled with scripts/sycl-build.sh -c (an object and its device image), then (1) the three objects are linked into one
+# compiled with scripts/sycl-build.rb -c (an object and its device image), then (1) the three objects are linked into one
 # program and (2) scale.o and shift.o go into a shared library that the program links. Each kernel reads a table of its own
 # TU, so a kernel run with another image's statics fails the check. Both on OpenCL and on Level Zero. A mutant (shift.cpp's
 # table changed) must fail. Needs spirv-val, the OpenCL headers, the Level Zero loader and an Intel GPU; a backend whose
@@ -23,9 +23,9 @@ export EDG_BUILD=${EDG_BUILD:-$root/build/edg} EDG_BASE=${EDG_BASE:-$root/build/
 build() {
   local b=$1 d=$2 shift_src=$3
   mkdir -p "$d"
-  "$root/scripts/sycl-build.sh" --backend=$b -c -fPIC scale.cpp -o "$d/scale.o" &&
-  "$root/scripts/sycl-build.sh" --backend=$b -c -fPIC "$shift_src" -o "$d/shift.o" &&
-  "$root/scripts/sycl-build.sh" --backend=$b -c main.cpp -o "$d/main.o"
+  "$root/scripts/sycl-build.rb" --backend=$b -c -fPIC scale.cpp -o "$d/scale.o" &&
+  "$root/scripts/sycl-build.rb" --backend=$b -c -fPIC "$shift_src" -o "$d/shift.o" &&
+  "$root/scripts/sycl-build.rb" --backend=$b -c main.cpp -o "$d/main.o"
 }
 
 # verdict NAME RC OUTPUT: 0 ok, 1 FAIL, 2 SKIP (no device)
