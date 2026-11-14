@@ -1028,6 +1028,7 @@ end
 
 # The CUDART_VERSION of a header, as nfcc reads it: the first line "#define CUDART_VERSION <digits>" (sed -nE); 0 when none.
 def cudart_version_of(path)
+  return 0 unless File.file?(path)   # a missing header: the version is unknown (the bash's sed fails, and || rtv= takes it)
   text = File.open(path, "rb") { |io| io.read }
   text.split("\n").each do |line|
     next unless line.start_with?("#define")
@@ -1081,10 +1082,8 @@ def cuda_driver_wrap(env, args, driver_name)
     derived = cuda_home_from_library(found)
     home = !derived.empty? && File.file?("#{derived}/include/cuda.h") ? derived : "/usr/local/cuda"
   end
-  # bash runs the version probe (sed on cuda_runtime_api.h) under set -e and pipefail: an unreadable header ends nfcc with
-  # status 2 and no message
+  # the version is read from cuda_runtime_api.h; a missing header leaves it unknown (the bash reads it with || rtv=)
   header = "#{home}/include/cuda_runtime_api.h"
-  raise CudaExit.new("", 2) unless File.file?(header)
   rtv = cudart_version_of(header)
 
   why = ""
@@ -1092,6 +1091,8 @@ def cuda_driver_wrap(env, args, driver_name)
     why = "the shim is x86-64 only"
   elsif !File.file?("#{home}/include/cuda.h") || !File.file?("#{home}/include/cudaTypedefs.h")
     why = "no cuda.h and cudaTypedefs.h in #{home}/include"
+  elsif !File.file?(header)
+    why = "no cuda_runtime_api.h in #{home}/include"
   elsif rtv == 0 || rtv < 12050
     rtv_text = rtv == 0 ? "of unknown version" : rtv.to_s
     why = "libcudart #{rtv_text} is older than 12.5"
