@@ -33,8 +33,9 @@ while IFS= read -r line; do
   cp -r "$repo/scripts" "$root/scripts"
   ln -sf "$here/stub.sh" "$root/scripts/sycl-integration-header.sh"
   # the driver, cut after its cpp2_prepare call; its nested self-runs go to the stub
+  # the nested runs of the SYCL passes (the lines with NFCXX_SYCL_PASS) go to the stub; the wrappers keep the driver's name
   awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$repo/nfcxx" \
-    | sed 's|"\$root/nfcxx"|"$root/nfcxx-nested"|g' > "$root/nfcxx"
+    | sed '/NFCXX_SYCL_PASS=1/s|"\$root/nfcxx"|"$root/nfcxx-nested"|g' > "$root/nfcxx"
   chmod +x "$root/nfcxx"
   ln -s "$here/stub.sh" "$root/nfcxx-nested"
   : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
@@ -57,6 +58,9 @@ while IFS= read -r line; do
   printf '#include <sycl/sycl.hpp>\nint k;\n' > "$work/sy.cc"
   printf '#include <sycl/sycl.hpp>\nmain: () -> int = { return 0; }\n' > "$work/sy.cpp2"
   printf 'int main() { return 0; }\n' > "$work/plain.cc"
+  printf '#include <sycl/sycl.hpp>\nint k;\n' > "$work/sy.cxx"
+  printf '#include <sycl/sycl.hpp>\nint k;\n' > "$work/sy.c"
+  printf 'int main() { return 0; }\n' > "$work/plain.c"
   envs=(); while read -r kind k v; do [ "$kind" = env ] && envs+=("$k=$v"); done < "$sb/facts"
 
   # the port
