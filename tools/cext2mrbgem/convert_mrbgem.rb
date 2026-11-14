@@ -969,11 +969,13 @@ texts = static_rename(texts)
     text_decls = regex_declarations(rel, f)
     extra = text_decls.select { |d| d['proto'] && names.include?(d['name']) && !listed.include?(d['po']) }
     # a definition the text has and the front end does not list is excluded by its #if (or is not a definition)
-    text_decls.each { |d| @excluded_defs << d['name'] if !d['proto'] && !names.include?(d['name']) }
+    # per definition: a text definition the front end does not list (its #if is false in this build), even when another
+    # definition of the same name is listed (#if A ... #else ... #endif)
+    text_decls.each { |d| @excluded_defs << d['name'] if !d['proto'] && !listed.include?(d['po']) }
     # the body of such a definition is not compiled (its #if is false in this build): its spans are kept, so a use inside
     # them is dead code, not a file-scope use (see the identifier pass)
     text_decls.each do |d|
-      next if d['proto'] || names.include?(d['name']) || d['brace'].nil? || d['body_end'].nil?
+      next if d['proto'] || listed.include?(d['po']) || d['brace'].nil? || d['body_end'].nil?
       (@excluded_spans ||= {})[rel] ||= []
       @excluded_spans[rel] << [d['brace'], d['body_end']]
     end
@@ -1420,6 +1422,20 @@ end
       out << [t, irel, a[0] + lead]
     end
     out
+  end
+
+  # A name with one definition, or with definitions that are the alternatives of one conditional (#if A ... #else/#elif ...
+  # #endif, in one file): only one of them is compiled, so each is converted the same way and the name is one helper.
+  def single_or_exclusive?(name)
+    defs = (@defs[name] || []).reject { |x| x['proto'] }
+    return true if defs.size == 1
+    return false if defs.empty?
+    return false unless defs.map { |x| x['file'] }.uniq.size == 1
+    sorted = defs.sort_by { |x| x['hstart'] }
+    sorted.each_cons(2).all? do |a, b|
+      between = @files[a['file']]['masked'][a['hend']...b['hstart']].to_s
+      between.match?(/^[ \t]*#[ \t]*(?:else|elif)\b/) && !between.match?(/^[ \t]*#[ \t]*endif\b/)
+    end
   end
 
   def fnptr_param_recs
@@ -1869,13 +1885,17 @@ end
     cands = Set.new
     @needs.to_a.sort.each do |name|
       next if (@reg_names - @split_names).include?(name) || name == init_first || !@defs.key?(name)
-      cands << name if @defs[name].size == 1
+      cands << name if single_or_exclusive?(name)
     end
 
     helper_uses = lambda do |name|
       out = []
       (@occ[name] || []).each do |rel, s, e|
         next if @decls.any? { |d| d['name'] == name && rel == d['file'] && d['hstart'] <= s && s < d['hend'] }
+        # a definition header in the text (also one the front end excludes, as in an inactive #if branch): name (params) {
+        next if @files[rel]['masked'][e..].to_s.match?(/\A[ \t\n]*\([^()]*\)[ \t\n]*\{/)
+        # a definition's own header (a name that has several definitions: each is a header, not a use)
+        next if (@defs[name] || []).any? { |d| d['file'] == rel && d['hstart'] && d['brace'] && d['hstart'] <= s && s < d['brace'] }
         # a split method's registration names it as the wrapper, which is not a use of the impl
         next if valid_reg.any? { |r| rel == r['file'] && r['open'] <= s && s <= r['close'] }
         next if in_dead_init(rel, s)
@@ -2020,7 +2040,7 @@ use_problem = lambda do |name, use|
     gcands = Set.new
     @needs.to_a.sort.each do |name|
       next if @reg_names.include?(name) || name == init_first || !@defs.key?(name) || cands.include?(name)
-      gcands << name if @defs[name].size == 1
+      gcands << name if single_or_exclusive?(name)
     end
     with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
     global_use = lambda do |name, use, members|
@@ -2762,6 +2782,9 @@ end
     @helper_names.to_a.sort.each do |name|
       (@occ[name] || []).each do |orel, s, e|
         next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
+        # a use in the text of an inactive definition (its #if is false in this build) stays as it is
+        next if ((@excluded_spans || {})[rel] || []).any? { |a, z| a < s && s < z }
+        next if masked[e..].to_s.match?(/\A[ \t\n]*\([^()]*\)[ \t\n]*\{/)
         po = next_nonspace(masked, e)
         next if po < 0 || masked[po] != '('
         pa = next_nonspace(masked, po + 1)
@@ -3449,6 +3472,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # mrb_class_ptr(mrb_singleton_class(...)); the identifier pass skips the CLASS_OF token inside that edit
       if (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
         tgt_new = "mrb_class_ptr(mrb_singleton_class(#{mrb_tok(rel, s)}, mrb_obj_value(#{co[1]})))"
+        ed.add(*rec['target_span'], tgt_new)
+        tgt = tgt_new
+      # a VALUE name of the function (a class value, unwrapped with mrb_class_ptr), or a VALUE struct member
+      elsif (rfn = enclosing_func(rel, s)) && (value_names_of(rfn).include?(tgt) && !@class_vars.include?(tgt) || is_param(rel, s, tgt)) &&
+            tgt.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        tgt_new = "mrb_class_ptr(#{tgt})"
         ed.add(*rec['target_span'], tgt_new)
         tgt = tgt_new
       # a tracked class variable, or a CRuby class constant with a mruby class expression (rb_cString -> mrb->string_class)

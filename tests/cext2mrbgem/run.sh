@@ -95,7 +95,7 @@ check grep -qF 'mrb_define_const(mrb, mrb->object_class, "MODULE_CONST_LOADED", 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name module_const_refused tools/cext2mrbgem/fixtures/module_const_refused/ext/module_const_refused "$work/module_const_refused" > "$work/module_const_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -q '  rb_define_const  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
-check grep -q '  rb_define_module_function  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
+check grep -qF 'mrb_define_module_function(mrb, mrb_class_ptr(target), "y", mcr_run, MRB_ARGS_NONE());' "$work/module_const_refused/src/module_const_refused.c"
 
 # 2h. rb_const_get maps to mrb_const_get (the receiver as a VALUE, rb_cObject as its VALUE); rb_const_get_at has no
 # exact mruby equivalent and stays refused
@@ -347,6 +347,12 @@ check grep -qF 'if (mrb_str_equal(mrb, s, mrb_str_new_cstr(mrb, "add"))) return 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ary_freeze tools/cext2mrbgem/fixtures/api_ary_freeze/ext/api_ary_freeze "$work/api_ary_freeze" > "$work/api_ary_freeze.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_freeze(mrb, ary);' "$work/api_ary_freeze/src/api_ary_freeze.c"
+# 2zzz46. a function defined in both branches of an #ifdef: the active definition is threaded and converted, the inactive one
+# stays as written (its #ifdef is false in this build), and the registration on a VALUE parameter is unwrapped.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dup_variant tools/cext2mrbgem/fixtures/api_dup_variant/ext/api_dup_variant "$work/api_dup_variant" > "$work/api_dup_variant.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_define_module_function(mrb, mrb_class_ptr(m), "hi", dv_hi, MRB_ARGS_NONE());' "$work/api_dup_variant/src/api_dup_variant.c"
+check grep -qF 'dv_setup(mrb, mrb_obj_value(mDv));' "$work/api_dup_variant/src/api_dup_variant.c"
 # 2zzz45. PRIsVALUE in an rb_sprintf format: %S and %!S (the same conversion as in rb_raise).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sprintf_pv tools/cext2mrbgem/fixtures/api_sprintf_pv/ext/api_sprintf_pv "$work/api_sprintf_pv" > "$work/api_sprintf_pv.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
