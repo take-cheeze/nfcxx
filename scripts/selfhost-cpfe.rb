@@ -142,12 +142,12 @@ exit 123 unless failed.zero?
 puts "selfhost-cpfe: #{Dir.glob(File.join(out, 'obj', '*.o')).size} objects"
 
 # The link: nfcxx passes the objects to eccp, which links libC.a; qbe-cc adds libnfcxxld.a and -lstdc++.
-# The x86-64 runtime (NFCXX_LDRT_X86=1, scripts/pathb-ldrt) goes first: the front end folds out-of-range float-to-integer
+# The x86-64 runtime (NFCXX_LDRT_X86=1, scripts/pathb-ldrt.rb) goes first: the front end folds out-of-range float-to-integer
 # conversions the way x86-64 gcc does, where user programs keep the trap. Its archive has the same symbols as the default
 # one, so the default archive is not pulled for them.
 objs = names.map { |name| File.join(out, "obj", "#{name}.o") }
 begin
-  x86rt = IO.popen([{ "NFCXX_LDRT_X86" => "1" }, File.join(root, "scripts/pathb-ldrt")], &:read)
+  x86rt = IO.popen([{ "NFCXX_LDRT_X86" => "1" }, File.join(root, "scripts/pathb-ldrt.rb")], &:read)
 rescue SystemCallError
   exit 127
 end
