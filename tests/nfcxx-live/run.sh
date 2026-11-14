@@ -1,9 +1,9 @@
 #!/bin/bash
-# Differential check of the live gcc plan (scripts/nfcxx-gcc-plan.rb --live=ROOT, run by scripts/nfcxx-run.rb) against
-# nfcxx's bash, on this machine with the real toolchain (build/edg, the EH shim, gcc). Each case is a source set and an
-# argument list: the bash builds it, the plan builds it, and the two programs must print the same and exit the same way.
-# A case the plan refuses (exit 3, "unported") is reported as unported, not as a failure: the live facts refuse what they
-# do not model. Needs the built EDG front end (scripts/setup-edg.sh); not run in CI.
+# Differential check of the CRuby driver (scripts/nfcxx.rb: the live gcc plan, run by scripts/nfcxx-run.rb, and bash for the
+# rest) against nfcxx's bash, on this machine with the real toolchain (build/edg, the EH shim, gcc). Each case is a source
+# set and an argument list: the bash builds it, the driver builds it, and the two must exit the same way and the programs
+# must print the same. "route" is the driver's route (plan: the Ruby plan built it; bash: the driver fell back). Needs the
+# built EDG front end (scripts/setup-edg.sh); not run in CI.
 #   bash tests/nfcxx-live/run.sh
 set -u
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -43,27 +43,27 @@ cases=(
   "cuda-refused:hello.cc -lcuda -o prog"
 )
 
-run_case() {  # run_case NAME ARGS...: builds with the bash and the plan in two directories, compares the programs
+run_case() {  # run_case NAME ARGS...: builds with the bash and with the driver (scripts/nfcxx.rb), and compares the programs
   local name=$1; shift
-  local b="$work/$name-bash" p="$work/$name-plan"
+  local b="$work/$name-bash" p="$work/$name-drv"
   mkdir -p "$b" "$p"; cp "$work"/*.cc "$work"/*.c "$b"/; cp "$work"/*.cc "$work"/*.c "$p"/
   (cd "$b" && "$root/nfcxx" --backend=gcc "$@" >"$b/build.log" 2>&1); local bs=$?
-  (cd "$p" && ruby "$root/scripts/nfcxx-gcc-plan.rb" --tabs --live="$root" --backend=gcc "$@" >"$p/plan.txt" 2>"$p/plan.err"); local ps=$?
-  if [ $ps = 3 ]; then unp=$((unp + 1)); echo "unported  $name: $(head -1 "$p/plan.err")"; return; fi
-  if [ $ps != 0 ]; then fail=$((fail + 1)); echo "FAIL      $name: the plan printer exited $ps: $(head -1 "$p/plan.err")"; return; fi
-  (cd "$p" && ruby "$root/scripts/nfcxx-run.rb" --root="$root" --chdir="$p" --plan="$p/plan.txt" >"$p/build.log" 2>&1); local rs=$?
-  if [ $bs != $rs ]; then fail=$((fail + 1)); echo "FAIL      $name: build status bash=$bs plan=$rs"; return; fi
-  if [ "$bs" != 0 ]; then pass=$((pass + 1)); echo "pass      $name (both fail the same way, status $bs)"; return; fi
-  local bo po
+  (cd "$p" && NFCXX_DRIVER_TRACE=1 ruby "$root/scripts/nfcxx.rb" --backend=gcc "$@" >"$p/build.log" 2>"$p/route"); local ps=$?
+  local route; route=$(sed -n 's/^nfcxx: driver: //p' "$p/route")
+  if [ "$bs" != "$ps" ]; then fail=$((fail + 1)); echo "FAIL      $name: build status bash=$bs driver=$ps"; return; fi
+  if [ "$route" = bash ]; then unp=$((unp + 1)); echo "fallback  $name: the driver took the bash route"; fi
+  if [ "$bs" != 0 ]; then pass=$((pass + 1)); echo "pass      $name [$route] (both fail the same way, status $bs)"; return; fi
   if [ ! -e "$b/prog" ] && [ ! -e "$p/prog" ]; then  # -c: the object files are the result
+    local bo po
     bo=$(cd "$b" && ls *.o 2>/dev/null); po=$(cd "$p" && ls *.o 2>/dev/null)
-    if [ "$bo" = "$po" ] && [ -n "$bo" ]; then pass=$((pass + 1)); echo "pass      $name ($bo)"; else fail=$((fail + 1)); echo "FAIL      $name: objects bash [$bo] plan [$po]"; fi
+    if [ "$bo" = "$po" ] && [ -n "$bo" ]; then pass=$((pass + 1)); echo "pass      $name [$route] ($bo)"; else fail=$((fail + 1)); echo "FAIL      $name: objects bash [$bo] driver [$po]"; fi
     return
   fi
+  local bo po
   bo=$("$b/prog" 2>&1; echo "status $?"); po=$("$p/prog" 2>&1; echo "status $?")
-  if [ "$bo" = "$po" ]; then pass=$((pass + 1)); echo "pass      $name"; else fail=$((fail + 1)); echo "FAIL      $name: bash [$bo] plan [$po]"; fi
+  if [ "$bo" = "$po" ]; then pass=$((pass + 1)); echo "pass      $name [$route]"; else fail=$((fail + 1)); echo "FAIL      $name: bash [$bo] driver [$po]"; fi
 }
 
 for c in "${cases[@]}"; do run_case "${c%%:*}" ${c#*:}; done
-echo "passed $pass, failed $fail, unported $unp"
+echo "passed $pass, failed $fail, bash fallbacks $unp"
 [ "$fail" = 0 ]

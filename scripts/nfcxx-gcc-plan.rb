@@ -148,6 +148,11 @@ class Facts
     @modules.include?(path)
   end
 
+  # a source the plan may compile: a file (the facts of a file list the sources the tests use, so this is true there)
+  def source_ok?(_path)
+    true
+  end
+
   # the isa macros of the -m options FLAGS (the facts list one entry per flag and macro)
   def isa_for(flags)
     @isa.select { |flag, _, _| flags.include?(flag) }
@@ -188,10 +193,15 @@ class LiveFacts < Facts
     @probes = {}
     @host_sys = nil  # computed on first use (Facts sets an empty list)
     ENV.each_key do |name|
-      next unless name.start_with?("NFCXX_") || %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+      # NFCXX_DRIVER_TRACE is the CRuby driver's own switch (scripts/nfcxx.rb); the bash does not read it
+      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
+                  %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
       unported("environment #{name} (the live facts do not read it)")
     end
+    # the bash builds these on first use (ensure_tool); the live facts do not build anything
+    unported("the EDG front end is not built (build/edg/bin/eccp)") unless File.executable?(File.join(root, "build/edg/bin/eccp"))
+    unported("the C++ runtime is not built (build/edg/lib/libC.a)") unless File.file?(File.join(root, "build/edg/lib/libC.a"))
   end
 
   def cwd_name
@@ -217,6 +227,10 @@ class LiveFacts < Facts
 
   def dir?(path)
     File.directory?(real(path))
+  end
+
+  def source_ok?(path)
+    File.file?(real(path))
   end
 
   def ld_available?(name)
@@ -501,6 +515,7 @@ class Plan
     if @ncpp + @nobj + @cfiles.length + (@stdin_src ? 1 : 0) == 0
       raise NfcxxExit.new("nfcxx: no input files", 2)
     end
+    @srcs.each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
     @srcs.each { |s| unported("module source #{s}") if @facts.module_source?(s) }
     return preprocess if @preprocess
 
