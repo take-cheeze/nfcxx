@@ -582,6 +582,13 @@ check test ! -e "$work/api_type_nil/NOT_BUILDABLE"
 check grep -qF 'return mrb_nil_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
 check grep -qF 'return !mrb_false_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
 
+# 2zzl. code under #ifndef NDEBUG is live in the mruby output: ruby.h defines NDEBUG (CRuby drops it), so the scan reads a copy with the guard true
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ndebug_guard tools/cext2mrbgem/fixtures/api_ndebug_guard/ext/api_ndebug_guard "$work/api_ndebug_guard" > "$work/api_ndebug_guard.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_ndebug_guard/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ng_guarded(mrb_state *mrb, mrb_value self) {' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
+check grep -qF 'mrb_define_module_function(mrb, mNG, "guarded", ng_guarded, MRB_ARGS_REQ(1));' "$work/api_ndebug_guard/src/api_ndebug_guard.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

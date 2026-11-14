@@ -1059,18 +1059,20 @@ def dtype_parse(rel, m)
   tx = @files[rel]['text']
   open = m.end(0) - 1
   close = match_close(mk, open)
-  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }
+  els = split_args(mk, open, close).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
     if !els.empty? && els.all? { |e| e[2].start_with?('.') }
       return dtype_designated(rel, m, open, close, els)
     end
   return { 'error' => 'the initializer is not CRuby\'s {name, {mark, free, size}, parent, data, flags}' } unless els.size == 5 && els[1][2].start_with?('{') && els[1][2].end_with?('}')
-  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+  nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
   ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
-  unless nested.size == 3 && ok_fn.call(nested[0][2]) && ok_fn.call(nested[1][2]) && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
+  # RUBY_TYPED_DEFAULT_FREE frees with CRuby's allocator: mruby's dfree takes (mrb, data), and mrb_free has that shape
+  nested_free = nested[1] && nested[1][2] == 'RUBY_TYPED_DEFAULT_FREE' ? 'mrb_free' : (nested[1] && nested[1][2])
+  unless (nested.size == 2 || nested.size == 3) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
     return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
   end
   return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
-  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested[1][2],
+  { 'error' => nil, 'open' => open, 'close' => close, 'name' => els[0][2], 'mark' => nested[0][2], 'free' => nested_free,
     'mark_pos' => nested[0][0], 'free_pos' => nested[1][0] }
 end
 
@@ -1101,6 +1103,7 @@ end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
     free = sf['dfree'] ? sf['dfree'][2] : 'NULL'
+    free = 'mrb_free' if free == 'RUBY_TYPED_DEFAULT_FREE'
     unless ok_fn.call(mark) && ok_fn.call(free)
       return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
     end
