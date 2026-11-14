@@ -12,7 +12,7 @@
 #                    is stopped with status 124: the driver builds the program with gcc after any status but 0, so a stuck stage must end
 #                    (the front end once looped on a type name over 300 bytes; the largest STL test takes 50 s). Needs timeout(1).
 #   --safe-pointers  (NFCXX_SAFE_POINTERS=1)  -fsafe-pointers: the emitter checks pointer arithmetic and accesses (docs/notes/safe-pointers.md);
-#                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt) first.
+#                    the IR carries (loc ...) lines for the reports. Link with $(scripts/safeptr-rt.rb) first.
 #   --asan           (NFCXX_PATHB_ASAN=1)  -fsanitize=address (docs/notes/asan-plan.md): the SSA emitter calls libasan's __asan_load/store checks before
 #                    each access through a computed address. Link the program with -fsanitize=address. Not with the mruby emitter or -fsafe-pointers.
 #   --sanitize=LIST  (NFCXX_IR_SANITIZE)  the checks of -fsanitize=undefined (docs/notes/ubsan.md), made by the front end (pathb-dump)

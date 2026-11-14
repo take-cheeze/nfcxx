@@ -39,7 +39,7 @@ run_set() {
   # run as they do; with the cache off and no CUDA input they print nothing, except the depmode step, which is ported
   cp "$repo/nfcxx" "$root/nfcxx"
   chmod +x "$root/nfcxx"
-  for s in ehshim sret.sh asan-vla cuda-cub cuda-driver-shim; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
+  for s in ehshim sret.sh asan-vla.rb cuda-cub cuda-driver-shim; do ln -sf "$here/stub.sh" "$root/scripts/$s"; done
   for c in gcc cc g++ cp mktemp ninja uname; do ln -s "$here/stub.sh" "$bin/$c"; done
   # the repository's tools are built (ensure_tool finds them fresh: no ninja run); the sandbox has no tool sources
   : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"

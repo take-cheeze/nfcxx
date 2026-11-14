@@ -3,7 +3,7 @@ nfcxx_vla_asan.c -- the runtime of C++ variable-length arrays under -fsanitize=a
 variable-length arrays"). EDG lowers a VLA to these four calls; EDG's own implementation is 3rd/edg/lib_src/vla_alloc.c,
 in libC.a.
 
-The driver links this object ahead of libC.a (scripts/asan-vla), so the symbols here are the ones EDG's generated code
+The driver links this object ahead of libC.a (scripts/asan-vla.rb), so the symbols here are the ones EDG's generated code
 calls, and vla_alloc.o of libC.a is not pulled in. EDG's allocator serves a VLA under 4096 bytes from one shared 32700-byte
 block: no redzone separates two such VLAs, so an overflow of one writes into the next, unreported, and the pool is not
 thread-safe. This one gives every VLA a malloc block of exactly the requested size. libasan intercepts malloc, so each VLA
@@ -13,7 +13,7 @@ The bookkeeping is EDG's: a stack of records (block, frame marker) per thread. _
 slot, freeing the records above it (those belong to scopes a jump left). A longjmp (EDG's exception runtime) can leave
 records of frames that are no longer on the stack; __vla_alloc finds them by their frame markers and frees them.
 
-Built by scripts/asan-vla with -fsanitize=address. The functions that take the address of a local (the frame markers
+Built by scripts/asan-vla.rb with -fsanitize=address. The functions that take the address of a local (the frame markers
 point into the stack) are built with no_sanitize_address, so that the markers are real stack addresses even when
 libasan's use-after-return detection is on.
 */
