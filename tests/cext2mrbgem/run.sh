@@ -292,6 +292,12 @@ check test "$rc" -eq 0
 check grep -qF '(mrb_type(v) == MRB_TT_CLASS || mrb_type(v) == MRB_TT_SCLASS) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_class/src/api_rb_type_class.c"
 check grep -qF 'return mrb_module_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_class/src/api_rb_type_class.c"
 
+# 2zzz30. a data type initializer with a preprocessor line inside its braces: the line is not an element, and the members after
+# free (dsize, dcompact) are dropped (mruby never moves objects).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_ifdef tools/cext2mrbgem/fixtures/api_dtype_ifdef/ext/api_dtype_ifdef "$work/api_dtype_ifdef" > "$work/api_dtype_ifdef.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static const mrb_data_type dt_type = { "DtBox", dt_free, dt_mark };' "$work/api_dtype_ifdef/src/api_dtype_ifdef.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

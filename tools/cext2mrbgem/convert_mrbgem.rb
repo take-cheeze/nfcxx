@@ -1126,7 +1126,8 @@ texts = static_rename(texts)
 # A rb_data_type_t declaration: its initializer's open and close braces, the five top-level element spans, the nested
 # {mark, free, size} spans, and the callback names. Returns a hash with 'error' when the shape is not CRuby's.
 def dtype_parse(rel, m)
-  mk = @files[rel]['masked']
+  # the masked text with its preprocessor lines blanked (same positions): an #ifdef inside the initializer is not an element
+  mk = @files[rel]['masked'].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
   tx = @files[rel]['text']
   open = m.end(0) - 1
   close = match_close(mk, open)
@@ -1139,7 +1140,9 @@ def dtype_parse(rel, m)
   ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
   # RUBY_TYPED_DEFAULT_FREE frees with CRuby's allocator: mruby's dfree takes (mrb, data), and mrb_free has that shape
   nested_free = nested[1] && %w[RUBY_TYPED_DEFAULT_FREE RUBY_DEFAULT_FREE].include?(nested[1][2]) ? 'mrb_free' : (nested[1] && nested[1][2])
-  unless (nested.size == 2 || nested.size == 3) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
+  # the members after free (dsize, and dcompact when the input has one) are dropped: mruby does not move objects, so
+  # compaction is never needed; dsize is the memory report, which mruby does not use
+  unless (nested.size >= 2 && nested.size <= 5) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
     return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
   end
   return { 'error' => 'the name is not a string literal' } unless els[0][2].start_with?('"')
