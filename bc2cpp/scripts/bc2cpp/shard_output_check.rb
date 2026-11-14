@@ -217,6 +217,21 @@ Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
               hot_files.any? { |t| t.include?('int cold_c(') } && hot_files.any? { |t| t.include?('int cold_d(') })
   suite.check('the main file keeps the hooks', hot_main.include?('/* hooks */'))
 
+  # The per-method report's tiers (bc2cpp.rb COMPILED_METHOD_REPORT): hot owners stay "default", cold units take the level.
+  owners = ShardOutput.sections(tier_program_text)[1].map { |u| u[:owner] }
+  tiered = tier_with_env('BC2CPP_SHARD_MIN_BYTES' => '1') do
+    ShardOutput.split_with_tiers(tier_program_text, 'chk', 3, 'O1', hot_set)[2]
+  end
+  suite.check('each unit reports one tier per print position',
+              tiered.size == owners.size && owners.size.positive?)
+  suite.check('hot owners report default and cold units report the cold level',
+              owners.zip(tiered).all? { |owner, tier| tier == (hot_set.include?(owner) ? 'default' : 'O1') } &&
+              tiered.include?('O1'))
+  untiered = tier_with_env('BC2CPP_SHARD_MIN_BYTES' => '1') do
+    ShardOutput.split_with_tiers(tier_program_text, 'chk', 3, nil, nil)[2]
+  end
+  suite.check('without a tier every unit reports default', untiered.all? { |tier| tier == 'default' })
+
   if Bc2cppCxx.executable?(Bc2cppCxx.compiler.first)
     tiered = File.join(dir, 'tiered')
     untiered = File.join(dir, 'untiered')

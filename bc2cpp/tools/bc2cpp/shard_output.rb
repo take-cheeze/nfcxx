@@ -55,6 +55,8 @@ module ShardOutput
   COLD_OPT_FLAG = '--shard-cold-opt='
   HOT_OWNERS_FLAG = '--shard-hot-owners='
   COLD_OPT = /\AO[0-3sz]\z/
+  # The tier a unit reports when it is compiled with the build's own flags: the main file, or no tier at all.
+  DEFAULT_TIER = 'default'
 
   # Takes the tier flags out of argv (in place) and returns { tier: level or nil, hot: Set of owners }.
   def take_argv!(argv)
@@ -95,7 +97,8 @@ module ShardOutput
   end
 
   # Register before every other stdout rewriter: at_exit runs last-in first-out, so this splits their final text.
-  def capture_stdout(symbol, out_dir, shards, tier = nil, hot = nil)
+  # on_tiers (optional) gets the shard tier of each unit in print order, after the files are written.
+  def capture_stdout(symbol, out_dir, shards, tier = nil, hot = nil, on_tiers = nil)
     original = $stdout
     buffer = StringIO.new
     $stdout = buffer
@@ -103,25 +106,40 @@ module ShardOutput
       $stdout = original
       next if $!
 
-      main, files = split(buffer.string, symbol, shards, tier, hot)
+      main, files, tiers = split_with_tiers(buffer.string, symbol, shards, tier, hot)
       files.each_with_index { |text, i| File.write(shard_path(out_dir, symbol, i + 1), text) }
       original.write(main)
+      on_tiers&.call(tiers)
     end
   end
 
   # [main text, the texts of shards 1...shards-1].
   def split(text, symbol, shards, tier = nil, hot = nil)
+    main, files, _tiers = split_with_tiers(text, symbol, shards, tier, hot)
+    [main, files]
+  end
+
+  # split, and the tier of each unit (in print order): DEFAULT_TIER for a unit in the main file or with no tier, else
+  # the tier level for a unit in a shard other than the main file.
+  def split_with_tiers(text, symbol, shards, tier = nil, hot = nil)
     tier = valid_tier(tier) if tier
     # Owners are kept in the main file only under a tier; without one the split is the default.
     hot = tier ? (hot || Set.new) : Set.new
     prelude, units, hooks = sections(text)
-    groups = assign(units, shards, hot)
+    # Each unit remembers its print position, so the placement can be reported after assign has regrouped them.
+    indexed = units.each_with_index.map { |u, i| u.merge(index: i) }
+    groups = assign(indexed, shards, hot)
+    tiers = Array.new(units.size, DEFAULT_TIER)
     if groups.count { |g| !g.empty? } <= 1
       plain = prelude + units.map { |u| u[:code] }.join + hooks
-      return [plain, Array.new(shards - 1) { |i| empty_shard(symbol, i + 1, shards) }]
+      return [plain, Array.new(shards - 1) { |i| empty_shard(symbol, i + 1, shards) }, tiers]
     end
 
-    rewrite(symbol, shards, prelude, groups, hooks, tier)
+    if tier
+      groups.each_with_index { |group, shard| group.each { |u| tiers[u[:index]] = tier } if shard.positive? }
+    end
+    main, files = rewrite(symbol, shards, prelude, groups, hooks, tier)
+    [main, files, tiers]
   end
 
   def empty_shard(symbol, index, shards)

@@ -1593,7 +1593,31 @@ BC2CPP_MAIN = lambda do
     (1...shards).each { |k| File.write(ShardOutput.shard_path(out_dir, symbol, k), ShardOutput.empty_shard(symbol, k, shards)) }
     shards = 1
   end
-  ShardOutput.capture_stdout(symbol, out_dir, shards, shard_tier[:tier], shard_tier[:hot]) if shards > 1
+  # COMPILED_METHOD_REPORT: one JSON line per compiled entry, written at exit because the shard split decides each
+  # entry's tier only then. tier is the shard tier the method is compiled at ("default": the main file, or no tier);
+  # compile_seconds is set under BC2CPP_PROFILE_TIMINGS=1 and null otherwise. self-compile's coverage.json reads it.
+  method_report = lambda do |tiers|
+    raise "bc2cpp: #{tiers.size} shard units for #{compiled.size} compiled methods" if tiers && tiers.size != compiled.size
+
+    warn ''
+    warn '== compiled method report =='
+    compiled.each_with_index do |m, i|
+      seconds = m[:compile_seconds]
+      fields = [
+        ['entry', m[:entry].to_s],
+        ['owner', m[:owner].to_s],
+        ['name', m[:name].to_s],
+        ['tier', tiers ? tiers[i] : ShardOutput::DEFAULT_TIER]
+      ].map { |key, value| "\"#{key}\": \"#{value.gsub(/["\\]/) { |c| "\\#{c}" }}\"" }
+      fields << "\"compile_seconds\": #{seconds ? format('%.9f', seconds) : 'null'}"
+      warn "  {#{fields.join(', ')}}"
+    end
+  end
+  if shards > 1
+    ShardOutput.capture_stdout(symbol, out_dir, shards, shard_tier[:tier], shard_tier[:hot], method_report)
+  else
+    at_exit { method_report.call(nil) unless $! }
+  end
   # RUNTIME_HEADER (runtime_header.rb): between the two, so it moves the compacted runtime text ShardOutput then splits.
   RuntimeHeader.capture_stdout(ENV[RuntimeHeader::DIR_KEY])
   CompactOutput.capture_stdout unless annotated

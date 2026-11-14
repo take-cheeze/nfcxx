@@ -37,7 +37,11 @@ the generator inherits (`RUBYOPT`, `NFCXX_AST_DUMP`, `LIBCLANG_EDG_CPFE`); `docs
 audit. The input program's owner filters and optimization controls are isolated from self-generation.
 Identical generated files retain their timestamps so warm setup does not rebuild every translation unit.
 `generation/host.json` records the actual Ruby version, YJIT state and inputs. `generation/coverage.json` records
-translated methods and the exact fallback reasons.
+translated methods and the exact fallback reasons. Its `methods` array has one object per translated method, with
+`entry`, `owner`, `name`, `tier` (the `--shard-cold-opt` level when the method is in a cold shard, else `"default"`)
+and `compile_seconds` (set when the generation ran with `BC2CPP_PROFILE_TIMINGS=1`, else `null`). The same objects
+are the `== compiled method report ==` section of `generation.log`, written by bc2cpp at exit. Self-generation passes
+no shard tier, so its tiers are `"default"`. `compile_seconds` includes the probes each method's compilation runs.
 
 ## Validation
 

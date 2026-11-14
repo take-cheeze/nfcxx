@@ -55,6 +55,8 @@ Dir.mktmpdir('self-compile-check') do |dir|
     == classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) ==
     == skipped (unsupported, left on the interpreter) ==
       Foo#g: unsupported fixture opcode
+    == compiled method report ==
+      {"entry": "Foo_f", "owner": "Foo", "name": "f", "tier": "O2", "compile_seconds": 0.001234}
     == end ==
   TEXT
   log = File.join(generation, 'generation.log')
@@ -68,6 +70,10 @@ Dir.mktmpdir('self-compile-check') do |dir|
   raise 'entry counter missing' unless File.read(actual).include?('++bc2cpp_self_compiled_calls;')
   coverage = JSON.parse(File.read(File.join(generation, 'coverage.json')))
   raise 'lost VM fallback' unless coverage.values_at('compiled_methods', 'interpreted_methods') == [1, 1]
+  unless coverage['methods'] == [{ 'entry' => 'Foo_f', 'owner' => 'Foo', 'name' => 'f', 'tier' => 'O2',
+                                   'compile_seconds' => 0.001234 }]
+    raise 'coverage lost the per-method tier or timing'
+  end
   File.utime(Time.at(1), Time.at(1), actual)
   stale = File.join(gem, 'src/bc2cpp_self_gen_shard99.cpp')
   File.write(stale, '// obsolete shard')
