@@ -47,3 +47,14 @@ NFCC -c -O2 -o a.o
 NFCC -c -O2 a.c -o a.o -o b.o
 NFCC -o prog a.c
 NFCC a.o -l nonexistent_lib -o prog
+NFCC -o prog a.c m.c --cuda-driver=cudart -lcuda
+NFCC -o prog a.c m.c -lcuda
+NFCC -o prog a.c m.c --cuda-driver=bogus
+NFCC -c a.c -o a.o --bundle-libs
+NFCC -o prog a.c m.c -lm --bundle-libs
+NFCC -o prog a.c m.c --bundle-libs --bundle-exclude=libm.so.6
+NFCC -o prog a.c m.c --bundle-foo
+NFCC -o prog a.c m.c --bundle-only=libc.so.6
+CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c -lcuda
+CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=cudart -lcuda
+CUDA_HOME=CUDAHOME NFCC -o prog a.c m.c --cuda-driver=libcuda -lcuda

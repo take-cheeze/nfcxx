@@ -16,10 +16,10 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
 - nfcc, the driver's Ruby half (stages 1 and 8 for nfcc): scripts/nfcc.rb runs the decisions of scripts/driver-loop.rb
   (its option loop, Path B, compile and link) with the real environment, host answers, temporary directory and
   commands. tests/nfcc/loop-state.sh checks the decisions against the bash (364 cases); tests/nfcc/port-driver.sh runs
-  49 command lines through ./nfcc and scripts/nfcc.rb and compares status, stdout, stderr and every output file.
-  ./nfcc remains the default driver. Command lines with --bundle-*, --cuda-driver= or a libcuda on the link line are
-  run by ./nfcc (the bash wrappers scripts/bundle-wrap.sh and scripts/cuda-driver-wrap.sh are not yet ported as
-  programs; their decisions are in driver-loop.rb and checked by loop-state.sh only).
+  60 command lines through ./nfcc and scripts/nfcc.rb and compares status, stdout, stderr and every output file.
+  ./nfcc remains the default driver. The bundle wrapper (--bundle-*: the driver again, then build/nfcbundle) and the CUDA
+  driver wrapper (--cuda-driver=, a libcuda on the link line: the shim) run in scripts/nfcc.rb too, checked against the bash
+  by tests/nfcc/port-driver.sh (60 command lines). The shim's success path needs a real CUDA toolkit and is not tested here.
 
 ## Stages
 
