@@ -502,6 +502,20 @@ check test ! -e "$work/api_batch_n18/NOT_BUILDABLE"
 check grep -qF 'char *e = (RSTRING_PTR(str) + RSTRING_LEN(str));' "$work/api_batch_n18/src/api_batch_n18.c"
 check grep -qF 'const mrb_value *items = RARRAY_PTR(ary);' "$work/api_batch_n18/src/api_batch_n18.c"
 
+# 2zzb. a use inside a body that the build's #if leaves out is dead code, not a file-scope use: the guard is kept and no refusal is recorded
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gated_body tools/cext2mrbgem/fixtures/api_gated_body/ext/api_gated_body "$work/api_gated_body" > "$work/api_gated_body.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_gated_body/NOT_BUILDABLE"
+check grep -qF '#ifdef GATED_TEST_METHODS' "$work/api_gated_body/src/api_gated_body.c"
+check grep -qE 'NUM2INT|mrb_as_int' "$work/api_gated_body/src/api_gated_body.c"
+
+# 2zzc. TYPE(x) is rb_type (compared with MRB_TT_*); T_STRING is exact; rb_obj_alloc allocates a plain object of the class (mrb_class_ptr)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_alloc tools/cext2mrbgem/fixtures/api_type_alloc/ext/api_type_alloc "$work/api_type_alloc" > "$work/api_type_alloc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_alloc/NOT_BUILDABLE"
+check grep -qF 'return mrb_type(v) == MRB_TT_STRING ? mrb_true_value() : mrb_false_value();' "$work/api_type_alloc/src/api_type_alloc.c"
+check grep -qF 'return mrb_obj_value(mrb_obj_alloc(mrb, MRB_TT_OBJECT, mrb_class_ptr(klass)));' "$work/api_type_alloc/src/api_type_alloc.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

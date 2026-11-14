@@ -376,6 +376,20 @@
       "mruby": "RARRAY_PTR",
       "caveat": "mruby has no read-only element pointer: the same pointer as RARRAY_PTR, so writes through it are not refused"
     },
+    "rb_obj_alloc": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_obj_value(mrb_obj_alloc($m, MRB_TT_OBJECT, mrb_class_ptr($0)))",
+      "caveat": "allocates a plain object of the class without calling initialize, as CRuby does; only plain-object instances: a class whose instances need a data type or string storage is not handled"
+    },
+    "TYPE": {
+      "kind": "call",
+      "mruby": "mrb_type",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "TYPE(x) is rb_type: it returns enum mrb_vtype, so compare only with MRB_TT_* values; nil and false both report MRB_TT_FALSE, so T_NIL and T_FALSE are refused"
+    },
     "rb_intern": {
       "kind": "call",
       "mruby": "mrb_intern_cstr",

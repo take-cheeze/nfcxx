@@ -862,6 +862,13 @@ texts = static_rename(texts)
     extra = text_decls.select { |d| d['proto'] && names.include?(d['name']) && !listed.include?(d['po']) }
     # a definition the text has and the front end does not list is excluded by its #if (or is not a definition)
     text_decls.each { |d| @excluded_defs << d['name'] if !d['proto'] && !names.include?(d['name']) }
+    # the body of such a definition is not compiled (its #if is false in this build): its spans are kept, so a use inside
+    # them is dead code, not a file-scope use (see the identifier pass)
+    text_decls.each do |d|
+      next if d['proto'] || names.include?(d['name']) || d['brace'].nil? || d['body_end'].nil?
+      (@excluded_spans ||= {})[rel] ||= []
+      @excluded_spans[rel] << [d['brace'], d['body_end']]
+    end
     [(recs + extra).sort_by { |d| d['hstart'] }, skipped]
   end
 
@@ -1987,6 +1994,8 @@ end
       next if @local_var_occ.include?([rel, s])
       entry = @entries[name]
       if !entry.nil?
+        excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
+        next if excluded && entry['needs_mrb']
         if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b } && !in_global_macro?(rel, s)
           refuse(rel, s, name, 'needs the mruby state, which is not in scope at file scope')
           next
