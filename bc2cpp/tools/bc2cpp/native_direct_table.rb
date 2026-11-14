@@ -93,9 +93,6 @@ module NativeDirect
     "angle=" => {
       "RGSS::Sprite" => ["spr_set_angle_direct", [:float]]
     },
-    "available?" => {
-      "RGSS::Tts.singleton" => ["tts_available_direct", []]
-    },
     "back_opacity=" => {
       "RGSS::Window" => ["window_set_back_opacity_direct", [:int]]
     },
@@ -248,14 +245,8 @@ module NativeDirect
       "RGSS::Color" => ["color_red_direct", []],
       "RGSS::Tone" => ["tone_red_direct", []]
     },
-    "speak" => {
-      "RGSS::Tts.singleton" => ["tts_speak_direct", [:cstr]]
-    },
     "src_rect=" => {
       "RGSS::Sprite" => ["spr_set_src_rect_direct", [:value]]
-    },
-    "stop" => {
-      "RGSS::Tts.singleton" => ["tts_stop_direct", []]
     },
     "stretch=" => {
       "RGSS::Window" => ["window_set_stretch_direct", [:bool]]
