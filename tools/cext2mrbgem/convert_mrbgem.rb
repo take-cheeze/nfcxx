@@ -1776,9 +1776,11 @@ end
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
     # a local macro whose body uses a name that needs the state needs it too: a use of the macro expands that use
     macro_needs = Set.new
+    macro_idents = {}   # macro name -> the identifiers of its body (a macro that calls a needed helper needs the state too)
     @files.each do |_rel, f|
       f['masked'].to_enum(:scan, /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][#{WC}]*)/).map { Regexp.last_match }.each do |m|
         body = psl(f['masked'], m.end(0), logical_line_end(f['masked'], m.end(0)))
+        macro_idents[m[1]] = body.scan(IDENT_RE)
         macro_needs << m[1] if body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] }
       end
     end
@@ -1789,9 +1791,16 @@ end
     changed = true
     while changed
       changed = false
+      macro_idents.each do |mn, idents|
+        next if macro_needs.include?(mn)
+        if idents.any? { |c| needs.include?(c) && @defs.key?(c) }
+          macro_needs << mn
+          changed = true
+        end
+      end
       ids.each do |name, s|
         next if needs.include?(name)
-        if s.any? { |c| needs.include?(c) && @defs.key?(c) }
+        if s.any? { |c| (needs.include?(c) && @defs.key?(c)) || macro_needs.include?(c) }
           needs << name
           changed = true
         end
