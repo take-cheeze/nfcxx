@@ -19,7 +19,7 @@
 #    assembly, the directives are appended, and the assembly is assembled to the object.
 #
 # This is scripts/gcc-cc (bash) ported to Ruby: the same filters, the same order and the same commands; the sed and
-# perl filters are done in Ruby, and the sret thunks' rename (scripts/sret.sh) is still applied by sed -E.
+# perl filters are done in Ruby. (The aarch64 sret thunks are gone: EDG passes a class result in x8 itself.)
 require "fileutils"
 require "open3"
 require "tmpdir"
@@ -46,17 +46,8 @@ def uname_s
   IO.popen(["uname", "-s"], &:read).sub(/\n+\z/, "")
 end
 
-# sret.sh's output: the object's path, or "" when the host needs no thunks (or the script fails)
-def sret_file
-  out, _err, st = Open3.capture3(File.join(ROOT, "scripts", "sret.sh"))
-  st.success? ? out.sub(/\n+\z/, "") : ""
-end
-
 host = uname_s
 tls_darwin = host == "Darwin"
-sret = sret_file
-sret_on = !sret.empty?
-sret_sed = File.join(ROOT, "build", "sret", "rename.sed")
 clang = begin
   out, = Open3.capture2(CC, "--version", err: File::NULL)
   out.match?(/clang/i)
@@ -81,7 +72,7 @@ argv.each do |a|
   when /\.c\z/
     csrc = a
     src = File.file?(a) ? File.binread(a) : nil
-    filter = src && (sret_on ||
+    filter = src && (
       src.match?(/^[[:space:]]*#pragma GCC unroll/) ||
       (clang && src.include?("static void __tls_init(void)")) ||
       src.match?(/^extern __inline__ __attribute__\(\(visibility\("default"\)\)\) void _ZN.*D1Ev\(/))
@@ -94,8 +85,6 @@ argv.each do |a|
 
         l.sub(/__asm__\("(_ZTH[^ ]*) = __tls_init"\)/) { %(__asm__("_#{$1} = ___tls_init")) }
       end.join
-      # the sret thunks' rename (rename.sed, extended regular expressions), as the sed -E -f of the bash
-      lines, = Open3.capture2("sed", "-E", "-f", sret_sed, stdin_data: lines, binmode: true) if sret_on
       # EDG's extern inline complete-object destructors become weak definitions (filter 2)
       lines = lines.lines.map do |l|
         l.sub(/\Aextern __inline__ __attribute__\(\(visibility\("default"\)\)\) void (_ZN.*D1Ev)\(/) do
