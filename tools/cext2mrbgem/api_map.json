@@ -27,7 +27,8 @@
         "mruby/numeric.h",
         "mruby/hash.h",
         "mruby/class.h",
-        "mruby/data.h"
+        "mruby/data.h",
+        "mruby/array.h"
       ]
     },
     "ruby/ruby.h": {
@@ -37,7 +38,8 @@
         "mruby/numeric.h",
         "mruby/hash.h",
         "mruby/class.h",
-        "mruby/data.h"
+        "mruby/data.h",
+        "mruby/array.h"
       ]
     },
     "ruby/re.h": {

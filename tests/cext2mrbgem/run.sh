@@ -456,6 +456,13 @@ check test ! -e "$work/api_noreturn/NOT_BUILDABLE"
 check grep -qF 'static void anr_fail(mrb_state *mrb, mrb_value v);' "$work/api_noreturn/src/api_noreturn.c"
 check sh -c "! grep -q 'NORETURN(static' '$work/api_noreturn/src/api_noreturn.c'"
 
+# 2zv. a struct function-pointer field whose callbacks are threaded takes mrb; its calls pass mrb (api_map.json batch N14)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_field tools/cext2mrbgem/fixtures/api_fnptr_field/ext/api_fnptr_field "$work/api_fnptr_field" > "$work/api_fnptr_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_fnptr_field/NOT_BUILDABLE"
+check grep -qF 'void (*on_value)(mrb_state *mrb, struct afp_parser *p, mrb_value v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
+check grep -qF 'p.on_value(mrb, &p, v);' "$work/api_fnptr_field/src/api_fnptr_field.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

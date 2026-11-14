@@ -1140,6 +1140,80 @@ end
     out
   end
 
+  # A struct field of function-pointer type, RET (*NAME)(PARAMS), in a struct body of this file. Returns the field's
+  # declaration; its assignments and calls are found across the whole input by fnptr_global.
+  def fnptr_decls(rel)
+    masked = @files[rel]['masked']
+    out = []
+    masked.to_enum(:scan, /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+      m = Regexp.last_match
+      open = m.end(0) - 1
+      close = match_close(masked, open)
+      next if close < 0
+      next unless struct_body_before?(masked, m.begin(0))
+      params = psl(masked, open + 1, close).strip
+      next if params.empty? || params == 'void'
+      out << { rel: rel, name: m[1], params_start: open + 1 }
+    end
+    out
+  end
+
+  # The assignments (x.NAME = helper;) and calls (x.NAME(...)) of a field, across every file of the input.
+  def fnptr_global(rec)
+    rec[:assigns] = []
+    rec[:calls] = []
+    @files.each do |frel, f|
+      masked = f['masked']
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*=\s*([A-Za-z_]\w*)\s*;/).each do
+        am = Regexp.last_match
+        rec[:assigns] << [am[1], frel, am.begin(1)]
+      end
+      masked.to_enum(:scan, /(?:\.|->)\s*#{rec[:name]}\s*\(/).each do
+        cm = Regexp.last_match
+        rec[:calls] << [cm.end(0) - 1, enclosing_func(frel, cm.begin(0))&.fetch('name', nil), frel]
+      end
+    end
+    rec
+  end
+
+  # whether the innermost unclosed brace before pos opens a struct body (struct TAG { or struct {)
+  def struct_body_before?(masked, pos)
+    depth = 0
+    k = pos - 1
+    while k >= 0
+      c = masked[k]
+      if c == '}'
+        depth += 1
+      elsif c == '{'
+        if depth == 0
+          return psl(masked, [k - 40, 0].max, k) =~ /struct\s*\w*\s*\z/ ? true : false
+        end
+        depth -= 1
+      end
+      k -= 1
+    end
+    false
+  end
+
+  # The field type and the calls through a threaded field take mrb (see compute_needs). The decision was made once for
+  # the whole input: every assigned callback is threaded, and every call is in a function with the mruby state.
+  def edit_fnptr_fields(rel)
+    cands = @threaded_cands || Set.new
+    regs = @valid_reg_names || Set.new
+    ed = @edits[rel]
+    (@fnptr_recs || []).each do |r|
+      next unless r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
+      next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
+      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel
+      r[:calls].each do |copen, _, crel|
+        next unless crel == rel
+        masked = @files[rel]['masked']
+        nxt = next_nonspace(masked, copen + 1)
+        ed.add(copen + 1, copen + 1, masked[nxt] == ')' ? 'mrb' : 'mrb, ')
+      end
+    end
+  end
+
   def compute_needs
     ids = {}
     @defs.each do |name, lst|
@@ -1147,6 +1221,16 @@ end
     end
     # a split registered method (compute_splits) is forced only through its body: its impl gets mrb when the body needs it
 forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
+    # struct function-pointer fields (fnptr_decls): the callbacks assigned to a field are threaded with mrb, as the field's
+    # type takes mrb (fnptr_global; the edits are in edit_fnptr_fields)
+    @fnptr_recs = []
+    @files.keys.each { |frel| fnptr_decls(frel).each { |d| @fnptr_recs << fnptr_global(d) } }
+    @fnptr_recs.each do |r|
+      next if r[:assigns].empty?
+      r[:ok] = r[:assigns].all? { |h, _, _| @defs.key?(h) } && r[:calls].all? { |_, fn, _| fn }
+      r[:assigns].each { |h, _, _| forced << h if @defs.key?(h) }
+    end
+    @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
 @dtype_cb_pos = Set.new
 dtype_decls.each do |rel, _m, info|
@@ -1291,6 +1375,7 @@ end
 
 use_problem = lambda do |name, use|
   rel, s, direct, fn = use
+  next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
@@ -1751,6 +1836,7 @@ end
   ed.add(start, open + 1, '') unless noreturn_in_rewritten_decl?(rel, start)
   ed.add(close, close + 1, '')
 end
+    edit_fnptr_fields(rel)
     # 4c. a rb_data_type_t initializer is CRuby's {name, {dmark, dfree, dsize}, parent, data, flags}; mruby's
     # mrb_data_type is {name, dfree, mark} (the fork's mark hook). The whole initializer is one edit, so the identifiers
     # inside it are not converted again (the identifier pass skips overlapping ranges). The mark and free functions must
