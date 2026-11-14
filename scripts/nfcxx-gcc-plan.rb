@@ -13,9 +13,13 @@
 #   CP SRC DST             a copy (the objects of a C-only -c)
 #   ENV NAME=VALUE         a variable the bash exports for the program that follows (EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS, -shared)
 # ROOT stands for the repository and WORK for the working directory; TMP for a temporary directory (mktemp -d).
-# An argument list outside the gcc backend (Path B by default, cosmo, CUDA, cache, modules, cppfront, freestanding, ...) exits
-# 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints the lines before it, then
-# its status.
+# An argument list outside the gcc backend (Path B by default, cosmo, the CUDA inputs, a cache lookup, modules, cppfront,
+# freestanding, ...) exits 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints
+# the lines before it, then its status. Modelled here: -fsyntax-only (the re-run as -c -o TMP/x.o, as nfcxx-loop.rb's
+# syntax_only_plan has it; -E execs g++ -E), --cuda-driver= and a link that names libcuda (the re-run of
+# scripts/cuda-driver-wrap.sh, or its note, or its error), and --cache=DIR when the compile is not one a cache lookup
+# keys (a link, several sources, -MD, an -o without an extension). A -c of one source with --cache is unported: its key
+# hashes the scripts and binaries.
 #
 # FILE holds the facts the bash reads from the machine and from its helper scripts (tests/nfcxx-gcc/run.sh writes it):
 #   host-sys DIR            a directory of the host C++ library, in host_sys_includes' order
@@ -29,10 +33,20 @@
 #   sret PATH               scripts/sret.sh prints PATH (absent: nothing)
 #   asan-vla PATH           scripts/asan-vla prints PATH (absent: it fails)
 #   eh-tls 1                ${EDG}/../eh-tls exists
+#   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
+#   machine M               uname -m
+#   cuda-home PATH          CUDA_HOME is PATH (no line: CUDA_HOME is unset)
+#   cuda-cub PATH           scripts/cuda-cub prints PATH (no line: it prints nothing and fails)
+#   cuda-shim PATH          scripts/cuda-driver-shim prints PATH (the shim's archive)
+#   cuda-shim-error TEXT    scripts/cuda-driver-shim fails with TEXT (takes precedence over cuda-shim)
+#   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
+#   cuda-file, cuda-dir     run.sh makes these in the work directory; the port reads the exists and dir lines instead
 #
-# Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none), the SYCL
-# pre-pass (it needs a sycl include in the source), the existence of eccp and of the built repository tools (ensure_tool
-# finds them fresh, so no ninja run), and the host GNU version (not used by this path).
+# Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none, and CUDA_HOME
+# only as the cuda-home fact), the SYCL pre-pass (it needs a sycl include in the source), the existence of eccp and of the
+# built repository tools (ensure_tool finds them fresh, so no ninja run), and the host GNU version (not used by this path).
+# A CUDA toolkit that is /usr/local/cuda (CUDA_HOME unset, and the libcuda path does not name a toolkit with cuda.h) is
+# not read: unported.
 
 require "pathname"
 
@@ -60,7 +74,7 @@ EH_UNWIND_HEADER = "ROOT/lib/ehshim/nfcxx_eh_unwind.h".freeze
 
 # The facts the bash reads from the machine (see the header).
 class Facts
-  attr_reader :host_sys, :isa, :ld, :exists, :modules
+  attr_reader :host_sys, :isa, :ld, :exists, :modules, :dirs
 
   def initialize
     @host_sys = []
@@ -68,6 +82,8 @@ class Facts
     @ld = []
     @exists = []
     @modules = []
+    @dirs = []
+    @rtv = {}
     @values = {}
   end
 
@@ -87,6 +103,11 @@ class Facts
       when "ld" then facts.ld << rest
       when "exists" then facts.exists << rest
       when "module" then facts.modules << rest
+      when "dir" then facts.dirs << rest
+      when "cuda-rtv"
+        path, version = rest.split(" ", 2)
+        facts.cuda_rtv_set(path, version)
+      when "cuda-file", "cuda-dir" then nil
       else facts.set(key, rest)
       end
     end
@@ -108,6 +129,24 @@ class Facts
   def exists?(path)
     @exists.include?(path)
   end
+
+  # a regular file (the bash's -f): it exists and is not a directory
+  def file?(path)
+    exists?(path) && !@dirs.include?(path)
+  end
+
+  def dir?(path)
+    @dirs.include?(path)
+  end
+
+  def cuda_rtv_set(path, version)
+    @rtv[path] = version
+  end
+
+  # the CUDART_VERSION of the header at PATH (nil when the header has no such line)
+  def cuda_rtv(path)
+    @rtv[path]
+  end
 end
 
 def unported(what)
@@ -119,16 +158,20 @@ def normalize(path)
 end
 
 # options of the argument loop that the gcc path does not port (the other tracks, or the tools they need)
-UNPORTED_PREFIXES = ["--cache", "--cuda-driver", "--bundle-", "--time-log=", "--trace=", "--module-dir=", "--target=",
+UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--module-dir=", "--target=",
                      "--pathb-c=", "--ir-opt=", "--promote-slots=", "--unroll=", "--struct-slots=", "--emit-"].freeze
-UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-pointers", "-fsyntax-only"].freeze
+UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-pointers"].freeze
 
 class Plan
   attr_reader :lines
 
-  def initialize(facts)
+  # lines: the output (a nested run, the -fsyntax-only or --cuda-driver= re-run, appends to it); env_mode: the mode of
+  # NFCXX_CUDA_DRIVER for this run ("libcuda" for the run the wrap execs, which has the mode in its environment)
+  def initialize(facts, lines = [], env_mode = "auto")
     @facts = facts
-    @lines = []
+    @lines = lines
+    @env_mode = env_mode
+    @cache_dir = ""
     @std = "--c++23"
     @out = "a.out"
     @outset = false
@@ -184,6 +227,8 @@ class Plan
       elsif a == "--keep-intermediates" || a == "--no-eh-unwind" then nil
       elsif a == "--eh-unwind" then @eh_unwind_on = true
       elsif a == "--no-eh-shim" then @eh_shim_on = false
+      elsif a.start_with?("--cache=") then @cache_dir = a[8..]
+      elsif a.start_with?("--cache-log=") then nil
       elsif a.start_with?("--instantiate=") then @instantiate = a[14..]
       elsif a.start_with?("--dialect=") then @dialect = a[10..]; @dialect_asked = true
       elsif a.start_with?("--gnu-version=") then nil
@@ -217,10 +262,7 @@ class Plan
       elsif a == "-pie" then @pie_opts.push("--c_to_obj_option", "-pie")
       elsif a.start_with?("-Wl,") then @files << a
       elsif a.start_with?("-l") && a.length > 2
-        unported("CUDA driver library #{a}") if a.match?(/\A-lcuda|\A-l:libcuda/)
         @files << a
-      elsif a.end_with?("/libcuda.so", "/libcuda.so.1", "/libcudart_static.a")
-        unported("CUDA driver library #{a}")
       elsif a == "-Wno-narrowing" then @diag_opts << "--diag_warning=narrowing_conversion"
       elsif a.start_with?("-W") || a == "-w" then nil
       elsif a.start_with?("-m") then @isa_opts << a
@@ -259,7 +301,12 @@ class Plan
   end
 
   def run(args)
-    parse(args)
+    return syntax_only(args) if args.include?("-fsyntax-only")
+
+    kind, argv = cuda_driver_step(args)
+    return nested(argv, "libcuda") if kind == :exec
+
+    parse(argv)
     if @ncpp + @nobj + @cfiles.length + (@stdin_src ? 1 : 0) == 0
       raise NfcxxExit.new("nfcxx: no input files", 2)
     end
@@ -276,6 +323,11 @@ class Plan
     raise NfcxxExit.new("nfcxx: unknown dialect '#{@dialect}'", 2) unless ["g++", "clang"].include?(@dialect)
 
     select_backend
+    # a -c of one source with -o and an extension is looked up in the object cache (the key is not modelled)
+    if !@cache_dir.empty? && @compile_only && @ncpp == 1 && @outset && @nobj == 0 && @cfiles.empty? && @depmode.empty? &&
+       @out.include?(".")
+      unported("--cache of a -c compile: its key hashes the scripts, the binaries and the host compilers")
+    end
     @moves = !@compile_only
     asan_c = @asan ? ["-fsanitize=address", "-fno-omit-frame-pointer", *@asanopts] : []
     @asanopts = [] unless @asan
@@ -490,6 +542,15 @@ class Plan
     files.each do |f|
       case f
       when /\A-I./ then userinc << ecp_arg(f)
+      when "-lcudart"
+        # scripts/nfcxx-loop's -lcudart: the run path of a CUDA_HOME's lib64, the CUB archive (links only), libcudart
+        home = @facts.value("cuda-home").to_s
+        eflist.push("--c_to_obj_option", "-Wl,-rpath,#{home}/lib64") if !home.empty? && @facts.dir?("#{home}/lib64")
+        unless @compile_only
+          cub = @facts.value("cuda-cub").to_s
+          eflist << cub unless cub.empty?
+        end
+        eflist << "--c_to_obj_lib=cudart"
       when /\A-l./ then eflist << "--c_to_obj_lib=#{f[2..]}"
       when "-Wl,--no-as-needed"
         no_as_needed = true
@@ -514,6 +575,134 @@ class Plan
       eflist.push("--c_to_obj_option", "-Wl,--as-needed")
     end
     [eflist, userinc]
+  end
+
+  # the run of nfcxx on ARGV, in the same output (the bash runs it as a new process)
+  def nested(argv, mode)
+    Plan.new(@facts, @lines, mode).run(argv)
+  end
+
+  # -fsyntax-only (the first step of the bash): the compile without its object, run as -c -o TMP/x.o, its -o value
+  # replaced (the same rule as scripts/nfcxx-loop.rb's syntax_only_plan). With -E the run goes on without the option, and
+  # that run execs g++ -E.
+  def syntax_only(args)
+    rest = args.reject { |b| b == "-fsyntax-only" }
+    return nested(rest, @env_mode) if rest.include?("-E")
+
+    if rest.include?("-o")
+      unported("-o with no value under -fsyntax-only") if rest.last == "-o"
+      replaced = []
+      skip = false
+      rest.each do |b|
+        if skip
+          replaced << "TMP/x.o"
+          skip = false
+          next
+        end
+        skip = true if b == "-o"
+        replaced << b
+      end
+      return nested(["-c", *replaced], @env_mode)
+    end
+    nested(["-c", *rest, "-o", "TMP/x.o"], @env_mode)
+  end
+
+  def libcuda?(arg)
+    ["-lcuda", "-l:libcuda.so", "-l:libcuda.so.1"].include?(arg) || arg.end_with?("/libcuda.so", "/libcuda.so.1")
+  end
+
+  def cuda_static?(arg)
+    arg == "-lcudart_static" || arg.end_with?("/libcudart_static.a")
+  end
+
+  # the toolkit a libcuda path implies (scripts/cuda-driver-wrap.sh: the directory above lib64, or above lib/stubs for a
+  # targets/ path); "" when it implies none
+  def derived_home(found)
+    if found.match?(%r{/lib64/(stubs/)?libcuda\.so}) then found[0...found.rindex("/lib64/")]
+    elsif found.match?(%r{/targets/.*/lib/stubs/libcuda\.so}) then found[0...found.rindex("/lib/stubs/")]
+    else ""
+    end
+  end
+
+  # the toolkit: CUDA_HOME when it is set, else the derived one when it has include/cuda.h, else /usr/local/cuda (not read)
+  def cuda_toolkit(found)
+    env_home = @facts.value("cuda-home").to_s
+    return env_home unless env_home.empty?
+
+    home = derived_home(found)
+    return home if !home.empty? && @facts.file?("#{home}/include/cuda.h")
+
+    unported("the CUDA toolkit is /usr/local/cuda (CUDA_HOME unset, and #{found} names no toolkit with cuda.h): not read")
+  end
+
+  # the reason the wrap cannot replace libcuda with the shim, or nil (the bash's why)
+  def cuda_why(home)
+    # the wrap reads the runtime header's CUDART_VERSION first: a missing header fails the sed, and the script with it
+    header = "#{home}/include/cuda_runtime_api.h"
+    raise NfcxxExit.new("nfcxx: cuda-driver-wrap: sed cannot read #{header}", 2) unless @facts.file?(header)
+
+    machine = @facts.value("machine") or unported("uname -m is not in the facts")
+    return "the shim is x86-64 only" unless machine == "x86_64"
+    return "no cuda.h and cudaTypedefs.h in #{home}/include" unless @facts.file?("#{home}/include/cuda.h") &&
+                                                                    @facts.file?("#{home}/include/cudaTypedefs.h")
+
+    rtv = @facts.cuda_rtv(header)
+    return "libcudart #{rtv || "of unknown version"} is older than 12.5" if rtv.nil? || rtv.to_i < 12050
+
+    error = @facts.value("cuda-shim-error")
+    return "the shim did not build: #{error}" unless error.nil?
+    unported("the shim's result (cuda-shim or cuda-shim-error) is not in the facts") if @facts.value("cuda-shim").nil?
+
+    nil
+  end
+
+  # scripts/cuda-driver-wrap.sh, the first step after -fsyntax-only: --cuda-driver=MODE is taken out of the arguments; a
+  # link that names libcuda is run again with the shim and -lcudart in its place ([:exec, ARGV]), or goes on as named
+  # ([:go, ARGV]: no libcuda, mode libcuda, or a note: the shim cannot be made). --cuda-driver=cudart fails then (status 1).
+  def cuda_driver_step(args)
+    mode = @env_mode
+    rest = []
+    args.each do |a|
+      if a.start_with?("--cuda-driver=") then mode = a.delete_prefix("--cuda-driver=")
+      else rest << a
+      end
+    end
+    unless ["auto", "cudart", "libcuda"].include?(mode)
+      raise NfcxxExit.new("nfcxx: --cuda-driver=#{mode}: auto, cudart or libcuda", 2)
+    end
+
+    found = rest.select { |a| libcuda?(a) }.last
+    return [:go, rest] if found.nil? || mode == "libcuda"
+
+    static = rest.select { |a| cuda_static?(a) }.last
+    home = cuda_toolkit(found)
+    why = cuda_why(home)
+    unless why.nil?
+      raise NfcxxExit.new("nfcxx: --cuda-driver=cudart: #{why}", 1) if mode == "cudart"
+
+      return [:go, rest]
+    end
+
+    lib64 = "#{home}/lib64"
+    out = []
+    done = false
+    rest.each do |a|
+      unless libcuda?(a)
+        out << a
+        next
+      end
+      next if done
+
+      done = true
+      out << @facts.value("cuda-shim")
+      if static
+        out << static
+      else
+        out.push("-L#{lib64}", "-Wl,-rpath,#{lib64}") if @facts.dir?(lib64)
+        out << "-lcudart"
+      end
+    end
+    [:exec, out]
   end
 
   # -E: exec g++ -E (before the backend is chosen)
