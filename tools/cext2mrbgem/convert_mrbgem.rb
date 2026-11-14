@@ -2174,6 +2174,35 @@ use_problem = lambda do |name, use|
     @mark_ctx_names = ctx
   end
 
+  # CRuby converts a C integer to a VALUE implicitly (return f(x) in a VALUE function, where f returns int): mruby's mrb_value
+  # is a struct, so the output does not compile. A return whose expression is a call of a defined function that returns a
+  # C integer type is refused (the compile check finds the rest when it runs).
+  INT_RET_RE = /\b(?:u?int(?:\d+_t)?|u?long|short|char|size_t|ssize_t|off_t|time_t|_Bool|bool|double|float)\b/
+  def integer_return_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}.>])return[ \t\n]+([A-Za-z_]\w*)[ \t\n]*\(/).each do
+        m = Regexp.last_match
+        callee = m[1]
+        defs = (@defs[callee] || []).reject { |x| x['proto'] }
+        next unless defs.size == 1 && defs[0]['ret']
+        ret = defs[0]['ret'].to_s
+        next if ret.include?('*')
+        next unless ret.match?(INT_RET_RE) && !ret.match?(/\bVALUE\b/)
+        fn = enclosing_func(rel, m.begin(0))
+        if fn.nil? && define_at(rel, m.begin(0))
+          # a return in a macro body: the functions that expand the macro return it
+          name = define_at(rel, m.begin(0))[0]
+          expanders = (@occ[name] || []).reject { |orel, os, _e| define_at(orel, os) }.map { |orel, os, _e| enclosing_func(orel, os) }
+          next unless expanders.any? { |f| f && f['ret'].to_s.strip == 'VALUE' }
+        else
+          next if fn.nil? || fn['ret'].to_s.strip != 'VALUE'
+        end
+        refuse(rel, m.begin(0), callee, "returns #{callee}'s #{ret} as a VALUE: CRuby converts the integer implicitly, mruby's mrb_value is a struct (not supported)")
+      end
+    end
+  end
+
   # CRuby compares VALUEs with ==, which is identity. mruby's mrb_value is a struct here, so a == b is mrb_obj_equal(mrb, a, b)
   # (identity too). Both operands must be VALUE names of a function with the mruby state, or a Qnil/Qtrue/Qfalse/Qundef
   # constant; any other comparison is left as it is (the compile check refuses it when it does not compile).
@@ -3321,6 +3350,7 @@ end
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
+    integer_return_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],
                             "#if 0  /* BC2CPP-MRBGEM: not the extension entry; CRuby never calls it */\n")

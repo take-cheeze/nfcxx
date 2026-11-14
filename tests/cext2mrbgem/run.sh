@@ -822,6 +822,13 @@ check grep -qF 'mrb_value vp_hello(mrb_state *mrb, mrb_value self)' "$work/api_s
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_return tools/cext2mrbgem/fixtures/api_macro_return/ext/api_macro_return "$work/api_macro_return" > "$work/api_macro_return.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return mret_make(mrb, s);' "$work/api_macro_return/src/api_macro_return.c"
+
+# 2zzz5. a VALUE function returns a C integer from a helper (return ir_sub(...), in a macro body): refused, CRuby converts it
+# implicitly and mruby's mrb_value does not
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_return tools/cext2mrbgem/fixtures/api_int_return/ext/api_int_return "$work/api_int_return" > "$work/api_int_return.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_int_return/NOT_BUILDABLE"
+if [ "$scanner" = libclang ]; then check grep -q "returns ir_sub's int as a VALUE" "$work/api_int_return/REFUSALS.txt"; fi
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
