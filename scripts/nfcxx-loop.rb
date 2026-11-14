@@ -507,17 +507,15 @@ def cuda_driver_step(argv, env, facts)
     home = "/usr/local/cuda" unless !home.empty? && facts.file?("#{home}/include/cuda.h")
   end
 
-  # The bash reads the version through a pipeline (sed | head) under set -euo pipefail (nfcxx's line 75): a missing
-  # cuda_runtime_api.h ends nfcxx there with status 2 and no message, before the machine is looked at. The port does the same
-  # (a bug of cuda-driver-wrap.sh: the fallback note and the cudart error are never reached when the header is missing).
+  # the version is read from cuda_runtime_api.h; a missing header leaves it unknown (the bash reads it with || rtv=)
   header = "#{home}/include/cuda_runtime_api.h"
-  raise NfcxxExit.new("", 2) unless facts.file?(header)
-
   rtv = facts.rtv(header)
   why = if facts.machine != "x86_64"
           "the shim is x86-64 only"
         elsif !facts.file?("#{home}/include/cuda.h") || !facts.file?("#{home}/include/cudaTypedefs.h")
           "no cuda.h and cudaTypedefs.h in #{home}/include"
+        elsif !facts.file?(header)
+          "no cuda_runtime_api.h in #{home}/include"
         elsif rtv.nil? || rtv.empty? || rtv.to_i < 12050
           "libcudart #{rtv.to_s.empty? ? "of unknown version" : rtv} is older than 12.5"
         elsif facts.shim.start_with?("error:")
