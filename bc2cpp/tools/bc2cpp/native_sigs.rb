@@ -15,7 +15,7 @@ module NativeSigs
   CORE_FILE = File.join(BC2CPP_WORLD_ROOT, "sig/bc2cpp/core.rbs")
   CORE_TABLES = %w[core_block_iterators core_block_params core_block_returns core_blockless_iterators core_class_tests
                    core_enumerators core_frame_readers core_fresh_arrays core_hierarchy core_predicates core_proc_calls
-                   core_results].freeze
+                   core_results native_singletons].freeze
   FILES = [FILE, CORE_FILE].freeze
   MARKER = '# bc2cpp-native:'
   MARK_WORD = 'bc2cpp-native:'
