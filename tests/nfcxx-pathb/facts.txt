@@ -6,6 +6,8 @@ qbe 1
 libc-a 1
 pathb-ldrt ROOT/build/nfcxxld.a
 ehshim ROOT/build/ehshim.o
+asan-vla ROOT/build/nfcxxvla.a
+safeptr-rt ROOT/build/nfcxxsafeptr.a
 ld mold
 module mod.cc
 pathb-status bad.cc 3

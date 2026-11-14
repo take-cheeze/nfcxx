@@ -43,3 +43,44 @@ default -E a.cc
 default c.c a.cc
 default -c mod.cc
 gcc a.cc -o prog
+# AddressSanitizer (Path B --asan on each compile; the link adds the options, the EH shim and the VLA runtime)
+default -fsanitize=address a.cc -o prog
+default -fno-omit-frame-pointer -fsanitize=address a.cc -o prog
+default -fsanitize=address -fno-sanitize=address a.cc -o prog
+default -fsanitize=address -c c.c
+default -fsanitize=address -fsafe-pointers -c a.cc
+# -fsafe-pointers (--safe-pointers; the link puts the safe-pointer runtime ahead of the objects)
+default -fsafe-pointers -c a.cc
+default -fsafe-pointers a.cc -o prog
+default -fsafe-pointers -fno-safe-pointers -c a.cc
+default -fsafe-pointers -shared fail.cc -o libx.so
+# -shared (--pic on the compiles; the link is cc -shared, with no EH shim or VLA runtime)
+pathb -shared a.cc -o libx.so
+pathb -shared -rdynamic -fuse-ld=mold -fPIC a.cc -o libx.so
+default -shared a.cc -o libx.so
+# -E (the preprocess is g++ -E; the C sources are not in it)
+default -E -P -DX=1 -Iinc -isystem inc -include pre.h -x c++ a.cc -o out.i
+default -E c.c a.cc
+default -E -
+# -fsyntax-only (the bash runs -c with the object in a temporary directory; -E runs the preprocess)
+default -fsyntax-only a.cc
+default -fsyntax-only -o out.o a.cc
+default -fsyntax-only -E a.cc
+pathb -fsyntax-only fail.cc
+default -fsyntax-only fail.cc
+# the depfile options (-MD and -MMD need -c; -MP, -MF, -MT and -MQ are read for the compile)
+pathb -c -MD -MF a.d -MT t a.cc
+default -c -MP -MF a.d a.cc
+default -MD a.cc -o prog
+default -c -MD a.cc
+# C sources (pathb-cc in C mode, -std=c11; a C-only -c copies the objects with cp)
+default c.c a.cc
+default c.c -o prog
+default -c c.c
+default -c c.c -o out.o
+default -c -o out.o c.c a.cc
+# cache, time log and trace: the Path B paths have no plan line for them
+default --cache=cache -c a.cc
+default --cache=cache --cache-log=log.txt a.cc -o prog
+default --time-log=t.log a.cc -o prog
+default --trace=t.json -c a.cc

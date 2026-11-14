@@ -4,9 +4,10 @@
 #   g++, gcc               probes (--version, -dumpfullversion, -v, -dM) answer; anything else is logged (RUN), not run
 #   cp, ninja, eccp        logged (RUN), not run (not on the Path B path)
 #   env                    the gcc fallback's exec: EXEC env ARGS, logged; exit 0 (the bash does not return from exec)
+#   g++ -E                 the -E exec (exec g++ -E ...): EXEC g++ ARGS, logged; exit 0 (probes such as g++ -v stay silent)
 #   mktemp                 -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   pathb-cc               RUN $0 ARGS, logged; exits with the pathb-status fact of the first argument that has one
-#   pathb-ldrt, ehshim, sret.sh, asan-vla
+#   pathb-ldrt, ehshim, sret.sh, asan-vla, safeptr-rt
 #                          print their facts (ROOT stands for the sandbox's repository); nothing when absent
 #   ld.NAME                exists only, for command -v (-fuse-ld=NAME)
 # Environment: NFCXX_FACTS (the facts file), NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP, NFCXX_STUB_ROOT (the sandbox's repository).
@@ -24,6 +25,8 @@ case $name in
       -dumpfullversion) echo 13.3.0; exit 0 ;;
       -v|-dM) exit 0 ;;
     esac
+    # g++ -E is the driver's -E exec (exec "$hostcxx" -E ...): the bash does not return from it
+    if [ "$name" = g++ ] && [[ " $* " == *" -E "* ]]; then log "EXEC $name $*"; exit 0; fi
     log "RUN $name $*"; exit 0 ;;
   cp|ninja|eccp) log "RUN $name $*"; exit 0 ;;
   env) log "EXEC env $*"; exit 0 ;;
@@ -37,7 +40,7 @@ case $name in
       if [ -n "$v" ]; then exit "$v"; fi
     done
     exit 0 ;;
-  pathb-ldrt|ehshim|asan-vla) v=$(fact "$name")
+  pathb-ldrt|ehshim|asan-vla|safeptr-rt) v=$(fact "$name")
     [ -z "$v" ] || printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"
     [ "$name" != asan-vla ] || [ -n "$v" ] || exit 1
     exit 0 ;;
