@@ -369,6 +369,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_new_inst/NOT_BUILDABLE"
 check grep -qF 'return mrb_obj_new(mrb, cApiNew, argc, argv);' "$work/api_new_inst/src/api_new_inst.c"
 
+# 2zh. rb_sym2str (api_map.json batch N3): the Symbol argument is wrapped with mrb_symbol(...), and mrb is passed first
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_sym_str tools/cext2mrbgem/fixtures/api_sym_str/ext/api_sym_str "$work/api_sym_str" > "$work/api_sym_str.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_sym_str/NOT_BUILDABLE"
+check grep -qF 'return mrb_sym_str(mrb, mrb_symbol(sym));' "$work/api_sym_str/src/api_sym_str.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
@@ -464,7 +470,7 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 6
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 5
 check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"

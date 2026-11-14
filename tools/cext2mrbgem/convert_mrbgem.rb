@@ -1689,6 +1689,21 @@ end
         rewrite(rel, s, name, entry['mruby'], entry['caveat'])
         return
       end
+      if entry['wrap_arg']
+        # text around one argument (a conversion such as mrb_symbol(x)): only insertions at its two ends, so the
+        # argument's own conversion stays exactly as it is
+        w = entry['wrap_arg']
+        cp = pyfind(masked, ')', nxt)
+        args = cp > 0 ? split_args(masked, nxt, cp) : []
+        if args.size <= w['index']
+          refuse(rel, s, name, "expected at least #{w['index'] + 1} arguments, found #{args.size}")
+          return
+        end
+        a, b = args[w['index']]
+        ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ") if entry['wrap_mrb']
+        ed.add(a, a, w['prefix'])
+        ed.add(b, b, w['suffix'])
+      end
       if entry['intern_arg']
         # a C name argument (a string literal) becomes the symbol mruby takes: mrb_intern_cstr(mrb, "name")
         cp = pyfind(masked, ')', nxt)

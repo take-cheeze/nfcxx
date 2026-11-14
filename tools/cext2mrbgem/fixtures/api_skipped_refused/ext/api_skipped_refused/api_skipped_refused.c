@@ -1,8 +1,8 @@
 #include <ruby.h>
 
 /* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_str_subseq (mruby's public
- * substr counts characters, the byte form is internal), rb_iv_get and rb_gv_get (mruby takes a symbol, not a C name),
- * rb_sym2str (takes a Symbol VALUE, mruby's mrb_sym_str takes an mrb_sym), rb_cstr_to_inum (no C-string form),
+ * substr counts characters, the byte form is internal), rb_gv_get (mruby takes a symbol, not a C name),
+ * rb_cstr_to_inum (no C-string form),
  * rb_bug (variadic format), StringValue (takes an lvalue it rewrites). */
 static VALUE mApiSkip;
 

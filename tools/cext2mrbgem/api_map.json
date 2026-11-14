@@ -1190,6 +1190,19 @@
         1
       ],
       "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+    },
+    "rb_sym2str": {
+      "kind": "call",
+      "mruby": "mrb_sym_str",
+      "inject_mrb": false,
+      "wrap_mrb": true,
+      "needs_mrb": true,
+      "wrap_arg": {
+        "index": 0,
+        "prefix": "mrb_symbol(",
+        "suffix": ")"
+      },
+      "caveat": "the Symbol VALUE is converted with mrb_symbol; mruby does not promise a frozen result, as CRuby does"
     }
   },
   "special_arg_positions_class_only": {
