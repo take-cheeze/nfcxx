@@ -400,6 +400,11 @@ check grep -qF '(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())' "$work/a
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_bignum_stuck tools/cext2mrbgem/fixtures/api_bignum_stuck/ext/api_bignum_stuck "$work/api_bignum_stuck" > "$work/api_bignum_stuck.log" 2>&1 || rc=$?
 check test "$rc" -ne 0
 check grep -qF 'stuck point: the fork has no Bignum' "$work/api_bignum_stuck/REFUSALS.txt"
+# 2zzz64. rb_hash_bulk_insert and rb_class_inherited_p map to the fork's mrb_hash_bulk_insert and mrb_class_inherited_p.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_class tools/cext2mrbgem/fixtures/api_hash_class/ext/api_hash_class "$work/api_hash_class" > "$work/api_hash_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_hash_bulk_insert(mrb, 4, pairs, h);' "$work/api_hash_class/src/api_hash_class.c"
+check grep -qF 'mrb_class_inherited_p(mrb, mrb_class_ptr(sub), mrb_class_ptr(sup))' "$work/api_hash_class/src/api_hash_class.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

@@ -952,6 +952,21 @@
       "needs_mrb": true,
       "caveat": "mruby's mrb->exc is the exception being handled (nil when none); CRuby's $! is the same notion for a rescue body"
     },
+    "rb_class_inherited_p": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [0, 1],
+      "needs_mrb": true,
+      "template": "mrb_class_inherited_p($m, $0, $1)",
+      "caveat": "the fork's mrb_class_inherited_p (mrbgem-independent, src/class.c): true if the first class is the second or inherits or includes it, false if the second is a subclass of the first, nil if unrelated; both class arguments must be tracked class variables or RClass * expressions"
+    },
+    "rb_hash_bulk_insert": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_hash_bulk_insert($m, $0, $1, $2)",
+      "caveat": "the fork's mrb_hash_bulk_insert (src/hash.c): argv holds argc elements, alternating keys and values, inserted in order as rb_hash_bulk_insert does"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
