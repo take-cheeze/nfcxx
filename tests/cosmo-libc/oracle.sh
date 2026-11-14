@@ -31,7 +31,7 @@ CC
   for o in $members; do
     src=$root/3rd/edg/lib_src/${o%.o}.c
     [ -f "$src" ] || { echo "cosmo-libc: no source for $o in 3rd/edg/lib_src" >&2; exit 2; }
-    NFCXX_GCC=$out/cosmo-cc NFCXX_CC=$root/scripts/gcc-cc.rb NFCXX_CCACHE=0 "$edg/bin/eccp" --building_runtime --c++23 -g \
+    NFCXX_GCC=$out/cosmo-cc NFCXX_CC=$root/scripts/gcc-cc NFCXX_CCACHE=0 "$edg/bin/eccp" --building_runtime --c++23 -g \
       -DCHECKING=1 -DDEBUG=1 -DUSE_STDINT_HEADER -DSYSTEM_RUNTIME_HAS_IA64_THREAD_ATEXIT=0 -D__COSMOPOLITAN__ -D__COSMOCC__ \
       -D__FATCOSMOCC__ --preinclude "$cosmo_root/include/libc/integral/normalize.inc" --no_standard_includes \
       --sys_include="$root/3rd/edg/include_c++" --sys_include="$root/3rd/edg/include_c99" --sys_include="$cosmo_root/include" \

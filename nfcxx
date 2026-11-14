@@ -1116,7 +1116,7 @@ if [ $backend = pathb ]; then
     # cosmocc's fat link (an aarch64 companion per input) is not used: the x86_64 driver links the objects with cosmo's
     # startup code (ape.o, crt.o), linker script and libraries, as cosmocc's x86_64 link does (bin/cosmocc).
     cosmo_lib=$cosmo_root/x86_64-linux-cosmo/lib
-    cosmo_libc=$("$root/scripts/cosmo-libc.sh")   # EDG's runtime for cosmo (libC.a, built from the host member list)
+    cosmo_libc=$("$root/scripts/cosmo-libc.rb")   # EDG's runtime for cosmo (libC.a, built from the host member list)
     # The ELF is then fixed up (zip sections: tools/cosmo/fixupobj.c) and packaged as APE, as cosmocc's link does.
     cosmo_elf=$ptmp/cosmo.elf
     "$cosmo_root/bin/x86_64-linux-cosmo-g++" -nostartfiles -nodefaultlibs -static -Wl,-T,"$cosmo_lib/ape.lds" -L"$cosmo_lib" -o "$cosmo_elf" ${sprt[@]+"${sprt[@]}"} "$cosmo_lib/ape.o" "$cosmo_lib/crt.o" ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pobjs[@]+"${pobjs[@]}"} ${plink[@]+${plink[@]+"${plink[@]}"}} "$ldrt" ${shim[@]+${shim[@]+"${shim[@]}"}} -L"$cosmo_libc" -lC -lcxx -lc -lcosmo -lm
