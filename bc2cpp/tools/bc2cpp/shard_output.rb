@@ -47,6 +47,30 @@ module ShardOutput
     n
   end
 
+  # BC2CPP_SHARD_COLD_OPT=O1 (docs/notes/bc2cpp-shard-tiers.md): the shards other than the main file are compiled at
+  # this optimization level (a GCC `#pragma GCC optimize` at the top of each), and BC2CPP_SHARD_HOT_OWNERS names a file
+  # of owners (one per line) whose methods stay in the main file, which keeps the build's own flags. The cold level
+  # trades run time of the moved methods for compile time; the hot list is the profile's, supplied by the caller.
+  COLD_OPT = /\AO[0-3sz]\z/
+
+  # nil unless BC2CPP_SHARD_COLD_OPT is set. GCC only: other compilers ignore the pragma.
+  def cold_opt(env = ENV)
+    raw = env['BC2CPP_SHARD_COLD_OPT']
+    return nil if raw.nil? || raw.empty?
+    raise Error, "BC2CPP_SHARD_COLD_OPT must be O0, O1, O2, O3, Os or Oz, got #{raw.inspect}" unless raw =~ COLD_OPT
+
+    raw
+  end
+
+  # The owners named in BC2CPP_SHARD_HOT_OWNERS, empty without a tier (cold_opt) so the default split is unchanged.
+  def hot_owners(env = ENV)
+    path = env['BC2CPP_SHARD_HOT_OWNERS']
+    return Set.new if path.nil? || path.empty? || cold_opt(env).nil?
+
+    names = File.read(path).split("\n").map(&:strip)
+    names.reject { |name| name.empty? || name[0] == '#' }.to_set
+  end
+
   def unit_mark(owner)
     "#{UNIT_MARK}#{owner} */\n"
   end
@@ -109,7 +133,14 @@ module ShardOutput
     wanted = [[shards, by_owner.size, (total / min_bytes.to_f).ceil].min, 1].max
     loads = Array.new(wanted, 0)
     placed = Array.new(wanted) { [] }
-    by_owner.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
+    hot = hot_owners
+    # Hot owners all go to the main file (shard 0), before the cold ones are spread over the lightest shards.
+    hot_part, cold_part = by_owner.partition { |owner, _| hot.include?(owner) }
+    hot_part.each do |_, list|
+      loads[0] += size.call(list)
+      placed[0].concat(list)
+    end
+    cold_part.sort_by { |owner, list| [-size.call(list), owner] }.each do |_, list|
       i = loads.index(loads.min)
       loads[i] += size.call(list)
       placed[i].concat(list)
@@ -149,10 +180,13 @@ module ShardOutput
     main = String.new(prelude_out)
     main << "// SHARD_DECLS: methods-section definitions another shard names (docs/bc2cpp-shards.md).\n" << decls
     main << "#ifndef #{PRELUDE_ONLY}\n" << bodies[0] << "#endif // #{PRELUDE_ONLY}\n"
+    tier = cold_opt
     files = bodies.drop(1).each_with_index.map do |body, i|
       next empty_shard(symbol, i + 1, shards) if groups[i + 1].empty?
 
-      "// #{symbol}_gen_shard#{i + 1}.cpp: shard #{i + 1} of #{shards} (docs/bc2cpp-shards.md).\n" \
+      # A pragma before the include covers the prelude and the methods of this translation unit (docs/notes/bc2cpp-shard-tiers.md).
+      head = tier ? "#pragma GCC optimize (\"#{tier}\")\n" : ''
+      "#{head}// #{symbol}_gen_shard#{i + 1}.cpp: shard #{i + 1} of #{shards} (docs/bc2cpp-shards.md).\n" \
         "#define #{PRELUDE_ONLY}\n#include \"#{symbol}_gen.cpp\"\n#{body}"
     end
     [main, files]
