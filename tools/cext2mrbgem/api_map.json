@@ -90,6 +90,12 @@
       "needs_mrb": true,
       "returns": "class"
     },
+    "Data_Make_Struct": {
+      "kind": "special",
+      "handler": "data_make",
+      "needs_mrb": true,
+      "caveat": "a static mrb_data_type per call with the mark and free callbacks (threaded); the struct is zeroed"
+    },
     "rb_define_method": {
       "kind": "special",
       "handler": "define_method",

@@ -1474,6 +1474,32 @@ end
     end
   end
 
+  # The Data_Make_Struct calls of the input: [rel, start, mark name, free name, mark position, free position] (names nil
+  # when they are not plain identifiers; 'NULL'/'0' for none).
+  def data_make_calls_all
+    out = []
+    @files.each do |rel, f|
+      next unless f['kind'] == 'src'
+      masked = f['masked']
+      text = f['text']
+      masked.to_enum(:scan, /(?<![#{WC}$.>])Data_Make_Struct#{SS}\(/).each do
+        m = Regexp.last_match
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close <= 0
+        args = split_args(masked, open, close)
+        next unless args.size == 5
+        names = args.map { |a, b| psl(text, a, b).strip }
+        mk_pos = args[2][0] + (psl(text, args[2][0], args[2][1])[/\A\s*/].length)
+        fr_pos = args[3][0] + (psl(text, args[3][0], args[3][1])[/\A\s*/].length)
+        mk = names[2].match?(/\A[A-Za-z_][#{WC}]*\z/) || names[2] == 'NULL' || names[2] == '0' ? names[2] : nil
+        fr = names[3].match?(/\A[A-Za-z_][#{WC}]*\z/) || names[3] == 'NULL' || names[3] == '0' ? names[3] : nil
+        out << [rel, m.begin(0), mk, fr, mk_pos, fr_pos]
+      end
+    end
+    out
+  end
+
   def fnptr_param_recs
     recs = []
     @defs.each do |hname, lst|
@@ -1801,6 +1827,16 @@ dtype_decls.each do |rel, _m, info|
     # the mark function is a mark-context name from the start: mark_context_names is memoized on its first use
     (@dtype_mark_names ||= Set.new) << nm if nm == info['mark']
   end
+end
+# Data_Make_Struct(klass, type, mark, free, ptr): the mark and free callbacks go into a static mrb_data_type, so they are
+# threaded like a data type's callbacks (the same positions and mark-context names)
+data_make_calls_all.each do |rel, pos, mk_name, fr_name, mk_pos, fr_pos|
+  [[mk_name, mk_pos], [fr_name, fr_pos]].each do |nm, p2|
+    next if nm.nil? || nm == 'NULL' || nm == '0' || !@defs.key?(nm)
+    forced << nm
+    @dtype_cb_pos << [rel, p2]
+  end
+  (@dtype_mark_names ||= Set.new) << mk_name if mk_name && @defs.key?(mk_name)
 end
     # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
     @hash_calls = hash_foreach_calls
@@ -3532,6 +3568,56 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # rb_funcall(recv, ID, n, a1..an) -> mrb_funcall_argv(mrb, recv, name, n, (mrb_value[]){a1..an}), with the name from
   # rb_intern("lit") or a character ID ('*'). Only the call's head, its ID and count and its closing paren are rewritten:
   # the receiver and the arguments stay in place, so the identifier pass converts them as it does everywhere else.
+  # Data_Make_Struct(klass, type, mark, free, ptr) -> a static mrb_data_type (threaded callbacks) and
+  # mrb_data_object_alloc of a zeroed struct: ptr = (type *)mrb_calloc(...). The static type is declared before the
+  # function that holds the call (its callbacks must be declared before it, so they must be defined earlier).
+  def data_make_special(rel, s, nxt, called)
+    masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
+    unless called
+      refuse(rel, s, 'Data_Make_Struct', 'used without a call')
+      return
+    end
+    cp = match_close(masked, nxt)
+    args = cp > 0 ? split_args(masked, nxt, cp) : []
+    texts = args.map { |a, b| psl(text, a, b).strip }
+    unless args.size == 5
+      refuse(rel, s, 'Data_Make_Struct', 'Data_Make_Struct takes five arguments')
+      return
+    end
+    klass, type, mk, fr, ptr = texts
+    fn = enclosing_func(rel, s)
+    unless fn && (@valid_reg_names.include?(fn['name']) || (@needs || Set.new).include?(fn['name']))
+      refuse(rel, s, 'Data_Make_Struct', 'the call is in a function that does not have the mruby state')
+      return
+    end
+    unless ptr.match?(/\A[A-Za-z_][#{WC}]*\z/) && klass.match?(/\A[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*\z/) &&
+           type.match?(/\A(?:struct[ \t]+)?[A-Za-z_][#{WC}]*\z/) &&
+           [mk, fr].all? { |x| x.match?(/\A[A-Za-z_][#{WC}]*\z/) || x == 'NULL' || x == '0' }
+      refuse(rel, s, 'Data_Make_Struct', 'the arguments are not plain names (klass, type, callbacks, pointer)')
+      return
+    end
+    # the callbacks must be defined before the function that holds the static type
+    [mk, fr].each do |x|
+      next if x == 'NULL' || x == '0'
+      dd = (@defs[x] || []).reject { |y| y['proto'] }
+      unless dd.size == 1 && dd[0]['file'] == rel && dd[0]['hstart'] < fn['hstart']
+        refuse(rel, s, 'Data_Make_Struct', "callback #{x} is not defined in this file before the function that makes the object")
+        return
+      end
+    end
+    @dm_counter = (@dm_counter || 0) + 1
+    dt = "nfcx_dt_#{@dm_counter}"
+    free_c = fr == '0' ? 'NULL' : fr
+    mark_c = mk == '0' ? 'NULL' : mk
+    ed.add(fn['hstart'], fn['hstart'], "static const mrb_data_type #{dt} = { #{texts[1].inspect.gsub('"', '"')}, #{free_c}, #{mark_c} };\n")
+    tok = mrb_tok(rel, s)
+    tname = type.sub(/\Astruct[ \t]+/, '')
+    cls = @class_vars.include?(klass) ? klass : "mrb_class_ptr(#{klass})"
+    new = "mrb_obj_value(mrb_data_object_alloc(#{tok}, #{cls}, (#{ptr} = (#{type} *)mrb_calloc(#{tok}, 1, sizeof(#{type}))), &#{dt}))"
+    ed.add(s, cp + 1, new)
+    rewrite(rel, s, 'Data_Make_Struct', new, 'the struct is zeroed (mrb_calloc, as Data_Make_Struct); its type is a static mrb_data_type with the threaded callbacks')
+  end
+
   def funcall_special(rel, s, nxt, called)
     masked = @files[rel]['masked']
     text = @files[rel]['text']
@@ -3584,6 +3670,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     masked = @files[rel]['masked']
     text = @files[rel]['text']
     ed = @edits[rel]
+    if name == 'Data_Make_Struct'
+      data_make_special(rel, s, nxt, called)
+      return
+    end
     if name == 'rb_funcall'
       funcall_special(rel, s, nxt, called)
       return

@@ -360,6 +360,11 @@ check grep -qF '#define tf_neg(x) mrb_funcall_argv(api_macro_twofile_bc2_mrb' "$
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_direct_scan tools/cext2mrbgem/fixtures/api_direct_scan/ext/api_direct_scan "$work/api_direct_scan" > "$work/api_direct_scan.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return mrb_funcall_argv(mrb, self, mrb_intern_cstr(mrb, "inner"), 0, NULL);' "$work/api_direct_scan/src/api_direct_scan.c"
+# 2zzz53. Data_Make_Struct: a static mrb_data_type (threaded mark and free) and a zeroed struct from mrb_calloc.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_data_make tools/cext2mrbgem/fixtures/api_data_make/ext/api_data_make "$work/api_data_make" > "$work/api_data_make.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static const mrb_data_type nfcx_dt_1 = { "DmBox", dm_free, dm_mark };' "$work/api_data_make/src/api_data_make.c"
+check grep -qF 'mrb_data_object_alloc(mrb, mrb_class_ptr(klass), (box = (DmBox *)mrb_calloc(mrb, 1, sizeof(DmBox))), &nfcx_dt_1)' "$work/api_data_make/src/api_data_make.c"
 # 2zzz52. a cast function-pointer table (VALUE (*)(void *))fn of this file: its callbacks run in global mode, and the table's
 # type name (struct ct_funcs) is not a use of the table.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_cast_table tools/cext2mrbgem/fixtures/api_cast_table/ext/api_cast_table "$work/api_cast_table" > "$work/api_cast_table.log" 2>&1 || rc=$?
