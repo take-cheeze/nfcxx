@@ -407,6 +407,31 @@ check grep -qF 'unsigned long ul = mrb_fixnum(v);' "$work/api_fetch_num_str/src/
 check grep -qF 'mrb_obj_freeze(mrb, str);' "$work/api_fetch_num_str/src/api_fetch_num_str.c"
 check grep -q 'rb_obj_freeze_inline, ruby/internal/fl_type.h:911' "$work/api_fetch_num_str/conversion_log.json"
 
+# 5. api_map.json batch B1 (rb_obj_is_kind_of, rb_obj_id, CLASS_OF, rb_class_of, rb_include_module, rb_eFrozenError,
+# RB_INTEGER_TYPE_P): mapped with no refusal; the class variables in the class-only argument positions are not wrapped
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_obj_class_int tools/cext2mrbgem/fixtures/api_obj_class_int/ext/api_obj_class_int "$work/api_obj_class_int" > "$work/api_obj_class_int.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_obj_class_int/NOT_BUILDABLE"
+check grep -q 'STATUS: no refusals' "$work/api_obj_class_int/REFUSALS.txt"
+check grep -qF '#include <mruby/class.h>' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_obj_is_kind_of(mrb, obj, cApiKind);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'return mrb_obj_id(obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_value k = mrb_class(mrb, obj);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_include_module(mrb, cApiKind, mApiMix);' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'if (mrb_integer_p(v)) return mrb_true_value();' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check grep -qF 'mrb_raisef(mrb, E_FROZEN_ERROR, "not an integer");' "$work/api_obj_class_int/src/api_obj_class_int.c"
+check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/api_obj_class_int/src/api_obj_class_int.c'"
+
+# 5b. names kept refused in batch B1 (no exact mruby equivalent: rb_str_subseq, rb_iv_get, rb_gv_get, rb_sym2str,
+# rb_cstr_to_inum, rb_bug, StringValue) stay refused with the no-entry reason, so a later mapping is a deliberate change
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
+check test "$rc" -eq 2
+check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
+check test "$(grep -c 'no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt")" -eq 7
+check grep -q '  rb_str_subseq  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_iv_get  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  StringValue  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

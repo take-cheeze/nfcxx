@@ -25,7 +25,8 @@
         "mruby.h",
         "mruby/string.h",
         "mruby/numeric.h",
-        "mruby/hash.h"
+        "mruby/hash.h",
+        "mruby/class.h"
       ]
     },
     "ruby/ruby.h": {
@@ -33,7 +34,8 @@
         "mruby.h",
         "mruby/string.h",
         "mruby/numeric.h",
-        "mruby/hash.h"
+        "mruby/hash.h",
+        "mruby/class.h"
       ]
     },
     "ruby/re.h": {
@@ -975,6 +977,54 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "caveat": "CRuby's OBJ_FREEZE (rb_obj_freeze_inline, ruby/internal/fl_type.h:911) returns void; mruby's mrb_obj_freeze returns the object, which a statement use discards"
+    },
+    "rb_obj_is_kind_of": {
+      "kind": "call",
+      "mruby": "mrb_obj_is_kind_of",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns mrb_bool (0 or 1), where CRuby returns VALUE (Qtrue or Qfalse); the class argument is a struct RClass * (a class variable is passed unwrapped: special_arg_positions_class_only), so a VALUE class does not type-check"
+    },
+    "rb_obj_id": {
+      "kind": "call",
+      "mruby": "mrb_obj_id",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "returns mrb_int, where CRuby returns an Integer VALUE: wrap with mrb_int_value(mrb, ...) where a VALUE is needed. mruby's id is the object's address (src/etc.c), CRuby's is a sequence number: both are unique among live objects, but the values differ"
+    },
+    "CLASS_OF": {
+      "kind": "call",
+      "mruby": "mrb_class",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns struct RClass *, where CRuby's CLASS_OF returns VALUE: wrap with mrb_obj_value() where a VALUE is needed"
+    },
+    "rb_class_of": {
+      "kind": "call",
+      "mruby": "mrb_class",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "returns struct RClass *, where CRuby's rb_class_of returns VALUE (ruby/internal/globals.h:174): wrap with mrb_obj_value() where a VALUE is needed"
+    },
+    "rb_include_module": {
+      "kind": "call",
+      "mruby": "mrb_include_module",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "both arguments are struct RClass * (class variables are passed unwrapped: special_arg_positions_class_only), so a VALUE class or module does not type-check; cyclic includes raise ArgumentError in both"
+    },
+    "rb_eFrozenError": {
+      "kind": "expr",
+      "mruby": "E_FROZEN_ERROR",
+      "needs_mrb": true,
+      "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "RB_INTEGER_TYPE_P": {
+      "kind": "call",
+      "mruby": "mrb_integer_p",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby has no bignum: MRB_TT_INTEGER matches every Integer, including values CRuby reports as a bignum (the same reason RUBY_T_FIXNUM is caveated)"
     }
   },
   "special_arg_positions_class_only": {
@@ -1008,6 +1058,13 @@
     ],
     "rb_undef_method": [
       0
+    ],
+    "rb_obj_is_kind_of": [
+      1
+    ],
+    "rb_include_module": [
+      0,
+      1
     ]
   }
 }
