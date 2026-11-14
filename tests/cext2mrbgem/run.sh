@@ -575,6 +575,13 @@ check test ! -e "$work/api_fnptr_positional/NOT_BUILDABLE"
 check grep -qF 'mrb_value (*on_second)(mrb_state *mrb, mrb_value v);' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
 check grep -qF 'return ops->on_second(mrb, ops->on_first(mrb, v));' "$work/api_fnptr_positional/src/api_fnptr_positional.c"
 
+# 2zzk. TYPE(v) == T_NIL and TYPE(v) != T_FALSE are value tests: mrb_nil_p and !mrb_false_p (nil and false share MRB_TT_FALSE)
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_type_nil tools/cext2mrbgem/fixtures/api_type_nil/ext/api_type_nil "$work/api_type_nil" > "$work/api_type_nil.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_type_nil/NOT_BUILDABLE"
+check grep -qF 'return mrb_nil_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
+check grep -qF 'return !mrb_false_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_type_nil/src/api_type_nil.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"

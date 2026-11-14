@@ -2157,6 +2157,17 @@ end
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      # TYPE(v) == T_NIL (or !=) is a nil test: mruby has no nil type tag (nil and false share MRB_TT_FALSE), so the whole
+      # comparison is rewritten to mrb_nil_p, and the T_NIL token inside that edit is not refused
+      if name == 'TYPE' && (tn = /\A\(\s*([A-Za-z_][#{WC}]*)\s*\)\s*(==|!=)\s*(T_NIL|T_FALSE)(?![#{WC}])/.match(masked[e..(e + 80)].to_s)) &&
+         !@entries.key?(tn[1]) && !@class_vars.include?(tn[1])
+        neg = tn[2] == '!=' ? '!' : ''
+        pred = tn[3] == 'T_NIL' ? 'mrb_nil_p' : 'mrb_false_p'
+        new_text = "#{neg}#{pred}(#{tn[1]})"
+        ed.add(s, e + tn.end(0), new_text)
+        rewrite(rel, s, 'TYPE', new_text, "TYPE(v) == #{tn[3]} is a value test: nil and false share MRB_TT_FALSE, so #{pred} (which checks the value) is used")
+        next
+      end
       next if @local_var_occ.include?([rel, s])
       entry = @entries[name]
       if !entry.nil?
