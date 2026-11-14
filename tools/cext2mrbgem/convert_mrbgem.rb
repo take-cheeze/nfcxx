@@ -1102,11 +1102,11 @@ texts = static_rename(texts)
     if split_arity(name) == -1
       masked = @files[d0['file']]['masked']
       if psl(masked, d0['brace'], d0['body_end'] + 1) =~ /(?<![#{WC}])rb_scan_args(?![#{WC}])/
-        # the impl reads its arguments from the argv array: only lead and optional parts (no rest, keyword or block)
+        # the impl reads its arguments from the argv array: lead, optional and keyword parts (no rest or block)
         fmts = []
         psl(@files[d0['file']]['text'], d0['brace'], d0['body_end'] + 1)
           .scan(/rb_scan_args[ \t\n]*\([ \t\n]*\w+[ \t\n]*,[ \t\n]*\w+[ \t\n]*,[ \t\n]*("[^"]*")/) { fmts << $1 }
-        unless !fmts.empty? && fmts.all? { |f| f.match?(/\A"[0-9][0-9]?"\z/) }
+        unless !fmts.empty? && fmts.all? { |f| f.match?(/\A"[0-9][0-9]?:?"\z/) }
           return 'its body calls rb_scan_args with a rest, keyword or block part, which would read the arguments from the mruby call frame'
         end
       end
@@ -3998,12 +3998,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # a split method's implementation takes its arguments as an argv array (mrb_value *), not from the mruby frame:
     # its lead and optional outputs are read from argv, the argc check raises as mrb_get_args does, and the value is argc
     if @split_names.include?(fn['name'])
-      if rest || kw || blk
-        refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest, keyword and block parts are not supported there')
+      if rest || blk
+        refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest and block parts are not supported there')
         return
       end
+      # a keyword part takes the trailing Hash when there are more arguments than positional outputs (CRuby 3 keywords);
+      # an empty Hash is nil, as in the frame form. The count returned excludes the keyword Hash.
+      kw_pre = kw ? "#{names[lead + opt]} = mrb_nil_value(); if (nfcx_ac > #{lead + opt} && mrb_hash_p(#{argv_n}[nfcx_ac - 1])) { #{names[lead + opt]} = #{argv_n}[--nfcx_ac]; } " \
+                  "#{names[lead + opt]} = (mrb_hash_p(#{names[lead + opt]}) && mrb_hash_size(#{mrb_tok(rel, s)}, #{names[lead + opt]}) ? #{names[lead + opt]} : mrb_nil_value()); " : ''
       assigns = (0...(lead + opt)).map { |i| "#{names[i]} = (#{i} < nfcx_ac) ? #{argv_n}[#{i}] : mrb_nil_value(); " }.join
-      ed.add(s, close + 1, "({ int nfcx_ac = #{argc_n}; if (nfcx_ac < #{lead} || nfcx_ac > #{lead + opt}) " \
+      ed.add(s, close + 1, "({ int nfcx_ac = #{argc_n}; #{kw_pre}if (nfcx_ac < #{lead} || nfcx_ac > #{lead + opt}) " \
                            "mrb_argnum_error(#{mrb_tok(rel, s)}, nfcx_ac, #{lead}, #{lead + opt}); #{assigns}nfcx_ac; })")
       rewrite(rel, s, 'rb_scan_args', "argv form of mrb_get_args(\"#{fmt}\", ...)",
               'the arguments come from the argv array of the split method; the argc check raises ArgumentError as CRuby does')

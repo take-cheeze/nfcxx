@@ -431,6 +431,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_split tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'int nfcx_ac = argc; if (nfcx_ac < 1 || nfcx_ac > 2) mrb_argnum_error(mrb, nfcx_ac, 1, 2);' "$work/api_scan_split/src/api_scan_split.c"
 check grep -qF 'ss_pick_impl(mrb, 1, &a, self)' "$work/api_scan_split/src/api_scan_split.c"
+# 2zzz71. rb_scan_args("1:") in a split method: the trailing Hash is the keyword part (nil when empty), and the count excludes it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_kw_split tools/cext2mrbgem/fixtures/api_scan_kw_split/ext/api_scan_kw_split "$work/api_scan_kw_split" > "$work/api_scan_kw_split.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (nfcx_ac > 1 && mrb_hash_p(argv[nfcx_ac - 1])) { opt = argv[--nfcx_ac]; }' "$work/api_scan_kw_split/src/api_scan_kw_split.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
