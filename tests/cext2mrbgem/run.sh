@@ -388,6 +388,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_ptr tools/cext2mrbgem
 check test "$rc" -eq 0
 check grep -qF 'mrb_ensure(mrb, ensure_body, mrb_cptr_value(mrb, &arg), ensure_done, mrb_cptr_value(mrb, &arg))' "$work/api_ensure_ptr/src/api_ensure_ptr.c"
 check grep -qF '(struct EnsureArg *)mrb_cptr(a)' "$work/api_ensure_ptr/src/api_ensure_ptr.c"
+# 2zzz61. rb_isdigit (a ctype macro of CRuby, ASCII-only) maps to the C library ctype function.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ctype tools/cext2mrbgem/fixtures/api_ctype/ext/api_ctype "$work/api_ctype" > "$work/api_ctype.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'isdigit((unsigned char)' "$work/api_ctype/src/api_ctype.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
