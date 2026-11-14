@@ -12,6 +12,8 @@ require 'tmpdir'
 require_relative 'check_support'
 require_relative 'fixture_runtime'
 require_relative '../../tools/bc2cpp/initializer_tables'
+require_relative '../../tools/bc2cpp/bc2cpp'
+require 'set'
 
 ENV['BC2CPP_SIG_DIRS'] = ''
 
@@ -78,5 +80,90 @@ check.call('a key proven in one run and absent from the other is proven',
            InitializerTables.super_direct([run.([['d1', 3]], []), run.([], [])]) == Set[['d1', 3]])
 check.call('a run without an evidence row proves nothing',
            InitializerTables.super_direct([run.([['d1', 3]], []), { err: '' }]).empty?)
+
+# ZSUPER_FORWARD (tools/bc2cpp/codegen_receiver_facts.rb, zsuper_forward_plan): a zsuper of a method with keyword parameters
+# and/or a block parameter calls the superclass `_impl` with the caller's keyword values and block, in the order
+# codegen_method.rb declares them. A block present on one side only, or a keyword set the superclass does not name, stays
+# out of the direct call. Fixtures compile to C++ through CodeGen#compile_method (no full build).
+ZSUPER_SOURCE = <<~'RUBY'
+  class Base
+    def initialize(enum = nil, key_type: 1, &block)
+      key_type
+    end
+  end
+
+  class Sub < Base
+    def initialize(enum = nil, key_type: Integer, &block)
+      super
+    end
+  end
+
+  class KwBase
+    def initialize(enum = nil, key_type: 1)
+      key_type
+    end
+  end
+
+  class KwSub < KwBase
+    def initialize(enum = nil, key_type: Integer)
+      super
+    end
+  end
+
+  class OtherBase
+    def initialize(enum = nil, other: 1, &block)
+      other
+    end
+  end
+
+  class MismatchSub < OtherBase
+    def initialize(enum = nil, key_type: 1, &block)
+      super
+    end
+  end
+
+  class BlockOnlyBase
+    def initialize(enum = nil)
+      enum
+    end
+  end
+
+  class BlockOnlySub < BlockOnlyBase
+    def initialize(enum = nil, &block)
+      super
+    end
+  end
+RUBY
+
+zsuper_init_code = lambda do |owner|
+  suite.compile(ZSUPER_SOURCE) do |ireps, root|
+    # build_registry's values in CodeGen.new's order: the registry, the superclass map (zsuper needs it), the container
+    # constants and, after the native name sources, the included and prepended modules.
+    registry, superclass_of, container_constants, included, prepended = build_registry(ireps, root)
+    gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, container_constants, {}, Set.new,
+                      nil, nil, nil, included, prepended)
+    method = registry.fetch('initialize').find { |d| d.owner == owner }
+    gen.compile_method(method.irep).fetch(:code)
+  end
+end
+
+zsuper_sub = zsuper_init_code.call('Sub')
+zsuper_kw_sub = zsuper_init_code.call('KwSub')
+zsuper_mismatch = zsuper_init_code.call('MismatchSub')
+zsuper_block_only = zsuper_init_code.call('BlockOnlySub')
+
+# Sub: enum (r1) is the forwarded positional; the block is r3 (after the keyword hash r2); Base's key_type is optional, so
+# its given flag follows the value.
+check.call('zsuper with keyword and block calls the superclass _impl with the block and the keyword value',
+           zsuper_sub.match?(/_impl\(M, self, r1, r3, 1, r\d+, 1\);/))
+check.call('the forwarded zsuper leaves no SUPER #error for that site', !zsuper_sub.include?('#error unhandled opcode SUPER'))
+check.call('keyword-only zsuper forwards the keyword value without a block',
+           zsuper_kw_sub.match?(/_impl\(M, self, r1, 1, r\d+, 1\);/))
+check.call('a block on only one side is not forwarded to the superclass _impl directly',
+           !zsuper_block_only.match?(/BlockOnlyBase_initialize_impl\(M, self/))
+check.call('that site keeps the by-name zsuper call, which passes the block at run time',
+           zsuper_block_only.include?('bc2cpp_super_call(M, self'))
+check.call('a keyword set the superclass does not name stays out of the direct call',
+           !zsuper_mismatch.match?(/OtherBase_initialize_impl\(M, self, r1, r3/) && zsuper_mismatch.include?('#error'))
 
 suite.finish!
