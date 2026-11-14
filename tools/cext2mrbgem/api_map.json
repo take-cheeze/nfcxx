@@ -1445,6 +1445,81 @@
     "RBIMPL_ATTR_NORETURN": {
       "kind": "drop",
       "reason": "a no-return attribute: a hint for the compiler that mruby does not need; the declaration has the same meaning without it"
+    },
+    "rb_eIOError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"IOError\")",
+      "needs_mrb": true,
+      "caveat": "IOError is defined by the mruby-io gem; mrb_exc_get raises at run time if it is not loaded"
+    },
+    "rb_eEOFError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"EOFError\")",
+      "needs_mrb": true,
+      "caveat": "EOFError is defined by the mruby-io gem"
+    },
+    "rb_eEncodingError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"EncodingError\")",
+      "needs_mrb": true,
+      "caveat": "mruby has no encodings; the exception is only the class"
+    },
+    "rb_eSysStackError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"SystemStackError\")",
+      "needs_mrb": true
+    },
+    "rb_eLoadError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"LoadError\")",
+      "needs_mrb": true
+    },
+    "rb_cNumeric": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Numeric\")",
+      "needs_mrb": true
+    },
+    "rb_cFixnum": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Integer\")",
+      "needs_mrb": true,
+      "caveat": "mruby has one Integer class; CRuby Fixnum and Bignum are both Integer here"
+    },
+    "rb_cFile": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"File\")",
+      "needs_mrb": true,
+      "caveat": "File is defined by the mruby-io gem"
+    },
+    "rb_cTime": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Time\")",
+      "needs_mrb": true,
+      "caveat": "Time is defined by the mruby-time gem"
+    },
+    "rb_cStruct": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Struct\")",
+      "needs_mrb": true,
+      "caveat": "Struct is defined by the mruby-struct gem"
+    },
+    "rb_cRegexp": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Regexp\")",
+      "needs_mrb": true,
+      "caveat": "Regexp is defined by the mruby-onig-regexp gem"
+    },
+    "rb_cRandom": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Random\")",
+      "needs_mrb": true,
+      "caveat": "Random is defined by the mruby-random gem"
+    },
+    "rb_cRational": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Rational\")",
+      "needs_mrb": true,
+      "caveat": "Rational is defined by a mruby gem"
     }
   },
   "special_arg_positions_class_only": {

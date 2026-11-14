@@ -734,6 +734,14 @@ check grep -qF '#include <mruby/data.h>' "$work/api_typed_ptr/src/api_typed_ptr.
 check grep -qF 'void *p = DATA_PTR(obj);' "$work/api_typed_ptr/src/api_typed_ptr.c"
 check grep -qF 'DATA_PTR(obj) = NULL;' "$work/api_typed_ptr/src/api_typed_ptr.c"
 
+
+# 2zzr. CRuby exception and class globals with an mruby lookup (rb_eIOError, rb_cNumeric): mrb_exc_get and mrb_class_get
+# with the name as a string; the converted output compiles with -Wall -Werror
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_class tools/cext2mrbgem/fixtures/api_exc_class/ext/api_exc_class "$work/api_exc_class" > "$work/api_exc_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_exc_class/NOT_BUILDABLE"
+check grep -qF 'mrb_class_get(mrb, "Numeric")' "$work/api_exc_class/src/api_exc_class.c"
+check grep -qF 'mrb_exc_get(mrb, "IOError")' "$work/api_exc_class/src/api_exc_class.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
