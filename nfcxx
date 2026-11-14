@@ -1270,6 +1270,11 @@ if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 
     fi
   fi
 fi
+# -c without -o: the object is <stem>.o, as for C and .cu inputs. eccp makes one object per call, so several sources need -o.
+if [ $compile_only = 1 ] && [ $outset = 0 ] && [ $ncpp -gt 0 ]; then
+  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with several sources needs -o (one object is made per call)" >&2; exit 2; }
+  b=$(basename "${srcs[0]}"); out=${b%.*}.o
+fi
 # The one-step build: eccp runs in a temporary directory (see ecp_arg), so its paths are made absolute before the cd.
 eccp_bin=$(ecp_arg "$edg/eccp"); eccp_out=$(ecp_arg "$out")
 if [ $moves = 1 ]; then
