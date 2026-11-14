@@ -308,6 +308,9 @@ def pathb_option(state, arg)
     state.pb_m16 = 1
   elsif arg == "-mregparm=3"
     state.pb_regparm = 1
+  elsif arg == "-ftree-vectorize"
+    # the loop vectorizer of the QBE back end (3rd/qbe vec.c, qbe -V); gcc's own flag, so the gcc backend takes it too
+    state.pbf << "--vectorize"
   elsif PATHB_PBF_FLAGS.include?(arg) || PATHB_TRIVIAL.include?(arg)
     state.pbf << arg
   elsif arg == "-fshort-wchar"

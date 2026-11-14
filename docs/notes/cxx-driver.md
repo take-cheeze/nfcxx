@@ -61,6 +61,9 @@ and each header the host preprocessor lists (hashed), every `NFCXX_*` variable, 
 and the host compilers' versions. Not cached: `.cu` (its device image is, below) and C inputs, `-E`, `-MD`, several sources in one command, and an `-o` without
 an extension. A header whose path has a space is not tracked, so its change would not invalidate the key. Test 15 of
 `tests/cxx-driver/run.sh` covers a hit that links, and a changed header.
+The same cache serves the Path B route (the default on x86-64 Linux, `scripts/pathb-cc`): a Path B key adds `backend: pathb` and
+the Path B front end (`PATHB_CPFE`, the files of `PATHB_BASE`), so a Path B object and a gcc-route object never share an entry,
+and a Path B entry holds the object only. `tests/nfcxx-cache/run.sh` covers both routes.
 
 A `.cu` compile is not kept as an object, but its device image is: under `DIR/cu-device/<key>`, the device IR and the
 PTX modules with their cubins. The key covers the device unit the rewriter writes and its kernel list, the `-D`/`-U`

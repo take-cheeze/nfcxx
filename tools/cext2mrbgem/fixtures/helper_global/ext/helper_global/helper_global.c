@@ -1,8 +1,8 @@
 #include <ruby.h>
 
-/* hg_make calls the mruby state's API (rb_str_new) and has no mrb argument. Its only uses are direct calls through the
- * macro HG_MAKE, expanded in two registered methods, so it is not threaded: it uses the file-scope state that the
- * method sets on entry (no refusal). hg_pick has two returns, and its method restores the previous state on each. */
+/* hg_make calls the mruby state's API (rb_str_new). Its only uses are direct calls through the macro HG_MAKE, expanded
+ * in two registered methods, so it is threaded with mrb, and the macro passes the file-scope state that the methods set on
+ * entry. hg_pick has two returns, and its method restores the previous state on each. */
 static VALUE hg_make(VALUE s) {
     return rb_str_new_cstr("made");
 }

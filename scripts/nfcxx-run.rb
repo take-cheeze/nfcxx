@@ -17,7 +17,7 @@
 #
 # Plan format: one command per line, its fields separated by single tabs (so an argument may hold spaces; an empty argument is
 # an empty field). The first field is the kind: RUN ARGV..., EXEC ARGV..., CP SRC DST, CAT FILE (to standard output), and
-# LN -s TARGET LINK. Blank lines and lines that start with # are skipped. A plan is read and checked in full before it runs.
+# LN -s TARGET LINK; ENV NAME=VALUE exports a variable for the programs that follow (as the bash's export does). Blank lines and lines that start with # are skipped. A plan is read and checked in full before it runs.
 # When a plan runs, each field that is ROOT or starts with ROOT/ has ROOT replaced by --root, and TMP likewise by --tmp; and a
 # RUN or EXEC whose program is nfcxx runs ROOT/nfcxx. The port's arguments must not hold a tab or a newline.
 # Exit status: the status of the command that failed (127 or 126 when it cannot be started), 0 when the plan ran to its end,
@@ -30,7 +30,7 @@ require "rbconfig"
 
 PORT = File.expand_path("nfcxx-loop.rb", __dir__)
 ROOT_DEFAULT = File.expand_path("..", __dir__)
-KINDS = %w[RUN EXEC CP CAT LN].freeze
+KINDS = %w[ENV RUN EXEC CP CAT LN].freeze
 
 # The print step of the port's main, and the copy of it this runner plans with: the same plan, one tab-separated line per
 # command (kind, then the argv), instead of the words joined by spaces. The copy is made in memory; the port file is not changed.
@@ -71,6 +71,8 @@ def parse_plan(text)
     raise PlanError, "line #{number}: unknown command #{kind.inspect}" unless KINDS.include?(kind)
 
     case kind
+    when "ENV"
+      raise PlanError, "line #{number}: ENV needs NAME=VALUE" unless fields.size == 1 && fields[0].include?("=")
     when "RUN", "EXEC"
       raise PlanError, "line #{number}: #{kind} needs a program" if fields.empty?
     when "CP"
@@ -114,12 +116,17 @@ rescue SystemCallError, IOError => e
 end
 
 def run_plan(plan, env, root, tmp)
+  exported = {}  # ENV lines: exported as the bash exports them, for the programs that follow
   plan.each do |kind, fields|
     args = fields.map { |field| expand(field, root, tmp) }
     status = case kind
+             when "ENV"
+               name, value = fields[0].split("=", 2)
+               exported[name] = value
+               0
              when "RUN", "EXEC"
                args[0] = File.join(root, "nfcxx") if args[0] == "nfcxx"
-               run_command(env, args)
+               run_command(env.merge(exported), args)
              when "CP"
                file_step(kind) { FileUtils.cp(args[0], args[1]) }
              when "CAT"

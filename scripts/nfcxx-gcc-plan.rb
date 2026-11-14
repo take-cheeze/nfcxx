@@ -31,7 +31,7 @@
 #   cc-clang 0|1            the C compiler (cc) is clang
 #   ehshim PATH             scripts/ehshim.rb prints PATH (absent: it prints nothing)
 #   sret PATH               scripts/sret.rb prints PATH (absent: nothing)
-#   asan-vla PATH           scripts/asan-vla prints PATH (absent: it fails)
+#   asan-vla PATH           scripts/asan-vla.rb prints PATH (absent: it fails)
 #   eh-tls 1                ${EDG}/../eh-tls exists
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
 #   machine M               uname -m
@@ -483,7 +483,7 @@ class Plan
     rtlib = [LIBC]
     if @asan
       v = @facts.value("asan-vla").to_s
-      raise NfcxxExit.new("nfcxx: cannot build the C++ VLA runtime for -fsanitize=address (scripts/asan-vla)", 2) if v.empty?
+      raise NfcxxExit.new("nfcxx: cannot build the C++ VLA runtime for -fsanitize=address (scripts/asan-vla.rb)", 2) if v.empty?
 
       vlart = [v]
     end

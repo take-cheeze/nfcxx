@@ -1,7 +1,8 @@
 #!/bin/bash
 # The CRuby driver (scripts/nfcxx.rb) must behave as the bash driver (nfcxx) for every argument list: the same output, error
 # messages and exit status. It also must plan the pre-loop steps the port models (-fsyntax-only, --bundle-*) and send the
-# rest to the bash. This host has no EDG build, so every compile ends with the same "EDG not built" error on both sides.
+# rest to the bash. The cases here are the error paths (missing sources, bad options), which the driver must report as the bash
+# does; the compiles that succeed are checked against the real toolchain by tests/nfcxx-live.
 cd "$(dirname "$0")/../.." || exit 1
 pass=0; fail=0
 cases=(

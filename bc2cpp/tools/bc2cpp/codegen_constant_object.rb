@@ -206,4 +206,18 @@ class CodeGen
       "  mrb_argnum_error(M, #{n}, #{min}, #{min});\n" \
       "  r#{d} = mrb_nil_value();\n"
   end
+  # NATIVE_SINGLETON_DIRECT: a zero-argument send `Const.m` on a constant whose bare name has one binding
+  # (UniqueClassNames), where no program defines m on Const's singleton and sig/bc2cpp/core.rbs declares m there with
+  # a C function (NativeSingletons.c_function). The constant is still read first, so a missing constant raises
+  # NameError as before. Returns the C function's name, or nil.
+  def native_singleton_direct_fn(name, n, self_implicit, irep, idx, reg)
+    return nil unless n.zero? && !self_implicit && irep && idx
+    return nil unless %i[SEND0 SSEND0].include?(BytecodeIR.for(irep).source_at(idx).op)
+
+    class_name = straight_line_constant_name(irep, idx, reg)
+    return nil unless class_name && UniqueClassNames.table&.value?(class_name)
+    return nil if (@registry[name] || []).any? { |definition| definition.owner == "#{class_name}.singleton" }
+
+    NativeSingletons.c_function(class_name, name)
+  end
 end
