@@ -29,15 +29,25 @@ class CodeGen
   def self.declared_element_table(applied)
     return {} unless applied
 
-    applied.ir_ivar_elements.each_with_object({}) do |((owner, name), classes), out|
+    out = applied.ir_ivar_elements.each_with_object({}) do |((owner, name), classes), acc|
       next unless classes.is_a?(Set) && classes.size == 1
 
       klass = classes.first.to_s
       kind, = DECLARED_ELEMENT_CLASSES[klass]
       next unless kind
 
-      out[[owner, name.to_s.delete_prefix('@')]] = { kind: kind, text: "Array[#{klass}]", klass: klass }
+      acc[[owner, name.to_s.delete_prefix('@')]] = { kind: kind, text: "Array[#{klass}]", klass: klass }
     end
+    # A program class: the RBS element of an exact-class Array (ivar_elements is filled only from declarations; the
+    # traced hints go to element_layout, which is not a declaration and is not used here).
+    (applied.ivar_elements || {}).each do |owner, names|
+      names.each do |name, klass|
+        next unless klass.is_a?(String) && !out.key?([owner, name.to_s.delete_prefix('@')])
+
+        out[[owner, name.to_s.delete_prefix('@')]] = { kind: :class, text: "Array[#{klass}]", klass: klass }
+      end
+    end
+    out
   end
 
   # The declared element of ivar +name+ for +klass+ or its nearest declaring ancestor, or nil.
@@ -88,6 +98,7 @@ class CodeGen
            when :integer then "(mrb_integer_p(#{var}) || mrb_bigint_p(#{var}))"
            when :symbol then "mrb_symbol_p(#{var})"
            when :string then "mrb_string_p(#{var})"
+           when :class then exact_class_guard(owner_class_ptr_expr(entry[:klass]), var)
            end
     "  if (mrb_unlikely(!(mrb_nil_p(#{var}) || (#{cond})))) " \
       "bc2cpp_declared_ivar_violation(M, #{var}, \"#{quote.call("#{entry[:owner]}#@#{entry[:name]}[]")}\", " \
@@ -104,6 +115,12 @@ class CodeGen
     entry = declared_element_receiver(irep, index, receiver, owner)
     return nil unless entry
 
-    NumericFlow.class_bits(entry[:klass]).keys.inject(0, :|) | NumericFlow::NIL
+    bits = if entry[:kind] == :class
+             declared_arg_bits(entry[:klass], :class, false)
+           else
+             NumericFlow.class_bits(entry[:klass]).keys.inject(0, :|)
+           end
+    # A class with no bit yet gives no mask: the flow keeps the unknown answer rather than renumbering the masks.
+    bits.zero? ? nil : bits | NumericFlow::NIL
   end
 end
