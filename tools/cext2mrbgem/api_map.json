@@ -1314,7 +1314,7 @@
         0,
         1
       ],
-      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class is a tracked class variable, a mapped class constant (rb_cRange is mrb->range_class), or a VALUE name or member unwrapped with mrb_class_ptr (CRuby requires a class there); argc may be an integer literal and argv NULL; both calls run initialize"
     },
     "rb_hash_lookup": {
       "kind": "call",

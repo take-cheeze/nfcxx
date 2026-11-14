@@ -2866,19 +2866,34 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         ord = entry['arg_order']
         texts = args.map { |a, b| psl(@files[rel]['text'], a, b) }
         klass_i = ord.first
-simple = texts.each_with_index.all? do |t, i|
-  t.match?(/\A[A-Za-z_][#{WC}]*\z/) && t != 'mrb' && (i == klass_i || !@class_vars.include?(t))
-end
+        # argc may be an integer literal and argv NULL (CRuby's 0, NULL); the class is a tracked class variable, or a VALUE
+        # name or VALUE struct member, which is a class value that mrb_class_ptr unwraps to struct RClass *
+        fnk = enclosing_func(rel, s)
+        vnames = fnk ? value_names_of(fnk) : Set.new
+        vfields = value_field_names
+        simple = texts.each_with_index.all? do |t, i|
+          if i == klass_i
+            (t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t.match?(/\A[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)+\z/)) && t != 'mrb'
+          else
+            (t.match?(/\A[A-Za-z_][#{WC}]*\z/) && t != 'mrb' && !@class_vars.include?(t)) || t.match?(/\A\d+\z/) || t == 'NULL'
+          end
+        end
         if args.size != ord.size || !simple
-          refuse(rel, s, name, 'the arguments are not all plain identifiers (only plain identifiers are reordered)')
+          refuse(rel, s, name, 'the arguments are not all plain identifiers, integer literals or NULL (only those are reordered)')
           return
         end
-        klass_arg = texts[ord.first]
-        unless @class_vars.include?(klass_arg)
-          refuse(rel, s, name, 'the class argument is not a tracked class or module variable (mrb_obj_new takes a struct RClass *)')
-          return
-        end
-        ed.add(nxt + 1, cp, "#{mrb_tok(rel, s)}, " + ord.map { |i| texts[i] }.join(', '))
+        klass_arg = texts[klass_i]
+        klass_value = (vnames.include?(klass_arg) && !@class_vars.include?(klass_arg)) ||
+                      (klass_arg.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields.include?(klass_arg[/([A-Za-z_]\w*)\z/]))
+        klass_text =
+          if @class_vars.include?(klass_arg) then klass_arg
+          elsif class_expr_ok.call(klass_arg) then @entries[klass_arg]['mruby']
+          elsif klass_value then "mrb_class_ptr(#{klass_arg})"
+          else
+            refuse(rel, s, name, 'the class argument is neither a tracked class or module variable nor a VALUE name or member (mrb_obj_new takes a struct RClass *)')
+            return
+          end
+        ed.add(nxt + 1, cp, "#{mrb_tok(rel, s)}, " + ord.map { |i| i == klass_i ? klass_text : texts[i] }.join(', '))
         ed.add(s, e, entry['mruby'])
         rewrite(rel, s, name, entry['mruby'], entry['caveat'])
         return

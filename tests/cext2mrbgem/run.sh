@@ -221,6 +221,12 @@ check test "$rc" -eq 0
 check grep -qF 'if (mrb_nil_p(v)) return mrb_true_value();' "$work/api_rb_type_p_nil/src/api_rb_type_p_nil.c"
 check grep -qF 'if (mrb_false_p(v)) return mrb_fixnum_value(0);' "$work/api_rb_type_p_nil/src/api_rb_type_p_nil.c"
 
+# 2zzz18. rb_class_new_instance with a literal argc, NULL argv and a VALUE class: the class is unwrapped with mrb_class_ptr.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_new_value_class tools/cext2mrbgem/fixtures/api_new_value_class/ext/api_new_value_class "$work/api_new_value_class" > "$work/api_new_value_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_obj_new(mrb, mrb_class_ptr(klass), 0, NULL)' "$work/api_new_value_class/src/api_new_value_class.c"
+check grep -qF 'return mrb_obj_new(mrb, mrb->range_class, 3, argv);' "$work/api_new_value_class/src/api_new_value_class.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
