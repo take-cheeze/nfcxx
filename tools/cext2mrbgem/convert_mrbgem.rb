@@ -2841,8 +2841,9 @@ end
       end
       close = pyfind(masked, ')', nxt)
       arg = py_strip(psl(text, nxt + 1, close))
-      if close < 0 || !/\A[A-Za-z_][#{WC}]*\z/.match?(arg)
-        refuse(rel, s, name, 'GC guard argument is not a plain variable')
+      # a variable, or a member path of one (a.bigdecimal, p->value): the guarded value is the member
+      if close < 0 || !/\A[A-Za-z_][#{WC}]*(?:(?:\.|->)[A-Za-z_][#{WC}]*)*\z/.match?(arg)
+        refuse(rel, s, name, 'GC guard argument is not a variable or a member path')
         return
       end
       ed.add(s, close + 1, "mrb_gc_protect(#{mrb_tok(rel, s)}, #{arg})")
