@@ -68,3 +68,4 @@ a.cc -o prog
 --backend=gcc --freestanding a.cc -o prog
 --backend=gcc -lcuda a.cc -o prog
 --backend=gcc -fsyntax-only a.cc
+--backend=gcc -c a.cc b.cc

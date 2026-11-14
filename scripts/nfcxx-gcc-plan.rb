@@ -311,10 +311,16 @@ class Plan
       end
       emit("ENV", "EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=#{lk.join(" ")}")
     end
+    # -c without -o: the object is <stem>.o, as for C and .cu inputs; eccp makes one object per call
+    out = @out
+    if @compile_only && !@outset && @ncpp > 0
+      raise NfcxxExit.new("nfcxx: -c with several sources needs -o (one object is made per call)", 2) if @srcs.length > 1
+      out = "#{File.basename(@srcs[0], ".*")}.o"
+    end
     emit("RUN", ECCP, @std, "--#{@dialect}", "--wdir", "/", *inst_opts, *@diag_opts, *userinc, *sys_inc, *hosted_libs,
          "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
          *keep_static, *eh_unwind, "--c_to_obj_option", "-fgnu89-inline", *picopts, *cobjs, *pre_opts, *eflist,
-         *shim, *vlart, *rtlib, "-o", ecp_arg(@out))
+         *shim, *vlart, *rtlib, "-o", ecp_arg(out))
     depend_step unless @depmode.empty?
     nil
   end
