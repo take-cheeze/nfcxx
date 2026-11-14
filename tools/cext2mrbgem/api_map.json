@@ -1155,6 +1155,22 @@
       "handler": "define_method",
       "needs_mrb": true,
       "caveat": "registers a private method: the same wrapper and argument spec as rb_define_method (mrb_define_private_method has the same shape); the method is callable only without a receiver, as in CRuby"
+    },
+    "rb_iv_get": {
+      "kind": "call",
+      "mruby": "mrb_iv_get",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "intern_arg": 1,
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not"
+    },
+    "rb_iv_set": {
+      "kind": "call",
+      "mruby": "mrb_iv_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "intern_arg": 1,
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not"
     }
   },
   "special_arg_positions_class_only": {
