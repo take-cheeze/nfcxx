@@ -93,7 +93,7 @@ ALNUM_RE = /[\p{L}\p{N}]/ # Python str.isalnum()
 IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 # A definition starts at a line start (Ruby's ^ is a line anchor, as Python's re.M). Return-type words may be split
 # across lines (`static VALUE` then `name(...)` on the next line, as bigdecimal and date write them).
-DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(([^()]*)\)#{SS}(\{|;)/
+DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
@@ -2393,10 +2393,8 @@ use_problem = lambda do |name, use|
         ok_a = is_value.call(a)
         ok_b = is_value.call(b)
         next unless ok_a && ok_b
-        if !with_state.include?(fn['name'])
-          refuse(rel, s0, op, 'VALUE comparison in a function without the mruby state (not supported)')
-          next
-        end
+        # a function without the mruby state compares identity with mrb_value_identical (the fork's stateless test)
+        stateless = !with_state.include?(fn['name'])
         conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
         # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
         # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
@@ -2414,7 +2412,7 @@ use_problem = lambda do |name, use|
           end
           @edits[rel].drop(own)
         end
-        expr = "mrb_obj_equal(#{mrb_tok(rel, s0)}, #{conv.call(a)}, #{conv.call(b)})"
+        expr = stateless ? "mrb_value_identical(#{conv.call(a)}, #{conv.call(b)})" : "mrb_obj_equal(#{mrb_tok(rel, s0)}, #{conv.call(a)}, #{conv.call(b)})"
         expr = "!#{expr}" if op == '!='
         @edits[rel].add(s0, e0, expr)
       end

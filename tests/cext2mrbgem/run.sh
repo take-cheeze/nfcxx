@@ -335,6 +335,10 @@ check grep -qF 'static FtCallbacks ft_cbs = { ft_item };' "$work/api_fn_table/sr
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_const_intern tools/cext2mrbgem/fixtures/api_const_intern/ext/api_const_intern "$work/api_const_intern" > "$work/api_const_intern.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return mrb_const_get_at(mrb, mrb->object_class, mrb_intern_cstr(mrb, "Comparable"));' "$work/api_const_intern/src/api_const_intern.c"
+# 2zzz41. a VALUE comparison in a function without the mruby state is mrb_value_identical (the fork's stateless identity).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_eq_stateless tools/cext2mrbgem/fixtures/api_eq_stateless/ext/api_eq_stateless "$work/api_eq_stateless" > "$work/api_eq_stateless.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_value_identical(a, b) ? mrb_true_value() : mrb_false_value();' "$work/api_eq_stateless/src/api_eq_stateless.c"
 # 2zzz37. a mixed declaration: VALUE, a class declarator (with a call), VALUE. The types change at the commas.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_mixed tools/cext2mrbgem/fixtures/api_decl_mixed/ext/api_decl_mixed "$work/api_decl_mixed" > "$work/api_decl_mixed.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -1036,7 +1040,7 @@ check grep -qF 'return mret_make(mrb, s);' "$work/api_macro_return/src/api_macro
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_return tools/cext2mrbgem/fixtures/api_int_return/ext/api_int_return "$work/api_int_return" > "$work/api_int_return.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_int_return/NOT_BUILDABLE"
-if [ "$scanner" = libclang ]; then check grep -q "returns ir_sub's int as a VALUE" "$work/api_int_return/REFUSALS.txt"; fi
+check grep -q "returns ir_sub's int as a VALUE" "$work/api_int_return/REFUSALS.txt"
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
