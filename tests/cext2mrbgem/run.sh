@@ -356,10 +356,11 @@ mkdir -p tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_twofile tools/cext2mrbgem/fixtures/api_macro_twofile/ext/api_macro_twofile "$work/api_macro_twofile" > "$work/api_macro_twofile.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '#define tf_neg(x) mrb_funcall_argv(api_macro_twofile_bc2_mrb' "$work/api_macro_twofile/src/tf_other.c"
-# 2zzz51. a direct call of a method that reads its arguments from the call frame (rb_scan_args) is a call through its name.
+# 2zzz51. a direct call of a variadic method whose body reads its arguments with rb_scan_args (lead and optional only) is a call of
+# the split implementation with the caller's argv (NULL with argc 0), which reads argv with the argc check.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_direct_scan tools/cext2mrbgem/fixtures/api_direct_scan/ext/api_direct_scan "$work/api_direct_scan" > "$work/api_direct_scan.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'return mrb_funcall_argv(mrb, self, mrb_intern_cstr(mrb, "inner"), 0, NULL);' "$work/api_direct_scan/src/api_direct_scan.c"
+check grep -qF 'return ds_inner_impl(mrb, 0, (mrb_value *)NULL, self);' "$work/api_direct_scan/src/api_direct_scan.c"
 # 2zzz53. Data_Make_Struct: a static mrb_data_type (threaded mark and free) and a zeroed struct from mrb_calloc.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_data_make tools/cext2mrbgem/fixtures/api_data_make/ext/api_data_make "$work/api_data_make" > "$work/api_data_make.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -425,6 +426,11 @@ check grep -qF 'mrb_iv_copy(mrb, dst, src)' "$work/api_copy_ivar/src/api_copy_iv
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_check_arity tools/cext2mrbgem/fixtures/api_check_arity/ext/api_check_arity "$work/api_check_arity" > "$work/api_check_arity.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_argnum_error(mrb, argc, 0, 1)' "$work/api_check_arity/src/api_check_arity.c"
+# 2zzz70. rb_scan_args("11") in a split method reads lead and optional outputs from its argv array (argc checked).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_split tools/cext2mrbgem/fixtures/api_scan_split/ext/api_scan_split "$work/api_scan_split" > "$work/api_scan_split.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'int nfcx_ac = argc; if (nfcx_ac < 1 || nfcx_ac > 2) mrb_argnum_error(mrb, nfcx_ac, 1, 2);' "$work/api_scan_split/src/api_scan_split.c"
+check grep -qF 'ss_pick_impl(mrb, 1, &a, self)' "$work/api_scan_split/src/api_scan_split.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?

@@ -1102,7 +1102,13 @@ texts = static_rename(texts)
     if split_arity(name) == -1
       masked = @files[d0['file']]['masked']
       if psl(masked, d0['brace'], d0['body_end'] + 1) =~ /(?<![#{WC}])rb_scan_args(?![#{WC}])/
-        return 'its body calls rb_scan_args, which would read the arguments from the mruby call frame'
+        # the impl reads its arguments from the argv array: only lead and optional parts (no rest, keyword or block)
+        fmts = []
+        psl(@files[d0['file']]['text'], d0['brace'], d0['body_end'] + 1)
+          .scan(/rb_scan_args[ \t\n]*\([ \t\n]*\w+[ \t\n]*,[ \t\n]*\w+[ \t\n]*,[ \t\n]*("[^"]*")/) { fmts << $1 }
+        unless !fmts.empty? && fmts.all? { |f| f.match?(/\A"[0-9][0-9]?"\z/) }
+          return 'its body calls rb_scan_args with a rest, keyword or block part, which would read the arguments from the mruby call frame'
+        end
       end
     end
     uses.each do |rel, s, e|
@@ -3989,6 +3995,20 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # with a keyword part, or with a rest part, takes a statement expression (GNU C, which the mruby build accepts).
     used = (prev >= 0 && !";{}".include?(masked[prev])) || after < 0 || masked[after] != ';'
     fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (rest ? '*' : '') + (kw ? ':' : '') + (blk ? '&' : '')
+    # a split method's implementation takes its arguments as an argv array (mrb_value *), not from the mruby frame:
+    # its lead and optional outputs are read from argv, the argc check raises as mrb_get_args does, and the value is argc
+    if @split_names.include?(fn['name'])
+      if rest || kw || blk
+        refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest, keyword and block parts are not supported there')
+        return
+      end
+      assigns = (0...(lead + opt)).map { |i| "#{names[i]} = (#{i} < nfcx_ac) ? #{argv_n}[#{i}] : mrb_nil_value(); " }.join
+      ed.add(s, close + 1, "({ int nfcx_ac = #{argc_n}; if (nfcx_ac < #{lead} || nfcx_ac > #{lead + opt}) " \
+                           "mrb_argnum_error(#{mrb_tok(rel, s)}, nfcx_ac, #{lead}, #{lead + opt}); #{assigns}nfcx_ac; })")
+      rewrite(rel, s, 'rb_scan_args', "argv form of mrb_get_args(\"#{fmt}\", ...)",
+              'the arguments come from the argv array of the split method; the argc check raises ArgumentError as CRuby does')
+      return
+    end
     # the outputs in mruby's order: the positional ones, then the rest (its array is built from the pointer and length),
     # the keyword hash (an empty table takes every keyword; CRuby gives nil when there are none), the block
     pos_names = names[0, lead + opt]
