@@ -1034,6 +1034,121 @@
       "inject_mrb": false,
       "needs_mrb": false,
       "caveat": "mruby has no bignum: MRB_TT_INTEGER matches every Integer, including values CRuby reports as a bignum (the same reason RUBY_T_FIXNUM is caveated)"
+    },
+    "rb_cString": {
+      "kind": "expr",
+      "mruby": "mrb->string_class",
+      "needs_mrb": true
+    },
+    "rb_cArray": {
+      "kind": "expr",
+      "mruby": "mrb->array_class",
+      "needs_mrb": true
+    },
+    "rb_cHash": {
+      "kind": "expr",
+      "mruby": "mrb->hash_class",
+      "needs_mrb": true
+    },
+    "rb_cRange": {
+      "kind": "expr",
+      "mruby": "mrb->range_class",
+      "needs_mrb": true
+    },
+    "rb_cFloat": {
+      "kind": "expr",
+      "mruby": "mrb->float_class",
+      "needs_mrb": true
+    },
+    "rb_cInteger": {
+      "kind": "expr",
+      "mruby": "mrb->integer_class",
+      "needs_mrb": true
+    },
+    "rb_cSymbol": {
+      "kind": "expr",
+      "mruby": "mrb->symbol_class",
+      "needs_mrb": true
+    },
+    "rb_cNilClass": {
+      "kind": "expr",
+      "mruby": "mrb->nil_class",
+      "needs_mrb": true
+    },
+    "rb_cTrueClass": {
+      "kind": "expr",
+      "mruby": "mrb->true_class",
+      "needs_mrb": true
+    },
+    "rb_cFalseClass": {
+      "kind": "expr",
+      "mruby": "mrb->false_class",
+      "needs_mrb": true
+    },
+    "rb_cModule": {
+      "kind": "expr",
+      "mruby": "mrb->module_class",
+      "needs_mrb": true
+    },
+    "rb_cClass": {
+      "kind": "expr",
+      "mruby": "mrb->class_class",
+      "needs_mrb": true
+    },
+    "rb_cProc": {
+      "kind": "expr",
+      "mruby": "mrb->proc_class",
+      "needs_mrb": true
+    },
+    "rb_eKeyError": {
+      "kind": "expr",
+      "mruby": "E_KEY_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eNameError": {
+      "kind": "expr",
+      "mruby": "E_NAME_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eNoMethodError": {
+      "kind": "expr",
+      "mruby": "E_NOMETHOD_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eNotImpError": {
+      "kind": "expr",
+      "mruby": "E_NOTIMP_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eZeroDivError": {
+      "kind": "expr",
+      "mruby": "E_ZERODIV_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eFloatDomainError": {
+      "kind": "expr",
+      "mruby": "E_FLOATDOMAIN_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eLocalJumpError": {
+      "kind": "expr",
+      "mruby": "E_LOCALJUMP_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eRegexpError": {
+      "kind": "expr",
+      "mruby": "E_REGEXP_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eScriptError": {
+      "kind": "expr",
+      "mruby": "E_SCRIPT_ERROR",
+      "needs_mrb": true
+    },
+    "rb_eSyntaxError": {
+      "kind": "expr",
+      "mruby": "E_SYNTAX_ERROR",
+      "needs_mrb": true
     }
   },
   "special_arg_positions_class_only": {

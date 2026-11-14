@@ -332,6 +332,15 @@ check grep -q 'MRB_TT_CLASS does not match' "$work/check_type_refused/REFUSALS.t
 check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
 check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
 
+# 2zb. built-in class and exception references (api_map.json batch D1): rb_cHash is mrb->hash_class and rb_eKeyError is
+# E_KEY_ERROR; both are expressions, so the lookup stays inline at each use
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_exc tools/cext2mrbgem/fixtures/api_class_exc/ext/api_class_exc "$work/api_class_exc" > "$work/api_class_exc.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_exc/NOT_BUILDABLE"
+check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->hash_class)' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'mrb_obj_is_kind_of(mrb, obj, mrb->string_class)' "$work/api_class_exc/src/api_class_exc.c"
+check grep -qF 'mrb_raisef(mrb, E_KEY_ERROR, "missing key");' "$work/api_class_exc/src/api_class_exc.c"
+
 # 2z. every fixture conversion records the scanner forced for its leg; the libclang leg reads every fixture with libclang
 for d in "$work"/*/; do
   check grep -q "\"scanner\": \"$scanner\"" "$d/conversion_log.json"
