@@ -1,14 +1,23 @@
 #!/bin/bash
-# Stub for the commands the --target gate of nfcxx can reach. tests/nfcxx-k1om/run.sh links this file under each name.
+# Stub for the commands the k1om build of nfcxx can reach. tests/nfcxx-k1om/run.sh links this file under each name.
 #   gcc, cc, g++  probes (--version, -dumpfullversion, -dM, and -v: the host include list, which is empty here) answer with
 #                 a GCC 13 host; any other call is logged (RUN), not run
 #   cp, ninja     logged (CP, RUN), not run
 #   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed (not logged)
-#   eccp          logged (RUN), not run (the EDG driver, at ROOT/build/edg/bin/eccp)
+#   eccp, cpfe    logged (RUN), then the variables they inherit that are set (ENV), not run: the EDG driver and the
+#                 EDG front end, at ROOT/build/edg/bin; cpfe creates its --gen_c_file_name file (empty)
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
+# The k1om GCC (ROOT/build/..., K1OM/bin/k1om-mpss-linux-gcc) is run for real by scripts/k1om-cc; run.sh makes it log
+# its arguments (RUN k1om-gcc).
 # Environment: NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP (the temporary directories).
 name=$(basename "$0")
 log() { printf '%s\n' "$*" >> "$NFCXX_STUB_LOG"; }
+envlog() {
+  local n
+  for n in EDG_CPFE_DEFAULT_OPTIONS NFCXX_AS NFCXX_CC NFCXX_GCC NFCXX_K1OM_ROOT; do
+    if [ "${!n+set}" = set ]; then log "ENV $n=${!n}"; fi
+  done
+}
 case $name in
   gcc|cc|g++)
     for a in "$@"; do
@@ -25,7 +34,11 @@ case $name in
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
     mkdir -p "$d" && echo "$d"; exit 0 ;;
-  eccp) log "RUN eccp $*"; exit 0 ;;
+  eccp) log "RUN $name $*"; envlog; exit 0 ;;
+  cpfe)
+    log "RUN $name $*"; envlog
+    for a in "$@"; do case $a in --gen_c_file_name=*) : > "${a#--gen_c_file_name=}" ;; esac; done
+    exit 0 ;;
   ld.*) exit 0 ;;
   *) echo "stub: no stub for $name" >&2; exit 99 ;;
 esac
