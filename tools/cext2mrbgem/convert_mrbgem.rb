@@ -1061,7 +1061,7 @@ texts = static_rename(texts)
       reg = @regs.find { |r| r['error'].nil? && r['func'] == name }
       rewrites = uses.map do |rel, s, _e|
         masked = @files[rel]['masked']
-        m = /#{Regexp.escape(name)}[ \t\n]*\([ \t\n]*(\d+)[ \t\n]*,[ \t\n]*(?:\([ \t\n]*VALUE[ \t\n]*\*[ \t\n]*\)[ \t\n]*)?NULL[ \t\n]*,[ \t\n]*([A-Za-z_][#{WC}]*)[ \t\n]*\)/.match(masked[s..].to_s)
+        m = /#{Regexp.escape(name)}[ \t\n]*\([ \t\n]*(\d+)[ \t\n]*,[ \t\n]*(?:\([ \t\n]*VALUE[ \t\n]*\*[ \t\n]*\)[ \t\n]*)?(?:NULL|0)[ \t\n]*,[ \t\n]*([A-Za-z_][#{WC}]*)[ \t\n]*\)/.match(masked[s..].to_s)
         fn = enclosing_func(rel, s)
         ok = m && m.begin(0) == 0 && reg && fn && (@valid_reg_names.include?(fn['name']) || (@needs || Set.new).include?(fn['name']))
         [rel, s, m, ok]
@@ -1069,7 +1069,9 @@ texts = static_rename(texts)
       if rewrites.all? { |_r, _s, _m, ok| ok }
         rewrites.each do |rel, s, m, _ok|
           tok = mrb_tok(rel, s)
-          new = "mrb_funcall_argv(#{tok}, #{m[2]}, mrb_intern_cstr(#{tok}, \"#{reg['name']}\"), #{m[1]}, NULL)"
+          # a tracked class variable is a struct RClass *: its VALUE is mrb_obj_value (the receiver of mrb_funcall_argv)
+          recv = @class_vars.include?(m[2]) ? "mrb_obj_value(#{m[2]})" : m[2]
+          new = "mrb_funcall_argv(#{tok}, #{recv}, mrb_intern_cstr(#{tok}, \"#{reg['name']}\"), #{m[1]}, NULL)"
           @edits[rel].add(s, s + m[0].length, new)
           rewrite(rel, s, name, new, 'a direct call of a method whose arguments are read from the call frame is a call through the method name: the method runs in its own frame (Ruby method dispatch, so a redefinition of the method is seen)')
         end

@@ -413,6 +413,10 @@ check grep -qF 'mrb_funcall_argv(mrb, recv, mrb_intern_cstr(mrb, "to_s"), RARRAY
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_nested tools/cext2mrbgem/fixtures/api_macro_nested/ext/api_macro_nested "$work/api_macro_nested" > "$work/api_macro_nested.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'static mrb_value nest_sum(mrb_state *mrb, union DD *x)' "$work/api_macro_nested/src/api_macro_nested.c"
+# 2zzz67. A direct call with (VALUE *)0 and a class receiver: the receiver is mrb_obj_value of the class.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_direct_null tools/cext2mrbgem/fixtures/api_direct_null/ext/api_direct_null "$work/api_direct_null" > "$work/api_direct_null.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'dn_today_impl(0, (mrb_value *)0, mrb_obj_value(mDirectNull))' "$work/api_direct_null/src/api_direct_null.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
