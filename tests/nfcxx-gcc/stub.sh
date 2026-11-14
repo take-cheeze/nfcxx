@@ -56,7 +56,7 @@ case $name in
   uname)
     if [ "$1" = -m ]; then fact machine; else /usr/bin/uname "$@"; fi
     exit 0 ;;
-  cuda-cub)
+  cuda-cub.rb)
     v=$(fact cuda-cub); [ -n "$v" ] || exit 1
     printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
   cuda-driver-shim)

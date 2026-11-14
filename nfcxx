@@ -1154,10 +1154,10 @@ for f in ${files[@]+${files[@]+"${files[@]}"}}; do
     # its runpath, so it loads the same libcudart it was linked against (not whichever one the loader finds first).
     -lcudart)
       [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ] && eflist+=(--c_to_obj_option "-Wl,-rpath,$CUDA_HOME/lib64")
-      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub): an archive, ahead of
+      # The device-wide CUB algorithms behind lib/cuda/host/cub/cub.cuh (scripts/cuda-cub.rb): an archive, ahead of
       # libcudart, so only a program that calls them links them.
       if [ $compile_only = 0 ]; then
-        cub_lib=$("$root/scripts/cuda-cub") || cub_lib=""
+        cub_lib=$("$root/scripts/cuda-cub.rb") || cub_lib=""
         [ -z "$cub_lib" ] || eflist+=("$cub_lib")
       fi
       eflist+=("--c_to_obj_lib=cudart") ;;

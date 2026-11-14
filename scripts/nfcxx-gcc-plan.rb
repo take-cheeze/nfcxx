@@ -37,7 +37,7 @@
 #   dir PATH                PATH (relative to WORK) is an existing directory (the exists lines cover files and directories)
 #   machine M               uname -m
 #   cuda-home PATH          CUDA_HOME is PATH (no line: CUDA_HOME is unset)
-#   cuda-cub PATH           scripts/cuda-cub prints PATH (no line: it prints nothing and fails)
+#   cuda-cub PATH           scripts/cuda-cub.rb prints PATH (no line: it prints nothing and fails)
 #   cuda-shim PATH          scripts/cuda-driver-shim prints PATH (the shim's archive)
 #   cuda-shim-error TEXT    scripts/cuda-driver-shim fails with TEXT (takes precedence over cuda-shim)
 #   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
