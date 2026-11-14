@@ -99,6 +99,7 @@ REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_si
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
 ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
+ID_ZERO_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}0#{SS}[;,]/
 ANY_WRITE_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}(?:[-+*\/%&|^]|<<|>>)?=(?!=)/
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
 
@@ -760,8 +761,10 @@ texts = static_rename(texts)
   # declared inside a function and never written otherwise always names the literal. A call that passes it can then
   # use mrb_intern_cstr with the literal (the same symbol the variable holds after the Init function runs).
   def compute_id_literals
-    lits = {}
-    writes = Hash.new(0)
+    lits = Hash.new { |h, k| h[k] = Set.new }   # name -> the literals it is set from (rb_intern("lit"))
+    lit_writes = Hash.new(0)                    # name -> number of rb_intern writes
+    zero_writes = Hash.new(0)                   # name -> number of writes of 0 (the unset value of a lazily set ID)
+    writes = Hash.new(0)                        # name -> every write
     address = Set.new
     local_decl = Set.new
     @files.each_value do |f|
@@ -770,8 +773,10 @@ texts = static_rename(texts)
       finditer(ID_LIT_ASSIGN_RE, masked).each do |m|
         lit = /"([^"\\]+)"/.match(text[m.begin(0)...m.end(0)])
         next unless lit
-        lits[m[1]] = lit[1]
+        lits[m[1]] << lit[1]
+        lit_writes[m[1]] += 1
       end
+      finditer(ID_ZERO_ASSIGN_RE, masked).each { |m| zero_writes[m[1]] += 1 }
       finditer(ANY_WRITE_RE, masked).each { |m| writes[m[1]] += 1 }
       masked.scan(/&\s*([#{WC}]+)\b/) { address << Regexp.last_match(1) }
       finditer(/(?<![#{WC}])ID\s+([#{WC}]+)\b/, masked).each do |m|
@@ -780,10 +785,11 @@ texts = static_rename(texts)
         local_decl << m[1] unless pre.match?(/\A(?:extern\s+|static\s+)?\z/)
       end
     end
-    lits.each do |name, lit|
-      next unless writes[name] == 1
+    lits.each do |name, set|
+      # every write is rb_intern of the one literal, or 0 (the unset value); nothing else writes it
+      next unless set.size == 1 && writes[name] == lit_writes[name] + zero_writes[name]
       next if address.include?(name) || local_decl.include?(name) || @class_vars.include?(name)
-      @id_literals[name] = lit
+      @id_literals[name] = set.first
     end
   end
 

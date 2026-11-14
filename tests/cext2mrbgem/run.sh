@@ -245,6 +245,11 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_call_arg tools/cext2mrbg
 check test "$rc" -eq 0
 check grep -qF 'long long sec = ((long long)mrb_int(mrb, mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "tv_sec"), 0, 0)));' "$work/api_num_call_arg/src/api_num_call_arg.c"
 
+# 2zzz22. an ID global set lazily (0 when unset, then rb_intern of one literal): a call names the literal.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_lazy tools/cext2mrbgem/fixtures/api_id_lazy/ext/api_id_lazy "$work/api_id_lazy" > "$work/api_id_lazy.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "lazy"), 0, NULL)' "$work/api_id_lazy/src/api_id_lazy.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?
