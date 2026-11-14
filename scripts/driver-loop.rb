@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # nfcc, ported from the bash in nfcc: its option handling and its compile stage. Covered: the @file expansion; the pre-loop
-# decisions that run the host compiler (-E, -M, -MM, -MG, -fsyntax-only, -dumpmachine and friends, -print-*, -v, the qbe-try
-# wrapper), printed as "EXEC"; every option of the loop's case statement, with the Path B helper (pathb_option), the QBE
+# decisions that run the host compiler (-E, -M, -MM, -MG, -fsyntax-only, -dumpmachine and friends, -print-*, -v), printed as
+# "EXEC"; every option of the loop's case statement, with the Path B helper (pathb_option), the QBE
 # kernel helper (qbekernel) and the gcc-only and passthrough rules, and the -fno-crossjumping host check; the post-loop
 # checks; the Path B reason checks (pathb_reason, with the -fshort-wchar answer as an input); the compile of each input
 # (compile_one: the Path B command, its -S copy, the gcc fallback, the qbe and cil commands, the dependency commands) and the
@@ -16,9 +16,9 @@
 # Nothing is refused as unported now: the empty source name gets realpath's message, and a libcuda with no CUDA_HOME gets the
 # home nfcc derives from the library path (the port reads the home's files itself). The remaining exits are nfcc's own.
 #
-# Configuration, which nfcc reads from its environment: --nfcc-backend=qbe|cil|gcc|pathb (default gcc),
-# --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL), --nfcc-qbe-try=0|1
-# (NFCXX_QBE_TRY) and --nfcc-host-gnu-gcc=0|1. They come first on the command line.
+# Configuration, which nfcc reads from its environment: --nfcc-backend=cil|gcc|pathb (default gcc),
+# --nfcc-passthrough=0|1 (NFCXX_GCC_PASSTHROUGH), --nfcc-qbe-kernel=0|1 (NFCXX_QBE_KERNEL, now unused: nfcc has no QBE
+# backend), --nfcc-qbe-try=0|1 (NFCXX_QBE_TRY, unused likewise) and --nfcc-host-gnu-gcc=0|1. They come first on the command line.
 #
 # Checked against the bash loop by tests/nfcc/loop-state.sh, which compares the state this prints with the state the bash
 # loop leaves (tests/nfcc/option-state.sh). Written for bc2cpp as well as CRuby: no Regexp, no ENV, no File.readable?.
@@ -636,14 +636,13 @@ EXEC_PREFIXES = %w[-dumpmachine -dumpversion -dumpfullversion -dumpspecs -V -qve
 EXEC_TOOLS = %w[-E -M -MM -MG -fsyntax-only].freeze
 
 # The decisions nfcc makes before its loop: a version query (not ported: raises Unported), a query or -E/-M/-fsyntax-only that
-# runs the host compiler, and the qbe-try wrapper. Returns the command that exec runs, or nil to carry on.
-def pre_loop_exec(args, host, qbe_try, banner_backend = nil, env = nil)
+# runs the host compiler. Returns the command that exec runs, or nil to carry on.
+def pre_loop_exec(args, host, banner_backend = nil, env = nil)
   args.each do |a|
     return [:banner, banner_backend, env] if a == "--version"
     return [host] + args if EXEC_PREFIXES.include?(a) || a.start_with?("-print-")
   end
   return [host, "-v"] if args == ["-v"]
-  return ["qbe-try"] + args if qbe_try
   args.each { |a| return [host] + args if EXEC_TOOLS.include?(a) }
   nil
 end
@@ -859,8 +858,8 @@ def compile_one(state, env, kind, src, obj)
     end
     pathb_log(env, "gcc #{src}: #{reason}")
     run_cmd(gcc_argv(state, what, csrc, obj, extra))
-  elsif state.backend == "qbe" || state.backend == "cil"
-    qcc = state.backend == "qbe" ? "#{env.root}/scripts/qbe-cc" : "#{env.root}/scripts/cil-cc"
+  elsif state.backend == "cil"
+    qcc = "#{env.root}/scripts/cil-cc"
     run_cmd([qcc, "--c-input", what, *state.kqf, *state.pp, *state.asf, *extra, csrc, "-o", obj])
   else
     run_cmd(gcc_argv(state, what, csrc, obj, extra))
@@ -901,8 +900,8 @@ def link_mode(state, env)
     end
     edg = env.edg_build || "#{env.root}/build/edg"
     run_cmd([env.host, *objs, *state.ld, "-o", out, env.ldrt, "-L#{edg}/lib", "-lC", *cxx_libs, "-lm", *atomic])
-  elsif state.backend == "qbe" || state.backend == "cil"
-    qcc = state.backend == "qbe" ? "#{env.root}/scripts/qbe-cc" : "#{env.root}/scripts/cil-cc"
+  elsif state.backend == "cil"
+    qcc = "#{env.root}/scripts/cil-cc"
     run_cmd([qcc, *objs, *state.ld, "-o", out])
   else
     run_cmd(["gcc", *objs, *state.ld, "-o", out])
@@ -1131,7 +1130,7 @@ end
 
 def main(argv)
   config = take_config(argv)
-  die("unknown NFCXX_BACKEND '#{config[:backend]}' (qbe, cil, gcc or pathb)") unless %w[qbe cil gcc pathb].include?(config[:backend])
+  die("unknown NFCXX_BACKEND '#{config[:backend]}' (gcc, pathb or cil)") unless %w[cil gcc pathb].include?(config[:backend])
   args = expand_response_args(argv)
   # nfcc's bundle_wrap and cuda_driver_wrap: with no --bundle- option and no libcuda, they change nothing; the others run a
   # second driver or build a shim, which the port does not do.
@@ -1145,12 +1144,11 @@ def main(argv)
   args = list
   die("no input files") if args.empty?
 
-  command = pre_loop_exec(args, config[:env].host, config[:qbe_try] && config[:backend] == "gcc",
-                          config[:backend], config[:env])
+  command = pre_loop_exec(args, config[:env].host, config[:backend], config[:env])
   if command && command[0] == :banner
     env = command[2]
     $stdout.write("nfcc (nfcxx C driver 0.1, backend #{command[1]}) #{env.dumpfullversion}\n")
-    $stdout.write("gcc-compatible driver over cproc/QBE; the host compiler is #{env.host_version_line}\n")
+    $stdout.write("gcc-compatible driver over Path B and gcc; the host compiler is #{env.host_version_line}\n")
     return 0
   end
   if command

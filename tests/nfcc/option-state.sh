@@ -30,7 +30,7 @@ stub_shim() { if [ -n "${STUB_SHIM_ERROR:-}" ]; then echo "$STUB_SHIM_ERROR"; re
 dump_state='dump_scalar() { printf "%s=%s\n" "$1" "${!1-}"; }
 dump_array() {
   local name=$1; local -n ref=$1
-  [ "${#ref[@]}" -gt 0 ] || return 0
+  [ -n "${ref[*]+x}" ] || return 0
   local x; for x in "${ref[@]}"; do printf "%s+=%s\n" "$name" "$x"; done
 }
 for n in mode asm out sawout lang backend optlvl depmode dfile dp spon pathb_pic pathb_pie pb_m16 pb_regparm nofp nounwind wchar16; do dump_scalar "$n"; done
