@@ -286,6 +286,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_rational tools/cext2
 check test "$rc" -eq 0
 check grep -qF 'return mrb_obj_is_kind_of(mrb, v, mrb_class_get(mrb, "Rational")) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_rational/src/api_rb_type_rational.c"
 
+# 2zzz29. RB_TYPE_P of T_CLASS (classes and singleton classes) and T_MODULE: mruby's MRB_TT_CLASS or MRB_TT_SCLASS, and MRB_TT_MODULE.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rb_type_class tools/cext2mrbgem/fixtures/api_rb_type_class/ext/api_rb_type_class "$work/api_rb_type_class" > "$work/api_rb_type_class.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '(mrb_type(v) == MRB_TT_CLASS || mrb_type(v) == MRB_TT_SCLASS) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_class/src/api_rb_type_class.c"
+check grep -qF 'return mrb_module_p(v) ? mrb_true_value() : mrb_false_value();' "$work/api_rb_type_class/src/api_rb_type_class.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

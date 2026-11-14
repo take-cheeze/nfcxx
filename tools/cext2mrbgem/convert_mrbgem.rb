@@ -3442,6 +3442,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, 'RB_TYPE_P', "object #{py_repr(obj)} is not a plain local variable (nested names would not be mapped)")
       return
     end
+    # classes and modules: CRuby's T_CLASS includes singleton classes (mruby's MRB_TT_SCLASS), and T_MODULE is MRB_TT_MODULE
+    type_expr = { 'T_CLASS' => "(mrb_type(OBJ) == MRB_TT_CLASS || mrb_type(OBJ) == MRB_TT_SCLASS)", 'T_MODULE' => 'mrb_module_p(OBJ)' }[tname.sub(/\ARUBY_/, '')]
+    if type_expr
+      new = type_expr.gsub('OBJ', obj)
+      ed.add(s, close + 1, new)
+      rewrite(rel, s, 'RB_TYPE_P', new, 'a class test: singleton classes are CRuby T_CLASS and mruby MRB_TT_SCLASS')
+      return
+    end
     # nil and false share mruby's MRB_TT_FALSE tag, so their tests are the value predicates: CRuby's RB_TYPE_P(v, T_NIL)
     # is true only for nil, and RB_TYPE_P(v, T_FALSE) only for false (Qfalse)
     # T_RATIONAL: the fork's rational gem makes Rational objects as data (no exact tag), but CRuby's Rational class has no
