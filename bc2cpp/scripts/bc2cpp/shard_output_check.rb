@@ -203,8 +203,9 @@ Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
 
   tier_main, tier_files = tier_split('O1', nil)
   nonempty = tier_files.select { |t| t.include?('#define BC2CPP_SHARD_PRELUDE_ONLY') }
-  suite.check('a tier puts the pragma at the top of every non-empty shard',
-              !nonempty.empty? && nonempty.all? { |t| t.start_with?(%(#pragma GCC optimize ("O1")\n)) })
+  guarded = "#if defined(__GNUC__) && !defined(__clang__)\n#pragma GCC optimize (\"O1\")\n#endif\n"
+  suite.check('a tier puts the GCC-only pragma at the top of every non-empty shard',
+              !nonempty.empty? && nonempty.all? { |t| t.start_with?(guarded) })
   suite.check('the main file gets no pragma', !tier_main.include?('#pragma GCC optimize'))
 
   hot_main, hot_files = tier_split('O1', hot_set)
@@ -226,7 +227,11 @@ Dir.mktmpdir('bc2cpp-shard-tiers') do |dir|
       File.write(File.join(d, 'driver.cpp'), <<~'CPP')
         #include <cstdio>
         int hot_a(int); int hot_b(int); int cold_c(int); int cold_d(int);
-        int main() { std::printf("%d %d %d %d\n", hot_a(2), hot_b(2), cold_c(2), cold_d(2)); return 0; }
+        int main() {
+          int a = hot_a(2); int b = hot_b(2); int c = cold_c(2); int d = cold_d(2);
+          std::printf("%d %d %d %d\n", a, b, c, d);
+          return 0;
+        }
       CPP
     end
     run_split = lambda do |d, files|

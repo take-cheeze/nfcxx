@@ -201,7 +201,8 @@ module ShardOutput
       next empty_shard(symbol, i + 1, shards) if groups[i + 1].empty?
 
       # A pragma before the include covers the prelude and the methods of this translation unit (docs/notes/bc2cpp-shard-tiers.md).
-      head = tier ? "#pragma GCC optimize (\"#{tier}\")\n" : ''
+      # GCC only: clang has no such pragma, and -Wunknown-pragmas under -Werror would fail its build.
+      head = tier ? "#if defined(__GNUC__) && !defined(__clang__)\n#pragma GCC optimize (\"#{tier}\")\n#endif\n" : ''
       "#{head}// #{symbol}_gen_shard#{i + 1}.cpp: shard #{i + 1} of #{shards} (docs/bc2cpp-shards.md).\n" \
         "#define #{PRELUDE_ONLY}\n#include \"#{symbol}_gen.cpp\"\n#{body}"
     end
