@@ -1229,6 +1229,38 @@ def noreturn_mask(rel)
   end
 end
 
+  # rb_ensure(body, data1, ensure, data2): both callbacks are static functions of this file, each used only by this call
+  # and each VALUE f(VALUE); they are threaded (mrb, mrb_value) for mrb_ensure. The data arguments are VALUE names or Q constants.
+  def ensure_calls
+    out = []
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])rb_ensure#{SS}\(/, masked).each do |m|
+        s = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        args_pos = split_args(masked, open, close).map { |a, _b| a }
+        args = split_args(masked, open, close).map { |a, b| psl(text, a, b).strip }
+        next unless args.size == 4
+        b_cb, d1, e_cb, d2 = args
+        next unless b_cb.match?(/\A[A-Za-z_][#{WC}]*\z/) && e_cb.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        next unless [d1, d2].all? { |d| d.match?(/\A[A-Za-z_][#{WC}]*\z/) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
+        ok = [b_cb, e_cb].all? do |cb|
+          d = (@defs[cb] || []).select { |x| x['file'] == rel }
+          d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
+            psl(text, d[0]['po'], d[0]['pc']).match?(/\A\(?\s*VALUE\s+[A-Za-z_][#{WC}]*\s*\)?\z/) &&
+            (@occ[cb] || []).count { |r, _, _| r == rel } == 2
+        end
+        next unless ok
+        out << { rel: rel, s: s, e: close + 1, b: b_cb, d1: d1, ecb: e_cb, d2: d2,
+                 bpos: args_pos[0], epos: args_pos[2] }
+      end
+    end
+    out
+  end
+
   def hash_foreach_calls
     out = []
     @files.each do |rel, f|
@@ -1662,6 +1694,9 @@ dtype_decls.each do |rel, _m, info|
 end
     # rb_hash_foreach callbacks are threaded (see hash_foreach_calls): forced into the needs set, with their call positions
     @hash_calls = hash_foreach_calls
+    @ensure_calls = ensure_calls
+    @ensure_calls.each { |c| forced << c[:b] << c[:ecb] }
+    @ensure_cb_pos = Set.new(@ensure_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:epos]]] })
     @hash_calls.each { |c| forced << c[:cb] }
     @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
@@ -1807,6 +1842,7 @@ use_problem = lambda do |name, use|
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
+  next nil if !direct && (@ensure_cb_pos || Set.new).include?([rel, s])
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -2835,6 +2871,20 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])
+    when 'ensure_call'
+      c = (@ensure_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
+      unless c
+        refuse(rel, s, name, 'rb_ensure needs static VALUE callbacks defined here and used only here, and data arguments that are VALUE names or Q constants (a pointer cast such as (VALUE)&x is not mapped)')
+        return
+      end
+      if ed.overlaps(c[:s], c[:e])
+        refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+        return
+      end
+      conv = ->(x) { x.match?(/\AQ(?:nil|undef|true|false)\z/) ? @entries[x]['mruby'] : x }
+      new = "mrb_ensure(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{c[:ecb]}, #{conv.call(c[:d2])})"
+      ed.add(c[:s], c[:e], new)
+      rewrite(rel, s, name, new, 'the body and the ensure callback run under mrb_ensure: the ensure runs, then the exception (if any) is re-raised, as CRuby')
     when 'hash_foreach'
       c = (@hash_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c

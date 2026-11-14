@@ -227,6 +227,12 @@ check test "$rc" -eq 0
 check grep -qF 'mrb_obj_new(mrb, mrb_class_ptr(klass), 0, NULL)' "$work/api_new_value_class/src/api_new_value_class.c"
 check grep -qF 'return mrb_obj_new(mrb, mrb->range_class, 3, argv);' "$work/api_new_value_class/src/api_new_value_class.c"
 
+# 2zzz19. rb_ensure with two static VALUE callbacks used only here: both are threaded and the call is mrb_ensure.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_call tools/cext2mrbgem/fixtures/api_ensure_call/ext/api_ensure_call "$work/api_ensure_call" > "$work/api_ensure_call.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'return mrb_ensure(mrb, ec_body, arr, ec_ensure, mrb_nil_value());' "$work/api_ensure_call/src/api_ensure_call.c"
+check grep -qF 'static mrb_value ec_body(mrb_state *mrb, mrb_value data) {' "$work/api_ensure_call/src/api_ensure_call.c"
+
 # 2l. numeric, symbol, constant, block and type-test calls (api_map.json batch B2). RB_LIKELY and RB_UNLIKELY keep their
 # argument as !!(x) (the hint is dropped, the 0 or 1 value kept). RB_TYPE_P of a caveated, unknown or nested form is refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_num_sym_ctl tools/cext2mrbgem/fixtures/api_num_sym_ctl/ext/api_num_sym_ctl "$work/api_num_sym_ctl" > "$work/api_num_sym_ctl.log" 2>&1 || rc=$?

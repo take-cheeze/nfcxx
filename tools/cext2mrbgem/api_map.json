@@ -215,8 +215,9 @@
       "needs_mrb": true
     },
     "rb_ensure": {
-      "kind": "refuse",
-      "reason": "no direct mruby equivalent (ensure callback not in the supported subset)"
+      "kind": "ensure_call",
+      "needs_mrb": true,
+      "caveat": "both callbacks are static VALUE f(VALUE) functions of this file used only here; they take (mrb, value) after threading, and mrb_ensure runs the ensure callback before re-raising an exception, as CRuby does"
     },
     "rb_rescue": {
       "kind": "refuse",
