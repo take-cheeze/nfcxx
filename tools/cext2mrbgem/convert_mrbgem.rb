@@ -2027,7 +2027,12 @@ use_problem = lambda do |name, use|
       rel, s, direct, fn = use
       macro = fn.nil? && direct ? define_at(rel, s) : nil
       if fn.nil?
-        if direct && macro && macro_expansions_ok(macro, with_state | members)
+        # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
+        # used: when every use of the table is in a registered method or Init, the call runs in a method's dynamic extent,
+        # where the global state is set (the same state the method's own helpers use)
+        if !direct && (tbl = file_scope_table_at(rel, s)) && table_used_in_methods?(tbl, rel, s)
+          nil
+        elsif direct && macro && macro_expansions_ok(macro, with_state | members)
           nil
         elsif direct
           'helper needs the mruby state threaded in, but the call is not in a function definition the converter ' \
@@ -2940,6 +2945,41 @@ end
       out << [st, kw_end, pieces]
     end
     out
+  end
+
+  # the variable of a file-scope initializer that contains position s (NAME = { ... } or NAME[] = { ... }), or nil
+  def file_scope_table_at(rel, s)
+    @table_spans ||= {}
+    spans = (@table_spans[rel] ||= begin
+      masked = @files[rel]['masked']
+      out = []
+      masked.to_enum(:scan, /(?<![#{WC}])([#{WC}]+)(?:[ \t\n]*\[[^\]\n]*\])?[ \t\n]*=[ \t\n]*\{/).each do
+        m = Regexp.last_match
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        out << [m[1], open, close]
+      end
+      out
+    end)
+    hit = spans.find { |_n, a, b| a < s && s < b }
+    return nil unless hit
+    fn = enclosing_func(rel, s)
+    return nil if fn
+    hit[0]
+  end
+
+  # every use of the table is inside its own initializer or in a registered method or Init function
+  def table_used_in_methods?(tbl, rel, s)
+    inits = (@init_defs || []).map { |d| d['name'] }
+    (@occ[tbl] || []).all? do |orel, os, _oe|
+      # the table's own declaration: a file-scope occurrence that opens its initializer
+      if enclosing_func(orel, os).nil? && @files[orel]['masked'][_oe..].to_s.match?(/\A(?:[ \t\n]*\[[^\]\n]*\])?[ \t\n]*=[ \t\n]*\{/)
+        next true
+      end
+      f = enclosing_func(orel, os)
+      f && ((@valid_reg_names || Set.new).include?(f['name']) || inits.include?(f['name']))
+    end
   end
 
   def is_param(rel, pos, name)

@@ -325,6 +325,12 @@ check sh -c "! grep -q '#if 0' '$work/api_init_helper/src/api_init_helper.c'"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_kr_proto tools/cext2mrbgem/fixtures/api_kr_proto/ext/api_kr_proto "$work/api_kr_proto" > "$work/api_kr_proto.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'return kp_helper(mrb, v);' "$work/api_kr_proto/src/api_kr_proto.c"
+# 2zzz39. a function in a file-scope table of this file: the table is used only in registered methods, so the function runs in a
+# method's dynamic extent, where the global state is set (global mode); the table's declaration is not a use.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fn_table tools/cext2mrbgem/fixtures/api_fn_table/ext/api_fn_table "$work/api_fn_table" > "$work/api_fn_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static mrb_value ft_item(mrb_value v) {' "$work/api_fn_table/src/api_fn_table.c"
+check grep -qF 'static FtCallbacks ft_cbs = { ft_item };' "$work/api_fn_table/src/api_fn_table.c"
 # 2zzz37. a mixed declaration: VALUE, a class declarator (with a call), VALUE. The types change at the commas.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_decl_mixed tools/cext2mrbgem/fixtures/api_decl_mixed/ext/api_decl_mixed "$work/api_decl_mixed" > "$work/api_decl_mixed.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
