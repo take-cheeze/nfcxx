@@ -78,7 +78,13 @@ class CodeGen
   # compiles it (the resumable paths call this too).
   def compile_insn_op(insn, irep, owner_def, idx = nil, reg_offset = 0)
     code = compile_insn_op_plain(insn, irep, owner_def, idx, reg_offset)
-    return code unless code.is_a?(String) && %i[GETIDX GETIDX0].include?(insn.op) && idx && irep
+    return code unless code.is_a?(String) && idx && irep
+
+    if insn.op == :SETIDX
+      # DECLARED_ELEMENT_GUARD on a store runs before the store writes the element.
+      return declared_element_setidx_guard(insn, irep, owner_def, idx, reg_offset) + code
+    end
+    return code unless %i[GETIDX GETIDX0].include?(insn.op)
 
     code + declared_element_getidx_guard(insn, irep, owner_def, idx, reg_offset)
   end

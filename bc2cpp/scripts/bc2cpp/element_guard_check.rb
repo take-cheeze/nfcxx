@@ -83,4 +83,88 @@ ensure
   ENV.delete('BC2CPP_SIG_DIRS')
 end
 
+
+# A program class: `@things: Array[Thing]` (an exact-class element), with a Thing and an Other.
+THING_SOURCE = <<~RUBY
+  class Thing
+    def ok?
+      true
+    end
+  end
+
+  class Other
+    def ok?
+      false
+    end
+  end
+
+  class Crate
+    def initialize
+      @things = [Thing.new, Thing.new]
+      nil
+    end
+
+    def at(i)
+      @things[i]
+    end
+
+    def poison
+      @things << Other.new
+      nil
+    end
+
+    def first_ok
+      @things[0].ok?
+    end
+
+    def put(i, v)
+      @things[i] = v
+      nil
+    end
+  end
+RUBY
+
+THING_SIG = <<~RBS
+  class Crate
+    @things: Array[Thing]
+  end
+RBS
+
+THING_DRIVER = <<~'RUBY'
+  c = Crate.new
+  puts c.at(0).class
+  c.poison
+  begin
+    puts c.at(2).class
+  rescue => e
+    puts "raised #{e.class}"
+  end
+  begin
+    c.put(1, Other.new)
+    puts 'stored'
+  rescue => e
+    puts "store raised #{e.class}"
+  end
+  puts 'end'
+RUBY
+
+Dir.mktmpdir('element_guard_thing_sig') do |sig_dir|
+  File.write(File.join(sig_dir, 'crate.rbs'), THING_SIG)
+  ENV['BC2CPP_SIG_DIRS'] = sig_dir
+  Dir.mktmpdir('element_guard_thing') do |dir|
+    code, = Bc2cppFixtureRuntime.generate(THING_SOURCE, dir, only_owners: %w[Crate Thing])
+    check.call('a program-class element read is guarded', code.include?('DECLARED_ELEMENT_GUARD Crate#things'))
+    check.call('a send to the declared element is a closed-world exact-class call', code.include?('NILABLE_RECEIVER :ok?') && code.include?('CLOSED_WORLD_EXACT_CLASS :ok? -> Thing#ok?'))
+  end
+  suite.generate(THING_SOURCE, %w[Crate Thing])
+  suite.behaviour(THING_DRIVER, banner: 'declared program-class element read, interpreted and compiled', same: false) do |interpreted, compiled|
+    check.call('the good program element reads the same in both runs', interpreted && compiled && interpreted[0] == compiled[0])
+    check.call('the interpreted run returns the wrong-class element', interpreted&.include?('Other'))
+    check.call('the compiled run raises the declaration violation', compiled&.any? { |l| l.start_with?('raised') })
+    check.call('a wrong-class store raises before it writes (compiled), and stores (interpreted)', interpreted&.include?('stored') && compiled&.include?('store raised BC2cppDeclarationViolation'))
+  end
+ensure
+  ENV.delete('BC2CPP_SIG_DIRS')
+end
+
 suite.finish
