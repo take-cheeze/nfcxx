@@ -173,7 +173,7 @@ module DeclScan
       hstart += 1 while hstart < name_pos && pp[hstart].match?(/\s/)
       head = pp[hstart...name_pos]
       storage = STORAGE_RE.match(head)[1]
-      ret = head[storage.length..].sub(/[#{WSP}\*]+\z/, '')
+      ret = head[storage.length..].sub(/[#{WSP}]+\z/, '')  # the pointer star of a return type (Real *) stays
       if ret.empty? || NON_FUNC_WORDS.include?(ret.split.last)
         skipped << [line, 'no return type before the name, or not a function']
         next

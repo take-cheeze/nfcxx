@@ -897,7 +897,7 @@ texts = static_rename(texts)
     out = []
     finditer(DEF_RE, masked).each do |m|
       storage, name, term = m[1], m[3], m[5]
-      ret = m[2].sub(/[#{WSP}\*]+\z/, '') # trailing pointer stars are dropped, as before
+      ret = m[2].sub(/[#{WSP}]+\z/, '') # the pointer star of a return type (Real *) stays
       po = pyfind(masked, '(', m.begin(3))
       pc = pyfind(masked, ')', po)
       d = { 'file' => rel, 'name' => name, 'storage' => storage, 'ret' => ret,
@@ -1086,7 +1086,7 @@ def dtype_parse(rel, m)
   nested = split_args(mk, els[1][0], els[1][1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.strip.empty? }
   ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
   # RUBY_TYPED_DEFAULT_FREE frees with CRuby's allocator: mruby's dfree takes (mrb, data), and mrb_free has that shape
-  nested_free = nested[1] && nested[1][2] == 'RUBY_TYPED_DEFAULT_FREE' ? 'mrb_free' : (nested[1] && nested[1][2])
+  nested_free = nested[1] && %w[RUBY_TYPED_DEFAULT_FREE RUBY_DEFAULT_FREE].include?(nested[1][2]) ? 'mrb_free' : (nested[1] && nested[1][2])
   unless (nested.size == 2 || nested.size == 3) && ok_fn.call(nested[0][2]) && ok_fn.call(nested_free || 'NULL') && %w[0 NULL].include?(els[2][2]) && %w[0 NULL].include?(els[3][2])
     return { 'error' => 'the mark or free function, the parent or the data slot is not a plain name or 0/NULL' }
   end
@@ -1122,7 +1122,7 @@ end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
     free = sf['dfree'] ? sf['dfree'][2] : 'NULL'
-    free = 'mrb_free' if free == 'RUBY_TYPED_DEFAULT_FREE'
+    free = 'mrb_free' if %w[RUBY_TYPED_DEFAULT_FREE RUBY_DEFAULT_FREE].include?(free)
     unless ok_fn.call(mark) && ok_fn.call(free)
       return { 'error' => 'the mark or free function is not a plain name or 0/NULL (a macro such as RUBY_TYPED_DEFAULT_FREE is not mapped)' }
     end
