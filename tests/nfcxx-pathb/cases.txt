@@ -84,3 +84,15 @@ default --cache=cache -c a.cc
 default --cache=cache --cache-log=log.txt a.cc -o prog
 default --time-log=t.log a.cc -o prog
 default --trace=t.json -c a.cc
+# option values: --instantiate, --promote-slots, --unroll, --struct-slots (CUDA only), --module-dir (modules only)
+default -c a.cc --instantiate=auto
+default -c a.cc --instantiate=used
+default --instantiate=auto a.cc -o prog
+default -c a.cc --instantiate=bogus
+pathb -c a.cc --instantiate=auto
+default -c a.cc --promote-slots=on --unroll=off --struct-slots=0
+default -c a.cc --promote-slots=off --unroll=1 --struct-slots=on
+default -c a.cc --promote-slots=maybe
+default -c a.cc --unroll=yes
+default -c a.cc --module-dir=mods
+pathb a.cc --module-dir=mods -o prog

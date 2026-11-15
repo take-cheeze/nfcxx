@@ -37,7 +37,8 @@
 # Not covered (exit 3): the gcc backend (the default with -shared, or with -MD or -MMD and no -fsafe-pointers, and the
 # --backend=gcc choice); .cu and .cpp2 inputs (CUDA and cppfront: the rewriter, the device units and the prelinker) and the
 # CUDA options; C++ modules; SYCL (a -I directory with the oneAPI kernel header); --freestanding, --cosmo, --target, --emit-c,
-# --emit-hip, --bundle-libs, --cuda-driver, --module-dir, --instantiate, --keep-intermediates, and any other --option; -M and
+# --emit-hip, --bundle-libs, --cuda-driver, --keep-intermediates, and any other --option (--instantiate=auto|used,
+# --promote-slots, --unroll, --struct-slots and --module-dir are read and planned as no line: see parse); -M and
 # -MM and the other -M options that are not the depfile family (the bash passes -M and -MM on to cc or drops them, while its
 # header comment says -M takes the gcc backend: the two disagree, so the port does not choose); -MD with -c of a file -fsafe-
 # and -MMD with the default backend and no -fsafe-pointers (the default takes gcc for them); -c with no C++ or C source; -x
@@ -272,6 +273,16 @@ class Plan
         @dialect_asked = true
       elsif x.start_with?("--gnu-version=")
         @gnu_user = x.delete_prefix("--gnu-version=")
+      elsif x.start_with?("--instantiate=")
+        # EDG's instantiation (the eccp calls of the gcc backend): Path B makes no such call
+        value = x.delete_prefix("--instantiate=")
+        exit_with("nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got #{value})", 2) unless %w[auto used].include?(value)
+      elsif x.start_with?("--promote-slots=", "--unroll=", "--struct-slots=")
+        # CUDA device code only (not in a hosted plan): the value is checked as the argument loop checks it
+        flag, value = x.split("=", 2)
+        exit_with("nfcxx: #{flag} takes on or off (got '#{value}')", 2) unless %w[on 1 off 0].include?(value)
+      elsif x.start_with?("--module-dir=")
+        nil # the directory of module files: a module source is refused by checks
       elsif x.start_with?("--")
         unported(x)
       elsif x.start_with?("-fuse-ld=")

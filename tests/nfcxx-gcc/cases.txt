@@ -105,3 +105,11 @@ a.cc -o prog
 --backend=gcc --cuda-driver=cudart nort/lib64/stubs/libcuda.so a.cc -o prog
 --backend=gcc nort/lib64/stubs/libcuda.so a.cc -o prog
 --backend=gcc -c a.cc b.cc
+# option values: --promote-slots, --unroll, --struct-slots (CUDA only), --module-dir (modules only)
+--backend=gcc --promote-slots=on --unroll=off --struct-slots=0 -c a.cc
+--backend=gcc --promote-slots=off a.cc -o prog
+--backend=gcc --promote-slots=maybe -c a.cc
+--backend=gcc --module-dir=mods -c a.cc
+--backend=gcc --module-dir=mods a.cc -o prog
+--backend=gcc --instantiate=auto -c a.cc
+--backend=gcc --instantiate=bogus -c a.cc

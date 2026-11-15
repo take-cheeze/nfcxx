@@ -356,13 +356,21 @@ def unported(what)
   raise NfcxxUnported, what
 end
 
+# onoff of the argument loop (nfcxx's onoff): on|1 and off|0 are accepted, anything else is the bash's error
+def onoff_value(arg)
+  flag, value = arg.split("=", 2)
+  return if %w[on 1 off 0].include?(value)
+
+  raise NfcxxExit.new("nfcxx: #{flag} takes on or off (got '#{value}')", 2)
+end
+
 def normalize(path)
   Pathname.new(path).cleanpath.to_s
 end
 
 # options of the argument loop that the gcc path does not port (the other tracks, or the tools they need)
-UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--module-dir=", "--target=",
-                     "--pathb-c=", "--ir-opt=", "--promote-slots=", "--unroll=", "--struct-slots=", "--emit-"].freeze
+UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--target=",
+                     "--pathb-c=", "--ir-opt=", "--emit-"].freeze
 UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-pointers"].freeze
 
 class Plan
@@ -433,6 +441,10 @@ class Plan
       elsif a.start_with?("--cache=") then @cache_dir = a[8..]
       elsif a.start_with?("--cache-log=") then nil
       elsif a.start_with?("--instantiate=") then @instantiate = a[14..]
+      # the CUDA device code's options (not in a hosted plan), and the module directory (read only for a module source,
+      # which run refuses)
+      elsif a.start_with?("--promote-slots=", "--unroll=", "--struct-slots=") then onoff_value(a)
+      elsif a.start_with?("--module-dir=") then nil
       elsif a.start_with?("--dialect=") then @dialect = a[10..]; @dialect_asked = true
       elsif a.start_with?("--gnu-version=") then nil
       elsif a.start_with?("-fuse-ld=")
