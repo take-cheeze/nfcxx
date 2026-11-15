@@ -347,7 +347,7 @@ nonnull, shared memory, the struct ABI, switch, atomics, warp shuffles and votes
 xor shuffle as an up shuffle, any as all) are caught.
 
 The `.cu` path is the same driver with `NFCXX_CUDA_TARGET=amdgpu` (and `NFCXX_AMDGPU_ARCH=gfx1151`, `NFCXX_AMDGPU_CLANG`,
-`ROCM`): the device pass is `cu_amd_build` (nfcxx), the IR goes to `pathb-amdgpu-emit`, ROCm's clang makes the code object, and the
+`ROCM`): the device pass is `amd_build` in `scripts/nfcxx-cuda-device.rb` (the bash `cu_amd_build` before the port), the IR goes to `pathb-amdgpu-emit`, ROCm's clang makes the code object, and the
 registration tail of `pathb-ptx-emit --embed` embeds it as a cubin is. The host copy's CUDA runtime is `lib/hip/cuda_runtime.h`, a
 shim of the calls `lib/cuda/nfcxx_cuda.h` makes (a library is a HIP module, `cudaLaunchKernelExC` is `hipModuleLaunchKernel`); the
 driver puts it, and ROCm's include directory, on the rewriter's system paths. The occupancy, host-address launch and cooperative

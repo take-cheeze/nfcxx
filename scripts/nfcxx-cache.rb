@@ -5,7 +5,8 @@
 # helper stubbed (tests/nfcxx-cache/bash-decision.sh).
 #
 # It prints the decision and the commands the bash would run, in the bash's order:
-#   RUN ARGV...           a command the bash runs (rm, mkdir, mv, ruby for the remote helper, build for the one-step build)
+#   RUN ARGV...           a command the bash runs (rm, mkdir, mv, ruby for scripts/nfcxx-cache-io.rb's remote-get and remote-put,
+#                         build for the one-step build)
 #   CP SRC DST            a copy into or out of the cache
 #   EXIT 0                a hit: the bash exits after the copy
 #   KEY HEX               the cache key (not a bash line: the runner reads it)
@@ -291,18 +292,10 @@ class Cache
      sha_line(concat_files(regular_files_directly_in(base)))]
   end
 
-  # the remote tier on a local miss: the helper's get into a temporary entry, moved into place on a hit
+  # the remote tier on a local miss: scripts/nfcxx-cache-io.rb remote-get (the temporary entry and its move are its own)
   def remote_get(key, entry)
-    tmp = "#{entry}.remote.#{Process.pid}"
-    puts "RUN rm -rf #{tmp}"
-    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-gha.rb get #{key} #{tmp}"
-    hit = @remote_answer == "hit"
-    if hit
-      puts "RUN mkdir -p #{File.dirname(entry)}"
-      puts "RUN mv #{tmp} #{entry}" unless File.exist?(entry)
-    end
-    puts "RUN rm -rf #{tmp}"
-    hit
+    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-io.rb remote-get #{key} #{entry}"
+    @remote_answer == "hit"
   end
 
   # the hit: the object and its records go back beside the output (a Path B entry has the object only). The records the
@@ -328,7 +321,7 @@ class Cache
     puts "RUN rm -rf #{tmp}"
     return unless moved && !remote.empty?
 
-    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-gha.rb put #{key} #{entry} #{(['obj'] + recs).join(' ')}"
+    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-io.rb remote-put #{key} #{entry}"
   end
 end
 

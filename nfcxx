@@ -172,29 +172,18 @@ cudatmp=""
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
 cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when --cache-log (NFCXX_CACHE_LOG) is set (a diagnostic; no effect on the key).
-  # Parallel compiles share the file, so each append takes a lock (mkdir, which is portable) and is a single printf.
+  # The append is scripts/nfcxx-cache-io.rb log (a lock shared with the parallel compiles, one write per call).
   [ -n "$cache_log_file" ] || return 0
-  while ! mkdir "$cache_log_file.lock" 2>/dev/null; do sleep 0.05; done
-  printf '%s\n' "$*" >> "$cache_log_file"
-  rmdir "$cache_log_file.lock"
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" log "$cache_log_file" "$*"
 }
 # The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
 # remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
+# scripts/nfcxx-cache-io.rb does the work (the temporary entry, the move into place, the GHA client's calls and the note).
 cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
-  local tmp=$2.remote.$$ rc=0
-  rm -rf "$tmp"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" get "$1" "$tmp" || rc=$?
-  if [ $rc = 0 ] && [ -f "$tmp/obj" ]; then
-    mkdir -p "$(dirname "$2")"; [ -e "$2" ] || mv "$tmp" "$2" 2>/dev/null || true
-  else rc=1; fi
-  rm -rf "$tmp"
-  return $rc
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"
 }
 cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
-  local names=(obj) x
-  for x in ti ii; do [ ! -f "$2/$x" ] || names+=("$x"); done
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" put "$1" "$2" "${names[@]}" \
-    || echo "nfcxx: remote cache: could not store $1 (the build continues)" >&2
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
@@ -209,8 +198,8 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     # and a failed link deletes the objects. It goes to a per-user cache, keyed by the absolute object path, and the
     # object records that absolute path, so the link finds it from any directory.
     local obj=$out; [ $outset = 1 ] || obj=$(basename "${cu_inputs[0]}" .cu).o
-    local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
-    dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cu/$key
+    # The directory is scripts/nfcxx-cuda-device.rb's (--cu-dir: the key is the SHA-1 of realpath -m OBJ, as before).
+    dir=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-dir="$obj") || exit $?
     mkdir -p "$dir"
     cu_keep=$dir
   fi
@@ -287,166 +276,24 @@ ensure_tool() {
 }
 # The rewriter: the C++ tool (build/cuda-rewrite, built from tools/cuda-rewrite on first use).
 ensure_tool "$root/tools/cuda-rewrite" "$root/build/cuda-rewrite" || exit $?
-rewriter=("$root/build/cuda-rewrite")
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
-  local src=$1 copy=$2
-  local base; base=$(basename "$src" .cu)
-  # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
-  local incs=(); local f; for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -I*) incs+=("$f");; esac; done
-  # The -D and -U options: the host compile gets them, and the device pass resolves its conditionals with them, so both
-  # copies agree on every #if the defines decide.
-  local defs_opts=(); for f in ${cflags[@]+${cflags[@]+"${cflags[@]}"}}; do case $f in -D*|-U*) defs_opts+=("$f");; esac; done
-  # The toolkit's version macros, for the device pass only: the host copy has them from the CUDA headers, the device unit
-  # includes none, and code tests them in #if (ggml-cuda's GGML_CUDA_USE_CUB is CUDART_VERSION >= 11070; without the
-  # value the host launched CUB-path kernels whose device bodies were the other branch). Read from the headers the host
-  # compile finds first (the -I directories, then CUDA_HOME); a -D of the same name on the command line wins.
-  local ver_opts=() d m v
-  for d in ${incs[@]+"${incs[@]#-I}"} "${CUDA_HOME:-/usr/local/cuda}/include"; do
-    [ -f "$d/cuda_runtime_api.h" ] || continue
-    for m in CUDART_VERSION:cuda_runtime_api.h CUDA_VERSION:cuda.h; do
-      case " ${defs_opts[*]+${defs_opts[*]}} " in *" -D${m%%:*}="*|*" -D${m%%:*} "*|*" -U${m%%:*} "*) continue ;; esac
-      v=$(sed -n "s/^#define ${m%%:*}  *\([0-9][0-9]*\).*/\1/p" "$d/${m#*:}" 2>/dev/null | head -1)
-      [ -z "$v" ] || ver_opts+=("-D${m%%:*}=$v")
-    done
-    break
-  done
-  # Kernel name obfuscation: one seed for both copies of the file (the host copy and the device unit must agree).
-  local obf=(); if [ "$obfuscate" = 1 ]; then obf=(--obfuscate="${NFCXX_OBFUSCATE_SEED:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"); fi
-  # The front end parses the plain kernel launches (EDG --cuda, 3rd/edg); the rewriter leaves them. Launches with
-  # template arguments are still rewritten here, and the device unit is unchanged. On by default, for .cu inputs only
-  # (this function); NFCXX_CUDA_EDG_LAUNCH=0 restores the rewriter's own launch rewrite.
-  local rw=()
-  if [ "${NFCXX_CUDA_EDG_LAUNCH:-1}" = 1 ]; then
-    rw+=(--edg-launches)
-    # An eccp argument, not the environment: the prelinker re-runs the front end on this copy at link time with the
-    # options recorded at compile time, and it must see --cuda there too (see the eccp call below).
-    cuda_opts=(--cuda)
-  fi
-  local t; t=$(trace_start)
-  ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${obf[@]+"${obf[@]}"} ${rw[@]+${rw[@]+"${rw[@]}"}} "$src" > "$copy" || exit $?
-  trace_end "$t" "cuda-rewrite (host copy): $base.cu" cuda
+  # The stages are scripts/nfcxx-cuda-device.rb --execute: the host copy and the device unit (the rewriter), the device IR, the
+  # module images (ptxas), the device image cache and the embedding, each run as a plan by scripts/nfcxx-run.rb. The driver's
+  # state goes to it as arguments (the bash originals: tests/nfcxx-cuda-device/nfcxx-bash, the oracle of the port).
+  local src=$1 copy=$2 f
+  local opts=(--execute --root="$root" --tmp="$cudatmp" --copy="$copy" --keep-dir="$cu_keep" --bash-pid="$BASHPID")
+  opts+=(--trace-unit="${trace_unit:-${NFCXX_TRACE_UNIT:-}}")
+  for f in ${cflags[@]+"${cflags[@]}"}; do opts+=("--cflag=$f"); done
+  if [ "$obfuscate" = 1 ]; then opts+=(--obfuscate-kernels); fi
+  if [ "$ir_opt_set" = 1 ]; then opts+=("--ir-opt=$ir_opt"); fi
+  opts+=("--promote-slots=$promote_slots" "--unroll=$unroll" "--struct-slots=$struct_slots")
+  if [ -n "$cache_dir" ]; then opts+=("--cache-dir=$cache_dir"); fi
+  if [ -n "${cache_log_file:-}" ]; then opts+=("--cache-log=$cache_log_file"); fi
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" "${opts[@]}" "$src" || exit $?
+  # the driver's own state: the --cuda of the eccp call (with the EDG launches, as the rewriter's --edg-launches), and the
+  # preinclude of the host copy
+  if [ "${NFCXX_CUDA_EDG_LAUNCH:-1}" = 1 ]; then cuda_opts=(--cuda); fi
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
-  local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  t=$(trace_start)
-  NFCXX_SM=$sm ${rewriter[@]+"${rewriter[@]}"} ${incs[@]+${incs[@]+"${incs[@]}"}} ${defs_opts[@]+${defs_opts[@]+"${defs_opts[@]}"}} ${ver_opts[@]+"${ver_opts[@]}"} ${obf[@]+"${obf[@]}"} ${NFCXX_CUDA_HOST_SYMBOLS:+"--host-symbols=$NFCXX_CUDA_HOST_SYMBOLS"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
-  trace_end "$t" "cuda-rewrite (device unit): $base.cu" cuda
-  [ -s "$dev.kernels" ] || return 0
-  if [ "${NFCXX_CUDA_TARGET:-nvidia}" = amdgpu ]; then
-    cu_amd_build "$src" "$dev" "$copy" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"}
-    return 0
-  fi
-  ensure_tool "$root/tools/pathb-ptx-emit" "$root/build/pathb-ptx-emit" || exit 1
-  local groups=${cu_keep:-$cudatmp}/$base.groups ext=cubin
-  [ "${NFCXX_CUDA_JIT:-0}" != 1 ] || ext=ptx
-  rm -rf "$groups"
-  # The device image cache (with --cache): the front end, the emitter and ptxas depend only on the device unit and
-  # its kernel list, the options below and the tools, so a device unit seen before takes its IR and groups from the
-  # cache. The rewriter runs every time (its output is the key).
-  local dkey="" dent=""
-  if [ -n "$cache_dir" ]; then
-    dkey=$(cu_device_key "$dev" "$sm" "$ptxas" "$ext" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"})
-    dent=$cache_dir/cu-device/$dkey
-  fi
-  if [ -n "$dent" ] && [ -f "$dent/ir" ]; then
-    cp "$dent/ir" "$dev.ir"; cp -R "$dent/groups" "$groups"
-    cache_log "== $base.cu device unit"$'\n'"key $dkey"$'\n'"hit"
-  else
-    [ -z "$dent" ] || cache_log "== $base.cu device unit"$'\n'"key $dkey"$'\n'"miss"
-    cu_device_build "$src" "$dev" "$groups" "$sm" "$ptxas" "$ext" ${defs_opts[@]+"${defs_opts[@]}"} ${ver_opts[@]+"${ver_opts[@]}"}
-    if [ -n "$dent" ]; then   # a whole entry appears at once (a rename), so a partial copy is never a hit
-      local ctmp=$dent.tmp.$$
-      mkdir -p "$ctmp" && cp "$dev.ir" "$ctmp/ir" && cp -R "$groups" "$ctmp/groups" && { [ -e "$dent" ] || mv "$ctmp" "$dent" 2>/dev/null || true; }
-      rm -rf "$ctmp"
-    fi
-  fi
-  t=$(trace_start)
-  "$root/build/pathb-ptx-emit" --embed --groups="$groups" --ext=$ext "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
-  trace_end "$t" "pathb-ptx-emit --embed: $base.cu" cuda
-}
-ir_opt_device() {  # ir_opt_device IR: the IR passes of --ir-opt on the device IR in place (default inline,sroa; off turns them off)
-  local ir=$1 v=inline,sroa p
-  [ $ir_opt_set = 0 ] || v=$ir_opt
-  if [ "$v" = off ] || [ -z "$v" ]; then return 0; fi
-  local o=(); for p in ${v//,/ }; do o+=("--$p"); done
-  # NFCXX_KEEP_DEVICE_IR=PATH: the device IR before the passes is copied to PATH.pre, after them to PATH.post
-  if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.pre"; fi
-  "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" "${o[@]}" "$ir" > "$ir.opt" && mv "$ir.opt" "$ir" \
-    || { echo "nfcxx: the IR passes failed on $ir (--ir-opt=off turns them off)" >&2; exit 2; }
-  if [ -n "${NFCXX_KEEP_DEVICE_IR:-}" ]; then cp "$ir" "$NFCXX_KEEP_DEVICE_IR.post"; fi
-  return 0
-}
-cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFCXX_CUDA_TARGET=amdgpu (docs/notes/gpu.md, "AMD GPUs (ROCm)")
-  # The kernels' IR (the same front end as the NVIDIA path) goes to amdgcn LLVM IR (tools/pathb-amdgpu-emit), ROCm's clang
-  # makes the code object, and the registration tail embeds it in COPY as a cubin is. One module: the AMD emitter has no
-  # grouping yet, so a large file is not split.
-  local src=$1 dev=$2 copy=$3 k; shift 3
-  # The architecture and the compiler: scripts/amdgpu-env.rb (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override).
-    local arch clang
-  arch=$(amdgpu_arch) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)" >&2; exit 2; }
-  clang=$(amdgpu_clang) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)" >&2; exit 2; }
-  ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1
-  "$root/scripts/pathb-dump.rb" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
-    || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
-  ir_opt_device "$dev.ir"
-  local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
-  "$root/build/pathb-amdgpu-emit" ${kopts[@]+"${kopts[@]}"} "$dev.ir" > "$dev.ll" || exit $?
-  "$clang" -target amdgcn-amd-amdhsa -mcpu="$arch" -O2 -nogpulib "$dev.ll" -o "$dev.hsaco" || exit $?
-  "$root/build/pathb-ptx-emit" --embed "$dev.hsaco" "$dev.ir" "$dev.kernels" "$dev.kernels.addr" >> "$copy" || exit $?
-}
-cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image cache key of the unit DEV.cpp (cu_rewrite)
-  local dev=$1 sm=$2 ptxas=$3 ext=$4 f; shift 4
-  {
-    printf 'nfcxx-cu-device-1\nsm %s ext %s\nopts:' "$sm" "$ext"; printf ' %q' "$@"
-    printf '\nconst %s lines %s\n' "${NFCXX_CUDA_MAX_CONST_BYTES:-65536}" "${NFCXX_CUDA_MAX_PTX_LINES:-1000000}"
-    printf 'inline %s\n' "${NFCXX_INLINE_DEVICE:-1}"
-    printf 'promote %s\n' "$promote_slots"
-    printf 'unroll %s\n' "$unroll"
-    printf 'struct-slots %s\n' "$struct_slots"
-    if [ $ir_opt_set = 1 ]; then printf 'ir-opt %s\n' "$ir_opt"; else printf 'ir-opt inline,sroa\n'; fi; cache_sha < "$root/scripts/pathb-ir-opt.rb"
-    cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
-    cache_sha < "$root/scripts/pathb-dump.rb"; cache_sha < "$root/scripts/host-sys.rb"
-    for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
-      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
-    done
-    find "${PATHB_BASE:-$root/build/pathb/edg-base}" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    if [ "$ext" = cubin ]; then "$ptxas" --version 2>&1 | tail -1; fi
-  } | cache_sha | cut -c1-40
-}
-cu_device_build() {  # cu_device_build SRC DEV GROUPS SM PTXAS EXT DEFINE...: DEV.ir and the module images in GROUPS
-  local src=$1 dev=$2 groups=$3 sm=$4 ptxas=$5 ext=$6 t k; shift 6
-  t=$(trace_start)
-  "$root/scripts/pathb-dump.rb" --cuda-device "$@" --ir --freestanding "$dev.cpp" > "$dev.ir" \
-    || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
-  ir_opt_device "$dev.ir"
-  trace_end "$t" "pathb-dump --ir (device front end): $(basename "$src")" cuda
-  # The kernels are the names the rewriter listed (its launches); the emitter lowers only what they reach.
-  local kopts=(); while IFS= read -r k; do [ -n "$k" ] && kopts+=(--kernel="$k"); done < "$dev.kernels"
-  # The kernels are partitioned into modules within the budgets (NFCXX_CUDA_MAX_CONST_BYTES: the constant data a module
-  # references, 64 KB is ptxas's limit; NFCXX_CUDA_MAX_PTX_LINES: its functions). A file that fits one module has one
-  # group. Each group is one PTX module: $base.groups/gNNNN.ptx and its kernels in groups.txt.
-  # The images are the copy's .incbin files: with -c they are kept beside the copy, which the link re-reads (cu_prepare).
-  t=$(trace_start)
-  # The device functions a kernel calls are compiled into it (pathb-ptx-emit's default); NFCXX_INLINE_DEVICE=0 keeps the calls.
-  local inl=()
-  if [ "${NFCXX_INLINE_DEVICE:-1}" = 0 ]; then inl=(--inline=off); fi
-  # The scalar frame slots live in registers (pathb-ptx-emit's default); --promote-slots=off keeps them in the frame.
-  if [ "$promote_slots" = 0 ]; then inl+=(--promote=off); fi
-  # A loop that `#pragma unroll` marks with a constant trip count is unrolled (pathb-ptx-emit's default); --unroll=off keeps it a loop.
-  if [ "$unroll" = 0 ]; then inl+=(--unroll=off); fi
-  # The struct locals whose fields are registers (pathb-ptx-emit's default); --struct-slots=off keeps them in memory.
-  if [ "$struct_slots" = 0 ]; then inl+=(--struct-slots=off); fi
-  "$root/build/pathb-ptx-emit" --emit --sm=$sm --f2i=convert --int=gpu ${inl[@]+"${inl[@]}"} --groups-dir="$groups" \
-    --max-const-bytes=${NFCXX_CUDA_MAX_CONST_BYTES:-65536} --max-ptx-lines=${NFCXX_CUDA_MAX_PTX_LINES:-1000000} \
-    ${kopts[@]+${kopts[@]+"${kopts[@]}"}} "$dev.ir" || exit $?
-  trace_end "$t" "pathb-ptx-emit --emit: $(basename "$src") ($(ls "$groups"/g*.ptx | wc -l | tr -d ' ') groups)" cuda
-  # NFCXX_CUDA_JIT=1 (EXT ptx): the image of each group is its PTX text, loaded by the runtime's JIT (cudaLibraryLoadData);
-  # ptxas is not run.
-  if [ "$ext" = cubin ]; then
-    # The groups are independent: assemble them NFCXX_PTXAS_JOBS at a time (default 4; each ptxas is ~170 MB at 8 kernels).
-    t=$(trace_start)
-    ls "$groups"/g*.ptx | xargs -P "${NFCXX_PTXAS_JOBS:-4}" -I{} sh -c 'f=$1; "$2" -arch=sm_$3 "$f" -o "${f%.ptx}.cubin"' _ {} "$ptxas" "$sm" || exit $?
-    trace_end "$t" "ptxas: $(basename "$src")" cuda
-  fi
 }
 # A compile and link (or a link of objects) runs eccp in a temporary directory, which the EXIT trap removes. eccp writes
 # <stem>.o, <stem>.ii and <stem>.ti into its working directory, and the prelinker reads the .ii and .ti there, so the
@@ -460,9 +307,7 @@ ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when ecc
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
-  if [ -n "$eccp_dir" ] && [ $keep_intermediates = 0 ]; then rm -rf "$eccp_dir"; fi
-  if [ -n "${cudatmp:-}" ]; then rm -rf "$cudatmp"; fi
-  if [ -n "${ctmp:-}" ]; then rm -rf "$ctmp"; fi
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
   trace_finish
   return $rc
 }
@@ -480,49 +325,15 @@ mod_imports() {
 mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet (exit 2, nfcxx's message)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$1" || exit $?
 }
-# mod_build_program: a program with modules is compiled one source at a time (EDG takes one translation unit per call with
-# modules on), the interface units first in dependency order, and the objects are then linked. Each step is this driver again.
+# mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
+# compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
+# then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
+# is cleared, as the bash function's own trap replaced any earlier one (cu_prepare's), so that effect is kept. A failing step
+# ends the build with its status (set -e).
 mod_build_program() {
-  local mdir ifaces=() others=() ordered=() rest=() s d o n=0 ready progress all=" " done_names=" "
-  local objs=() compile_args=() link_args=() a x is_src skip=0
-  mtmp=$(mktemp -d); trap 'rm -rf "$mtmp"' EXIT
-  mdir=${moddir:-$mtmp}
-  for s in ${srcs[@]+"${srcs[@]}"}; do
-    mod_check_src "$s"
-    if [ -n "$(mod_decl_name "$s")" ]; then ifaces+=("$s"); all+="$(mod_decl_name "$s") "; else others+=("$s"); fi
-  done
-  while [ ${#ifaces[@]} -gt 0 ]; do
-    progress=0; rest=()
-    for s in "${ifaces[@]}"; do
-      ready=1
-      for d in $(mod_imports "$s"); do
-        case $all in *" $d "*) case $done_names in *" $d "*) ;; *) ready=0 ;; esac ;; esac
-      done
-      if [ $ready = 1 ]; then ordered+=("$s"); done_names+="$(mod_decl_name "$s") "; progress=1; else rest+=("$s"); fi
-    done
-    [ $progress = 1 ] || { echo "nfcxx: cyclic module imports among: ${rest[*]}" >&2; exit 2; }
-    ifaces=(${rest[@]+"${rest[@]}"})
-  done
-  ordered+=(${others[@]+"${others[@]}"})
-  # The options of each step: the compile gets everything but the link-only ones, the link gets everything but the sources.
-  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-    if [ $skip = 1 ]; then skip=0; continue; fi
-    is_src=0; for x in ${srcs[@]+"${srcs[@]}"}; do [ "$x" = "$a" ] && is_src=1; done
-    [ $is_src = 0 ] || continue
-    case $a in
-      -o) skip=1 ;;
-      -c|--module-dir=*) ;;
-      -l?*|-L?*|-Wl,*|*.o|*.a|*.so) link_args+=("$a") ;;
-      *) compile_args+=("$a"); link_args+=("$a") ;;
-    esac
-  done
-  for s in ${ordered[@]+"${ordered[@]}"}; do
-    o=$mtmp/m$n.o; n=$((n + 1))
-    "$root/nfcxx" -c "$s" -o "$o" --module-dir="$mdir" ${compile_args[@]+"${compile_args[@]}"}
-    objs+=("$o")
-  done
-  "$root/nfcxx" ${objs[@]+"${objs[@]}"} ${link_args[@]+"${link_args[@]}"} -o "$out"
-  exit 0
+  trap - EXIT
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
+  exit $?
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
@@ -627,39 +438,9 @@ fi
 # do. Pass 1 (NFCXX_SYCL_DUMP) records each kernel's stable name, closure size and parameters; scripts/sycl-integration-header.rb
 # turns them into KernelInfoData specializations; pass 2 compiles a wrapper that includes sycl.hpp, that header and the source,
 # with __SYCL_UNNAMED_LAMBDA__ defined as the real toolchain defines it. Other sources are unchanged.
-sycl_kernel_headers() {  # sycl_kernel_headers ARG...: TRUE when a -I directory of the arguments has the oneAPI kernel header
-  local prev="" a d=""
-  for a in "$@"; do
-    d=""
-    case $a in -I?*) d=${a#-I} ;; esac
-    [ "$prev" = -I ] && d=$a
-    prev=$a
-    if [ -n "$d" ] && [ -f "$d/sycl/detail/kernel_desc.hpp" ]; then return 0; fi
-  done
-  return 1
-}
-if [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $preprocess = 0 ] \
-   && [ $emit_c = 0 ] && [ -z "${NFCXX_SYCL_PASS:-}" ] && sycl_kernel_headers "${args0[@]}" \
-   && grep -Eq '#[[:space:]]*include[[:space:]]*[<"]sycl/' "${srcs[0]}"; then
-  sy_tmp=$(mktemp -d)
-  sy_src=$(realpath "${srcs[0]}")
-  # Pass 1: the front end records the kernels (the compile fails at the header's size check; the record is what matters).
-  NFCXX_SYCL_PASS=1 NFCXX_SYCL_DUMP="$sy_tmp/dump" "$root/nfcxx" "${args0[@]}" > "$sy_tmp/pass1.log" 2>&1 || true
-  if [ ! -s "$sy_tmp/dump" ]; then
-    cat "$sy_tmp/pass1.log" >&2; rm -rf "$sy_tmp"
-    echo "nfcxx: the SYCL pre-pass recorded no kernels" >&2; exit 2
-  fi
-  "$root/scripts/sycl-integration-header.rb" "$sy_tmp/dump" > "$sy_tmp/integration.hpp" || { rm -rf "$sy_tmp"; exit 2; }
-  printf '#include <sycl/sycl.hpp>\n#include "%s"\n#include "%s"\n' "$sy_tmp/integration.hpp" "$sy_src" > "$sy_tmp/wrapper.cpp"
-  sy_args=()
-  for a in "${args0[@]}"; do
-    if [ "$a" = "${srcs[0]}" ]; then sy_args+=("$sy_tmp/wrapper.cpp"); else sy_args+=("$a"); fi
-  done
-  [ $outset = 1 ] || sy_args+=(-o "$(basename "${sy_src%.*}").o")
-  # Pass 2: the wrapper, with the macro that selects the integration-header path (and __make_integer_seq).
-  NFCXX_SYCL_PASS=1 "$root/nfcxx" -D__SYCL_UNNAMED_LAMBDA__=1 "${sy_args[@]}"; sy_rc=$?
-  rm -rf "$sy_tmp"
-  exit $sy_rc
+# The pass decision and the two passes are scripts/nfcxx-sycl.rb's (tests/nfcxx-sycl/run.sh checks them against the bash block).
+if "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" check ${args0[@]+"${args0[@]}"}; then
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-sycl.rb" run --root="$root" ${args0[@]+"${args0[@]}"}; exit $?
 fi
 [ $compile_only = 1 ] || moves=1   # a -c compile stays in the user's directory (see ecp_arg)
 # The unit of the time log's lines (scripts/trace.sh): the first source, else the output. Tracing starts before the .cu
@@ -1254,10 +1035,7 @@ if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   done
 fi
 link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of this link (see "A link writes" below)
-  local f
-  for f in ${files[@]+"${files[@]}"}; do
-    case $f in *.o) rm -f "${f%.o}.ii" ;; esac
-  done
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 }
 # A link writes <stem>.ii beside each object it uses: the instances the link assigned to that object (the <stem>.ti requests
 # stay). An assignment left by an earlier link can name an instance that a later link assigns to another object ("assigned

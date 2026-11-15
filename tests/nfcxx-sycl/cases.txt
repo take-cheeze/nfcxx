@@ -1,0 +1,38 @@
+# facts-name, then the driver's argument list (the facts are in tests/nfcxx-sycl/facts or tests/nfcxx-prepass/facts)
+# the two passes
+base -c -Iinc sy.cc
+base -c -Iinc sy.cc -o out/sy.o
+base -c -Iinc sy.cc -o sy.o
+base -c -I inc sy.cc
+base -c -Iother -Iinc sy.cc
+base -c -Iinc sy.cxx
+base -c -Iinc sy.cpp2
+base -c -Iinc sy.cu
+base -c -Iinc sy.cc -fsanitize=undefined
+base -c -Iinc sy.cc -fsanitize=bogus
+base -c -Iinc sy.cc -fsanitize-foo
+base -c -Iinc sy.cc -MD -MF d.d -MT t
+base -c -x c++ -Iinc sy.cc
+base -c -Iinc sy.cc -DX=1 -UY -include pre.h
+base -c -Iinc sy.cc -Wl,-rpath,/x -lm
+base -c -Iinc sy.cc -fPIC -pthread
+base -fsyntax-only -Iinc sy.cc
+base -fsyntax-only -o out.o -Iinc sy.cc
+# not the two passes: the bash goes on
+base -c -Iinc plain.cc
+base -c plain.cc -Iinc
+base -c -Iinc sy.cc plain.cc
+base -c -Iinc -foo.o sy.cc
+base -c -Iinc -Ifoo.c sy.cc
+base -c -Iinc sy.c
+base -c -Iinc -E sy.cc
+base -c -Iinc --emit-c sy.cc
+base -c -Iinc -
+base -c -Iinc sy.cc -fsanitize=address
+sypass -c -Iinc sy.cc
+nohdr -c -Iinc sy.cc
+nosycl -c -Iinc sy.cc
+# the failures of the passes (the stub's facts)
+dump0 -c -Iinc sy.cc
+hdr3 -c -Iinc sy.cc
+pass2_5 -c -Iinc sy.cc

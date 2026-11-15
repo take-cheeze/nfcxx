@@ -1,7 +1,9 @@
 #!/usr/bin/env ruby
 # nfcxx's CUDA device build, ported from the CUDA helpers in nfcxx: cu_prepare (where the copy goes), cu_rewrite (the host
 # copy, the device unit, the toolkit's version macros, the device image), cu_device_build (the device IR, the modules,
-# ptxas), cu_amd_build (the amdgcn image) and ir_opt_device. Checked against the bash by tests/nfcxx-cuda-device/run.sh.
+# ptxas), cu_amd_build (the amdgcn image), ir_opt_device and cu_device_key (the device image cache key). The bash driver
+# calls --execute for each .cu input (cu_rewrite) and --cu-dir for the copy's directory (cu_prepare). The bash originals are
+# kept as tests/nfcxx-cuda-device/nfcxx-bash (the oracle of tests/nfcxx-cuda-device/run.sh and key.sh).
 #
 # The port prints the commands the bash would run, one per line (tab-separated with --tabs, for scripts/nfcxx-run.rb; with
 # spaces otherwise, as the test's oracle prints them):
@@ -17,18 +19,26 @@
 #   --phase=finish the ptxas run of each group, the device image cache store and the embedding into the copy (needs --group
 #                  facts, the group files)
 #   --phase=all    the three together (the tests' default; needs both kind of facts)
-# Nothing here runs a tool. The facts of the tree are inputs, as the other ports take them:
+# Nothing here runs a tool in text mode. The facts of the tree are inputs, as the other ports take them:
 #   --nfcxx-file=PATH, --nfcxx-dir=PATH   the paths that exist (a cache entry, a CUDA header); --live reads the file system
 #   --kernel=NAME                         the kernels the rewriter listed, in order (none: no device image)
 #   --group=NAME                          the group files the emitter wrote (gNNNN.ptx; the bash lists them in glob order)
-#   --cache-key=KEY                       the device image cache key (cu_device_key, not ported)
+#   --cache-key=KEY                       the device image cache key (text mode; --execute computes it, as cu_device_key)
 # The environment is read from --nfcxx-env=NAME=VALUE (the variables the bash reads: NFCXX_SM, NFCXX_PTXAS, NFCXX_CUDA_*,
 # NFCXX_OBFUSCATE_*, NFCXX_CU_CACHE, CUDA_HOME, HOME, XDG_CACHE_HOME, RUBY, ...). The options --obfuscate-kernels,
-# --promote-slots=0|1, --unroll=0|1, --struct-slots=0|1 and --ir-opt=V are the driver's own arguments, as the bash reads them.
+# --promote-slots=V, --unroll=V, --struct-slots=V and --ir-opt=V are the driver's own arguments, as the bash reads them.
 # The toolkit's version macros are read from the header files that exist (their text, not a tool's output).
 # The temporary directory of the bash (cudatmp) is --tmp=DIR. The PID of a cache store (.tmp.$$) prints as PID.
 #
+# --execute (what nfcxx's cu_rewrite does): the plan is run, group by group, with scripts/nfcxx-run.rb. A group is one
+# command, or the commands the bash runs between two of its checks; a failed group stops with the bash's status (and the
+# bash's message, when it has one), and ptxas runs every group before it stops, as xargs does (status 123). Each stage the
+# bash traces (trace_start / trace_end) is a span of scripts/trace.rb, recorded in the bash's order with the bash's name.
+# The copy, the temporary directory, the groups directory (--keep-dir, the copy's directory with -c), the trace unit and
+# the driver's PID are the bash's (--copy, --tmp, --keep-dir, --trace-unit, --bash-pid); the cache log is --cache-log=FILE.
+#
 #   ruby scripts/nfcxx-cuda-device.rb [OPTION]... SRC.cu
+#   ruby scripts/nfcxx-cuda-device.rb --cu-dir=OBJ    prints the directory of the copy of a -c compile of OBJ (cu_prepare)
 #   --root=DIR                nfcxx's root
 #   --tmp=DIR                 the temporary directory
 #   --tabs                    tab-separated lines
@@ -39,18 +49,82 @@
 #   --compile --out=PATH      -c and its -o: the copy and the groups go to the cache (NFCXX_CU_CACHE)
 #   --ir-opt=V                --ir-opt (default inline,sroa; off turns the IR passes off)
 #   --obfuscate-kernels       the driver's option (NFCXX_OBFUSCATE_KERNELS=1 is the environment's)
-#   --promote-slots=0|1, --unroll=0|1, --struct-slots=0|1   the driver's options (the environment's values otherwise)
+#   --promote-slots=V, --unroll=V, --struct-slots=V   the driver's options (the environment's values otherwise)
 #   --cache-dir=DIR           the device image cache (--cache)
-#   --cache-key=KEY           its key (cu_device_key)
+#   --cache-key=KEY           its key (text mode; cu_device_key)
 #   --nfcxx-file=PATH, --nfcxx-dir=PATH, --kernel=NAME, --group=NAME
-# Exit: 0; 2 with nfcxx's message; 3 with "unported: ..." for what is not ported (the AMD GPU's architecture and the
-# amdgcn clang when NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG are not set, and a device image cache without --cache-key).
+#   --execute                 runs the plan (the bash's cu_rewrite); --copy=PATH, --keep-dir=DIR, --trace-unit=U,
+#                             --bash-pid=N, --cache-log=FILE: the driver's values for --execute
+# Exit: 0; 2 with nfcxx's message; 3 with "unported: ..." for what is not ported (text mode: the AMD GPU's architecture and
+# the amdgcn clang when NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG are not set, and a device image cache without --cache-key).
 
 require "digest"
+require "open3"
+require "rbconfig"
 require "securerandom"
+require_relative "trace"
+require_relative "amdgpu-env"
+
+RUNNER_PATH = File.expand_path("nfcxx-run.rb", __dir__)
 
 class CudaUnported < StandardError; end
 class CudaRefused < StandardError; end
+
+# A stop of --execute: the driver's status. Its message (the bash's) is printed already.
+class CudaStop < StandardError
+  attr_reader :status
+
+  def initialize(status)
+    super("stop #{status}")
+    @status = status
+  end
+end
+
+# bash's printf %q for one argument (bash 5.2 in the C locale): empty is '', the shell's specials and a leading # or ~ are
+# backslashed, and a control or non-ASCII byte is $'...' with octal escapes.
+def bash_quote(s)
+  return "''" if s.empty?
+
+  if s.b.match?(/[^\x20-\x7e]/n)
+    body = s.bytes.map do |b|
+      case b
+      when 0x5c then "\\\\"
+      when 0x27 then "\\'"
+      when 0x0a then "\\n"
+      when 0x09 then "\\t"
+      when 0x0d then "\\r"
+      when 0x20..0x7e then b.chr
+      else format("\\%03o", b)
+      end
+    end
+    return "$'#{body.join}'"
+  end
+  # always: the shell's specials (a comma too); at the start: # and ~; after = or :, ~ (a tilde expansion of an assignment)
+  s.gsub(/[ !"$&'()*,;<>?\[\\\]^`{|}]|\A[#~]|(?<=[=:])~/) { "\\#{$&}" }
+end
+
+# realpath -m: the absolute path with the symbolic links of the existing part resolved (the rest is kept as written)
+def realpath_m(path)
+  parts = File.expand_path(path).split("/").reject(&:empty?)
+  resolved = "/"
+  parts.each_with_index do |part, i|
+    cand = File.join(resolved, part)
+    return File.join(resolved, *parts[i..]) unless File.exist?(cand)
+
+    resolved = File.realpath(cand)
+  end
+  resolved
+end
+
+# cu_prepare's directory of the copy of a -c compile of OBJ (the per-user cache, keyed by the absolute object path)
+def cu_dir(obj, env = ENV)
+  key = Digest::SHA1.hexdigest("#{realpath_m(obj)}\n")[0, 16]
+  cache = nonempty(env["NFCXX_CU_CACHE"]) ||
+          "#{nonempty(env["XDG_CACHE_HOME"]) || "#{nonempty(env["HOME"]) || "/tmp"}/.cache"}/nfcxx"
+  "#{cache}/cu/#{key}"
+end
+
+def nonempty(v) = (v.nil? || v.empty?) ? nil : v
 
 class CudaDevicePlan
   PHASES = %i[all prep emit finish].freeze
@@ -78,26 +152,61 @@ class CudaDevicePlan
     @cache_dir = opts[:cache_dir]
     @cache_key = opts[:cache_key]
     @src = opts.fetch(:src)
+    # --execute: the bash's own facts (the copy, the groups directory, the trace, the cache log) and the live file system
+    @exec = opts.fetch(:exec, false)
+    @copy_opt = opts[:copy]
+    @keep_dir = opts[:keep_dir]
+    @trace_unit = opts[:trace_unit] || ""
+    @bash_pid = opts[:bash_pid] || Process.pid
+    @cache_log = opts[:cache_log]
+    @append_src_dir = opts.fetch(:append_src_dir, true)
     @seed = nil
     @lines = []
+    @pending = nil     # execute: the commands of the group being built
+    @plan_n = 0
+    @live = true if @exec
+    @tabs = true if @exec
   end
 
-  # The lines of the plan for the phase: the copy and the device unit, then the device image.
+  # The lines of the plan for the phase: the copy and the device unit, then the device image. With --execute the plan runs
+  # instead, and the lines are not kept (execute returns the status).
   def run
     raise CudaRefused, "unknown phase #{@phase}" unless PHASES.include?(@phase)
 
+    setup
+    return execute_plan if @exec
+
+    prep if %i[all prep].include?(@phase)
+    return @lines if @phase == :prep || @kernels.empty?
+
+    device_build if %i[all emit].include?(@phase)
+    finish if %i[all finish].include?(@phase)
+    @lines
+  end
+
+  # --key: the device image cache key of this unit (cu_device_key), with the options and the environment the driver has
+  def key_only
+    setup
+    device_key
+  end
+
+  # The names and the tool paths of the unit, from the options and the environment (run, key_only).
+  def setup
     @base = File.basename(@src, ".cu")
     @dir = @tmp
-    if @compile
+    if @exec
+      @cu_keep = @keep_dir || ""
+      @dir = @cu_keep.empty? ? @tmp : @cu_keep
+      @copy = @copy_opt
+      @dev = "#{@tmp}/#{@base}.dev"
+    elsif @compile
       obj = @out || "#{@base}.o"
-      key = Digest::SHA1.hexdigest("#{File.expand_path(obj)}\n")[0, 16]
-      cache = env("NFCXX_CU_CACHE") || "#{env("XDG_CACHE_HOME") || "#{env("HOME") || "/tmp"}/.cache"}/nfcxx"
-      @dir = "#{cache}/cu/#{key}"
+      @dir = cu_dir(obj, @env)
     end
-    @cu_keep = @compile ? @dir : ""
-    @cflags << "-I#{File.realpath(File.dirname(@src))}"
-    @copy = "#{@dir}/#{@base}.cpp"
-    @dev = "#{@tmp}/#{@base}.dev"
+    @cu_keep ||= @compile ? @dir : ""
+    @cflags << "-I#{File.realpath(File.dirname(@src))}" if @append_src_dir
+    @copy ||= "#{@dir}/#{@base}.cpp"
+    @dev ||= "#{@tmp}/#{@base}.dev"
     @sm = env("NFCXX_SM", "75")
     @ptxas = env("NFCXX_PTXAS") || "#{env("CUDA_HOME") || "/usr/local/cuda"}/bin/ptxas"
     @ext = env("NFCXX_CUDA_JIT", "0") == "1" ? "ptx" : "cubin"
@@ -108,13 +217,14 @@ class CudaDevicePlan
     @obf = obfuscate_opts
     @rw = env("NFCXX_CUDA_EDG_LAUNCH", "1") == "1" ? ["--edg-launches"] : []
     @hs = env("NFCXX_CUDA_HOST_SYMBOLS") ? ["--host-symbols=#{env("NFCXX_CUDA_HOST_SYMBOLS")}"] : []
+  end
 
-    prep if %i[all prep].include?(@phase)
-    return @lines if @phase == :prep || @kernels.empty?
-
-    device_build if %i[all emit].include?(@phase)
-    finish if %i[all finish].include?(@phase)
-    @lines
+  # --execute: the bash's cu_rewrite, run (see the header). Returns the driver's status.
+  def execute
+    run
+    0
+  rescue CudaStop => e
+    e.status
   end
 
   private
@@ -127,7 +237,14 @@ class CudaDevicePlan
   def amd? = env("NFCXX_CUDA_TARGET", "nvidia") == "amdgpu"
 
   def emit_line(kind, argv)
-    @lines << [kind, *argv].join(@tabs ? "\t" : " ")
+    line = [kind, *argv].join(@tabs ? "\t" : " ")
+    if @exec
+      raise "internal: a command outside a group (--execute)" if @pending.nil?
+
+      @pending << line
+    else
+      @lines << line
+    end
   end
 
   def run_cmd(*argv)
@@ -149,7 +266,6 @@ class CudaDevicePlan
     @files.include?(path) || @dirs.include?(path)
   end
 
-
   def rewriter = "#{@root}/build/cuda-rewrite"
   def pathb_dump = "#{@root}/scripts/pathb-dump.rb"
   def ptx_emit = "#{@root}/build/pathb-ptx-emit"
@@ -159,14 +275,106 @@ class CudaDevicePlan
     run_cmd("ensure_tool", dir, out)
   end
 
+  # ---- execute: groups, spans and the bash's messages
+
+  # A group of commands, in the bash's order. In text mode its commands are the plan's lines and the block only builds them.
+  # In execute mode they run now, as one plan: a failure stops with fail_status (default: the command's status) and fail,
+  # the bash's message on stderr. soft: the failure is returned and the bash goes on (cache store, ptxas).
+  def group(fail: nil, fail_status: nil, soft: false)
+    unless @exec && @pending.nil?
+      yield
+      return 0
+    end
+
+    @pending = []
+    begin
+      yield
+      lines = @pending
+    ensure
+      @pending = nil
+    end
+    st = run_group(lines)
+    return 0 if st.zero?
+    return st if soft
+
+    $stderr.puts(fail) if fail
+    raise CudaStop.new(fail_status || st)
+  end
+
+  def run_group(lines)
+    return 0 if lines.empty?
+
+    file = File.join(@tmp, "plan-#{@plan_n += 1}.plan")
+    File.write(file, lines.join("\n") + "\n")
+    system(RbConfig.ruby, RUNNER_PATH, "--root=#{@root}", "--tmp=#{@tmp}", "--plan=#{file}")
+    $?.exitstatus || 128 + ($?.termsig || 0)
+  end
+
+  # the bash's trace_start / trace_end around a stage: a span of scripts/trace.rb (its unit and the driver's pid, as the bash's).
+  # name may be a proc, evaluated after the stage (the emitter's group count).
+  def with_span(name)
+    return yield unless @exec
+
+    t0 = NfccxxTrace.start(@env)
+    yield
+    label = name.respond_to?(:call) ? name.call : name
+    NfccxxTrace.span(t0, label, "cuda", unit: @trace_unit, pid: @bash_pid, env: @env)
+  end
+
+  # the bash's cache_log: one line appended under a lock directory (parallel compiles share the file)
+  def cache_log(text)
+    return unless @exec && @cache_log && !@cache_log.empty?
+
+    lock = "#{@cache_log}.lock"
+    sleep 0.05 until (Dir.mkdir(lock) rescue nil)
+    begin
+      File.open(@cache_log, "a") { |f| f.write(text + "\n") }
+    ensure
+      Dir.rmdir(lock) rescue nil
+    end
+  end
+
+  def exec_fail(status, message)
+    $stderr.puts message
+    raise CudaStop.new(status)
+  end
+
+  # the stages of --execute: the host copy, the device unit, then the device image (the bash's cu_rewrite)
+  def execute_plan
+    prep
+    kfile = "#{@dev}.kernels"
+    return [] unless File.size?(kfile)   # the bash's [ -s "$dev.kernels" ] || return 0
+
+    @kernels = File.readlines(kfile, chomp: true).reject(&:empty?)
+    return [] if @kernels.empty?
+
+    if amd?
+      amd_build
+    else
+      device_build
+      finish
+    end
+    []
+  end
+
+  # ---- the stages (text and execute)
+
   # cu_rewrite up to the device image: the host copy, then the device unit (its kernel list is the next phase's fact).
   def prep
-    run_cmd("mkdir", "-p", @dir) if @compile
-    out_to(@copy)
-    run_cmd(rewriter, *@incs, *@defs, *@obf, *@rw, @src)
-    env1("NFCXX_SM", @sm)
-    out_to("#{@dev}.cpp")
-    run_cmd(rewriter, *@incs, *@defs, *@ver, *@obf, *@hs, "--device", "--kernels=#{@dev}.kernels", @src)
+    with_span("cuda-rewrite (host copy): #{@base}.cu") do
+      group do
+        run_cmd("mkdir", "-p", @dir) if @compile && !@exec
+        out_to(@copy)
+        run_cmd(rewriter, *@incs, *@defs, *@obf, *@rw, @src)
+      end
+    end
+    with_span("cuda-rewrite (device unit): #{@base}.cu") do
+      group do
+        env1("NFCXX_SM", @sm)
+        out_to("#{@dev}.cpp")
+        run_cmd(rewriter, *@incs, *@defs, *@ver, *@obf, *@hs, "--device", "--kernels=#{@dev}.kernels", @src)
+      end
+    end
   end
 
   # The device image cache entry of this unit (--cache-dir with the key), or nil. A hit has the IR and the groups.
@@ -180,25 +388,45 @@ class CudaDevicePlan
   def device_build
     return amd_build if amd?
 
-    ensure_tool("#{@root}/tools/pathb-ptx-emit", ptx_emit)
-    run_cmd("rm", "-rf", @groups_dir)
+    group(fail_status: 1) do
+      ensure_tool("#{@root}/tools/pathb-ptx-emit", ptx_emit)
+      run_cmd("rm", "-rf", @groups_dir)
+    end
+    @cache_key = device_key if @exec && cache_dir_set? && @cache_key.nil?
     if cache_hit?
-      cp("#{cache_entry}/ir", "#{@dev}.ir")
-      cp("-R", "#{cache_entry}/groups", @groups_dir)
+      group do
+        cp("#{cache_entry}/ir", "#{@dev}.ir")
+        cp("-R", "#{cache_entry}/groups", @groups_dir)
+      end
+      cache_log("== #{@base}.cu device unit\nkey #{@cache_key}\nhit")
       return
     end
-    out_to("#{@dev}.ir")
-    run_cmd(pathb_dump, "--cuda-device", *@defs, *@ver, "--ir", "--freestanding", "#{@dev}.cpp")
-    ir_opt("#{@dev}.ir")
+    cache_log("== #{@base}.cu device unit\nkey #{@cache_key}\nmiss") if cache_entry
+
+    with_span("pathb-dump --ir (device front end): #{File.basename(@src)}") do
+      group(fail: front_end_message, fail_status: 2) do
+        out_to("#{@dev}.ir")
+        run_cmd(pathb_dump, "--cuda-device", *@defs, *@ver, "--ir", "--freestanding", "#{@dev}.cpp")
+      end
+      ir_opt("#{@dev}.ir")
+    end
     kopts = @kernels.map { |k| "--kernel=#{k}" }
     inl = []
     inl << "--inline=off" if env("NFCXX_INLINE_DEVICE", "1") == "0"
     inl << "--promote=off" if promote_slots == "0"
     inl << "--unroll=off" if unroll == "0"
     inl << "--struct-slots=off" if struct_slots == "0"
-    run_cmd(ptx_emit, "--emit", "--sm=#{@sm}", "--f2i=convert", "--int=gpu", *inl, "--groups-dir=#{@groups_dir}",
-            "--max-const-bytes=#{env("NFCXX_CUDA_MAX_CONST_BYTES", "65536")}",
-            "--max-ptx-lines=#{env("NFCXX_CUDA_MAX_PTX_LINES", "1000000")}", *kopts, "#{@dev}.ir")
+    with_span(-> { "pathb-ptx-emit --emit: #{File.basename(@src)} (#{groups_on_disk.size} groups)" }) do
+      group do
+        run_cmd(ptx_emit, "--emit", "--sm=#{@sm}", "--f2i=convert", "--int=gpu", *inl, "--groups-dir=#{@groups_dir}",
+                "--max-const-bytes=#{env("NFCXX_CUDA_MAX_CONST_BYTES", "65536")}",
+                "--max-ptx-lines=#{env("NFCXX_CUDA_MAX_PTX_LINES", "1000000")}", *kopts, "#{@dev}.ir")
+      end
+    end
+  end
+
+  def front_end_message
+    "nfcxx: #{@src}: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)"
   end
 
   # the groups' cubins (ptxas, NFCXX_CUDA_JIT=0), the store of a miss in the device image cache, then the embedding of the
@@ -208,16 +436,29 @@ class CudaDevicePlan
 
     unless cache_hit?
       if @ext == "cubin"
-        emit_line("JOBS", [env("NFCXX_PTXAS_JOBS", "4")])
-        @groups.each do |g|
-          run_cmd(@ptxas, "-arch=sm_#{@sm}", "#{@groups_dir}/#{g}", "-o", "#{@groups_dir}/#{g.sub(/\.ptx\z/, "")}.cubin")
+        names = @exec ? groups_on_disk : @groups
+        with_span("ptxas: #{File.basename(@src)}") do
+          group { emit_line("JOBS", [env("NFCXX_PTXAS_JOBS", "4")]) }
+          status = 0
+          names.each do |g|
+            # xargs -P runs every group, then reports a failure (123) for any of them
+            st = group(soft: true) do
+              run_cmd(@ptxas, "-arch=sm_#{@sm}", "#{@groups_dir}/#{g}", "-o", "#{@groups_dir}/#{g.sub(/\.ptx\z/, "")}.cubin")
+            end
+            status = 123 unless st.zero?
+          end
+          raise CudaStop.new(status) unless status.zero?
         end
       end
       cache_store if cache_entry
     end
-    app_to(@copy)
-    run_cmd(ptx_emit, "--embed", "--groups=#{@groups_dir}", "--ext=#{@ext}", "#{@dev}.ir", "#{@dev}.kernels",
-            "#{@dev}.kernels.addr")
+    with_span("pathb-ptx-emit --embed: #{File.basename(@src)}") do
+      group do
+        app_to(@copy)
+        run_cmd(ptx_emit, "--embed", "--groups=#{@groups_dir}", "--ext=#{@ext}", "#{@dev}.ir", "#{@dev}.kernels",
+                "#{@dev}.kernels.addr")
+      end
+    end
   end
 
   def promote_slots = @promote || env("NFCXX_PROMOTE_SLOTS", "1")
@@ -230,51 +471,132 @@ class CudaDevicePlan
     return if v.empty? || v == "off"
 
     keep = env("NFCXX_KEEP_DEVICE_IR")
-    cp(ir, "#{keep}.pre") if keep
+    group { cp(ir, "#{keep}.pre") } if keep
     opts = v.split(",").reject(&:empty?).map { |p| "--#{p}" }
-    out_to("#{ir}.opt")
-    run_cmd(env("RUBY", "ruby"), "#{@root}/scripts/pathb-ir-opt.rb", *opts, ir)
-    run_cmd("mv", "#{ir}.opt", ir)
-    cp(ir, "#{keep}.post") if keep
+    group(fail: "nfcxx: the IR passes failed on #{ir} (--ir-opt=off turns them off)", fail_status: 2) do
+      out_to("#{ir}.opt")
+      run_cmd(env("RUBY", "ruby"), "#{@root}/scripts/pathb-ir-opt.rb", *opts, ir)
+      run_cmd("mv", "#{ir}.opt", ir)
+    end
+    group { cp(ir, "#{keep}.post") } if keep
   end
 
   # cu_amd_build: the same device IR, then pathb-amdgpu-emit, clang for the amdgcn target and the embed.
   def amd_build
+    arch, clang = amd_tools
+    amd_emit = "#{@root}/build/pathb-amdgpu-emit"
+    group(fail_status: 1) { ensure_tool("#{@root}/tools/pathb-amdgpu-emit", amd_emit) }
+    group(fail: front_end_message, fail_status: 2) do
+      out_to("#{@dev}.ir")
+      run_cmd(pathb_dump, "--cuda-device", *@defs, *@ver, "--ir", "--freestanding", "#{@dev}.cpp")
+    end
+    ir_opt("#{@dev}.ir")
+    kopts = @kernels.map { |k| "--kernel=#{k}" }
+    group do
+      out_to("#{@dev}.ll")
+      run_cmd(amd_emit, *kopts, "#{@dev}.ir")
+    end
+    group do
+      run_cmd(clang, "-target", "amdgcn-amd-amdhsa", "-mcpu=#{arch}", "-O2", "-nogpulib", "#{@dev}.ll", "-o", "#{@dev}.hsaco")
+    end
+    group do
+      app_to(@copy)
+      run_cmd(ptx_emit, "--embed", "#{@dev}.hsaco", "#{@dev}.ir", "#{@dev}.kernels", "#{@dev}.kernels.addr")
+    end
+  end
+
+  # the architecture and the clang of cu_amd_build (scripts/amdgpu-env.rb finds them; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG
+  # override). Text mode cannot plan without them (unported); execute stops with the bash's message.
+  def amd_tools
+    if @exec
+      arch = AmdgpuEnv.arch(@env) or exec_fail(2, "nfcxx: #{@src}: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)")
+      clang = AmdgpuEnv.clang(@env) or exec_fail(2, "nfcxx: #{@src}: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)")
+      return [arch, clang]
+    end
     arch = env("NFCXX_AMDGPU_ARCH") or
       raise CudaUnported, "the AMD GPU's architecture (scripts/amdgpu-env.rb finds it in KFD; NFCXX_AMDGPU_ARCH overrides)"
     clang = env("NFCXX_AMDGPU_CLANG") or
       raise CudaUnported, "the amdgcn clang (scripts/amdgpu-env.rb searches for it; NFCXX_AMDGPU_CLANG overrides)"
-    amd_emit = "#{@root}/build/pathb-amdgpu-emit"
-    ensure_tool("#{@root}/tools/pathb-amdgpu-emit", amd_emit)
-    out_to("#{@dev}.ir")
-    run_cmd(pathb_dump, "--cuda-device", *@defs, *@ver, "--ir", "--freestanding", "#{@dev}.cpp")
-    ir_opt("#{@dev}.ir")
-    kopts = @kernels.map { |k| "--kernel=#{k}" }
-    out_to("#{@dev}.ll")
-    run_cmd(amd_emit, *kopts, "#{@dev}.ir")
-    run_cmd(clang, "-target", "amdgcn-amd-amdhsa", "-mcpu=#{arch}", "-O2", "-nogpulib", "#{@dev}.ll", "-o", "#{@dev}.hsaco")
-    app_to(@copy)
-    run_cmd(ptx_emit, "--embed", "#{@dev}.hsaco", "#{@dev}.ir", "#{@dev}.kernels", "#{@dev}.kernels.addr")
+    [arch, clang]
   end
 
+  def cache_dir_set? = !(@cache_dir.nil? || @cache_dir.empty?)
+
   def device_cache_entry
-    return nil if @cache_dir.nil? || @cache_dir.empty?
+    return nil unless cache_dir_set?
     raise CudaUnported, "the device image cache key (cu_device_key; the port takes it as --cache-key=)" if @cache_key.nil?
 
     "#{@cache_dir}/cu-device/#{@cache_key}"
   end
 
-  # The store of a miss: a whole entry appears at once (a rename), so a partial copy is never a hit.
+  # The store of a miss: a whole entry appears at once (a rename), so a partial copy is never a hit. A failure is a miss
+  # next time, not a failed build (the bash's `|| true` and its chain).
   def cache_store
-    ctmp = "#{cache_entry}.tmp.PID"
-    run_cmd("mkdir", "-p", ctmp)
-    cp("#{@dev}.ir", "#{ctmp}/ir")
-    cp("-R", @groups_dir, "#{ctmp}/groups")
-    run_cmd("mv", ctmp, cache_entry) unless exists?(cache_entry)
-    run_cmd("rm", "-rf", ctmp)
+    ctmp = "#{cache_entry}.tmp.#{@exec ? @bash_pid : "PID"}"
+    group(soft: true) do
+      run_cmd("mkdir", "-p", ctmp)
+      cp("#{@dev}.ir", "#{ctmp}/ir")
+      cp("-R", @groups_dir, "#{ctmp}/groups")
+      run_cmd("mv", ctmp, cache_entry) unless exists?(cache_entry)
+    end
+    group(soft: true) { run_cmd("rm", "-rf", ctmp) }
   end
 
-  # obfuscate_opts: the seed is one for both copies of the file (the host and the device unit must agree), so it is drawn once.
+  # cu_device_key: the device image cache key of this unit (the bash's text, hashed the same way)
+  def device_key
+    text = +"nfcxx-cu-device-1\nsm #{@sm} ext #{@ext}\nopts:"
+    # printf ' %q' "$@": with no argument the format is printed once with an empty one (" ''")
+    args = @defs + @ver
+    (args.empty? ? [""] : args).each { |a| text << " " << bash_quote(a) }
+    text << "\nconst #{env("NFCXX_CUDA_MAX_CONST_BYTES", "65536")} lines #{env("NFCXX_CUDA_MAX_PTX_LINES", "1000000")}\n"
+    text << "inline #{env("NFCXX_INLINE_DEVICE", "1")}\n"
+    text << "promote #{promote_slots}\n" << "unroll #{unroll}\n" << "struct-slots #{struct_slots}\n"
+    text << (@ir_opt.nil? ? "ir-opt inline,sroa\n" : "ir-opt #{@ir_opt}\n")
+    text << sha_line(File.join(@root, "scripts", "pathb-ir-opt.rb"))
+    text << sha_line("#{@dev}.cpp") << sha_line("#{@dev}.kernels")
+    text << sha_line(pathb_dump) << sha_line(File.join(@root, "scripts", "host-sys.rb"))
+    [env("PATHB_CPFE") || "#{@root}/build/pathb/cmake/bin/cpfe", ptx_emit].each do |f|
+      text << (File.file?(f) ? sha_line(f) : "missing #{f}\n")
+    end
+    text << digest_line(pathb_base_files.map { |f| File.binread(f) }.join)
+    text << ptxas_version_line if @ext == "cubin"
+    Digest::SHA256.hexdigest(text)[0, 40]
+  end
+
+  # cache_sha < FILE: the hash line of sha256sum (empty when FILE does not exist, as the bash's redirection fails)
+  def sha_line(path)
+    return "" unless File.file?(path)
+
+    digest_line(File.binread(path))
+  end
+
+  def digest_line(data) = "#{Digest::SHA256.hexdigest(data)}  -\n"
+
+  # the regular files of PATHB_BASE (find -maxdepth 1 -type f, sorted), which the key hashes together
+  def pathb_base_files
+    base = env("PATHB_BASE") || "#{@root}/build/pathb/edg-base"
+    return [] unless Dir.exist?(base)
+
+    Dir.children(base).map { |n| File.join(base, n) }
+       .select { |p| File.file?(p) && !File.symlink?(p) }.sort
+  end
+
+  # the last line of the ptxas version (2>&1 | tail -1); nothing when ptxas prints nothing
+  def ptxas_version_line
+    out = begin
+      Open3.capture2e(@ptxas, "--version")[0]
+    rescue SystemCallError
+      ""
+    end
+    out.lines.last.to_s
+  end
+
+  def groups_on_disk
+    return [] unless Dir.exist?(@groups_dir)
+
+    Dir.children(@groups_dir).select { |f| f.start_with?("g") && f.end_with?(".ptx") }.sort
+  end
+
   def obfuscate_opts
     return [] unless @obfuscate || env("NFCXX_OBFUSCATE_KERNELS", "0") != "0"
 
@@ -315,7 +637,8 @@ end
 def parse_options(argv)
   o = { env: {}, files: [], dirs: [], cflags: [], kernels: [], groups: [], compile: false, live: false, tabs: false,
         phase: :all, obfuscate: false, promote: nil, unroll: nil, struct_slots: nil,
-        out: nil, ir_opt: nil, cache_dir: nil, cache_key: nil, root: nil, tmp: nil, src: nil }
+        out: nil, ir_opt: nil, cache_dir: nil, cache_key: nil, root: nil, tmp: nil, src: nil,
+        execute: false, copy: nil, keep_dir: nil, trace_unit: nil, bash_pid: nil, cache_log: nil }
   argv.each do |a|
     case a
     when /\A--root=(.*)\z/m then o[:root] = $1
@@ -329,15 +652,22 @@ def parse_options(argv)
     when "--compile" then o[:compile] = true
     when "--live" then o[:live] = true
     when "--tabs" then o[:tabs] = true
+    when "--execute" then o[:execute] = true
+    when "--key" then o[:key] = true
     when "--obfuscate-kernels" then o[:obfuscate] = true
     when /\A--phase=(.*)\z/ then o[:phase] = $1.to_sym
-    when /\A--promote-slots=([01])\z/ then o[:promote] = $1
-    when /\A--unroll=([01])\z/ then o[:unroll] = $1
-    when /\A--struct-slots=([01])\z/ then o[:struct_slots] = $1
+    when /\A--promote-slots=(.*)\z/m then o[:promote] = $1
+    when /\A--unroll=(.*)\z/m then o[:unroll] = $1
+    when /\A--struct-slots=(.*)\z/m then o[:struct_slots] = $1
     when /\A--out=(.*)\z/m then o[:out] = $1
     when /\A--ir-opt=(.*)\z/m then o[:ir_opt] = $1
     when /\A--cache-dir=(.*)\z/m then o[:cache_dir] = $1
     when /\A--cache-key=(.*)\z/m then o[:cache_key] = $1
+    when /\A--copy=(.*)\z/m then o[:copy] = $1
+    when /\A--keep-dir=(.*)\z/m then o[:keep_dir] = $1
+    when /\A--trace-unit=(.*)\z/m then o[:trace_unit] = $1
+    when /\A--bash-pid=(.*)\z/m then o[:bash_pid] = $1.to_i
+    when /\A--cache-log=(.*)\z/m then o[:cache_log] = $1
     when /\A--/ then raise CudaRefused, "unknown option #{a}"
     else
       raise CudaRefused, "one .cu input" if o[:src]
@@ -352,13 +682,32 @@ def parse_options(argv)
 end
 
 def plan_for(o)
-  env = o[:env]
-  CudaDevicePlan.new(o.merge(env: env, live: o[:live]))
+  if o[:execute]
+    # the driver's environment is the bash's (its exports); --nfcxx-env adds to it
+    env = ENV.to_h.merge(o[:env])
+    return CudaDevicePlan.new(o.merge(env: env, live: true, tabs: true, exec: true, append_src_dir: false))
+  end
+  if o[:key]
+    # the key of the flags as given (no -I of the source's directory: the test passes the flags of cu_device_key)
+    return CudaDevicePlan.new(o.merge(env: o[:env], live: true, append_src_dir: false))
+  end
+  CudaDevicePlan.new(o.merge(env: o[:env], live: o[:live]))
 end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    if ARGV.size == 1 && ARGV[0].start_with?("--cu-dir=")
+      puts cu_dir(ARGV[0].delete_prefix("--cu-dir="))
+      exit 0
+    end
     o = parse_options(ARGV)
+    if o[:execute]
+      exit plan_for(o).execute
+    end
+    if o[:key]
+      puts plan_for(o).key_only
+      exit 0
+    end
     puts plan_for(o).run
   rescue CudaUnported => e
     $stderr.puts "unported: #{e.message}"

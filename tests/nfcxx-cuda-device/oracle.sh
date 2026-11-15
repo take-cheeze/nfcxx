@@ -10,7 +10,7 @@
 #   tests/nfcxx-cuda-device/oracle.sh ROOT SRC [--cflag=ARG | --compile | --out=PATH | --ir-opt=V | --cache-dir=DIR | --cache-key=KEY]...
 # run.sh gives the environment (CU_TEST_*, and the NFCXX_* and CUDA_HOME variables of the case).
 here=$(cd "$(dirname "$0")" && pwd)
-nfcxx=$here/../../nfcxx
+nfcxx=$here/nfcxx-bash   # the driver before the port (its CUDA functions are the oracle; the working driver calls the Ruby now)
 
 extract() {  # extract NAME: nfcxx's function NAME, from its header line to the closing brace at column 0
   awk -v f="$1" 'index($0, f "() {") == 1 { p = 1 } p { print } p && $0 == "}" { p = 0 }' "$nfcxx"

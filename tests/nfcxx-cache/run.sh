@@ -104,6 +104,9 @@ pre_old_entry() {  # an entry under the key of the header as it is before the ch
 mutate_header() { printf '// changed\n' >> "$work/local.h"; }
 check_key_changed() { [ -n "$PORT_KEY" ] && [ "$PORT_KEY" != "$PRE_KEY" ] || bad "the key did not change with the header"; }
 
+check_remote_hit() {  # the remote entry (the bash stub's object) was copied back as the output
+  grep -qx 'OBJECT remote' "$work/main.o" || bad "the bash did not copy the remote entry back"
+}
 check_stored() {  # the bash stored the object and the records under the key the port gives
   local dir; dir=$(entry_dir "$PORT_KEY")
   [ -n "$PORT_KEY" ] && grep -qx 'OBJECT main.o' "$dir/obj" && [ -f "$dir/ti" ] && [ -f "$dir/ii" ] \
@@ -151,10 +154,26 @@ run_all() {
   EXPECT="RUN build main.o"; run_case
 
   set_case gha-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
-  CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); EXPECT="EXIT 0"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); CHECK=check_remote_hit
+  EXPECT="RUN ruby"; run_case
 
   set_case gha-miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
-  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); EXPECT="nfcxx-cache-gha.rb put"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); EXPECT="nfcxx-cache-io.rb remote-put"; run_case
+
+  set_case gha-local-first main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
+  CASE_TEST=(CACHE_TEST_REMOTE=hit); PRE=pre_hit; CHECK=check_hit; EXPECT="EXIT 0"; run_case
+
+  set_case cache-log-flag main.cpp main.o; CASE_ARGS=("--cache-log=$work/cache.log" "--cache=$work/cache" -c main.cpp -o main.o)
+  CASE_LOG=1; EXPECT="RUN build main.o"; run_case
+
+  set_case cache-log-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_LOG=$work/cache.log")
+  PRE=pre_hit; CASE_LOG=1; CHECK=check_hit; EXPECT="EXIT 0"; run_case
+
+  set_case cache-log-remote-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha" "NFCXX_CACHE_LOG=$work/cache.log")
+  CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); CASE_LOG=1; CHECK=check_remote_hit; EXPECT="EXIT 0"; run_case
+
+  set_case cache-log-remote-miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha" "NFCXX_CACHE_LOG=$work/cache.log")
+  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); CASE_LOG=1; EXPECT="nfcxx-cache-io.rb remote-put"; run_case
 
   set_case bad-remote main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=s3"); CHECK=check_bad_remote
   run_case

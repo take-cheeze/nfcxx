@@ -166,11 +166,12 @@ end' "$rb" "$work/link.tar" "$work/link-dest")
 if [ "$linked" = "unexpected entry 'lnk'" ]; then ok "a symlink member is refused (ruby reader takes regular files only)"
 else bad "a symlink member: $linked"; fi
 
-# 12. The driver's remote tier: the two functions from nfcxx, which call the Ruby helper.
+# 12. The driver's remote tier: the two functions from nfcxx, which call scripts/nfcxx-cache-io.rb (that calls the GHA client).
 funcs=$work/remote-funcs.sh
 sed -n '/^cache_remote_get() {/,/^}/p; /^cache_remote_put() {/,/^}/p' "$root/nfcxx" \
   > "$funcs"
-if ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-gha.rb"' "$funcs"; then
+if ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-get' "$funcs" \
+   || ! grep -q '"\${RUBY:-ruby}" "\$root/scripts/nfcxx-cache-io.rb" remote-put' "$funcs"; then
   bad "the driver functions do not call the Ruby helper (substitution did not apply)"
 fi
 drv=0
