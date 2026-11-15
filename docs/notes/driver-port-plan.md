@@ -39,6 +39,8 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    tests/nfcxx-cuda-driver) cover the planning.
 7. Trace and time log: trace.sh (sourced by the driver and by every helper it runs). Port the functions to a Ruby
    module used by the Ruby helpers, and keep the driver's inline calls until stage 8.
+   Done as a module: scripts/trace.rb (the same files and formats), checked against trace.sh by tests/trace/run.sh.
+   trace.sh stays until stage 8, since the bash driver still calls it.
 8. The remaining driver body (the dispatch in nfcxx, and nfcc's main), and bundle-wrap.sh, cuda-driver-wrap.sh,
    amdgpu-env.sh (sourced; they go when the body does). The last stage removes the bash drivers and makes
    scripts/nfcxx.rb and scripts/nfcc.rb the entries.
