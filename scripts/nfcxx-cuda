@@ -24,7 +24,7 @@
 # Anything else is an error with the flag named, so an unhandled flag does not change the build silently.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-# NFCXX_CUDA_WHEEL: the headers come from a CUDA_HOME-shaped directory of PyPI wheels (scripts/fetch-cudart-wheel.sh).
+# NFCXX_CUDA_WHEEL: the headers come from a CUDA_HOME-shaped directory of PyPI wheels (scripts/fetch-cudart-wheel.rb).
 # nvcc is the toolkit's and is only used for CMake's probes, so it stays under CUDA_HOME.
 cuda=${NFCXX_CUDA_WHEEL:-${CUDA_HOME:-/usr/local/cuda}}
 nvcc=${CUDA_HOME:-/usr/local/cuda}/bin/nvcc

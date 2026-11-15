@@ -25,7 +25,7 @@ ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; [ -z "${2:-}" ] || head -20 <<<"$2"; fail=1; }
 cp $d/blas_dnn.c "$tmp/blas_dnn.cpp"
 inc=(-I"$cuda/include" -I"$dninc")
-[ -d "$cuda/include/cccl" ] && inc+=(-I"$cuda/include/cccl")   # the PyPI toolkit (scripts/fetch-cuda-libs.sh)
+[ -d "$cuda/include/cccl" ] && inc+=(-I"$cuda/include/cccl")   # the PyPI toolkit (scripts/fetch-cuda-libs.rb)
 libs=(-L"$cuda/lib64" -L"$dnlib" -lcublas -lcudnn -lcudart -lcuda -lm)
 # The output of a run on the GPU: the device, both results within tolerance, the context the runtime made.
 good() { grep -q '^cublas .* ok$' <<<"$1" && grep -q '^cudnn .* ok$' <<<"$1" && grep -q '^ctx primary' <<<"$1"; }

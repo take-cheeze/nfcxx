@@ -37,7 +37,7 @@ cmake -DCMAKE_C_COMPILER=$PWD/nfcc ...                        # CUDA::cuda_drive
 gcc app.c $(scripts/cuda-driver-shim $CUDA_HOME/include) -L$CUDA_HOME/lib64 -lcudart   # without the drivers
 ```
 
-The PyPI wheel directory of `scripts/fetch-cuda-libs.sh` works as the toolkit. Test: `tests/cuda/driver/run.sh` (CI:
+The PyPI wheel directory of `scripts/fetch-cuda-libs.rb` works as the toolkit. Test: `tests/cuda/driver/run.sh` (CI:
 cuda.yml); on a GPU, `tests/cuda/gpu/run.sh` (by hand).
 
 ## How
