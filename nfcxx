@@ -328,10 +328,8 @@ mod_check_src() {  # mod_check_src FILE: refuses the module features that are no
 # mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
 # compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
 # then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
-# is cleared, as the bash function's own trap replaced any earlier one (cu_prepare's), so that effect is kept. A failing step
-# ends the build with its status (set -e).
+# is left as it is, so cu_prepare's cleanup and trace_finish still run. A failing step ends the build with its status (set -e).
 mod_build_program() {
-  trap - EXIT
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
   exit $?
 }
