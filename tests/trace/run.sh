@@ -1,74 +1,59 @@
-#!/usr/bin/env bash
-# --trace output: a valid Chrome trace-event JSON file with the expected spans, for both backends.
-# The program's exit code must still match its EXPECT value. Open the file in https://ui.perfetto.dev.
-cd "$(dirname "$0")/../.."
-root=$PWD
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-src=tests/cases/constexpr_static.cpp   # EXPECT: 120
-fail=0
+#!/bin/bash
+# Differential test of scripts/trace.rb against scripts/trace.sh. Each case runs the same spans (or the driver's begin and
+# finish) once through the bash functions and once through the Ruby module, with the same environment, in a fresh
+# directory each. The two trace files and time logs must match after the clock readings and process ids are replaced by
+# placeholders (their values differ between any two runs; their presence and order do not).
+#
+#   bash tests/trace/run.sh
+set -u
+here=$(cd "$(dirname "$0")" && pwd -P)
+repo=$(cd "$here/../.." && pwd -P)
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
-check_json() { # file label expected-names...
-  local json=$1 label=$2; shift 2
-  python3 -I - "$json" "$label" "$@" <<'PY'
-import json, sys
-path, label, want = sys.argv[1], sys.argv[2], sys.argv[3:]
-events = json.load(open(path))          # fails on invalid JSON
-assert isinstance(events, list) and events, "not a non-empty JSON array"
-spans = [e for e in events if e.get("ph") == "X"]
-for e in spans:
-    assert isinstance(e["ts"], int) and isinstance(e["dur"], int) and e["dur"] >= 0, e
-    assert "pid" in e and "name" in e, e
-names = {e["name"] for e in spans}
-missing = [n for n in want if n not in names]
-assert not missing, f"{label}: missing spans {missing}; have {sorted(names)}"
-print(f"ok   {label}: {len(spans)} spans, all required spans present")
-PY
+# the same placeholders for both sides
+normalize() {
+  sed -e 's/"ts":[0-9]*/"ts":N/g' -e 's/"dur":[0-9]*/"dur":N/g' -e 's/"pid":[0-9]*/"pid":P/g' \
+      -e 's/^[0-9][0-9]*\.[0-9][0-9][0-9][0-9][0-9][0-9]\t/S.SSSSSS\t/' "$1"
 }
 
-backends=${NFCXX_BACKEND:-"gcc"}
-if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then
-  case $(uname -m) in x86_64|aarch64|arm64) backends="pathb gcc" ;; esac   # Path B is the default on Linux x86-64 and arm64
-fi
-for backend in $backends; do
-  json=$tmp/$backend.json
-  if ! NFCXX_BACKEND=$backend ./nfcxx --trace="$json" "$src" -o "$tmp/$backend.bin" > "$tmp/$backend.log" 2>&1; then
-    echo "FAIL $backend: build"; cat "$tmp/$backend.log"; fail=1; continue
-  fi
-  "$tmp/$backend.bin"; rc=$?
-  [ $rc -eq 120 ] || { echo "FAIL $backend: exit $rc, want 120"; fail=1; continue; }
-  # Each backend's own spans: qbe and gcc run eccp (EDG's front end, then the C compile of its output); pathb has no eccp, its
-  # driver times the Path B compile of each source and the link.
-  case $backend in
-    qbe) check_json "$json" qbe nfcxx "host C++ headers" "eccp (front end, C compile, link)" "cc -E (preprocess)" \
-           "cproc (C to QBE IL)" "qbe (IL to assembly)" "cc -c (assemble)" || fail=1 ;;
-    gcc) check_json "$json" gcc nfcxx "host C++ headers" "eccp (front end, C compile, link)" || fail=1 ;;
-    pathb) check_json "$json" pathb nfcxx "host C++ headers" "Path B: $src" link || fail=1 ;;
-    *) echo "FAIL $backend: no trace expectation for this backend"; fail=1 ;;
-  esac
+# the cases: "NAME | ENVIRONMENT | BASH SNIPPET | RUBY SNIPPET"; the snippets use $OUT (the trace file) and $LOG (the log)
+cases=(
+  "off | | t=\$(trace_start); trace_end \"\$t\" x driver | t = start; span(t, 'x', 'driver')"
+  "log-only | NFCXX_TRACE_UNIT=u.c | t=\$(trace_start); trace_end \"\$t\" 'compile a' pathb | t = start; span(t, 'compile a', 'pathb')"
+  "trace-only | NFCXX_TRACE=@OUT@ | t=\$(trace_start); trace_end \"\$t\" 'say \"hi\" \\ x' cat | t = start; span(t, 'say \"hi\" \\ x', 'cat')"
+  "both-with-unit | NFCXX_TRACE=@OUT@ NFCXX_TIME_LOG=@LOG@ NFCXX_TRACE_UNIT=src/a.cc | t=\$(trace_start); trace_end \"\$t\" 'EH shim' driver; trace_end \"\$t\" 'link' pathb | t = start; span(t, 'EH shim', 'driver'); span(t, 'link', 'pathb')"
+  "driver-begin-finish | NFCXX_TRACE_UNIT=a.c NFCXX_TRACE_UNIT=a.c | trace_begin @OUT@; t=\$(trace_start); trace_end \"\$t\" 'front end' frontend; trace_finish | t0 = begin_trace('@OUT@'); t = start; span(t, 'front end', 'frontend'); finish_trace(t0)"
+  "nested-no-brackets | NFCXX_TRACE_OWNER=4242 | trace_begin @OUT@; t=\$(trace_start); trace_end \"\$t\" 'inner' driver; trace_finish | t0 = begin_trace('@OUT@'); t = start; span(t, 'inner', 'driver'); finish_trace(t0)"
+  "finish-without-begin | NFCXX_TRACE=@OUT@ | trace_finish; echo done | finish_trace(nil); puts 'done'"
+)
+
+pass=0; fail=0
+for c in "${cases[@]}"; do
+  IFS='|' read -r name envs bsnip rsnip <<< "$c"
+  name=${name// /}
+  # the placeholders: the trace file and the time log, in one directory per side
+  for side in bash ruby; do
+    d=$work/$name-$side; mkdir -p "$d"
+    e=${envs//@OUT@/$d/out.json}; e=${e//@LOG@/$d/log.txt}
+    s=${bsnip//@OUT@/$d/out.json}; r=${rsnip//@OUT@/$d/out.json}
+    if [ "$side" = bash ]; then
+      (cd "$d" && env -i PATH="$PATH" HOME="$d" $e bash -c "source '$repo/tests/host-sys/oracle.sh'; source '$repo/scripts/trace.sh'; $s" \
+         > "$d/stdout" 2>&1)
+    else
+      (cd "$d" && env -i PATH="$PATH" HOME="$d" $e ruby -e "require '$repo/scripts/trace'; include NfccxxTrace; $r" > "$d/stdout" 2>&1)
+    fi
+    echo $? > "$d/status"
+  done
+  ok=1
+  for f in out.json log.txt stdout status; do
+    a=$work/$name-bash/$f; b=$work/$name-ruby/$f
+    [ -e "$a" ] || [ -e "$b" ] || continue
+    if ! diff <(if [ -e "$a" ]; then normalize "$a"; fi) <(if [ -e "$b" ]; then normalize "$b"; fi) > "$work/$name.diff.$f" 2>&1; then
+      ok=0
+      echo "FAIL $name ($f)"; sed 's/^/  /' "$work/$name.diff.$f" | head -20
+    fi
+  done
+  if [ $ok = 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
 done
-
-# --emit-c runs the front end alone; its span is named accordingly.
-./nfcxx --emit-c --trace="$tmp/emit.json" "$src" > /dev/null || fail=1
-check_json "$tmp/emit.json" emit-c "nfcxx" "host C++ headers" "cpfe --emit-c (front end)" || fail=1
-
-# --time-log=FILE (NFCXX_TIME_LOG): one line per stage, "SECONDS<Tab>CATEGORY<Tab>STAGE<Tab>SOURCE", the QBE back end's script stages
-# too, and no trace file. Two compiles append to the same log. On the first backend of the run (macOS has gcc only).
-tl=$tmp/time.log; tb=${backends%% *}
-for i in 1 2; do NFCXX_BACKEND=$tb ./nfcxx --time-log="$tl" "$src" -o "$tmp/tl$i.bin" > "$tmp/tl.log" 2>&1 || { echo "FAIL time log: build"; cat "$tmp/tl.log"; fail=1; }; done
-qsteps=0; [ "$tb" != qbe ] || qsteps=8
-compile_stage="eccp (front end, C compile, link)"; [ "$tb" != pathb ] || compile_stage="Path B: $src"
-if awk -F'\t' -v src="$src" 'NF != 4 || $1 !~ /^[0-9]+\.[0-9]{6}$/ || $4 != src { bad = 1 } END { exit bad }' "$tl" \
-   && [ "$(cut -f3 "$tl" | grep -cxF "$compile_stage")" = 2 ] && [ "$(cut -f2 "$tl" | grep -c '^qbe-backend$')" -ge $qsteps ]; then
-  echo "ok   time log: $(wc -l < "$tl") lines"
-else
-  echo "FAIL time log:"; cat "$tl"; fail=1
-fi
-
-# Without --trace (and without NFCXX_TRACE) no trace file is written.
-plain=$tmp/plain; mkdir "$plain"
-(cd "$plain" && env -u NFCXX_TRACE NFCXX_BACKEND=gcc "$root/nfcxx" "$root/$src" -o "$plain/a.out") || fail=1
-[ -z "$(ls "$plain")" ] || [ "$(ls "$plain")" = a.out ] || { echo "FAIL: unexpected files without --trace"; fail=1; }
-[ -z "$(find "$plain" -name '*.json')" ] || { echo "FAIL: a trace file appeared without --trace"; fail=1; }
-
-[ $fail = 0 ] && echo "trace: ok"
-exit $fail
+echo "trace: $pass passed, $fail failed"
+[ $fail = 0 ]
