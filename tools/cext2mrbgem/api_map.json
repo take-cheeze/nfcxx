@@ -1004,6 +1004,13 @@
       "template": "(($0 < $1 || $0 > $2) ? (mrb_argnum_error($m, $0, $1, $2), $0) : $0)",
       "caveat": "raises ArgumentError (mrb_argnum_error) when the count is outside min..max and returns the count, as rb_check_arity does; the count is a plain identifier, so repeating it has no effect"
     },
+    "ruby_scan_digits": {
+      "kind": "template",
+      "arity": 5,
+      "template": "mrb_scan_digits($0, $1, $2, $3, $4)",
+      "decl_drop": true,
+      "caveat": "the fork's mrb_scan_digits (src/string.c) has CRuby's ruby_scan_digits semantics: the length is mrb_int (a negative length means no limit), and the call takes no state"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",

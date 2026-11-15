@@ -3059,6 +3059,15 @@ end
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
     local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
+    # A prototype of a name whose api_map entry says decl_drop (the fork provides the function under another name, which the
+    # calls use): the declaration is removed, the names inside it are not converted
+    @decls.each do |d|
+      next unless d['file'] == rel && d['proto'] && (@entries[d['name']] || {})['decl_drop']
+      semi = masked.index(';', d['pc'] + 1)
+      next if semi.nil?
+      ed.add(d['hstart'], semi + 1, "/* BC2CPP-MRBGEM: prototype of #{d['name']} removed: the calls use the fork's function */")
+      rewrite(rel, d['hstart'], d['name'], '(prototype removed)', 'the prototype is replaced by the fork function the calls use')
+    end
     # A macro with no use anywhere in the gem (no occurrence outside its own #define) is dead text: its CRuby body is not
     # converted, so the #define is kept under #if 0 and its names are not refused. A macro used in any file is not dead.
     unused_spans = define_spans(rel).select do |mname, a, b|

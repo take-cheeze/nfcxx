@@ -443,6 +443,11 @@ check grep -qF '{ mrb_value nfcx_bc2_ret = ( mrb_false_value()); api_macro_ret_r
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_helper tools/cext2mrbgem/fixtures/api_scan_helper/ext/api_scan_helper "$work/api_scan_helper" > "$work/api_scan_helper.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'int nfcx_ac = argc; if (nfcx_ac < 1 || nfcx_ac > 2) mrb_argnum_error(mrb, nfcx_ac, 1, 2);' "$work/api_scan_helper/src/api_scan_helper.c"
+# 2zzz74. ruby_scan_digits maps to the fork's mrb_scan_digits; its prototype is removed (the fork declares it).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_digits tools/cext2mrbgem/fixtures/api_scan_digits/ext/api_scan_digits "$work/api_scan_digits" > "$work/api_scan_digits.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_scan_digits(p, (ssize_t)n, 10, &n, &ov)' "$work/api_scan_digits/src/api_scan_digits.c"
+check test "$(grep -c 'ruby_scan_digits(' "$work/api_scan_digits/src/api_scan_digits.c")" -eq 0
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
