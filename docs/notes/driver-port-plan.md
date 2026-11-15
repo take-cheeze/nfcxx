@@ -40,6 +40,11 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
 6. CUDA: `cu_prepare`, `cu_rewrite`, `ir_opt_device`, `cu_amd_build`, `cu_device_key`, `cu_device_build`, and the
    rewriter build (tools/cuda-rewrite). Needs a CUDA toolkit to test end to end; the stubs (tests/nfcxx-cuda-device,
    tests/nfcxx-cuda-driver) cover the planning.
+   Done: none of the bash functions above is left. cu_rewrite is one call to `scripts/nfcxx-cuda-device.rb --execute`,
+   which runs the plan through scripts/nfcxx-run.rb (the host copy, the device unit, the device IR, ptxas, the device image
+   cache, the embedding), with the bash's messages, statuses and trace spans. cu_prepare asks `--cu-dir` for the copy's
+   directory. The bash originals are kept as tests/nfcxx-cuda-device/nfcxx-bash (the oracle of run.sh and key.sh, and of
+   tests/nfcxx-cuda-live with a toolkit). The rewriter's build stays in the driver's startup (ensure_tool).
 7. Trace and time log: trace.sh (sourced by the driver and by every helper it runs). Port the functions to a Ruby
    module used by the Ruby helpers, and keep the driver's inline calls until stage 8.
    Done as a module: scripts/trace.rb (the same files and formats), checked against trace.sh by tests/trace/run.sh.
