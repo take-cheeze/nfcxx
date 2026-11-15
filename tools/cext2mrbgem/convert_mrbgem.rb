@@ -3711,7 +3711,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
               'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called
-        refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
+        if name == 'rb_gc_mark'
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value, and the fork\'s mrb_data_type has no mark callback (include/mruby/data.h:22-30)')
+        else
+          refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
+        end
         return
       end
       # a mapped call whose mruby function returns void, where CRuby returns the value: a value use is not converted
