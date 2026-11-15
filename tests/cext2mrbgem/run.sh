@@ -1068,10 +1068,10 @@ check sh -c "! grep -q 'mrb_obj_value(cApiKind)\|mrb_obj_value(mApiMix)' '$work/
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2mrbgem/fixtures/api_skipped_refused/ext/api_skipped_refused "$work/api_skipped_refused" > "$work/api_skipped_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
-check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 3
+check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 2
 check grep -q '  rb_memhash  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
-check grep -q '  rb_require  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_require  stuck point (require)' "$work/api_skipped_refused/REFUSALS.txt"
 
 # 6. api_map.json batch C1 (RTYPEDDATA_DATA -> DATA_PTR, an lvalue in both): mapped with no refusal, mruby/data.h included
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_typed_ptr tools/cext2mrbgem/fixtures/api_typed_ptr/ext/api_typed_ptr "$work/api_typed_ptr" > "$work/api_typed_ptr.log" 2>&1 || rc=$?

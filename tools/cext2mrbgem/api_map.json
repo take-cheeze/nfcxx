@@ -25,6 +25,23 @@
   "unmapped_reasons": {
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_from_index": "stuck point (Encoding): an encoding index; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_find_index": "stuck point (Encoding): an encoding lookup by name; the fork has no Encoding (accepted stuck point)",
+    "RB_ENCODING_GET": "stuck point (Encoding): the encoding index of a string; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_str_asciionly_p": "stuck point (Encoding): an encoding query; the fork has no Encoding (accepted stuck point)",
+    "rb_str_conv_enc": "stuck point (Encoding): the conversion between encodings; the fork has no Encoding (accepted stuck point)",
+    "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
+    "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
+    "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
+    "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_require": "stuck point (require): the fork has no require (accepted stuck point)",
+    "rb_big_cmp": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "rb_absint_size": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
+    "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
@@ -1040,6 +1057,106 @@
       "needs_mrb": true,
       "template": "mrb_str_format($m, $0, $1, $2)",
       "caveat": "CRuby's rb_str_format(argc, argv, fmt) is the Ruby format of fmt with argv: the fork's mrb_str_format (mruby-sprintf, which must be in the build; the fork declares it in include/mruby/string.h)"
+    },
+    "rb_check_string_type": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_check_string_type($m, $0)",
+          "caveat": "CRuby's rb_check_string_type returns the string or nil; the fork's mrb_check_string_type has the same contract"
+    },
+    "rb_exc_new3": {
+          "kind": "template",
+          "arity": 2,
+          "class_args": [
+                0
+          ],
+          "needs_mrb": true,
+          "template": "mrb_exc_new_str($m, $0, $1)",
+          "caveat": "rb_exc_new3(klass, str) is rb_exc_new_str; the class is an RClass * (class_args)"
+    },
+    "rb_data_typed_object_zalloc": {
+          "kind": "template",
+          "arity": 3,
+          "class_args": [
+                0
+          ],
+          "needs_mrb": true,
+          "template": "mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2)",
+          "caveat": "a zeroed struct of the given size with the data type, as the Data_Make_Struct path builds it"
+    },
+    "ruby_xrealloc2": {
+          "kind": "template",
+          "arity": 3,
+          "needs_mrb": true,
+          "template": "mrb_realloc($m, $0, ($1) * ($2))",
+          "caveat": "ruby_xrealloc2(ptr, n, size) is a reallocation of n * size bytes; the fork's mrb_realloc raises when it cannot allocate, as CRuby does"
+    },
+    "rb_str_tmp_new": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_str_buf_new($m, $0)",
+          "caveat": "an empty string buffer of the length given (its contents are not set, as CRuby's rb_str_tmp_new)"
+    },
+    "rb_set_errinfo": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "((mrb->exc = mrb_nil_p($0) ? NULL : (struct RObject *)mrb_ptr($0)), (void)0)",
+          "caveat": "sets the exception being handled (mrb->exc); nil clears it. CRuby's rb_set_errinfo returns void"
+    },
+    "OBJ_FROZEN": {
+          "kind": "template",
+          "arity": 1,
+          "template": "MRB_FROZEN_P(mrb_basic_ptr($0))",
+          "caveat": "the frozen flag of a heap object (the fork's MRB_FROZEN_P on its RBasic)"
+    },
+    "RBASIC_CLASS": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_obj_value(mrb_class($m, $0))",
+          "caveat": "the class of an object as a VALUE (the fork's mrb_class)"
+    },
+    "RUBY_ATOMIC_SIZE_INC": {
+          "kind": "template",
+          "arity": 1,
+          "template": "(($0)++)",
+          "caveat": "an increment; mruby's build is single-threaded, so the increment is not atomic and needs no more"
+    },
+    "RUBY_ATOMIC_SIZE_DEC": {
+          "kind": "template",
+          "arity": 1,
+          "template": "(($0)--)",
+          "caveat": "a decrement; mruby's build is single-threaded (see RUBY_ATOMIC_SIZE_INC)"
+    },
+    "RUBY_TYPED_THREAD_SAFE_FREE": {
+          "kind": "expr",
+          "mruby": "0",
+          "caveat": "a data type flag; mruby's data types have no flags (0)"
+    },
+    "RBIMPL_HAS_BUILTIN": {
+          "kind": "template",
+          "arity": 1,
+          "template": "0",
+          "caveat": "CRuby's compiler-feature probe; mruby does not use the builtin, so 0 (the fallback path)"
+    },
+    "RBIMPL_STATIC_ASSERT": {
+          "kind": "template",
+          "arity": 2,
+          "template": "((void)0)",
+          "caveat": "a compile-time check of the CRuby build; the check is not carried over"
+    },
+    "RLIM_INFINITY": {
+          "kind": "expr",
+          "mruby": "RLIM_INFINITY",
+          "caveat": "the sys/resource.h constant of the C library, the same in the mruby build"
+    },
+    "RLIMIT_STACK": {
+          "kind": "expr",
+          "mruby": "RLIMIT_STACK",
+          "caveat": "the sys/resource.h constant of the C library, the same in the mruby build"
     },
     "rb_block_given_p": {
       "kind": "call",
