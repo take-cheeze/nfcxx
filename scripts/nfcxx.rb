@@ -10,6 +10,8 @@
 #      with the same arguments, which builds the program with gcc as it always does; under --backend=pathb the status is the
 #      driver's, as in the bash;
 #   4. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
+# A refusal the bash makes before it runs anything (the gcc port exits 2 with its message and prints no plan line) is the
+# driver's: the message goes to stderr and the status is 2, without the bash.
 # The ports' plans are the bash's commands for the argument lists they model (tests/nfcxx-live, tests/nfcxx-gcc,
 # tests/nfcxx-driver check that), so the behaviour is the bash's for every argument list.
 #
@@ -38,10 +40,23 @@ def plan_text?(out)
   !first.nil? && PLAN_KINDS.include?(first.split(/[ \t]/, 2).first)
 end
 
-# the gcc plan of these arguments as a plan file (text), or nil when the live port does not plan them (its status is not 0,
-# or it prints no plan)
+# a refusal the bash makes before it runs anything: the port exits 2 with its message and prints no plan line. The message is
+# the bash's, so the driver prints it and exits 2 (Refusal), without the bash
+Refusal = Struct.new(:message)
+
+def refusal_of(out, err, status)
+  return nil unless status.exitstatus == 2 && out.strip.empty? && !err.strip.empty?
+
+  Refusal.new(err)
+end
+
+# the gcc plan of these arguments as a plan file (text), a Refusal, or nil when the live port does not plan them (its status is
+# not 0, or it prints no plan). The Path B port exits 0 on its own refusals (its --tabs plan has no status line), so its refusals
+# reach the bash
 def gcc_plan(args)
-  out, _err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
+  out, err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
+  refusal = refusal_of(out, err, status)
+  return refusal if refusal
   return nil unless status.success? && plan_text?(out)
 
   out
@@ -85,6 +100,11 @@ if planned?(ARGV)
 end
 
 plan = gcc_plan(ARGV)
+if plan.is_a?(Refusal)
+  trace("gcc-plan")
+  $stderr.write(plan.message)
+  exit(2)
+end
 if plan
   trace("gcc-plan")
   exit(run_plan_text(plan))

@@ -57,7 +57,8 @@
 #   exists PATH                PATH (relative to WORK) exists (the SYCL pre-pass test reads an -I directory's header)
 #   pathb-status PATH CODE     scripts/pathb-cc.rb exits with CODE on the source PATH (absent: 0)
 #
-# Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none), the
+# Read from the environment: NFCXX_LD and NFCXX_DIALECT (PLAN_ENV: the defaults the bash sets before its arguments).
+# Assumed, not read: the environment (other NFCXX_* variables are not read: the harness runs the bash with none), the
 # repository tools (ensure_tool finds them fresh), the build of pathb-cc itself (its harness is inside pathb-cc: its status
 # is the pathb-status fact), and the host GNU version and dialect (only an explicit --dialect reaches the command line).
 
@@ -86,6 +87,8 @@ DRIVER = "ROOT/nfcxx".freeze
 PATHB_CC = "ROOT/scripts/pathb-cc.rb".freeze
 LIBC = "ROOT/build/edg/lib/libC.a".freeze
 CHOICES = %w[default pathb gcc].freeze
+# the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
+PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
 FSO_OBJECT = "TMP/x.o".freeze # the object of -fsyntax-only (its temporary directory's x.o)
 
 def unported(what)
@@ -162,6 +165,11 @@ class Facts
     @values[key]
   end
 
+  # an environment variable the plan reads (NFCXX_LD, NFCXX_DIALECT): nil when unset, or when the facts have none
+  def env_value(_name)
+    nil
+  end
+
   def flag?(key)
     @values[key] == "1"
   end
@@ -228,6 +236,14 @@ class Plan
     @ld_name = nil
     @eh_shim = true
     @default_backend = false
+    # the environment first (the arguments after it override it, as in the bash): NFCXX_DIALECT (non-empty: asked for), NFCXX_LD
+    env_dialect = facts.env_value("NFCXX_DIALECT")
+    if env_dialect && !env_dialect.empty?
+      @dialect = env_dialect
+      @dialect_asked = true
+    end
+    env_ld = facts.env_value("NFCXX_LD")
+    @ld_name = env_ld unless env_ld.nil? || env_ld.empty?
   end
 
   def run
@@ -397,6 +413,8 @@ class Plan
       exit_with("nfcxx: EDG not built; run scripts/setup-edg.sh", 2)
     end
     exit_with("nfcxx: unknown dialect '#{@dialect}'", 2) if @dialect_asked && !%w[g++ clang].include?(@dialect)
+    # NFCXX_LD (the arguments' -fuse-ld= is checked when it is read): the linker must be on PATH
+    exit_with("nfcxx: NFCXX_LD=#{@ld_name}: ld.#{@ld_name} is not on PATH", 2) if @ld_name && !@facts.ld?(@ld_name)
     @srcs.each { |s| unported("C++ module source #{s}") if @facts.module?(s) }
     if @compile_only && @ncpp == 1 && @nobj.zero? && @cfiles.empty? && sycl_kernel_headers?
       unported("SYCL pre-pass (an -I directory has sycl/detail/kernel_desc.hpp)")
@@ -591,11 +609,16 @@ class LiveFacts < Facts
     @cwd = cwd
     @probes = {}
     ENV.each_key do |name|
+      next if PLAN_ENV.include?(name)
       next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
                   %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
       unported("environment #{name} (the live facts do not read it)")
     end
+  end
+
+  def env_value(name)
+    ENV[name] if PLAN_ENV.include?(name)
   end
 
   def real(path)
