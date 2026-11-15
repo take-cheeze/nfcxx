@@ -9,13 +9,13 @@
 here=$(cd "$(dirname "$0")" && pwd -P)
 root=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-# the bash functions, as nfcxx defines them (from mod_decl_name up to mod_build_program)
-sed -n '/^mod_decl_name() {/,/^# mod_build_program:/p' "$root/nfcxx" | sed '$d' > "$work/bash-scan.sh"
-[ -s "$work/bash-scan.sh" ] || { echo "cannot read the bash scan functions from nfcxx"; exit 1; }
-# mod_is_module_src: the original grep function (the oracle) and nfcxx's thin call of the port
+# the bash wrappers: the verbatim copy of nfcxx's before the driver made the direct calls (oracle-wrappers.sh)
+cp "$here/oracle-wrappers.sh" "$work/bash-scan.sh"
+[ -s "$work/bash-scan.sh" ] || { echo "cannot read the bash scan functions from oracle-wrappers.sh"; exit 1; }
+# mod_is_module_src: the original grep function (the oracle) and the thin call of the port (also in oracle-wrappers.sh)
 cp "$here/oracle-is-module.sh" "$work/oracle-is-module.sh"
-sed -n '/^mod_is_module_src() {/,/^}/p' "$root/nfcxx" > "$work/thin-is-module.sh"
-[ -s "$work/thin-is-module.sh" ] || { echo "cannot read mod_is_module_src from nfcxx"; exit 1; }
+sed -n '/^mod_is_module_src() {/,/^}/p' "$here/oracle-wrappers.sh" > "$work/thin-is-module.sh"
+[ -s "$work/thin-is-module.sh" ] || { echo "cannot read mod_is_module_src from oracle-wrappers.sh"; exit 1; }
 mkdir -p "$work/edge"
 e="$work/edge"
 printf '  \texport   module  a.b ; // tabbed\nexport import  x.y;\n' > "$e/tabs.cppm"
