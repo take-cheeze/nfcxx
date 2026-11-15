@@ -1,7 +1,7 @@
 #include <ruby.h>
 
 /* A macro defined here is local, but its body uses a CRuby API with no entry: the API is still refused. */
-#define LNR_CALL rb_memhash(self, self)
+#define LNR_CALL rb_memcicmp(self, self, 1)
 
 /* Only used, never defined in the input: not local, refused. */
 static VALUE lnr_missing(VALUE self) {

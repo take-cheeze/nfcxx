@@ -1003,6 +1003,20 @@
       "template": "mrb_class_inherited_p($m, $0, $1)",
       "caveat": "the fork's mrb_class_inherited_p (mrbgem-independent, src/class.c): true if the first class is the second or inherits or includes it, false if the second is a subclass of the first, nil if unrelated; both class arguments must be tracked class variables or RClass * expressions"
     },
+    "rb_cmpint": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_cmpint($m, $0, $1, $2)",
+      "caveat": "the fork's mrb_cmpint (src/numeric.c): the sign of a <=> result; nil raises ArgumentError as rb_cmpint does"
+    },
+    "rb_memhash": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "mrb_memhash($0, $1)",
+      "caveat": "the fork's mrb_memhash (src/numeric.c): an FNV-1a hash of the bytes; the value differs from CRuby's, which only matters where the hash is printed or stored across runs"
+    },
     "rb_hash_bulk_insert": {
       "kind": "template",
       "arity": 3,
@@ -2428,6 +2442,7 @@
       "arity": 2,
       "needs_mrb": true,
       "template": "mrb_funcall_argv($m, mrb_fixnum_value((mrb_int)($0)), mrb_intern_cstr($m, \"**\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "decl_drop": true,
       "caveat": "x ** y on Integers (Integer#**), as CRuby's rb_int_positive_pow"
     },
     "rb_struct_s_members": {

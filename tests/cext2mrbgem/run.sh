@@ -659,7 +659,7 @@ check grep -qF 'return mrb_fixnum_value(LN_ANSWER);' "$work/local_names/src/loca
 rc=0; "$rb" "$conv" --scanner "$scanner" --name local_names_refused tools/cext2mrbgem/fixtures/local_names_refused/ext/local_names_refused "$work/local_names_refused" > "$work/local_names_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/local_names_refused/NOT_BUILDABLE"
-check grep -q '  rb_memhash  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
+check grep -q '  rb_memcicmp  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_missing  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_ln_fallback  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
 check grep -q '  rb_lnr_proto  no entry in api_map.json' "$work/local_names_refused/REFUSALS.txt"
@@ -1136,7 +1136,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_skipped_refused tools/cext2m
 check test "$rc" -eq 2
 check test -e "$work/api_skipped_refused/NOT_BUILDABLE"
 check test "$(grep -c "no entry in api_map.json" "$work/api_skipped_refused/REFUSALS.txt")" -eq 2
-check grep -q '  rb_memhash  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
+check grep -q '  rb_memcicmp  no entry in api_map.json' "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q "  rb_iv_get  argument 2 is not a string literal" "$work/api_skipped_refused/REFUSALS.txt"
 check grep -q '  rb_require  stuck point (require)' "$work/api_skipped_refused/REFUSALS.txt"
 
@@ -1306,6 +1306,17 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_helper_name tools/cext
 check test "$rc" -eq 0
 check test ! -e "$work/api_field_helper_name/NOT_BUILDABLE"
 check grep -qF 'static mrb_value sec(mrb_state *mrb, mrb_value f) {' "$work/api_field_helper_name/src/api_field_helper_name.c"
+# 2zzz100. "else if (c) {" is a statement: a braceless loop with a yield in it is converted (not dead); a yielding variadic
+# method fetches the block with "*&"; SYM2ID of a Symbol value is the method name (mrb_symbol); rb_cmpint is mrb_cmpint.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_stmt_keywords tools/cext2mrbgem/fixtures/api_stmt_keywords/ext/api_stmt_keywords "$work/api_stmt_keywords" > "$work/api_stmt_keywords.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_stmt_keywords/NOT_BUILDABLE"
+check grep -qF 'mrb_get_args(mrb, "*&", &argv, &nfcx_argc, &nfcx_block);' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
+check grep -qF 'mrb_yield(mrb, nfcx_block, self);' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
+check grep -qF 'mrb_funcall_argv(mrb, self, mrb_symbol(sym), 0, NULL)' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
+check grep -qF 'mrb_cmpint(mrb, ' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
+# a local int c shadows the class variable VALUE c of Init: its comparisons are not wrapped
+check grep -qF '    if (c < 0) {' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

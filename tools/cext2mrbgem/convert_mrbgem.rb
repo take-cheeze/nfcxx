@@ -93,6 +93,7 @@ ALNUM_RE = /[\p{L}\p{N}]/ # Python str.isalnum()
 IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 # A definition starts at a line start (Ruby's ^ is a line anchor, as Python's re.M). Return-type words may be split
 # across lines (`static VALUE` then `name(...)` on the next line, as bigdecimal and date write them).
+C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
@@ -1028,7 +1029,11 @@ texts = static_rename(texts)
     names = recs.map { |d| d['name'] }.to_set
     listed = recs.map { |d| d['po'] }.to_set
     text_decls = regex_declarations(rel, f)
-    extra = text_decls.select { |d| d['proto'] && names.include?(d['name']) && !listed.include?(d['po']) }
+    # a prototype of a decl_drop name is added even when the front end lists it only as a header declaration (the libclang
+    # records are for this file's own declarations): its declaration is removed (see the decl_drop loop)
+    extra = text_decls.select do |d|
+      d['proto'] && (names.include?(d['name']) || (@entries[d['name']] || {})['decl_drop']) && !listed.include?(d['po'])
+    end
     # a definition the text has and the front end does not list is excluded by its #if (or is not a definition)
     # per definition: a text definition the front end does not list (its #if is false in this build), even when another
     # definition of the same name is listed (#if A ... #else ... #endif)
@@ -1049,6 +1054,8 @@ texts = static_rename(texts)
     out = []
     finditer(DEF_RE, masked).each do |m|
       storage, name, term = m[1], m[3], m[5]
+      # `else if (c) {` and `while (x) {` match the header shape with a keyword as the name: not a definition
+      next if C_STATEMENT_KEYWORDS.include?(name)
       ret = m[2].sub(/[#{WSP}]+\z/, '') # the pointer star of a return type (Real *) stays
       po = pyfind(masked, '(', m.begin(3))
       pc = pyfind(masked, ')', po)
@@ -1145,6 +1152,19 @@ texts = static_rename(texts)
   end
 
   # a parameter or local of the enclosing function fn with the name hides a function of that name there
+  # true when a declaration of name in fn is a local or a parameter, not the declaration of a class variable of that name
+  # (a class variable's own VALUE declaration is in @decl_name_pos, and it is not a shadow)
+  def local_shadows_class_var?(name, fn)
+    return true if param_names(fn).include?(name)
+    masked = @files[fn['file']]['masked']
+    start = fn['brace']
+    stop = fn['body_end'] + 1
+    re = /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+(#{Regexp.escape(name)})#{SS}[=;,\[)]/
+    masked[start...stop].to_s.to_enum(:scan, re).map { Regexp.last_match }.any? do |m|
+      !@decl_name_pos.include?([fn['file'], start + m.begin(1)])
+    end
+  end
+
   def shadowed_in?(name, fn)
     return true if param_names(fn).include?(name)
     n = Regexp.escape(name)
@@ -2446,7 +2466,13 @@ use_problem = lambda do |name, use|
       uses[name].each do |rel, s, _direct, fn|
         # a refused definition is still emitted: its calls of threaded helpers would pass an mrb that is not in scope
         next unless fn && !mrb_bearing.include?(fn['name'])
-        refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
+        # a caller reached from a per-class allocator is part of that accepted stuck point (the allocator has no state)
+        if alloc_reach.include?(fn['name'])
+          refuse(rel, s, name, 'stuck point (per-class allocator): the caller is reached from a per-class allocator ' \
+                               '(rb_define_alloc_func), which has no state argument in the fork (accepted stuck point)')
+        else
+          refuse(rel, s, name, 'caller has no mruby state and no refusal of its own (not supported)')
+        end
       end
     end
     compute_global_macros(with_state | gset)
@@ -2996,9 +3022,6 @@ use_problem = lambda do |name, use|
     if d['brace'] && d['body_end'] && @files[d['file']]
       yields = @files[d['file']]['masked'][d['brace']..d['body_end']].to_s.match?(/\brb_yield\s*\(/)
     end
-    if yields && n == -1
-      return [nil, nil, 'variadic registered method that yields is not supported']
-    end
     return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if value_ret_after_storage_macros(d) != 'VALUE'
     if n == -1
       p = variadic_params(d)
@@ -3008,8 +3031,14 @@ use_problem = lambda do |name, use|
       end
       argc_n, argv_n, self_n = p
       hdr = "#{storage_of(d)}mrb_value #{d['name']}(mrb_state *mrb, mrb_value #{self_n})"
-      prologue = "\n  mrb_int nfcx_argc;\n  mrb_value *#{argv_n};\n  mrb_get_args(mrb, \"*\", &#{argv_n}, &nfcx_argc);" \
-                 "\n  int #{argc_n} = (int)nfcx_argc;"
+      # a yielding variadic method fetches the block too ("&": nil when there is none), as a fixed-arity one does
+      if yields
+        prologue = "\n  mrb_int nfcx_argc;\n  mrb_value *#{argv_n};\n  mrb_value nfcx_block;\n" \
+                   "  mrb_get_args(mrb, \"*&\", &#{argv_n}, &nfcx_argc, &nfcx_block);\n  int #{argc_n} = (int)nfcx_argc;"
+      else
+        prologue = "\n  mrb_int nfcx_argc;\n  mrb_value *#{argv_n};\n  mrb_get_args(mrb, \"*\", &#{argv_n}, &nfcx_argc);" \
+                   "\n  int #{argc_n} = (int)nfcx_argc;"
+      end
       return [hdr, prologue, nil]
     end
     params = d['params'].split(',', -1).map { |p| py_strip(p) }
@@ -3282,6 +3311,9 @@ end
         end
       end
       entry = @entries[name]
+      # the name in the prototype that decl_drop removes is not a use (the calls are converted)
+      next if entry && entry['decl_drop'] && @decls.any? { |d| d['name'] == name && d['proto'] && d['file'] == rel &&
+                                                              d['hstart'] <= s && s < d['hend'] }
       if !entry.nil?
         excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
         next if excluded && entry['needs_mrb']
@@ -3305,6 +3337,9 @@ end
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
       elsif @class_vars.include?(name)
         next if @decl_name_pos.include?([rel, s]) || is_param(rel, s, name)
+        # a local or parameter of this name in the enclosing function shadows the class variable: not a use of it
+        fn_here = enclosing_func(rel, s)
+        next if fn_here && local_shadows_class_var?(name, fn_here)
         nx = next_nonspace(masked, e)
         next if nx >= 0 && masked[nx] == '=' && psl(masked, nx + 1, nx + 2) != '='
         callee, idx = call_context(masked, s)
@@ -4020,11 +4055,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       elsif (m = /\A'([^'\\])'\z/.match(id_text)) then m[1]
       end
       name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
-    if name.nil?
+    # SYM2ID(x) with x a Symbol value (a method name held at run time): the ID is that symbol (mrb_symbol), as in CRuby
+    sym_m = name.nil? && /\ASYM2ID\(\s*([A-Za-z_][#{WC}]*)\s*\)\z/.match(id_text)
+    if name.nil? && !sym_m
       refuse(rel, s, 'rb_funcall', "the ID #{id_text} is not rb_intern of a string literal or a character (not supported)")
       return
     end
     tok = mrb_tok(rel, s)
+    id_expr = sym_m ? "mrb_symbol(#{sym_m[1]})" : "mrb_intern_cstr(#{tok}, \"#{name}\")"
     n = n_text.to_i
     spans = [[s, nxt + 1], [args[1][0], n.zero? ? args[2][1] : args[3][0]]]
     spans << [cp, cp + 1] if n.positive?
@@ -4034,13 +4072,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     ed.add(s, nxt + 1, "mrb_funcall_argv(#{tok}, ")
     if n.zero?
-      ed.add(args[1][0], args[2][1], "mrb_intern_cstr(#{tok}, \"#{name}\"), 0, NULL")
+      ed.add(args[1][0], args[2][1], "#{id_expr}, 0, NULL")
     else
-      ed.add(args[1][0], args[3][0], "mrb_intern_cstr(#{tok}, \"#{name}\"), #{n}, (mrb_value[]){")
+      ed.add(args[1][0], args[3][0], "#{id_expr}, #{n}, (mrb_value[]){")
       ed.add(cp, cp + 1, '})')
     end
-    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., \"#{name}\", #{n}, ...)",
-            'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
+    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., #{sym_m ? "mrb_symbol(#{sym_m[1]})" : "\"#{name}\""}, #{n}, ...)",
+            sym_m ? 'the method name is the Symbol value of the SYM2ID argument (mrb_symbol)' \
+                  : 'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
   end
 
   def special(rel, s, e, name, entry, nxt, called)
@@ -4545,6 +4584,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       err.each_line do |ln|
         m = ln.chomp.match(/\A#{Regexp.escape(path)}:(\d+):\d+: (?:fatal )?error: (.+)\z/)
         next unless m
+        # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
+        # such header, and gcc stops at the fatal error, so the rest of the file is not checked
+        if m[2].strip == 'ruby/encoding.h: No such file or directory'
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => 'stuck point (Encoding): the converted code keeps #include <ruby/encoding.h>, which the fork ' \
+                                     'does not have (accepted stuck point); the compile check stops at this include' }
+          next
+        end
         @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
                        'reason' => "the converted code does not compile: #{m[2].strip}" }
       end
