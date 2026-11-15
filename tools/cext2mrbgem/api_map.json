@@ -24,7 +24,13 @@
   },
   "unmapped_reasons": {
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
-    "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)"
+    "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
+    "rb_encoding": "stuck point (Encoding): the rb_encoding type; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_get": "stuck point (Encoding): the encoding of a string; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_check": "stuck point (Encoding): checks two strings are compatible encodings; the fork has no Encoding (accepted stuck point)",
+    "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
     "ruby.h": {
