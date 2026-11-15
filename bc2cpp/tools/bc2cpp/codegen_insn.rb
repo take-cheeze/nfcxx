@@ -324,15 +324,18 @@ class CodeGen
         # HEAP_INTEGER_PAIR (here and in SUB/MUL): OP_MATH computes any Integer pair in place, a heap Integer
         # included, whatever Integer#+ is; only the other shapes send.
         <<~CPP
+          { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('+', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_add(M, #{RegName[d]}, #{RegName[s]});
-          } else if (bc2cpp_num_add_float(M, &#{RegName[d]}, #{RegName[s]})) {
+          } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_add_float(M, #{RegName[d]}, #{RegName[s]}))) {
+            #{RegName[d]} = bc2cpp_nt;
           } else {
             #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
           #{guarded ? '  }' : ''}
+          }
         CPP
       end
     when :SUBI
@@ -379,15 +382,18 @@ class CodeGen
                         ''
                       end
         <<~CPP
+          { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('-', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_sub(M, #{RegName[d]}, #{RegName[s]});
-          } else if (bc2cpp_num_sub_float(M, &#{RegName[d]}, #{RegName[s]})) {
+          } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_sub_float(M, #{RegName[d]}, #{RegName[s]}))) {
+            #{RegName[d]} = bc2cpp_nt;
           } else {
             #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
           #{guarded ? '  }' : ''}
+          }
         CPP
       end
     when :MUL
@@ -409,15 +415,18 @@ class CodeGen
                         ''
                       end
         <<~CPP
+          { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely(TaggedFixnum.pair("r#{d}", "r#{s}"))}) {
             #{fixnum_exact_tier('*', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_mul(M, #{RegName[d]}, #{RegName[s]});
-          } else if (bc2cpp_num_mul_float(M, &#{RegName[d]}, #{RegName[s]})) {
+          } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_mul_float(M, #{RegName[d]}, #{RegName[s]}))) {
+            #{RegName[d]} = bc2cpp_nt;
           } else {
             #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
           #{guarded ? '  }' : ''}
+          }
         CPP
       end
     when :DIV
@@ -443,13 +452,16 @@ class CodeGen
                         ''
                       end
         <<~CPP
+          { mrb_value bc2cpp_nt;
           #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
             #{RegName[d]} = mrb_div_int_value(M, mrb_integer(#{RegName[d]}), mrb_integer(#{RegName[s]}));
-          } else if (bc2cpp_num_div_float(M, &#{RegName[d]}, #{RegName[s]})) {
+          } else if (!mrb_undef_p(bc2cpp_nt = bc2cpp_num_div_float(M, #{RegName[d]}, #{RegName[s]}))) {
+            #{RegName[d]} = bc2cpp_nt;
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
           #{guarded ? '  }' : ''}
+          }
         CPP
       end
     when :EQ, :LT, :LE, :GT, :GE

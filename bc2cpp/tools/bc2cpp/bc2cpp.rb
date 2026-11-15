@@ -1787,47 +1787,57 @@ BC2CPP_MAIN = lambda do
       bc2cpp_root(M, a);
       return a;
     }
-    // NUMERIC_SLOW: the Float arms of a binary operator, shared by every site of that operator (one copy per link,
-    // not one per site). Returns false for a pair with no Float arm, and the caller sends. Same arms, same order.
-    [[gnu::noinline]] inline bool bc2cpp_num_add_float(mrb_state* M, mrb_value* d, mrb_value s) {
+    // NUMERIC_SLOW: the Float arms of a binary operator, shared by every site of that operator (one copy per link).
+    // Returns mrb_undef when the pair has no Float arm, and the caller sends. Values in and out, so no register is
+    // address-taken (a step function keeps its registers local).
+    [[gnu::noinline]] inline mrb_value bc2cpp_num_add_float(mrb_state* M, mrb_value d, mrb_value s) {
     #ifndef MRB_NO_FLOAT
-      if (mrb_float_p(*d) && mrb_integer_p(s)) { *d = mrb_float_value(M, mrb_float(*d) + mrb_integer(s)); return true; }
-      if (mrb_integer_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_integer(*d) + mrb_float(s)); return true; }
-      if (mrb_float_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_float(*d) + mrb_float(s)); return true; }
+          if (mrb_float_p(d) && mrb_integer_p(s)) return mrb_float_value(M, mrb_float(d) + mrb_integer(s));
+          if (mrb_integer_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_integer(d) + mrb_float(s));
+          if (mrb_float_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_float(d) + mrb_float(s));
     #else
       (void)M; (void)d; (void)s;
     #endif
-      return false;
+      return mrb_undef_value();
     }
-    [[gnu::noinline]] inline bool bc2cpp_num_sub_float(mrb_state* M, mrb_value* d, mrb_value s) {
+    // NUMERIC_SLOW: the Float arms of a binary operator, shared by every site of that operator (one copy per link).
+    // Returns mrb_undef when the pair has no Float arm, and the caller sends. Values in and out, so no register is
+    // address-taken (a step function keeps its registers local).
+    [[gnu::noinline]] inline mrb_value bc2cpp_num_sub_float(mrb_state* M, mrb_value d, mrb_value s) {
     #ifndef MRB_NO_FLOAT
-      if (mrb_float_p(*d) && mrb_integer_p(s)) { *d = mrb_float_value(M, mrb_float(*d) - mrb_integer(s)); return true; }
-      if (mrb_integer_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_integer(*d) - mrb_float(s)); return true; }
-      if (mrb_float_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_float(*d) - mrb_float(s)); return true; }
+          if (mrb_float_p(d) && mrb_integer_p(s)) return mrb_float_value(M, mrb_float(d) - mrb_integer(s));
+          if (mrb_integer_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_integer(d) - mrb_float(s));
+          if (mrb_float_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_float(d) - mrb_float(s));
     #else
       (void)M; (void)d; (void)s;
     #endif
-      return false;
+      return mrb_undef_value();
     }
-    [[gnu::noinline]] inline bool bc2cpp_num_mul_float(mrb_state* M, mrb_value* d, mrb_value s) {
+    // NUMERIC_SLOW: the Float arms of a binary operator, shared by every site of that operator (one copy per link).
+    // Returns mrb_undef when the pair has no Float arm, and the caller sends. Values in and out, so no register is
+    // address-taken (a step function keeps its registers local).
+    [[gnu::noinline]] inline mrb_value bc2cpp_num_mul_float(mrb_state* M, mrb_value d, mrb_value s) {
     #ifndef MRB_NO_FLOAT
-      if (mrb_float_p(*d) && mrb_integer_p(s)) { *d = mrb_float_value(M, mrb_float(*d) * mrb_integer(s)); return true; }
-      if (mrb_integer_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_integer(*d) * mrb_float(s)); return true; }
-      if (mrb_float_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_float(*d) * mrb_float(s)); return true; }
+          if (mrb_float_p(d) && mrb_integer_p(s)) return mrb_float_value(M, mrb_float(d) * mrb_integer(s));
+          if (mrb_integer_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_integer(d) * mrb_float(s));
+          if (mrb_float_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_float(d) * mrb_float(s));
     #else
       (void)M; (void)d; (void)s;
     #endif
-      return false;
+      return mrb_undef_value();
     }
-    [[gnu::noinline]] inline bool bc2cpp_num_div_float(mrb_state* M, mrb_value* d, mrb_value s) {
+    // NUMERIC_SLOW: the Float arms of a binary operator, shared by every site of that operator (one copy per link).
+    // Returns mrb_undef when the pair has no Float arm, and the caller sends. Values in and out, so no register is
+    // address-taken (a step function keeps its registers local).
+    [[gnu::noinline]] inline mrb_value bc2cpp_num_div_float(mrb_state* M, mrb_value d, mrb_value s) {
     #ifndef MRB_NO_FLOAT
-      if (mrb_integer_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(*d), mrb_float(s))); return true; }
-      if (mrb_float_p(*d) && mrb_integer_p(s)) { *d = mrb_float_value(M, mrb_div_float(mrb_float(*d), (mrb_float)mrb_integer(s))); return true; }
-      if (mrb_float_p(*d) && mrb_float_p(s)) { *d = mrb_float_value(M, mrb_div_float(mrb_float(*d), mrb_float(s))); return true; }
+          if (mrb_integer_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(d), mrb_float(s)));
+          if (mrb_float_p(d) && mrb_integer_p(s)) return mrb_float_value(M, mrb_div_float(mrb_float(d), (mrb_float)mrb_integer(s)));
+          if (mrb_float_p(d) && mrb_float_p(s)) return mrb_float_value(M, mrb_div_float(mrb_float(d), mrb_float(s)));
     #else
       (void)M; (void)d; (void)s;
     #endif
-      return false;
+      return mrb_undef_value();
     }
     static inline mrb_value bc2cpp_keep_removed(mrb_state* M, mrb_value v) {
       bc2cpp_root(M, v);
