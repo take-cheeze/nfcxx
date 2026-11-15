@@ -1644,8 +1644,8 @@ end
       rel = d['file']
       masked = @files[rel]['masked']
       psub = masked[(d['po'] + 1)...d['pc']].to_s
-      m = /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/.match(psub)
-      next unless m
+      # every function-pointer parameter of the definition has its own record (a callee may take two callbacks)
+      psub.to_enum(:scan, /\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).map { Regexp.last_match }.each do |m|
       cname = m[1]
       pidx = psub[0...m.begin(0)].count(',')
       rec = { name: cname, owner: hname, rel: rel, params_start: d['po'] + 1 + m.end(0), assigns: [], calls: [], bad: false, pidx: pidx }
@@ -1699,6 +1699,7 @@ end
       rec[:bad] = true unless non_retaining?(hname, pidx)
       next if rec[:bad] || rec[:assigns].empty?
       recs << rec
+      end
     end
     # resolve forwarded assigns through the records of the enclosing functions' parameters (bounded depth)
     by_key = {}

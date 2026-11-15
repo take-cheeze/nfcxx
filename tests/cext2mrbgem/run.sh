@@ -460,6 +460,14 @@ check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$wo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem/fixtures/api_alt_branch/ext/api_alt_branch "$work/api_alt_branch" > "$work/api_alt_branch.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
+# 2zzz80. A callee that takes two callbacks: each function-pointer parameter takes its own helper, and both helpers gain mrb.
+# (The regex scanner cannot read two parenthesis levels in a parameter list, so it refuses this safely: the test is libclang's.)
+if [ "$scanner" = libclang ]; then
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_thread tools/cext2mrbgem/fixtures/api_fnptr_thread/ext/api_fnptr_thread "$work/api_fnptr_thread" > "$work/api_fnptr_thread.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_value (*conv2)(mrb_state *mrb, mrb_value)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
+check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
+fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use2" > "$work/api_dead_use2.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
