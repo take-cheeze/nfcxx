@@ -1562,6 +1562,27 @@ end
       index = bo ? masked[(bo + 1)...m.begin(0)].to_s.count(';') : nil
       out << { rel: rel, name: m[1], params_start: open + 1, tag: tag, index: index }
     end
+    # Fields whose type is a typedef of a function pointer, typedef RET (*T)(PARAMS): each field of type T in a struct body of
+    # this file is a callback field, and its parameter list is the typedef's (retyped once for all of them: see edit_fnptr_fields)
+    typedefs = {}
+    masked.to_enum(:scan, /\btypedef[ \t\n]+[^;{}()]*?\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(/).each do
+      tm = Regexp.last_match
+      topen = tm.end(0) - 1
+      tclose = match_close(masked, topen)
+      next if tclose < 0
+      next if struct_body_before?(masked, tm.begin(0))
+      typedefs[tm[1]] = topen + 1 unless psl(masked, topen + 1, tclose).strip.empty? || psl(masked, topen + 1, tclose).strip == 'void'
+    end
+    typedefs.each do |tname, pstart|
+      masked.to_enum(:scan, /(?<![#{WC}.>])#{Regexp.escape(tname)}[ \t\n]+([A-Za-z_]\w*)[ \t\n]*(?:\[[^\]\n]*\][ \t\n]*)?;/).each do
+        fm = Regexp.last_match
+        next unless struct_body_before?(masked, fm.begin(0))
+        bo = struct_body_open(masked, fm.begin(0))
+        tag = bo && psl(masked, [bo - 60, 0].max, bo)[/struct\s+(\w+)\s*\z/, 1]
+        index = bo ? masked[(bo + 1)...fm.begin(0)].to_s.count(';') : nil
+        out << { rel: rel, name: fm[1], params_start: pstart, tag: tag, index: index, typedef: tname }
+      end
+    end
     out
   end
 
@@ -1844,12 +1865,21 @@ end
     cands = @threaded_cands || Set.new
     regs = @valid_reg_names || Set.new
     ed = @edits[rel]
+    applied_pstart = nil
+    applied_copen = nil
     (@fnptr_recs || []).each do |r|
       next unless r[:ok] && r[:assigns].all? { |h, _, _| cands.include?(h) }
       next unless r[:calls].all? { |_, fn, _| fn && (cands.include?(fn) || regs.include?(fn)) }
-      ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ') if r[:rel] == rel && r[:owner].nil?
+      # the callback's parameter list gains mrb once (a typedef shared by several fields has one parameter list)
+      if r[:rel] == rel && r[:owner].nil? && !(applied_pstart ||= Set.new).include?(r[:params_start])
+        applied_pstart << r[:params_start]
+        ed.add(r[:params_start], r[:params_start], 'mrb_state *mrb, ')
+      end
       r[:calls].each do |copen, _, crel|
         next unless crel == rel
+        # a call is passed mrb once, however many records name its field
+        next if (applied_copen ||= Set.new).include?(copen)
+        applied_copen << copen
         masked = @files[rel]['masked']
         nxt = next_nonspace(masked, copen + 1)
         ed.add(copen + 1, copen + 1, masked[nxt] == ')' ? 'mrb' : 'mrb, ')
@@ -2163,6 +2193,18 @@ end
     # why a use of a helper through its address (not a direct call) cannot take mrb, or nil (see value_problem below)
     value_problem = lambda do |rel, s, name|
       masked = @files[rel]['masked']
+      # the helper is assigned to a callback field (its assignment is a field assign, in fnptr_global) or compared with one: once the
+      # field's type takes mrb, both sides have the same type, so the comparison is not a use that escapes
+      fields = (@fnptr_recs || []).map { |r| r[:name] }.to_set
+      if masked[[s - 80, 0].max...s].to_s =~ /(?:\.|->)[ \t\n]*(\w+)[ \t\n]*(?:==|!=)[ \t\n]*\z/ && fields.include?($1)
+        next nil
+      end
+      if masked[[s - 80, 0].max...s].to_s =~ /(?:\.|->)[ \t\n]*(\w+)[ \t\n]*=[ \t\n]*\z/ && fields.include?($1)
+        next nil
+      end
+      if masked[(s + name.length)..(s + name.length + 80)].to_s =~ /\A[ \t\n]*(?:==|!=)[ \t\n]*[A-Za-z_][\w\t\n .>-]*?\.(\w+)/ && fields.include?($1)
+        next nil
+      end
       open, callee = innermost_open(masked, s)
       before = prev_nonspace(masked, s - 1)
       after = next_nonspace(masked, s + name.length)

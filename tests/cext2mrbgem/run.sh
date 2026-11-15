@@ -502,6 +502,11 @@ check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_tbl_names tools/cext2mrbgem/fixtures/api_tbl_names/ext/api_tbl_names "$work/api_tbl_names" > "$work/api_tbl_names.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'h.cbs->on_null(ctx)' "$work/api_tbl_names/src/api_tbl_names.c"
+# 2zzz93. A struct field whose type is a typedef'd function pointer: its assigned helper and calls convert; the comparison of a
+# helper with the field is not a use that escapes.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_typedef tools/cext2mrbgem/fixtures/api_fnptr_typedef/ext/api_fnptr_typedef "$work/api_fnptr_typedef" > "$work/api_fnptr_typedef.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'if (h.dump == ftd_attrs) {' "$work/api_fnptr_typedef/src/api_fnptr_typedef.c"
 # 2zzz90. A helper defined in a header included by exactly one source converts with that source (its registered callers too).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_single tools/cext2mrbgem/fixtures/api_header_single/ext/api_header_single "$work/api_header_single" > "$work/api_header_single.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
