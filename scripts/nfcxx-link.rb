@@ -4,12 +4,12 @@
 # tests/nfcxx-link/run.sh (tests/nfcxx-link/oracle.sh holds them verbatim).
 #
 #   ruby scripts/nfcxx-link.rb records-rm -- FILE...
-#       link_records_rm: for each FILE that ends in .o, removes the <stem>.ii beside it (rm -f "${f%.o}.ii"). The status is the
-#       status of the last FILE (a file that does not end in .o counts as 0, as the bash's case does); a <stem>.ii that is a
-#       directory, or that cannot be removed, is rm's message and status 1.
+#       link_records_rm: for each FILE that ends in .o, removes the <stem>.ii beside it (rm -f "${f%.o}.ii"). nfcxx runs under
+#       set -e, so the first rm that fails ends the step with its status (a <stem>.ii that is a directory, or that cannot be
+#       removed, or a name that rm reads as an option: rm's message, status 1). A FILE that does not end in .o is skipped.
 #
 #   ruby scripts/nfcxx-link.rb cleanup KEEP ECCP_DIR CUDATMP CTMP
-#       eccp_cleanup's removals (rm -rf), for the EXIT trap: ECCP_DIR is removed unless KEEP is 1 (keep_intermediates); CUDATMP
+#       eccp_cleanup's removals (rm -rf), for the EXIT trap: ECCP_DIR is removed when KEEP is 0 (keep_intermediates off); CUDATMP
 #       and CTMP are always removed. An empty argument is an unset variable. The trace is finished by the bash (trace.sh).
 #
 # Both print rm's messages on standard error ("rm: ..."), as the bash's rm does. Exit status: as the bash's (see each step).
