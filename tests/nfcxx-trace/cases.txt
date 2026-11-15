@@ -1,0 +1,41 @@
+# The trace and time-log cases: "ROUTE | ARGS" (tests/nfcxx-trace/run.sh). The fixtures are a.cpp (main), b.cpp, bad.cpp (#error)
+# and c.c in the directory. The routes are those of the Ruby entry: pathb-plan (planned in Ruby), pathb-fallback (planned, and
+# the bash runs it again when the default backend fails), plan (the loop port's plan), bash (the ports refuse it).
+
+# the two cases of tests/nfcxx/loop-cases.txt that give the trace and the time log
+pathb-plan | --keep-intermediates --time-log=t.json -c a.cpp
+pathb-plan | --trace=t.json -c a.cpp
+
+# a compile, a link and both, with the default backend and with --backend=pathb
+pathb-plan | -c a.cpp
+pathb-plan | --time-log=l.txt -c a.cpp
+pathb-plan | --trace=t.json --time-log=l.txt -c a.cpp
+pathb-plan | --trace=t.json a.cpp -o prog
+pathb-plan | --time-log=l.txt a.cpp -o prog
+pathb-plan | --trace=t.json --time-log=l.txt a.cpp b.cpp -o prog
+pathb-plan | --backend=pathb --trace=t.json -c a.cpp
+pathb-plan | --backend=pathb --trace=t.json a.cpp -o prog
+pathb-plan | --backend=pathb --trace=t.json --time-log=l.txt a.cpp b.cpp -o prog
+pathb-plan | --backend=pathb --trace=t.json -c bad.cpp
+pathb-plan | --backend=pathb --trace=t.json a.cpp bad.cpp -o prog
+pathb-plan | --trace=t.json --time-log=l.txt a.cpp -o prog -fsanitize=address
+
+# a failure under the default backend: the bash runs the arguments again, with its own trace
+pathb-fallback | --trace=t.json -c bad.cpp
+pathb-fallback | --trace=t.json --time-log=l.txt a.cpp bad.cpp -o prog
+
+# an empty value is off (the bash's trace= and time_log= are empty), and the last value counts
+pathb-plan | --trace= -c a.cpp
+pathb-plan | --trace=t.json --trace= --time-log=l.txt -c a.cpp
+pathb-plan | --time-log=l.txt -E a.cpp
+
+# the bash's own routes: a preprocess with a trace, a shared link (the default backend takes gcc), a gcc backend, C sources,
+# a source that is not a file, a directory that does not exist, a refused argument
+bash | --trace=t.json -E a.cpp
+bash | --trace=t.json -shared a.cpp -o lib.so
+bash | --trace=t.json --backend=gcc -c a.cpp
+bash | --trace=t.json a.cpp c.c -o prog
+bash | --trace=t.json -c missing.cpp
+bash | --trace=nodir/t.json -c a.cpp
+bash | --trace=t.json -c a.cpp -x c
+plan | --trace=t.json -fsyntax-only a.cpp

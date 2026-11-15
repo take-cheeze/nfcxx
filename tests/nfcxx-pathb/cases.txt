@@ -97,7 +97,8 @@ default c.c -o prog
 default -c c.c
 default -c c.c -o out.o
 default -c -o out.o c.c a.cc
-# cache, time log and trace: the Path B paths have no plan line for them
+# cache: the Path B paths have no plan line for it. time log and trace: the Path B plan has TIMELOG, TRACE, START, SPAN and SPANF
+# lines for the driver's spans (left out of this comparison: tests/nfcxx-trace/run.sh checks the files)
 default --cache=cache -c a.cc
 default --cache=cache --cache-log=log.txt a.cc -o prog
 default --time-log=t.log a.cc -o prog
@@ -114,3 +115,10 @@ default -c a.cc --promote-slots=maybe
 default -c a.cc --unroll=yes
 default -c a.cc --module-dir=mods
 pathb a.cc --module-dir=mods -o prog
+default -fno-sanitize=thread -c a.cc
+default -fno-sanitize=undefined -c a.cc
+default -fsanitize-recover=undefined -c a.cc
+default -fsanitize=address,undefined -c a.cc
+pathb -fno-sanitize=thread -c a.cc
+pathb -fsanitize-recover=undefined a.cc -o prog
+default -fsanitize=undefined -fno-sanitize=address -c a.cc
