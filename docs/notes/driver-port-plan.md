@@ -36,6 +36,9 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    tests/nfcxx-modules (its plan printer exists: scripts/nfcxx-modules.rb).
 4. Eccp steps and link: `ecp_arg`, `eccp_cleanup`, `link_records_rm`, and the link dispatch. Test: the live
    differential (tests/nfcxx-live) and tests/nfcxx-gcc.
+   Progress: `eccp_cleanup` and `link_records_rm` run scripts/nfcxx-link.rb. The link argument loop (-I, -l, -lcudart, -Wl and
+   the objects) is scripts/nfcxx-linkargs.rb (`edg`), shared with the gcc plan; tests/nfcxx-linkargs checks it against the
+   bash loop. `ecp_args` answers all of a driver call's arguments in one ruby call (`ecp-arg.rb --batch`).
 5. SYCL pre-pass: `sycl_kernel_headers` (the header script is already ported). Test: tests/nfcxx-prepass.
 6. CUDA: `cu_prepare`, `cu_rewrite`, `ir_opt_device`, `cu_amd_build`, `cu_device_key`, `cu_device_build`, and the
    rewriter build (tools/cuda-rewrite). Needs a CUDA toolkit to test end to end; the stubs (tests/nfcxx-cuda-device,

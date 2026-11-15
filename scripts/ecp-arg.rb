@@ -5,6 +5,10 @@
 # eccp runs in a temporary directory (moves=1); with moves=0 the argument is passed as it is.
 #
 #   ruby scripts/ecp-arg.rb ARG     prints the argument for eccp (one line)
+#   ruby scripts/ecp-arg.rb --batch MOVES ARG...
+#       the same for each ARG (MOVES is 0 or 1, nfcxx's moves), in one process: each answer is a record "v" ANSWER followed by
+#       a NUL byte, and a run that finishes ends with the record "z" (the end marker: the bash stops when it is missing). The
+#       answers are the bash's $(...) values (trailing newlines removed), so the driver reads them as it read the one-line form.
 #
 # abs_path is host-sys.rb's: the absolute path of a path that need not exist (its directory must exist, else it is unchanged).
 
@@ -58,6 +62,11 @@ module EcpArg
     res
   end
 
+  # the value a bash $(...) keeps of TEXT: its trailing newlines removed
+  def substitution(text)
+    text.sub(/\n+\z/, "")
+  end
+
   # the argument as eccp receives it
   def ecp_arg(arg)
     if arg.start_with?("-I") && arg.length > 2
@@ -75,6 +84,16 @@ module EcpArg
 end
 
 if $PROGRAM_NAME == __FILE__
-  abort "ecp-arg: one argument" unless ARGV.length == 1
-  puts EcpArg.ecp_arg(ARGV[0])
+  if ARGV.first == "--batch"
+    _, moves, *args = ARGV
+    abort "ecp-arg: --batch MOVES ARG..." unless %w[0 1].include?(moves)
+    $stdout.binmode
+    args.each do |arg|
+      $stdout.write("v#{EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg)}\0")
+    end
+    $stdout.write("z\0")
+  else
+    abort "ecp-arg: one argument" unless ARGV.length == 1
+    puts EcpArg.ecp_arg(ARGV[0])
+  end
 end

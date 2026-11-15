@@ -52,6 +52,7 @@
 
 require "open3"
 require "pathname"
+require_relative "nfcxx-linkargs"
 
 class NfcxxUnported < StandardError
 end
@@ -811,48 +812,14 @@ class Plan
     cobjs
   end
 
-  # the link options of the EDG call: -l, -L, -Wl, and the rest, in argument order
+  # the link options of the EDG call: -l, -L, -Wl, and the rest, in argument order (scripts/nfcxx-linkargs.rb's rules; the
+  # facts give the CUDA home and the CUB archive)
   def edg_link_options(files)
-    eflist = []
-    userinc = []
-    no_as_needed = false
-    as_needed = false
-    files.each do |f|
-      case f
-      when /\A-I./ then userinc << ecp_arg(f)
-      when "-lcudart"
-        # scripts/nfcxx-loop's -lcudart: the run path of a CUDA_HOME's lib64, the CUB archive (links only), libcudart
-        home = @facts.value("cuda-home").to_s
-        eflist.push("--c_to_obj_option", "-Wl,-rpath,#{home}/lib64") if !home.empty? && @facts.dir?("#{home}/lib64")
-        unless @compile_only
-          cub = @facts.value("cuda-cub").to_s
-          eflist << cub unless cub.empty?
-        end
-        eflist << "--c_to_obj_lib=cudart"
-      when /\A-l./ then eflist << "--c_to_obj_lib=#{f[2..]}"
-      when "-Wl,--no-as-needed"
-        no_as_needed = true
-      when /\A-Wl,--no-as-needed,/
-        no_as_needed = true
-        f.delete_prefix("-Wl,--no-as-needed,").split(",", -1).each do |item|
-          if item.start_with?("-l") && item.length > 2 then eflist << "--c_to_obj_lib=#{item[2..]}"
-          elsif item.start_with?("-") then eflist.push("--c_to_obj_option", ecp_arg("-Wl,#{item}"))
-          else eflist << ecp_arg(item)
-          end
-        end
-      when "-Wl,--as-needed" then as_needed = true
-      when /\A-Wl,(--whole-archive|--no-whole-archive|--start-group|--end-group|--as-needed|-Bstatic|-Bdynamic)(,|\z)/
-        raise NfcxxExit.new("nfcxx: #{f}: an order-dependent link option cannot be kept with C++ inputs (docs/notes/cxx-driver.md)", 2)
-      when /\A-Wl,/ then eflist.push("--c_to_obj_option", ecp_arg(f))
-      else eflist << ecp_arg(f)
-      end
-    end
-    if no_as_needed
-      eflist.push("--c_to_obj_option", "-Wl,--no-as-needed")
-    elsif as_needed
-      eflist.push("--c_to_obj_option", "-Wl,--as-needed")
-    end
-    [eflist, userinc]
+    NfcxxLinkArgs.edg_options(files, compile_only: @compile_only, cuda_home: @facts.value("cuda-home").to_s,
+                              dir: ->(d) { @facts.dir?(d) }, cub: -> { @facts.value("cuda-cub").to_s },
+                              ecp_arg: ->(a) { ecp_arg(a) })
+  rescue NfcxxLinkArgs::Refused => e
+    raise NfcxxExit.new(e.message, 2)
   end
 
   # the run of nfcxx on ARGV, in the same output (the bash runs it as a new process)
