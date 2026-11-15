@@ -36,7 +36,7 @@ module NfccxxTrace
   end
 
   # record a span from START (from start) to now
-  def span(start, name, category, unit: nil, env: ENV)
+  def span(start, name, category, unit: nil, pid: Process.pid, env: ENV)
     return unless enabled?(env)
 
     now = now_us
@@ -53,7 +53,7 @@ module NfccxxTrace
 
     File.open(trace, "a") do |f|
       f.write(format(%({"name":"%s","cat":"%s","ph":"X","ts":%d,"dur":%d,"pid":%d,"tid":1},\n),
-                     escape(name), category, start, dur, Process.pid))
+                     escape(name), category, start, dur, pid))
     end
   end
 
@@ -80,5 +80,25 @@ module NfccxxTrace
     File.open(env["NFCXX_TRACE"], "a") do |f|
       f.write(format(%({"name":"trace_end","ph":"i","s":"g","ts":%d,"pid":%d,"tid":1}\n]\n), now_us, Process.pid))
     end
+  end
+end
+
+# The command line that scripts/trace.sh (nfcxx's shim) calls. The files and the settings are the environment's, as above.
+#   ruby scripts/trace.rb now                          prints the clock reading (microseconds)
+#   ruby scripts/trace.rb span START NAME CAT PID UNIT   records a span from START to now, for process PID
+#   ruby scripts/trace.rb open FILE                    starts the trace file (the opening "[")
+#   ruby scripts/trace.rb close FILE PID               the closing instant event and "]"
+if $PROGRAM_NAME == __FILE__
+  case ARGV[0]
+  when "now" then puts NfccxxTrace.now_us
+  when "span"
+    _, start, name, cat, pid, unit = ARGV
+    NfccxxTrace.span(start.to_i, name, cat, unit: unit, pid: pid.to_i)
+  when "open" then File.write(ARGV[1], "[\n")
+  when "close"
+    File.open(ARGV[1], "a") do |f|
+      f.write(format(%({"name":"trace_end","ph":"i","s":"g","ts":%d,"pid":%d,"tid":1}\n]\n), NfccxxTrace.now_us, ARGV[2].to_i))
+    end
+  else abort "trace: unknown command #{ARGV[0].inspect} (now, span, open, close)"
   end
 end
