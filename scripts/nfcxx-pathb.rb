@@ -28,11 +28,13 @@
 # -o value is replaced by TMP/x.o), or the -E path when -E is given. The port plans that command line.
 #
 # Modelled, with the bash's order of the lines: C sources (-c, and a link with C++ or alone), -E (exec g++ -E), -fsyntax-only,
-# -fsanitize=address (--asan on the compile, the ASan link options, the VLA runtime), -fsafe-pointers (--safe-pointers, the
-# runtime ahead of the objects), -shared (--pic and -shared on the link; the default backend takes gcc for it), the depfile
-# options -MP, -MF, -MT, -MQ with -c, and -MD and -MMD with -c and an explicit --backend=pathb (the bash writes no depfile on
-# the Path B compile: its -c path returns before the depfile). --cache, --cache-log, --time-log and --trace have no plan line
-# of their own (the cache and the Path B paths return before the cache; the trace and time log write files, not commands).
+# -fsanitize=address (--asan on the compile, the ASan link options, the VLA runtime), -fsanitize=CHECKS (--sanitize=CHECKS
+# on each compile; the names the bash implements), -fsafe-pointers (--safe-pointers, the runtime ahead of the objects),
+# -shared (--pic and -shared on the link; the default backend takes gcc for it), the depfile options -MP, -MF, -MT, -MQ
+# with -c, and -MD and -MMD with -c and an explicit --backend=pathb (the bash writes no depfile on
+# the Path B compile: its -c path returns before the depfile). --cache and --cache-log have no plan line of their own (the
+# cache and the Path B paths return before the cache). --keep-intermediates, --pathb-c and --obfuscate-kernels have none
+# either: the bash reads them on the EDG and CUDA paths only.
 #
 # Not covered (exit 3): the gcc backend (the default with -shared, or with -MD or -MMD and no -fsafe-pointers, and the
 # --backend=gcc choice); .cu and .cpp2 inputs (CUDA and cppfront: the rewriter, the device units and the prelinker) and the
@@ -42,7 +44,8 @@
 # -MM and the other -M options that are not the depfile family (the bash passes -M and -MM on to cc or drops them, while its
 # header comment says -M takes the gcc backend: the two disagree, so the port does not choose); -MD with -c of a file -fsafe-
 # and -MMD with the default backend and no -fsafe-pointers (the default takes gcc for them); -c with no C++ or C source; -x
-# with a language other than c++; -fsanitize=undefined and the other -fsanitize values (the bash exits 2 for them: refused).
+# with a language other than c++; --time-log and --trace (the bash writes the driver's spans to the file: not modelled here).
+# A -fsanitize= name the bash does not implement, and -fsanitize-* and -fno-sanitize=NAME, exit 2 (the bash's refusal).
 #
 # FILE holds the facts the bash reads from the machine and from its helper scripts (tests/nfcxx-pathb/run.sh writes it):
 #   host linux-x86_64          the host is x86-64 Linux (the link libraries and the QBE target are that host's)
@@ -90,6 +93,9 @@ LIBC = "ROOT/build/edg/lib/libC.a".freeze
 CHOICES = %w[default pathb gcc].freeze
 # the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
 PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
+# the -fsanitize= checks the bash implements (its sanitize block; docs/notes/ubsan.md)
+SANITIZE_CHECKS = %w[undefined signed-integer-overflow integer-divide-by-zero shift bounds null unreachable return
+                     float-cast-overflow].freeze
 FSO_OBJECT = "TMP/x.o".freeze # the object of -fsyntax-only (its temporary directory's x.o)
 
 def unported(what)
@@ -229,6 +235,7 @@ class Plan
     @asan = false
     @asanopts = []
     @safeptr = false
+    @sanitize = nil # the -fsanitize= checks (a comma list), "" after -fno-sanitize=all
     @depmode = nil
     @ir_opt = nil
     @dialect = "g++"
@@ -282,8 +289,12 @@ class Plan
         nil # with the gcc backend only (the EDG C side); Path B does not read it
       elsif x == "--no-eh-shim"
         @eh_shim = false
-      elsif x.start_with?("--cache=", "--cache-log=", "--time-log=", "--trace=")
-        nil # no plan line: the cache is not reached by the Path B paths, the logs and traces write files
+      elsif x == "--keep-intermediates" || x == "--obfuscate-kernels" || x.start_with?("--pathb-c=")
+        nil # the bash reads these on the EDG and CUDA paths only (the Path B routes here never read them)
+      elsif x.start_with?("--time-log=", "--trace=")
+        unported(x) # the bash writes the spans of the driver's steps to the file: no plan line models them
+      elsif x.start_with?("--cache=", "--cache-log=")
+        nil # no plan line: the cache is not reached by the Path B paths
       elsif x.start_with?("--dialect=")
         @dialect = x.delete_prefix("--dialect=")
         @dialect_asked = true
@@ -317,8 +328,12 @@ class Plan
       elsif x == "-fno-safe-pointers"
         @safeptr = false
       elsif x == "-fno-sanitize=all"
-        nil
-      elsif x.start_with?("-fsanitize=") || x.start_with?("-fsanitize-") || x.start_with?("-fno-sanitize=")
+        @sanitize = ""
+      elsif x.start_with?("-fsanitize=")
+        # the bash joins the values in order (sanitize=${sanitize:+$sanitize,}VALUE) and checks each name after the loop
+        value = x.delete_prefix("-fsanitize=")
+        @sanitize = @sanitize.to_s.empty? ? value : "#{@sanitize},#{value}"
+      elsif x.start_with?("-fsanitize-") || x.start_with?("-fno-sanitize=")
         exit_with("nfcxx: #{x} is not supported (only -fsanitize=address; docs/notes/asan.md)", 2)
       elsif x == "-fno-omit-frame-pointer" || x == "-fomit-frame-pointer"
         @asanopts << x
@@ -435,6 +450,13 @@ class Plan
     unported("the gcc backend: the default is gcc for -shared and for -MD or -MMD (scripts/nfcxx-gcc-plan.rb)") unless
       @choice == "pathb" || @safeptr || default_selected?
     @default_backend = @choice == "default" && default_selected?
+    # each check is named as the bash names it (sanitize=, split on commas; a trailing comma is no check)
+    unless @sanitize.to_s.empty?
+      checks = @sanitize.split(",", -1)
+      checks.pop if @sanitize.end_with?(",")
+      bad = checks.find { |c| !SANITIZE_CHECKS.include?(c) }
+      exit_with("nfcxx: -fsanitize=#{bad} is not supported (implemented: #{SANITIZE_CHECKS.join(", ")})", 2) if bad
+    end
     exit_with("nfcxx: -fsanitize=address and -fsafe-pointers both replace malloc; use one", 2) if @asan && @safeptr
     unported("host is not x86-64 Linux") unless @facts.value("host") == "linux-x86_64"
     exit_with("nfcxx: QBE not built; run scripts/setup-qbe.sh", 2) unless @facts.flag?("qbe")
@@ -470,10 +492,11 @@ class Plan
     raise PlanExec
   end
 
-  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
-  # B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
+  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --sanitize, --safe-pointers, --ir-opt,
+  # --asan (Path B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
+    f << "--sanitize=#{@sanitize}" unless @sanitize.to_s.empty?
     f << "--safe-pointers" if @safeptr
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
