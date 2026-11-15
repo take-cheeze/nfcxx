@@ -147,9 +147,12 @@ class LiveFacts < Facts
     @cwd = cwd
     @probes = {}
     @host_sys = nil
+    # CUDA_HOME is read by the --emit-hip plan only (the bash exports NFCXX_SYSTEM_PATHS from it: plan() gives that line),
+    # so it is a fact here and the other emit plans refuse it
+    @cuda_home = ENV["CUDA_HOME"].to_s.empty? ? nil : ENV["CUDA_HOME"]
     ENV.each_key do |name|
       next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
-                  %w[CUDA_HOME EDG_BASE EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+                  %w[EDG_BASE EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
       raise Unported, "environment #{name} (the live facts do not read it)"
     end
@@ -161,6 +164,9 @@ class LiveFacts < Facts
   def live?
     true
   end
+
+  # CUDA_HOME when it is set (the bash's CUDA_HOME test is non-empty), else nil
+  attr_reader :cuda_home
 
   def work
     @cwd
@@ -413,13 +419,16 @@ def plan(argv, facts)
   o = parse(argv)
   # the live plan covers the emit modes (the Path B compile and link are checked against the facts file only)
   raise Unported, "the live plan covers --emit-c and --emit-hip only" if facts.live? && !(o[:emit_c] || o[:emit_hip])
+  raise Unported, "environment CUDA_HOME (the --emit-c plan does not read it)" if facts.live? && facts.cuda_home && !o[:emit_hip]
   # the sources the bash counts: the .cu and .cpp inputs (ncpp), then the .c files apart
   sources = o[:cu] + o[:srcs]
   raise Ends, 2 if sources.empty? && o[:cfiles].empty? && !o[:stdin]
 
   if o[:emit_hip]
     raise Ends, 2 unless o[:cu].size == 1
-    return [["EXEC", "#{ROOT}/build/cuda-rewrite", "--hip", *o[:cflags], o[:cu][0]]]
+    # the bash exports NFCXX_SYSTEM_PATHS (CUDA_HOME first) before its arguments are read: the rewriter reads it
+    exports = facts.live? && facts.cuda_home ? [["ENV", "NFCXX_SYSTEM_PATHS=#{facts.cuda_home}"]] : []
+    return exports + [["EXEC", "#{ROOT}/build/cuda-rewrite", "--hip", *o[:cflags], o[:cu][0]]]
   end
 
   raise Unported, "cu inputs (the rewriter runs before the rest)" unless o[:cu].empty?
