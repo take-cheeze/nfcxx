@@ -113,3 +113,9 @@ a.cc -o prog
 --backend=gcc --module-dir=mods a.cc -o prog
 --backend=gcc --instantiate=auto -c a.cc
 --backend=gcc --instantiate=bogus -c a.cc
+--backend=gcc -fno-sanitize=thread -c a.cc
+--backend=gcc -fno-sanitize=undefined -c a.cc
+--backend=gcc -fsanitize-recover=undefined -c a.cc
+--backend=gcc -fsanitize=address,undefined -c a.cc
+--backend=gcc -fsanitize=undefined,,bounds -c a.cc
+--backend=gcc -fno-sanitize=address -fsanitize=address -c a.cc

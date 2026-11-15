@@ -63,6 +63,15 @@ cases=(
   "refuse-x-c:-x c -c hello.c"
   "sanitize-undefined-default:-fsanitize=undefined -c hello.cc"
   "sanitize-undefined-gcc:--backend=gcc hello.cc -fsanitize=undefined -o prog"
+  "sanitize-address-link:-fsanitize=address hello.cc -o prog"
+  "sanitize-address-undefined-refused:-fsanitize=address,undefined -c hello.cc"
+  "sanitize-no-thread-refused:-fno-sanitize=thread -c hello.cc"
+  "sanitize-no-undefined-refused:-fno-sanitize=undefined -c hello.cc"
+  "sanitize-recover-refused:-fsanitize-recover=undefined -c hello.cc"
+  "sanitize-address-safeptr-refused:-fsanitize=address -fsafe-pointers hello.cc -o prog"
+  "sanitize-thread-refused:-fsanitize=thread hello.cc -o prog"
+  "sanitize-gcc-no-thread-refused:--backend=gcc -fno-sanitize=thread -c hello.cc"
+  "sanitize-gcc-thread-refused:--backend=gcc -fsanitize=thread hello.cc -o prog"
 )
 
 

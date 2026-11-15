@@ -12,8 +12,8 @@
 #      with the same arguments, which builds the program with gcc as it always does; under --backend=pathb the status is the
 #      driver's, as in the bash;
 #   5. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
-# A refusal the bash makes before it runs anything (the gcc port exits 2 with its message and prints no plan line) is the
-# driver's: the message goes to stderr and the status is 2, without the bash.
+# A refusal the bash makes before it runs anything (the gcc port exits 2 with its message and prints no plan line; the Path B
+# port does the same for its sanitizer refusals) is the driver's: the message goes to stderr and the status is 2, without the bash.
 # The ports' plans are the bash's commands for the argument lists they model (tests/nfcxx-live, tests/nfcxx-gcc,
 # tests/nfcxx-driver check that), so the behaviour is the bash's for every argument list.
 #
@@ -74,8 +74,9 @@ def freestanding_plan(args)
   out
 end
 
-# the Path B plan of these arguments: [plan text, the backend choice the port was given], or nil when the port does not plan
-# them. The choice is default (no --backend) or pathb (--backend=pathb, which the port takes as its own argument).
+# the Path B plan of these arguments: [plan text, the backend choice the port was given], a Refusal (the sanitizer options the
+# bash refuses before it runs anything), or nil when the port does not plan them. The choice is default (no --backend) or
+# pathb (--backend=pathb, which the port takes as its own argument).
 def pathb_plan(args)
   return nil if ENV.key?("NFCXX_BACKEND")
 
@@ -85,7 +86,9 @@ def pathb_plan(args)
     elsif backends == ["--backend=pathb"] then ["pathb", args - backends]
     else return nil
     end
-  out, _err, status = Open3.capture3(RbConfig.ruby, PATHB_PLAN, "--tabs", "--live=#{ROOT}", "--backend=#{choice}", "--", *rest)
+  out, err, status = Open3.capture3(RbConfig.ruby, PATHB_PLAN, "--tabs", "--live=#{ROOT}", "--backend=#{choice}", "--", *rest)
+  refusal = refusal_of(out, err, status)
+  return refusal if refusal
   return nil unless status.success? && plan_text?(out)
 
   [out, choice]
@@ -129,6 +132,11 @@ if fs
 end
 
 pb = pathb_plan(ARGV)
+if pb.is_a?(Refusal)
+  trace("pathb-plan")
+  $stderr.write(pb.message)
+  exit(2)
+end
 if pb
   trace("pathb-plan")
   status = run_plan_text(pb[0])
