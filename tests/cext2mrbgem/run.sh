@@ -456,6 +456,9 @@ check grep -qF '(sizeof(".%N") - 1)' "$work/api_strlen_lit/src/api_strlen_lit.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_format tools/cext2mrbgem/fixtures/api_str_format/ext/api_str_format "$work/api_str_format" > "$work/api_str_format.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$work/api_str_format/src/api_str_format.c"
+# 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use2" > "$work/api_dead_use2.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
 # 2zzz76. A use of a helper in inactive code (#if 0) is not a use: the converter does not refuse it, and the live code converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use" > "$work/api_dead_use.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

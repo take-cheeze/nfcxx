@@ -2398,6 +2398,8 @@ use_problem = lambda do |name, use|
           ok = (@occ[name] || []).all? do |orel, os, _oe|
             inside = orel == rel && s <= os && os < e
             next true if inside
+            # an expansion in an inactive definition (its #if is false in this build) is dead code
+            next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
             # a macro is local to its file: a same-named macro of another file is another definition, not a use
             next true if orel != rel
             fn = enclosing_func(orel, os)
@@ -3128,7 +3130,12 @@ end
         excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
         next if excluded && entry['needs_mrb']
         if entry['needs_mrb'] && body_spans.none? { |a, b| a < s && s < b } && !in_global_macro?(rel, s)
-          refuse(rel, s, name, 'needs the mruby state, which is not in scope at file scope')
+          dm = define_at(rel, s)
+          if dm && alloc_reach.include?(dm[0])
+            refuse(rel, s, name, 'stuck point (per-class allocator): the macro is expanded in a per-class allocator, which has no state argument in the fork (accepted stuck point)')
+          else
+            refuse(rel, s, name, 'needs the mruby state, which is not in scope at file scope')
+          end
           next
         end
         map_entry(rel, s, e, name, entry)
