@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/../.."
 pass=0; fail=0; skipped=0
 ldav=""
-# The facts of the CUDA wrap (scripts/cuda-driver-wrap.sh) for the toolkits given: the headers that exist, the lib64
+# The facts of the CUDA wrap (scripts/wrap.rb) for the toolkits given: the headers that exist, the lib64
 # directories that exist, and the CUDART_VERSION of cuda_runtime_api.h (the wrap's own sed), as the port's options.
 cuda_facts() {
   local h f v

@@ -1,3 +1,5 @@
+# The bash original of the wrapper that scripts/wrap.rb ports (moved from scripts/ once the Ruby port was verified; kept as the oracle of
+# tests/wrap/run.sh and of the nfcc tests).
 # Sourced by nfcxx and nfcc: --bundle-libs and its companions (docs/notes/bundle.md).
 #   --bundle-libs              after the link, copy the shared libraries the output needs (libstdc++, libgcc_s, the
 #                              program's own; never glibc) into it with tools/bundle (build/nfcbundle)

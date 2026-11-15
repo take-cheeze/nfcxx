@@ -2,7 +2,7 @@
 # The CUDA driver API through the CUDA runtime (docs/notes/cuda-driver.md): builds libnfcxx_cudrv.a, whose cu* functions
 # (cuInit, cuModuleLoadData, cuLaunchKernel, ...) look the driver's own function up through libcudart's
 # cudaGetDriverEntryPointByVersion on their first call and jump to it. nfcxx and nfcc link it in place of libcuda
-# (scripts/cuda-driver-wrap.sh). A program linked with it and libcudart does not need libcuda.so.1 to link or to start (cudart loads the driver when it is first used), and a bundle
+# (scripts/wrap.rb). A program linked with it and libcudart does not need libcuda.so.1 to link or to start (cudart loads the driver when it is first used), and a bundle
 # (docs/notes/bundle.md) does not name the driver in DT_NEEDED. x86-64 Linux.
 #   usage: scripts/cuda-driver-shim [INCLUDE_DIR]   prints the archive's path
 #   INCLUDE_DIR holds cuda.h and cudaTypedefs.h (default: $CUDA_HOME/include, else /usr/local/cuda/include).

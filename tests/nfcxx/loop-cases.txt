@@ -122,7 +122,7 @@ NFCXX_CUDA_TARGET=amdgpu x.cpp
 NFCXX_CUDA_TARGET=amdgpu ROCM=/r CUDA_HOME=/c NFCXX_SYSTEM_PATHS=/s x.cpp
 NFCXX_CUDA_TARGET=nvidia NFCXX_SYSTEM_PATHS=/s x.cpp
 NFCXX_CUDA_TARGET= ROCM= x.cpp
-# --cuda-driver= and a link that names libcuda (scripts/cuda-driver-wrap.sh, docs/notes/cuda-driver.md)
+# --cuda-driver= and a link that names libcuda (scripts/wrap.rb, docs/notes/cuda-driver.md)
 --cuda-driver=cudart a.cpp -o p -lm
 --cuda-driver=libcuda -c a.cpp -lm
 NFCXX_CUDA_DRIVER=cudart -c a.cpp -lm

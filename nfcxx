@@ -46,7 +46,7 @@
 #                  needs (libstdc++, libgcc_s, the program's own; never glibc) are copied into it, so it runs without them
 #                  (tools/bundle, docs/notes/bundle.md). Executables and -shared objects.
 #   --cuda-driver=auto|cudart|libcuda: a link that names libcuda (-lcuda, CMake's CUDA::cuda_driver path) reaches the
-#                  CUDA driver API through libcudart instead (default auto; scripts/cuda-driver-wrap.sh,
+#                  CUDA driver API through libcudart instead (default auto; scripts/wrap.rb,
 #                  docs/notes/cuda-driver.md); NFCXX_CUDA_DRIVER= for every command.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
 #   -fuse-ld=NAME (NFCXX_LD=NAME): link with that linker (mold, lld, gold, bfd; needs ld.NAME on PATH). Default: the system linker.
@@ -97,8 +97,9 @@ for a in "$@"; do
     "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
   fi
 done
-source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
-source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
+source "$root/scripts/wrap.sh"   # --bundle-libs and --cuda-driver= (docs/notes/bundle.md, docs/notes/cuda-driver.md)
+bundle_wrap "$root/nfcxx" "$@"   # --bundle-libs (docs/notes/bundle.md)
+cuda_driver_wrap "$root/nfcxx" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
 set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim, scripts/cuda-driver-wrap.sh;
+# The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim, scripts/wrap.rb;
 # docs/notes/cuda-driver.md): a link that names libcuda gets the shim and libcudart instead.
 #   - with a stand-in libcudart (fakecudart.c): the version and stream flags each call asks for, eleven arguments
 #     through the trampoline, failures and the local error strings, one lookup per function (expected.txt); built by

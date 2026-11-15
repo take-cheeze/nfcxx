@@ -41,10 +41,10 @@ harness() {
   local nfcc_sed=$tmp/nfcc.sed
   # The sourced wrappers, with the driver and the tools stubbed as nfcc's own commands are: a driver run prints RUN, an exec EXEC.
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
-      "$root/scripts/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
+      "$root/tests/wrap/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec run_stub "\$driver" |exec_stub "$driver" |g' \
       -e 's|"\$root/scripts/cuda-driver-shim" "\$home/include" 2>&1|stub_shim "$home/include" 2>\&1|' \
-      "$root/scripts/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
+      "$root/tests/wrap/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" \&\& pwd)|root=$root|" \
       -e 's|die "QBE not built; run scripts/setup-qbe.sh"|:|' \
       -e 's|die "CIL backend not set up; run scripts/setup-cil.sh"|:|' \
@@ -58,8 +58,8 @@ harness() {
       -e 's|\bgcc \$what|run_stub gcc $what|g' \
       -e 's|^  gcc "\${objs|  run_stub gcc "${objs|' \
       -e 's|\bln -s |run_stub LN -s |g' \
-      -e "s|source \"\\\$root/scripts/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|" \
-      -e "s|source \"\\\$root/scripts/cuda-driver-wrap.sh\"|source \"$tmp/cuda-driver-wrap.sh\"|" \
+      -e "s|source \"\\\$root/tests/wrap/bundle-wrap.sh\"|source \"$tmp/bundle-wrap.sh\"|" \
+      -e "s|source \"\\\$root/tests/wrap/cuda-driver-wrap.sh\"|source \"$tmp/cuda-driver-wrap.sh\"|" \
       "$root/nfcc-bash" > "$nfcc_sed"
   # the compile-only dispatch: the "if" line before the line that sets suffix (the post-loop checks have an "if" of their own)
   local at
