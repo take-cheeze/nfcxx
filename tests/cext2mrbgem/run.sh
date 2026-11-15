@@ -484,6 +484,10 @@ check grep -qF 'mrb_funcall(mrb, c, "imaginary", 0)' "$work/api_complex/src/api_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_ts tools/cext2mrbgem/fixtures/api_time_ts/ext/api_time_ts "$work/api_time_ts" > "$work/api_time_ts.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '.tv_sec = mrb_fixnum(mrb_funcall(mrb, t, "to_i", 0))' "$work/api_time_ts/src/api_time_ts.c"
+# 2zzz85. rb_ivar_count(obj) is the length of the object's instance variable names.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_count tools/cext2mrbgem/fixtures/api_ivar_count/ext/api_ivar_count "$work/api_ivar_count" > "$work/api_ivar_count.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '(size_t)RARRAY_LEN(mrb_obj_instance_variables(mrb, obj))' "$work/api_ivar_count/src/api_ivar_count.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).

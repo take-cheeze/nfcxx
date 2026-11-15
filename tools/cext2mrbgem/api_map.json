@@ -1186,6 +1186,13 @@
       "template": "((struct timespec){ .tv_sec = mrb_fixnum(mrb_funcall($m, $0, \"to_i\", 0)), .tv_nsec = (long)mrb_fixnum(mrb_funcall($m, $0, \"usec\", 0)) * 1000 })",
       "caveat": "the seconds and the nanoseconds of a Time, from the mruby-time gem's to_i and usec: that gem keeps microseconds, so the nanoseconds are a multiple of 1000"
     },
+    "rb_ivar_count": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(size_t)RARRAY_LEN(mrb_obj_instance_variables($m, $0))",
+      "caveat": "the number of instance variables of the object: the length of mruby's instance_variables array (CRuby counts the generic ivar table the same way)"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
