@@ -497,6 +497,11 @@ check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
 check test "$rc" -ne 0
 check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
+# 2zzz92. A file-scope table used from a registered method: a member of the same name, a prototype parameter and a shadowing
+# parameter are not uses of the table, so the table's callbacks convert (yajl's callbacks table).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_tbl_names tools/cext2mrbgem/fixtures/api_tbl_names/ext/api_tbl_names "$work/api_tbl_names" > "$work/api_tbl_names.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'h.cbs->on_null(ctx)' "$work/api_tbl_names/src/api_tbl_names.c"
 # 2zzz90. A helper defined in a header included by exactly one source converts with that source (its registered callers too).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_single tools/cext2mrbgem/fixtures/api_header_single/ext/api_header_single "$work/api_header_single" > "$work/api_header_single.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

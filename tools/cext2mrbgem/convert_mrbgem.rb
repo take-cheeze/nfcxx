@@ -3329,6 +3329,17 @@ end
     (@occ[tbl] || []).all? do |orel, os, _oe|
       # a type name (struct tbl) is not a use of the table
       next true if @files[orel]['masked'][[os - 12, 0].max...os].to_s.match?(/\b(?:struct|union|enum)[ \t\n]+\z/)
+      # a member of that name (x.tbl, x->tbl) is a field, not the table
+      next true if @files[orel]['masked'][[os - 3, 0].max...os].to_s.match?(/(?:\.|->)[ \t\n]*\z/)
+      # a parameter or local of the enclosing function with that name shadows the table there
+      ef = enclosing_func(orel, os)
+      next true if ef && shadowed_in?(tbl, ef)
+      # a declaration of that name (a parameter of a prototype: `T *tbl`, `T tbl`) is not a use: a use follows no type name
+      pv = prev_nonspace(@files[orel]['masked'], os - 1)
+      if pv >= 0
+        pw = @files[orel]['masked'][0..pv][/([A-Za-z_]\w*)\z/, 1]
+        next true if @files[orel]['masked'][pv] == '*' || (pw && !%w[return case else do sizeof].include?(pw))
+      end
       # the table's own declaration: a file-scope occurrence that opens its initializer
       if enclosing_func(orel, os).nil? && @files[orel]['masked'][_oe..].to_s.match?(/\A(?:[ \t\n]*\[[^\]\n]*\])?[ \t\n]*=[ \t\n]*\{/)
         next true
