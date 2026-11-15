@@ -12,7 +12,7 @@
 cd "$(dirname "$0")/../.."
 #   // HOST-GCC-MIN: 14        the gcc backend needs a host GCC of that major version (or it skips; clang hosts skip too).
 #   // GCC-DIALECT-ONLY: <reason>  skip the probe when the host C++ compiler is clang (Apple's g++; its builtins differ).
-cd_root=$PWD; source "$cd_root/scripts/host-sys.sh"
+cd_root=$PWD; host_dialect() { ruby "$cd_root/scripts/host-sys.rb" host_dialect; }
 host_is_clang=$( [ "$(host_dialect)" = clang ] && echo 1 || echo 0 )
 backends=${NFCXX_BACKEND:-"gcc"}
 if [ -z "${NFCXX_BACKEND:-}" ] && [ "$(uname -s)" = Linux ]; then

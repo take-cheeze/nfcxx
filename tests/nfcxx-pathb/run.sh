@@ -63,7 +63,7 @@ while IFS= read -r line; do
   bargs=("${args[@]}")
   [ "$choice" != pathb ] || bargs=(--backend=pathb "${args[@]}")
   : > "$sb/stublog"
-  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/stublog" \
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/stublog" \
      NFCXX_STUB_TMP="$tmp" NFCXX_STUB_ROOT="$root" bash "$root/nfcxx" "${bargs[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
   # an exec (the gcc fallback) replaces the bash: the status is the re-run's, so only the EXEC line is compared
   if tail -1 "$sb/stublog" | grep -q '^EXEC '; then

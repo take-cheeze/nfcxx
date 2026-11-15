@@ -57,11 +57,11 @@ if (target) {
   }
   targetOpts.push("--target", target, "--signed_chars");
 }
-// The host's system include directories and GNU version (scripts/host-sys.sh), as the native front end gets them.
+// The host's system include directories and GNU version (scripts/host-sys.rb), as the native front end gets them.
 const sysInc = [], gnuOpts = [];
 if (hosted) {
-  const sh = (fn) => execFileSync("bash", ["-c", `source "${root}/scripts/host-sys.sh"; ${fn}`], { encoding: "utf8" });
-  for (const d of sh(`host_sys_includes ${lang}`).split("\n")) if (d) sysInc.push(d);
+  const sh = (...args) => execFileSync("ruby", [`${root}/scripts/host-sys.rb`, ...args], { encoding: "utf8" });
+  for (const d of sh("host_sys_includes", lang).split("\n")) if (d) sysInc.push(d);
   const gnu = sh("host_gnu_version").trim();
   if (gnu) gnuOpts.push("--gnu_version=" + gnu);
 }

@@ -1,3 +1,5 @@
+# The bash original of scripts/host-sys.rb (removed from scripts/ once the Ruby port was verified). Kept as the oracle
+# of tests/host-sys/run.sh: the same functions, sourced as before.
 # Sourced by nfcxx and scripts/pathb-dump.rb: discovery of the host C++ library headers and GNU version, so that
 # Path A (eccp / cpfe --gen_c_file_name) and Path B (the harness cpfe) lower hosted programs the same way.
 #   host_sys_includes   prints the include directories of the host g++ (NFCXX_CXX), one per line;

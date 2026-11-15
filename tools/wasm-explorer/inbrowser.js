@@ -7,7 +7,7 @@
 // (test-inbrowser.cjs).
 //
 // The assets (build-static.cjs writes them to inbrowser/ of the site):
-//   manifest.json        { gnuVersion }: the GNU version the server's front end runs with (scripts/host-sys.sh)
+//   manifest.json        { gnuVersion }: the GNU version the server's front end runs with (scripts/host-sys.rb)
 //   cpfe.js, cpfe.wasm   the front end (createCpfe)          mruby.js, mruby.wasm   the interpreter (createMruby)
 //   base.json            { path: text }: EDG's base directory (predefined macros, EDG's own headers)
 //   pathb-wasm-emit.rb, llvm-to-pathb.rb

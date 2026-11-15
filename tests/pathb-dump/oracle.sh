@@ -7,7 +7,7 @@
 # -std=c89, c99, c11, c17 (c18) or c23 reads the files as C (cpfe --cNN --gcc), and so does a file ending in .c when
 # no -std is given (C17 then). Hosted C takes the host C compiler's include directories (gcc -x c, NFCXX_CC).
 # Hosted by default, like the driver: the host g++'s C++ library include directories and GNU version
-# (scripts/host-sys.sh; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
+# (scripts/host-sys.rb; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
 # (only EDG's include_c++, no C library headers).
 # --gnu-version=N (or --gnu_version=N) sets the GNU version of the front end, as nfcxx does; it overrides the host's.
 # --stats (NFCXX_PATHB_STATS=1) prints per-node-kind lowered/unsupported counts to stderr (--ir only).

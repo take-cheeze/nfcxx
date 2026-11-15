@@ -8,6 +8,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sb=$work/sb; mkdir -p "$sb/scripts"
 for f in "$repo"/scripts/*; do ln -s "$f" "$sb/scripts/"; done
 rm -f "$sb/scripts/pathb-cc.rb"; cp "$repo/tests/pathb-cc/oracle.sh" "$sb/scripts/pathb-cc"; chmod +x "$sb/scripts/pathb-cc"
+rm -f "$sb/scripts/host-sys.sh"; cp "$repo/tests/host-sys/oracle.sh" "$sb/scripts/host-sys.sh"   # the bash original (the oracle sources it)
 ln -s "$repo/build" "$sb/build"; ln -s "$repo/tools" "$sb/tools"; ln -s "$repo/lib" "$sb/lib"
 cd "$work" || exit 1
 printf 'int f(int x) { return x * 3 + 1; }\n' > plain.cc

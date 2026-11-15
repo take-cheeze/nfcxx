@@ -246,7 +246,7 @@ class LiveFacts < Facts
     File.foreach(f, mode: "rb").any? { |l| l.match?(/\A[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]/n) }
   end
 
-  # the host C++ library directories of g++, as host_sys_includes (scripts/host-sys.sh) prints them
+  # the host C++ library directories of g++, as host_sys_includes (scripts/host-sys.rb) prints them
   def host_sys
     @host_sys ||= begin
       _out, err, _status = Open3.capture3("g++", "-E", "-x", "c++", "-v", "-", stdin_data: "")
@@ -300,7 +300,7 @@ class LiveFacts < Facts
     end
   end
 
-  # host_gnu_version (scripts/host-sys.sh): major*10000 + minor*100 + patch from g++ -dumpfullversion; Apple clang, which has
+  # host_gnu_version (scripts/host-sys.rb): major*10000 + minor*100 + patch from g++ -dumpfullversion; Apple clang, which has
   # no -dumpfullversion, reports 150000
   def host_gnu_version
     ver, = Open3.capture2("g++", "-dumpfullversion", err: File::NULL)
@@ -314,7 +314,7 @@ class LiveFacts < Facts
     nil
   end
 
-  # host_clang_version (scripts/host-sys.sh): the version of the host clang as major*10000 + minor*100 + patch, at most 200000
+  # host_clang_version (scripts/host-sys.rb): the version of the host clang as major*10000 + minor*100 + patch, at most 200000
   def host_clang_version
     out, = Open3.capture2("g++", "--version", err: File::NULL)
     m = out.lines.first.to_s.match(/version ([0-9][0-9.]*)/)

@@ -9,7 +9,15 @@ cpfe=${LIBCLANG_EDG_CPFE:-$root/build/libclang-edg/cmake/bin/cpfe}
 base=${LIBCLANG_EDG_BASE:-$root/build/libclang-edg/edg-base}
 [ -x "$cpfe" ] || { echo "libclang-cursors: front end not built; run scripts/setup-libclang-edg.sh" >&2; exit 2; }
 
-source "$root/scripts/host-sys.sh"
+host_sys() { "${RUBY:-ruby}" "$root/scripts/host-sys.rb" "$@"; }   # the host probes (scripts/host-sys.rb)
+host_sys_includes() { host_sys host_sys_includes "$@"; }
+host_gnu_version() { host_sys host_gnu_version; }
+abs_path() {
+  local d b
+  d=$(dirname "$1"); b=$(basename "$1")
+  if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
+  else printf '%s\n' "$1"; fi
+}
 std=--c++23; files=(); user_opts=(); c_mode=0
 for arg in "$@"; do
   case $arg in

@@ -40,11 +40,11 @@ run_port() {  # run_port: the port's output for the case, in the sandbox (the -M
   opts+=("--var=backend=$CASE_BACKEND")
   for a in "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}"; do opts+=("--arg=$a"); done
   opts+=("--src=$CASE_SRC")
-  (cd "$work" && env -i PATH="$PATH" ruby "$port" "${opts[@]}" "${CASE_PORT[@]}")
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" ruby "$port" "${opts[@]}" "${CASE_PORT[@]}")
 }
 
 run_bash() {  # run_bash: the bash's output for the case, in the sandbox
-  (cd "$work" && env -i PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "${CASE_TEST[@]}" \
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "${CASE_TEST[@]}" \
      bash "$oracle" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}")
 }
 

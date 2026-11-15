@@ -75,7 +75,7 @@ while IFS= read -r line; do
 
   # the bash
   : > "$sb/log"
-  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" "${envs[@]}" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/log" \
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" "${envs[@]}" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/log" \
      NFCXX_STUB_TMP="$tmp" NFCXX_STUB_ROOT="$root" bash "$root/nfcxx" "${args[@]}" >"$sb/bout" 2>"$sb/berr"); orc=$?
 
   norm() { sed -e "s#$tmp/d[0-9.]*#<tmp>#g" -e "s#$cache#<cache>#g" -e "s#$root#<root>#g" -e "s#$work#<work>#g" -e "s#$sb#<sb>#g"; }

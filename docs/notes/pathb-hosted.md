@@ -7,7 +7,7 @@ as the gcc backend.
 
 ## What changed
 
-- **Header discovery shared with the driver.** `scripts/host-sys.sh` (sourced by `nfcxx` and `scripts/pathb-dump`) prints the
+- **Header discovery shared with the driver.** `scripts/host-sys.rb` (sourced by `nfcxx` and `scripts/pathb-dump`) prints the
   include directories of the host `g++` (`NFCXX_CXX`, `NFCXX_SYS_INCLUDES`) and its GNU version (`--gnu_version=130000`).
   `pathb-dump` puts the host directories *before* EDG's `include_c++` (as `eccp` orders user and default directories; before,
   EDG's own minimal `<stdexcept>` hid `std::runtime_error`). `--freestanding` or `PATHB_HOSTED=0` gives the old harness.
