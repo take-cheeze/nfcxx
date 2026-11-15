@@ -16,8 +16,12 @@
 #   --chdir=DIR    the working directory of the commands (default: the current one)
 #
 # Plan format: one command per line, its fields separated by single tabs (so an argument may hold spaces; an empty argument is
-# an empty field). The first field is the kind: RUN ARGV..., EXEC ARGV..., CP SRC DST, CAT FILE (to standard output), and
-# LN -s TARGET LINK; ENV NAME=VALUE exports a variable for the programs that follow (as the bash's export does). Blank lines and lines that start with # are skipped. A plan is read and checked in full before it runs.
+# an empty field). The first field is the kind: RUN ARGV..., EXEC ARGV..., CP SRC DST (CP -R SRC DST for a directory), CAT FILE
+# (to standard output), and LN -s TARGET LINK; ENV NAME=VALUE exports a variable for the programs that follow (as the bash's
+# export does). The prefixes of the next RUN or EXEC, as the bash writes them: ENV1 NAME=VALUE (NAME=VALUE cmd), OUT FILE
+# (cmd > FILE) and APP FILE (cmd >> FILE). JOBS N does nothing (the bash's ptxas parallelism). RUN ensure_tool DIR OUT is the
+# bash's ensure_tool: it builds DIR with ninja when OUT is missing or older than a source of DIR, under the lock OUT.lock.
+# Blank lines and lines that start with # are skipped. A plan is read and checked in full before it runs.
 # When a plan runs, each field that is ROOT or starts with ROOT/ has ROOT replaced by --root, and TMP likewise by --tmp (also after
 # -I or --NAME=, as in -IROOT/lib and --gen_c_file_name=TMP/out.c); and a
 # RUN or EXEC whose program is nfcxx runs ROOT/nfcxx. The port's arguments must not hold a tab or a newline.
@@ -31,7 +35,9 @@ require "rbconfig"
 
 PORT = File.expand_path("nfcxx-loop.rb", __dir__)
 ROOT_DEFAULT = File.expand_path("..", __dir__)
-KINDS = %w[ENV RUN EXEC CP CAT LN].freeze
+KINDS = %w[ENV RUN EXEC CP CAT LN ENV1 OUT APP JOBS].freeze
+# ENV1, OUT and APP are the prefixes of the next RUN or EXEC (the bash's NAME=VALUE cmd, cmd > FILE and cmd >> FILE): they
+# apply to that command only. JOBS N is the bash's ptxas parallelism, which the runner does not need: it does nothing.
 
 # The print step of the port's main, and the copy of it this runner plans with: the same plan, one tab-separated line per
 # command (kind, then the argv), instead of the words joined by spaces. The copy is made in memory; the port file is not changed.
@@ -63,6 +69,7 @@ end
 
 def parse_plan(text)
   plan = []
+  pending = nil   # the line number of an ENV1, OUT or APP that the next RUN or EXEC takes
   text.each_line.with_index(1) do |line, number|
     line = line.chomp
     next if line.empty? || line.start_with?("#")
@@ -70,21 +77,32 @@ def parse_plan(text)
     fields = line.split("\t", -1)
     kind = fields.shift
     raise PlanError, "line #{number}: unknown command #{kind.inspect}" unless KINDS.include?(kind)
+    raise PlanError, "line #{number}: #{kind} must come before a RUN or EXEC" if pending && !%w[RUN EXEC ENV1 OUT APP].include?(kind)
 
     case kind
     when "ENV"
       raise PlanError, "line #{number}: ENV needs NAME=VALUE" unless fields.size == 1 && fields[0].include?("=")
+    when "ENV1"
+      raise PlanError, "line #{number}: ENV1 needs NAME=VALUE" unless fields.size == 1 && fields[0].include?("=")
+    when "OUT", "APP"
+      raise PlanError, "line #{number}: #{kind} needs one file" unless fields.size == 1
+    when "JOBS"
+      raise PlanError, "line #{number}: JOBS needs a count" unless fields.size == 1 && fields[0].match?(/\A[0-9]+\z/)
     when "RUN", "EXEC"
       raise PlanError, "line #{number}: #{kind} needs a program" if fields.empty?
     when "CP"
-      raise PlanError, "line #{number}: CP needs SRC DST" unless fields.size == 2
+      raise PlanError, "line #{number}: CP needs SRC DST" unless fields.size == 2 || (fields.size == 3 && fields[0] == "-R")
     when "CAT"
       raise PlanError, "line #{number}: CAT needs one file" unless fields.size == 1
     when "LN"
       raise PlanError, "line #{number}: LN needs -s TARGET LINK" unless fields.size == 3 && fields[0] == "-s"
     end
+    pending = %w[ENV1 OUT APP].include?(kind) ? number : nil
+    pending = nil if %w[RUN EXEC].include?(kind)
     plan << [kind, fields]
   end
+  raise PlanError, "line #{pending}: a redirect or ENV1 with no command after it" if pending
+
   plan
 end
 
@@ -99,16 +117,63 @@ def expand(field, root, tmp)
   field
 end
 
-# Runs one program without a shell. Returns its status (128 + the signal when it was killed).
-def run_command(env, argv)
+# Runs one program without a shell. Returns its status (128 + the signal when it was killed). out: [FILE, MODE] sends its
+# standard output to FILE (MODE "w": the bash's >, "a": >>).
+def run_command(env, argv, out: nil)
   $stdout.flush
   $stderr.flush
-  pid = Process.spawn(env, [argv[0], argv[0]], *argv[1..])
+  opts = out ? { out: out } : {}
+  pid = Process.spawn(env, [argv[0], argv[0]], *argv[1..], **opts)
   Process.wait(pid)
   $?.exitstatus || 128 + $?.termsig
 rescue SystemCallError => e
   $stderr.puts "nfcxx-run: #{argv[0]}: #{e.message}"
   e.is_a?(Errno::ENOENT) ? 127 : 126
+end
+
+# RUN ensure_tool DIR OUT: the bash's ensure_tool. OUT is fresh when it is executable and no source file of DIR (the top
+# level only: .c, .cpp, .h, .hpp, .inc, .rb) is newer; otherwise DIR is built with ninja (CXX from NFCXX_CXX, default g++).
+# The bash's lock is not needed: a plan runs its commands one at a time.
+def tool_fresh?(dir, out)
+  return false unless File.file?(out) && File.executable?(out)
+
+  Dir.children(dir).none? do |name|
+    f = File.join(dir, name)
+    name.match?(/\.(c|cpp|h|hpp|inc|rb)\z/) && File.file?(f) && File.mtime(f) > File.mtime(out)
+  end
+end
+
+# The lock is a directory OUT.lock (the bash's mkdir lock): a parallel run waits for the build and finds OUT fresh.
+def ensure_tool(dir, out, env)
+  return 0 if tool_fresh?(dir, out)
+
+  FileUtils.mkdir_p(File.dirname(out))
+  lock = "#{out}.lock"
+  waited = 0
+  until (begin Dir.mkdir(lock); true; rescue Errno::EEXIST; false; end)
+    return 0 if tool_fresh?(dir, out)
+    sleep 0.2
+    waited += 1
+    next if waited < 3000
+
+    $stderr.puts "nfcxx: #{lock} is stuck (remove it if no build is running)"
+    return 1
+  end
+  begin
+    return 0 if tool_fresh?(dir, out)
+
+    cxx = env["NFCXX_CXX"] || ENV["NFCXX_CXX"] || "g++"
+    $stdout.flush
+    $stderr.flush
+    pid = Process.spawn(env.merge("CXX" => cxx), "ninja", "-C", dir, out: $stderr)
+    Process.wait(pid)
+    $?.exitstatus || 128 + $?.termsig
+  ensure
+    Dir.rmdir(lock) rescue nil
+  end
+rescue SystemCallError => e
+  $stderr.puts "nfcxx-run: ensure_tool: #{e.message}"
+  127
 end
 
 def file_step(kind)
@@ -121,6 +186,7 @@ end
 
 def run_plan(plan, env, root, tmp)
   exported = {}  # ENV lines: exported as the bash exports them, for the programs that follow
+  prefix = { env: {}, out: nil }   # ENV1, OUT and APP: for the next RUN or EXEC only
   plan.each do |kind, fields|
     args = fields.map { |field| expand(field, root, tmp) }
     status = case kind
@@ -128,11 +194,33 @@ def run_plan(plan, env, root, tmp)
                name, value = fields[0].split("=", 2)
                exported[name] = value
                0
+             when "ENV1"
+               name, value = fields[0].split("=", 2)
+               prefix[:env][name] = value
+               0
+             when "OUT"
+               prefix[:out] = [expand(fields[0], root, tmp), "w"]
+               0
+             when "APP"
+               prefix[:out] = [expand(fields[0], root, tmp), "a"]
+               0
+             when "JOBS"
+               0
              when "RUN", "EXEC"
                args[0] = File.join(root, "nfcxx") if args[0] == "nfcxx"
-               run_command(env.merge(exported), args)
+               st = if kind == "RUN" && args[0] == "ensure_tool"
+                      ensure_tool(args[1], args[2], env.merge(exported).merge(prefix[:env]))
+                    else
+                      run_command(env.merge(exported).merge(prefix[:env]), args, out: prefix[:out])
+                    end
+               prefix = { env: {}, out: nil }
+               st
              when "CP"
-               file_step(kind) { FileUtils.cp(args[0], args[1]) }
+               if args[0] == "-R"
+                 file_step(kind) { FileUtils.cp_r(args[1], args[2]) }
+               else
+                 file_step(kind) { FileUtils.cp(args[0], args[1]) }
+               end
              when "CAT"
                file_step(kind) { File.open(args[0], "rb") { |io| IO.copy_stream(io, $stdout) } }
              when "LN"

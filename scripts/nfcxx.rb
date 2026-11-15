@@ -7,11 +7,14 @@
 #      is written as a plan file and run by the runner;
 #   3. the freestanding plan (scripts/nfcxx-freestanding.rb --live): the --emit-c and --emit-hip lists, planned from this
 #      machine's facts (the EDG front end and the rewriter, built and fresh);
-#   4. the Path B plan (scripts/nfcxx-pathb.rb --live): the default backend or --backend=pathb, planned from this machine's
+#   4. the CUDA compile of one .cu input (scripts/nfcxx-cuda-live.rb): the -c compile of a .cu, planned stage by stage
+#      (the device image, then the host copy through the Path B port); it exits 3 for what it does not plan, and the
+#      arguments then go on to the next step, so the bash runs them.
+#   5. the Path B plan (scripts/nfcxx-pathb.rb --live): the default backend or --backend=pathb, planned from this machine's
 #      facts. The pathb-cc statuses are not facts here: a failed plan under the default backend is run again by the bash
 #      with the same arguments, which builds the program with gcc as it always does; under --backend=pathb the status is the
 #      driver's, as in the bash;
-#   5. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
+#   6. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
 # A refusal the bash makes before it runs anything (the gcc port exits 2 with its message and prints no plan line) is the
 # driver's: the message goes to stderr and the status is 2, without the bash.
 # The ports' plans are the bash's commands for the argument lists they model (tests/nfcxx-live, tests/nfcxx-gcc,
@@ -27,6 +30,7 @@ LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
 GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
 PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
 FREESTANDING_PLAN = File.join(ROOT, "scripts", "nfcxx-freestanding.rb")
+CUDA_LIVE = File.join(ROOT, "scripts", "nfcxx-cuda-live.rb")
 RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
 PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
 
@@ -72,6 +76,19 @@ def freestanding_plan(args)
   return nil unless status.success? && plan_text?(out)
 
   out
+end
+
+# the CUDA compile of these arguments (a .cu input): its status, or nil when the port does not plan them (exit 3 from it).
+# It runs the compile itself, in stages, so this is not a probe. Its exit 3 means the bash runs the arguments: when that
+# comes after its stages ran (a host compile the Path B port cannot build, under the default backend), the stages' output is
+# dropped and the bash's own output is the one printed (the bash rewrites the same files).
+def cuda_run(args)
+  return nil unless args.any? { |a| a.end_with?(".cu") }
+
+  pid = Process.spawn(RbConfig.ruby, CUDA_LIVE, "--", *args)
+  Process.wait(pid)
+  status = $?.exitstatus || 128 + $?.termsig
+  status == 3 ? nil : status
 end
 
 # the Path B plan of these arguments: [plan text, the backend choice the port was given], or nil when the port does not plan
@@ -126,6 +143,12 @@ fs = freestanding_plan(ARGV)
 if fs
   trace("freestanding-plan")
   exit(run_plan_text(fs))
+end
+
+cu = cuda_run(ARGV)
+if cu
+  trace("cuda-plan")
+  exit(cu)
 end
 
 pb = pathb_plan(ARGV)

@@ -289,6 +289,8 @@ class Plan
         nil # with the gcc backend only (the EDG C side); Path B does not read it
       elsif x == "--no-eh-shim"
         @eh_shim = false
+      elsif x == "--nfcxx-cuda-unit"
+        @cuda_unit = true # the source is the host copy of a .cu input (scripts/nfcxx-cuda-live.rb): the bash passes --cuda
       elsif x == "--keep-intermediates" || x == "--obfuscate-kernels" || x.start_with?("--pathb-c=")
         nil # the bash reads these on the EDG and CUDA paths only (the Path B routes here never read them)
       elsif x.start_with?("--time-log=", "--trace=")
@@ -509,7 +511,8 @@ class Plan
 
   # One pathb-cc call on a C++ source; returns its status (the pathb-status fact).
   def pathb_cc(source, dst)
-    argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, source, "-o", dst]
+    cuda = @cuda_unit ? ["--cuda"] : []   # cuda_opts of the bash: the host copy of a .cu input is compiled with --cuda
+    argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, *cuda, source, "-o", dst]
     @lines << ["RUN", *argv]
     @facts.status(source)
   end
