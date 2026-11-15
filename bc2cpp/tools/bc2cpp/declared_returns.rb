@@ -70,7 +70,8 @@ module DeclaredReturns
     case name
     # A nilable simple kind (`Integer?`) admits nil as well as the class: the guard is `nil || test`.
     when 'Integer' then type.args.empty? ? [:fixnum, 'Integer', nilable] : nil
-    when 'Array' then type.args.empty? ? [:array, 'Array', nilable] : nil
+    # The element type is not checked (as before): an Array[T] return is the array kind.
+    when 'Array' then [:array, 'Array', nilable]
     when 'String' then type.args.empty? ? [:string, 'String', nilable] : nil
     when 'Hash' then type.args.empty? ? [:hash, 'Hash', nilable] : nil
     when 'Symbol' then type.args.empty? ? [:symbol, 'Symbol', nilable] : nil
