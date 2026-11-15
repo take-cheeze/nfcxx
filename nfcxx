@@ -324,8 +324,8 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
 }
 # C++ modules (docs/notes/modules.md). mod_decl_name FILE prints NAME for an interface unit (export module NAME;); mod_imports FILE
 # prints the names it imports (import NAME;). Both read the declarations at the start of a line only.
-mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one
-  grep -Eq '^[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]' "$1"
+mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one (scripts/nfcxx-modscan.rb is-module)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$1"
 }
 mod_decl_name() {  # mod_decl_name FILE: the source scans are scripts/nfcxx-modscan.rb (tests/nfcxx-modscan/run.sh checks them)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "$1"
@@ -339,10 +339,8 @@ mod_check_src() {  # mod_check_src FILE: refuses the module features that are no
 # mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
 # compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
 # then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
-# is cleared, as the bash function's own trap replaced any earlier one (cu_prepare's), so that effect is kept. A failing step
-# ends the build with its status (set -e).
+# is left as it is, so cu_prepare's cleanup and trace_finish still run. A failing step ends the build with its status (set -e).
 mod_build_program() {
-  trap - EXIT
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
   exit $?
 }
