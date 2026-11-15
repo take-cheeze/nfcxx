@@ -452,6 +452,10 @@ check test "$(grep -c 'ruby_scan_digits(' "$work/api_scan_digits/src/api_scan_di
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_strlen_lit tools/cext2mrbgem/fixtures/api_strlen_lit/ext/api_strlen_lit "$work/api_strlen_lit" > "$work/api_strlen_lit.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '(sizeof(".%N") - 1)' "$work/api_strlen_lit/src/api_strlen_lit.c"
+# 2zzz77. rb_str_format(argc, argv, fmt) is the fork's mrb_str_format over the same argv.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_format tools/cext2mrbgem/fixtures/api_str_format/ext/api_str_format "$work/api_str_format" > "$work/api_str_format.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$work/api_str_format/src/api_str_format.c"
 # 2zzz76. A use of a helper in inactive code (#if 0) is not a use: the converter does not refuse it, and the live code converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use" > "$work/api_dead_use.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

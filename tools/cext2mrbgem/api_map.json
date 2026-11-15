@@ -1034,6 +1034,13 @@
       "mruby": "RUBY_EXTCONF_H",
       "caveat": "the build's extconf header name, defined only by CRuby's mkmf build; mruby never defines it, so the #ifdef that tests it is false and the include beneath it is inert"
     },
+    "rb_str_format": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_format($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_str_format(argc, argv, fmt) is the Ruby format of fmt with argv: the fork's mrb_str_format (mruby-sprintf, which must be in the build; the fork declares it in include/mruby/string.h)"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
