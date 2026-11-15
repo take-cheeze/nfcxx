@@ -4,10 +4,11 @@
 #   bash tests/pathb-dump/run.sh
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-# the oracle's sandbox: the repository's scripts (its host-sys.sh is the one the bash sources), with the built harness
+# the oracle's sandbox: the repository's scripts (its host-sys.sh is the bash original, tests/host-sys/oracle.sh), with the built harness
 sb=$work/sb; mkdir -p "$sb/scripts"
 for f in "$repo"/scripts/*; do ln -s "$f" "$sb/scripts/"; done
 rm -f "$sb/scripts/pathb-dump.rb"; cp "$repo/tests/pathb-dump/oracle.sh" "$sb/scripts/pathb-dump"; chmod +x "$sb/scripts/pathb-dump"
+rm -f "$sb/scripts/host-sys.sh"; cp "$repo/tests/host-sys/oracle.sh" "$sb/scripts/host-sys.sh"   # the bash original (the oracle sources it)
 ln -s "$repo/build" "$sb/build"; ln -s "$repo/tools" "$sb/tools"; ln -s "$repo/lib" "$sb/lib"
 cd "$work" || exit 1
 printf 'int f(int x) { return x * 3 + 1; }\n' > plain.cc

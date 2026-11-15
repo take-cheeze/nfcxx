@@ -3,7 +3,7 @@
 #   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
 #   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; --emitter=mruby selects scripts/pathb-qbe-emit.rb
 #   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
-#   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
+#   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.rb).
 # Usage: scripts/pathb-cc.rb [options] [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 # This is scripts/pathb-cc (bash) ported to Ruby: the same options (see the bash script's header), the same stages in the
 # same order, and the same exit statuses. The options below are what the nfcxx driver passes; each has an environment

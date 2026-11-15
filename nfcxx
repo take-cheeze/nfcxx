@@ -108,7 +108,19 @@ edg=${EDG_BUILD:-$root/build/edg}/bin
 # stack of EH entries before.
 eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
-source "$root/scripts/host-sys.sh"   # host_dialect, host_clang_version, host_sys_includes, host_gnu_version
+# The host probes are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced); abs_path is the bash
+# one, which runs once per argument and stays here.
+host_sys() { "${RUBY:-ruby}" "$root/scripts/host-sys.rb" "$@"; }
+host_dialect() { host_sys host_dialect; }
+host_clang_version() { host_sys host_clang_version; }
+host_gnu_version() { host_sys host_gnu_version; }
+host_sys_includes() { host_sys host_sys_includes "$@"; }
+abs_path() {
+  local d b
+  d=$(dirname "$1"); b=$(basename "$1")
+  if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
+  else printf '%s\n' "$1"; fi
+}
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
@@ -389,7 +401,7 @@ cu_device_key() {  # cu_device_key DEV SM PTXAS EXT DEFINE...: the device image 
     printf 'struct-slots %s\n' "$struct_slots"
     if [ $ir_opt_set = 1 ]; then printf 'ir-opt %s\n' "$ir_opt"; else printf 'ir-opt inline,sroa\n'; fi; cache_sha < "$root/scripts/pathb-ir-opt.rb"
     cache_sha < "$dev.cpp"; cache_sha < "$dev.kernels"
-    cache_sha < "$root/scripts/pathb-dump.rb"; cache_sha < "$root/scripts/host-sys.sh"
+    cache_sha < "$root/scripts/pathb-dump.rb"; cache_sha < "$root/scripts/host-sys.rb"
     for f in "${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}" "$root/build/pathb-ptx-emit"; do
       if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
     done
@@ -771,7 +783,6 @@ fi
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
-source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shared with scripts/pathb-dump.rb)
 extra=()
 sys_inc=()
 hosted_libs=()

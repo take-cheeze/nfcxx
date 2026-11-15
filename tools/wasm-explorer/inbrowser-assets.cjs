@@ -32,10 +32,9 @@ function baseFiles(dir = files.base, rel = "", out = {}) {
   return out;
 }
 
-// The GNU version the server's front end runs with (scripts/pathb-dump.rb, scripts/host-sys.sh).
+// The GNU version the server's front end runs with (scripts/pathb-dump.rb, scripts/host-sys.rb).
 function gnuVersion() {
-  const sh = `source "${root}/scripts/host-sys.sh"; host_gnu_version`;
-  return execFileSync("bash", ["-c", sh], { encoding: "utf8" }).trim();
+  return execFileSync("ruby", [`${root}/scripts/host-sys.rb`, "host_gnu_version"], { encoding: "utf8" }).trim();
 }
 
 function load() {

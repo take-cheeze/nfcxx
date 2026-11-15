@@ -64,7 +64,7 @@ while IFS= read -r line; do
       args+=("$t")
     fi
   done
-  port_out=$(env -i PATH="$PATH" ${penv[@]+"${penv[@]}"} ruby "$repo/scripts/nfcxx-cosmo.rb" --facts="$sb/facts" ${args[@]+"${args[@]}"} 2>"$sb/perr"); rc=$?
+  port_out=$(env -i RUBY="$(command -v ruby)" PATH="$PATH" ${penv[@]+"${penv[@]}"} ruby "$repo/scripts/nfcxx-cosmo.rb" --facts="$sb/facts" ${args[@]+"${args[@]}"} 2>"$sb/perr"); rc=$?
   if [ $rc = 3 ]; then
     unp=$((unp + 1)); unported_list+="  $line
       $(head -1 "$sb/perr")
@@ -72,7 +72,7 @@ while IFS= read -r line; do
     continue
   fi
   : > "$sb/stublog"
-  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" NFCXX_STUB_LOG="$sb/stublog" NFCXX_STUB_TMP="$tmp" \
      ${oenv[@]+"${oenv[@]}"} bash "$root/nfcxx" ${args[@]+"${args[@]}"} >/dev/null 2>"$sb/oerr"); orc=$?
   oracle_out=$(sed -e "s#$tmp/[^/]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" -e "s#$sb/#SB/#g" "$sb/stublog"; echo "STATUS $orc")
   if [ "$port_out" = "$oracle_out" ]; then

@@ -25,7 +25,7 @@ if [ $# -gt 0 ]; then names=("$@"); else names=(); for d in "$here"/*/; do [ -f 
 sandbox() {
   local sb=$1 variant=$2 name=$3 base=${3%.sh}
   mkdir -p "$sb"/{scripts,bin,work,tmp,build,be,lib/ehshim}
-  cp "$repo/scripts/host-sys.sh" "$sb/scripts/"
+  cp "$repo/tests/host-sys/oracle.sh" "$sb/scripts/host-sys.sh"
   if [ "$variant" = oracle ]; then
     cp "$here/$name/oracle.sh" "$sb/scripts/$name"; chmod +x "$sb/scripts/$name"; S=$sb/scripts/$name
   else
@@ -52,9 +52,9 @@ run_case() {
   sb=$w/sb; res=$w/res
   mkdir -p "$res"
   sandbox "$sb" "$variant" "$name"
-  [ -z "$setup" ] || (cd "$sb" && env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C SB="$sb" S="$S" bash -c "$setup") > /dev/null 2>&1
+  [ -z "$setup" ] || (cd "$sb" && env -i RUBY="$(command -v ruby)" PATH=/usr/local/bin:/usr/bin:/bin LANG=C SB="$sb" S="$S" bash -c "$setup") > /dev/null 2>&1
   : > "$sb/log"
-  (cd "$sb/work" && env -i PATH="$sb/bin:/usr/local/bin:/usr/bin:/bin" LANG=C HOME="$sb" \
+  (cd "$sb/work" && env -i RUBY="$(command -v ruby)" PATH="$sb/bin:/usr/local/bin:/usr/bin:/bin" LANG=C HOME="$sb" \
      NFCXX_STUB_LOG="$sb/log" NFCXX_STUB_TMP="$sb/tmp" SB="$sb" S="$S" bash -c "$cmd") > "$res/out" 2> "$res/err"
   echo $? > "$res/status"
   cp "$sb/log" "$res/log"

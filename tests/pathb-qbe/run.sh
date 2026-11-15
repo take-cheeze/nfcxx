@@ -51,7 +51,7 @@ cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 qbe=${QBE:-build/qbe/qbe}
 # The QBE target: PATHB_QBE_TARGET (passed to QBE with -t), else the host's, which is QBE's default. The append step takes
 # the arm64 or x86-64 helpers and the Apple or ELF forms from it (scripts/pathb-qbe-emit.rb, asm_helper).
-. "$root/scripts/host-sys.sh"
+host_qbe_target() { ruby "$root/scripts/host-sys.rb" host_qbe_target; }
 qbe_t=(); [ -n "${PATHB_QBE_TARGET:-}" ] && qbe_t=(-t "$PATHB_QBE_TARGET")
 qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }

@@ -3,7 +3,7 @@
 #   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
 #   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; --emitter=mruby selects scripts/pathb-qbe-emit.rb
 #   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
-#   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
+#   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.rb).
 # Usage: scripts/pathb-cc [options] [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 # The options below are what the nfcxx driver passes; each has an environment variable as a fallback (for scripts and tests that
 # predate the flag), and the flag wins when both are given.
@@ -36,7 +36,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 qbe=${QBE:-$root/build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-cc: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
-# The QBE target (PATHB_QBE_TARGET, else the host's): the append step takes the helpers of that target (scripts/host-sys.sh).
+# The QBE target (PATHB_QBE_TARGET, else the host's): the append step takes the helpers of that target (scripts/host-sys.rb).
 . "$root/scripts/host-sys.sh"
 qbe_t=(); [ -n "${PATHB_QBE_TARGET:-}" ] && qbe_t=(-t "$PATHB_QBE_TARGET")
 qbe_target=${PATHB_QBE_TARGET:-$(host_qbe_target)}

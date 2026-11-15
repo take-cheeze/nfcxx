@@ -1,6 +1,7 @@
-# The host C and C++ library discovery of scripts/host-sys.sh, ported to Ruby (a module for the Ruby scripts that the bash
-# ones source it for): abs_path, host_dialect, host_clang_version, host_gnu_version and host_sys_includes, with the same
-# probes and the same values.
+# The host C and C++ library discovery, ported to Ruby from the bash host-sys.sh (its original is tests/host-sys/oracle.sh):
+# abs_path, host_dialect, host_clang_version, host_gnu_version, host_qbe_target and host_sys_includes, with the same probes
+# and the same values. A module for the Ruby scripts; the bash scripts call its command line (see the end of this file).
+# tests/host-sys/run.sh is the differential test.
 require "open3"
 
 module HostSys
@@ -88,5 +89,31 @@ module HostSys
     dirs
   rescue SystemCallError
     []
+  end
+end
+
+# The command line the bash scripts call (one function per run, the bash name and arguments):
+#   ruby scripts/host-sys.rb host_dialect | host_clang_version | host_gnu_version | host_qbe_target
+#   ruby scripts/host-sys.rb host_sys_includes [c]      one directory per line
+#   ruby scripts/host-sys.rb abs_path PATH
+if $PROGRAM_NAME == __FILE__
+  fn, *args = ARGV
+  case fn
+  when "abs_path"
+    puts HostSys.abs_path(args.fetch(0) { abort "host-sys: abs_path needs a path" })
+  when "host_dialect"
+    puts HostSys.dialect
+  when "host_clang_version"
+    v = HostSys.clang_version
+    puts v if v
+  when "host_gnu_version"
+    v = HostSys.gnu_version
+    puts v if v
+  when "host_qbe_target"
+    puts HostSys.qbe_target
+  when "host_sys_includes"
+    HostSys.sys_includes(args.fetch(0, "c++")).each { |d| puts d }
+  else
+    abort "host-sys: unknown function #{fn.inspect}"
   end
 end

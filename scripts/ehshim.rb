@@ -8,7 +8,7 @@
 # The object is compiled by nfcxx itself with the gcc backend (needs EDG: scripts/setup-edg.sh), so that its `throw`
 # statements are EDG throws. It depends on the host g++ (headers), hence the version in the file name. When it cannot be
 # built the script prints a warning on stderr and nothing on stdout: programs then link without the shim, as before.
-# The host_gnu_version and host_dialect of scripts/host-sys.sh are ported here (same probes, same values).
+# The host_gnu_version and host_dialect of scripts/host-sys.rb are ported here (same probes, same values).
 require "fileutils"
 
 # A variable that is unset or empty is nil (bash's ${VAR:-default}).

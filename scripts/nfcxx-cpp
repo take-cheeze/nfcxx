@@ -7,7 +7,9 @@
 # (`nfcxx -E` itself hands the preprocessing to the host g++, as nfcc does; this is the EDG preprocessor.)
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-source "$root/scripts/host-sys.sh"
+host_sys() { "${RUBY:-ruby}" "$root/scripts/host-sys.rb" "$@"; }   # the host probes (scripts/host-sys.rb)
+host_sys_includes() { host_sys host_sys_includes "$@"; }
+host_gnu_version() { host_sys host_gnu_version; }
 cpfe=${CPFE:-$root/build/edg/bin/cpfe}
 [ -x "$cpfe" ] || { echo "nfcxx-cpp: EDG not built ($cpfe); run scripts/setup-edg.sh" >&2; exit 2; }
 export EDG_BASE=${EDG_BASE:-$root/build/edg-base}

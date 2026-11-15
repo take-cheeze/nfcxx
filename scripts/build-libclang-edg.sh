@@ -22,7 +22,9 @@ flags=(-std=c99 -Wall -Wextra -Werror -fPIC -O2 -DLIBCLANG_EDG_RUNNER_DEFAULT="\
 
 if [ "${LIBCLANG_EDG_IN_PROCESS:-1}" != 0 ] && [ -f "$archive" ]; then
   # the options of scripts/libclang-cursors, as C strings: before the -std option, and after the caller's -I/-D/-U
-  source "$root/scripts/host-sys.sh"
+  host_sys() { "${RUBY:-ruby}" "$root/scripts/host-sys.rb" "$@"; }   # the host probes (scripts/host-sys.rb)
+  host_sys_includes() { host_sys host_sys_includes "$@"; }
+  host_gnu_version() { host_sys host_gnu_version; }
   cstr() { local s=${1//\\/\\\\}; printf '  "%s",\n' "${s//\"/\\\"}"; }
   gnu=$(host_gnu_version)
   {

@@ -17,8 +17,8 @@ norm() { head -1 "$1" | sed -e "s|$sb|ROOT|g" -e "s|$repo|ROOT|g" -e 's|\.build\
 check() {  # check NAME ENV... -- the same stdout, stderr and status from both
   local name=$1; shift
   local bo be bs ro re rs
-  bo=$(env -i PATH="$PATH" HOME="$HOME" "$@" NFCXX_CUDA_CUB_DIR=$work/bash-$name bash "$sb/scripts/cuda-cub" 2> "$work/$name.bash.err"); bs=$?
-  ro=$(env -i PATH="$PATH" HOME="$HOME" "$@" NFCXX_CUDA_CUB_DIR=$work/ruby-$name ruby "$repo/scripts/cuda-cub.rb" 2> "$work/$name.ruby.err"); rs=$?
+  bo=$(env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "$@" NFCXX_CUDA_CUB_DIR=$work/bash-$name bash "$sb/scripts/cuda-cub" 2> "$work/$name.bash.err"); bs=$?
+  ro=$(env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "$@" NFCXX_CUDA_CUB_DIR=$work/ruby-$name ruby "$repo/scripts/cuda-cub.rb" 2> "$work/$name.ruby.err"); rs=$?
   bo=${bo//$work/WORK}; ro=${ro//$work/WORK}
   if [ "$bs" = "$rs" ] && [ "$bo" = "$ro" ] && [ "$(norm "$work/$name.bash.err")" = "$(norm "$work/$name.ruby.err")" ]; then
     # the warning itself is the contract (the build's own lines follow it and name the tree they were built in)
