@@ -15,7 +15,7 @@
 # 3. Weak symbols. EDG marks its COMDAT functions and data __attribute__((__weak__)) and GCC honours that, but a
 #    non-extern `__inline__` member is an external definition under gnu89, so each object carries a strong copy
 #    and the link fails with "multiple definition". The QBE path appends .weak directives for them
-#    (scripts/weak-symbols, which also covers `extern __inline__` members). Here the compile stops at the
+#    (scripts/weak-symbols.rb, which also covers `extern __inline__` members). Here the compile stops at the
 #    assembly, the directives are appended, and the assembly is assembled to the object.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)

@@ -8,7 +8,7 @@ mkdir -p "$out"
 tmp=$(mktemp -d "$out/fetch.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 curl -fLSs "https://raw.githubusercontent.com/cpprefjp/site/$pin/implementation-status.md" -o "$tmp/source.md"
-scripts/mrb scripts/cpp-feature-checklist.rb "$tmp/source.md" > "$tmp/checklist.tsv"
+scripts/mrb.rb scripts/cpp-feature-checklist.rb "$tmp/source.md" > "$tmp/checklist.tsv"
 mv "$tmp/source.md" "$out/implementation-status.md"
 mv "$tmp/checklist.tsv" "$out/checklist.tsv"
 printf '%s\n' "$pin" > "$out/checklist.commit"

@@ -27,8 +27,8 @@ cil_both() {
   done
   rm -f "$tmp/py.json" "$tmp/rb.json"
   runs=$((runs + 1))
-  "$root/scripts/mrb" "$oracle/pathb-cil-emit.rb" "${pa[@]}" <"$in" >"$tmp/py.out" 2>"$tmp/py.err"; rcp=$?
-  "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "${ra[@]}" <"$in" >"$tmp/rb.out" 2>"$tmp/rb.err"; rcr=$?
+  "$root/scripts/mrb.rb" "$oracle/pathb-cil-emit.rb" "${pa[@]}" <"$in" >"$tmp/py.out" 2>"$tmp/py.err"; rcp=$?
+  "$root/scripts/mrb.rb" "$root/scripts/pathb-cil-emit.rb" "${ra[@]}" <"$in" >"$tmp/rb.out" 2>"$tmp/rb.err"; rcr=$?
   if [ "$rcp" -ne "$rcr" ]; then
     echo "FAIL pathb-cil-emit $label: exit status py=$rcp rb=$rcr"; head -2 "$tmp/py.err" "$tmp/rb.err"; fail=1; return
   fi
@@ -56,7 +56,7 @@ for f in "$here"/*.ir; do
   cil_both "pathb-cil-edge/$(basename "$f")" $mode /dev/null "$f" OUT
 done
 
-# The IR of the CIL spike's C++ programs, when the Path B harness is built (the same lowering as scripts/pathb-cil).
+# The IR of the CIL spike's C++ programs, when the Path B harness is built (the same lowering as scripts/pathb-cil.rb).
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 if [ -x "$cpfe" ]; then
   export PATHB_CPFE=$cpfe PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}

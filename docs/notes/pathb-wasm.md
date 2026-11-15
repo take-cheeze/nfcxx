@@ -1,12 +1,12 @@
 # Path B: a WebAssembly emitter
 
 `scripts/pathb-wasm-emit.rb` lowers the nfcxx mid-level IR (`docs/notes/pathb-stage2.md`) to a WebAssembly module, in the
-binary format, with sign extension and bulk memory. It runs under the mruby interpreter (`scripts/mrb`), like the QBE
+binary format, with sign extension and bulk memory. It runs under the mruby interpreter (`scripts/mrb.rb`), like the QBE
 emitter (`docs/notes/pathb-stage3.md`), and writes the module to stdout.
 
 ```
 scripts/pathb-dump --ir prog.cpp > prog.ir
-scripts/mrb scripts/pathb-wasm-emit.rb prog.ir > prog.wasm
+scripts/mrb.rb scripts/pathb-wasm-emit.rb prog.ir > prog.wasm
 node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "trap")
 ```
 
@@ -60,7 +60,7 @@ the carry, unsigned), `cmul` by dividing the result by the left operand (`INT64_
 
 ## AddressSanitizer (`--asan`)
 
-`scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > prog.wasm` emits the module in an AddressSanitizer-style mode.
+`scripts/mrb.rb scripts/pathb-wasm-emit.rb --asan prog.ir > prog.wasm` emits the module in an AddressSanitizer-style mode.
 The mruby interpreter has no `ENV`, so the mode is an argument; `tests/wasm/run.sh` passes it when `NFCXX_WASM_ASAN=1`.
 Without the argument the module is byte-identical to the one before the mode existed. The mode is the wasm part of
 `docs/notes/asan-plan.md`: no libasan runs on wasm, so the runtime is in the module. It checks the stack, the static data
@@ -176,7 +176,7 @@ last line. A host of an ASan module must provide `env.__asan_report`; a plain mo
 
 ## Emscripten (`--emscripten`)
 
-`scripts/mrb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the module with the exports the Emscripten
+`scripts/mrb.rb scripts/pathb-wasm-emit.rb --emscripten prog.ir > prog.wasm` emits the module with the exports the Emscripten
 JS runtime reads, in the ILP32 data model of wasm32: pointers and `long` are i32. Its input is ILP32 IR:
 `scripts/pathb-dump --freestanding --target linux_riscv32 --ir prog.cpp > prog.ir`. The emitter reads the model from the
 IR's `(layout ...)` header. LP64 IR under `--emscripten` is refused, and ILP32 IR without it is refused (LP64 is the
@@ -289,7 +289,7 @@ glue failed at `emscripten_stack_init`, and a data end that is not 4-byte aligne
 
 ## Memory64 (`--memory64`)
 
-`scripts/mrb scripts/pathb-wasm-emit.rb --memory64 prog.ir > prog.wasm` emits the LP64 module with a 64-bit linear memory
+`scripts/mrb.rb scripts/pathb-wasm-emit.rb --memory64 prog.ir > prog.wasm` emits the LP64 module with a 64-bit linear memory
 (the memory64 proposal, which node 22 runs without a flag): the memory's limit has the memory64 flag (`0x04`, an i64
 minimum), the data segments' offsets are `i64.const`, and a memory access takes its address as the IR's i64 pointer
 value, with no `i32.wrap_i64`. The copy of `copy` takes i64 operands. The IR is the default one (`pathb-dump --ir`); the

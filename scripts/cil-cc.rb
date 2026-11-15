@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# The CIL route of nfcc (docs/notes/cil.md): a C or C++ file -> Path B (scripts/pathb-cil -c) -> a JSON fragment, which is the
+# The CIL route of nfcc (docs/notes/cil.md): a C or C++ file -> Path B (scripts/pathb-cil.rb -c) -> a JSON fragment, which is the
 # object; the link is scripts/cil-link.rb over the fragments (CIL, ilasm, a launcher for dotnet). The old per-file fallback
 # through cproc is gone with cproc: a file Path B refuses is an error here. NFCXX_CIL_VERBOSE=1 says which file was refused, and why.
 require "tempfile"
@@ -57,7 +57,7 @@ if compile
   end
   err = IO.popen(["mktemp"], &:read).sub(/\n+\z/, "")
   at_exit { File.delete(err) if File.exist?(err) }
-  if system("#{here}/pathb-cil", "-c", *pass, "-o", out, srcs[0], err: [err, "w"])
+  if system("#{here}/pathb-cil.rb", "-c", *pass, "-o", out, srcs[0], err: [err, "w"])
     warn "cil-cc: Path B: #{srcs[0]}" if env("NFCXX_CIL_VERBOSE")
     exit 0
   end
@@ -87,7 +87,7 @@ keep = env("NFCXX_KEEP_IL") ? ["--keep-il"] : []
 ilasm = env("ILASM") || "#{root}/build/cil/ilasm"
 cc = env("CC") || "cc"
 begin
-  Kernel.exec("#{root}/scripts/mrb", "#{root}/scripts/cil-link.rb", "--ilasm", ilasm, "--cc", cc,
+  Kernel.exec("#{root}/scripts/mrb.rb", "#{root}/scripts/cil-link.rb", "--ilasm", ilasm, "--cc", cc,
               *keep, "-o", out, *frags)
 rescue SystemCallError => e
   warn "cil-cc: #{e.message}"

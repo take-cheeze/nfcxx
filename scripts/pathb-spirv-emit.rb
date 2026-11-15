@@ -3,7 +3,7 @@
 # 64-bit physical addresses (PhysicalStorageBuffer64), so the IR's LP64 layout is kept as it is; 64-bit integers and double
 # are real types; barriers and atomics are the SPIR-V ones.
 #
-# Usage: scripts/mrb scripts/pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv
+# Usage: scripts/mrb.rb scripts/pathb-spirv-emit.rb [--kernel-cl] [--no-div-trap] [--no-checks] [--manifest=FILE] [FILE.ir | -] > out.spv
 #   --kernel-cl     the OpenCL (Kernel) module instead of the Vulkan one
 #   --no-div-trap   a zero divisor (or INT_MIN / -1) divides by 1 instead of trapping
 #   --no-checks     the IR's null-pointer and bounds checks, (nonnull P) and (bounds I N), emit nothing (sycl-build.rb --ndebug)

@@ -3,7 +3,7 @@
 # to SPIR-V. The lambda's id parameter is the global index (the same thread-index intrinsics as tests/gpu/device),
 # and the accessors it captures are the device function's pointer parameters.
 #
-# Usage: scripts/mrb scripts/sycl-rewrite.rb FILE.cpp > device.cpp
+# Usage: scripts/mrb.rb scripts/sycl-rewrite.rb FILE.cpp > device.cpp
 #
 # The output is C++ for the device only: the kernels, named __nfcxx_sycl_k0, __nfcxx_sycl_k1, ... in source order, each
 # with the parameters (one pointer per captured accessor, in declaration order, then `int n`). The guard `if (i >= n)`

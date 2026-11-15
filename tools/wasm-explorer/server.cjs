@@ -79,7 +79,7 @@ const server = http.createServer(async (req, res) => {
     return serveExample(res, url.pathname.slice("/examples/".length));
   }
   if (req.method === "GET" && url.pathname === "/api/health") {
-    const ready = ["pathb-dump.rb", "mrb"].every((n) => fs.existsSync(path.join(root, "scripts", n)))
+    const ready = ["pathb-dump.rb", "mrb.rb"].every((n) => fs.existsSync(path.join(root, "scripts", n)))
       && fs.existsSync(path.join(root, "scripts", "pathb-wasm-emit.rb"));
     return sendJson(res, 200, { ok: true, ready, live: true });
   }

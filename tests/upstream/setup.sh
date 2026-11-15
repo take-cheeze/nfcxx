@@ -17,14 +17,14 @@ pages=()
 for path in "$out/cppreference/reference/en/cpp/language/"*.html; do
   pages+=("cpp/language/$(basename "$path")")
 done
-scripts/mrb tests/upstream/cppreference-extract.rb "$out/cppreference/reference/en" \
+scripts/mrb.rb tests/upstream/cppreference-extract.rb "$out/cppreference/reference/en" \
   "$out/cppreference-examples" "${pages[@]}" > "$out/cppreference-inventory.tsv.tmp"
 mv "$out/cppreference-inventory.tsv.tmp" "$out/cppreference-inventory.tsv"
 pages=()
 while IFS= read -r path; do
   pages+=("${path#"$out/cppreference/reference/en/"}")
 done < <(rg --files --no-ignore "$out/cppreference/reference/en/cpp" -g '*.html' | sort)
-scripts/mrb tests/upstream/cppreference-extract.rb "$out/cppreference/reference/en" \
+scripts/mrb.rb tests/upstream/cppreference-extract.rb "$out/cppreference/reference/en" \
   "$out/cppreference-examples" "${pages[@]}" > "$out/cppreference-all-inventory.tsv.tmp"
 mv "$out/cppreference-all-inventory.tsv.tmp" "$out/cppreference-all-inventory.tsv"
 git rev-parse HEAD > "$out/nfcxx.commit"

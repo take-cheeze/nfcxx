@@ -2,7 +2,7 @@
 # Path B compiler: one C++ file to an object file.
 #   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
 #   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; --emitter=mruby selects scripts/pathb-qbe-emit.rb
-#   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
+#   (run by scripts/mrb.rb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
 #   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.rb).
 # Usage: scripts/pathb-cc.rb [options] [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 # This is scripts/pathb-cc (bash) ported to Ruby: the same options (see the bash script's header), the same stages in the
@@ -275,7 +275,7 @@ end
 
 if emitter == "mruby"
   ssa = File.join(tmp, "#{n}.ssa")
-  rc = status_of(File.join(ROOT, "scripts", "mrb"), File.join(ROOT, "scripts", "pathb-qbe-emit.rb"), *ldopt, *emitopt, *safe, ir,
+  rc = status_of(File.join(ROOT, "scripts", "mrb.rb"), File.join(ROOT, "scripts", "pathb-qbe-emit.rb"), *ldopt, *emitopt, *safe, ir,
                  out: ssa, err: emit_err)
   if rc != 0
     warn("pathb-cc: #{src}: #{first_line(emit_err)}")
@@ -288,7 +288,7 @@ if emitter == "mruby"
   run!(qbe, *qbe_t, ssa, out: s_path)
   # QBE has no weak linkage: .weak for the IR's (weak) definitions
   aw_err = File.join(tmp, "#{n}.aw")
-  rc = status_of(File.join(ROOT, "scripts", "mrb"), File.join(ROOT, "scripts", "pathb-qbe-emit.rb"), "--append-weak", ssa, s_path,
+  rc = status_of(File.join(ROOT, "scripts", "mrb.rb"), File.join(ROOT, "scripts", "pathb-qbe-emit.rb"), "--append-weak", ssa, s_path,
                  qbe_target, err: aw_err)
   if rc != 0
     warn("pathb-cc: #{src}: #{first_line(aw_err)}")

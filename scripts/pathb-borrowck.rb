@@ -2614,7 +2614,7 @@ def main(argv)
     end
   end
   unless args.length == 1
-    raise BadIR, 'usage: scripts/mrb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] [--emitted-only] [--effects FILE]... FILE.ir'
+    raise BadIR, 'usage: scripts/mrb.rb scripts/pathb-borrowck.rb [--infer-loan-ends] [--infer-summaries] [--emitted-only] [--effects FILE]... FILE.ir'
   end
   forms = parse_forms(tokenize(File.read(args[0])))
   raise BadIR, 'missing ir-module' unless bh(forms[0]) == 'ir-module'

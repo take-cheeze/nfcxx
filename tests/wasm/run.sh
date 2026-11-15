@@ -89,7 +89,7 @@ for f in "$dir"/*.cpp; do
     echo "FAIL $n: front end: $(head -1 "$tmp/$n.front")"; fail=$((fail + 1)); continue
   fi
   if [ -n "$refuse" ]; then
-    if "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
+    if "$root/scripts/mrb.rb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
       echo "FAIL $n: emitted a module, expected a refusal"; fail=$((fail + 1))
       continue
     fi
@@ -101,7 +101,7 @@ for f in "$dir"/*.cpp; do
     fi
     continue
   fi
-  if ! "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
+  if ! "$root/scripts/mrb.rb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$tmp/$n.ir" > "$tmp/$n.wasm" 2> "$tmp/$n.err"; then
     echo "FAIL $n: emitter: $(head -1 "$tmp/$n.err")"; fail=$((fail + 1)); continue
   fi
   if [ $emscripten = 1 ] && ! "$node" "$dir/emscripten.cjs" "$tmp/$n.wasm" > "$tmp/$n.emcc" 2>&1; then
@@ -124,7 +124,7 @@ for f in "$dir"/*.cpp; do
 done
 # checked_arith.ir: hand-written LP64 IR, so not under the emscripten modes (ILP32); checked_arith.cjs calls its functions
 if [ $emscripten = 0 ]; then
-  if "$root/scripts/mrb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$dir/checked_arith.ir" \
+  if "$root/scripts/mrb.rb" "$root/scripts/pathb-wasm-emit.rb" "${mode_args[@]}" "$dir/checked_arith.ir" \
       > "$tmp/checked_arith.wasm" 2> "$tmp/checked_arith.err" &&
     got=$("$node" "$dir/checked_arith.cjs" "$tmp/checked_arith.wasm" 2>&1); then
     echo "ok   checked_arith ($got)"; pass=$((pass + 1))

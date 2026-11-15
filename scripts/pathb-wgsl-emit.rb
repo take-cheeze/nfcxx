@@ -1,7 +1,7 @@
 # Path B: emit WGSL (WebGPU compute shaders) from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md), for the SYCL
 # path (docs/notes/sycl-webgpu.md).
 #
-# Usage: scripts/mrb scripts/pathb-wgsl-emit.rb [--manifest=FILE] [--narrow-i64] [FILE.ir | -] > out.wgsl
+# Usage: scripts/mrb.rb scripts/pathb-wgsl-emit.rb [--manifest=FILE] [--narrow-i64] [FILE.ir | -] > out.wgsl
 #
 # Exit status: 0 the WGSL was written; 3 refused (a node, type or form not handled yet, reason on stderr); 1 malformed IR.
 #

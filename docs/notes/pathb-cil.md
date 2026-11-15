@@ -1,6 +1,6 @@
 # Path B to CIL: C++ exceptions as CLR exceptions (spike), and the C route of the CIL backend
 
-`scripts/pathb-cil file.cpp -o x` compiles a C++ file through Path B's IR and runs it as a .NET 8 assembly. It is the
+`scripts/pathb-cil.rb file.cpp -o x` compiles a C++ file through Path B's IR and runs it as a .NET 8 assembly. It is the
 spike of the route chosen for C++ exceptions on CIL (see `docs/notes/cil.md`, "Not supported"): the exception handling
 of Path B's IR is turned into CLR `try`/`catch`, not into EDG's `setjmp`/`longjmp` runtime.
 
@@ -10,7 +10,7 @@ of Path B's IR is turned into CLR `try`/`catch`, not into EDG's `setjmp`/`longjm
 C++ --pathb-dump --ir--> Path B IR --pathb-cil-emit.rb--> JSON fragment --cil-link.rb--> CIL --ilasm--> x.dll (+ launcher)
 ```
 
-- `scripts/pathb-cil-emit.rb` (run by `scripts/mrb`) reads the IR text (its format: `docs/notes/pathb-stage2.md`) and writes a fragment, the
+- `scripts/pathb-cil-emit.rb` (run by `scripts/mrb.rb`) reads the IR text (its format: `docs/notes/pathb-stage2.md`) and writes a fragment, the
   same format `qbe2cil.rb` writes, so `cil-link.rb` links both: one class `Prog`, globals as `addr_<name>` fields,
   `Init` for data, and the entry point.
 - The memory model is the C backend's: pointers are int64 addresses, frame slots are one `localloc` per call, and
@@ -103,7 +103,7 @@ list of statement heads at the top of a function and silently drop the rest (`as
 
 ## C inputs, and the route of `cil-cc` (cproc removal, workstream E)
 
-`scripts/pathb-cil` takes C as `./nfcxx` does: a `.c` file is read by EDG's C front end (`pathb-dump --ir -std=c11`, plus
+`scripts/pathb-cil.rb` takes C as `./nfcxx` does: a `.c` file is read by EDG's C front end (`pathb-dump --ir -std=c11`, plus
 `-D_DEFAULT_SOURCE`, because gcc's default dialect defines it and a strict `-std=c11` leaves `strdup` undeclared, so an implicit `int`
 truncates its pointer), several files are several fragments of one link, and `-c` writes one fragment (the object of
 `scripts/cil-cc.rb`). A static function, global or string literal is `name@UNIT`, as in `qbe2cil.rb`, so two files may each have a
@@ -129,7 +129,7 @@ therefore refused now, and 53 of the 84 translate (41 before).
 
 ### Measured: the programs of `tests/cil`
 
-Every program built and run through Path B (`scripts/pathb-cil`, and through `nfcc` with the routing above), against the exit status and
+Every program built and run through Path B (`scripts/pathb-cil.rb`, and through `nfcc` with the routing above), against the exit status and
 the stdout the test expects:
 
 | program | Path B | what it needed |

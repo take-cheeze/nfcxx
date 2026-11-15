@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The mruby gems vendored under 3rd/ (JSON: mattn/mruby-json; regexp: mattn/mruby-onig-regexp, Onigmo bundled by the
-# gem) are in the scripts/mrb interpreter. Checks their basic behaviour; exits 1 on a wrong result.
+# gem) are in the scripts/mrb.rb interpreter. Checks their basic behaviour; exits 1 on a wrong result.
 cd "$(dirname "$0")/../.."
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 cat > "$tmp" <<'RB'
@@ -14,4 +14,4 @@ check.call('onig anchors', OnigRegexp.compile('^a.c$').match('abc') ? :yes : :no
 puts(ok ? 'mruby gems: ok' : 'mruby gems: FAILED')
 exit(ok ? 0 : 1)
 RB
-scripts/mrb "$tmp"
+scripts/mrb.rb "$tmp"

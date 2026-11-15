@@ -56,7 +56,7 @@ cproc) is ours to vendor.
 
 Stage 2 was checked against stage 1: the 22 cases of `tests/run.sh` (qbe) pass with either front end (0 failures); `--emit-c` output matches on 41 inputs after normalising timestamps and temporary names; the object files match on 36 of 37 sources compiled, and the one difference (`tests/cases/qbe_gnu_forms.cpp`) also differs between two runs of stage 1.
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
-| `./nfcxx`, `./nfcc` with the qbe backend (`scripts/qbe-cc`) | EDG, QBE, cproc built; `tools/qbe-prep` and `tools/weak-symbols` (built on first use with the C++ compiler and ninja); the **mruby interpreter** only on macOS and Linux aarch64 (`strip-atomic.rb`) and for the CIL back end (built on first use by `scripts/mrb`, which then needs ruby and ninja) | none after the setup |
+| `./nfcxx`, `./nfcc` with the qbe backend (`scripts/qbe-cc`) | EDG, QBE, cproc built; `tools/qbe-prep` and `tools/weak-symbols` (built on first use with the C++ compiler and ninja); the **mruby interpreter** only on macOS and Linux aarch64 (`strip-atomic.rb`) and for the CIL back end (built on first use by `scripts/mrb.rb`, which then needs ruby and ninja) | none after the setup |
 | C-only inputs (`nfcxx x.c`, `nfcc`) | no EDG; the same QBE chain for the qbe backend | none |
 | `tests/run.sh`, `tests/lib`, `tests/builtins`, `tests/c`, `tests/eval` | the above | none |
 | `tests/trace/run.sh` | python3 | none |
@@ -68,13 +68,13 @@ Stage 2 was checked against stage 1: the 22 cases of `tests/run.sh` (qbe) pass w
 
 ### Which scripts run on mruby
 
-`scripts/mrb script.rb args...` runs a script on `build/mruby-tool/bin/mruby` (building it first if missing).
+`scripts/mrb.rb script.rb args...` runs a script on `build/mruby-tool/bin/mruby` (building it first if missing).
 The Python scripts they replaced exist only as test oracles.
 
 | Script | Run by |
 | --- | --- |
 | `scripts/qbe-prep` (`tools/qbe-prep`, C++, built on first use) | `scripts/qbe-cc` (every qbe-backend compile, `nfcxx` and `nfcc`) |
-| `scripts/weak-symbols` (`tools/weak-symbols`, C++, built on first use) | `scripts/qbe-cc`, `scripts/gcc-cc` |
+| `scripts/weak-symbols.rb` (`tools/weak-symbols`, C++, built on first use) | `scripts/qbe-cc`, `scripts/gcc-cc` |
 | `scripts/pathb-qbe-emit.rb` | `tests/pathb-qbe/run.sh` (Path B IR to QBE IL; `--append-weak`) |
 | `tests/hexagon/flatlink.rb` | `tests/hexagon/run.sh` |
 
