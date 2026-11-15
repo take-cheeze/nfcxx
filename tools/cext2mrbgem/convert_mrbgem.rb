@@ -551,6 +551,14 @@ class Converter
     nil
   end
 
+  # A header included by exactly one converted source file: its function bodies are compiled as part of that source, so a use in
+  # it is a use in the including file's text (the same rules apply).
+  def single_src_header?(rel)
+    base = File.basename(rel)
+    srcs = @files.select { |r, f| f['kind'] == 'src' && f['text'] =~ /^[ \t]*#[ \t]*include[ \t]*"#{Regexp.escape(base)}"/ }
+    srcs.size == 1
+  end
+
   def refuse(rel, pos, api, reason)
     if rel.nil?
       @refusals << { 'file' => '(gem)', 'line' => 0, 'api' => api, 'reason' => reason }
@@ -1165,7 +1173,9 @@ texts = static_rename(texts)
     end
     uses.each do |rel, s, e|
       next if in_dead_init(rel, s)
-      return "it is used in #{rel}, a header, whose function bodies are not converted" if @files[rel]['kind'] != 'src'
+      if @files[rel]['kind'] != 'src' && !single_src_header?(rel)
+        return "it is used in #{rel}, a header, whose function bodies are not converted (it is not included by exactly one source)"
+      end
       masked = @files[rel]['masked']
       nx = next_nonspace(masked, e)
       return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('

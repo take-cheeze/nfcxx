@@ -497,6 +497,10 @@ check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
 check test "$rc" -ne 0
 check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
+# 2zzz90. A helper defined in a header included by exactly one source converts with that source (its registered callers too).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_single tools/cext2mrbgem/fixtures/api_header_single/ext/api_header_single "$work/api_header_single" > "$work/api_header_single.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_funcall' "$work/api_header_single/include/helper.h"
 # 2zzz88. rb_method_boundp(obj, id, 1) is mrb_respond_to; rb_proc_call_with_block(proc, argc, argv, Qnil) is a call of the proc.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_proc_method tools/cext2mrbgem/fixtures/api_proc_method/ext/api_proc_method "$work/api_proc_method" > "$work/api_proc_method.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
