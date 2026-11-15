@@ -448,6 +448,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_digits tools/cext2mrbge
 check test "$rc" -eq 0
 check grep -qF 'mrb_scan_digits(p, (ssize_t)n, 10, &n, &ov)' "$work/api_scan_digits/src/api_scan_digits.c"
 check test "$(grep -c 'ruby_scan_digits(' "$work/api_scan_digits/src/api_scan_digits.c")" -eq 0
+# 2zzz75. rb_strlen_lit("lit") is sizeof of the literal less the terminator.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_strlen_lit tools/cext2mrbgem/fixtures/api_strlen_lit/ext/api_strlen_lit "$work/api_strlen_lit" > "$work/api_strlen_lit.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '(sizeof(".%N") - 1)' "$work/api_strlen_lit/src/api_strlen_lit.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?

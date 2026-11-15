@@ -25,6 +25,7 @@
   "unmapped_reasons": {
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
     "rb_encoding": "stuck point (Encoding): the rb_encoding type; the fork has no Encoding (accepted stuck point)",
@@ -1016,6 +1017,22 @@
       "template": "mrb_scan_digits($0, $1, $2, $3, $4)",
       "decl_drop": true,
       "caveat": "the fork's mrb_scan_digits (src/string.c) has CRuby's ruby_scan_digits semantics: the length is mrb_int (a negative length means no limit), and the call takes no state"
+    },
+    "rb_strlen_lit": {
+      "kind": "template",
+      "arity": 1,
+      "template": "(sizeof($0) - 1)",
+      "caveat": "CRuby's compile-time length of a string literal (sizeof less the terminator); the argument is a string literal"
+    },
+    "RUBY_EXTERN": {
+      "kind": "expr",
+      "mruby": "extern",
+      "caveat": "CRuby's visibility keyword for a declaration of a function or variable of the interpreter; in mruby it is the plain C extern"
+    },
+    "RUBY_EXTCONF_H": {
+      "kind": "expr",
+      "mruby": "RUBY_EXTCONF_H",
+      "caveat": "the build's extconf header name, defined only by CRuby's mkmf build; mruby never defines it, so the #ifdef that tests it is false and the include beneath it is inert"
     },
     "rb_block_given_p": {
       "kind": "call",
