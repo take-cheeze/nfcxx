@@ -261,7 +261,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
   cflags+=("-I$cppfront_src/include"); files+=("-I$cppfront_src/include")
 }
 # A CUDA_HOME outside /usr is still a system directory for the rewriter (its headers are not inlined into the device unit),
-# so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.rb) behaves like the toolkit's.
+# so a CUDA_HOME-shaped directory from PyPI wheels (scripts/fetch-cudart-wheel.sh) behaves like the toolkit's.
 [ -n "${CUDA_HOME:-}" ] && export NFCXX_SYSTEM_PATHS="$CUDA_HOME${NFCXX_SYSTEM_PATHS:+:$NFCXX_SYSTEM_PATHS}"
 # NFCXX_CUDA_TARGET=amdgpu: lib/hip (the CUDA runtime on HIP, lib/hip/cuda_runtime.h) is a system directory for the rewriter too.
 # (and ROCm's include directory, where the HIP headers are: the host copy's -I is the caller's.)

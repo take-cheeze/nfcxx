@@ -3636,7 +3636,7 @@ std::vector<std::string> g_user_undefs;
 bool system_path(const std::string &path) {
   std::string p = path;
   // NFCXX_SYSTEM_PATHS: extra prefixes that are system directories (the driver sets it to a CUDA_HOME-shaped directory
-  // unpacked from PyPI wheels, scripts/fetch-cudart-wheel.rb), separated by ':'.
+  // unpacked from PyPI wheels, scripts/fetch-cudart-wheel.sh), separated by ':'.
   if (const char *extra = std::getenv("NFCXX_SYSTEM_PATHS")) {
     std::string list = extra;
     size_t start = 0;
