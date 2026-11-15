@@ -271,7 +271,8 @@ def split_args(argv, srcs)
       skip = false
       next
     end
-    next if srcs.include?(a)
+    # a source: the driver has replaced each .cu input with its copy in srcs (cu_prepare), so the .cu name itself is dropped here
+    next if srcs.include?(a) || (!a.start_with?("-") && a.end_with?(".cu"))
 
     case a
     when "-o" then skip = true
