@@ -42,6 +42,7 @@
     "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
+    "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",

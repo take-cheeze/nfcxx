@@ -493,6 +493,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_range_values tools/cext2mrbg
 check test "$rc" -eq 0
 check grep -qF '*(&beg) = RANGE_BEG(mrb_range_ptr(mrb, r))' "$work/api_range_values/src/api_range_values.c"
 check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_values.c"
+# 2zzz87. rb_time_timespec_new with a fixed offset is a recorded stuck point (mruby-time has only UTC and LOCAL).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
+check test "$rc" -ne 0
+check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
