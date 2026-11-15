@@ -5,7 +5,7 @@
 # helper stubbed (tests/nfcxx-cache/bash-decision.sh).
 #
 # It prints the decision and the commands the bash would run, in the bash's order:
-#   RUN ARGV...           a command the bash runs (rm, mkdir, mv, python3 for the remote helper, build for the one-step build)
+#   RUN ARGV...           a command the bash runs (rm, mkdir, mv, ruby for the remote helper, build for the one-step build)
 #   CP SRC DST            a copy into or out of the cache
 #   EXIT 0                a hit: the bash exits after the copy
 #   KEY HEX               the cache key (not a bash line: the runner reads it)
@@ -295,7 +295,7 @@ class Cache
   def remote_get(key, entry)
     tmp = "#{entry}.remote.#{Process.pid}"
     puts "RUN rm -rf #{tmp}"
-    puts "RUN python3 -I #{ROOT}/scripts/nfcxx-cache-gha.py get #{key} #{tmp}"
+    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-gha.rb get #{key} #{tmp}"
     hit = @remote_answer == "hit"
     if hit
       puts "RUN mkdir -p #{File.dirname(entry)}"
@@ -328,7 +328,7 @@ class Cache
     puts "RUN rm -rf #{tmp}"
     return unless moved && !remote.empty?
 
-    puts "RUN python3 -I #{ROOT}/scripts/nfcxx-cache-gha.py put #{key} #{entry} #{(['obj'] + recs).join(' ')}"
+    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-gha.rb put #{key} #{entry} #{(['obj'] + recs).join(' ')}"
   end
 end
 

@@ -38,7 +38,7 @@
 # Nothing that changes meaning is dropped silently.
 set -euo pipefail
 shopt -s extglob
-root=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)   # the repository (this file is tests/nfcc/nfcc-bash)
 host=${NFCC_HOST_CC:-cc}
 # The default backend: Path B when this checkout has the Path B harness and QBE, on x86-64 Linux, and then a unit Path B cannot
 # take (an option it cannot honour, a construct it refuses) is made by gcc (NFCXX_PATHB_FALLBACK=gcc unless the environment sets it).

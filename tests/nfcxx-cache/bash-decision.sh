@@ -15,6 +15,7 @@ end=$(grep -n -F -x 'if [ -n "$depmode" ]; then' "$root/nfcxx" | cut -d: -f1 | a
 harness() {
   cat <<'EOF'
 _out() { local s=$1 x; shift; for x in "$@"; do s+=" $x"; done; printf '%s\n' "$s"; }
+RUBY=ruby   # nfcxx runs the Ruby helper as "${RUBY:-ruby}": the ruby stub below records it
 run_stub() { _out RUN "$@"; return 0; }
 exec_stub() { _out EXEC "$@"; exit 0; }
 ensure_tool() { return 0; }
@@ -22,10 +23,11 @@ cp() { _out CP "$@"; command cp "$@"; }
 mv() { _out RUN mv "$@"; command mv "$@"; }
 rm() { _out RUN rm "$@"; command rm "$@"; }
 mkdir() { case ${*: -1} in *.lock) command mkdir "$@"; return ;; esac; _out RUN mkdir "$@"; command mkdir "$@"; }
-python3() {
-  _out RUN python3 "$@"
-  case $3 in
-    get) [ "${CACHE_TEST_REMOTE:-miss}" = hit ] || return 1; command mkdir -p "$5"; printf 'OBJECT remote\n' > "$5/obj" ;;
+ruby() {
+  case $1 in *nfcxx-cache-gha.rb) ;; *) command ruby "$@"; return ;; esac
+  _out RUN ruby "$@"
+  case $2 in
+    get) [ "${CACHE_TEST_REMOTE:-miss}" = hit ] || return 1; command mkdir -p "$4"; printf 'OBJECT remote\n' > "$4/obj" ;;
   esac
   return 0
 }

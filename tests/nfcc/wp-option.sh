@@ -13,7 +13,7 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 {
   echo 'die() { echo "nfcc: error: $*" >&2; exit 1; }'
   echo 'pp=(); depmode=""; dfile=""; dts=(); dp=0'
-  awk '/^wp_option\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/nfcc-bash"
+  awk '/^wp_option\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/tests/nfcc/nfcc-bash"
   echo 'wp_option "$1"'
   echo 'for x in "${pp[@]+"${pp[@]}"}"; do printf "pp %s\n" "$x"; done'
   echo '[ -z "$depmode" ] || printf "depmode %s\n" "$depmode"'

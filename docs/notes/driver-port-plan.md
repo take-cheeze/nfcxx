@@ -17,7 +17,7 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
   (its option loop, Path B, compile and link) with the real environment, host answers, temporary directory and
   commands. tests/nfcc/loop-state.sh checks the decisions against the bash (364 cases); tests/nfcc/port-driver.sh runs
   60 command lines through ./nfcc and scripts/nfcc.rb and compares status, stdout, stderr and every output file.
-  ./nfcc is now a wrapper that runs scripts/nfcc.rb; the bash driver it replaced is kept as ./nfcc-bash, the reference
+  ./nfcc is now a wrapper that runs scripts/nfcc.rb; the bash driver it replaced is kept as tests/nfcc/nfcc-bash, the reference
   for the differential tests (tests/nfcc/port-driver.sh, option-state.sh, the wp_option tests). The bundle wrapper (--bundle-*: the driver again, then build/nfcbundle) and the CUDA
   driver wrapper (--cuda-driver=, a libcuda on the link line: the shim) run in scripts/nfcc.rb too, checked against the bash
   by tests/nfcc/port-driver.sh (60 command lines). The shim's success path needs a real CUDA toolkit and is not tested here.

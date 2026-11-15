@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nfcc: the C driver. The Ruby driver (scripts/nfcc.rb) does the work. The bash driver it replaced is kept as nfcc-bash, the
+# nfcc: the C driver. The Ruby driver (scripts/nfcc.rb) does the work. The bash driver it replaced is kept as tests/nfcc/nfcc-bash, the
 # reference for the differential tests (tests/nfcc/port-driver.sh, tests/nfcc/option-state.sh, the wp_option tests).
 root=$(cd "$(dirname "$0")" && pwd)
 exec "${RUBY:-ruby}" "$root/scripts/nfcc.rb" "$@"
