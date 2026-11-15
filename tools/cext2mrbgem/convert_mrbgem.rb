@@ -2245,7 +2245,8 @@ use_problem = lambda do |name, use|
       end
       # a threaded helper called from a macro body: the macro's expansions are all in functions with the state, so the
       # expansion passes the mrb of its function (mrb_tok gives mrb outside the global macros)
-      if fn.nil? && direct && (dm = define_at(rel, s)) && macro_expansions_ok(dm, cands | (@valid_reg_names || Set.new) | (init_first ? Set[init_first] : Set.new))
+      # a macro expanded in a global-state helper expands with the global name, consistent with the threaded helper it calls
+      if fn.nil? && direct && (dm = define_at(rel, s)) && macro_expansions_ok(dm, cands | (@valid_reg_names || Set.new) | (init_first ? Set[init_first] : Set.new) | (@global_helpers || Set.new))
         next nil
       end
       if fn.nil?
@@ -2556,7 +2557,7 @@ use_problem = lambda do |name, use|
 
   # A macro whose body calls a global-state helper: safe when the body has no return and every expansion is in a
   # function with the state (ctx). Checked again as the set of global-state helpers changes (its fixpoint).
-  def macro_expansions_ok(macro, ctx)
+  def macro_expansions_ok(macro, ctx, seen = nil)
     name, a, b, rel = macro
     (@occ[name] || []).all? do |orel, os, _oe|
       next true if rel == orel && a <= os && os < b
@@ -2567,7 +2568,13 @@ use_problem = lambda do |name, use|
       # another #define of the same macro (an alternative branch) is a definition, not an expansion
       next true if (dd = define_at(orel, os)) && dd[0] == name
       fn = enclosing_func(orel, os)
-      !fn.nil? && ctx.include?(fn['name'])
+      if fn.nil?
+        # an expansion inside another macro's body is ok when that macro's own expansions are (the nesting is followed)
+        outer = define_at(orel, os)
+        next false if outer.nil? || outer[0] == name || (seen ||= Set.new).include?(outer[0])
+        next macro_expansions_ok(outer, ctx, seen | [name])
+      end
+      ctx.include?(fn['name'])
     end
   end
 

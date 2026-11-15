@@ -515,6 +515,9 @@ check grep -qF 'mrb_write_field(mrb, holder, &box->v, ow_canon(val));' "$work/ap
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_aset_value tools/cext2mrbgem/fixtures/api_hash_aset_value/ext/api_hash_aset_value "$work/api_hash_aset_value" > "$work/api_hash_aset_value.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_hash_set_value(mrb, h, k, v)' "$work/api_hash_aset_value/src/api_hash_aset_value.c"
+# 2zzz98. A helper called from a macro that is itself used in a macro body: the nesting is followed to the functions that expand it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_nested tools/cext2mrbgem/fixtures/api_macro_nested/ext/api_macro_nested "$work/api_macro_nested2" > "$work/api_macro_nested2.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
 # 2zzz94. An inline static function defined in two .c files is renamed per file (as a plain static is).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_inline_static tools/cext2mrbgem/fixtures/api_inline_static/ext/api_inline_static "$work/api_inline_static" > "$work/api_inline_static.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
