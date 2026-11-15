@@ -61,6 +61,10 @@ module DeclaredReturns
       return [:union, members, false]
     end
     # A declared `bool` is not a checked kind: callers rely on truthiness, so it is never guarded (see RbsSignatures).
+    # `bool` is checked as exactly true or false: the guard is `true || false`, with `nil` first when nilable.
+    if defined?(RBS::Types::Bases::Bool) && type.is_a?(RBS::Types::Bases::Bool)
+      return [:bool, nil, nilable]
+    end
     if defined?(RBS::Types::Bases::Nil) && type.is_a?(RBS::Types::Bases::Nil)
       return nilable ? nil : [:nil, nil, false]
     end
@@ -71,7 +75,13 @@ module DeclaredReturns
     # A nilable simple kind (`Integer?`) admits nil as well as the class: the guard is `nil || test`.
     when 'Integer' then type.args.empty? ? [:fixnum, 'Integer', nilable] : nil
     # The element type is not checked (as before): an Array[T] return is the array kind.
-    when 'Array' then [:array, 'Array', nilable]
+    when 'Array'
+      elem = type.args.size == 1 ? kind_of(type.args[0], known_owners) : nil
+      if elem && ELEMENT_CHECKED_KINDS.include?(elem[0]) && !elem[2]
+        [:array_of, elem, nilable]
+      else
+        [:array, 'Array', nilable]
+      end
     when 'String' then type.args.empty? ? [:string, 'String', nilable] : nil
     when 'Hash' then type.args.empty? ? [:hash, 'Hash', nilable] : nil
     when 'Symbol' then type.args.empty? ? [:symbol, 'Symbol', nilable] : nil
@@ -91,7 +101,9 @@ module DeclaredReturns
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
   # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
   # A module (Enumerable) is a kind-of test, since no exact class test matches its includers.
-  GUARD_ONLY_KINDS = %i[nil string hash symbol float module union].freeze
+  GUARD_ONLY_KINDS = %i[nil string hash symbol float module union bool array_of].freeze
+  # An element kind an Array[T] return checks element by element (a class element is not checked: see kind_of).
+  ELEMENT_CHECKED_KINDS = %i[fixnum float string symbol bool].freeze
   UNION_MAX = 4
 
   # Entries for the loaded method signatures that name a bytecode definition with the signature's required arity
