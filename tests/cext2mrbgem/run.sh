@@ -460,6 +460,8 @@ check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$wo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem/fixtures/api_alt_branch/ext/api_alt_branch "$work/api_alt_branch" > "$work/api_alt_branch.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
+# a method entered while another mruby state is active aborts (the global state is one state; a nested one would be wrong)
+check grep -qF 'if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
 # 2zzz80. A callee that takes two callbacks: each function-pointer parameter takes its own helper, and both helpers gain mrb.
 # (The regex scanner cannot read two parenthesis levels in a parameter list, so it refuses this safely: the test is libclang's.)
 if [ "$scanner" = libclang ]; then

@@ -1265,7 +1265,7 @@ texts = static_rename(texts)
     if @global_wrap
       # as a registered method: the global state is set on entry and restored on return (wrap_returns)
       g = @global_name
-      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "#{g} = mrb;")
+      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */", "#{g} = mrb;")
       lines += ["mrb_value nfcx_bc2_ret = #{call};", "#{g} = nfcx_bc2_old;", 'return nfcx_bc2_ret;']
     else
       lines << "return #{call};"
@@ -3167,7 +3167,7 @@ end
         # a registered method or Init of a gem that uses the global state saves and restores it (wrap_returns)
         if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
           g = @global_name
-          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  #{g} = mrb;" + pro
+          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
           wrap_returns(rel, d, name == init_name && !@valid_reg_names.include?(name))
         end
         ed.add(d['hstart'], d['hend'], hdr + ' ')
