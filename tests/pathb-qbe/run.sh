@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb).
+# Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb.rb).
 #
 # For each program: scripts/pathb-dump.rb --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
 # cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lC -lstdc++ -lgcc_s -lpthread -lm -latomic; libC.a first, so EDG's EH runtime and operator new/delete win) -> run.
@@ -69,7 +69,7 @@ case $(uname -s)/$(uname -m) in
   Linux/aarch64) emit_opts+=(--arm64-abi) ;;
   Darwin/arm64) emit_opts+=(--arm64-abi --arm64-abi-apple) ;;   # Apple: a variadic aggregate is on the stack
 esac
-mrb=$root/scripts/mrb
+mrb=$root/scripts/mrb.rb
 ldrt=$(scripts/pathb-ldrt.rb) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

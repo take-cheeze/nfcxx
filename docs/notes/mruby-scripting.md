@@ -10,14 +10,14 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | --- | --- |
 | `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, generates a ninja build file with `scripts/mruby-ninja.rb` (no rake) and builds it with ninja, then installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
 | `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bigint` (stage 3), `mruby-bin-mruby`; and the define `MRB_ARY_LENGTH_MAX=0`, because mruby caps an `Array` at 131072 entries by default (`array size too big`) and the token list of a big translation unit is longer (stage 3). Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
-| `scripts/mrb` | `scripts/mrb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
-| `scripts/weak-symbols` | Was `weak-symbols.rb` (the port of `weak-symbols.py`); now the C++ tool `tools/weak-symbols` behind this wrapper, used by `scripts/qbe-cc` and `scripts/gcc-cc`. The mruby script took 292 s on the 48 MB of C that ggml-cuda's binbcast.cu gives (character positions in a large string cost a scan in mruby); the tool takes under 2 s. The oracle stays. |
+| `scripts/mrb.rb` | `scripts/mrb.rb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
+| `scripts/weak-symbols.rb` | Was `weak-symbols.rb` (the port of `weak-symbols.py`); now the C++ tool `tools/weak-symbols` behind this wrapper, used by `scripts/qbe-cc` and `scripts/gcc-cc`. The mruby script took 292 s on the 48 MB of C that ggml-cuda's binbcast.cu gives (character positions in a large string cost a scan in mruby); the tool takes under 2 s. The oracle stays. |
 | `scripts/qbe-prep` | Was `qbe-prep.rb` (the port of `qbe-prep.py`, stage 3 below); now the C++ tool `tools/qbe-prep` behind this wrapper, used by `scripts/qbe-cc`. The mruby script took 33 s on the 44 MB of preprocessed C that ggml-cuda's binbcast.cu gives; the tool takes 1 s. The oracle stays. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
-| `scripts/cil-link.rb` | Port of `cil-link.py` (stage 5, below); used by `scripts/qbe-cc` (the CIL backend) and `scripts/pathb-cil`. Takes `--ilasm`, `--cc` and `--keep-il` as arguments. `tests/mruby/cil-link.sh` checks it. |
+| `scripts/cil-link.rb` | Port of `cil-link.py` (stage 5, below); used by `scripts/qbe-cc` (the CIL backend) and `scripts/pathb-cil.rb`. Takes `--ilasm`, `--cc` and `--keep-il` as arguments. `tests/mruby/cil-link.sh` checks it. |
 | `scripts/qbe2cil.rb` | Port of `tests/mruby/oracle/qbe2cil.py` (done, see the stage 4 section below); used by `scripts/qbe-cc` on the CIL backend (so `scripts/cil-cc.rb`). |
-| `scripts/pathb-cil-emit.rb` | Port of `pathb-cil-emit.py` (stage 6, below); used by `scripts/pathb-cil`. |
+| `scripts/pathb-cil-emit.rb` | Port of `pathb-cil-emit.py` (stage 6, below); used by `scripts/pathb-cil.rb`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
 What the test compares:
@@ -80,7 +80,7 @@ What the test compares:
 ## Stage 3 (done): `qbe-prep.py` to `qbe-prep.rb`
 
 `scripts/qbe-prep.rb` (about 1200 lines with the comments, the Python was 760) replaces `scripts/qbe-prep.py`; `scripts/qbe-cc` runs
-`scripts/mrb scripts/qbe-prep.rb [--c-input] PP.c OUT.c TAIL.s`. The Python is the oracle
+`scripts/mrb.rb scripts/qbe-prep.rb [--c-input] PP.c OUT.c TAIL.s`. The Python is the oracle
 `tests/mruby/oracle/qbe-prep.py` (it still reads `NFCXX_C_INPUT` from the environment; the port takes
 `--c-input`, which `qbe-cc` passes exactly when `NFCXX_C_INPUT` is non-empty, as before).
 
@@ -125,7 +125,7 @@ a different message (a traceback in Python); the test compares only the exit sta
 
 ## Stage 2 (done): `pathb-qbe-emit.py` to `pathb-qbe-emit.rb`
 
-`scripts/pathb-qbe-emit.rb` is a line-by-line port; `tests/pathb-qbe/run.sh` runs it through `scripts/mrb`. The
+`scripts/pathb-qbe-emit.rb` is a line-by-line port; `tests/pathb-qbe/run.sh` runs it through `scripts/mrb.rb`. The
 Python original is the oracle `tests/mruby/oracle/pathb-qbe-emit.py`. What the port needed:
 
 - `re` (three anchored patterns: `%(\d+)$`, `[A-Za-z_][A-Za-z0-9_.]*$`, the integer atom `-?(0x[0-9a-fA-F]+|\d+)`):
@@ -198,7 +198,7 @@ shared library) also for a definition in the module; the oracle changed with it 
 ## Stage 4 (done): `qbe2cil.py` to `qbe2cil.rb`
 
 `scripts/qbe2cil.rb` replaces `scripts/qbe2cil.py` (the CIL backend's translation of one unit's QBE IL into a JSON
-fragment); `scripts/qbe-cc` runs `scripts/mrb scripts/qbe2cil.rb IN.ssa TAIL.s TU OUT.json`. The Python is the oracle
+fragment); `scripts/qbe-cc` runs `scripts/mrb.rb scripts/qbe2cil.rb IN.ssa TAIL.s TU OUT.json`. The Python is the oracle
 `tests/mruby/oracle/qbe2cil.py`. How the Python features were answered:
 
 - The regexes (the instruction and definition heads, `CMP_INT`/`CMP_FLT`, `z N`, the data operands `$sym + N`, the type
@@ -226,7 +226,7 @@ a string literal of a data item is one byte (Python reads one code point, which 
 ## Stage 5 (done): `cil-link.py` to `cil-link.rb`
 
 `scripts/cil-link.rb` replaces `scripts/cil-link.py`, which moved to `tests/mruby/oracle/cil-link.py`. The callers
-(`scripts/qbe-cc` for the CIL backend, `scripts/pathb-cil`) pass what the Python read from the environment: `--ilasm`
+(`scripts/qbe-cc` for the CIL backend, `scripts/pathb-cil.rb`) pass what the Python read from the environment: `--ilasm`
 (the `ILASM` setting, default `build/cil/ilasm`), `--cc` (`CC`, for the variadic call shim) and `--keep-il`
 (`NFCXX_KEEP_IL`). The fragments are read with `JSON.parse`; the integers above `2**63 - 1` (a float64 whose sign bit
 is set is one) are quoted first, see the rules above. ilasm and the shim's C compile run through `IO.popen`, with
@@ -245,8 +245,8 @@ only the status is compared, and the ilasm error text, which names the temporary
 
 ## Stage 6 (done): `pathb-cil-emit.py` to `pathb-cil-emit.rb`
 
-`scripts/pathb-cil-emit.rb` replaces `scripts/pathb-cil-emit.py`; `scripts/pathb-cil` runs
-`scripts/mrb scripts/pathb-cil-emit.rb IR.txt OUT.json`. The Python is the oracle `tests/mruby/oracle/pathb-cil-emit.py`.
+`scripts/pathb-cil-emit.rb` replaces `scripts/pathb-cil-emit.py`; `scripts/pathb-cil.rb` runs
+`scripts/mrb.rb scripts/pathb-cil-emit.rb IR.txt OUT.json`. The Python is the oracle `tests/mruby/oracle/pathb-cil-emit.py`.
 The fragment is written to the output file (`json.dump`, `indent=1`), so stdout stays empty in both.
 
 | Python | mruby |

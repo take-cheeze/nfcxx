@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The mruby interpreter of scripts/mrb, built with Emscripten (scripts/mruby-wasm-config.rb), for the browser:
+# The mruby interpreter of scripts/mrb.rb, built with Emscripten (scripts/mruby-wasm-config.rb), for the browser:
 # build/mruby-wasm/out/wasm/bin/mruby.js and mruby.wasm. Uses the pinned mruby source of scripts/setup-mruby.sh and
 # Emscripten on PATH (scripts/setup-emsdk.sh, then source build/emsdk/emsdk_env.sh).
 #   FORCE=1   build again

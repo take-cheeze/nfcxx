@@ -70,7 +70,7 @@ wasm32, which every browser runs. SoftFloat is needed either way: wasm64's `long
 
 ## mruby for the browser
 
-`scripts/setup-mruby-wasm.sh` builds the interpreter of `scripts/mrb` with Emscripten (mruby's own `emscripten`
+`scripts/setup-mruby-wasm.sh` builds the interpreter of `scripts/mrb.rb` with Emscripten (mruby's own `emscripten`
 toolchain, wasm exceptions for its `setjmp`), `createMruby` like `createCpfe`: `build/mruby-wasm/out/wasm/bin/mruby.js`
 and `mruby.wasm` (0.9 MB, 0.3 MB gzip). Its `Integer` is 64-bit (`MRB_INT64`, with `MRB_NO_BOXING`, which mruby needs
 for it on a 32-bit target): mruby's default on wasm32 is 32-bit, and with it the emitter's output changed (a LEB128

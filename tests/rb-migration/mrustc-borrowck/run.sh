@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/mrustc-borrowck.sh against scripts/mrustc-borrowck.rb. mrustc is a stub ($RB_WORK/bin/mrustc, via MRUSTC):
 # it writes the dump (the source itself) and fails as the source's "// STUB:" line says. scripts/monomir-to-pathb.rb
-# and scripts/mrb are stubs in the tree. The checker's verdict is the source's "// VERDICT:" line (as in the
+# and scripts/mrb.rb are stubs in the tree. The checker's verdict is the source's "// VERDICT:" line (as in the
 # pathb-borrowck-tally test). A stub mrustc killed by a signal is not compared: the shell reports that itself.
 NAME=mrustc-borrowck
 . "$(dirname "$0")/../lib.sh"
@@ -33,7 +33,7 @@ chmod +x "$RB_WORK/bin/mrustc"
 
 populate() {
   mkdir -p "$1/scripts" "$1/sub"
-  cat > "$1/scripts/mrb" <<'EOS'
+  cat > "$1/scripts/mrb.rb" <<'EOS'
 #!/usr/bin/env bash
 # stub: mrb SCRIPT ARGS... IR: the verdict is the IR's VERDICT line
 ir=${@: -1}
@@ -58,7 +58,7 @@ if text.include?("// STUB: monomir-fail")
 end
 File.write(ir, text)
 EOS
-  chmod +x "$1/scripts/mrb" "$1/scripts/monomir-to-pathb.rb"
+  chmod +x "$1/scripts/mrb.rb" "$1/scripts/monomir-to-pathb.rb"
 }
 
 rb_case "accepted" "printf '%s\n' '// VERDICT: accept' > prog.rs" prog.rs

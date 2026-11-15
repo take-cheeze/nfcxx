@@ -54,7 +54,7 @@ def verdict_lines(log)
 end
 
 def run_checker(root, tmp)
-  mrb = File.join(root, "scripts/mrb")
+  mrb = File.join(root, "scripts/mrb.rb")
   checker = File.join(root, "scripts/pathb-borrowck.rb")
   system(mrb, checker, "--infer-loan-ends", "--infer-summaries", File.join(tmp, "prog.ir"))
   $?.exitstatus || 128 + $?.termsig

@@ -9,8 +9,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 for f in "$here"/*.c; do
   n=$(basename "$f")
-  "$root/scripts/mrb" "$root/tests/mruby/oracle/strip-atomic.rb" < "$f" > "$tmp/$n.py"
-  "$root/scripts/mrb" "$root/scripts/strip-atomic.rb" < "$f" > "$tmp/$n.rb"
+  "$root/scripts/mrb.rb" "$root/tests/mruby/oracle/strip-atomic.rb" < "$f" > "$tmp/$n.py"
+  "$root/scripts/mrb.rb" "$root/scripts/strip-atomic.rb" < "$f" > "$tmp/$n.rb"
   if cmp -s "$tmp/$n.py" "$tmp/$n.rb"; then echo "ok   strip-atomic $n"
   else echo "FAIL strip-atomic $n: differs from the oracle"; cmp "$tmp/$n.py" "$tmp/$n.rb" | head -2; fail=1; fi
 done

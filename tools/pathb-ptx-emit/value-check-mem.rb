@@ -2,7 +2,7 @@
 # Writes the GPU value check of the memory forms (run by value-check-mem.cu): for each scalar type, one kernel whose body
 # is the C++ emitter's own lines for index, load and store (build/pathb-ptx-emit --eval-arith), with the thread's index
 # loaded from memory and the value copied out. The runner compares the output with the host's copy of the indexed input.
-# Usage: scripts/mrb tools/pathb-ptx-emit/value-check-mem.rb OUT.ptx   (needs build/pathb-ptx-emit built)
+# Usage: scripts/mrb.rb tools/pathb-ptx-emit/value-check-mem.rb OUT.ptx   (needs build/pathb-ptx-emit built)
 # mruby has no Process, so the emitter runs through IO.popen with its exit status read back from `echo $?`; its cases
 # and output go through files next to OUT.ptx (OUT.ptx.emit.*), removed again. The directory comes from __FILE__.
 

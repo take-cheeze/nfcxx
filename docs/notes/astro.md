@@ -240,7 +240,7 @@ Found while building the samples above. Not reported yet; each has a short fix. 
 
 ## ASTroGen under mruby
 
-`ASTRO_GEN=mruby tests/realworld/run_astro.sh` runs the generator on the repo's mruby (`scripts/mrb`) instead of CRuby, so
+`ASTRO_GEN=mruby tests/realworld/run_astro.sh` runs the generator on the repo's mruby (`scripts/mrb.rb`) instead of CRuby, so
 generating `node_*.c` / `node_head.h` needs no CRuby. `scripts/astrogen-mruby` takes the arguments of the `ruby` command it
 replaces (`-I dir -r lib -e code`); mruby has no `require`, so it concatenates `scripts/mruby-astrogen.rb` (the shim), the
 generator sources (with their `require` lines blanked, the `if __FILE__ == $0` self-test cut) and the code into one script.

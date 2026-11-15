@@ -109,14 +109,14 @@ if [ "${NFCXX_FORWARD:-on}" = on ]; then
   "${RUBY:-ruby}" "$root/scripts/pathb-ir-opt.rb" --forward "$absout.dev.ir" > "$absout.dev.fwd.ir" && mv "$absout.dev.fwd.ir" "$absout.dev.ir"
 fi
 rc=0
-# the SPIR-V emitter: scripts/spirv-emit (NFCXX_SPIRV_EMITTER picks the Ruby script, its C++ port, or both compared)
+# the SPIR-V emitter: scripts/spirv-emit.rb (NFCXX_SPIRV_EMITTER picks the Ruby script, its C++ port, or both compared)
 if [ $backend = vulkan ]; then
-  "$root/scripts/spirv-emit" ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
+  "$root/scripts/spirv-emit.rb" ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.spv" || rc=$?
 elif [ $backend = opencl ] || [ $backend = level-zero ]; then
   # the Kernel-capability module (OpenCL 2.2): one kernel per entry point, the push block as its argument (OpenCL and Level Zero)
-  "$root/scripts/spirv-emit" --kernel-cl ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
+  "$root/scripts/spirv-emit.rb" --kernel-cl ${emitopts[@]+"${emitopts[@]}"} --manifest="$absout.man" "$absout.dev.ir" > "$absout.cl.spv" || rc=$?
 else
-  "$root/scripts/mrb" "$root/scripts/pathb-wgsl-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.wgsl" || rc=$?
+  "$root/scripts/mrb.rb" "$root/scripts/pathb-wgsl-emit.rb" --manifest="$absout.man" "$absout.dev.ir" > "$absout.wgsl" || rc=$?
 fi
 [ "$keep" = 1 ] || rm -f "$absout.dev.ir"
 if [ $rc -ne 0 ]; then rm -f "$absout.wgsl" "$absout.spv" "$absout.cl.spv" "$absout.man"; echo "sycl-build: the device code of $src was refused (exit $rc)" >&2; exit $rc; fi

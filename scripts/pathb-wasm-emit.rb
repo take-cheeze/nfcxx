@@ -1,14 +1,14 @@
 # Path B: emit a WebAssembly module (binary format, MVP plus sign extension and bulk memory) from the nfcxx mid-level IR
 # text (docs/notes/pathb-stage2.md, sections 6 and 7).
 #
-# Usage: scripts/mrb scripts/pathb-wasm-emit.rb [FILE.ir | -] > out.wasm
+# Usage: scripts/mrb.rb scripts/pathb-wasm-emit.rb [FILE.ir | -] > out.wasm
 #
 # Exit status:
 #   0  the module was written to stdout
 #   3  refused: the IR has a node, type or marker this emitter does not handle yet; the reason is on stderr
 #   1  error: malformed IR text
 #
-# Usage with --asan (before the file): scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > out.wasm. The mruby
+# Usage with --asan (before the file): scripts/mrb.rb scripts/pathb-wasm-emit.rb --asan prog.ir > out.wasm. The mruby
 # interpreter has no ENV, so the mode is an argument, and tests/wasm/run.sh passes it when NFCXX_WASM_ASAN=1.
 # The mode is an AddressSanitizer-style check (docs/notes/pathb-wasm.md, "AddressSanitizer"): a shadow region at the
 # top of the memory, redzones around the static objects, the slots of each frame and the blocks of the heap, and a check

@@ -1,5 +1,5 @@
 # Separate unsupported dialect flags from reference/example rejection.
-# Usage: scripts/mrb normalize-survey.rb RESULT_ROOT INPUT.tsv
+# Usage: scripts/mrb.rb normalize-survey.rb RESULT_ROOT INPUT.tsv
 root, input = ARGV
 File.open(input, 'rb') do |f|
   f.read.split("\n").each_with_index do |line, index|

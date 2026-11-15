@@ -1,4 +1,4 @@
-# Usage: scripts/mrb scripts/cpp-feature-report.rb checklist.tsv results.tsv
+# Usage: scripts/mrb.rb scripts/cpp-feature-report.rb checklist.tsv results.tsv
 # An invalid result: main reports the message and returns status 1 (raised, not exited, as in cpp-feature-checklist.rb).
 class ReportError < StandardError; end
 def fail_report(message)

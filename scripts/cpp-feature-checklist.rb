@@ -1,5 +1,5 @@
 # Parse a locally fetched, pinned cpprefjp checklist. No network access here.
-# Usage: scripts/mrb scripts/cpp-feature-checklist.rb implementation-status.md
+# Usage: scripts/mrb.rb scripts/cpp-feature-checklist.rb implementation-status.md
 # TSV stays in build/: upstream descriptions/version notes are not vendored.
 # A malformed checklist: main reports the message and returns status 1. Raised, not exited, so the compiled build
 # (script-world) returns the same status as the interpreter.

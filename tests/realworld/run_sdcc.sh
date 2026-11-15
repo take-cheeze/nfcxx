@@ -83,7 +83,7 @@ compare_one() {
 export -f compare_one
 export ref nfc fwk dev out xfail_test xfail_be
 # Every test the reference accepts for mcs51, in name order (the list is fixed, so a run is repeatable).
-# The qbe back end runs scripts/mrb for each compile. Build the mruby tool first: when it is missing, the first qbe compile
+# The qbe back end runs scripts/mrb.rb for each compile. Build the mruby tool first: when it is missing, the first qbe compile
 # starts setup-mruby.sh, which builds the onig gem through nfcc, which runs mrb again, and the two wait on each other.
 PATH=$base_path "$root/scripts/setup-mruby.sh" || exit 1
 backends=${NFCXX_BACKEND:-"gcc"}

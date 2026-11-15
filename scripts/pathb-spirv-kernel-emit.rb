@@ -1,7 +1,7 @@
 # Path B: emit SPIR-V assembly text (the input of spirv-as) for a GPU kernel, from the nfcxx mid-level IR text
 # (docs/notes/pathb-stage2.md). The sibling of scripts/pathb-ptx-emit.rb, for the Intel XPU (OpenCL and SYCL take SPIR-V).
 #
-# Usage: scripts/mrb scripts/pathb-spirv-kernel-emit.rb [FILE.ir | -] > out.spvasm
+# Usage: scripts/mrb.rb scripts/pathb-spirv-kernel-emit.rb [FILE.ir | -] > out.spvasm
 #        then: spirv-as --target-env spv1.1 out.spvasm -o out.spv, spirv-val, and load out.spv (tests/gpu/spirv/run.sh)
 #
 # Exit status:

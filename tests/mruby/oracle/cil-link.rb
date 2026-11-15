@@ -1,7 +1,7 @@
 # cil-link.rb: link qbe2cil.rb / pathb-cil-emit.rb fragments into one CIL executable (the nfcc `cil` backend;
 # docs/notes/cil.md). Port of tests/mruby/oracle/cil-link.py, which writes the same CIL text and the same launcher.
 #
-#   scripts/mrb scripts/cil-link.rb [--ilasm PATH] [--cc CC] [--keep-il] -o OUT FRAGMENT...
+#   scripts/mrb.rb scripts/cil-link.rb [--ilasm PATH] [--cc CC] [--keep-il] -o OUT FRAGMENT...
 #
 # The mruby interpreter has no ENV, so the Python original's environment variables are arguments:
 # ILASM -> --ilasm (default build/cil/ilasm beside scripts/), CC -> --cc (default cc, for the variadic call shim),

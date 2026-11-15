@@ -39,7 +39,7 @@ one() {
       -I"$root/lib/sycl-ggml" -I"$ggml_src" -I"$ggml_src/../../include" -I"$ggml_src/.." "$f" > "$out/$b.ir" 2> "$out/$b.err"; then
     echo "$b: FAIL (front end) $(grep -m1 -A1 -E 'error' "$out/$b.err" | tr -s ' \n' ' ' | cut -c1-200)"; return
   fi
-  if ! "$root/scripts/spirv-emit" --kernel-cl --manifest="$out/$b.man" "$out/$b.ir" \
+  if ! "$root/scripts/spirv-emit.rb" --kernel-cl --manifest="$out/$b.man" "$out/$b.ir" \
       > "$out/$b.spv" 2> "$out/$b.err"; then
     echo "$b: FAIL (emitter) $(head -1 "$out/$b.err" | cut -c1-200)"; return
   fi

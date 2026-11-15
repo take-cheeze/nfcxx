@@ -25,7 +25,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
 # 1. The emitted assembly matches its golden (the same module as the OpenCL check).
-"$root/scripts/mrb" "$root/scripts/pathb-spirv-kernel-emit.rb" ../device/vecadd.ir > "$out/vecadd.spvasm"
+"$root/scripts/mrb.rb" "$root/scripts/pathb-spirv-kernel-emit.rb" ../device/vecadd.ir > "$out/vecadd.spvasm"
 if diff -u ../spirv/vecadd.spvasm "$out/vecadd.spvasm"; then echo "asm vecadd: ok"; else echo "asm vecadd: FAIL"; fail=1; fi
 
 # 2. It assembles and validates (SPIR-V 1.1, as the OpenCL check; the Level Zero driver takes it).

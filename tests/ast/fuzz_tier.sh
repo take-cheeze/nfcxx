@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Differential fuzzing of the tier (docs/notes/ast.md, "Tiering") against a real Lua 5.4: random numeric kernels
-# (fuzz/gen_kernel.rb, an mruby script run by scripts/mrb; some of them assign upvalues of the chunk), called with random and
+# (fuzz/gen_kernel.rb, an mruby script run by scripts/mrb.rb; some of them assign upvalues of the chunk), called with random and
 # sometimes wrongly typed arguments through
 # pcall, and "segments": functions that are not kernels as a whole (they make a table), with locals of every type, one that a closure
 # captures, a local function and random loops that read and assign them and sometimes return, which only the on-stack replacement of
@@ -28,7 +28,7 @@ norm() { sed -E 's/0x[0-9a-f]{6,}/ADDR/g; s/-nan/nan/g' "$1"; }   # the sign of 
 export NFCXX="$PWD/nfcxx" NFCXX_BACKEND=$be
 bad=0; compiled=0; calls=0; osr=0
 for seed in $(seq "$first" $((first + seeds - 1))); do
-  scripts/mrb tests/ast/fuzz/gen_kernel.rb "$seed" "$nf" > "$tmp/p.lua"
+  scripts/mrb.rb tests/ast/fuzz/gen_kernel.rb "$seed" "$nf" > "$tmp/p.lua"
   timeout 20 "$lua" "$tmp/p.lua" > "$tmp/ref.raw" 2>&1 || { echo "skip seed $seed: the reference takes too long"; continue; }
   norm "$tmp/ref.raw" > "$tmp/ref.out"
   NFCAST_TIER=sync NFCAST_TIER_THRESHOLD=1 timeout 300 "$tmp/driver" --stats "$tmp/p.lua" > "$tmp/tier.raw" 2> "$tmp/tier.err"; norm "$tmp/tier.raw" > "$tmp/tier.out"

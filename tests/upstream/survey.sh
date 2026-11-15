@@ -17,7 +17,7 @@ mkdir -p "$out"; out=$(cd "$out" && pwd)
 mkdir "$out/.lock" 2>/dev/null || { echo "survey already running: $out" >&2; exit 1; }
 trap 'rm -rf "$out/.lock"' EXIT
 mkdir "$out/.lock/tasks"
-scripts/mrb tests/upstream/reference-manifest.rb "$suite" "$inventory" > "$out/manifest.tsv"
+scripts/mrb.rb tests/upstream/reference-manifest.rb "$suite" "$inventory" > "$out/manifest.tsv"
 # Preflight all tools before calling a rejection a reference observation.
 printf 'int main() { return 0; }\n' > "$out/.lock/smoke.cpp"
 for route in host $routes; do
@@ -39,7 +39,7 @@ while IFS=$'\t' read -r suite id rest; do
   [ "$suite" = suite ] && continue
   cat "$out/$id/result.tsv" >> "$out/results.tsv.tmp"
 done < "$out/manifest.tsv"
-scripts/mrb tests/upstream/normalize-survey.rb "$out" "$out/results.tsv.tmp" > "$out/results.tsv.normalized"
+scripts/mrb.rb tests/upstream/normalize-survey.rb "$out" "$out/results.tsv.tmp" > "$out/results.tsv.normalized"
 mv "$out/results.tsv.normalized" "$out/results.tsv"
 rm "$out/results.tsv.tmp"
 cp tests/upstream/{git-snapshots,snapshots}.tsv "$out/"

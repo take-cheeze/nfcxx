@@ -1,4 +1,4 @@
-# gen_inl.rb: port of tests/ast/fuzz/gen_inl.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb).
+# gen_inl.rb: port of tests/ast/fuzz/gen_inl.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb.rb).
 # Writes a Lua program for the inlining of small functions to stdout; run by tests/ast/fuzz.sh next to gen_expr.rb and gen_pat.rb.
 # A few random helper functions (one to three parameters; a `return <expr>`, a local and a return, an if chain with returns, an
 # update of an upvalue or of a field, a call of an earlier helper) and a few methods of two classes (reading and writing fields of
@@ -9,7 +9,7 @@
 # Since the inliner takes loops, multiple assignment, parameter substitution and polymorphic sites: bodies with numeric/while/repeat/
 # generic loops (break, return from inside), multiple assignment (parameters swapped, fields and upvalues as targets), assigned
 # parameters, and calls through a list of helpers indexed by the argument tuple (the guard fails and the site is inlined again).
-# usage: scripts/mrb tests/ast/fuzz/gen_inl.rb SEED N
+# usage: scripts/mrb.rb tests/ast/fuzz/gen_inl.rb SEED N
 # The draws come from Rng (mruby-random's Random seeded by SEED), not from Python's random module, so the programs for a given seed are
 # not the Python original's; the grammar and the order of the draws are the same.
 

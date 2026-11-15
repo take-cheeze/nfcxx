@@ -1,7 +1,7 @@
-# gen_expr.rb: port of tests/ast/fuzz/gen_expr.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb).
+# gen_expr.rb: port of tests/ast/fuzz/gen_expr.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb.rb).
 # Writes a Lua program of N random expressions (arithmetic, bitwise, comparison, concatenation, logic and a few math functions
 # over integers, floats, strings and other values) to stdout, each evaluated under pcall; run by tests/ast/fuzz.sh.
-# usage: scripts/mrb tests/ast/fuzz/gen_expr.rb SEED N
+# usage: scripts/mrb.rb tests/ast/fuzz/gen_expr.rb SEED N
 # The draws come from Rng (mruby-random's Random seeded by SEED), not from Python's random module, so the programs for a given seed are
 # not the Python original's; the grammar and the order of the draws are the same.
 

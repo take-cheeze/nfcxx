@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The CIL route of nfcc (docs/notes/cil.md): a C or C++ file -> Path B (scripts/pathb-cil -c) -> a JSON fragment, which is the
+# The CIL route of nfcc (docs/notes/cil.md): a C or C++ file -> Path B (scripts/pathb-cil.rb -c) -> a JSON fragment, which is the
 # object; the link is scripts/cil-link.rb over the fragments (CIL, ilasm, a launcher for dotnet). The old per-file fallback
 # through cproc is gone with cproc: a file Path B refuses is an error here. NFCXX_CIL_VERBOSE=1 says which file was refused, and why.
 export NFCXX_CIL=1
@@ -26,7 +26,7 @@ done
 if [ $compile = 1 ]; then
   [ ${#srcs[@]} -eq 1 ] || { echo "cil-cc: -c takes one source file" >&2; exit 2; }
   err=$(mktemp); trap 'rm -f "$err"' EXIT
-  if "$here/pathb-cil" -c ${pass[@]+"${pass[@]}"} -o "$out" "${srcs[0]}" 2> "$err"; then
+  if "$here/pathb-cil.rb" -c ${pass[@]+"${pass[@]}"} -o "$out" "${srcs[0]}" 2> "$err"; then
     [ -z "${NFCXX_CIL_VERBOSE:-}" ] || echo "cil-cc: Path B: ${srcs[0]}" >&2
     exit 0
   fi
@@ -42,5 +42,5 @@ fi
 [ ${#srcs[@]} -eq 0 ] || { echo "cil-cc: the link takes fragments, not sources" >&2; exit 2; }
 [ ${#frags[@]} -ge 1 ] || { echo "cil-cc: nothing to link" >&2; exit 2; }
 keep=(); [ -z "${NFCXX_KEEP_IL:-}" ] || keep=(--keep-il)
-exec "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "${ILASM:-$root/build/cil/ilasm}" --cc "${CC:-cc}" \
+exec "$root/scripts/mrb.rb" "$root/scripts/cil-link.rb" --ilasm "${ILASM:-$root/build/cil/ilasm}" --cc "${CC:-cc}" \
   ${keep[@]+"${keep[@]}"} -o "$out" "${frags[@]}"

@@ -26,7 +26,7 @@ for kind in expr pat inl; do
   [ $kind = inl ] && envs=("NFCAST_INLINE_WARM=2" "NFCAST_INLINE_WARM=1" "NFCAST_INLINE=0")
   for seed in $(seq 1 "$seeds"); do
     n=200; [ $kind = pat ] && n=150; [ $kind = inl ] && n=40
-    scripts/mrb tests/ast/fuzz/gen_$kind.rb "$seed" $n > "$tmp/p.lua"
+    scripts/mrb.rb tests/ast/fuzz/gen_$kind.rb "$seed" $n > "$tmp/p.lua"
     "$lua" "$tmp/p.lua" 2>&1 | sed -E 's/0x[0-9a-f]{6,}/ADDR/g' > "$tmp/ref.out"
     for e in "${envs[@]}"; do
       env $e "$tmp/driver" "$tmp/p.lua" 2>&1 | sed -E 's/0x[0-9a-f]{6,}/ADDR/g' > "$tmp/ast.out"

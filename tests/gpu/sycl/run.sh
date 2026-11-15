@@ -20,7 +20,7 @@ fi
 fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-mrb() { "$root/scripts/mrb" "$@"; }
+mrb() { "$root/scripts/mrb.rb" "$@"; }
 
 # 1. The rewrite of the SYCL source matches its golden; the device source is lowered to IR (golden).
 mrb "$root/scripts/sycl-rewrite.rb" vecadd.cpp > "$out/vecadd_device.cpp"

@@ -1,5 +1,5 @@
 # Shim that lets ASTroGen (lib/astrogen.rb of https://github.com/ko1/astro, and the samples' *_gen.rb) run on the
-# repo's mruby (scripts/mrb) instead of CRuby. scripts/astrogen-mruby concatenates this file, the generator sources
+# repo's mruby (scripts/mrb.rb) instead of CRuby. scripts/astrogen-mruby concatenates this file, the generator sources
 # (their `require` lines dropped: mruby has no require) and the caller's code into one script.
 # What mruby lacks that the generator uses is defined here; see docs/notes/astro.md.
 

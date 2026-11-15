@@ -1,5 +1,5 @@
 # Inventory GCC directives without pretending to implement the DejaGnu harness.
-# Usage: scripts/mrb gcc-index.rb SNAPSHOT FILELIST
+# Usage: scripts/mrb.rb gcc-index.rb SNAPSHOT FILELIST
 root, list = ARGV
 puts "page\taction\tstandard\tclassification\treason"
 paths = File.open(list, 'rb') { |f| f.read.split("\n") }
