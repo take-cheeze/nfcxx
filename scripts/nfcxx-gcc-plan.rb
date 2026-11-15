@@ -50,6 +50,8 @@
 # not read: unported.
 
 require "open3"
+require "tmpdir"
+require "rbconfig"
 require "pathname"
 
 class NfcxxUnported < StandardError
@@ -185,6 +187,9 @@ end
 # more than one -m option, a macro with arguments, a module source (the bash's grammar is read, but a module is not
 # planned), and NFCXX_* or CUDA_HOME in the environment (the port does not read them; the bash does).
 class LiveFacts < Facts
+  # the repository's real path (the cache key hashes its files; the plan prints ROOT)
+  attr_reader :root
+
   def initialize(root, cwd)
     super()
     @root = root
@@ -193,6 +198,8 @@ class LiveFacts < Facts
     @host_sys = nil  # computed on first use (Facts sets an empty list)
     ENV.each_key do |name|
       # NFCXX_DRIVER_TRACE is the CRuby driver's own switch (scripts/nfcxx.rb); the bash does not read it
+      # the cache's own settings: the cache planner (nfcxx-cache.rb) reads them, and they are not in the key
+      next if %w[NFCXX_CACHE NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE].include?(name)
       next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
                   %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
@@ -431,7 +438,7 @@ class Plan
       elsif a == "--eh-unwind" then @eh_unwind_on = true
       elsif a == "--no-eh-shim" then @eh_shim_on = false
       elsif a.start_with?("--cache=") then @cache_dir = a[8..]
-      elsif a.start_with?("--cache-log=") then nil
+      elsif a.start_with?("--cache-log=") then @cache_log_arg = a[12..]
       elsif a.start_with?("--instantiate=") then @instantiate = a[14..]
       elsif a.start_with?("--dialect=") then @dialect = a[10..]; @dialect_asked = true
       elsif a.start_with?("--gnu-version=") then nil
@@ -506,6 +513,8 @@ class Plan
   def run(args)
     return syntax_only(args) if args.include?("-fsyntax-only")
 
+    @args_for_key = args
+
     kind, argv = cuda_driver_step(args)
     return nested(argv, "libcuda") if kind == :exec
 
@@ -528,9 +537,15 @@ class Plan
 
     select_backend
     # a -c of one source with -o and an extension is looked up in the object cache (the key is not modelled)
-    if !@cache_dir.empty? && @compile_only && @ncpp == 1 && @outset && @nobj == 0 && @cfiles.empty? && @depmode.empty? &&
-       @out.include?(".")
-      unported("--cache of a -c compile: its key hashes the scripts, the binaries and the host compilers")
+    # a -c of one source with -o and an extension is looked up in the object cache: a hit is the copy back (the plan ends),
+    # a miss is the build and the store after it (nfcxx-cache.rb plans both; the key is the live one)
+    @cache_post = []
+    if cache_applies?
+      cache = cache_plan
+      cache[:pre].each { |kind, *words| emit(kind, *words) }
+      return nil if cache[:hit]
+
+      @cache_post = cache[:post]
     end
     @moves = !@compile_only
     asan_c = @asan ? ["-fsanitize=address", "-fno-omit-frame-pointer", *@asanopts] : []
@@ -582,6 +597,7 @@ class Plan
          "--c_to_obj_option", "-O2", "--c_to_obj_option", "-fwrapv", "--c_to_obj_option", "-fno-strict-aliasing",
          *keep_static, *eh_unwind, "--c_to_obj_option", "-fgnu89-inline", *picopts, *cobjs, *pre_opts, *eflist,
          *shim, *vlart, *rtlib, "-o", ecp_arg(out))
+    @cache_post.each { |kind, *words| emit(kind, *words) }
     depend_step unless @depmode.empty?
     nil
   end
@@ -590,6 +606,83 @@ class Plan
 
   def emit(kind, *words)
     @lines << [kind, *words]
+  end
+
+  CACHE_PLANNER = "scripts/nfcxx-cache.rb".freeze
+
+  # whether this compile is looked up in the object cache: -c of one source with -o (with an extension), no module, CUDA,
+  # cpp2, -MD or stdin input, and a cache directory (--cache= or NFCXX_CACHE)
+  def cache_applies?
+    dir = @cache_dir.empty? ? ENV["NFCXX_CACHE"].to_s : @cache_dir
+    !dir.empty? && @compile_only && @ncpp == 1 && @outset && @nobj == 0 && @cfiles.empty? && @depmode.empty? &&
+      @out.include?(".")
+  end
+
+  # the cache planner's lines for this compile: {hit:, pre:, post:} with pre and post as [kind, *words]. Live facts only
+  # (the key hashes the scripts, the EDG binaries and the host compilers); the remote tier and the cache log are not planned.
+  def cache_plan
+    unported("--cache of a -c compile in facts mode (its key hashes live files)") unless @facts.is_a?(LiveFacts)
+    unported("--cache-log with the cache of a -c compile (not planned)") if @cache_log_arg || !ENV["NFCXX_CACHE_LOG"].to_s.empty?
+    unported("NFCXX_CACHE_REMOTE with the cache of a -c compile (not planned)") unless ENV["NFCXX_CACHE_REMOTE"].to_s.empty?
+    root = @facts.root
+    dir = @cache_dir.empty? ? ENV["NFCXX_CACHE"].to_s : @cache_dir
+    src = @srcs.first
+    # the planner's own options (--tabs) are not nfcxx's arguments: the bash's argv has none of them
+    key_args = @args_for_key.reject { |a| a == "--tabs" || a.start_with?("--cache=", "--cache-log=", "--time-log=", "--trace=") }
+    cli = ["--cwd=#{Dir.pwd}", "--uid=#{Process.uid}", "--remote=miss", "--src=#{src}"]
+    key_args.each { |a| cli << "--arg=#{a}" }
+    # every NFCXX_ variable, as the bash's key reads them (the cache planner leaves out the log and trace settings)
+    # (NFCXX_DRIVER_TRACE is the CRuby driver's own switch: the bash never has it, so it is not in the key)
+    ENV.each { |name, value| cli << "--env=#{name}=#{value}" if name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE" }
+    cli << "--env=NFCXX_CC=#{root}/scripts/gcc-cc.rb"
+    %w[EDG_BUILD EDG_BASE NFCXX_CXX].each { |n| cli << "--env=#{n}=#{ENV[n]}" if ENV[n] }
+    out = @out
+    {compile_only: 1, ncpp: 1, outset: 1, nobj: 0, modules: 0, preprocess: 0, stdin_src: 0, depmode: "", cfiles_n: 0,
+     cu_n: 0, cpp2_n: 0, out: out, backend: "gcc"}.each { |k, v| cli << "--var=#{k}=#{v}" }
+    cli << "--env=NFCXX_CACHE=#{dir}" unless ENV["NFCXX_CACHE"]   # the cache directory given by --cache= only
+    mdeps = mdeps_file(src)
+    cli << (mdeps ? "--mdeps=#{mdeps}" : "--mdeps-failed")
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, File.join(root, CACHE_PLANNER), *cli)
+    File.delete(mdeps) if mdeps
+    unported("the cache planner did not plan this compile: #{stderr.lines.first.to_s.strip}") unless status.success?
+    parse_cache_lines(stdout)
+  end
+
+  # the dependency list of SRC, as the bash's key reads it (gcc -M with the same options); nil when it fails
+  def mdeps_file(src)
+    cxx = ENV["NFCXX_CXX"].to_s.empty? ? "g++" : ENV["NFCXX_CXX"]
+    cmd = [cxx, "-M", "-std=#{@std.delete_prefix("--")}", *@cflags, *@preinc.flat_map { |f| ["-include", f] },
+           *@sysdirs.map { |d| "-isystem#{d}" }, src]
+    out, status = Open3.capture2(*cmd, err: File::NULL)
+    return nil unless status.success?
+
+    path = File.join(Dir.tmpdir, "nfcxx-mdeps-#{Process.pid}-#{rand(1 << 30)}.txt")
+    File.write(path, out)
+    path
+  end
+
+  # the planner's output lines: RUN/CP kinds before and after "RUN build OUT"; EXIT 0 is a hit (the plan ends)
+  def parse_cache_lines(text)
+    pre = []
+    post = []
+    hit = false
+    building = false
+    text.each_line do |line|
+      line = line.chomp
+      next if line.start_with?("KEY ") || line.empty?
+
+      if line == "EXIT 0"
+        hit = true
+      elsif line.start_with?("RUN build ")
+        building = true
+      elsif line.start_with?("RUN ", "CP ")
+        kind, *words = line.split(" ")
+        (building ? post : pre) << [kind, *words]
+      else
+        unported("the cache planner printed #{line.inspect}")
+      end
+    end
+    {hit: hit, pre: pre, post: post}
   end
 
   # the backend: an explicit --backend=, else gcc unless the default would be Path B (which is not ported)
