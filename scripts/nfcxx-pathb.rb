@@ -87,6 +87,11 @@ class NfcxxExit < StandardError
   end
 end
 
+# A refusal the bash makes before it runs anything (the sanitizer options): with --tabs it is printed by the caller, which
+# exits 2 without the bash (scripts/nfcxx.rb), so it prints no plan line.
+class NfcxxRefusal < NfcxxExit
+end
+
 # The bash replaces itself (the gcc fallback, or the -E preprocess): the EXEC line is the last line of the plan.
 class PlanExec < StandardError
 end
@@ -108,6 +113,10 @@ end
 
 def exit_with(message, status)
   raise NfcxxExit.new(message, status)
+end
+
+def refuse(message)
+  raise NfcxxRefusal.new(message, 2)
 end
 
 # The -fsyntax-only rewrite of nfcxx (the first loop of the script): with -E, the arguments without -fsyntax-only; otherwise
@@ -343,8 +352,10 @@ class Plan
         # the bash joins the values in order (sanitize=${sanitize:+$sanitize,}VALUE) and checks each name after the loop
         value = x.delete_prefix("-fsanitize=")
         @sanitize = @sanitize.to_s.empty? ? value : "#{@sanitize},#{value}"
-      elsif x.start_with?("-fsanitize-") || x.start_with?("-fno-sanitize=")
-        exit_with("nfcxx: #{x} is not supported (only -fsanitize=address; docs/notes/asan.md)", 2)
+      elsif x.start_with?("-fsanitize-")
+        refuse("nfcxx: #{x} is not supported (only -fsanitize=address; docs/notes/asan.md)")
+      elsif x.start_with?("-fno-sanitize=")
+        refuse("nfcxx: #{x} is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)")
       elsif x == "-fno-omit-frame-pointer" || x == "-fomit-frame-pointer"
         @asanopts << x
       elsif x == "-fPIC" || x == "-fpic"
@@ -465,9 +476,9 @@ class Plan
       checks = @sanitize.split(",", -1)
       checks.pop if @sanitize.end_with?(",")
       bad = checks.find { |c| !SANITIZE_CHECKS.include?(c) }
-      exit_with("nfcxx: -fsanitize=#{bad} is not supported (implemented: #{SANITIZE_CHECKS.join(", ")})", 2) if bad
+      refuse("nfcxx: -fsanitize=#{bad} is not supported (implemented: #{SANITIZE_CHECKS.join(", ")})") if bad
     end
-    exit_with("nfcxx: -fsanitize=address and -fsafe-pointers both replace malloc; use one", 2) if @asan && @safeptr
+    refuse("nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one") if @asan && @safeptr
     unported("host is not x86-64 Linux") unless @facts.value("host") == "linux-x86_64"
     exit_with("nfcxx: QBE not built; run scripts/setup-qbe.sh", 2) unless @facts.flag?("qbe")
   end
@@ -820,6 +831,11 @@ def main(argv)
   rescue PlanExec
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
   rescue NfcxxExit => e
+    # a refusal before any plan line: the caller prints the message and exits with its status (no bash)
+    if tabs && e.is_a?(NfcxxRefusal)
+      warn e.message
+      return e.status
+    end
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
     warn e.message unless e.message.empty?
     puts "STATUS #{e.status}" unless tabs

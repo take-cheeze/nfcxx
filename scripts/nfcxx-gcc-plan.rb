@@ -384,6 +384,9 @@ end
 UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--target=",
                      "--pathb-c=", "--ir-opt=", "--emit-"].freeze
 UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-pointers"].freeze
+# the -fsanitize= checks the bash implements (its sanitize block; docs/notes/ubsan.md)
+SANITIZE_CHECKS = %w[undefined signed-integer-overflow integer-divide-by-zero shift bounds null unreachable return
+                     float-cast-overflow].freeze
 # the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
 PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
 
@@ -411,6 +414,7 @@ class Plan
     @eh_shim_on = true
     @asan = false
     @asanopts = []
+    @sanitize = "" # the -fsanitize= checks, joined as the bash joins them (sanitize_checks)
     @pic = false
     @shared = false
     @rdynamic = false
@@ -447,6 +451,19 @@ class Plan
     @ld_name = facts.env_value("NFCXX_LD") || ""
   end
 
+  # the -fsanitize= checks, after the argument loop, as the bash's sanitize block: an unknown name is the bash's refusal (exit 2);
+  # the checks the bash implements take Path B, which the port does not plan here (@sanitize is "" after -fno-sanitize=all)
+  def sanitize_checks
+    return if @sanitize.empty?
+
+    checks = @sanitize.split(",", -1)
+    checks.pop if @sanitize.end_with?(",")
+    bad = checks.find { |c| !SANITIZE_CHECKS.include?(c) }
+    raise NfcxxExit.new("nfcxx: -fsanitize=#{bad} is not supported (implemented: #{SANITIZE_CHECKS.join(", ")})", 2) if bad
+
+    unported("-fsanitize=#{@sanitize} (Path B: scripts/nfcxx-pathb.rb)")
+  end
+
   # the argument loop (scripts/nfcxx-loop.rb's run_loop, for the options of this slice)
   def parse(args)
     i = 0
@@ -474,10 +491,17 @@ class Plan
         if @facts.ld_available?(name) then @ld_name = name else @files << a end
       elsif a == "-fsanitize=address" then @asan = true
       elsif a == "-fno-sanitize=address" then @asan = false
-      elsif a == "-fno-sanitize=all" then nil
-      elsif a.start_with?("-fsanitize=", "-fsanitize-", "-fno-sanitize=", "-fno-sanitize-")
-        # the bash builds these (-fsanitize=undefined runs on Path B and on the gcc backend too), so this is not a refusal
-        # of the port's: the port leaves them to the bash
+      elsif a == "-fno-sanitize=all" then @sanitize = ""
+      # refusals the bash makes in its loop, whatever the backend (before any compile): the bash's messages
+      elsif a.start_with?("-fsanitize-")
+        raise NfcxxExit.new("nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)", 2)
+      elsif a.start_with?("-fno-sanitize=")
+        raise NfcxxExit.new("nfcxx: #{a} is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)", 2)
+      elsif a.start_with?("-fsanitize=")
+        # the checks are joined as the bash joins them and checked after the loop (sanitize_checks)
+        value = a.delete_prefix("-fsanitize=")
+        @sanitize = @sanitize.empty? ? value : "#{@sanitize},#{value}"
+      elsif a.start_with?("-fno-sanitize-")
         unported(a)
       elsif a == "-fno-safe-pointers" then nil
       elsif a == "-fno-omit-frame-pointer" || a == "-fomit-frame-pointer" then @asanopts << a
@@ -549,7 +573,10 @@ class Plan
     end
     @srcs.each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
     @srcs.each { |s| unported("module source #{s}") if @facts.module_source?(s) }
-    return preprocess if @preprocess
+    if @preprocess
+      unported("-fsanitize with -E") unless @sanitize.empty?
+      return preprocess
+    end
 
     raise NfcxxExit.new("nfcxx: a source on stdin is supported only with -E", 2) if @stdin_src
     unless ["", "c++", "none"].include?(@xlang)
@@ -559,6 +586,7 @@ class Plan
       raise NfcxxExit.new("nfcxx: #{@depmode} needs -c (dependency files are written for a compile only)", 2)
     end
     raise NfcxxExit.new("nfcxx: unknown dialect '#{@dialect}'", 2) unless ["g++", "clang"].include?(@dialect)
+    sanitize_checks
 
     select_backend
     # a -c of one source with -o and an extension is looked up in the object cache (the key is not modelled)
