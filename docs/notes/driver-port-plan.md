@@ -39,6 +39,11 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
    Progress: `eccp_cleanup` and `link_records_rm` run scripts/nfcxx-link.rb. The link argument loop (-I, -l, -lcudart, -Wl and
    the objects) is scripts/nfcxx-linkargs.rb (`edg`), shared with the gcc plan; tests/nfcxx-linkargs checks it against the
    bash loop. `ecp_args` answers all of a driver call's arguments in one ruby call (`ecp-arg.rb --batch`).
+   The eccp command line is planned by scripts/nfcxx-eccp-plan.rb: the argument vector in the bash's order, the variable
+   a shared link exports (EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS) and the directory the call runs in (the temporary directory of
+   a link, and the keep-intermediates note). It reads the call's arrays as NUL-separated records (`eccp_plan_input`).
+   Still in bash: `mktemp -d` and the EXIT trap (eccp_cleanup), the `moves` decision (ecp_args needs it before the plan),
+   the trace spans, the subshell that runs the command, and the second CUDA pass.
 5. SYCL pre-pass: `sycl_kernel_headers` (the header script is already ported). Test: tests/nfcxx-prepass.
 6. CUDA: `cu_prepare`, `cu_rewrite`, `ir_opt_device`, `cu_amd_build`, `cu_device_key`, `cu_device_build`, and the
    rewriter build (tools/cuda-rewrite). Needs a CUDA toolkit to test end to end; the stubs (tests/nfcxx-cuda-device,
