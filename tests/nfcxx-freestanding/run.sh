@@ -31,7 +31,7 @@ mkdir -p "$root/build/edg/bin" "$root/build/edg/lib" "$root/build/edg-base" "$bi
 cp -r "$repo/scripts" "$root/scripts"
 cp "$repo/nfcxx" "$root/nfcxx"
 chmod +x "$root/nfcxx"
-for c in g++ gcc cc cp mktemp ninja uname; do ln -s "$here/stub.sh" "$bin/$c"; done
+for c in g++ gcc cc cat cp mktemp ninja uname; do ln -s "$here/stub.sh" "$bin/$c"; done
 ln -s "$here/stub.sh" "$root/build/edg/bin/cpfe"
 ln -s "$here/stub.sh" "$root/build/edg/bin/eccp"
 ln -s "$here/stub.sh" "$root/build/cuda-rewrite"
@@ -81,7 +81,7 @@ while IFS= read -r line; do
   facts=$(facts_for ${htoks[@]+"${htoks[@]}"})
   # build/qbe/qbe exists exactly when the facts say so (Path B checks it with -x)
   if grep -qx 'qbe 1' "$facts"; then : > "$root/build/qbe/qbe"; chmod +x "$root/build/qbe/qbe"; else rm -f "$root/build/qbe/qbe"; fi
-  port_out=$(ruby "$repo/scripts/nfcxx-freestanding.rb" --facts="$facts" "${args[@]}" 2>"$sb/perr"); rc=$?
+  port_out=$(ruby "$repo/scripts/nfcxx-freestanding.rb" --facts="$facts" -- "${args[@]}" 2>"$sb/perr"); rc=$?
   if [ $rc = 3 ]; then
     unp=$((unp + 1)); unported_list+="  $line
       $(head -1 "$sb/perr")

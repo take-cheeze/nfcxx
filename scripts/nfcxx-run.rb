@@ -18,7 +18,8 @@
 # Plan format: one command per line, its fields separated by single tabs (so an argument may hold spaces; an empty argument is
 # an empty field). The first field is the kind: RUN ARGV..., EXEC ARGV..., CP SRC DST, CAT FILE (to standard output), and
 # LN -s TARGET LINK; ENV NAME=VALUE exports a variable for the programs that follow (as the bash's export does). Blank lines and lines that start with # are skipped. A plan is read and checked in full before it runs.
-# When a plan runs, each field that is ROOT or starts with ROOT/ has ROOT replaced by --root, and TMP likewise by --tmp; and a
+# When a plan runs, each field that is ROOT or starts with ROOT/ has ROOT replaced by --root, and TMP likewise by --tmp (also after
+# -I or --NAME=, as in -IROOT/lib and --gen_c_file_name=TMP/out.c); and a
 # RUN or EXEC whose program is nfcxx runs ROOT/nfcxx. The port's arguments must not hold a tab or a newline.
 # Exit status: the status of the command that failed (127 or 126 when it cannot be started), 0 when the plan ran to its end,
 # 2 for a usage or plan error, and the port's status when the port refuses the arguments (3 for an unported option).
@@ -88,9 +89,12 @@ def parse_plan(text)
 end
 
 def expand(field, root, tmp)
+  # the placeholder may follow an -I or a --NAME= option (-I ROOT/lib, --gen_c_file_name=TMP/out.c), as the bash expands it
+  head = field[/\A(-I|--[A-Za-z][\w-]*=)?/].to_s
+  rest = field[head.size..]
   { "ROOT" => root, "TMP" => tmp }.each do |name, dir|
-    return dir if field == name
-    return dir + field[name.size..] if field.start_with?("#{name}/")
+    return head + dir if rest == name
+    return head + dir + rest[name.size..] if rest.start_with?("#{name}/")
   end
   field
 end

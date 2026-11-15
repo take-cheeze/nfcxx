@@ -5,15 +5,17 @@
 #      print RUN and EXEC lines, and the runner (scripts/nfcxx-run.rb) runs them;
 #   2. the gcc plan (scripts/nfcxx-gcc-plan.rb --live): a gcc-backend compile and link, planned from this machine's facts,
 #      is written as a plan file and run by the runner;
-#   3. the Path B plan (scripts/nfcxx-pathb.rb --live): the default backend or --backend=pathb, planned from this machine's
+#   3. the freestanding plan (scripts/nfcxx-freestanding.rb --live): the --emit-c and --emit-hip lists, planned from this
+#      machine's facts (the EDG front end and the rewriter, built and fresh);
+#   4. the Path B plan (scripts/nfcxx-pathb.rb --live): the default backend or --backend=pathb, planned from this machine's
 #      facts. The pathb-cc statuses are not facts here: a failed plan under the default backend is run again by the bash
 #      with the same arguments, which builds the program with gcc as it always does; under --backend=pathb the status is the
 #      driver's, as in the bash;
-#   4. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
+#   5. the bash driver, with the same arguments: anything the ports refuse (their "unported" status) or do not plan.
 # The ports' plans are the bash's commands for the argument lists they model (tests/nfcxx-live, tests/nfcxx-gcc,
 # tests/nfcxx-driver check that), so the behaviour is the bash's for every argument list.
 #
-#   ruby scripts/nfcxx.rb ARG...   the driver; NFCXX_DRIVER_TRACE=1 prints "nfcxx: driver: plan|gcc-plan|bash" to stderr
+#   ruby scripts/nfcxx.rb ARG...   the driver; NFCXX_DRIVER_TRACE=1 prints "nfcxx: driver: plan|gcc-plan|freestanding-plan|pathb-plan|bash" to stderr
 require "open3"
 require "rbconfig"
 require "tmpdir"
@@ -22,6 +24,7 @@ ROOT = File.expand_path("..", __dir__)
 LOOP = File.join(ROOT, "scripts", "nfcxx-loop.rb")
 GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
 PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
+FREESTANDING_PLAN = File.join(ROOT, "scripts", "nfcxx-freestanding.rb")
 RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
 PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
 
@@ -42,6 +45,15 @@ end
 # or it prints no plan)
 def gcc_plan(args)
   out, _err, status = Open3.capture3(RbConfig.ruby, GCC_PLAN, "--tabs", "--live=#{ROOT}", *args)
+  return nil unless status.success? && plan_text?(out)
+
+  out
+end
+
+# the freestanding plan of these arguments (--emit-c and --emit-hip, planned from this machine's facts) as a plan file, or nil
+# when the port does not plan them (it is unported, or it refuses them: the bash reports the refusal)
+def freestanding_plan(args)
+  out, _err, status = Open3.capture3(RbConfig.ruby, FREESTANDING_PLAN, "--tabs", "--live=#{ROOT}", "--", *args)
   return nil unless status.success? && plan_text?(out)
 
   out
@@ -88,6 +100,12 @@ plan = gcc_plan(ARGV)
 if plan
   trace("gcc-plan")
   exit(run_plan_text(plan))
+end
+
+fs = freestanding_plan(ARGV)
+if fs
+  trace("freestanding-plan")
+  exit(run_plan_text(fs))
 end
 
 pb = pathb_plan(ARGV)
