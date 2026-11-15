@@ -1,9 +1,9 @@
 #include <ruby.h>
 static VALUE mVl;
 
-/* the value of rb_hash_aset is used: mruby's mrb_hash_set returns void, so this stays refused */
+/* the value of rb_ivar_set is used: mruby's mrb_iv_set returns void, so this stays refused */
 static VALUE vl_store(VALUE self, VALUE h, VALUE k) {
-    VALUE v = rb_hash_aset(h, k, Qnil);
+    VALUE v = rb_ivar_set(h, k, Qnil);
     return v;
 }
 

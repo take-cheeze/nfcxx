@@ -511,6 +511,10 @@ check grep -qF 'if (h.dump == ftd_attrs) {' "$work/api_fnptr_typedef/src/api_fnp
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_obj_write tools/cext2mrbgem/fixtures/api_obj_write/ext/api_obj_write "$work/api_obj_write" > "$work/api_obj_write.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_write_field(mrb, holder, &box->v, ow_canon(val));' "$work/api_obj_write/src/api_obj_write.c"
+# 2zzz96. rb_hash_aset used as a value returns the stored value (the fork's mrb_hash_set_value).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_aset_value tools/cext2mrbgem/fixtures/api_hash_aset_value/ext/api_hash_aset_value "$work/api_hash_aset_value" > "$work/api_hash_aset_value.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_hash_set_value(mrb, h, k, v)' "$work/api_hash_aset_value/src/api_hash_aset_value.c"
 # 2zzz94. An inline static function defined in two .c files is renamed per file (as a plain static is).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_inline_static tools/cext2mrbgem/fixtures/api_inline_static/ext/api_inline_static "$work/api_inline_static" > "$work/api_inline_static.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -572,7 +576,7 @@ fi
 # 2zzz48. a value use of a CRuby setter whose mruby function returns void (rb_hash_aset) is refused; a statement use converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_lost tools/cext2mrbgem/fixtures/api_value_lost/ext/api_value_lost "$work/api_value_lost" > "$work/api_value_lost.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
-check grep -q '  rb_hash_aset  rb_hash_aset returns its value in CRuby' "$work/api_value_lost/REFUSALS.txt"
+check grep -q '  rb_ivar_set  rb_ivar_set returns its value in CRuby' "$work/api_value_lost/REFUSALS.txt"
 # 2zzz46. a function defined in both branches of an #ifdef: the active definition is threaded and converted, the inactive one
 # stays as written (its #ifdef is false in this build), and the registration on a VALUE parameter is unwrapped.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dup_variant tools/cext2mrbgem/fixtures/api_dup_variant/ext/api_dup_variant "$work/api_dup_variant" > "$work/api_dup_variant.log" 2>&1 || rc=$?

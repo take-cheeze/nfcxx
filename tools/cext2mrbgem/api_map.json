@@ -551,11 +551,10 @@
     },
     "rb_hash_aset": {
       "kind": "call",
-      "mruby": "mrb_hash_set",
+      "mruby": "mrb_hash_set_value",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available",
-      "value_lost": true
+      "caveat": "the fork's mrb_hash_set_value (include/mruby/hash.h, branch claude/hash-set-value of take-cheeze/mruby) stores the value and returns it, as rb_hash_aset does"
     },
     "rb_hash_aref": {
       "kind": "call",
