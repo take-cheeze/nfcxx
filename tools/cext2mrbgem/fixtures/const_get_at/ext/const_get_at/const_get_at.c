@@ -1,10 +1,11 @@
 #include <ruby.h>
 
-/* rb_const_get_at looks only in the receiver: no exact mruby equivalent, so it stays refused. */
+/* rb_const_get_at looks only in the receiver (the fork's mrb_const_get_at); the receiver is a tracked module */
 static VALUE mCGA;
 
 static VALUE cga_lookup(VALUE self) {
-    return rb_const_get_at(mCGA, rb_intern("VERSION"));
+    ID version = rb_intern("VERSION");
+    return rb_const_get_at(mCGA, version);
 }
 
 void Init_const_get_at(void) {

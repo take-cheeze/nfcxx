@@ -1,7 +1,7 @@
 #include <ruby.h>
 
-/* A local VALUE that is not assigned from rb_define_class or rb_define_module is not a tracked class variable,
-   so both calls with it as the receiver stay refused. */
+/* A local VALUE that is not assigned from rb_define_class or rb_define_module is not a tracked class variable: rb_define_const
+   with it stays refused, and a method registration unwraps it with mrb_class_ptr (CRuby requires a class or module there). */
 static VALUE mcr_run(VALUE self) {
     VALUE target = self;
     rb_define_const(target, "X", Qnil);

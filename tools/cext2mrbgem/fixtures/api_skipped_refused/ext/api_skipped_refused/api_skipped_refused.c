@@ -1,13 +1,13 @@
 #include <ruby.h>
 
-/* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_obj_method_arity (no mruby equivalent), rb_gv_get (mruby takes a symbol, not a C name),
+/* Names with no exact mruby equivalent that batch B1 leaves refused (api_map.json): rb_memcicmp (no mruby equivalent), rb_gv_get (mruby takes a symbol, not a C name),
  * rb_intern3 (takes an encoding),
- * rb_bug (variadic format), StringValue (takes an lvalue it rewrites). */
+ * rb_memcicmp (no mruby equivalent), rb_require (a Ruby-level load, not in the core mruby API). */
 static VALUE mApiSkip;
 static const char *gv_name = "$x";
 
 static VALUE api_sub(VALUE self, VALUE s) {
-    return rb_obj_method_arity(s, s);
+    return rb_memcicmp(s, s, 1);
 }
 
 static const char *iv_name = "@a";
@@ -29,12 +29,12 @@ static VALUE api_num(VALUE self) {
 }
 
 static VALUE api_bug(VALUE self) {
-    rb_bug("never");
+    rb_memcicmp("never", "never", 5);
     return Qnil;
 }
 
 static VALUE api_sv(VALUE self, VALUE s) {
-    StringValue(s);
+    rb_require("x");
     return s;
 }
 

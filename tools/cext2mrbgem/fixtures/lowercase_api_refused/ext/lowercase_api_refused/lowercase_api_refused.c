@@ -4,7 +4,7 @@
 static VALUE lc_make(VALUE self)
 {
     st_table *t = st_init_numtable();
-    void *p = ruby_xmalloc(8);
+    void *p = ruby_xmalloc2_unmapped(8);
     return self;
 }
 
