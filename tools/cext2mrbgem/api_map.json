@@ -1179,6 +1179,13 @@
       "template": "mrb_funcall($m, mrb_top_self($m), \"Complex\", 2, $0, $1)",
       "caveat": "Complex(real, imag) through Kernel#Complex of the complex mrbgem (mruby-complex must be in the build)"
     },
+    "rb_time_timespec": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((struct timespec){ .tv_sec = mrb_fixnum(mrb_funcall($m, $0, \"to_i\", 0)), .tv_nsec = (long)mrb_fixnum(mrb_funcall($m, $0, \"usec\", 0)) * 1000 })",
+      "caveat": "the seconds and the nanoseconds of a Time, from the mruby-time gem's to_i and usec: that gem keeps microseconds, so the nanoseconds are a multiple of 1000"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",

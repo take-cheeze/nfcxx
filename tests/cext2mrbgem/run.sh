@@ -480,6 +480,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_complex tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check grep -qF 'mrb_funcall(mrb, mrb_top_self(mrb), "Complex", 2, re, im)' "$work/api_complex/src/api_complex.c"
 check grep -qF 'mrb_funcall(mrb, c, "imaginary", 0)' "$work/api_complex/src/api_complex.c"
+# 2zzz84. rb_time_timespec(t) reads the seconds (to_i) and the nanoseconds (usec * 1000) of a Time from the mruby-time gem.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_ts tools/cext2mrbgem/fixtures/api_time_ts/ext/api_time_ts "$work/api_time_ts" > "$work/api_time_ts.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '.tv_sec = mrb_fixnum(mrb_funcall(mrb, t, "to_i", 0))' "$work/api_time_ts/src/api_time_ts.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
