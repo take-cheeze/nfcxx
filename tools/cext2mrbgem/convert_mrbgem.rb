@@ -4628,6 +4628,28 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # Compiles each converted source with gcc -fsyntax-only against the mruby headers (NFCX_MRUBY_INCLUDE, colon-separated).
   # A compile error becomes a refusal at its output line, so the gem is marked not buildable. The converter's own
   # refusals do not see every wrong conversion (a CRuby VALUE compared with == has no mruby form in the output).
+  # names of the functions (source) that have a stuck-point refusal in rel
+  def stuck_function_names(rel)
+    names = Set.new
+    text = @files[rel]['text']
+    @refusals.each do |r|
+      next unless r['file'] == rel && r['reason'].to_s.match?(/stuck point/)
+      off = text.lines.take(r['line'].to_i - 1).sum(&:length)
+      fn = enclosing_func(rel, off)
+      names << fn['name'] if fn
+    end
+    names
+  end
+
+  # the name of the function whose definition header is the last column-0 header above output line l (1-based), or nil
+  def output_function_name(lines, l)
+    (l - 1).downto(0) do |i|
+      m = /\A(?:static |inline |extern )*[A-Za-z_][\w \*]*?\b([A-Za-z_]\w*)[ \t]*\([^;]*\)[ \t]*\{/.match(lines[i].to_s)
+      return m[1] if m
+    end
+    nil
+  end
+
   def verify_compile(src_dir, inc_dir)
     incs = ENV['NFCX_MRUBY_INCLUDE'].split(':').reject(&:empty?)
     @files.each do |rel, f|
@@ -4637,9 +4659,22 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       incs.each { |d| args += ['-I', d] }
       args << path
       _o, err, _st = Open3.capture3(*args)
+      out_lines = File.exist?(path) ? File.readlines(path, encoding: 'UTF-8').map { |x| x.scrub } : []
+      stuck_fns = stuck_function_names(rel)
       err.each_line do |ln|
         m = ln.chomp.match(/\A#{Regexp.escape(path)}:(\d+):\d+: (?:fatal )?error: (.+)\z/)
         next unless m
+        # a compile error inside a function that has a stuck-point refusal is that stuck point's cascade: the stuck call
+        # is left as written, so the compiler reports its uses (the stuck point is counted once, under its own reason)
+        fn_out = output_function_name(out_lines, m[1].to_i)
+        # a CRuby type tag the fork cannot test (T_RATIONAL, T_BIGNUM) is its own open or stuck group, not a cascade
+        tag_err = m[2].match?(/'T_[A-Z_]+'|\bCheck_Type\b/)
+        if fn_out && stuck_fns.include?(fn_out) && !tag_err && m[2].strip != 'ruby/encoding.h: No such file or directory'
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (cascade in #{fn_out}): the converted code does not compile here because of a stuck " \
+                                     "point in the same function (#{m[2].strip})" }
+          next
+        end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
         # such header, and gcc stops at the fatal error, so the rest of the file is not checked
         if m[2].strip == 'ruby/encoding.h: No such file or directory'
