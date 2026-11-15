@@ -863,72 +863,48 @@ if [ ${#cfiles[@]} -gt 0 ]; then
 fi
 
 # The compile cache's functions, defined before the routes that use them (the Path B -c route runs before the gcc route's
-# code). cache_lookup prints the key of this compile; cache_check is the lookup and the hit (the object copied back, exit 0);
-# cache_store stores the object just built when the cache is in use and has no entry for it yet.
-cache_lookup() {  # cache_lookup SRC OUT: prints the key, or fails when the headers cannot be listed. With --cache-log
-  # the whole lookup is logged in one write: the output, the key inputs, the key, and hit or miss.
-  local src=$1 out=$2 deps f pre=() inputs key state
-  for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
-  deps=$("${NFCXX_CXX:-g++}" -M "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} "$src" 2>/dev/null) || return 1
-  deps=$(sed 's/\\$//' <<<"$deps" | tr ' ' '\n' | sed '/^$/d' | tail -n +2)
-  inputs=$({
-    # (--cache, --cache-log, --time-log and --trace name where things are kept, not what is built: they are not in the argv.)
-    printf 'nfcxx-cache-1\nargv:'; printf ' %q' ${key_argv[@]+"${key_argv[@]}"}; printf '\ncwd: %s\nout: %s\nsrc: %s\n' "$PWD" "$(realpath -m "$out")" "$(realpath -m "$src")"
-    # The logs and the trace are diagnostics: they must not change the key.
-    (env | grep '^NFCXX_' | grep -Ev '^NFCXX_(CACHE_LOG|CACHE_REMOTE|TIME_LOG|TRACE|TRACE_OWNER|TRACE_UNIT)=' || true) | LC_ALL=C sort
-    cache_sha < "$root/nfcxx"
-    find "$root/scripts" -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    find "$edg" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    for f in "$root/build/qbe/qbe"; do [ ! -f "$f" ] || cache_sha < "$f"; done
-    cat "$root/tools/weak-symbols/weak_symbols.cpp" | cache_sha   # the weak-symbol tool (built on first use)
-    # The EDG driver: the eccp script and environment that the wrapper (bin/eccp) runs and sources, and the configuration it reads
-    for f in "$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" "$(sed -n 's/^\. "\([^"]*\)".*/\1/p' "$edg/eccp" 2>/dev/null)" \
-             "${EDG_BASE:-$root/build/edg-base}/edg_eccp_config"; do
-      if [ -f "$f" ]; then cache_sha < "$f"; else echo "missing $f"; fi
-    done
-    "${NFCXX_CXX:-g++}" --version | head -1; cc --version | head -1
-    # a Path B object's key: the backend, the Path B front end (PATHB_CPFE) and its base files (PATHB_BASE), as scripts/nfcxx-cache.rb keys them
-    if [ "$backend" = pathb ]; then
-      echo backend: pathb
-      pb_cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}; pb_base=${PATHB_BASE:-$root/build/pathb/edg-base}
-      if [ -f "$pb_cpfe" ]; then cache_sha < "$pb_cpfe"; else echo "missing $pb_cpfe"; fi
-      find "$pb_base" -maxdepth 1 -type f -print0 | LC_ALL=C sort -z | xargs -0 cat | cache_sha
-    fi
-    for f in $deps; do printf '%s ' "$f"; if [ -f "$f" ]; then cache_sha < "$f"; else echo missing; fi; done
-  })
-  key=$(printf '%s\n' "$inputs" | cache_sha | cut -c1-40)
-  state=miss; [ ! -f "$cache_dir/objects/$key/obj" ] || state=hit
-  cache_log "== $out ($src)"$'\n'"$inputs"$'\n'"key $key"$'\n'"$state"
-  printf '%s\n' "$key"
-}
+# code). The decisions are scripts/nfcxx-cache.rb's: the key of this compile, the --cache-log block, hit or miss, the copy of
+# a hit back beside the output, and the store of the object just built. The bash runs Ruby only when the cache is on.
+# cache_check is the lookup and the hit (exit 0 on a hit); cache_store stores the object just built when the cache is in use
+# and has no entry for it yet. The remote tier (NFCXX_CACHE_REMOTE=gha) is scripts/nfcxx-cache-io.rb, called from here.
 cache_check() {  # cache_check: sets cache_entry (empty when the cache does not apply) and exits 0 on a hit
 cache_entry=""
-key_argv=(); for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
+[ -n "$cache_dir" ] || return 0   # the cache is off: no Ruby is started
+local f a look decision state key pre=() cpp=() opts=() key_argv=()
+for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
   case $a in --cache=*|--cache-log=*|--time-log=*|--trace=*) ;; *) key_argv+=("$a") ;; esac
 done
-if [ -n "$cache_dir" ] && [ $compile_only = 1 ] && [ $ncpp = 1 ] && [ $outset = 1 ] && [ $nobj = 0 ] && [ ${#cfiles[@]} = 0 ] && [ $modules = 0 ] \
-   && [ ${#cu_inputs[@]} = 0 ] && [ ${#cpp2_inputs[@]} = 0 ] && [ -z "$depmode" ] && [ $preprocess = 0 ] && [ $stdin_src = 0 ] && [ "$out" != "${out%.*}" ]; then
-  if key=$(cache_lookup "${srcs[0]}" "$out") && [ -n "$key" ]; then
-    cache_entry=$cache_dir/objects/$key
-    [ -f "$cache_entry/obj" ] || [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
-    if [ -f "$cache_entry/obj" ]; then
-      rm -f "${out%.*}.ti" "${out%.*}.ii"
-      cp "$cache_entry/obj" "$out"
-      for x in ti ii; do [ ! -f "$cache_entry/$x" ] || cp "$cache_entry/$x" "${out%.*}.$x"; done
-      exit 0
-    fi
-  fi
+for f in ${preinc[@]+"${preinc[@]}"}; do pre+=(-include "$f"); done
+# the host preprocessor's arguments (its -M command line, after -M and before the source)
+cpp=("-std=${std#--}" ${cflags[@]+"${cflags[@]}"} ${pre[@]+"${pre[@]}"} ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"})
+opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src="${srcs[0]-}" --cwd="$PWD"
+      --var=backend="$backend" --var=compile_only="$compile_only" --var=ncpp="$ncpp" --var=outset="$outset"
+      --var=nobj="$nobj" --var=modules="$modules" --var=preprocess="$preprocess" --var=stdin_src="$stdin_src"
+      --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
+for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
+for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
+# lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
+look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
+[ -n "$look" ] || return 0
+decision=${look##*$'\n'}
+[ "$look" = "$decision" ] || cache_log "${look%$'\n'*}"
+read -r state key <<<"$decision"
+cache_entry=$cache_dir/objects/$key
+# a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
+if [ "$state" = miss ]; then
+  [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
+  [ -f "$cache_entry/obj" ] || return 0
 fi
+# hit: the object and its records are copied back, and the program is done
+"${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" hit --out="$out" --entry="$cache_entry" && exit 0
+return 0
 }
 cache_store() {  # cache_store OBJ: a whole entry appears at once (a partial copy is never a hit)
-  [ -n "$cache_entry" ] && [ ! -f "$cache_entry/obj" ] || return 0
-  local ctmp=$cache_entry.tmp.$$ x
-  mkdir -p "$ctmp" "$(dirname "$cache_entry")"
-  cp "$1" "$ctmp/obj"
-  for x in ti ii; do [ ! -f "${1%.*}.$x" ] || cp "${1%.*}.$x" "$ctmp/$x"; done
-  [ -e "$cache_entry" ] || mv "$ctmp" "$cache_entry" 2>/dev/null
-  rm -rf "$ctmp"
-  [ -z "$cache_remote" ] || [ ! -f "$cache_entry/obj" ] || cache_remote_put "${cache_entry##*/}" "$cache_entry"
+  [ -n "$cache_entry" ] || return 0
+  # store: exit 0 when this call made the entry; a new entry goes to the remote tier (cache_remote_put, a note on failure)
+  if "${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" store --out="$1" --entry="$cache_entry" && [ -n "$cache_remote" ]; then
+    cache_remote_put "${cache_entry##*/}" "$cache_entry"
+  fi
 }
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc.rb), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.

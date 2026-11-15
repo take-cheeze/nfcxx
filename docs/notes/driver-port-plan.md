@@ -27,11 +27,14 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
 1. nfcc option handling: `die`, `add_arg` (response files), `need`, `onoff`-style flags, `wp_option` and
    `pathb_option`. Test: tests/nfcc (loop-state, option-state, response-file, wp-option) against the bash.
 2. nfcxx cache: `cache_sha`, `cache_log`, `cache_remote_get`, `cache_remote_put`, `cache_lookup` (the compile cache
-   key and the GHA remote tier). Test: tests/nfcxx-cache. scripts/nfcxx-cache.rb already has the key logic; the bash
-   calls to it are what remains.
-   Progress: `cache_log`, `cache_remote_get` and `cache_remote_put` are calls of scripts/nfcxx-cache-io.rb (log, remote-get,
-   remote-put; the GHA client is behind it). Test: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). Still in
-   bash: `cache_sha` and the key computation in `cache_lookup`, and the gating of `cache_check` and `cache_store`.
+   key and the GHA remote tier). Test: tests/nfcxx-cache (against the frozen driver, tests/nfcxx-cache/nfcxx-bash).
+   Done: the gating, the key, the --cache-log block, the hit copy and the store are scripts/nfcxx-cache.rb (`lookup`,
+   `hit`, `store`); `cache_check` and `cache_store` in nfcxx call it, and run Ruby only when the cache is on. `cache_log`,
+   `cache_remote_get` and `cache_remote_put` are calls of scripts/nfcxx-cache-io.rb (log, remote-get, remote-put; the GHA
+   client is behind it). Test of those: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). Still in bash:
+   the remote calls, `cache_log` (the bash writes the block the lookup prints), and the removals before a compile.
+   `cache_sha` is defined but nfcxx no longer calls it (tests/nfcxx-cache-io reads it).
+   The key covers nfcxx and scripts/, so a change to either changes every key, as it always did.
 3. Modules: `mod_is_module_src`, `mod_decl_name`, `mod_imports`, `mod_check_src`, `mod_build_program`. Test:
    tests/nfcxx-modules (its plan printer exists: scripts/nfcxx-modules.rb).
 4. Eccp steps and link: `ecp_arg`, `eccp_cleanup`, `link_records_rm`, and the link dispatch. Test: the live

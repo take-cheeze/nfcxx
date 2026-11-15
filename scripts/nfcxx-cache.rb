@@ -1,48 +1,43 @@
 #!/usr/bin/env ruby
-# nfcxx's compile cache, ported from the bash in nfcxx: the records removal before and after a link (link_records_rm, and the
-# removal before a compile), cache_lookup (the key), the hit copy, and the store behind the one-step build. Checked against the
-# bash by tests/nfcxx-cache/run.sh, which runs nfcxx's own setup and loop with the cache block run and the build and the remote
-# helper stubbed (tests/nfcxx-cache/bash-decision.sh).
+# nfcxx's compile cache: the key of a -c compile, the lookup, the copy of a hit back beside the output, and the store of a new
+# object. The bash driver (nfcxx) calls these; the bash originals are frozen in tests/nfcxx-cache/nfcxx-bash (the oracle of
+# tests/nfcxx-cache/run.sh). Without a cache directory nfcxx starts no Ruby.
 #
-# It prints the decision and the commands the bash would run, in the bash's order:
-#   RUN ARGV...           a command the bash runs (rm, mkdir, mv, ruby for scripts/nfcxx-cache-io.rb's remote-get and remote-put,
-#                         build for the one-step build)
-#   CP SRC DST            a copy into or out of the cache
-#   EXIT 0                a hit: the bash exits after the copy
-#   KEY HEX               the cache key (not a bash line: the runner reads it)
-#   CAT PATH / BODY / END the --cache-log write: BODY is the text the bash appends to PATH
+#   ruby scripts/nfcxx-cache.rb lookup --cache-dir=DIR [--cache-log=FILE] --out=OUT --src=SRC --cwd=DIR
+#                                      [--cpp=ARG]... [--arg=ARG]... [--var=NAME=VALUE]...
+#   ruby scripts/nfcxx-cache.rb hit --out=OUT --entry=DIR
+#   ruby scripts/nfcxx-cache.rb store --out=OUT --entry=DIR
 #
-# The loop's state that the cache reads goes on the command line; the environment (NFCXX_CACHE, NFCXX_CACHE_LOG,
-# NFCXX_CACHE_REMOTE, TMPDIR, NFCXX_CXX, EDG_BUILD, EDG_BASE, and the NFCXX_* variables the key lists) goes in as --env. The
-# NFCXX_* variables are those the setup leaves: the key lists them, and the setup exports some (NFCXX_CC for --backend=gcc,
-# NFCXX_SYSTEM_PATHS, NFCXX_GCC for cosmo and k1om), so the caller passes them.
+# lookup: a compile is cached when the loop state says so (--var: compile_only, ncpp, outset, nobj, cfiles_n, modules, cu_n,
+# cpp2_n, depmode, preprocess, stdin_src, backend; the conditions of nfcxx's cache_check). Then the host preprocessor runs as
+# "$NFCXX_CXX -M ARG... SRC" (--cpp gives the ARGs; stderr is dropped), its header list is hashed with the rest of the key,
+# and the key is the first 40 hex digits of the SHA-256 of the key inputs. stdout is the --cache-log block when --cache-log
+# is given (the text nfcxx's cache_log appends: the key inputs, the key, hit or miss), then one line "hit KEY" or "miss KEY".
+# Nothing is printed when the compile is not cached or its headers cannot be listed.
+# hit: exit 0 when the entry holds an object: the object goes to OUT, and the entry's .ti and .ii beside it (OUT's own .ti and
+# .ii are removed first). Exit 1 when the entry holds no object, with nothing changed.
+# store: exit 0 when the entry had no object and now has one: OUT and the .ti and .ii beside it that exist are copied under a
+# temporary name and moved into place, so a whole entry appears at once. Exit 1 otherwise.
 #
-#   ruby scripts/nfcxx-cache.rb [--arg=ARG]... [--env=NAME=VALUE]... [--var=NAME=VALUE]... [--src=SRC]... [--file=FILE]...
-#                               [--mdeps=PATH | --mdeps-failed] [--records=ti,ii] [--remote=hit|miss] [--uid=N] [--cwd=DIR]
-#   --arg       the command line as given (nfcxx_argv; --cache=, --cache-log=, --time-log= and --trace= are left out of the key)
-#   --var       loop state: out, compile_only, ncpp, outset, nobj, modules, preprocess, stdin_src, depmode (empty when unset),
-#               cfiles_n, cu_n, cpp2_n (the counts of cfiles, cu_inputs and cpp2_inputs)
-#   --src       the sources (srcs), in order; --file the link's files (files), for the .o removal
-#   --mdeps     the output of the host preprocessor's -M: the headers the key lists; --mdeps-failed when that command failed
-#   --records   the records the build leaves beside the object: ti and ii
-#   --remote    the remote helper's answer on a local miss (only read with NFCXX_CACHE_REMOTE=gha; default miss)
-#   --uid       id -u (the default cache directory when NFCXX_CACHE is empty)
-#   --cwd       the working directory (default: the process's)
+# The key covers what the bash covered (docs/notes/cxx-driver.md): the argv (--cache=, --cache-log=, --time-log= and --trace=
+# left out, as nfcxx passes them), the working directory, the absolute output and source, every NFCXX_* environment variable
+# but the logs and the remote tier's, nfcxx and scripts/, the EDG binaries, build/qbe/qbe, tools/weak-symbols, the EDG driver
+# and its configuration, the host compiler versions, the Path B front end when backend=pathb, and each header (hashed).
 #
-# Not covered: the GitHub Actions calls (the helper's answer is --remote), the device image cache, the CUDA second pass, -MD
-# (its dependency file), -E and stdin inputs (not cached: the lookup is skipped, which the port does too), and arguments
-# that are not ASCII (the %q quoting below handles ASCII only).
+# Not covered: the GitHub Actions calls (nfcxx runs scripts/nfcxx-cache-io.rb between a miss and the hit check, and after a
+# store), the device image cache, and the CUDA second pass.
 
 require "digest"
+require "fileutils"
 require "find"
 require "open3"
 
 ROOT = File.expand_path("..", __dir__)
 
-# The environment lines the key leaves out (cache_lookup's grep -Ev).
+# The environment variables the key leaves out (their names are the bash's grep -Ev).
 KEY_ENV_LEFT_OUT = %w[NFCXX_CACHE_LOG NFCXX_CACHE_REMOTE NFCXX_TIME_LOG NFCXX_TRACE NFCXX_TRACE_OWNER NFCXX_TRACE_UNIT].freeze
 
-# An error that nfcxx prints and exits 2 for.
+# A usage error: nfcxx prints it and exits 2.
 class Fatal < StandardError
 end
 
@@ -53,7 +48,7 @@ def shell_quote(text)
   text.gsub(/[^A-Za-z0-9_.\/=:+@%~-]/) { |c| "\\#{c}" }
 end
 
-# cache_sha on stdin, as sha256sum prints it.
+# cache_sha on the bytes of data, as sha256sum prints it.
 def sha_line(data)
   "#{Digest::SHA256.hexdigest(data)}  -"
 end
@@ -66,7 +61,7 @@ def concat_files(paths)
   paths.inject("".b) { |acc, p| acc << File.binread(p) }
 end
 
-# find DIR -type f | sort: the regular files (not symlinks) under DIR, sorted bytewise by path.
+# find DIR -type f | sort LC_ALL=C: the regular files (not symlinks) under DIR, bytewise by path.
 def regular_files_under(dir)
   return [] unless File.directory?(dir)
 
@@ -99,260 +94,189 @@ def strip_ext(text)
   text.include?(".") ? text[0...text.rindex(".")] : text
 end
 
-class Cache
-  def initialize(opt)
-    @args = opt[:args]
-    @env = opt[:env]
-    @vars = opt[:vars]
-    @srcs = opt[:srcs]
-    @files = opt[:files]
-    @mdeps = opt[:mdeps]
-    @mdeps_failed = opt[:mdeps_failed]
-    @records = opt[:records]
-    @remote_answer = opt[:remote]
-    @uid = opt[:uid]
-    @cwd = opt[:cwd]
+# cp SRC DST as GNU cp makes it without -p: DST keeps its mode when it exists; a new file gets SRC's mode less the umask.
+# A failure is a note on stderr, as cp's is, and the caller goes on.
+def copy_file(src, dst)
+  File.open(dst, "wb", File.stat(src).mode & 0o777) { |f| IO.copy_stream(src, f) }
+rescue SystemCallError => e
+  warn "cp: #{e.message}"
+end
+
+def env_value(name, default = "")
+  value = ENV[name]
+  value.nil? || value.empty? ? default : value
+end
+
+# The header list of the -M output: the target (the first token) and the continuation backslashes are left out; the words are
+# split as the bash's for loop splits them.
+def header_list(deps)
+  joined = deps.split("\n", -1).map { |l| l.sub(/\\\z/, "") }.join("\n")
+  joined.split(/[ \t\n]+/).reject(&:empty?).drop(1)
+end
+
+# The key inputs, as the bash's cache_lookup printed them (without the newlines that $(...) drops).
+def key_inputs(opt, deps)
+  cxx = env_value("NFCXX_CXX", "g++")
+  edg = "#{env_value('EDG_BUILD', File.join(ROOT, 'build/edg'))}/bin"
+  lines = ["nfcxx-cache-1", "argv:" + opt[:args].map { |a| " #{shell_quote(a)}" }.join,
+           "cwd: #{opt[:cwd]}", "out: #{realpath_m(opt[:out], opt[:cwd])}", "src: #{realpath_m(opt[:src], opt[:cwd])}"]
+  lines.concat(nfcxx_env_lines)
+  lines << sha_line(File.binread(File.join(ROOT, "nfcxx")))
+  lines << sha_line(concat_files(regular_files_under(File.join(ROOT, "scripts"))))
+  lines << sha_line(concat_files(regular_files_directly_in(edg)))
+  qbe = File.join(ROOT, "build/qbe/qbe")
+  lines << sha_line(File.binread(qbe)) if File.file?(qbe)
+  lines << sha_line(read_or_empty(File.join(ROOT, "tools/weak-symbols/weak_symbols.cpp")))
+  lines.concat(driver_lines(edg))
+  [cxx, "cc"].each do |c|
+    line = first_line_of(c)
+    lines << line if line
   end
-
-  def run
-    # the setup: NFCXX_CACHE_REMOTE is checked first, and the default directory is made when there is none
-    remote = env_value("NFCXX_CACHE_REMOTE")
-    raise Fatal, "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '#{remote}')" unless ["", "gha"].include?(remote)
-
-    cache_dir = env_value("NFCXX_CACHE")
-    cache_log = env_value("NFCXX_CACHE_LOG")
-    cache_dir = "#{env_value('TMPDIR', '/tmp')}/nfcxx-cache-#{@uid}" if cache_dir.empty? && !remote.empty?
-    # the loop's --cache= and --cache-log= (the last one wins)
-    @args.each do |a|
-      case a
-      when /\A--cache=(.*)\z/m then cache_dir = Regexp.last_match(1)
-      when /\A--cache-log=(.*)\z/m then cache_log = Regexp.last_match(1)
-      end
-    end
-
-    out = var("out", "a.out")
-    srcs = @srcs
-    # A Path B compile (backend=pathb) has no removals before the compile and none after it: it writes no records.
-    pathb = backend == "pathb"
-    unless pathb
-      removals_before_compile(srcs, out)
-      link_records_rm
-    end
-    cache_entry = nil
-    key = nil
-    if eligible?(cache_dir, out, srcs)
-      key = lookup(srcs.first, out, cache_dir, cache_log)
-      if key
-        entry = "#{cache_dir}/objects/#{key}"
-        cache_entry = entry
-        remote_hit = !remote.empty? && !File.file?("#{entry}/obj") && remote_get(key, entry)
-        if File.file?("#{entry}/obj") || remote_hit
-          hit(out, entry, pathb)
-          return
-        end
-      end
-    end
-    puts "RUN build #{out}"
-    link_records_rm unless pathb
-    store(out, cache_entry, key, remote, pathb ? [] : @records) if cache_entry && !File.file?("#{cache_entry}/obj")
+  lines.concat(pathb_lines) if opt[:vars]["backend"] == "pathb"
+  header_list(deps).each do |f|
+    lines << "#{f} #{File.file?(f) ? sha_line(File.binread(f)) : 'missing'}"
   end
+  lines.join("\n").sub(/\n+\z/, "")
+end
 
-  private
+# env | grep '^NFCXX_' | grep -Ev the left-out names | LC_ALL=C sort
+def nfcxx_env_lines
+  ENV.keys.select { |k| k.start_with?("NFCXX_") && !KEY_ENV_LEFT_OUT.include?(k) }
+     .map { |k| "#{k}=#{ENV[k]}" }
+     .sort
+end
 
-  def backend
-    var("backend", "gcc")
+# The EDG driver: the executables and the sourced files that bin/eccp names, and the configuration it reads
+def driver_lines(edg)
+  eccp = File.join(edg, "eccp")
+  text = File.file?(eccp) ? File.binread(eccp) : "".b
+  execs = text.lines.filter_map { |l| l[/\Aexec "([^"]*)"/, 1] }.join("\n")
+  dots = text.lines.filter_map { |l| l[/\A\. "([^"]*)"/, 1] }.join("\n")
+  config = File.join(env_value("EDG_BASE", File.join(ROOT, "build/edg-base")), "edg_eccp_config")
+  [execs, dots, config].map { |f| File.file?(f) ? sha_line(File.binread(f)) : "missing #{f}" }
+end
+
+# "$1 --version | head -1": the first line, or nothing when the command cannot run
+def first_line_of(command)
+  out, = Open3.capture2(command, "--version")
+  out.lines.first&.chomp
+rescue SystemCallError
+  nil
+end
+
+# a Path B object's key: the backend, the Path B front end (PATHB_CPFE) and its base files (PATHB_BASE)
+def pathb_lines
+  cpfe = env_value("PATHB_CPFE", File.join(ROOT, "build/pathb/cmake/bin/cpfe"))
+  base = env_value("PATHB_BASE", File.join(ROOT, "build/pathb/edg-base"))
+  ["backend: pathb",
+   File.file?(cpfe) ? sha_line(File.binread(cpfe)) : "missing #{cpfe}",
+   sha_line(concat_files(regular_files_directly_in(base)))]
+end
+
+# cache_check's conditions: one -c compile of one source with -o, with no other input or option that the cache does not keep
+def eligible?(opt)
+  v = opt[:vars]
+  count = ->(name) { v.fetch(name, "0").to_i }
+  count.call("compile_only") == 1 && count.call("ncpp") == 1 && count.call("outset") == 1 &&
+    count.call("nobj") == 0 && count.call("cfiles_n") == 0 && count.call("modules") == 0 &&
+    count.call("cu_n") == 0 && count.call("cpp2_n") == 0 && v.fetch("depmode", "").empty? &&
+    count.call("preprocess") == 0 && count.call("stdin_src") == 0 && opt[:out].include?(".") && !opt[:src].empty?
+end
+
+# The host preprocessor's dependency output, or nil when it fails (the bash drops stderr and returns 1 then).
+def dependency_text(opt)
+  cxx = env_value("NFCXX_CXX", "g++")
+  out, status = Open3.capture2(cxx, "-M", *opt[:cpp], opt[:src], err: File::NULL)
+  status.success? ? out : nil
+rescue SystemCallError
+  nil
+end
+
+def lookup(opt)
+  return unless eligible?(opt)
+
+  deps = dependency_text(opt)
+  return if deps.nil?
+
+  inputs = key_inputs(opt, deps)
+  key = Digest::SHA256.hexdigest(inputs + "\n")[0, 40]
+  state = File.file?(File.join(opt[:cache_dir], "objects", key, "obj")) ? "hit" : "miss"
+  puts "== #{opt[:out]} (#{opt[:src]})\n#{inputs}\nkey #{key}\n#{state}" unless opt[:cache_log].empty?
+  puts "#{state} #{key}"
+end
+
+def hit(opt)
+  obj = File.join(opt[:entry], "obj")
+  return 1 unless File.file?(obj)
+
+  stem = strip_ext(opt[:out])
+  ["#{stem}.ti", "#{stem}.ii"].each { |f| FileUtils.rm_f(f) }
+  copy_file(obj, opt[:out])
+  %w[ti ii].each do |x|
+    rec = File.join(opt[:entry], x)
+    copy_file(rec, "#{stem}.#{x}") if File.file?(rec)
   end
+  0
+end
 
-  def env_value(name, default = "")
-    value = @env[name]
-    value.nil? || value.empty? ? default : value
+def store(opt)
+  entry = opt[:entry]
+  return 1 if File.file?(File.join(entry, "obj"))
+
+  tmp = "#{entry}.tmp.#{Process.pid}"
+  FileUtils.mkdir_p(tmp)
+  FileUtils.mkdir_p(File.dirname(entry))
+  copy_file(opt[:out], File.join(tmp, "obj"))
+  stem = strip_ext(opt[:out])
+  %w[ti ii].each do |x|
+    rec = "#{stem}.#{x}"
+    copy_file(rec, File.join(tmp, x)) if File.file?(rec)
   end
-
-  def var(name, default)
-    value = @vars[name]
-    value.nil? ? default : value
-  end
-
-  def int_var(name)
-    var(name, "0").to_i
-  end
-
-  def cxx
-    env_value("NFCXX_CXX", "g++")
-  end
-
-  def edg
-    "#{env_value('EDG_BUILD', File.join(ROOT, 'build/edg'))}/bin"
-  end
-
-  # the eligibility test of the cache block (one -c compile of one source with -o, not in any listed form)
-  def eligible?(cache_dir, out, srcs)
-    !cache_dir.empty? && int_var("compile_only") == 1 && int_var("ncpp") == 1 && int_var("outset") == 1 &&
-      int_var("nobj") == 0 && int_var("cfiles_n") == 0 && int_var("modules") == 0 && int_var("cu_n") == 0 &&
-      int_var("cpp2_n") == 0 && var("depmode", "").empty? && int_var("preprocess") == 0 &&
-      int_var("stdin_src") == 0 && out.include?(".") && !srcs.empty?
-  end
-
-  # the removal before a compile: <stem>.ii and <stem>.ti (the first source takes the -o name)
-  def removals_before_compile(srcs, out)
-    return unless int_var("compile_only") == 1 && int_var("ncpp") > 0
-
-    first = true
-    srcs.each do |s|
-      stem = strip_ext(File.basename(s))
-      stem = strip_ext(out) if first && out.include?(".")
-      puts "RUN rm -f #{stem}.ii #{stem}.ti"
-      first = false
-    end
-  end
-
-  # link_records_rm: <stem>.ii beside each object of the link
-  def link_records_rm
-    @files.each { |f| puts "RUN rm -f #{f[0...-2]}.ii" if f.end_with?(".o") }
-  end
-
-  def lookup(src, out, cache_dir, cache_log)
-    return nil if @mdeps_failed
-
-    inputs = key_inputs(src, out)
-    key = Digest::SHA256.hexdigest(inputs + "\n")[0, 40]
-    state = File.file?("#{cache_dir}/objects/#{key}/obj") ? "hit" : "miss"
-    unless cache_log.empty?
-      puts "CAT #{cache_log}"
-      print "== #{out} (#{src})\n#{inputs}\nkey #{key}\n#{state}\n"
-      puts "END"
-    end
-    puts "KEY #{key}"
-    key
-  end
-
-  def key_argv
-    @args.reject { |a| a.start_with?("--cache=", "--cache-log=", "--time-log=", "--trace=") }
-  end
-
-  def env_lines
-    @env.select { |k, _| k.start_with?("NFCXX_") && !KEY_ENV_LEFT_OUT.include?(k) }
-        .map { |k, v| "#{k}=#{v}" }
-        .sort
-  end
-
-  # the header list: the -M output with its continuation backslashes and its target (the first token) left out
-  def header_list
-    text = File.binread(@mdeps)
-    tokens = text.split("\n", -1).map { |l| l.sub(/\\\z/, "") }.join("\n").tr(" ", "\n").split("\n").reject(&:empty?)
-    tokens.drop(1)
-  end
-
-  def driver_lines
-    eccp = File.join(edg, "eccp")
-    text = File.file?(eccp) ? File.binread(eccp) : "".b
-    execs = text.lines.filter_map { |l| l[/\Aexec "([^"]*)"/, 1] }.join("\n")
-    dots = text.lines.filter_map { |l| l[/\A\. "([^"]*)"/, 1] }.join("\n")
-    config = File.join(env_value("EDG_BASE", File.join(ROOT, "build/edg-base")), "edg_eccp_config")
-    [execs, dots, config].map { |f| File.file?(f) ? sha_line(File.binread(f)) : "missing #{f}" }
-  end
-
-  def first_line_of(command)
-    out, = Open3.capture2(command, "--version")
-    line = out.lines.first
-    line&.chomp
+  begin
+    File.rename(tmp, entry) unless File.exist?(entry)
   rescue SystemCallError
     nil
   end
-
-  # the text that cache_lookup hashes (its inputs, without the trailing newline that $(...) drops)
-  def key_inputs(src, out)
-    lines = ["nfcxx-cache-1", "argv:" + key_argv.map { |a| " #{shell_quote(a)}" }.join,
-             "cwd: #{@cwd}", "out: #{realpath_m(out, @cwd)}", "src: #{realpath_m(src, @cwd)}"]
-    lines.concat(env_lines)
-    lines << sha_line(File.binread(File.join(ROOT, "nfcxx")))
-    lines << sha_line(concat_files(regular_files_under(File.join(ROOT, "scripts"))))
-    lines << sha_line(concat_files(regular_files_directly_in(edg)))
-    qbe = File.join(ROOT, "build/qbe/qbe")
-    lines << sha_line(File.binread(qbe)) if File.file?(qbe)
-    lines << sha_line(read_or_empty(File.join(ROOT, "tools/weak-symbols/weak_symbols.cpp")))
-    lines.concat(driver_lines)
-    [cxx, "cc"].each do |c|
-      line = first_line_of(c)
-      lines << line if line
-    end
-    lines.concat(pathb_lines) if backend == "pathb"
-    header_list.each do |f|
-      lines << "#{f} #{File.file?(f) ? sha_line(File.binread(f)) : 'missing'}"
-    end
-    lines.join("\n").sub(/\n+\z/, "")
-  end
-
-  # a Path B object's key: the backend, the Path B front end (PATHB_CPFE) and its base files (PATHB_BASE)
-  def pathb_lines
-    cpfe = env_value("PATHB_CPFE", File.join(ROOT, "build/pathb/cmake/bin/cpfe"))
-    base = env_value("PATHB_BASE", File.join(ROOT, "build/pathb/edg-base"))
-    ["backend: pathb",
-     File.file?(cpfe) ? sha_line(File.binread(cpfe)) : "missing #{cpfe}",
-     sha_line(concat_files(regular_files_directly_in(base)))]
-  end
-
-  # the remote tier on a local miss: scripts/nfcxx-cache-io.rb remote-get (the temporary entry and its move are its own)
-  def remote_get(key, entry)
-    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-io.rb remote-get #{key} #{entry}"
-    @remote_answer == "hit"
-  end
-
-  # the hit: the object and its records go back beside the output (a Path B entry has the object only). The records the
-  # output had are removed on every hit, as nfcxx does: a Path B hit leaves none behind either.
-  def hit(out, entry, pathb)
-    stem = strip_ext(out)
-    puts "RUN rm -f #{stem}.ti #{stem}.ii"
-    puts "CP #{entry}/obj #{out}"
-    %w[ti ii].each { |x| puts "CP #{entry}/#{x} #{stem}.#{x}" if !pathb && File.file?("#{entry}/#{x}") }
-    puts "EXIT 0"
-  end
-
-  # the store: the entry appears at once (it is made under a temporary name and moved into place)
-  def store(out, entry, key, remote, records)
-    stem = strip_ext(out)
-    tmp = "#{entry}.tmp.#{Process.pid}"
-    recs = %w[ti ii].select { |x| records.include?(x) }
-    puts "RUN mkdir -p #{tmp} #{File.dirname(entry)}"
-    puts "CP #{out} #{tmp}/obj"
-    recs.each { |x| puts "CP #{stem}.#{x} #{tmp}/#{x}" }
-    moved = !File.exist?(entry)
-    puts "RUN mv #{tmp} #{entry}" if moved
-    puts "RUN rm -rf #{tmp}"
-    return unless moved && !remote.empty?
-
-    puts "RUN ruby #{ROOT}/scripts/nfcxx-cache-io.rb remote-put #{key} #{entry}"
-  end
+  FileUtils.rm_rf(tmp)
+  File.file?(File.join(entry, "obj")) ? 0 : 1
 end
 
-def parse_options(argv)
-  opt = { args: [], env: {}, vars: {}, srcs: [], files: [], mdeps: nil, mdeps_failed: false, records: [],
-          remote: "miss", uid: Process.uid, cwd: Dir.pwd }
-  argv.each do |a|
+def parse(argv)
+  cmd, *rest = argv
+  opt = { args: [], cpp: [], vars: {}, cache_dir: "", cache_log: "", out: "", src: "", cwd: Dir.pwd, entry: "" }
+  rest.each do |a|
     case a
-    when /\A--arg=(.*)\z/m then opt[:args] << Regexp.last_match(1)
-    when /\A--env=([^=]*)=(.*)\z/m then opt[:env][Regexp.last_match(1)] = Regexp.last_match(2)
-    when /\A--var=([^=]*)=(.*)\z/m then opt[:vars][Regexp.last_match(1)] = Regexp.last_match(2)
-    when /\A--src=(.*)\z/m then opt[:srcs] << Regexp.last_match(1)
-    when /\A--file=(.*)\z/m then opt[:files] << Regexp.last_match(1)
-    when /\A--mdeps=(.*)\z/m then opt[:mdeps] = Regexp.last_match(1)
-    when "--mdeps-failed" then opt[:mdeps_failed] = true
-    when /\A--records=(.*)\z/ then opt[:records] = Regexp.last_match(1).split(",")
-    when /\A--remote=(.*)\z/ then opt[:remote] = Regexp.last_match(1)
-    when /\A--uid=(\d+)\z/ then opt[:uid] = Regexp.last_match(1).to_i
+    when /\A--cache-dir=(.*)\z/m then opt[:cache_dir] = Regexp.last_match(1)
+    when /\A--cache-log=(.*)\z/m then opt[:cache_log] = Regexp.last_match(1)
+    when /\A--out=(.*)\z/m then opt[:out] = Regexp.last_match(1)
+    when /\A--src=(.*)\z/m then opt[:src] = Regexp.last_match(1)
     when /\A--cwd=(.*)\z/m then opt[:cwd] = Regexp.last_match(1)
-    else raise Fatal, "usage: nfcxx-cache.rb [--arg=ARG] [--env=NAME=VALUE] [--var=NAME=VALUE] [--src=SRC] [--file=FILE] " \
-                      "[--mdeps=PATH | --mdeps-failed] [--records=ti,ii] [--remote=hit|miss] [--uid=N] [--cwd=DIR] (got #{a})"
+    when /\A--entry=(.*)\z/m then opt[:entry] = Regexp.last_match(1)
+    when /\A--arg=(.*)\z/m then opt[:args] << Regexp.last_match(1)
+    when /\A--cpp=(.*)\z/m then opt[:cpp] << Regexp.last_match(1)
+    when /\A--var=([^=]*)=(.*)\z/m then opt[:vars][Regexp.last_match(1)] = Regexp.last_match(2)
+    else raise Fatal, "usage: nfcxx-cache.rb lookup|hit|store [options] (got #{a})"
     end
   end
-  raise Fatal, "nfcxx-cache.rb: --mdeps or --mdeps-failed is needed for a cached compile" if opt[:mdeps].nil? && !opt[:mdeps_failed]
+  raise Fatal, "nfcxx-cache.rb: no command" if cmd.nil?
 
-  opt
+  [cmd, opt]
 end
 
 if $PROGRAM_NAME == __FILE__
   begin
-    Cache.new(parse_options(ARGV)).run
+    cmd, opt = parse(ARGV)
+    case cmd
+    when "lookup"
+      lookup(opt)
+      exit 0
+    when "hit"
+      exit(hit(opt))
+    when "store"
+      exit(store(opt))
+    else
+      raise Fatal, "usage: nfcxx-cache.rb lookup|hit|store [options] (got #{cmd})"
+    end
   rescue Fatal => e
     warn e.message
     exit 2

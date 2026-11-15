@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Checks the port of nfcxx's compile cache (scripts/nfcxx-cache.rb) against the bash (tests/nfcxx-cache/bash-decision.sh).
-# Each case runs in one sandbox (a copy of fixtures/): the port's decision, then the bash's, from the same state. The printed
-# lines (RUN, CP, EXIT) must match, and so must the stderr and the exit status; the key the port prints (KEY) must be the key
-# the bash stores its entry under (CHECK); the cache log must match the file the bash writes; and the case's EXPECT line must
-# be printed.
+# Checks nfcxx's compile cache, now decided and stored by scripts/nfcxx-cache.rb, against the driver it was before
+# (tests/nfcxx-cache/nfcxx-bash, frozen). Each case runs in one sandbox (a copy of fixtures/): the live driver, then the frozen
+# one, from the same state. Compared: the printed decisions (CP and RUN lines of the file operations are left out: the Ruby
+# helper makes its own copies, so the sandbox is compared instead), the exit status, stderr, and the sandbox after the run
+# (every file and directory, with the cache entries and the cache log). The live driver's sandbox must also pass the case's
+# CHECK, and its decision lines must print the case's EXPECT.
 #   tests/nfcxx-cache/run.sh           runs the cases
-#   tests/nfcxx-cache/run.sh --mutate  changes the key length in the port and checks that cases fail, then restores the port
+#   tests/nfcxx-cache/run.sh --mutate  changes the key length in the Ruby helper and checks that cases fail, then restores it
 #                                      and runs them again
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 port=$root/scripts/nfcxx-cache.rb
+frozen=$here/nfcxx-bash
 oracle=$here/bash-decision.sh
 work=$(realpath "$(mktemp -d)")
 scratch=$(realpath "$(mktemp -d)")
@@ -20,32 +22,27 @@ trap 'cp "$backup" "$port" 2>/dev/null; rm -rf "$work" "$scratch"' EXIT
 # A stand-in EDG build: nfcxx's setup needs bin/eccp (the build itself is stubbed). The key lists its files on both sides.
 mkdir -p "$scratch/edg/bin" && printf '#!/bin/sh\nexit 1\n' > "$scratch/edg/bin/eccp" && chmod +x "$scratch/edg/bin/eccp"
 base_env=("EDG_BUILD=$scratch/edg")
-# The backend of a case is CASE_BACKEND (set_case: gcc, or pathb with the stubbed Path B compile); it is passed as --backend=
-# on both sides, so it is part of the key on both sides.
+# The backend of a case is CASE_BACKEND (set_case: gcc, or pathb with the stubbed Path B compile).
 
 norm() { sed -e "s#$work#SANDBOX#g" -e "s#$root#ROOT#g" -e 's/\.\(tmp\|remote\)\.[0-9][0-9]*/.\1.PID/g'; }
+# The decision lines: the file operations (CP, and the RUN of rm, mkdir and mv) are left out; the build, the remote helper and
+# EXIT are kept.
+decisions() { grep -v -E '^(CP |RUN (rm|mkdir|mv) )' | norm; }
 
 reset() {  # reset: the sandbox holds the fixtures and nothing else
   rm -rf "$work"; mkdir -p "$work"; cp -r "$here/fixtures/." "$work/"
 }
 
-run_port() {  # run_port: the port's output for the case, in the sandbox (the -M output is the real one)
-  local opts=() e v a mdeps=$scratch/mdeps.txt
-  if (cd "$work" && g++ -M -std=c++23 "$CASE_SRC" > "$mdeps" 2>/dev/null); then opts+=("--mdeps=$mdeps"); else opts+=(--mdeps-failed); fi
-  # the setup exports NFCXX_CC for --backend=gcc (nfcxx's case on the backend): the port is given it as the setup leaves it
-  for e in "${base_env[@]}" "${CASE_ENV[@]}" "NFCXX_CC=$root/scripts/gcc-cc.rb"; do opts+=("--env=$e"); done
-  for v in compile_only=1 ncpp=1 outset=1 nobj=0 modules=0 preprocess=0 stdin_src=0 depmode= cfiles_n=0 cu_n=0 cpp2_n=0 "out=$CASE_OUT"; do
-    opts+=("--var=$v")
-  done
-  opts+=("--var=backend=$CASE_BACKEND")
-  for a in "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}"; do opts+=("--arg=$a"); done
-  opts+=("--src=$CASE_SRC")
-  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" ruby "$port" "${opts[@]}" "${CASE_PORT[@]}")
+# run_driver FILE: the driver of the case (FILE is the live nfcxx or the frozen copy), in the sandbox; the decision lines are printed
+run_driver() {
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "${CASE_TEST[@]}" \
+     bash "$oracle" "$1" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}")
 }
 
-run_bash() {  # run_bash: the bash's output for the case, in the sandbox
-  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "${CASE_TEST[@]}" \
-     bash "$oracle" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}")
+snapshot() {  # the sandbox: every directory and file (with its sha-256), as the names and the contents
+  (cd "$work" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
+     if [ -d "$p" ]; then echo "D $p"; else echo "F $p $(sha256sum < "$p" | cut -c1-64)"; fi
+   done) | norm
 }
 
 prepare() {  # prepare: the sandbox as the case starts (the fixtures, then PRE and MUTATE)
@@ -57,77 +54,85 @@ prepare() {  # prepare: the sandbox as the case starts (the fixtures, then PRE a
 bad() { echo "      $*"; bad_case=1; }
 
 run_case() {  # run_case: runs the case set up by set_case, and prints ok or FAIL
-  bad_case=0; PORT_KEY=""
+  bad_case=0
   prepare
-  run_port > "$scratch/port.raw" 2> "$scratch/port.err"; PORT_RC=$?
-  PORT_KEY=$(sed -n 's/^KEY //p' "$scratch/port.raw")
-  prepare
-  run_bash > "$scratch/bash.raw" 2> "$scratch/bash.err"; bash_rc=$?
-
-  sed -e '/^KEY /d' -e '/^CAT /,/^END$/d' "$scratch/port.raw" | norm > "$scratch/port.dec"
-  norm < "$scratch/bash.raw" > "$scratch/bash.dec"
-  if ! diff -u "$scratch/bash.dec" "$scratch/port.dec" > "$scratch/dec.diff"; then bad "decisions differ:"; sed 's/^/      /' "$scratch/dec.diff"; fi
-  [ "$PORT_RC" = "$bash_rc" ] || bad "exit status: port $PORT_RC, bash $bash_rc"
-  norm < "$scratch/port.err" > "$scratch/port.errn"; norm < "$scratch/bash.err" > "$scratch/bash.errn"
-  if ! diff -u "$scratch/bash.errn" "$scratch/port.errn" > "$scratch/err.diff"; then bad "stderr differs:"; sed 's/^/      /' "$scratch/err.diff"; fi
-  if [ "$CASE_LOG" = 1 ]; then
-    sed -n '/^CAT /,/^END$/p' "$scratch/port.raw" | sed '1d;$d' | norm > "$scratch/port.log"
-    norm < "$work/cache.log" > "$scratch/bash.log" 2>/dev/null || bad "the bash wrote no cache log"
-    if ! diff -u "$scratch/bash.log" "$scratch/port.log" > "$scratch/log.diff"; then bad "cache log differs:"; sed 's/^/      /' "$scratch/log.diff"; fi
-  fi
-  [ -z "$EXPECT" ] || grep -qF -- "$EXPECT" "$scratch/port.dec" || bad "EXPECT not printed: $EXPECT"
+  run_driver "$root/nfcxx" > "$scratch/new.raw" 2> "$scratch/new.err"; new_rc=$?
   [ -z "$CHECK" ] || $CHECK
+  snapshot > "$scratch/new.tree"
+  prepare
+  run_driver "$frozen" > "$scratch/old.raw" 2> "$scratch/old.err"; old_rc=$?
+  snapshot > "$scratch/old.tree"
+
+  decisions < "$scratch/new.raw" > "$scratch/new.dec"; decisions < "$scratch/old.raw" > "$scratch/old.dec"
+  if ! diff -u "$scratch/old.dec" "$scratch/new.dec" > "$scratch/dec.diff"; then bad "decisions differ:"; sed 's/^/      /' "$scratch/dec.diff"; fi
+  [ "$new_rc" = "$old_rc" ] || bad "exit status: new $new_rc, frozen $old_rc"
+  norm < "$scratch/new.err" > "$scratch/new.errn"; norm < "$scratch/old.err" > "$scratch/old.errn"
+  if ! diff -u "$scratch/old.errn" "$scratch/new.errn" > "$scratch/err.diff"; then bad "stderr differs:"; sed 's/^/      /' "$scratch/err.diff"; fi
+  if ! diff -u "$scratch/old.tree" "$scratch/new.tree" > "$scratch/tree.diff"; then bad "the sandbox differs:"; sed 's/^/      /' "$scratch/tree.diff"; fi
+  [ -z "$EXPECT" ] || grep -qF -- "$EXPECT" "$scratch/new.dec" || bad "EXPECT not printed: $EXPECT"
   if [ "$bad_case" = 0 ]; then pass=$((pass + 1)); echo "ok    $CASE"; else fail=$((fail + 1)); echo "FAIL  $CASE"; fi
 }
 
 # set_case NAME SRC OUT: a case with no environment, no extra options and no checks; the case then sets what it needs.
 set_case() {
-  CASE=$1; CASE_SRC=$2; CASE_OUT=$3; CASE_ARGS=(-c "$2" -o "$3"); CASE_ENV=(); CASE_TEST=(); CASE_PORT=(); CASE_BACKEND=gcc
-  CASE_LOG=0; PRE=""; MUTATE=""; CHECK=""; EXPECT=""
+  CASE=$1; CASE_SRC=$2; CASE_OUT=$3; CASE_ARGS=(-c "$2" -o "$3"); CASE_ENV=(); CASE_TEST=(); CASE_BACKEND=gcc
+  PRE=""; MUTATE=""; CHECK=""; EXPECT=""
 }
 
+# The key the frozen driver gives this case, from its cache log in the sandbox (run in the sandbox's own path, as the key needs it).
+port_key() {
+  reset
+  local keylog=$scratch/keylog.txt; rm -f "$keylog"
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$PATH" HOME="$HOME" "${base_env[@]}" "${CASE_ENV[@]}" "NFCXX_CACHE_LOG=$keylog" \
+     "${CASE_TEST[@]}" bash "$oracle" "$frozen" "--backend=$CASE_BACKEND" "${CASE_ARGS[@]}") > /dev/null 2>&1
+  sed -n 's/^key //p' "$keylog" 2>/dev/null | head -1
+}
 entry_dir() { echo "$work/cache/objects/$1"; }
+# the entries the live driver stored (their keys, by name)
+stored_keys() { ls "$work/cache/objects" 2>/dev/null | grep -v '\.tmp\.' ; }
 
-pre_hit() {  # an entry under the key the port gives: the bash must copy it back
+pre_hit() {  # an entry under the key the frozen driver gives: the driver must copy it back
   local dir; dir=$(entry_dir "$(port_key)")
   mkdir -p "$dir"; printf 'CACHED\n' > "$dir/obj"; printf 'CACHED-TI\n' > "$dir/ti"; printf 'CACHED-II\n' > "$dir/ii"
 }
 check_hit() {
   grep -qx CACHED "$work/main.o" && grep -qx CACHED-TI "$work/main.ti" && grep -qx CACHED-II "$work/main.ii" \
-    || bad "the bash did not copy the entry back"
+    || bad "the driver did not copy the entry back"
 }
-port_key() { run_port | sed -n 's/^KEY //p'; }
-
-pre_old_entry() {  # an entry under the key of the header as it is before the change
+pre_old_entry() {  # an entry under the key of the header as it is before the change (PRE_KEY)
   PRE_KEY=$(port_key); local dir; dir=$(entry_dir "$PRE_KEY"); mkdir -p "$dir"; printf 'OLD\n' > "$dir/obj"
 }
 mutate_header() { printf '// changed\n' >> "$work/local.h"; }
-check_key_changed() { [ -n "$PORT_KEY" ] && [ "$PORT_KEY" != "$PRE_KEY" ] || bad "the key did not change with the header"; }
-
-check_remote_hit() {  # the remote entry (the bash stub's object) was copied back as the output
-  grep -qx 'OBJECT remote' "$work/main.o" || bad "the bash did not copy the remote entry back"
+check_key_changed() {  # the change of a header makes a new entry (the driver stores it), and the entry before the change stays
+  [ -n "$PRE_KEY" ] && [ "$(stored_keys | wc -l)" -ge 2 ] && grep -qx OLD "$(entry_dir "$PRE_KEY")/obj" \
+    && [ "$(stored_keys | grep -cx "$PRE_KEY")" = 1 ] || bad "the key did not change with the header"
 }
-check_stored() {  # the bash stored the object and the records under the key the port gives
-  local dir; dir=$(entry_dir "$PORT_KEY")
-  [ -n "$PORT_KEY" ] && grep -qx 'OBJECT main.o' "$dir/obj" && [ -f "$dir/ti" ] && [ -f "$dir/ii" ] \
-    || bad "no entry under the port's key $PORT_KEY"
+check_remote_hit() {  # the remote entry (the stub's object) was copied back as the output
+  grep -qx 'OBJECT remote' "$work/main.o" || bad "the driver did not copy the remote entry back"
+}
+check_stored() {  # the driver stored the object and the records under a key
+  local k; k=$(stored_keys)
+  [ "$(echo "$k" | wc -l)" = 1 ] && [ -n "$k" ] || { bad "no single entry: $k"; return; }
+  local dir; dir=$(entry_dir "$k")
+  grep -qx 'OBJECT main.o' "$dir/obj" && [ -f "$dir/ti" ] && [ -f "$dir/ii" ] || bad "the entry $k lacks the object or the records"
 }
 check_bad_remote() {
-  grep -qF "nfcxx: NFCXX_CACHE_REMOTE takes gha (got 's3')" "$scratch/port.err" && [ "$PORT_RC" = 2 ] \
-    || bad "the port did not refuse the remote value"
+  grep -qF "nfcxx: NFCXX_CACHE_REMOTE takes gha (got 's3')" "$scratch/new.err" && [ "$new_rc" = 2 ] \
+    || bad "the driver did not refuse the remote value"
 }
 # The Path B route (CASE_BACKEND=pathb): its entry is the object alone, and its key differs from the gcc key of the same command.
-pre_hit_pathb() {  # an entry under the Path B key: the object only
+pre_hit_pathb() {
   local dir; dir=$(entry_dir "$(port_key)"); mkdir -p "$dir"; printf 'CACHED\n' > "$dir/obj"
 }
-check_hit_pathb() {  # the bash copied the object back, and no records (Path B writes none)
+check_hit_pathb() {
   grep -qx CACHED "$work/main.o" && [ ! -e "$work/main.ti" ] && [ ! -e "$work/main.ii" ] \
-    || bad "the bash did not copy the Path B entry back"
+    || bad "the driver did not copy the Path B entry back"
 }
-check_stored_pathb() {  # the bash stored the object under the Path B key the port gives, and no records
-  local dir; dir=$(entry_dir "$PORT_KEY")
-  [ -n "$PORT_KEY" ] && grep -qx 'OBJECT main.o' "$dir/obj" && [ ! -e "$dir/ti" ] && [ ! -e "$dir/ii" ] \
-    || bad "no Path B entry under the port's key $PORT_KEY"
+check_stored_pathb() {
+  local k; k=$(stored_keys)
+  [ -n "$k" ] || { bad "no Path B entry"; return; }
+  local dir; dir=$(entry_dir "$k")
+  grep -qx 'OBJECT main.o' "$dir/obj" && [ ! -e "$dir/ti" ] && [ ! -e "$dir/ii" ] || bad "the Path B entry is not the object alone"
 }
 pre_gcc_entry() {  # an entry under the key of the same command on the gcc backend: a Path B compile must not take it
   local keep=$CASE_BACKEND k dir
@@ -141,7 +146,7 @@ run_all() {
   set_case miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache"); EXPECT="RUN build main.o"; run_case
 
   set_case stored main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache"); CASE_TEST=(CACHE_TEST_RECORDS="ti ii")
-  CASE_PORT=(--records=ti,ii); CHECK=check_stored; EXPECT="RUN mv"; run_case
+  CHECK=check_stored; EXPECT="RUN build main.o"; run_case
 
   set_case cache-flag main.cpp main.o; CASE_ARGS=("--cache=$work/cache" -c main.cpp -o main.o); EXPECT="RUN build main.o"; run_case
 
@@ -150,30 +155,29 @@ run_all() {
   set_case changed-header main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache"); PRE=pre_old_entry; MUTATE=mutate_header
   CHECK=check_key_changed; EXPECT="RUN build main.o"; run_case
 
-  set_case cache-log main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_LOG=$work/cache.log"); CASE_LOG=1
+  set_case cache-log main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_LOG=$work/cache.log")
   EXPECT="RUN build main.o"; run_case
 
   set_case gha-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
-  CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); CHECK=check_remote_hit
-  EXPECT="RUN ruby"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=hit); CHECK=check_remote_hit; EXPECT="EXIT 0"; run_case
 
   set_case gha-miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
-  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); EXPECT="nfcxx-cache-io.rb remote-put"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=miss); EXPECT="nfcxx-cache-io.rb remote-put"; run_case
 
   set_case gha-local-first main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
   CASE_TEST=(CACHE_TEST_REMOTE=hit); PRE=pre_hit; CHECK=check_hit; EXPECT="EXIT 0"; run_case
 
   set_case cache-log-flag main.cpp main.o; CASE_ARGS=("--cache-log=$work/cache.log" "--cache=$work/cache" -c main.cpp -o main.o)
-  CASE_LOG=1; EXPECT="RUN build main.o"; run_case
+  EXPECT="RUN build main.o"; run_case
 
   set_case cache-log-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_LOG=$work/cache.log")
-  PRE=pre_hit; CASE_LOG=1; CHECK=check_hit; EXPECT="EXIT 0"; run_case
+  PRE=pre_hit; CHECK=check_hit; EXPECT="EXIT 0"; run_case
 
   set_case cache-log-remote-hit main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha" "NFCXX_CACHE_LOG=$work/cache.log")
-  CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); CASE_LOG=1; CHECK=check_remote_hit; EXPECT="EXIT 0"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=hit); CHECK=check_remote_hit; EXPECT="EXIT 0"; run_case
 
   set_case cache-log-remote-miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha" "NFCXX_CACHE_LOG=$work/cache.log")
-  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); CASE_LOG=1; EXPECT="nfcxx-cache-io.rb remote-put"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=miss); EXPECT="nfcxx-cache-io.rb remote-put"; run_case
 
   set_case bad-remote main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=s3"); CHECK=check_bad_remote
   run_case
@@ -186,7 +190,7 @@ run_all() {
   set_case pathb-miss main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache"); EXPECT="RUN build main.o"; run_case
 
   set_case pathb-stored main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache")
-  CHECK=check_stored_pathb; EXPECT="RUN mv"; run_case
+  CHECK=check_stored_pathb; EXPECT="RUN build main.o"; run_case
 
   set_case pathb-hit main.cpp main.o; CASE_BACKEND=pathb; CASE_ENV=("NFCXX_CACHE=$work/cache"); PRE=pre_hit_pathb
   CHECK=check_hit_pathb; EXPECT="EXIT 0"; run_case
