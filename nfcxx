@@ -346,20 +346,8 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
   trace_finish
   return $rc
 }
-# C++ modules (docs/notes/modules.md). mod_decl_name FILE prints NAME for an interface unit (export module NAME;); mod_imports FILE
-# prints the names it imports (import NAME;). Both read the declarations at the start of a line only.
-mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one (scripts/nfcxx-modscan.rb is-module)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$1"
-}
-mod_decl_name() {  # mod_decl_name FILE: the source scans are scripts/nfcxx-modscan.rb (tests/nfcxx-modscan/run.sh checks them)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "$1"
-}
-mod_imports() {
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" imports "$1"
-}
-mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet (exit 2, nfcxx's message)
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$1" || exit $?
-}
+# C++ modules (docs/notes/modules.md): the source scans are scripts/nfcxx-modscan.rb (is-module, decl-name, check; they read
+# the declarations at the start of a line only; tests/nfcxx-modscan/oracle-wrappers.sh is the bash they replaced).
 # mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
 # compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
 # then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
@@ -478,18 +466,18 @@ case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; 
 # --module-dir, else the directory of -o) and, for an interface unit, the BMI it writes.
 modules=0; modopts=()
 for s in ${srcs[@]+"${srcs[@]}"}; do
-  if mod_is_module_src "$s"; then modules=1; fi
+  if "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$s"; then modules=1; fi
 done
 if [ $modules = 1 ]; then
   case $std in --c++98|--c++03|--c++11|--c++14|--c++17) echo "nfcxx: C++ modules need -std=c++20 or later" >&2; exit 2 ;; esac
   [ $emit_c = 0 ] || { echo "nfcxx: --emit-c does not support C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
   [ ${#cfiles[@]} = 0 ] || { echo "nfcxx: C sources cannot be built with C++ modules yet (docs/notes/modules.md)" >&2; exit 2; }
-  for s in ${srcs[@]+"${srcs[@]}"}; do mod_check_src "$s"; done
+  for s in ${srcs[@]+"${srcs[@]}"}; do "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$s" || exit $?; done
   if [ $compile_only = 0 ]; then mod_build_program; fi
   [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with C++ modules takes one source" >&2; exit 2; }
   mdir=${moddir:-$(dirname "$out")}; mkdir -p "$mdir"; mdir=$(cd "$mdir" && pwd -P)
   modopts=(--modules --modules_directory "$mdir")
-  n=$(mod_decl_name "${srcs[0]}")
+  n=$("${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "${srcs[0]}")
   [ -z "$n" ] || modopts+=(--create_module_interface "$mdir/$n.eifc")
 fi
 
