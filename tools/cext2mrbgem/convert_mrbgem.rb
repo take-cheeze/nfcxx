@@ -2076,6 +2076,8 @@ end
         # a split method's registration names it as the wrapper, which is not a use of the impl
         next if valid_reg.any? { |r| rel == r['file'] && r['open'] <= s && s <= r['close'] }
         next if in_dead_init(rel, s)
+        # a use in inactive code (an #if 0 or another excluded conditional branch) cannot run: it is not a use
+        next if ((@excluded_spans || {})[rel] || []).any? { |a, z| a < s && s < z }
         masked = @files[rel]['masked']
         nx = next_nonspace(masked, e)
         direct = nx >= 0 && masked[nx] == '('

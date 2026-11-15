@@ -452,6 +452,10 @@ check test "$(grep -c 'ruby_scan_digits(' "$work/api_scan_digits/src/api_scan_di
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_strlen_lit tools/cext2mrbgem/fixtures/api_strlen_lit/ext/api_strlen_lit "$work/api_strlen_lit" > "$work/api_strlen_lit.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '(sizeof(".%N") - 1)' "$work/api_strlen_lit/src/api_strlen_lit.c"
+# 2zzz76. A use of a helper in inactive code (#if 0) is not a use: the converter does not refuse it, and the live code converts.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use" > "$work/api_dead_use.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'static mrb_value du_dead' "$work/api_dead_use/src/api_dead_use.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
