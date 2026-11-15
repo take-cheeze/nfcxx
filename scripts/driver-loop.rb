@@ -921,6 +921,7 @@ def link_mode(state, env)
     elsif kind == "c" || kind == "s"
       obj = "#{env.tmp}/obj#{state.k}.o"
       compile_one(state, env, kind, src, obj)
+      state.k += 1 if kind == "s"   # compile_one counts a C input, not an assembly one: the next temporary name must differ
       objs << obj
     end
   end
@@ -1188,7 +1189,8 @@ def main(argv)
   return bundled unless bundled.nil?
   kind, list = cuda_driver_wrap(config[:env], args, "nfcc")
   if kind == :exec
-    $stdout.write("EXEC #{(["#{config[:env].root}/nfcc"] + list).join(' ')}\n")
+    # the driver again with the rewritten arguments (the shim in place of libcuda): the process is replaced, as bash's exec
+    exec_cmd([config[:env].driver || "#{config[:env].root}/nfcc", *list])
     return 0
   end
   args = list

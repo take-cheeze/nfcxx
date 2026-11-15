@@ -9,7 +9,7 @@ root=$PWD
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 base=$tmp/base
 mkdir -p "$base/inc"
-cp tests/nfcc/port/*.c tests/nfcc/port/*.cpp tests/nfcc/port/resp "$base/" 2>/dev/null
+cp tests/nfcc/port/*.c tests/nfcc/port/*.cpp tests/nfcc/port/*.s tests/nfcc/port/resp "$base/" 2>/dev/null
 cp tests/nfcc/port/h.h "$base/inc/" 2>/dev/null
 pass=0; fail=0
 norm() { sed -e "s|$tmp/bash|W|g" -e "s|$tmp/ruby|W|g" -e "s|$tmp|TMP|g" -e "s|/tmp/[A-Za-z0-9._-]*|TMP|g" -e "s|$root|ROOT|g" "$1"; }
@@ -17,7 +17,7 @@ while IFS= read -r line; do
   case $line in ''|'#'*) continue ;; esac
   for side in bash ruby; do
     w=$tmp/$side; rm -rf "$w"; cp -a "$base" "$w"
-    if [ $side = bash ]; then impl="$root/nfcc"; else impl="ruby $root/scripts/nfcc.rb"; fi
+    if [ $side = bash ]; then impl="$root/nfcc-bash"; else impl="ruby $root/scripts/nfcc.rb"; fi
     cmd=${line//CUDAHOME/$root/tests/nfcc/cuda-home}; cmd=${cmd//NFCC/$impl}
     (cd "$w" && eval "$cmd") > "$tmp/$side.out" 2> "$tmp/$side.err" < "$base/a.c"; echo $? > "$tmp/$side.rc"
     norm "$tmp/$side.out" > "$tmp/$side.out.n"; norm "$tmp/$side.err" > "$tmp/$side.err.n"

@@ -13,8 +13,8 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 
 {
   echo 'die() { echo "nfcc: error: $*" >&2; exit 1; }'
-  awk '/^wp_option_sealed\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/nfcc"
-  awk '/^wp_option\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/nfcc"
+  awk '/^wp_option_sealed\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/nfcc-bash"
+  awk '/^wp_option\(\) \{/ { on = 1 } on { print } on && /^\}/ { exit }' "$root/nfcc-bash"
   echo 'pp=(); depmode=""; dfile=""; dts=(); dp=0'
   echo 'wp_option "$1"'
   echo 'for x in "${pp[@]+"${pp[@]}"}"; do printf "pp %s\n" "$x"; done'
