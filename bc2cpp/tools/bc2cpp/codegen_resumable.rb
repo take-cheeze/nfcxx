@@ -1360,7 +1360,8 @@ class CodeGen
   # into the host function (the loop would share the host's register numbering and cells).
   def inline_block_boxes?(irep, region)
     block = inline_region_block(irep, region)
-    block ? recognize_block_fallback_regions(block).any? { |nested| nested[:boxed] } : false
+    # The block receives its own upvars from the enclosing scope; its nested blocks need exactly those (R522).
+    block ? recognize_block_fallback_regions(block, available_upvars: block_upvar_needs(block) || []).any? { |nested| nested[:boxed] } : false
   end
 
   # Can the block body +block+ suspend the fiber: it reaches Fiber.yield, calls a block (`yield`, `block.call`), or calls a
