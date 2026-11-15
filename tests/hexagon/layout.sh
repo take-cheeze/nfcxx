@@ -9,7 +9,7 @@ triple=hexagon-unknown-linux-musl
 echo 'int f(void){return 0;}' | $clang --target=$triple -ffreestanding -c -x c - -o /dev/null 2>/dev/null \
   || { echo "SKIP layout: $clang has no hexagon target"; exit 0; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-"$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/probe.c" "$here/layout_probe.cpp" || exit 1
+"$root/scripts/gen-c-target.rb" -t "$target" -o "$tmp/probe.c" "$here/layout_probe.cpp" || exit 1
 # nfcxx_<name> = <value>  ->  _Static_assert((<C expression for name>) == <value>)
 grep -o 'const unsigned long nfcxx_[A-Za-z0-9_]* = [0-9]*' "$tmp/probe.c" | sed 's/const unsigned long nfcxx_//; s/ = /=/' |
 while IFS== read name val; do

@@ -105,13 +105,13 @@ def front_setup(config)
     !system("ninja", "-C", File.join(ROOT, "tools/bundle"), out: File::NULL)
   end
 
-  # the CUDA driver wrapper: the environment's home, the machine, and the shim, which scripts/cuda-driver-shim builds for the
+  # the CUDA driver wrapper: the environment's home, the machine, and the shim, which scripts/cuda-driver-shim.rb builds for the
   # headers of the home (the wrapper asks only when its other checks pass)
   env.cuda_home = ENV["CUDA_HOME"].to_s
   env.cuda_driver_env = ENV["NFCXX_CUDA_DRIVER"].to_s.empty? ? "auto" : ENV["NFCXX_CUDA_DRIVER"]
   env.machine = uname[:machine]
   env.shim = lambda do |include_dir|
-    out, ok = capture_stdout([File.join(ROOT, "scripts/cuda-driver-shim"), include_dir], err: [:child, :out])
+    out, ok = capture_stdout([File.join(ROOT, "scripts/cuda-driver-shim.rb"), include_dir], err: [:child, :out])
     text = out.sub(/\n+\z/, "")
     ok ? [text, nil] : [nil, text]
   end

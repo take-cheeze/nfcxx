@@ -60,7 +60,7 @@ $QEMU_HEXAGON --version
 
 ### The recipe (no change to `3rd/edg`)
 
-`scripts/gen-c-target.sh` does exactly what the nfcxx driver does, with `--target` added:
+`scripts/gen-c-target.rb` does exactly what the nfcxx driver does, with `--target` added:
 
 ```
 cd build/edg-base && build/edg/bin/cpfe -D_POSIX_SOURCE -D__CHAR_BIT__=8 --c++23 --g++ \
@@ -123,7 +123,7 @@ Notes from the generated C:
 
 `tests/cases/*.cpp` plus two new HVX-style int16 kernels (`tests/cases/hvx_add_i16.cpp`,
 `hvx_mul_i16.cpp`: local-array loops, no tables, so data-free). All generate with
-`scripts/gen-c-target.sh -t linux_riscv32` and compile with
+`scripts/gen-c-target.rb -t linux_riscv32` and compile with
 `clang --target=hexagon-unknown-linux-musl -ffreestanding -fno-pic -O2 -fwrapv -fno-strict-aliasing`
 (all 10 compile; `exceptions` gives one warning, a non-void function without a return, same as x86).
 Expected-exit values were computed in Python and checked against the host build
@@ -151,7 +151,7 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
 | `virtual_dispatch` | ok (exit 23) | vtables in `.data` (`R_HEX_32`); typeinfo vtables are stubs in `stub.c` |
 | `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
-| `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.sh` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
+| `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.rb` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
 All 11 Hexagon checks in this table run (the generated cases and HVX).
 Compile-only mode (no qemu) compiles all 11.
@@ -221,7 +221,7 @@ multi-level pointer qualification conversions, throw specifications / `noexcept`
 | Hexagon libc (`stdlib.h`, `string.h`, `setjmp.h`, `stdio.h`, `pthread.h`) | none; `runtime.h` fails with `'stdlib.h' file not found` under clang | hexagon libc (QuRT or musl-hexagon) headers + `libc.a` |
 | QuRT (bare-metal runtime) | none | SDK QuRT for the `hexagon-sim`/DSP target. QuRT has its own startup and no Linux syscalls, so the qemu stub does not apply |
 | EH runtime (`lib_src`) | `tests/hexagon/eh_rt.c`, a trimmed port of `lib_src/throw.c`, with its own `_setjmp`/longjmp (section 3a) | for a real target: compile `lib_src/*.c` with the libc above; fix `TARG_JMP_BUF_NUM_ELEMENTS` (36 `long long` in riscv32) to the real `jmp_buf` size |
-| Template instantiation | `scripts/gen-c-target.sh` emits only the first pass | run `edg_prelink` for the target (as eccp does) |
+| Template instantiation | `scripts/gen-c-target.rb` emits only the first pass | run `edg_prelink` for the target (as eccp does) |
 | `long double` | 16 bytes in EDG vs 8 in Hexagon | a real `linux_hexagon` target (section 2) |
 | `hexagon-sim` / real DSP | not run | SDK |
 
@@ -256,7 +256,7 @@ Hexagon plan:
   symlink (`../../../../include_c++/`), so `build/edg-base/include` dangled and `#include <exception>` failed
   (`cannot open source file "exception"`, rc 4). `setup-edg.sh` now runs
   `ln -sfn "$src/include_c++" "$base/include"` after the copy (and `setup-pathb.sh` does the same). The fallback in
-  `scripts/gen-c-target.sh` (use `3rd/edg/include_c++` when `exception.h` is not found) is kept for old `build/edg-base` trees.
+  `scripts/gen-c-target.rb` (use `3rd/edg/include_c++` when `exception.h` is not found) is kept for old `build/edg-base` trees.
 - EDG ships only about 15 C++ headers in `include_c++/` (`exception`, `new`, `typeinfo`, `cxxabi.h`, ...; no `<cstdio>`, `<cstddef>`, `<stdlib.h>`).
   Programs that need them need a freestanding shim or the real libc headers.
 
@@ -264,7 +264,7 @@ Hexagon plan:
 
 ```
 scripts/setup-edg.sh                                     # build/edg (cpfe, edg_prelink, libC.a)
-scripts/gen-c-target.sh -t linux_riscv32 tests/cases/hvx_add_i16.cpp   # generated C to stdout
+scripts/gen-c-target.rb -t linux_riscv32 tests/cases/hvx_add_i16.cpp   # generated C to stdout
 tests/run.sh                                             # host regression (QBE backend)
 tests/hexagon/layout.sh                                  # EDG layout vs clang Hexagon ABI
 tests/hexagon/run.sh                                     # Hexagon compile of every case (+ qemu if QEMU_HEXAGON is set)
@@ -275,7 +275,7 @@ Manual single-case run:
 
 ```
 mkdir -p build/hexagon
-scripts/gen-c-target.sh -t linux_riscv32 -o build/hexagon/k.c tests/cases/hvx_add_i16.cpp
+scripts/gen-c-target.rb -t linux_riscv32 -o build/hexagon/k.c tests/cases/hvx_add_i16.cpp
 cat tests/hexagon/stub.c >> build/hexagon/k.c
 clang --target=hexagon-unknown-linux-musl -ffreestanding -fno-pic -O2 -fwrapv -fno-strict-aliasing \
       -w -c build/hexagon/k.c -o build/hexagon/k.o

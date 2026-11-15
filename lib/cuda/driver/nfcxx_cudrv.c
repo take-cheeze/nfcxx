@@ -1,4 +1,4 @@
-// The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim, docs/notes/cuda-driver.md).
+// The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim.rb, docs/notes/cuda-driver.md).
 //
 // Every driver function of nfcxx_cudrv_table.inc (generated from cuda.h and cudaTypedefs.h: the linked name, the base
 // name, the ABI version, 1 for the legacy default stream or 2 for the per-thread one) is a trampoline that jumps

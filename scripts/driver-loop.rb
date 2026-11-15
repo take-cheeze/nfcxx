@@ -1088,7 +1088,7 @@ def cudart_version_of(path)
   0
 end
 
-# The CUDA shim for the headers of HOME: [path, nil], or [nil, why it did not build]. nfcc builds it (scripts/cuda-driver-shim) when the
+# The CUDA shim for the headers of HOME: [path, nil], or [nil, why it did not build]. nfcc builds it (scripts/cuda-driver-shim.rb) when the
 # checks before it pass; the real driver gives env.shim a probe that does, and the oracle gives the two answers as values.
 def shim_for(env, home)
   return [env.shim, env.shim_error] unless env.shim.respond_to?(:call)

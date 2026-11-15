@@ -43,7 +43,7 @@ harness() {
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
       "$root/tests/wrap/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec run_stub "\$driver" |exec_stub "$driver" |g' \
-      -e 's|"\$root/scripts/cuda-driver-shim" "\$home/include" 2>&1|stub_shim "$home/include" 2>\&1|' \
+      -e 's|"\$root/scripts/cuda-driver-shim.rb" "\$home/include" 2>&1|stub_shim "$home/include" 2>\&1|' \
       "$root/tests/wrap/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" \&\& pwd)|root=$root|" \
       -e 's|die "QBE not built; run scripts/setup-qbe.sh"|:|' \

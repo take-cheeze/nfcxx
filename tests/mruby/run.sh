@@ -111,7 +111,7 @@ else
   if [ -x "$root/build/edg/bin/cpfe" ]; then
     for f in "$root"/tests/cases/*.cpp; do
       n=$(basename "$f" .cpp)
-      "$root/scripts/gen-c-target.sh" -t linux_riscv32 -o "$tmp/$n.c" "$f" 2>/dev/null || continue
+      "$root/scripts/gen-c-target.rb" -t linux_riscv32 -o "$tmp/$n.c" "$f" 2>/dev/null || continue
       cat "$here/stub.c" >>"$tmp/$n.c"
       ehdef=
       if grep -q '__throw_setup\|__rethrow\|__internal_rethrow' "$tmp/$n.c"; then ehdef=-DNFCXX_EH_RT; cat "$here/eh_rt.c" >>"$tmp/$n.c"; fi

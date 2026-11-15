@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hexagon check for the generated C of every tests/cases/*.cpp (see docs/notes/hexagon.md).
-#   1. EDG generates C for a 32-bit little-endian target (scripts/gen-c-target.sh, linux_riscv32).
+#   1. EDG generates C for a 32-bit little-endian target (scripts/gen-c-target.rb, linux_riscv32).
 #   2. clang --target=hexagon compiles it (-fwrapv -fno-strict-aliasing, as the gcc backend does).
 #   3. If qemu-hexagon (Linux user mode) is installed, the object is flattened (flatlink.rb,
 #      since no Hexagon linker exists here), run, and its exit code compared with `// EXPECT:`.
@@ -34,7 +34,7 @@ for f in "$root"/tests/cases/*.cpp; do
   if x86only=$(sed -n 's,^// X86-ONLY: *\(.*\),\1,p' "$f" | head -1) && [ -n "$x86only" ]; then
     echo "skip $n: x86-64 only ($x86only)"; skip=$((skip+1)); continue
   fi
-  if ! "$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/$n.c" "$f" 2>"$tmp/$n.edg"; then
+  if ! "$root/scripts/gen-c-target.rb" -t "$target" -o "$tmp/$n.c" "$f" 2>"$tmp/$n.edg"; then
     # The target configuration has no hosted C++ headers, so a case that includes <cstdint>, <map>,
     # etc. cannot be generated for it. That is a limit of this check, not a failure of the case.
     if tr -s " \n" "  " < "$tmp/$n.edg" | grep -q "cannot open source file"; then   # EDG wraps the message after "cannot open"

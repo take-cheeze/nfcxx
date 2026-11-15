@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ESP32-C3 (RV32IMC, ILP32, bare metal) checks. EDG has no bare-metal RV32 table, so the generated C comes from the
-# linux_riscv32 stand-in (scripts/gen-c-target.sh, docs/notes/hexagon.md). Three checks:
+# linux_riscv32 stand-in (scripts/gen-c-target.rb, docs/notes/hexagon.md). Three checks:
 #   1. layout: the sizes, alignments and offsets EDG assumes for linux_riscv32 are _Static_asserted by clang for
 #      riscv32-unknown-elf (tests/hexagon/layout_probe.cpp, the same oracle the Hexagon check uses);
 #   2. compile: tests/mcu/*.cpp, emitted as C by EDG and compiled by clang for the ESP32-C3 ISA and ABI;
@@ -22,7 +22,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0
 
 # 1. Layout: EDG's numbers become _Static_asserts on the struct as clang lays it out.
-"$root/scripts/gen-c-target.sh" -t "$target" -o "$tmp/layout.c" "$root/tests/hexagon/layout_probe.cpp" || exit 1
+"$root/scripts/gen-c-target.rb" -t "$target" -o "$tmp/layout.c" "$root/tests/hexagon/layout_probe.cpp" || exit 1
 grep -o 'const unsigned long nfcxx_[A-Za-z0-9_]* = [0-9]*' "$tmp/layout.c" | sed 's/const unsigned long nfcxx_//; s/ = /=/' |
 while IFS== read name val; do
   val=${val%UL}

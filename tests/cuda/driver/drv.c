@@ -1,4 +1,4 @@
-// Driver API calls through the shim (scripts/cuda-driver-shim): each prints its CUresult; with the stand-in cudart the
+// Driver API calls through the shim (scripts/cuda-driver-shim.rb): each prints its CUresult; with the stand-in cudart the
 // requests it made are printed too. The *_v2 and suffix-less names are the ones cuda.h binds the calls to.
 #include <cuda.h>
 #include <stdio.h>
