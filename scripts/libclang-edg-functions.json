@@ -1,0 +1,1422 @@
+{
+  "source": {
+    "binding": "clang.cindex (PyPI package libclang 18.1.1)",
+    "python": "3.13.18",
+    "machine": "x86_64",
+    "pointer_size": 8,
+    "note": "sizes are ctypes sizes on this platform; the functionList is the binding's own table"
+  },
+  "functions": [
+    {
+      "name": "clang_annotateTokens",
+      "args": [
+        "TranslationUnit",
+        {
+          "ptr": "Token"
+        },
+        "c_uint",
+        {
+          "ptr": "Cursor"
+        }
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_CompilationDatabase_dispose",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_CompilationDatabase_fromDirectory",
+      "args": [
+        "c_interop_string",
+        {
+          "ptr": "c_uint"
+        }
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_CompilationDatabase_getAllCompileCommands",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_CompilationDatabase_getCompileCommands",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        },
+        "c_interop_string"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_CompileCommands_dispose",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_CompileCommands_getCommand",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        },
+        "c_uint"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_CompileCommands_getSize",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_CompileCommand_getArg",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        },
+        "c_uint"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_CompileCommand_getDirectory",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_CompileCommand_getFilename",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_CompileCommand_getNumArgs",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_codeCompleteAt",
+      "args": [
+        "TranslationUnit",
+        "c_interop_string",
+        "c_int",
+        "c_int",
+        "c_void_p",
+        "c_int",
+        "c_int"
+      ],
+      "ret": {
+        "ptr": "CCRStructure"
+      }
+    },
+    {
+      "name": "clang_codeCompleteGetDiagnostic",
+      "args": [
+        "CodeCompletionResults",
+        "c_int"
+      ],
+      "ret": "Diagnostic"
+    },
+    {
+      "name": "clang_codeCompleteGetNumDiagnostics",
+      "args": [
+        "CodeCompletionResults"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_createIndex",
+      "args": [
+        "c_int",
+        "c_int"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_createTranslationUnit",
+      "args": [
+        "Index",
+        "c_interop_string"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_CXXConstructor_isConvertingConstructor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXConstructor_isCopyConstructor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXConstructor_isDefaultConstructor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXConstructor_isMoveConstructor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXField_isMutable",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isConst",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isDefaulted",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isDeleted",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isCopyAssignmentOperator",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isMoveAssignmentOperator",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isExplicit",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isPureVirtual",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isStatic",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXMethod_isVirtual",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_CXXRecord_isAbstract",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_EnumDecl_isScoped",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_defaultDiagnosticDisplayOptions",
+      "args": [],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_defaultSaveOptions",
+      "args": [
+        "TranslationUnit"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_disposeCodeCompleteResults",
+      "args": [
+        "CodeCompletionResults"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_disposeDiagnostic",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_disposeIndex",
+      "args": [
+        "Index"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_disposeString",
+      "args": [
+        "_CXString"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_disposeTokens",
+      "args": [
+        "TranslationUnit",
+        {
+          "ptr": "Token"
+        },
+        "c_uint"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_disposeTranslationUnit",
+      "args": [
+        "TranslationUnit"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_equalCursors",
+      "args": [
+        "Cursor",
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_equalLocations",
+      "args": [
+        "SourceLocation",
+        "SourceLocation"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_equalRanges",
+      "args": [
+        "SourceRange",
+        "SourceRange"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_equalTypes",
+      "args": [
+        "Type",
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_formatDiagnostic",
+      "args": [
+        "Diagnostic",
+        "c_uint"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getArgType",
+      "args": [
+        "Type",
+        "c_uint"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getArrayElementType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getArraySize",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_getFieldDeclBitWidth",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getCanonicalCursor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCanonicalType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getChildDiagnostics",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getCompletionAvailability",
+      "args": [
+        "c_void_p"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getCompletionBriefComment",
+      "args": [
+        "c_void_p"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getCompletionChunkCompletionString",
+      "args": [
+        "c_void_p",
+        "c_int"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getCompletionChunkKind",
+      "args": [
+        "c_void_p",
+        "c_int"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getCompletionChunkText",
+      "args": [
+        "c_void_p",
+        "c_int"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getCompletionPriority",
+      "args": [
+        "c_void_p"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getCString",
+      "args": [
+        "_CXString"
+      ],
+      "ret": "c_interop_string"
+    },
+    {
+      "name": "clang_getCursor",
+      "args": [
+        "TranslationUnit",
+        "SourceLocation"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCursorAvailability",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getCursorDefinition",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCursorDisplayName",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getCursorExtent",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "SourceRange"
+    },
+    {
+      "name": "clang_getCursorLexicalParent",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCursorLocation",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getCursorReferenced",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCursorReferenceNameRange",
+      "args": [
+        "Cursor",
+        "c_uint",
+        "c_uint"
+      ],
+      "ret": "SourceRange"
+    },
+    {
+      "name": "clang_getCursorResultType",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getCursorSemanticParent",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getCursorSpelling",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getCursorType",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getCursorUSR",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_Cursor_getMangling",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getCXXAccessSpecifier",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getDeclObjCTypeEncoding",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getDiagnostic",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        },
+        "c_uint"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getDiagnosticCategory",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getDiagnosticCategoryText",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getDiagnosticFixIt",
+      "args": [
+        "Diagnostic",
+        "c_uint",
+        {
+          "ptr": "SourceRange"
+        }
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getDiagnosticInSet",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        },
+        "c_uint"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getDiagnosticLocation",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getDiagnosticNumFixIts",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getDiagnosticNumRanges",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getDiagnosticOption",
+      "args": [
+        "Diagnostic",
+        {
+          "ptr": "_CXString"
+        }
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getDiagnosticRange",
+      "args": [
+        "Diagnostic",
+        "c_uint"
+      ],
+      "ret": "SourceRange"
+    },
+    {
+      "name": "clang_getDiagnosticSeverity",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getDiagnosticSpelling",
+      "args": [
+        "Diagnostic"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getElementType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getEnumConstantDeclUnsignedValue",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_ulong"
+    },
+    {
+      "name": "clang_getEnumConstantDeclValue",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_getEnumDeclIntegerType",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getFile",
+      "args": [
+        "TranslationUnit",
+        "c_interop_string"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getFileName",
+      "args": [
+        "File"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getFileTime",
+      "args": [
+        "File"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getIBOutletCollectionType",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getIncludedFile",
+      "args": [
+        "Cursor"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_getInclusions",
+      "args": [
+        "TranslationUnit",
+        "CFunctionType",
+        "py_object"
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_getInstantiationLocation",
+      "args": [
+        "SourceLocation",
+        {
+          "ptr": {
+            "ptr": "c_void_p"
+          }
+        },
+        {
+          "ptr": "c_uint"
+        },
+        {
+          "ptr": "c_uint"
+        },
+        {
+          "ptr": "c_uint"
+        }
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_getLocation",
+      "args": [
+        "TranslationUnit",
+        "File",
+        "c_uint",
+        "c_uint"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getLocationForOffset",
+      "args": [
+        "TranslationUnit",
+        "File",
+        "c_uint"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getNullCursor",
+      "args": [],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getNumArgTypes",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getNumCompletionChunks",
+      "args": [
+        "c_void_p"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_getNumDiagnostics",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getNumDiagnosticsInSet",
+      "args": [
+        {
+          "ptr": "c_void_p"
+        }
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getNumElements",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_getNumOverloadedDecls",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getOverloadedDecl",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getPointeeType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getRange",
+      "args": [
+        "SourceLocation",
+        "SourceLocation"
+      ],
+      "ret": "SourceRange"
+    },
+    {
+      "name": "clang_getRangeEnd",
+      "args": [
+        "SourceRange"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getRangeStart",
+      "args": [
+        "SourceRange"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getResultType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getSpecializedCursorTemplate",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getTemplateCursorKind",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getTokenExtent",
+      "args": [
+        "TranslationUnit",
+        "Token"
+      ],
+      "ret": "SourceRange"
+    },
+    {
+      "name": "clang_getTokenKind",
+      "args": [
+        "Token"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_getTokenLocation",
+      "args": [
+        "TranslationUnit",
+        "Token"
+      ],
+      "ret": "SourceLocation"
+    },
+    {
+      "name": "clang_getTokenSpelling",
+      "args": [
+        "TranslationUnit",
+        "Token"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getTranslationUnitCursor",
+      "args": [
+        "TranslationUnit"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getTranslationUnitSpelling",
+      "args": [
+        "TranslationUnit"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getTUResourceUsageName",
+      "args": [
+        "c_uint"
+      ],
+      "ret": "c_interop_string"
+    },
+    {
+      "name": "clang_getTypeDeclaration",
+      "args": [
+        "Type"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_getTypedefDeclUnderlyingType",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_getTypedefName",
+      "args": [
+        "Type"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getTypeKindSpelling",
+      "args": [
+        "c_uint"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_getTypeSpelling",
+      "args": [
+        "Type"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_hashCursor",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_isAttribute",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isConstQualifiedType",
+      "args": [
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isCursorDefinition",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isDeclaration",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isExpression",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isFileMultipleIncludeGuarded",
+      "args": [
+        "TranslationUnit",
+        "File"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isFunctionTypeVariadic",
+      "args": [
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isInvalid",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isPODType",
+      "args": [
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isPreprocessing",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isReference",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isRestrictQualifiedType",
+      "args": [
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isStatement",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isTranslationUnit",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isUnexposed",
+      "args": [
+        "CursorKind"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isVirtualBase",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_isVolatileQualifiedType",
+      "args": [
+        "Type"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_parseTranslationUnit",
+      "args": [
+        "Index",
+        "c_interop_string",
+        "c_void_p",
+        "c_int",
+        "c_void_p",
+        "c_int",
+        "c_int"
+      ],
+      "ret": {
+        "ptr": "c_void_p"
+      }
+    },
+    {
+      "name": "clang_reparseTranslationUnit",
+      "args": [
+        "TranslationUnit",
+        "c_int",
+        "c_void_p",
+        "c_int"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_saveTranslationUnit",
+      "args": [
+        "TranslationUnit",
+        "c_interop_string",
+        "c_uint"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_tokenize",
+      "args": [
+        "TranslationUnit",
+        "SourceRange",
+        {
+          "ptr": {
+            "ptr": "Token"
+          }
+        },
+        {
+          "ptr": "c_uint"
+        }
+      ],
+      "ret": null
+    },
+    {
+      "name": "clang_visitChildren",
+      "args": [
+        "Cursor",
+        "CFunctionType",
+        "py_object"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_Cursor_getNumArguments",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_Cursor_getArgument",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "Cursor"
+    },
+    {
+      "name": "clang_Cursor_getNumTemplateArguments",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_Cursor_getTemplateArgumentKind",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "from_id"
+    },
+    {
+      "name": "clang_Cursor_getTemplateArgumentType",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_Cursor_getTemplateArgumentValue",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_Cursor_getTemplateArgumentUnsignedValue",
+      "args": [
+        "Cursor",
+        "c_uint"
+      ],
+      "ret": "c_ulong"
+    },
+    {
+      "name": "clang_Cursor_isAnonymous",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_Cursor_isBitField",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_Cursor_getBriefCommentText",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_Cursor_getRawCommentText",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "_CXString"
+    },
+    {
+      "name": "clang_Cursor_getOffsetOfField",
+      "args": [
+        "Cursor"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_Location_isInSystemHeader",
+      "args": [
+        "SourceLocation"
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "clang_Type_getAlignOf",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_Type_getClassType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_Type_getNumTemplateArguments",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_int"
+    },
+    {
+      "name": "clang_Type_getTemplateArgumentAsType",
+      "args": [
+        "Type",
+        "c_uint"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_Type_getOffsetOf",
+      "args": [
+        "Type",
+        "c_interop_string"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_Type_getSizeOf",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_long"
+    },
+    {
+      "name": "clang_Type_getCXXRefQualifier",
+      "args": [
+        "Type"
+      ],
+      "ret": "c_uint"
+    },
+    {
+      "name": "clang_Type_getNamedType",
+      "args": [
+        "Type"
+      ],
+      "ret": "Type"
+    },
+    {
+      "name": "clang_Type_visitFields",
+      "args": [
+        "Type",
+        "CFunctionType",
+        "py_object"
+      ],
+      "ret": "c_uint"
+    }
+  ],
+  "layout_sizes": {
+    "CCRStructure": 16,
+    "Cursor": 32,
+    "SourceLocation": 24,
+    "SourceRange": 24,
+    "Token": 24,
+    "Type": 24,
+    "_CXString": 16
+  },
+  "leaf_reprs": {
+    "CCRStructure": "<class 'clang.cindex.CCRStructure'>",
+    "CFunctionType": "<class 'ctypes.CFUNCTYPE.<locals>.CFunctionType'>",
+    "CodeCompletionResults": "<class 'clang.cindex.CodeCompletionResults'>",
+    "Cursor": "<class 'clang.cindex.Cursor'>",
+    "CursorKind": "<class 'clang.cindex.CursorKind'>",
+    "Diagnostic": "<class 'clang.cindex.Diagnostic'>",
+    "File": "<class 'clang.cindex.File'>",
+    "Index": "<class 'clang.cindex.Index'>",
+    "SourceLocation": "<class 'clang.cindex.SourceLocation'>",
+    "SourceRange": "<class 'clang.cindex.SourceRange'>",
+    "Token": "<class 'clang.cindex.Token'>",
+    "TranslationUnit": "<class 'clang.cindex.TranslationUnit'>",
+    "Type": "<class 'clang.cindex.Type'>",
+    "_CXString": "<class 'clang.cindex._CXString'>",
+    "bool": "<class 'bool'>",
+    "c_int": "<class 'ctypes.c_int'>",
+    "c_interop_string": "<class 'clang.cindex.c_interop_string'>",
+    "c_long": "<class 'ctypes.c_long'>",
+    "c_uint": "<class 'ctypes.c_uint'>",
+    "c_ulong": "<class 'ctypes.c_ulong'>",
+    "c_void_p": "<class 'ctypes.c_void_p'>",
+    "from_id": "<bound method BaseEnumeration.from_id of <class 'clang.cindex.TemplateArgumentKind'>>",
+    "py_object": "<class 'ctypes.py_object'>"
+  }
+}
