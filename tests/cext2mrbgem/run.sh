@@ -516,6 +516,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check grep -qF '#if 0' "$work/api_dead_use/src/api_dead_use.c"  # the inactive block stays inactive (its text is not compiled)
 check grep -qF 'du_dead(' "$work/api_dead_use/src/api_dead_use.c"
+# 2zzz91. Direct name mappings: rb_attr_get, rb_check_hash_type, rb_struct_aset, RB_EXT_RACTOR_SAFE, RUBY_Qnil.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_misc_names tools/cext2mrbgem/fixtures/api_misc_names/ext/api_misc_names "$work/api_misc_names" > "$work/api_misc_names.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_iv_get(mrb, obj, mrb_intern_cstr(mrb, "@x"))' "$work/api_misc_names/src/api_misc_names.c"
+check grep -qF 'mrb_check_hash_type(mrb, v)' "$work/api_misc_names/src/api_misc_names.c"
+check grep -qF 'mrb_funcall(mrb, s, "[]=", 2, mrb_fixnum_value(0), v)' "$work/api_misc_names/src/api_misc_names.c"
 # 2zzz89. #ifdef _WIN32 is inactive on the non-Windows target: a Windows-only call inside it is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_win_branch tools/cext2mrbgem/fixtures/api_win_branch/ext/api_win_branch "$work/api_win_branch" > "$work/api_win_branch.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

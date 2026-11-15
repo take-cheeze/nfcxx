@@ -43,6 +43,18 @@
     "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
     "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
+    "rb_str_export_to_enc": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_default_internal_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_utf8_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_codepoint_len": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_utf8_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_usascii_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_ascii8bit_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_strlen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_mbclen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
@@ -1215,6 +1227,44 @@
       "needs_mrb": true,
       "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"call\"), $1, $2)",
       "caveat": "a call of the proc through its call method with the argument array; the block argument must be nil (CRuby's Qnil), which is dropped"
+    },
+    "RUBY_Qnil": {
+          "kind": "expr",
+          "mruby": "mrb_nil_value()"
+    },
+    "RB_EXT_RACTOR_SAFE": {
+          "kind": "template",
+          "arity": 1,
+          "template": "((void)0)",
+          "caveat": "the ractor declaration of CRuby; mruby has no ractors, so it has no effect (as rb_ext_ractor_safe is dropped)"
+    },
+    "rb_attr_get": {
+          "kind": "template",
+          "arity": 2,
+          "needs_mrb": true,
+          "template": "mrb_iv_get($m, $0, $1)",
+          "caveat": "the instance variable of the object named by the ID (an mrb_sym); no warning is raised for a missing one, as in CRuby"
+    },
+    "rb_check_hash_type": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_check_hash_type($m, $0)",
+          "caveat": "the hash, or nil when the value is not a Hash, via the fork mrb_check_hash_type"
+    },
+    "rb_struct_aset": {
+          "kind": "template",
+          "arity": 3,
+          "needs_mrb": true,
+          "template": "mrb_funcall($m, $0, \"[]=\", 2, $1, $2)",
+          "caveat": "Struct#[]= with the index and the value (mruby-struct must be in the build)"
+    },
+    "rb_memerror": {
+          "kind": "template",
+          "arity": 0,
+          "needs_mrb": true,
+          "template": "mrb_raise($m, mrb_exc_get($m, \"NoMemoryError\"), \"failed to allocate memory\")",
+          "caveat": "raises NoMemoryError; the fork has no E_NOMEMORY_ERROR constant, so the class is looked up by name"
     },
     "rb_block_given_p": {
       "kind": "call",
