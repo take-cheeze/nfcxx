@@ -1,7 +1,9 @@
 # Sourced by nfcxx: its --bundle-* and --cuda-driver= wrappers, which are scripts/wrap.rb's (docs/notes/bundle.md,
-# docs/notes/cuda-driver.md). wrap.rb exits 254 when there is nothing to do: the bundle wrapper then returns, and the CUDA one
-# returns with cuda_driver_args (the arguments without --cuda-driver=), read from the NUL-terminated file it writes. Needs
-# $root and RUBY (default ruby). The bash originals are tests/wrap/bundle-wrap.sh and tests/wrap/cuda-driver-wrap.sh.
+# docs/notes/cuda-driver.md). Needs $root and RUBY (default ruby). The bash originals are tests/wrap/bundle-wrap.sh and
+# tests/wrap/cuda-driver-wrap.sh.
+#   bundle_wrap DRIVER ARGS...: returns when there is nothing to do (wrap.rb exits 254); the process ends otherwise.
+#   cuda_driver_wrap DRIVER ARGS...: returns with cuda_driver_args set (the arguments without --cuda-driver=), or runs the
+#     driver again with the shim in place of libcuda (EXEC, the process is replaced).
 bundle_wrap() {
   local rc=0
   "${RUBY:-ruby}" "$root/scripts/wrap.rb" bundle "$@" || rc=$?
@@ -9,14 +11,12 @@ bundle_wrap() {
   exit $rc
 }
 cuda_driver_wrap() {
-  local list="${TMPDIR:-/tmp}/nfcxx-cuda-args.$$" rc=0 a
-  "${RUBY:-ruby}" "$root/scripts/wrap.rb" cuda-driver "$list" "$@" || rc=$?
-  if [ $rc = 254 ]; then
-    cuda_driver_args=()
-    while IFS= read -r -d '' a; do cuda_driver_args+=("$a"); done < "$list"
-    rm -f "$list"
-    return 0
+  local out rc=0 kind a
+  out=$("${RUBY:-ruby}" "$root/scripts/wrap.rb" cuda-driver "$@") || rc=$?
+  [ $rc = 0 ] || exit $rc
+  { read -r kind; cuda_driver_args=(); while IFS= read -r a; do cuda_driver_args+=("$a"); done; } <<< "$out"
+  if [ "$kind" = EXEC ]; then
+    NFCXX_CUDA_DRIVER=libcuda exec "$1" ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
   fi
-  rm -f "$list"
-  exit $rc
+  return 0
 }

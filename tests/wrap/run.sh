@@ -49,24 +49,25 @@ bash_run() {
      exit 0' bash "$repo" "$w" "$fn" "$work/bin/nfcxx" "$@")
 }
 
-# ruby_run KIND ENVS ARGS...: the same through scripts/wrap.rb (254 is "go on": CONTINUE, and the kept list)
+# ruby_run KIND ENVS ARGS...: the same through scripts/wrap.rb. A bundle that goes on is status 254; a CUDA decision is a
+# line (CONTINUE, or EXEC: not among these cases) and the arguments, one to a line, which print as the bash prints them.
 ruby_run() {
   local kind=$1 envs=$2; shift 2
-  local lst=$work/kept.$$ st=0
+  local out st=0 first=1 a
   # shellcheck disable=SC2086
   if [ "$kind" = bundle ]; then
     (cd "$work" && env -i HOME="$work" PATH="$work/bin:$(dirname "$ruby_bin"):/usr/bin:/bin" $envs \
        "$ruby_bin" "$ruby_cli" bundle "$work/bin/nfcxx" "$@") || st=$?
-  else
-    (cd "$work" && env -i HOME="$work" PATH="$work/bin:$(dirname "$ruby_bin"):/usr/bin:/bin" $envs \
-       "$ruby_bin" "$ruby_cli" cuda-driver "$lst" "$work/bin/nfcxx" "$@") || st=$?
+    [ "$st" = 254 ] || return "$st"
+    echo CONTINUE
+    return 0
   fi
-  [ "$st" = 254 ] || return "$st"
-  echo CONTINUE
-  if [ "$kind" = cuda ]; then
-    while IFS= read -r -d '' a; do printf '[%s]\n' "$a"; done < "$lst"
-    rm -f "$lst"
-  fi
+  out=$(cd "$work" && env -i HOME="$work" PATH="$work/bin:$(dirname "$ruby_bin"):/usr/bin:/bin" $envs \
+       "$ruby_bin" "$ruby_cli" cuda-driver "$work/bin/nfcxx" "$@") || st=$?
+  [ "$st" = 0 ] || return "$st"
+  while IFS= read -r a; do
+    if [ $first = 1 ]; then first=0; echo "$a"; else printf '[%s]\n' "$a"; fi
+  done <<< "$out"
   return 0
 }
 

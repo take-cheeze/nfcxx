@@ -6,12 +6,14 @@
 #
 #   ruby scripts/wrap.rb bundle DRIVER ARGS...
 #       the --bundle-* options: the driver runs again on ARGS without them, and a link is bundled with build/nfcbundle
-#   ruby scripts/wrap.rb cuda-driver LISTFILE DRIVER ARGS...
-#       --cuda-driver=: LISTFILE gets the arguments without the --cuda-driver= options, NUL-terminated, when the driver goes on
+#   ruby scripts/wrap.rb cuda-driver DRIVER ARGS...
+#       --cuda-driver=: prints a decision line, CONTINUE (the driver goes on with the arguments that follow, without the
+#       --cuda-driver= options) or EXEC (the driver is run again with them, the shim in place of libcuda), then the arguments,
+#       one to a line. An argument with a newline is refused (the lines could not carry it).
 #
-# Exit status: 254 means nothing was done and the caller goes on (for cuda-driver, with LISTFILE's arguments). Any other status
-# is the end of the run (a refusal, the driver's status, nfcbundle's), and a process that exec's the driver or nfcbundle is
-# replaced, as in bash. A status of 254 from a run is reported as 255, since 254 means "go on".
+# Exit status of bundle: 254 means nothing was done and the caller goes on. Any other status is the end of the run (a
+# refusal, the driver's status, nfcbundle's), and a process that exec's the driver or nfcbundle is replaced, as in bash. A
+# status of 254 from a run is reported as 255, since 254 means "go on".
 
 require_relative "nfcc"
 
@@ -64,16 +66,14 @@ module WrapCli
     finish(e.status)
   end
 
-  def cuda_driver(listfile, driver, args)
-    $nfcc_effects = NfccEffects.new
-    kind, list = cuda_driver_wrap(environment(driver), args, File.basename(driver))
-    if kind == :exec
-      # bash: NFCXX_CUDA_DRIVER=libcuda exec "$driver" ...
-      ENV["NFCXX_CUDA_DRIVER"] = "libcuda"
-      $nfcc_effects.exec([driver, *list])
+  def cuda_driver(driver, args)
+    if args.any? { |a| a.include?("\n") }
+      $stderr.write("wrap: an argument with a newline cannot be passed to the CUDA driver wrapper\n")
+      exit(2)
     end
-    File.binwrite(listfile, list.map { |a| a + "\0" }.join)
-    exit(GO_ON)
+    kind, list = cuda_driver_wrap(environment(driver), args, File.basename(driver))
+    $stdout.write((kind == :exec ? "EXEC\n" : "CONTINUE\n") + list.map { |a| "#{a}\n" }.join)
+    exit(0)
   rescue CudaExit => e
     $stderr.write("#{e.message}\n") unless e.message.empty?
     finish(e.status)
@@ -84,7 +84,7 @@ if $PROGRAM_NAME == __FILE__
   mode = ARGV.shift
   case mode
   when "bundle" then WrapCli.bundle(ARGV[0], ARGV[1..])
-  when "cuda-driver" then WrapCli.cuda_driver(ARGV[0], ARGV[1], ARGV[2..])
+  when "cuda-driver" then WrapCli.cuda_driver(ARGV[0], ARGV[1..])
   else abort "wrap: unknown mode #{mode.inspect} (bundle or cuda-driver)"
   end
 end
