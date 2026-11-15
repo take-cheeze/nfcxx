@@ -12,6 +12,9 @@
 # variables that are not in the apply_environment list.
 #
 #   ruby scripts/nfcxx-loop.rb ARG...   prints the state the loop leaves, one line per variable
+#   ruby scripts/nfcxx-loop.rb --records --ld-available=... -- ARG...
+#                                       the loop alone, as NUL-terminated records (records mode, see run_records): what the
+#                                       driver reads after its setup (nfcxx's loop is a consumer of these records)
 #   --ld-available=NAME,...             the ld.NAME programs that exist (for -fuse-ld=NAME)
 #   --nfcxx-env=NAME=VALUE              the environment (NFCXX_CUDA_DRIVER, CUDA_HOME, and the NFCXX_* state variables)
 #   --nfcxx-machine=M                   uname -m (default x86_64)
@@ -33,16 +36,31 @@ class NfcxxExit < StandardError
   end
 end
 
-# The state of the loop (the bash globals of the same names).
+# a value option (-o, -x, -MF, -MT, -MQ, -include, -isystem) given last: the bash reads $2 unset (set -u) and ends the driver
+class NfcxxMissing < StandardError
+end
+
+# The scalar state of the loop (the bash globals of the same names), in the order the text output prints them.
+LOOP_SCALARS = %i[std out outset emit_c emit_hip backend backend_explicit path_b ir_opt ir_opt_set eh_unwind_on eh_shim_on
+                  cache_dir cache_log_file keep_intermediates time_log instantiate promote_slots unroll struct_slots pathb_c
+                  ld_name obfuscate dialect dialect_asked gnu gnu_user freestanding cosmo target trace moddir asan safeptr
+                  sanitize shared pic rdynamic compile_only pthread preprocess xlang stdin_src depmode dfile dtarget depphony
+                  ncpp nobj system_paths].freeze
+# the array state of the loop, in the order the text output prints them
+LOOP_ARRAYS = %i[files cflags cfiles cu_inputs cpp2_inputs srcs ppflags pie_opts preinc sysdirs isa diag_opts asanopts].freeze
+
+# The state of the loop (the bash globals of the same names). A scalar records each assignment the loop makes (assigned):
+# the driver's records mode sets only those, and keeps the value its own setup gave the others.
 class LoopState
-  attr_accessor :std, :out, :outset, :emit_c, :emit_hip, :backend, :backend_explicit, :path_b, :ir_opt, :ir_opt_set
-  attr_accessor :eh_unwind_on, :eh_shim_on, :cache_dir, :cache_log_file, :keep_intermediates, :time_log, :instantiate
-  attr_accessor :promote_slots, :unroll, :struct_slots, :pathb_c, :ld_name, :obfuscate, :dialect, :dialect_asked
-  attr_accessor :gnu, :gnu_user, :freestanding, :cosmo, :target, :trace, :moddir, :asan, :safeptr, :sanitize
-  attr_accessor :shared, :pic, :rdynamic, :compile_only, :pthread, :preprocess, :xlang, :stdin_src
-  attr_accessor :depmode, :dfile, :dtarget, :depphony, :ncpp, :nobj, :system_paths
-  attr_reader :files, :cflags, :cfiles, :cu_inputs, :cpp2_inputs, :srcs, :ppflags, :pie_opts, :preinc, :sysdirs
-  attr_reader :isa, :diag_opts, :asanopts
+  LOOP_SCALARS.each do |name|
+    define_method(name) { instance_variable_get("@#{name}") }
+    define_method("#{name}=") do |value|
+      @assigned << name unless @assigned.include?(name)
+      instance_variable_set("@#{name}", value)
+    end
+  end
+  attr_reader :assigned
+  attr_reader(*LOOP_ARRAYS)
 
   def initialize
     @std = "--c++23"
@@ -108,6 +126,7 @@ class LoopState
     @isa = []
     @diag_opts = []
     @asanopts = []
+    @assigned = []
   end
 end
 
@@ -189,6 +208,13 @@ def starts_with?(text, prefix)
   text.start_with?(prefix)
 end
 
+# the value of the option at args[i] (the next argument); the bash reads $2, which is unset when the option is last
+def value_at(args, i, option)
+  raise NfcxxMissing, option unless i + 1 < args.length
+
+  args[i + 1].to_s
+end
+
 # The loop. args are the arguments after the setup's own set -- (no wrapper has changed them).
 def run_loop(args, state, ld_available)
   i = 0
@@ -251,7 +277,7 @@ def run_loop(args, state, ld_available)
       state.compile_only = 1
       state.files << "-c"
     elsif a == "-o"
-      state.out = args[i + 1].to_s
+      state.out = value_at(args, i, a)
       state.outset = 1
       i += 1
     elsif starts_with?(a, "-std=c++") then state.std = "--c++#{a[8..]}"
@@ -259,7 +285,7 @@ def run_loop(args, state, ld_available)
     elsif a == "-E" then state.preprocess = 1
     elsif a == "-P" then state.ppflags << "-P"
     elsif a == "-x"
-      state.xlang = args[i + 1].to_s
+      state.xlang = value_at(args, i, a)
       i += 1
     elsif a == "-" then state.stdin_src = 1
     elsif a == "-pthread" then state.pthread = 1
@@ -287,16 +313,16 @@ def run_loop(args, state, ld_available)
     elsif a == "-MD" || a == "-MMD" then state.depmode = a
     elsif a == "-MP" then state.depphony = "-MP"
     elsif a == "-MF"
-      state.dfile = args[i + 1].to_s
+      state.dfile = value_at(args, i, a)
       i += 1
     elsif a == "-MT" || a == "-MQ"
-      state.dtarget = args[i + 1].to_s
+      state.dtarget = value_at(args, i, a)
       i += 1
     elsif a == "-include"
-      state.preinc << args[i + 1].to_s
+      state.preinc << value_at(args, i, a)
       i += 1
     elsif a == "-isystem"
-      state.sysdirs << args[i + 1].to_s
+      state.sysdirs << value_at(args, i, a)
       i += 1
     elsif starts_with?(a, "-isystem") && a.length > 8 then state.sysdirs << a[8..]
     elsif a.end_with?(".c") then state.cfiles << a
@@ -558,7 +584,29 @@ def cuda_driver_step(argv, env, facts)
   [[["EXEC", ["ROOT/nfcxx", *replaced]]], args]
 end
 
+# records mode (the driver's, `--records --ld-available=... -- ARG...`): the loop alone, from an empty state, as NUL-terminated
+# records. "s NAME=VALUE": a scalar the loop assigned. "a NAME=ELEMENT": an element an array got, in order. "x MESSAGE": an
+# argument the loop refuses (the driver prints MESSAGE and exits 2; every refusal of the loop is status 2). "u OPTION": a
+# value option given last (the driver ends as the bash does with set -u). "z": the end marker, written last and only on
+# success; nothing is written before the loop has finished, so a record run never shows a partial state.
+def run_records(argv, ld_available)
+  state = LoopState.new
+  run_loop(argv, state, ld_available)
+  state.assigned.each { |name| $stdout.write("s#{name}=#{state.public_send(name)}\0") }
+  LOOP_ARRAYS.each { |name| state.public_send(name).each { |x| $stdout.write("a#{name}=#{x}\0") } }
+  $stdout.write("z\0")
+  0
+rescue NfcxxExit => e
+  $stdout.write("x#{e.message}\0")
+  0
+rescue NfcxxMissing => e
+  $stdout.write("u#{e.message}\0")
+  0
+end
+
 def main(argv)
+  records = argv.first == "--records"
+  argv.shift if records
   ld_available = []
   env = {}
   uid = "0"
@@ -581,6 +629,10 @@ def main(argv)
       raise NfcxxUnported, option
     end
   end
+  if records
+    argv.shift if argv.first == "--"
+    return run_records(argv, ld_available)
+  end
   plan = syntax_only_plan(argv)
   plan = [plan] if plan
   plan ||= bundle_plan(argv)
@@ -602,6 +654,10 @@ rescue NfcxxUnported => e
   $stdout.flush
   $stderr.write("unported: #{e.message}\n")
   3
+rescue NfcxxMissing => e
+  $stdout.flush
+  $stderr.write("nfcxx: #{e.message} needs a value\n")
+  1
 end
 
 rc = main(ARGV)
