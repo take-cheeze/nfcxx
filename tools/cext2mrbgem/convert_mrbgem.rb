@@ -1154,6 +1154,15 @@ texts = static_rename(texts)
   # a parameter or local of the enclosing function fn with the name hides a function of that name there
   # true when a declaration of name in fn is a local or a parameter, not the declaration of a class variable of that name
   # (a class variable's own VALUE declaration is in @decl_name_pos, and it is not a shadow)
+  # true when the class variable NAME is owned at pos: a file-scope variable, or a variable of a function that assigns it a
+  # class (NAME = rb_define_class...). A VALUE local of another function with the same name is an ordinary value.
+  def owns_class_var?(rel, pos, name)
+    fn = enclosing_func(rel, pos)
+    return true if fn.nil?
+    masked = @files[fn['file']]['masked']
+    !(psl(masked, fn['brace'], fn['body_end'] + 1) =~ /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/).nil?
+  end
+
   def local_shadows_class_var?(name, fn)
     return true if param_names(fn).include?(name)
     masked = @files[fn['file']]['masked']
@@ -1161,7 +1170,7 @@ texts = static_rename(texts)
     stop = fn['body_end'] + 1
     re = /(?<![#{WC}])(?!return(?![#{WC}])|else(?![#{WC}])|case(?![#{WC}])|goto(?![#{WC}]))[A-Za-z_][#{WC}]*[ \t\n\*]+(#{Regexp.escape(name)})#{SS}[=;,\[)]/
     masked[start...stop].to_s.to_enum(:scan, re).map { Regexp.last_match }.any? do |m|
-      !@decl_name_pos.include?([fn['file'], start + m.begin(1)])
+      !owns_class_var?(fn['file'], start + m.begin(1), name)
     end
   end
 
@@ -3164,7 +3173,7 @@ end
     value_decl_statements(masked).each do |st, kw_end, decls|
       next if decls.none? { |d| d[:name] && @class_vars.include?(d[:name]) && !is_param(rel, d[:start], d[:name]) }
       next if decls.any? { |d| d[:name].nil? || d[:fn] }
-      cls = decls.map { |d| d[:name] && @class_vars.include?(d[:name]) && !is_param(rel, d[:start], d[:name]) }
+      cls = decls.map { |d| d[:name] && @class_vars.include?(d[:name]) && !is_param(rel, d[:start], d[:name]) && owns_class_var?(rel, d[:start], d[:name]) }
       next if decls.zip(cls).any? { |d, c| c && d[:ptr] }
       ed.add(st, kw_end, 'struct RClass') if cls[0]
       decls.each_with_index do |d, i|
@@ -3349,7 +3358,7 @@ end
         end
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
-        next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}[A-Za-z_]/)
+        next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}(?:[A-Za-z_]|\*#{SS1}[A-Za-z_])/)
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
@@ -3365,6 +3374,8 @@ end
         next if nx >= 0 && masked[nx] == '=' && psl(masked, nx + 1, nx + 2) != '='
         callee, idx = call_context(masked, s)
         next if callee && (@special_pos[callee] || []).include?(idx)
+        # rb_raise's class is an RClass * for mrb_raisef: the class variable is not wrapped
+        next if callee == 'rb_raise' && idx == 0
         ed.add(s, e, "mrb_obj_value(#{name})")
         rewrite(rel, s, name, "mrb_obj_value(#{name})")
       end

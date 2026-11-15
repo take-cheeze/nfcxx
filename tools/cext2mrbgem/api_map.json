@@ -2457,7 +2457,7 @@
       "kind": "template",
       "arity": 1,
       "needs_mrb": true,
-      "template": "((void *)mrb_malloc($m, $0))",
+      "template": "((void *)mrb_malloc($m, sizeof($0)))",
       "caveat": "allocates the bytes with mrb_malloc (raises on failure, as CRuby's xmalloc raises NoMemoryError); the pointer is void * as in CRuby"
     },
     "RB_ALLOC_N": {
@@ -2471,7 +2471,7 @@
       "kind": "template",
       "arity": 1,
       "needs_mrb": true,
-      "template": "((void *)mrb_malloc($m, $0))",
+      "template": "((void *)mrb_malloc($m, sizeof($0)))",
       "caveat": "see RB_ALLOC"
     },
     "ALLOC_N": {
