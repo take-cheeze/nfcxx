@@ -15,7 +15,7 @@
 # the struct on the stack, and a struct result is written through a hidden first pointer. CXString (returned in two
 # registers, and only the first one is readable here) is not used. The library's C mode is not reachable through
 # clang_parseTranslationUnit, so C sources go to the runner tools/cext2mrbgem/libclang-cursors-c (LIBCLANG_EDG_RUNNER),
-# which runs scripts/libclang-cursors --c.
+# which runs scripts/libclang-cursors.rb --c.
 #
 # Nothing is compiled or run from the input: the front end parses the text, and the converter reads only the records.
 

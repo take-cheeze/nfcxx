@@ -688,8 +688,11 @@ jobs:
             - "tests/pathb-borrow/**"
             - "be/nfcxx_*.c"
             - "scripts/nfcxx-*"
+            # a world compiles this Ruby script (bc2cpp base_rbs_native.rb runs it); scope_check.rb lists plain .rb paths
+            - "scripts/nfcxx-cpp.rb"
             - "scripts/setup-libclang-edg.sh"
-            - "scripts/build-libclang-edg.sh"
+            # a glob, as the bash name was: this build step is not a bc2cpp world script
+            - "scripts/build-libclang-edg.*"
             - "scripts/setup-edg.sh"
             # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
             # of EDG or QBE, or a change to their setup, must re-run the parity check.
@@ -1018,7 +1021,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/libclang-edg
-          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.rb', 'scripts/setup-edg.sh') }}
 
       - name: Build the AST front end
         if: steps.libclang-edg.outputs.cache-hit != 'true'

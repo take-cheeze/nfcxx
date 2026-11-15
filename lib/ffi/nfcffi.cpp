@@ -57,7 +57,7 @@ void* Module::symbol(const std::string& name) const {
 Ffi::Ffi(std::string driver)
     : driver_(driver.empty() ? build::default_driver(__FILE__) : std::move(driver)),
       cache_(build::default_cache_dir("NFCFFI_CACHE", "nfcffi-cache")),
-      decl_tool_(build::repo_root_of(__FILE__) + "/scripts/libclang-cursors") {}
+      decl_tool_(build::repo_root_of(__FILE__) + "/scripts/libclang-cursors.rb") {}
 
 Ffi& Ffi::set_decl_tool(std::string path) {
   decl_tool_ = std::move(path);
