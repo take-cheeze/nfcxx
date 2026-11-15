@@ -80,4 +80,36 @@ ensure
   saved ? ENV['BC2CPP_STEP_CLOSURES'] = saved : ENV.delete('BC2CPP_STEP_CLOSURES')
 end
 
+require_relative "../../tools/bc2cpp/irep_arity"
+require_relative "../../tools/bc2cpp/bc2cpp"
+require "set"
+# Pins for two recent block-recognition changes, kept in this FixtureCheck file so CI runs them.
+# BLOCK_FALLBACK_UPVAR_SAFE_METHODS (irep_arity.rb): bc2cpp's own synchronous iterators may capture outer locals; lambda may not.
+%w[each_source each_with_op each_nested_insn each_body adjacent_pairs each_irep_of_method filter_map].each do |name|
+  check.call("#{name} is on the synchronous block allowlist", BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name))
+end
+check.call('lambda stays off the synchronous block allowlist (it keeps its block)', !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?('lambda'))
+
+# R522: a nested block needing an outer local is claimed when its enclosing block passes its own upvars, and refused
+# with an empty list (the gate that inline_block_boxes? and the enclosing-body call sites must satisfy).
+NEST_R522_SOURCE = <<~'RUBY'
+  class Nest
+    def run(a)
+      [1].each do |x|
+        [2].each { |y| a + x + y }
+      end
+    end
+  end
+RUBY
+suite.compile(NEST_R522_SOURCE) do |ireps, root|
+  registry, superclass_of, cc, inc, pre = build_registry(ireps, root)
+  gen = CodeGen.new(ireps, registry, {}, {}, {}, {}, superclass_of, {}, {}, cc, {}, Set.new, nil, nil, nil, inc, pre)
+  meth = ireps.fetch(registry.fetch('run').find { |d| d.owner == 'Nest' }.irep)
+  outer = meth.reps.map { |l| ireps[l] }.find { |i| i && i.reps.any? }
+  claimed = gen.recognize_block_fallback_regions(outer, available_upvars: gen.block_upvar_needs(outer) || []).size
+  refused = gen.recognize_block_fallback_regions(outer, available_upvars: []).size
+  check.call('a nested block is claimed when the enclosing block passes its own upvars (R522)', claimed >= 1)
+  check.call('the same nested block is refused with an empty upvar list (the R522 gate)', refused.zero?)
+end
+
 suite.finish!
