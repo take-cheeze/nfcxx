@@ -10,7 +10,7 @@ on:
     paths:
       - "tests/mcu/**"
       - "tests/hexagon/layout_probe.cpp"
-      - "scripts/gen-c-target.sh"
+      - "scripts/gen-c-target.rb"
       - "scripts/setup-edg.sh"
       - "nfcxx"
       - "be/**"
@@ -21,7 +21,7 @@ on:
     paths:
       - "tests/mcu/**"
       - "tests/hexagon/layout_probe.cpp"
-      - "scripts/gen-c-target.sh"
+      - "scripts/gen-c-target.rb"
       - "scripts/setup-edg.sh"
       - "nfcxx"
       - "be/**"

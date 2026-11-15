@@ -38,8 +38,8 @@
 #   machine M               uname -m
 #   cuda-home PATH          CUDA_HOME is PATH (no line: CUDA_HOME is unset)
 #   cuda-cub PATH           scripts/cuda-cub.rb prints PATH (no line: it prints nothing and fails)
-#   cuda-shim PATH          scripts/cuda-driver-shim prints PATH (the shim's archive)
-#   cuda-shim-error TEXT    scripts/cuda-driver-shim fails with TEXT (takes precedence over cuda-shim)
+#   cuda-shim PATH          scripts/cuda-driver-shim.rb prints PATH (the shim's archive)
+#   cuda-shim-error TEXT    scripts/cuda-driver-shim.rb fails with TEXT (takes precedence over cuda-shim)
 #   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
 #   cuda-file, cuda-dir     run.sh makes these in the work directory; the port reads the exists and dir lines instead
 #

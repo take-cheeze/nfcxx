@@ -37,7 +37,7 @@ harness() {
   sed -e 's|"\$driver" |run_stub "$driver" |g' -e 's|exec "\$tool" |exec_stub "$tool" |g' \
       "$root/tests/wrap/bundle-wrap.sh" > "$tmp/bundle-wrap.sh"
   # the CUDA driver wrap, as a copy whose driver call prints EXEC and whose shim and uname -m are stubs (see fso_stubs)
-  sed -e 's|exec "\$driver" |exec_stub "$driver" |g' -e 's|"\$root/scripts/cuda-driver-shim" |stub_shim |g' \
+  sed -e 's|exec "\$driver" |exec_stub "$driver" |g' -e 's|"\$root/scripts/cuda-driver-shim.rb" |stub_shim |g' \
       -e 's|\$(uname -m)|$(cuda_test_machine)|g' "$root/tests/wrap/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
   # nfcxx's setup and loop: up to the loop's closing "done"
   awk 'seen && /^done$/ { print; exit } /^while \[ \$# -gt 0 \]; do$/ { seen = 1 } { print }' "$root/nfcxx" |

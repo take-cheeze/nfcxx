@@ -12,7 +12,7 @@ on:
     paths:
       - "3rd/edg"
       - "scripts/setup-edg.sh"
-      - "scripts/gen-c-target.sh"
+      - "scripts/gen-c-target.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -23,7 +23,7 @@ on:
     paths:
       - "3rd/edg"
       - "scripts/setup-edg.sh"
-      - "scripts/gen-c-target.sh"
+      - "scripts/gen-c-target.rb"
       - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"

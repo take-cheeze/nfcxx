@@ -4,7 +4,7 @@
 # libcuda is named by -lcuda, -l:libcuda.so[.1], or a path ending in libcuda.so[.1] (what CMake passes for
 # CUDA::cuda_driver: $CUDA_HOME/lib64/stubs/libcuda.so or the system's libcuda.so; libtorch's caffe2::cuda and
 # llama.cpp's ggml-cuda link it).
-#   --cuda-driver=auto     the default: the driver API goes through libcudart (the shim of scripts/cuda-driver-shim
+#   --cuda-driver=auto     the default: the driver API goes through libcudart (the shim of scripts/cuda-driver-shim.rb
 #                          and libcudart in place of libcuda), so the program needs no libcuda.so.1 to link or start and
 #                          cudart loads the driver when it is first used; falls back to linking libcuda, with a note,
 #                          when the shim cannot be made (no cuda.h and cudaTypedefs.h, libcudart before 12.5, not x86-64)
@@ -48,7 +48,7 @@ cuda_driver_wrap() {
   elif [ ! -f "$home/include/cuda.h" ] || [ ! -f "$home/include/cudaTypedefs.h" ]; then why="no cuda.h and cudaTypedefs.h in $home/include"
   elif [ ! -f "$home/include/cuda_runtime_api.h" ]; then why="no cuda_runtime_api.h in $home/include"
   elif [ -z "$rtv" ] || [ "$rtv" -lt 12050 ]; then why="libcudart ${rtv:-of unknown version} is older than 12.5"
-  elif ! shim=$("$root/scripts/cuda-driver-shim" "$home/include" 2>&1); then why="the shim did not build: $shim"
+  elif ! shim=$("$root/scripts/cuda-driver-shim.rb" "$home/include" 2>&1); then why="the shim did not build: $shim"
   fi
   if [ -n "$why" ]; then
     if [ $mode = cudart ]; then echo "$(basename "$driver"): --cuda-driver=cudart: $why" >&2; exit 1; fi

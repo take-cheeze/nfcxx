@@ -34,7 +34,7 @@ of libcuda goes; the first becomes the shim.
 ./nfcc app.c -lcuda -o app                                    # needs libcudart.so.12, not libcuda.so.1
 cmake -DCMAKE_C_COMPILER=$PWD/nfcc ...                        # CUDA::cuda_driver the same way
 ./nfcxx --bundle-libs app.cpp -L$CUDA_HOME/lib64 -lcuda -o app   # needs glibc only
-gcc app.c $(scripts/cuda-driver-shim $CUDA_HOME/include) -L$CUDA_HOME/lib64 -lcudart   # without the drivers
+gcc app.c $(scripts/cuda-driver-shim.rb $CUDA_HOME/include) -L$CUDA_HOME/lib64 -lcudart   # without the drivers
 ```
 
 The PyPI wheel directory of `scripts/fetch-cuda-libs.sh` works as the toolkit. Test: `tests/cuda/driver/run.sh` (CI:
@@ -42,7 +42,7 @@ cuda.yml); on a GPU, `tests/cuda/gpu/run.sh` (by hand).
 
 ## How
 
-`scripts/cuda-driver-shim INCLUDE_DIR` builds `build/cuda-driver/<hash>/libnfcxx_cudrv.a` from the CUDA headers and
+`scripts/cuda-driver-shim.rb INCLUDE_DIR` builds `build/cuda-driver/<hash>/libnfcxx_cudrv.a` from the CUDA headers and
 `lib/cuda/driver/nfcxx_cudrv.c`, and prints its path. Each driver function is a trampoline that jumps through its slot;
 a slot starts at a resolve stub that saves the argument registers, asks libcudart for the function, stores it in the
 slot and jumps there. One trampoline serves every signature, and later calls cost one indirect jump. The functions are
