@@ -175,7 +175,7 @@ check test -e "$work/gc_map_refused/NOT_BUILDABLE"
 check grep -q '  rb_gc_disable  no mruby disable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_enable  no mruby enable function' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_start  the return value of rb_gc_start (nil) is used' "$work/gc_map_refused/REFUSALS.txt"
-check grep -q '  rb_gc_mark  rb_gc_mark is valid only in a data type mark callback' "$work/gc_map_refused/REFUSALS.txt"
+check grep -q '  rb_gc_mark  stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback' "$work/gc_map_refused/REFUSALS.txt"
 check grep -q '  rb_gc_writebarrier  argument .rb_str_new_cstr("x"). is not a plain local variable' "$work/gc_map_refused/REFUSALS.txt"
 
 # 2k. String, Hash and Array calls with exact mruby equivalents (api_map.json batch B1; header lines in the commit)

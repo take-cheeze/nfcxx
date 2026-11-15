@@ -3666,7 +3666,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
         unless fn && mark_context_names.include?(fn['name'])
-          refuse(rel, s, name, 'rb_gc_mark is valid only in a data type mark callback (the runtime calls it during marking)')
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and the fork\'s mrb_data_type has no mark ' \
+                               'callback (include/mruby/data.h:22-30: only dfree), so the runtime never calls one')
           return
         end
       end
