@@ -482,25 +482,14 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
 mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one
   grep -Eq '^[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]' "$1"
 }
-mod_decl_name() {
-  awk '/^[ \t]*export[ \t]+module[ \t]+[A-Za-z_][A-Za-z0-9_.]*[ \t]*;/ {
-         sub(/^[ \t]*export[ \t]+module[ \t]+/, ""); sub(/[ \t]*;.*/, ""); print; exit }' "$1"
+mod_decl_name() {  # mod_decl_name FILE: the source scans are scripts/nfcxx-modscan.rb (tests/nfcxx-modscan/run.sh checks them)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "$1"
 }
 mod_imports() {
-  awk '/^[ \t]*(export[ \t]+)?import[ \t]+[A-Za-z_][A-Za-z0-9_.]*[ \t]*;/ {
-         sub(/^[ \t]*(export[ \t]+)?import[ \t]+/, ""); sub(/[ \t]*;.*/, ""); print }' "$1"
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" imports "$1"
 }
-mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet
-  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?module[[:space:]]+[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*:' "$1"; then
-    echo "nfcxx: $1: module partitions are not supported yet (docs/notes/modules.md)" >&2; exit 2
-  fi
-  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?import[[:space:]]+[<"]' "$1"; then
-    echo "nfcxx: $1: header units are not supported yet (docs/notes/modules.md)" >&2; exit 2
-  fi
-  local d
-  for d in $(mod_imports "$1"); do
-    case $d in std|std.*) echo "nfcxx: $1: import $d: the standard library modules are not built yet (docs/notes/modules.md)" >&2; exit 2 ;; esac
-  done
+mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet (exit 2, nfcxx's message)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$1" || exit $?
 }
 # mod_build_program: a program with modules is compiled one source at a time (EDG takes one translation unit per call with
 # modules on), the interface units first in dependency order, and the objects are then linked. Each step is this driver again.

@@ -93,7 +93,7 @@ while IFS= read -r line; do
     continue
   fi
   : > "$sb/stublog"
-  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/stublog" \
+  (cd "$work" && env -i PATH="$bin:/usr/bin:/bin" RUBY="$(command -v ruby)" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/stublog" \
      NFCXX_STUB_TMP="$tmp" NFCXX_STUB_ROOT="$root" bash "$root/nfcxx" "${args[@]}" >/dev/null 2>"$sb/oerr"); orc=$?
   oracle_out=$(sed -e "s#$tmp/[^/[:space:]]*#TMP#g" -e "s#$work#WORK#g" -e "s#$root#ROOT#g" "$sb/stublog" | project; echo "STATUS $orc")
   if [ "$port_out" = "$oracle_out" ]; then
