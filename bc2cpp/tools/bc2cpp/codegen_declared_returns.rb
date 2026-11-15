@@ -290,6 +290,14 @@ class CodeGen
       when :float then "mrb_float_p(#{var})"
       when :module then "mrb_obj_is_kind_of(M, #{var}, mrb_module_get(M, \"#{cls}\"))"
       when :union then return cls.map { |k, c, n| "(#{declared_return_condition(k, c, n, var)})" }.join(' || ')
+      when :bool then "(mrb_true_p(#{var}) || mrb_false_p(#{var}))"
+      when :array_of
+        # Every element is tested with the element kind; the loop runs in the expression, with M in scope.
+        ek, ec, en = cls
+        elem = declared_return_condition(ek, ec, en, 'e_')
+        "(mrb_array_p(#{var}) && ([&]() { mrb_value a_ = #{var}; mrb_int n_ = RARRAY_LEN(a_); " \
+          "for (mrb_int i_ = 0; i_ < n_; ++i_) { mrb_value e_ = mrb_ary_ref(M, a_, i_); if (!(#{elem})) return false; } " \
+          "return true; }()))"
       when :class
         exact = exact_class_guard(owner_class_ptr_expr(cls), var)
         return nilable ? "mrb_nil_p(#{var}) || #{exact}" : exact
