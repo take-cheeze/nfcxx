@@ -41,8 +41,11 @@ harness() {
   # the CUDA driver wrap, as a copy whose driver call prints EXEC and whose shim and uname -m are stubs (see fso_stubs)
   sed -e 's|exec "\$driver" |exec_stub "$driver" |g' -e 's|"\$root/scripts/cuda-driver-shim.rb" |stub_shim |g' \
       -e 's|\$(uname -m)|$(cuda_test_machine)|g' "$root/tests/wrap/cuda-driver-wrap.sh" > "$tmp/cuda-driver-wrap.sh"
-  # nfcxx's setup and loop: up to the loop's closing "done"
-  awk 'seen && /^done$/ { print; exit } /^while \[ \$# -gt 0 \]; do$/ { seen = 1 } { print }' "$root/tests/nfcxx/nfcxx-bash" |
+  # nfcxx's setup and loop: up to the loop's end. The frozen driver's loop is the bash loop ("while" to its "done"); the
+  # driver (OPTION_STATE_SRC=nfcxx, the default is the frozen one) has the loop as its records consumer, between the markers
+  local src=${OPTION_STATE_SRC:-$root/tests/nfcxx/nfcxx-bash} start='while [ $# -gt 0 ]; do' end='done'
+  if [ "$src" != "$root/tests/nfcxx/nfcxx-bash" ]; then start='# BEGIN the argument loop'; end='# END the argument loop'; fi
+  awk -v s="$start" -v e="$end" 'seen && $0 == e { print; exit } !seen && index($0, s) == 1 { seen = 1 } { print }' "$src" |
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
         -e "s|source \"\\\$root/scripts/wrap.sh\"|source \"$tmp/bundle-wrap.sh\"; source \"$tmp/cuda-driver-wrap.sh\"|"
