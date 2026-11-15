@@ -609,7 +609,7 @@ class Converter
     defs = {}
     texts.each do |base, t|
       next unless base.end_with?('.c')
-      mask_c(t).scan(/^[ \t]*static\b[^;{}()]*?\b([A-Za-z_]\w*)[ \t\n]*\([^;{}]*\)[ \t\n]*\{/) do
+      mask_c(t).scan(/^[ \t]*(?:(?:inline|static)[ \t]+)*static\b[^;{}()]*?\b([A-Za-z_]\w*)[ \t\n]*\([^;{}]*\)[ \t\n]*\{/) do
         (defs[Regexp.last_match(1)] ||= Set.new) << base
       end
     end

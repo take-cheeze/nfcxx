@@ -507,6 +507,10 @@ check grep -qF 'h.cbs->on_null(ctx)' "$work/api_tbl_names/src/api_tbl_names.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_typedef tools/cext2mrbgem/fixtures/api_fnptr_typedef/ext/api_fnptr_typedef "$work/api_fnptr_typedef" > "$work/api_fnptr_typedef.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'if (h.dump == ftd_attrs) {' "$work/api_fnptr_typedef/src/api_fnptr_typedef.c"
+# 2zzz94. An inline static function defined in two .c files is renamed per file (as a plain static is).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_inline_static tools/cext2mrbgem/fixtures/api_inline_static/ext/api_inline_static "$work/api_inline_static" > "$work/api_inline_static.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'is_first__other' "$work/api_inline_static/src/other.c"
 # 2zzz90. A helper defined in a header included by exactly one source converts with that source (its registered callers too).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_header_single tools/cext2mrbgem/fixtures/api_header_single/ext/api_header_single "$work/api_header_single" > "$work/api_header_single.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
