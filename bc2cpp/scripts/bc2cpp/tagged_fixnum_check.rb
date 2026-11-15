@@ -150,10 +150,11 @@ pair = ->(text) { text.match(/if \(mrb_likely\(BC2CPP_FIXNUM_PAIR_P\((r\d+), (r\
 { 'add' => %w[add mrb_num_add], 'sub' => %w[sub mrb_num_sub], 'mul' => %w[mul mrb_num_mul] }.each do |name, (op, slow)|
   body = code_of(code, "TfOps_#{name}")
   m = pair.call(body)
-  check.call("#{name}: one pair test, the word helper, its mrb_num_* overflow, the Float arms and the fallback",
+  check.call("#{name}: one pair test, the word helper, its mrb_num_* overflow, the shared Float helper and the fallback",
              m && body.include?("if (mrb_unlikely(bc2cpp_fixnum_#{op}(#{m[1]}, #{m[2]}, #{m[1]}))) " \
                                 "{ #{m[1]} = #{slow}(M, #{m[1]}, #{m[2]}); }") &&
-               body.include?("mrb_float_p(#{m[1]}) && mrb_float_p(#{m[2]})"))
+               body.include?("bc2cpp_num_#{name}_float(M, #{m[1]}, #{m[2]})") &&
+               code.include?("mrb_value bc2cpp_num_#{name}_float(mrb_state* M, mrb_value d, mrb_value s)"))
 end
 { 'addi' => 'add', 'subi' => 'sub' }.each do |name, op|
   check.call("#{name}: the literal is a boxed constant to the word helper",
