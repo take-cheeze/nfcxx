@@ -328,14 +328,7 @@ class CodeGen
             #{fixnum_exact_tier('+', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_add(M, #{RegName[d]}, #{RegName[s]});
-          #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) + mrb_integer(#{RegName[s]}));
-          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) + mrb_float(#{RegName[s]}));
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) + mrb_float(#{RegName[s]}));
-          #endif
+          } else if (bc2cpp_num_add_float(M, &#{RegName[d]}, #{RegName[s]})) {
           } else {
             #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
@@ -390,14 +383,7 @@ class CodeGen
             #{fixnum_exact_tier('-', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_sub(M, #{RegName[d]}, #{RegName[s]});
-          #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) - mrb_integer(#{RegName[s]}));
-          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) - mrb_float(#{RegName[s]}));
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) - mrb_float(#{RegName[s]}));
-          #endif
+          } else if (bc2cpp_num_sub_float(M, &#{RegName[d]}, #{RegName[s]})) {
           } else {
             #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
@@ -427,14 +413,7 @@ class CodeGen
             #{fixnum_exact_tier('*', d, "r#{s}")}
           } else if (mrb_integer_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
             #{RegName[d]} = mrb_num_mul(M, #{RegName[d]}, #{RegName[s]});
-          #ifndef MRB_NO_FLOAT
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) * mrb_integer(#{RegName[s]}));
-          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_integer(#{RegName[d]}) * mrb_float(#{RegName[s]}));
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_float(#{RegName[d]}) * mrb_float(#{RegName[s]}));
-          #endif
+          } else if (bc2cpp_num_mul_float(M, &#{RegName[d]}, #{RegName[s]})) {
           } else {
             #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
@@ -466,14 +445,7 @@ class CodeGen
         <<~CPP
           #{guarded_arm}  if (#{BranchHints.likely("mrb_integer_p(r#{d}) && mrb_integer_p(r#{s})")}) {
             #{RegName[d]} = mrb_div_int_value(M, mrb_integer(#{RegName[d]}), mrb_integer(#{RegName[s]}));
-          #ifndef MRB_NO_FLOAT
-          } else if (mrb_integer_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(#{RegName[d]}), mrb_float(#{RegName[s]})));
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_integer_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{RegName[d]}), (mrb_float)mrb_integer(#{RegName[s]})));
-          } else if (mrb_float_p(#{RegName[d]}) && mrb_float_p(#{RegName[s]})) {
-            #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{RegName[d]}), mrb_float(#{RegName[s]})));
-          #endif
+          } else if (bc2cpp_num_div_float(M, &#{RegName[d]}, #{RegName[s]})) {
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
