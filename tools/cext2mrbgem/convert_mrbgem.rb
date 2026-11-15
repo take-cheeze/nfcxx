@@ -2314,6 +2314,13 @@ use_problem = lambda do |name, use|
       end
     end
     compute_global_macros(with_state | gset)
+    # a macro that returns in a registered method or Init restores the global state before its return (see compute_global_macros)
+    (@macro_return_plan || {}).each do |(prel, ps), plan|
+      next unless ((@global_macro_spans || {})[prel] || []).any? { |a, _z| a == ps }
+      ed = @edits[prel]
+      ed.add(plan[:ret], plan[:ret] + 6, "{ mrb_value nfcx_bc2_ret = (")
+      ed.add(plan[:end], plan[:end], "); #{@global_name} = nfcx_bc2_old; return nfcx_bc2_ret; }")
+    end
     @global_wrap = !gset.empty? || @global_macro_spans.any? { |_r, l| !l.empty? }
     warn "DBGW gset=#{gset.to_a} spans=#{@global_macro_spans.values.map(&:size)} threaded=#{(@threaded_cands||Set.new).to_a}" if ENV['NR_DEBUG']
     if @global_wrap
@@ -2323,6 +2330,8 @@ use_problem = lambda do |name, use|
       @files.each do |rel, f|
         define_spans(rel).each do |mname, a, b|
           next unless psl(f['masked'], a, b) =~ /(?<![#{WC}])return(?![#{WC}])/
+          # a macro whose body restores the state before its return (the plan applied above) is not refused
+          next if (@macro_return_plan || {}).key?([rel, a]) && ((@global_macro_spans || {})[rel] || []).any? { |x, _z| x == a }
           (@occ[mname] || []).each do |orel, os, _oe|
             next if orel == rel && a <= os && os < b
             fn = enclosing_func(orel, os)
@@ -2363,11 +2372,24 @@ use_problem = lambda do |name, use|
           next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) || accepted_names.include?(i) || (@macro_needs || Set.new).include?(i) }
           # a return in the body skips the state restore of a registered method or Init that expands it: refused there
           if body =~ /(?<![#{WC}])return(?![#{WC}])/
-            wrapped = (@occ[name] || []).any? do |orel, os, _oe|
+            wrapped_use = lambda do |orel, os|
               fnx = enclosing_func(orel, os)
               fnx && (@valid_reg_names.include?(fnx['name']) || (@init_defs || []).any? { |x| x['name'] == fnx['name'] })
             end
-            next if wrapped
+            uses_out = (@occ[name] || []).reject { |orel, os, _oe| orel == rel && s <= os && os < e }
+            wrapped = uses_out.any? { |orel, os, _oe| wrapped_use.call(orel, os) }
+            if wrapped
+              # every use is in a registered method or Init (each restores the global state before it returns), and the body is
+              # `if (C) return E` with one return: the macro restores the state itself, before its return (the plan below)
+              plan = nil
+              mm = /(if[ \t]*\(.*\)[ \t]*)return([ \t]+[^;]*)\z/m.match(body)
+              if mm && body.scan(/(?<![#{WC}])return(?![#{WC}])/).size == 1 && !uses_out.empty? &&
+                 uses_out.all? { |orel, os, _oe| wrapped_use.call(orel, os) }
+                plan = { ret: m.end(0) + mm.begin(0) + mm[1].length, end: e }
+              end
+              next unless plan
+              (@macro_return_plan ||= {})[[rel, s]] = plan if record
+            end
           end
           ok = (@occ[name] || []).all? do |orel, os, _oe|
             inside = orel == rel && s <= os && os < e

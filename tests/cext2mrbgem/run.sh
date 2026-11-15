@@ -435,6 +435,10 @@ check grep -qF 'ss_pick_impl(mrb, 1, &a, self)' "$work/api_scan_split/src/api_sc
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_kw_split tools/cext2mrbgem/fixtures/api_scan_kw_split/ext/api_scan_kw_split "$work/api_scan_kw_split" > "$work/api_scan_kw_split.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'if (nfcx_ac > 1 && mrb_hash_p(argv[nfcx_ac - 1])) { opt = argv[--nfcx_ac]; }' "$work/api_scan_kw_split/src/api_scan_kw_split.c"
+# 2zzz72. A macro whose body is `if (C) return E` and whose uses are all in registered methods restores the global state itself.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_ret_restore tools/cext2mrbgem/fixtures/api_macro_ret_restore/ext/api_macro_ret_restore "$work/api_macro_ret_restore" > "$work/api_macro_ret_restore.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '{ mrb_value nfcx_bc2_ret = ( mrb_false_value()); api_macro_ret_restore_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/api_macro_ret_restore/src/api_macro_ret_restore.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
