@@ -73,3 +73,20 @@ base --trace=x.json hello.cpp2
 base -c -Iinc/ sy.cc
 base -c -Iinc sy.cc --bundle-libs
 base -c hello.cpp2 -x
+# the sanitizer options the loop takes or refuses before the pre-pass (the checks are refused after it)
+base -c -Iinc sy.cc -fsanitize=address
+base -c -Iinc sy.cc -fsanitize=bogus
+base -c -Iinc sy.cc -fsanitize=undefined,bounds -o out/sy.o
+base -c -Iinc sy.cc -fsanitize-foo
+base -c -Iinc sy.cc -fno-sanitize=undefined
+base -c -Iinc sy.cc -fno-sanitize=all
+base -c -Iinc sy.cc -fsafe-pointers
+base -c -Iinc sy.cc -fsanitize=address -o out/sy.o
+# options the pre-pass only passes on, and the SYCL test's -I forms
+base -c -Iother -Iinc sy.cc
+base -c -Iinc sy.cc -MD
+base -c -Iinc sy.cc -MD -MF dep.d -MT t
+base -c -Iinc sy.cc -include pre.h -DX=1 -UY
+base -c -Iinc sy.cc -x c++
+base -c -Iinc sy.cc -Wl,-rpath,/x -lm -pthread -fPIC
+base -c -Iinc -fsanitize=undefined sy.cpp2

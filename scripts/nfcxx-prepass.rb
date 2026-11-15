@@ -167,8 +167,12 @@ def parse_args(argv)
     when glob?(a, "--pathb-c=*"), glob?(a, "-fuse-ld=*"), a == "--obfuscate-kernels" then nil
     when a == "-fsanitize=address", a == "-fsafe-pointers", a == "-fno-safe-pointers", a == "-fno-sanitize=address"
       nil
-    when glob?(a, "-fsanitize=*"), glob?(a, "-fsanitize-*")
+    when glob?(a, "-fsanitize-*")
       raise Stop.new(2, "nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)")
+    # the loop takes any -fsanitize=CHECK; the checks the driver does not run are refused after the pre-pass, in the
+    # sanitizer block (the bash's "implemented: undefined, ..." message), so the pre-pass does not see them
+    when glob?(a, "-fsanitize=*")
+      nil
     when a == "-fno-omit-frame-pointer", a == "-fomit-frame-pointer" then nil
     when glob?(a, "--dialect=*"), glob?(a, "--gnu-version=*"), a == "--freestanding", a == "--cosmo",
          glob?(a, "--target=*"), glob?(a, "--module-dir=*")
