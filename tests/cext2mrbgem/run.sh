@@ -1008,7 +1008,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_drop tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
 check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
-check grep -qF 'return s;' "$work/api_enc_drop/src/api_enc_drop.c"
+check grep -qF 'mrb_intern_cstr(mrb, "force_encoding"), 1, (mrb_value[]){' "$work/api_enc_drop/src/api_enc_drop.c"
 
 # 2zzo. a positional callback table with a NULL entry, and a callback stored by address (x.NAME = &helper;): both are read by the field rule
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_null tools/cext2mrbgem/fixtures/api_fnptr_null/ext/api_fnptr_null "$work/api_fnptr_null" > "$work/api_fnptr_null.log" 2>&1 || rc=$?
@@ -1331,6 +1331,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_table_init tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_table_init/NOT_BUILDABLE"
 check grep -qF 'static mrb_value ti_str(mrb_state *mrb, mrb_value self) {' "$work/api_table_init/src/api_table_init.c"
+# 2zzz103. the encoding API maps to the mruby-encoding gem's Ruby-level methods and constants (rb_enc_get -> String#encoding,
+# rb_enc_associate -> String#force_encoding, rb_utf8_encoding / rb_ascii8bit_encoding -> Encoding::UTF_8 / BINARY).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_encoding tools/cext2mrbgem/fixtures/api_encoding/ext/api_encoding "$work/api_encoding" > "$work/api_encoding.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_encoding/NOT_BUILDABLE"
+check grep -qF 'mrb_funcall_argv(mrb, str, mrb_intern_cstr(mrb, "encoding"), 0, NULL)' "$work/api_encoding/src/api_encoding.c"
+check grep -qF 'mrb_module_get(mrb, "Encoding")' "$work/api_encoding/src/api_encoding.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
