@@ -200,13 +200,13 @@ function whose rewrite would lose a definition are reported as such.
 
 ## Wider use (2026-11-05)
 
-- **AMD `.cu` path** (`NFCXX_CUDA_TARGET=amdgpu`, `cu_amd_build` in the driver): the passes run on the device IR before
+- **AMD `.cu` path** (`NFCXX_CUDA_TARGET=amdgpu`, `amd_build` in `scripts/nfcxx-cuda-device.rb`, the bash `cu_amd_build` before the port): the passes run on the device IR before
   `pathb-amdgpu-emit`, on by default. `NFCXX_IR_OPT=off` turns them off. `tests/cuda/amdgpu/run.sh` passes with them on and off. The
   compile sweep (`tests/cuda/amdgpu/sweep.sh`, 214 files) gives the same 155 ok / 23 refused / 36 fail with and without them, once
   `pathb-amdgpu-emit` accepts the bare-operand values that the passes create (`(let %D T %K)`, fixed in `main.cpp`).
 - **Measured:** the `mul2` benchmark (2^26 ints, no structs) is the same with and without the passes, about 2.3 ms per launch and
   about 232 GB/s, which is the memory limit. The passes help code with struct locals and address chains, such as the SYCL kernels.
-- **PTX path** (`cu_device_build`): the passes are wired in but opt-in (`NFCXX_IR_OPT=inline,sroa`). `pathb-ptx-emit` also accepts
+- **PTX path** (`device_build` in `scripts/nfcxx-cuda-device.rb`, the bash `cu_device_build` before the port): the passes are wired in but opt-in (`NFCXX_IR_OPT=inline,sroa`). `pathb-ptx-emit` also accepts
   the bare-operand values now (`emit_fn.cpp`). The device goldens emit the same kernels with the passes on, but there is no NVIDIA
   GPU and no `ptxas` here, so the PTX output has not run; it stays opt-in until it has.
 - **SYCL device build**: the default passes (`inline,sroa`) apply to every backend (Vulkan, OpenCL, Level Zero, WebGPU), since the
