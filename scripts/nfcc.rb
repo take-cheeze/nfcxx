@@ -3,8 +3,8 @@
 # loop, Path B, the compile and link commands, checked against the bash driver by tests/nfcc/loop-state.sh. This file does what
 # the bash does at its start (the environment, the host's answers, the temporary directory, the backend choice) and then runs the
 # commands the decisions name, including the bundle wrapper (--bundle-*: the driver again, then build/nfcbundle) and the CUDA
-# driver wrapper (--cuda-driver=, a libcuda on the link line: the shim). The bash wrappers scripts/bundle-wrap.sh and
-# scripts/cuda-driver-wrap.sh are the reference for those (their decisions are checked by tests/nfcc/loop-state.sh).
+# driver wrapper (--cuda-driver=, a libcuda on the link line: the shim). The bash wrappers scripts/wrap.rb and
+# scripts/wrap.rb are the reference for those (their decisions are checked by tests/nfcc/loop-state.sh).
 #
 #   ruby scripts/nfcc.rb ARG...
 

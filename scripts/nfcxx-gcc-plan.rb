@@ -19,7 +19,7 @@
 # freestanding, ...) exits 3 with "unported: ..." on stderr and prints nothing. A refusal the bash makes (status 2) prints
 # the lines before it, then its status. Modelled here: -fsyntax-only (the re-run as -c -o TMP/x.o, as nfcxx-loop.rb's
 # syntax_only_plan has it; -E execs g++ -E), --cuda-driver= and a link that names libcuda (the re-run of
-# scripts/cuda-driver-wrap.sh, or its note, or its error), and --cache=DIR when the compile is not one a cache lookup
+# scripts/wrap.rb, or its note, or its error), and --cache=DIR when the compile is not one a cache lookup
 # keys (a link, several sources, -MD, an -o without an extension). A -c of one source with --cache is unported: its key
 # hashes the scripts and binaries.
 #
@@ -828,7 +828,7 @@ class Plan
     arg == "-lcudart_static" || arg.end_with?("/libcudart_static.a")
   end
 
-  # the toolkit a libcuda path implies (scripts/cuda-driver-wrap.sh: the directory above lib64, or above lib/stubs for a
+  # the toolkit a libcuda path implies (scripts/wrap.rb: the directory above lib64, or above lib/stubs for a
   # targets/ path); "" when it implies none
   def derived_home(found)
     if found.match?(%r{/lib64/(stubs/)?libcuda\.so}) then found[0...found.rindex("/lib64/")]
@@ -869,7 +869,7 @@ class Plan
     nil
   end
 
-  # scripts/cuda-driver-wrap.sh, the first step after -fsyntax-only: --cuda-driver=MODE is taken out of the arguments; a
+  # scripts/wrap.rb, the first step after -fsyntax-only: --cuda-driver=MODE is taken out of the arguments; a
   # link that names libcuda is run again with the shim and -lcudart in its place ([:exec, ARGV]), or goes on as named
   # ([:go, ARGV]: no libcuda, mode libcuda, or a note: the shim cannot be made). --cuda-driver=cudart fails then (status 1).
   def cuda_driver_step(args)

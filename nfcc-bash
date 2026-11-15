@@ -69,8 +69,8 @@ expanded=()
 while IFS= read -r -d '' x; do expanded+=("$x"); done < "$rsp"
 rm -f "$rsp"
 set -- "${expanded[@]+"${expanded[@]}"}"
-source "$root/scripts/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
-source "$root/scripts/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcc" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
+source "$root/tests/wrap/bundle-wrap.sh"; bundle_wrap "$root/nfcc" "$@"   # --bundle-libs (docs/notes/bundle.md)
+source "$root/tests/wrap/cuda-driver-wrap.sh"; cuda_driver_wrap "$root/nfcc" "$@"   # --cuda-driver= (docs/notes/cuda-driver.md)
 set -- ${cuda_driver_args[@]+"${cuda_driver_args[@]}"}
 
 # Queries first: they take no input files.

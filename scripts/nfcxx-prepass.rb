@@ -122,7 +122,7 @@ def writable_here?(path)
   File.directory?(File.dirname(path)) && !File.directory?(path)
 end
 
-# The driver's --cuda-driver handling (scripts/cuda-driver-wrap.sh), before the option loop: the option is taken out,
+# The driver's --cuda-driver handling (scripts/wrap.rb), before the option loop: the option is taken out,
 # and its mode is checked. A libcuda link that the wrapper replaces (the shim) is not covered.
 def cuda_driver_prelude(plan, argv)
   mode = plan.env("NFCXX_CUDA_DRIVER") || "auto"

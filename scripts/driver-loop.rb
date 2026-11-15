@@ -8,8 +8,8 @@
 # link. The commands are printed as "RUN argv..." (copies as CP, CAT, LN) and not run; tests/nfcc/option-state.sh runs nfcc's
 # own code with the same commands stubbed, so the output can be compared.
 #
-# Also covered: the bundle wrapper (scripts/bundle-wrap.sh: the --bundle- options, the driver re-run, the nfcbundle link step) and
-# the CUDA driver wrapper (scripts/cuda-driver-wrap.sh: --cuda-driver=, the libcuda rewrite, the shim, the refusals and the
+# Also covered: the bundle wrapper (scripts/wrap.rb: the --bundle- options, the driver re-run, the nfcbundle link step) and
+# the CUDA driver wrapper (scripts/wrap.rb: --cuda-driver=, the libcuda rewrite, the shim, the refusals and the
 # note). Their probes of the file system (the CUDA home's headers and lib64, the shim build, the nfcbundle tool's state, ninja)
 # and the host's answers are inputs here (--nfcc-cuda-*, --nfcc-bundle-tool, --nfcc-ninja-fails, --nfcc-shim).
 #
@@ -993,10 +993,10 @@ end
 
 BUNDLE_LINK_OFF = %w[-c -E -S -M -MM -fsyntax-only --emit-c].freeze
 
-# nfcc's bundle_wrap (scripts/bundle-wrap.sh): with no --bundle- option it changes nothing. Otherwise it runs the driver on the
+# nfcc's bundle_wrap (tests/wrap/bundle-wrap.sh; nfcxx's is the same through scripts/wrap.rb): with no --bundle- option it changes nothing. Otherwise it runs the driver on the
 # arguments without them, and for a link it runs the bundling tool (build/nfcbundle, built with ninja when it is missing or
 # older than its source; the tool's state is an input here, see main). Returns nil when there is nothing to do.
-def bundle_wrap(env, args)
+def bundle_wrap(env, args, name = "nfcc")
   return nil unless (" " + args.join(" ") + " ").include?(" --bundle-")
 
   on = false
@@ -1025,7 +1025,7 @@ def bundle_wrap(env, args)
     elsif a.start_with?("--bundle-rpath=")
       opts << "--rpath" << a[15..]
     elsif a.start_with?("--bundle-")
-      raise BundleExit.new("nfcc: unknown option #{a} (--bundle-libs, --bundle-exclude=, --bundle-only=, --bundle-add=, --bundle-stubs=, --bundle-runpath=, --bundle-rpath=)", 2)
+      raise BundleExit.new("#{name}: unknown option #{a} (--bundle-libs, --bundle-exclude=, --bundle-only=, --bundle-add=, --bundle-stubs=, --bundle-runpath=, --bundle-rpath=)", 2)
     else
       rest << a
       link = false if BUNDLE_LINK_OFF.include?(a)
@@ -1033,7 +1033,7 @@ def bundle_wrap(env, args)
     end
     prev = a
   end
-  raise BundleExit.new("nfcc: the --bundle-* options need --bundle-libs", 2) unless on
+  raise BundleExit.new("#{name}: the --bundle-* options need --bundle-libs", 2) unless on
 
   # the driver again, without the --bundle- options: the real driver runs the Ruby driver (env.driver), the oracle the bash one
   run_cmd([env.driver || (env.root + "/nfcc"), *rest])
@@ -1043,7 +1043,7 @@ def bundle_wrap(env, args)
   if env.bundle_tool != "fresh"
     # ninja builds the tool when it is missing or older than its source (env.ninja_fails: the build failed)
     if lazy_value(env.ninja_fails)
-      raise BundleExit.new("nfcc: cannot build #{tool} (tools/bundle)", 1)
+      raise BundleExit.new("#{name}: cannot build #{tool} (tools/bundle)", 1)
     end
   end
   # bash: exec "$tool" ... (the process is replaced: nothing after it runs)
@@ -1100,7 +1100,7 @@ def cuda_libcuda?(arg)
   %w[-lcuda -l:libcuda.so -l:libcuda.so.1].include?(arg) || arg.end_with?("/libcuda.so") || arg.end_with?("/libcuda.so.1")
 end
 
-# nfcc's cuda_driver_wrap (scripts/cuda-driver-wrap.sh). Returns [:args, list] when the driver goes on with list (its arguments
+# nfcc's cuda_driver_wrap (scripts/wrap.rb). Returns [:args, list] when the driver goes on with list (its arguments
 # without the --cuda-driver= options, which the wrapper drops from cuda_driver_args on every path), or [:exec, list], the
 # arguments the driver is re-run with (the shim in place of libcuda). Raises CudaExit for a refusal.
 def cuda_driver_wrap(env, args, driver_name)

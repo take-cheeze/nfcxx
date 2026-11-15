@@ -1,3 +1,5 @@
+# The bash original of the wrapper that scripts/wrap.rb ports (moved from scripts/ once the Ruby port was verified; kept as the oracle of
+# tests/wrap/run.sh and of the nfcc tests).
 # Sourced by nfcxx and nfcc: how a link that names the CUDA driver library is done (docs/notes/cuda-driver.md).
 # libcuda is named by -lcuda, -l:libcuda.so[.1], or a path ending in libcuda.so[.1] (what CMake passes for
 # CUDA::cuda_driver: $CUDA_HOME/lib64/stubs/libcuda.so or the system's libcuda.so; libtorch's caffe2::cuda and

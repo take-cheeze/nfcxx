@@ -6,7 +6,7 @@
 #
 # -fsyntax-only (the re-run before the setup) prints the command the bash would run instead of the state (syntax_only_plan).
 # --bundle-* (the re-run before the setup) prints the commands it runs (bundle_plan). --cuda-driver= and a link that names
-# libcuda (the wrap of scripts/cuda-driver-wrap.sh, after the bundle re-run) prints the driver's re-run, or a note or an
+# libcuda (the wrap of scripts/wrap.rb, after the bundle re-run) prints the driver's re-run, or a note or an
 # error, or goes on without --cuda-driver= (cuda_driver_step). Not covered in this slice (refused as "unported", exit 3):
 # -fuse-ld= (which asks the shell whether ld.NAME exists; the port takes that as --ld-available=), and the NFCXX_*
 # variables that are not in the apply_environment list.
@@ -369,7 +369,7 @@ def syntax_only_plan(argv)
   ["RUN", ["nfcxx", "-c", *args, "-o", "TMP/x.o"]]
 end
 
-# nfcxx's --bundle-* options (scripts/bundle-wrap.sh, before its setup): the driver runs again on the arguments without them,
+# nfcxx's --bundle-* options (scripts/wrap.rb, before its setup): the driver runs again on the arguments without them,
 # and a link then goes through the bundler. Returns the commands the bash runs as [kind, argv] (RUN, EXEC), or nil when
 # no --bundle- option is given. ROOT stands for the repository. The bundler's build (ninja) is taken to succeed.
 BUNDLE_NO_LINK = %w[-c -E -S -M -MM -fsyntax-only --emit-c].freeze
@@ -421,7 +421,7 @@ def bundle_plan(argv)
 end
 
 # ============================================================================================================================
-# --cuda-driver= (scripts/cuda-driver-wrap.sh, cuda_driver_wrap; docs/notes/cuda-driver.md). The bash is sourced after the
+# --cuda-driver= (scripts/wrap.rb, cuda_driver_wrap; docs/notes/cuda-driver.md). The bash is sourced after the
 # bundle re-run and before the setup, and it sees every argument: a link that names libcuda (-lcuda, -l:libcuda.so[.1], a
 # path ending in libcuda.so[.1]) is run again through the shim and libcudart (EXEC), and otherwise the arguments go on
 # without --cuda-driver=*. The toolkit's files and the machine are the facts the bash reads (CudaFacts, the options above).
