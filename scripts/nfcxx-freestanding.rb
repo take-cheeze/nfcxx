@@ -5,16 +5,22 @@
 # --gen_c_file_name), the rewriter exec of --emit-hip, the preprocessor exec of -E, and the Path B compile (pathb-cc per
 # source, -c or the link's objects) and link (cc with EDG's runtime and libc).
 #
-#   ruby scripts/nfcxx-freestanding.rb --facts=FILE ARG...
+#   ruby scripts/nfcxx-freestanding.rb --facts=FILE -- ARG...      the facts of a file (the tests)
+#   ruby scripts/nfcxx-freestanding.rb --tabs --live=ROOT -- ARG...  the facts of this machine; the plan is one command per
+#                          line, its fields separated by tabs (the form scripts/nfcxx-run.rb reads), and no STATUS line
 #
 # prints the commands the bash runs for ARG..., one per line, then "STATUS n" (the exit status the bash ends with):
 #   ENV NAME=VALUE         a variable the bash exports for the programs that follow (EDG_CPFE_DEFAULT_OPTIONS): printed
 #                          before each RUN line it applies to, as the stub logs it
 #   RUN PROGRAM ARG...     a program the driver runs (ROOT/build/edg/bin/cpfe, ROOT/scripts/pathb-cc.rb, cc); its output is
 #                          not part of the plan
+#   CAT FILE               the bash's cat of a file to standard output (the generated C of --emit-c)
 #   EXEC PROGRAM ARG...    the program replaces nfcxx (--emit-hip: ROOT/build/cuda-rewrite; -E: g++). No STATUS line: the
 #                          exit status is the program's.
-# ROOT stands for the repository, WORK for the working directory, TMP for a temporary directory (mktemp -d).
+# ROOT stands for the repository, WORK for the working directory, TMP for a temporary directory (mktemp -d). The live
+# facts (--live) give WORK as the working directory's real path, as the bash's abs_path does. The live plan covers the
+# --emit-c and --emit-hip lists only (the Path B compile of freestanding programs is planned from the facts file).
+# A refusal in the tabs form prints nothing (the bash makes it, and nfcxx.rb runs the bash).
 #
 # A refusal the bash makes before it runs anything (status 2: no input files, a bad --dialect, --target without
 # --freestanding or --emit-c, an unknown --target, --emit-hip without one .cu, C sources with --emit-c, a module
@@ -45,6 +51,9 @@
 # (the bash passes -isystem to eccp and the gcc -dM probe feeds eccp's -D options only), so the port does not model them
 # for Path B.
 
+require "open3"
+require_relative "host-sys"
+
 class Unported < StandardError
 end
 
@@ -70,9 +79,11 @@ UNSIGNED_CHAR_TARGETS = %w[linux_aarch64 linux_armv7 linux_riscv32 linux_riscv64
 PATHB_FS_MACHINES = { "Linux" => %w[x86_64 aarch64 arm64], "Darwin" => %w[arm64] }.freeze
 
 class Facts
-  def initialize(path)
+  def initialize(path = nil)
     @single = {}
     @lists = Hash.new { |h, k| h[k] = [] }
+    return if path.nil?
+
     File.foreach(path) do |line|
       line = line.chomp
       next if line.empty? || line.start_with?("#")
@@ -98,6 +109,131 @@ class Facts
   def exists?(path)
     list("exists").include?(path)
   end
+
+  def module?(path)
+    list("module").include?(path)
+  end
+
+  def target?(name)
+    list("target-table").include?(name)
+  end
+
+  def sycl_header?(dir)
+    list("sycl-header").include?(dir)
+  end
+
+  # the working directory (WORK) and the absolute path of a name in it, as the bash's abs_path makes it
+  def work
+    "WORK"
+  end
+
+  def abs_path(name)
+    "#{work}/#{name}"
+  end
+
+  def live?
+    false
+  end
+end
+
+# The facts of this machine (--live=ROOT): each fact is probed when the port asks for it, with the commands the bash runs.
+# The bash's own probes (scripts/host-sys.rb) are used for the host compiler. The port refuses (unported) what it cannot
+# read: the NFCXX_* and EDG_* variables the bash reads, a missing front end, a rewriter the bash would build first (it is
+# stale or missing: ensure_tool runs for every argument list), and a Path B fact (pathb-ldrt) that only the link path uses.
+class LiveFacts < Facts
+  def initialize(root, cwd)
+    super()
+    @root = root
+    @cwd = cwd
+    @probes = {}
+    @host_sys = nil
+    ENV.each_key do |name|
+      next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
+                  %w[CUDA_HOME EDG_BASE EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
+
+      raise Unported, "environment #{name} (the live facts do not read it)"
+    end
+    edg_bin = File.join(root, "build/edg/bin/cpfe")
+    raise Unported, "the EDG front end is not built (build/edg/bin/cpfe)" unless File.executable?(edg_bin)
+    raise Unported, "build/cuda-rewrite is not fresh (the bash builds it first)" unless fresh_tool?(File.join(root, "tools/cuda-rewrite"), File.join(root, "build/cuda-rewrite"))
+  end
+
+  def live?
+    true
+  end
+
+  def work
+    @cwd
+  end
+
+  def abs_path(name)
+    HostSys.abs_path(File.join(@cwd, name))
+  end
+
+  def exists?(path)
+    File.directory?(File.join(@cwd, path))
+  end
+
+  # a source that may declare or import a module: refused as one (the bash's module check is not read here)
+  def module?(path)
+    f = File.join(@cwd, path)
+    # a missing source: the bash's module check (grep) fails with a message the port does not reproduce
+    raise Unported, "#{path} is not a file (the bash's module check reports it)" unless File.file?(f)
+
+    File.foreach(f, mode: "rb").any? { |l| l.match?(/\A[[:space:]]*(export[[:space:]]+)?(module|import)\b/n) }
+  end
+
+  def target?(name)
+    File.directory?(File.join(@root, "build/edg-base/lib_#{name}"))
+  end
+
+  def sycl_header?(dir)
+    File.file?(File.join(@cwd, dir, "sycl/detail/kernel_desc.hpp"))
+  end
+
+  def list(key)
+    return @host_sys ||= HostSys.sys_includes("c++") if key == "host-sys"
+
+    super
+  end
+
+  def value(key)
+    @probes.fetch(key) { @probes[key] = probe(key) }
+  end
+
+  def flag?(key)
+    value(key) == "1"
+  end
+
+  private
+
+  def probe(key)
+    case key
+    when "uname" then Open3.capture2("uname", "-s", err: File::NULL).first.chomp
+    when "machine" then Open3.capture2("uname", "-m", err: File::NULL).first.chomp
+    when "cxx-clang" then HostSys.dialect == "clang" ? "1" : "0"
+    when "clang-version" then HostSys.clang_version
+    when "gnu-dump"
+      out, status = Open3.capture2(HostSys.cxx, "-dumpfullversion", err: File::NULL)
+      status.success? ? out.chomp : nil
+    when "eh-tls" then File.file?(File.join(@root, "build/edg/eh-tls")) ? "1" : nil
+    when "qbe" then File.file?(File.join(@root, "build/qbe/qbe")) && File.executable?(File.join(@root, "build/qbe/qbe")) ? "1" : nil
+    else raise Unported, "#{key} is not in the live facts"
+    end
+  rescue SystemCallError
+    raise Unported, "#{key} cannot be probed"
+  end
+
+  # ensure_tool's freshness test: the binary is executable and no source in DIR (a .c, .cpp, .h, .hpp, .inc or .rb file)
+  # is newer than it
+  def fresh_tool?(dir, out)
+    return false unless File.file?(out) && File.executable?(out)
+
+    newer = Dir.children(dir).select { |n| n.match?(/\.(c|cpp|h|hpp|inc|rb)\z/) }.map { |n| File.join(dir, n) }
+    newer.none? { |f| File.file?(f) && File.mtime(f) > File.mtime(out) }
+  rescue SystemCallError
+    false
+  end
 end
 
 # host_gnu_version: major*10000 + minor*100 + patch from g++ -dumpfullversion; 150000 for a clang host without it
@@ -110,9 +246,12 @@ def host_gnu_version(facts)
   (maj.to_i * 10000 + min.to_i * 100 + pat.to_i).to_s
 end
 
-# host_clang_version: the --clang_version value of the host clang (clang 21 is capped at 200000), or nil
+# host_clang_version: the --clang_version value of the host clang (clang 21 is capped at 200000), or nil; the live facts
+# read the version (host-sys.rb's host_clang_version), and a clang without one has none
 def host_clang_version(facts)
-  facts.flag?("cxx-clang") ? "200000" : nil
+  return nil unless facts.flag?("cxx-clang")
+
+  facts.value("clang-version") || (facts.live? ? nil : "200000")
 end
 
 # pb_fs_host: Path B compiles freestanding programs on this host (x86-64 and aarch64 Linux, arm64 macOS)
@@ -130,7 +269,7 @@ def abs_include(value, facts)
     dir = File.dirname(value)
     raise Unported, "-I#{value}: its directory is not a fact" unless facts.exists?(dir)
   end
-  "#{WORK}/#{value}"
+  facts.abs_path(value)
 end
 
 # the argument loop of nfcxx for the options in this port; anything else is unported
@@ -201,11 +340,12 @@ def parse(argv)
   o
 end
 
-# the EDG front end's line (cpfe runs in the EDG base directory; its defaults come from EDG_CPFE_DEFAULT_OPTIONS)
+# A plan row is [KIND, FIELD...]: the words of a command line (the tabs form joins them with tabs, the test form with spaces).
+# The EDG front end's line (cpfe runs in the EDG base directory; its defaults come from EDG_CPFE_DEFAULT_OPTIONS)
 def run_lines(env, prog, args)
   out = []
-  out << env if env
-  out << (["RUN", prog] + args).join(" ")
+  out << ["ENV", env] if env
+  out << ["RUN", prog, *args]
   out
 end
 
@@ -220,10 +360,11 @@ def preprocess_plan(o)
   args += o[:srcs]
   args << "-" if o[:stdin]
   args += ["-o", o[:out]] if o[:outset]
-  [(["EXEC", "g++"] + args).join(" ")]
+  [["EXEC", "g++", *args]]
 end
 
-# --emit-c: the EDG front end alone, its generated C on stdout (hosted or freestanding)
+# --emit-c: the EDG front end alone, its generated C on stdout (hosted or freestanding): the front end writes the C to a
+# temporary file, and the bash prints it
 def emit_plan(o, facts, dialect, sys_inc, env, source)
   raise Unported, "-isystem in a hosted --emit-c (the host's include lists are not ported)" unless o[:sysdirs].empty? || o[:fs]
   raise Unported, "host #{facts.value('uname')}" unless facts.value("uname") == "Linux"
@@ -232,8 +373,8 @@ def emit_plan(o, facts, dialect, sys_inc, env, source)
   o[:user_inc].each { |v| inc = ["-I#{abs_include(v, facts)}"] + inc }
   eh_tls = facts.flag?("eh-tls") ? ["--nfcxx_eh_thread_local"] : []
   args = ["-D_POSIX_SOURCE", "-D__CHAR_BIT__=8", o[:std], "--#{dialect}"] + eh_tls +
-         env[:gnu_opts] + o[:diag] + inc + ["--gen_c_file_name=#{TMP}/out.c", "#{WORK}/#{source}"]
-  run_lines(env[:line], "#{EDG_BIN}/cpfe", args) + ["STATUS 0"]
+         env[:gnu_opts] + o[:diag] + inc + ["--gen_c_file_name=#{TMP}/out.c", facts.abs_path(source)]
+  run_lines(env[:line], "#{EDG_BIN}/cpfe", args) + [["CAT", "#{TMP}/out.c"], ["STATUS", "0"]]
 end
 
 def host_dialect(facts)
@@ -265,24 +406,26 @@ def pathb_plan(o, facts, env, dialect, gnu)
     link = ["-o", o[:out]] + pobjs + ["#{ROOT}/#{ldrt}", EDG_LIBC, "-lpthread", "-lm"]
     lines += run_lines(env, "cc", link)
   end
-  lines + ["STATUS 0"]
+  lines + [["STATUS", "0"]]
 end
 
 def plan(argv, facts)
   o = parse(argv)
+  # the live plan covers the emit modes (the Path B compile and link are checked against the facts file only)
+  raise Unported, "the live plan covers --emit-c and --emit-hip only" if facts.live? && !(o[:emit_c] || o[:emit_hip])
   # the sources the bash counts: the .cu and .cpp inputs (ncpp), then the .c files apart
   sources = o[:cu] + o[:srcs]
   raise Ends, 2 if sources.empty? && o[:cfiles].empty? && !o[:stdin]
 
   if o[:emit_hip]
     raise Ends, 2 unless o[:cu].size == 1
-    return [(["EXEC", "#{ROOT}/build/cuda-rewrite", "--hip"] + o[:cflags] + [o[:cu][0]]).join(" ")]
+    return [["EXEC", "#{ROOT}/build/cuda-rewrite", "--hip", *o[:cflags], o[:cu][0]]]
   end
 
   raise Unported, "cu inputs (the rewriter runs before the rest)" unless o[:cu].empty?
   # the SYCL two-pass build of a -c compile whose -I directory holds the oneAPI kernel header (not a fact here)
   if o[:compile_only] && sources.size == 1 && o[:cfiles].empty? && !o[:preprocess] && !o[:emit_c] &&
-     o[:user_inc].any? { |d| facts.list("sycl-header").include?(d) }
+     o[:user_inc].any? { |d| facts.sycl_header?(d) }
     raise Unported, "the SYCL two-pass build (-I directory with sycl/detail/kernel_desc.hpp)"
   end
   return preprocess_plan(o) if o[:preprocess]
@@ -292,7 +435,7 @@ def plan(argv, facts)
   dialect = o[:dialect] || host_dialect(facts)
   raise Ends, 2 unless %w[g++ clang].include?(dialect)
 
-  if sources.any? { |s| facts.list("module").include?(s) }
+  if sources.any? { |s| facts.module?(s) }
     raise Ends, 2 if o[:emit_c]
     raise Unported, "C++ modules (docs/notes/modules.md)"
   end
@@ -319,13 +462,14 @@ def plan(argv, facts)
     raise Unported, "--target=linux_k1om" if target == "linux_k1om"
     raise Ends, 2 unless o[:fs]
     raise Ends, 2 unless o[:emit_c]
-    raise Ends, 2 unless facts.list("target-table").include?(target)
+    raise Ends, 2 unless facts.target?(target)
     gnu_opts += ["--target", target]
     gnu_opts << "--unsigned_chars" if UNSIGNED_CHAR_TARGETS.include?(target)
   end
 
-  # EDG_CPFE_DEFAULT_OPTIONS is exported for every program that runs after this point
-  env = { gnu_opts: gnu_opts, line: gnu_opts.empty? ? nil : "ENV EDG_CPFE_DEFAULT_OPTIONS=#{gnu_opts.join(' ')} " }
+  # EDG_CPFE_DEFAULT_OPTIONS is exported for every program that runs after this point (the value keeps a trailing space,
+  # as the bash's "${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}" leaves it)
+  env = { gnu_opts: gnu_opts, line: gnu_opts.empty? ? nil : "EDG_CPFE_DEFAULT_OPTIONS=#{gnu_opts.join(' ')} " }
 
   raise Ends, 2 if o[:emit_c] && !o[:cfiles].empty?
   return emit_plan(o, facts, dialect, sys_inc, env, sources[0]) if o[:emit_c]
@@ -345,20 +489,43 @@ def plan(argv, facts)
   pathb_plan(o, facts, env[:line], dialect, gnu)
 end
 
+USAGE = "usage: nfcxx-freestanding.rb [--tabs] (--facts=FILE | --live=ROOT) -- ARG...".freeze
+
 def main(argv)
+  sep = argv.index("--")
+  opts = sep ? argv[0...sep] : argv
+  args = sep ? argv[(sep + 1)..] : []
+  tabs = false
   facts_path = nil
-  rest = []
-  argv.each do |a|
-    if a.start_with?("--facts=") then facts_path = a.delete_prefix("--facts=") else rest << a end
+  live_root = nil
+  opts.each do |a|
+    case a
+    when "--tabs" then tabs = true
+    when /\A--facts=(.*)\z/m then facts_path = Regexp.last_match(1)
+    when /\A--live=(.*)\z/m then live_root = Regexp.last_match(1)
+    else abort USAGE
+    end
   end
-  abort "usage: nfcxx-freestanding.rb --facts=FILE ARG..." unless facts_path
-  facts = Facts.new(facts_path)
+  abort USAGE unless facts_path.nil? != live_root.nil?
+
   begin
-    out = plan(rest, facts)
-    puts out
-    0
-  rescue Ends => e
-    puts "STATUS #{e.status}"
+    facts = facts_path ? Facts.new(facts_path) : LiveFacts.new(live_root, Dir.pwd)
+    rows = begin
+      plan(args, facts)
+    rescue Ends => e
+      [["STATUS", e.status.to_s]]
+    end
+    refused = rows.size == 1 && rows[0][0] == "STATUS" && rows[0][1] != "0"
+    if tabs
+      # the tabs form is a plan for nfcxx.rb: a refusal prints nothing, so the bash makes it
+      if refused
+        warn "refused (the bash makes it, status #{rows[0][1]})"
+        return 3
+      end
+      rows.each { |r| $stdout.write("#{r.join("\t")}\n") unless r[0] == "STATUS" }
+    else
+      rows.each { |r| puts r.join(" ") }
+    end
     0
   rescue Unported => e
     warn "unported: #{e.message}"

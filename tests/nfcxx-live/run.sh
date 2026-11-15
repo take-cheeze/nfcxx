@@ -52,15 +52,28 @@ cases=(
   "pathb-broken:--backend=pathb broken.cc -o prog"
   "default-plain:hello.cc -o prog"
   "default-broken:broken.cc -o prog"
+  "env-ld-gold:NFCXX_LD=gold --backend=gcc hello.cc -o prog"
+  "env-ld-bogus:NFCXX_LD=bogus --backend=gcc hello.cc -o prog"
+  "env-ld-pathb:NFCXX_LD=gold hello.cc -o prog"
+  "env-ld-bogus-c:NFCXX_LD=bogus -c hello.cc"
+  "env-dialect-clang:NFCXX_DIALECT=clang -c hello.cc"
+  "env-dialect-bogus:NFCXX_DIALECT=bogus -c hello.cc"
+  "refuse-dash-c-i:--backend=gcc -c -I"
+  "refuse-stdin:--backend=gcc -x c++ -c -"
+  "refuse-x-c:-x c -c hello.c"
+  "sanitize-undefined-default:-fsanitize=undefined -c hello.cc"
+  "sanitize-undefined-gcc:--backend=gcc hello.cc -fsanitize=undefined -o prog"
 )
 
 
-run_case() {  # run_case NAME ARGS...: builds with the bash and with the driver (scripts/nfcxx.rb), and compares the programs
+run_case() {  # run_case NAME [NFCXX_VAR=VALUE...] ARGS...: builds with the bash and with the driver (scripts/nfcxx.rb), and compares the programs
   local name=$1; shift
+  local envs=()
+  while [ $# -gt 0 ] && [[ $1 == NFCXX_*=* ]]; do envs+=("$1"); shift; done
   local b="$work/$name-bash" p="$work/$name-drv"
   mkdir -p "$b" "$p"; cp "$work"/*.cc "$work"/*.c "$b"/; cp "$work"/*.cc "$work"/*.c "$p"/
-  (cd "$b" && "$root/nfcxx" "$@" >"$b/build.log" 2>&1); local bs=$?
-  (cd "$p" && NFCXX_DRIVER_TRACE=1 ruby "$root/scripts/nfcxx.rb" "$@" >"$p/build.log" 2>"$p/route"); local ps=$?
+  (cd "$b" && env "${envs[@]}" "$root/nfcxx" "$@" >"$b/build.log" 2>&1); local bs=$?
+  (cd "$p" && env "${envs[@]}" NFCXX_DRIVER_TRACE=1 ruby "$root/scripts/nfcxx.rb" "$@" >"$p/build.log" 2>"$p/route"); local ps=$?
   local route; route=$(sed -n 's/^nfcxx: driver: //p' "$p/route")
   if [ "$bs" != "$ps" ]; then fail=$((fail + 1)); echo "FAIL      $name: build status bash=$bs driver=$ps"; return; fi
   if [ "$route" = bash ]; then unp=$((unp + 1)); echo "fallback  $name: the driver took the bash route"; fi
