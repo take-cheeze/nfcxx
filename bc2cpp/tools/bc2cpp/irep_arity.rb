@@ -199,6 +199,7 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   page_field section open new reduce inject each_with_object upto downto
   auto_battle_best_target cached_bitmap flat_map gsub gsub! scan zip each_value
   sub sub! with_index step each_line bsearch bsearch_index filter_map
+  each_source each_with_op each_nested_insn each_body adjacent_pairs each_irep_of_method
 ].freeze
 
 # CORE_BLOCK_REST: `{ |*args| }` (ENTER 0:0:1:0:0:0:0:0), the shape of every Enumerable
