@@ -13,7 +13,7 @@ work=$root/build/libclang-edg/test
 mkdir -p "$work"
 
 [ -x build/libclang-edg/cmake/bin/cpfe ] || scripts/setup-libclang-edg.sh
-scripts/build-libclang-edg.sh >/dev/null
+scripts/build-libclang-edg.rb >/dev/null
 cc=${CC:-cc}
 
 oracle=${LIBCLANG_ORACLE:-}
@@ -75,7 +75,7 @@ for src in tests/libclang-edg/cases/*.cpp; do
   # catastrophic error) give the same walk.
   if [ -f build/libclang-edg/edg_args.h ]; then
     before=$status
-    LIBCLANG_EDG_RUNNER=$root/scripts/libclang-cursors "$work/walk-edg" "$src" -std=c++17 > "$work/$name.proc" &&
+    LIBCLANG_EDG_RUNNER=$root/scripts/libclang-cursors.rb "$work/walk-edg" "$src" -std=c++17 > "$work/$name.proc" &&
       cmp -s "$work/$name.edg" "$work/$name.proc" || { echo "FAIL $name: in-process and runner walks differ"; status=1; }
     WALK_REPEAT=3 "$work/walk-edg" "$src" -std=c++17 > "$work/$name.rep" &&
       cmp -s <(cat "$work/$name.edg" "$work/$name.edg" "$work/$name.edg") "$work/$name.rep" ||

@@ -31,7 +31,7 @@ resolve = lambda do |name|
 
   File.realpath(path)
 end
-# The nfcxx front end's AST (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md) is the default where it is built; clang's is the
+# The nfcxx front end's AST (scripts/nfcxx-ast-dump.rb, docs/notes/nfcxx-ast.md) is the default where it is built; clang's is the
 # fallback, and BC2CPP_AST_PRODUCER=clang opts out. The two manifests' roots agree on everything a consumer reads
 # (scripts/bc2cpp/main_ast_producers_diff.rb). The nfcxx producer needs no clang at all when BC2CPP_HOST_CXX preprocesses.
 producer = NativeAstSource.producer
@@ -87,7 +87,7 @@ Dir.mktmpdir('bc2cpp-main-ast') do |dir|
     end
     json = nil
     if producer == 'nfcxx'
-      # The front end's own dump; -MD/-MF make scripts/nfcxx-ast-dump list the headers it read (the host preprocess above already wrote them).
+      # The front end's own dump; -MD/-MF make scripts/nfcxx-ast-dump.rb list the headers it read (the host preprocess above already wrote them).
       dump_flags = host_cxx ? flags : [*flags, '-MD', '-MF', depfile]
       out, err, status = NativeAstSource.dump(input, dump_flags, lang: :cxx, name: 'nfcxx')
       abort "AST compilation failed: #{source}: #{err.lines.find { |l| l =~ /error/ } || err.lines.first}" unless status.success?
