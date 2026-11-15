@@ -2404,7 +2404,9 @@ use_problem = lambda do |name, use|
         # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
         # used: when every use of the table is in a registered method or Init, the call runs in a method's dynamic extent,
         # where the global state is set (the same state the method's own helpers use)
-        if !direct && (tbl = file_scope_table_at(rel, s)) && table_used_in_methods?(tbl, rel, s)
+        # Init sets the global state too (and every method restores it on return), so once the gem's Init has run the state is
+        # valid wherever the table's entries run: a table used from any function is accepted when there is an Init
+        if !direct && (tbl = file_scope_table_at(rel, s)) && (init_first || table_used_in_methods?(tbl, rel, s))
           nil
         elsif direct && macro && macro_expansions_ok(macro, with_state | members)
           nil

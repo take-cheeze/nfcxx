@@ -1326,6 +1326,11 @@ check grep -qF 'mrb_intern_cstr(mrb, "each_n")' "$work/api_enum_classvar/src/api
 check grep -qF 'mrb_intern_cstr(mrb, "to_enum")' "$work/api_enum_classvar/src/api_enum_classvar.c"
 check grep -qF 'mrb_obj_value(mrb_class(mrb, mrb_obj_value(cK)))' "$work/api_enum_classvar/src/api_enum_classvar.c"
 check grep -qF 'mrb_singleton_class(mrb, mrb_obj_value(cK))' "$work/api_enum_classvar/src/api_enum_classvar.c"
+# 2zzz102. a helper whose address is in a file-scope table is accepted when the gem has an Init (which sets the global state).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_table_init tools/cext2mrbgem/fixtures/api_table_init/ext/api_table_init "$work/api_table_init" > "$work/api_table_init.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_table_init/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ti_str(mrb_state *mrb, mrb_value self) {' "$work/api_table_init/src/api_table_init.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
