@@ -460,9 +460,7 @@ ecp_arg() {  # ecp_arg ARG: ARG as eccp receives it (its paths absolute when ecc
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
-  if [ -n "$eccp_dir" ] && [ $keep_intermediates = 0 ]; then rm -rf "$eccp_dir"; fi
-  if [ -n "${cudatmp:-}" ]; then rm -rf "$cudatmp"; fi
-  if [ -n "${ctmp:-}" ]; then rm -rf "$ctmp"; fi
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
   trace_finish
   return $rc
 }
@@ -1252,10 +1250,7 @@ if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   done
 fi
 link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of this link (see "A link writes" below)
-  local f
-  for f in ${files[@]+"${files[@]}"}; do
-    case $f in *.o) rm -f "${f%.o}.ii" ;; esac
-  done
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 }
 # A link writes <stem>.ii beside each object it uses: the instances the link assigned to that object (the <stem>.ti requests
 # stay). An assignment left by an earlier link can name an instance that a later link assigns to another object ("assigned
