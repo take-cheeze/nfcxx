@@ -122,9 +122,6 @@ abs_path() {
   if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
   else printf '%s\n' "$1"; fi
 }
-# the AMD GPU's architecture and compiler: scripts/amdgpu-env.rb (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override)
-amdgpu_arch() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_arch; }
-amdgpu_clang() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_clang; }
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
