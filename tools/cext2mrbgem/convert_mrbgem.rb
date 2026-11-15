@@ -3020,7 +3020,7 @@ use_problem = lambda do |name, use|
     # the block is fetched by the wrapper when the body yields (rb_yield: the template names nfcx_block)
     yields = false
     if d['brace'] && d['body_end'] && @files[d['file']]
-      yields = @files[d['file']]['masked'][d['brace']..d['body_end']].to_s.match?(/\brb_yield\s*\(/)
+      yields = @files[d['file']]['masked'][d['brace']..d['body_end']].to_s.match?(/\b(?:rb_yield|RETURN_ENUMERATOR)\s*\(/)
     end
     return [nil, nil, "registered method must return VALUE (found #{py_repr(d['ret'])})"] if value_ret_after_storage_macros(d) != 'VALUE'
     if n == -1
@@ -3307,6 +3307,27 @@ end
           repl = name == 'T_NIL' ? '1000 /* nil */' : 'MRB_TT_FALSE /* false only: nil is case 1000 */'
           ed.add(s, e, repl)
           rewrite(rel, s, name, repl, 'a case label of a switch on TYPE(v): nil is the value test in case 1000')
+          next
+        end
+      end
+      # RETURN_ENUMERATOR(obj, argc, argv) in a registered method: when no block is given, the method returns the enumerator
+      # of its own name (to_enum(:name, *args), the Ruby-level Kernel#to_enum of mruby-enumerator)
+      if name == 'RETURN_ENUMERATOR' && !@entries.key?(name) && (op = next_nonspace(masked, e)) >= 0 && masked[op] == '('
+        cpe = match_close(masked, op)
+        eargs = cpe > 0 ? split_args(masked, op, cpe) : []
+        fne = enclosing_func(rel, s)
+        rec_e = fne && @regs.find { |r| r['error'].nil? && r['func'] == fne['name'] && r['name'] }
+        if eargs.size == 3 && rec_e && statement_call(rel, s, cpe)
+          obj_t, argc_t, argv_t = eargs.map { |a| psl(text, a[0], a[1]).strip }
+          tk = mrb_tok(rel, s)
+          repl = "if (mrb_nil_p(nfcx_block)) { mrb_value nfcx_ea[(#{argc_t}) + 1]; " \
+                 "nfcx_ea[0] = mrb_symbol_value(mrb_intern_cstr(#{tk}, \"#{rec_e['name']}\")); " \
+                 "for (int nfcx_i = 0; nfcx_i < (#{argc_t}); nfcx_i++) nfcx_ea[nfcx_i + 1] = (#{argv_t})[nfcx_i]; " \
+                 "return mrb_funcall_argv(#{tk}, #{obj_t}, mrb_intern_cstr(#{tk}, \"to_enum\"), (#{argc_t}) + 1, nfcx_ea); }"
+          after_semi = next_nonspace(masked, cpe + 1)
+          ed.add(s, after_semi + 1, repl)
+          rewrite(rel, s, name, 'if (mrb_nil_p(nfcx_block)) return to_enum(:' + rec_e['name'] + ', ...)',
+                  'no block: the method returns its enumerator (Kernel#to_enum of mruby-enumerator, as RETURN_ENUMERATOR)')
           next
         end
       end
@@ -3695,7 +3716,7 @@ end
       end
 ignored = entry['ignored_args'] || []
 # an argument the template drops (an encoding) may be a call of a pure encoding getter: its value is not used
-unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && !@class_vars.include?(t.delete('&')) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
+unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:rb_utf8_encoding|rb_ascii8bit_encoding|rb_usascii_encoding)\(\)\z/) || t.match?(/\Arb_enc_get\(\s*[A-Za-z_][#{WC}]*\s*\)\z/) || t.match?(/\A[A-Za-z_][#{WC}]*\z/) : (class_args.include?(i) ? (@class_vars.include?(t.delete('&')) || class_expr_ok.call(t.delete('&')) || value_class_arg.call(t.delete('&'), s)) : (t.match?(/\A&?(?:[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*|\d+|(?:struct|union)[ \t]+[A-Za-z_][#{WC}]*)\z/) && t != 'mrb' && (!@class_vars.include?(t.delete('&')) || entry['class_var_value']) || plain_expr?(t, rel) || t.match?(/\Arb_intern\(\s*"[^"\\]*"\s*\)\z/) || (str_args.include?(i) && t.match?(/\A"[^"\\]*"\z/)))) }
         refuse(rel, s, name, 'the arguments are not all plain identifiers or integer literals (only those are substituted)')
         return
       end
@@ -3717,6 +3738,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           @entries[t]['mruby']
         elsif class_args.include?(k) && value_class.call(t)
           "mrb_class_ptr(#{t})"
+        elsif entry['class_var_value'] && @class_vars.include?(t)
+          # a class variable is an RClass * in the converted code: its VALUE (the mruby value of the class) is passed
+          "mrb_obj_value(#{t})"
         elsif str_args.include?(k) && texts[k].strip.match?(/\A"[^"\\]*"\z/)
           # a string literal where the map says it is a string: a mruby String value
           "mrb_str_new_cstr(#{mrb_tok(rel, s)}, #{texts[k].strip})"
@@ -4388,6 +4412,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     after = next_nonspace(masked, close + 1)
     return false if after < 0 || masked[after] != ';'
     return true if prev < 0 || ";{})".include?(masked[prev])
+    # the previous nonblank text is a preprocessor line (#endif, #else, ...): a statement starts after it
+    pl = masked.rindex("\n", prev) || -1
+    return true if masked[(pl + 1)..prev].to_s.match?(/\A[ \t]*#/)
     # after a case label or default: (a statement starts there)
     return true if masked[prev] == ':' && !(psl(masked, [prev - 120, 0].max, prev + 1) =~ /(?:\bcase\b[^;{}]*|\bdefault)#{SS}:\z/).nil?
     !(psl(masked, 0, s) =~ /(?<![#{WC}])(?:else|do)#{SS}\z/).nil?

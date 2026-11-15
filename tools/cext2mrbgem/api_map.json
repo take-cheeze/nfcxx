@@ -1541,6 +1541,7 @@
       "arity": 1,
       "needs_mrb": true,
       "template": "mrb_obj_value(mrb_class($m, $0))",
+      "class_var_value": true,
       "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby's CLASS_OF returns a VALUE"
     },
     "rb_class_of": {
@@ -2506,6 +2507,7 @@
       "arity": 1,
       "needs_mrb": true,
       "template": "mrb_singleton_class($m, $0)",
+      "class_var_value": true,
       "caveat": "the singleton class of the value, as CRuby's rb_singleton_class (returns a VALUE in both)"
     },
     "rb_alias": {

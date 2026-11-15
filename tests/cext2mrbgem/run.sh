@@ -1317,6 +1317,15 @@ check grep -qF 'mrb_funcall_argv(mrb, self, mrb_symbol(sym), 0, NULL)' "$work/ap
 check grep -qF 'mrb_cmpint(mrb, ' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
 # a local int c shadows the class variable VALUE c of Init: its comparisons are not wrapped
 check grep -qF '    if (c < 0) {' "$work/api_stmt_keywords/src/api_stmt_keywords.c"
+# 2zzz101. RETURN_ENUMERATOR in a variadic registered method returns to_enum(:name, *args) when no block is given; a class
+# variable is an argument of CLASS_OF and rb_singleton_class (wrapped with mrb_obj_value).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enum_classvar tools/cext2mrbgem/fixtures/api_enum_classvar/ext/api_enum_classvar "$work/api_enum_classvar" > "$work/api_enum_classvar.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_enum_classvar/NOT_BUILDABLE"
+check grep -qF 'mrb_intern_cstr(mrb, "each_n")' "$work/api_enum_classvar/src/api_enum_classvar.c"
+check grep -qF 'mrb_intern_cstr(mrb, "to_enum")' "$work/api_enum_classvar/src/api_enum_classvar.c"
+check grep -qF 'mrb_obj_value(mrb_class(mrb, mrb_obj_value(cK)))' "$work/api_enum_classvar/src/api_enum_classvar.c"
+check grep -qF 'mrb_singleton_class(mrb, mrb_obj_value(cK))' "$work/api_enum_classvar/src/api_enum_classvar.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
