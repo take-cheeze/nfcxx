@@ -53,7 +53,7 @@ signatures. The historical design below was written against `origin/main` at
 | C. On the IR text | the printed IR (`ir-module` ... `function` forms) | The IR text is the interface Lean and the QBE emitter already read. The emitter has a tokenizer and parser (`scripts/pathb-qbe-emit.rb`, `tokenize`, `parse_forms`). The checker can be goldened and run without rebuilding EDG | Anything the checker needs must be printed. The text is the only input |
 
 **Decision: C for tiers A and B, with the facts printed by the lowering (B's printer side, tier 0).** The checker is a
-mruby script, `scripts/pathb-borrowck.rb`, run like the emitter through `scripts/mrb`. Tier C may move the summary
+mruby script, `scripts/pathb-borrowck.rb`, run like the emitter through `scripts/mrb.rb`. Tier C may move the summary
 computation into the lowering if summaries need EDG's routine types in more detail than the text carries. Option A is
 kept as a fallback only if a rule cannot be expressed on lowered code.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/pathb-borrowck-tally.sh against scripts/pathb-borrowck-tally.rb. The fixture is a tree with the programs
-# the default file list finds. scripts/pathb-dump.rb and scripts/mrb are stubs in the tree: a program's first line
+# the default file list finds. scripts/pathb-dump.rb and scripts/mrb.rb are stubs in the tree: a program's first line
 # "// VERDICT: WORD [TEXT]" picks what the checker stub does with it (accept, error, malformed, refuse TEXT,
 # refuse-infer: refused unless --infer-loan-ends, crash: exit 7), and "nolower" in a file name makes lowering fail.
 NAME=pathb-borrowck-tally
@@ -29,7 +29,7 @@ case $2 in *nolower*) exit 1 ;; esac
 echo "// lowered with NFCXX_PATHB_BORROW=$NFCXX_PATHB_BORROW"
 cat "$2"
 EOS
-  cat > "$1/scripts/mrb" <<'EOS'
+  cat > "$1/scripts/mrb.rb" <<'EOS'
 #!/usr/bin/env bash
 # stub: mrb SCRIPT ARGS... IR: the checker's verdict for the IR's VERDICT line; stderr gets an inferred: line too
 ir=${@: -1}
@@ -49,7 +49,7 @@ case $verdict in
   *) echo "no verdict" >&2; exit 5 ;;
 esac
 EOS
-  chmod +x "$1/scripts/pathb-dump.rb" "$1/scripts/mrb"
+  chmod +x "$1/scripts/pathb-dump.rb" "$1/scripts/mrb.rb"
 }
 
 rb_case "default file list" ""

@@ -31,8 +31,8 @@ link_cmp() {
   local label=$1; shift
   local d=$tmp/link/$label
   mkdir -p "$d/py" "$d/rb"
-  "$root/scripts/mrb" "$oracle" --ilasm "$ilasm" --keep-il -o "$d/py/prog" "$@" 2>"$d/py.err"; local rcp=$?
-  "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" --keep-il -o "$d/rb/prog" "$@" 2>"$d/rb.err"; local rcr=$?
+  "$root/scripts/mrb.rb" "$oracle" --ilasm "$ilasm" --keep-il -o "$d/py/prog" "$@" 2>"$d/py.err"; local rcp=$?
+  "$root/scripts/mrb.rb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" --keep-il -o "$d/rb/prog" "$@" 2>"$d/rb.err"; local rcr=$?
   if [ $rcp -ne $rcr ]; then
     echo "FAIL cil-link $label: exit status py=$rcp rb=$rcr"; head -3 "$d/py.err" "$d/rb.err"; fail=1; return
   fi
@@ -63,8 +63,8 @@ link_cmp() {
 usage_cmp() {
   local label=$1 msg=$2; shift 2
   local d=$tmp/usage/$label; mkdir -p "$d"
-  "$root/scripts/mrb" "$oracle" --ilasm "$ilasm" "$@" 2>"$d/py.err" >/dev/null; local rcp=$?
-  "$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" "$@" 2>"$d/rb.err" >/dev/null; local rcr=$?
+  "$root/scripts/mrb.rb" "$oracle" --ilasm "$ilasm" "$@" 2>"$d/py.err" >/dev/null; local rcp=$?
+  "$root/scripts/mrb.rb" "$root/scripts/cil-link.rb" --ilasm "$ilasm" "$@" 2>"$d/rb.err" >/dev/null; local rcr=$?
   if [ $rcp -ne 1 ] || [ $rcr -ne 1 ]; then echo "FAIL cil-link usage $label: status py=$rcp rb=$rcr, want 1"; fail=1; return; fi
   if [ "$msg" != - ] && { [ "$(cat "$d/py.err")" != "$msg" ] || [ "$(cat "$d/rb.err")" != "$msg" ]; }; then
     echo "FAIL cil-link usage $label: stderr differs from '$msg'"; head -2 "$d/py.err" "$d/rb.err"; fail=1; return
@@ -96,7 +96,7 @@ if [ -x "$root/build/pathb/cmake/bin/cpfe" ]; then
     n=$(basename "$f" .cpp)
     grep -q '^// EXPECT-REFUSED' "$f" && continue  # the emitter refuses these: no fragment
     if ! "$root/scripts/pathb-dump.rb" --ir "$f" >"$tmp/frag/pb-$n.ir" 2>/dev/null ||
-       ! "$root/scripts/mrb" "$root/scripts/pathb-cil-emit.rb" "$tmp/frag/pb-$n.ir" "$tmp/frag/pb-$n.json" 2>/dev/null; then
+       ! "$root/scripts/mrb.rb" "$root/scripts/pathb-cil-emit.rb" "$tmp/frag/pb-$n.ir" "$tmp/frag/pb-$n.json" 2>/dev/null; then
       echo "FAIL cil-link: no fragment for pathb-cil/$n"; fail=1; continue
     fi
     pb_n=$((pb_n + 1))
@@ -133,8 +133,8 @@ usage_cmp missing-fragment - -o "$tmp/usage/x" "$tmp/usage/no-such-file.json"
 usage_cmp o-without-name - "$here/bigint.json" -o
 # An ilasm that is not there: both refuse with status 1 (the messages name the setting differently).
 d=$tmp/usage/no-ilasm; mkdir -p "$d"
-"$root/scripts/mrb" "$oracle" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/py" "$here/bigint.json" 2>"$d/py.err"; rcp=$?
-"$root/scripts/mrb" "$root/scripts/cil-link.rb" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/rb" "$here/bigint.json" 2>"$d/rb.err"; rcr=$?
+"$root/scripts/mrb.rb" "$oracle" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/py" "$here/bigint.json" 2>"$d/py.err"; rcp=$?
+"$root/scripts/mrb.rb" "$root/scripts/cil-link.rb" --ilasm "$tmp/usage/no-such-ilasm" -o "$d/rb" "$here/bigint.json" 2>"$d/rb.err"; rcr=$?
 if [ $rcp -eq 1 ] && [ $rcr -eq 1 ] && grep -q '^cil-link: ilasm not found at ' "$d/py.err" && grep -q '^cil-link: ilasm not found at ' "$d/rb.err"; then
   echo "ok   cil-link usage no-ilasm"
 else echo "FAIL cil-link usage no-ilasm: status py=$rcp rb=$rcr"; fail=1; fi

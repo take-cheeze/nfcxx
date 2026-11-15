@@ -3,7 +3,7 @@
 # (docs/notes/pathb-stage2.md, section 6). scripts/pathb-qbe-emit.rb then turns that into QBE IL.
 # The subset, the mapping and the decisions are in docs/notes/pathb-llvm.md.
 #
-# Usage: scripts/mrb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir
+# Usage: scripts/mrb.rb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir
 #
 # --wasm: the IR is for a WebAssembly module (scripts/pathb-wasm-emit.rb), which runs on one thread and has no
 # operating system. The atomic operations (load atomic, store atomic, cmpxchg, atomicrmw, fence) are plain loads and
@@ -21,7 +21,7 @@
 # checked (cshl, cshr), because a shift count out of range is poison. `undef` reads as zero. `inbounds` is not
 # checked: the IR has no length for a pointer.
 #
-# Written in the subset of Ruby that the mruby interpreter (scripts/mrb) runs: string scanning by index, no keyword
+# Written in the subset of Ruby that the mruby interpreter (scripts/mrb.rb) runs: string scanning by index, no keyword
 # arguments, no regular expressions.
 
 # A refusal or a malformed input ends the translation with an exception; main reports it and returns the status.
@@ -1786,7 +1786,7 @@ def main(argv)
   args = argv.dup
   wasm = args.delete("--wasm") ? true : false
   if args.size != 1
-    $stderr.puts "usage: scripts/mrb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir"
+    $stderr.puts "usage: scripts/mrb.rb scripts/llvm-to-pathb.rb [--wasm] FILE.ll > FILE.ir"
     return 1
   end
   Translator.new(args[0], wasm).run

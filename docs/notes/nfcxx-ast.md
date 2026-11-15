@@ -1,7 +1,7 @@
 # nfcxx AST dump: the front end's replacement for `clang -ast-dump=json` in bc2cpp
 
 bc2cpp reads a translation unit's AST to compute facts about native (C/C++) functions. It used clang's JSON AST dump.
-`scripts/nfcxx-ast-dump` produces the same facts' input from the nfcxx front end (EDG): one JSON document per file with
+`scripts/nfcxx-ast-dump.rb` produces the same facts' input from the nfcxx front end (EDG): one JSON document per file with
 the function definitions, complete record definitions and file-scope variables, and every function body's statements and
 expressions. It is the default producer wherever the front end is built (`scripts/setup-libclang-edg.sh`), clang the fallback;
 `BC2CPP_AST_PRODUCER=clang` opts out (`tools/bc2cpp/native_ast_source.rb`).
@@ -33,7 +33,7 @@ not have are removed: the function-scope block around the body, compiler-generat
 constructor calls (a `return` of a class value is its source expression). It ships with the libclang-edg build
 (`scripts/setup-libclang-edg.sh`; `LIBCLANG_EDG_IN_PROCESS=0` is enough).
 
-`scripts/nfcxx-ast-dump [clang options] FILE...` runs that `cpfe` in EDG's gcc / g++ dialect with the host's library headers
+`scripts/nfcxx-ast-dump.rb [clang options] FILE...` runs that `cpfe` in EDG's gcc / g++ dialect with the host's library headers
 and clang's option spelling (`-x`, `-std=gnuNN`, `-I`, `-isystem`, `-D`, `-U`, `-include`). `tools/bc2cpp/native_ast_source.rb`
 (`NativeAstSource.dump`) is the one place bc2cpp asks for an AST; `base_rbs_native.rb` uses it.
 
@@ -55,7 +55,7 @@ functions, 492 with a proven kind, 569 candidate rows, 0 differences. The other 
 
 The dump also carries what `scripts/bc2cpp/main_ast.rb` / `tools/bc2cpp/main_roots.rb` read from the user's host program
 (`BC2CPP_AST_PRODUCER=nfcxx scripts/bc2cpp/main_ast.rb ...` runs the front end in place of `clang++ -ast-dump=json`; the host
-preprocess by `BC2CPP_HOST_CXX` and the manifest format are unchanged, and `scripts/nfcxx-ast-dump -MD -MF f` writes the
+preprocess by `BC2CPP_HOST_CXX` and the manifest format are unchanged, and `scripts/nfcxx-ast-dump.rb -MD -MF f` writes the
 header list the manifest's dependencies need):
 
 | Construct | Emitted as |

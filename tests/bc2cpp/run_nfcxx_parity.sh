@@ -7,7 +7,7 @@
 #      and must be byte-identical; it is the overlay the AST producers parse with.
 #   1c. main_ast.rb (the host program's roots, BC2CPP_AST_PRODUCER clang vs nfcxx) over a host main with libstdc++ and every
 #      parseable C++ unit of the world (main_ast_producers_diff.rb): refusals, names and `*_impl` functions agree.
-#   2. Preprocessor: BaseRbsNative.preprocess + scan with BC2CPP_PREPROCESSOR=clang against =nfcxx (scripts/nfcxx-cpp),
+#   2. Preprocessor: BaseRbsNative.preprocess + scan with BC2CPP_PREPROCESSOR=clang against =nfcxx (scripts/nfcxx-cpp.rb),
 #      over a fixed list of mruby sources; the registrations found must be identical.
 #   3. cxx_fiber_check.rb with CXX=nfcxx (NFCXX_PARITY_FIBER=1; builds a full-core libmruby, minutes).
 # Needs clang, the EDG front end (scripts/setup-edg.sh), the AST front end (scripts/setup-libclang-edg.sh) and, for step 3,

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the small standalone `mruby` interpreter that runs nfcxx's own scripts (see scripts/mrb and
+# Build the small standalone `mruby` interpreter that runs nfcxx's own scripts (see scripts/mrb.rb and
 # docs/notes/mruby-scripting.md) into build/mruby-tool/bin/mruby. Does nothing if it is already built.
 # No rake: scripts/mruby-ninja.rb reads mruby's build config and gems and writes a ninja build file, and ninja builds it.
 #   MRUBY_CC=<cc>   Build a second interpreter, bin/mruby-nfcc, with this C compiler and linker instead of
 #                   the host cc (MRUBY_CC=$PWD/nfcc dogfoods the compiler, as tests/realworld/run_mruby.sh
 #                   does; NFCXX_BACKEND picks its back end). The host-cc bin/mruby is always built first:
 #                   scripts/qbe-cc runs mruby, so an nfcc build needs one to exist.
-#                   Run scripts with it via MRB=build/mruby-tool/bin/mruby-nfcc scripts/mrb ...
+#                   Run scripts with it via MRB=build/mruby-tool/bin/mruby-nfcc scripts/mrb.rb ...
 #   FORCE=1         rebuild even if bin/mruby exists
 # Needs ruby (CRuby, stdlib only), ninja, git, flock, and the host tools of the vendored gems: a C compiler, make,
 # ar, gzip and tar (docs/notes/mruby-scripting.md). The 3rd/ gems are submodules: `git submodule update --init`.

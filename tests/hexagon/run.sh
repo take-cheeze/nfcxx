@@ -55,7 +55,7 @@ for f in "$root"/tests/cases/*.cpp; do
     echo "FAIL (clang) $n"; head -3 "$tmp/$n.cc"; fail=1; continue
   fi
   if [ $run = 0 ]; then echo "ok   compile $n"; pass=$((pass+1)); continue; fi
-  if ! "$root/scripts/mrb" "$here/flatlink.rb" "$tmp/$n.o" "$tmp/$n.elf" _start 2>"$tmp/$n.link"; then
+  if ! "$root/scripts/mrb.rb" "$here/flatlink.rb" "$tmp/$n.o" "$tmp/$n.elf" _start 2>"$tmp/$n.link"; then
     case $(cat "$tmp/$n.link") in
       *SKIP-*) echo "skip $n: $(sed 's/^flatlink: //' "$tmp/$n.link")"; skip=$((skip+1)) ;;
       *) echo "FAIL (link) $n"; cat "$tmp/$n.link"; fail=1 ;;
@@ -71,7 +71,7 @@ done
 if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w \
       -c "$here/hvx_vaddh.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then
   if [ $run = 0 ]; then echo "ok   compile hvx_vaddh"; pass=$((pass+1));
-  elif ! "$root/scripts/mrb" "$here/flatlink.rb" "$tmp/hvx.o" "$tmp/hvx.elf" _start 2>"$tmp/hvx.link"; then
+  elif ! "$root/scripts/mrb.rb" "$here/flatlink.rb" "$tmp/hvx.o" "$tmp/hvx.elf" _start 2>"$tmp/hvx.link"; then
     echo "FAIL (link) hvx_vaddh"; cat "$tmp/hvx.link"; fail=1
   else
     chmod +x "$tmp/hvx.elf"

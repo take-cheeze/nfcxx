@@ -15,7 +15,7 @@
 # Anything it cannot load exits with a "SKIP-data" or "SKIP-undef" message (undefined symbols,
 # GP-relative access, TLS, constructors) so the test runner reports the case as skipped, not failed.
 #
-# usage: scripts/mrb tests/hexagon/flatlink.rb <in.o> <out.elf> <entry_symbol>
+# usage: scripts/mrb.rb tests/hexagon/flatlink.rb <in.o> <out.elf> <entry_symbol>
 #
 # Port of flatlink.py (its oracle port is tests/mruby/oracle/flatlink.rb) for mruby (no Regexp, struct -> pack/unpack). Integer literals above 2**31-1 are
 # avoided (mruby without mruby-bigint parses them as bigints): 32-bit masks are spelled as shifts.

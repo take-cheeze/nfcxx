@@ -1,5 +1,5 @@
 # Extract complete example blocks from the pinned cppreference HTML book.
-# Usage: scripts/mrb tests/upstream/cppreference-extract.rb HTML_ROOT OUT PAGE...
+# Usage: scripts/mrb.rb tests/upstream/cppreference-extract.rb HTML_ROOT OUT PAGE...
 # PAGE is relative to HTML_ROOT; outputs are data under ignored build/.
 def die(message)
   $stderr.puts message

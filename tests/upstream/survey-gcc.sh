@@ -18,7 +18,7 @@ for route in host $routes; do
   env NFCXX_PATH=a NFCXX_BACKEND=gcc timeout -k 2 "$limit" "$compiler" "${flags[@]}" \
     -std=c++11 "$out/.lock/smoke.cpp" -o "$out/.lock/smoke.o" > "$out/preflight-$route.log" 2>&1
 done
-scripts/mrb tests/upstream/gcc-positive-manifest.rb "$snapshot" > "$out/manifest.tsv"
+scripts/mrb.rb tests/upstream/gcc-positive-manifest.rb "$snapshot" > "$out/manifest.tsv"
 n=0
 while IFS= read -r row; do
   ((n+=1)); [ "$n" = 1 ] && continue
@@ -32,7 +32,7 @@ while IFS=$'\t' read -r suite id rest; do
   [ "$suite" = suite ] && continue
   cat "$out/$id/result.tsv" >> "$out/results.tsv.tmp"
 done < "$out/manifest.tsv"
-scripts/mrb tests/upstream/normalize-survey.rb "$out" "$out/results.tsv.tmp" > "$out/results.tsv"
+scripts/mrb.rb tests/upstream/normalize-survey.rb "$out" "$out/results.tsv.tmp" > "$out/results.tsv"
 git rev-parse HEAD > "$out/nfcxx.commit"
 cp tests/upstream/git-snapshots.tsv "$out/"
 echo "GCC positive compile observations: $out/results.tsv"

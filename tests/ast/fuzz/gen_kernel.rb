@@ -1,7 +1,7 @@
-# gen_kernel.rb: port of tests/ast/fuzz/gen_kernel.py for mruby (run by tests/ast/fuzz_tier.sh through scripts/mrb).
+# gen_kernel.rb: port of tests/ast/fuzz/gen_kernel.py for mruby (run by tests/ast/fuzz_tier.sh through scripts/mrb.rb).
 # Random numeric kernels for differential testing of the tier (tests/ast/fuzz_tier.sh).
 #
-# usage: scripts/mrb tests/ast/fuzz/gen_kernel.rb SEED [FUNCTIONS [SEGMENTS]]
+# usage: scripts/mrb.rb tests/ast/fuzz/gen_kernel.rb SEED [FUNCTIONS [SEGMENTS]]
 #
 # Prints a Lua program: FUNCTIONS (default 10) well-typed functions over integers, floats, booleans and "numbers" (variables,
 # parameters and results that are an integer in one place and a float in another; type n below) (arithmetic, bitwise

@@ -94,7 +94,7 @@ stamp = File.join(outdir, "obj", ".inputs")
 inputs = [
   "lib/sycl", "lib/sycl-ggml", "scripts/sycl-build.rb", "scripts/pathb-spirv-emit.rb",
   "build/pathb/cmake/bin/cpfe", "build/edg/bin/cpfe", "build/qbe/qbe",
-  "scripts/weak-symbols", "tools/weak-symbols/weak_symbols.cpp", "nfcxx"
+  "scripts/weak-symbols.rb", "tools/weak-symbols/weak_symbols.cpp", "nfcxx"
 ].flat_map { |p| files_under(File.join(root, p)) }
 newest_entry = inputs.map { |f| [File.mtime(f).to_f, f] }.max
 newest = newest_entry ? newest_entry[1] : ""

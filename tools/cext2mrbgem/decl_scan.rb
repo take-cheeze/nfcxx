@@ -15,7 +15,7 @@
 # the struct on the stack, and a struct result is written through a hidden first pointer. CXString (returned in two
 # registers, and only the first one is readable here) is not used. The library's C mode is not reachable through
 # clang_parseTranslationUnit, so C sources go to the runner tools/cext2mrbgem/libclang-cursors-c (LIBCLANG_EDG_RUNNER),
-# which runs scripts/libclang-cursors --c.
+# which runs scripts/libclang-cursors.rb --c.
 #
 # Nothing is compiled or run from the input: the front end parses the text, and the converter reads only the records.
 
@@ -173,7 +173,7 @@ module DeclScan
       hstart += 1 while hstart < name_pos && pp[hstart].match?(/\s/)
       head = pp[hstart...name_pos]
       storage = STORAGE_RE.match(head)[1]
-      ret = head[storage.length..].sub(/[#{WSP}\*]+\z/, '')
+      ret = head[storage.length..].sub(/[#{WSP}]+\z/, '')  # the pointer star of a return type (Real *) stays
       if ret.empty? || NON_FUNC_WORDS.include?(ret.split.last)
         skipped << [line, 'no return type before the name, or not a function']
         next

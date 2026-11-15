@@ -17,7 +17,7 @@ PATH=/usr/bin:/bin:$PATH tests/upstream/survey.sh cppreference language
 PATH=/usr/bin:/bin:$PATH tests/upstream/survey.sh cpprefjp language
 SURVEY_ROUTES='' PATH=/usr/bin:/bin:$PATH tests/upstream/survey.sh cppreference all
 SURVEY_ROUTES='' PATH=/usr/bin:/bin:$PATH tests/upstream/survey.sh cpprefjp all
-scripts/mrb tests/upstream/reference-report.rb build/testsuite-snapshots \
+scripts/mrb.rb tests/upstream/reference-report.rb build/testsuite-snapshots \
   > docs/notes/reference-suite-survey.md
 ```
 
@@ -25,7 +25,7 @@ Setup downloads sources explicitly; the run/survey scripts work offline once
 setup has completed. Snapshots, extracted sources, logs and results stay in
 ignored `build/testsuite-snapshots/`. Prerequisites are Git, curl, GNU sha256sum,
 tar/xz, rg, a host g++, GNU timeout, Python 3 (for native LLVM/EDG tooling),
-CMake/Ninja, installed Clang 21, and Docker. `scripts/mrb` bootstraps mruby.
+CMake/Ninja, installed Clang 21, and Docker. `scripts/mrb.rb` bootstraps mruby.
 The smoke setup also builds missing nfcxx route tools using the existing setup
 scripts. On another host select a consistent host toolchain instead of copying
 this machine's PATH workaround blindly.

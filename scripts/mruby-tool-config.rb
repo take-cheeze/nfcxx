@@ -1,5 +1,5 @@
 # Build configuration for scripts/setup-mruby.sh: a small standalone `mruby` interpreter for nfcxx's own
-# scripts (scripts/mrb). Core plus the I/O, pack, sprintf and *-ext gems the scripts use, and the regexp (Onigmo)
+# scripts (scripts/mrb.rb). Core plus the I/O, pack, sprintf and *-ext gems the scripts use, and the regexp (Onigmo)
 # and JSON gems of 3rd/ (scripts may use them; the older scripts scan by hand and still run without them).
 # The C compiler / linker come from MRUBY_CC / MRUBY_LD (host cc by default; nfcc to dogfood the compiler).
 MRuby::Build.new do |conf|

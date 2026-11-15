@@ -1,9 +1,9 @@
 # Path B IR passes (IR to IR)
 
 `scripts/pathb-ir-opt.rb` runs passes on the mid-level IR text of `scripts/pathb-dump --ir`, so every back end that reads that
-text can use them. It runs on the mruby subset that the emitters use (`scripts/mrb`).
+text can use them. It runs on the mruby subset that the emitters use (`scripts/mrb.rb`).
 
-    scripts/mrb scripts/pathb-ir-opt.rb --inline [--max-depth=N] [--report] FILE.ir > out.ir
+    scripts/mrb.rb scripts/pathb-ir-opt.rb --inline [--max-depth=N] [--report] FILE.ir > out.ir
     ruby scripts/pathb-ir-opt.rb [--prune-unreachable=SUBSTR] [--strip-eh] [--inline] [--sroa] [--jobs=N] [--forward] FILE.ir
 
 ## Inlining (`--inline`)

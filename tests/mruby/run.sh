@@ -3,7 +3,7 @@
 # give byte-identical output to the Python original on real inputs. The oracles in tests/mruby/oracle/ are the mruby
 # ports of those originals (the Python files were verified against them and deleted; see the headers there). Each
 # production script is compared with its oracle.
-#   1. scripts/weak-symbols (tools/weak-symbols, the C++ port; oracle tests/mruby/oracle/weak-symbols.rb): the assembly QBE
+#   1. scripts/weak-symbols.rb (tools/weak-symbols, the C++ port; oracle tests/mruby/oracle/weak-symbols.rb): the assembly QBE
 #      produces for generated C of several tests/cases, and hand-made edge cases.
 #   2. tests/hexagon/flatlink.rb (oracle tests/mruby/oracle/flatlink.rb): Hexagon objects (clang, if it has the hexagon target) built from
 #      the generated C of several tests/cases and the HVX kernel; output image, stderr and exit status.
@@ -29,7 +29,7 @@ if [ ! -x "${MRB:-$root/build/mruby-tool/bin/mruby}" ]; then
   command -v ruby >/dev/null || { echo "SKIP mruby: ruby (needed to build mruby) not installed"; exit 0; }
   "$root/scripts/setup-mruby.sh" || { echo "FAIL mruby: setup-mruby.sh failed"; exit 1; }
 fi
-mrb=$root/scripts/mrb
+mrb=$root/scripts/mrb.rb
 
 # Sanity: the interpreter works and has the gems the scripts use.
 got=$("$mrb" -e 'puts [1, 258].pack("vV").unpack("vV").inspect + format("%04x", 255) + Set.new([1]).size.to_s' 2>&1)
@@ -67,7 +67,7 @@ EOF
   printf 'cmp_id:\nlits:\nretfn:\nretfn_weak:\next_inline:\nstatic_inline:\nalpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n\tmovq _ZTH6ref_tl@GOTPCREL(%%rip), %%rax\n\tcall inline_ref\n' >"$tmp/edge.s"
   cp "$tmp/edge.s" "$tmp/edge.orc.s"; cp "$tmp/edge.s" "$tmp/edge.rb.s"
   "$mrb" "$oracle/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.orc.s"
-  "$root/scripts/weak-symbols" "$tmp/edge.c" "$tmp/edge.rb.s"
+  "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.rb.s"
   # _ZTH6ref_tl is only referenced: a weak undefined reference. inline_ref (extern __inline__, only referenced) stays strong.
   if cmp -s "$tmp/edge.orc.s" "$tmp/edge.rb.s" && [ "$(grep -c '^\.weak ' "$tmp/edge.orc.s")" -ge 3 ] &&
      grep -q '^\.weak _ZTH6ref_tl$' "$tmp/edge.rb.s" && ! grep -q '^\.weak inline_ref$' "$tmp/edge.rb.s"; then
@@ -76,18 +76,18 @@ EOF
   # clang's assembly for an Apple target (the gcc back end on macOS, no --sym-prefix): no ".weak" for the reference, which
   # the Apple assembler rejects.
   { cat "$tmp/edge.s"; printf '.subsections_via_symbols\n'; } > "$tmp/edge.macho.s"
-  "$root/scripts/weak-symbols" "$tmp/edge.c" "$tmp/edge.macho.s"
+  "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.macho.s"
   if ! grep -q '^\.weak _ZTH6ref_tl$' "$tmp/edge.macho.s"; then report ok "weak-symbols: no weak reference in Mach-O assembly"
   else report fail "weak-symbols: a weak reference in Mach-O assembly"; fi
   # Mach-O labels carry the target's "_" prefix (--sym-prefix=_, passed by qbe-cc on Darwin): .weak_definition lines name them.
   printf '_alpha:\n\tret\n_beta:\n\tret\n_delta:\n\tret\n' > "$tmp/macho.orc.s"; cp "$tmp/macho.orc.s" "$tmp/macho.rb.s"
   "$mrb" "$oracle/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.orc.s"
-  "$root/scripts/weak-symbols" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.rb.s"
+  "$root/scripts/weak-symbols.rb" --sym-prefix=_ "$tmp/edge.c" "$tmp/macho.rb.s"
   if cmp -s "$tmp/macho.orc.s" "$tmp/macho.rb.s" && grep -q '^\.weak_definition _alpha$' "$tmp/macho.rb.s" && ! grep -q '^\.weak ' "$tmp/macho.rb.s"; then
     report ok "weak-symbols --sym-prefix=_ (Mach-O labels, .weak_definition) matches the oracle"
   else report fail "weak-symbols --sym-prefix=_ differs or misses _alpha"; diff "$tmp/macho.orc.s" "$tmp/macho.rb.s" | head -5; fi
   # No-op case: the assembly is left untouched when nothing is weak.
-  cp "$tmp/edge.s" "$tmp/none.s"; "$root/scripts/weak-symbols" /dev/null "$tmp/none.s"
+  cp "$tmp/edge.s" "$tmp/none.s"; "$root/scripts/weak-symbols.rb" /dev/null "$tmp/none.s"
   if cmp -s "$tmp/edge.s" "$tmp/none.s"; then report ok "weak-symbols no-op leaves the assembly untouched"
   else report fail "weak-symbols no-op changed the assembly"; fi
 else

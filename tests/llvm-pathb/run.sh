@@ -16,7 +16,7 @@ qbe=${QBE:-build/qbe/qbe}
 [ -x "$qbe" ] || { echo "llvm-pathb: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 clang=${CLANG:-clang-18}
 command -v "$clang" >/dev/null || { echo "llvm-pathb: no $clang" >&2; exit 2; }
-mrb=$root/scripts/mrb
+mrb=$root/scripts/mrb.rb
 xlate=scripts/llvm-to-pathb.rb
 emit=scripts/pathb-qbe-emit.rb
 

@@ -337,7 +337,7 @@ jobs:
             root="$PWD/build/testsuite-snapshots"
             rg --files --no-ignore "$root/gcc/gcc/testsuite/g++.dg" "$root/gcc/gcc/testsuite/g++.old-deja" \
               "$root/gcc/gcc/testsuite/g++.target" -g '*.C' -g '*.cpp' | sort | sed "s|^$root/gcc/||" > "$root/gcc-files.txt"
-            scripts/mrb tests/upstream/gcc-index.rb "$root/gcc" "$root/gcc-files.txt" > "$root/gcc-inventory.tsv"
+            scripts/mrb.rb tests/upstream/gcc-index.rb "$root/gcc" "$root/gcc-files.txt" > "$root/gcc-inventory.tsv"
             tests/upstream/survey-gcc.sh
           else
             python3 tests/upstream/survey-ms-stl.py

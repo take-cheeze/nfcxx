@@ -234,14 +234,14 @@ end
 
 rc = 0
 if backend == "vulkan"
-  st = run_status({}, [pathb.call("spirv-emit")] + emitopts + ["--manifest=#{absout}.man", dev_ir], out: "#{absout}.spv")
+  st = run_status({}, [pathb.call("spirv-emit.rb")] + emitopts + ["--manifest=#{absout}.man", dev_ir], out: "#{absout}.spv")
   rc = st unless st.zero?
 elsif backend == "opencl" || backend == "level-zero"
-  st = run_status({}, [pathb.call("spirv-emit"), "--kernel-cl"] + emitopts + ["--manifest=#{absout}.man", dev_ir],
+  st = run_status({}, [pathb.call("spirv-emit.rb"), "--kernel-cl"] + emitopts + ["--manifest=#{absout}.man", dev_ir],
                   out: "#{absout}.cl.spv")
   rc = st unless st.zero?
 else
-  st = run_status({}, [pathb.call("mrb"), pathb.call("pathb-wgsl-emit.rb"), "--manifest=#{absout}.man", dev_ir],
+  st = run_status({}, [pathb.call("mrb.rb"), pathb.call("pathb-wgsl-emit.rb"), "--manifest=#{absout}.man", dev_ir],
                   out: "#{absout}.wgsl")
   rc = st unless st.zero?
 end

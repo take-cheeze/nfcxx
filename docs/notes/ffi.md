@@ -59,7 +59,7 @@ output is compared byte for byte, on both back ends.
 ## Declarations (Milestone 2)
 
 `Ffi::declarations(file, dialect)` lists the functions a source declares, with their signatures, read from the
-front end (`scripts/libclang-cursors`, the libclang-edg shim's cpfe):
+front end (`scripts/libclang-cursors.rb`, the libclang-edg shim's cpfe):
 
 ```cpp
 for (const nfcffi::Declaration& d : ffi.declarations("/usr/include/string.h")) {
@@ -70,7 +70,7 @@ for (const nfcffi::Declaration& d : ffi.declarations("/usr/include/string.h")) {
 - **Records.** `be/nfcxx_decl.c` writes one `sig` record after each free function's record: its return type, a
   variadic flag and each parameter type spelled as a C declaration with `@` where the name goes (`int (*@)(int)`).
   The printer is EDG's type IL (qualifiers, typedef names, enums, `_Bool`, `long double`, function pointers, arrays
-  decayed to pointers in parameters). `scripts/libclang-cursors --c` reads the file as C (the default for
+  decayed to pointers in parameters). `scripts/libclang-cursors.rb --c` reads the file as C (the default for
   `Dialect::C`); `Dialect::Cxx` reads it as C++, where overloads are listed and flagged `overloaded`.
 - **Headers.** `NFCXX_DECL_ALL=1` lists the declarations of every file the source includes, system headers too, not
   only the primary file. `Ffi::declarations` sets it.

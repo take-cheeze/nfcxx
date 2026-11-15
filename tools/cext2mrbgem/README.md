@@ -27,10 +27,10 @@ The function declarations and definitions are found by one of two scanners, reco
 `conversion_log.json`:
 
 - `regex`: the `DEF_RE` regex over the text (the original scan).
-- `libclang`: `decl_scan.rb` loads `libclang-edg.so` (`lib/libclang-edg`, built by `scripts/build-libclang-edg.sh`)
+- `libclang`: `decl_scan.rb` loads `libclang-edg.so` (`lib/libclang-edg`, built by `scripts/build-libclang-edg.rb`)
   through Fiddle and walks each file's declarations with `clang_visitChildren`. The library gives each function's
   name position; storage, return type, parameters and braces are read from the text with the regex scan's rules.
-  C sources go through `libclang-cursors-c` (`LIBCLANG_EDG_RUNNER`), which runs `scripts/libclang-cursors --c`.
+  C sources go through `libclang-cursors-c` (`LIBCLANG_EDG_RUNNER`), which runs `scripts/libclang-cursors.rb --c`.
 - `auto` (the default) uses libclang when the library loads, and the regex otherwise.
 
 Environment: `CEXT_LIBCLANG` (the library; relative paths are from the repository root, default

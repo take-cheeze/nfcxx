@@ -279,7 +279,7 @@ scripts/gen-c-target.rb -t linux_riscv32 -o build/hexagon/k.c tests/cases/hvx_ad
 cat tests/hexagon/stub.c >> build/hexagon/k.c
 clang --target=hexagon-unknown-linux-musl -ffreestanding -fno-pic -O2 -fwrapv -fno-strict-aliasing \
       -w -c build/hexagon/k.c -o build/hexagon/k.o
-scripts/mrb tests/hexagon/flatlink.rb build/hexagon/k.o build/hexagon/k.elf _start
+scripts/mrb.rb tests/hexagon/flatlink.rb build/hexagon/k.o build/hexagon/k.elf _start
 chmod +x build/hexagon/k.elf && $QEMU_HEXAGON build/hexagon/k.elf; echo "exit $?"   # expect 67
 ```
 

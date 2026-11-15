@@ -1,7 +1,7 @@
-# gen_pat.rb: port of tests/ast/fuzz/gen_pat.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb).
+# gen_pat.rb: port of tests/ast/fuzz/gen_pat.py for mruby (run by tests/ast/fuzz.sh through scripts/mrb.rb).
 # Writes a Lua program of N random calls of string.find, string.match, string.gsub and string.gmatch with random patterns and
 # subjects to stdout, each under pcall; run by tests/ast/fuzz.sh.
-# usage: scripts/mrb tests/ast/fuzz/gen_pat.rb SEED N
+# usage: scripts/mrb.rb tests/ast/fuzz/gen_pat.rb SEED N
 # The draws come from Rng (mruby-random's Random seeded by SEED), not from Python's random module, so the programs for a given seed are
 # not the Python original's; the grammar and the order of the draws are the same.
 

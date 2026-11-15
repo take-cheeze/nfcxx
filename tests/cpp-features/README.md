@@ -9,13 +9,13 @@ written; upstream examples are not copied.
 
 Build with `scripts/setup-edg.sh`, `scripts/setup-qbe.sh` and
 `scripts/setup-pathb.sh`. Scripts use the repository's mruby interpreter
-(`scripts/mrb`, bootstrapped on demand). GNU `timeout` is required. Then run:
+(`scripts/mrb.rb`, bootstrapped on demand). GNU `timeout` is required. Then run:
 
 ```sh
 tests/cpp-features/self-test.sh
 tests/cpp-features/fetch-checklist.sh
 tests/cpp-features/run.sh
-scripts/mrb scripts/cpp-feature-report.rb \
+scripts/mrb.rb scripts/cpp-feature-report.rb \
   build/cpp-features/checklist.tsv build/cpp-features/results/results.tsv \
   > docs/notes/cpp-feature-matrix.md
 ```

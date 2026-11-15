@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # The analysis headers (scripts/bc2cpp/analysis_headers.rb) generated with each preprocessor: BC2CPP_PREPROCESSOR=clang and =nfcxx
-# (scripts/nfcxx-cpp) over the same sources, AnalysisHeaders.native_sources (the closed world's natives, the compiler's C and
+# (scripts/nfcxx-cpp.rb) over the same sources, AnalysisHeaders.native_sources (the closed world's natives, the compiler's C and
 # the RGSS sources), through mruby's own presym scanner. The presym ID header must be byte-identical; exits 1 otherwise.
 #
 #   BC2CPP_WORLD_ROOT=/path/to/rpg-maker-clone ruby scripts/bc2cpp/analysis_headers_pp_diff.rb OUT_DIR

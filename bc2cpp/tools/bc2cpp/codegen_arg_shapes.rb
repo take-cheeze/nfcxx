@@ -107,7 +107,7 @@ module ArgShapeCalls
     return true if BytecodeIR.for(irep).instructions_with_op(:BLKPUSH).any? { |insn| insn.paren_value == '0' }
     return true if block_given_modelled? && block_given_reads?(irep)
 
-    (regions || recognize_block_fallback_regions(irep, blk_available: true)).any? { |region| region[:needs_blk] }
+    (regions || recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: true)).any? { |region| region[:needs_blk] }
   end
 
   # OPTIONAL_REST_YIELD shape: optionals and/or a rest, no post, keyword or `&blk` parameter, and a bare `yield`.

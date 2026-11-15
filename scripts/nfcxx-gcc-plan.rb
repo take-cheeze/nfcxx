@@ -43,8 +43,9 @@
 #   cuda-rtv PATH N         the header PATH has "#define CUDART_VERSION N"
 #   cuda-file, cuda-dir     run.sh makes these in the work directory; the port reads the exists and dir lines instead
 #
-# Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none, and CUDA_HOME
-# only as the cuda-home fact), the SYCL pre-pass (it needs a sycl include in the source), the existence of eccp and of the
+# Read from the environment: NFCXX_LD and NFCXX_DIALECT (PLAN_ENV: the defaults the bash sets before its arguments).
+# Assumed, not read: the environment (other NFCXX_* variables: the harness runs the bash with none, and CUDA_HOME only as
+# the cuda-home fact), the SYCL pre-pass (it needs a sycl include in the source), the existence of eccp and of the
 # built repository tools (ensure_tool finds them fresh, so no ninja run), and the host GNU version (not used by this path).
 # A CUDA toolkit that is /usr/local/cuda (CUDA_HOME unset, and the libcuda path does not name a toolkit with cuda.h) is
 # not read: unported.
@@ -124,6 +125,11 @@ class Facts
     @values[key]
   end
 
+  # an environment variable the plan reads (NFCXX_LD, NFCXX_DIALECT): nil when unset, or when the facts have none
+  def env_value(_name)
+    nil
+  end
+
   def host_sys
     @host_sys
   end
@@ -183,7 +189,8 @@ end
 # The facts read from this machine, for the repository (--live=ROOT): each fact is probed when the port asks for it, with
 # the commands the bash runs. A fact the live facts do not model is unported, never guessed: the CUDA toolkit and shim,
 # more than one -m option, a macro with arguments, a module source (the bash's grammar is read, but a module is not
-# planned), and NFCXX_* or CUDA_HOME in the environment (the port does not read them; the bash does).
+# planned), and NFCXX_* (but NFCXX_LD and NFCXX_DIALECT) or CUDA_HOME in the environment (the port does not read them;
+# the bash does).
 class LiveFacts < Facts
   def initialize(root, cwd)
     super()
@@ -193,6 +200,7 @@ class LiveFacts < Facts
     @host_sys = nil  # computed on first use (Facts sets an empty list)
     ENV.each_key do |name|
       # NFCXX_DRIVER_TRACE is the CRuby driver's own switch (scripts/nfcxx.rb); the bash does not read it
+      next if PLAN_ENV.include?(name)
       next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
                   %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
@@ -279,6 +287,10 @@ class LiveFacts < Facts
     @probes.fetch(key) { @probes[key] = probe(key) }
   end
 
+  def env_value(name)
+    ENV[name] if PLAN_ENV.include?(name)
+  end
+
   def cuda_rtv(_path)
     unported("the CUDA toolkit is not in the live facts")
   end
@@ -356,14 +368,24 @@ def unported(what)
   raise NfcxxUnported, what
 end
 
+# onoff of the argument loop (nfcxx's onoff): on|1 and off|0 are accepted, anything else is the bash's error
+def onoff_value(arg)
+  flag, value = arg.split("=", 2)
+  return if %w[on 1 off 0].include?(value)
+
+  raise NfcxxExit.new("nfcxx: #{flag} takes on or off (got '#{value}')", 2)
+end
+
 def normalize(path)
   Pathname.new(path).cleanpath.to_s
 end
 
 # options of the argument loop that the gcc path does not port (the other tracks, or the tools they need)
-UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--module-dir=", "--target=",
-                     "--pathb-c=", "--ir-opt=", "--promote-slots=", "--unroll=", "--struct-slots=", "--emit-"].freeze
+UNPORTED_PREFIXES = ["--bundle-", "--time-log=", "--trace=", "--target=",
+                     "--pathb-c=", "--ir-opt=", "--emit-"].freeze
 UNPORTED_OPTIONS = ["--cosmo", "--freestanding", "--obfuscate-kernels", "-fsafe-pointers"].freeze
+# the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
+PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
 
 class Plan
   attr_reader :lines
@@ -415,6 +437,14 @@ class Plan
     @isa_opts = []
     @diag_opts = []
     @dialect_asked = false
+    # the environment first, as the bash sets its defaults (the arguments after it override them): NFCXX_DIALECT (a
+    # non-empty value is asked for) and NFCXX_LD
+    env_dialect = facts.env_value("NFCXX_DIALECT")
+    if env_dialect && !env_dialect.empty?
+      @dialect = env_dialect
+      @dialect_asked = true
+    end
+    @ld_name = facts.env_value("NFCXX_LD") || ""
   end
 
   # the argument loop (scripts/nfcxx-loop.rb's run_loop, for the options of this slice)
@@ -433,6 +463,10 @@ class Plan
       elsif a.start_with?("--cache=") then @cache_dir = a[8..]
       elsif a.start_with?("--cache-log=") then nil
       elsif a.start_with?("--instantiate=") then @instantiate = a[14..]
+      # the CUDA device code's options (not in a hosted plan), and the module directory (read only for a module source,
+      # which run refuses)
+      elsif a.start_with?("--promote-slots=", "--unroll=", "--struct-slots=") then onoff_value(a)
+      elsif a.start_with?("--module-dir=") then nil
       elsif a.start_with?("--dialect=") then @dialect = a[10..]; @dialect_asked = true
       elsif a.start_with?("--gnu-version=") then nil
       elsif a.start_with?("-fuse-ld=")
@@ -441,10 +475,10 @@ class Plan
       elsif a == "-fsanitize=address" then @asan = true
       elsif a == "-fno-sanitize=address" then @asan = false
       elsif a == "-fno-sanitize=all" then nil
-      elsif a.start_with?("-fsanitize=", "-fsanitize-")
-        raise NfcxxExit.new("nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)", 2)
-      elsif a.start_with?("-fno-sanitize=", "-fno-sanitize-")
-        raise NfcxxExit.new("nfcxx: #{a} is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)", 2)
+      elsif a.start_with?("-fsanitize=", "-fsanitize-", "-fno-sanitize=", "-fno-sanitize-")
+        # the bash builds these (-fsanitize=undefined runs on Path B and on the gcc backend too), so this is not a refusal
+        # of the port's: the port leaves them to the bash
+        unported(a)
       elsif a == "-fno-safe-pointers" then nil
       elsif a == "-fno-omit-frame-pointer" || a == "-fomit-frame-pointer" then @asanopts << a
       elsif a == "-shared" then @shared = true; @pic = true
@@ -714,6 +748,9 @@ class Plan
     ldopts = ["-shared"] if @shared
     ldopts << "-rdynamic" if @rdynamic
     unless @ld_name.empty?
+      unless @facts.ld_available?(@ld_name)
+        raise NfcxxExit.new("nfcxx: NFCXX_LD=#{@ld_name}: ld.#{@ld_name} is not on PATH", 2)
+      end
       ldopts << "-fuse-ld=#{@ld_name}"
       picopts.push("--c_to_obj_option", "-fuse-ld=#{@ld_name}")
     end

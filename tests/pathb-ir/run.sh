@@ -63,9 +63,9 @@ else
   fi
 fi
 # Built-ins and va_arg lowered without a library call (va_arg of long double is a helper call), and the inline asm cases the emitter must refuse by name.
-# Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
+# Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb.rb) must accept or refuse the IR as stated:
 #   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown (the asm-block statement)
-mrb=scripts/mrb
+mrb=scripts/mrb.rb
 for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:refused: statement (asm-block"; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
