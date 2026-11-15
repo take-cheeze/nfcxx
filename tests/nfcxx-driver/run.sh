@@ -15,6 +15,8 @@ cases=(
   "--cuda-driver=cudart x.cc -lcuda"
   "--backend=gcc -c a.cc -o a.o"
   "-c a.cc b.cc"
+  "-c -I"
+  "-x c++ -c -"
 )
 for c in "${cases[@]}"; do
   read -r -a args <<< "$c"
@@ -34,5 +36,8 @@ check_dispatch plan --bundle-libs x.cc
 check_dispatch bash -c x.cc
 check_dispatch bash -E x.cc
 check_dispatch bash --bogus x.cc
+# a refusal the bash makes before it runs anything is the port's: the driver prints its message, without the bash
+check_dispatch gcc-plan -c -I
+check_dispatch gcc-plan -x c++ -c -
 echo "passed $pass, failed $fail"
 [ "$fail" = 0 ]
