@@ -456,6 +456,10 @@ check grep -qF '(sizeof(".%N") - 1)' "$work/api_strlen_lit/src/api_strlen_lit.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_str_format tools/cext2mrbgem/fixtures/api_str_format/ext/api_str_format "$work/api_str_format" > "$work/api_str_format.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$work/api_str_format/src/api_str_format.c"
+# 2zzz79. #ifndef of a macro the gem defines: the #ifndef branch is inactive, the #else branch is the live one.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem/fixtures/api_alt_branch/ext/api_alt_branch "$work/api_alt_branch" > "$work/api_alt_branch.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use2" > "$work/api_dead_use2.log" 2>&1 || rc=$?
 check test "$rc" -eq 0

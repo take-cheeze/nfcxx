@@ -960,6 +960,52 @@ texts = static_rename(texts)
   # [records, skipped] from libclang-edg: the function declarations of the main file (decl_scan.rb). libclang-edg
   # lists one record per function entity, so a prototype with a definition in the same file is not listed; the
   # prototypes of the names it lists are taken from the text, as the regex scan finds them.
+  # The inactive branches of conditionals whose condition is known in this build: #if 0, and #ifdef / #ifndef of a name that
+  # this build does not define (no -D option) and the gem never #defines. Other conditions are unknown and stay active.
+  # Returns [start, end] spans of inactive text (the directive lines themselves are kept).
+  def text_inactive_spans(rel)
+    f = @files[rel]
+    masked = f['masked']
+    build = Set.new((@defines || []).map { |d| d.split('=', 2)[0] })
+    gem_defined = Set.new
+    @files.each_value { |g| g['masked'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/) { gem_defined << $1 } }
+    out = []
+    stack = []   # frames: {value: true/false/nil, branch_start: pos}
+    pos = 0
+    masked.each_line do |line|
+      lstart = pos
+      pos += line.length
+      if (m = /\A[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b[ \t]*(.*)\z/.match(line))
+        kw, arg = m[1], m[2].to_s.strip
+        case kw
+        when 'if', 'ifdef', 'ifndef'
+          # only #if 0 and a name this build or the gem defines are decided: a name defined by no -D option and no #define
+          # of the gem may come from mkmf (HAVE_*, extconf.h), so its branch stays active
+          value = if kw == 'if' && arg == '0' then false
+                  elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && (build.include?($1) || gem_defined.include?($1))
+                    kw == 'ifdef'
+                  end
+          frame = { value: value, inactive_from: nil }
+          frame[:inactive_from] = pos if value == false
+          stack << frame
+        when 'else'
+          fr = stack.last
+          next unless fr
+          if fr[:inactive_from]
+            out << [fr[:inactive_from], lstart]
+            fr[:inactive_from] = nil
+          end
+          fr[:inactive_from] = pos if fr[:value] == true
+        when 'endif'
+          fr = stack.pop
+          next unless fr
+          out << [fr[:inactive_from], lstart] if fr[:inactive_from]
+        end
+      end
+    end
+    out
+  end
+
   def libclang_declarations(rel, f)
     dirs = [@cext_dir]
     dirs += DeclScan.ruby_include_dirs if INC_RE.match?(f['text'])
@@ -2400,6 +2446,8 @@ use_problem = lambda do |name, use|
             next true if inside
             # an expansion in an inactive definition (its #if is false in this build) is dead code
             next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
+            # another #define of the same macro (an alternative branch) is a definition, not an expansion
+            next true if (dd = define_at(orel, os)) && dd[0] == name
             # a macro is local to its file: a same-named macro of another file is another definition, not a use
             next true if orel != rel
             fn = enclosing_func(orel, os)
@@ -2454,6 +2502,8 @@ use_problem = lambda do |name, use|
       next true if orel != rel
       # an expansion in an inactive definition (its #if is false in this build) is dead code
       next true if ((@excluded_spans || {})[orel] || []).any? { |x, z| x < os && os < z }
+      # another #define of the same macro (an alternative branch) is a definition, not an expansion
+      next true if (dd = define_at(orel, os)) && dd[0] == name
       fn = enclosing_func(orel, os)
       !fn.nil? && ctx.include?(fn['name'])
     end
@@ -3063,6 +3113,11 @@ end
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
     local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
+    # text-inactive branches (#if 0, a #ifdef of a name this build defines or the gem #defines) are excluded like dead definitions
+    text_inactive_spans(rel).each do |a, z|
+      (@excluded_spans ||= {})[rel] ||= []
+      @excluded_spans[rel] << [a, z]
+    end
     # A prototype of a name whose api_map entry says decl_drop (the fork provides the function under another name, which the
     # calls use): the declaration is removed, the names inside it are not converted
     @decls.each do |d|
