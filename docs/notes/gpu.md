@@ -366,7 +366,7 @@ and its device code wants wave64 on CDNA (the wave32 model here is RDNA's).
 
 ### Toolchain and coverage
 
-The AMD path needs no ROCm tool to build: `scripts/amdgpu-env.sh` finds the GPU's architecture from the kernel driver's topology
+The AMD path needs no ROCm tool to build: `scripts/amdgpu-env.rb` finds the GPU's architecture from the kernel driver's topology
 (KFD: `gfx_target_version` 110501 is gfx1151), and the compiler is any clang with the amdgcn target. Upstream LLVM has it (Ubuntu's
 clang 21 compiles and links the device kernels of `tests/gpu/amd` unchanged), and ROCm's clang is the fallback. `rocminfo` and
 `hipcc` are not used. The HIP runtime (`libamdhip64`) and its headers are still needed to run a program. NFCXX_AMDGPU_ARCH and

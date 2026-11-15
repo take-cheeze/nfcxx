@@ -121,6 +121,9 @@ abs_path() {
   if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
   else printf '%s\n' "$1"; fi
 }
+# the AMD GPU's architecture and compiler: scripts/amdgpu-env.rb (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override)
+amdgpu_arch() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_arch; }
+amdgpu_clang() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_clang; }
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
@@ -376,9 +379,8 @@ cu_amd_build() {  # cu_amd_build SRC DEV COPY DEFINE...: the device image of NFC
   # makes the code object, and the registration tail embeds it in COPY as a cubin is. One module: the AMD emitter has no
   # grouping yet, so a large file is not split.
   local src=$1 dev=$2 copy=$3 k; shift 3
-  # The architecture and the compiler: scripts/amdgpu-env.sh (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override).
-  . "$root/scripts/amdgpu-env.sh"
-  local arch clang
+  # The architecture and the compiler: scripts/amdgpu-env.rb (no ROCm tool is needed; NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG override).
+    local arch clang
   arch=$(amdgpu_arch) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no AMD GPU found (set NFCXX_AMDGPU_ARCH, e.g. gfx1151)" >&2; exit 2; }
   clang=$(amdgpu_clang) || { echo "nfcxx: $src: NFCXX_CUDA_TARGET=amdgpu: no clang with the amdgcn target (set NFCXX_AMDGPU_CLANG)" >&2; exit 2; }
   ensure_tool "$root/tools/pathb-amdgpu-emit" "$root/build/pathb-amdgpu-emit" || exit 1

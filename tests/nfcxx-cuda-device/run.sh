@@ -21,7 +21,7 @@ setup() {  # setup W HAVE: the case's tree: nfcxx's root (W/root) with stub tool
            "$w/nocuda/bin" "$w/inc" "$w/cache" || exit 2
   cp "$here"/fixtures/cuda/include/* "$w/cuda/include/" || exit 2
   cp "$here"/fixtures/inc/* "$w/inc/" || exit 2
-  cp scripts/amdgpu-env.sh "$w/root/scripts/" || exit 2
+  cp scripts/amdgpu-env.rb "$w/root/scripts/" || exit 2
   cp "$here/tool-stub" "$w/root/build/cuda-rewrite" || exit 2
   cp "$here/tool-stub" "$w/root/scripts/pathb-dump.rb" || exit 2
   cp "$here/tool-stub" "$w/root/bin/clang" || exit 2

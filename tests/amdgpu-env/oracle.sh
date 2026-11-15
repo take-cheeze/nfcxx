@@ -1,3 +1,5 @@
+# The bash original of scripts/amdgpu-env.rb (removed from scripts/ once the Ruby port was verified). Kept as the oracle of
+# tests/amdgpu-env/run.sh: the same functions, sourced as before.
 # Sourced (not run): finds the AMD GPU's architecture and an LLVM clang that can compile for amdgcn, for nfcxx's AMD GPU
 # path (docs/notes/gpu.md, "AMD GPUs (ROCm)"). Neither needs a ROCm tool: the architecture comes from the kernel driver's
 # topology (KFD), and the compiler is any clang with the amdgcn target (upstream LLVM has it), else ROCm's clang. The HIP
