@@ -6,7 +6,7 @@
 #
 # The oracle is the bash: a sandbox with a copy of the repository's scripts and the driver, run under env -i. The copy of
 # the driver is cut after its cpp2_prepare call (the main compile is not compared), and its nested self-runs (the two
-# SYCL passes) call a stub, nfcxx-nested, instead of the driver. The other external commands are stubs (stub.sh):
+# SYCL passes, which scripts/nfcxx-sycl.rb runs through root/nfcxx) call a stub, nfcxx-nested, instead of the driver. The other external commands are stubs (stub.sh):
 # cppfront, the integration-header script, the nested runs, mktemp, mkdir, cat and the host probes. Everything else runs
 # for real (realpath, sha1sum, grep, sed, awk, cut). The sandbox's paths are normalized: temporary directories to <tmp>,
 # the cache to <cache>, the repository to <root>, the work directory to <work>.
@@ -32,11 +32,11 @@ while IFS= read -r line; do
   mkdir -p "$root/build" "$work" "$bin" "$tmp" "$sb/home" "$sb/xdg"
   cp -r "$repo/scripts" "$root/scripts"
   ln -sf "$here/stub.sh" "$root/scripts/sycl-integration-header.rb"
-  # the driver, cut after its cpp2_prepare call; its nested self-runs go to the stub
-  # the nested runs of the SYCL passes (the lines with NFCXX_SYCL_PASS) go to the stub; the wrappers keep the driver's name
-  awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$repo/nfcxx" \
-    | sed '/NFCXX_SYCL_PASS=1/s|"\$root/nfcxx"|"$root/nfcxx-nested"|g' > "$root/nfcxx"
-  chmod +x "$root/nfcxx"
+  # the driver, cut after its cpp2_prepare call, is root/driver (its -fsyntax-only re-run is itself); root/nfcxx is what its
+  # nested runs call (the two SYCL passes, scripts/nfcxx-sycl.rb): a wrapper that runs the stub
+  awk '{ print } /^cpp2_prepare$/ { print "exit 0"; exit }' "$repo/nfcxx" > "$root/driver"
+  chmod +x "$root/driver"
+  printf '#!/bin/bash\nexec "$(dirname "$0")/nfcxx-nested" "$@"\n' > "$root/nfcxx"; chmod +x "$root/nfcxx"
   ln -s "$here/stub.sh" "$root/nfcxx-nested"
   : > "$root/build/cuda-rewrite"; chmod +x "$root/build/cuda-rewrite"
   for c in gcc cc g++ mktemp mkdir cat; do ln -s "$here/stub.sh" "$bin/$c"; done
@@ -75,10 +75,10 @@ while IFS= read -r line; do
 
   # the bash
   : > "$sb/log"
-  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" "${envs[@]}" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/log" \
-     NFCXX_STUB_TMP="$tmp" NFCXX_STUB_ROOT="$root" bash "$root/nfcxx" "${args[@]}" >"$sb/bout" 2>"$sb/berr"); orc=$?
+  (cd "$work" && env -i RUBY="$(command -v ruby)" PATH="$bin:/usr/bin:/bin" TMPDIR="$tmp" "${envs[@]}" NFCXX_FACTS="$sb/facts" NFCXX_STUB_LOG="$sb/log" \
+     NFCXX_STUB_TMP="$tmp" NFCXX_STUB_ROOT="$root" bash "$root/driver" "${args[@]}" >"$sb/bout" 2>"$sb/berr"); orc=$?
 
-  norm() { sed -e "s#$tmp/d[0-9.]*#<tmp>#g" -e "s#$cache#<cache>#g" -e "s#$root#<root>#g" -e "s#$work#<work>#g" -e "s#$sb#<sb>#g"; }
+  norm() { sed -e "s#$tmp/[^ \"/]*#<tmp>#g" -e "s#$cache#<cache>#g" -e "s#$root#<root>#g" -e "s#$work#<work>#g" -e "s#$sb#<sb>#g"; }
   port_txt=$(norm < "$sb/pout")
   oracle_txt=$({ norm < "$sb/log"; echo "STATUS $orc"; })
   [ -s "$sb/bout" ] && oracle_txt+=$'\nSTDOUT-NOT-EMPTY'

@@ -149,7 +149,7 @@ end
 # arms are in the driver's order; the first one that matches wins. Returns the state the pre-pass reads.
 def parse_args(argv)
   st = { compile_only: false, out: "a.out", outset: false, srcs: [], cpp2: [], ncpp: 0, nobj: 0, ncfiles: 0,
-         stdin: false, preprocess: false, emit_c: false, emit_hip: false, trace: nil, time_log: nil }
+         stdin: false, preprocess: false, emit_c: false, emit_hip: false, trace: nil, time_log: nil, cu: [] }
   i = 0
   while i < argv.size
     a = argv[i]
@@ -167,8 +167,12 @@ def parse_args(argv)
     when glob?(a, "--pathb-c=*"), glob?(a, "-fuse-ld=*"), a == "--obfuscate-kernels" then nil
     when a == "-fsanitize=address", a == "-fsafe-pointers", a == "-fno-safe-pointers", a == "-fno-sanitize=address"
       nil
-    when glob?(a, "-fsanitize=*"), glob?(a, "-fsanitize-*")
+    when glob?(a, "-fsanitize-*")
       raise Stop.new(2, "nfcxx: #{a} is not supported (only -fsanitize=address; docs/notes/asan.md)")
+    # the loop takes any -fsanitize=CHECK; the checks the driver does not run are refused after the pre-pass, in the
+    # sanitizer block (the bash's "implemented: undefined, ..." message), so the pre-pass does not see them
+    when glob?(a, "-fsanitize=*")
+      nil
     when a == "-fno-omit-frame-pointer", a == "-fomit-frame-pointer" then nil
     when glob?(a, "--dialect=*"), glob?(a, "--gnu-version=*"), a == "--freestanding", a == "--cosmo",
          glob?(a, "--target=*"), glob?(a, "--module-dir=*")
@@ -207,7 +211,10 @@ def parse_args(argv)
       i += 1
     when glob?(a, "*.o") then st[:nobj] += 1
     when glob?(a, "-*"), glob?(a, "*.a"), glob?(a, "*.so") then nil
-    when glob?(a, "*.cu") then raise Unported, ".cu input: its device pre-pass belongs to the CUDA plan"
+    when glob?(a, "*.cu")   # a source (the bash counts it as one); run_driver refuses it: its pre-pass is the CUDA plan
+      st[:cu] << a
+      st[:srcs] << a
+      st[:ncpp] += 1
     when glob?(a, "*.cpp2")
       st[:cpp2] << a
       st[:srcs] << a
@@ -329,6 +336,7 @@ def run_driver(plan, argv, tmp_obj)
   cache_remote = plan.env("NFCXX_CACHE_REMOTE")
   raise Stop.new(2, "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '#{cache_remote}')") if cache_remote && cache_remote != "gha"
   st = parse_args(argv)
+  raise Unported, ".cu input: its device pre-pass belongs to the CUDA plan" unless st[:cu].empty?
   if st[:ncpp] + st[:nobj] + st[:ncfiles] + (st[:stdin] ? 1 : 0) == 0
     raise Stop.new(2, "nfcxx: no input files")
   end
