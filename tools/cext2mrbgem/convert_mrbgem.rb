@@ -1158,7 +1158,12 @@ texts = static_rename(texts)
   # class (NAME = rb_define_class...). A VALUE local of another function with the same name is an ordinary value.
   def owns_class_var?(rel, pos, name)
     fn = enclosing_func(rel, pos)
-    return true if fn.nil?
+    if fn.nil?
+      # a struct or union member is a field of that type, not a class variable (a field may share a class variable's name)
+      open = enclosing_open_brace(@files[rel]['masked'], pos)
+      return false if open && @files[rel]['masked'][[open - 60, 0].max...open].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
+      return true
+    end
     masked = @files[fn['file']]['masked']
     !(psl(masked, fn['brace'], fn['body_end'] + 1) =~ /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/).nil?
   end
@@ -3968,8 +3973,15 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, 'expression mapping used in call form')
         return
       end
-      ed.add(s, e, entry['mruby'])
-      rewrite(rel, s, name, entry['mruby'])
+      # a class expression (RClass *: mrb->object_class, mrb_class_get(...)) used as a plain value is its VALUE
+      text = entry['mruby']
+      # not in a class argument of a call: that position takes the RClass * itself (mrb_define_method(mrb, mrb->object_class, ...))
+      callee_c, idx_c = call_context(masked, s)
+      class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
+                               ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
+      text = "mrb_obj_value(#{text})" if !class_pos && text.match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      ed.add(s, e, text)
+      rewrite(rel, s, name, text)
     else
       refuse(rel, s, name, "unknown kind #{py_repr(kind)} in api_map.json")
     end
@@ -4227,6 +4239,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       if fmt.include?('PRIsVALUE') && !prsvalue_edits(rel, args[1][0], args[1][1])
         refuse(rel, s, name, 'PRIsVALUE format (VALUE to string) not supported in this position (only "%"PRIsVALUE and "%+"PRIsVALUE)')
         return
+      end
+      # a VALUE class (a VALUE name or member, not a tracked class variable) is unwrapped: mrb_raisef takes an RClass *
+      cls_t = psl(text, args[0][0], args[0][1]).strip
+      if !@class_vars.include?(cls_t) && (cls_t.match?(/\A[A-Za-z_]\w*\z/) && value_names_of(enclosing_func(rel, s) || {}).include?(cls_t) ||
+                                       cls_t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && value_field_names.include?(cls_t[/([A-Za-z_]\w*)\z/]))
+        ed.add(args[0][0], args[0][1], "mrb_class_ptr(#{cls_t})")
       end
       ed.add(s, e, 'mrb_raisef')
       ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
