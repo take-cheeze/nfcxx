@@ -313,8 +313,8 @@ eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary direc
 }
 # C++ modules (docs/notes/modules.md). mod_decl_name FILE prints NAME for an interface unit (export module NAME;); mod_imports FILE
 # prints the names it imports (import NAME;). Both read the declarations at the start of a line only.
-mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one
-  grep -Eq '^[[:space:]]*(export[[:space:]]+)?(module|import)[[:space:]]+[A-Za-z_<"]' "$1"
+mod_is_module_src() {  # mod_is_module_src FILE: true when FILE declares a module or imports one (scripts/nfcxx-modscan.rb is-module)
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" is-module "$1"
 }
 mod_decl_name() {  # mod_decl_name FILE: the source scans are scripts/nfcxx-modscan.rb (tests/nfcxx-modscan/run.sh checks them)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" decl-name "$1"
