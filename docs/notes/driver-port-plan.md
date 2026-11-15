@@ -29,6 +29,9 @@ and the Ruby entry (scripts/nfcxx.rb) routes to it until the last stage.
 2. nfcxx cache: `cache_sha`, `cache_log`, `cache_remote_get`, `cache_remote_put`, `cache_lookup` (the compile cache
    key and the GHA remote tier). Test: tests/nfcxx-cache. scripts/nfcxx-cache.rb already has the key logic; the bash
    calls to it are what remains.
+   Progress: `cache_log`, `cache_remote_get` and `cache_remote_put` are calls of scripts/nfcxx-cache-io.rb (log, remote-get,
+   remote-put; the GHA client is behind it). Test: tests/nfcxx-cache-io (against the frozen bash, bash-oracle.sh). Still in
+   bash: `cache_sha` and the key computation in `cache_lookup`, and the gating of `cache_check` and `cache_store`.
 3. Modules: `mod_is_module_src`, `mod_decl_name`, `mod_imports`, `mod_check_src`, `mod_build_program`. Test:
    tests/nfcxx-modules (its plan printer exists: scripts/nfcxx-modules.rb).
 4. Eccp steps and link: `ecp_arg`, `eccp_cleanup`, `link_records_rm`, and the link dispatch. Test: the live

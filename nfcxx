@@ -172,29 +172,18 @@ cudatmp=""
 # The cache helpers (the compile cache below and the device image cache of cu_rewrite).
 cache_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG when --cache-log (NFCXX_CACHE_LOG) is set (a diagnostic; no effect on the key).
-  # Parallel compiles share the file, so each append takes a lock (mkdir, which is portable) and is a single printf.
+  # The append is scripts/nfcxx-cache-io.rb log (a lock shared with the parallel compiles, one write per call).
   [ -n "$cache_log_file" ] || return 0
-  while ! mkdir "$cache_log_file.lock" 2>/dev/null; do sleep 0.05; done
-  printf '%s\n' "$*" >> "$cache_log_file"
-  rmdir "$cache_log_file.lock"
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" log "$cache_log_file" "$*"
 }
 # The remote tier (NFCXX_CACHE_REMOTE=gha). An entry is the object and its records, as one tar keyed by the cache key. A
 # remote failure is a miss or a store that did not happen, with a note on stderr: a build does not fail for its cache.
+# scripts/nfcxx-cache-io.rb does the work (the temporary entry, the move into place, the GHA client's calls and the note).
 cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
-  local tmp=$2.remote.$$ rc=0
-  rm -rf "$tmp"
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" get "$1" "$tmp" || rc=$?
-  if [ $rc = 0 ] && [ -f "$tmp/obj" ]; then
-    mkdir -p "$(dirname "$2")"; [ -e "$2" ] || mv "$tmp" "$2" 2>/dev/null || true
-  else rc=1; fi
-  rm -rf "$tmp"
-  return $rc
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-get "$1" "$2"
 }
 cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
-  local names=(obj) x
-  for x in ti ii; do [ ! -f "$2/$x" ] || names+=("$x"); done
-  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" put "$1" "$2" "${names[@]}" \
-    || echo "nfcxx: remote cache: could not store $1 (the build continues)" >&2
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-io.rb" remote-put "$1" "$2" || true
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
 # with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.

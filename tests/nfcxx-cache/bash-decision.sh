@@ -23,11 +23,13 @@ cp() { _out CP "$@"; command cp "$@"; }
 mv() { _out RUN mv "$@"; command mv "$@"; }
 rm() { _out RUN rm "$@"; command rm "$@"; }
 mkdir() { case ${*: -1} in *.lock) command mkdir "$@"; return ;; esac; _out RUN mkdir "$@"; command mkdir "$@"; }
-ruby() {
-  case $1 in *nfcxx-cache-gha.rb) ;; *) command ruby "$@"; return ;; esac
+ruby() {  # the cache's Ruby helper (scripts/nfcxx-cache-io.rb): log runs for real; remote-get and remote-put are the stubs below
+  case $1 in *nfcxx-cache-io.rb) ;; *) command ruby "$@"; return ;; esac
+  case $2 in log) command ruby "$@"; return ;; esac
   _out RUN ruby "$@"
   case $2 in
-    get) [ "${CACHE_TEST_REMOTE:-miss}" = hit ] || return 1; command mkdir -p "$4"; printf 'OBJECT remote\n' > "$4/obj" ;;
+    remote-get) [ "${CACHE_TEST_REMOTE:-miss}" = hit ] || return 1
+                [ -e "$4" ] || { command mkdir -p "$(dirname "$4")"; command mkdir -p "$4"; printf 'OBJECT remote\n' > "$4/obj"; } ;;
   esac
   return 0
 }
