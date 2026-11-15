@@ -1945,6 +1945,8 @@ end
       end
     end
     @macro_needs = macro_needs
+    # a helper that reads rb_scan_args on its argc and argv needs the mruby state for its argc check (mrb_argnum_error)
+    forced.merge(argv_scan_helpers.keys)
     needs = Set.new(forced)
     ids.each do |name, s|
       needs << name if s.any? { |i| (@entries[i] || {})['needs_mrb'] || macro_needs.include?(i) }
@@ -4015,10 +4017,36 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
   # "<lead><opt>" (no rest, keyword or block parts) -> mrb_get_args(mrb, "o|o", &v...). mrb_get_args reads
   # the same stack the method was called with, and its arity check is the one rb_scan_args makes. Optional
   # outputs are set to nil first, because mrb_get_args leaves a missing optional argument unwritten.
+  # Functions that are not registered variadic methods but read rb_scan_args on their own (argc, argv) parameters: a helper
+  # called with an argv array (the registered method's arguments, or NULL with argc 0). Name => [argc, argv, self] names.
+  def argv_scan_helpers
+    @argv_scan_helpers ||= begin
+      out = {}
+      @files.each do |rel, f|
+        masked, text = f['masked'], f['text']
+        finditer(/(?<![#{WC}$.>])rb_scan_args#{SS}\(/, masked).each do |m|
+          s = m.begin(0)
+          open = m.end(0) - 1
+          close = match_close(masked, open)
+          next if close < 0
+          args = split_args(masked, open, close).map { |a, b| psl(text, a, b).strip }
+          next if args.size < 3
+          fn = enclosing_func(rel, s)
+          next if fn.nil? || @variadic.key?(fn['name'])
+          plist = fn['params'].to_s.split(',', -1).map { |x| x.strip[/([A-Za-z_][#{WC}]*)\s*\z/, 1] }
+          next unless plist.size >= 2 && plist[0] == args[0] && plist[1] == args[1]
+          out[fn['name']] = plist[0, 3]
+        end
+      end
+      out
+    end
+  end
+
   def scan_args(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
     fn = enclosing_func(rel, s)
-    if !called || fn.nil? || !@variadic.key?(fn['name'])
+    argv_helper = called && fn && !@variadic.key?(fn['name']) && argv_scan_helpers.key?(fn['name'])
+    if !called || fn.nil? || (!@variadic.key?(fn['name']) && !argv_helper)
       refuse(rel, s, 'rb_scan_args', 'only supported directly in a variadic method (argc -1)')
       return
     end
@@ -4028,7 +4056,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       refuse(rel, s, 'rb_scan_args', 'rb_scan_args needs argc, argv and a format string')
       return
     end
-    argc_n, argv_n, self_n = @variadic[fn['name']]
+    argc_n, argv_n, self_n = argv_helper ? argv_scan_helpers[fn['name']] : @variadic[fn['name']]
     if psl(text, args[0][0], args[0][1]) != argc_n || psl(text, args[1][0], args[1][1]) != argv_n
       refuse(rel, s, 'rb_scan_args', 'rb_scan_args is not called on the argc and argv of its method')
       return
@@ -4070,7 +4098,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     fmt = 'o' * lead + (opt > 0 ? '|' + 'o' * opt : '') + (rest ? '*' : '') + (kw ? ':' : '') + (blk ? '&' : '')
     # a split method's implementation takes its arguments as an argv array (mrb_value *), not from the mruby frame:
     # its lead and optional outputs are read from argv, the argc check raises as mrb_get_args does, and the value is argc
-    if @split_names.include?(fn['name'])
+    if @split_names.include?(fn['name']) || argv_helper
       if rest || blk
         refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest and block parts are not supported there')
         return

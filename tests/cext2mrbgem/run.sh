@@ -439,6 +439,10 @@ check grep -qF 'if (nfcx_ac > 1 && mrb_hash_p(argv[nfcx_ac - 1])) { opt = argv[-
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_macro_ret_restore tools/cext2mrbgem/fixtures/api_macro_ret_restore/ext/api_macro_ret_restore "$work/api_macro_ret_restore" > "$work/api_macro_ret_restore.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '{ mrb_value nfcx_bc2_ret = ( mrb_false_value()); api_macro_ret_restore_bc2_mrb = nfcx_bc2_old; return nfcx_bc2_ret; }' "$work/api_macro_ret_restore/src/api_macro_ret_restore.c"
+# 2zzz73. A helper that is not a registered method reads rb_scan_args on its own (argc, argv): the argv form, with the argc check.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_scan_helper tools/cext2mrbgem/fixtures/api_scan_helper/ext/api_scan_helper "$work/api_scan_helper" > "$work/api_scan_helper.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'int nfcx_ac = argc; if (nfcx_ac < 1 || nfcx_ac > 2) mrb_argnum_error(mrb, nfcx_ac, 1, 2);' "$work/api_scan_helper/src/api_scan_helper.c"
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
