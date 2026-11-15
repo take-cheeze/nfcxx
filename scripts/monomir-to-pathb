@@ -1,2 +1,0 @@
-#!/bin/sh
-exec ruby "$(dirname "$0")/monomir-to-pathb.rb" "$@"
