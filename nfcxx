@@ -469,49 +469,15 @@ mod_imports() {
 mod_check_src() {  # mod_check_src FILE: refuses the module features that are not built yet (exit 2, nfcxx's message)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-modscan.rb" check "$1" || exit $?
 }
-# mod_build_program: a program with modules is compiled one source at a time (EDG takes one translation unit per call with
-# modules on), the interface units first in dependency order, and the objects are then linked. Each step is this driver again.
+# mod_build_program: a program with modules is built by scripts/nfcxx-modules.rb build (docs/notes/modules.md): each source is
+# compiled on its own (EDG takes one translation unit per call with modules on), the interface units first in dependency order,
+# then the objects are linked; each compile is this driver again. The build's temporary directory is the Ruby's. The EXIT trap
+# is cleared, as the bash function's own trap replaced any earlier one (cu_prepare's), so that effect is kept. A failing step
+# ends the build with its status (set -e).
 mod_build_program() {
-  local mdir ifaces=() others=() ordered=() rest=() s d o n=0 ready progress all=" " done_names=" "
-  local objs=() compile_args=() link_args=() a x is_src skip=0
-  mtmp=$(mktemp -d); trap 'rm -rf "$mtmp"' EXIT
-  mdir=${moddir:-$mtmp}
-  for s in ${srcs[@]+"${srcs[@]}"}; do
-    mod_check_src "$s"
-    if [ -n "$(mod_decl_name "$s")" ]; then ifaces+=("$s"); all+="$(mod_decl_name "$s") "; else others+=("$s"); fi
-  done
-  while [ ${#ifaces[@]} -gt 0 ]; do
-    progress=0; rest=()
-    for s in "${ifaces[@]}"; do
-      ready=1
-      for d in $(mod_imports "$s"); do
-        case $all in *" $d "*) case $done_names in *" $d "*) ;; *) ready=0 ;; esac ;; esac
-      done
-      if [ $ready = 1 ]; then ordered+=("$s"); done_names+="$(mod_decl_name "$s") "; progress=1; else rest+=("$s"); fi
-    done
-    [ $progress = 1 ] || { echo "nfcxx: cyclic module imports among: ${rest[*]}" >&2; exit 2; }
-    ifaces=(${rest[@]+"${rest[@]}"})
-  done
-  ordered+=(${others[@]+"${others[@]}"})
-  # The options of each step: the compile gets everything but the link-only ones, the link gets everything but the sources.
-  for a in ${nfcxx_argv[@]+"${nfcxx_argv[@]}"}; do
-    if [ $skip = 1 ]; then skip=0; continue; fi
-    is_src=0; for x in ${srcs[@]+"${srcs[@]}"}; do [ "$x" = "$a" ] && is_src=1; done
-    [ $is_src = 0 ] || continue
-    case $a in
-      -o) skip=1 ;;
-      -c|--module-dir=*) ;;
-      -l?*|-L?*|-Wl,*|*.o|*.a|*.so) link_args+=("$a") ;;
-      *) compile_args+=("$a"); link_args+=("$a") ;;
-    esac
-  done
-  for s in ${ordered[@]+"${ordered[@]}"}; do
-    o=$mtmp/m$n.o; n=$((n + 1))
-    "$root/nfcxx" -c "$s" -o "$o" --module-dir="$mdir" ${compile_args[@]+"${compile_args[@]}"}
-    objs+=("$o")
-  done
-  "$root/nfcxx" ${objs[@]+"${objs[@]}"} ${link_args[@]+"${link_args[@]}"} -o "$out"
-  exit 0
+  trap - EXIT
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-modules.rb" build "$root" "$out" "${moddir:-}" "${#srcs[@]}" "${srcs[@]}" "${nfcxx_argv[@]}"
+  exit $?
 }
 nfcxx_argv=("$@")   # the command as given: the compile cache keys on it (see cache_key)
 args0=("$@")   # the arguments as given: the SYCL two-pass build below re-runs the driver with them
