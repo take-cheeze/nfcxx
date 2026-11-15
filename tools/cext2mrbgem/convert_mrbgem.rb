@@ -98,7 +98,7 @@ INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
-ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
+ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern(?:_const)?#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
 ID_ZERO_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}0#{SS}[;,]/
 ANY_WRITE_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}(?:[-+*\/%&|^]|<<|>>)?=(?!=)/
 NON_FUNC_WORDS = Set.new(%w[if while for switch return sizeof else do case goto])
@@ -3041,7 +3041,11 @@ use_problem = lambda do |name, use|
         @warnings << { 'file' => rel, 'line' => line_of(text, m.begin(0)), 'api' => "#include <#{inc}>", 'reason' => reason }
         warn "warning: #{rel}:#{line_of(text, m.begin(0))} dropped #include <#{inc}> (#{reason})"
       else
-        refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
+        if inc == 'ruby/encoding.h'
+          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
+        else
+          refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
+        end
       end
     end
     # 2. function headers

@@ -660,7 +660,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name includes_map tools/cext2mrbgem/f
 check test "$rc" -eq 2
 check grep -qF '#include <mruby/re.h>' "$work/includes_map/src/includes_map.c"
 check grep -qF '#include <mruby/numeric.h>' "$work/includes_map/src/includes_map.c"
-check grep -q '  #include <ruby/encoding.h>  CRuby header not in the supported subset' "$work/includes_map/REFUSALS.txt"
+check grep -q '  #include <ruby/encoding.h>  stuck point (Encoding)' "$work/includes_map/REFUSALS.txt"
 
 # 2r. exception classes rb_eIndexError and rb_eRangeError (api_map.json batch D1): the class argument of rb_raise
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_exc_index tools/cext2mrbgem/fixtures/api_exc_index/ext/api_exc_index "$work/api_exc_index" > "$work/api_exc_index.log" 2>&1 || rc=$?
