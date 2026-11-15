@@ -83,7 +83,7 @@ backend does (not as one directory saved by `actions/cache`). A local miss is lo
 `DIR/objects/<key>`; a new local entry is stored remotely after it is written. `NFCXX_CACHE` is still the local side
 (without it, a temporary directory is used). The entry is a tar of `obj`, `ti` and `ii`, under the key `nfcxx-<key>`
 with the version the SHA-256 of `nfcxx-cache-v1` (a change to that namespace drops every entry).
-`scripts/nfcxx-cache-gha.py` (standard library only) makes the calls: CreateCacheEntry, PATCH to the signed upload URL
+`scripts/nfcxx-cache-gha.rb` (standard library only) makes the calls: CreateCacheEntry, PATCH to the signed upload URL
 with `Content-Range`, FinalizeCacheEntryUpload, GetCacheEntryDownloadURL and GET. It needs `ACTIONS_RESULTS_URL`,
 `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_CACHE_SERVICE_V2` set, which a workflow step has when it runs with the cache
 enabled. A remote failure is a miss, or a store that did not happen, with a note on stderr: a build does not fail for its

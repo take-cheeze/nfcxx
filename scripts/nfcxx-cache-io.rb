@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # The cache's small helpers of the bash driver (nfcxx), ported: the SHA-256 of standard input (cache_sha), the diagnostic
 # log line of --cache-log (cache_log), and the remote tier's get and put (cache_remote_get, cache_remote_put, which call the
-# Python helper scripts/nfcxx-cache-gha.py). The bash driver's functions call this script with the same arguments.
+# Python helper scripts/nfcxx-cache-gha.rb). The bash driver's functions call this script with the same arguments.
 #
 #   ruby scripts/nfcxx-cache-io.rb sha                 the SHA-256 of standard input, as "HEX  -" (sha256sum's form)
 #   ruby scripts/nfcxx-cache-io.rb log FILE TEXT...    appends TEXT (joined by spaces, as "$*") and a newline to FILE, under a
@@ -14,10 +14,10 @@ require "fileutils"
 require "open3"
 
 ROOT = File.expand_path("..", File.expand_path(File.dirname($0)))
-GHA = File.join(ROOT, "scripts", "nfcxx-cache-gha.py")
+GHA = File.join(ROOT, "scripts", "nfcxx-cache-gha.rb")
 
 def python_helper(*args)
-  Open3.capture2e("python3", "-I", GHA, *args)
+  Open3.capture2e(RbConfig.ruby, GHA, *args)
 end
 
 cmd, *rest = ARGV

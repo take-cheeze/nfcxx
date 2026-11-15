@@ -54,7 +54,7 @@
 #                  For a .cu file it keeps the device images (DIR/cu-device): an unchanged device unit skips the device
 #                  front end, the PTX emitter and ptxas; the rewriter and the host compile still run.
 #   --cache-log=FILE (NFCXX_CACHE_LOG=FILE): with --cache, appends each lookup's key inputs, its key, and hit or miss to FILE, to diff a miss against a hit.
-#   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.py), like sccache's GHA backend.
+#   NFCXX_CACHE_REMOTE=gha: with the cache, objects are also kept in the GitHub Actions cache (scripts/nfcxx-cache-gha.rb), like sccache's GHA backend.
 #   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Path B (the default
 #                  backend) calls libasan's checks before each access through a computed address (docs/notes/asan-plan.md), and
 #                  a program Path B does not build falls back to gcc, which instruments the code; --backend=gcc is used.
@@ -138,7 +138,7 @@ eh_unwind_on=0; [ "${NFCXX_EH_UNWIND:-}" != 1 ] || eh_unwind_on=1       # --eh-u
 eh_shim_on=1; [ "${NFCXX_EHSHIM:-1}" != 0 ] || eh_shim_on=0             # --no-eh-shim
 cache_dir=${NFCXX_CACHE:-}; cache_log_file=${NFCXX_CACHE_LOG:-}         # --cache=DIR, --cache-log=FILE
 # NFCXX_CACHE_REMOTE=gha: each stored object is also kept in the GitHub Actions cache, and a local miss is looked up there
-# (scripts/nfcxx-cache-gha.py; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
+# (scripts/nfcxx-cache-gha.rb; docs/notes/cxx-driver.md). Without NFCXX_CACHE the local side is a temporary directory.
 cache_remote=${NFCXX_CACHE_REMOTE:-}
 case $cache_remote in ""|gha) ;; *) echo "nfcxx: NFCXX_CACHE_REMOTE takes gha (got '$cache_remote')" >&2; exit 2 ;; esac
 [ -n "$cache_dir" ] || [ -z "$cache_remote" ] || cache_dir=${TMPDIR:-/tmp}/nfcxx-cache-$(id -u)
@@ -183,7 +183,7 @@ cache_log() {  # cache_log TEXT: appends TEXT as one write to NFCXX_CACHE_LOG wh
 cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) from the remote cache; fails on a miss or an error
   local tmp=$2.remote.$$ rc=0
   rm -rf "$tmp"
-  python3 -I "$root/scripts/nfcxx-cache-gha.py" get "$1" "$tmp" || rc=$?
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" get "$1" "$tmp" || rc=$?
   if [ $rc = 0 ] && [ -f "$tmp/obj" ]; then
     mkdir -p "$(dirname "$2")"; [ -e "$2" ] || mv "$tmp" "$2" 2>/dev/null || true
   else rc=1; fi
@@ -193,7 +193,7 @@ cache_remote_get() {  # cache_remote_get KEY ENTRY: fills ENTRY (a directory) fr
 cache_remote_put() {  # cache_remote_put KEY ENTRY: stores the files of the local entry ENTRY remotely
   local names=(obj) x
   for x in ti ii; do [ ! -f "$2/$x" ] || names+=("$x"); done
-  python3 -I "$root/scripts/nfcxx-cache-gha.py" put "$1" "$2" "${names[@]}" \
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-cache-gha.rb" put "$1" "$2" "${names[@]}" \
     || echo "nfcxx: remote cache: could not store $1 (the build continues)" >&2
 }
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:

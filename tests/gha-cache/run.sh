@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Tests scripts/nfcxx-cache-gha.py against tests/gha-cache/mock_results.py (a mock of the Actions cache service).
+# Tests the Python original (tests/gha-cache/oracle-nfcxx-cache-gha.py) against tests/gha-cache/mock_results.py (a mock of the Actions cache service).
 # This checks the client's requests and its handling of the service's answers. It does not reach GitHub.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-helper=$root/scripts/nfcxx-cache-gha.py
+helper=$root/tests/gha-cache/oracle-nfcxx-cache-gha.py
 mock=$root/tests/gha-cache/mock_results.py
 work=$(mktemp -d); trap 'kill $mock_pid 2>/dev/null || true; rm -rf "$work"' EXIT
 pass=0; fail=0

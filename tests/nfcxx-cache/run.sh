@@ -154,7 +154,7 @@ run_all() {
   CASE_TEST=(CACHE_TEST_REMOTE=hit); CASE_PORT=(--remote=hit); EXPECT="EXIT 0"; run_case
 
   set_case gha-miss main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=gha")
-  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); EXPECT="nfcxx-cache-gha.py put"; run_case
+  CASE_TEST=(CACHE_TEST_REMOTE=miss); CASE_PORT=(--remote=miss); EXPECT="nfcxx-cache-gha.rb put"; run_case
 
   set_case bad-remote main.cpp main.o; CASE_ENV=("NFCXX_CACHE=$work/cache" "NFCXX_CACHE_REMOTE=s3"); CHECK=check_bad_remote
   run_case

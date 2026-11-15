@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A mock of the GitHub Actions cache service (the v2 Results API calls scripts/nfcxx-cache-gha.py makes), for tests.
+"""A mock of the GitHub Actions cache service (the v2 Results API calls scripts/nfcxx-cache-gha.rb makes), for tests.
 It keeps entries in memory and checks what the client must send: the bearer token, the protobuf fields, the PATCH with
 Content-Range, and the size at finalize. Entries are immutable, as the real service's are. Usage: mock_results.py TOKEN
 Prints the base URL on its first line, then serves until it is killed."""
@@ -9,20 +9,86 @@ import sys
 import threading
 import uuid
 
-import importlib.util
-import os
+# The client's wire format, as the Python codec this mock once imported from scripts/nfcxx-cache-gha.py had it: the mock
+# carries its own copy, so it does not depend on the client (the Ruby client is checked against it).
+SERVICE = "twirp/github.actions.results.api.v1.CacheService/"
+ACCEPT = "application/json;api-version=6.0-preview.1"
 
-# The helper's protobuf codec is reused here, so the test checks the wire format both ways.
-_spec = importlib.util.spec_from_file_location(
-    "nfcxx_cache_gha", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "nfcxx-cache-gha.py"))
-c = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(c)
+
+class CacheError(Exception):
+    pass
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _pb_str(field, s):
+    data = s.encode() if isinstance(s, str) else s
+    return _varint((field << 3) | 2) + _varint(len(data)) + data
+
+
+def _pb_int(field, n):
+    return _varint((field << 3) | 0) + _varint(n)
+
+
+def _pb_decode(buf):
+    """Returns {field: [value, ...]}; a varint is an int, a length-delimited field is bytes."""
+    out = {}
+    i = 0
+    while i < len(buf):
+        tag = 0
+        shift = 0
+        while True:
+            b = buf[i]
+            i += 1
+            tag |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                break
+        field, wire = tag >> 3, tag & 7
+        if wire == 0:
+            val = 0
+            shift = 0
+            while True:
+                b = buf[i]
+                i += 1
+                val |= (b & 0x7F) << shift
+                shift += 7
+                if not b & 0x80:
+                    break
+        elif wire == 2:
+            n = 0
+            shift = 0
+            while True:
+                b = buf[i]
+                i += 1
+                n |= (b & 0x7F) << shift
+                shift += 7
+                if not b & 0x80:
+                    break
+            val = bytes(buf[i:i + n])
+            i += n
+        else:
+            raise CacheError(f"unsupported protobuf wire type {wire}")
+        out.setdefault(field, []).append(val)
+    return out
+
+
 
 TOKEN = sys.argv[1]
 ENTRIES = {}    # (key, version) -> {"id": str, "data": bytes or None, "final": bool}
 BLOBS = {}      # id -> bytes
 LOCK = threading.Lock()
-SERVICE = "/" + c.SERVICE
+SERVICE = "/" + SERVICE
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -45,14 +111,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.headers.get("Authorization") == f"Bearer {TOKEN}"
 
     def do_POST(self):
+        body = self._body()   # read before any early reply: an unread body would be parsed as the next request
         if not self.path.startswith(SERVICE):
             return self._send(404)
         if not self._auth_ok():
             return self._send(401, b'{"code":"unauthenticated"}', "application/json")
-        if self.headers.get("Accept") != c.ACCEPT:
+        if self.headers.get("Accept") != ACCEPT:
             return self._send(400, b'{"code":"invalid_argument","msg":"Accept"}', "application/json")
         method = self.path[len(SERVICE):]
-        f = c._pb_decode(self._body())
+        f = _pb_decode(body)
         key = f.get(2, [b""])[0].decode()
         version = f.get(4 if method in ("FinalizeCacheEntryUpload", "GetCacheEntryDownloadURL") else 3, [b""])[0].decode()
         if method == "FinalizeCacheEntryUpload" and 4 not in f:
@@ -61,20 +128,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ent = ENTRIES.get((key, version))
             if method == "CreateCacheEntry":
                 if ent is not None:
-                    return self._send(200, c._pb_int(1, 0) + c._pb_str(3, "exists"))
+                    return self._send(200, _pb_int(1, 0) + _pb_str(3, "exists"))
                 eid = uuid.uuid4().hex
                 ENTRIES[(key, version)] = {"id": eid, "data": None, "final": False}
-                return self._send(200, c._pb_int(1, 1) + c._pb_str(2, f"{BASE}/blob/{eid}"))
+                return self._send(200, _pb_int(1, 1) + _pb_str(2, f"{BASE}/blob/{eid}"))
             if method == "FinalizeCacheEntryUpload":
                 size = f.get(3, [-1])[0]
                 if ent is None or ent["data"] is None or len(ent["data"]) != size:
-                    return self._send(200, c._pb_int(1, 0))
+                    return self._send(200, _pb_int(1, 0))
                 ent["final"] = True
-                return self._send(200, c._pb_int(1, 1) + c._pb_int(2, 1))
+                return self._send(200, _pb_int(1, 1) + _pb_int(2, 1))
             if method == "GetCacheEntryDownloadURL":
                 if ent is None or not ent["final"]:
-                    return self._send(200, c._pb_int(1, 0))
-                return self._send(200, c._pb_int(1, 1) + c._pb_str(2, f"{BASE}/blob/{ent['id']}"))
+                    return self._send(200, _pb_int(1, 0))
+                return self._send(200, _pb_int(1, 1) + _pb_str(2, f"{BASE}/blob/{ent['id']}"))
         return self._send(404)
 
     def do_PATCH(self):
