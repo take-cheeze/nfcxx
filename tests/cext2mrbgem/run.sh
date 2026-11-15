@@ -507,6 +507,10 @@ check grep -qF 'h.cbs->on_null(ctx)' "$work/api_tbl_names/src/api_tbl_names.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_typedef tools/cext2mrbgem/fixtures/api_fnptr_typedef/ext/api_fnptr_typedef "$work/api_fnptr_typedef" > "$work/api_fnptr_typedef.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'if (h.dump == ftd_attrs) {' "$work/api_fnptr_typedef/src/api_fnptr_typedef.c"
+# 2zzz95. RB_OBJ_WRITE with a call as its value and a field address: mrb_write_field takes each argument once, in order.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_obj_write tools/cext2mrbgem/fixtures/api_obj_write/ext/api_obj_write "$work/api_obj_write" > "$work/api_obj_write.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_write_field(mrb, holder, &box->v, ow_canon(val));' "$work/api_obj_write/src/api_obj_write.c"
 # 2zzz94. An inline static function defined in two .c files is renamed per file (as a plain static is).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_inline_static tools/cext2mrbgem/fixtures/api_inline_static/ext/api_inline_static "$work/api_inline_static" > "$work/api_inline_static.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -1147,7 +1151,7 @@ check test ! -e "$work/api_exc_class/NOT_BUILDABLE"
 check grep -qF 'mrb_class_get(mrb, "Numeric")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_exc_get(mrb, "IOError")' "$work/api_exc_class/src/api_exc_class.c"
 check grep -qF 'mrb_ensure_string_type(mrb, s)' "$work/api_exc_class/src/api_exc_class.c"
-check grep -qF 'mrb_field_write_barrier_value(mrb, mrb_basic_ptr(self), v)' "$work/api_exc_class/src/api_exc_class.c"
+check grep -qF 'mrb_write_field(mrb, self, &slot, v);' "$work/api_exc_class/src/api_exc_class.c"
 
 # 2zzs. CRuby address roots (rb_gc_register_address, rb_global_variable: a VALUE the GC must keep through a variable):
 # mapped to the fork's mrb_gc_register_address (fork branch claude/gc-address-roots); the output compiles against the fork headers

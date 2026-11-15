@@ -452,8 +452,8 @@
       "kind": "template",
       "arity": 3,
       "needs_mrb": true,
-      "template": "do { *($1) = ($2); mrb_field_write_barrier_value($m, mrb_basic_ptr($0), $2); } while (0)",
-      "caveat": "the object must be a heap value (CRuby's RB_OBJ_WRITE has the same requirement); the write barrier is mruby's field barrier"
+      "template": "mrb_write_field($m, $0, $1, $2)",
+      "caveat": "the object must be a heap value (CRuby's RB_OBJ_WRITE has the same requirement); the fork's mrb_write_field (include/mruby.h, branch claude/write-field of take-cheeze/mruby) stores the value and runs mruby's field write barrier once"
     },
     "StringValue": {
       "kind": "template",
