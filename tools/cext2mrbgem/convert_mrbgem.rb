@@ -967,6 +967,9 @@ texts = static_rename(texts)
     f = @files[rel]
     masked = f['masked']
     build = Set.new((@defines || []).map { |d| d.split('=', 2)[0] })
+    # The target is a non-Windows mruby build: these names are undefined in it, so their #ifdef branches are inactive
+    # (oj's rb_w32_* calls sit under #ifdef _WIN32). A Windows target would need this set changed.
+    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__])
     gem_defined = Set.new
     @files.each_value { |g| g['masked'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/) { gem_defined << $1 } }
     out = []
@@ -975,15 +978,18 @@ texts = static_rename(texts)
     masked.each_line do |line|
       lstart = pos
       pos += line.length
-      if (m = /\A[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b[ \t]*(.*)\z/.match(line))
+      if (m = /\A[ \t]*#[ \t]*(if|ifdef|ifndef|else|elif|endif)\b[ \t]*(.*?)[ \t\r\n]*\z/.match(line))
         kw, arg = m[1], m[2].to_s.strip
         case kw
         when 'if', 'ifdef', 'ifndef'
-          # only #if 0 and a name this build or the gem defines are decided: a name defined by no -D option and no #define
-          # of the gem may come from mkmf (HAVE_*, extconf.h), so its branch stays active
+          # only #if 0, a name this build defines (-D), and the names the target leaves undefined are decided: a name the gem
+          # #defines is not decided (an include guard #defines its own name inside its #ifndef), and a name no -D option
+          # sets may come from mkmf (HAVE_*, extconf.h), so its branch stays active
           value = if kw == 'if' && arg == '0' then false
-                  elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && (build.include?($1) || gem_defined.include?($1))
+                  elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && build.include?($1)
                     kw == 'ifdef'
+                  elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && target_undefined.include?($1)
+                    kw == 'ifndef'
                   end
           frame = { value: value, inactive_from: nil }
           frame[:inactive_from] = pos if value == false
@@ -3144,7 +3150,12 @@ end
       s, e = m.begin(0), m.end(0)
       name = m[0]
       next if is_member(masked, s) || ed.overlaps(s, e)
+      # the name a #define or #undef names is the macro's own name, not a use (an api_map name with an expr entry keeps it)
+      lstart = masked.rindex("\n", s - 1) || -1
+      next if masked[(lstart + 1)...s].to_s.match?(/\A[ \t]*#[ \t]*(?:define|undef)[ \t]+\z/)
       next if unused_spans.any? { |a, b| a <= s && s < b }
+      # a name in inactive code (#if 0, an excluded branch, a dead definition) is not compiled: it is left as written
+      next if ((@excluded_spans || {})[rel] || []).any? { |a, z| a < s && s < z }
       # a name in a conditional directive (#if, #ifdef, #ifndef, #elif, or defined(...)) is a feature test, not a use: it stays
       # as written, and the preprocessor of the mruby build answers it (mruby defines none of CRuby's feature macros)
       next if pp_conditional_at?(masked, s)

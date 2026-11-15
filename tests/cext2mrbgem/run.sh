@@ -510,7 +510,12 @@ check test "$rc" -eq 0
 # 2zzz76. A use of a helper in inactive code (#if 0) is not a use: the converter does not refuse it, and the live code converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dead_use tools/cext2mrbgem/fixtures/api_dead_use/ext/api_dead_use "$work/api_dead_use" > "$work/api_dead_use.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'static mrb_value du_dead' "$work/api_dead_use/src/api_dead_use.c"
+check grep -qF '#if 0' "$work/api_dead_use/src/api_dead_use.c"  # the inactive block stays inactive (its text is not compiled)
+check grep -qF 'du_dead(' "$work/api_dead_use/src/api_dead_use.c"
+# 2zzz89. #ifdef _WIN32 is inactive on the non-Windows target: a Windows-only call inside it is not refused.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_win_branch tools/cext2mrbgem/fixtures/api_win_branch/ext/api_win_branch "$work/api_win_branch" > "$work/api_win_branch.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_win_branch/REFUSALS.txt" -o "$(grep -c rb_w32 "$work/api_win_branch/REFUSALS.txt" 2>/dev/null)" = 0
 check grep -qF '#if 0  /* BC2CPP-MRBGEM: unused macro' "$work/api_macro_nested/src/api_macro_nested.c"
 # 2zzz56. rb_intern3(str, len, enc) with expression arguments: the encoding is dropped (a pure encoding getter), the rest converts.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_intern3 tools/cext2mrbgem/fixtures/api_intern3/ext/api_intern3 "$work/api_intern3" > "$work/api_intern3.log" 2>&1 || rc=$?
