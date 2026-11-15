@@ -1301,6 +1301,11 @@ rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner
 check test "$rc" -eq 0
 fi
 check grep -qF 'mrb_undef_class_method(mrb, cBox, "new");' "$work/api_str_barrier/src/api_str_barrier.c"
+# 2zzz99. a struct member named like a helper (and reached through a macro's ->x) is a field: the helper is still threaded.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_helper_name tools/cext2mrbgem/fixtures/api_field_helper_name/ext/api_field_helper_name "$work/api_field_helper_name" > "$work/api_field_helper_name.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_field_helper_name/NOT_BUILDABLE"
+check grep -qF 'static mrb_value sec(mrb_state *mrb, mrb_value f) {' "$work/api_field_helper_name/src/api_field_helper_name.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

@@ -1599,6 +1599,23 @@ end
     m[1].split(',').map(&:strip).index(t)
   end
 
+  # true when the name at [s, e) is the only argument of a call M(name) to a one-parameter function-like macro M
+  # whose body uses its parameter as a member (M(x) (p->x) or p.x): the name is a field, not a use of a helper
+  def member_macro_arg?(rel, s, e)
+    masked = @files[rel]['masked']
+    open = prev_nonspace(masked, s - 1)
+    return false if open < 0 || masked[open] != '('
+    callee = masked[[open - 60, 0].max...open].to_s[/([A-Za-z_]\w*)[ \t\n]*\z/, 1]
+    return false unless callee
+    close = next_nonspace(masked, e)
+    return false if close < 0 || masked[close] != ')'
+    d = /^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(callee)}\(([A-Za-z_]\w*)\)/.match(masked)
+    return false unless d
+    param = d[1]
+    body_end = logical_line_end(masked, d.end(0))
+    masked[d.end(0)...body_end].to_s.match?(/(?:\.|->)[ \t\n]*#{Regexp.escape(param)}\b/)
+  end
+
   # for each invocation of macro name (outside any #define), its k-th argument when that is a plain helper name:
   # [helper, rel, position], or nil when some invocation's argument is not one
   # The name an object-like macro stands for when the macro's body is a single identifier (#define cb real_cb): real_cb.
@@ -2173,6 +2190,12 @@ end
         # a use in inactive code (an #if 0 or another excluded conditional branch) cannot run: it is not a use
         next if ((@excluded_spans || {})[rel] || []).any? { |a, z| a < s && s < z }
         masked = @files[rel]['masked']
+        # a struct member of the same name (obj.name, obj->name) is a field, not a use of the helper
+        next if masked[[s - 40, 0].max...s].to_s.match?(/(?:\.|->)[ \t\n]*\z/)
+        # a function-pointer field declaration of the same name, as in a struct body: type (*name)(params);
+        next if masked[[s - 40, 0].max...s].to_s.match?(/\(\*[ \t\n]*\z/) && masked[e..].to_s.match?(/\A[ \t\n]*\)[ \t\n]*\(/)
+        # the only argument of a one-parameter macro whose body uses the parameter as a member (#define M(x) (p->x)): a field
+        next if member_macro_arg?(rel, s, e)
         nx = next_nonspace(masked, e)
         direct = nx >= 0 && masked[nx] == '('
         out << [rel, s, direct, enclosing_func(rel, s)]
