@@ -4448,7 +4448,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
     # a converted source that uses mruby names includes the mruby headers itself (gem_init.c has its own include)
     prelude_headers = %w[mruby.h mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h
-                         mruby/numeric.h mruby/string.h mruby/variable.h]
+                         mruby/numeric.h mruby/range.h mruby/string.h mruby/variable.h]
     @files.each do |rel, f|
       next unless f['kind'] == 'src'
       t = outputs[rel]

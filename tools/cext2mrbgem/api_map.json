@@ -1193,6 +1193,13 @@
       "template": "(size_t)RARRAY_LEN(mrb_obj_instance_variables($m, $0))",
       "caveat": "the number of instance variables of the object: the length of mruby's instance_variables array (CRuby counts the generic ivar table the same way)"
     },
+    "rb_range_values": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "template": "(*($1) = RANGE_BEG(mrb_range_ptr($m, $0)), *($2) = RANGE_END(mrb_range_ptr($m, $0)), *($3) = mrb_range_ptr($m, $0)->excl, 1)",
+      "caveat": "the begin, end and exclude-end of a Range (the fork's RANGE_BEG/RANGE_END accessors); the result is 1 for a Range: the argument must be a Range, as the callers check it"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",

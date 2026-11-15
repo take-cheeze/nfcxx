@@ -488,6 +488,11 @@ check grep -qF '.tv_sec = mrb_fixnum(mrb_funcall(mrb, t, "to_i", 0))' "$work/api
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_count tools/cext2mrbgem/fixtures/api_ivar_count/ext/api_ivar_count "$work/api_ivar_count" > "$work/api_ivar_count.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF '(size_t)RARRAY_LEN(mrb_obj_instance_variables(mrb, obj))' "$work/api_ivar_count/src/api_ivar_count.c"
+# 2zzz86. rb_range_values(r, &beg, &end, &excl) reads the Range's edges through the fork's accessors (range.h is included).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_range_values tools/cext2mrbgem/fixtures/api_range_values/ext/api_range_values "$work/api_range_values" > "$work/api_range_values.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF '*(&beg) = RANGE_BEG(mrb_range_ptr(mrb, r))' "$work/api_range_values/src/api_range_values.c"
+check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_values.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
