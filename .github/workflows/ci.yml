@@ -116,13 +116,13 @@ jobs:
           echo "host=$(gcc -dumpfullversion)-$(g++ -dumpfullversion)-ruby$(ruby -e 'print RUBY_VERSION')" >> "$GITHUB_OUTPUT"
           echo "go=$(go env GOVERSION 2>/dev/null)" >> "$GITHUB_OUTPUT"
 
-      # scripts/mrb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
+      # scripts/mrb.rb runs nfcxx's scripts with this mruby, and every QBE-backend compile runs it, so each QBE job built it on
       # first use. setup-mruby.sh only checks that the executable exists, so the key holds the script, its config and mrb.
       - name: Restore the mruby tool
         uses: actions/cache@v6
         with:
           path: build/mruby-tool/bin/mruby
-          key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}-${{ steps.key.outputs.host }}
+          key: mruby-tool-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb.rb') }}-${{ steps.key.outputs.host }}
 
       # The nfcpoly interpreters (scripts/setup-poly.sh, setup-poly-lua.sh, setup-poly-js.sh) for one back end. Their inputs are
       # the scripts, the patches and the pins in them, the compiler (nfcxx, nfcc, be/, the runtime files of lib/ that the
@@ -462,7 +462,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb.rb') }}
 
       - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
         if: steps.mruby.outputs.cache-hit != 'true'
@@ -544,7 +544,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb.rb') }}
           fail-on-cache-miss: true
 
       - name: ${{ matrix.name }}
@@ -688,8 +688,11 @@ jobs:
             - "tests/pathb-borrow/**"
             - "be/nfcxx_*.c"
             - "scripts/nfcxx-*"
+            # a world compiles this Ruby script (bc2cpp base_rbs_native.rb runs it); scope_check.rb lists plain .rb paths
+            - "scripts/nfcxx-cpp.rb"
             - "scripts/setup-libclang-edg.sh"
-            - "scripts/build-libclang-edg.sh"
+            # a glob, as the bash name was: this build step is not a bc2cpp world script
+            - "scripts/build-libclang-edg.*"
             - "scripts/setup-edg.sh"
             # The submodules and scripts the nfcxx-clang-parity job builds from (the toolchain action's cache keys): a bump
             # of EDG or QBE, or a change to their setup, must re-run the parity check.
@@ -1018,7 +1021,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/libclang-edg
-          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.sh', 'scripts/setup-edg.sh') }}
+          key: libclang-edg-${{ runner.os }}-${{ runner.arch }}-${{ steps.libclang-key.outputs.edg }}-${{ hashFiles('be/nfcxx_decl.c', 'be/nfcxx_ast.c', 'be/nfcxx_edg_entry.c', 'scripts/setup-libclang-edg.sh', 'scripts/build-libclang-edg.rb', 'scripts/setup-edg.sh') }}
 
       - name: Build the AST front end
         if: steps.libclang-edg.outputs.cache-hit != 'true'

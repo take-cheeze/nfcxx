@@ -41,7 +41,7 @@ module WrapCli
       !system("ninja", "-C", File.join(ROOT, "tools/bundle"), out: File::NULL)
     end
     env.shim = lambda do |include_dir|
-      out, ok = capture_stdout([File.join(ROOT, "scripts/cuda-driver-shim"), include_dir], err: [:child, :out])
+      out, ok = capture_stdout([File.join(ROOT, "scripts/cuda-driver-shim.rb"), include_dir], err: [:child, :out])
       text = out.sub(/\n+\z/, "")
       ok ? [text, nil] : [nil, text]
     end

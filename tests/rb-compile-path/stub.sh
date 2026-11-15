@@ -1,6 +1,6 @@
 #!/bin/bash
 # Logging stub for the external commands of the compile-path scripts (tests/rb-compile-path/run.sh links it under each command
-# name in the sandbox's bin directory and at the sandbox's scripts/mrb, scripts/pathb-cil and nfcxx). Every call is logged
+# name in the sandbox's bin directory and at the sandbox's scripts/mrb.rb, scripts/pathb-cil.rb and nfcxx). Every call is logged
 # as "NAME ARGS" to NFCXX_STUB_LOG and nothing real runs, except awk, grep, head, tr, sed, cat, which are the real tools.
 #   cc, gcc, g++   --version / -dumpfullversion answer from NFCXX_STUB_CXX_CLANG (clang) and NFCXX_STUB_NOVER (no version);
 #                  -print-file-name prints NFCXX_STUB_LIBSTDCXX; -c -o OUT SRC copies SRC to OUT (exit NFCXX_STUB_CC_RC)
@@ -63,11 +63,11 @@ case $name in
   nm) [ -z "${NFCXX_STUB_NM:-}" ] || cat "$NFCXX_STUB_NM"; exit 0 ;;
   realpath) last_arg "$@"; echo; exit 0 ;;
   xcrun) echo "${NFCXX_STUB_SDK:-}"; exit 0 ;;
-  pathb-cil)
+  pathb-cil.rb)
     rc=${NFCXX_STUB_PATHB_RC:-0}
     if [ "$rc" = 0 ]; then o=$(out_of "$@"); [ -z "$o" ] || echo '{' > "$o"; exit 0; fi
     printf '%b\n' "${NFCXX_STUB_PATHB_ERR:-}" >&2; exit "$rc" ;;
-  mrb)
+  mrb.rb)
     log "ENV NFCXX_CIL=${NFCXX_CIL:-unset}"; exit 0 ;;
   nfcxx)
     rc=${NFCXX_STUB_RC:-0}

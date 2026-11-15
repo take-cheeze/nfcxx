@@ -88,7 +88,7 @@ def tally(out, files)
     files.each do |f|
       ir = ir_path(out, f)
       next unless File.file?(ir)
-      rc = run({}, ["scripts/mrb", "scripts/pathb-borrowck.rb", *opts, ir], out: stdout_file, err: stderr_file)
+      rc = run({}, ["scripts/mrb.rb", "scripts/pathb-borrowck.rb", *opts, ir], out: stdout_file, err: stderr_file)
       # The first line of the checker's stderr, then its stdout, that is not an "inferred:" line.
       msg = (slurp(stderr_file).lines + slurp(stdout_file).lines)
             .reject { |l| l.start_with?("inferred:") }.first.to_s.delete_suffix("\n")

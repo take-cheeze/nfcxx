@@ -12,7 +12,7 @@
 # uses them (and COMDAT data: variable templates, static data members of templates, local statics of inline
 # functions), marked __weak__. GCC honours the attribute so the link merges the copies; cproc drops
 # attributes, so QBE emits them as strong symbols and the link fails with "multiple definition".
-# Usage: scripts/mrb scripts/weak-symbols.rb [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
+# Usage: scripts/mrb.rb scripts/weak-symbols.rb [--c-input] PREPROCESSED_C ASSEMBLY  (appends .weak lines to ASSEMBLY)
 #
 # mruby has no Regexp, so the scanning is by hand. It mirrors the Python original (tests/mruby/oracle/weak-symbols.py, deleted) exactly.
 

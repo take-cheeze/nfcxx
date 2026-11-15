@@ -4,7 +4,7 @@ static VALUE body_fn(VALUE self) {
     return Qnil;
 }
 
-static VALUE cleanup_fn(VALUE self) {
+VALUE cleanup_fn(VALUE self) {
     return Qnil;
 }
 

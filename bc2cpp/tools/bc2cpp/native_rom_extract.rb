@@ -3,7 +3,7 @@
 require 'json'
 
 # Native method registrations from the AST of a translation unit: clang's JSON (`clang -fsyntax-only -Xclang
-# -ast-dump=json`) or the nfcxx front end's (scripts/nfcxx-ast-dump, docs/notes/nfcxx-ast.md; it carries the file-scope
+# -ast-dump=json`) or the nfcxx front end's (scripts/nfcxx-ast-dump.rb, docs/notes/nfcxx-ast.md; it carries the file-scope
 # initializers, a ck_aggregate array of structs as InitListExpr of InitListExpr, and enumerators by name).
 #
 #   clang -fsyntax-only -Xclang -ast-dump=json <flags> SOURCE | ruby native_rom_extract.rb

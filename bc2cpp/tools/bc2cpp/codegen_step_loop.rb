@@ -73,7 +73,7 @@ class CodeGen
   # bound needs Integer#step's own body, which a `long long` counter cannot stand in for. The
   # block becomes the ordinary BLOCK_FALLBACK cfunc; nil when it is not fallback-safe.
   def step_loop_guard_fallback(region, irep, d)
-    fallback = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep))
+    fallback = recognize_block_fallback_regions(irep, available_upvars: block_upvar_needs(irep) || [], blk_available: frame_block_available?(irep))
                .find { |r| r[:block_addr] == region[:block_addr] }
     return nil unless fallback
 

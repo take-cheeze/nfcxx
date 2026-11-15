@@ -8,7 +8,7 @@ pass=0
 for src in tests/pathb-borrow/cases/*.ir; do
   want=$(head -1 "${src%.ir}.expect")
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb "$src" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb "$src" > "$tmp/out" 2>&1 || rc=$?
   if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "${src%.ir}.expect") "$tmp/out"; then
     echo "FAIL $src: expected exit $want, got $rc"
     cat "$tmp/out"
@@ -18,7 +18,7 @@ for src in tests/pathb-borrow/cases/*.ir; do
   pass=$((pass + 1))
   if [ "$want" = 3 ]; then
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$src" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb --infer-loan-ends "$src" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != 3 ] || ! diff -u <(tail -n +2 "${src%.ir}.expect") "$tmp/out"; then
       echo "FAIL $src: inference must preserve refusal"
       exit 1
@@ -35,7 +35,7 @@ for src in tests/pathb-borrow/emitted/*.ir; do
     [ -n "$options" ] || [ ! -f "${src%.ir}.all.expect" ] || expected=${src%.ir}.all.expect
     want=$(head -1 "$expected")
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb $options "$src" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb $options "$src" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
       echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
       cat "$tmp/out"
@@ -52,7 +52,7 @@ for src in tests/pathb-borrow/emitted/*.cpp; do
     want=$(sed -n 's,^// EXIT: ,,p' "$src"); pattern=$(sed -n 's,^// DIAG: ,,p' "$src")
     [ -n "$options" ] || { want=$(sed -n 's,^// ALL: ,,p' "$src"); pattern=""; }
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb $options --infer-summaries --infer-loan-ends "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb $options --infer-summaries --infer-loan-ends "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! grep -Fq -- "$pattern" "$tmp/out"; then
       echo "FAIL $src (${options:-all functions}): expected exit $want, got $rc"
       cat "$tmp/out"
@@ -70,7 +70,7 @@ for src in tests/pathb-borrow/inferred/*.ir; do
     expected=${src%.ir}.$mode.expect
     want=$(head -1 "$expected")
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
       echo "FAIL $src ($mode): expected exit $want, got $rc"
       cat "$tmp/out"
@@ -91,7 +91,7 @@ for src in tests/pathb-borrow/moves/*.ir tests/pathb-borrow/fields/*.ir tests/pa
     fi
     want=$(head -1 "$expected")
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
       echo "FAIL $src ($mode): expected exit $want, got $rc"
       cat "$tmp/out"
@@ -109,7 +109,7 @@ for src in tests/pathb-borrow/summaries/*.ir; do
     expected=${src%.ir}.expect
     want=$(head -1 "$expected")
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$src" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
       echo "FAIL $src ($mode): expected exit $want, got $rc"
       cat "$tmp/out"
@@ -124,7 +124,7 @@ done
 for src in tests/pathb-borrow/cpp/*.cpp; do
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/source.ir"
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/source.ir" > "$tmp/out" 2>&1 || rc=$?
   want=$(sed -n 's,^// EXIT: ,,p' "$src")
   pattern=$(sed -n 's,^// DIAG: ,,p' "$src")
   if [ "$rc" != "$want" ] || ! grep -Fq -- "$pattern" "$tmp/out"; then
@@ -132,7 +132,7 @@ for src in tests/pathb-borrow/cpp/*.cpp; do
     cat "$tmp/out"
     exit 1
   fi
-  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/source.ir" > "$tmp/source.qbe"
+  scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/source.ir" > "$tmp/source.qbe"
   echo "ok   $src"
   pass=$((pass + 1))
 done
@@ -145,13 +145,13 @@ for effects in tests/pathb-borrow/contracts/*.effects; do
   want=$(head -1 "$expected")
   for options in "" --infer-loan-ends; do
     rc=0
-    scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/contracted.ir" > "$tmp/out" 2>&1 || rc=$?
+    scripts/mrb.rb scripts/pathb-borrowck.rb $options "$tmp/contracted.ir" > "$tmp/out" 2>&1 || rc=$?
     if [ "$rc" != "$want" ] || ! diff -u <(tail -n +2 "$expected") "$tmp/out"; then
       echo "FAIL $effects ${options:-explicit}: expected exit $want, got $rc"
       exit 1
     fi
   done
-  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/contracted.ir" > "$tmp/contracted.qbe"
+  scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/contracted.ir" > "$tmp/contracted.qbe"
   echo "ok   $effects against lowered C++ bodies"
   pass=$((pass + 1))
 done
@@ -164,10 +164,10 @@ grep -Fqx '(borrow-layout (struct "Pair") 8 4 (field "a" 0 int) (field "b" 4 int
 sed '/^  init_pair(&s, 2);$/d' tests/pathb-borrow/contracts/inferred.cpp > "$tmp/uninit.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/uninit.cpp" > "$tmp/uninit0.layout.ir" 2>/dev/null
 for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
-  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/inferred0.layout.ir" > "$tmp/out"
+  scripts/mrb.rb scripts/pathb-borrowck.rb $options "$tmp/inferred0.layout.ir" > "$tmp/out"
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL inferred.cpp ($options)"; cat "$tmp/out"; exit 1; }
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/uninit0.layout.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb $options "$tmp/uninit0.layout.ir" > "$tmp/out" 2>&1 || rc=$?
   if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: s' "$tmp/out"; then
     echo "FAIL inferred.cpp without init_pair ($options): expected exit 1, got $rc"
     cat "$tmp/out"
@@ -176,13 +176,13 @@ for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
 done
 # Printed summaries are ordinary contracts: pasted back, they check without inference.
 { head -1 "$tmp/inferred0.layout.ir"
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/inferred0.layout.ir" | sed -n 's/^inferred: //p'
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries "$tmp/inferred0.layout.ir" | sed -n 's/^inferred: //p'
   tail -n +2 "$tmp/inferred0.layout.ir"; } > "$tmp/pasted.ir"
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/pasted.ir" > "$tmp/out"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted-oracle.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted.qbe"
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/pasted.ir" > "$tmp/out"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/pasted.ir" > "$tmp/pasted.qbe"
 cmp "$tmp/pasted.qbe" "$tmp/pasted-oracle.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/inferred0.layout.ir" > "$tmp/inferred.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/inferred0.layout.ir" > "$tmp/inferred.qbe"
 cmp "$tmp/inferred.qbe" "$tmp/pasted.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/inferred.qbe" -o "$tmp/inferred.s"
 cc "$tmp/inferred.s" -o "$tmp/inferred"
@@ -198,19 +198,19 @@ for name in aliases aliases_held; do
   [ "$name" = aliases ] || src=$tmp/$name.cpp
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/$name.ir"
 done
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $aliases"; cat "$tmp/out"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases_held.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/aliases_held.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
   echo "FAIL $aliases holding the alias across a write: expected exit 1, got $rc"
   cat "$tmp/out"
   exit 1
 fi
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/aliases.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries "$tmp/aliases.ir" > "$tmp/out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || { echo "FAIL $aliases: implicit loans need inference, got $rc"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/aliases.ir" > "$tmp/aliases.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/aliases.ir" > "$tmp/aliases.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/aliases.qbe" -o "$tmp/aliases.s"
 cc "$tmp/aliases.s" -o "$tmp/aliases"
 "$tmp/aliases" || { echo "FAIL $aliases runtime: expected 0"; exit 1; }
@@ -226,14 +226,14 @@ for name in two_sources two_held_arg two_held_field; do
   [ "$name" = two_sources ] || src=$tmp/$name.cpp
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/$name.ir"
 done
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $two"; cat "$tmp/out"; exit 1; }
 grep -q '(from-arg 0 0 exclusive) (from-arg 1 0 exclusive)' "$tmp/out" || { echo "FAIL $two: two-argument summary"; cat "$tmp/out"; exit 1; }
 grep -q '(from-arg 0 0 exclusive) (from-arg 0 4 exclusive)' "$tmp/out" || { echo "FAIL $two: two-field summary"; cat "$tmp/out"; exit 1; }
 for mutant in 'two_held_arg:main: loan-conflict: y (&.*pick.*#1\.2)' 'two_held_field:main: loan-conflict: s\[4\.\.8\] (&.*either.*#2\.2)'; do
   name=${mutant%%:*}
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/$name.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/$name.ir" > "$tmp/out" 2>&1 || rc=$?
   if [ "$rc" != 1 ] || ! grep -q "${mutant#*:}" "$tmp/out"; then
     echo "FAIL $two ($name): expected exit 1, got $rc"
     cat "$tmp/out"
@@ -241,13 +241,13 @@ for mutant in 'two_held_arg:main: loan-conflict: y (&.*pick.*#1\.2)' 'two_held_f
   fi
 done
 { head -1 "$tmp/two_sources.ir"
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" | sed -n 's/^inferred: //p'
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/two_sources.ir" | sed -n 's/^inferred: //p'
   tail -n +2 "$tmp/two_sources.ir"; } > "$tmp/two_pasted.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$tmp/two_pasted.ir" > "$tmp/out"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted-oracle.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted.qbe"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-loan-ends "$tmp/two_pasted.ir" > "$tmp/out"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_pasted.ir" > "$tmp/two_pasted.qbe"
 cmp "$tmp/two_pasted.qbe" "$tmp/two_pasted-oracle.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_sources.ir" > "$tmp/two_sources.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/two_sources.ir" > "$tmp/two_sources.qbe"
 cmp "$tmp/two_sources.qbe" "$tmp/two_pasted.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/two_sources.qbe" -o "$tmp/two_sources.s"
 cc "$tmp/two_sources.s" -o "$tmp/two_sources"
@@ -261,15 +261,15 @@ lay=tests/pathb-borrow/contracts/layouts.cpp
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$lay" > "$tmp/lay.ir"
 grep -v '^(borrow-layout ' "$tmp/lay.ir" > "$tmp/lay_bare.ir"
 cmp -s "$tmp/lay.ir" "$tmp/lay_bare.ir" && { echo "FAIL $lay: no borrow-layout records"; exit 1; }
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $lay"; cat "$tmp/out"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay_bare.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries "$tmp/lay_bare.ir" > "$tmp/out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || { echo "FAIL $lay without records: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay_bare.ir" > "$tmp/lay_bare.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/lay_bare.ir" > "$tmp/lay_bare.qbe"
 cmp "$tmp/lay.qbe" "$tmp/lay_bare.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay-oracle.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/lay.ir" > "$tmp/lay-oracle.qbe"
 cmp "$tmp/lay.qbe" "$tmp/lay-oracle.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/lay.qbe" -o "$tmp/lay.s"
 cc "$tmp/lay.s" -o "$tmp/lay"
@@ -278,7 +278,7 @@ NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/pathb-borrow/contracts/nol
 grep '^(borrow-layout ' "$tmp/nolay.ir" > "$tmp/nolay.layouts" || true
 printf '%s\n' '(borrow-layout (struct "Plain") 16 8 (field "z" 0 int) (field "next" 8 (ptr (const (struct "Plain")))))' |
   cmp - "$tmp/nolay.layouts" || { echo "FAIL nolayouts.cpp records"; cat "$tmp/nolay.layouts"; exit 1; }
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nolay.ir" > /dev/null
 echo "ok   frontend borrow-layout records, record-less mutant, unsupported structs, and native execution"
 pass=$((pass + 1))
 # A const pointer result gets a shared alias summary; writing its source while the
@@ -287,17 +287,17 @@ calias=tests/pathb-borrow/contracts/const_alias.cpp
 sed 's/^  int v = \*q;$/  s.b = 5; int v = *q;/' "$calias" > "$tmp/calias_held.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$calias" > "$tmp/calias.ir"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/calias_held.cpp" > "$tmp/calias_held.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias.ir" > "$tmp/out"
 grep -Fq '(returns (ptr (const int)) (from-arg 0 4 shared))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
   { echo "FAIL $calias"; cat "$tmp/out"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias_held.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/calias_held.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -q 'main: loan-conflict: s\[4\.\.8\] (&.*second.*#1)' "$tmp/out"; then
   echo "FAIL $calias writing the source while the result is live: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
 { head -1 "$tmp/calias.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/calias.ir"; } > "$tmp/calias_pasted.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/calias_pasted.ir" > "$tmp/calias-oracle.qbe"
 cmp "$tmp/calias.qbe" "$tmp/calias-oracle.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/calias.qbe" -o "$tmp/calias.s"
 cc "$tmp/calias.s" -o "$tmp/calias"
@@ -312,14 +312,14 @@ sed 's/^  return r - 3;$/  return get(k) - 3;/' "$raii" > "$tmp/raii_late.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$raii" > "$tmp/raii.ir"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/raii_late.cpp" > "$tmp/raii_late.ir" 2>/dev/null
 grep -Fq '@"__curr_eh_stack_entry" $"' "$tmp/raii.ir" || { echo "FAIL $raii: no exception-stack frame"; exit 1; }
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $raii"; cat "$tmp/out"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii_late.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/raii_late.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -Fq 'main: use-after-scope: g' "$tmp/out"; then
   echo "FAIL $raii using the object after its scope: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
-scripts/mrb scripts/pathb-qbe-emit.rb "$tmp/raii.ir" > "$tmp/raii.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb "$tmp/raii.ir" > "$tmp/raii.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/raii.qbe" -o "$tmp/raii.s"
 # EDG's EH runtime (libC.a) defines the exception-stack globals, linked as tests/pathb-qbe/run.sh does.
 edglib=${EDG_LIB:-build/edg/lib}
@@ -338,12 +338,12 @@ for src in tests/pathb-borrow/destructors/*.cpp; do
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/dtor.ir" 2>/dev/null
   grep -Fq '(drop-obligation ' "$tmp/dtor.ir" || { echo "FAIL $src: no drop obligation"; exit 1; }
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/dtor.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/dtor.ir" > "$tmp/out" 2>&1 || rc=$?
   want=$(sed -n 's,^// EXIT: ,,p' "$src")
   if [ "$rc" != "$want" ] || ! diff -u <(sed -n 's,^// OUT: ,,p' "$src") <(grep -v '^inferred: ' "$tmp/out"); then
     echo "FAIL $src: expected exit $want, got $rc"; cat "$tmp/out"; exit 1
   fi
-  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+  scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
   echo "ok   $src"
   pass=$((pass + 1))
 done
@@ -351,13 +351,13 @@ done
 # is the same. The accepted program runs natively.
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/pathb-borrow/destructors/temporary_dangling.cpp > "$tmp/dtor.ir"
 perl -0pe 's/\s*\((drop-obligation|drop-live|drop-state) [^()\n]*\)//g' "$tmp/dtor.ir" > "$tmp/nodrop.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/nodrop.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/nodrop.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL temporary_dangling.cpp without drop facts"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nodrop.ir" > "$tmp/nodrop.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/nodrop.ir" > "$tmp/nodrop.qbe"
 cmp -s "$tmp/dtor.qbe" "$tmp/nodrop.qbe" || { echo "FAIL drop facts change the QBE"; exit 1; }
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/pathb-borrow/destructors/raii_ok.cpp > "$tmp/dtor.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb "$tmp/dtor.ir" > "$tmp/dtor.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb "$tmp/dtor.ir" > "$tmp/dtor.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/dtor.qbe" -o "$tmp/dtor.s"
 if [ -f "$edglib/libC.a" ]; then
   cc "$tmp/dtor.s" -o "$tmp/dtor" -L"$edglib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
@@ -377,12 +377,12 @@ sed 's/^  long double a = 2.0L, b = 3.0L;$/  long double a, b = 3.0L;/' "$ldsrc"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$ldsrc" > "$tmp/ld.ir"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/ld_uninit.cpp" > "$tmp/ld_uninit.ir" 2>/dev/null
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || { echo "FAIL $ldsrc without --effects: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $ldsrc"; cat "$tmp/out"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -q '^main: uninitialized: ' "$tmp/out"; then
   echo "FAIL $ldsrc with an uninitialized operand: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
@@ -391,19 +391,19 @@ fi
   echo '(call-effects "__nfcxx_ld_mul" (returns void) (nothrow) (noescape) (closed) (args (write (array 16 unsigned_char)) (read (array 16 unsigned_char)) (read (array 16 unsigned_char))))'
   tail -n +2 "$tmp/ld.ir"; } > "$tmp/ld_own.ir"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_own.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --effects "$effects" "$tmp/ld_own.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -q '^main: uninitialized: ' "$tmp/out"; then
   echo "FAIL $ldsrc: a module summary must override --effects (write needs its output initialized), got $rc"; cat "$tmp/out"; exit 1
 fi
 echo '(borrow-layout (struct "X") 4 4)' > "$tmp/bad.effects"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --effects "$tmp/bad.effects" "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --effects "$tmp/bad.effects" "$tmp/ld.ir" > "$tmp/out" 2>&1 || rc=$?
 [ "$rc" = 2 ] || { echo "FAIL --effects with a non-call-effects form: expected exit 2, got $rc"; exit 1; }
 { head -1 "$tmp/ld.ir"; grep -v '^;' "$effects"; tail -n +2 "$tmp/ld.ir"; } > "$tmp/ld_effects.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/ld_effects.ir" > "$tmp/ld-oracle.qbe"
 cmp "$tmp/ld.qbe" "$tmp/ld-oracle.qbe"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld.ir" | cmp - "$tmp/ld.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/ld.ir" | cmp - "$tmp/ld.qbe"
 ldrt=$(scripts/pathb-ldrt.rb)
 "${QBE:-build/qbe/qbe}" "$tmp/ld.qbe" -o "$tmp/ld.s"
 cc "$tmp/ld.s" "$ldrt" -lstdc++ -lm -o "$tmp/ld"
@@ -417,19 +417,19 @@ bvsrc=tests/pathb-borrow/contracts/byval.cpp
 sed 's/ v.d = 3;//' "$bvsrc" > "$tmp/byval_uninit.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$bvsrc" > "$tmp/byval.ir"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/byval_uninit.cpp" > "$tmp/byval_uninit.ir" 2>/dev/null
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval.ir" > "$tmp/out"
 grep -Fq '(args (byval (struct "V"))))' "$tmp/out" && grep -Fq 'ok: local lifetime checks passed' "$tmp/out" ||
   { echo "FAIL $bvsrc"; cat "$tmp/out"; exit 1; }
 { head -1 "$tmp/byval.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/byval.ir"; } > "$tmp/byval_pasted.ir"
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/byval_pasted.ir" | grep -Fq 'ok: local lifetime checks passed' ||
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/byval_pasted.ir" | grep -Fq 'ok: local lifetime checks passed' ||
   { echo "FAIL $bvsrc with the pasted summary"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/byval_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: tmp' "$tmp/out"; then
   echo "FAIL $bvsrc passing an uninitialized field: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/byval_pasted.ir" > "$tmp/byval-oracle.qbe"
 cmp "$tmp/byval.qbe" "$tmp/byval-oracle.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/byval.qbe" -o "$tmp/byval.s"
 cc "$tmp/byval.s" -o "$tmp/byval"
@@ -442,26 +442,26 @@ pass=$((pass + 1))
 thr=tests/pathb-borrow/contracts/throws.cpp
 threff=tests/pathb-borrow/throws/may.effects
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$thr" > "$tmp/thr.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr.ir" > "$tmp/out"
 grep -Fq '(call-effects "_Z6calleei" (returns int) (may-throw)' "$tmp/out" &&
   grep -Fq '(call-effects "_Z10with_locali" (returns int) (may-throw)' "$tmp/out" &&
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $thr"; cat "$tmp/out"; exit 1; }
 { head -1 "$tmp/thr.ir"; grep -v "^;" "$threff"; tail -n +2 "$tmp/thr.ir"; } > "$tmp/thr_effects.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/thr_effects.ir" > "$tmp/thr-oracle.qbe"
 cmp "$tmp/thr.qbe" "$tmp/thr-oracle.qbe"
 # The mutant adds an uncalled function whose normal path writes an uninitialized local through the may-throw callee.
 { cat "$thr"; printf '%s\n' 'int lone(int c) {' '  int x;' '  may(&x);' '  return x + c;' '}'; } > "$tmp/throws_uninit.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/throws_uninit.cpp" > "$tmp/thr_uninit.ir" 2>/dev/null
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -Fq '_Z4lonei: uninitialized: x' "$tmp/out"; then
   echo "FAIL $thr with an uninitialized local before the throwing call: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
 # (loc ...) statements name the place of a diagnostic.
 NFCXX_IR_LOC=1 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/throws_uninit.cpp" > "$tmp/thr_loc.ir" 2>/dev/null
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_loc.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects "$threff" "$tmp/thr_loc.ir" > "$tmp/out" 2>&1 || rc=$?
 grep -Fq "_Z4lonei: uninitialized: x at $tmp/throws_uninit.cpp:" "$tmp/out" || { echo "FAIL source locations in diagnostics (exit $rc)"; cat "$tmp/out"; exit 1; }
 echo "ok   calls of may-throw callees, destructor frames around them, uninitialized mutant, source locations, and emitter validation"
 pass=$((pass + 1))
@@ -476,16 +476,16 @@ for name in array_fields longdouble_byval; do
   esac
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/$name.ir"
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/$name.mut.cpp" > "$tmp/$name.mut.ir" 2>/dev/null
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $src"; cat "$tmp/out"; exit 1; }
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.mut.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.mut.ir" > "$tmp/out" 2>&1 || rc=$?
   if [ "$rc" != 1 ] || ! grep -Fq "$mut_want" "$tmp/out"; then
     echo "FAIL $src mutant: expected exit 1 with '$mut_want', got $rc"; cat "$tmp/out"; exit 1
   fi
-  { head -1 "$tmp/$name.ir"; scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
-  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
-  scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
+  { head -1 "$tmp/$name.ir"; scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
+  scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
+  scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
   cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
   "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
   cc "$tmp/$name.s" $(scripts/pathb-ldrt.rb) -lstdc++ -lm -o "$tmp/$name"
@@ -499,11 +499,11 @@ pass=$((pass + 1))
 libsrc=tests/pathb-borrow/contracts/libc.cpp
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$libsrc" > "$tmp/libc.ir"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/libc.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/libc.ir" > "$tmp/out" 2>&1 || rc=$?
 [ "$rc" = 3 ] && grep -Fq 'calls require lifetime/effect contracts' "$tmp/out" || { echo "FAIL $libsrc without the libc summaries: expected exit 3, got $rc"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-libc.effects "$tmp/libc.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-libc.effects "$tmp/libc.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $libsrc"; cat "$tmp/out"; exit 1; }
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/libc.ir" > "$tmp/libc.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/libc.ir" > "$tmp/libc.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/libc.qbe" -o "$tmp/libc.s"
 cc "$tmp/libc.s" -lm -o "$tmp/libc"
 "$tmp/libc" || { echo "FAIL $libsrc runtime: expected 0"; exit 1; }
@@ -515,11 +515,11 @@ pass=$((pass + 1))
 for name in sret int128_return; do
   src=tests/pathb-borrow/contracts/$name.cpp
   NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$src" > "$tmp/$name.ir"
-  scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
+  scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends --effects scripts/pathb-runtime.effects "$tmp/$name.ir" > "$tmp/out"
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $src"; cat "$tmp/out"; exit 1; }
-  { head -1 "$tmp/$name.ir"; scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
-  scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
-  scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
+  { head -1 "$tmp/$name.ir"; scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --effects scripts/pathb-runtime.effects "$tmp/$name.ir" | sed -n 's/^inferred: //p'; tail -n +2 "$tmp/$name.ir"; } > "$tmp/$name.pasted.ir"
+  scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name.qbe"
+  scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/$name.pasted.ir" > "$tmp/$name-oracle.qbe"
   cmp "$tmp/$name.qbe" "$tmp/$name-oracle.qbe"
   "${QBE:-build/qbe/qbe}" "$tmp/$name.qbe" -o "$tmp/$name.s"
   cc "$tmp/$name.s" $(scripts/pathb-ldrt.rb) -lstdc++ -lm -o "$tmp/$name"
@@ -528,7 +528,7 @@ done
 sed 's/^  P q = make(2);$/  P q;/' tests/pathb-borrow/contracts/sret.cpp > "$tmp/sret_nocall.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/sret_nocall.cpp" > "$tmp/sret_nocall.ir" 2>/dev/null
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/sret_nocall.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/sret_nocall.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: q' "$tmp/out"; then
   echo "FAIL sret without the call: expected exit 1, got $rc"; cat "$tmp/out"; exit 1
 fi
@@ -540,11 +540,11 @@ pass=$((pass + 1))
 # diagnostic.
 tc=tests/pathb-borrow/contracts/try_catch.cpp
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tc" > "$tmp/tc.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/tc.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/tc.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $tc"; cat "$tmp/out"; exit 1; }
 { head -1 "$tmp/tc.ir"; sed -n 's/^inferred: //p' "$tmp/out"; tail -n +2 "$tmp/tc.ir"; } > "$tmp/tc_pasted.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$tmp/tc_pasted.ir" > "$tmp/tc-oracle.qbe"
 cmp "$tmp/tc.qbe" "$tmp/tc-oracle.qbe"
 edglib=${EDG_LIB:-build/edg/lib}
 if [ -f "$edglib/libC.a" ]; then
@@ -557,7 +557,7 @@ fi
 tce=tests/pathb-borrow/contracts/try_catch_errors.cpp
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tce" > "$tmp/tce.ir"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends --effects tests/pathb-borrow/throws/may.effects "$tmp/tce.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-loan-ends --effects tests/pathb-borrow/throws/may.effects "$tmp/tce.ir" > "$tmp/out" 2>&1 || rc=$?
 printf '%s\n' '_Z9late_initv: uninitialized: x' '_Z13dangling_bodyv: use-after-scope: inner' \
   '_Z12outer_directv: uninitialized: x' '_Z18dangling_exceptionv: use-after-scope: exception object' > "$tmp/tce.expect"
 if [ "$rc" != 1 ] || ! diff -u "$tmp/tce.expect" "$tmp/out"; then
@@ -567,7 +567,7 @@ fi
 # tests/cases/exceptions.cpp returns from both its body and its one typed handler, and EDG's dead fall-through after
 # them does not pop main's frame.
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/cases/exceptions.cpp > "$tmp/exceptions.ir"
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/exceptions.ir" > "$tmp/out"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries --infer-loan-ends "$tmp/exceptions.ir" > "$tmp/out"
 grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL tests/cases/exceptions.cpp"; cat "$tmp/out"; exit 1; }
 echo "ok   try/catch handlers from throw points, typed and catch-all clauses, rethrow, handler-path mutants, and native execution"
 pass=$((pass + 1))
@@ -577,7 +577,7 @@ NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir tests/pathb-borrow/contracts/vla
 grep -Fq '(decl $"a" val)' "$tmp/vla.ir" && grep -Fq '(scope-end $"a")' "$tmp/vla.ir" ||
   { echo "FAIL vla.cpp: no facts for the VLA"; exit 1; }
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/vla.ir" > "$tmp/out" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/vla.ir" > "$tmp/out" 2>&1 || rc=$?
 if [ "$rc" != 3 ] || grep -Fq 'missing declaration facts' "$tmp/out"; then
   echo "FAIL vla.cpp: expected a refusal other than missing facts, got $rc"; cat "$tmp/out"; exit 1
 fi
@@ -592,17 +592,17 @@ grep -Fq '(decl $"tmp" temp)' "$tmp/temps.ir" && grep -Fq '(scope-end $"tmp")' "
 sed 's/int c = 0;/int c;/' "$temps" > "$tmp/temps_uninit.cpp"
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump.rb --ir "$tmp/temps_uninit.cpp" > "$tmp/temps_uninit.ir"
 for options in --infer-summaries "--infer-summaries --infer-loan-ends"; do
-  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps.ir" > "$tmp/out"
+  scripts/mrb.rb scripts/pathb-borrowck.rb $options "$tmp/temps.ir" > "$tmp/out"
   grep -Fq 'ok: local lifetime checks passed' "$tmp/out" || { echo "FAIL $temps ($options)"; cat "$tmp/out"; exit 1; }
   rc=0
-  scripts/mrb scripts/pathb-borrowck.rb $options "$tmp/temps_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
+  scripts/mrb.rb scripts/pathb-borrowck.rb $options "$tmp/temps_uninit.ir" > "$tmp/out" 2>&1 || rc=$?
   if [ "$rc" != 1 ] || ! grep -Fq 'main: uninitialized: c' "$tmp/out"; then
     echo "FAIL $temps with an uninitialized argument ($options): expected exit 1, got $rc"
     cat "$tmp/out"
     exit 1
   fi
 done
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/temps.ir" > "$tmp/temps.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/temps.ir" > "$tmp/temps.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/temps.qbe" -o "$tmp/temps.s"
 cc "$tmp/temps.s" -o "$tmp/temps"
 "$tmp/temps" || { echo "FAIL $temps runtime: expected 0"; exit 1; }
@@ -611,13 +611,13 @@ pass=$((pass + 1))
 # Checking facts and value-transfer policy must not change native execution.
 # Loan erasure and replacing explicit transfers with loads must yield the same QBE.
 for loan_ir in tests/mruby/pathb-edge/loan_facts.ir tests/mruby/pathb-edge/reborrow_facts.ir tests/mruby/pathb-edge/move_facts.ir tests/mruby/pathb-edge/field_move_facts.ir tests/mruby/pathb-edge/drop_state_facts.ir tests/mruby/pathb-edge/object_drop_facts.ir; do
-scripts/mrb scripts/pathb-borrowck.rb "$loan_ir" > "$tmp/loan-check"
-scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends "$loan_ir" > "$tmp/inferred-check"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/loans.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/oracle.qbe"
+scripts/mrb.rb scripts/pathb-borrowck.rb "$loan_ir" > "$tmp/loan-check"
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-loan-ends "$loan_ir" > "$tmp/inferred-check"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/loans.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$loan_ir" > "$tmp/oracle.qbe"
 cmp "$tmp/loans.qbe" "$tmp/oracle.qbe"
 sed -E 's/\((move-value|copy-value) int (\(offset \$"s" [0-9]+\))\)/\(load int \2\)/g; s/\((move-value|copy-value) int (\$"x")\)/\(load int \2\)/g; s/\(reborrow \(ptr int\) "[^"]+" (shared|exclusive) "[^"]+" (%[0-9]+)\)/\2/g; s/\(borrow \(ptr int\) "[^"]+" (shared|exclusive) (\$"x")\)/\2/g; /\(loan-end /d; /\(drop-(obligation|live|state|state-if-live) /d' "$loan_ir" > "$tmp/plain.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/plain.ir" > "$tmp/plain.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/plain.ir" > "$tmp/plain.qbe"
 cmp "$tmp/loans.qbe" "$tmp/plain.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/loans.qbe" -o "$tmp/loans.s"
 cc "$tmp/loans.s" -o "$tmp/loans"
@@ -633,20 +633,20 @@ semantic_ir=tests/mruby/pathb-edge/semantic_layout_facts.ir
 for mode in explicit inferred; do
   options=()
   [ "$mode" = explicit ] || options=(--infer-loan-ends)
-  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$semantic_ir" > "$tmp/semantic-check"
+  scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$semantic_ir" > "$tmp/semantic-check"
 done
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$semantic_ir" > "$tmp/semantic-oracle.qbe"
 cmp "$tmp/semantic.qbe" "$tmp/semantic-oracle.qbe"
 sed '/^(borrow-layout /d' "$semantic_ir" > "$tmp/unannotated.ir"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/unannotated.ir" > "$tmp/unannotated-check" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/unannotated.ir" > "$tmp/unannotated-check" 2>&1 || rc=$?
 if [ "$rc" != 1 ] || ! grep -Fq 'uninitialized: s' "$tmp/unannotated-check"; then
   echo "FAIL semantic layout fallback: expected conservative padding error, got $rc"
   cat "$tmp/unannotated-check"
   exit 1
 fi
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/unannotated.ir" > "$tmp/unannotated.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/unannotated.ir" > "$tmp/unannotated.qbe"
 cmp "$tmp/semantic.qbe" "$tmp/unannotated.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/semantic.qbe" -o "$tmp/semantic.s"
 cc "$tmp/semantic.s" -o "$tmp/semantic"
@@ -661,20 +661,20 @@ call_ir=tests/mruby/pathb-edge/call_effects_facts.ir
 for mode in explicit inferred; do
   options=()
   [ "$mode" = explicit ] || options=(--infer-loan-ends)
-  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$call_ir" > "$tmp/call-check"
+  scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$call_ir" > "$tmp/call-check"
 done
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/calls.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/call-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/calls.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$call_ir" > "$tmp/call-oracle.qbe"
 cmp "$tmp/calls.qbe" "$tmp/call-oracle.qbe"
 sed '/^(call-effects /d' "$call_ir" > "$tmp/uncontracted.ir"
 rc=0
-scripts/mrb scripts/pathb-borrowck.rb "$tmp/uncontracted.ir" > "$tmp/uncontracted-check" 2>&1 || rc=$?
+scripts/mrb.rb scripts/pathb-borrowck.rb "$tmp/uncontracted.ir" > "$tmp/uncontracted-check" 2>&1 || rc=$?
 if [ "$rc" != 3 ] || ! grep -Fq 'calls require lifetime/effect contracts' "$tmp/uncontracted-check"; then
   echo "FAIL uncontracted call: expected refusal, got $rc"
   cat "$tmp/uncontracted-check"
   exit 1
 fi
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/uncontracted.ir" > "$tmp/uncontracted.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/uncontracted.ir" > "$tmp/uncontracted.qbe"
 cmp "$tmp/calls.qbe" "$tmp/uncontracted.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/calls.qbe" -o "$tmp/calls.s"
 cc "$tmp/calls.s" tests/pathb-borrow/native/call_effects.c -o "$tmp/calls"
@@ -689,13 +689,13 @@ returned_ir=tests/mruby/pathb-edge/returned_loan_facts.ir
 for mode in explicit inferred; do
   options=()
   [ "$mode" = explicit ] || options=(--infer-loan-ends)
-  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$returned_ir" > "$tmp/returned-check"
+  scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$returned_ir" > "$tmp/returned-check"
 done
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$returned_ir" > "$tmp/returned-oracle.qbe"
 cmp "$tmp/returned.qbe" "$tmp/returned-oracle.qbe"
 sed -e '/^(call-effects /d' -e 's/(call-borrow (ptr int) "R" root /(call (ptr int) /' "$returned_ir" > "$tmp/returned-plain.ir"
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$tmp/returned-plain.ir" > "$tmp/returned-plain.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$tmp/returned-plain.ir" > "$tmp/returned-plain.qbe"
 cmp "$tmp/returned.qbe" "$tmp/returned-plain.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/returned.qbe" -o "$tmp/returned.s"
 cc "$tmp/returned.s" tests/pathb-borrow/native/call_effects.c -o "$tmp/returned"
@@ -709,10 +709,10 @@ verified_ir=tests/mruby/pathb-edge/verified_callee_facts.ir
 for mode in explicit inferred; do
   options=()
   [ "$mode" = explicit ] || options=(--infer-loan-ends)
-  scripts/mrb scripts/pathb-borrowck.rb "${options[@]}" "$verified_ir" > "$tmp/verified-check"
+  scripts/mrb.rb scripts/pathb-borrowck.rb "${options[@]}" "$verified_ir" > "$tmp/verified-check"
 done
-scripts/mrb scripts/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified.qbe"
-scripts/mrb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified-oracle.qbe"
+scripts/mrb.rb scripts/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified.qbe"
+scripts/mrb.rb tests/mruby/oracle/pathb-qbe-emit.rb --no-prune "$verified_ir" > "$tmp/verified-oracle.qbe"
 cmp "$tmp/verified.qbe" "$tmp/verified-oracle.qbe"
 "${QBE:-build/qbe/qbe}" "$tmp/verified.qbe" -o "$tmp/verified.s"
 cc "$tmp/verified.s" -o "$tmp/verified"

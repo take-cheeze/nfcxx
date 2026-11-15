@@ -2,7 +2,7 @@
 # Path B compiler: one C++ file to an object file.
 #   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL -> QBE -> assembler
 #   the QBE IL is the SSA route (scripts/pathb-ssa-build) by default; --emitter=mruby selects scripts/pathb-qbe-emit.rb
-#   (run by scripts/mrb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
+#   (run by scripts/mrb.rb), and a unit the SSA route does not fully emit falls back to it with a message on stderr.
 #   The mruby pipeline is what tests/pathb-qbe/run.sh validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.rb).
 # Usage: scripts/pathb-cc [options] [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 # The options below are what the nfcxx driver passes; each has an environment variable as a fallback (for scripts and tests that
@@ -199,7 +199,7 @@ if [ "$emitter" = ssa ]; then
   fi
 fi
 if [ "$emitter" = mruby ]; then
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${emitopt[@]+"${emitopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
+  "$root/scripts/mrb.rb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} ${emitopt[@]+"${emitopt[@]}"} ${safe[@]+"${safe[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
   if [ $rc != 0 ]; then
     echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
     [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }
@@ -208,7 +208,7 @@ if [ "$emitter" = mruby ]; then
   "$qbe" ${qbe_t[@]+"${qbe_t[@]}"} "$tmp/$n.ssa" > "$tmp/$n.s"
   # QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
   # Status 3: the target's assembler has no form for something in the unit (an ifunc or file-scope asm on Apple): refused.
-  "$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target" 2> "$tmp/$n.aw" || rc=$?
+  "$root/scripts/mrb.rb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s" "$qbe_target" 2> "$tmp/$n.aw" || rc=$?
   if [ $rc != 0 ]; then
     echo "pathb-cc: $src: $(head -1 "$tmp/$n.aw")" >&2
     [ -z "$keep" ] || { mkdir -p "$keep"; cp "$tmp/$n.ir" "$keep/"; }

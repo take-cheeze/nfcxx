@@ -23,7 +23,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
 # 1. The emitted assembly matches its golden.
-"$root/scripts/mrb" "$root/scripts/pathb-spirv-kernel-emit.rb" ../device/vecadd.ir > "$out/vecadd.spvasm"
+"$root/scripts/mrb.rb" "$root/scripts/pathb-spirv-kernel-emit.rb" ../device/vecadd.ir > "$out/vecadd.spvasm"
 if diff -u vecadd.spvasm "$out/vecadd.spvasm"; then echo "asm vecadd: ok"; else echo "asm vecadd: FAIL"; fail=1; fi
 
 # 2. It assembles and validates (SPIR-V 1.1 is what the OpenCL drivers take here).
@@ -52,7 +52,7 @@ fi
 
 # 5. The loop kernel (loop.ir: break, a set accumulator) emits to its golden, validates, and sums 0..9 on the GPU. The
 # mutant turns the bound test into <= (sum 55): it must fail. (Not OpIAdd -> OpISub: the counter would never reach the break.)
-"$root/scripts/mrb" "$root/scripts/pathb-spirv-kernel-emit.rb" loop.ir > "$out/loop.spvasm"
+"$root/scripts/mrb.rb" "$root/scripts/pathb-spirv-kernel-emit.rb" loop.ir > "$out/loop.spvasm"
 if diff -u loop.spvasm "$out/loop.spvasm"; then echo "asm loop: ok"; else echo "asm loop: FAIL"; fail=1; fi
 spirv-as --target-env spv1.1 "$out/loop.spvasm" -o "$out/loop.spv"
 if spirv-val --target-env spv1.1 "$out/loop.spv"; then echo "validate loop: ok"; else echo "validate loop: FAIL"; fail=1; fi
@@ -63,7 +63,7 @@ spirv-as --target-env spv1.1 "$out/loop_mut.spvasm" -o "$out/loop_mut.spv"
 if "$out/loop_sum" "$out/loop_mut.spv" >/dev/null 2>&1; then echo "mutant loop: FAIL (not caught)"; fail=1; else echo "mutant loop: caught"; fi
 
 # 6. A construct the emitter does not lower is refused with exit 3.
-rc=0; "$root/scripts/mrb" "$root/scripts/pathb-spirv-kernel-emit.rb" refuse_trap.ir > /dev/null 2>&1 || rc=$?
+rc=0; "$root/scripts/mrb.rb" "$root/scripts/pathb-spirv-kernel-emit.rb" refuse_trap.ir > /dev/null 2>&1 || rc=$?
 if [ "$rc" = 3 ]; then echo "refused trap: ok"; else echo "refused trap: FAIL (exit $rc)"; fail=1; fi
 
 exit $fail

@@ -35,25 +35,81 @@ module NfccxxTrace
     s.gsub("\\") { "\\\\" }.gsub('"') { '\\"' }
   end
 
+  # the two texts of a span from START to now: the NFCXX_TIME_LOG line and the trace event, each nil when its output is off.
+  # span writes them; the Recorder keeps them until its run ends.
+  def span_texts(start, name, category, unit:, pid:, log:, trace:)
+    dur = now_us - start
+    log_text = log ? format("%d.%06d\t%s\t%s\t%s\n", dur / 1_000_000, dur % 1_000_000, category, name, unit) : nil
+    trace_text = trace ? format(%({"name":"%s","cat":"%s","ph":"X","ts":%d,"dur":%d,"pid":%d,"tid":1},\n),
+                                escape(name), category, start, dur, pid) : nil
+    [log_text, trace_text]
+  end
+
   # record a span from START (from start) to now
   def span(start, name, category, unit: nil, pid: Process.pid, env: ENV)
     return unless enabled?(env)
 
-    now = now_us
-    dur = now - start
     log = env["NFCXX_TIME_LOG"].to_s
-    unless log.empty?
-      unit ||= env["NFCXX_TRACE_UNIT"].to_s
-      File.open(log, "a") do |f|
-        f.write(format("%d.%06d\t%s\t%s\t%s\n", dur / 1_000_000, dur % 1_000_000, category, name, unit))
-      end
-    end
     trace = env["NFCXX_TRACE"].to_s
-    return if trace.empty?
+    unit ||= env["NFCXX_TRACE_UNIT"].to_s
+    log_text, trace_text = span_texts(start, name, category, unit: unit, pid: pid, log: !log.empty?, trace: !trace.empty?)
+    File.open(log, "a") { |f| f.write(log_text) } if log_text
+    File.open(trace, "a") { |f| f.write(trace_text) } if trace_text
+  end
 
-    File.open(trace, "a") do |f|
-      f.write(format(%({"name":"%s","cat":"%s","ph":"X","ts":%d,"dur":%d,"pid":%d,"tid":1},\n),
-                     escape(name), category, start, dur, pid))
+  # The spans of one run, kept in memory until commit. The runner of a plan (scripts/nfcxx-run.rb) records the driver's spans
+  # with it, in the bash's order and with the bash's texts, and writes the files when the run ends. A run that the bash then
+  # does again (discard) writes nothing, so the bash's own trace is the whole of the file and of the time log.
+  class Recorder
+    attr_accessor :trace, :time_log, :unit
+
+    def initialize
+      @trace = nil        # the trace file (absolute), nil when the trace is off
+      @time_log = nil     # the time log (absolute), nil when it is off
+      @unit = ""          # the unit of the time log's lines (the driver's trace_unit)
+      @log_lines = []
+      @events = []
+      @t0 = nil           # the start of the run, from begin_trace (the trace is on)
+      @closing = nil      # the closing lines of the trace file, from finish_trace
+    end
+
+    def enabled?
+      !@trace.nil? || !@time_log.nil?
+    end
+
+    # trace_start: a clock reading when tracing, 0 otherwise
+    def start
+      enabled? ? NfccxxTrace.now_us : 0
+    end
+
+    # trace_end: a span from START to now
+    def span(start, name, category, unit: @unit, pid: Process.pid)
+      return unless enabled?
+
+      log_text, trace_text = NfccxxTrace.span_texts(start, name, category, unit: unit, pid: pid,
+                                                    log: !@time_log.nil?, trace: !@trace.nil?)
+      @log_lines << log_text if log_text
+      @events << trace_text if trace_text
+    end
+
+    # trace_begin, for the trace file (written at commit): the start of the run
+    def begin_trace
+      @t0 = NfccxxTrace.now_us
+    end
+
+    # trace_finish: the whole run's span, and the closing lines of the trace file (this run is its owner)
+    def finish_trace
+      return if @t0.nil?
+
+      span(@t0, "nfcxx", "driver")
+      @closing = format(%({"name":"trace_end","ph":"i","s":"g","ts":%d,"pid":%d,"tid":1}\n]\n), NfccxxTrace.now_us, Process.pid) if @trace
+      @t0 = nil
+    end
+
+    # writes the files: the trace file (the opening "[", the events, the closing lines) and the time log's lines, appended
+    def commit
+      File.write(@trace, "[\n" + @events.join + @closing.to_s) if @trace
+      File.open(@time_log, "a") { |f| f.write(@log_lines.join) } if @time_log && !@log_lines.empty?
     end
   end
 

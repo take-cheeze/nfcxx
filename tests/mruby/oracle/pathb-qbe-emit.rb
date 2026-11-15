@@ -8,8 +8,8 @@
 #
 # Path B stage 3: emit QBE IL from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md, sections 6 and 7).
 #
-# Usage: scripts/mrb scripts/pathb-qbe-emit.rb [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
-#        scripts/mrb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s
+# Usage: scripts/mrb.rb scripts/pathb-qbe-emit.rb [FILE.ir | -]   QBE IL on stdout (reads stdin for '-' or no argument)
+#        scripts/mrb.rb scripts/pathb-qbe-emit.rb --append-weak IL.ssa ASM.s
 #                                                              append `.weak` lines for the IR (weak) definitions
 #
 # Exit status:

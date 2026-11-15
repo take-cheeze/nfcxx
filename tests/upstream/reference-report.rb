@@ -1,4 +1,4 @@
-# Usage: scripts/mrb tests/upstream/reference-report.rb SNAPSHOT_ROOT
+# Usage: scripts/mrb.rb tests/upstream/reference-report.rb SNAPSHOT_ROOT
 def die(message)
   $stderr.puts message
   exit 1

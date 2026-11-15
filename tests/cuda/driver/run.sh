@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim, scripts/wrap.rb;
+# The CUDA driver API through the CUDA runtime (scripts/cuda-driver-shim.rb, scripts/wrap.rb;
 # docs/notes/cuda-driver.md): a link that names libcuda gets the shim and libcudart instead.
 #   - with a stand-in libcudart (fakecudart.c): the version and stream flags each call asks for, eleven arguments
 #     through the trampoline, failures and the local error strings, one lookup per function (expected.txt); built by
@@ -24,7 +24,7 @@ fi
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; [ -z "${2:-}" ] || head -20 <<<"$2"; fail=1; }
-if ! shim=$(scripts/cuda-driver-shim "$cuda/include" 2>&1); then bad "cuda-driver-shim" "$shim"; exit 1; fi
+if ! shim=$(scripts/cuda-driver-shim.rb "$cuda/include" 2>&1); then bad "cuda-driver-shim" "$shim"; exit 1; fi
 ok "cuda-driver-shim: $(grep -c '^X(' "$(dirname "$shim")/nfcxx_cudrv_table.inc") driver functions"
 
 # The stand-in runtime, as a CUDA_HOME of its own (the real headers, the stand-in library).

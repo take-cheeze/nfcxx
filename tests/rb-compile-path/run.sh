@@ -4,7 +4,7 @@
 # The oracle is the bash original, kept as tests/rb-compile-path/<name>/oracle.sh. Each case of tests/rb-compile-path/<name>/cases.txt
 # runs twice, once per variant, in a fresh sandbox: the sandbox has the script under test as scripts/<name> (the oracle) or
 # scripts/<base>.rb (the port, base = name without .sh), and stubs (stub.sh, linked
-# under the command names in the sandbox's bin directory and as scripts/mrb, scripts/pathb-cil and nfcxx). Nothing real is
+# under the command names in the sandbox's bin directory and as scripts/mrb.rb, scripts/pathb-cil.rb and nfcxx). Nothing real is
 # compiled, linked or run except the scripts, the shell and the real text tools. The sandbox's work directory holds the
 # sources and fragments the cases name (see setup below); build/, be/ and lib/ are where the scripts keep their files.
 #
@@ -32,7 +32,7 @@ sandbox() {
     cp "$repo/scripts/$base.rb" "$sb/scripts/$base.rb"; chmod +x "$sb/scripts/$base.rb"; S=$sb/scripts/$base.rb
   fi
   for c in cc gcc g++ ar llvm-ar llvm-mc mktemp uname nm realpath xcrun; do ln -s "$here/stub.sh" "$sb/bin/$c"; done
-  for c in scripts/mrb scripts/pathb-cil nfcxx; do ln -s "$here/stub.sh" "$sb/$c"; done
+  for c in scripts/mrb.rb scripts/pathb-cil.rb nfcxx; do ln -s "$here/stub.sh" "$sb/$c"; done
   # the sources the scripts read: their mtimes are old, so an object or archive made by a case is newer
   : > "$sb/be/nfcxx_ldrt.c"; : > "$sb/lib/ehshim/nfcxx_eh_shim.cpp"; touch -d 2000-01-01 "$sb/be/nfcxx_ldrt.c" "$sb/lib/ehshim/nfcxx_eh_shim.cpp"
   local f

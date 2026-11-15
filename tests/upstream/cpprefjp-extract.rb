@@ -1,5 +1,5 @@
 # Extract explicitly tagged runnable examples, not API declarations/fragments.
-# Usage: scripts/mrb tests/upstream/cpprefjp-extract.rb ROOT OUT PAGE...
+# Usage: scripts/mrb.rb tests/upstream/cpprefjp-extract.rb ROOT OUT PAGE...
 def die(message)
   $stderr.puts message
   exit 1

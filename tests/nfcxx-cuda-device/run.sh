@@ -70,6 +70,8 @@ while IFS= read -r line; do
            bash "$here/oracle.sh" "$w/root" "$src" "${argw[@]}" 2>&1); ost=$?
 
   # the PID of a cache store's temporary directory is not part of the plan
+  # the prefixes (OUT, APP, ENV1) are the redirections and environment of the next command: the oracle's stubs do not see them
+  pout=$(printf '%s\n' "$pout" | grep -v '^\(OUT\|APP\|ENV1\) ')
   pnorm=$(printf '%s\n' "$pout" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')
   onorm=$(printf '%s\n' "$oout" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')
   if [ "$pst" = "$ost" ] && [ "$pnorm" = "$onorm" ]; then
@@ -79,5 +81,20 @@ while IFS= read -r line; do
     diff <(printf '%s\n' "$pnorm") <(printf '%s\n' "$onorm") | head -12 | sed 's/^/  /'
   fi
 done < "$here/cases.txt"
+# the phases: the prep, emit and finish plans together are the all-phase plan (the composition plans them one at a time, with the
+# facts each stage made). The mul2 case with its group, and the cubin ptxas lines.
+phase_fail=0
+setup "$work/phase" "ptx-emit"
+pargs=(--root="$work/phase/root" --tmp="$work/phase/tmp" "--nfcxx-env=CUDA_HOME=$work/phase/cuda" "--nfcxx-env=HOME=$work/phase/home"
+       --kernel=mul2 --group=g0000.ptx)
+mapfile -t facts < <({ find "$work/phase" -type f -printf '--nfcxx-file=%p\n'; find "$work/phase" -type d -printf '--nfcxx-dir=%p\n'; })
+plan() { ruby scripts/nfcxx-cuda-device.rb "$@" "${facts[@]}" "${pargs[@]}" --compile --out=/work/obj/mul2.o "$src" 2>&1 | grep -v '^\(OUT\|APP\|ENV1\) ' ; }
+all=$(plan --phase=all)
+joined=$({ plan --phase=prep; plan --phase=emit; plan --phase=finish; })
+[ -n "$all" ] && [ "$(printf '%s\n' "$all" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')" = "$(printf '%s\n' "$joined" | sed 's/\.tmp\.[0-9][0-9]*/.tmp.PID/g')" ] \
+  || { phase_fail=1; echo "FAIL phases: prep, emit and finish do not give the all-phase plan"; }
+if [ "$phase_fail" = 0 ]; then echo "phases: prep, emit and finish give the all-phase plan"; fi
+fail=$((fail + phase_fail))
+
 echo "$pass passed, $fail failed, $skipped unported"
 [ "$fail" = 0 ]

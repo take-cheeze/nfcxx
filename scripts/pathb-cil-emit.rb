@@ -2,8 +2,8 @@
 # Path B route (docs/notes/pathb-cil.md). Same memory model as qbe2cil.rb: pointers are int64 addresses, frame slots are
 # one localloc per call, globals are the linker's addr_<name> fields.
 #
-#   pathb-dump --ir x.cpp | scripts/mrb scripts/pathb-cil-emit.rb - OUT.json
-#   scripts/mrb scripts/pathb-cil-emit.rb x.ir OUT.json
+#   pathb-dump --ir x.cpp | scripts/mrb.rb scripts/pathb-cil-emit.rb - OUT.json
+#   scripts/mrb.rb scripts/pathb-cil-emit.rb x.ir OUT.json
 #
 # The fragment goes to OUT.json (nothing on stdout). Exit status 1 with `pathb-cil-emit: refused: ...` on stderr for a
 # refusal; the same for an error the original would raise (a missing file, a malformed form).

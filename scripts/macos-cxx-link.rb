@@ -47,7 +47,7 @@ begin
   Dir.chdir(work) do
     sysincl = "#{cleanroom}/cxx:#{libcxx}:#{sysroot}"
     cc = File.join(root, "scripts/cross-macos-cc.rb")
-    cxx = File.join(root, "scripts/cross-macos-cxx.sh")
+    cxx = File.join(root, "scripts/cross-macos-cxx.rb")
     link = File.join(root, "scripts/cross-macos-link.rb")
     nfcxx = File.join(root, "nfcxx")
 

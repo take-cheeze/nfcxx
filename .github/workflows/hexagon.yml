@@ -2,7 +2,7 @@ name: Hexagon
 
 # Hexagon checks (docs/notes/hexagon.md). Kept out of the main CI job, and run only when a change
 # can affect them: the EDG front end that generates the C, the Hexagon harness (tests/hexagon/flatlink.rb
-# runs on the mruby interpreter, scripts/mrb), the test cases it runs, or the workflow itself.
+# runs on the mruby interpreter, scripts/mrb.rb), the test cases it runs, or the workflow itself.
 # Runs nightly (schedule) and on demand too (workflow_dispatch).
 on:
   schedule:
@@ -12,8 +12,8 @@ on:
     paths:
       - "3rd/edg"
       - "scripts/setup-edg.sh"
-      - "scripts/gen-c-target.sh"
-      - "scripts/mrb"
+      - "scripts/gen-c-target.rb"
+      - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
       - "tests/hexagon/**"
@@ -23,8 +23,8 @@ on:
     paths:
       - "3rd/edg"
       - "scripts/setup-edg.sh"
-      - "scripts/gen-c-target.sh"
-      - "scripts/mrb"
+      - "scripts/gen-c-target.rb"
+      - "scripts/mrb.rb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
       - "tests/hexagon/**"

@@ -18,8 +18,8 @@ static VALUE tr_fixnum(VALUE self, VALUE obj) {
     return Qfalse;
 }
 
-static VALUE tr_nil(VALUE self, VALUE obj) {
-    if (RB_TYPE_P(obj, T_NIL)) return Qtrue;
+static VALUE tr_bignum(VALUE self, VALUE obj) {
+    if (RB_TYPE_P(obj, T_BIGNUM)) return Qtrue;
     return Qfalse;
 }
 
@@ -28,5 +28,5 @@ void Init_api_type_refused(void) {
     rb_define_module_function(mTypeRefused, "data", tr_data, 1);
     rb_define_module_function(mTypeRefused, "nested", tr_nested, 1);
     rb_define_module_function(mTypeRefused, "fixnum", tr_fixnum, 1);
-    rb_define_module_function(mTypeRefused, "nil", tr_nil, 1);
+    rb_define_module_function(mTypeRefused, "bignum", tr_bignum, 1);
 }

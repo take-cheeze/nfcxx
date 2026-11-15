@@ -1,5 +1,5 @@
 // ESP32-C3 (RV32IMC, ILP32, little-endian, bare metal). EDG has no bare-metal RV32 table, so tests/mcu/run.sh
-// generates the C for the linux_riscv32 stand-in (scripts/gen-c-target.sh) and clang compiles it for
+// generates the C for the linux_riscv32 stand-in (scripts/gen-c-target.rb) and clang compiles it for
 // riscv32-unknown-elf -march=rv32imc -mabi=ilp32. Nothing here runs yet: this is the compile-only step.
 #include <cstddef>
 #include <cstdint>

@@ -14,7 +14,7 @@ this note records what stage 3 covers, what it refuses, and the results.
   a value-less `return` in a non-void, non-`main` function lowers to `(unreachable)`.
 - **Template instances:** `pathb-dump` passes `-tused`, as `eccp` does for one file, so templates used by a
   file are defined (`templates_lambdas` links).
-- **The emitter** (`scripts/pathb-qbe-emit.rb`, an mruby script; run it with `scripts/mrb`) reads the IR text and writes QBE IL.
+- **The emitter** (`scripts/pathb-qbe-emit.rb`, an mruby script; run it with `scripts/mrb.rb`) reads the IR text and writes QBE IL.
 - **Second round:** `(continue)`, a `(layout ...)` header, bool-load normalisation, reachability and `setjmp` (see
   Closed gaps below).
 
@@ -549,7 +549,7 @@ tests/pathb-ir/run.sh          # IR goldens, coverage and the gap probe
 tests/pathb-qbe/run.sh         # translation validation
 ```
 
-`scripts/pathb-dump --ir FILE.cpp | scripts/mrb scripts/pathb-qbe-emit.rb - > x.ssa` shows the emitter output for
+`scripts/pathb-dump --ir FILE.cpp | scripts/mrb.rb scripts/pathb-qbe-emit.rb - > x.ssa` shows the emitter output for
 one file.
 
 ## Dynamic initialization (round 3)

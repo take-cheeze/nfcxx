@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/mruby-tool
-          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb') }}
+          key: mruby-${{ runner.os }}-${{ hashFiles('scripts/setup-mruby.sh', 'scripts/mruby-tool-config.rb', 'scripts/mrb.rb') }}
 
       - name: Build the mruby interpreter
         if: steps.mruby.outputs.cache-hit != 'true'

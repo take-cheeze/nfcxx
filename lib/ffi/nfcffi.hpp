@@ -170,7 +170,7 @@ class Ffi {
   Ffi& add_flag(std::string flag);           // -I..., -D..., --backend=...
   Ffi& set_cache_dir(std::string dir);       // default $NFCFFI_CACHE, else $TMPDIR/nfcffi-cache-<uid>
   Ffi& set_compile_timeout(unsigned seconds);  // 0 disables; default 300
-  Ffi& set_decl_tool(std::string path);        // scripts/libclang-cursors; default <repo>/scripts/libclang-cursors
+  Ffi& set_decl_tool(std::string path);        // scripts/libclang-cursors.rb; default <repo>/scripts/libclang-cursors.rb
 
   // Compiles SOURCE (C) into a shared object and loads it. Throws CompileError when the source does not compile.
   Module compile(const std::string& source, bool cxx = false) const;

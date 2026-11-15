@@ -13,16 +13,16 @@ cat > "$tmp/checklist.md" <<'EOF'
 ## <a id="cpp23" href="#cpp23">C++23</a>
 | P2718R0: [range for](lang/cpp23/lifetime.md) | | 15 | 20 | - | - |
 EOF
-scripts/mrb scripts/cpp-feature-checklist.rb "$tmp/checklist.md" > "$tmp/checklist.tsv"
+scripts/mrb.rb scripts/cpp-feature-checklist.rb "$tmp/checklist.md" > "$tmp/checklist.tsv"
 [ "$(wc -l < "$tmp/checklist.tsv")" -eq 5 ]
 grep -q '^cpp11-N2347-scoped_enum-forward' "$tmp/checklist.tsv"
 grep -q '^cpp17-P0136R1-paper' "$tmp/checklist.tsv"
 cat "$tmp/checklist.md" "$tmp/checklist.md" > "$tmp/duplicate.md"
-if scripts/mrb scripts/cpp-feature-checklist.rb "$tmp/duplicate.md" > /dev/null 2>&1; then
+if scripts/mrb.rb scripts/cpp-feature-checklist.rb "$tmp/duplicate.md" > /dev/null 2>&1; then
   echo 'duplicate checklist row was accepted' >&2; exit 1
 fi
 printf 'bad input\n' > "$tmp/invalid.md"
-if scripts/mrb scripts/cpp-feature-checklist.rb "$tmp/invalid.md" > /dev/null 2>&1; then
+if scripts/mrb.rb scripts/cpp-feature-checklist.rb "$tmp/invalid.md" > /dev/null 2>&1; then
   echo 'empty checklist was accepted' >&2; exit 1
 fi
 cat > "$tmp/compiler" <<'EOF'
@@ -61,10 +61,10 @@ if FEATURE_CXX="$tmp/missing" FEATURE_ROUTES=gcc FEATURE_OUT="$tmp/missing-resul
   echo 'missing compiler passed smoke check' >&2; exit 1
 fi
 printf 'probe\tstandard\troute\tstatus\tcompile_exit\trun_exit\ncpp11-N2347-scoped_enum\tc++11\tqbe\tpass\t0\t0\n' > "$tmp/report.tsv"
-scripts/mrb scripts/cpp-feature-report.rb "$tmp/checklist.tsv" "$tmp/report.tsv" > "$tmp/report.md"
+scripts/mrb.rb scripts/cpp-feature-report.rb "$tmp/checklist.tsv" "$tmp/report.tsv" > "$tmp/report.md"
 grep -q 'pass | not-run | not-run' "$tmp/report.md"
 cat "$tmp/report.tsv" "$tmp/report.tsv" > "$tmp/bad-results.tsv"
-if scripts/mrb scripts/cpp-feature-report.rb "$tmp/checklist.tsv" "$tmp/bad-results.tsv" > /dev/null 2>&1; then
+if scripts/mrb.rb scripts/cpp-feature-report.rb "$tmp/checklist.tsv" "$tmp/bad-results.tsv" > /dev/null 2>&1; then
   echo 'invalid results were accepted' >&2; exit 1
 fi
 echo 'cpp-features parser, report and runner checks passed'

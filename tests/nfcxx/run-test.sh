@@ -155,5 +155,28 @@ check "$st" "2" "usage: unknown option"
 ruby "$run" > /dev/null 2>&1; st=$?
 check "$st" "2" "usage: no plan and no port arguments"
 
+# the prefixes of a command (OUT, APP, ENV1) apply to the next RUN only; JOBS does nothing; CP -R copies a directory
+mkdir -p "$work/pre/d/sub"; printf 'x\n' > "$work/pre/d/sub/f"
+printf 'OUT\t%s\nRUN\tsh\t-c\techo $NAMED\nRUN\tsh\t-c\techo $NAMED\nENV1\tNAMED=one\nAPP\t%s\nRUN\tsh\t-c\techo $NAMED\nJOBS\t4\nCP\t-R\t%s\t%s\n' \
+  "$work/pre/out" "$work/pre/out" "$work/pre/d" "$work/pre/copy" > "$work/pre/plan"
+ruby "$run" --plan="$work/pre/plan"; st=$?
+check "$st:$(cat "$work/pre/out" | tr '\n' '|')" "0:|one|" "prefixes: OUT truncates, APP appends, ENV1 is for one command"
+check "$(cat "$work/pre/copy/sub/f")" "x" "CP -R: the directory is copied"
+printf 'ENV1\tZ=1\n' > "$work/pre/bad"
+ruby "$run" --plan="$work/pre/bad" 2> /dev/null; st=$?
+check "$st" "2" "prefixes: a prefix with no command after it is refused"
+
+# ensure_tool: a fresh tool is not built (ninja is not on this PATH: a build would fail with 127)
+mkdir -p "$work/tool/src" "$work/tool/build"
+printf 'int x;\n' > "$work/tool/src/a.cpp"; sleep 1
+printf '#!/bin/sh\nexit 0\n' > "$work/tool/build/tool"; chmod +x "$work/tool/build/tool"
+printf 'RUN\tensure_tool\t%s\t%s\n' "$work/tool/src" "$work/tool/build/tool" > "$work/tool/plan"
+rb=$(command -v ruby)
+PATH="/nonexistent" "$rb" "$run" --plan="$work/tool/plan"; st=$?
+check "$st" "0" "ensure_tool: a fresh tool is left alone"
+touch "$work/tool/src/a.cpp"; sleep 1
+PATH="/nonexistent" "$rb" "$run" --plan="$work/tool/plan" 2> /dev/null; st=$?
+check "$st" "127" "ensure_tool: a stale tool is built (ninja missing: 127)"
+
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

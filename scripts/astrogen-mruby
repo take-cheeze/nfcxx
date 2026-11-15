@@ -39,4 +39,4 @@ add() {  # add NAME: the file for NAME (after the files it requires from the -I 
 }
 for l in "${libs[@]}"; do add "$l"; done
 printf '%s\n' "$code" >> "$tmp"
-exec "$root/scripts/mrb" "$tmp"
+exec "$root/scripts/mrb.rb" "$tmp"

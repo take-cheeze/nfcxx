@@ -10,7 +10,7 @@
 #   ld.NAME       exists only, for command -v (-fuse-ld=NAME)
 #   uname -m      the fact machine (other uname calls run for real)
 #   cuda-cub      prints the fact cuda-cub (absent: it fails, as the script does without a CUDA archive)
-#   cuda-driver-shim  the fact cuda-shim-error (fails with its text), else the fact cuda-shim (its path)
+#   cuda-driver-shim.rb  the fact cuda-shim-error (fails with its text), else the fact cuda-shim (its path)
 # Environment: NFCXX_FACTS (the facts file), NFCXX_STUB_LOG (the log), NFCXX_STUB_TMP, NFCXX_STUB_ROOT (the sandbox's
 # repository, which the facts' ROOT stands for).
 name=$(basename "$0")
@@ -59,7 +59,7 @@ case $name in
   cuda-cub.rb)
     v=$(fact cuda-cub); [ -n "$v" ] || exit 1
     printf '%s\n' "${v//ROOT/$NFCXX_STUB_ROOT}"; exit 0 ;;
-  cuda-driver-shim)
+  cuda-driver-shim.rb)
     e=$(fact cuda-shim-error)
     if [ -n "$e" ]; then printf '%s\n' "$e"; exit 1; fi
     v=$(fact cuda-shim); [ -n "$v" ] || { echo "stub: no cuda-shim fact" >&2; exit 99; }

@@ -11,7 +11,7 @@ prog.c --clang-18 -O0 -S -emit-llvm--> prog.ll --scripts/llvm-to-pathb.rb--> pro
 prog.ir --scripts/pathb-qbe-emit.rb--> prog.ssa --qbe--> prog.s --cc--> prog
 ```
 
-Run: `scripts/mrb scripts/llvm-to-pathb.rb FILE.ll > FILE.ir` (exit 0 translated, 3 refused with `refused: ...` on
+Run: `scripts/mrb.rb scripts/llvm-to-pathb.rb FILE.ll > FILE.ir` (exit 0 translated, 3 refused with `refused: ...` on
 stderr, 1 malformed input). The translator is written in the subset of Ruby the mruby tool runs, like the other scripts.
 
 Tests: `tests/llvm-pathb/run.sh`. Each `tests/llvm-pathb/cases/*.c` is compiled by clang-18 (`-O0`, or `-O1` with

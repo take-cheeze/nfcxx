@@ -1,23 +1,70 @@
 {
   "_comment": "CRuby -> mruby API map for convert_mrbgem.rb. kind: call (rename; inject mrb as first arg when inject_mrb), macro (rename or identity, no mrb), expr (identifier replaced by an expression), type (identifier replaced), special (handled by converter code), refuse (no equivalent; marker left in output). needs_mrb marks identifiers that require an mrb_state in scope. Any CRuby-looking identifier missing from this file is refused by the converter.",
   "types": {
+    "rb_data_type_t": "struct mrb_data_type",
     "VALUE": "mrb_value",
-    "ID": "mrb_sym"
+    "ID": "mrb_sym",
+    "SIGNED_VALUE": "intptr_t",
+    "st_index_t": "uintptr_t"
   },
   "type_check_refused": {
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
-    "T_FIXNUM": "mruby has one integer tag (MRB_TT_INTEGER, include/mruby/value.h:144); CRuby's Fixnum range is not mruby's integer range, and mruby's bignum tag is MRB_TT_BIGINT (value.h:165)",
-    "T_BIGNUM": "mruby's bignum tag MRB_TT_BIGINT (include/mruby/value.h:165) is chosen by mruby's integer width, not CRuby's Fixnum/Bignum boundary, so the tags do not select the same values",
-    "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:245-248; mrb_nil_p tells them apart by value), so a type check cannot tell nil from false",
-    "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:245-248) also matches nil, which CRuby reports as T_NIL",
-    "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (value.h:251) is true only, so it can be added as its own change",
-    "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF is a separate value kind",
-    "T_STRUCT": "mruby's MRB_TT_STRUCT (include/mruby/value.h:160) is not documented as the type of Struct instances, so the match is not verified",
-    "T_REGEXP": "mruby has no core Regexp type tag (none in include/mruby/value.h:138-167), so there is no fixed tag to compare with",
-    "T_RATIONAL": "mruby's MRB_TT_RATIONAL (include/mruby/value.h:164) is a gem type; the match with CRuby's Rational is not verified",
-    "T_COMPLEX": "mruby's MRB_TT_COMPLEX (include/mruby/value.h:163) is a gem type; the match with CRuby's Complex is not verified"
+    "T_FIXNUM": "mruby has one integer tag, MRB_TT_FIXNUM (include/mruby/value.h:109); CRuby's Fixnum/Bignum split is not mruby's integer range, so MRB_TT_FIXNUM matches every Integer (see the RB_TYPE_P caveat)",
+    "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
+    "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
+    "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
+    "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
+    "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF (value.h:111) is a separate value kind",
+    "T_STRUCT": "the fork has no MRB_TT_STRUCT tag (include/mruby/value.h:106-131); Struct instances are an mrbgem class (mrbgems/mruby-struct), so a type test would be a class test, which is not made here",
+    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with",
+    "T_RATIONAL": "the fork has no MRB_TT_RATIONAL tag: Rational is the mruby-rational mrbgem class (mrbgems/mruby-rational), so a test is mrb_obj_is_kind_of against it. Where the state is in scope RB_TYPE_P converts to that test; a case label of a switch cannot test a class, so a switch on T_RATIONAL needs an if-chain (not made here); Check_Type in a function without the state is refused",
+    "T_COMPLEX": "the fork has no MRB_TT_COMPLEX tag; Complex is the mruby-complex mrbgem class (mrbgems/mruby-complex), so a type test is a class test against that gem, which is not made here"
+  },
+  "unmapped_reasons": {
+    "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
+    "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_from_index": "stuck point (Encoding): an encoding index; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_find_index": "stuck point (Encoding): an encoding lookup by name; the fork has no Encoding (accepted stuck point)",
+    "RB_ENCODING_GET": "stuck point (Encoding): the encoding index of a string; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_str_asciionly_p": "stuck point (Encoding): an encoding query; the fork has no Encoding (accepted stuck point)",
+    "rb_str_conv_enc": "stuck point (Encoding): the conversion between encodings; the fork has no Encoding (accepted stuck point)",
+    "rb_thread_current": "stuck point (Thread): the fork has no Thread (accepted stuck point)",
+    "rb_thread_local_aref": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
+    "rb_thread_local_aset": "stuck point (Thread): thread-local storage; the fork has no Thread (accepted stuck point)",
+    "rb_mutex_new": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_mutex_lock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_mutex_unlock": "stuck point (Thread): a Mutex; the fork has no Thread or Mutex (accepted stuck point)",
+    "rb_require": "stuck point (require): the fork has no require (accepted stuck point)",
+    "rb_big_cmp": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "rb_absint_size": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "RBIGNUM_NEGATIVE_P": "stuck point (Bignum): the fork has no Bignum (no MRB_TT_BIGINT tag, no bignum mrbgem)",
+    "T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
+    "RUBY_T_NONE": "stuck point: the fork has no T_NONE tag (the MRB_TT enum, include/mruby/value.h:106-131); the empty-object marker has no mruby value kind",
+    "rb_time_timespec_new": "stuck point (Time offset): mruby-time's Time has only UTC and LOCAL timezones (mrbgems/mruby-time/include/mruby/time.h:15-20; getlocal takes no offset), so a fixed UTC offset from the caller cannot be represented",
+    "rb_str_export_to_enc": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_encoder": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_default_internal_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_utf8_encoding": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_codepoint_len": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_utf8_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_usascii_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_ascii8bit_encindex": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_strlen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_mbclen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
+    "rb_num_coerce_cmp": "stuck point (coerce): the fork has no numeric coercion protocol: no coerce method in src/ or mrblib/ (grep finds only the step counter, src/numeric.c:173), so there is no coerced operand to compare",
+    "rb_num_coerce_relop": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
+    "rb_num_coerce_bin": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
+    "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
+    "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
+    "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
+    "rb_encoding": "stuck point (Encoding): the rb_encoding type; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_get": "stuck point (Encoding): the encoding of a string; the fork has no Encoding (accepted stuck point)",
+    "rb_enc_check": "stuck point (Encoding): checks two strings are compatible encodings; the fork has no Encoding (accepted stuck point)",
+    "rb_define_alloc_func": "stuck point (per-class allocator): the fork has only the global allocf, no per-class allocator (accepted stuck point)"
   },
   "includes": {
     "ruby.h": {
@@ -87,6 +134,12 @@
       "needs_mrb": true,
       "returns": "class"
     },
+    "Data_Make_Struct": {
+      "kind": "special",
+      "handler": "data_make",
+      "needs_mrb": true,
+      "caveat": "a static mrb_data_type per call with the mark and free callbacks (threaded); the struct is zeroed"
+    },
     "rb_define_method": {
       "kind": "special",
       "handler": "define_method",
@@ -118,8 +171,14 @@
       "needs_mrb": true
     },
     "rb_const_get_at": {
-      "kind": "refuse",
-      "reason": "no exact mruby equivalent: mrb_const_get also searches the superclass chain, rb_const_get_at looks only in the receiver"
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "class_args": [
+        0
+      ],
+      "template": "mrb_const_get_at($m, $0, $1)",
+      "caveat": "the receiver's own constant table only (the fork's mrb_const_get_at, branch claude/const-get-at); a missing constant goes to const_missing, which raises NameError, as in CRuby. The receiver must be a tracked class or a mapped class constant"
     },
     "rb_scan_args": {
       "kind": "special",
@@ -147,28 +206,32 @@
       "mruby": "RSTRING_LEN"
     },
     "NUM2INT": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((int)mrb_int($m, $0))",
+      "caveat": "NUM2INT converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "NUM2LONG": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((long)mrb_int($m, $0))",
+      "caveat": "NUM2LONG converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "INT2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); the value is converted to mrb_int"
     },
     "LONG2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); the value is converted to mrb_int"
     },
     "RTEST": {
       "kind": "call",
@@ -207,9 +270,20 @@
       "mruby": "E_TYPE_ERROR",
       "needs_mrb": true
     },
+    "rb_streql_lit": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "str_args": [
+        1
+      ],
+      "template": "mrb_str_equal($m, $0, $1)",
+      "caveat": "the second argument is a string literal, made a mruby String; mrb_str_equal compares the bytes, as CRuby's rb_streql_lit (length and memcmp)"
+    },
     "rb_ensure": {
-      "kind": "refuse",
-      "reason": "no direct mruby equivalent (ensure callback not in the supported subset)"
+      "kind": "ensure_call",
+      "needs_mrb": true,
+      "caveat": "both callbacks are static VALUE f(VALUE) functions of this file used only here; they take (mrb, value) after threading, and mrb_ensure runs the ensure callback before re-raising an exception, as CRuby does"
     },
     "rb_rescue": {
       "kind": "refuse",
@@ -230,8 +304,11 @@
       "needs_mrb": true
     },
     "rb_gc_register_address": {
-      "kind": "refuse",
-      "reason": "address form (VALUE *): mruby has no address root. mrb_gc_register roots a value, so a later store through the address would not be rooted; the rooting must be designed by hand"
+      "kind": "call",
+      "mruby": "mrb_gc_register_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered"
     },
     "rb_gc_register_mark_object": {
       "kind": "call",
@@ -249,8 +326,12 @@
       "caveat": "valid only inside a data type mark callback (the runtime passes the state); refused elsewhere"
     },
     "rb_gc_mark_movable": {
-      "kind": "refuse",
-      "reason": "no mark callback in mruby: mrb_data_type has only dfree and ivars (include/mruby/data.h), so a mark function would never be called and rb_gc_mark has no place to run (movable marking has no mruby form either)"
+      "kind": "call",
+      "mruby": "mrb_gc_mark_value",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "gc_mark_context": true,
+      "caveat": "valid only inside a data type mark callback, as rb_gc_mark; mruby does not compact, so a movable mark is the same mark (the mark hook is the fork's mrb_data_type.mark, branch claude/markable-data-type)"
     },
     "rb_gc_enable": {
       "kind": "refuse",
@@ -277,11 +358,11 @@
       "needs_mrb": false
     },
     "StringValuePtr": {
-      "kind": "call",
-      "mruby": "RSTRING_PTR",
-      "inject_mrb": false,
-      "needs_mrb": false,
-      "caveat": "argument must already be a String: no implicit to_str conversion"
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "RSTRING_PTR(($0) = mrb_ensure_string_type($m, $0))",
+      "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "StringValueCStr": {
       "kind": "call",
@@ -291,11 +372,11 @@
       "caveat": "argument must already be a String: no to_str conversion and no NUL-byte check"
     },
     "NUM2ULONG": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: unsigned range is not checked"
+      "template": "((unsigned long)mrb_int($m, $0))",
+      "caveat": "NUM2ULONG converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "rb_str_new2": {
       "kind": "call",
@@ -345,6 +426,9 @@
       "arity": 3,
       "needs_mrb": true,
       "template": "mrb_intern($m, $0, $1)",
+      "ignored_args": [
+        2
+      ],
       "caveat": "the encoding argument is dropped: mruby symbols carry no encoding"
     },
     "RB_UNUSED_VAR": {
@@ -363,6 +447,20 @@
     "rb_deprecate_constant": {
       "kind": "drop",
       "reason": "CRuby warns when a deprecated constant is used; mruby has no constant deprecation, so the call has no effect"
+    },
+    "RB_OBJ_WRITE": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_write_field($m, $0, $1, $2)",
+      "caveat": "the object must be a heap value (CRuby's RB_OBJ_WRITE has the same requirement); the fork's mrb_write_field (include/mruby.h, branch claude/write-field of take-cheeze/mruby) stores the value and runs mruby's field write barrier once"
+    },
+    "StringValue": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(($0) = mrb_ensure_string_type($m, $0))",
+      "caveat": "the argument is converted in place with to_str; the argument must be a plain identifier"
     },
     "RSTRING_END": {
       "kind": "template",
@@ -428,10 +526,10 @@
       "caveat": "argument must be a string literal (mrb_intern_lit is a macro over mrb_intern_static); a char pointer does not compile"
     },
     "rb_funcall": {
-      "kind": "call",
-      "mruby": "mrb_funcall_id",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "special",
+      "handler": "funcall",
+      "needs_mrb": true,
+      "caveat": "a literal argument count; the method name is rb_intern of a string literal or a character ID; the argument list is an mrb_value array (mrb_funcall_argv)"
     },
     "rb_funcallv": {
       "kind": "call",
@@ -453,10 +551,10 @@
     },
     "rb_hash_aset": {
       "kind": "call",
-      "mruby": "mrb_hash_set",
+      "mruby": "mrb_hash_set_value",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "mruby returns void; the CRuby return value (the stored value) is not available"
+      "caveat": "the fork's mrb_hash_set_value (include/mruby/hash.h, branch claude/hash-set-value of take-cheeze/mruby) stores the value and returns it, as rb_hash_aset does"
     },
     "rb_hash_aref": {
       "kind": "call",
@@ -502,11 +600,11 @@
       "caveat": "mruby strings carry no encoding: the bytes are copied unchanged and UTF-8 is not recorded"
     },
     "rb_obj_class": {
-      "kind": "call",
-      "mruby": "mrb_obj_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, not mrb_value: wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_obj_class($m, $0))",
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby returns the class as a VALUE"
     },
     "rb_respond_to": {
       "kind": "call",
@@ -532,7 +630,8 @@
       "mruby": "mrb_iv_set",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "mruby returns void; the CRuby return value (the value) is not available"
+      "caveat": "mruby returns void; the CRuby return value (the value) is not available",
+      "value_lost": true
     },
     "ID2SYM": {
       "kind": "call",
@@ -628,13 +727,16 @@
     },
     "T_DATA": {
       "kind": "expr",
-      "mruby": "MRB_TT_CDATA",
+      "mruby": "MRB_TT_DATA",
       "type_check": "caveat",
-      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_CDATA is the nearest mruby C-data type, so check each use"
+      "caveat": "CRuby T_DATA also covers TypedData; MRB_TT_DATA is the nearest mruby C-data type, so check each use"
     },
     "rb_global_variable": {
-      "kind": "refuse",
-      "reason": "address form (VALUE *), as rb_gc_register_address: no mruby equivalent (mrb_gc_register roots a value, not a variable)"
+      "kind": "call",
+      "mruby": "mrb_gc_register_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered; CRuby's rb_global_variable never unregisters the address, and neither does this"
     },
     "rb_str_cat": {
       "kind": "call",
@@ -709,6 +811,13 @@
       "kind": "macro",
       "mruby": "mrb_float"
     },
+    "rb_ary_freeze": {
+      "kind": "call",
+      "mruby": "mrb_obj_freeze",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "an array is an object: its freeze is mrb_obj_freeze (the same frozen flag)"
+    },
     "rb_obj_freeze": {
       "kind": "call",
       "mruby": "mrb_obj_freeze",
@@ -716,10 +825,11 @@
       "needs_mrb": true
     },
     "rb_check_frozen": {
-      "kind": "call",
-      "mruby": "mrb_check_frozen_value",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_check_frozen($m, mrb_ptr($0))",
+      "caveat": "checks the object is not frozen; a value that is not a heap object raises in mruby's mrb_ptr"
     },
     "rb_hash_delete": {
       "kind": "call",
@@ -753,10 +863,8 @@
       "needs_mrb": true
     },
     "rb_ary_dup": {
-      "kind": "call",
-      "mruby": "mrb_ary_dup",
-      "inject_mrb": true,
-      "needs_mrb": true
+      "kind": "refuse",
+      "reason": "mrb_ary_dup is not in this fork; a copy is mrb_ary_new_from_values over the elements, which needs the RARRAY accessors by hand"
     },
     "rb_ary_new_capa": {
       "kind": "call",
@@ -771,18 +879,18 @@
       "needs_mrb": true
     },
     "NUM2DBL": {
-      "kind": "call",
-      "mruby": "mrb_as_float",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+      "template": "mrb_to_flo($m, $0)",
+      "caveat": "a Float conversion through mruby's mrb_to_flo; a non-numeric value raises TypeError"
     },
     "rb_num2dbl": {
-      "kind": "call",
-      "mruby": "mrb_as_float",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "needs float support (not MRB_NO_FLOAT); nil and non-numeric values raise TypeError as in CRuby, with mruby's message"
+      "template": "mrb_to_flo($m, $0)",
+      "caveat": "a Float conversion through mruby's mrb_to_flo; a non-numeric value raises TypeError"
     },
     "DBL2NUM": {
       "kind": "call",
@@ -792,24 +900,24 @@
     },
     "ULONG2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); no range check: an unsigned value above the mrb_int maximum wraps negative"
     },
     "ULL2NUM": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "no range check: an unsigned value above the mrb_int maximum wraps negative"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); no range check: an unsigned value above the mrb_int maximum wraps negative"
     },
     "NUM2LL": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+      "template": "((long long)mrb_int($m, $0))",
+      "caveat": "NUM2LL converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "rb_id2name": {
       "kind": "call",
@@ -838,12 +946,348 @@
       "inject_mrb": false,
       "needs_mrb": false
     },
+    "rb_isdigit": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isdigit((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_isxdigit": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isxdigit((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_isspace": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isspace((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_isalpha": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isalpha((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_isalnum": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isalnum((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_isupper": {
+      "kind": "template",
+      "arity": 1,
+      "template": "isupper((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_islower": {
+      "kind": "template",
+      "arity": 1,
+      "template": "islower((unsigned char)$0)",
+      "caveat": "the C library ctype function in the C locale, which is ASCII-only as CRuby's ctype macros are"
+    },
+    "rb_errinfo": {
+      "kind": "template",
+      "arity": 0,
+      "template": "(mrb->exc ? mrb_obj_value(mrb->exc) : mrb_nil_value())",
+      "needs_mrb": true,
+      "caveat": "mruby's mrb->exc is the exception being handled (nil when none); CRuby's $! is the same notion for a rescue body"
+    },
+    "rb_class_inherited_p": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [0, 1],
+      "needs_mrb": true,
+      "template": "mrb_class_inherited_p($m, $0, $1)",
+      "caveat": "the fork's mrb_class_inherited_p (mrbgem-independent, src/class.c): true if the first class is the second or inherits or includes it, false if the second is a subclass of the first, nil if unrelated; both class arguments must be tracked class variables or RClass * expressions"
+    },
+    "rb_cmpint": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_cmpint($m, $0, $1, $2)",
+      "caveat": "the fork's mrb_cmpint (src/numeric.c): the sign of a <=> result; nil raises ArgumentError as rb_cmpint does"
+    },
+    "rb_memhash": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "mrb_memhash($0, $1)",
+      "caveat": "the fork's mrb_memhash (src/numeric.c): an FNV-1a hash of the bytes; the value differs from CRuby's, which only matters where the hash is printed or stored across runs"
+    },
+    "rb_hash_bulk_insert": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_hash_bulk_insert($m, $0, $1, $2)",
+      "caveat": "the fork's mrb_hash_bulk_insert (src/hash.c): argv holds argc elements, alternating keys and values, inserted in order as rb_hash_bulk_insert does"
+    },
+    "rb_apply": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, $1, RARRAY_LEN($2), RARRAY_PTR($2))",
+      "caveat": "rb_apply(recv, mid, args) calls mid with the elements of the array args, as rb_funcallv does; the array is read, not retained"
+    },
+    "rb_reg_new": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
+    "rb_reg_regcomp": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
+    "RREGEXP_PTR": {
+      "kind": "refuse",
+      "reason": "stuck point: the fork has no Regexp class (no mruby-regexp mrbgem in mrbgems/) and no Regexp tag (include/mruby/value.h:106-131), so there is no regexp object to build or read"
+    },
+    "rb_copy_generic_ivar": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_iv_copy($m, $0, $1)",
+      "caveat": "copies the instance variables of the second object into the first, as rb_copy_generic_ivar does; the fork's mrb_iv_copy replaces the first object's table"
+    },
+    "rb_check_arity": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(($0 < $1 || $0 > $2) ? (mrb_argnum_error($m, $0, $1, $2), $0) : $0)",
+      "caveat": "raises ArgumentError (mrb_argnum_error) when the count is outside min..max and returns the count, as rb_check_arity does; the count is a plain identifier, so repeating it has no effect"
+    },
+    "ruby_scan_digits": {
+      "kind": "template",
+      "arity": 5,
+      "template": "mrb_scan_digits($0, $1, $2, $3, $4)",
+      "decl_drop": true,
+      "caveat": "the fork's mrb_scan_digits (src/string.c) has CRuby's ruby_scan_digits semantics: the length is mrb_int (a negative length means no limit), and the call takes no state"
+    },
+    "rb_strlen_lit": {
+      "kind": "template",
+      "arity": 1,
+      "template": "(sizeof($0) - 1)",
+      "caveat": "CRuby's compile-time length of a string literal (sizeof less the terminator); the argument is a string literal"
+    },
+    "RUBY_EXTERN": {
+      "kind": "expr",
+      "mruby": "extern",
+      "caveat": "CRuby's visibility keyword for a declaration of a function or variable of the interpreter; in mruby it is the plain C extern"
+    },
+    "RUBY_EXTCONF_H": {
+      "kind": "expr",
+      "mruby": "RUBY_EXTCONF_H",
+      "caveat": "the build's extconf header name, defined only by CRuby's mkmf build; mruby never defines it, so the #ifdef that tests it is false and the include beneath it is inert"
+    },
+    "rb_str_format": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_format($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_str_format(argc, argv, fmt) is the Ruby format of fmt with argv: the fork's mrb_str_format (mruby-sprintf, which must be in the build; the fork declares it in include/mruby/string.h)"
+    },
+    "rb_check_string_type": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_check_string_type($m, $0)",
+          "caveat": "CRuby's rb_check_string_type returns the string or nil; the fork's mrb_check_string_type has the same contract"
+    },
+    "rb_exc_new3": {
+          "kind": "template",
+          "arity": 2,
+          "class_args": [
+                0
+          ],
+          "needs_mrb": true,
+          "template": "mrb_exc_new_str($m, $0, $1)",
+          "caveat": "rb_exc_new3(klass, str) is rb_exc_new_str; the class is an RClass * (class_args)"
+    },
+    "rb_data_typed_object_zalloc": {
+          "kind": "template",
+          "arity": 3,
+          "class_args": [
+                0
+          ],
+          "needs_mrb": true,
+          "template": "mrb_data_object_alloc($m, $0, mrb_calloc($m, 1, $1), $2)",
+          "caveat": "a zeroed struct of the given size with the data type, as the Data_Make_Struct path builds it"
+    },
+    "ruby_xrealloc2": {
+          "kind": "template",
+          "arity": 3,
+          "needs_mrb": true,
+          "template": "mrb_realloc($m, $0, ($1) * ($2))",
+          "caveat": "ruby_xrealloc2(ptr, n, size) is a reallocation of n * size bytes; the fork's mrb_realloc raises when it cannot allocate, as CRuby does"
+    },
+    "rb_str_tmp_new": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_str_buf_new($m, $0)",
+          "caveat": "an empty string buffer of the length given (its contents are not set, as CRuby's rb_str_tmp_new)"
+    },
+    "rb_set_errinfo": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "((mrb->exc = mrb_nil_p($0) ? NULL : (struct RObject *)mrb_ptr($0)), (void)0)",
+          "caveat": "sets the exception being handled (mrb->exc); nil clears it. CRuby's rb_set_errinfo returns void"
+    },
+    "OBJ_FROZEN": {
+          "kind": "template",
+          "arity": 1,
+          "template": "MRB_FROZEN_P(mrb_basic_ptr($0))",
+          "caveat": "the frozen flag of a heap object (the fork's MRB_FROZEN_P on its RBasic)"
+    },
+    "RBASIC_CLASS": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_obj_value(mrb_class($m, $0))",
+          "caveat": "the class of an object as a VALUE (the fork's mrb_class)"
+    },
+    "RUBY_ATOMIC_SIZE_INC": {
+          "kind": "template",
+          "arity": 1,
+          "template": "(($0)++)",
+          "caveat": "an increment; mruby's build is single-threaded, so the increment is not atomic and needs no more"
+    },
+    "RUBY_ATOMIC_SIZE_DEC": {
+          "kind": "template",
+          "arity": 1,
+          "template": "(($0)--)",
+          "caveat": "a decrement; mruby's build is single-threaded (see RUBY_ATOMIC_SIZE_INC)"
+    },
+    "RUBY_TYPED_THREAD_SAFE_FREE": {
+          "kind": "expr",
+          "mruby": "0",
+          "caveat": "a data type flag; mruby's data types have no flags (0)"
+    },
+    "RBIMPL_HAS_BUILTIN": {
+          "kind": "template",
+          "arity": 1,
+          "template": "0",
+          "caveat": "CRuby's compiler-feature probe; mruby does not use the builtin, so 0 (the fallback path)"
+    },
+    "RBIMPL_STATIC_ASSERT": {
+          "kind": "template",
+          "arity": 2,
+          "template": "((void)0)",
+          "caveat": "a compile-time check of the CRuby build; the check is not carried over"
+    },
+    "RLIM_INFINITY": {
+          "kind": "expr",
+          "mruby": "RLIM_INFINITY",
+          "caveat": "the sys/resource.h constant of the C library, the same in the mruby build"
+    },
+    "RLIMIT_STACK": {
+          "kind": "expr",
+          "mruby": "RLIMIT_STACK",
+          "caveat": "the sys/resource.h constant of the C library, the same in the mruby build"
+    },
+    "rb_complex_real": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"real\", 0)",
+      "caveat": "the real part, by the complex mrbgem's Complex#real (mruby-complex must be in the build)"
+    },
+    "rb_complex_imag": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"imaginary\", 0)",
+      "caveat": "the imaginary part, by the complex mrbgem's Complex#imaginary (mruby-complex must be in the build)"
+    },
+    "rb_complex_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, mrb_top_self($m), \"Complex\", 2, $0, $1)",
+      "caveat": "Complex(real, imag) through Kernel#Complex of the complex mrbgem (mruby-complex must be in the build)"
+    },
+    "rb_time_timespec": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((struct timespec){ .tv_sec = mrb_fixnum(mrb_funcall($m, $0, \"to_i\", 0)), .tv_nsec = (long)mrb_fixnum(mrb_funcall($m, $0, \"usec\", 0)) * 1000 })",
+      "caveat": "the seconds and the nanoseconds of a Time, from the mruby-time gem's to_i and usec: that gem keeps microseconds, so the nanoseconds are a multiple of 1000"
+    },
+    "rb_ivar_count": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "(size_t)RARRAY_LEN(mrb_obj_instance_variables($m, $0))",
+      "caveat": "the number of instance variables of the object: the length of mruby's instance_variables array (CRuby counts the generic ivar table the same way)"
+    },
+    "rb_range_values": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "template": "(*($1) = RANGE_BEG(mrb_range_ptr($m, $0)), *($2) = RANGE_END(mrb_range_ptr($m, $0)), *($3) = mrb_range_ptr($m, $0)->excl, 1)",
+      "caveat": "the begin, end and exclude-end of a Range (the fork's RANGE_BEG/RANGE_END accessors); the result is 1 for a Range: the argument must be a Range, as the callers check it"
+    },
+    "rb_method_boundp": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(mrb_respond_to($m, $0, $1) ? 1 : 0)",
+      "caveat": "whether the object responds to the method (the fork's mrb_respond_to); the visibility argument (public only) is not distinguished, so it is dropped"
+    },
+    "rb_proc_call_with_block": {
+      "kind": "template",
+      "arity": 4,
+      "ignored_args": [3],
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"call\"), $1, $2)",
+      "caveat": "a call of the proc through its call method with the argument array; the block argument must be nil (CRuby's Qnil), which is dropped"
+    },
+    "RUBY_Qnil": {
+          "kind": "expr",
+          "mruby": "mrb_nil_value()"
+    },
+    "RB_EXT_RACTOR_SAFE": {
+          "kind": "template",
+          "arity": 1,
+          "template": "((void)0)",
+          "caveat": "the ractor declaration of CRuby; mruby has no ractors, so it has no effect (as rb_ext_ractor_safe is dropped)"
+    },
+    "rb_attr_get": {
+          "kind": "template",
+          "arity": 2,
+          "needs_mrb": true,
+          "template": "mrb_iv_get($m, $0, $1)",
+          "caveat": "the instance variable of the object named by the ID (an mrb_sym); no warning is raised for a missing one, as in CRuby"
+    },
+    "rb_check_hash_type": {
+          "kind": "template",
+          "arity": 1,
+          "needs_mrb": true,
+          "template": "mrb_check_hash_type($m, $0)",
+          "caveat": "the hash, or nil when the value is not a Hash, via the fork mrb_check_hash_type"
+    },
+    "rb_struct_aset": {
+          "kind": "template",
+          "arity": 3,
+          "needs_mrb": true,
+          "template": "mrb_funcall($m, $0, \"[]=\", 2, $1, $2)",
+          "caveat": "Struct#[]= with the index and the value (mruby-struct must be in the build)"
+    },
+    "rb_memerror": {
+          "kind": "template",
+          "arity": 0,
+          "needs_mrb": true,
+          "template": "mrb_raise($m, mrb_exc_get($m, \"NoMemoryError\"), \"failed to allocate memory\")",
+          "caveat": "raises NoMemoryError; the fork has no E_NOMEMORY_ERROR constant, so the class is looked up by name"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
       "inject_mrb": true,
       "needs_mrb": true,
-      "caveat": "returns mrb_bool (0 or 1), where CRuby returns int"
+      "caveat": "the block slot of the current call frame (the fork's mrb_block_given_p, branch claude/block-given-p; mrb_get_args reads the same slot with &); it is false in a method called without a block"
     },
     "rb_exc_raise": {
       "kind": "call",
@@ -853,12 +1297,12 @@
     },
     "rb_eStandardError": {
       "kind": "expr",
-      "mruby": "E_STANDARD_ERROR",
+      "mruby": "mrb_exc_get(mrb, \"StandardError\")",
       "needs_mrb": true
     },
     "rb_eException": {
       "kind": "expr",
-      "mruby": "E_EXCEPTION",
+      "mruby": "mrb_exc_get(mrb, \"Exception\")",
       "needs_mrb": true
     },
     "rb_const_defined": {
@@ -934,13 +1378,13 @@
     },
     "RUBY_T_FIXNUM": {
       "kind": "expr",
-      "mruby": "MRB_TT_INTEGER",
-      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "mruby": "MRB_TT_FIXNUM",
+      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
     "T_FIXNUM": {
       "kind": "expr",
-      "mruby": "MRB_TT_INTEGER",
-      "caveat": "mruby has no bignum, so MRB_TT_INTEGER matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "mruby": "MRB_TT_FIXNUM",
+      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
     },
     "rb_eIndexError": {
       "kind": "expr",
@@ -1041,24 +1485,24 @@
     },
     "rb_ll2inum": {
       "kind": "call",
-      "mruby": "mrb_int_value",
-      "inject_mrb": true,
-      "needs_mrb": true,
-      "caveat": "mrb_int may be narrower than long long: values outside its range are not preserved"
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "mruby's Integer (mrb_fixnum_value); mrb_int may be narrower than long long: values outside its range are not preserved"
     },
     "NUM2UINT": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: the unsigned int range is not checked, and the result is mrb_int, not unsigned int"
+      "template": "((unsigned int)mrb_int($m, $0))",
+      "caveat": "NUM2UINT converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "NUM2SIZET": {
-      "kind": "call",
-      "mruby": "mrb_as_int",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "signed conversion: the size_t range is not checked, and the result is mrb_int, not size_t"
+      "template": "((size_t)mrb_int($m, $0))",
+      "caveat": "NUM2SIZET converts through mruby's integer conversion (mrb_to_int, the mrb_int macro): a Float is truncated, a non-numeric value raises TypeError"
     },
     "FIX2ULONG": {
       "kind": "call",
@@ -1075,32 +1519,37 @@
       "caveat": "CRuby's OBJ_FREEZE (rb_obj_freeze_inline, ruby/internal/fl_type.h:911) returns void; mruby's mrb_obj_freeze returns the object, which a statement use discards"
     },
     "rb_obj_is_kind_of": {
-      "kind": "call",
-      "mruby": "mrb_obj_is_kind_of",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 2,
+      "class_args": [
+        1
+      ],
       "needs_mrb": true,
-      "caveat": "returns mrb_bool (0 or 1), where CRuby returns VALUE (Qtrue or Qfalse); the class argument is a struct RClass * (a class variable is passed unwrapped: special_arg_positions_class_only), so a VALUE class does not type-check"
+      "template": "mrb_bool_value(mrb_obj_is_kind_of($m, $0, $1))",
+      "template_cond": "mrb_obj_is_kind_of($m, $0, $1)",
+      "caveat": "a condition (if/while, !, &&, ||) gets the mrb_bool; a value gets Qtrue/Qfalse; the class argument must be a tracked class variable or an RClass * expression"
     },
     "rb_obj_id": {
-      "kind": "call",
-      "mruby": "mrb_obj_id",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": false,
-      "caveat": "returns mrb_int, where CRuby returns an Integer VALUE: wrap with mrb_int_value(mrb, ...) where a VALUE is needed. mruby's id is the object's address (src/etc.c), CRuby's is a sequence number: both are unique among live objects, but the values differ"
+      "template": "mrb_fixnum_value(mrb_obj_id($0))",
+      "caveat": "mruby's object id (mrb_int) is wrapped as an Integer VALUE; the numbers differ from CRuby's object_id, which only has to be stable and unique"
     },
     "CLASS_OF": {
-      "kind": "call",
-      "mruby": "mrb_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, where CRuby's CLASS_OF returns VALUE: wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_class($m, $0))",
+      "class_var_value": true,
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby's CLASS_OF returns a VALUE"
     },
     "rb_class_of": {
-      "kind": "call",
-      "mruby": "mrb_class",
-      "inject_mrb": true,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": true,
-      "caveat": "returns struct RClass *, where CRuby's rb_class_of returns VALUE (ruby/internal/globals.h:174): wrap with mrb_obj_value() where a VALUE is needed"
+      "template": "mrb_obj_value(mrb_class($m, $0))",
+      "caveat": "the struct RClass * is wrapped with mrb_obj_value: CRuby's rb_class_of returns a VALUE (ruby/internal/globals.h:174)"
     },
     "rb_include_module": {
       "kind": "call",
@@ -1123,11 +1572,11 @@
       "caveat": "both read the data field of a VALUE and are lvalues. mruby has no typed/untyped split: the object must be an mruby data object (mrb_data_type), and the type is not checked, as in CRuby"
     },
     "RB_INTEGER_TYPE_P": {
-      "kind": "call",
-      "mruby": "mrb_integer_p",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 1,
       "needs_mrb": false,
-      "caveat": "mruby has no bignum: MRB_TT_INTEGER matches every Integer, including values CRuby reports as a bignum (the same reason RUBY_T_FIXNUM is caveated)"
+      "template": "mrb_fixnum_p($0)",
+      "caveat": "mruby has one fixnum tag (MRB_TT_FIXNUM): only a fixnum is an Integer here; a bignum-sized Integer has no mruby tag in this build"
     },
     "rb_cString": {
       "kind": "expr",
@@ -1216,7 +1665,7 @@
     },
     "rb_eZeroDivError": {
       "kind": "expr",
-      "mruby": "E_ZERODIV_ERROR",
+      "mruby": "mrb_exc_get(mrb, \"ZeroDivisionError\")",
       "needs_mrb": true
     },
     "rb_eFloatDomainError": {
@@ -1264,7 +1713,8 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "intern_arg": 1,
-      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not"
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; CRuby checks the name is an ivar name, mruby does not",
+      "value_lost": true
     },
     "rb_protect": {
       "kind": "call",
@@ -1283,7 +1733,7 @@
         0,
         1
       ],
-      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class must be a tracked class variable (struct RClass *); both calls run initialize"
+      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class is a tracked class variable, a mapped class constant (rb_cRange is mrb->range_class), or a VALUE name or member unwrapped with mrb_class_ptr (CRuby requires a class there); argc may be an integer literal and argv NULL; both calls run initialize"
     },
     "rb_hash_lookup": {
       "kind": "call",
@@ -1336,7 +1786,8 @@
       "inject_mrb": true,
       "needs_mrb": true,
       "intern_arg": 0,
-      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby"
+      "caveat": "the name must be a string literal: it is interned with mrb_intern_cstr at each call; special globals may behave differently in mruby",
+      "value_lost": true
     },
     "rb_reg_nth_match": {
       "kind": "template",
@@ -1425,6 +1876,11 @@
       "template": "($3 = ($1 *)mrb_data_get_ptr($m, $0, $2))",
       "caveat": "reads the data pointer with mrb_data_get_ptr, which raises TypeError on a mismatched type, as CRuby does"
     },
+    "rb_ivar_foreach": {
+      "kind": "hash_foreach",
+      "needs_mrb": true,
+      "caveat": "the fork's mrb_iv_foreach over the object's instance variables: the callback gets (mrb, symbol, value, void *) (ID is mrb_sym); a result of 0 continues, non-zero stops, as CRuby ST_CONTINUE and ST_STOP"
+    },
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,
@@ -1445,6 +1901,654 @@
     "RBIMPL_ATTR_NORETURN": {
       "kind": "drop",
       "reason": "a no-return attribute: a hint for the compiler that mruby does not need; the declaration has the same meaning without it"
+    },
+    "rb_eIOError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"IOError\")",
+      "needs_mrb": true,
+      "caveat": "IOError is defined by the mruby-io gem; mrb_exc_get raises at run time if it is not loaded"
+    },
+    "rb_eEOFError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"EOFError\")",
+      "needs_mrb": true,
+      "caveat": "EOFError is defined by the mruby-io gem"
+    },
+    "rb_eEncodingError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"EncodingError\")",
+      "needs_mrb": true,
+      "caveat": "mruby has no encodings; the exception is only the class"
+    },
+    "rb_eSysStackError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"SystemStackError\")",
+      "needs_mrb": true
+    },
+    "rb_eLoadError": {
+      "kind": "expr",
+      "mruby": "mrb_exc_get(mrb, \"LoadError\")",
+      "needs_mrb": true
+    },
+    "rb_cNumeric": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Numeric\")",
+      "needs_mrb": true
+    },
+    "rb_cFixnum": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Integer\")",
+      "needs_mrb": true,
+      "caveat": "mruby has one Integer class; CRuby Fixnum and Bignum are both Integer here"
+    },
+    "rb_cFile": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"File\")",
+      "needs_mrb": true,
+      "caveat": "File is defined by the mruby-io gem"
+    },
+    "rb_cTime": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Time\")",
+      "needs_mrb": true,
+      "caveat": "Time is defined by the mruby-time gem"
+    },
+    "rb_cStruct": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Struct\")",
+      "needs_mrb": true,
+      "caveat": "Struct is defined by the mruby-struct gem"
+    },
+    "rb_cRegexp": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Regexp\")",
+      "needs_mrb": true,
+      "caveat": "Regexp is defined by the mruby-onig-regexp gem"
+    },
+    "rb_cRandom": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Random\")",
+      "needs_mrb": true,
+      "caveat": "Random is defined by the mruby-random gem"
+    },
+    "rb_cRational": {
+      "kind": "expr",
+      "mruby": "mrb_class_get(mrb, \"Rational\")",
+      "needs_mrb": true,
+      "caveat": "Rational is defined by a mruby gem"
+    },
+    "rb_gc_unregister_address": {
+      "kind": "call",
+      "mruby": "mrb_gc_unregister_address",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "needs the mruby fork's address roots (claude/gc-address-roots: mrb_gc_register_address reads *ptr at each collection); the value at the address stays rooted for as long as it is registered"
+    },
+    "xmalloc": {
+      "kind": "call",
+      "mruby": "mrb_malloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xcalloc": {
+      "kind": "call",
+      "mruby": "mrb_calloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xrealloc": {
+      "kind": "call",
+      "mruby": "mrb_realloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "xfree": {
+      "kind": "call",
+      "mruby": "mrb_free",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xmalloc": {
+      "kind": "call",
+      "mruby": "mrb_malloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xcalloc": {
+      "kind": "call",
+      "mruby": "mrb_calloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xrealloc": {
+      "kind": "call",
+      "mruby": "mrb_realloc",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "ruby_xfree": {
+      "kind": "call",
+      "mruby": "mrb_free",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "CRuby's allocator raises NoMemoryError on failure; mruby's raises RuntimeError"
+    },
+    "rb_str_cat2": {
+      "kind": "call",
+      "mruby": "mrb_str_cat_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
+    },
+    "rb_str_cat_cstr": {
+      "kind": "call",
+      "mruby": "mrb_str_cat_cstr",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "appends the NUL-terminated bytes; returns the string, as CRuby"
+    },
+    "rb_undef_alloc_func": {
+      "kind": "template",
+      "arity": 1,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_undef_class_method($m, $0, \"new\")",
+      "caveat": "mruby has no separate allocator: the class's new is undefined, so Klass.new raises NoMethodError where CRuby raises TypeError (allocator undefined); the argument must be a tracked class variable"
+    },
+    "RB_OBJ_WRITTEN": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "do { mrb_field_write_barrier_value($m, mrb_basic_ptr($0), $2); } while (0)",
+      "caveat": "the object must be a heap value; the old value is not needed by mruby's field barrier, as CRuby's write barrier does not need it"
+    },
+    "SSIZET2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby's Integer from a C size (signed for SSIZET2NUM): mruby's fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "SIZET2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "CRuby's Integer from a C size (signed for SSIZET2NUM): mruby's fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "rb_const_set": {
+      "kind": "call",
+      "mruby": "mrb_const_set",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the class is a VALUE here (mrb_const_set takes an mrb_value); the ID is an mrb_sym"
+    },
+    "rb_obj_as_string": {
+      "kind": "call",
+      "mruby": "mrb_obj_as_string",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "calls to_s, as CRuby's rb_obj_as_string"
+    },
+    "rb_inspect": {
+      "kind": "call",
+      "mruby": "mrb_inspect",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "calls inspect, as CRuby's rb_inspect"
+    },
+    "rb_class_name": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_str_new_cstr($m, mrb_class_name($m, mrb_class_ptr($0)))",
+      "caveat": "returns the class name as a String (CRuby returns a VALUE); the argument is a class value"
+    },
+    "rb_id2sym": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_symbol_value($0)",
+      "caveat": "an ID is an mrb_sym here; the Symbol value is mrb_symbol_value"
+    },
+    "rb_intern2": {
+      "kind": "call",
+      "mruby": "mrb_intern",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "interns the bytes (length given), as CRuby's rb_intern2"
+    },
+    "rb_mEnumerable": {
+      "kind": "expr",
+      "mruby": "mrb_module_get(mrb, \"Enumerable\")",
+      "needs_mrb": true,
+      "caveat": "Enumerable is a mruby gem module (mruby-enumerator); looked up by name, raises at run time if the gem is not loaded"
+    },
+    "rb_mComparable": {
+      "kind": "expr",
+      "mruby": "mrb_module_get(mrb, \"Comparable\")",
+      "needs_mrb": true,
+      "caveat": "Comparable is looked up by name, as Enumerable"
+    },
+    "rb_str_concat": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "(mrb_str_concat($m, $0, $1), $0)",
+      "caveat": "appends the other value to the string and returns the string, as CRuby's rb_str_concat"
+    },
+    "RB_NIL_P": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_nil_p($0)",
+      "caveat": "nil test, as CRuby's NIL_P"
+    },
+    "RB_OBJ_FREEZE": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void)mrb_obj_freeze($m, $0))",
+      "caveat": "freezes the object; the result is not used (CRuby's RB_OBJ_FREEZE is void)"
+    },
+    "RUBY_T_HASH": {
+      "kind": "expr",
+      "mruby": "MRB_TT_HASH"
+    },
+    "RUBY_T_ARRAY": {
+      "kind": "expr",
+      "mruby": "MRB_TT_ARRAY"
+    },
+    "RB_INT2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "an mruby fixnum (see INT2NUM)"
+    },
+    "LL2NUM": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "an mruby fixnum; a value beyond mruby's integer range is not represented"
+    },
+    "NUM2SSIZET": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((ssize_t)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "NUM2USHORT": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((unsigned short)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "NUM2ULL": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((unsigned long long)mrb_int($m, $0))",
+      "caveat": "converts through mruby's integer conversion (see NUM2INT)"
+    },
+    "rb_bug": {
+      "kind": "call",
+      "mruby": "mrb_bug",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "the format is printed by mruby's formatter; CRuby's PRIsVALUE arguments are not mapped (refused where they appear)"
+    },
+    "rb_sprintf": {
+      "kind": "call",
+      "mruby": "mrb_format",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "format_arg": 0,
+      "caveat": "returns a String built by mruby's formatter (see rb_bug for the format); PRIsVALUE in the format becomes %S (%!S for the + flag)"
+    },
+    "rb_ary_new_from_values": {
+      "kind": "call",
+      "mruby": "mrb_ary_new_from_values",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "copies the n values into a new Array, as CRuby's rb_ary_new_from_values"
+    },
+    "FIXNUM_MAX": {
+      "kind": "expr",
+      "mruby": "(LONG_MAX >> 1)",
+      "needs_mrb": false,
+      "caveat": "CRuby's FIXNUM_MAX (2^62-1 on 64-bit): the value is kept, so the converted code makes the same Fixnum/Bignum decisions; the mruby integer is wider, so a value in this range is still an mruby fixnum"
+    },
+    "FIXNUM_MIN": {
+      "kind": "expr",
+      "mruby": "(LONG_MIN >> 1)",
+      "needs_mrb": false,
+      "caveat": "CRuby's FIXNUM_MIN (-2^62 on 64-bit): the value is kept (see FIXNUM_MAX)"
+    },
+    "rb_rational_new2": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_Rational": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 2, (mrb_value[]){$0, $1})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_new1": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 1, (mrb_value[]){$0})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_Rational1": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_top_self($m), mrb_intern_cstr($m, \"Rational\"), 1, (mrb_value[]){$0})",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_num": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"numerator\"), 0, NULL)",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_rational_den": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"denominator\"), 0, NULL)",
+      "caveat": "needs the mruby-rational gem (its Kernel#Rational and Rational#numerator / denominator); the call raises at run time if the gem is not in the build"
+    },
+    "rb_struct_aref": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"[]\"), 1, (mrb_value[]){$1})",
+      "caveat": "needs the mruby-struct gem (Struct#[] and Struct#size); the call raises at run time if the gem is not in the build"
+    },
+    "RSTRUCT_GET": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"[]\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "needs the mruby-struct gem (Struct#[]); the index is a C integer here (CRuby's RSTRUCT_GET takes a long), so it is converted to an Integer value"
+    },
+    "RSTRUCT_LEN": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_int($m, mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"size\"), 0, NULL))",
+      "caveat": "needs the mruby-struct gem (Struct#[] and Struct#size); the call raises at run time if the gem is not in the build; the length is an mrb_int (as CRuby's long)"
+    },
+    "rb_time_nano_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_class_get($m, \"Time\")), mrb_intern_cstr($m, \"at\"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)($0)), mrb_fixnum_value((mrb_int)($1) / 1000)})",
+      "caveat": "needs the mruby-time gem (Time.at); mruby's Time keeps microseconds, so the nanoseconds are divided by 1000 (the sub-microsecond part is dropped)"
+    },
+    "rb_time_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_class_get($m, \"Time\")), mrb_intern_cstr($m, \"at\"), 2, (mrb_value[]){mrb_fixnum_value((mrb_int)($0)), mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "needs the mruby-time gem (Time.at with seconds and microseconds, as CRuby's rb_time_new)"
+    },
+    "rb_enc_interned_str": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [2],
+      "template": "mrb_str_new($m, $0, $1)",
+      "caveat": "the encoding argument is dropped (mruby strings carry no encoding): the bytes are kept; CRuby's interned string is frozen, this one is not"
+    },
+    "rb_enc_str_asciicompat_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "mrb_true_value()",
+      "caveat": "mruby strings are byte strings with no encoding, so every string is taken as ASCII-compatible; a CRuby string in a non-ASCII-compatible encoding (UTF-16) has no mruby form",
+      "template_cond": "1"
+    },
+    "rb_obj_method_arity": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((int)mrb_int($m, mrb_funcall_argv($m, mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"method\"), 1, (mrb_value[]){mrb_symbol_value($1)}), mrb_intern_cstr($m, \"arity\"), 0, NULL)))",
+      "caveat": "needs the mruby-method gem (Object#method and Method#arity); the call raises at run time if the gem is not in the build; the arity is a C int (CRuby's rb_obj_method_arity returns int)"
+    },
+    "rb_big2str": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"to_s\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "caveat": "calls to_s with the base (Integer#to_s), as CRuby's rb_big2str"
+    },
+    "rb_cstr2inum": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_cstr_to_inum($m, $0, $1, 0)",
+      "caveat": "parses the C string in the base without the badcheck (CRuby's rb_cstr2inum with badcheck off)"
+    },
+    "ST2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "a st_data_t / st_index_t value is a fixnum here (as INT2FIX); the value must fit mruby's integer"
+    },
+    "RB_ST2FIX": {
+      "kind": "call",
+      "mruby": "mrb_fixnum_value",
+      "inject_mrb": false,
+      "needs_mrb": false,
+      "caveat": "see ST2FIX"
+    },
+    "rb_io_write": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"write\"), 1, (mrb_value[]){$1})",
+      "caveat": "calls write on the IO (mruby-io), as CRuby's rb_io_write"
+    },
+    "rb_enc_copy": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "((void)($0), (void)($1))",
+      "caveat": "mruby strings carry no encoding, so copying one's encoding to another does nothing"
+    },
+    "rb_must_asciicompat": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template": "((void)($0))",
+      "caveat": "every mruby string is ASCII-compatible (see rb_enc_str_asciicompat_p), so the check always passes"
+    },
+    "rb_ary_new3": {
+      "kind": "special",
+      "handler": "ary_new3",
+      "needs_mrb": true,
+      "caveat": "a literal count; the values are an mrb_value array (mrb_ary_new_from_values)"
+    },
+    "rb_to_int": {
+      "kind": "call",
+      "mruby": "mrb_to_int",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "converts the value to an Integer (to_int), as CRuby's rb_to_int"
+    },
+    "rb_exc_new2": {
+      "kind": "template",
+      "arity": 2,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "mrb_exc_new_str($m, $0, mrb_str_new_cstr($m, $1))",
+      "caveat": "a new exception of the class with the message (CRuby's rb_exc_new2); the class must be a tracked class variable"
+    },
+    "rb_yield_values2": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "requires_block": true,
+      "template": "mrb_yield_argv($m, nfcx_block, $0, $1)",
+      "caveat": "yields the argc values of argv to the block (as rb_yield_values2); valid only in a registered method (the block is fetched by its wrapper)"
+    },
+    "rb_check_typeddata": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_data_get_ptr($m, $0, $1)",
+      "caveat": "checks the value's data type and returns its pointer (mruby's mrb_data_get_ptr raises on another type), as CRuby's rb_check_typeddata"
+    },
+    "rb_obj_call_init": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "((void)mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"initialize\"), $1, $2))",
+      "caveat": "calls initialize on the object with argc values from argv (CRuby's rb_obj_call_init)"
+    },
+    "rb_int_positive_pow": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_fixnum_value((mrb_int)($0)), mrb_intern_cstr($m, \"**\"), 1, (mrb_value[]){mrb_fixnum_value((mrb_int)($1))})",
+      "decl_drop": true,
+      "caveat": "x ** y on Integers (Integer#**), as CRuby's rb_int_positive_pow"
+    },
+    "rb_struct_s_members": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"members\"), 0, NULL)",
+      "caveat": "the struct class's members (mruby-struct's Struct.members), as CRuby's rb_struct_s_members; needs the struct gem"
+    },
+    "RB_ALLOC": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0)))",
+      "caveat": "allocates the bytes with mrb_malloc (raises on failure, as CRuby's xmalloc raises NoMemoryError); the pointer is void * as in CRuby"
+    },
+    "RB_ALLOC_N": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0) * ($1)))",
+      "caveat": "n values of the type, allocated with mrb_malloc (see RB_ALLOC)"
+    },
+    "ALLOC": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0)))",
+      "caveat": "see RB_ALLOC"
+    },
+    "ALLOC_N": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "((void *)mrb_malloc($m, sizeof($0) * ($1)))",
+      "caveat": "see RB_ALLOC_N"
+    },
+    "RB_REALLOC_N": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(($0) = (void *)mrb_realloc($m, $0, sizeof($1) * ($2)))",
+      "caveat": "reallocates the variable to n values of the type with mrb_realloc (see RB_ALLOC_N)"
+    },
+    "rb_gc": {
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "((void)mrb_full_gc($m))",
+      "caveat": "a full collection, as CRuby's rb_gc"
+    },
+    "rb_hash": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"hash\"), 0, NULL)",
+      "caveat": "calls hash on the object (Object#hash), as CRuby's rb_hash"
+    },
+    "rb_singleton_class": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_singleton_class($m, $0)",
+      "class_var_value": true,
+      "caveat": "the singleton class of the value, as CRuby's rb_singleton_class (returns a VALUE in both)"
+    },
+    "rb_alias": {
+      "kind": "template",
+      "arity": 3,
+      "class_args": [
+        0
+      ],
+      "needs_mrb": true,
+      "template": "((void)mrb_alias_method($m, $0, $1, $2))",
+      "caveat": "aliases the method of the class (the class must be a tracked class variable; the names are IDs, mrb_sym here)"
+    },
+    "rb_str_to_inum": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "mrb_str_to_inum($m, $0, $1, $2)",
+      "caveat": "parses the string in the base; badcheck as given (CRuby's rb_str_to_inum)"
+    },
+    "RB_FLOAT_TYPE_P": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template_cond": "mrb_float_p($0)",
+      "template": "mrb_bool_value(mrb_float_p($0))",
+      "caveat": "a Float test (mruby's float tag), as CRuby's RB_FLOAT_TYPE_P"
+    },
+    "rb_special_const_p": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": false,
+      "template_cond": "mrb_immediate_p($0)",
+      "template": "mrb_bool_value(mrb_immediate_p($0))",
+      "caveat": "an immediate value (no heap object), as CRuby's special constant test (the immediates differ: mruby's are not CRuby's)"
+    },
+    "RSTRING_GETMEM": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": false,
+      "template": "(($1) = RSTRING_PTR($0), ($2) = RSTRING_LEN($0))",
+      "caveat": "the pointer and length of the string, as CRuby's RSTRING_GETMEM"
     }
   },
   "special_arg_positions_class_only": {

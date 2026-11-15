@@ -20,7 +20,7 @@ static VALUE api_hash(VALUE self, VALUE h, VALUE k) {
 }
 
 static VALUE api_ary(VALUE self, VALUE a) {
-    VALUE copy = rb_ary_dup(a);
+    VALUE copy = rb_ary_new_capa(0); /* an empty array to store into (rb_ary_dup has no mruby form in this fork) */
     VALUE fresh = rb_ary_new_capa(4);
     VALUE old = rb_ary_new2(2);
     rb_ary_store(copy, 0, fresh);

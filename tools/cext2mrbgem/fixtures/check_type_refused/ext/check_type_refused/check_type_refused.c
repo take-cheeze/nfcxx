@@ -15,7 +15,7 @@ static VALUE ctr_nil(VALUE self, VALUE v) {
 }
 
 static VALUE ctr_class(VALUE self, VALUE v) {
-    Check_Type(v, T_CLASS);
+    Check_Type(v, T_OBJECT);
     return v;
 }
 

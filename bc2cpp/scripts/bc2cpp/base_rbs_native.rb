@@ -390,11 +390,11 @@ module BaseRbsNative
   end
 
   # The preprocessor command for `-E -P`: BC2CPP_PREPROCESSOR (`clang`, `nfcxx`, or a program taking clang's -x/-std/-E/-P
-  # options), else nfcxx's EDG preprocessor (scripts/nfcxx-cpp) when EDG is built, else clang. `nfcxx` is the nfcxx checkout
+  # options), else nfcxx's EDG preprocessor (scripts/nfcxx-cpp.rb) when EDG is built, else clang. `nfcxx` is the nfcxx checkout
   # bc2cpp sits in (the repository's bc2cpp/, or rpg-maker-clone's 3rd/nfcxx/bc2cpp).
   def preprocessor
     choice = ENV.fetch('BC2CPP_PREPROCESSOR', '')
-    nfcxx_cpp = File.expand_path('../scripts/nfcxx-cpp', BC2CPP_TREE_ROOT)
+    nfcxx_cpp = File.expand_path('../scripts/nfcxx-cpp.rb', BC2CPP_TREE_ROOT)
     edg = File.expand_path('../build/edg/bin/cpfe', BC2CPP_TREE_ROOT)
     case choice
     when 'clang' then 'clang'

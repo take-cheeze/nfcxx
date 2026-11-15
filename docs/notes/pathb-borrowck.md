@@ -6,7 +6,7 @@ The existing C++ frontend emits the required facts with `NFCXX_PATHB_BORROW=1`:
 
 ```sh
 NFCXX_PATHB_BORROW=1 scripts/pathb-dump --ir example.cpp > example.ir
-scripts/mrb scripts/pathb-borrowck.rb example.ir
+scripts/mrb.rb scripts/pathb-borrowck.rb example.ir
 ```
 
 This command explicitly opts the supplied module into analysis. It checks every function, without
@@ -211,7 +211,7 @@ its callers, and `(readonly %N)` needs no exception. Only the mrustc translator 
 ## Inferred loan ends (opt-in)
 
 ```sh
-scripts/mrb scripts/pathb-borrowck.rb --infer-loan-ends example.ir
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-loan-ends example.ir
 ```
 
 This mode shortens local loan lifetimes to their last possible use, without changing the input IR
@@ -880,7 +880,7 @@ callees with their caller and runs natively.
 ## Inferred summaries (opt-in)
 
 ```sh
-scripts/mrb scripts/pathb-borrowck.rb --infer-summaries example.ir
+scripts/mrb.rb scripts/pathb-borrowck.rb --infer-summaries example.ir
 ```
 
 This mode gives each defined function other than `main` that has no `call-effects` form a summary

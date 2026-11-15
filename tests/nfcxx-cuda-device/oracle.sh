@@ -4,7 +4,8 @@
 # In cu_device_build the xargs -P that assembles the groups is replaced (sed) by a loop that logs the job count (JOBS) and
 # runs ptxas once per group in glob order: the parallel run is scheduling, the count is the decision.
 # The stubs: the tools (the rewriter, the emitter, pathb-dump, ptxas, clang, the IR passes through ruby) run tool-stub, which
-# logs its command line; ensure_tool builds a missing tool (a copy of tool-stub); mktemp is CU_TEST_TMP; the trace, the cache
+# logs its command line; ensure_tool is logged at each call (the bash's function decides whether the tool is stale), and a
+# missing tool is a copy of tool-stub; mktemp is CU_TEST_TMP; the trace, the cache
 # log and the device key (CU_TEST_KEY) are no-ops. cp, mv, mkdir and rm log their lines and run. The log is printed at the end.
 #   tests/nfcxx-cuda-device/oracle.sh ROOT SRC [--cflag=ARG | --compile | --out=PATH | --ir-opt=V | --cache-dir=DIR | --cache-key=KEY]...
 # run.sh gives the environment (CU_TEST_*, and the NFCXX_* and CUDA_HOME variables of the case).
@@ -24,7 +25,7 @@ eval "$text"
 
 # The stubs (after the functions, so they replace any of their commands).
 _out() { local s=$1 x; shift; for x in "$@"; do s+=" $x"; done; printf '%s\n' "$s" >> "$CU_TEST_LOG"; }
-ensure_tool() { if [ ! -e "$2" ]; then _out RUN ensure_tool "$1" "$2"; command cp "$here/tool-stub" "$2"; fi; return 0; }
+ensure_tool() { _out RUN ensure_tool "$1" "$2"; if [ ! -e "$2" ]; then command cp "$here/tool-stub" "$2"; fi; return 0; }
 cp() { _out CP "$@"; command cp "$@"; }
 mv() { _out RUN mv "$@"; command mv "$@"; }
 mkdir() { _out RUN mkdir "$@"; command mkdir "$@"; }
@@ -51,6 +52,10 @@ for a in "$@"; do
     --ir-opt=*) ir_opt=${a#--ir-opt=}; ir_opt_set=1 ;;
     --cache-dir=*) cache_dir=${a#--cache-dir=} ;;
     --cache-key=*) CU_TEST_KEY=${a#--cache-key=} ;;
+    --obfuscate-kernels) obfuscate=1 ;;
+    --promote-slots=*) promote_slots=${a#--promote-slots=} ;;
+    --unroll=*) unroll=${a#--unroll=} ;;
+    --struct-slots=*) struct_slots=${a#--struct-slots=} ;;
     *) echo "oracle: unknown argument $a" >&2; exit 2 ;;
   esac
 done

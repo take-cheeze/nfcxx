@@ -28,20 +28,28 @@
 # -o value is replaced by TMP/x.o), or the -E path when -E is given. The port plans that command line.
 #
 # Modelled, with the bash's order of the lines: C sources (-c, and a link with C++ or alone), -E (exec g++ -E), -fsyntax-only,
-# -fsanitize=address (--asan on the compile, the ASan link options, the VLA runtime), -fsafe-pointers (--safe-pointers, the
-# runtime ahead of the objects), -shared (--pic and -shared on the link; the default backend takes gcc for it), the depfile
-# options -MP, -MF, -MT, -MQ with -c, and -MD and -MMD with -c and an explicit --backend=pathb (the bash writes no depfile on
-# the Path B compile: its -c path returns before the depfile). --cache, --cache-log, --time-log and --trace have no plan line
-# of their own (the cache and the Path B paths return before the cache; the trace and time log write files, not commands).
+# -fsanitize=address (--asan on the compile, the ASan link options, the VLA runtime), -fsanitize=CHECKS (--sanitize=CHECKS
+# on each compile; the names the bash implements), -fsafe-pointers (--safe-pointers, the runtime ahead of the objects),
+# -shared (--pic and -shared on the link; the default backend takes gcc for it), the depfile options -MP, -MF, -MT, -MQ
+# with -c, and -MD and -MMD with -c and an explicit --backend=pathb (the bash writes no depfile on
+# the Path B compile: its -c path returns before the depfile). --cache and --cache-log have no plan line of their own (the
+# cache and the Path B paths return before the cache). --keep-intermediates, --pathb-c and --obfuscate-kernels have none
+# either: the bash reads them on the EDG and CUDA paths only.
 #
 # Not covered (exit 3): the gcc backend (the default with -shared, or with -MD or -MMD and no -fsafe-pointers, and the
 # --backend=gcc choice); .cu and .cpp2 inputs (CUDA and cppfront: the rewriter, the device units and the prelinker) and the
 # CUDA options; C++ modules; SYCL (a -I directory with the oneAPI kernel header); --freestanding, --cosmo, --target, --emit-c,
-# --emit-hip, --bundle-libs, --cuda-driver, --module-dir, --instantiate, --keep-intermediates, and any other --option; -M and
+# --emit-hip, --bundle-libs, --cuda-driver, --keep-intermediates, and any other --option (--instantiate=auto|used,
+# --promote-slots, --unroll, --struct-slots and --module-dir are read and planned as no line: see parse); -M and
 # -MM and the other -M options that are not the depfile family (the bash passes -M and -MM on to cc or drops them, while its
 # header comment says -M takes the gcc backend: the two disagree, so the port does not choose); -MD with -c of a file -fsafe-
 # and -MMD with the default backend and no -fsafe-pointers (the default takes gcc for them); -c with no C++ or C source; -x
-# with a language other than c++; -fsanitize=undefined and the other -fsanitize values (the bash exits 2 for them: refused).
+# with a language other than c++; --trace and --time-log with C sources, a link of object files only, or -E with --trace (the
+# bash's spans for those are not modelled here). --trace and --time-log on C++ compiles and links are modelled: the plan has
+# TRACE and TIMELOG lines, and START and SPAN (SPANF for a pathb-cc span) around the driver's steps, in the bash's order (the
+# host C++ headers, the EH shim and the ASan VLA runtime of a link, then each Path B compile and the link), which
+# scripts/nfcxx-run.rb records. A -c compile records only the host C++ headers span: the bash's compiles have no span of their own.
+# A -fsanitize= name the bash does not implement, and -fsanitize-* and -fno-sanitize=NAME, exit 2 (the bash's refusal).
 #
 # FILE holds the facts the bash reads from the machine and from its helper scripts (tests/nfcxx-pathb/run.sh writes it):
 #   host linux-x86_64          the host is x86-64 Linux (the link libraries and the QBE target are that host's)
@@ -57,7 +65,8 @@
 #   exists PATH                PATH (relative to WORK) exists (the SYCL pre-pass test reads an -I directory's header)
 #   pathb-status PATH CODE     scripts/pathb-cc.rb exits with CODE on the source PATH (absent: 0)
 #
-# Assumed, not read: the environment (NFCXX_* variables are not read: the harness runs the bash with none), the
+# Read from the environment: NFCXX_LD and NFCXX_DIALECT (PLAN_ENV: the defaults the bash sets before its arguments).
+# Assumed, not read: the environment (other NFCXX_* variables are not read: the harness runs the bash with none), the
 # repository tools (ensure_tool finds them fresh), the build of pathb-cc itself (its harness is inside pathb-cc: its status
 # is the pathb-status fact), and the host GNU version and dialect (only an explicit --dialect reaches the command line).
 
@@ -78,6 +87,11 @@ class NfcxxExit < StandardError
   end
 end
 
+# A refusal the bash makes before it runs anything (the sanitizer options): with --tabs it is printed by the caller, which
+# exits 2 without the bash (scripts/nfcxx.rb), so it prints no plan line.
+class NfcxxRefusal < NfcxxExit
+end
+
 # The bash replaces itself (the gcc fallback, or the -E preprocess): the EXEC line is the last line of the plan.
 class PlanExec < StandardError
 end
@@ -86,6 +100,11 @@ DRIVER = "ROOT/nfcxx".freeze
 PATHB_CC = "ROOT/scripts/pathb-cc.rb".freeze
 LIBC = "ROOT/build/edg/lib/libC.a".freeze
 CHOICES = %w[default pathb gcc].freeze
+# the environment variables the plan reads (the bash's defaults for the linker and the dialect): their values are the facts'
+PLAN_ENV = %w[NFCXX_LD NFCXX_DIALECT].freeze
+# the -fsanitize= checks the bash implements (its sanitize block; docs/notes/ubsan.md)
+SANITIZE_CHECKS = %w[undefined signed-integer-overflow integer-divide-by-zero shift bounds null unreachable return
+                     float-cast-overflow].freeze
 FSO_OBJECT = "TMP/x.o".freeze # the object of -fsyntax-only (its temporary directory's x.o)
 
 def unported(what)
@@ -94,6 +113,10 @@ end
 
 def exit_with(message, status)
   raise NfcxxExit.new(message, status)
+end
+
+def refuse(message)
+  raise NfcxxRefusal.new(message, 2)
 end
 
 # The -fsyntax-only rewrite of nfcxx (the first loop of the script): with -E, the arguments without -fsyntax-only; otherwise
@@ -162,6 +185,11 @@ class Facts
     @values[key]
   end
 
+  # an environment variable the plan reads (NFCXX_LD, NFCXX_DIALECT): nil when unset, or when the facts have none
+  def env_value(_name)
+    nil
+  end
+
   def flag?(key)
     @values[key] == "1"
   end
@@ -220,6 +248,7 @@ class Plan
     @asan = false
     @asanopts = []
     @safeptr = false
+    @sanitize = nil # the -fsanitize= checks (a comma list), "" after -fno-sanitize=all
     @depmode = nil
     @ir_opt = nil
     @dialect = "g++"
@@ -228,16 +257,28 @@ class Plan
     @ld_name = nil
     @eh_shim = true
     @default_backend = false
+    @trace = nil      # --trace=FILE (the last one; "" is off, as the bash's trace= is)
+    @time_log = nil   # --time-log=FILE (the last one; "" is off)
+    # the environment first (the arguments after it override it, as in the bash): NFCXX_DIALECT (non-empty: asked for), NFCXX_LD
+    env_dialect = facts.env_value("NFCXX_DIALECT")
+    if env_dialect && !env_dialect.empty?
+      @dialect = env_dialect
+      @dialect_asked = true
+    end
+    env_ld = facts.env_value("NFCXX_LD")
+    @ld_name = env_ld unless env_ld.nil? || env_ld.empty?
   end
 
   def run
     parse
     exit_with("nfcxx: no input files", 2) if @ncpp + @nobj + @cfiles.size + (@stdin_src ? 1 : 0) == 0
     (@srcs + @cfiles).each { |s| unported("source #{s} is not a file (the bash reports it)") unless @facts.source_ok?(s) }
+    unported("-E with --trace (the bash writes the trace file before its exec)") if @preprocess && trace_file
     preprocess_exec if @preprocess
     checks
     @pb_pre = @preinc.flat_map { |h| ["-include", h] }
     @pb_flags = pb_flags
+    trace_setup
     compile_c_files
     if @compile_only
       if @ncpp.zero?
@@ -265,13 +306,31 @@ class Plan
         nil # with the gcc backend only (the EDG C side); Path B does not read it
       elsif x == "--no-eh-shim"
         @eh_shim = false
-      elsif x.start_with?("--cache=", "--cache-log=", "--time-log=", "--trace=")
-        nil # no plan line: the cache is not reached by the Path B paths, the logs and traces write files
+      elsif x == "--nfcxx-cuda-unit"
+        @cuda_unit = true # the source is the host copy of a .cu input (scripts/nfcxx-cuda-live.rb): the bash passes --cuda
+      elsif x == "--keep-intermediates" || x == "--obfuscate-kernels" || x.start_with?("--pathb-c=")
+        nil # the bash reads these on the EDG and CUDA paths only (the Path B routes here never read them)
+      elsif x.start_with?("--time-log=")
+        @time_log = x.delete_prefix("--time-log=")
+      elsif x.start_with?("--trace=")
+        @trace = x.delete_prefix("--trace=")
+      elsif x.start_with?("--cache=", "--cache-log=")
+        nil # no plan line: the cache is not reached by the Path B paths
       elsif x.start_with?("--dialect=")
         @dialect = x.delete_prefix("--dialect=")
         @dialect_asked = true
       elsif x.start_with?("--gnu-version=")
         @gnu_user = x.delete_prefix("--gnu-version=")
+      elsif x.start_with?("--instantiate=")
+        # EDG's instantiation (the eccp calls of the gcc backend): Path B makes no such call
+        value = x.delete_prefix("--instantiate=")
+        exit_with("nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got #{value})", 2) unless %w[auto used].include?(value)
+      elsif x.start_with?("--promote-slots=", "--unroll=", "--struct-slots=")
+        # CUDA device code only (not in a hosted plan): the value is checked as the argument loop checks it
+        flag, value = x.split("=", 2)
+        exit_with("nfcxx: #{flag} takes on or off (got '#{value}')", 2) unless %w[on 1 off 0].include?(value)
+      elsif x.start_with?("--module-dir=")
+        nil # the directory of module files: a module source is refused by checks
       elsif x.start_with?("--")
         unported(x)
       elsif x.start_with?("-fuse-ld=")
@@ -290,9 +349,15 @@ class Plan
       elsif x == "-fno-safe-pointers"
         @safeptr = false
       elsif x == "-fno-sanitize=all"
-        nil
-      elsif x.start_with?("-fsanitize=") || x.start_with?("-fsanitize-") || x.start_with?("-fno-sanitize=")
-        exit_with("nfcxx: #{x} is not supported (only -fsanitize=address; docs/notes/asan.md)", 2)
+        @sanitize = ""
+      elsif x.start_with?("-fsanitize=")
+        # the bash joins the values in order (sanitize=${sanitize:+$sanitize,}VALUE) and checks each name after the loop
+        value = x.delete_prefix("-fsanitize=")
+        @sanitize = @sanitize.to_s.empty? ? value : "#{@sanitize},#{value}"
+      elsif x.start_with?("-fsanitize-")
+        refuse("nfcxx: #{x} is not supported (only -fsanitize=address; docs/notes/asan.md)")
+      elsif x.start_with?("-fno-sanitize=")
+        refuse("nfcxx: #{x} is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)")
       elsif x == "-fno-omit-frame-pointer" || x == "-fomit-frame-pointer"
         @asanopts << x
       elsif x == "-fPIC" || x == "-fpic"
@@ -397,6 +462,8 @@ class Plan
       exit_with("nfcxx: EDG not built; run scripts/setup-edg.sh", 2)
     end
     exit_with("nfcxx: unknown dialect '#{@dialect}'", 2) if @dialect_asked && !%w[g++ clang].include?(@dialect)
+    # NFCXX_LD (the arguments' -fuse-ld= is checked when it is read): the linker must be on PATH
+    exit_with("nfcxx: NFCXX_LD=#{@ld_name}: ld.#{@ld_name} is not on PATH", 2) if @ld_name && !@facts.ld?(@ld_name)
     @srcs.each { |s| unported("C++ module source #{s}") if @facts.module?(s) }
     if @compile_only && @ncpp == 1 && @nobj.zero? && @cfiles.empty? && sycl_kernel_headers?
       unported("SYCL pre-pass (an -I directory has sycl/detail/kernel_desc.hpp)")
@@ -406,7 +473,14 @@ class Plan
     unported("the gcc backend: the default is gcc for -shared and for -MD or -MMD (scripts/nfcxx-gcc-plan.rb)") unless
       @choice == "pathb" || @safeptr || default_selected?
     @default_backend = @choice == "default" && default_selected?
-    exit_with("nfcxx: -fsanitize=address and -fsafe-pointers both replace malloc; use one", 2) if @asan && @safeptr
+    # each check is named as the bash names it (sanitize=, split on commas; a trailing comma is no check)
+    unless @sanitize.to_s.empty?
+      checks = @sanitize.split(",", -1)
+      checks.pop if @sanitize.end_with?(",")
+      bad = checks.find { |c| !SANITIZE_CHECKS.include?(c) }
+      refuse("nfcxx: -fsanitize=#{bad} is not supported (implemented: #{SANITIZE_CHECKS.join(", ")})") if bad
+    end
+    refuse("nfcxx: -fsafe-pointers and -fsanitize=address both replace malloc; use one") if @asan && @safeptr
     unported("host is not x86-64 Linux") unless @facts.value("host") == "linux-x86_64"
     exit_with("nfcxx: QBE not built; run scripts/setup-qbe.sh", 2) unless @facts.flag?("qbe")
   end
@@ -441,10 +515,11 @@ class Plan
     raise PlanExec
   end
 
-  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --safe-pointers, --ir-opt, --asan (Path
-  # B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
+  # The options scripts/pathb-cc.rb gets, in the order the bash appends them (pb_flags): --sanitize, --safe-pointers, --ir-opt,
+  # --asan (Path B only), --pic, the EDG diagnostic options, --dialect=clang (only when asked), --gnu-version.
   def pb_flags
     f = []
+    f << "--sanitize=#{@sanitize}" unless @sanitize.to_s.empty?
     f << "--safe-pointers" if @safeptr
     f << "--ir-opt=#{@ir_opt}" unless @ir_opt.nil?
     f << "--asan" if @asan
@@ -457,7 +532,8 @@ class Plan
 
   # One pathb-cc call on a C++ source; returns its status (the pathb-status fact).
   def pathb_cc(source, dst)
-    argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, source, "-o", dst]
+    cuda = @cuda_unit ? ["--cuda"] : []   # cuda_opts of the bash: the host copy of a .cu input is compiled with --cuda
+    argv = [PATHB_CC, *@pb_flags, "-std=c++#{@std}", *@cflags, *@pb_pre, *cuda, source, "-o", dst]
     @lines << ["RUN", *argv]
     @facts.status(source)
   end
@@ -502,6 +578,50 @@ class Plan
       dst = @outset ? @out : "#{File.basename(x).sub(/\.[^.]*\z/, '')}.o"
       check_status(x, pathb_cc(x, dst))
     end
+  end
+
+  # --trace and --time-log: the bash's values ("" is off)
+  def trace_file
+    @trace.to_s.empty? ? nil : @trace
+  end
+
+  def time_log_file
+    @time_log.to_s.empty? ? nil : @time_log
+  end
+
+  def tracing?
+    !trace_file.nil? || !time_log_file.nil?
+  end
+
+  # the unit of the time log's lines (the bash's trace_unit): the first C++ source, else the output
+  def trace_unit
+    @srcs.first || @out
+  end
+
+  # A span of the driver's steps: START, the lines of the block, then SPAN (SPANF: recorded also when the block's command
+  # failed, as the bash's trace_end after a pathb-cc status it passes on). The block runs as it does without a trace.
+  def traced(name, category, kind: "SPAN")
+    return yield unless tracing?
+
+    @lines << ["START", "t"]
+    result = yield
+    @lines << [kind, "t", name, category, trace_unit]
+    result
+  end
+
+  # The trace file and the time log are set first, then the host C++ headers span (the first step of a hosted route). The
+  # shapes are the ones whose spans are modelled: C++ compiles and links, with no C source and no link of objects only.
+  def trace_setup
+    return unless tracing?
+
+    unported("C sources with --trace or --time-log (the bash's spans for them are not modelled)") unless @cfiles.empty?
+    unported("a link of object files only with --trace or --time-log") unless @compile_only || @ncpp.positive?
+    if trace_file && !File.directory?(File.dirname(File.expand_path(trace_file)))
+      unported("#{trace_file}: its directory does not exist (the bash reports it)")
+    end
+    @lines << ["TIMELOG", time_log_file] if time_log_file
+    @lines << ["TRACE", trace_file, trace_unit] if trace_file
+    traced("host C++ headers", "driver") { nil }
   end
 
   # The options of the link's cc: -shared (a shared object), -rdynamic, -fuse-ld=NAME, in the bash's order.
@@ -549,6 +669,11 @@ class Plan
     unported("#{LIBC} does not exist") unless @facts.flag?("libc-a")
     ldrt = fact_path("pathb-ldrt")
     shim, vla = hosted_extras
+    # the driver's EH shim step, and its ASan VLA step, come before the compiles (not in a -shared link)
+    unless @shared
+      traced("EH shim", "driver") { nil }
+      traced("VLA runtime (asan)", "driver") { nil } if @asan
+    end
     sprt = @safeptr ? [fact_path("safeptr-rt"), "-pthread"] : []
     pobjs = []
     plink = []
@@ -561,13 +686,14 @@ class Plan
       else
         o = "TMP/p#{n}.o"
         n += 1
-        check_status(x, pathb_cc(x, o))
+        status = traced("Path B: #{x}", "pathb", kind: "SPANF") { pathb_cc(x, o) }
+        check_status(x, status)
         pobjs << o
       end
     end
     argv = ["cc", *asan_c, *ldopts, "-o", @out, *sprt, *@c_objs, *pobjs, *plink, ldrt, *shim, *vla,
             LIBC, "-lstdc++", "-lgcc_s", "-lpthread", "-lm", "-latomic"]
-    @lines << ["RUN", *argv]
+    traced("link", "pathb") { @lines << ["RUN", *argv] }
   end
 
   # The link of C sources alone (or with object files when eccp is not built): cc with the C objects, every link option of the
@@ -591,11 +717,16 @@ class LiveFacts < Facts
     @cwd = cwd
     @probes = {}
     ENV.each_key do |name|
+      next if PLAN_ENV.include?(name)
       next unless (name.start_with?("NFCXX_") && name != "NFCXX_DRIVER_TRACE") ||
                   %w[CUDA_HOME EDG_BUILD EDG_CPFE_DEFAULT_OPTIONS EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS].include?(name)
 
       unported("environment #{name} (the live facts do not read it)")
     end
+  end
+
+  def env_value(name)
+    ENV[name] if PLAN_ENV.include?(name)
   end
 
   def real(path)
@@ -703,6 +834,11 @@ def main(argv)
   rescue PlanExec
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
   rescue NfcxxExit => e
+    # a refusal before any plan line: the caller prints the message and exits with its status (no bash)
+    if tabs && e.is_a?(NfcxxRefusal)
+      warn e.message
+      return e.status
+    end
     plan.lines.each { |l| puts(tabs ? l.join("\t") : l.join(" ")) }
     warn e.message unless e.message.empty?
     puts "STATUS #{e.status}" unless tabs
