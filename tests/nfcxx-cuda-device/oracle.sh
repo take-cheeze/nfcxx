@@ -19,6 +19,8 @@ text=$({ extract cu_prepare; extract cu_rewrite; extract ir_opt_device; extract 
 [ "$(printf '%s\n' "$text" | grep -c 'xargs')" = 0 ] || { echo "oracle: the xargs line of cu_device_build was not replaced" >&2; exit 2; }
 [ "$(printf '%s\n' "$text" | grep -c '^cu_[a-z_]*() {\|^ir_opt_device() {')" = 5 ] || { echo "oracle: the functions were not all extracted" >&2; exit 2; }
 eval "$text"
+# the AMD GPU helpers, as the bash driver sources them (the bash original of scripts/amdgpu-env.rb)
+. "$here/../../tests/amdgpu-env/oracle.sh"
 
 # The stubs (after the functions, so they replace any of their commands).
 _out() { local s=$1 x; shift; for x in "$@"; do s+=" $x"; done; printf '%s\n' "$s" >> "$CU_TEST_LOG"; }

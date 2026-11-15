@@ -172,9 +172,9 @@ class CudaDevicePlan
   # cu_amd_build: the same device IR, then pathb-amdgpu-emit, clang for the amdgcn target and the embed.
   def amd_build(dev, defs, ver)
     arch = env("NFCXX_AMDGPU_ARCH") or
-      raise CudaUnported, "the AMD GPU's architecture (scripts/amdgpu-env.sh finds it in KFD; NFCXX_AMDGPU_ARCH overrides)"
+      raise CudaUnported, "the AMD GPU's architecture (scripts/amdgpu-env.rb finds it in KFD; NFCXX_AMDGPU_ARCH overrides)"
     clang = env("NFCXX_AMDGPU_CLANG") or
-      raise CudaUnported, "the amdgcn clang (scripts/amdgpu-env.sh searches for it; NFCXX_AMDGPU_CLANG overrides)"
+      raise CudaUnported, "the amdgcn clang (scripts/amdgpu-env.rb searches for it; NFCXX_AMDGPU_CLANG overrides)"
     amd_emit = "#{@root}/build/pathb-amdgpu-emit"
     ensure_tool("#{@root}/tools/pathb-amdgpu-emit", amd_emit)
     run_cmd(pathb_dump, "--cuda-device", *defs, *ver, "--ir", "--freestanding", "#{dev}.cpp")

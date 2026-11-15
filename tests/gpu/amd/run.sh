@@ -3,13 +3,14 @@
 # LLVM IR, ROCm's clang makes the code object, and the CUDA launchers of tests/gpu run it unchanged through the HIP
 # runtime (cuda_runtime.h here maps their calls). Each launcher checks the results on the host. Mutants of the IR must
 # fail. docs/notes/gpu.md, "AMD GPUs (ROCm)".
-# Env: ROCM (default /opt/rocm; the HIP headers and runtime), NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG (scripts/amdgpu-env.sh).
+# Env: ROCM (default /opt/rocm; the HIP headers and runtime), NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG (scripts/amdgpu-env.rb).
 # Skips (exit 0) without a clang with the amdgcn target, the HIP headers and runtime, or an AMD GPU.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 rocm=${ROCM:-/opt/rocm}
-. "$root/scripts/amdgpu-env.sh"
+amdgpu_arch() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_arch; }
+amdgpu_clang() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_clang; }
 arch=$(amdgpu_arch) || arch=""
 clang=$(amdgpu_clang) || clang=""
 if [ -z "$clang" ] || [ ! -f "$rocm/include/hip/hip_runtime_api.h" ] || [ ! -e "$rocm/lib/libamdhip64.so" ] || [ -z "$arch" ]; then

@@ -3,14 +3,15 @@
 # (ROCm)"), and report: ok (the object builds, device code included), refused (a construct the AMD path does not lower, by
 # design: inline PTX, indirect calls, device-wide CUB, ...), or fail (anything else, with the first error). This is a compile
 # sweep, not a run: most of these files need an NVIDIA GPU to run. The results are in OUT/results.txt, one line per file.
-# Env: OUT (default: a temporary directory), JOBS (default 8), NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG (scripts/amdgpu-env.sh),
+# Env: OUT (default: a temporary directory), JOBS (default 8), NFCXX_AMDGPU_ARCH and NFCXX_AMDGPU_CLANG (scripts/amdgpu-env.rb),
 # ROCM (the HIP headers, default /opt/rocm), EDG_BUILD / EDG_BASE (the EDG build; it needs the HIP headers' fix, docs/notes/gpu.md).
 # Skips (exit 0) without a clang with the amdgcn target, the HIP headers, or an AMD GPU.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 rocm=${ROCM:-/opt/rocm}
-. "$root/scripts/amdgpu-env.sh"
+amdgpu_arch() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_arch; }
+amdgpu_clang() { "${RUBY:-ruby}" "$root/scripts/amdgpu-env.rb" amdgpu_clang; }
 arch=$(amdgpu_arch) || arch=""
 if ! amdgpu_clang > /dev/null || [ ! -f "$rocm/include/hip/hip_runtime_api.h" ] || [ -z "$arch" ]; then
   echo "SKIP: cuda amdgpu sweep: needs a clang with the amdgcn target, the HIP headers, and an AMD GPU"; exit 0
