@@ -263,6 +263,8 @@ def run_loop(args, state, ld_available)
       i += 1
     elsif a == "-" then state.stdin_src = 1
     elsif a == "-pthread" then state.pthread = 1
+    # -fopenmp: the link gets libgomp (eccp rejects -fopenmp itself), as nfcxx does (PR #1230)
+    elsif a == "-fopenmp" then state.files << "-lgomp"
     elsif a == "-fexceptions" || a == "-fwrapv" || a == "-fno-strict-aliasing" then nil
     elsif starts_with?(a, "-fsanitize=")
       # the UBSan checks, comma-separated; the post-loop stage validates the names and takes Path B
