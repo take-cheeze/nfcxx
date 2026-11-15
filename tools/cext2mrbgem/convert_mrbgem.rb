@@ -2423,7 +2423,7 @@ use_problem = lambda do |name, use|
         nil # a local of this name, not a use of the helper
       elsif shadowed.call(name, fn)
         'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
-      elsif !(with_state.include?(fn['name']) || members.include?(fn['name']))
+      elsif !(init_first || with_state.include?(fn['name']) || members.include?(fn['name']))
         CTX_REASON
       elsif !direct
         why = value_problem.call(rel, s, name)
@@ -2481,7 +2481,8 @@ use_problem = lambda do |name, use|
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
         # a refused definition is still emitted: its calls of threaded helpers would pass an mrb that is not in scope
-        next unless fn && !mrb_bearing.include?(fn['name'])
+        # with the gem's Init, a caller without the state reads the global (set by Init, restored by each method)
+        next unless fn && !init_first && !mrb_bearing.include?(fn['name'])
         # a caller reached from a per-class allocator is part of that accepted stuck point (the allocator has no state)
         if alloc_reach.include?(fn['name'])
           refuse(rel, s, name, 'stuck point (per-class allocator): the caller is reached from a per-class allocator ' \
@@ -2938,6 +2939,11 @@ use_problem = lambda do |name, use|
     fd = enclosing_func(rel, pos)
     return @global_name if fd && @global_helpers && @global_helpers.include?(fd['name'])
     return @global_name if in_global_macro?(rel, pos)
+    # with the gem's Init, a function that has no state parameter reads the global (set by Init)
+    if fd && (@init_defs || []).any? && !((@threaded_cands || Set.new) | (@valid_reg_names || Set.new) |
+                                          (@init_defs || []).map { |d| d['name'] }.to_set).include?(fd['name'])
+      return @global_name
+    end
     'mrb'
   end
 
