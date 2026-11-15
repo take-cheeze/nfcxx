@@ -1482,7 +1482,8 @@ end
     @files.each do |rel, f|
       masked = f['masked']
       text = f['text']
-      finditer(/(?<![#{WC}$.>])rb_hash_foreach#{SS}\(/, masked).each do |m|
+      finditer(/(?<![#{WC}$.>])(?:rb_hash_foreach|rb_ivar_foreach)#{SS}\(/, masked).each do |m|
+        fe_name = m[0].sub(/#{SS}\(\z/, '')
         s = m.begin(0)
         open = m.end(0) - 1
         close = match_close(masked, open)
@@ -1500,7 +1501,7 @@ end
         next unless d.size == 1 && d[0]['storage'].split.include?('static')
         next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
-        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
+        out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
                  cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
       end
     end
@@ -2280,6 +2281,8 @@ use_problem = lambda do |name, use|
     with_state = cands | @valid_reg_names | (init_first ? Set[init_first] : Set.new)
     global_use = lambda do |name, use, members|
       rel, s, direct, fn = use
+      # a callback passed to rb_hash_foreach / rb_ivar_foreach is converted by that call (the callback takes mrb)
+      next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
       macro = fn.nil? && direct ? define_at(rel, s) : nil
       if fn.nil?
         # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
@@ -3618,8 +3621,15 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, 'not a call of the form rb_hash_foreach(hash, callback, (VALUE)pointer) with a callback defined here and used only here')
         return
       end
-      ed.add(c[:s], c[:e], "mrb_hash_foreach(#{mrb_tok(rel, s)}, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})")
-      rewrite(rel, s, name, "mrb_hash_foreach(mrb, RHASH(#{c[:h]}), #{c[:cb]}, (void *)#{c[:arg]})",
+      # a refusal of the callback (or of the call's arguments) inside the call's span: the call is refused with it
+      if ed.overlaps(c[:s], c[:e])
+        refuse(rel, s, name, "the callback #{c[:cb]} is refused, so the call of #{name} is refused with it")
+        return
+      end
+      # rb_ivar_foreach(obj, callback, data) is the fork's mrb_iv_foreach over the object's instance variables (ID -> mrb_sym)
+      fe = c[:fe] == 'rb_ivar_foreach' ? ['mrb_iv_foreach', c[:h]] : ['mrb_hash_foreach', "RHASH(#{c[:h]})"]
+      ed.add(c[:s], c[:e], "#{fe[0]}(#{mrb_tok(rel, s)}, #{fe[1]}, #{c[:cb]}, (void *)#{c[:arg]})")
+      rewrite(rel, s, name, "#{fe[0]}(mrb, #{fe[1]}, #{c[:cb]}, (void *)#{c[:arg]})",
               'the callback gets (mrb, key, value, void *): its third VALUE parameter is a pointer; the callback result is passed through (0 continues, as CRuby ST_CONTINUE)')
     when 'call'
       unless called

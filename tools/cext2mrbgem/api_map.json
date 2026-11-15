@@ -1634,6 +1634,11 @@
       "template": "($3 = ($1 *)mrb_data_get_ptr($m, $0, $2))",
       "caveat": "reads the data pointer with mrb_data_get_ptr, which raises TypeError on a mismatched type, as CRuby does"
     },
+    "rb_ivar_foreach": {
+      "kind": "hash_foreach",
+      "needs_mrb": true,
+      "caveat": "the fork's mrb_iv_foreach over the object's instance variables: the callback gets (mrb, symbol, value, void *) (ID is mrb_sym); a result of 0 continues, non-zero stops, as CRuby ST_CONTINUE and ST_STOP"
+    },
     "rb_hash_foreach": {
       "kind": "hash_foreach",
       "needs_mrb": true,

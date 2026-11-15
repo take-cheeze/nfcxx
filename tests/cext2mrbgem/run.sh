@@ -471,6 +471,10 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dispatch_table tools/cext2mr
 check test "$rc" -eq 0
 check grep -qF 'typedef void (*DumpFunc)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_dispatch_table/src/api_dispatch_table.c"
 check grep -qF 'dt_funcs[mrb_nil_p(obj) ? 0 : 1](mrb, obj, depth);' "$work/api_dispatch_table/src/api_dispatch_table.c"
+# 2zzz82. rb_ivar_foreach(obj, callback, data) is the fork's mrb_iv_foreach; the callback takes (mrb, sym, value, void *).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_foreach tools/cext2mrbgem/fixtures/api_ivar_foreach/ext/api_ivar_foreach "$work/api_ivar_foreach" > "$work/api_ivar_foreach.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_iv_foreach(mrb, obj, iv_count_cb, (void *)&count);' "$work/api_ivar_foreach/src/api_ivar_foreach.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
