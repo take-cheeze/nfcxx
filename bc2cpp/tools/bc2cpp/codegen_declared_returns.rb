@@ -291,6 +291,16 @@ class CodeGen
       when :module then "mrb_obj_is_kind_of(M, #{var}, mrb_module_get(M, \"#{cls}\"))"
       when :union then return cls.map { |k, c, n| "(#{declared_return_condition(k, c, n, var)})" }.join(' || ')
       when :bool then "(mrb_true_p(#{var}) || mrb_false_p(#{var}))"
+      when :hash_of
+        # Every key and value is tested with its element kind; mrb_hash_foreach stops at the first failure.
+        # The callback is capture-less (a C function pointer), so the result comes back through p_.
+        kk, vk = cls
+        key = declared_return_condition(kk[0], kk[1], kk[2], 'k_')
+        val = declared_return_condition(vk[0], vk[1], vk[2], 'v_')
+        "(mrb_hash_p(#{var}) && ([&]() { bool ok_ = true; mrb_hash_foreach(M, RHASH(#{var}), " \
+          "[](mrb_state* M_, mrb_value k_, mrb_value v_, void* p_) -> int { (void)M_; " \
+          "if (!((#{key}) && (#{val}))) { *static_cast<bool*>(p_) = false; return 1; } return 0; }, &ok_); " \
+          "return ok_; }()))"
       when :array_of
         # Every element is tested with the element kind; the loop runs in the expression, with M in scope.
         ek, ec, en = cls

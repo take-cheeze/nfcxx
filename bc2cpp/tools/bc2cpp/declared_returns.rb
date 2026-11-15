@@ -83,7 +83,15 @@ module DeclaredReturns
         [:array, 'Array', nilable]
       end
     when 'String' then type.args.empty? ? [:string, 'String', nilable] : nil
-    when 'Hash' then type.args.empty? ? [:hash, 'Hash', nilable] : nil
+    when 'Hash'
+      if type.args.empty?
+        [:hash, 'Hash', nilable]
+      elsif type.args.size == 2
+        kk = kind_of(type.args[0], known_owners)
+        vk = kind_of(type.args[1], known_owners)
+        ok = kk && vk && ELEMENT_CHECKED_KINDS.include?(kk[0]) && ELEMENT_CHECKED_KINDS.include?(vk[0]) && !kk[2] && !vk[2]
+        ok ? [:hash_of, [kk, vk], nilable] : nil
+      end
     when 'Symbol' then type.args.empty? ? [:symbol, 'Symbol', nilable] : nil
     when 'Float' then type.args.empty? ? [:float, 'Float', nilable] : nil
     when 'Enumerable' then type.args.size <= 1 ? [:module, 'Enumerable', nilable] : nil
@@ -101,7 +109,7 @@ module DeclaredReturns
   # The kinds that only a runtime-checked declaration (%a{bc2cpp:hint}) may take: no proof analysis reads them, so
   # the compiled body's guard is their whole check (codegen_declared_returns.rb). A native class is one too.
   # A module (Enumerable) is a kind-of test, since no exact class test matches its includers.
-  GUARD_ONLY_KINDS = %i[nil string hash symbol float module union bool array_of].freeze
+  GUARD_ONLY_KINDS = %i[nil string hash symbol float module union bool array_of hash_of].freeze
   # An element kind an Array[T] return checks element by element (a class element is not checked: see kind_of).
   ELEMENT_CHECKED_KINDS = %i[fixnum float string symbol bool].freeze
   UNION_MAX = 4
