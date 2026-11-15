@@ -475,6 +475,11 @@ check grep -qF 'dt_funcs[mrb_nil_p(obj) ? 0 : 1](mrb, obj, depth);' "$work/api_d
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ivar_foreach tools/cext2mrbgem/fixtures/api_ivar_foreach/ext/api_ivar_foreach "$work/api_ivar_foreach" > "$work/api_ivar_foreach.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_iv_foreach(mrb, obj, iv_count_cb, (void *)&count);' "$work/api_ivar_foreach/src/api_ivar_foreach.c"
+# 2zzz83. rb_complex_new / rb_complex_real / rb_complex_imag map to the complex mrbgem's Kernel#Complex, #real and #imaginary.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_complex tools/cext2mrbgem/fixtures/api_complex/ext/api_complex "$work/api_complex" > "$work/api_complex.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_funcall(mrb, mrb_top_self(mrb), "Complex", 2, re, im)' "$work/api_complex/src/api_complex.c"
+check grep -qF 'mrb_funcall(mrb, c, "imaginary", 0)' "$work/api_complex/src/api_complex.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).

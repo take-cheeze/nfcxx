@@ -1158,6 +1158,27 @@
           "mruby": "RLIMIT_STACK",
           "caveat": "the sys/resource.h constant of the C library, the same in the mruby build"
     },
+    "rb_complex_real": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"real\", 0)",
+      "caveat": "the real part, by the complex mrbgem's Complex#real (mruby-complex must be in the build)"
+    },
+    "rb_complex_imag": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, $0, \"imaginary\", 0)",
+      "caveat": "the imaginary part, by the complex mrbgem's Complex#imaginary (mruby-complex must be in the build)"
+    },
+    "rb_complex_new": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_funcall($m, mrb_top_self($m), \"Complex\", 2, $0, $1)",
+      "caveat": "Complex(real, imag) through Kernel#Complex of the complex mrbgem (mruby-complex must be in the build)"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
