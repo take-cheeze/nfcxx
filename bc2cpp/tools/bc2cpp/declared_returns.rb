@@ -68,12 +68,14 @@ module DeclaredReturns
 
     name = type.name.to_s.delete_prefix('::')
     case name
-    when 'Integer' then nilable || !type.args.empty? ? nil : [:fixnum, 'Integer', false]
-    when 'Array' then nilable ? nil : [:array, 'Array', false]
-    when 'String' then nilable || !type.args.empty? ? nil : [:string, 'String', false]
-    when 'Hash' then nilable || !type.args.empty? ? nil : [:hash, 'Hash', false]
-    when 'Symbol' then nilable || !type.args.empty? ? nil : [:symbol, 'Symbol', false]
-    when 'Float' then nilable || !type.args.empty? ? nil : [:float, 'Float', false]
+    # A nilable simple kind (`Integer?`) admits nil as well as the class: the guard is `nil || test`.
+    when 'Integer' then type.args.empty? ? [:fixnum, 'Integer', nilable] : nil
+    # The element type is not checked (as before): an Array[T] return is the array kind.
+    when 'Array' then [:array, 'Array', nilable]
+    when 'String' then type.args.empty? ? [:string, 'String', nilable] : nil
+    when 'Hash' then type.args.empty? ? [:hash, 'Hash', nilable] : nil
+    when 'Symbol' then type.args.empty? ? [:symbol, 'Symbol', nilable] : nil
+    when 'Float' then type.args.empty? ? [:float, 'Float', nilable] : nil
     when 'Enumerable' then type.args.size <= 1 ? [:module, 'Enumerable', nilable] : nil
     else
       return nil unless type.args.empty?
