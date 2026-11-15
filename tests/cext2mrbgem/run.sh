@@ -466,6 +466,11 @@ if [ "$scanner" = libclang ]; then
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_thread tools/cext2mrbgem/fixtures/api_fnptr_thread/ext/api_fnptr_thread "$work/api_fnptr_thread" > "$work/api_fnptr_thread.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_value (*conv2)(mrb_state *mrb, mrb_value)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
+# 2zzz81. A file-scope table of dump functions: the table's type and its entries take mrb, and a dispatch helper calls through it.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dispatch_table tools/cext2mrbgem/fixtures/api_dispatch_table/ext/api_dispatch_table "$work/api_dispatch_table" > "$work/api_dispatch_table.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'typedef void (*DumpFunc)(mrb_state *mrb, mrb_value obj, int depth);' "$work/api_dispatch_table/src/api_dispatch_table.c"
+check grep -qF 'dt_funcs[mrb_nil_p(obj) ? 0 : 1](mrb, obj, depth);' "$work/api_dispatch_table/src/api_dispatch_table.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).
