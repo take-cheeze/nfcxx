@@ -137,5 +137,41 @@ ecp_case "batch: moves 0 keeps the arguments" 0 a.o "my obj.o" "-Wl,-rpath,sub" 
 ecp_case "batch: the same argument twice" 1 a.o a.o sub
 ecp_case "batch: a single argument" 1 "dir with space/q.o"
 
+# a forced crash of the helper: the wrapper runs the real ruby, then cuts its output (partway, and it fails) or drops the
+# final end marker (and exits 0). The driver's function must stop the driver with status 1 and the message, before the
+# next statement runs.
+mk_crash_ruby() {  # mk_crash_ruby MODE FILE: MODE partial (60 bytes, status 3) or nomarker (the last record dropped, status 0)
+  {
+    printf '#!/bin/bash\n"%s" "$@" > "%s/crash.out"\n' "$ruby_bin" "$work"
+    case $1 in
+      partial) printf 'head -c 60 "%s/crash.out"; exit 3\n' "$work" ;;
+      nomarker) printf 'head -c -2 "%s/crash.out"\n' "$work" ;;
+    esac
+  } > "$2"
+  chmod +x "$2"
+}
+crash_case() {  # crash_case NAME MODE KIND ARG...: KIND link (link_args, the files) or ecp (ecp_args, the arguments)
+  local name=$1 mode=$2 kind=$3; shift 3
+  local w=$work/crash-ruby-$mode out err rc call
+  mk_crash_ruby "$mode" "$w"
+  [ "$kind" = link ] && call='link_args 0 1 "$@"' || call='ecp_args "$@"'
+  make_sb
+  out=$(cd "$sb" && "${base_env[@]}" bash -c '
+    set -euo pipefail
+    root=$1; RUBY=$2; source "$3"; shift 3
+    '"$call"'
+    echo reached' bash "$repo" "$w" "$work/thin.sh" "$@" 2>"$work/err"); rc=$?
+  err=$(cat "$work/err")
+  if [ "$rc" = 1 ] && [ "$out" = "" ] && [[ "$err" == *"stopped before its end"* ]]; then
+    pass=$((pass + 1))
+  else
+    fail=$((fail + 1)); echo "FAIL $name"; echo "  status $rc"; echo "  stdout [$out]"; echo "  stderr [$err]"
+  fi
+}
+crash_case "link: the helper cut partway exits the driver with status 1" partial link -lm -lpthread -lz -lfoo -lbar -lbaz -lqux a.o
+crash_case "link: the helper's final end marker missing exits the driver with status 1" nomarker link -lm -lpthread -lz -lfoo a.o
+crash_case "ecp: the helper cut partway exits the driver with status 1" partial ecp /home/user/some/long/path/one /home/user/some/long/path/two /home/user/some/long/path/three /home/user/some/long/path/four
+crash_case "ecp: the helper's final end marker missing exits the driver with status 1" nomarker ecp a.o sub
+
 echo "nfcxx-linkargs: $pass passed, $fail failed"
 [ "$fail" = 0 ]

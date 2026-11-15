@@ -8,7 +8,9 @@
 #   ruby scripts/nfcxx-linkargs.rb edg COMPILE_ONLY MOVES FILE...
 #       COMPILE_ONLY and MOVES are 0 or 1 (nfcxx's compile_only and moves). Standard output is one record per value,
 #       each ending in a NUL byte: "e" VALUE (an eflist element), "u" VALUE (a userinc element), or "x" MESSAGE for an
-#       option the link refuses (the bash prints MESSAGE on standard error and exits 2; no records follow it).
+#       option the link refuses (the bash prints MESSAGE on standard error and exits 2; no records follow it). A run that
+#       finishes writes a final record "z" (the end marker): the bash stops with an error when it does not see one, so a
+#       helper that crashes partway cannot leave partial arrays behind.
 #       The CUDA home is CUDA_HOME (the environment); the CUB archive is scripts/cuda-cub.rb's output.
 #
 # Standard error is the command's own (the cuda-cub script's messages pass through).
@@ -95,6 +97,7 @@ if $PROGRAM_NAME == __FILE__
                                                 ecp_arg: ecp)
     eflist.each { |v| $stdout.write("e#{v}\0") }
     userinc.each { |v| $stdout.write("u#{v}\0") }
+    $stdout.write("z\0")
   rescue NfcxxLinkArgs::Refused => e
     $stdout.write("x#{e.message}\0")
   end

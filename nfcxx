@@ -302,11 +302,18 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
 # its <stem>.ii and <stem>.ti beside the object (see "-c" before the eccp call).
 moves=0; eccp_dir=""
 ecp_args() {  # ecp_args ARG...: ARG as eccp receives it, for each ARG in order, into ecp_list (one ruby call for all of them)
-  local rec
+  local rec done=0
   ecp_list=()
   [ $# -gt 0 ] || return 0
-  # the port (tests/nfcxx-ecp-arg/run.sh checks it against the bash original): NUL-separated answers
-  while IFS= read -r -d '' rec; do ecp_list+=("$rec"); done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "$@")
+  # the port (tests/nfcxx-ecp-arg/run.sh checks it against the bash original): NUL-separated records, v ANSWER per argument
+  # and the end marker z, which the port writes last: without it the helper stopped early and the driver stops
+  while IFS= read -r -d '' rec; do
+    case $rec in
+      v*) ecp_list+=("${rec:1}") ;;
+      z) done=1 ;;
+    esac
+  done < <("${RUBY:-ruby}" "$root/scripts/ecp-arg.rb" --batch "$moves" "$@")
+  [ $done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
   return 0
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
@@ -980,15 +987,18 @@ fi
 # include directories userinc: scripts/nfcxx-linkargs.rb (tests/nfcxx-linkargs/run.sh checks it against the bash loop it
 # replaced, tests/nfcxx-linkargs/oracle.sh).
 link_args() {  # link_args COMPILE_ONLY MOVES FILE...: sets eflist and userinc; a refused option ends nfcxx with status 2
-  local rec
+  local rec done=0
   eflist=(); userinc=()
   while IFS= read -r -d '' rec; do
     case $rec in
       e*) eflist+=("${rec:1}") ;;
       u*) userinc+=("${rec:1}") ;;
       x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
+      z) done=1 ;;
     esac
   done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-linkargs.rb" edg "$1" "$2" ${3+"${@:3}"})
+  # the end marker z is written last by the port: without it the helper stopped early, so the arrays are incomplete
+  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-linkargs.rb stopped before its end (the link arguments are incomplete)" >&2; exit 1; }
   return 0
 }
 link_args "$compile_only" "$moves" ${files[@]+"${files[@]}"}
