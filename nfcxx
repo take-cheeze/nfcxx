@@ -6,7 +6,7 @@
 # scripts that cannot change a command line. When both are given the flag wins. Tool and host locations stay environment
 # variables, as CC= does: NFCXX_GCC, NFCXX_CC, NFCXX_CXX, NFCXX_COSMOCC, NFCXX_SYSTEM_PATHS, NFCXX_SYS_INCLUDES,
 # NFCXX_K1OM_ROOT, NFCXX_MACOS_SYSROOT, and the CUDA tuning variables (NFCXX_SM, NFCXX_CUDA_*, docs/notes/gpu.md).
-#   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
+#   Hosted (default): host C++ headers and GNU version from g++ (see scripts/host-sys.rb host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
 #   pathb (default on x86-64 Linux, unless cosmo, --emit-c, --target, -E, -M or -shared is
 #                  asked for; --backend=pathb, or NFCXX_PATH=b): EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs, and freestanding ones on x86-64 and aarch64 Linux and arm64 macOS.
@@ -111,11 +111,6 @@ eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
 # The host probes are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced); abs_path is the bash
 # one, which runs once per argument and stays here.
-host_sys() { "${RUBY:-ruby}" "$root/scripts/host-sys.rb" "$@"; }
-host_dialect() { host_sys host_dialect; }
-host_clang_version() { host_sys host_clang_version; }
-host_gnu_version() { host_sys host_gnu_version; }
-host_sys_includes() { host_sys host_sys_includes "$@"; }
 abs_path() {
   local d b
   d=$(dirname "$1"); b=$(basename "$1")
@@ -127,7 +122,7 @@ std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 asan=0; backend_explicit=0; asanopts=(); safeptr=0; cosmo=0
-dialect=${NFCXX_DIALECT:-$(host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
+dialect=${NFCXX_DIALECT:-$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_dialect)}; dialect_asked=${NFCXX_DIALECT:+1}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}; target=""
 # Options with a flag and an environment variable: the variable is the default, the flag overrides it (see the usage above).
 path_b=0; [ "${NFCXX_PATH:-}" != b ] || path_b=1                        # --backend=pathb: Path B asked for by name
 ir_opt_set=0; ir_opt=""; if [ -n "${NFCXX_IR_OPT+x}" ]; then ir_opt_set=1; ir_opt=$NFCXX_IR_OPT; fi   # --ir-opt=LIST
@@ -595,7 +590,7 @@ if [ $freestanding = 1 ]; then
   [ -n "$gnu" ] || gnu=130000
 else
   t=$(trace_start)
-  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
+  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_sys_includes)
   trace_end "$t" "host C++ headers" driver
   # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
   # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
@@ -603,7 +598,7 @@ else
   # macOS has libc++, not libstdc++: the link needs it explicitly (eccp's Linux default is libstdc++).
   [ "$(uname -s)" = Darwin ] && hosted_libs+=(--c_to_obj_lib=c++)
   if [ -z "$gnu" ]; then
-    gnu=$(host_gnu_version)
+    gnu=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_gnu_version)
   fi
 fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
@@ -632,7 +627,7 @@ done
 [ $freestanding = 0 ] && [ "$(uname -s)" = Linux ] && { [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; } && { cflags+=(-D__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }
 gnu_opts=()
 if [ "$dialect" = clang ]; then
-  cv=$(host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
+  cv=$("${RUBY:-ruby}" "$root/scripts/host-sys.rb" host_clang_version); [ -n "$cv" ] && gnu_opts=(--clang_version="$cv")
 elif [ -n "$gnu" ]; then
   gnu_opts=(--gnu_version="$gnu")
 fi
