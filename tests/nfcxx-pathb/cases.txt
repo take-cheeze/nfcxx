@@ -97,7 +97,8 @@ default c.c -o prog
 default -c c.c
 default -c c.c -o out.o
 default -c -o out.o c.c a.cc
-# cache, time log and trace: the Path B paths have no plan line for them
+# cache: the Path B paths have no plan line for it. time log and trace: the Path B plan has TIMELOG, TRACE, START, SPAN and SPANF
+# lines for the driver's spans (left out of this comparison: tests/nfcxx-trace/run.sh checks the files)
 default --cache=cache -c a.cc
 default --cache=cache --cache-log=log.txt a.cc -o prog
 default --time-log=t.log a.cc -o prog

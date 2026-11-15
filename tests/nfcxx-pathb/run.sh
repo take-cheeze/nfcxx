@@ -17,6 +17,8 @@
 # The port gets the same facts (facts.txt plus the exists lines) and the same arguments. A case the port refuses (exit 3) is
 # listed as unported with its reason and not compared; every other case must print the same lines and status as the bash (the
 # stderr text is not compared). For --backend=pathb the bash gets --backend=pathb in front of the arguments.
+# The driver's trace lines (TRACE, TIMELOG, START, SPAN, SPANF) are not commands: the stubs do not log them, so they are left
+# out of the port's output here. tests/nfcxx-trace/run.sh checks them against the bash's trace file and time log.
 #
 #   bash tests/nfcxx-pathb/run.sh [CASES]     CASES defaults to tests/nfcxx-pathb/cases.txt
 set -u
@@ -54,6 +56,7 @@ while IFS= read -r line; do
   read -r -a words <<< "$line"
   choice=${words[0]}; args=("${words[@]:1}")
   port_out=$(ruby "$repo/scripts/nfcxx-pathb.rb" --facts="$sb/facts" --backend="$choice" -- "${args[@]}" 2>"$sb/perr"); rc=$?
+  port_out=$(printf '%s\n' "$port_out" | grep -v -E '^(TRACE|TIMELOG|START|SPAN|SPANF) ' || true)
   if [ $rc = 3 ]; then
     unp=$((unp + 1)); unported_list+="  $line
       $(head -1 "$sb/perr")

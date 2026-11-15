@@ -28,7 +28,7 @@ GCC_PLAN = File.join(ROOT, "scripts", "nfcxx-gcc-plan.rb")
 PATHB_PLAN = File.join(ROOT, "scripts", "nfcxx-pathb.rb")
 FREESTANDING_PLAN = File.join(ROOT, "scripts", "nfcxx-freestanding.rb")
 RUNNER = File.join(ROOT, "scripts", "nfcxx-run.rb")
-PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV].freeze
+PLAN_KINDS = %w[RUN EXEC CP CAT LN ENV TRACE TIMELOG START SPAN SPANF].freeze
 
 # true when the port plans these arguments: its output is a plan (its first line is a plan command) and it ran to its end
 def planned?(args)
@@ -95,12 +95,14 @@ def trace(kind)
   $stderr.write("nfcxx: driver: #{kind}\n") if ENV["NFCXX_DRIVER_TRACE"] == "1"
 end
 
-# runs a plan file with the runner; returns its status
-def run_plan_text(text)
+# runs a plan file with the runner; returns its status. fallback: the bash runs the arguments again when the plan fails (see
+# the runner's --fallback): the runner then writes no trace file or time log for a failed run
+def run_plan_text(text, fallback: false)
   Dir.mktmpdir("nfcxx-plan") do |dir|
     file = File.join(dir, "plan.txt")
     File.write(file, text)
-    pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--plan=#{file}")
+    opts = fallback ? ["--fallback"] : []
+    pid = Process.spawn(RbConfig.ruby, RUNNER, "--root=#{ROOT}", "--plan=#{file}", *opts)
     Process.wait(pid)
     $?.exitstatus || 128 + $?.termsig
   end
@@ -131,7 +133,7 @@ end
 pb = pathb_plan(ARGV)
 if pb
   trace("pathb-plan")
-  status = run_plan_text(pb[0])
+  status = run_plan_text(pb[0], fallback: pb[1] == "default")
   # the default backend's failure is the bash's to report and to rebuild with gcc: it runs the arguments again
   if status != 0 && pb[1] == "default"
     trace("bash")
