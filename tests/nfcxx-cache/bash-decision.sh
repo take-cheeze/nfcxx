@@ -50,10 +50,11 @@ EOF
     sed -e "s|^root=\$(cd \"\$(dirname \"\$0\")\" && pwd)|root=$root|" -e 's/^ensure_tool() {/ensure_tool_real() {/' \
         -e 's|exec "\$0" |exec_stub nfcxx |g' -e 's|"\$0" |run_stub nfcxx |g' \
         -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
-        -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|'
+        -e 's|cp "\$pb_entry/obj" "\$out"; exit 0|cp "$pb_entry/obj" "$out"; _out EXIT 0; exit 0|' \
+        -e '/^cache_check() {/,/^}/ s/^\( *\)exit 0$/\1_out EXIT 0; exit 0/'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$root/nfcxx" |
-    sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/'
+    sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/'
 }
 harness > "$tmp/harness.sh"
 bash "$tmp/harness.sh" "$@"

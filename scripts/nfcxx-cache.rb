@@ -305,10 +305,11 @@ class Cache
     hit
   end
 
-  # the hit: the object and its records go back beside the output (a Path B entry has the object only)
+  # the hit: the object and its records go back beside the output (a Path B entry has the object only). The records the
+  # output had are removed on every hit, as nfcxx does: a Path B hit leaves none behind either.
   def hit(out, entry, pathb)
     stem = strip_ext(out)
-    puts "RUN rm -f #{stem}.ti #{stem}.ii" unless pathb
+    puts "RUN rm -f #{stem}.ti #{stem}.ii"
     puts "CP #{entry}/obj #{out}"
     %w[ti ii].each { |x| puts "CP #{entry}/#{x} #{stem}.#{x}" if !pathb && File.file?("#{entry}/#{x}") }
     puts "EXIT 0"
