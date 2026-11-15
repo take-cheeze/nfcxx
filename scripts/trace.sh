@@ -1,42 +1,28 @@
-# Chrome trace-event output for nfcxx, viewable in https://ui.perfetto.dev ("Open trace file").
-# Enabled by --trace=FILE on the nfcxx driver, or by NFCXX_TRACE=FILE in the environment.
-# Every process that runs with NFCXX_TRACE set appends complete ("X") events to the file; the driver
-# writes the opening "[" and the closing "]", so the file is valid JSON. Times are wall-clock
-# microseconds from GNU date (Linux). Every function is a no-op when NFCXX_TRACE is unset.
+# Sourced by nfcxx and by the scripts it runs: the trace and time-log functions, whose work is scripts/trace.rb's (the
+# Chrome trace file and the NFCXX_TIME_LOG lines; docs/notes/driver-port-plan.md, stage 7). The bash original is
+# tests/trace/oracle.sh. Every function is a no-op when neither NFCXX_TRACE nor NFCXX_TIME_LOG is set, and no process is
+# started then: trace_start answers 0 without one.
+_trace_rb="$(dirname "${BASH_SOURCE[0]}")/trace.rb"
+_trace_on() { [ -n "${NFCXX_TRACE:-}${NFCXX_TIME_LOG:-}" ]; }
 
-trace_now() { local t; t=$(date +%s%N); echo $((t / 1000)); }
+trace_now() { "${RUBY:-ruby}" "$_trace_rb" now; }
 
-# NFCXX_TIME_LOG=FILE: every span is also appended to FILE as one text line, "SECONDS<Tab>CATEGORY<Tab>NAME<Tab>UNIT".
-# UNIT is the source the driver compiles (its trace_unit; the scripts it runs get it as NFCXX_TRACE_UNIT), so the
-# compiles of a parallel build (one driver per source) can share one file, and sort -rn FILE ranks the stages. A line
-# is a single short append, which the compiles do not interleave.
-
-# Start time for trace_end: a clock reading when tracing, 0 otherwise (no date call when disabled).
-trace_start() { if [ -n "${NFCXX_TRACE:-}${NFCXX_TIME_LOG:-}" ]; then trace_now; else echo 0; fi; }
-
-trace_escape() { local s=${1//\\/\\\\}; printf '%s' "${s//\"/\\\"}"; }
+# Start time for trace_end: a clock reading when tracing, 0 otherwise.
+trace_start() { if _trace_on; then trace_now; else echo 0; fi; }
 
 # Record a span from start (from trace_start) to now. Args: start name category.
 trace_end() {
-  [ -n "${NFCXX_TRACE:-}${NFCXX_TIME_LOG:-}" ] || return 0
-  local start=$1 now
-  now=$(trace_now)
-  if [ -n "${NFCXX_TIME_LOG:-}" ]; then
-    printf '%d.%06d\t%s\t%s\t%s\n' $(((now - start) / 1000000)) $(((now - start) % 1000000)) "$3" "$2" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}" >> "$NFCXX_TIME_LOG"
-  fi
-  [ -n "${NFCXX_TRACE:-}" ] || return 0
-  printf '{"name":"%s","cat":"%s","ph":"X","ts":%s,"dur":%s,"pid":%s,"tid":1},\n' \
-    "$(trace_escape "$2")" "$3" "$start" $((now - start)) "${BASHPID:-$$}" >> "$NFCXX_TRACE"
+  _trace_on || return 0
+  "${RUBY:-ruby}" "$_trace_rb" span "$1" "$2" "$3" "${BASHPID:-$$}" "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"
 }
 
-# Driver only: start a trace file at $1 and record the whole run when the driver exits. A driver that runs another
-# driver (the EH shim build) shares the file: only the outermost one (NFCXX_TRACE_OWNER) writes the opening "[" and the
-# closing "]"; the nested one adds its own span.
+# Driver only: start a trace file at $1 and record the whole run when the driver exits. Only the outermost driver
+# (NFCXX_TRACE_OWNER) writes the opening "[" and the closing "]".
 trace_begin() {
   NFCXX_TRACE=$(abs_path "$1"); export NFCXX_TRACE
   if [ -z "${NFCXX_TRACE_OWNER:-}" ]; then
     export NFCXX_TRACE_OWNER=$$
-    printf '[\n' > "$NFCXX_TRACE"
+    "${RUBY:-ruby}" "$_trace_rb" open "$NFCXX_TRACE"
   fi
   NFCXX_TRACE_T0=$(trace_now)
   trap trace_finish EXIT
@@ -48,6 +34,6 @@ trace_finish() {
   unset NFCXX_TRACE_T0
   trace_end "$t0" nfcxx driver
   if [ "${NFCXX_TRACE_OWNER:-}" = "$$" ]; then
-    printf '{"name":"trace_end","ph":"i","s":"g","ts":%s,"pid":%s,"tid":1}\n]\n' "$(trace_now)" "$$" >> "$NFCXX_TRACE"
+    "${RUBY:-ruby}" "$_trace_rb" close "$NFCXX_TRACE" "$$"
   fi
 }

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Differential test of scripts/trace.rb against scripts/trace.sh. Each case runs the same spans (or the driver's begin and
-# finish) once through the bash functions and once through the Ruby module, with the same environment, in a fresh
+# Differential test of scripts/trace.rb and scripts/trace.sh (the shim over it) against tests/trace/oracle.sh (the bash
+# original). Each case runs the same spans (or the driver's begin and finish) through the bash original, the Ruby module and
+# the shim, with the same environment, in a fresh
 # directory each. The two trace files and time logs must match after the clock readings and process ids are replaced by
 # placeholders (their values differ between any two runs; their presence and order do not).
 #
@@ -32,12 +33,14 @@ for c in "${cases[@]}"; do
   IFS='|' read -r name envs bsnip rsnip <<< "$c"
   name=${name// /}
   # the placeholders: the trace file and the time log, in one directory per side
-  for side in bash ruby; do
+  for side in bash ruby shim; do
     d=$work/$name-$side; mkdir -p "$d"
     e=${envs//@OUT@/$d/out.json}; e=${e//@LOG@/$d/log.txt}
     s=${bsnip//@OUT@/$d/out.json}; r=${rsnip//@OUT@/$d/out.json}
-    if [ "$side" = bash ]; then
-      (cd "$d" && env -i PATH="$PATH" HOME="$d" $e bash -c "source '$repo/tests/host-sys/oracle.sh'; source '$repo/scripts/trace.sh'; $s" \
+    if [ "$side" = shim ]; then
+      (cd "$d" && env -i PATH="$PATH" HOME="$d" RUBY="$(command -v ruby)" $e bash -c "source '$repo/tests/host-sys/oracle.sh'; source '$repo/scripts/trace.sh'; $s" > "$d/stdout" 2>&1)
+    elif [ "$side" = bash ]; then
+      (cd "$d" && env -i PATH="$PATH" HOME="$d" $e bash -c "source '$repo/tests/host-sys/oracle.sh'; source '$repo/tests/trace/oracle.sh'; $s" \
          > "$d/stdout" 2>&1)
     else
       (cd "$d" && env -i PATH="$PATH" HOME="$d" $e ruby -e "require '$repo/scripts/trace'; include NfccxxTrace; $r" > "$d/stdout" 2>&1)
@@ -45,13 +48,15 @@ for c in "${cases[@]}"; do
     echo $? > "$d/status"
   done
   ok=1
-  for f in out.json log.txt stdout status; do
-    a=$work/$name-bash/$f; b=$work/$name-ruby/$f
-    [ -e "$a" ] || [ -e "$b" ] || continue
-    if ! diff <(if [ -e "$a" ]; then normalize "$a"; fi) <(if [ -e "$b" ]; then normalize "$b"; fi) > "$work/$name.diff.$f" 2>&1; then
-      ok=0
-      echo "FAIL $name ($f)"; sed 's/^/  /' "$work/$name.diff.$f" | head -20
-    fi
+  for other in ruby shim; do
+    for f in out.json log.txt stdout status; do
+      a=$work/$name-bash/$f; b=$work/$name-$other/$f
+      [ -e "$a" ] || [ -e "$b" ] || continue
+      if ! diff <(if [ -e "$a" ]; then normalize "$a"; fi) <(if [ -e "$b" ]; then normalize "$b"; fi) > "$work/$name.$other.diff.$f" 2>&1; then
+        ok=0
+        echo "FAIL $name ($other, $f)"; sed 's/^/  /' "$work/$name.$other.diff.$f" | head -20
+      fi
+    done
   done
   if [ $ok = 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
 done
