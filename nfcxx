@@ -316,6 +316,38 @@ ecp_args() {  # ecp_args ARG...: ARG as eccp receives it, for each ARG in order,
   [ $done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
   return 0
 }
+ecp_group() {  # ecp_group NAME VALUE...: one group of the eccp command's input (scripts/nfcxx-eccp-plan.rb reads the records)
+  local n=$1 v
+  shift
+  printf 'k%s\0' "$n"
+  for v in ${1+"$@"}; do printf 'v%s\0' "$v"; done
+}
+eccp_plan_input() {  # the records of the eccp command line: the call's arrays and scalars, in the order of nfcxx-eccp-plan.rb
+  ecp_group eccp "$eccp_bin"; ecp_group std "$std"; ecp_group dialect "$dialect"; ecp_group out "$eccp_out"
+  ecp_group extra ${extra[@]+"${extra[@]}"}; ecp_group inst_opts ${inst_opts[@]+"${inst_opts[@]}"}
+  ecp_group modopts ${modopts[@]+"${modopts[@]}"}; ecp_group diag_opts ${diag_opts[@]+"${diag_opts[@]}"}
+  ecp_group userinc ${userinc[@]+"${userinc[@]}"}; ecp_group sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
+  ecp_group hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; ecp_group keep_static ${keep_static[@]+"${keep_static[@]}"}
+  ecp_group eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; ecp_group picopts ${picopts[@]+"${picopts[@]}"}
+  ecp_group cobjs ${cobjs[@]+"${cobjs[@]}"}; ecp_group pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
+  ecp_group cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}; ecp_group eflist ${eflist[@]+"${eflist[@]}"}
+  ecp_group shim ${shim[@]+"${shim[@]}"}; ecp_group vlart ${vlart[@]+"${vlart[@]}"}; ecp_group rtlib ${rtlib[@]+"${rtlib[@]}"}
+}
+eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
+  # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The keep note
+  # is printed by the port.
+  local rec done=0
+  eccp_argv=(); eccp_envs=(); eccp_cd=""
+  while IFS= read -r -d '' rec; do
+    case $rec in
+      a*) eccp_argv+=("${rec:1}") ;;
+      e*) eccp_envs+=("${rec:1}") ;;
+      d*) eccp_cd=${rec:1} ;;
+      z) done=1 ;;
+    esac
+  done < <(eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared")
+  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
+}
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
   local rc=$?
   "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" cleanup "$keep_intermediates" "$eccp_dir" "${cudatmp:-}" "${ctmp:-}"   # the removals (tests/nfcxx-link/run.sh)
@@ -1038,26 +1070,16 @@ fi
 ecp_args "$edg/eccp" "$out"; eccp_bin=${ecp_list[0]}; eccp_out=${ecp_list[1]}
 if [ $moves = 1 ]; then
   eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
-  [ $keep_intermediates = 0 ] || echo "nfcxx: intermediates kept in $eccp_dir (--keep-intermediates)" >&2
 fi
+# The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
+# scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
+# A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (see the port).
+eccp_plan
 t=$(trace_start)
 (
-  [ -z "$eccp_dir" ] || cd "$eccp_dir"
-  # A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (the C compile options), so the link
-  # options among them go there with -shared: -Wl,... (-soname, -rpath, --gc-sections), -fuse-ld=, -pthread, -rdynamic.
-  # Without them a library lost its SONAME and RUNPATH. (eccp splits the variable at spaces.)
-  if [ $shared = 1 ]; then
-    lk=(-shared) prev=
-    for a in ${picopts[@]+"${picopts[@]}"} ${eflist[@]+"${eflist[@]}"} ${inst_opts[@]+"${inst_opts[@]}"}; do
-      if [ "$prev" = --c_to_obj_option ]; then
-        case $a in -Wl,*|-fuse-ld=*|-pthread|-rdynamic) lk+=("$a") ;; esac
-      fi
-      prev=$a
-    done
-    export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS="${lk[*]}"
-  fi
-  "$eccp_bin" "$std" --"$dialect" --wdir / ${extra[@]+"${extra[@]}"} ${inst_opts[@]+"${inst_opts[@]}"} ${modopts[@]+"${modopts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} ${userinc[@]+${userinc[@]+"${userinc[@]}"}} ${sys_inc[@]+"${sys_inc[@]}"} ${hosted_libs[@]+"${hosted_libs[@]}"} --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing ${keep_static[@]+${keep_static[@]+"${keep_static[@]}"}} ${eh_unwind[@]+${eh_unwind[@]+"${eh_unwind[@]}"}} --c_to_obj_option -fgnu89-inline ${picopts[@]+${picopts[@]+"${picopts[@]}"}} \
-    ${cobjs[@]+${cobjs[@]+"${cobjs[@]}"}} ${pre_opts[@]+${pre_opts[@]+"${pre_opts[@]}"}} ${cuda_opts[@]+${cuda_opts[@]+"${cuda_opts[@]}"}} ${eflist[@]+${eflist[@]+"${eflist[@]}"}} ${shim[@]+${shim[@]+"${shim[@]}"}} ${vlart[@]+${vlart[@]+"${vlart[@]}"}} ${rtlib[@]+${rtlib[@]+"${rtlib[@]}"}} -o "$eccp_out"
+  [ -z "$eccp_cd" ] || cd "$eccp_cd"
+  for e in ${eccp_envs[@]+"${eccp_envs[@]}"}; do export "$e"; done
+  "${eccp_argv[@]}"
 )
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 link_records_rm
