@@ -571,6 +571,8 @@ while [ $# -gt 0 ]; do
     -x) xlang=$2; shift ;;      # -x c++ (CMake's compiler probes pipe a source to -E -x c++ -)
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
+    # -fopenmp: the link gets libgomp. eccp rejects -fopenmp itself ("unknown option"), so it is passed on as -lgomp.
+    -fopenmp) files+=(-lgomp) ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
     -fsanitize=*) sanitize=${sanitize:+$sanitize,}${1#-fsanitize=} ;;
     -fno-sanitize=all) sanitize="" ;;
