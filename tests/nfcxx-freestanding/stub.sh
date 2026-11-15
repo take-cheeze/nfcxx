@@ -9,6 +9,7 @@
 #   uname         -s and -m answer from facts.txt; other calls run the real uname
 #   cuda-rewrite  the rewriter: logged (EXEC), as the bash execs it
 #   cp, ninja     logged (CP, RUN), not run
+#   cat           the --emit-c output (a TMP/out.c file): logged (CAT), then run; other files are not logged
 #   mktemp        -d: a fresh directory under $NFCXX_STUB_TMP, printed
 #   eccp          exists only (the driver checks -x)
 # The environment variable EDG_CPFE_DEFAULT_OPTIONS, when the driver exported it, is logged (ENV) before the RUN line of
@@ -52,6 +53,9 @@ case $name in
     exit 0 ;;
   cuda-rewrite) log "EXEC $0 $*"; exit 0 ;;
   cp) log "CP $*"; exit 0 ;;
+  cat)
+    case $1 in */out.c) log "CAT $1" ;; esac
+    exec /usr/bin/cat "$@" ;;
   ninja) log "RUN ninja $*"; exit 0 ;;
   mktemp)
     d=$NFCXX_STUB_TMP/d$$.$RANDOM.$RANDOM
