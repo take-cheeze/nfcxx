@@ -31,6 +31,8 @@
 # functions from nfcxx.
 require "pathname"
 require "set"
+require "tmpdir"
+require_relative "nfcxx-modscan"
 
 class Unported < StandardError; end
 
@@ -247,4 +249,88 @@ def main(argv)
   end
 end
 
-exit main(ARGV) if $PROGRAM_NAME == __FILE__
+# build: mod_build_program of nfcxx, in Ruby (docs/notes/modules.md). The bash driver calls it as
+#   ruby scripts/nfcxx-modules.rb build ROOT OUT MODDIR NSRCS SRC... ARGV...
+# ROOT is the repository (nfcxx is ROOT/nfcxx), OUT the -o output, MODDIR the --module-dir value ("" when unset), SRC the
+# NSRCS source arguments and ARGV the command as given. Each source is compiled on its own by nfcxx (-c, the interface
+# directory, the compile options), the interface units first in dependency order, then the objects are linked by nfcxx.
+# A failing step ends the build with its status, as the bash's set -e did.
+def link_only?(a)
+  (a.start_with?("-l") && a.length > 2) || (a.start_with?("-L") && a.length > 2) || a.start_with?("-Wl,") ||
+    a.end_with?(".o", ".a", ".so")
+end
+
+# the options of each step, split as the bash loop of mod_build_program does: the compile gets everything but the link-only
+# options, the link everything but the sources, -c, --module-dir= and -o FILE
+def split_args(argv, srcs)
+  compile_args = []
+  link_args = []
+  skip = false
+  argv.each do |a|
+    if skip
+      skip = false
+      next
+    end
+    next if srcs.include?(a)
+
+    case a
+    when "-o" then skip = true
+    when "-c" then nil
+    else
+      if a.start_with?("--module-dir=") then nil
+      elsif link_only?(a) then link_args << a
+      else
+        compile_args << a
+        link_args << a
+      end
+    end
+  end
+  [compile_args, link_args]
+end
+
+# one step of the build: nfcxx's status is the build's (set -e), its output passes through
+def run_step(*cmd)
+  return if system(*cmd)
+
+  st = $?
+  exit(st.exitstatus || (128 + st.termsig.to_i))
+end
+
+def build(args)
+  root = args[0]
+  out = args[1]
+  moddir = args[2].to_s.empty? ? nil : args[2]
+  nsrc = Integer(args[3], 10)
+  srcs = args[4, nsrc]
+  argv = args[(4 + nsrc)..] || []
+  nfcxx = File.join(root, "nfcxx")
+  Dir.mktmpdir("nfcxx-mod") do |mtmp|
+    mdir = moddir || mtmp
+    facts = {}
+    srcs.each do |s|
+      rc, msg = NfcxxModscan.check_source(s)
+      if rc != 0
+        warn msg
+        exit rc
+      end
+      facts[s] = Fact.new(false, NfcxxModscan.decl_name(s), NfcxxModscan.import_names(s), 0, nil)
+    end
+    order = build_order(srcs, facts)
+    compile_args, link_args = split_args(argv, srcs)
+    objs = []
+    order.each_with_index do |s, n|
+      o = File.join(mtmp, "m#{n}.o")
+      run_step(nfcxx, "-c", s, "-o", o, "--module-dir=#{mdir}", *compile_args)
+      objs << o
+    end
+    run_step(nfcxx, *objs, *link_args, "-o", out)
+  end
+  0
+rescue Refused => e
+  warn e.message
+  e.status
+end
+
+if $PROGRAM_NAME == __FILE__
+  exit(ARGV[0] == "build" ? build(ARGV[1..]) : main(ARGV))
+end
