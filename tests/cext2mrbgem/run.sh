@@ -497,6 +497,11 @@ check grep -qF '#include <mruby/range.h>' "$work/api_range_values/src/api_range_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_time_new tools/cext2mrbgem/fixtures/api_time_new/ext/api_time_new "$work/api_time_new" > "$work/api_time_new.log" 2>&1 || rc=$?
 check test "$rc" -ne 0
 check grep -q 'rb_time_timespec_new  stuck point (Time offset)' "$work/api_time_new/REFUSALS.txt"
+# 2zzz88. rb_method_boundp(obj, id, 1) is mrb_respond_to; rb_proc_call_with_block(proc, argc, argv, Qnil) is a call of the proc.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_proc_method tools/cext2mrbgem/fixtures/api_proc_method/ext/api_proc_method "$work/api_proc_method" > "$work/api_proc_method.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check grep -qF 'mrb_respond_to(mrb, obj, pm_hset_id)' "$work/api_proc_method/src/api_proc_method.c"
+check grep -qF 'mrb_funcall_argv(mrb, proc, mrb_intern_cstr(mrb, "call"), 1, &arg)' "$work/api_proc_method/src/api_proc_method.c"
 check grep -qF '(*conv2)(mrb, c)' "$work/api_fnptr_thread/src/api_fnptr_thread.c"
 fi
 # 2zzz78. A macro expanded only in inactive code converts without refusal (its expansions are dead).

@@ -1201,6 +1201,21 @@
       "template": "(*($1) = RANGE_BEG(mrb_range_ptr($m, $0)), *($2) = RANGE_END(mrb_range_ptr($m, $0)), *($3) = mrb_range_ptr($m, $0)->excl, 1)",
       "caveat": "the begin, end and exclude-end of a Range (the fork's RANGE_BEG/RANGE_END accessors); the result is 1 for a Range: the argument must be a Range, as the callers check it"
     },
+    "rb_method_boundp": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "template": "(mrb_respond_to($m, $0, $1) ? 1 : 0)",
+      "caveat": "whether the object responds to the method (the fork's mrb_respond_to); the visibility argument (public only) is not distinguished, so it is dropped"
+    },
+    "rb_proc_call_with_block": {
+      "kind": "template",
+      "arity": 4,
+      "ignored_args": [3],
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"call\"), $1, $2)",
+      "caveat": "a call of the proc through its call method with the argument array; the block argument must be nil (CRuby's Qnil), which is dropped"
+    },
     "rb_block_given_p": {
       "kind": "call",
       "mruby": "mrb_block_given_p",
