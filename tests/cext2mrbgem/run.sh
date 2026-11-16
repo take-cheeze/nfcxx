@@ -1346,6 +1346,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_rescue/NOT_BUILDABLE"
 check grep -qF 'return mrb_rescue(mrb, rs_body, proc, nfcx_rescue_rs_recover_' "$work/api_rescue/src/api_rescue.c"
 check grep -qF 'rs_recover(mrb, data, mrb_obj_value(mrb->exc))' "$work/api_rescue/src/api_rescue.c"
+# 2zzz105. rb_rescue2 maps to mrb_rescue_exceptions with the listed classes as an RClass * array.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue2 tools/cext2mrbgem/fixtures/api_rescue2/ext/api_rescue2 "$work/api_rescue2" > "$work/api_rescue2.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rescue2/NOT_BUILDABLE"
+check grep -qF 'mrb_rescue_exceptions(mrb, rs2_body, proc, nfcx_rescue_rs2_recover_' "$work/api_rescue2/src/api_rescue2.c"
+check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

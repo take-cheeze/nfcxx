@@ -1465,14 +1465,24 @@ end
     @files.each do |rel, f|
       masked = f['masked']
       text = f['text']
-      finditer(/(?<![#{WC}$.>])rb_rescue#{SS}\(/, masked).each do |m|
+      finditer(/(?<![#{WC}$.>])(rb_rescue2?)#{SS}\(/, masked).each do |m|
+        fname = m[1]
         s0 = m.begin(0)
         open = m.end(0) - 1
         close = match_close(masked, open)
         next if close < 0
         spans = split_args(masked, open, close)
         args = spans.map { |a, b| psl(text, a, b).strip }
-        next unless args.size == 4
+        # rb_rescue2(body, data1, rescue, data2, class..., 0): the classes are mapped to RClass * in a compound array
+        if fname == 'rb_rescue2'
+          next unless args.size >= 6 && args.last.match?(/\A(?:\(VALUE\)\s*)?0\z|\ANULL\z/)
+          cls = args[4...-1]
+          next unless cls.all? { |x| x.match?(/\Arb_e[A-Za-z]\w*\z/) && (@entries[x] || {})['kind'] == 'expr' }
+          cls_text = cls.map { |x| @entries[x]['mruby'] }
+        else
+          next unless args.size == 4
+          cls_text = []
+        end
         b_cb, d1, r_cb, d2 = args
         next unless b_cb.match?(ident) && r_cb.match?(ident)
         data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
@@ -1481,7 +1491,7 @@ end
         next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
         raw_refs[[rel, b_cb]] += 1
         raw_refs[[rel, r_cb]] += 1
-        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2,
+        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2, cls: cls_text,
                    bpos: spans[0][0], rpos: spans[2][0] }
       end
     end
@@ -3890,7 +3900,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       wname = "nfcx_rescue_#{c[:r]}_#{c[:s]}"
       # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument
       ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
-      ed.add(c[:s], c[:e], "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})")
+      if c[:cls].empty?
+        call = "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})"
+      else
+        call = "mrb_rescue_exceptions(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])}, " \
+               "#{c[:cls].size}, (struct RClass *[]){ #{c[:cls].join(', ')} })"
+      end
+      ed.add(c[:s], c[:e], call)
       # the callbacks cast their data parameter: each cast becomes mrb_cptr (once per callback, as for rb_ensure)
       @ptr_cast_applied ||= Set.new
       (c[:cast_pos] || []).each do |_r, u0, u1|

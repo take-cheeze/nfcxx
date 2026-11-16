@@ -289,8 +289,9 @@
       "caveat": "mrb_rescue (mruby-error): the body is called with (mrb, data); the rescue callback's exception argument is mrb->exc, passed by a wrapper"
     },
     "rb_rescue2": {
-      "kind": "refuse",
-      "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
+      "kind": "rescue_call",
+      "needs_mrb": true,
+      "caveat": "mrb_rescue_exceptions (mruby-error): the listed exception classes (rb_eXxx) are an RClass * array; the rescue callback gets the exception from mrb->exc"
     },
     "Check_Type": {
       "kind": "special",
