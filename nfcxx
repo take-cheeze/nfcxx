@@ -353,6 +353,7 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
   state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
   state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}; state_put eflist ${eflist[@]+"${eflist[@]}"}
   state_put shim ${shim[@]+"${shim[@]}"}; state_put vlart ${vlart[@]+"${vlart[@]}"}; state_put rtlib ${rtlib[@]+"${rtlib[@]}"}
+  state_put moves "$moves"
 }
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
   # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The keep note
@@ -1017,7 +1018,7 @@ if [ $compile_only = 1 ] && [ $outset = 0 ] && [ $ncpp -gt 0 ]; then
   b=$(basename "${srcs[0]}"); out=${b%.*}.o
 fi
 # The one-step build: eccp runs in a temporary directory (see ecp_args), so its paths are made absolute before the cd.
-ecp_args "$edg/eccp" "$out"; eccp_bin=${ecp_list[0]}; eccp_out=${ecp_list[1]}
+eccp_bin="$edg/eccp"; eccp_out=$out   # made absolute by scripts/nfcxx-eccp-plan.rb when the call runs in a temporary directory (moves)
 if [ $moves = 1 ]; then
   eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
 fi
