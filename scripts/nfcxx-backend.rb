@@ -5,6 +5,9 @@
 # tests/driver-backend/run.sh (tests/driver-backend/oracle.sh holds the bash verbatim).
 #
 #   ruby scripts/nfcxx-backend.rb decide KEY=VALUE...
+#   ruby scripts/nfcxx-backend.rb default KEY=VALUE...
+#       the default only (the bash block that runs when no backend was named): backend is kept when given, else gcc or pathb;
+#       no refusals and no NFCXX_PATH=b handling (nfcxx does those where they always were). nfcxx evals the output.
 #
 # Inputs (each optional; the bash defaults are used when absent):
 #   backend=      the explicit --backend= value or NFCXX_BACKEND ("" when none)
@@ -34,6 +37,25 @@ module NfcxxBackend
       super(message)
       @status = status
     end
+  end
+
+  # the default block alone: no refusals, no override (see the usage above)
+  def default_choice(opts)
+    flag = ->(k) { opts.fetch(k, "0") == "1" }
+    system_name, machine = opts.fetch("host", "Linux x86_64").split(" ", 2)
+    pb_fs = pb_fs_host?(system_name, machine) ? 1 : 0
+    backend = opts.fetch("backend", "")
+    default_backend = 0
+    if backend.empty?
+      backend = "gcc"
+      fs_ok = !flag.("freestanding") || pb_fs == 1
+      if !flag.("backend_explicit") && fs_ok && !flag.("cosmo") && !flag.("emit_c") &&
+         opts.fetch("target", "").empty? && !flag.("preprocess") && opts.fetch("depmode", "").empty? && !flag.("shared")
+        backend = "pathb"
+        default_backend = 1
+      end
+    end
+    [backend, default_backend, pb_fs]
   end
 
   def decide(opts)
@@ -85,13 +107,20 @@ end
 
 if $PROGRAM_NAME == __FILE__
   cmd, *rest = ARGV
-  abort "nfcxx-backend: decide KEY=VALUE... (got #{cmd.inspect})" unless cmd == "decide"
   opts = rest.to_h { |kv| kv.split("=", 2) }
-  begin
-    backend, default_backend, pb_fs = NfcxxBackend.decide(opts)
+  case cmd
+  when "decide"
+    begin
+      backend, default_backend, pb_fs = NfcxxBackend.decide(opts)
+      puts "backend=#{backend} default_backend=#{default_backend} pb_fs_host=#{pb_fs}"
+    rescue NfcxxBackend::Refusal => e
+      warn e.message
+      exit e.status
+    end
+  when "default"
+    backend, default_backend, pb_fs = NfcxxBackend.default_choice(opts)
     puts "backend=#{backend} default_backend=#{default_backend} pb_fs_host=#{pb_fs}"
-  rescue NfcxxBackend::Refusal => e
-    warn e.message
-    exit e.status
+  else
+    abort "nfcxx-backend: decide or default KEY=VALUE... (got #{cmd.inspect})"
   end
 end

@@ -526,25 +526,12 @@ fi
 # something only qbe or gcc does (cosmo, --emit-c, --target, -E, -M, -shared; a freestanding program takes Path B on
 # x86-64 and aarch64 Linux, arm64 macOS). A program Path B does not build is built again with gcc, below
 # (docs/notes/pathb-default.md). An explicit --backend=, or NFCXX_BACKEND, is used as given.
-default_backend=0
-# pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64 Linux and arm64 macOS (the EDG front end is the
-# x86-64 target on all; see docs/notes/freestanding.md, "Path B on aarch64" and "Path B on macOS"). Used for the default and for an explicit --backend=pathb.
-pb_fs_host=0
-case $(uname -s) in
-  Linux) case $(uname -m) in x86_64|aarch64|arm64) pb_fs_host=1 ;; esac ;;
-  Darwin) [ "$(uname -m)" = arm64 ] && pb_fs_host=1 ;;   # macOS arm64: the same front end; its link is the Darwin one (docs/notes/freestanding.md)
-esac
-if [ -z "$backend" ]; then
-  backend=gcc
-  # A .cu input takes Path B too: its rewritten host copy gets the forced nfcxx_cuda.h include and the launch syntax, and
-  # its device image is a file-scope asm block that Path B passes through (docs/notes/pathb-default.md, "CUDA").
-  # A freestanding program takes Path B on x86-64 and aarch64 Linux and arm64 macOS (the old harness with the lib/ headers, docs/notes/freestanding.md).
-  fs_ok=1; [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] || fs_ok=0
-  if [ $backend_explicit = 0 ] && [ $fs_ok = 1 ] && [ $cosmo = 0 ] \
-     && [ $emit_c = 0 ] && [ -z "$target" ] && [ $preprocess = 0 ] && [ -z "$depmode" ] && [ $shared = 0 ]; then
-    backend=pathb; default_backend=1
-  fi
-fi
+# The default backend (docs/notes/pathb-default.md; the rule is scripts/nfcxx-backend.rb, stage B3 of docs/notes/driver-body-port.md):
+# gcc, or Path B for a request only Path B takes. pb_fs_host: the hosts Path B compiles freestanding programs on, x86-64 and aarch64
+# Linux and arm64 macOS (docs/notes/freestanding.md). Both are set here; the refusals and the NFCXX_PATH=b override stay below.
+eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend.rb" default backend="$backend" backend_explicit="$backend_explicit" \
+  freestanding="$freestanding" cosmo="$cosmo" emit_c="$emit_c" target="$target" preprocess="$preprocess" depmode="$depmode" \
+  shared="$shared" host="$(uname -s) $(uname -m)")"
 
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
