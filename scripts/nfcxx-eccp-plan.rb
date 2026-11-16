@@ -26,6 +26,7 @@
 
 require_relative "driver-state"
 require_relative "ecp-arg"
+require_relative "nfcxx-linkargs"
 
 module NfcxxEccpPlan
   module_function
@@ -89,6 +90,18 @@ if $PROGRAM_NAME == __FILE__
     ecp = ->(arg) { EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg) }
     groups["eccp"] = [ecp.(DriverState.scalar(groups, "eccp"))]   # a scalar group (one value) is checked as the plan checks it
     groups["out"] = [ecp.(DriverState.scalar(groups, "out"))]
+    # the link arguments (slice 8): the files of the link are planned here, with the call, so a refused option stops the driver
+    # before the compile cache (the bash used to read them in a call of its own)
+    if groups.key?("files")
+      root = (groups["root"] || [])[0] || File.expand_path("..", __dir__)
+      begin
+        groups["eflist"], groups["userinc"] = NfcxxLinkArgs.edg_options(groups["files"], compile_only: (groups["compile_only"] || ["0"])[0] == "1",
+          cuda_home: ENV["CUDA_HOME"].to_s, dir: ->(d) { File.directory?(d) }, cub: -> { NfcxxLinkArgs.cub_archive(root) }, ecp_arg: ecp)
+      rescue NfcxxLinkArgs::Refused => e
+        warn e.message
+        exit 2
+      end
+    end
     words, env, cd, note = NfcxxEccpPlan.plan(groups, dir, keep, shared)
   rescue ArgumentError => e
     $stderr.puts "nfcxx-eccp-plan: #{e.message}"

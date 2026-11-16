@@ -13,7 +13,7 @@ ruby_bin=$(command -v ruby)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sb=$work/sb
 # the functions as nfcxx has them now
-sed -n '/^ecp_args() {/,/^}/p;/^link_args() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"
+sed -n '/^ecp_args() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"; cat "$here/thin-link-args.sh" >> "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-linkargs: no link functions in nfcxx" >&2; exit 2; }
 
 # the CUDA home and the CUB archive a case may name (cuda-cub prints the archive when it is newer than its inputs)

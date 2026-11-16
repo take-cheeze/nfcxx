@@ -347,27 +347,35 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
   state_put eccp "$eccp_bin"; state_put std "$std"; state_put dialect "$dialect"; state_put out "$eccp_out"
   state_put extra ${extra[@]+"${extra[@]}"}; state_put inst_opts ${inst_opts[@]+"${inst_opts[@]}"}
   state_put modopts ${modopts[@]+"${modopts[@]}"}; state_put diag_opts ${diag_opts[@]+"${diag_opts[@]}"}
-  state_put userinc ${userinc[@]+"${userinc[@]}"}; state_put sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
+  state_put root "$root"; state_put files ${files[@]+"${files[@]}"}; state_put compile_only "$compile_only"
+  state_put sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
   state_put hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; state_put keep_static ${keep_static[@]+"${keep_static[@]}"}
   state_put eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; state_put picopts ${picopts[@]+"${picopts[@]}"}
   state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
-  state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}; state_put eflist ${eflist[@]+"${eflist[@]}"}
+  state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}
   state_put shim ${shim[@]+"${shim[@]}"}; state_put vlart ${vlart[@]+"${vlart[@]}"}; state_put rtlib ${rtlib[@]+"${rtlib[@]}"}
   state_put moves "$moves"
 }
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
-  # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The keep note
+  # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The plan also
+  # plans the link arguments (eflist and userinc, from the files), and refuses an option it cannot keep: the status is the
+  # plan's, read from the reply file after the call (a refused option ends the driver with 2, as the bash did). The keep note
   # is printed by the port.
-  local rec done=0
+  local rec done=0 reply rc
   eccp_argv=(); eccp_envs=(); eccp_cd=""
-  while IFS= read -r -d '' rec; do
+  local rdir; rdir=$(mktemp -d) || exit $?
+  reply=$rdir/reply.rec
+  eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
+    || { rc=$?; rm -rf "$rdir"; exit $rc; }
+  while IFS= read -r -d "" rec; do
     case $rec in
       a*) eccp_argv+=("${rec:1}") ;;
       e*) eccp_envs+=("${rec:1}") ;;
       d*) eccp_cd=${rec:1} ;;
       z) done=1 ;;
     esac
-  done < <(eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared")
+  done < "$reply"
+  rm -rf "$rdir"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
@@ -968,25 +976,24 @@ eh_unwind=(${eh_tls[@]+"${eh_tls[@]}"})
 if [ $eh_unwind_on = 1 ] && [ "$backend" = gcc ]; then
   eh_unwind+=(--nfcxx_eh_unwind --c_to_obj_option -fexceptions --c_to_obj_option -include --c_to_obj_option "$root/lib/ehshim/nfcxx_eh_unwind.h")
 fi
-# The link arguments (-I, -l, -lcudart, -Wl and the objects, in argument order) become the EDG options eflist and the user
-# include directories userinc: scripts/nfcxx-linkargs.rb (tests/nfcxx-linkargs/run.sh checks it against the bash loop it
-# replaced, tests/nfcxx-linkargs/oracle.sh).
-link_args() {  # link_args COMPILE_ONLY MOVES FILE...: sets eflist and userinc; a refused option ends nfcxx with status 2
-  local rec done=0 group=
-  eflist=(); userinc=()
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*) if [ "$group" = eflist ]; then eflist+=("${rec:1}"); elif [ "$group" = userinc ]; then userinc+=("${rec:1}"); fi ;;
-      x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
-      z) done=1 ;;
-    esac
-  done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-linkargs.rb" edg "$1" "$2" ${3+"${@:3}"})
-  # the end marker z is written last by the port: without it the helper stopped early, so the arrays are incomplete
-  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-linkargs.rb stopped before its end (the link arguments are incomplete)" >&2; exit 1; }
-  return 0
-}
-link_args "$compile_only" "$moves" ${files[@]+"${files[@]}"}
+# The link arguments (-I, -l, -lcudart, -Wl and the objects, in argument order) become the EDG options and the user include
+# directories, and the one-step command line is planned here, before the compile cache: a refused option stops the driver
+# (status 2) before a cache hit could skip it. scripts/nfcxx-eccp-plan.rb plans the arguments with the call (see the port;
+# tests/nfcxx-linkargs/run.sh and tests/nfcxx-eccp-plan/run.sh check them).
+# -c without -o: the object is <stem>.o, as for C and .cu inputs. eccp makes one object per call, so several sources need -o.
+if [ $compile_only = 1 ] && [ $outset = 0 ] && [ $ncpp -gt 0 ]; then
+  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with several sources needs -o (one object is made per call)" >&2; exit 2; }
+  b=$(basename "${srcs[0]}"); out=${b%.*}.o
+fi
+# The one-step build: eccp runs in a temporary directory, so its paths are made absolute before the cd (in the plan).
+eccp_bin="$edg/eccp"; eccp_out=$out
+if [ $moves = 1 ]; then
+  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
+fi
+# The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
+# scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
+# A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (see the port).
+eccp_plan
 # -c: eccp writes the records of each source (<stem>.ti, the requests) beside its object, and the link reads them there. eccp
 # adds to a .ti that exists, so the records of the sources being compiled are removed first and the compile starts clean
 # (eccp keeps the old content of a .ti and writes the new record ahead of it). The first source takes the name of -o, as eccp names it.
@@ -1012,20 +1019,6 @@ link_records_rm
 # -E inputs, -MD (its dependency file), several sources in one command, and an -o without an extension. A file name with
 # spaces in the header list is not handled.
 cache_check
-# -c without -o: the object is <stem>.o, as for C and .cu inputs. eccp makes one object per call, so several sources need -o.
-if [ $compile_only = 1 ] && [ $outset = 0 ] && [ $ncpp -gt 0 ]; then
-  [ ${#srcs[@]} = 1 ] || { echo "nfcxx: -c with several sources needs -o (one object is made per call)" >&2; exit 2; }
-  b=$(basename "${srcs[0]}"); out=${b%.*}.o
-fi
-# The one-step build: eccp runs in a temporary directory (see ecp_args), so its paths are made absolute before the cd.
-eccp_bin="$edg/eccp"; eccp_out=$out   # made absolute by scripts/nfcxx-eccp-plan.rb when the call runs in a temporary directory (moves)
-if [ $moves = 1 ]; then
-  eccp_dir=$(mktemp -d); trap eccp_cleanup EXIT
-fi
-# The command line (its arguments, the variable a shared link exports, and the directory it runs in) is planned by
-# scripts/nfcxx-eccp-plan.rb, which also prints the note for a kept temporary directory (--keep-intermediates).
-# A shared link: EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces eccp's link options (see the port).
-eccp_plan
 t=$(trace_start)
 (
   [ -z "$eccp_cd" ] || cd "$eccp_cd"
