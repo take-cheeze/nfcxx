@@ -697,14 +697,8 @@ fi
 
 if [ -n "$sanitize" ]; then
   # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
-  IFS=, read -ra sz <<< "$sanitize"
-  for c in ${sz[@]+"${sz[@]}"}; do
-    case $c in
-      undefined|signed-integer-overflow|integer-divide-by-zero|shift|bounds|null|unreachable|return|float-cast-overflow) ;;
-      *) echo "nfcxx: -fsanitize=$c is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)" >&2; exit 2 ;;
-    esac
-  done
-  [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
+  # The validation is scripts/nfcxx-sanitize.rb (stage B3): its refusals are the bash's messages, status 2.
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-sanitize.rb" check "$sanitize" "$freestanding" || exit $?
   pb_flags+=(--sanitize="$sanitize")   # scripts/pathb-cc.rb: the front end's checks (NFCXX_IR_SANITIZE)
   backend=pathb
 fi
