@@ -363,9 +363,10 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
   # is printed by the port.
   local rec done=0 reply rc
   eccp_argv=(); eccp_envs=(); eccp_cd=""
-  reply=$(mktemp) || exit $?
+  local rdir; rdir=$(mktemp -d) || exit $?
+  reply=$rdir/reply.rec
   eccp_plan_input | "${RUBY:-ruby}" "$root/scripts/nfcxx-eccp-plan.rb" "$eccp_dir" "$keep_intermediates" "$shared" > "$reply" \
-    || { rc=$?; rm -f "$reply"; exit $rc; }
+    || { rc=$?; rm -rf "$rdir"; exit $rc; }
   while IFS= read -r -d "" rec; do
     case $rec in
       a*) eccp_argv+=("${rec:1}") ;;
@@ -374,7 +375,7 @@ eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp
       z) done=1 ;;
     esac
   done < "$reply"
-  rm -f "$reply"
+  rm -rf "$rdir"
   [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)" >&2; exit 1; }
 }
 eccp_cleanup() {  # the EXIT trap of a build that runs eccp in a temporary directory (and of the C-input and .cu steps)
