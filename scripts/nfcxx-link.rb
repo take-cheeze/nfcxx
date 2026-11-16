@@ -20,18 +20,13 @@ module NfcxxLink
   module_function
 
   # rm -f PATH: nothing to do when PATH does not exist (a dangling symbolic link is removed); a directory is not removed.
-  # A name that starts with - is an option to rm (the bash passes the name without --): GNU getopt's message for it.
+  # A name that starts with - is an option to rm (the bash passes the name without --). rm's option parsing decides what
+  # happens and what it says (--name=value, the long options that take an argument, the first bad letter), so rm itself
+  # runs for such a name: the same words, the same status.
   def rm_f(path)
-    if path.start_with?("--")
-      $stderr.puts "rm: unrecognized option '#{path.split("=", 2)[0]}'"
-      $stderr.puts "Try 'rm --help' for more information."
-      return 1
-    end
     if path.start_with?("-")
-      bad = path[1..].each_char.find { |ch| !"fiIrRdv".include?(ch) }
-      $stderr.puts "rm: invalid option -- '#{bad}'"
-      $stderr.puts "Try 'rm --help' for more information."
-      return 1
+      system("rm", "-f", path)
+      return $?.exitstatus || 1
     end
     return 0 unless File.exist?(path) || File.symlink?(path)
     if File.directory?(path) && !File.symlink?(path)

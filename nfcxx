@@ -308,22 +308,22 @@ ecp_args() {  # ecp_args ARG...: ARG as eccp receives it, for each ARG in order,
   [ $done = 1 ] || { echo "nfcxx: scripts/ecp-arg.rb stopped before its end (the argument answers are incomplete)" >&2; exit 1; }
   return 0
 }
-ecp_group() {  # ecp_group NAME VALUE...: one group of the eccp command's input (scripts/nfcxx-eccp-plan.rb reads the records)
+state_put() {  # state_put NAME VALUE...: one group of the records scripts/driver-state.rb reads (k NAME, then v VALUE for each)
   local n=$1 v
   shift
   printf 'k%s\0' "$n"
   for v in ${1+"$@"}; do printf 'v%s\0' "$v"; done
 }
 eccp_plan_input() {  # the records of the eccp command line: the call's arrays and scalars, in the order of nfcxx-eccp-plan.rb
-  ecp_group eccp "$eccp_bin"; ecp_group std "$std"; ecp_group dialect "$dialect"; ecp_group out "$eccp_out"
-  ecp_group extra ${extra[@]+"${extra[@]}"}; ecp_group inst_opts ${inst_opts[@]+"${inst_opts[@]}"}
-  ecp_group modopts ${modopts[@]+"${modopts[@]}"}; ecp_group diag_opts ${diag_opts[@]+"${diag_opts[@]}"}
-  ecp_group userinc ${userinc[@]+"${userinc[@]}"}; ecp_group sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
-  ecp_group hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; ecp_group keep_static ${keep_static[@]+"${keep_static[@]}"}
-  ecp_group eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; ecp_group picopts ${picopts[@]+"${picopts[@]}"}
-  ecp_group cobjs ${cobjs[@]+"${cobjs[@]}"}; ecp_group pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
-  ecp_group cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}; ecp_group eflist ${eflist[@]+"${eflist[@]}"}
-  ecp_group shim ${shim[@]+"${shim[@]}"}; ecp_group vlart ${vlart[@]+"${vlart[@]}"}; ecp_group rtlib ${rtlib[@]+"${rtlib[@]}"}
+  state_put eccp "$eccp_bin"; state_put std "$std"; state_put dialect "$dialect"; state_put out "$eccp_out"
+  state_put extra ${extra[@]+"${extra[@]}"}; state_put inst_opts ${inst_opts[@]+"${inst_opts[@]}"}
+  state_put modopts ${modopts[@]+"${modopts[@]}"}; state_put diag_opts ${diag_opts[@]+"${diag_opts[@]}"}
+  state_put userinc ${userinc[@]+"${userinc[@]}"}; state_put sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
+  state_put hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; state_put keep_static ${keep_static[@]+"${keep_static[@]}"}
+  state_put eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; state_put picopts ${picopts[@]+"${picopts[@]}"}
+  state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
+  state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}; state_put eflist ${eflist[@]+"${eflist[@]}"}
+  state_put shim ${shim[@]+"${shim[@]}"}; state_put vlart ${vlart[@]+"${vlart[@]}"}; state_put rtlib ${rtlib[@]+"${rtlib[@]}"}
 }
 eccp_plan() {  # eccp_plan: the eccp command line (eccp_argv), its exports (eccp_envs) and its directory (eccp_cd), from
   # scripts/nfcxx-eccp-plan.rb (tests/nfcxx-eccp-plan/run.sh checks it against the bash's own construction). The keep note

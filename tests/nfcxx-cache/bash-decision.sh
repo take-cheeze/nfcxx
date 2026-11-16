@@ -60,7 +60,7 @@ EOT
         -e '/^cache_check() {/,/^}/ s/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
   # the cache block: from the pre-compile removal to the line before the -MD block
   sed -n "${first},$((end - 1))p" "$file" |
-    sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
+    sed -e 's/"\$eccp_bin" /eccp_stub /' -e 's/^  "\${eccp_argv\[@\]}"$/  eccp_stub/' -e 's|"\$root/scripts/pathb-cc.rb" |pathbcc_stub |g' \
         -e 's/^\( *\)exit 0$/\1_out EXIT 0; exit 0/' -e 's/&& exit 0$/\&\& { _out EXIT 0; exit 0; }/'
 }
 harness > "$tmp/harness.sh"
