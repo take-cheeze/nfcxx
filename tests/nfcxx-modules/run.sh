@@ -41,6 +41,8 @@ awk -v f="$here/bash-build.sh" '
   /^mod_build_program\(\) \{/ { while ((getline l < f) > 0) print l; skip = 1; next }
   skip && /^\}/ { skip = 0; next }
   !skip { print }' "$repo/nfcxx" > "$sb/nfcxx-oracle"
+# the module wrappers are no longer in nfcxx (its call sites are direct); the oracle gets their verbatim copy first
+{ cat "$repo/tests/nfcxx-modscan/oracle-wrappers.sh"; cat "$sb/nfcxx-oracle"; } > "$sb/nfcxx-oracle.tmp" && mv "$sb/nfcxx-oracle.tmp" "$sb/nfcxx-oracle"
 mkroot "$oracle" "$sb/nfcxx-oracle"
 mkroot "$port" "$repo/nfcxx"
 root=$oracle   # the module functions of nfcxx (mod_decl_name and the rest) run the scripts of this root
@@ -49,7 +51,7 @@ for c in gcc cc g++ cp mktemp ninja; do ln -s "$here/stub.sh" "$bin/$c"; done
 cp "$repo"/tests/modules/*.cpp "$repo"/tests/modules/*.cppm "$here"/src/* "$work"/
 cp "$here/facts.txt" "$sb/facts"
 # the SRC facts: nfcxx's module functions, run on each source in the work directory
-fns=$(sed -n '/^mod_is_module_src()/,/^# mod_build_program/p' "$repo/nfcxx" | sed '$d')
+fns=$(cat "$repo/tests/nfcxx-modscan/oracle-wrappers.sh")
 src_fact() {  # src_fact FILE: the SRC line the port reads for a source argument
   local f=$1 m=0 decl imps msg rc
   ( eval "$fns"; mod_is_module_src "$f" ) && m=1
