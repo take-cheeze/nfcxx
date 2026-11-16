@@ -57,6 +57,27 @@ module NfccxxTrace
     File.open(trace, "a") { |f| f.write(trace_text) } if trace_text
   end
 
+# the batched spans of a driver run (trace.sh appends them to the PENDING file, NUL-separated: start, stop, name, category,
+  # pid and unit, six fields a span, in the order they ended). flush writes their trace events and time-log lines, in that
+  # order, to the files of ENV (as span does), and empties the file's records.
+  def flush(pending, env: ENV)
+    fields = File.binread(pending).split("\0", -1)
+    fields.pop if fields.last == ""
+    log = env["NFCXX_TIME_LOG"].to_s
+    trace = env["NFCXX_TRACE"].to_s
+    log_text = +""
+    trace_text = +""
+    fields.each_slice(6) do |start, stop, name, category, pid, unit|
+      start = start.to_i
+      dur = stop.to_i - start
+      log_text << format("%d.%06d\t%s\t%s\t%s\n", dur / 1_000_000, dur % 1_000_000, category, name, unit) unless log.empty?
+      trace_text << format(%({"name":"%s","cat":"%s","ph":"X","ts":%d,"dur":%d,"pid":%d,"tid":1},\n),
+                           escape(name), category, start, dur, pid.to_i) unless trace.empty?
+    end
+    File.open(log, "a") { |f| f.write(log_text) } unless log.empty? || log_text.empty?
+    File.open(trace, "a") { |f| f.write(trace_text) } unless trace.empty? || trace_text.empty?
+  end
+
   # The spans of one run, kept in memory until commit. The runner of a plan (scripts/nfcxx-run.rb) records the driver's spans
   # with it, in the bash's order and with the bash's texts, and writes the files when the run ends. A run that the bash then
   # does again (discard) writes nothing, so the bash's own trace is the whole of the file and of the time log.
@@ -150,6 +171,7 @@ if $PROGRAM_NAME == __FILE__
   when "span"
     _, start, name, cat, pid, unit = ARGV
     NfccxxTrace.span(start.to_i, name, cat, unit: unit, pid: pid.to_i)
+  when "flush" then NfccxxTrace.flush(ARGV[1])
   when "open" then File.write(ARGV[1], "[\n")
   when "close"
     File.open(ARGV[1], "a") do |f|
