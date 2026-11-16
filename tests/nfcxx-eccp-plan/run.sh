@@ -16,7 +16,7 @@ ruby_bin=$(command -v ruby) || { echo "nfcxx-eccp-plan: ruby is not on PATH" >&2
 
 # the port, as nfcxx has it: the functions, and the call (the lines from the moves test to the trace span of eccp)
 sed -n '/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/nfcxx" > "$work/thin_defs.sh"
-sed -n '/^if \[ \$moves = 1 \]; then$/,/^trace_end "\$t" "eccp (front end/p' "$repo/nfcxx" > "$work/thin_call.sh"
+sed -n '/^if \[ \$moves = 1 \]; then$/,/^eccp_plan$/p' "$repo/nfcxx" > "$work/thin_call.sh"; sed -n '/^t=\$(trace_start)$/,/^trace_end "\$t" "eccp (front end/p' "$repo/nfcxx" >> "$work/thin_call.sh"
 for f in "$work/thin_defs.sh" "$work/thin_call.sh"; do
   [ -s "$f" ] || { echo "nfcxx-eccp-plan: nothing to test in nfcxx ($f is empty)" >&2; exit 2; }
 done
@@ -40,7 +40,7 @@ chmod +x "$stub"
 prelude="set -euo pipefail; root=$repo; RUBY=$ruby_bin; trace_start() { :; }; trace_end() { :; }; trace_finish() { :; }
 eccp_bin=$stub; std=--c++23; dialect=gnu; eccp_out=/nfcxx-test/a.out; moves=0; keep_intermediates=0; shared=0; eccp_dir=
 extra=(); inst_opts=(); modopts=(); diag_opts=(); userinc=(); sys_inc=(); hosted_libs=(); keep_static=(); eh_unwind=()
-picopts=(); cobjs=(); pre_opts=(); cuda_opts=(); eflist=(); shim=(); vlart=(); rtlib=()"
+picopts=(); cobjs=(); pre_opts=(); cuda_opts=(); eflist=(); shim=(); vlart=(); rtlib=(); files=(); compile_only=0"
 
 # normalize TMPD TEXT: the side's temporary directory (and the directories mktemp made in it) as <tmp>
 normalize() {
@@ -103,7 +103,7 @@ case_ "-c with keep-intermediates: no directory, no note" 'moves=0; keep_interme
 case_ "extra options: a word with a space and an empty word" 'moves=1; extra=(-DNAME=a\ b "" -O0 -I/x)'
 case_ "modopts and diag_opts" 'moves=1; modopts=(-fmodules-ts); diag_opts=(--diag_suppress 1234); cobjs=(a.o)'
 case_ "cuda_opts and rtlib" 'moves=1; cuda_opts=(--cuda_arch sm_80); rtlib=(-lcudart); cobjs=(a.o)'
-case_ "shared link: link options across picopts, eflist and inst_opts" 'moves=1; shared=1; picopts=(--c_to_obj_option); eflist=(-Wl,--gc-sections -O2 -fuse-ld=mold); inst_opts=(--c_to_obj_option -pthread -rdynamic --c_to_obj_option -Wl,-rpath,/x -O3 -Wl,-z,now); cobjs=(a.o)'
+case_ "shared link: link options across picopts, eflist and inst_opts" 'moves=1; shared=1; picopts=(--c_to_obj_option); files=(-Wl,--gc-sections -O2 -fuse-ld=mold); eflist=(--c_to_obj_option -Wl,--gc-sections -O2 -fuse-ld=mold); inst_opts=(--c_to_obj_option -pthread -rdynamic --c_to_obj_option -Wl,-rpath,/x -O3 -Wl,-z,now); cobjs=(a.o)'
 case_ "shared link with no link options: -shared alone" 'moves=1; shared=1; cobjs=(a.o)'
 case_ "a link that is not shared: no variable, -Wl kept as an option" 'moves=1; shared=0; picopts=(--c_to_obj_option -Wl,-rpath,/x); cobjs=(a.o)'
 case_ "eccp's status is the call's status" 'moves=1; export ECCP_RC=3; cobjs=(a.o)'
@@ -117,8 +117,7 @@ refused() {
     "$prelude; moves=1; cobjs=(a.o); source '$work/thin_defs.sh'
      eccp_plan_input() { state_put eccp \"\$eccp_bin\"; state_put std \"\$std\"; state_put dialect \"\$dialect\"; state_put out \"\$eccp_out\" extra; }
      source '$work/thin_call.sh'" 2>&1 >/dev/null); rc=$?
-  want="nfcxx-eccp-plan: group out needs one value
-nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)"
+  want="nfcxx-eccp-plan: group out needs one value"
   if [ "$rc" = 1 ] && [ "$out" = "$want" ] && [ ! -e "$log" ] && [ -z "$(ls -A "$tmpd")" ]; then
     report "$name" 1 ""
   else
