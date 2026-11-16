@@ -1,5 +1,5 @@
 #!/bin/bash
-# Differential test of nfcxx's eccp command line. The port is nfcxx's eccp call: ecp_group, eccp_plan_input, eccp_plan and
+# Differential test of nfcxx's eccp command line. The port is nfcxx's eccp call: state_put, eccp_plan_input, eccp_plan and
 # the lines of the call that stay in bash (the temporary directory, the trap, the trace span), taken from ./nfcxx as they are.
 # It runs scripts/nfcxx-eccp-plan.rb. The oracle is tests/nfcxx-eccp-plan/oracle.sh: the bash the port replaced, verbatim.
 # Each case runs both sides with a stub eccp that records its working directory, EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS (set or
@@ -15,7 +15,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby) || { echo "nfcxx-eccp-plan: ruby is not on PATH" >&2; exit 2; }
 
 # the port, as nfcxx has it: the functions, and the call (the lines from the moves test to the trace span of eccp)
-sed -n '/^ecp_group() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/nfcxx" > "$work/thin_defs.sh"
+sed -n '/^state_put() {/,/^}/p;/^eccp_plan_input() {/,/^}/p;/^eccp_plan() {/,/^}/p;/^eccp_cleanup() {/,/^}/p' "$repo/nfcxx" > "$work/thin_defs.sh"
 sed -n '/^if \[ \$moves = 1 \]; then$/,/^trace_end "\$t" "eccp (front end/p' "$repo/nfcxx" > "$work/thin_call.sh"
 for f in "$work/thin_defs.sh" "$work/thin_call.sh"; do
   [ -s "$f" ] || { echo "nfcxx-eccp-plan: nothing to test in nfcxx ($f is empty)" >&2; exit 2; }
@@ -115,7 +115,7 @@ refused() {
   rm -rf "$tmpd" "$log"; mkdir -p "$tmpd"; tmpd=$(cd "$tmpd" && pwd -P)
   out=$(cd "$work/usercwd" && env -u EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS ECCP_LOG="$log" TMPDIR="$tmpd" bash -c \
     "$prelude; moves=1; cobjs=(a.o); source '$work/thin_defs.sh'
-     eccp_plan_input() { ecp_group eccp \"\$eccp_bin\"; ecp_group std \"\$std\"; ecp_group dialect \"\$dialect\"; ecp_group out \"\$eccp_out\" extra; }
+     eccp_plan_input() { state_put eccp \"\$eccp_bin\"; state_put std \"\$std\"; state_put dialect \"\$dialect\"; state_put out \"\$eccp_out\" extra; }
      source '$work/thin_call.sh'" 2>&1 >/dev/null); rc=$?
   want="nfcxx-eccp-plan: group out needs one value
 nfcxx: scripts/nfcxx-eccp-plan.rb stopped before its end (the eccp command line is incomplete)"

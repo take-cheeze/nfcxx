@@ -24,6 +24,8 @@
 # A note for a kept temporary directory goes to standard error, as the bash printed it.
 # Standard error for a bad record stream is a message and status 1 (no "z" is written).
 
+require_relative "driver-state"
+
 module NfcxxEccpPlan
   module_function
 
@@ -59,27 +61,6 @@ module NfcxxEccpPlan
     lk
   end
 
-  # the records of RECORDS (NUL-separated, see the header) as the groups they name
-  def read_groups(data)
-    groups = {}
-    current = nil
-    records = data.split("\0", -1)
-    records.pop if records.last == ""
-    records.each do |rec|
-      case rec[0]
-      when "k"
-        current = rec[1..]
-        groups[current] ||= []
-      when "v"
-        raise ArgumentError, "a value before any group" if current.nil?
-        groups[current] << rec[1..]
-      else
-        raise ArgumentError, "unknown record #{rec[0].inspect}"
-      end
-    end
-    groups
-  end
-
   # the plan: [argv, env, cd, note]; note is the message for standard error ("" for none)
   def plan(groups, dir, keep, shared)
     words = argv(groups)
@@ -100,7 +81,7 @@ if $PROGRAM_NAME == __FILE__
   dir, keep, shared = ARGV
   $stdin.binmode
   begin
-    groups = NfcxxEccpPlan.read_groups($stdin.read)
+    groups = DriverState.read_groups($stdin.read)
     words, env, cd, note = NfcxxEccpPlan.plan(groups, dir, keep, shared)
   rescue ArgumentError => e
     $stderr.puts "nfcxx-eccp-plan: #{e.message}"
