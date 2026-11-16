@@ -960,14 +960,12 @@ link_args "$compile_only" "$moves" ${files[@]+"${files[@]}"}
 # -c: eccp writes the records of each source (<stem>.ti, the requests) beside its object, and the link reads them there. eccp
 # adds to a .ti that exists, so the records of the sources being compiled are removed first and the compile starts clean
 # (eccp keeps the old content of a .ti and writes the new record ahead of it). The first source takes the name of -o, as eccp names it.
-if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
-  first=1
-  for s in ${srcs[@]+"${srcs[@]}"}; do
-    b=$(basename "$s"); b=${b%.*}
-    if [ $first = 1 ] && [ "$out" != "${out%.*}" ]; then b=${out%.*}; fi
-    rm -f "$b.ii" "$b.ti"; first=0
-  done
-fi
+compile_clean() {  # compile_clean: removes the records of the sources of a -c compile (scripts/nfcxx-link.rb compile-clean)
+  if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+    "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" compile-clean "$out" ${srcs[@]+"${srcs[@]}"}
+  fi
+}
+compile_clean
 link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of this link (see "A link writes" below)
   "${RUBY:-ruby}" "$root/scripts/nfcxx-link.rb" records-rm -- ${files[@]+"${files[@]}"}   # the loop (tests/nfcxx-link/run.sh)
 }

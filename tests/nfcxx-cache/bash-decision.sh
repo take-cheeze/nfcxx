@@ -11,7 +11,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-first=$(grep -n -F -x 'if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then' "$file" | head -1 | cut -d: -f1)
+first=$(grep -n -F -x 'compile_clean' "$file" | head -1 | cut -d: -f1)
+[ -n "$first" ] || first=$(grep -n -F -x 'if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then' "$file" | head -1 | cut -d: -f1)   # the frozen copy has the -c block itself
 end=$(grep -n -F -x 'if [ -n "$depmode" ]; then' "$file" | cut -d: -f1 | awk -v s="$first" '$1 > s { print; exit }')
 
 harness() {
