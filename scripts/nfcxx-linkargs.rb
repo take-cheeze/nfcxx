@@ -17,6 +17,7 @@
 
 require "open3"
 require_relative "ecp-arg"
+require_relative "driver-state"
 
 module NfcxxLinkArgs
   module_function
@@ -95,10 +96,9 @@ if $PROGRAM_NAME == __FILE__
     eflist, userinc = NfcxxLinkArgs.edg_options(files, compile_only: compile_only == "1", cuda_home: ENV["CUDA_HOME"].to_s,
                                                 dir: ->(d) { File.directory?(d) }, cub: -> { NfcxxLinkArgs.cub_archive(root) },
                                                 ecp_arg: ecp)
-    eflist.each { |v| $stdout.write("e#{v}\0") }
-    userinc.each { |v| $stdout.write("u#{v}\0") }
-    $stdout.write("z\0")
+    DriverState.write_groups($stdout, [["eflist", eflist], ["userinc", userinc]])
+    DriverState.write_end($stdout)
   rescue NfcxxLinkArgs::Refused => e
-    $stdout.write("x#{e.message}\0")
+    DriverState.write_refusal($stdout, e.message)
   end
 end
