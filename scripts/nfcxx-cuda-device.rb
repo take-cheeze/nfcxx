@@ -132,7 +132,7 @@ def nonempty(v) = (v.nil? || v.empty?) ? nil : v
 # A source directory that does not exist ends the step with realpath's message and status 1 (nfcxx runs under set -e).
 def cu_copies(dir, srcs)
   sdirs = srcs.map do |s|
-    File.realpath(File.dirname(s))
+    DriverState.gnu_realpath(File.dirname(s))
   rescue SystemCallError
     raise CuCopiesFailed, "realpath: #{File.dirname(s)}: No such file or directory"
   end

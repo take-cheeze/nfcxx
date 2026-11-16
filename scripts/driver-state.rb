@@ -58,3 +58,17 @@ module DriverState
     io.write("x#{message}\0")
   end
 end
+
+module DriverState
+  module_function
+
+  # realpath as the bash runs it (GNU realpath without -m): every component but the last must exist; a missing last
+  # component is resolved in its existing directory. The error names the path as given (ENOENT).
+  def gnu_realpath(path)
+    File.realpath(path)
+  rescue Errno::ENOENT
+    parent = File.dirname(path)
+    raise Errno::ENOENT, path if parent == path
+    File.join(File.realpath(parent), File.basename(path))
+  end
+end
