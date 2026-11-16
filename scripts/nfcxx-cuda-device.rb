@@ -142,6 +142,31 @@ end
 
 class CuCopiesFailed < StandardError; end
 
+# cu_prepare's loop (slice 5): for each .cu input, in order, the -I of its source directory is added to the flags, and the
+# rewrite runs with the options of rewrite_argv (in this process: plan_for(o).execute). The state comes in as records (the
+# inputs, the directory, the flags, the rewrite's settings, the preinclude list, cuda_opts and whether the EDG launch is
+# on) and goes back as the groups sdirs, copies, cuda and preinc. A failing rewrite stops with its status.
+def cu_prepare_run(g)
+  inputs = g["inputs"] || []
+  dir = (g["dir"] || [])[0]
+  sdirs, copies = cu_copies(dir, inputs)
+  cflags = (g["cflags"] || []).dup
+  root = (g["root"] || [])[0]
+  hdr = "#{root}/lib/cuda/nfcxx_cuda.h"
+  preinc = (g["preinc"] || []).dup
+  cuda = (g["cuda"] || []).dup
+  inputs.each_with_index do |src, i|
+    cflags << "-I#{sdirs[i]}"
+    rg = g.merge("cflags" => cflags, "copy" => [copies[i]])
+    o = parse_options(rewrite_argv(rg) + [src])
+    status = plan_for(o).execute
+    return [nil, status] unless status == 0
+    cuda = ["--cuda"] if (g["edg_launch"] || []).first == "1"
+    preinc << hdr unless preinc.include?(hdr)
+  end
+  [[["sdirs", sdirs], ["copies", copies], ["cuda", cuda], ["preinc", preinc]], 0]
+end
+
 # cu_rewrite's --execute options (the bash built them from the driver's state; the bash now writes that state as records,
 # with state_put, and runs this): the root, the temporary and copy directories, the keep directory, the bash's pid, the trace
 # unit, one --cflag per word, --obfuscate-kernels when the flag is set, --ir-opt when it is set (even empty), the promotion,
@@ -730,6 +755,19 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    if ARGV[0] == "--cu-prepare"
+      begin
+        groups = DriverState.read_groups($stdin.binmode.read)
+        result, status = cu_prepare_run(groups)
+      rescue ArgumentError, CuCopiesFailed => e
+        $stderr.puts(e.message.start_with?("realpath") ? e.message : "nfcxx-cuda-device: #{e.message}")
+        exit 2
+      end
+      exit status unless status == 0
+      DriverState.write_groups($stdout, result)
+      DriverState.write_end($stdout)
+      exit 0
+    end
     if ARGV[0] == "--rewrite-argv"
       begin
         groups = DriverState.read_groups($stdin.binmode.read)
