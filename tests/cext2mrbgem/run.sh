@@ -460,6 +460,8 @@ check grep -qF 'mrb_str_format(mrb, 2, args, mrb_str_new_cstr(mrb, "%*d"))' "$wo
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_alt_branch tools/cext2mrbgem/fixtures/api_alt_branch/ext/api_alt_branch "$work/api_alt_branch" > "$work/api_alt_branch.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check grep -qF 'mrb_obj_as_string(api_alt_branch_bc2_mrb, (x))' "$work/api_alt_branch/src/api_alt_branch.c"
+# a method entered while another mruby state is active aborts (the global state is one state; a nested one would be wrong)
+check grep -qF 'if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort();' "$work/api_alt_branch/src/api_alt_branch.c"
 # 2zzz80. A callee that takes two callbacks: each function-pointer parameter takes its own helper, and both helpers gain mrb.
 # (The regex scanner cannot read two parenthesis levels in a parameter list, so it refuses this safely: the test is libclang's.)
 if [ "$scanner" = libclang ]; then
@@ -1008,7 +1010,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_enc_drop tools/cext2mrbgem/f
 check test "$rc" -eq 0
 check test ! -e "$work/api_enc_drop/NOT_BUILDABLE"
 check grep -qF 'return mrb_str_new(mrb, p, n);' "$work/api_enc_drop/src/api_enc_drop.c"
-check grep -qF 'return s;' "$work/api_enc_drop/src/api_enc_drop.c"
+check grep -qF 'mrb_intern_cstr(mrb, "force_encoding"), 1, (mrb_value[]){' "$work/api_enc_drop/src/api_enc_drop.c"
 
 # 2zzo. a positional callback table with a NULL entry, and a callback stored by address (x.NAME = &helper;): both are read by the field rule
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_fnptr_null tools/cext2mrbgem/fixtures/api_fnptr_null/ext/api_fnptr_null "$work/api_fnptr_null" > "$work/api_fnptr_null.log" 2>&1 || rc=$?
@@ -1326,6 +1328,30 @@ check grep -qF 'mrb_intern_cstr(mrb, "each_n")' "$work/api_enum_classvar/src/api
 check grep -qF 'mrb_intern_cstr(mrb, "to_enum")' "$work/api_enum_classvar/src/api_enum_classvar.c"
 check grep -qF 'mrb_obj_value(mrb_class(mrb, mrb_obj_value(cK)))' "$work/api_enum_classvar/src/api_enum_classvar.c"
 check grep -qF 'mrb_singleton_class(mrb, mrb_obj_value(cK))' "$work/api_enum_classvar/src/api_enum_classvar.c"
+# 2zzz102. a helper whose address is in a file-scope table is accepted when the gem has an Init (which sets the global state).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_table_init tools/cext2mrbgem/fixtures/api_table_init/ext/api_table_init "$work/api_table_init" > "$work/api_table_init.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_table_init/NOT_BUILDABLE"
+check grep -qF 'static mrb_value ti_str(mrb_state *mrb, mrb_value self) {' "$work/api_table_init/src/api_table_init.c"
+# 2zzz103. the encoding API maps to the mruby-encoding gem's Ruby-level methods and constants (rb_enc_get -> String#encoding,
+# rb_enc_associate -> String#force_encoding, rb_utf8_encoding / rb_ascii8bit_encoding -> Encoding::UTF_8 / BINARY).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_encoding tools/cext2mrbgem/fixtures/api_encoding/ext/api_encoding "$work/api_encoding" > "$work/api_encoding.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_encoding/NOT_BUILDABLE"
+check grep -qF 'mrb_funcall_argv(mrb, str, mrb_intern_cstr(mrb, "encoding"), 0, NULL)' "$work/api_encoding/src/api_encoding.c"
+check grep -qF 'mrb_module_get(mrb, "Encoding")' "$work/api_encoding/src/api_encoding.c"
+# 2zzz104. rb_rescue maps to mrb_rescue; the rescue callback gets the exception from mrb->exc through a file-scope wrapper.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue tools/cext2mrbgem/fixtures/api_rescue/ext/api_rescue "$work/api_rescue" > "$work/api_rescue.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rescue/NOT_BUILDABLE"
+check grep -qF 'return mrb_rescue(mrb, rs_body, proc, nfcx_rescue_rs_recover_' "$work/api_rescue/src/api_rescue.c"
+check grep -qF 'rs_recover(mrb, data, mrb_obj_value(mrb->exc))' "$work/api_rescue/src/api_rescue.c"
+# 2zzz105. rb_rescue2 maps to mrb_rescue_exceptions with the listed classes as an RClass * array.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue2 tools/cext2mrbgem/fixtures/api_rescue2/ext/api_rescue2 "$work/api_rescue2" > "$work/api_rescue2.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rescue2/NOT_BUILDABLE"
+check grep -qF 'mrb_rescue_exceptions(mrb, rs2_body, proc, nfcx_rescue_rs2_recover_' "$work/api_rescue2/src/api_rescue2.c"
+check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

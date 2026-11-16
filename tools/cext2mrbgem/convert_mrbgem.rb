@@ -1265,7 +1265,7 @@ texts = static_rename(texts)
     if @global_wrap
       # as a registered method: the global state is set on entry and restored on return (wrap_returns)
       g = @global_name
-      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "#{g} = mrb;")
+      lines.unshift("mrb_state *nfcx_bc2_old = #{g};", "if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */", "#{g} = mrb;")
       lines += ["mrb_value nfcx_bc2_ret = #{call};", "#{g} = nfcx_bc2_old;", 'return nfcx_bc2_ret;']
     else
       lines << "return #{call};"
@@ -1455,6 +1455,74 @@ end
     end
   end
 
+  # rb_rescue(body, data1, rescue, data2) with static callbacks defined here and used only here. The body takes (VALUE) and
+  # the rescue callback (VALUE data, VALUE exc): mruby's rescue takes (mrb, data) and reads the exception from mrb->exc, so
+  # a wrapper after the rescue callback passes mrb->exc as its exc argument.
+  def rescue_calls
+    cands = []
+    raw_refs = Hash.new(0)
+    ident = /\A[A-Za-z_][#{WC}]*\z/
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])(rb_rescue2?)#{SS}\(/, masked).each do |m|
+        fname = m[1]
+        s0 = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        spans = split_args(masked, open, close)
+        args = spans.map { |a, b| psl(text, a, b).strip }
+        # rb_rescue2(body, data1, rescue, data2, class..., 0): the classes are mapped to RClass * in a compound array
+        if fname == 'rb_rescue2'
+          next unless args.size >= 6 && args.last.match?(/\A(?:\(VALUE\)\s*)?0\z|\ANULL\z/)
+          cls = args[4...-1]
+          next unless cls.all? { |x| x.match?(/\Arb_e[A-Za-z]\w*\z/) && (@entries[x] || {})['kind'] == 'expr' }
+          cls_text = cls.map { |x| @entries[x]['mruby'] }
+        else
+          next unless args.size == 4
+          cls_text = []
+        end
+        b_cb, d1, r_cb, d2 = args
+        next unless b_cb.match?(ident) && r_cb.match?(ident)
+        data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
+        # a pointer passed as data: (VALUE)name, whose callback uses the parameter only in pointer casts
+        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) }
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
+        raw_refs[[rel, b_cb]] += 1
+        raw_refs[[rel, r_cb]] += 1
+        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2, cls: cls_text,
+                   bpos: spans[0][0], rpos: spans[2][0] }
+      end
+    end
+    out = []
+    cands.each do |c|
+      rel = c[:rel]
+      text = @files[rel]['text']
+      masked = @files[rel]['masked']
+      ok = [[c[:b], /\A\(?\s*VALUE\s+[A-Za-z_]\w*\s*\)?\z/], [c[:r], /\A\(?\s*VALUE\s+[A-Za-z_]\w*\s*,\s*VALUE\s+[A-Za-z_]\w*\s*\)?\z/]].all? do |cb, pat|
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
+          psl(text, d[0]['po'], d[0]['pc']).match?(pat) &&
+          ((@occ[cb] || []).count { |r0, _, _| r0 == rel } -
+           @decls.count { |x| x['name'] == cb && x['file'] == rel && x['proto'] }) == 1 + raw_refs[[rel, cb]]
+      end
+      next unless ok
+      rdef = (@defs[c[:r]] || []).find { |x| x['file'] == rel }
+      bdef = (@defs[c[:b]] || []).find { |x| x['file'] == rel }
+      casts = []
+      cast_ok = [[c[:d1], bdef], [c[:d2], rdef]].all? do |dd, dfn|
+        next true unless dd.match?(/\A\(VALUE\)/)
+        pos = ptr_cast_uses(rel, dfn, text, masked, 0)
+        casts.concat(pos) unless pos.nil?
+        !pos.nil?
+      end
+      next unless cast_ok
+      out << c.merge(rend: rdef['body_end'] + 1, cast_pos: casts.uniq)
+    end
+    out
+  end
+
   def ensure_calls
     cands = []
     raw_refs = Hash.new(0)   # every rb_ensure call's callbacks, candidate or not: a callback is referenced by all of them
@@ -1511,17 +1579,46 @@ end
     out
   end
 
-  def ptr_cast_uses(rel, d, text, masked)
+  # a typedef of a pointer type in the gem: typedef ... *NAME;
+  def pointer_typedef?(name)
+    @pointer_typedefs ||= begin
+      set = Set.new
+      @files.each_value do |f|
+        masked = f['masked']
+        masked.to_enum(:scan, /\btypedef\b/).map { Regexp.last_match.end(0) }.each do |pos|
+          # the declarator follows the type: past a braced body (typedef struct X {...} *P;) if there is one
+          # the first '{' or ';' after the keyword: a braced body (struct tag {...}) comes before the declarator
+          jb = masked.index(/[{;]/, pos)
+          if jb && masked[jb] == '{'
+            close = match_close(masked, jb)
+            next if close < 0
+            tail = masked[(close + 1)..(close + 80)].to_s
+          else
+            tail = masked[pos...(pos + 200)].to_s
+          end
+          m = /\A[^;{}]*?\*[ \t\n]*([A-Za-z_]\w*)[ \t\n]*;/.match(tail)
+          set << m[1] if m
+        end
+      end
+      set
+    end
+    @pointer_typedefs.include?(name)
+  end
+
+  def ptr_cast_uses(rel, d, text, masked, idx = nil)
     return nil if d.nil? || !d.key?('brace')
     pars = split_args(masked, d['po'], d['pc']).map { |a2, b2| psl(text, a2, b2).strip }
-    return nil unless pars.size == 1
-    pname = pars[0][/([A-Za-z_]\w*)\z/, 1]
+    return nil unless idx.nil? ? pars.size == 1 : (idx < pars.size)
+    pname = pars[idx || 0][/([A-Za-z_]\w*)\z/, 1]
     return nil if pname.nil?
     body = masked[d['brace']...d['body_end']].to_s
     uses = []
     body.to_enum(:scan, /(?<![#{WC}$.>])#{Regexp.escape(pname)}(?![#{WC}])/).map { Regexp.last_match }.each do |m|
       pre = body[0...m.begin(0)]
-      return nil unless pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/)
+      # a cast to a pointer type: (T *), or (P) where P is a typedef of a pointer type in this gem
+      ptr_cast = pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/) ||
+                 ((tn = pre[/\(\s*([A-Za-z_]\w*)\s*\)\s*\z/, 1]) && pointer_typedef?(tn))
+      return nil unless ptr_cast
       uses << (d['brace'] + m.begin(0))
     end
     uses.map { |u| [rel, u, u + pname.size] }
@@ -2076,6 +2173,9 @@ end
     @ensure_calls = ensure_calls
     @ensure_calls.each { |c| forced << c[:b] << c[:ecb] }
     @ensure_cb_pos = Set.new(@ensure_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:epos]]] })
+    @rescue_calls = rescue_calls
+    @rescue_calls.each { |c| forced << c[:b] << c[:r] }
+    @rescue_cb_pos = Set.new(@rescue_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:rpos]]] })
     @hash_calls.each { |c| forced << c[:cb] }
     @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
@@ -2286,7 +2386,7 @@ use_problem = lambda do |name, use|
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
-  next nil if !direct && (@ensure_cb_pos || Set.new).include?([rel, s])
+  next nil if !direct && ((@ensure_cb_pos || Set.new).include?([rel, s]) || (@rescue_cb_pos || Set.new).include?([rel, s]))
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -2404,7 +2504,9 @@ use_problem = lambda do |name, use|
         # a function address in a file-scope table (an initializer of a variable of this file) runs only when the table is
         # used: when every use of the table is in a registered method or Init, the call runs in a method's dynamic extent,
         # where the global state is set (the same state the method's own helpers use)
-        if !direct && (tbl = file_scope_table_at(rel, s)) && table_used_in_methods?(tbl, rel, s)
+        # Init sets the global state too (and every method restores it on return), so once the gem's Init has run the state is
+        # valid wherever the table's entries run: a table used from any function is accepted when there is an Init
+        if !direct && (tbl = file_scope_table_at(rel, s)) && (init_first || table_used_in_methods?(tbl, rel, s))
           nil
         elsif direct && macro && macro_expansions_ok(macro, with_state | members)
           nil
@@ -2421,7 +2523,7 @@ use_problem = lambda do |name, use|
         nil # a local of this name, not a use of the helper
       elsif shadowed.call(name, fn)
         'helper needs the mruby state threaded in, but its name is shadowed in the calling function (not supported)'
-      elsif !(with_state.include?(fn['name']) || members.include?(fn['name']))
+      elsif !(init_first || with_state.include?(fn['name']) || members.include?(fn['name']))
         CTX_REASON
       elsif !direct
         why = value_problem.call(rel, s, name)
@@ -2479,7 +2581,8 @@ use_problem = lambda do |name, use|
     cands.to_a.sort.each do |name|
       uses[name].each do |rel, s, _direct, fn|
         # a refused definition is still emitted: its calls of threaded helpers would pass an mrb that is not in scope
-        next unless fn && !mrb_bearing.include?(fn['name'])
+        # with the gem's Init, a caller without the state reads the global (set by Init, restored by each method)
+        next unless fn && !init_first && !mrb_bearing.include?(fn['name'])
         # a caller reached from a per-class allocator is part of that accepted stuck point (the allocator has no state)
         if alloc_reach.include?(fn['name'])
           refuse(rel, s, name, 'stuck point (per-class allocator): the caller is reached from a per-class allocator ' \
@@ -2936,6 +3039,11 @@ use_problem = lambda do |name, use|
     fd = enclosing_func(rel, pos)
     return @global_name if fd && @global_helpers && @global_helpers.include?(fd['name'])
     return @global_name if in_global_macro?(rel, pos)
+    # with the gem's Init, a function that has no state parameter reads the global (set by Init)
+    if fd && (@init_defs || []).any? && !((@threaded_cands || Set.new) | (@valid_reg_names || Set.new) |
+                                          (@init_defs || []).map { |d| d['name'] }.to_set).include?(fd['name'])
+      return @global_name
+    end
     'mrb'
   end
 
@@ -3159,7 +3267,7 @@ end
         # a registered method or Init of a gem that uses the global state saves and restores it (wrap_returns)
         if @global_wrap && (@valid_reg_names.include?(name) || name == init_name)
           g = @global_name
-          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  #{g} = mrb;" + pro
+          pro = "\n  mrb_state *nfcx_bc2_old = #{g};\n  if (nfcx_bc2_old != NULL && nfcx_bc2_old != mrb) abort(); /* nested mruby state */\n  #{g} = mrb;" + pro
           wrap_returns(rel, d, name == init_name && !@valid_reg_names.include?(name))
         end
         ed.add(d['hstart'], d['hend'], hdr + ' ')
@@ -3769,6 +3877,46 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])
+    when 'rescue_call'
+      c = (@rescue_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
+      unless c
+        refuse(rel, s, name, 'rb_rescue needs static callbacks defined here and used only here (the body takes one VALUE, the rescue ' \
+                             'callback takes the data and the exception), and VALUE-name or Q data arguments')
+        return
+      end
+      if ed.overlaps(c[:s], c[:e])
+        refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+        return
+      end
+      conv = lambda do |x|
+        if (pm = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*)\z/.match(x))
+          "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
+        elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
+          @entries[x]['mruby']
+        else
+          x
+        end
+      end
+      wname = "nfcx_rescue_#{c[:r]}_#{c[:s]}"
+      # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument
+      ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
+      if c[:cls].empty?
+        call = "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})"
+      else
+        call = "mrb_rescue_exceptions(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])}, " \
+               "#{c[:cls].size}, (struct RClass *[]){ #{c[:cls].join(', ')} })"
+      end
+      ed.add(c[:s], c[:e], call)
+      # the callbacks cast their data parameter: each cast becomes mrb_cptr (once per callback, as for rb_ensure)
+      @ptr_cast_applied ||= Set.new
+      (c[:cast_pos] || []).each do |_r, u0, u1|
+        next if @ptr_cast_applied.include?([rel, u0])
+        @ptr_cast_applied << [rel, u0]
+        ed.add(u0, u1, "mrb_cptr(#{@files[rel]['text'][u0...u1]})")
+      end
+      rewrite(rel, s, 'rb_rescue', "mrb_rescue(#{mrb_tok(rel, s)}, ...)",
+              'the rescue callback gets the exception from mrb->exc (a wrapper passes it as the exc argument)')
+      return
     when 'ensure_call'
       c = (@ensure_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c
