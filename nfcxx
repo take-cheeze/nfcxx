@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# NFCXX_RUBY_DRIVER=1: the Ruby driver (scripts/nfcxx.rb, stage B2 of docs/notes/driver-body-port.md) runs in its place; until its
+# stages are ported it runs this driver, so the flag changes nothing yet.
+if [ "${NFCXX_RUBY_DRIVER:-0}" = 1 ]; then exec "${RUBY:-ruby}" "$(dirname "$0")/scripts/nfcxx.rb" "$@"; fi
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
 # Usage: nfcxx [--emit-c] [--backend=gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]

@@ -10,6 +10,12 @@ oracle=$here/nfcxx-bash
 pass=0; fail=0
 check() { if [ "$2" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $1"; fi; }
 bash -n "$oracle"; check "the frozen driver parses" $?
-check "the frozen driver's header matches the driver's" "$(head -3 "$oracle" | diff -q - <(head -3 "$repo/nfcxx") >/dev/null && echo 0 || echo 1)"
+check "the frozen driver matches the driver apart from the Ruby flag (B2)" "$(sed '/^# NFCXX_RUBY_DRIVER=1/,/NFCXX_RUBY_DRIVER:-0/d' "$repo/nfcxx" | diff -q "$oracle" - >/dev/null && echo 0 || echo 1)"
+# B2: the flag runs the Ruby skeleton, which runs the oracle: a compile gives the same stdout, stderr and status
+src=$(mktemp -d); printf 'int main() { return 0; }\n' > "$src/m.cpp"
+(cd "$src" && "$repo/nfcxx" -c m.cpp -o plain.o >p.out 2>p.err; echo $? > p.rc; NFCXX_RUBY_DRIVER=1 "$repo/nfcxx" -c m.cpp -o flag.o >f.out 2>f.err; echo $? > f.rc)
+check "the Ruby skeleton gives the bash driver's stdout, stderr and status" "$(cd "$src" && cmp -s p.out f.out && cmp -s p.err f.err && cmp -s p.rc f.rc && echo 0 || echo 1)"
+rm -rf "$src"
+
 echo "driver-body: $pass passed, $fail failed"
 [ "$fail" = 0 ]
