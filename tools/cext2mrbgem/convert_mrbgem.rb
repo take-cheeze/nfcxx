@@ -1476,7 +1476,9 @@ end
         b_cb, d1, r_cb, d2 = args
         next unless b_cb.match?(ident) && r_cb.match?(ident)
         data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
-        next unless data_ok.call(d1) && data_ok.call(d2)
+        # a pointer passed as data: (VALUE)name, whose callback uses the parameter only in pointer casts
+        ptr_data = ->(d) { d.match?(/\A\(VALUE\)\s*[A-Za-z_][#{WC}]*\z/) }
+        next unless [d1, d2].all? { |d| data_ok.call(d) || ptr_data.call(d) }
         raw_refs[[rel, b_cb]] += 1
         raw_refs[[rel, r_cb]] += 1
         cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2,
@@ -1492,11 +1494,21 @@ end
         d = (@defs[cb] || []).select { |x| x['file'] == rel }
         d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
           psl(text, d[0]['po'], d[0]['pc']).match?(pat) &&
-          (@occ[cb] || []).count { |r0, _, _| r0 == rel } == 1 + raw_refs[[rel, cb]]
+          ((@occ[cb] || []).count { |r0, _, _| r0 == rel } -
+           @decls.count { |x| x['name'] == cb && x['file'] == rel && x['proto'] }) == 1 + raw_refs[[rel, cb]]
       end
       next unless ok
       rdef = (@defs[c[:r]] || []).find { |x| x['file'] == rel }
-      out << c.merge(rend: rdef['body_end'] + 1)
+      bdef = (@defs[c[:b]] || []).find { |x| x['file'] == rel }
+      casts = []
+      cast_ok = [[c[:d1], bdef], [c[:d2], rdef]].all? do |dd, dfn|
+        next true unless dd.match?(/\A\(VALUE\)/)
+        pos = ptr_cast_uses(rel, dfn, text, masked, 0)
+        casts.concat(pos) unless pos.nil?
+        !pos.nil?
+      end
+      next unless cast_ok
+      out << c.merge(rend: rdef['body_end'] + 1, cast_pos: casts.uniq)
     end
     out
   end
@@ -1557,17 +1569,46 @@ end
     out
   end
 
-  def ptr_cast_uses(rel, d, text, masked)
+  # a typedef of a pointer type in the gem: typedef ... *NAME;
+  def pointer_typedef?(name)
+    @pointer_typedefs ||= begin
+      set = Set.new
+      @files.each_value do |f|
+        masked = f['masked']
+        masked.to_enum(:scan, /\btypedef\b/).map { Regexp.last_match.end(0) }.each do |pos|
+          # the declarator follows the type: past a braced body (typedef struct X {...} *P;) if there is one
+          # the first '{' or ';' after the keyword: a braced body (struct tag {...}) comes before the declarator
+          jb = masked.index(/[{;]/, pos)
+          if jb && masked[jb] == '{'
+            close = match_close(masked, jb)
+            next if close < 0
+            tail = masked[(close + 1)..(close + 80)].to_s
+          else
+            tail = masked[pos...(pos + 200)].to_s
+          end
+          m = /\A[^;{}]*?\*[ \t\n]*([A-Za-z_]\w*)[ \t\n]*;/.match(tail)
+          set << m[1] if m
+        end
+      end
+      set
+    end
+    @pointer_typedefs.include?(name)
+  end
+
+  def ptr_cast_uses(rel, d, text, masked, idx = nil)
     return nil if d.nil? || !d.key?('brace')
     pars = split_args(masked, d['po'], d['pc']).map { |a2, b2| psl(text, a2, b2).strip }
-    return nil unless pars.size == 1
-    pname = pars[0][/([A-Za-z_]\w*)\z/, 1]
+    return nil unless idx.nil? ? pars.size == 1 : (idx < pars.size)
+    pname = pars[idx || 0][/([A-Za-z_]\w*)\z/, 1]
     return nil if pname.nil?
     body = masked[d['brace']...d['body_end']].to_s
     uses = []
     body.to_enum(:scan, /(?<![#{WC}$.>])#{Regexp.escape(pname)}(?![#{WC}])/).map { Regexp.last_match }.each do |m|
       pre = body[0...m.begin(0)]
-      return nil unless pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/)
+      # a cast to a pointer type: (T *), or (P) where P is a typedef of a pointer type in this gem
+      ptr_cast = pre.match?(/\(\s*(?:const\s+|volatile\s+)*(?:void|struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*\z/) ||
+                 ((tn = pre[/\(\s*([A-Za-z_]\w*)\s*\)\s*\z/, 1]) && pointer_typedef?(tn))
+      return nil unless ptr_cast
       uses << (d['brace'] + m.begin(0))
     end
     uses.map { |u| [rel, u, u + pname.size] }
@@ -3838,12 +3879,25 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       conv = lambda do |x|
-        x.match?(/\AQ(?:nil|undef|true|false)\z/) ? @entries[x]['mruby'] : x
+        if (pm = /\A\(VALUE\)\s*([A-Za-z_][#{WC}]*)\z/.match(x))
+          "mrb_cptr_value(#{mrb_tok(rel, s)}, #{pm[1]})"
+        elsif x.match?(/\AQ(?:nil|undef|true|false)\z/)
+          @entries[x]['mruby']
+        else
+          x
+        end
       end
       wname = "nfcx_rescue_#{c[:r]}_#{c[:s]}"
       # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument
       ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
       ed.add(c[:s], c[:e], "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})")
+      # the callbacks cast their data parameter: each cast becomes mrb_cptr (once per callback, as for rb_ensure)
+      @ptr_cast_applied ||= Set.new
+      (c[:cast_pos] || []).each do |_r, u0, u1|
+        next if @ptr_cast_applied.include?([rel, u0])
+        @ptr_cast_applied << [rel, u0]
+        ed.add(u0, u1, "mrb_cptr(#{@files[rel]['text'][u0...u1]})")
+      end
       rewrite(rel, s, 'rb_rescue', "mrb_rescue(#{mrb_tok(rel, s)}, ...)",
               'the rescue callback gets the exception from mrb->exc (a wrapper passes it as the exc argument)')
       return
