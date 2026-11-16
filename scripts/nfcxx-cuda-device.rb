@@ -142,6 +142,24 @@ end
 
 class CuCopiesFailed < StandardError; end
 
+# cu_rewrite's --execute options (the bash built them from the driver's state; the bash now writes that state as records,
+# with state_put, and runs this): the root, the temporary and copy directories, the keep directory, the bash's pid, the trace
+# unit, one --cflag per word, --obfuscate-kernels when the flag is set, --ir-opt when it is set (even empty), the promotion,
+# unrolling and struct-slot settings, and the cache options when they are not empty. The source is appended by the bash.
+def rewrite_argv(g)
+  s = ->(n) { (g[n] || [])[0] }
+  argv = ["--execute", "--root=#{s["root"]}", "--tmp=#{s["tmp"]}", "--copy=#{s["copy"]}", "--keep-dir=#{s["keep"]}",
+          "--bash-pid=#{s["bash_pid"]}", "--trace-unit=#{s["trace_unit"]}"]
+  (g["cflags"] || []).each { |f| argv << "--cflag=#{f}" }
+  argv << "--obfuscate-kernels" if s["obfuscate"] == "1"
+  argv << "--ir-opt=#{s["ir_opt"]}" if (g["ir_opt"] || []).any?
+  argv += ["--promote-slots=#{s["promote_slots"]}", "--unroll=#{s["unroll"]}", "--struct-slots=#{s["struct_slots"]}"]
+  argv << "--cache-dir=#{s["cache_dir"]}" unless s["cache_dir"].to_s.empty?
+  argv << "--cache-log=#{s["cache_log"]}" unless s["cache_log"].to_s.empty?
+  argv
+end
+
+
 class CudaDevicePlan
   PHASES = %i[all prep emit finish].freeze
   attr_reader :copy, :dev, :groups_dir   # the paths the plan writes (set by run)
@@ -712,6 +730,17 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    if ARGV[0] == "--rewrite-argv"
+      begin
+        groups = DriverState.read_groups($stdin.binmode.read)
+      rescue ArgumentError => e
+        $stderr.puts "nfcxx-cuda-device: #{e.message}"
+        exit 2
+      end
+      DriverState.write_groups($stdout, [["argv", rewrite_argv(groups)]])
+      DriverState.write_end($stdout)
+      exit 0
+    end
     if ARGV[0] == "--cu-copies"
       begin
         sdirs, copies = cu_copies(ARGV[1], ARGV[2..])
