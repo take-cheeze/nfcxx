@@ -150,7 +150,7 @@ scratch directory). Depends on slices 3 and 5. Test: a stub cppfront in the driv
 `moves` is still set in bash (453). Depends on slices 4 and 5. Test: tests/nfcxx-ecp-arg, and a new tests/nfcxx-eccp-plan. The run.sh that nfcxx and
 scripts/nfcxx-eccp-plan.rb cite does not exist in the tree (see risk 11), so slice 7 writes the bash oracle first.
 
-**Slice 8: link_args and the eccp inputs.** Make `link_args`' output part of the slice 7 call, so one Ruby call builds
+**Slice 8: link_args and the eccp inputs. Decision: not folded (kept as the refusal gate).** Folding link_args into the eccp call would move the link refusal after cache_check, which can return a cache hit (exit 0), so a refused link option could be skipped on a warm cache. link_args stays before the cache, and costs one short Ruby process per link. Revisit only if the refusal is moved ahead of cache_check. Make `link_args`' output part of the slice 7 call, so one Ruby call builds
 `eflist`, `userinc` and the eccp command. Depends on slice 7 and on slice 1. Test: tests/nfcxx-linkargs (49) and
 tests/nfcxx-link.
 
