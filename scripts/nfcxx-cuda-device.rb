@@ -64,6 +64,7 @@ require "rbconfig"
 require "securerandom"
 require_relative "trace"
 require_relative "amdgpu-env"
+require_relative "driver-state"
 
 RUNNER_PATH = File.expand_path("nfcxx-run.rb", __dir__)
 
@@ -125,6 +126,64 @@ def cu_dir(obj, env = ENV)
 end
 
 def nonempty(v) = (v.nil? || v.empty?) ? nil : v
+
+# cu_prepare's per-input data: for each .cu input, the directory of its source (realpath of its dirname: the -I that quoted
+# includes need) and its copy, DIR/<name without .cu>.cpp. Driver-state groups: "sdirs" and "copies", one value per input.
+# A source directory that does not exist ends the step with realpath's message and status 1 (nfcxx runs under set -e).
+def cu_copies(dir, srcs)
+  sdirs = srcs.map do |s|
+    DriverState.gnu_realpath(File.dirname(s))
+  rescue SystemCallError
+    raise CuCopiesFailed, "realpath: #{File.dirname(s)}: No such file or directory"
+  end
+  copies = srcs.map { |s| "#{dir}/#{File.basename(s, ".cu")}.cpp" }
+  [sdirs, copies]
+end
+
+class CuCopiesFailed < StandardError; end
+
+# cu_prepare's loop (slice 5): for each .cu input, in order, the -I of its source directory is added to the flags, and the
+# rewrite runs with the options of rewrite_argv (in this process: plan_for(o).execute). The state comes in as records (the
+# inputs, the directory, the flags, the rewrite's settings, the preinclude list, cuda_opts and whether the EDG launch is
+# on) and goes back as the groups sdirs, copies, cuda and preinc. A failing rewrite stops with its status.
+def cu_prepare_run(g)
+  inputs = g["inputs"] || []
+  dir = (g["dir"] || [])[0]
+  sdirs, copies = cu_copies(dir, inputs)
+  cflags = (g["cflags"] || []).dup
+  root = (g["root"] || [])[0]
+  hdr = "#{root}/lib/cuda/nfcxx_cuda.h"
+  preinc = (g["preinc"] || []).dup
+  cuda = (g["cuda"] || []).dup
+  inputs.each_with_index do |src, i|
+    cflags << "-I#{sdirs[i]}"
+    rg = g.merge("cflags" => cflags, "copy" => [copies[i]])
+    o = parse_options(rewrite_argv(rg) + [src])
+    status = plan_for(o).execute
+    return [nil, status] unless status == 0
+    cuda = ["--cuda"] if (g["edg_launch"] || []).first == "1"
+    preinc << hdr unless preinc.include?(hdr)
+  end
+  [[["sdirs", sdirs], ["copies", copies], ["cuda", cuda], ["preinc", preinc]], 0]
+end
+
+# cu_rewrite's --execute options (the bash built them from the driver's state; the bash now writes that state as records,
+# with state_put, and runs this): the root, the temporary and copy directories, the keep directory, the bash's pid, the trace
+# unit, one --cflag per word, --obfuscate-kernels when the flag is set, --ir-opt when it is set (even empty), the promotion,
+# unrolling and struct-slot settings, and the cache options when they are not empty. The source is appended by the bash.
+def rewrite_argv(g)
+  s = ->(n) { (g[n] || [])[0] }
+  argv = ["--execute", "--root=#{s["root"]}", "--tmp=#{s["tmp"]}", "--copy=#{s["copy"]}", "--keep-dir=#{s["keep"]}",
+          "--bash-pid=#{s["bash_pid"]}", "--trace-unit=#{s["trace_unit"]}"]
+  (g["cflags"] || []).each { |f| argv << "--cflag=#{f}" }
+  argv << "--obfuscate-kernels" if s["obfuscate"] == "1"
+  argv << "--ir-opt=#{s["ir_opt"]}" if (g["ir_opt"] || []).any?
+  argv += ["--promote-slots=#{s["promote_slots"]}", "--unroll=#{s["unroll"]}", "--struct-slots=#{s["struct_slots"]}"]
+  argv << "--cache-dir=#{s["cache_dir"]}" unless s["cache_dir"].to_s.empty?
+  argv << "--cache-log=#{s["cache_log"]}" unless s["cache_log"].to_s.empty?
+  argv
+end
+
 
 class CudaDevicePlan
   PHASES = %i[all prep emit finish].freeze
@@ -696,6 +755,41 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    if ARGV[0] == "--cu-prepare"
+      begin
+        groups = DriverState.read_groups($stdin.binmode.read)
+        result, status = cu_prepare_run(groups)
+      rescue ArgumentError, CuCopiesFailed => e
+        $stderr.puts(e.message.start_with?("realpath") ? e.message : "nfcxx-cuda-device: #{e.message}")
+        exit 2
+      end
+      exit status unless status == 0
+      DriverState.write_groups($stdout, result)
+      DriverState.write_end($stdout)
+      exit 0
+    end
+    if ARGV[0] == "--rewrite-argv"
+      begin
+        groups = DriverState.read_groups($stdin.binmode.read)
+      rescue ArgumentError => e
+        $stderr.puts "nfcxx-cuda-device: #{e.message}"
+        exit 2
+      end
+      DriverState.write_groups($stdout, [["argv", rewrite_argv(groups)]])
+      DriverState.write_end($stdout)
+      exit 0
+    end
+    if ARGV[0] == "--cu-copies"
+      begin
+        sdirs, copies = cu_copies(ARGV[1], ARGV[2..])
+      rescue CuCopiesFailed => e
+        warn e.message
+        exit 1
+      end
+      DriverState.write_groups($stdout, [["sdirs", sdirs], ["copies", copies]])
+      DriverState.write_end($stdout)
+      exit 0
+    end
     if ARGV.size == 1 && ARGV[0].start_with?("--cu-dir=")
       puts cu_dir(ARGV[0].delete_prefix("--cu-dir="))
       exit 0

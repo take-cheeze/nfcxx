@@ -25,6 +25,7 @@
 # Standard error for a bad record stream is a message and status 1 (no "z" is written).
 
 require_relative "driver-state"
+require_relative "ecp-arg"
 
 module NfcxxEccpPlan
   module_function
@@ -82,6 +83,12 @@ if $PROGRAM_NAME == __FILE__
   $stdin.binmode
   begin
     groups = DriverState.read_groups($stdin.read)
+    # the eccp path and the -o name are given as nfcxx has them; with moves (the call runs in a temporary directory) they are
+    # made absolute, as ecp-arg.rb does for the argument answers (the bash used to ask for them in a call of its own)
+    moves = (groups["moves"] || ["0"])[0]
+    ecp = ->(arg) { EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg) }
+    groups["eccp"] = [ecp.(DriverState.scalar(groups, "eccp"))]   # a scalar group (one value) is checked as the plan checks it
+    groups["out"] = [ecp.(DriverState.scalar(groups, "out"))]
     words, env, cd, note = NfcxxEccpPlan.plan(groups, dir, keep, shared)
   rescue ArgumentError => e
     $stderr.puts "nfcxx-eccp-plan: #{e.message}"
