@@ -50,8 +50,9 @@ module NfcxxSycl
     return false unless ENV["NFCXX_SYCL_PASS"].to_s.empty?
     st = state(argv)
     return false if st.nil? || st[:emit_hip]
+    # a .cu input is not in the two passes: its device pre-pass is the CUDA plan (the bash ran the passes for it before)
     st[:compile_only] && st[:ncpp] == 1 && st[:nobj].zero? && st[:ncfiles].zero? && !st[:preprocess] && !st[:emit_c] &&
-      headers?(argv) && !st[:srcs].empty? && sycl_include?(st[:srcs][0])
+      st[:cu].empty? && headers?(argv) && !st[:srcs].empty? && sycl_include?(st[:srcs][0])
   end
 
   # a command with NAME=VALUE environment entries; its status (127 when it cannot start, as the shell's)

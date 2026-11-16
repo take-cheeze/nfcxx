@@ -7,7 +7,6 @@ base -c -I inc sy.cc
 base -c -Iother -Iinc sy.cc
 base -c -Iinc sy.cxx
 base -c -Iinc sy.cpp2
-base -c -Iinc sy.cu
 base -c -Iinc sy.cc -fsanitize=undefined
 base -c -Iinc sy.cc -fsanitize=bogus
 base -c -Iinc sy.cc -fsanitize-foo
