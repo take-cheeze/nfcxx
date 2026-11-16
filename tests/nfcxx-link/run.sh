@@ -11,7 +11,7 @@ repo=$(cd "$here/../.." && pwd -P)
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 ruby_bin=$(command -v ruby)
 # the functions as nfcxx has them now (the port is what they call)
-sed -n '/^eccp_cleanup() {/,/^}/p;/^link_records_rm() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"
+sed -n '/^eccp_cleanup() {/,/^}/p;/^link_records_rm() {/,/^}/p;/^compile_clean() {/,/^}/p' "$repo/nfcxx" > "$work/thin.sh"
 [ -s "$work/thin.sh" ] || { echo "nfcxx-link: no link steps in nfcxx" >&2; exit 2; }
 
 # run WHICH SB SETUP BODY: builds SB, runs BODY in bash with the functions of WHICH (thin or oracle); prints the outcome
@@ -80,6 +80,21 @@ case_ "cleanup: only the .cu temporary directory" 'keep_intermediates=0; cudatmp
 case_ "cleanup: a directory that does not exist" 'keep_intermediates=0; eccp_dir=nowhere; ctmp=tmp3' 'trap eccp_cleanup EXIT; exit 5'
 case_ "cleanup: keep-intermediates with the other two" 'keep_intermediates=1; cudatmp=tmp2; ctmp=tmp3' 'trap eccp_cleanup EXIT; exit 0'
 case_ "cleanup: the status of a failed build is kept" 'keep_intermediates=0; eccp_dir=tmp1' 'trap eccp_cleanup EXIT; false'
+
+# compile_clean: the records of the sources of a -c compile (the first source takes the stem of -o)
+case_ "compile-clean: a source's records go" ': > a.ti' 'compile_only=1; ncpp=1; srcs=(a.cc); out=a.o; compile_clean; echo after'
+case_ "compile-clean: not -c, nothing goes" ': > a.ti' 'compile_only=0; ncpp=1; srcs=(a.cc); out=a.o; compile_clean; echo after'
+case_ "compile-clean: no C++ sources, nothing goes" ': > a.ti' 'compile_only=1; ncpp=0; srcs=(a.cc); out=a.o; compile_clean; echo after'
+case_ "compile-clean: the first source takes the stem of -o" ': > b.ti' 'compile_only=1; ncpp=2; srcs=(a.cc b.cc); out=b.o; compile_clean; echo after'
+case_ "compile-clean: -o without a dot: the sources' own stems" ': > prog.ti' 'compile_only=1; ncpp=1; srcs=(a.cc); out=prog; compile_clean; echo after'
+case_ "compile-clean: a dot in a directory of -o is the stem (as the bash)" ': > x.ti' 'compile_only=1; ncpp=1; srcs=(a.cc); out=x.d/prog; compile_clean; echo after'
+case_ "compile-clean: a source with no extension" ': > noext.ti' 'compile_only=1; ncpp=1; srcs=(noext); out=noext.o; compile_clean; echo after'
+case_ "compile-clean: a source in a directory" ': > sub/d.ti' 'compile_only=1; ncpp=1; srcs=(sub/d.cc); out=d.o; compile_clean; echo after'
+case_ "compile-clean: a .ti that is a directory fails the step" 'mkdir a.ti' 'compile_only=1; ncpp=2; srcs=(a.cc b.cc); out=a.o; compile_clean; echo after'
+case_ "compile-clean: a failing first source stops the loop" 'mkdir a.ti; : > b.ii' 'compile_only=1; ncpp=2; srcs=(a.cc b.cc); out=a.o; compile_clean; echo after'
+case_ "compile-clean: an option-like source is rm's to read" ': > -x.ti' 'compile_only=1; ncpp=1; srcs=(-x.cc); out=-x.o; compile_clean; echo after'
+case_ "compile-clean: no sources" '' 'compile_only=1; ncpp=1; srcs=(); out=a.o; compile_clean; echo after'
+case_ "compile-clean: sources unset" '' 'compile_only=1; ncpp=1; unset srcs; out=a.o; compile_clean; echo after'
 
 echo "nfcxx-link: $pass passed, $fail failed"
 [ "$fail" = 0 ]

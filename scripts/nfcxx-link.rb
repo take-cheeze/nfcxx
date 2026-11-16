@@ -15,6 +15,7 @@
 # Both print rm's messages on standard error ("rm: ..."), as the bash's rm does. Exit status: as the bash's (see each step).
 
 require "fileutils"
+require "open3"
 
 module NfcxxLink
   module_function
@@ -68,6 +69,30 @@ module NfcxxLink
     status = rm_rf(ctmp) unless ctmp.empty?
     status
   end
+
+  # nfcxx's compile_clean, before a -c compile: for each source, rm -f <stem>.ii <stem>.ti, where the stem is the name without
+  # its last extension (the bash ${b%.*}), except that the first source takes the stem of -o when -o has a dot. rm runs with
+  # both names, as the bash does, so an option-like name is rm's to read and a directory is rm's to report. The first rm
+  # that fails ends the step with its status (nfcxx runs under set -e).
+  def compile_clean(out, srcs)
+    first = true
+    srcs.each do |s|
+      # basename is the command the bash runs: a name that starts with - is an option to it (its message and status)
+      if s.start_with?("-")
+        name, st = Open3.capture2("basename", s)
+        return st.exitstatus || 1 unless st.success?
+        name = name.chomp
+      else
+        name = File.basename(s)
+      end
+      stem = name.sub(/\.[^.]*\z/, "")
+      stem = out.sub(/\.[^.]*\z/, "") if first && out.include?(".")
+      first = false
+      next if system("rm", "-f", "#{stem}.ii", "#{stem}.ti")
+      return $?.exitstatus || 1
+    end
+    0
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -79,7 +104,10 @@ if $PROGRAM_NAME == __FILE__
   when "cleanup"
     abort "nfcxx-link: cleanup takes KEEP ECCP_DIR CUDATMP CTMP" unless rest.length == 4
     exit NfcxxLink.cleanup(*rest)
+  when "compile-clean"
+    abort "nfcxx-link: compile-clean takes OUT and the sources" if rest.empty?
+    exit NfcxxLink.compile_clean(rest[0], rest[1..])
   else
-    abort "nfcxx-link: records-rm or cleanup (got #{cmd.inspect})"
+    abort "nfcxx-link: records-rm, cleanup or compile-clean (got #{cmd.inspect})"
   end
 end

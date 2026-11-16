@@ -13,6 +13,7 @@
 # abs_path is host-sys.rb's: the absolute path of a path that need not exist (its directory must exist, else it is unchanged).
 
 require_relative "host-sys"
+require_relative "driver-state"
 
 module EcpArg
   module_function
@@ -88,10 +89,9 @@ if $PROGRAM_NAME == __FILE__
     _, moves, *args = ARGV
     abort "ecp-arg: --batch MOVES ARG..." unless %w[0 1].include?(moves)
     $stdout.binmode
-    args.each do |arg|
-      $stdout.write("v#{EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg)}\0")
-    end
-    $stdout.write("z\0")
+    answers = args.map { |arg| EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg) }
+    DriverState.write_groups($stdout, [["ecp", answers]])
+    DriverState.write_end($stdout)
   else
     abort "ecp-arg: one argument" unless ARGV.length == 1
     puts EcpArg.ecp_arg(ARGV[0])

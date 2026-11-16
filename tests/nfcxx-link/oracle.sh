@@ -15,3 +15,14 @@ link_records_rm() {  # link_records_rm: removes <stem>.ii beside each object of 
     case $f in *.o) rm -f "${f%.o}.ii" ;; esac
   done
 }
+# compile_clean: nfcxx's loop before a -c compile, verbatim from before the port (the loop itself, as it was in nfcxx)
+compile_clean() {
+  if [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
+  first=1
+  for s in ${srcs[@]+"${srcs[@]}"}; do
+    b=$(basename "$s"); b=${b%.*}
+    if [ $first = 1 ] && [ "$out" != "${out%.*}" ]; then b=${out%.*}; fi
+    rm -f "$b.ii" "$b.ti"; first=0
+  done
+  fi
+}
