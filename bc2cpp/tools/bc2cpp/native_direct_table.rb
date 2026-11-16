@@ -78,9 +78,6 @@ module NativeDirect
     "_stbi_error" => {
       "RGSS::Bitmap.singleton" => ["bmp_stbi_error_direct", []]
     },
-    "_transition_alpha" => {
-      "RGSS::Bitmap" => ["bmp_transition_alpha_direct", [:value, :float, :float]]
-    },
     "_update" => {
       "RGSS::Audio.singleton" => ["audio_update_direct", []]
     },
@@ -89,9 +86,6 @@ module NativeDirect
     },
     "alpha" => {
       "RGSS::Color" => ["color_alpha_direct", []]
-    },
-    "angle=" => {
-      "RGSS::Sprite" => ["spr_set_angle_direct", [:float]]
     },
     "available?" => {
       "RGSS::Tts.singleton" => ["tts_available_direct", []]
@@ -355,14 +349,6 @@ module NativeDirect
     },
     "zlib_inflate" => {
       "RGSS.singleton" => ["zlib_inflate_direct", [:str]]
-    },
-    "zoom_x=" => {
-      "RGSS::Sprite" => ["spr_set_zoom_x_direct", [:float]],
-      "RGSS::Plane" => ["plane_set_zoom_x_direct", [:float]]
-    },
-    "zoom_y=" => {
-      "RGSS::Sprite" => ["spr_set_zoom_y_direct", [:float]],
-      "RGSS::Plane" => ["plane_set_zoom_y_direct", [:float]]
     },
     "zsize" => {
       "RGSS::Table" => ["table_zsize_direct", []]
