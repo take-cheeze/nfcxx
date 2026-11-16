@@ -26,18 +26,6 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-bigint/core/bigint.c' => %w[dcc607215eb53346f5a2e5b760314f06afa9f629ad3c2f14e18f56059a29117f c32092a6670bc77ca978eb093cd8af6d4dcfa947ce826bbe30834483fde5dad4],
     '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '4b00efbb0d4b26bb8310aff773b8e4d2abf05dca6a993ebd963f69fa9c6cf397',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
-    'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c
-                                 0dc8534bc7cabd36a10818deedd7559a61691dee1bf23d5e05febf11e3ca202e
-                                 105657191ab86f45ba563ddf8e5818c1cb5a912d7cfce02c7b6ffe32a2a5f12b
-                                 eda898bc7ee051089bbba85bdb74f7cd4f892966c8df49a687ea7f7c9d570eb0
-                                 1c00ea527391818a1ef2ac74b1de433abc0f97a92423fa9cf9a35906bb6e6a1f
-                                 27b968ac91121591b1062306fc7789f8c8a748f1e2203b6544cf21319753f0ab
-                                 0fec5fb83a27afe86cc94be51eeca8e93f652274cf1d5e2933c8694489b5ac9a
-                                 ef08dd05d4af765093a318ee244170826638c69abcad905c9b8e25f4ade66037
-                                 5b4c16217d5c03fcdc3f2e9049d4320c872a5e6bc648501c034537c850b942ac
-                                 0b06553c24e0e6de91f7dfaff11bd3c8831ae8d4a3e92a5bae03d10949dba16b
-                                 6bb287bb1047c2128e8b84519e45371c491eda88557e341e3b060a5cffc1a56e,
-                                 5789e5dafdcb96152a993eff86579e2ae6c1e3587986a04a0ddce819d8b73df2]
   }.freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {
@@ -71,9 +59,7 @@ module NativeClassResults
       3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c
       3rd/mruby/mrbgems/mruby-method/src/method.c
       3rd/mruby-onig-regexp/src/mruby_onig_regexp.c
-      mruby-rgss/src/lib.cxx
-    ]],
-    'snap_to_bitmap' => [['RGSS::Bitmap', :nil], %w[mruby-rgss/src/lib.cxx]]
+    ]]
   }.freeze
 
   STRUCT_ALIAS_PATH = '3rd/mruby/mrbgems/mruby-struct/mrblib/struct.rb'

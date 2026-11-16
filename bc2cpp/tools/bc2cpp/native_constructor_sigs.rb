@@ -217,6 +217,7 @@ module NativeConstructorSigs
     return nil if calls.empty?
 
     overloads = calls.each_with_index.map do |(format, vars), i|
+      format = numeric_objects(format, vars, body)
       overload = format_overload(format)
       return nil unless overload
 
@@ -225,7 +226,7 @@ module NativeConstructorSigs
 
       # The value an optional positional's variable starts with, which is what the native uses when it is absent.
       names = vars.scan(/&\s*(\w+)/).flatten
-      overload.merge(defaults: names.drop(overload[:req].size).map { |v| body[/\b#{v}\s*=\s*(-?\d+(?:\.\d+)?)\b/, 1] })
+      overload.merge(defaults: names.drop(overload[:req].size).map { |v| body[/\b#{v}\s*=\s*(?:mrb_fixnum_value\()?(-?\d+(?:\.\d+)?)\b/, 1] })
     end
     zero = body.match(/if\s*\(\s*mrb_get_argc\(\s*\w+\s*\)\s*==\s*0\s*\)\s*\{([^{}]*)\}/m)
     if zero && !zero[1].include?('mrb_get_args')
@@ -235,6 +236,29 @@ module NativeConstructorSigs
       overloads.unshift(empty)
     end
     overloads
+  end
+
+  # An "o" the source converts with rgss::num_arg / rgss::fraction_arg is a number argument (what the "f" it
+  # replaced converted): the format letter reads as "f" for the audit. Any other "o" stays unknown.
+  def numeric_objects(format, vars, body)
+    names = vars.scan(/&\s*(\w+)/).flatten
+    letters = format.delete('|').chars
+    return format unless letters.size == names.size
+
+    converted = letters.each_index.map do |i|
+      letters[i] == 'o' && body.match?(/rgss::(?:num|fraction)_arg\(\s*M\s*,\s*#{names[i]}\s*\)/)
+    end
+    return format unless converted.any?
+
+    chars = format.chars.map.with_index { |c, _| c }
+    k = -1
+    chars.each_index do |j|
+      next if chars[j] == '|'
+
+      k += 1
+      chars[j] = 'f' if converted[k]
+    end
+    chars.join
   end
 
   def format_overload(format)
