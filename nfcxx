@@ -195,13 +195,23 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     mkdir -p "$dir"
     cu_keep=$dir
   fi
-  local src copy i sdir
-  for src in ${cu_inputs[@]+"${cu_inputs[@]}"}; do
-    # The copy is not next to the source, so quoted includes that are relative to the source (`#include "../x.cuh"`
-    # in a .cu, and in the headers it includes) are found through the source's own directory, as a user -I.
-    sdir=$(realpath -- "$(dirname -- "$src")")
+  # The source directories and the copies of the inputs are scripts/nfcxx-cuda-device.rb's (--cu-copies), as groups of records.
+  # The copy is not next to the source, so quoted includes that are relative to the source (`#include "../x.cuh"` in a .cu, and
+  # in the headers it includes) are found through the source's own directory, as a user -I.
+  local src copy i idx sdir rec group done=0
+  local cu_sdirs=() cu_copies=()
+  while IFS= read -r -d '' rec; do
+    case $rec in
+      k*) group=${rec:1} ;;
+      v*) if [ "$group" = sdirs ]; then cu_sdirs+=("${rec:1}"); elif [ "$group" = copies ]; then cu_copies+=("${rec:1}"); fi ;;
+      x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
+      z) done=1 ;;
+    esac
+  done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-copies "$dir" ${cu_inputs[@]+"${cu_inputs[@]}"})
+  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-cuda-device.rb stopped before its end (the copies are incomplete)" >&2; exit 1; }
+  for idx in "${!cu_inputs[@]}"; do
+    src=${cu_inputs[$idx]}; sdir=${cu_sdirs[$idx]}; copy=${cu_copies[$idx]}
     cflags+=("-I$sdir"); files+=("-I$sdir")
-    copy=$dir/$(basename "$src" .cu).cpp
     cu_rewrite "$src" "$copy"
     # if, not `[ ] && x`: a loop whose last test fails returns non-zero, and set -e would end the driver.
     for i in "${!srcs[@]}"; do if [ "${srcs[$i]}" = "$src" ]; then srcs[$i]=$copy; fi; done

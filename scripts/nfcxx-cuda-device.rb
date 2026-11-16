@@ -64,6 +64,7 @@ require "rbconfig"
 require "securerandom"
 require_relative "trace"
 require_relative "amdgpu-env"
+require_relative "driver-state"
 
 RUNNER_PATH = File.expand_path("nfcxx-run.rb", __dir__)
 
@@ -125,6 +126,21 @@ def cu_dir(obj, env = ENV)
 end
 
 def nonempty(v) = (v.nil? || v.empty?) ? nil : v
+
+# cu_prepare's per-input data: for each .cu input, the directory of its source (realpath of its dirname: the -I that quoted
+# includes need) and its copy, DIR/<name without .cu>.cpp. Driver-state groups: "sdirs" and "copies", one value per input.
+# A source directory that does not exist ends the step with realpath's message and status 1 (nfcxx runs under set -e).
+def cu_copies(dir, srcs)
+  sdirs = srcs.map do |s|
+    File.realpath(File.dirname(s))
+  rescue SystemCallError
+    raise CuCopiesFailed, "realpath: #{File.dirname(s)}: No such file or directory"
+  end
+  copies = srcs.map { |s| "#{dir}/#{File.basename(s, ".cu")}.cpp" }
+  [sdirs, copies]
+end
+
+class CuCopiesFailed < StandardError; end
 
 class CudaDevicePlan
   PHASES = %i[all prep emit finish].freeze
@@ -696,6 +712,17 @@ end
 
 if $PROGRAM_NAME == __FILE__
   begin
+    if ARGV[0] == "--cu-copies"
+      begin
+        sdirs, copies = cu_copies(ARGV[1], ARGV[2..])
+      rescue CuCopiesFailed => e
+        warn e.message
+        exit 1
+      end
+      DriverState.write_groups($stdout, [["sdirs", sdirs], ["copies", copies]])
+      DriverState.write_end($stdout)
+      exit 0
+    end
     if ARGV.size == 1 && ARGV[0].start_with?("--cu-dir=")
       puts cu_dir(ARGV[0].delete_prefix("--cu-dir="))
       exit 0
