@@ -1455,6 +1455,52 @@ end
     end
   end
 
+  # rb_rescue(body, data1, rescue, data2) with static callbacks defined here and used only here. The body takes (VALUE) and
+  # the rescue callback (VALUE data, VALUE exc): mruby's rescue takes (mrb, data) and reads the exception from mrb->exc, so
+  # a wrapper after the rescue callback passes mrb->exc as its exc argument.
+  def rescue_calls
+    cands = []
+    raw_refs = Hash.new(0)
+    ident = /\A[A-Za-z_][#{WC}]*\z/
+    @files.each do |rel, f|
+      masked = f['masked']
+      text = f['text']
+      finditer(/(?<![#{WC}$.>])rb_rescue#{SS}\(/, masked).each do |m|
+        s0 = m.begin(0)
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        spans = split_args(masked, open, close)
+        args = spans.map { |a, b| psl(text, a, b).strip }
+        next unless args.size == 4
+        b_cb, d1, r_cb, d2 = args
+        next unless b_cb.match?(ident) && r_cb.match?(ident)
+        data_ok = ->(d) { d.match?(ident) && (!@entries.key?(d) || d.match?(/\AQ(?:nil|undef|true|false)\z/)) }
+        next unless data_ok.call(d1) && data_ok.call(d2)
+        raw_refs[[rel, b_cb]] += 1
+        raw_refs[[rel, r_cb]] += 1
+        cands << { rel: rel, s: s0, e: close + 1, b: b_cb, d1: d1, r: r_cb, d2: d2,
+                   bpos: spans[0][0], rpos: spans[2][0] }
+      end
+    end
+    out = []
+    cands.each do |c|
+      rel = c[:rel]
+      text = @files[rel]['text']
+      masked = @files[rel]['masked']
+      ok = [[c[:b], /\A\(?\s*VALUE\s+[A-Za-z_]\w*\s*\)?\z/], [c[:r], /\A\(?\s*VALUE\s+[A-Za-z_]\w*\s*,\s*VALUE\s+[A-Za-z_]\w*\s*\)?\z/]].all? do |cb, pat|
+        d = (@defs[cb] || []).select { |x| x['file'] == rel }
+        d.size == 1 && d[0]['storage'].split.include?('static') && d[0]['ret'].to_s.strip == 'VALUE' &&
+          psl(text, d[0]['po'], d[0]['pc']).match?(pat) &&
+          (@occ[cb] || []).count { |r0, _, _| r0 == rel } == 1 + raw_refs[[rel, cb]]
+      end
+      next unless ok
+      rdef = (@defs[c[:r]] || []).find { |x| x['file'] == rel }
+      out << c.merge(rend: rdef['body_end'] + 1)
+    end
+    out
+  end
+
   def ensure_calls
     cands = []
     raw_refs = Hash.new(0)   # every rb_ensure call's callbacks, candidate or not: a callback is referenced by all of them
@@ -2076,6 +2122,9 @@ end
     @ensure_calls = ensure_calls
     @ensure_calls.each { |c| forced << c[:b] << c[:ecb] }
     @ensure_cb_pos = Set.new(@ensure_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:epos]]] })
+    @rescue_calls = rescue_calls
+    @rescue_calls.each { |c| forced << c[:b] << c[:r] }
+    @rescue_cb_pos = Set.new(@rescue_calls.flat_map { |c| [[c[:rel], c[:bpos]], [c[:rel], c[:rpos]]] })
     @hash_calls.each { |c| forced << c[:cb] }
     @hash_cb_pos = Set.new(@hash_calls.map { |c| [c[:rel], c[:cb_pos]] })
     @hash_cb_names = Set.new(@hash_calls.map { |c| c[:cb] })
@@ -2286,7 +2335,7 @@ use_problem = lambda do |name, use|
   next nil if !direct && (@fnptr_assign_pos || Set.new).include?([rel, s])
   next nil if !direct && @dtype_cb_pos.include?([rel, s])
   next nil if !direct && (@hash_cb_pos || Set.new).include?([rel, s])
-  next nil if !direct && (@ensure_cb_pos || Set.new).include?([rel, s])
+  next nil if !direct && ((@ensure_cb_pos || Set.new).include?([rel, s]) || (@rescue_cb_pos || Set.new).include?([rel, s]))
   # the first argument of rb_protect is called synchronously with the mrb_func_t shape (mrb, data), which a
   # threaded helper has; it is a value use that may take mrb (api_map.json rb_protect)
   next nil if !direct && protect_callback_use.call(rel, s)
@@ -3777,6 +3826,27 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       ed.add(s, cp + 1, out)
       rewrite(rel, s, name, out, entry['caveat'])
+    when 'rescue_call'
+      c = (@rescue_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
+      unless c
+        refuse(rel, s, name, 'rb_rescue needs static callbacks defined here and used only here (the body takes one VALUE, the rescue ' \
+                             'callback takes the data and the exception), and VALUE-name or Q data arguments')
+        return
+      end
+      if ed.overlaps(c[:s], c[:e])
+        refuse(rel, s, name, 'the call overlaps a rewritten span (not supported)')
+        return
+      end
+      conv = lambda do |x|
+        x.match?(/\AQ(?:nil|undef|true|false)\z/) ? @entries[x]['mruby'] : x
+      end
+      wname = "nfcx_rescue_#{c[:r]}_#{c[:s]}"
+      # the wrapper is file scope, after the rescue callback: it passes the exception (mrb->exc) as the callback's exc argument
+      ed.add(c[:rend], c[:rend], "\nstatic mrb_value #{wname}(mrb_state *mrb, mrb_value data) { return #{c[:r]}(mrb, data, mrb_obj_value(mrb->exc)); }\n")
+      ed.add(c[:s], c[:e], "mrb_rescue(#{mrb_tok(rel, s)}, #{c[:b]}, #{conv.call(c[:d1])}, #{wname}, #{conv.call(c[:d2])})")
+      rewrite(rel, s, 'rb_rescue', "mrb_rescue(#{mrb_tok(rel, s)}, ...)",
+              'the rescue callback gets the exception from mrb->exc (a wrapper passes it as the exc argument)')
+      return
     when 'ensure_call'
       c = (@ensure_calls || []).find { |x| x[:rel] == rel && x[:s] == s }
       unless c

@@ -1340,6 +1340,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_encoding/NOT_BUILDABLE"
 check grep -qF 'mrb_funcall_argv(mrb, str, mrb_intern_cstr(mrb, "encoding"), 0, NULL)' "$work/api_encoding/src/api_encoding.c"
 check grep -qF 'mrb_module_get(mrb, "Encoding")' "$work/api_encoding/src/api_encoding.c"
+# 2zzz104. rb_rescue maps to mrb_rescue; the rescue callback gets the exception from mrb->exc through a file-scope wrapper.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue tools/cext2mrbgem/fixtures/api_rescue/ext/api_rescue "$work/api_rescue" > "$work/api_rescue.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_rescue/NOT_BUILDABLE"
+check grep -qF 'return mrb_rescue(mrb, rs_body, proc, nfcx_rescue_rs_recover_' "$work/api_rescue/src/api_rescue.c"
+check grep -qF 'rs_recover(mrb, data, mrb_obj_value(mrb->exc))' "$work/api_rescue/src/api_rescue.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads

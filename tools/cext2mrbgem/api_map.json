@@ -284,8 +284,9 @@
       "caveat": "both callbacks are static VALUE f(VALUE) functions of this file used only here; they take (mrb, value) after threading, and mrb_ensure runs the ensure callback before re-raising an exception, as CRuby does"
     },
     "rb_rescue": {
-      "kind": "refuse",
-      "reason": "no direct mruby equivalent (rescue callback not in the supported subset)"
+      "kind": "rescue_call",
+      "needs_mrb": true,
+      "caveat": "mrb_rescue (mruby-error): the body is called with (mrb, data); the rescue callback's exception argument is mrb->exc, passed by a wrapper"
     },
     "rb_rescue2": {
       "kind": "refuse",
