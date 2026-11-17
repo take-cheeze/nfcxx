@@ -1472,6 +1472,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_zalloc_idcast/NOT_BUILDABLE"
 check grep -qF 'mrb_value obj = mrb_obj_value(mrb_data_object_alloc(mrb, mrb->object_class, mrb_calloc(mrb, 1, sz), &zb_type));' "$work/api_zalloc_idcast/src/api_zalloc_idcast.c"
 check grep -qF 'f = (mrb_sym)mrb_intern_cstr(mrb, "a");' "$work/api_zalloc_idcast/src/api_zalloc_idcast.c"
+# 2zzz127. CRuby's MEMCPY(p, src, type, n) is memcpy with sizeof(type)*(n), and PRIdVALUE is "ld" (a printf format for a VALUE-sized
+# signed value); the call converts with those forms.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_memcpy_pri tools/cext2mrbgem/fixtures/api_memcpy_pri/ext/api_memcpy_pri "$work/api_memcpy_pri" > "$work/api_memcpy_pri.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_memcpy_pri/NOT_BUILDABLE"
+check grep -qF 'memcpy(buf, RSTRING_PTR(str), sizeof(char)*(n));' "$work/api_memcpy_pri/src/api_memcpy_pri.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
