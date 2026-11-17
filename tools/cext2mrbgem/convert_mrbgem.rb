@@ -3711,6 +3711,35 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # VALUE x = 0 (CRuby's Qfalse is the zero word): the local is initialized with mrb_false_value(), the fork's false
+  def value_zero_init_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /\b(?:VALUE|mrb_value)[ \t\n]+[A-Za-z_]\w*[ \t\n]*=[ \t\n]*(0)[ \t\n]*[;,]/).each do
+        m = Regexp.last_match
+        s0 = m.begin(1)
+        next unless enclosing_func(rel, s0)
+        next if in_dead_init(rel, s0) || @edits[rel].overlaps(s0, s0 + 1)
+        @edits[rel].add(s0, s0 + 1, 'mrb_false_value()')
+      end
+    end
+  end
+
+  # (uintptr_t)v of a VALUE: CRuby's word as an integer (the fork's VALUE is a struct, with no integer form of the word)
+  def value_cast_integer_stuck_pass
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      mv.to_enum(:scan, /\(\s*(?:uintptr_t|intptr_t|unsigned\s+long|long|unsigned\s+int|int|size_t|ID)\s*\)\s*([A-Za-z_]\w*)(?![\w(\[])/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
+        next if in_dead_init(rel, m.begin(1)) || @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        refuse(rel, m.begin(0), nm, "stuck point (VALUE as integer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and its word is read as an integer in CRuby; the fork has no integer form of it")
+      end
+    end
+  end
+
   # A VALUE cast to a struct pointer (CRuby carries a struct pointer in a VALUE: (OO)ov, (ParseInfo)pip): the fork's VALUE is a
   # struct, so the cast does not compile. The target is a struct pointer, or a typedef of one.
   def value_struct_pointer_cast_pass
@@ -3994,6 +4023,8 @@ use_problem = lambda do |name, use|
     end
     return true if t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vfields.include?(t[/([A-Za-z_]\w*)\z/])
     return true if t.match?(/\A[A-Za-z_]\w*\s*\(/) && t.match?(/_value\s*\(/) && t.start_with?('mrb_')
+    # a funcall of the fork returns a VALUE (mrb_funcall_argv(...) == mrb_fixnum_value(1))
+    return true if t.match?(/\Amrb_funcall\w*\s*\(/)
     if (cm = t.match(/\A([A-Za-z_]\w*)\s*\(/))
       defs = (@defs[cm[1]] || []).reject { |x| x['proto'] }
       return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
@@ -5941,11 +5972,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       funcall_special(rel, s, nxt, called)
       return
     end
-    if name == 'RB_ALLOCV_N'
+    if %w[RB_ALLOCV_N ALLOCV_N].include?(name)
       allocv_n_special(rel, s, nxt, called)
       return
     end
-    if name == 'RB_ALLOCV_END'
+    if %w[RB_ALLOCV_END ALLOCV_END].include?(name)
       allocv_end_special(rel, s, nxt, called)
       return
     end
@@ -6540,6 +6571,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       next unless f['kind'] == 'src'
       path = File.join(src_dir, rel)
       args = ['gcc', '-fsyntax-only', '-w', '-include', 'stddef.h', '-I', src_dir, '-I', inc_dir]
+      # the build's defines (the --define options: the names the build defines, as extconf would set them)
+      (@defines || []).each { |d| args << "-D#{d}" }
       incs.each { |d| args += ['-I', d] }
       args << path
       _o, err, _st = Open3.capture3(*args)
@@ -6756,6 +6789,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       "  spec.summary = 'converted from CRuby ext/#{@name}'",
     ]
     rake << "  spec.add_dependency 'mruby-uv'  # thread model: nfcx_uv_thread.h" if uses_uv_thread?
+    (@defines || []).each { |d| rake << "  spec.cc.defines << '#{d}'  # a build define (--define): the guard branches it selects are the ones built" }
     (@gem_deps || Set.new).to_a.sort.each { |g| rake << "  spec.add_dependency '#{g}'  # a class test in the converted code" }
     rake += ['end', '']
     write_bytes(File.join(@out_dir, 'mrbgem.rake'), rake.join("\n"))
@@ -6814,6 +6848,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_order_stuck_pass
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
+    value_cast_integer_stuck_pass
+    value_zero_init_pass
     onig_engine_stuck_pass
     id_return_pass
     id_arg_of_value_pass

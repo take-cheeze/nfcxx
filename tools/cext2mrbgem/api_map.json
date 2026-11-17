@@ -2660,6 +2660,16 @@
       "needs_mrb": true,
       "caveat": "the free of the buffer RB_ALLOCV_N allocated for this VALUE: mrb_free of that pointer"
     },
+    "ALLOCV_N": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the unprefixed form of RB_ALLOCV_N (CRuby's ruby/util.h alias): the same temporary buffer, converted the same way"
+    },
+    "ALLOCV_END": {
+      "kind": "special",
+      "needs_mrb": true,
+      "caveat": "the unprefixed form of RB_ALLOCV_END: the same free"
+    },
     "PRIdVALUE": {
       "kind": "expr",
       "mruby": "\"ld\"",
