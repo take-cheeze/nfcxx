@@ -4722,12 +4722,13 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
       end
       # a class expression (RClass *: mrb->object_class, mrb_class_get(...)) used as a plain value is its VALUE
-      text = entry['mruby']
+      # an expression that names the state (mrb->object_class) names the state of this context (the global, in a global-state helper)
+      text = entry['mruby'].gsub(/\bmrb->/) { "#{mrb_tok(rel, s)}->" }
       # not in a class argument of a call: that position takes the RClass * itself (mrb_define_method(mrb, mrb->object_class, ...))
       callee_c, idx_c = call_context(masked, s)
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
-      text = "mrb_obj_value(#{text})" if !class_pos && text.match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      text = "mrb_obj_value(#{text})" if !class_pos && entry['mruby'].match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
       # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
       # initializer is removed, and the variable is set at the start of Init (the file's Init function)
       fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
