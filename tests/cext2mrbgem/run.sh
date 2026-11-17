@@ -95,7 +95,7 @@ check grep -qF 'mrb_define_const(mrb, mrb->object_class, "MODULE_CONST_LOADED", 
 rc=0; "$rb" "$conv" --scanner "$scanner" --name module_const_refused tools/cext2mrbgem/fixtures/module_const_refused/ext/module_const_refused "$work/module_const_refused" > "$work/module_const_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check grep -q '  rb_define_const  target .target. is not a tracked' "$work/module_const_refused/REFUSALS.txt"
-check grep -qF 'mrb_define_module_function(mrb, mrb_class_ptr(target), "y", mcr_run, MRB_ARGS_NONE());' "$work/module_const_refused/src/module_const_refused.c"
+check grep -qF 'BC2CPP-MRBGEM stub: refused code' "$work/module_const_refused/src/module_const_refused.c"
 
 # 2h. rb_const_get maps to mrb_const_get (the receiver as a VALUE, rb_cObject as its VALUE); rb_const_get_at has no
 # exact mruby equivalent and stays refused
@@ -1613,6 +1613,12 @@ check grep -qF 'stuck point (VALUE as integer): obj is a VALUE' "$work/api_value
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_if tools/cext2mrbgem/fixtures/api_value_if/ext/api_value_if "$work/api_value_if" > "$work/api_value_if.log" 2>&1 || rc=$?
 check test -e "$work/api_value_if/NOT_BUILDABLE"
 check grep -qF 'stuck point (VALUE truth test): if tests v' "$work/api_value_if/REFUSALS.txt"
+# 2zzz149. the stub policy (option A): the function holding a refused use has its body replaced by a stub that raises
+# NotImplementedError when it runs, so gem_init.c carries no #error (the refusal is recorded in REFUSALS.txt as stubbed).
+check grep -qF 'BC2CPP-MRBGEM stub: refused code' "$work/api_value_if/src/api_value_if.c"
+check grep -qF 'NotImplementedError' "$work/api_value_if/src/api_value_if.c"
+check test "$(grep -c '#error' "$work/api_value_if/src/gem_init.c")" -eq 0
+check grep -qF 'STATUS: STUBBED' "$work/api_value_if/REFUSALS.txt"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
