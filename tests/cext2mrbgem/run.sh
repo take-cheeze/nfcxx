@@ -968,6 +968,16 @@ check grep -qF 'return cb(mrb, v, hash);' "$work/api_fnptr_param/src/api_fnptr_p
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_undef_build --undefine UB_TEST_ONLY_METHODS tools/cext2mrbgem/fixtures/api_undef_build/ext/api_undef_build "$work/api_undef_build" > "$work/api_undef_build.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_undef_build/NOT_BUILDABLE"
+# 2zzz108. a function under #ifdef HAVE_OPENSSL_* (mkmf defines it when OpenSSL is in the build) is a stuck point; a registration
+# under #if 0 == 1 is dead code (the integer comparison is decided).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ssl_guard tools/cext2mrbgem/fixtures/api_ssl_guard/ext/api_ssl_guard "$work/api_ssl_guard" > "$work/api_ssl_guard.log" 2>&1 || rc=$?
+check sh -c "! grep -q 'sg_dead' '$work/api_ssl_guard/REFUSALS.txt' 2>/dev/null"
+if [ "$scanner" = libclang ]; then
+  # the libclang front end excludes the HAVE_OPENSSL_* branch (undefined in this build): stuck. The regex scan keeps the
+  # undefined name's branch (mkmf may define it) and converts it as written.
+  check test "$rc" -eq 2
+  check grep -q 'stuck point (OpenSSL): the function is compiled only when the build has OpenSSL' "$work/api_ssl_guard/REFUSALS.txt"
+fi
 check grep -qF 'return fp_each(mrb, fp_cb, v, mrb_nil_value());' "$work/api_fnptr_param/src/api_fnptr_param.c"
 
 # 2zzj. a struct function-pointer field filled by a positional initializer (struct TAG var = { h1, h2, ... }): the member index

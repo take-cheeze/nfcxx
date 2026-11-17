@@ -973,6 +973,30 @@ texts = static_rename(texts)
   # The inactive branches of conditionals whose condition is known in this build: #if 0, and #ifdef / #ifndef of a name that
   # this build does not define (no -D option) and the gem never #defines. Other conditions are unknown and stay active.
   # Returns [start, end] spans of inactive text (the directive lines themselves are kept).
+  # the HAVE_OPENSSL* / HAVE_SSL* guard (mkmf defines it when OpenSSL is in the build) of the definition of name, or nil
+  def openssl_guarded_definition?(name)
+    @files.each_value do |f|
+      masked = f['masked']
+      m = /^[ \t]*(?:[A-Za-z_][\w \t\*]*?\b)?#{Regexp.escape(name)}[ \t]*\(/.match(masked)
+      next unless m
+      pos = m.begin(0)
+      # the conditionals still open at the definition (a stack of #if/#ifdef/#ifndef, popped by #endif): an OpenSSL one guards it
+      stack = []
+      masked[0...pos].each_line do |line|
+        if (d = /\A[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b[ \t]*(.*?)[ \t\r\n]*\z/.match(line))
+          if d[1] == 'endif'
+            stack.pop
+          else
+            stack << d[2].to_s
+          end
+        end
+      end
+      open_ssl = stack.find { |g| g =~ /HAVE_(?:OPENSSL|SSL)/ }
+      return open_ssl[/\b(HAVE_(?:OPENSSL|SSL)\w*)\b/, 1] if open_ssl
+    end
+    nil
+  end
+
   def text_inactive_spans(rel)
     f = @files[rel]
     masked = f['masked']
@@ -996,6 +1020,9 @@ texts = static_rename(texts)
           # #defines is not decided (an include guard #defines its own name inside its #ifndef), and a name no -D option
           # sets may come from mkmf (HAVE_*, extconf.h), so its branch stays active
           value = if kw == 'if' && arg == '0' then false
+                  elsif kw == 'if' && arg =~ /\A(\d+)[ \t]*(==|!=)[ \t]*(\d+)\z/
+                    # a comparison of two integer literals is decided (#if 0 == 1)
+                    (($1.to_i == $3.to_i) == ($2 == '==')) ? true : false
                   elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && build.include?($1)
                     kw == 'ifdef'
                   elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && target_undefined.include?($1)
@@ -2322,7 +2349,13 @@ end
         next
       end
       why = if @excluded_defs.include?(r['func'])
-              'registered function has no active definition: its only definition is in text the front end excludes'
+              ssl = openssl_guarded_definition?(r['func'])
+              if ssl
+                "stuck point (OpenSSL): the function is compiled only when the build has OpenSSL (#ifdef #{ssl}), and it uses " \
+                "OpenSSL, which mruby has no binding for (accepted stuck point)"
+              else
+                'registered function has no active definition: its only definition is in text the front end excludes'
+              end
             else
               'registered function has no definition in the input'
             end
