@@ -96,7 +96,7 @@ IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
-REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
+REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
 ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern(?:_const)?#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
@@ -214,6 +214,7 @@ def read_text(path)
 end
 
 def write_bytes(path, text)
+  FileUtils.mkdir_p(File.dirname(path))
   File.binwrite(path, text)
 end
 
@@ -486,12 +487,13 @@ def kr_normalize(src)
 end
 
 class Converter
-  def initialize(cext_dir, out_dir, name = nil, scanner_mode = 'auto', defines = [])
+  def initialize(cext_dir, out_dir, name = nil, scanner_mode = 'auto', defines = [], undefines = [])
     @scanner_mode = scanner_mode  # auto, libclang or regex
     @scanner = 'regex'            # the scanner used: libclang or regex (choose_scanner)
     @scanner_reason = nil
     @scanner_fallback = []        # files the regex scan read although libclang was used
     @excluded_defs = Set.new      # names defined in text the libclang scan does not list (see libclang_declarations)
+    @undefines = undefines        # names this build leaves undefined (--undefine): their #ifdef branches are inactive
     @defines = defines            # -D options for the libclang front end (NAME or NAME=VALUE), as extconf would set
     @cext_dir = File.absolute_path(cext_dir)
     @out_dir = File.absolute_path(out_dir)
@@ -519,6 +521,9 @@ class Converter
     @reg_by_call = {}
     @reg_names = Set.new
     @valid_reg_names = Set.new  # registered functions whose registration survived check_refs
+    @block_arg_files = Set.new  # files that have the nfcx_block_arg definition (rb_yield in a helper)
+    @yield_cb_files = Set.new   # files that have the nfcx_yield_cb wrapper (rb_yield as the rb_protect callback)
+    @q_helpers = {}            # per file: the nil/true/false test helpers defined (nfcx_is_nil, ...)
     @decls = []   # dicts for function prototypes and definitions
     @defs = {}    # name -> [def dicts]
     @init_defs = []
@@ -651,6 +656,11 @@ Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |tb|
   next if File.directory?(tp)
   texts[tb] = read_text(tp) if tb.end_with?('.c') || tb.end_with?('.h')
 end
+# the headers of an immediate subdirectory (yajl's api/ holds its public headers, which the sources include as "api/x.h")
+# are inputs at their relative path; the subdirectory's sources are not compiled (only the gem's own C files are)
+sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
+                  .flat_map { |d| Dir.glob(File.join(@cext_dir, d, '*.{h,c}')).sort.map { |p| File.join(d, File.basename(p)) } }
+sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
@@ -670,6 +680,11 @@ texts = static_rename(texts)
       @edits[base] = Edits.new
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
+    end
+    sub_headers.each do |rel|
+      @files[rel] = { 'text' => texts.fetch(rel), 'masked' => mask_c(texts.fetch(rel)), 'kind' => 'hdr' }
+      noreturn_mask(rel)
+      @edits[rel] = Edits.new
     end
   end
 
@@ -860,12 +875,20 @@ texts = static_rename(texts)
           rec['error'] = 'unbalanced parentheses in registration call'
         else
           args = split_args(masked, op, cp)
-          if args.size != 4
-            rec['error'] = "registration call has #{args.size} arguments, expected 4"
+          # rb_define_global_function(name, func, argc) has no target: it defines a Kernel method
+          global = m[1] == 'rb_define_global_function'
+          if args.size != (global ? 3 : 4)
+            rec['error'] = "registration call has #{args.size} arguments, expected #{global ? 3 : 4}"
           else
-            (ts, te), (ns, ne), (fs, fe), (as_, ae) = args
-            rec['target'] = py_strip(psl(text, ts, te))
-            rec['target_span'] = [ts, te]
+            if global
+              (ns, ne), (fs, fe), (as_, ae) = args
+              rec['target'] = 'rb_mKernel'
+            else
+              (ts, te), (ns, ne), (fs, fe), (as_, ae) = args
+              rec['target'] = py_strip(psl(text, ts, te))
+              rec['target_span'] = [ts, te]
+            end
+            rec['name_span'] = [ns, ne]
             nm = /\A"([^"\\\n]*)"\z/.match(py_strip(psl(text, ns, ne)))
             fm = /\A(?:\(#{SS}VALUE#{SS}\(#{SS}\*#{SS}\)#{SS}\(#{SS}ANYARGS#{SS}\)#{SS}\)#{SS})?([A-Za-z_][#{WC}]*)\z/
                  .match(py_strip(psl(text, fs, fe)))
@@ -921,6 +944,13 @@ texts = static_rename(texts)
         finditer(/(?<![#{WC}])VALUE(?![#{WC}])#{SS1}#{Regexp.escape(c)}(?![#{WC}])(?=#{SS}[=;,\[])/, f['masked'])
           .each { |m| @decl_name_pos << [rel, m.end(0) - c.length] }
       end
+      # every declarator of a VALUE declaration list (static VALUE a, cParseError, cEncoder;): a list has no call or braces
+      finditer(/(?<![#{WC}])VALUE(?![#{WC}])([^;{}()]*);/, f['masked']).each do |m|
+        m[1].scan(/(?<![#{WC}])([A-Za-z_]\w*)(?![#{WC}])/) do
+          next unless @class_vars.include?($1)
+          @decl_name_pos << [rel, m.begin(1) + $~.begin(0)]
+        end
+      end
     end
   end
 
@@ -972,13 +1002,68 @@ texts = static_rename(texts)
   # The inactive branches of conditionals whose condition is known in this build: #if 0, and #ifdef / #ifndef of a name that
   # this build does not define (no -D option) and the gem never #defines. Other conditions are unknown and stay active.
   # Returns [start, end] spans of inactive text (the directive lines themselves are kept).
+  # the HAVE_OPENSSL* / HAVE_SSL* guard (mkmf defines it when OpenSSL is in the build) of the definition of name, or nil
+  def openssl_guarded_definition?(name)
+    @files.each_value do |f|
+      masked = f['masked']
+      m = /^[ \t]*(?:[A-Za-z_][\w \t\*]*?\b)?#{Regexp.escape(name)}[ \t]*\(/.match(masked)
+      next unless m
+      pos = m.begin(0)
+      # the conditionals still open at the definition (a stack of #if/#ifdef/#ifndef, popped by #endif): an OpenSSL one guards it
+      stack = []
+      masked[0...pos].each_line do |line|
+        if (d = /\A[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b[ \t]*(.*?)[ \t\r\n]*\z/.match(line))
+          if d[1] == 'endif'
+            stack.pop
+          else
+            stack << d[2].to_s
+          end
+        end
+      end
+      open_ssl = stack.find { |g| g =~ /HAVE_(?:OPENSSL|SSL)/ }
+      return open_ssl[/\b(HAVE_(?:OPENSSL|SSL)\w*)\b/, 1] if open_ssl
+    end
+    nil
+  end
+
+  # the value of a #if condition made of defined(NAME) / !defined(NAME) atoms joined by && or || (no grouping):
+  # true, false, or nil when an atom is not decided (a name no build or target setting defines or undefines)
+  def pred_value(arg, build, undefined)
+    atom = lambda do |t|
+      t = t.strip
+      neg = t.start_with?('!')
+      t = t.sub(/\A!\s*/, '') if neg
+      t = t.sub(/\A\(\s*/, '').sub(/\s*\)\z/, '') while t.start_with?('(') && t.end_with?(')')
+      m = t.match(/\Adefined\s*\(?\s*([A-Za-z_]\w*)\s*\)?\z/)
+      return nil unless m
+      v = if build.include?(m[1]) then true
+          elsif undefined.include?(m[1]) then false
+          end
+      return nil if v.nil?
+      neg ? !v : v
+    end
+    return nil if arg.include?('(') && !arg.match?(/\A\s*!?\s*\(?\s*defined/)
+    ors = arg.split('||').map(&:strip)
+    ors.map do |o|
+      ands = o.split('&&').map { |a| atom.call(a) }
+      if ands.include?(false) then false
+      elsif ands.all? { |x| x == true } then true
+      end
+    end.then do |vals|
+      if vals.include?(true) then true
+      elsif vals.all? { |x| x == false } then false
+      end
+    end
+  end
+
   def text_inactive_spans(rel)
     f = @files[rel]
     masked = f['masked']
     build = Set.new((@defines || []).map { |d| d.split('=', 2)[0] })
     # The target is a non-Windows mruby build: these names are undefined in it, so their #ifdef branches are inactive
     # (oj's rb_w32_* calls sit under #ifdef _WIN32). A Windows target would need this set changed.
-    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__])
+    # _LIBC is defined only while glibc itself is compiled (bcrypt's crypt_r is under defined(__GLIBC__) && defined(_LIBC))
+    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__ _LIBC]) | Set.new(@undefines || [])
     gem_defined = Set.new
     @files.each_value { |g| g['masked'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/) { gem_defined << $1 } }
     out = []
@@ -995,10 +1080,16 @@ texts = static_rename(texts)
           # #defines is not decided (an include guard #defines its own name inside its #ifndef), and a name no -D option
           # sets may come from mkmf (HAVE_*, extconf.h), so its branch stays active
           value = if kw == 'if' && arg == '0' then false
+                  elsif kw == 'if' && arg =~ /\A(\d+)[ \t]*(==|!=)[ \t]*(\d+)\z/
+                    # a comparison of two integer literals is decided (#if 0 == 1)
+                    (($1.to_i == $3.to_i) == ($2 == '==')) ? true : false
                   elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && build.include?($1)
                     kw == 'ifdef'
                   elsif kw != 'if' && arg =~ /\A([A-Za-z_]\w*)\z/ && target_undefined.include?($1)
                     kw == 'ifndef'
+                  elsif kw == 'if' && arg.match?(/defined|&&|\|\|/)
+                    # a condition of defined(NAME) atoms joined by && and || (no grouping): decided when the atoms decide it
+                    pred_value(arg, build, target_undefined)
                   end
           frame = { value: value, inactive_from: nil }
           frame[:inactive_from] = pos if value == false
@@ -1168,6 +1259,76 @@ texts = static_rename(texts)
     !(psl(masked, fn['brace'], fn['body_end'] + 1) =~ /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/).nil?
   end
 
+  # for a Q constant at s that is the right operand of == or !=: [operator position, left operand start, negated?] when the
+  # left operand is a call (NAME(...)); nil otherwise (an identifier or a member is the value pass's comparison)
+  def q_comparison(rel, s, masked)
+    pre = prev_nonspace(masked, s - 1)
+    return nil if pre < 1
+    op = masked[(pre - 1)..pre]
+    return nil unless op == '==' || op == '!='
+    ops = pre - 1
+    lhs_end = prev_nonspace(masked, ops - 1)
+    return nil if lhs_end < 0
+    if masked[lhs_end] == ')'
+      depth = 0
+      i = lhs_end
+      while i >= 0
+        c = masked[i]
+        if c == ')' then depth += 1
+        elsif c == '('
+          depth -= 1
+          break if depth.zero?
+        end
+        i -= 1
+      end
+      return nil if i < 0
+      head = masked[0...i]
+      m = head.match(/([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)\s*\z/)
+      return nil unless m
+    else
+      # an identifier or a member path is a VALUE comparison, which value_equality_pass handles (mrb_obj_equal)
+      return nil
+    end
+    return nil if %w[if while for switch return sizeof].include?(m[1])
+    [ops, m.begin(1), op == '!=']
+  end
+
+  # true when the declaration of ID variables at e (ID a, b, c;) names only variables that are assigned ID2SYM(...) somewhere
+  # in the input (their value is a symbol VALUE), with no other declarator and no initializer that is not ID2SYM
+  def symbol_value_decl?(rel, e)
+    @symbol_vars ||= begin
+      sv = Set.new
+      @files.each_value { |f| f['masked'].scan(/(?<![#{WC}$.>])([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*ID2SYM\(/) { sv << $1 } }
+      sv
+    end
+    masked = @files[rel]['masked']
+    stop = masked.index(';', e)
+    return false if stop.nil?
+    decl = masked[e...stop]
+    return false if decl.include?('(') || decl.include?('{')
+    names = decl.split(',').map { |x| x.strip[/\A[A-Za-z_]\w*/] }
+    !names.empty? && names.all? { |n| n && @symbol_vars.include?(n) }
+  end
+
+  # the first argument of a statement-level call of a local macro, when it is an all-caps name the input's macro pastes into a
+  # declaration (DEF_MAX_LENGTH(REQUEST_URI, 1024) declares MAX_REQUEST_URI_LENGTH): not a CRuby name (no api_map entry, no
+  # CRuby prefix), so it is not an unknown name to refuse
+  def local_macro_arg_names
+    @local_macro_arg_names ||= begin
+      out = Set.new
+      @files.each_value do |f|
+        f['masked'].scan(/^[ \t]*([A-Za-z_]\w*)[ \t]*\(([^()\n;]*)\)[ \t]*;/) do
+          next unless @local_macros.include?($1)
+          first = $2.split(',').first.to_s.strip
+          next unless first.match?(/\A[A-Z][A-Z0-9_]*\z/)
+          next if @entries.key?(first) || first.match?(/\A(?:RUBY_|RB_|RSTRING|RARRAY|RHASH|RTYPEDDATA|RBASIC|RDATA|Q[a-z]|T_|ID2|SYM2|FIX|INT2|NUM2|LONG2|CLASS_OF)/)
+          out << first
+        end
+      end
+      out
+    end
+  end
+
   def local_shadows_class_var?(name, fn)
     return true if param_names(fn).include?(name)
     masked = @files[fn['file']]['masked']
@@ -1196,11 +1357,11 @@ texts = static_rename(texts)
     if split_arity(name) == -1
       masked = @files[d0['file']]['masked']
       if psl(masked, d0['brace'], d0['body_end'] + 1) =~ /(?<![#{WC}])rb_scan_args(?![#{WC}])/
-        # the impl reads its arguments from the argv array: lead, optional and keyword parts (no rest or block)
+        # the impl reads its arguments from the argv array: lead, optional, keyword and block parts (no rest)
         fmts = []
         psl(@files[d0['file']]['text'], d0['brace'], d0['body_end'] + 1)
           .scan(/rb_scan_args[ \t\n]*\([ \t\n]*\w+[ \t\n]*,[ \t\n]*\w+[ \t\n]*,[ \t\n]*("[^"]*")/) { fmts << $1 }
-        unless !fmts.empty? && fmts.all? { |f| f.match?(/\A"[0-9][0-9]?:?"\z/) }
+        unless !fmts.empty? && fmts.all? { |f| f.match?(/\A"[0-9][0-9]?:?&?"\z/) }
           return 'its body calls rb_scan_args with a rest, keyword or block part, which would read the arguments from the mruby call frame'
         end
       end
@@ -1336,12 +1497,20 @@ end
     return { 'error' => 'no .function field' } unless fn
     return { 'error' => '.function is not a braced group' } unless fn[2].start_with?('{') && fn[2].end_with?('}')
     brace = fn[0] + tx[fn[0]...fn[1]].index('{')
-    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }.reject { |_a, _b, t| t.empty? }
+    # the elements of .function: a preprocessor line before an element (#ifdef HAVE_RB_GC_LOCATION) is not part of it, and an
+    # element in inactive text (its branch is not in this build) is not an element (mruby's data type has no compaction hook)
+    inactive = (@excluded_spans || {})[rel] || []
+    sub = split_args(mk, brace, fn[1] - 1).map { |a, b| [a, b, psl(tx, a, b)] }
+    sub = sub.reject { |a, _b, _t| inactive.any? { |x, z| x < a && a < z } }
+    sub = sub.map { |a, b, t| [a, b, t.gsub(/^[ \t]*#[^\n]*\n?/, '').strip] }.reject { |_a, _b, t| t.empty? }
     sf = {}
     sub.each do |a, b, t|
       mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
       return { 'error' => '.function holds a non-designated element' } unless mm
-      sf[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+      # the position of the value's first character (after the '=' and its spaces): the identifier's own position
+      eq = t.index('=')
+      lead = t[(eq + 1)..][/\A\s*/].length
+      sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
     end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
@@ -1640,8 +1809,11 @@ end
         h = args[0][2]
         cb = args[1][2]
         arg = args[2][2]
-        next unless h.match?(/\A[A-Za-z_][#{WC}]*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
+        next unless h.match?(/\A[A-Za-z_][#{WC}]*(?:(?:->|\.)[A-Za-z_][#{WC}]*)*\z/) && cb.match?(/\A&?[A-Za-z_][#{WC}]*\z/)
+        raw_cb = cb
         cb = cb.delete('&')
+        # the callback's position is its identifier's (after a & address-of), where its occurrence is recorded
+        cb_ident_pos = args[1][0] + raw_cb.index(cb)
         next unless arg.match?(/\A(?:\(VALUE\)\s*)?&?[A-Za-z_][#{WC}]*\z/)
         # a static callback defined in this file, with no other use in the file (its definition and this call)
         d = (@defs[cb] || []).select { |x| x['file'] == rel }
@@ -1649,7 +1821,7 @@ end
         next unless (@occ[cb] || []).count { |r, _, _| r == rel } == 2
         pars = split_args(masked, d[0]['po'], d[0]['pc']).map { |a2, b2| [a2, b2, psl(text, a2, b2)] }
         out << { rel: rel, s: s, e: close + 1, h: h, cb: cb, fe: fe_name, arg: arg.sub(/\A\(VALUE\)\s*/, ''),
-                 cb_pos: args[1][0], cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
+                 cb_pos: cb_ident_pos, cb_file: d[0]['file'], param_edit: [pars[2][0], pars[2][0] + 5] }
       end
     end
     out
@@ -2307,15 +2479,32 @@ end
     if !@init_defs.empty?
       @init_rel = @init_defs[0]['file']
     else
-      refuse(nil, 0, "Init_#{@name}", 'no Init_<name> function found')
+      cxx = Dir.glob(File.join(@cext_dir, '*.{cc,cpp,cxx}'))
+      if cxx.any?
+        refuse(nil, 0, "Init_#{@name}", "stuck point (C++): the extension is C++ (#{cxx.map { |f| File.basename(f) }.sort.join(', ')}), and the converter reads C sources only; C++ classes, templates and exceptions are not translated (accepted stuck point)")
+      else
+        refuse(nil, 0, "Init_#{@name}", 'no Init_<name> function found')
+      end
     end
     init_first = @init_defs.empty? ? nil : @init_defs[0]['name']
     # registered functions: must be defined; must not be called directly
     @regs.each do |r|
       next unless r['error'].nil?
       next if @defs.key?(r['func'])
+      # a registration in inactive text (an #if 0 or an undefined #ifdef branch) is dead code: it is not refused, and the
+      # text stays as written
+      if text_inactive_spans(r['file']).any? { |a, z| a < r['call'] && r['call'] < z }
+        r['error'] = 'dead: the registration is in inactive text'
+        next
+      end
       why = if @excluded_defs.include?(r['func'])
-              'registered function has no active definition: its only definition is in text the front end excludes'
+              ssl = openssl_guarded_definition?(r['func'])
+              if ssl
+                "stuck point (OpenSSL): the function is compiled only when the build has OpenSSL (#ifdef #{ssl}), and it uses " \
+                "OpenSSL, which mruby has no binding for (accepted stuck point)"
+              else
+                'registered function has no active definition: its only definition is in text the front end excludes'
+              end
             else
               'registered function has no definition in the input'
             end
@@ -2374,6 +2563,13 @@ end
         masked = @files[rel]['masked']
         # a struct member of the same name (obj.name, obj->name) is a field, not a use of the helper
         next if masked[[s - 40, 0].max...s].to_s.match?(/(?:\.|->)[ \t\n]*\z/)
+        # a field declared in a struct body (type name;) is a member, not a use of the helper of the same name
+        nxd = next_nonspace(masked, e)
+        pvd = prev_nonspace(masked, s - 1)
+        if nxd >= 0 && (masked[nxd] == ';' || masked[nxd] == '[') && pvd >= 0 && masked[pvd].match?(/[A-Za-z_0-9*]/) &&
+           struct_body_before?(masked, s)
+          next
+        end
         # a function-pointer field declaration of the same name, as in a struct body: type (*name)(params);
         next if masked[[s - 40, 0].max...s].to_s.match?(/\(\*[ \t\n]*\z/) && masked[e..].to_s.match?(/\A[ \t\n]*\)[ \t\n]*\(/)
         # the only argument of a one-parameter macro whose body uses the parameter as a member (#define M(x) (p->x)): a field
@@ -2407,7 +2603,7 @@ end
       if masked[[s - 80, 0].max...s].to_s =~ /(?:\.|->)[ \t\n]*(\w+)[ \t\n]*=[ \t\n]*\z/ && fields.include?($1)
         next nil
       end
-      if masked[(s + name.length)..(s + name.length + 80)].to_s =~ /\A[ \t\n]*(?:==|!=)[ \t\n]*[A-Za-z_][\w\t\n .>-]*?\.(\w+)/ && fields.include?($1)
+      if masked[(s + name.length)..(s + name.length + 80)].to_s =~ /\A[ \t\n]*(?:==|!=)[ \t\n]*[A-Za-z_][\w\t\n .>\[\]-]*?\.(\w+)/ && fields.include?($1)
         next nil
       end
       open, callee = innermost_open(masked, s)
@@ -2710,9 +2906,15 @@ use_problem = lambda do |name, use|
               # `if (C) return E` with one return: the macro restores the state itself, before its return (the plan below)
               plan = nil
               mm = /(if[ \t]*\(.*\)[ \t]*)return([ \t]+[^;]*)\z/m.match(body)
-              if mm && body.scan(/(?<![#{WC}])return(?![#{WC}])/).size == 1 && !uses_out.empty? &&
+              # the final statement form: `... return E;` (the macro's last statement; its ';' ends the return)
+              mf = /(?<![#{WC}])return([ \t]+[^;]*);[ \t\\\n]*\z/m.match(body) unless mm
+              if (mm || mf) && body.scan(/(?<![#{WC}])return(?![#{WC}])/).size == 1 && !uses_out.empty? &&
                  uses_out.all? { |orel, os, _oe| wrapped_use.call(orel, os) }
-                plan = { ret: m.end(0) + mm.begin(0) + mm[1].length, end: e }
+                if mm
+                  plan = { ret: m.end(0) + mm.begin(0) + mm[1].length, end: e }
+                else
+                  plan = { ret: m.end(0) + mf.begin(0), end: m.end(0) + mf.begin(0) + mf[0].rindex(';') }
+                end
               end
               next unless plan
               (@macro_return_plan ||= {})[[rel, s]] = plan if record
@@ -2953,7 +3155,7 @@ use_problem = lambda do |name, use|
         else
           next if fn.nil? || fn['ret'].to_s.strip != 'VALUE'
         end
-        refuse(rel, m.begin(0), callee, "returns #{callee}'s #{ret} as a VALUE: CRuby converts the integer implicitly, mruby's mrb_value is a struct (not supported)")
+        refuse(rel, m.begin(0), callee, "stuck point (source bug): returns #{callee}'s #{ret} from a function that returns VALUE; CRuby converts the int implicitly to a bit pattern that is not a Ruby value (the source does not define the result), and mruby's mrb_value is a struct (accepted stuck point)")
       end
     end
   end
@@ -2961,6 +3163,47 @@ use_problem = lambda do |name, use|
   # CRuby compares VALUEs with ==, which is identity. mruby's mrb_value is a struct here, so a == b is mrb_obj_equal(mrb, a, b)
   # (identity too). Both operands must be VALUE names of a function with the mruby state, or a Qnil/Qtrue/Qfalse/Qundef
   # constant; any other comparison is left as it is (the compile check refuses it when it does not compile).
+  # the VALUE names declared in a macro body (VALUE a, b;) of a define span [name, start, end]
+  def macro_value_names(rel, mac)
+    body = psl(@files[rel]['masked'], mac[1], mac[2])
+    names = Set.new
+    body.scan(/(?<![#{WC}])VALUE(?![#{WC}])([^;{}()]*);/) do
+      $1.split(',').each { |d| n = d.strip[/\A[A-Za-z_]\w*/]; names << n if n }
+    end
+    names
+  end
+
+  # assert(E) with E a VALUE member (p->stream) or a VALUE name: CRuby's assert tests that the word is nonzero, which has no
+  # mruby equivalent (mrb_value is a struct). The argument is still evaluated, and the check is not made: the value is ((void)(E), 1).
+  # The caveat is recorded in the refusal list's conversion notes (the rewrite line).
+  # the VALUE variables declared at file scope in a file (static VALUE x = ...;)
+  def file_scope_value_names(rel)
+    @fs_value_names ||= {}
+    @fs_value_names[rel] ||= begin
+      out = Set.new
+      value_decl_statements(@files[rel]['masked']).each do |_st, _kw, decls|
+        decls.each { |d| out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil? }
+      end
+      out
+    end
+  end
+
+  # X = 0; where X is a VALUE struct member: CRuby's Qfalse is the zero word, so the 0 is mrb_false_value()
+  def value_zero_assign_pass
+    vfields = value_field_names
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /((?:->|\.)[A-Za-z_]\w*)[ \t\n]*(?<![=!<>+\-*\/%&|^])=(?!=)[ \t\n]*0(?![\w.])[ \t\n]*;/).each do
+        m = Regexp.last_match
+        field = m[1][/[A-Za-z_]\w*\z/]
+        next unless vfields.include?(field) && enclosing_func(rel, m.begin(0))
+        zpos = m.begin(0) + m[0].rindex('0')
+        @edits[rel].add(zpos, zpos + 1, 'mrb_false_value()')
+        rewrite(rel, zpos, field, "#{field} = mrb_false_value()", 'a literal 0 stored in a VALUE member is Qfalse (the zero word)')
+      end
+    end
+  end
+
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
@@ -2968,15 +3211,24 @@ use_problem = lambda do |name, use|
     @files.each_key do |rel|
       masked = @files[rel]['masked']
       operand = '[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*'
-      masked.to_enum(:scan, /(?<![#{WC}.>])(#{operand})[ \t\n]*(==|!=)[ \t\n]*(#{operand})(?![#{WC}(])/).each do
+      # the right operand may be the literal 0 (CRuby's Qfalse is the zero word, so 0 compared with a VALUE is Qfalse)
+      masked.to_enum(:scan, /(?<![#{WC}.>])(#{operand})[ \t\n]*(==|!=)[ \t\n]*(#{operand}|0(?![\w.]))(?![#{WC}(])/).each do
         m = Regexp.last_match
         a, op, b = m[1], m[2], m[3]
         s0, e0 = m.begin(0), m.end(0)
+        next if qconst.match?(b) && (@q_done || Set.new).include?(m.begin(3))
         fn = enclosing_func(rel, s0)
-        next if fn.nil?
-        value_names = value_names_of(fn)
+        # a comparison in the body of a global macro (its expansions have the state, through the global name) is a value
+        # comparison too: its VALUE names are the macro body's own declarations
+        mac = fn.nil? ? define_at(rel, s0) : nil
+        if fn.nil?
+          next unless mac && ((@global_macro_spans || {})[rel] || []).any? { |x, _z| x == mac[1] }
+        end
+        value_names = fn ? value_names_of(fn) : macro_value_names(rel, mac)
         is_value = lambda do |x|
-          next true if qconst.match?(x)
+          next true if qconst.match?(x) || x == '0'
+          # a tracked class variable is a VALUE (its mrb_obj_value wrap, made by the identifier pass)
+          next true if x.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(x) && !value_names.include?(x)
           next value_names.include?(x) if x.match?(/\A[A-Za-z_]\w*\z/)
           # a member path is VALUE when its last member is declared VALUE in every struct that declares that name
           x.match?(/(?:->|\.)([A-Za-z_]\w*)\z/) && vfields.include?(x[/([A-Za-z_]\w*)\z/])
@@ -2985,14 +3237,14 @@ use_problem = lambda do |name, use|
         ok_b = is_value.call(b)
         next unless ok_a && ok_b
         # a function without the mruby state compares identity with mrb_value_identical (the fork's stateless test)
-        stateless = !with_state.include?(fn['name'])
-        conv = ->(x) { qconst.match?(x) ? @entries[x]['mruby'] : x }
+        stateless = fn ? !with_state.include?(fn['name']) : false
+        conv = ->(x) { x == '0' ? 'mrb_false_value()' : (qconst.match?(x) ? @entries[x]['mruby'] : (@class_vars.include?(x) && !value_names.include?(x) ? "mrb_obj_value(#{x})" : x)) }
         # the only edits allowed inside the comparison are the rewrites of its own Q-constant operands (Qundef becomes
         # mrb_undef_value()); the comparison replaces them with the same text, so they are dropped
         if @edits[rel].overlaps(s0, e0)
           operand_spans = []
-          operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a)
-          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b)
+          operand_spans << [m.begin(1), m.end(1), a] if qconst.match?(a) || (@class_vars.include?(a) && !value_names.include?(a))
+          operand_spans << [m.begin(3), m.end(3), b] if qconst.match?(b) || b == '0' || (@class_vars.include?(b) && !value_names.include?(b))
           inner = @edits[rel].overlapping(s0, e0)
           own = inner.select do |x, y, t|
             operand_spans.any? { |os, oe, name| x >= os && y <= oe && t == conv.call(name) }
@@ -3087,6 +3339,15 @@ use_problem = lambda do |name, use|
     if fn.key?('brace') && fn.key?('body_end')
       body = psl(@files[fn['file']]['masked'], fn['brace'], fn['body_end'] + 1)
       body.scan(/\bVALUE\s+([A-Za-z_]\w*)\s*[;=,)]/) { |m| names << m[0] }
+      # every declarator of a VALUE declaration list in the body (VALUE a, b, c;): the statements are parsed once per file
+      @vdecl_cache ||= {}
+      stmts = (@vdecl_cache[fn['file']] ||= value_decl_statements(@files[fn['file']]['masked']))
+      stmts.each do |_st, _kw, decls|
+        decls.each do |d|
+          next unless d[:name] && !d[:ptr] && !d[:fn] && d[:start] > fn['brace'] && d[:start] < fn['body_end']
+          names << d[:name]
+        end
+      end
     end
     names
   end
@@ -3282,6 +3543,10 @@ use_problem = lambda do |name, use|
       else
         if inc == 'ruby/encoding.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
+        elsif inc == 'ruby/io.h'
+          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (IO): ruby/io.h declares the CRuby IO struct (rb_io_t) and its API; the fork has no binding for that struct (mruby-io has its own, different one) (accepted stuck point)')
+        elsif inc == 'ruby/version.h'
+          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (CRuby version): ruby/version.h gives the CRuby version (RUBY_API_VERSION_CODE, RUBY_VERSION), which the code uses to choose its paths; mruby has no such number, so the version to emulate is a decision (accepted stuck point)')
         else
           refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
         end
@@ -3403,7 +3668,12 @@ end
       # mrb_free is mruby's library free, already (mrb, data): it needs no threading
       cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' || n == 'mrb_free' }
       unless cbs.all? { |n| @threaded_cands.include?(n) }
-        refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        unthreaded = cbs.reject { |n| @threaded_cands.include?(n) }
+        if unthreaded.all? { |n| openssl_guarded_definition?(n) }
+          refuse(rel, m.begin(0), 'rb_data_type_t', "stuck point (OpenSSL): the mark or free function #{unthreaded.join(', ')} is compiled only with OpenSSL, which mruby has no binding for (accepted stuck point)")
+        else
+          refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{unthreaded.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        end
         next
       end
       (@dtype_mark_names ||= Set.new) << info['mark'] unless info['mark'] == '0' || info['mark'] == 'NULL'
@@ -3416,7 +3686,7 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     # text-inactive branches (#if 0, a #ifdef of a name this build defines or the gem #defines) are excluded like dead definitions
     text_inactive_spans(rel).each do |a, z|
@@ -3515,6 +3785,14 @@ end
       # the name in the prototype that decl_drop removes is not a use (the calls are converted)
       next if entry && entry['decl_drop'] && @decls.any? { |d| d['name'] == name && d['proto'] && d['file'] == rel &&
                                                               d['hstart'] <= s && s < d['hend'] }
+      # a VALUE local of the enclosing macro body or function named like an API entry (yajl's rb_encoder) is that local, not
+      # the API: it is not a use of the entry (a call of it is still the API)
+      if entry && !psl(masked, e, e + 1).match?(/\A\(/)
+        dl = define_at(rel, s)
+        fl = enclosing_func(rel, s)
+        local_v = dl ? macro_value_names(rel, dl).include?(name) : (fl && value_names_of(fl).include?(name))
+        next if local_v
+      end
       if !entry.nil?
         excluded = (@excluded_spans || {})[rel]&.any? { |a, z| a < s && s < z }
         next if excluded && entry['needs_mrb']
@@ -3530,9 +3808,19 @@ end
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
         next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}(?:[A-Za-z_]|\*#{SS1}[A-Za-z_])/)
+        # a declaration of ID variables that are all assigned ID2SYM(...) holds a symbol VALUE (CRuby keeps it in an ID-typed
+        # variable): it is an mrb_value, as ID2SYM is mrb_symbol_value
+        if name == 'ID' && symbol_value_decl?(rel, e)
+          ed.add(s, e, 'mrb_value')
+          rewrite(rel, s, name, 'mrb_value', 'an ID variable assigned ID2SYM holds a symbol value: mrb_value')
+          next
+        end
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
-      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
+      elsif (name == 'T_RATIONAL' || name == 'T_COMPLEX') && (cc_t = call_context(masked, s)) && cc_t[0] == 'RB_TYPE_P'
+        # the type argument of an RB_TYPE_P that is rewritten to a class test (or refused with its own reason): not a use here
+        next
+      elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) && !local_value_at?(rel, s, name) &&
             !(@local_tags.include?(name) && psl(masked, [s - 40, 0].max, s).match?(/\b(?:struct|union|enum)[ \t\n]+\z/))
         # a CRuby type tag the fork cannot test has its recorded reason (type_check_refused), not a generic one
         refuse(rel, s, name, @type_check_refused[name] || @unmapped_reasons[name] || 'no entry in api_map.json')
@@ -3545,8 +3833,14 @@ end
         next if nx >= 0 && masked[nx] == '=' && psl(masked, nx + 1, nx + 2) != '='
         callee, idx = call_context(masked, s)
         next if callee && (@special_pos[callee] || []).include?(idx)
-        # rb_raise's class is an RClass * for mrb_raisef: the class variable is not wrapped
-        next if callee == 'rb_raise' && idx == 0
+        # rb_raise's class is an RClass * for mrb_raisef: an owned class variable is one already; a class variable whose
+        # value is not a class definition (rb_const_get) is an mrb_value, and its class pointer is taken
+        if callee == 'rb_raise' && idx == 0
+          next if owns_class_var?(rel, s, name)
+          ed.add(s, e, "mrb_class_ptr(#{name})")
+          rewrite(rel, s, name, "mrb_class_ptr(#{name})")
+          next
+        end
         ed.add(s, e, "mrb_obj_value(#{name})")
         rewrite(rel, s, name, "mrb_obj_value(#{name})")
       end
@@ -3567,7 +3861,8 @@ end
       st = Regexp.last_match.begin(0)
       kw_end = Regexp.last_match.end(0)
       # the words before the type, with preprocessor lines blanked (they are not statements)
-      ctx = masked[[st - 60, 0].max...st].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
+      # (the whole text before the type, so a statement that follows a long run of preprocessor lines is still found)
+      ctx = masked[0...st].gsub(/^[ \t]*#[^\n]*/) { |x| ' ' * x.length }
       next unless ctx.match?(/(?:\A|[;{}])\s*(?:(?:static|const|extern|register|volatile)\s+)*\z/)
       depth = 0
       i = kw_end
@@ -3786,6 +4081,14 @@ end
     false
   end
 
+  # a VALUE local of the enclosing macro body or function (VALUE a, b; in it), not a CRuby name
+  def local_value_at?(rel, s, name)
+    dl = define_at(rel, s)
+    return macro_value_names(rel, dl).include?(name) if dl
+    fl = enclosing_func(rel, s)
+    !!(fl && value_names_of(fl).include?(name))
+  end
+
   def map_entry(rel, s, e, name, entry)
     masked = @files[rel]['masked']
     ed = @edits[rel]
@@ -3817,6 +4120,26 @@ end
       # a fixed expression over the call's arguments (api_map.json "template"): $0, $1, ... are the argument texts and
       # $m is the mruby state. Only plain identifiers and integer literals are substituted, and none is a class variable.
       unless called
+        # rb_yield as the function of rb_protect (rb_protect(rb_yield, Qnil, &state)): a file-scope wrapper yields with
+        # the data as the argument, and the callback slot takes it (the wrapper reads the block as a helper does)
+        open_p, callee_p = innermost_open(masked, s)
+        prev_p = prev_nonspace(masked, s - 1)
+        fnp = enclosing_func(rel, s)
+        if name == 'rb_yield' && open_p == '(' && callee_p == 'rb_protect' && prev_p >= 0 && masked[prev_p] == '(' && fnp && fnp['hstart']
+          unless @block_arg_files.include?(rel)
+            @block_arg_files << rel
+            ed.add(fnp['hstart'], fnp['hstart'],
+                   "static mrb_value nfcx_block_arg(mrb_state *mrb)\n{\n  mrb_value nfcx_b;\n  mrb_get_args(mrb, \"&\", &nfcx_b);\n  return nfcx_b;\n}\n\n")
+          end
+          unless @yield_cb_files.include?(rel)
+            @yield_cb_files << rel
+            ed.add(fnp['hstart'], fnp['hstart'],
+                   "static mrb_value nfcx_yield_cb(mrb_state *mrb, mrb_value data)\n{\n  return mrb_yield(mrb, nfcx_block_arg(mrb), data);\n}\n\n")
+          end
+          ed.add(s, e, 'nfcx_yield_cb')
+          rewrite(rel, s, name, 'nfcx_yield_cb', 'the callback of rb_protect: yields to the block of the calling method (a file-scope wrapper)')
+          return
+        end
         refuse(rel, s, name, 'used without a call; cannot map it')
         return
       end
@@ -3826,6 +4149,25 @@ end
       if texts.size != entry['arity']
         refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
         return
+      end
+      # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
+      # per file, before the enclosing function (as nfcx_block_arg is)
+      if entry['prelude']
+        # a call in a function: the helper goes before that function; a call in a macro body: before the #define (file scope)
+        dpre = define_at(rel, s)
+        fnq = enclosing_func(rel, s)
+        at = if dpre then dpre[1]
+             elsif fnq && fnq['hstart'] then fnq['hstart']
+             end
+        unless at
+          refuse(rel, s, name, 'the helper this call needs has no place before it (not in a function or a macro)')
+          return
+        end
+        @prelude_done ||= Set.new
+        unless @prelude_done.include?([rel, entry['prelude_name']])
+          @prelude_done << [rel, entry['prelude_name']]
+          ed.add(at, at, entry['prelude'] + "\n")
+        end
       end
       class_args = entry['class_args'] || []
       str_args = entry['str_args'] || []
@@ -3837,10 +4179,21 @@ end
           (t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && vf.include?(t[/([A-Za-z_]\w*)\z/]))
       end
       # rb_yield needs the block of the method, which only a registered method's wrapper fetches (registered_header)
+      # in a helper (a function with the mruby state), the block is read from the current call frame, as the wrapper does:
+      # nfcx_block_arg (one per file, placed before the helper) runs mrb_get_args with "&" (the frame's block slot)
       if entry['requires_block']
         fnb = enclosing_func(rel, s)
-        unless fnb && @valid_reg_names.include?(fnb['name'])
-          refuse(rel, s, name, 'rb_yield is supported only in the body of a registered method (the wrapper fetches the block)')
+        if fnb && @valid_reg_names.include?(fnb['name'])
+          nil
+        elsif fnb && fnb['hstart']
+          unless @block_arg_files.include?(rel)
+            @block_arg_files << rel
+            ed.add(fnb['hstart'], fnb['hstart'],
+                   "static mrb_value nfcx_block_arg(mrb_state *mrb)\n{\n  mrb_value nfcx_b;\n  mrb_get_args(mrb, \"&\", &nfcx_b);\n  return nfcx_b;\n}\n\n")
+          end
+          entry = entry.merge('template' => entry['template'].sub('nfcx_block', 'nfcx_block_arg($m)'))
+        else
+          refuse(rel, s, name, 'rb_yield is supported only in a function body (no block is in scope at file scope)')
           return
         end
       end
@@ -4023,7 +4376,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     when 'call'
       unless called
         if name == 'rb_gc_mark'
-          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value, and the fork\'s mrb_data_type has no mark callback (include/mruby/data.h:22-30)')
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value outside a data type mark callback (the fork calls mrb_data_type.mark with the state, include/mruby/data.h, and marks only there)')
         else
           refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         end
@@ -4069,8 +4422,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
         unless fn && mark_context_names.include?(fn['name'])
-          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and the fork\'s mrb_data_type has no mark ' \
-                               'callback (include/mruby/data.h:22-30: only dfree), so the runtime never calls one')
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and this function is not one; ' \
+                               'callback here (the fork calls mrb_data_type.mark, include/mruby/data.h, only from the runtime)')
           return
         end
       end
@@ -4179,6 +4532,42 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, 'expression mapping used in call form')
         return
       end
+      # a Q constant that labels a case of a switch (on a VALUE): the switch is on nfcx_q_key of its subject (1 nil, 2 true,
+      # 3 false, 0 other), and the label is that integer. The switch keeps its structure (fall-through, default).
+      if %w[Qnil Qtrue Qfalse].include?(name) && masked[0...s].match?(/(?<![#{WC}])case[ \t\n]+\z/) &&
+         next_nonspace(masked, e) >= 0 && masked[next_nonspace(masked, e)] == ':'
+        sw = nil
+        masked.to_enum(:scan, /(?<![#{WC}])switch[ \t\n]*\(/).each do
+          m = Regexp.last_match
+          op = m.end(0) - 1
+          cl = match_close(masked, op)
+          next if cl < 0 || cl > s
+          br = next_nonspace(masked, cl + 1)
+          next unless br >= 0 && masked[br] == '{' && match_close(masked, br) > s
+          sw = [op, cl] if sw.nil? || op > sw[0]
+        end
+        if sw
+          tok_q = mrb_tok(rel, s)
+          @switch_keyed ||= Set.new
+          unless @switch_keyed.include?([rel, sw[0]])
+            @switch_keyed << [rel, sw[0]]
+            ed.add(sw[0] + 1, sw[0] + 1, "nfcx_q_key(#{tok_q}, ")
+            ed.add(sw[1], sw[1], ')')
+          end
+          fnk = enclosing_func(rel, s)
+          at_k = define_at(rel, s) ? define_at(rel, s)[1] : (fnk && fnk['hstart'])
+          @prelude_done ||= Set.new
+          unless !at_k || @prelude_done.include?([rel, 'nfcx_q_key'])
+            @prelude_done << [rel, 'nfcx_q_key']
+            ed.add(at_k, at_k, "static int nfcx_q_key(mrb_state *mrb, mrb_value v) {\n" \
+                               "  if (mrb_nil_p(v)) return 1;\n  if (mrb_true_p(v)) return 2;\n  if (mrb_false_p(v)) return 3;\n  return 0;\n}\n")
+          end
+          key = { 'Qnil' => 1, 'Qtrue' => 2, 'Qfalse' => 3 }[name]
+          ed.add(s, e, key.to_s)
+          rewrite(rel, s, name, key.to_s, 'a case label of a switch on a VALUE: the switch is on the key of its subject (nfcx_q_key)')
+          return
+        end
+      end
       # a class expression (RClass *: mrb->object_class, mrb_class_get(...)) used as a plain value is its VALUE
       text = entry['mruby']
       # not in a class argument of a call: that position takes the RClass * itself (mrb_define_method(mrb, mrb->object_class, ...))
@@ -4186,6 +4575,42 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
       text = "mrb_obj_value(#{text})" if !class_pos && text.match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
+      # initializer is removed, and the variable is set at the start of Init (the file's Init function)
+      fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
+                  eq = prev_nonspace(masked, s - 1)
+                  var = eq >= 0 && masked[eq] == '=' ? masked[0...eq].match(/([A-Za-z_]\w*)\s*\z/) : nil
+                  init_d = @init_defs.find { |d| d['file'] == rel && d['brace'] }
+                  [eq, var && var[1], init_d] if var && init_d && (@init_rel == rel)
+                end
+      if fs_init
+        eq, var_name, init_d = fs_init
+        ed.add(eq, e, '')
+        ed.add(init_d['brace'] + 1, init_d['brace'] + 1, "\n  #{var_name} = #{entry['mruby']};")
+        rewrite(rel, s, name, "#{var_name} = #{entry['mruby']} (in Init)", 'a file-scope initializer is set at the start of Init (not a constant in C)')
+        return
+      end
+      # nil, true and false compare by identity in CRuby (x == Qnil); mruby values are structs, so the comparison is a test
+      # through a one-argument helper (the value is evaluated once) defined before the enclosing function
+      if %w[Qnil Qtrue Qfalse].include?(name) && (cmp = q_comparison(rel, s, masked))
+        ops, lhs_start, neg = cmp
+        fnq = enclosing_func(rel, s)
+        if fnq && fnq['hstart']
+          hname = { 'Qnil' => 'nfcx_is_nil', 'Qtrue' => 'nfcx_is_true', 'Qfalse' => 'nfcx_is_false' }[name]
+          ptest = { 'Qnil' => 'mrb_nil_p', 'Qtrue' => 'mrb_true_p', 'Qfalse' => 'mrb_false_p' }[name]
+          @q_helpers[rel] ||= Set.new
+          unless @q_helpers[rel].include?(hname)
+            @q_helpers[rel] << hname
+            ed.add(fnq['hstart'], fnq['hstart'],
+                   "static mrb_bool #{hname}(mrb_value v) { return #{ptest}(v); }\n")
+          end
+          ed.add(lhs_start, lhs_start, "#{neg ? '!' : ''}#{hname}(")
+          ed.add(ops, e, ')')
+          (@q_done ||= Set.new) << s   # the comparison is rewritten here: value_equality_pass leaves it
+          rewrite(rel, s, name, "#{hname}(…)", 'a comparison with nil, true or false (==, !=) is the helper test of the left operand')
+          return
+        end
+      end
       ed.add(s, e, text)
       rewrite(rel, s, name, text)
     else
@@ -4206,6 +4631,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     cp = match_close(masked, nxt)
     args = cp > 0 ? split_args(masked, nxt, cp) : []
     n_text = args.empty? ? '' : psl(text, args[0][0], args[0][1]).strip
+    # rb_ary_new3(__VA_ARGS__) in a variadic macro: the count and the values come from each expansion, so the call is the
+    # variadic helper nfcx_ary_new3(mrb, n, values...), defined once before the macro (its count is the first argument)
+    if n_text == '__VA_ARGS__' && (dpre = define_at(rel, s))
+      unless (@prelude_done ||= Set.new).include?([rel, 'nfcx_ary_new3'])
+        @prelude_done << [rel, 'nfcx_ary_new3']
+        ed.add(dpre[1], dpre[1], "#include <stdarg.h>\n" \
+          "static mrb_value nfcx_ary_new3(mrb_state *mrb, int n, ...) {\n" \
+          "  mrb_value ary = mrb_ary_new_capa(mrb, n);\n" \
+          "  va_list ap; int i;\n  va_start(ap, n);\n" \
+          "  for (i = 0; i < n; i++) mrb_ary_push(mrb, ary, va_arg(ap, mrb_value));\n" \
+          "  va_end(ap);\n  return ary;\n}\n")
+      end
+      ed.add(s, s + 'rb_ary_new3'.length, 'nfcx_ary_new3')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      rewrite(rel, s, 'rb_ary_new3', 'nfcx_ary_new3(mrb, __VA_ARGS__)', 'the count and values come from the expansion (a variadic helper)')
+      return
+    end
     unless n_text.match?(/\A\d+\z/) && args.size == 1 + n_text.to_i
       refuse(rel, s, 'rb_ary_new3', 'the count must be an integer literal that matches the values (not supported)')
       return
@@ -4299,6 +4741,23 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     id_text = psl(text, args[1][0], args[1][1]).strip
     n_text = psl(text, args[2][0], args[2][1]).strip
+    # rb_funcall(recv, id, __VA_ARGS__) in a variadic macro: the count and the arguments come from each expansion, so the call is
+    # the variadic helper nfcx_funcall_va(mrb, recv, id, n, args...), defined once before the macro (up to 16 arguments)
+    if n_text == '__VA_ARGS__' && args.size == 3 && (dpre = define_at(rel, s))
+      unless (@prelude_done ||= Set.new).include?([rel, 'nfcx_funcall_va'])
+        @prelude_done << [rel, 'nfcx_funcall_va']
+        ed.add(dpre[1], dpre[1], "#include <stdarg.h>\n" \
+          "static mrb_value nfcx_funcall_va(mrb_state *mrb, mrb_value recv, mrb_sym mid, int n, ...) {\n" \
+          "  mrb_value argv[16]; va_list ap; int i;\n" \
+          "  if (n < 0 || n > 16) mrb_raise(mrb, E_ARGUMENT_ERROR, \"too many arguments\");\n" \
+          "  va_start(ap, n);\n  for (i = 0; i < n; i++) argv[i] = va_arg(ap, mrb_value);\n" \
+          "  va_end(ap);\n  return mrb_funcall_argv(mrb, recv, mid, n, argv);\n}\n")
+      end
+      ed.add(s, s + 'rb_funcall'.length, 'nfcx_funcall_va')
+      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      rewrite(rel, s, 'rb_funcall', 'nfcx_funcall_va(mrb, recv, mid, n, args...)', 'the count and the arguments come from the expansion (a variadic helper)')
+      return
+    end
     unless n_text.match?(/\A\d+\z/) && args.size == 3 + n_text.to_i
       refuse(rel, s, 'rb_funcall', 'the argument count must be an integer literal that matches the arguments')
       return
@@ -4310,12 +4769,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
     # SYM2ID(x) with x a Symbol value (a method name held at run time): the ID is that symbol (mrb_symbol), as in CRuby
     sym_m = name.nil? && /\ASYM2ID\(\s*([A-Za-z_][#{WC}]*)\s*\)\z/.match(id_text)
-    if name.nil? && !sym_m
+    # an ID that is a variable, a pointer or array element, or a member (ID i; ID *idp; odd->attrs[k]) is already a symbol: every
+    # ID declaration is an mrb_sym (the type map), so the expression is passed unchanged
+    id_var = name.nil? && !sym_m && id_text.match?(/\A\*?\s*[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*|\[[^\]]*\])*\z/) &&
+             !@entries.key?(id_text.delete('*').strip)
+    if name.nil? && !sym_m && !id_var
       refuse(rel, s, 'rb_funcall', "the ID #{id_text} is not rb_intern of a string literal or a character (not supported)")
       return
     end
     tok = mrb_tok(rel, s)
-    id_expr = sym_m ? "mrb_symbol(#{sym_m[1]})" : "mrb_intern_cstr(#{tok}, \"#{name}\")"
+    id_expr = sym_m ? "mrb_symbol(#{sym_m[1]})" : (id_var ? id_text : "mrb_intern_cstr(#{tok}, \"#{name}\")")
     n = n_text.to_i
     spans = [[s, nxt + 1], [args[1][0], n.zero? ? args[2][1] : args[3][0]]]
     spans << [cp, cp + 1] if n.positive?
@@ -4330,8 +4793,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       ed.add(args[1][0], args[3][0], "#{id_expr}, #{n}, (mrb_value[]){")
       ed.add(cp, cp + 1, '})')
     end
-    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., #{sym_m ? "mrb_symbol(#{sym_m[1]})" : "\"#{name}\""}, #{n}, ...)",
+    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., #{id_expr}, #{n}, ...)",
             sym_m ? 'the method name is the Symbol value of the SYM2ID argument (mrb_symbol)' \
+                  : id_var ? 'the method name is an ID already converted to a symbol (mrb_sym), passed unchanged' \
                   : 'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
   end
 
@@ -4370,7 +4834,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     case name
-    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function'
+    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function', 'rb_define_global_function'
       rec = @reg_by_call[[rel, s]]
       if rec.nil? || !called || nxt != rec['open']
         refuse(rel, s, name, 'used without a registration call')
@@ -4381,9 +4845,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       tgt = rec['target']
+      if name == 'rb_define_global_function'
+        # the Kernel module: a private instance method and a module function, as CRuby's global function
+        tgt = 'mrb->kernel_module'
       # CLASS_OF(cls) of a tracked class is its singleton class (CRuby creates it with the class): the target becomes
       # mrb_class_ptr(mrb_singleton_class(...)); the identifier pass skips the CLASS_OF token inside that edit
-      if (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
+      elsif (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
         tgt_new = "mrb_class_ptr(mrb_singleton_class(#{mrb_tok(rel, s)}, mrb_obj_value(#{co[1]})))"
         ed.add(*rec['target_span'], tgt_new)
         tgt = tgt_new
@@ -4400,9 +4867,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_private_method',
               'rb_define_singleton_method' => 'mrb_define_class_method',
-              'rb_define_module_function' => 'mrb_define_module_function' }[name]
+              'rb_define_module_function' => 'mrb_define_module_function',
+              'rb_define_global_function' => 'mrb_define_module_function' }[name]
       ed.add(s, e, new)
-      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      if name == 'rb_define_global_function'
+        ed.add(rec['name_span'][0], rec['name_span'][0], "#{mrb_tok(rel, s)}, #{tgt}, ")
+      else
+        ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      end
       fs, fe = rec['func_span']
       ed.add(fs, fe, rec['func'])
       as_, ae = rec['argc_span']
@@ -4448,7 +4920,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # a VALUE class (a VALUE name or member, not a tracked class variable) is unwrapped: mrb_raisef takes an RClass *
       cls_t = psl(text, args[0][0], args[0][1]).strip
-      if !@class_vars.include?(cls_t) && (cls_t.match?(/\A[A-Za-z_]\w*\z/) && value_names_of(enclosing_func(rel, s) || {}).include?(cls_t) ||
+      # (a tracked class variable that is not owned is an mrb_value too: its class pointer is taken)
+      if (@class_vars.include?(cls_t) && !owns_class_var?(rel, args[0][0], cls_t)) || !@class_vars.include?(cls_t) && (cls_t.match?(/\A[A-Za-z_]\w*\z/) && (value_names_of(enclosing_func(rel, s) || {}).include?(cls_t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(cls_t) }) ||
                                        cls_t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && value_field_names.include?(cls_t[/([A-Za-z_]\w*)\z/]))
         ed.add(args[0][0], args[0][1], "mrb_class_ptr(#{cls_t})")
       end
@@ -4537,9 +5010,21 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
   end
 
+  # the function of a macro body's expansions, when every expansion is a variadic method with the same argc and argv names
+  # (the macro's rb_scan_args then reads its arguments as each of them does): nil otherwise
+  def macro_expansion_fn(rel, s)
+    dm = define_at(rel, s)
+    return nil unless dm
+    fns = (@occ[dm[0]] || []).reject { |orel, os, _oe| define_at(orel, os) }.map { |orel, os, _oe| enclosing_func(orel, os) }
+    return nil if fns.empty? || fns.any?(&:nil?)
+    return nil unless fns.all? { |f| @variadic.key?(f['name']) }
+    return nil unless fns.map { |f| @variadic[f['name']] }.uniq.size == 1
+    fns.first
+  end
+
   def scan_args(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
-    fn = enclosing_func(rel, s)
+    fn = enclosing_func(rel, s) || (called ? macro_expansion_fn(rel, s) : nil)
     argv_helper = called && fn && !@variadic.key?(fn['name']) && argv_scan_helpers.key?(fn['name'])
     if !called || fn.nil? || (!@variadic.key?(fn['name']) && !argv_helper)
       refuse(rel, s, 'rb_scan_args', 'only supported directly in a variadic method (argc -1)')
@@ -4594,9 +5079,20 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # a split method's implementation takes its arguments as an argv array (mrb_value *), not from the mruby frame:
     # its lead and optional outputs are read from argv, the argc check raises as mrb_get_args does, and the value is argc
     if @split_names.include?(fn['name']) || argv_helper
-      if rest || blk
-        refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest and block parts are not supported there')
+      if rest
+        refuse(rel, s, 'rb_scan_args', 'a split method reads its arguments from an argv array: rest parts are not supported there')
         return
+      end
+      # a block part is the block of the frame the call runs in (CRuby's rb_scan_args "&" reads the same slot): nfcx_block_arg
+      # reads it, as the helper's rb_yield does (one definition per file, before the function)
+      blk_assign = ''
+      if blk
+        unless @block_arg_files.include?(rel)
+          @block_arg_files << rel
+          ed.add(fn['hstart'], fn['hstart'],
+                 "static mrb_value nfcx_block_arg(mrb_state *mrb)\n{\n  mrb_value nfcx_b;\n  mrb_get_args(mrb, \"&\", &nfcx_b);\n  return nfcx_b;\n}\n\n")
+        end
+        blk_assign = "#{names[-1]} = nfcx_block_arg(#{mrb_tok(rel, s)}); "
       end
       # a keyword part takes the trailing Hash when there are more arguments than positional outputs (CRuby 3 keywords);
       # an empty Hash is nil, as in the frame form. The count returned excludes the keyword Hash.
@@ -4604,7 +5100,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
                   "#{names[lead + opt]} = (mrb_hash_p(#{names[lead + opt]}) && mrb_hash_size(#{mrb_tok(rel, s)}, #{names[lead + opt]}) ? #{names[lead + opt]} : mrb_nil_value()); " : ''
       assigns = (0...(lead + opt)).map { |i| "#{names[i]} = (#{i} < nfcx_ac) ? #{argv_n}[#{i}] : mrb_nil_value(); " }.join
       ed.add(s, close + 1, "({ int nfcx_ac = #{argc_n}; #{kw_pre}if (nfcx_ac < #{lead} || nfcx_ac > #{lead + opt}) " \
-                           "mrb_argnum_error(#{mrb_tok(rel, s)}, nfcx_ac, #{lead}, #{lead + opt}); #{assigns}nfcx_ac; })")
+                           "mrb_argnum_error(#{mrb_tok(rel, s)}, nfcx_ac, #{lead}, #{lead + opt}); #{assigns}#{blk_assign}nfcx_ac; })")
       rewrite(rel, s, 'rb_scan_args', "argv form of mrb_get_args(\"#{fmt}\", ...)",
               'the arguments come from the argv array of the split method; the argc check raises ArgumentError as CRuby does')
       return
@@ -4711,15 +5207,20 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # is true only for nil, and RB_TYPE_P(v, T_FALSE) only for false (Qfalse)
     # T_RATIONAL: the fork's rational gem makes Rational objects as data (no exact tag), but CRuby's Rational class has no
     # subclasses, so the class test is the match. It needs the mruby state, which only a function that has it can pass.
-    if tname.sub(/\ARUBY_/, '') == 'T_RATIONAL'
+    # T_RATIONAL and T_COMPLEX: the classes of the mruby-rational and mruby-complex gems (data objects, no subclasses in CRuby),
+    # so the test is the class test; the gem is a dependency of the generated mrbgem (only when such a test is emitted)
+    class_gem = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    if class_gem
+      cls_name, gem_name = class_gem
       fnr = enclosing_func(rel, s)
       unless fnr && ((@valid_reg_names || Set.new).include?(fnr['name']) || (@needs || Set.new).include?(fnr['name']))
-        refuse(rel, s, 'RB_TYPE_P', 'T_RATIONAL needs the mruby state (the Rational class test), which this function does not have')
+        refuse(rel, s, 'RB_TYPE_P', "#{tname} needs the mruby state (the #{cls_name} class test), which this function does not have")
         return
       end
-      new = "mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj}, mrb_class_get(#{mrb_tok(rel, s)}, \"Rational\"))"
+      new = "mrb_obj_is_kind_of(#{mrb_tok(rel, s)}, #{obj}, mrb_class_get(#{mrb_tok(rel, s)}, \"#{cls_name}\"))"
       ed.add(s, close + 1, new)
-      rewrite(rel, s, 'RB_TYPE_P', new, 'a Rational test by class (mruby-rational gem: Rational is a data object; CRuby Rational has no subclasses)')
+      (@gem_deps ||= Set.new) << gem_name
+      rewrite(rel, s, 'RB_TYPE_P', new, "a #{cls_name} test by class (the #{gem_name} gem; CRuby #{cls_name} has no subclasses)")
       return
     end
     pred = { 'T_NIL' => 'mrb_nil_p', 'T_FALSE' => 'mrb_false_p' }[tname.sub(/\ARUBY_/, '')]
@@ -4774,6 +5275,25 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       new = "(#{test} ? (void)0 : mrb_raise(#{mrb_tok(rel, s)}, E_TYPE_ERROR, \"wrong argument type (expected Class or Module)\"))"
       ed.add(s, close + 1, new)
       rewrite(rel, s, name, new, 'a class or module check by tag (singleton classes are CRuby T_CLASS and mruby MRB_TT_SCLASS); the message is generic')
+      return
+    end
+    # Check_Type(x, T_RATIONAL / T_COMPLEX): the class test of the gem's class, raising TypeError as CRuby does (the gem is a dependency)
+    class_gem_c = { 'T_RATIONAL' => ['Rational', 'mruby-rational'], 'T_COMPLEX' => ['Complex', 'mruby-complex'] }[tname.sub(/\ARUBY_/, '')]
+    if class_gem_c
+      cls_name, gem_name = class_gem_c
+      fnc = enclosing_func(rel, s)
+      obj_c = psl(text, args[0][0], args[0][1]).strip
+      unless fnc && ((@valid_reg_names || Set.new).include?(fnc['name']) || (@needs || Set.new).include?(fnc['name'])) &&
+             obj_c.match?(/\A[A-Za-z_][#{WC}]*\z/)
+        refuse(rel, s, name, "#{tname} needs the mruby state and a plain object (the #{cls_name} class test)")
+        return
+      end
+      tok_c = mrb_tok(rel, s)
+      new_c = "(mrb_obj_is_kind_of(#{tok_c}, #{obj_c}, mrb_class_get(#{tok_c}, \"#{cls_name}\")) ? (void)0 : " \
+              "mrb_raise(#{tok_c}, E_TYPE_ERROR, \"wrong argument type (expected #{cls_name})\"))"
+      ed.add(s, close + 1, new_c)
+      (@gem_deps ||= Set.new) << gem_name
+      rewrite(rel, s, name, new_c, "a #{cls_name} check by class (the #{gem_name} gem); the message is generic")
       return
     end
     ent = @entries[tname]
@@ -4883,6 +5403,31 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
         # such header, and gcc stops at the fatal error, so the rest of the file is not checked
+        # an undeclared CRuby type tag that is a stuck decision (Rational, Complex: a gem; Bignum: no bignum): the tag's own
+        # stuck point is the reason, not a cascade
+        if (tm = m[2].strip.match(/\A'(T_RATIONAL|T_COMPLEX|T_BIGNUM|T_FIXNUM)' undeclared/))
+          why = tm[1] == 'T_BIGNUM' || tm[1] == 'T_FIXNUM' ? 'the bignum decision (no bignum in the fork)' : 'the gem decision (mruby-rational or mruby-complex in the build)'
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (#{tm[1]}): the converted code uses #{tm[1]}, a tag the fork does not have; it is #{why} (accepted stuck point)" }
+          next
+        end
+        # bcrypt's #else branch defines crypt_r for libcs without it; a glibc host declares crypt_r in crypt.h with another
+        # signature, and the gem gates its own branch on _LIBC (defined only while glibc is built): a target conflict
+        if m[2].strip.start_with?("conflicting types for 'crypt_r'")
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => 'stuck point (target): the gem defines crypt_r in its #else branch for libcs without it; glibc declares ' \
+                                     'crypt_r in crypt.h with another signature, and the gem gates its glibc branch on _LIBC, which is ' \
+                                     'defined only while glibc is built (accepted stuck point)' }
+          next
+        end
+        # the CRuby version and IO headers, kept as the stuck include they are, stop gcc the same way
+        if ['ruby/version.h', 'ruby/io.h'].any? { |h| m[2].strip == "#{h}: No such file or directory" }
+          hdr = m[2].strip.split(':').first
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (#{hdr == 'ruby/io.h' ? 'IO' : 'CRuby version'}): the converted code keeps #include <#{hdr}>, " \
+                                     'which the fork does not have (accepted stuck point); the compile check stops at this include' }
+          next
+        end
         if m[2].strip == 'ruby/encoding.h: No such file or directory'
           @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
                          'reason' => 'stuck point (Encoding): the converted code keeps #include <ruby/encoding.h>, which the fork ' \
@@ -4964,6 +5509,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       "  spec.summary = 'converted from CRuby ext/#{@name}'",
     ]
     rake << "  spec.add_dependency 'mruby-uv'  # thread model: nfcx_uv_thread.h" if uses_uv_thread?
+    (@gem_deps || Set.new).to_a.sort.each { |g| rake << "  spec.add_dependency '#{g}'  # a class test in the converted code" }
     rake += ['end', '']
     write_bytes(File.join(@out_dir, 'mrbgem.rake'), rake.join("\n"))
     lines = ["BC2CPP-MRBGEM refusals for ext/#{@name}",
@@ -4996,6 +5542,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     choose_scanner
     load
     scan_local_macros
+    # the inactive text of each file (its #if branches the build decides) is known before the uses are collected: a use in
+    # inactive text is not a use (its helper and its prototype)
+    @files.each_key do |rel|
+      text_inactive_spans(rel).each do |a, z|
+        (@excluded_spans ||= {})[rel] ||= []
+        @excluded_spans[rel] << [a, z]
+      end
+    end
     scan
     build_occurrences
     scan_local_names
@@ -5004,6 +5558,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
+    value_zero_assign_pass
     integer_return_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],
@@ -5022,6 +5577,7 @@ def main(argv)
   name = nil
   scanner = 'auto'
   defines = []
+  undefines = []
   while args.first&.start_with?('--')
     opt = args.shift
     if opt == '--name' && !args.empty?
@@ -5030,17 +5586,19 @@ def main(argv)
       scanner = args.shift
     elsif opt == '--define' && !args.empty?
       defines << args.shift
+    elsif opt == '--undefine' && !args.empty?
+      undefines << args.shift
     else
       args = nil
       break
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... ' \
          '<cext_dir> <out_dir>'
     return 1
   end
-  Converter.new(args[0], args[1], name, scanner, defines).run
+  Converter.new(args[0], args[1], name, scanner, defines, undefines).run
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__

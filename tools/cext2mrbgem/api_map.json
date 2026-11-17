@@ -11,18 +11,17 @@
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
-    "T_FIXNUM": "mruby has one integer tag, MRB_TT_FIXNUM (include/mruby/value.h:109); CRuby's Fixnum/Bignum split is not mruby's integer range, so MRB_TT_FIXNUM matches every Integer (see the RB_TYPE_P caveat)",
     "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
     "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
     "T_TRUE": "not in the type-check subset of this change (refused as listed); mruby's MRB_TT_TRUE (include/mruby/value.h:107) is true only, so it can be added as its own change",
     "T_UNDEF": "CRuby's Qundef is an internal marker, not a Ruby object type; mruby's MRB_TT_UNDEF (value.h:111) is a separate value kind",
     "T_STRUCT": "the fork has no MRB_TT_STRUCT tag (include/mruby/value.h:106-131); Struct instances are an mrbgem class (mrbgems/mruby-struct), so a type test would be a class test, which is not made here",
-    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with",
-    "T_RATIONAL": "the fork has no MRB_TT_RATIONAL tag: Rational is the mruby-rational mrbgem class (mrbgems/mruby-rational), so a test is mrb_obj_is_kind_of against it. Where the state is in scope RB_TYPE_P converts to that test; a case label of a switch cannot test a class, so a switch on T_RATIONAL needs an if-chain (not made here); Check_Type in a function without the state is refused",
-    "T_COMPLEX": "the fork has no MRB_TT_COMPLEX tag; Complex is the mruby-complex mrbgem class (mrbgems/mruby-complex), so a type test is a class test against that gem, which is not made here"
+    "T_REGEXP": "stuck point: the fork has no Regexp tag (include/mruby/value.h:106-131) and no mrbgem defines a Regexp class (mrbgems/ lists no mruby-regexp), so there is nothing to compare with"
   },
   "unmapped_reasons": {
+    "T_RATIONAL": "stuck point (gem dependency): a Rational test is the mruby-rational class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
+    "T_COMPLEX": "stuck point (gem dependency): a Complex test is the mruby-complex class test, which needs the state and the gem (the decision is made: the gem is a dependency when the test is emitted); a bare use has no test to make here",
     "_comment": "A name with no api_map entry is refused with the reason given here (the converter's no-entry path). PRIsVALUE is converted where rb_raise and rb_sprintf take it; elsewhere it is an argument of rb_enc_sprintf, which takes an rb_encoding *.",
     "PRIsVALUE": "stuck point (Encoding): PRIsVALUE outside rb_raise and rb_sprintf is an argument of rb_enc_sprintf, which takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_enc_from_index": "stuck point (Encoding): an encoding index; the fork has no Encoding (accepted stuck point)",
@@ -54,9 +53,6 @@
     "rb_enc_mbclen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_num_coerce_cmp": "stuck point (coerce): the fork has no numeric coercion protocol: no coerce method in src/ or mrblib/ (grep finds only the step counter, src/numeric.c:173), so there is no coerced operand to compare",
-    "rb_num_coerce_relop": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
-    "rb_num_coerce_bin": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
@@ -157,6 +153,12 @@
       "kind": "special",
       "handler": "define_method",
       "needs_mrb": true
+    },
+    "rb_define_global_function": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true,
+      "caveat": "a private Kernel method and module function: mrb_define_module_function on mrb->kernel_module (CRuby's rb_define_global_function, which has no target argument)"
     },
     "rb_define_const": {
       "kind": "special",
@@ -334,12 +336,18 @@
       "caveat": "valid only inside a data type mark callback, as rb_gc_mark; mruby does not compact, so a movable mark is the same mark (the mark hook is the fork's mrb_data_type.mark, branch claude/markable-data-type)"
     },
     "rb_gc_enable": {
-      "kind": "refuse",
-      "reason": "no mruby enable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_module_get($m, \"GC\")), mrb_intern_cstr($m, \"enable\"), 0, NULL)",
+      "caveat": "calls the GC.enable class method (src/gc.c), which clears gc.disabled and returns the previous state as a boolean, as CRuby's rb_gc_enable returns Qtrue when GC was disabled"
     },
     "rb_gc_disable": {
-      "kind": "refuse",
-      "reason": "no mruby disable function: gc.disabled is a VM flag (include/mruby/gc.h), and CRuby's return value (the previous state) would have to be emulated"
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, mrb_obj_value(mrb_module_get($m, \"GC\")), mrb_intern_cstr($m, \"disable\"), 0, NULL)",
+      "caveat": "calls the GC.disable class method (src/gc.c), which sets gc.disabled and returns the previous state as a boolean, as CRuby's rb_gc_disable returns Qtrue when GC was already disabled"
     },
     "rb_gc_start": {
       "kind": "special",
@@ -1403,8 +1411,9 @@
     },
     "T_FIXNUM": {
       "kind": "expr",
+      "type_check": "caveat",
       "mruby": "MRB_TT_FIXNUM",
-      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "caveat": "mruby has one integer tag (MRB_TT_FIXNUM) and no bignum: the check accepts every Integer, which is weaker than CRuby's Fixnum check (accepted: the user chose the weaker check)"
     },
     "rb_eIndexError": {
       "kind": "expr",
@@ -1583,6 +1592,34 @@
       "mruby": "E_FROZEN_ERROR",
       "needs_mrb": true,
       "caveat": "struct RClass *, as E_ARGUMENT_ERROR: a VALUE use needs mrb_obj_value(); in rb_raise it is the class argument"
+    },
+    "Data_Get_Struct": {
+      "kind": "template",
+      "arity": 3,
+      "template": "($2 = ($1 *)DATA_PTR($0))",
+      "caveat": "reads the data pointer of an mruby data object (DATA_PTR), with no type check, as CRuby's Data_Get_Struct does not check the type of an untyped object; use TypedData_Get_Struct where the type is checked"
+    },
+    "RUBY_TYPED_DEFAULT_FREE": {
+      "kind": "expr",
+      "mruby": "mrb_free",
+      "caveat": "CRuby's default free (xfree, the data type's dfree slot): mrb_free has the same signature (mrb_state *, void *) and frees what mrb_malloc allocated, which is how the converted allocations are made"
+    },
+    "RUBY_DEFAULT_FREE": {
+      "kind": "expr",
+      "mruby": "mrb_free",
+      "caveat": "as RUBY_TYPED_DEFAULT_FREE: mrb_free, the default release of mrb_malloc'd data"
+    },
+    "rb_reg_region_copy": {
+      "kind": "refuse",
+      "reason": "stuck point (regexp internals): rb_reg_region_copy copies CRuby's Onigmo match region (struct re_registers); mruby's regexp is the mruby-onig-regexp gem with a different match API, so there is no region to copy (accepted stuck point)"
+    },
+    "rb_reg_prepare_re": {
+      "kind": "refuse",
+      "reason": "stuck point (regexp internals): rb_reg_prepare_re returns CRuby's compiled Onigmo regex for a Regexp; mruby's regexp is the mruby-onig-regexp gem with its own compiled form (accepted stuck point)"
+    },
+    "RUBY_API_VERSION_CODE": {
+      "kind": "refuse",
+      "reason": "stuck point (CRuby version): RUBY_API_VERSION_CODE is the CRuby version the code tests (#if RUBY_API_VERSION_CODE >= ...), and mruby has no version number to test against; the version to emulate is a decision (accepted stuck point)"
     },
     "RTYPEDDATA_DATA": {
       "kind": "call",
@@ -2230,6 +2267,13 @@
       "needs_mrb": true,
       "caveat": "the format is printed by mruby's formatter; CRuby's PRIsVALUE arguments are not mapped (refused where they appear)"
     },
+    "rb_fatal": {
+      "kind": "call",
+      "mruby": "mrb_bug",
+      "inject_mrb": true,
+      "needs_mrb": true,
+      "caveat": "mrb_bug (src/error.c) prints the message and exits, as CRuby's rb_fatal does: it is not an exception, so no rescue sees it. The prefix differs (CRuby prints [FATAL], mruby prints bug:); CRuby's PRIsVALUE arguments are not mapped"
+    },
     "rb_sprintf": {
       "kind": "call",
       "mruby": "mrb_format",
@@ -2546,6 +2590,95 @@
       "needs_mrb": true,
       "template": "mrb_str_to_inum($m, $0, $1, $2)",
       "caveat": "parses the string in the base; badcheck as given (CRuby's rb_str_to_inum)"
+    },
+    "rb_num_coerce_cmp": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_cmp(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value pair, a, b;\n  if (!mrb_respond_to(mrb, y, mrb_intern_cstr(mrb, \"coerce\"))) return mrb_nil_value();\n  pair = mrb_funcall_argv(mrb, y, mrb_intern_cstr(mrb, \"coerce\"), 1, &x);\n  a = mrb_ary_ref(mrb, pair, 0); b = mrb_ary_ref(mrb, pair, 1);\n  return mrb_funcall_argv(mrb, a, op, 1, &b);\n}",
+      "prelude_name": "nfcx_num_coerce_cmp",
+      "template": "nfcx_num_coerce_cmp($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_cmp: y.coerce(x) gives [a, b], and a.op(b) is the result; nil when y does not coerce (no rescue: a coerce that raises propagates)"
+    },
+    "rb_num_coerce_bin": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_bin(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value pair, a, b;\n  pair = mrb_funcall_argv(mrb, y, mrb_intern_cstr(mrb, \"coerce\"), 1, &x);\n  a = mrb_ary_ref(mrb, pair, 0); b = mrb_ary_ref(mrb, pair, 1);\n  return mrb_funcall_argv(mrb, a, op, 1, &b);\n}",
+      "prelude_name": "nfcx_num_coerce_bin",
+      "template": "nfcx_num_coerce_bin($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_bin: y.coerce(x) gives [a, b], and a.op(b) is the result (a TypeError from coerce propagates)"
+    },
+    "rb_num_coerce_relop": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_relop(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value r = nfcx_num_coerce_cmp(mrb, x, y, op);\n  if (mrb_nil_p(r)) mrb_raisef(mrb, E_ARGUMENT_ERROR, \"comparison of %S with %S failed\", mrb_str_new_cstr(mrb, mrb_obj_classname(mrb, x)), mrb_str_new_cstr(mrb, mrb_obj_classname(mrb, y)));\n  return r;\n}",
+      "prelude_name": "nfcx_num_coerce_relop",
+      "template": "nfcx_num_coerce_relop($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_relop: the coerced comparison; when it cannot be made, it raises ArgumentError (comparison failed), as CRuby's rb_cmperr"
+    },
+    "rb_opts_exception_p": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "static int nfcx_opts_exception_p(mrb_state *mrb, mrb_value opts, int default_value) {\n  mrb_value key, v;\n  if (!mrb_hash_p(opts)) return default_value;\n  key = mrb_symbol_value(mrb_intern_cstr(mrb, \"exception\"));\n  if (!mrb_hash_key_p(mrb, opts, key)) return default_value;\n  v = mrb_hash_get(mrb, opts, key);\n  if (mrb_true_p(v)) return 1;\n  if (mrb_false_p(v)) return 0;\n  mrb_raise(mrb, E_ARGUMENT_ERROR, \"expected true or false as exception\");\n  return 0;\n}",
+      "prelude_name": "nfcx_opts_exception_p",
+      "template": "nfcx_opts_exception_p($m, $0, $1)",
+      "caveat": "CRuby's rb_opts_exception_p: the :exception option of an options hash (nil or no key: the default); true/false; anything else raises ArgumentError (as CRuby)"
+    },
+    "rb_typeddata_is_kind_of": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "(mrb_type($0) == MRB_TT_DATA && DATA_TYPE($0) == &$1)",
+      "caveat": "CRuby's rb_typeddata_is_kind_of(obj, &type): obj is a typed data object whose type is type (or a subclass of it in CRuby). mruby's data objects carry one type descriptor and no parent chain, so this is an exact match; the second argument is the address of the type, as in the bigdecimal use"
+    },
+    "PRIuSIZE": {"kind": "expr", "mruby": "\"zu\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIuSIZE is this string literal)"},
+    "PRIdSIZE": {"kind": "expr", "mruby": "\"zd\"", "caveat": "C99 printf length modifier for size_t (CRuby's PRIdSIZE is this string literal)"},
+    "PUREFUNC": {"kind": "template", "arity": 1, "template": "$0", "caveat": "PUREFUNC (CRuby's pure-function attribute) is a compiler hint: the declaration it wraps is kept, without the attribute"},
+    "RARRAY_PTR": {"kind": "macro", "mruby": "RARRAY_PTR", "caveat": "mruby's RARRAY_PTR (include/mruby/array.h) is the array's element pointer, as CRuby's; the use reads elements. A write through it would need mruby's array modify step (not done here)"},
+    "rb_long2int": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "prelude": "#include <limits.h>\nstatic int nfcx_long2int(mrb_state *mrb, long v) {\n  if (v < (long)INT_MIN || v > (long)INT_MAX) mrb_raise(mrb, E_RANGE_ERROR, \"integer too big to convert to int\");\n  return (int)v;\n}",
+      "prelude_name": "nfcx_long2int",
+      "template": "nfcx_long2int($m, $0)",
+      "caveat": "CRuby's rb_long2int: the long as an int, raising RangeError when it does not fit (a checked conversion, as CRuby's)"
+    },
+    "rb_check_symbol_cstr": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "ignored_args": [
+        2
+      ],
+      "prelude": "static mrb_value nfcx_check_symbol(mrb_state *mrb, const char *p, long n) {\n  return mrb_check_intern(mrb, p, (size_t)n);\n}",
+      "prelude_name": "nfcx_check_symbol",
+      "template": "nfcx_check_symbol($m, $0, $1)",
+      "caveat": "CRuby's rb_check_symbol_cstr: the symbol of the name when one exists, nil otherwise (callers test for nil, as oj does); the encoding argument is dropped (mruby symbols carry no encoding)"
+    },
+    "rb_cstr_to_dbl": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "template": "mrb_cstr_to_dbl($m, $0, $1)",
+      "caveat": "parses the NUL-terminated string as a Float; badcheck as given (CRuby's rb_cstr_to_dbl), raising ArgumentError on a bad string"
+    },
+    "rb_check_convert_type": {
+      "kind": "template",
+      "arity": 4,
+      "needs_mrb": true,
+      "template": "mrb_check_convert_type($m, $0, $1, $2, $3)",
+      "caveat": "returns nil when the value has no conversion method, as CRuby; the type is the mruby MRB_TT_ tag (T_STRING and the other T_ tags map to it)"
+    },
+    "rb_need_block": {
+      "kind": "template",
+      "arity": 0,
+      "needs_mrb": true,
+      "template": "(mrb_block_given_p($m) ? (void)0 : mrb_raise($m, E_LOCALJUMP_ERROR, \"no block given\"))",
+      "caveat": "raises LocalJumpError when the method has no block, as CRuby's rb_need_block; it reads the block of the enclosing method, so it is supported only where the mruby state is in scope"
     },
     "RB_FLOAT_TYPE_P": {
       "kind": "template",
