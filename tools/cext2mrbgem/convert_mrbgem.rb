@@ -3875,6 +3875,37 @@ end
         rewrite(rel, s, name, "mrb_obj_value(#{name})")
       end
     end
+    # 5b. a VALUE is a struct in the fork (the default boxing, include/mruby/boxing_no.h): a cast of a VALUE name to a pointer
+    # type, and a (VALUE) cast of an address, have no mruby form (the converted code does not compile)
+    mv = @files[rel]['masked']
+    fs_values = file_scope_value_names(rel)
+    mv.to_enum(:scan, /\(\s*(?:void|char|unsigned\s+char|const\s+char|VALUE)\s*\*\s*\)\s*([A-Za-z_]\w*)/).each do
+      m = Regexp.last_match
+      nm = m[1]
+      next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
+      # the third parameter of a rb_hash_foreach callback is the void * it was given (the threading above), not a VALUE
+      fnv = enclosing_func(rel, m.begin(1))
+      next if fnv && (@hash_cb_names || Set.new).include?(fnv['name']) &&
+              (fnv['params'] || '').split(',')[2].to_s.split.last.to_s.delete('*') == nm
+      next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+      refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), and a cast of it to a pointer has no mruby form")
+    end
+    # assert(v) on a VALUE (a local, parameter or VALUE struct member) is a truth test that the fork's VALUE struct has no
+    # exact form for (the converter does not weaken it to a nil test; see the assert decision in the history)
+    vfields = value_field_names
+    mv.to_enum(:scan, /(?<![#{WC}])assert\s*\(\s*([A-Za-z_]\w*)(?:\s*->\s*([A-Za-z_]\w*))?\s*\)/).each do
+      m = Regexp.last_match
+      base, field = m[1], m[2]
+      is_value = field ? vfields.include?(field) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
+      next unless is_value
+      next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+      refuse(rel, m.begin(0), 'assert', "stuck point (VALUE truth test): assert(#{field ? "#{base}->#{field}" : base}) tests a VALUE, a struct in the fork (include/mruby/boxing_no.h), and no exact truth test of it is expressed")
+    end
+    mv.to_enum(:scan, /\(\s*VALUE\s*\)\s*&\s*[A-Za-z_]\w*/).each do
+      m = Regexp.last_match
+      next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+      refuse(rel, m.begin(0), 'VALUE', 'stuck point (VALUE as pointer): a pointer is cast to VALUE, which is a struct in the fork (include/mruby/boxing_no.h) and cannot hold an address')
+    end
     # 6. mrb name clash in files that get the mrb parameter
     if @decls.any? { |d| d['file'] == rel && @needs.include?(d['name']) }
       mm = /(?<![#{WC}])mrb(?![#{WC}])/.match(masked)

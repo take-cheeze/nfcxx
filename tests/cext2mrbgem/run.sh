@@ -1455,6 +1455,16 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_class_mixed/NOT_BUILDABLE"
 check grep -qF 'clas = mrb_obj_value(mrb_define_class_under(' "$work/api_class_mixed/src/api_class_mixed.c"
 check grep -qF 'mrb_value clas;' "$work/api_class_mixed/src/api_class_mixed.c"
+# 2zzz124. a VALUE cast to a pointer (void *)obj is a stuck point (VALUE as pointer): the fork's VALUE is a struct, so the
+# cast has no mruby form, and the file is marked not buildable with that reason.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_ptr tools/cext2mrbgem/fixtures/api_value_ptr/ext/api_value_ptr "$work/api_value_ptr" > "$work/api_value_ptr.log" 2>&1 || rc=$?
+check test -e "$work/api_value_ptr/NOT_BUILDABLE"
+check grep -qF 'stuck point (VALUE as pointer): obj is a VALUE' "$work/api_value_ptr/REFUSALS.txt"
+# 2zzz125. assert(v) on a VALUE is a stuck point (VALUE truth test): the fork's VALUE is a struct, and no exact truth test is
+# expressed (the assert is not weakened to a nil test).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_assert tools/cext2mrbgem/fixtures/api_value_assert/ext/api_value_assert "$work/api_value_assert" > "$work/api_value_assert.log" 2>&1 || rc=$?
+check test -e "$work/api_value_assert/NOT_BUILDABLE"
+check grep -qF 'stuck point (VALUE truth test): assert(obj)' "$work/api_value_assert/REFUSALS.txt"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
