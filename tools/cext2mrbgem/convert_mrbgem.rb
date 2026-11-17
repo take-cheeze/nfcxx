@@ -2414,6 +2414,13 @@ end
         masked = @files[rel]['masked']
         # a struct member of the same name (obj.name, obj->name) is a field, not a use of the helper
         next if masked[[s - 40, 0].max...s].to_s.match?(/(?:\.|->)[ \t\n]*\z/)
+        # a field declared in a struct body (type name;) is a member, not a use of the helper of the same name
+        nxd = next_nonspace(masked, e)
+        pvd = prev_nonspace(masked, s - 1)
+        if nxd >= 0 && (masked[nxd] == ';' || masked[nxd] == '[') && pvd >= 0 && masked[pvd].match?(/[A-Za-z_0-9*]/) &&
+           struct_body_before?(masked, s)
+          next
+        end
         # a function-pointer field declaration of the same name, as in a struct body: type (*name)(params);
         next if masked[[s - 40, 0].max...s].to_s.match?(/\(\*[ \t\n]*\z/) && masked[e..].to_s.match?(/\A[ \t\n]*\)[ \t\n]*\(/)
         # the only argument of a one-parameter macro whose body uses the parameter as a member (#define M(x) (p->x)): a field
