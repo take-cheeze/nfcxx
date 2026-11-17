@@ -60,6 +60,17 @@ m_switch_q(VALUE self, VALUE v)
     }
 }
 
+/* keyword options: one optional keyword, absent gives Qundef (as strscan's fixed_anchor) */
+static VALUE
+m_kw(VALUE self, VALUE opts)
+{
+    ID kw_ids[1];
+    VALUE anchor;
+    kw_ids[0] = rb_intern("fixed_anchor");
+    rb_get_kwargs(opts, kw_ids, 0, 1, &anchor);
+    return anchor == Qundef ? Qfalse : anchor;
+}
+
 void
 Init_api_q_call_cmp(void)
 {
@@ -71,4 +82,5 @@ Init_api_q_call_cmp(void)
     rb_define_method(c, "call_id", m_call_id, 1);
     rb_define_method(c, "checked", m_checked, 1);
     rb_define_method(c, "switch_q", m_switch_q, 1);
+    rb_define_method(c, "kw", m_kw, 1);
 }

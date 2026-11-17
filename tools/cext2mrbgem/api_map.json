@@ -2659,6 +2659,15 @@
       "template": "nfcx_check_symbol($m, $0, $1)",
       "caveat": "CRuby's rb_check_symbol_cstr: the symbol of the name when one exists, nil otherwise (callers test for nil, as oj does); the encoding argument is dropped (mruby symbols carry no encoding)"
     },
+    "rb_get_kwargs": {
+      "kind": "template",
+      "arity": 5,
+      "needs_mrb": true,
+      "prelude": "static int nfcx_get_kwargs(mrb_state *mrb, mrb_value hash, const mrb_sym *ids, int required, int optional, mrb_value *values) {\n  int i, n = required + optional, found = 0;\n  for (i = 0; i < n; i++) {\n    mrb_value key = mrb_symbol_value(ids[i]);\n    if (mrb_hash_p(hash) && mrb_hash_key_p(mrb, hash, key)) {\n      values[i] = mrb_hash_get(mrb, hash, key); found++;\n    } else if (i < required) {\n      mrb_raise(mrb, E_ARGUMENT_ERROR, \"missing keyword\");\n    } else {\n      values[i] = mrb_undef_value();\n    }\n  }\n  return found;\n}",
+      "prelude_name": "nfcx_get_kwargs",
+      "template": "nfcx_get_kwargs($m, $0, $1, $2, $3, $4)",
+      "caveat": "CRuby's rb_get_kwargs: the values of the listed keywords (Qundef when an optional one is absent); a missing required keyword raises ArgumentError. Unknown keywords are not rejected (a caveat: CRuby rejects them unless the method takes **rest)"
+    },
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,
