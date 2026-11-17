@@ -2,11 +2,12 @@
 
 require 'digest'
 require_relative 'source_text'
+require_relative 'world_audit_pins'
 
 # All native spellings of a name must belong to pinned, audited files.
 # A result fact joins successful returns; it never bypasses the original call.
 module NativeClassResults
-  FILES = {
+  BASE_FILES = {
     '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e 2bf54ced4214251c7706ca7bcef3e9ee35293313f10d06cea2ba1d7ab43754fb 762601d078c5ba3c3bee3ea7eaf247e7b61324e06b5e975c363036eb9c25070e e76fb737d2e1f0728e554f34cc53b3b194792ffd5406b58cda716b231156e96d 5faa351f6365b009cd795c90f3b20d6f36ec09df9d38bd80a60d8e78ab4b490d c91d78d0a09ff1e3391606a35e4c2b5e6ade3c1788018071e4721070c8b653ca 55f2068bc101b47740ba55a72298a00e33fbdf91e0fee79cd0b382d703919f6c 23085b96748406651288a3b1a3138baf7f8862f2e09061c49abb2611ff41b85f],
     '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => %w[8065d3073a5bb5290cafe20df0785ccdfecc0563ef14ac211f203915c1a2fc29 da9cfd32fe7f43f0c6038dc6ba7b773803924e99ccdfbccd56c22cd03ca62fb9 237ee07f0418f986d721ab255b0d0832b9fc552a448c051d7ca78ca12757b0f9],
     '3rd/mruby/src/hash.c' => %w[42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16 a2f064d6a6def159eb9209feafb6796925938c7f372ab2be9c6ca008dac991ea 2c5b569866628c74d24b3c0eb7d80ad056054a5bec575004f145089ed87ba3bd 117b20906acbccc99bd3ec2009f7a38e4417be62d64aa77f31abf6b12544e5c8 39b750c1f106a877e68f3fd5fc530da68453368fec46ba3dfbdb98d94dcbe2d7 3deb92092e3cc2ff141f6389ceb9c8c58a6dbec826c366590afe49e1f792f783 77cb6e9212d13461d1d820f4450937c61ca4c7052d60d8220d19b8a45e61dd17 13dcb55856546382bde86692b0f4aace864d6b2fc13528ae69d92338d5db9790 a99e0e4b76be89cd6bb5befae102b54b6b3693ce55a24b109eed7a0c06e1f90c],
@@ -27,8 +28,9 @@ module NativeClassResults
     '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '4b00efbb0d4b26bb8310aff773b8e4d2abf05dca6a993ebd963f69fa9c6cf397',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
   }.freeze
+  FILES = BASE_FILES.merge(WorldAuditPins.class_result_files).freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
-  FACTS = {
+  BASE_FACTS = {
     'join' => ['String', %w[3rd/mruby/src/array.c 3rd/mruby/mrbgems/mruby-io/src/file.c]],
     'compact' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     'flatten' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
@@ -61,6 +63,8 @@ module NativeClassResults
       3rd/mruby-onig-regexp/src/mruby_onig_regexp.c
     ]]
   }.freeze
+
+  FACTS = WorldAuditPins.merge_facts(BASE_FACTS)
 
   STRUCT_ALIAS_PATH = '3rd/mruby/mrbgems/mruby-struct/mrblib/struct.rb'
   STRUCT_ALIAS_SHA = '6d651f44caf2f46e15ee6569426cdaabe8721c1405fdcfa6592a767aca1cb5e1'
