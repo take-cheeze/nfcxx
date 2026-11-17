@@ -798,8 +798,8 @@ fi
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (gcc-cc).
 # -fkeep-static-functions is a GCC option; clang (the C compiler on macOS) rejects it.
-keep_static=(--c_to_obj_option -fkeep-static-functions)
-"${NFCXX_GCC:-cc}" --version 2>/dev/null | head -1 | grep -qi clang && keep_static=()
+ks_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-keep-static.rb" plan) || exit $?   # keep_static: scripts/nfcxx-keep-static.rb
+eval "$ks_sh"
 # --eh-unwind (NFCXX_EH_UNWIND=1): a throw runs the cleanups of the frames it unwinds in the system unwinder (EDG's --nfcxx_eh_unwind;
 # lib_src/throw.c). gcc: the frames need unwind tables (-fexceptions) and the declarations of
 # lib/ehshim/nfcxx_eh_unwind.h, which the C compiler reads first.
