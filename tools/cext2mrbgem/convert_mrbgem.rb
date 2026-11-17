@@ -3466,6 +3466,10 @@ use_problem = lambda do |name, use|
         close = match_close(masked, open)
         next if close < 0
         next if in_dead_init(rel, rs)
+        # the call is a whole truth operand: what follows it ends the operand (a comparison or arithmetic on it is not a truth test)
+        nxt_t = next_nonspace(masked, close + 1)
+        next unless nxt_t >= 0 && (masked[nxt_t] == ')' || masked[nxt_t] == ';' || masked[nxt_t] == '?' || masked[nxt_t] == ',' ||
+                                   masked[nxt_t, 2] == '&&' || masked[nxt_t, 2] == '||')
         next if @edits[rel].touches_strictly?(rs) || @edits[rel].touches_strictly?(close + 1)
         @edits[rel].add(rs, rs, 'mrb_test(')
         @edits[rel].add(close + 1, close + 1, ')')
