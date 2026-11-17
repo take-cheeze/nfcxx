@@ -195,7 +195,9 @@ class CodeGen
       entry = irep.pool.fetch(pidx)
       if entry.is_a?(Hash) && entry[:type] == :float
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
-        "  #{RegName[d]} = mrb_float_value(M, #{lit});\n"
+        # The parser turns a float literal into 0 under MRB_NO_FLOAT, so no FLOAT pool entry exists there; static_assert
+        # keeps a stray one from compiling into a silent wrong value (static_assert, not #error: #error marks code as unsupported in every build).
+        "#ifndef MRB_NO_FLOAT\n  #{RegName[d]} = mrb_float_value(M, #{lit});\n#else\n  static_assert(0, \"float literal in a no-Float build\");\n#endif\n"
       elsif entry.is_a?(Hash) && entry[:type] == :bigint && entry[:digits].match?(/\A[0-9a-zA-Z]{1,255}\z/)
         # LOADL_BIGINT: rebuilt from its digits as OP_LOADL does, never
         # from a 64-bit C constant a 32-bit mrb_int target could not hold.

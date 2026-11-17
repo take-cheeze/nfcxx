@@ -244,7 +244,9 @@ class CodeGen
                  else
                    dynamic_dispatch_line(d, recv, name, argv)
                  end
+      # No Float arm in a no-Float build: mrb_float_p is FALSE there, so the send is the only path left.
       return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, guarded by exact Float type\n" \
+             "  #ifndef MRB_NO_FLOAT\n" \
              "  #ifdef MRB_USE_COMPLEX\n" \
              "  if (mrb_float_p(#{recv}) && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
              "  #else\n" \
@@ -253,7 +255,12 @@ class CodeGen
              "    #{RegName[d]} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
              "  } else {\n" \
              "    #{fallback.chomp}\n" \
-             "  }\n"
+             "  }\n" \
+             "  #else\n" \
+             "  {\n" \
+             "    #{fallback.chomp}\n" \
+             "  }\n" \
+             "  #endif\n"
     end
 
     # Devirtualize `:new` when either bytecode traces its class constant or the
