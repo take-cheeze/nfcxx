@@ -3355,6 +3355,14 @@ use_problem = lambda do |name, use|
     @all_fs_values ||= @files.keys.inject(Set.new) { |acc, fr| acc | file_scope_value_names(fr) }
   end
 
+  # the names declared as a VALUE pointer (VALUE *p, mrb_value *p) in a function's parameters and body
+  def value_pointer_names(fn)
+    text = @files[fn['file']]['text']
+    body = psl(text, fn['brace'], fn['body_end'] + 1).to_s
+    params = fn['params'].to_s
+    (body + ' ' + params).scan(/\b(?:VALUE|mrb_value)\s*\*\s*([A-Za-z_]\w*)/).flatten.to_set
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -3376,7 +3384,12 @@ use_problem = lambda do |name, use|
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
         # a comparison with a definite VALUE (a Q constant or an mrb_*_value call) compares VALUEs: the other operand is one too
         # (CRuby compares VALUEs with ==; a member whose name is declared differently in other structs is not judged by name)
-        strong = ->(t) { t.strip.match?(/\AQ(?:nil|true|false|undef)\z/) || t.strip.match?(/\Amrb_\w*_value\s*\(/) }
+        strong = ->(t) { t.strip.match?(/\AQ(?:nil|true|false|undef)\z/) || t.strip.match?(/\Amrb_\w*_value\s*\(/) ||
+                         (t.strip.match?(/\A[A-Za-z_]\w*\z/) && (e_s = @entries[t.strip]).is_a?(Hash) && e_s['kind'] == 'expr' &&
+                          e_s['mruby'].to_s.match?(CLASS_EXPR_RE)) }
+        # a dereference of a VALUE pointer (VALUE *argv, mrb_value *p) is a VALUE
+        value_ptr = fn ? value_pointer_names(fn) : Set.new
+        value_names = value_names | value_ptr.map { |n| "*#{n}" }
         next unless (value_operand?(l_text, value_names, vfields, rel, op_s) || strong.call(r_text)) &&
                     (value_operand?(r_text, value_names, vfields, rel, op_s) || strong.call(l_text))
         # the insertions must not fall strictly inside another edit
@@ -3474,6 +3487,7 @@ use_problem = lambda do |name, use|
     t = t.strip
     return true if t.match?(/\AQ(?:nil|true|false|undef)\z/)
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && value_names.include?(t)
+    return true if t.match?(/\A\*\s*[A-Za-z_]\w*\z/) && value_names.include?(t.delete(' \t'))
     return true if t.match?(/\A[A-Za-z_]\w*\z/) && @class_vars.include?(t)
     # a class constant (rb_cObject, mrb->object_class) outside a class argument is its VALUE (mrb_obj_value)
     if t.match?(/\A[A-Za-z_]\w*\z/) && (e = @entries[t]).is_a?(Hash) && e['kind'] == 'expr' && e['mruby'].to_s.match?(CLASS_EXPR_RE)
