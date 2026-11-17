@@ -36,7 +36,7 @@ run() {
   local side=$1 sb=$2 setup=$3 src
   src=$here/oracle.sh; [ "$side" = thin ] && src=$work/thin.sh
   local log=$work/$side.stublog; : > "$log"
-  local prelude="set -euo pipefail; root=$sb; RUBY=$ruby_bin; NFCXX_STUB_LOG=$log; NFCXX_CU_CACHE=$sb/cache; source $src"
+  local prelude="set -euo pipefail; root=$sb; RUBY=$ruby_bin; NFCXX_STUB_LOG=$log; export NFCXX_CU_CACHE=$sb/cache; source $src"
   local err rc
   err=$( cd "$sb" && bash -c "$prelude; cudatmp=$sb/tmp; $setup; cpp2_prepare; echo \"srcs \${srcs[*]:-}\"; echo \"files \${files[*]:-}\"; echo \"cflags \${cflags[*]:-}\"; for f in \${cpp2_copies_seen[@]:-}; do :; done" 2>&1 >"$work/$side.out"); rc=$?
   { printf 'status %s\n' "$rc"; cat "$work/$side.out"; printf 'stderr %s\n' "$err"; echo "stub:"; cat "$log"; } \
@@ -60,6 +60,23 @@ case_ "-c without -o: the object is named after the input" 'cpp2_inputs=(src/a.c
 case_ "cppfront fails: the driver stops with its status, the later inputs are not run" 'cpp2_inputs=(src/fail.cpp2 z.cpp2); srcs=(src/fail.cpp2 z.cpp2); files=(); cflags=(); compile_only=0; out=a.out; outset=0; ncpp=2'
 case_ "a source directory that does not exist" 'cpp2_inputs=(nodir/a.cpp2); srcs=(nodir/a.cpp2); files=(); cflags=(); compile_only=0; out=a.out; outset=0; ncpp=1'
 case_ "a bare file name (its directory is the root)" 'cpp2_inputs=(z.cpp2); srcs=(z.cpp2); files=(); cflags=(); compile_only=0; out=a.out; outset=0; ncpp=1'
+
+# the cache directory of a -c compile (the bash's key was the SHA-1 of realpath -m OBJ, through sha1sum): the port's directory
+# must equal the bash's for objects that exist, do not exist, sit under a symbolic link and have a relative name
+ln -s "$work" "$work/link"
+keys_ok=1
+for obj in "$work/sb/obj/prog.o" "$work/no/such/dir/x.o" "$work/link/sb/obj/prog.o" "rel/x.o" "./a.o"; do
+  want=$(NFCXX_CU_CACHE=$work/cache sh -c 'realpath -m "$1" | sha1sum | cut -c1-16' sh "$obj")
+  got=$(NFCXX_CU_CACHE=$work/cache ruby "$repo/scripts/nfcxx-cpp2.rb" --cpp2-dir="$obj")
+  [ "$got" = "$work/cache/cpp2/$want" ] || { keys_ok=0; echo "  cpp2-dir: $obj: got $got, want $work/cache/cpp2/$want"; }
+done
+if [ "$keys_ok" = 1 ]; then pass=$((pass + 1)); echo "ok   cpp2-dir key matches realpath -m | sha1sum"
+else fail=$((fail + 1)); echo "FAIL cpp2-dir key matches realpath -m | sha1sum"; fi
+# the default cache (no NFCXX_CU_CACHE): XDG_CACHE_HOME, then HOME/.cache
+a=$(env -u NFCXX_CU_CACHE XDG_CACHE_HOME=/x/c ruby "$repo/scripts/nfcxx-cpp2.rb" --cpp2-dir=o.o)
+b=$(env -u NFCXX_CU_CACHE -u XDG_CACHE_HOME HOME=/x/h ruby "$repo/scripts/nfcxx-cpp2.rb" --cpp2-dir=o.o)
+if [ "$a" = "/x/c/nfcxx/cpp2/${a##*/}" ] && [ "$b" = "/x/h/.cache/nfcxx/cpp2/${b##*/}" ]; then pass=$((pass + 1)); echo "ok   cpp2-dir default cache"
+else fail=$((fail + 1)); echo "FAIL cpp2-dir default cache: $a $b"; fi
 
 echo "cpp2-prepare: $pass passed, $fail failed"
 [ "$fail" = 0 ]
