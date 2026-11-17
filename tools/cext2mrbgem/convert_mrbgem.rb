@@ -3398,6 +3398,34 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the body of each function definition whose parameter list has no mrb_state *mrb: mrb-> becomes the global state's ->
+  def global_mrb_arrows(text, gname)
+    out = text.dup
+    spans = []
+    text.to_enum(:scan, /^[A-Za-z_][^\n;{}()]*\([^;{}]*\)[ \t]*\{/).each do
+      m = Regexp.last_match
+      next if m[0].include?('mrb_state')
+      open = m.end(0) - 1
+      depth = 0
+      k = open
+      while k < text.length
+        c = text[k]
+        if c == '{' then depth += 1
+        elsif c == '}'
+          depth -= 1
+          break if depth.zero?
+        end
+        k += 1
+      end
+      spans << [open, k] if k < text.length
+    end
+    spans.reverse_each do |a, b|
+      body = out[a..b]
+      out[a..b] = body.gsub(/(?<![\w$.>])mrb->/, "#{gname}->")
+    end
+    out
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -6092,6 +6120,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     FileUtils.mkdir_p(inc_dir)
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
+    # a function without the state parameter reads the gem's state global: a literal mrb-> (from a template's class argument)
+    # in its body names that global (the global-state functions are the ones that have no mrb parameter)
+    if @global_wrap
+      @files.each do |rel, f|
+        next unless f['kind'] == 'src'
+        outputs[rel] = global_mrb_arrows(outputs[rel], @global_name)
+      end
+    end
     # a converted source that uses mruby names includes the mruby headers itself (gem_init.c has its own include)
     prelude_headers = %w[mruby.h mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h
                          mruby/numeric.h mruby/range.h mruby/string.h mruby/variable.h]
