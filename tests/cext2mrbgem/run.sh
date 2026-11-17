@@ -1436,6 +1436,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_gc_addr_cls tools/cext2mrbge
 check test -e "$work/api_gc_addr_cls/NOT_BUILDABLE"
 check grep -qF 'stuck point (GC root): the address of an owned class variable' "$work/api_gc_addr_cls/REFUSALS.txt"
 check bash -c "! grep -rqF '&mrb_obj_value(' '$work/api_gc_addr_cls'"
+# 2zzz121. an ID pointer declared in a function body (ID *idp) is an mrb_sym pointer, as an ID variable is (the declaration
+# test takes the * with or without spaces).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_ptr tools/cext2mrbgem/fixtures/api_id_ptr/ext/api_id_ptr "$work/api_id_ptr" > "$work/api_id_ptr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_id_ptr/NOT_BUILDABLE"
+check grep -qF 'mrb_sym *idp;' "$work/api_id_ptr/src/api_id_ptr.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

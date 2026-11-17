@@ -3828,7 +3828,8 @@ end
         end
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
-        next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}(?:[A-Za-z_]|\*#{SS1}[A-Za-z_])/)
+        # an ID declaration: `ID x` or `ID *x` (the spaces around the * are optional; the match is on the text after the type)
+        next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A[#{WSP}]*(?:[A-Za-z_]|\*[#{WSP}]*[A-Za-z_])/)
         # a declaration of ID variables that are all assigned ID2SYM(...) holds a symbol VALUE (CRuby keeps it in an ID-typed
         # variable): it is an mrb_value, as ID2SYM is mrb_symbol_value
         if name == 'ID' && symbol_value_decl?(rel, e)
