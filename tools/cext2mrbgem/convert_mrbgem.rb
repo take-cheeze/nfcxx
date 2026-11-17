@@ -3350,6 +3350,11 @@ use_problem = lambda do |name, use|
   # A == or != between two VALUE expressions that the other passes do not rewrite whole (a call, a dereference, an assignment in
   # parentheses, a function result): CRuby compares VALUEs by identity, which is mrb_value_identical (stateless, in the fork). The
   # operands keep their own rewrites; only the operator and the two ends of the comparison are edited (insertions).
+  # the file-scope VALUE names of every file (a global VALUE, declared extern in a header, is a VALUE in each file)
+  def all_file_scope_value_names
+    @all_fs_values ||= @files.keys.inject(Set.new) { |acc, fr| acc | file_scope_value_names(fr) }
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -3365,7 +3370,7 @@ use_problem = lambda do |name, use|
         next if @edits[rel].overlaps(op_s, op_e)
         fn = enclosing_func(rel, op_s)
         next unless fn
-        value_names = value_names_of(fn) | file_scope_value_names(rel)
+        value_names = value_names_of(fn) | all_file_scope_value_names
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
