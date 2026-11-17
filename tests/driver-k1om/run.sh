@@ -1,5 +1,5 @@
 #!/bin/bash
-# scripts/nfcxx-k1om.rb plan must leave the state the bash k1om block of nfcxx leaves (verbatim below): backend, the k1om root and
+# scripts/nfcxx-k1om-env.rb plan must leave the state the bash k1om block of nfcxx leaves (verbatim below): backend, the k1om root and
 # the exports, or the refusal (message and status), for each target, freestanding and backend setting, toolchain, runtime and
 # NFCXX_K1OM_ROOT setting.   bash tests/driver-k1om/run.sh
 here=$(cd "$(dirname "$0")" && pwd -P); repo=$(cd "$here/../.." && pwd -P)
@@ -21,7 +21,7 @@ state() {
   if [ "$1" = bash ]; then
     out=$( bash_block 2>"$t/err" && printf 'backend=%s gcc=%s as=%s k1om=%s' "$backend" "${NFCXX_GCC:-}" "${NFCXX_AS:-}" "${NFCXX_K1OM_ROOT:-}" ); rc=$?
   else
-    out=$(ruby "$repo/scripts/nfcxx-k1om.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root" 2>"$t/err"); rc=$?
+    out=$(ruby "$repo/scripts/nfcxx-k1om-env.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root" 2>"$t/err"); rc=$?
     if [ $rc = 0 ]; then [ -n "$out" ] && eval "$out"; out="backend=$backend gcc=${NFCXX_GCC:-} as=${NFCXX_AS:-} k1om=${NFCXX_K1OM_ROOT:-}"; fi
   fi
   printf 'status=%s %s | %s\n' "$rc" "$out" "$(cat "$t/err")"

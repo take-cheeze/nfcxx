@@ -566,8 +566,8 @@ eval "$gnu_sh"
 # --target=linux_k1om: Intel Knights Corner (k1om). The front end lays out the program for the build host (LP64, the
 # same sizes as k1om); the C is compiled and linked by the k1om GCC 5.1.1 (scripts/k1om-cc.rb) with the k1om assembler and
 # runtime (scripts/setup-k1om.sh). Freestanding and the gcc backend only: the k1om toolchain is GCC's.
-# --target=linux_k1om: the k1om toolchain and runtime, the gcc backend (scripts/nfcxx-k1om.rb plan, restructure step 3).
-k1om_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-k1om.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root") || exit $?
+# --target=linux_k1om: the k1om toolchain and runtime, the gcc backend (scripts/nfcxx-k1om-env.rb plan, restructure step 3).
+k1om_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-k1om-env.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root") || exit $?
 [ -z "$k1om_sh" ] || eval "$k1om_sh"
 if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
   [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
