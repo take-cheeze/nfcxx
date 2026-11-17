@@ -1259,6 +1259,23 @@ texts = static_rename(texts)
     [ops, m.begin(1), op == '!=']
   end
 
+  # true when the declaration of ID variables at e (ID a, b, c;) names only variables that are assigned ID2SYM(...) somewhere
+  # in the input (their value is a symbol VALUE), with no other declarator and no initializer that is not ID2SYM
+  def symbol_value_decl?(rel, e)
+    @symbol_vars ||= begin
+      sv = Set.new
+      @files.each_value { |f| f['masked'].scan(/(?<![#{WC}$.>])([A-Za-z_]\w*)[ \t\n]*=[ \t\n]*ID2SYM\(/) { sv << $1 } }
+      sv
+    end
+    masked = @files[rel]['masked']
+    stop = masked.index(';', e)
+    return false if stop.nil?
+    decl = masked[e...stop]
+    return false if decl.include?('(') || decl.include?('{')
+    names = decl.split(',').map { |x| x.strip[/\A[A-Za-z_]\w*/] }
+    !names.empty? && names.all? { |n| n && @symbol_vars.include?(n) }
+  end
+
   def local_shadows_class_var?(name, fn)
     return true if param_names(fn).include?(name)
     masked = @files[fn['file']]['masked']
@@ -3641,6 +3658,13 @@ end
         map_entry(rel, s, e, name, entry)
       elsif @types.key?(name)
         next if name == 'ID' && !(psl(masked, e, e + 40) =~ /\A#{SS1}(?:[A-Za-z_]|\*#{SS1}[A-Za-z_])/)
+        # a declaration of ID variables that are all assigned ID2SYM(...) holds a symbol VALUE (CRuby keeps it in an ID-typed
+        # variable): it is an mrb_value, as ID2SYM is mrb_symbol_value
+        if name == 'ID' && symbol_value_decl?(rel, e)
+          ed.add(s, e, 'mrb_value')
+          rewrite(rel, s, name, 'mrb_value', 'an ID variable assigned ID2SYM holds a symbol value: mrb_value')
+          next
+        end
         ed.add(s, e, @types[name])
         rewrite(rel, s, name, @types[name])
       elsif UNKNOWN_RE.match?(name) && !local_syms.include?(name) &&
