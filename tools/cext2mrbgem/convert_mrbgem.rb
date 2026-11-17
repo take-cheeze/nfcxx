@@ -404,7 +404,8 @@ end
 def map_types(s, types)
   types.each do |ctype, mtype|
     if ctype == 'ID'
-      s = s.gsub(/(?<![#{WC}])ID(?![#{WC}])(?=[#{WSP}]+[A-Za-z_])/) { mtype }
+      # ID as a declared type: followed by a name, or alone (a return type before the name is written separately)
+      s = s.gsub(/(?<![#{WC}])ID(?![#{WC}])(?=[#{WSP}]+[A-Za-z_]|\z)/) { mtype }
     else
       s = s.gsub(/(?<![#{WC}])#{Regexp.escape(ctype)}(?![#{WC}])/) { mtype }
     end
@@ -3326,6 +3327,24 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # A prototype in a header that is copied (not converted, since several sources include it) still has CRuby types: its type
+  # names are mapped with the same type map (ID -> mrb_sym, VALUE -> mrb_value, ...), unless another pass edits it.
+  def header_prototype_types_pass
+    @files.each do |rel, f|
+      next if f['kind'] == 'src'
+      text = f['text']
+      @decls.each do |d|
+        next unless d['file'] == rel && d['proto'] && d['hstart'] && d['hend']
+        a = d['hstart']
+        b = d['hend']
+        next if @edits[rel].overlaps(a, b)
+        decl = psl(text, a, b)
+        mapped = map_types(decl, @types)
+        @edits[rel].add(a, b, mapped) if mapped != decl
+      end
+    end
+  end
+
   # A == or != between two VALUE expressions that the other passes do not rewrite whole (a call, a dereference, an assignment in
   # parentheses, a function result): CRuby compares VALUEs by identity, which is mrb_value_identical (stateless, in the fork). The
   # operands keep their own rewrites; only the operator and the two ends of the comparison are edited (insertions).
@@ -6087,6 +6106,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
     value_compare_wrap_pass
+    header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
     @dead_inits.each do |d|
