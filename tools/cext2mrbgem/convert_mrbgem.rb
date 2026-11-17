@@ -1256,7 +1256,11 @@ texts = static_rename(texts)
       return true
     end
     masked = @files[fn['file']]['masked']
-    !(psl(masked, fn['brace'], fn['body_end'] + 1) =~ /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/).nil?
+    text = psl(masked, fn['brace'], fn['body_end'] + 1)
+    return false unless text.match?(/(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/)
+    # a function that also assigns the name a value that is not a class definition (Qundef, a lookup) holds an mrb_value:
+    # an RClass * cannot take it
+    !text.match?(/(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=(?!=)(?>#{SS})(?!rb_define_(?:class|module)(?:_under)?#{SS}\()/)
   end
 
   # for a Q constant at s that is the right operand of == or !=: [operator position, left operand start, negated?] when the
@@ -2383,7 +2387,6 @@ forced = (@reg_names - @split_names) | Set.new(@init_defs.map { |d| d['name'] })
       # the function that calls an ok field passes it the state (edit_fnptr_fields): it needs the state too
       r[:calls].each { |_, cfn, _| forced << cfn if r[:ok] && cfn && @defs.key?(cfn) }
     end
-    (@fnptr_recs || []).each { |r| warn "DBG2 owner=#{r[:owner].inspect} name=#{r[:name]} ok=#{r[:ok].inspect} pidx=#{r[:pidx].inspect} assigns=#{r[:assigns].inspect} calls=#{r[:calls].map { |c| c[1..] }.inspect}" } if ENV['NR_DEBUG']
     @fnptr_assign_pos = Set.new(@fnptr_recs.select { |r| r[:ok] }.flat_map { |r| r[:assigns].map { |_, frel, hp| [frel, hp] } })
 # a data type's mark and free functions are called by the runtime with (mrb, data): they are threaded like helpers
 @dtype_cb_pos = Set.new
@@ -2866,7 +2869,6 @@ use_problem = lambda do |name, use|
       ed.add(plan[:end], plan[:end], "); #{@global_name} = nfcx_bc2_old; return nfcx_bc2_ret; }")
     end
     @global_wrap = !gset.empty? || @global_macro_spans.any? { |_r, l| !l.empty? }
-    warn "DBGW gset=#{gset.to_a} spans=#{@global_macro_spans.values.map(&:size)} threaded=#{(@threaded_cands||Set.new).to_a}" if ENV['NR_DEBUG']
     if @global_wrap
       # a macro that expands a return skips the restore of a registered method or Init that expands it (wrap_returns
       # only sees return statements written in the body). Such a use is refused; the macro's own body is not changed.
@@ -4454,6 +4456,22 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           ed.add(ca, cb, "mrb_class_ptr(#{at})")
         end
       end
+      # a class-returning call (rb_define_class_under, ...) assigned to a VALUE name of the function is a VALUE: mruby's
+      # definition returns struct RClass *, which an mrb_value cannot take. An owned class variable (struct RClass *) is not
+      # wrapped: its assignment is a class assignment.
+      if entry['returns'] == 'class'
+        cpr = match_close(@files[rel]['masked'], nxt)
+        eqr = prev_nonspace(@files[rel]['masked'], s - 1)
+        lhs_m = eqr >= 0 && @files[rel]['masked'][eqr] == '=' && !(eqr > 0 && '=!<>'.include?(@files[rel]['masked'][eqr - 1])) &&
+                @files[rel]['masked'][0...eqr].match(/(?<![#{WC}])([A-Za-z_][#{WC}]*)\s*\z/)
+        fnr = enclosing_func(rel, s)
+        if cpr > 0 && lhs_m && fnr && value_names_of(fnr).include?(lhs_m[1]) &&
+           !(@class_vars.include?(lhs_m[1]) && owns_class_var?(rel, s, lhs_m[1]))
+          ed.add(s, s, 'mrb_obj_value(')
+          ed.add(cpr + 1, cpr + 1, ')')
+          rewrite(rel, s, name, 'mrb_obj_value(...)', 'a class definition assigned to a VALUE: the class is its VALUE (mrb_obj_value)')
+        end
+      end
       if entry['gc_mark_context']
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
@@ -5245,8 +5263,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
     obj = psl(text, args[0][0], args[0][1])
     tname = psl(text, args[1][0], args[1][1])
+    # a class variable name is an object only when no local of the function shadows it (then the local is the object)
     if !/\A[A-Za-z_][#{WC}]*\z/.match?(obj) || @entries.key?(obj) || @types.key?(obj) ||
-       @class_vars.include?(obj) || obj == 'mrb'
+       (@class_vars.include?(obj) && !shadowed_local?(rel, obj, s)) || obj == 'mrb'
       refuse(rel, s, 'RB_TYPE_P', "object #{py_repr(obj)} is not a plain local variable (nested names would not be mapped)")
       return
     end

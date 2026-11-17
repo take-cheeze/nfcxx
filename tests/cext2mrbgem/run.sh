@@ -1448,6 +1448,13 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_module_arg tools/cext2mrbgem
 check test "$rc" -eq 0
 check test ! -e "$work/api_module_arg/NOT_BUILDABLE"
 check grep -qF 'mrb_class_inherited_p(mrb, mrb_class_ptr(clas), mrb_module_get(mrb, "Enumerable"))' "$work/api_module_arg/src/api_module_arg.c"
+# 2zzz123. a VALUE local assigned a class definition and also Qundef is an mrb_value, not a struct RClass * (the class
+# definition is wrapped with mrb_obj_value), so the converted function compiles and the Qundef assignment is valid.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_mixed tools/cext2mrbgem/fixtures/api_class_mixed/ext/api_class_mixed "$work/api_class_mixed" > "$work/api_class_mixed.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_mixed/NOT_BUILDABLE"
+check grep -qF 'clas = mrb_obj_value(mrb_define_class_under(' "$work/api_class_mixed/src/api_class_mixed.c"
+check grep -qF 'mrb_value clas;' "$work/api_class_mixed/src/api_class_mixed.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
