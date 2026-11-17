@@ -2668,6 +2668,13 @@
       "template": "nfcx_get_kwargs($m, $0, $1, $2, $3, $4)",
       "caveat": "CRuby's rb_get_kwargs: the values of the listed keywords (Qundef when an optional one is absent); a missing required keyword raises ArgumentError. Unknown keywords are not rejected (a caveat: CRuby rejects them unless the method takes **rest)"
     },
+    "rb_str_dump": {
+      "kind": "template",
+      "arity": 1,
+      "needs_mrb": true,
+      "template": "mrb_funcall_argv($m, $0, mrb_intern_cstr($m, \"dump\"), 0, NULL)",
+      "caveat": "CRuby's rb_str_dump: the String#dump of the string (mruby-string-ext's String#dump, a fork gem). Its escapes follow mruby's, which may differ from CRuby's for non-ASCII bytes"
+    },
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,
