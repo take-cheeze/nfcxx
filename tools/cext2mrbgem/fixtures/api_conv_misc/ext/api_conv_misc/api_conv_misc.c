@@ -43,6 +43,13 @@ m_fatal(VALUE self)
     return Qnil;
 }
 
+/* a global function: a private method of Kernel */
+static VALUE
+m_global(VALUE self)
+{
+    return INT2FIX(7);
+}
+
 void
 Init_api_conv_misc(void)
 {
@@ -53,4 +60,5 @@ Init_api_conv_misc(void)
     rb_define_method(c, "gc_off", m_gc_off, 0);
     rb_define_method(c, "gc_on", m_gc_on, 0);
     rb_define_method(c, "fatal", m_fatal, 0);
+    rb_define_global_function("conv_global", m_global, 0);
 }

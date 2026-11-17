@@ -158,6 +158,12 @@
       "handler": "define_method",
       "needs_mrb": true
     },
+    "rb_define_global_function": {
+      "kind": "special",
+      "handler": "define_method",
+      "needs_mrb": true,
+      "caveat": "a private Kernel method and module function: mrb_define_module_function on mrb->kernel_module (CRuby's rb_define_global_function, which has no target argument)"
+    },
     "rb_define_const": {
       "kind": "special",
       "handler": "define_const",

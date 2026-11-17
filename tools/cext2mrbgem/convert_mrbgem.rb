@@ -96,7 +96,7 @@ IDENT_RE = /(?<![#{WC}$])[A-Za-z_][#{WC}]*/
 C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
-REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function)#{SS}\(/
+REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
 ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern(?:_const)?#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
@@ -861,12 +861,20 @@ texts = static_rename(texts)
           rec['error'] = 'unbalanced parentheses in registration call'
         else
           args = split_args(masked, op, cp)
-          if args.size != 4
-            rec['error'] = "registration call has #{args.size} arguments, expected 4"
+          # rb_define_global_function(name, func, argc) has no target: it defines a Kernel method
+          global = m[1] == 'rb_define_global_function'
+          if args.size != (global ? 3 : 4)
+            rec['error'] = "registration call has #{args.size} arguments, expected #{global ? 3 : 4}"
           else
-            (ts, te), (ns, ne), (fs, fe), (as_, ae) = args
-            rec['target'] = py_strip(psl(text, ts, te))
-            rec['target_span'] = [ts, te]
+            if global
+              (ns, ne), (fs, fe), (as_, ae) = args
+              rec['target'] = 'rb_mKernel'
+            else
+              (ts, te), (ns, ne), (fs, fe), (as_, ae) = args
+              rec['target'] = py_strip(psl(text, ts, te))
+              rec['target_span'] = [ts, te]
+            end
+            rec['name_span'] = [ns, ne]
             nm = /\A"([^"\\\n]*)"\z/.match(py_strip(psl(text, ns, ne)))
             fm = /\A(?:\(#{SS}VALUE#{SS}\(#{SS}\*#{SS}\)#{SS}\(#{SS}ANYARGS#{SS}\)#{SS}\)#{SS})?([A-Za-z_][#{WC}]*)\z/
                  .match(py_strip(psl(text, fs, fe)))
@@ -4417,7 +4425,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       return
     end
     case name
-    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function'
+    when 'rb_define_method', 'rb_define_private_method', 'rb_define_singleton_method', 'rb_define_module_function', 'rb_define_global_function'
       rec = @reg_by_call[[rel, s]]
       if rec.nil? || !called || nxt != rec['open']
         refuse(rel, s, name, 'used without a registration call')
@@ -4428,9 +4436,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         return
       end
       tgt = rec['target']
+      if name == 'rb_define_global_function'
+        # the Kernel module: a private instance method and a module function, as CRuby's global function
+        tgt = 'mrb->kernel_module'
       # CLASS_OF(cls) of a tracked class is its singleton class (CRuby creates it with the class): the target becomes
       # mrb_class_ptr(mrb_singleton_class(...)); the identifier pass skips the CLASS_OF token inside that edit
-      if (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
+      elsif (co = /\ACLASS_OF\(\s*([A-Za-z_]\w*)\s*\)\z/.match(tgt)) && @class_vars.include?(co[1])
         tgt_new = "mrb_class_ptr(mrb_singleton_class(#{mrb_tok(rel, s)}, mrb_obj_value(#{co[1]})))"
         ed.add(*rec['target_span'], tgt_new)
         tgt = tgt_new
@@ -4447,9 +4458,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       new = { 'rb_define_method' => 'mrb_define_method', 'rb_define_private_method' => 'mrb_define_private_method',
               'rb_define_singleton_method' => 'mrb_define_class_method',
-              'rb_define_module_function' => 'mrb_define_module_function' }[name]
+              'rb_define_module_function' => 'mrb_define_module_function',
+              'rb_define_global_function' => 'mrb_define_module_function' }[name]
       ed.add(s, e, new)
-      ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      if name == 'rb_define_global_function'
+        ed.add(rec['name_span'][0], rec['name_span'][0], "#{mrb_tok(rel, s)}, #{tgt}, ")
+      else
+        ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      end
       fs, fe = rec['func_span']
       ed.add(fs, fe, rec['func'])
       as_, ae = rec['argc_span']

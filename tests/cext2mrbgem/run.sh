@@ -1359,7 +1359,8 @@ check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "
 check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
 # 2zzz109. rb_cstr_to_dbl, rb_check_convert_type (with the T_ tag as MRB_TT_), rb_need_block (LocalJumpError without a block),
-# rb_gc_enable / rb_gc_disable (the GC class methods), and rb_fatal (mrb_bug, which exits).
+# rb_gc_enable / rb_gc_disable (the GC class methods), rb_fatal (mrb_bug, which exits), and rb_define_global_function
+# (a module function of mrb->kernel_module).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_conv_misc tools/cext2mrbgem/fixtures/api_conv_misc/ext/api_conv_misc "$work/api_conv_misc" > "$work/api_conv_misc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_conv_misc/NOT_BUILDABLE"
@@ -1369,6 +1370,7 @@ check grep -qF 'mrb_raise(mrb, E_LOCALJUMP_ERROR, "no block given")' "$work/api_
 check grep -qF 'mrb_funcall_argv(mrb, mrb_obj_value(mrb_module_get(mrb, "GC")), mrb_intern_cstr(mrb, "disable"), 0, NULL)' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_intern_cstr(mrb, "enable")' "$work/api_conv_misc/src/api_conv_misc.c"
 check grep -qF 'mrb_bug(mrb, "boom %d", 1)' "$work/api_conv_misc/src/api_conv_misc.c"
+check grep -qF 'mrb_define_module_function(mrb, mrb->kernel_module, "conv_global", m_global, MRB_ARGS_NONE())' "$work/api_conv_misc/src/api_conv_misc.c"
 }
 
 # the regex leg always runs; the libclang leg runs when the library loads
