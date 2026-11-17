@@ -3508,6 +3508,20 @@ use_problem = lambda do |name, use|
     @files.each_key do |rel|
       mv = @files[rel]['masked']
       fs_values = file_scope_value_names(rel)
+      # a struct pointer carried in a VALUE: (VALUE)pi, where pi is declared as a struct pointer (CRuby passes such a pointer as
+      # the data of rb_protect, rb_ensure, rb_hash_foreach)
+      ptr_names = Set.new
+      ptr_re = ptr_typedefs.empty? ? /struct\s+[A-Za-z_]\w*\s*\*+\s*([A-Za-z_]\w*)/ :
+               /(?:struct\s+[A-Za-z_]\w*\s*\*+|\b(?:#{ptr_typedefs.to_a.map { |t| Regexp.escape(t) }.join('|')})\b\s*\**)\s*([A-Za-z_]\w*)/
+      mv.to_enum(:scan, ptr_re).each { ptr_names << Regexp.last_match(1) }
+      mv.to_enum(:scan, /\(\s*(?:VALUE|mrb_value)\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        next unless ptr_names.include?(nm) && !local_value_at?(rel, m.begin(1), nm) && !fs_values.include?(nm)
+        next if in_dead_init(rel, m.begin(1))
+        next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        refuse(rel, m.begin(0), nm, "stuck point (VALUE as pointer): #{nm} is a struct pointer, cast to a VALUE, a struct in the fork (include/mruby/boxing_no.h): a pointer has no VALUE form here")
+      end
       mv.to_enum(:scan, /\(\s*(?:struct\s+[A-Za-z_]\w*\s*\*+|([A-Za-z_]\w*))\s*\)\s*([A-Za-z_]\w*)(?=\s*(?:[;,)\-.\[]|\z))/).each do
         m = Regexp.last_match
         target = m[1]
@@ -3769,6 +3783,12 @@ use_problem = lambda do |name, use|
       return true if ent.is_a?(Hash) && (ent['template'].to_s.start_with?('mrb_obj_value(') || ent['mruby'].to_s.end_with?('_value'))
     end
     if (am = t.match(/\A\(\s*([A-Za-z_]\w*)\s*=/))
+      # the assigned call's result decides: a converted function that returns a non-VALUE (a Leaf pointer, an int) is not one
+      rhs_call = t[am.end(0)..].to_s.match(/\A\s*([A-Za-z_]\w*)\s*\(/)
+      if rhs_call && (rdefs = (@defs[rhs_call[1]] || []).reject { |x| x['proto'] }).any? &&
+         rdefs.none? { |x| x['ret'].to_s.strip == 'VALUE' }
+        return false
+      end
       return true if value_names.include?(am[1])
     end
     false
