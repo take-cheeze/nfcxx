@@ -4902,7 +4902,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       # a VALUE class (a VALUE name or member, not a tracked class variable) is unwrapped: mrb_raisef takes an RClass *
       cls_t = psl(text, args[0][0], args[0][1]).strip
-      if !@class_vars.include?(cls_t) && (cls_t.match?(/\A[A-Za-z_]\w*\z/) && value_names_of(enclosing_func(rel, s) || {}).include?(cls_t) ||
+      # (a tracked class variable that is not owned is an mrb_value too: its class pointer is taken)
+      if (@class_vars.include?(cls_t) && !owns_class_var?(rel, args[0][0], cls_t)) || !@class_vars.include?(cls_t) && (cls_t.match?(/\A[A-Za-z_]\w*\z/) && (value_names_of(enclosing_func(rel, s) || {}).include?(cls_t) || @files.keys.any? { |fr| file_scope_value_names(fr).include?(cls_t) }) ||
                                        cls_t.match?(/(?:->|\.)[A-Za-z_]\w*\z/) && value_field_names.include?(cls_t[/([A-Za-z_]\w*)\z/]))
         ed.add(args[0][0], args[0][1], "mrb_class_ptr(#{cls_t})")
       end
