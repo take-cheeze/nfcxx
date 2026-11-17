@@ -112,14 +112,7 @@ edg=${EDG_BUILD:-$root/build/edg}/bin
 # stack of EH entries before.
 eh_tls=(); [ ! -f "$edg/../eh-tls" ] || eh_tls=(--nfcxx_eh_thread_local)
 
-# The host probes are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced); abs_path is the bash
-# one, which runs once per argument and stays here.
-abs_path() {
-  local d b
-  d=$(dirname "$1"); b=$(basename "$1")
-  if (cd "$d" 2>/dev/null); then (cd "$d" && printf '%s/%s\n' "$(pwd -P)" "$b")
-  else printf '%s\n' "$1"; fi
-}
+# The host probes are scripts/host-sys.rb's (the Ruby port of the functions this driver sourced).
 sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-}; files=()   # empty: chosen below (default_backend)
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
@@ -303,7 +296,7 @@ eccp_plan_input() {  # the records of the eccp command line: the call's arrays a
   state_put sys_inc ${sys_inc[@]+"${sys_inc[@]}"}
   state_put hosted_libs ${hosted_libs[@]+"${hosted_libs[@]}"}; state_put keep_static ${keep_static[@]+"${keep_static[@]}"}
   state_put eh_unwind ${eh_unwind[@]+"${eh_unwind[@]}"}; state_put picopts ${picopts[@]+"${picopts[@]}"}
-  state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put pre_opts ${pre_opts[@]+"${pre_opts[@]}"}
+  state_put cobjs ${cobjs[@]+"${cobjs[@]}"}; state_put preinc ${preinc[@]+"${preinc[@]}"}
   state_put cuda_opts ${cuda_opts[@]+"${cuda_opts[@]}"}
   state_put shim ${shim[@]+"${shim[@]}"}; state_put vlart ${vlart[@]+"${vlart[@]}"}; state_put rtlib ${rtlib[@]+"${rtlib[@]}"}
   state_put moves "$moves"
@@ -499,11 +492,6 @@ fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
 ecp_args ${sysdirs[@]+"${sysdirs[@]}"}
 for d in ${ecp_list[@]+"${ecp_list[@]}"}; do sys_inc+=("--sys_include=$d"); done
-# -include FILE is found through the include directories as well as here, so it is made absolute only when it exists here.
-pre_opts=(); for f in ${preinc[@]+${preinc[@]+"${preinc[@]}"}}; do
-  if [ $moves = 1 ] && [ -e "$f" ]; then f=$(abs_path "$f"); fi
-  pre_opts+=(--preinclude "$f")
-done
 # The host-platform cflags (Path B on macOS and Linux aarch64, and the __AARCH64EL__ define on hosted Linux aarch64): the rules are
 # scripts/nfcxx-host-cflags.rb plan (stage B3), with the reasons beside them there.
 eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-cflags.rb" plan backend="$backend" freestanding="$freestanding" sys="$(uname -s)" mach="$(uname -m)" root="$root")"
