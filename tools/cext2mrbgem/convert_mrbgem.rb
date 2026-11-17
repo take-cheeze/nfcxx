@@ -4756,12 +4756,16 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       name ||= @id_literals[id_text] if id_text.match?(/\A[#{WC}]+\z/)
     # SYM2ID(x) with x a Symbol value (a method name held at run time): the ID is that symbol (mrb_symbol), as in CRuby
     sym_m = name.nil? && /\ASYM2ID\(\s*([A-Za-z_][#{WC}]*)\s*\)\z/.match(id_text)
-    if name.nil? && !sym_m
+    # an ID that is a variable, a pointer or array element, or a member (ID i; ID *idp; odd->attrs[k]) is already a symbol: every
+    # ID declaration is an mrb_sym (the type map), so the expression is passed unchanged
+    id_var = name.nil? && !sym_m && id_text.match?(/\A\*?\s*[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*|\[[^\]]*\])*\z/) &&
+             !@entries.key?(id_text.delete('*').strip)
+    if name.nil? && !sym_m && !id_var
       refuse(rel, s, 'rb_funcall', "the ID #{id_text} is not rb_intern of a string literal or a character (not supported)")
       return
     end
     tok = mrb_tok(rel, s)
-    id_expr = sym_m ? "mrb_symbol(#{sym_m[1]})" : "mrb_intern_cstr(#{tok}, \"#{name}\")"
+    id_expr = sym_m ? "mrb_symbol(#{sym_m[1]})" : (id_var ? id_text : "mrb_intern_cstr(#{tok}, \"#{name}\")")
     n = n_text.to_i
     spans = [[s, nxt + 1], [args[1][0], n.zero? ? args[2][1] : args[3][0]]]
     spans << [cp, cp + 1] if n.positive?
@@ -4776,8 +4780,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       ed.add(args[1][0], args[3][0], "#{id_expr}, #{n}, (mrb_value[]){")
       ed.add(cp, cp + 1, '})')
     end
-    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., #{sym_m ? "mrb_symbol(#{sym_m[1]})" : "\"#{name}\""}, #{n}, ...)",
+    rewrite(rel, s, 'rb_funcall', "mrb_funcall_argv(#{tok}, ..., #{id_expr}, #{n}, ...)",
             sym_m ? 'the method name is the Symbol value of the SYM2ID argument (mrb_symbol)' \
+                  : id_var ? 'the method name is an ID already converted to a symbol (mrb_sym), passed unchanged' \
                   : 'the receiver and arguments are unchanged; the method name is an interned C string (mrb_funcall_argv)')
   end
 

@@ -33,6 +33,14 @@ qcc_reset(struct qcc_holder *q)
     return q->t != 0 ? Qtrue : Qfalse;
 }
 
+/* a method called by an ID held in a variable (an mrb_sym after conversion) */
+static VALUE
+m_call_id(VALUE self, VALUE target)
+{
+    ID mid = rb_intern("to_s");
+    return rb_funcall(target, mid, 0);
+}
+
 void
 Init_api_q_call_cmp(void)
 {
@@ -41,4 +49,5 @@ Init_api_q_call_cmp(void)
     sym_key = ID2SYM(rb_intern("key"));
     saved_nil = Qnil;
     rb_define_method(c, "key", m_key, 1);
+    rb_define_method(c, "call_id", m_call_id, 1);
 }

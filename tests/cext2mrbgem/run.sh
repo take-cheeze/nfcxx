@@ -205,12 +205,11 @@ check grep -qF 'mrb_full_gc(mrb)' "$work/api_alloc_alias/src/api_alloc_alias.c"
 check grep -qF 'mrb_alias_method(mrb, mAl, ia, ib)' "$work/api_alloc_alias/src/api_alloc_alias.c"
 
 # 2zzz15. an ID variable written once in the gem from rb_intern of a literal names that literal in a call (mrb_intern_cstr);
-# one written twice is refused, because its value depends on the write order.
+# an ID variable written twice is already an mrb_sym whatever its write order, so the call passes it unchanged.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_id_global tools/cext2mrbgem/fixtures/api_id_global/ext/api_id_global "$work/api_id_global" > "$work/api_id_global.log" 2>&1 || rc=$?
-check test "$rc" -eq 2
+check test "$rc" -eq 0
 check grep -qF 'mrb_funcall_argv(mrb, obj, mrb_intern_cstr(mrb, "hello"), 1, (mrb_value[]){arg});' "$work/api_id_global/src/api_id_global.c"
-check grep -qF 'REFUSED: rb_funcall */ rb_funcall(obj, id_twice, 1, arg);' "$work/api_id_global/src/api_id_global.c"
-check grep -qF 'id_twice is not rb_intern of a string literal' "$work/api_id_global/REFUSALS.txt"
+check grep -qF 'mrb_funcall_argv(mrb, obj, id_twice, 1, (mrb_value[]){arg});' "$work/api_id_global/src/api_id_global.c"
 
 # 2zzz16. a comparison with Qundef inside a condition that also has NIL_P: the Qundef rewrite is part of the comparison,
 # so the comparison is converted (mrb_obj_equal with mrb_undef_value()), not refused as overlapping a rewrite.
@@ -1375,6 +1374,7 @@ check grep -qF 'static mrb_bool nfcx_is_nil(mrb_value v) { return mrb_nil_p(v); 
 check grep -qF 'if (nfcx_is_nil(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'if (!nfcx_is_false(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value sym_key;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'mrb_funcall_argv(mrb, target, mid, 0, NULL)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'mrb_hash_get(mrb, h, sym_key)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value saved_nil ;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'saved_nil = mrb_nil_value();' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
