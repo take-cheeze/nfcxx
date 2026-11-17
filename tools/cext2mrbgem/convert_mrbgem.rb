@@ -3477,6 +3477,11 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # the template uses mrb_class_ptr($k) on argument k (the argument is a VALUE there)
+  def out_tmpl_uses_class_ptr?(tmpl, k)
+    tmpl.to_s.include?("mrb_class_ptr($#{k})")
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -4838,7 +4843,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         t = texts[k].delete('&')
         # a class argument that the map turns into an RClass * expression (rb_cHash -> mrb->hash_class): the expression
         if class_args.include?(k) && !@class_vars.include?(t) && class_expr_ok.call(t)
-          @entries[t]['mruby']
+          # the template takes the argument as a VALUE and applies mrb_class_ptr to it: the class expression is that VALUE
+          if out_tmpl_uses_class_ptr?(entry['template'], k)
+            "mrb_obj_value(#{@entries[t]['mruby']})"
+          else
+            @entries[t]['mruby']
+          end
         elsif class_args.include?(k) && value_class.call(t)
           "mrb_class_ptr(#{t})"
         elsif entry['class_var_value'] && @class_vars.include?(t)
@@ -4850,6 +4860,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         elsif (idl = /\Arb_intern\(\s*"([^"\\]*)"\s*\)\z/.match(texts[k].strip))
           # an ID argument written inline: the symbol of the literal (rb_intern("lit") -> mrb_intern_cstr)
           "mrb_intern_cstr(#{mrb_tok(rel, s)}, \"#{idl[1]}\")"
+        elsif (qe = { 'Qnil' => 'mrb_nil_value()', 'Qtrue' => 'mrb_true_value()', 'Qfalse' => 'mrb_false_value()', 'Qundef' => 'mrb_undef_value()' }[texts[k].strip])
+          # a Q constant argument of a template is its value (the template copies the argument text)
+          qe
         else
           texts[k]
         end
