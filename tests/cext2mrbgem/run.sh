@@ -1299,7 +1299,7 @@ check grep -qF 'return mret_make(mrb, s);' "$work/api_macro_return/src/api_macro
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_int_return tools/cext2mrbgem/fixtures/api_int_return/ext/api_int_return "$work/api_int_return" > "$work/api_int_return.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/api_int_return/NOT_BUILDABLE"
-check grep -q "returns ir_sub's int as a VALUE" "$work/api_int_return/REFUSALS.txt"
+check grep -q "stuck point (source bug): returns ir_sub's int from a function that returns VALUE" "$work/api_int_return/REFUSALS.txt"
 if [ -n "${NFCX_MRUBY_INCLUDE:-}" ]; then
 rc=0; NFCX_MRUBY_INCLUDE="$NFCX_MRUBY_INCLUDE" "$rb" "$conv" --scanner "$scanner" --name api_value_eq_cc tools/cext2mrbgem/fixtures/api_value_eq/ext/api_value_eq "$work/api_value_eq_cc" > "$work/api_value_eq_cc.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
@@ -1376,6 +1376,13 @@ check grep -qF 'if (nfcx_is_nil(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/s
 check grep -qF 'if (!nfcx_is_false(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value sym_key;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'mrb_hash_get(mrb, h, sym_key)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+# 2zzz113. a name pasted by a local macro is not a refused CRuby name; RUBY_TYPED_DEFAULT_FREE is mrb_free; a data type's
+# mark callback is threaded (its initializer position is the identifier's, so the initializer use is not an escape).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_mark tools/cext2mrbgem/fixtures/api_dtype_mark/ext/api_dtype_mark "$work/api_dtype_mark" > "$work/api_dtype_mark.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_dtype_mark/NOT_BUILDABLE"
+check grep -qF 'static void holder_mark(mrb_state *mrb, void *ptr) {' "$work/api_dtype_mark/src/api_dtype_mark.c"
+check grep -qF 'mrb_free' "$work/api_dtype_mark/src/api_dtype_mark.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

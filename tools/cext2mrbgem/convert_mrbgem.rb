@@ -1276,6 +1276,25 @@ texts = static_rename(texts)
     !names.empty? && names.all? { |n| n && @symbol_vars.include?(n) }
   end
 
+  # the first argument of a statement-level call of a local macro, when it is an all-caps name the input's macro pastes into a
+  # declaration (DEF_MAX_LENGTH(REQUEST_URI, 1024) declares MAX_REQUEST_URI_LENGTH): not a CRuby name (no api_map entry, no
+  # CRuby prefix), so it is not an unknown name to refuse
+  def local_macro_arg_names
+    @local_macro_arg_names ||= begin
+      out = Set.new
+      @files.each_value do |f|
+        f['masked'].scan(/^[ \t]*([A-Za-z_]\w*)[ \t]*\(([^()\n;]*)\)[ \t]*;/) do
+          next unless @local_macros.include?($1)
+          first = $2.split(',').first.to_s.strip
+          next unless first.match?(/\A[A-Z][A-Z0-9_]*\z/)
+          next if @entries.key?(first) || first.match?(/\A(?:RUBY_|RB_|RSTRING|RARRAY|RHASH|RTYPEDDATA|RBASIC|RDATA|Q[a-z]|T_|ID2|SYM2|FIX|INT2|NUM2|LONG2|CLASS_OF)/)
+          out << first
+        end
+      end
+      out
+    end
+  end
+
   def local_shadows_class_var?(name, fn)
     return true if param_names(fn).include?(name)
     masked = @files[fn['file']]['masked']
@@ -1449,7 +1468,10 @@ end
     sub.each do |a, b, t|
       mm = t.match(/\A\.\s*([A-Za-z_]\w*)\s*=\s*(.*)\z/m)
       return { 'error' => '.function holds a non-designated element' } unless mm
-      sf[mm[1]] = [a, b, mm[2].strip, a + t.index('=') + 1]
+      # the position of the value's first character (after the '=' and its spaces): the identifier's own position
+      eq = t.index('=')
+      lead = t[(eq + 1)..][/\A\s*/].length
+      sf[mm[1]] = [a, b, mm[2].strip, a + eq + 1 + lead]
     end
     ok_fn = ->(t) { t.match?(/\A[A-Za-z_][#{WC}]*\z/) || t == 'NULL' || t == '0' }
     mark = sf['dmark'] ? sf['dmark'][2] : 'NULL'
@@ -3080,7 +3102,7 @@ use_problem = lambda do |name, use|
         else
           next if fn.nil? || fn['ret'].to_s.strip != 'VALUE'
         end
-        refuse(rel, m.begin(0), callee, "returns #{callee}'s #{ret} as a VALUE: CRuby converts the integer implicitly, mruby's mrb_value is a struct (not supported)")
+        refuse(rel, m.begin(0), callee, "stuck point (source bug): returns #{callee}'s #{ret} from a function that returns VALUE; CRuby converts the int implicitly to a bit pattern that is not a Ruby value (the source does not define the result), and mruby's mrb_value is a struct (accepted stuck point)")
       end
     end
   end
@@ -3531,7 +3553,12 @@ end
       # mrb_free is mruby's library free, already (mrb, data): it needs no threading
       cbs = [info['mark'], info['free']].reject { |n| n == 'NULL' || n == '0' || n == 'mrb_free' }
       unless cbs.all? { |n| @threaded_cands.include?(n) }
-        refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{cbs.reject { |n| @threaded_cands.include?(n) }.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        unthreaded = cbs.reject { |n| @threaded_cands.include?(n) }
+        if unthreaded.all? { |n| openssl_guarded_definition?(n) }
+          refuse(rel, m.begin(0), 'rb_data_type_t', "stuck point (OpenSSL): the mark or free function #{unthreaded.join(', ')} is compiled only with OpenSSL, which mruby has no binding for (accepted stuck point)")
+        else
+          refuse(rel, m.begin(0), 'rb_data_type_t', "the mark or free function #{unthreaded.join(', ')} is not threaded (it does not take the mruby state; see that function's own refusal)")
+        end
         next
       end
       (@dtype_mark_names ||= Set.new) << info['mark'] unless info['mark'] == '0' || info['mark'] == 'NULL'
@@ -3544,7 +3571,7 @@ end
     end
     # 5. identifier pass. Local names: functions the input defines (a prototype alone does not count: it may declare a
     # CRuby API), class variables and the macros the input defines (scan_local_macros).
-    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names
+    local_syms = Set.new(@defs.keys) | @class_vars | @local_macros | local_enumerators | local_file_scope_names | local_macro_arg_names
     body_spans = @defs.values.flatten.select { |d| d['file'] == rel }.map { |d| [d['brace'], d['body_end']] }
     # text-inactive branches (#if 0, a #ifdef of a name this build defines or the gem #defines) are excluded like dead definitions
     text_inactive_spans(rel).each do |a, z|
@@ -4190,7 +4217,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     when 'call'
       unless called
         if name == 'rb_gc_mark'
-          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value, and the fork\'s mrb_data_type has no mark callback (include/mruby/data.h:22-30)')
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is used as a value outside a data type mark callback (the fork calls mrb_data_type.mark with the state, include/mruby/data.h, and marks only there)')
         else
           refuse(rel, s, name, 'used without a call; no expression form in api_map.json')
         end
@@ -4236,8 +4263,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         # rb_gc_mark marks a value for the GC: it is valid only in a data type's mark callback, which the runtime calls
         fn = enclosing_func(rel, s)
         unless fn && mark_context_names.include?(fn['name'])
-          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and the fork\'s mrb_data_type has no mark ' \
-                               'callback (include/mruby/data.h:22-30: only dfree), so the runtime never calls one')
+          refuse(rel, s, name, 'stuck point (GC mark callback): rb_gc_mark is valid only in a data type mark callback, and this function is not one; ' \
+                               'callback here (the fork calls mrb_data_type.mark, include/mruby/data.h, only from the runtime)')
           return
         end
       end
