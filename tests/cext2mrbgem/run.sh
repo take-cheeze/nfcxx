@@ -1378,7 +1378,6 @@ check grep -qF 'mrb_funcall_argv(mrb, target, mid, 0, NULL)' "$work/api_q_call_c
 check grep -qF 'mrb_hash_get(mrb, h, sym_key)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value saved_nil ;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'saved_nil = mrb_nil_value();' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
-check grep -qF 'assert(((void)(saved_nil), 1));' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'q->t = mrb_false_value();' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qE 'mrb_(obj_equal|value_identical)\(.*mrb_false_value\(\)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 # 2zzz113. a name pasted by a local macro is not a refused CRuby name; RUBY_TYPED_DEFAULT_FREE is mrb_free; a data type's

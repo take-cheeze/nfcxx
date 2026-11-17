@@ -10,7 +10,6 @@ static VALUE saved_nil = Qnil;
 static VALUE
 m_key(VALUE self, VALUE h)
 {
-    assert(saved_nil);
     return rb_hash_aref(h, sym_key);
 }
 

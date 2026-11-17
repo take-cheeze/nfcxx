@@ -3204,32 +3204,6 @@ use_problem = lambda do |name, use|
     end
   end
 
-  def value_assert_pass
-    vfields = value_field_names
-    @files.each_key do |rel|
-      masked = @files[rel]['masked']
-      masked.to_enum(:scan, /(?<![#{WC}.>])assert[ \t\n]*\(/).each do
-        m = Regexp.last_match
-        open = m.end(0) - 1
-        close = match_close(masked, open)
-        next if close < 0
-        args = split_args(masked, open, close)
-        next unless args.size == 1
-        a, b = args[0]
-        arg = psl(@files[rel]['text'], a, b).strip
-        fn = enclosing_func(rel, m.begin(0))
-        next unless fn
-        vfield = arg.match?(/\A[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*\z/) && arg.match?(/(?:->|\.)([A-Za-z_]\w*)\z/) &&
-                 vfields.include?(arg[/([A-Za-z_]\w*)\z/])
-        vname = arg.match?(/\A[A-Za-z_]\w*\z/) && (value_names_of(fn).include?(arg) || file_scope_value_names(rel).include?(arg))
-        next unless vfield || vname
-        @edits[rel].add(a, a, '((void)(')
-        @edits[rel].add(b, b, '), 1)')
-        rewrite(rel, m.begin(0), 'assert', "assert(((void)(#{arg}), 1))", 'a VALUE in assert: CRuby tests it is nonzero; mruby has no equivalent, so the check is not made')
-      end
-    end
-  end
-
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
@@ -5520,7 +5494,6 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
-    value_assert_pass
     value_zero_assign_pass
     integer_return_pass
     @dead_inits.each do |d|
