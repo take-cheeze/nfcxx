@@ -1335,6 +1335,12 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_rescue2 tools/cext2mrbgem/fi
 check test "$rc" -eq 0
 check test ! -e "$work/api_rescue2/NOT_BUILDABLE"
 check grep -qF 'mrb_rescue_exceptions(mrb, rs2_body, proc, nfcx_rescue_rs2_recover_' "$work/api_rescue2/src/api_rescue2.c"
+# 2zzz106. a callback stored into a struct field: the parameter, the field and the field's calls all take mrb (field forwarding).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_store_field tools/cext2mrbgem/fixtures/api_store_field/ext/api_store_field "$work/api_store_field" > "$work/api_store_field.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_store_field/NOT_BUILDABLE"
+check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "$work/api_store_field/src/api_store_field.c"
+check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
 }
 
