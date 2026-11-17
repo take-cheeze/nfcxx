@@ -3492,9 +3492,12 @@ use_problem = lambda do |name, use|
   def macro_paste_mrb(text)
     text.gsub(/^#define(?:[^\n]*\\\n)*[^\n]*/) do |blk|
       blk.gsub(/##([A-Za-z_]\w*)\(/) do
-        suffix = Regexp.last_match(1)
+        m = Regexp.last_match
+        # a function head (static ... name##_key(ojParser p)) is a definition, not a call
+        next m[0] if m.pre_match.match?(/\bstatic\b[^(;{}]*\z/)
+        suffix = m[1]
         needs = (@needs || Set.new).any? { |n| n.end_with?(suffix) }
-        needs ? "##{suffix}(mrb, " : Regexp.last_match(0)
+        needs ? '##' + suffix + '(mrb, ' : m[0]
       end
     end
   end
@@ -3807,13 +3810,16 @@ use_problem = lambda do |name, use|
   def value_truth_call_pass
     @files.each_key do |rel|
       masked = @files[rel]['masked']
-      masked.to_enum(:scan, /(?<![#{WC}])(&&|\|\|)[ \t\n]*(?=[A-Za-z_])/).each do
+      # an operand after && or ||, or the first operand of an if or while condition
+      masked.to_enum(:scan, /(?<![#{WC}])((?:&&|\|\|)[ \t\n]*|\b(?:if|while)[ \t\n]*\([ \t\n]*)(?=[A-Za-z_])/).each do
         m = Regexp.last_match
         rs = m.end(0)
         cm = masked[rs..].to_s.match(/\A([A-Za-z_]\w*)[ \t\n]*\(/)
         next unless cm
         ent = @entries[cm[1]]
-        next unless ent.is_a?(Hash) && (ent['mruby'].to_s.start_with?('mrb_funcall') || ent['template'].to_s.start_with?('mrb_funcall') || ent['handler'] == 'funcall')
+        # a macro whose body is a funcall (date's f_ge_p: #define f_ge_p(x,y) rb_funcall(...)) is a funcall too
+        macro_funcall = @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(cm[1])}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+        next unless macro_funcall || (ent.is_a?(Hash) && (ent['mruby'].to_s.start_with?('mrb_funcall') || ent['template'].to_s.start_with?('mrb_funcall') || ent['handler'] == 'funcall'))
         open = rs + cm[0].length - 1
         close = match_close(masked, open)
         next if close < 0
@@ -6551,6 +6557,15 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
                          'reason' => "stuck point (cascade in #{fn_out}): the converted code does not compile here because of a stuck " \
                                      "point in the same function (#{m[2].strip})" }
+          next
+        end
+        # an error on a line that holds a refused use (a macro body, or an expression the refusal marked): the marked use is the
+        # stuck point, and the error is its cascade
+        line_txt = out_lines[m[1].to_i - 1].to_s
+        if line_txt.match?(/BC2CPP-MRBGEM (?:REFUSED|stub)/)
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (cascade of a refused use on the same line): the converted line does not compile " \
+                                     "because of its refused use (#{m[2].strip})" }
           next
         end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
