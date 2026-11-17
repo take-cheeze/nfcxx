@@ -5267,6 +5267,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
         # such header, and gcc stops at the fatal error, so the rest of the file is not checked
+        # the CRuby version and IO headers, kept as the stuck include they are, stop gcc the same way
+        if ['ruby/version.h', 'ruby/io.h'].any? { |h| m[2].strip == "#{h}: No such file or directory" }
+          hdr = m[2].strip.split(':').first
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (#{hdr == 'ruby/io.h' ? 'IO' : 'CRuby version'}): the converted code keeps #include <#{hdr}>, " \
+                                     'which the fork does not have (accepted stuck point); the compile check stops at this include' }
+          next
+        end
         if m[2].strip == 'ruby/encoding.h: No such file or directory'
           @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
                          'reason' => 'stuck point (Encoding): the converted code keeps #include <ruby/encoding.h>, which the fork ' \
@@ -5380,6 +5388,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     choose_scanner
     load
     scan_local_macros
+    # the inactive text of each file (its #if branches the build decides) is known before the uses are collected: a use in
+    # inactive text is not a use (its helper and its prototype)
+    @files.each_key do |rel|
+      text_inactive_spans(rel).each do |a, z|
+        (@excluded_spans ||= {})[rel] ||= []
+        @excluded_spans[rel] << [a, z]
+      end
+    end
     scan
     build_occurrences
     scan_local_names
