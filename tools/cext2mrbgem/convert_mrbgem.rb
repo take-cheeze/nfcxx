@@ -3432,6 +3432,8 @@ use_problem = lambda do |name, use|
       else
         if inc == 'ruby/encoding.h'
           refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (Encoding): ruby/encoding.h declares rb_encoding and the encoding API; the fork has no Encoding (accepted stuck point)')
+        elsif inc == 'ruby/version.h'
+          refuse(rel, m.begin(0), "#include <#{inc}>", 'stuck point (CRuby version): ruby/version.h gives the CRuby version (RUBY_API_VERSION_CODE, RUBY_VERSION), which the code uses to choose its paths; mruby has no such number, so the version to emulate is a decision (accepted stuck point)')
         else
           refuse(rel, m.begin(0), "#include <#{inc}>", 'CRuby header not in the supported subset')
         end

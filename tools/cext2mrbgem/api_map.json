@@ -1612,6 +1612,10 @@
       "mruby": "mrb_free",
       "caveat": "as RUBY_TYPED_DEFAULT_FREE: mrb_free, the default release of mrb_malloc'd data"
     },
+    "RUBY_API_VERSION_CODE": {
+      "kind": "refuse",
+      "reason": "stuck point (CRuby version): RUBY_API_VERSION_CODE is the CRuby version the code tests (#if RUBY_API_VERSION_CODE >= ...), and mruby has no version number to test against; the version to emulate is a decision (accepted stuck point)"
+    },
     "RTYPEDDATA_DATA": {
       "kind": "call",
       "mruby": "DATA_PTR",
