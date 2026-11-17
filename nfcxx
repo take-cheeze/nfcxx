@@ -550,10 +550,10 @@ if [ $emit_c = 1 ]; then
   tmp=$(mktemp -d); trap trace_finish EXIT
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
-  inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
-  # The user's -I directories (kept in files, with the other options) go in front, as eccp puts them.
-  # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
-  for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
+  # the include list: scripts/nfcxx-emit-c.rb inc (the host or freestanding directories, EDG's own, and the user's -I directories
+  # in front of them, made absolute: cpfe runs from the EDG base directory)
+  inc=()
+  while IFS= read -r -d '' x; do inc+=("$x"); done < <("${RUBY:-ruby}" "$root/scripts/nfcxx-emit-c.rb" inc "$base" "$root" "$freestanding" -- ${sys_inc[@]+"${sys_inc[@]}"} -- ${files[@]+"${files[@]}"})
   t=$(trace_start)
   eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-libs.rb" plan sys="$(uname -s)" freestanding="$freestanding")"   # posix_def: as the macOS base (scripts/nfcxx-host-libs.rb)
   (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${eh_tls[@]+"${eh_tls[@]}"} ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
