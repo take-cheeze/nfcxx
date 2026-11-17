@@ -716,18 +716,19 @@ opts=(--cache-dir="$cache_dir" --cache-log="$cache_log_file" --out="$out" --src=
       --var=depmode="$depmode" --var=cfiles_n="${#cfiles[@]}" --var=cu_n="${#cu_inputs[@]}" --var=cpp2_n="${#cpp2_inputs[@]}")
 for a in "${key_argv[@]+"${key_argv[@]}"}"; do opts+=(--arg="$a"); done
 for a in "${cpp[@]+"${cpp[@]}"}"; do opts+=(--cpp="$a"); done
-# lookup: the --cache-log block (when there is a log) and the last line, "hit KEY" or "miss KEY"; nothing when not cached
-look=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" lookup "${opts[@]}") || return 0
-[ -n "$look" ] || return 0
-decision=${look##*$'\n'}
-[ "$look" = "$decision" ] || cache_log "${look%$'\n'*}"
-read -r state key <<<"$decision"
-cache_entry=$cache_dir/objects/$key
-# a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
-if [ "$state" = miss ]; then
-  [ -z "$cache_remote" ] || cache_remote_get "$key" "$cache_entry" || true
-  [ -f "$cache_entry/obj" ] || return 0
-fi
+# the lookup and the cache log (scripts/nfcxx-cache-check.rb check, restructure step 2): the decision comes back as cc_state and
+# cc_key; the remote fetch and the hit are below, as they were
+cc_file=$(mktemp)
+"${RUBY:-ruby}" "$root/scripts/nfcxx-cache-check.rb" check --statements="$cc_file" "${opts[@]}" || { rm -f "$cc_file"; return 0; }
+. "$cc_file"; rm -f "$cc_file"
+case $cc_state in
+  hit) ;;
+  miss)
+    # a local miss is looked up in the remote tier (nfcxx-cache-io.rb remote-get; a failure is a miss)
+    [ -z "$cache_remote" ] || cache_remote_get "$cc_key" "$cache_entry" || true
+    [ -f "$cache_entry/obj" ] || return 0 ;;
+  *) return 0 ;;
+esac
 # hit: the object and its records are copied back, and the program is done
 "${RUBY:-ruby}" "$root/scripts/nfcxx-cache.rb" hit --out="$out" --entry="$cache_entry" && exit 0
 return 0
