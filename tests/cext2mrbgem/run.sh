@@ -1496,6 +1496,12 @@ check grep -qF 'nfcx_memsearch(RSTRING_PTR(needle), RSTRING_LEN(needle),' "$work
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_ptr_stuck tools/cext2mrbgem/fixtures/api_hash_ptr_stuck/ext/api_hash_ptr_stuck "$work/api_hash_ptr_stuck" > "$work/api_hash_ptr_stuck.log" 2>&1 || rc=$?
 check test -e "$work/api_hash_ptr_stuck/NOT_BUILDABLE"
 check grep -qF 'stuck point (VALUE as pointer): rb_hash_foreach gets a pointer cast to VALUE' "$work/api_hash_ptr_stuck/REFUSALS.txt"
+# 2zzz131. a struct field declared with the name of a registered method (char to_json;) and member accesses of it are not uses of the
+# method: the method converts, and the file is not refused as a direct-called or address-taken function.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_field_named_fn tools/cext2mrbgem/fixtures/api_field_named_fn/ext/api_field_named_fn "$work/api_field_named_fn" > "$work/api_field_named_fn.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_field_named_fn/NOT_BUILDABLE"
+check grep -qF 'char to_json;' "$work/api_field_named_fn/src/api_field_named_fn.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

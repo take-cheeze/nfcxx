@@ -1393,10 +1393,14 @@ texts = static_rename(texts)
     end
     uses.each do |rel, s, e|
       next if in_dead_init(rel, s)
+      masked = @files[rel]['masked']
+      # a member access (x.name, p->name) or a struct or union field declaration named like the function is not a use of it
+      next if is_member(masked, s)
+      ob = enclosing_open_brace(masked, s)
+      next if ob && masked[[ob - 60, 0].max...ob].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
       if @files[rel]['kind'] != 'src' && !single_src_header?(rel)
         return "it is used in #{rel}, a header, whose function bodies are not converted (it is not included by exactly one source)"
       end
-      masked = @files[rel]['masked']
       nx = next_nonspace(masked, e)
       return 'its address is taken, so a pointer would reach the wrapper' unless nx >= 0 && masked[nx] == '('
       fn = enclosing_func(rel, s)
@@ -3684,6 +3688,11 @@ end
       (@occ[name] || []).each do |orel, s, _e|
         next if orel != rel || header_spans.any? { |a, b| a <= s && s < b }
         next if @regs.any? { |r| r['error'].nil? && r['file'] == rel && r['open'] <= s && s <= r['close'] }
+        # a member access or a struct or union field named like the method is not a call of it
+        mk = @files[rel]['masked']
+        next if is_member(mk, s)
+        ob = enclosing_open_brace(mk, s)
+        next if ob && mk[[ob - 60, 0].max...ob].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
         ed.add(s, s + name.length, "#{name}_impl")
         rewrite(rel, s, name, "#{name}_impl")
       end
