@@ -204,17 +204,19 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
   # and preinc from the reply. A failing rewrite ends the driver with its status (the reply's file is read after the call).
   local rec group done=0 idx src copy i bpid=$BASHPID inf=$cudatmp/cu-in.rec outf=$cudatmp/cu-out.rec
   local cu_sdirs=() cu_copies=() cu_cuda=() cu_pre=()
-  {
-    state_put root "$root"; state_put tmp "$cudatmp"; state_put keep "$cu_keep"; state_put bash_pid "$bpid"
-    state_put trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}"; state_put dir "$dir"
-    state_put inputs ${cu_inputs[@]+"${cu_inputs[@]}"}; state_put cflags ${cflags[@]+"${cflags[@]}"}
-    if [ "$obfuscate" = 1 ]; then state_put obfuscate 1; else state_put obfuscate 0; fi
-    if [ "$ir_opt_set" = 1 ]; then state_put ir_opt "$ir_opt"; else state_put ir_opt; fi
-    state_put promote_slots "$promote_slots"; state_put unroll "$unroll"; state_put struct_slots "$struct_slots"
-    state_put cache_dir "$cache_dir"; state_put cache_log "${cache_log_file:-}"
-    state_put preinc ${preinc[@]+"${preinc[@]}"}; state_put cuda ${cuda_opts[@]+"${cuda_opts[@]}"}
-    state_put edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}"
-  } > "$inf"
+  # the planner's state records (scripts/nfcxx-state-records.rb, restructure step 2): each group is its name, its values, and a
+  # separator; the writer prints the records state_put printed
+  local st=()
+  st+=(root "$root" $'\x1e' tmp "$cudatmp" $'\x1e' keep "$cu_keep" $'\x1e' bash_pid "$bpid" $'\x1e')
+  st+=(trace_unit "${trace_unit:-${NFCXX_TRACE_UNIT:-}}" $'\x1e' dir "$dir" $'\x1e')
+  st+=(inputs ${cu_inputs[@]+"${cu_inputs[@]}"} $'\x1e' cflags ${cflags[@]+"${cflags[@]}"} $'\x1e')
+  if [ "$obfuscate" = 1 ]; then st+=(obfuscate 1 $'\x1e'); else st+=(obfuscate 0 $'\x1e'); fi
+  if [ "$ir_opt_set" = 1 ]; then st+=(ir_opt "$ir_opt" $'\x1e'); else st+=(ir_opt $'\x1e'); fi
+  st+=(promote_slots "$promote_slots" $'\x1e' unroll "$unroll" $'\x1e' struct_slots "$struct_slots" $'\x1e')
+  st+=(cache_dir "$cache_dir" $'\x1e' cache_log "${cache_log_file:-}" $'\x1e')
+  st+=(preinc ${preinc[@]+"${preinc[@]}"} $'\x1e' cuda ${cuda_opts[@]+"${cuda_opts[@]}"} $'\x1e')
+  st+=(edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}" $'\x1e')
+  "${RUBY:-ruby}" "$root/scripts/nfcxx-state-records.rb" "${st[@]}" > "$inf"
   "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-prepare < "$inf" > "$outf" || exit $?
   # the reply (scripts/nfcxx-cu-apply.rb plan, restructure step 2): the -I directories and the copies replace the inputs in srcs and
   # files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
