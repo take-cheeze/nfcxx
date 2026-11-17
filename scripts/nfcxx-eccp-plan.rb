@@ -13,8 +13,8 @@
 #
 # RECORDS: NUL-separated. "k NAME" starts a group; "v VALUE" adds a value to the group (an empty value is "v").
 # The groups: eccp (the EDG driver), std, dialect, out (the -o name), extra, inst_opts, modopts, diag_opts, userinc, sys_inc,
-# hosted_libs, keep_static, eh_unwind, picopts, cobjs, pre_opts, cuda_opts, eflist, shim, vlart, rtlib. The scalars (eccp,
-# std, dialect, out) have one value. An absent group is empty.
+# hosted_libs, keep_static, eh_unwind, picopts, cobjs, preinc (the forced includes: their pre_opts are planned from them),
+# cuda_opts, eflist, shim, vlart, rtlib. The scalars (eccp, std, dialect, out) have one value. An absent group is empty.
 #
 # Standard output: NUL-separated records, then the end marker "z":
 #   "a ARG"   the next word of the command (the first is the driver's path, as the bash runs it)
@@ -46,6 +46,17 @@ module NfcxxEccpPlan
      *g.call("keep_static"), *g.call("eh_unwind"), "--c_to_obj_option", "-fgnu89-inline",
      *g.call("picopts"), *g.call("cobjs"), *g.call("pre_opts"), *g.call("cuda_opts"), *g.call("eflist"),
      *g.call("shim"), *g.call("vlart"), *g.call("rtlib"), "-o", scalar.call("out")]
+  end
+
+  # the --preinclude options of the forced includes (the bash's pre_opts, with the same values). With moves (the call runs in a
+  # temporary directory) a file that exists here is made absolute, as the bash's abs_path made it: EcpArg.abs gives the path
+  # (its directory must exist; the bash's $(...) removes trailing newlines). -include FILE is found through the include
+  # directories as well as here, so the file is made absolute only when it exists here.
+  def preinclude_options(files, moves)
+    files.flat_map do |f|
+      value = moves == "1" && File.exist?(f) ? EcpArg.substitution(EcpArg.abs(f)) : f
+      ["--preinclude", value]
+    end
   end
 
   # EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS of a shared link: the link options among picopts, eflist and inst_opts (in that order),
@@ -90,6 +101,8 @@ if $PROGRAM_NAME == __FILE__
     ecp = ->(arg) { EcpArg.substitution(moves == "1" ? EcpArg.ecp_arg(arg) : arg) }
     groups["eccp"] = [ecp.(DriverState.scalar(groups, "eccp"))]   # a scalar group (one value) is checked as the plan checks it
     groups["out"] = [ecp.(DriverState.scalar(groups, "out"))]
+    # the forced includes (preinc, the bash's -include FILE): their --preinclude options are planned here, with the call
+    groups["pre_opts"] = NfcxxEccpPlan.preinclude_options(groups["preinc"] || [], moves) if groups.key?("preinc")
     # the link arguments (slice 8): the files of the link are planned here, with the call, so a refused option stops the driver
     # before the compile cache (the bash used to read them in a call of its own)
     if groups.key?("files")
