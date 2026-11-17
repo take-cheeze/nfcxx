@@ -5050,10 +5050,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
                 end
       # a Q constant in a file-scope initializer (a table entry) is a constant compound literal with the same bits as the
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
-      if %w[Qnil Qtrue Qfalse].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil?
+      if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil?
         const_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
                       'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
-                      'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})' }[name]
+                      'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
+                      'Qundef' => '((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})' }[name]
         ed.add(s, e, const_lit)
         rewrite(rel, s, name, const_lit, 'a file-scope Q constant as a constant value (the fork\'s nil, true or false bits)')
         return
