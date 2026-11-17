@@ -13,8 +13,8 @@ bash -n "$oracle"; check "the frozen driver parses" $?
 # the driver differs from the frozen copy only where the ports moved code out: the Ruby flag (B2) and the default backend block (B3,
 # scripts/nfcxx-backend.rb default). Both are removed from both sides; the rest must be the same.
 check "the frozen driver matches the driver apart from the ports (B2, B3)" "$(
-  diff -q <(sed -e '/^default_backend=0$/,/^fi$/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' -e '/^if \[ \$freestanding = 1 \]; then$/,/^fi$/d' -e '/^# Path B hosted on macOS (the SDK/,/__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }$/d' "$oracle") \
-          <(sed -e '/^# NFCXX_RUBY_DRIVER=1/,/NFCXX_RUBY_DRIVER:-0/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' -e '/^# The freestanding or hosted setup/,/^fi$/d' -e '/^# The host-platform cflags (Path B/,/nfcxx-host-cflags.rb\" plan/d' "$repo/nfcxx" \
+  diff -q <(sed -e '/^default_backend=0$/,/^fi$/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' -e '/^if \[ \$freestanding = 1 \]; then$/,/^fi$/d' -e '/^# Path B hosted on macOS (the SDK/,/__AARCH64EL__=1); files+=(-D__AARCH64EL__=1); }$/d' -e '/^  posix_def=(-D_POSIX_SOURCE)/d' -e '/^  # The C++ and atomic libraries of the host: macOS/,/^  \[ \$freestanding = 0 \] || { pb_cxx_libs=""/d' "$oracle") \
+          <(sed -e '/^# NFCXX_RUBY_DRIVER=1/,/NFCXX_RUBY_DRIVER:-0/d' -e '/^if \[ -n "\$sanitize" \]; then$/,/^fi$/d' -e '/^if \[ \$cosmo = 1 \]; then$/,/^fi$/d' -e '/^# The freestanding or hosted setup/,/^fi$/d' -e '/^# The host-platform cflags (Path B/,/nfcxx-host-cflags.rb\" plan/d' -e '/^  # posix_def: as the macOS base/d' -e '/^  # The C++ and atomic libraries of the host (macOS/,/nfcxx-host-libs.rb" plan/d' -e '/nfcxx-host-libs.rb" plan/d' "$repo/nfcxx" \
             | awk '/^# The default backend \(docs\/notes\/pathb-default.md; the rule is/ { skip = 1 }
                    skip && /uname -m\)"\)"$/ { skip = 0; next }
                    !skip') >/dev/null && echo 0 || echo 1)"

@@ -652,7 +652,7 @@ if [ $emit_c = 1 ]; then
   # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
   for x in ${files[@]+${files[@]+"${files[@]}"}}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+${inc[@]+"${inc[@]}"}}) ;; esac; done
   t=$(trace_start)
-  posix_def=(-D_POSIX_SOURCE); [ "$(uname -s)" = Darwin ] && posix_def=(-D_DARWIN_C_SOURCE -U__BLOCKS__)   # as the macOS base
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-libs.rb" plan sys="$(uname -s)" freestanding="$freestanding")"   # posix_def: as the macOS base (scripts/nfcxx-host-libs.rb)
   (cd "$base" && "$edg/cpfe" ${posix_def[@]+"${posix_def[@]}"} -D__CHAR_BIT__=8 "$std" --"$dialect" ${eh_tls[@]+"${eh_tls[@]}"} ${gnu_opts[@]+"${gnu_opts[@]}"} ${diag_opts[@]+"${diag_opts[@]}"} \
       ${inc[@]+"${inc[@]}"} --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
@@ -889,9 +889,9 @@ if [ $backend = pathb ]; then
   t=$(trace_start)
   # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt.rb, docs/notes/pathb-longdouble.md)
   ldrt=$("$root/scripts/pathb-ldrt.rb")
-  # The C++ and atomic libraries of the host: macOS has libc++ (in libSystem's SDK) and no libstdc++, libgcc_s or libatomic.
-  if [ "$(uname -s)" = Darwin ]; then pb_cxx_libs="-lc++"; pb_atomic_lib=""; else pb_cxx_libs="-lstdc++ -lgcc_s"; pb_atomic_lib="-latomic"; fi
-  [ $freestanding = 0 ] || { pb_cxx_libs=""; pb_atomic_lib=""; }   # no hosted C++ runtime: the program links EDG's runtime and libc
+  # The C++ and atomic libraries of the host (macOS: libc++ in libSystem's SDK, no libstdc++, libgcc_s or libatomic); none for a
+  # freestanding program, which links EDG's runtime and libc. The choice is scripts/nfcxx-host-libs.rb plan.
+  eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-host-libs.rb" plan sys="$(uname -s)" freestanding="$freestanding")"
   sprt=(); [ $safeptr = 0 ] || [ $compile_only = 1 ] || sprt=("$("$root/scripts/safeptr-rt.rb")" -pthread)   # first: its malloc wins
   if [ $cosmo = 1 ]; then
     # cosmo: cosmocc links, its libc++ comes with the C++ driver, and the glibc-only libraries are not there
