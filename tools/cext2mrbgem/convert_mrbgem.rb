@@ -3363,6 +3363,16 @@ use_problem = lambda do |name, use|
     (body + ' ' + params).scan(/\b(?:VALUE|mrb_value)\s*\*\s*([A-Za-z_]\w*)/).flatten.to_set
   end
 
+  # a call name whose result is a VALUE: a converted function returning VALUE, or a mapped API call whose mruby form or
+  # template yields a VALUE (mrb_const_get*, mrb_obj_value(...)) (the rb_const_get_at family)
+  def value_call_name?(name)
+    defs = (@defs[name] || []).reject { |x| x['proto'] }
+    return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
+    ent = @entries[name]
+    return false unless ent.is_a?(Hash)
+    ent['template'].to_s.match?(/\Amrb_(?:obj_value\(|const_get)/) || ent['mruby'].to_s.match?(/\Amrb_const_get|_value\z/)
+  end
+
   def value_compare_wrap_pass
     cmp_re = /(?<![=!<>])(==|!=)(?!=)/
     @files.each_key do |rel|
@@ -5510,6 +5520,12 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       end
       ed.add(s, e, 'mrb_raisef')
       ed.add(nxt + 1, nxt + 1, "#{mrb_tok(rel, s)}, ")
+      if (cm_r = cls_t.match(/\A([A-Za-z_]\w*)\s*\(/)) && value_call_name?(cm_r[1])
+        # a call whose result is a VALUE (rb_const_get_at(...), a converted function returning VALUE): the call's own rewrites
+        # stay, and the class pointer of its result is taken around it (after the state argument, which precedes it)
+        ed.add(args[0][0], args[0][0], 'mrb_class_ptr(')
+        ed.add(args[0][1], args[0][1], ')')
+      end
       rewrite(rel, s, name, 'mrb_raisef')
     else
       refuse(rel, s, name, 'unknown special handler')
