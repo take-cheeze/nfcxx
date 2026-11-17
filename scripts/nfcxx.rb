@@ -50,7 +50,7 @@ begin
   end
   status = system(env, "bash", program.path, *ARGV)
   unless trace_file.empty?
-    system(env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
+    system(env, env["RUBY"], trace_rb, "flush", env["NFCXX_TRACE_PENDING"]) if File.size?(env["NFCXX_TRACE_PENDING"])
     system(env["RUBY"], trace_rb, "close", trace_abs, Process.pid.to_s)
   end
   status_code = status ? 0 : ($?.exitstatus || 1)
