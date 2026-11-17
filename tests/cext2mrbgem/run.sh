@@ -1366,6 +1366,14 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_decl_list tools/cext2m
 check test "$rc" -eq 0
 check test ! -e "$work/api_class_decl_list/NOT_BUILDABLE"
 check grep -qF 'static mrb_value cStandardError; struct RClass *cA, *cB, *mM;' "$work/api_class_decl_list/include/api_class_decl_list.h"
+# 2zzz112. a call compared with nil or false (==, !=) is a helper test of its value (nfcx_is_nil, mrb_false_p), once per file;
+# the call is evaluated once.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_q_call_cmp tools/cext2mrbgem/fixtures/api_q_call_cmp/ext/api_q_call_cmp "$work/api_q_call_cmp" > "$work/api_q_call_cmp.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_q_call_cmp/NOT_BUILDABLE"
+check grep -qF 'static mrb_bool nfcx_is_nil(mrb_value v) { return mrb_nil_p(v); }' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'if (nfcx_is_nil(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'if (!nfcx_is_false(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

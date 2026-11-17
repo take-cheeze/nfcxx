@@ -523,6 +523,7 @@ class Converter
     @valid_reg_names = Set.new  # registered functions whose registration survived check_refs
     @block_arg_files = Set.new  # files that have the nfcx_block_arg definition (rb_yield in a helper)
     @yield_cb_files = Set.new   # files that have the nfcx_yield_cb wrapper (rb_yield as the rb_protect callback)
+    @q_helpers = {}            # per file: the nil/true/false test helpers defined (nfcx_is_nil, ...)
     @decls = []   # dicts for function prototypes and definitions
     @defs = {}    # name -> [def dicts]
     @init_defs = []
@@ -1222,6 +1223,40 @@ texts = static_rename(texts)
     end
     masked = @files[fn['file']]['masked']
     !(psl(masked, fn['brace'], fn['body_end'] + 1) =~ /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/).nil?
+  end
+
+  # for a Q constant at s that is the right operand of == or !=: [operator position, left operand start, negated?] when the
+  # left operand is a call (NAME(...)); nil otherwise (an identifier or a member is the value pass's comparison)
+  def q_comparison(rel, s, masked)
+    pre = prev_nonspace(masked, s - 1)
+    return nil if pre < 1
+    op = masked[(pre - 1)..pre]
+    return nil unless op == '==' || op == '!='
+    ops = pre - 1
+    lhs_end = prev_nonspace(masked, ops - 1)
+    return nil if lhs_end < 0
+    if masked[lhs_end] == ')'
+      depth = 0
+      i = lhs_end
+      while i >= 0
+        c = masked[i]
+        if c == ')' then depth += 1
+        elsif c == '('
+          depth -= 1
+          break if depth.zero?
+        end
+        i -= 1
+      end
+      return nil if i < 0
+      head = masked[0...i]
+      m = head.match(/([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)\s*\z/)
+      return nil unless m
+    else
+      # an identifier or a member path is a VALUE comparison, which value_equality_pass handles (mrb_obj_equal)
+      return nil
+    end
+    return nil if %w[if while for switch return sizeof].include?(m[1])
+    [ops, m.begin(1), op == '!=']
   end
 
   def local_shadows_class_var?(name, fn)
@@ -3047,6 +3082,7 @@ use_problem = lambda do |name, use|
         m = Regexp.last_match
         a, op, b = m[1], m[2], m[3]
         s0, e0 = m.begin(0), m.end(0)
+        next if qconst.match?(b) && (@q_done || Set.new).include?(m.begin(3))
         fn = enclosing_func(rel, s0)
         next if fn.nil?
         value_names = value_names_of(fn)
@@ -4293,6 +4329,27 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
       text = "mrb_obj_value(#{text})" if !class_pos && text.match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      # nil, true and false compare by identity in CRuby (x == Qnil); mruby values are structs, so the comparison is a test
+      # through a one-argument helper (the value is evaluated once) defined before the enclosing function
+      if %w[Qnil Qtrue Qfalse].include?(name) && (cmp = q_comparison(rel, s, masked))
+        ops, lhs_start, neg = cmp
+        fnq = enclosing_func(rel, s)
+        if fnq && fnq['hstart']
+          hname = { 'Qnil' => 'nfcx_is_nil', 'Qtrue' => 'nfcx_is_true', 'Qfalse' => 'nfcx_is_false' }[name]
+          ptest = { 'Qnil' => 'mrb_nil_p', 'Qtrue' => 'mrb_true_p', 'Qfalse' => 'mrb_false_p' }[name]
+          @q_helpers[rel] ||= Set.new
+          unless @q_helpers[rel].include?(hname)
+            @q_helpers[rel] << hname
+            ed.add(fnq['hstart'], fnq['hstart'],
+                   "static mrb_bool #{hname}(mrb_value v) { return #{ptest}(v); }\n")
+          end
+          ed.add(lhs_start, lhs_start, "#{neg ? '!' : ''}#{hname}(")
+          ed.add(ops, e, ')')
+          (@q_done ||= Set.new) << s   # the comparison is rewritten here: value_equality_pass leaves it
+          rewrite(rel, s, name, "#{hname}(…)", 'a comparison with nil, true or false (==, !=) is the helper test of the left operand')
+          return
+        end
+      end
       ed.add(s, e, text)
       rewrite(rel, s, name, text)
     else
