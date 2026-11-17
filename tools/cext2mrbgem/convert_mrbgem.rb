@@ -3487,6 +3487,18 @@ use_problem = lambda do |name, use|
     out
   end
 
+  # A macro calls a helper by a pasted name (s##_trunc(v##s, &fr), with s = d giving d_trunc); when the converted helper takes the
+  # state (@needs), the macro's call passes mrb, which is in scope where the macro is used
+  def macro_paste_mrb(text)
+    text.gsub(/^#define(?:[^\n]*\\\n)*[^\n]*/) do |blk|
+      blk.gsub(/##([A-Za-z_]\w*)\(/) do
+        suffix = Regexp.last_match(1)
+        needs = (@needs || Set.new).any? { |n| n.end_with?(suffix) }
+        needs ? "##{suffix}(mrb, " : Regexp.last_match(0)
+      end
+    end
+  end
+
   # a #define that generates a static function without the state parameter (DEFINE_DELEGATED_FUNCTION) names the global in
   # its expansion: the generated function is a stored callback, run inside a method call
   def global_macro_arrows(text, gname)
@@ -3541,6 +3553,27 @@ use_problem = lambda do |name, use|
     end
   end
 
+  # !v on a VALUE, or !f(...) of a VALUE-returning function (date's f_nonzero_p is (!f_zero_p(x))): CRuby's ! tests the word (Qfalse is
+  # zero); the fork's VALUE is a struct, and no exact test of it is expressed (the VALUE truth test)
+  def value_not_stuck_pass
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      mv.to_enum(:scan, /(?<![!=<>\w$.>])!(?!=)\s*([A-Za-z_]\w*)\s*(\()?/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        if m[2]
+          defs = (@defs[nm] || []).reject { |x| x['proto'] }
+          next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm)
+        else
+          next unless (local_value_at?(rel, m.begin(1), nm) || fs_values.include?(nm)) && !@class_vars.include?(nm)
+        end
+        next if @edits[rel].overlaps(m.begin(0), m.begin(0) + 1)
+        refuse(rel, m.begin(0), nm, "stuck point (VALUE truth test): !#{nm}#{m[2] ? '(...)' : ''} tests a VALUE, a struct in the fork (include/mruby/boxing_no.h); CRuby's ! tests the word (Qfalse is zero), which has no exact struct test")
+      end
+    end
+  end
+
   # if (v) on a VALUE tests its word: CRuby's Qnil is a nonzero word, so the test is true for nil, which the fork's struct has no
   # exact test of (the same reason as the assert case); a VALUE struct cannot be a condition
   def value_if_truth_stuck_pass
@@ -3558,6 +3591,20 @@ use_problem = lambda do |name, use|
         next if in_dead_init(rel, m.begin(1))
         next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
         refuse(rel, m.begin(1), field ? "#{base}->#{field}" : base, "stuck point (VALUE truth test): if tests #{field ? "#{base}->#{field}" : base}, a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+      end
+      # if (f(...)) of a VALUE-returning function: the whole condition is that VALUE
+      mv.to_enum(:scan, /(?<![#{WC}])if\s*\(\s*([A-Za-z_]\w*)\s*\(/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        defs = (@defs[nm] || []).reject { |x| x['proto'] }
+        next unless (defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }) || value_call_name?(nm)
+        open = m.end(0) - 1
+        close = match_close(mv, open)
+        next if close < 0
+        outer = match_close(mv, mv.index('(', m.begin(0)))
+        next if outer < 0 || next_nonspace(mv, close + 1) != outer
+        next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+        refuse(rel, m.begin(1), nm, "stuck point (VALUE truth test): if tests #{nm}(...), a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
       end
     end
   end
@@ -5552,6 +5599,18 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
           return
         end
       end
+      # a static local initialized with a Q constant (static VALUE pat = Qnil;) needs a constant initializer too: the compound
+      # literal with the fork's bits (mrb_nil_value() is a function call, not a constant)
+      if %w[Qnil Qtrue Qfalse Qundef].include?(name) && enclosing_func(rel, s) &&
+         masked[[s - 80, 0].max...s].to_s.match?(/\bstatic\s+(?:const\s+)?(?:VALUE|mrb_value)\s+[A-Za-z_]\w*\s*=\s*\z/)
+        static_lit = { 'Qnil' => '((mrb_value){.value.i = 0, .tt = MRB_TT_FALSE})',
+                       'Qtrue' => '((mrb_value){.value.i = 1, .tt = MRB_TT_TRUE})',
+                       'Qfalse' => '((mrb_value){.value.i = 1, .tt = MRB_TT_FALSE})',
+                       'Qundef' => '((mrb_value){.value.i = 0, .tt = MRB_TT_UNDEF})' }[name]
+        ed.add(s, e, static_lit)
+        rewrite(rel, s, name, static_lit, 'a static local initialized with a Q constant: a constant compound literal (the fork\'s bits)')
+        return
+      end
       # a Q constant in a file-scope initializer (a table entry) is a constant compound literal with the same bits as the
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil? &&
@@ -6589,6 +6648,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     outputs = {}
     @files.each { |rel, f| outputs[rel] = @edits[rel].apply(f['text']) }
     @files.each { |rel, f| outputs[rel] = id_value_casts(outputs[rel]) if f['kind'] == 'src' }
+    @files.each { |rel, _f| outputs[rel] = macro_paste_mrb(outputs[rel]) }
     # Onigmo's types in declarations (a struct field of OnigRegion, a UChar pointer): the fork has no regexp engine, so these are
     # placeholder types for the declarations only. Every use of an Onigmo function or constant is refused, so the code that
     # reads these types is a stub: the placeholders are never used to compute a result.
@@ -6742,6 +6802,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     onig_engine_stuck_pass
     id_return_pass
     id_arg_of_value_pass
+    value_not_stuck_pass
     value_if_truth_stuck_pass
     value_pointer_array_stuck_pass
     encoding_pointer_assign_pass
