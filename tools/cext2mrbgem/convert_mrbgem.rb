@@ -3168,6 +3168,47 @@ use_problem = lambda do |name, use|
     names
   end
 
+  # assert(E) with E a VALUE member (p->stream) or a VALUE name: CRuby's assert tests that the word is nonzero, which has no
+  # mruby equivalent (mrb_value is a struct). The argument is still evaluated, and the check is not made: the value is ((void)(E), 1).
+  # The caveat is recorded in the refusal list's conversion notes (the rewrite line).
+  # the VALUE variables declared at file scope in a file (static VALUE x = ...;)
+  def file_scope_value_names(rel)
+    @fs_value_names ||= {}
+    @fs_value_names[rel] ||= begin
+      out = Set.new
+      value_decl_statements(@files[rel]['masked']).each do |_st, _kw, decls|
+        decls.each { |d| out << d[:name] if d[:name] && !d[:ptr] && enclosing_func(rel, d[:start]).nil? }
+      end
+      out
+    end
+  end
+
+  def value_assert_pass
+    vfields = value_field_names
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, /(?<![#{WC}.>])assert[ \t\n]*\(/).each do
+        m = Regexp.last_match
+        open = m.end(0) - 1
+        close = match_close(masked, open)
+        next if close < 0
+        args = split_args(masked, open, close)
+        next unless args.size == 1
+        a, b = args[0]
+        arg = psl(@files[rel]['text'], a, b).strip
+        fn = enclosing_func(rel, m.begin(0))
+        next unless fn
+        vfield = arg.match?(/\A[A-Za-z_]\w*(?:(?:->|\.)[A-Za-z_]\w*)*\z/) && arg.match?(/(?:->|\.)([A-Za-z_]\w*)\z/) &&
+                 vfields.include?(arg[/([A-Za-z_]\w*)\z/])
+        vname = arg.match?(/\A[A-Za-z_]\w*\z/) && (value_names_of(fn).include?(arg) || file_scope_value_names(rel).include?(arg))
+        next unless vfield || vname
+        @edits[rel].add(a, a, '((void)(')
+        @edits[rel].add(b, b, '), 1)')
+        rewrite(rel, m.begin(0), 'assert', "assert(((void)(#{arg}), 1))", 'a VALUE in assert: CRuby tests it is nonzero; mruby has no equivalent, so the check is not made')
+      end
+    end
+  end
+
   def value_equality_pass
     qconst = /\AQ(?:nil|true|false|undef)\z/
     with_state = (@threaded_cands || Set.new) | (@valid_reg_names || Set.new)
@@ -5345,6 +5386,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     check_refs
     @files.keys.sort.each { |rel| process(rel) }
     value_equality_pass
+    value_assert_pass
     integer_return_pass
     @dead_inits.each do |d|
       @edits[d['file']].add(d['hstart'], d['hstart'],

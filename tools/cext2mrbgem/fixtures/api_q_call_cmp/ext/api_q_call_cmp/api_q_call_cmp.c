@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ruby.h>
 
 /* an ID-typed variable that holds a symbol VALUE (assigned ID2SYM), used as a hash key */
@@ -9,6 +10,7 @@ static VALUE saved_nil = Qnil;
 static VALUE
 m_key(VALUE self, VALUE h)
 {
+    assert(saved_nil);
     return rb_hash_aref(h, sym_key);
 }
 
