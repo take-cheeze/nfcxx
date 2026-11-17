@@ -214,6 +214,7 @@ def read_text(path)
 end
 
 def write_bytes(path, text)
+  FileUtils.mkdir_p(File.dirname(path))
   File.binwrite(path, text)
 end
 
@@ -654,6 +655,11 @@ Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |tb|
   next if File.directory?(tp)
   texts[tb] = read_text(tp) if tb.end_with?('.c') || tb.end_with?('.h')
 end
+# the headers of an immediate subdirectory (yajl's api/ holds its public headers, which the sources include as "api/x.h")
+# are inputs at their relative path; the subdirectory's sources are not compiled (only the gem's own C files are)
+sub_headers = Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.select { |n| File.directory?(File.join(@cext_dir, n)) }
+                  .flat_map { |d| Dir.glob(File.join(@cext_dir, d, '*.h')).sort.map { |p| File.join(d, File.basename(p)) } }
+sub_headers.each { |rel| texts[rel] = read_text(File.join(@cext_dir, rel)) }
 texts.each_key { |k| texts[k] = kr_normalize(texts[k]) }
 texts = static_rename(texts)
     Dir.children(@cext_dir).reject { |n| n.start_with?('.') }.sort.each do |base|
@@ -673,6 +679,11 @@ texts = static_rename(texts)
       @edits[base] = Edits.new
       # gem_init.c is the generated file; the input's own copy is refused (set up before the refusal is recorded)
       refuse(base, 0, 'gem_init.c', 'name collides with the generated gem_init.c') if base == 'gem_init.c'
+    end
+    sub_headers.each do |rel|
+      @files[rel] = { 'text' => texts.fetch(rel), 'masked' => mask_c(texts.fetch(rel)), 'kind' => 'hdr' }
+      noreturn_mask(rel)
+      @edits[rel] = Edits.new
     end
   end
 

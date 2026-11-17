@@ -1360,6 +1360,13 @@ check test ! -e "$work/api_store_field/NOT_BUILDABLE"
 check grep -qF 'mrb_value (*fn)(mrb_state *mrb, const char *str, size_t len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF 'return sf_cur.fn(mrb, str, len);' "$work/api_store_field/src/api_store_field.c"
 check grep -qF '(struct RClass *[]){ E_TYPE_ERROR, mrb_exc_get(mrb, "EOFError") }' "$work/api_rescue2/src/api_rescue2.c"
+# 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
+# resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_subdir_hdr/NOT_BUILDABLE"
+check test -f "$work/api_subdir_hdr/include/api/subdir_public.h"
+check grep -qF '#include "api/subdir_public.h"' "$work/api_subdir_hdr/src/api_subdir_hdr.c"
 # 2zzz109. rb_cstr_to_dbl, rb_check_convert_type (with the T_ tag as MRB_TT_), rb_need_block (LocalJumpError without a block),
 # rb_gc_enable / rb_gc_disable (the GC class methods), rb_fatal (mrb_bug, which exits), and rb_define_global_function
 # (a module function of mrb->kernel_module), and rb_yield in a helper (the block is read from the current frame by nfcx_block_arg).
