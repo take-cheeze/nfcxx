@@ -1562,6 +1562,12 @@ check test ! -e "$work/api_struct_cmp/NOT_BUILDABLE"
 check grep -qF 'if (!mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))) {' "$work/api_struct_cmp/src/api_struct_cmp.c"
 check grep -qF 'if (mrb_obj_is_kind_of(mrb, obj, mrb_class_get(mrb, "Struct"))) {' "$work/api_struct_cmp/src/api_struct_cmp.c"
 check grep -qF "spec.add_dependency 'mruby-struct'" "$work/api_struct_cmp/mrbgem.rake"
+# 2zzz141. #include <ruby/st.h> is dropped (its st_retval codes are mapped; no st table is used), so the file converts; a callback returning
+# ST_CONTINUE is the mapped 0.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_st_include tools/cext2mrbgem/fixtures/api_st_include/ext/api_st_include "$work/api_st_include" > "$work/api_st_include.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_st_include/NOT_BUILDABLE"
+check grep -qF 'return 0;' "$work/api_st_include/src/api_st_include.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

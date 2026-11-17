@@ -85,6 +85,10 @@
         "mruby/array.h"
       ]
     },
+    "ruby/st.h": {
+      "headers": [],
+      "caveat": "CRuby's st.h declares the st table API and the st_retval enum; mruby has no st table (its hash is mrb_hash). The include is dropped: st_retval's ST_* return codes are mapped (ST_CONTINUE, ST_STOP as expressions), and any st_table or st_* call has no entry and is refused where it is used"
+    },
     "ruby/re.h": {
       "headers": [
         "mruby/re.h"
