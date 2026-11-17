@@ -49,6 +49,17 @@ m_checked(VALUE self, VALUE v)
     return Qnil == sym ? INT2FIX(n) : sym;
 }
 
+/* a switch on a VALUE with Q constant labels (CRuby compares the words; mruby's values are structs) */
+static VALUE
+m_switch_q(VALUE self, VALUE v)
+{
+    switch (v) {
+      case Qnil: return INT2FIX(1);
+      case Qtrue: case Qfalse: return INT2FIX(2);
+      default: return INT2FIX(3);
+    }
+}
+
 void
 Init_api_q_call_cmp(void)
 {
@@ -59,4 +70,5 @@ Init_api_q_call_cmp(void)
     rb_define_method(c, "key", m_key, 1);
     rb_define_method(c, "call_id", m_call_id, 1);
     rb_define_method(c, "checked", m_checked, 1);
+    rb_define_method(c, "switch_q", m_switch_q, 1);
 }

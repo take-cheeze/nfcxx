@@ -4532,6 +4532,42 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         refuse(rel, s, name, 'expression mapping used in call form')
         return
       end
+      # a Q constant that labels a case of a switch (on a VALUE): the switch is on nfcx_q_key of its subject (1 nil, 2 true,
+      # 3 false, 0 other), and the label is that integer. The switch keeps its structure (fall-through, default).
+      if %w[Qnil Qtrue Qfalse].include?(name) && masked[0...s].match?(/(?<![#{WC}])case[ \t\n]+\z/) &&
+         next_nonspace(masked, e) >= 0 && masked[next_nonspace(masked, e)] == ':'
+        sw = nil
+        masked.to_enum(:scan, /(?<![#{WC}])switch[ \t\n]*\(/).each do
+          m = Regexp.last_match
+          op = m.end(0) - 1
+          cl = match_close(masked, op)
+          next if cl < 0 || cl > s
+          br = next_nonspace(masked, cl + 1)
+          next unless br >= 0 && masked[br] == '{' && match_close(masked, br) > s
+          sw = [op, cl] if sw.nil? || op > sw[0]
+        end
+        if sw
+          tok_q = mrb_tok(rel, s)
+          @switch_keyed ||= Set.new
+          unless @switch_keyed.include?([rel, sw[0]])
+            @switch_keyed << [rel, sw[0]]
+            ed.add(sw[0] + 1, sw[0] + 1, "nfcx_q_key(#{tok_q}, ")
+            ed.add(sw[1], sw[1], ')')
+          end
+          fnk = enclosing_func(rel, s)
+          at_k = define_at(rel, s) ? define_at(rel, s)[1] : (fnk && fnk['hstart'])
+          @prelude_done ||= Set.new
+          unless !at_k || @prelude_done.include?([rel, 'nfcx_q_key'])
+            @prelude_done << [rel, 'nfcx_q_key']
+            ed.add(at_k, at_k, "static int nfcx_q_key(mrb_state *mrb, mrb_value v) {\n" \
+                               "  if (mrb_nil_p(v)) return 1;\n  if (mrb_true_p(v)) return 2;\n  if (mrb_false_p(v)) return 3;\n  return 0;\n}\n")
+          end
+          key = { 'Qnil' => 1, 'Qtrue' => 2, 'Qfalse' => 3 }[name]
+          ed.add(s, e, key.to_s)
+          rewrite(rel, s, name, key.to_s, 'a case label of a switch on a VALUE: the switch is on the key of its subject (nfcx_q_key)')
+          return
+        end
+      end
       # a class expression (RClass *: mrb->object_class, mrb_class_get(...)) used as a plain value is its VALUE
       text = entry['mruby']
       # not in a class argument of a call: that position takes the RClass * itself (mrb_define_method(mrb, mrb->object_class, ...))
