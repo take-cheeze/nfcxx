@@ -135,6 +135,10 @@ eh_tls = []
 eh_tls = ["--nfcxx_eh_thread_local"] if (hosted != "0" || eh_runtime) && File.file?(File.join(edg_build, "eh-tls"))
 if hosted != "0"
   sys_inc.concat(HostSys.sys_includes(lang).map { |d| "--sys_include=#{d}" }) unless nostdinc
+  # CUDA_HOME's include directory (the CUDA runtime headers) after the host's, as nvcc puts it: a .cu file's host copy includes
+  # cuda_runtime.h, which is not in the host's directories when the toolkit is outside them
+  cuda_home = ENV["CUDA_HOME"].to_s
+  sys_inc << "--sys_include=#{File.join(cuda_home, "include")}" unless nostdinc || cuda_home.empty? || !Dir.exist?(File.join(cuda_home, "include"))
   gnu = HostSys.gnu_version
   gnu_opts = ["--gnu_version=#{gnu}"] if gnu
 end
