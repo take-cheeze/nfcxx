@@ -1783,16 +1783,14 @@
       "caveat": "the function is called with the mruby state (mrb_func_t: mrb, then the data), so a callback passed here is threaded with an mrb argument (helper threading); the state argument is int * in CRuby but mrb_bool * in mruby, so a caller variable must be declared mrb_bool; only mruby exceptions are caught, and CRuby errinfo is not set"
     },
     "rb_class_new_instance": {
-      "kind": "call",
-      "mruby": "mrb_obj_new",
-      "inject_mrb": false,
+      "kind": "template",
+      "arity": 3,
+      "class_args": [2],
       "needs_mrb": true,
-      "arg_order": [
-        2,
-        0,
-        1
-      ],
-      "caveat": "the arguments are reordered: CRuby rb_class_new_instance(argc, argv, klass) is mruby mrb_obj_new(mrb, klass, argc, argv); the class is a tracked class variable, a mapped class constant (rb_cRange is mrb->range_class), or a VALUE name or member unwrapped with mrb_class_ptr (CRuby requires a class there); argc may be an integer literal and argv NULL; both calls run initialize"
+      "prelude": "static mrb_value nfcx_class_new_instance(mrb_state *mrb, int argc, mrb_value *argv, struct RClass *c) {\n  return mrb_obj_new(mrb, c, argc, argv);\n}",
+      "prelude_name": "nfcx_class_new_instance",
+      "template": "nfcx_class_new_instance($m, $0, $1, $2)",
+      "caveat": "CRuby rb_class_new_instance(argc, argv, klass) is mrb_obj_new(mrb, klass, argc, argv) through a helper that keeps CRuby's argument order (so the arguments need no reordering): the class is a tracked class variable, a mapped class constant, or a VALUE name or member unwrapped with mrb_class_ptr; both calls run initialize"
     },
     "rb_hash_lookup": {
       "kind": "call",

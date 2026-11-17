@@ -227,8 +227,8 @@ check grep -qF 'if (mrb_false_p(v)) return mrb_fixnum_value(0);' "$work/api_rb_t
 # 2zzz18. rb_class_new_instance with a literal argc, NULL argv and a VALUE class: the class is unwrapped with mrb_class_ptr.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_new_value_class tools/cext2mrbgem/fixtures/api_new_value_class/ext/api_new_value_class "$work/api_new_value_class" > "$work/api_new_value_class.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
-check grep -qF 'mrb_obj_new(mrb, mrb_class_ptr(klass), 0, NULL)' "$work/api_new_value_class/src/api_new_value_class.c"
-check grep -qF 'return mrb_obj_new(mrb, mrb->range_class, 3, argv);' "$work/api_new_value_class/src/api_new_value_class.c"
+check grep -qF 'nfcx_class_new_instance(mrb, 0, NULL, mrb_class_ptr(klass))' "$work/api_new_value_class/src/api_new_value_class.c"
+check grep -qF 'return nfcx_class_new_instance(mrb, 3, argv, mrb->range_class);' "$work/api_new_value_class/src/api_new_value_class.c"
 
 # 2zzz19. rb_ensure with two static VALUE callbacks used only here: both are threaded and the call is mrb_ensure.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_ensure_call tools/cext2mrbgem/fixtures/api_ensure_call/ext/api_ensure_call "$work/api_ensure_call" > "$work/api_ensure_call.log" 2>&1 || rc=$?
@@ -772,7 +772,7 @@ check grep -qF 'mrb_protect(mrb, protect_body, mrb_nil_value(), &state);' "$work
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_new_inst tools/cext2mrbgem/fixtures/api_new_inst/ext/api_new_inst "$work/api_new_inst" > "$work/api_new_inst.log" 2>&1 || rc=$?
 check test "$rc" -eq 0
 check test ! -e "$work/api_new_inst/NOT_BUILDABLE"
-check grep -qF 'return mrb_obj_new(mrb, cApiNew, argc, argv);' "$work/api_new_inst/src/api_new_inst.c"
+check grep -qF 'return nfcx_class_new_instance(mrb, argc, argv, cApiNew);' "$work/api_new_inst/src/api_new_inst.c"
 
 # 2zg. rb_hash_lookup (api_map.json batch N2): mrb_hash_fetch with a nil default appended to the closing parenthesis
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_hash_lookup tools/cext2mrbgem/fixtures/api_hash_lookup/ext/api_hash_lookup "$work/api_hash_lookup" > "$work/api_hash_lookup.log" 2>&1 || rc=$?
@@ -1548,6 +1548,12 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_method_scope/NOT_BUILDABLE"
 check grep -qF 'last = mrb_str_dup(api_method_scope_bc2_mrb, v);' "$work/api_method_scope/src/api_method_scope.c"
 check grep -qF 'api_method_scope_bc2_mrb = mrb;' "$work/api_method_scope/src/api_method_scope.c"
+# 2zzz139. rb_class_new_instance(argc expression, argv expression, rb_cX) converts through the order-preserving helper nfcx_class_new_instance
+# (the arguments are kept in CRuby's order, and a mapped class constant needs no unwrapping).
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_class_new_expr tools/cext2mrbgem/fixtures/api_class_new_expr/ext/api_class_new_expr "$work/api_class_new_expr" > "$work/api_class_new_expr.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_class_new_expr/NOT_BUILDABLE"
+check grep -qF 'nfcx_class_new_instance(mrb, (int)(RARRAY_LEN(arr) - 1), RARRAY_PTR(arr) + 1, mrb->range_class)' "$work/api_class_new_expr/src/api_class_new_expr.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

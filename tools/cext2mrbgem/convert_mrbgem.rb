@@ -4358,7 +4358,9 @@ end
         end
       end
       # (an argument with a special form, a string literal or rb_intern, is substituted by the general path below)
-      if entry['template_cond'].nil? && class_args.empty? && (entry['ignored_args'] || []).empty? && str_args.empty? &&
+      # (a class argument that is a mapped CRuby class constant, rb_cX, is its class expression as it stands: no unwrapping)
+      consts_only = class_args.all? { |i| texts[i].to_s.match?(/\Arb_c[A-Z]\w*\z/) }
+      if entry['template_cond'].nil? && (class_args.empty? || consts_only) && (entry['ignored_args'] || []).empty? && str_args.empty? &&
          texts.none? { |t| t.match?(/\Arb_intern\(/) } &&
          order == (0...entry['arity']).to_a && texts.any? { |t| !t.match?(/\A&?[#{WC}\s.\->]+\z/) }
         pieces = tmpl.split(/(\$\d+(?!\d))/, -1)
