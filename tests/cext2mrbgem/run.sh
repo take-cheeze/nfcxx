@@ -732,7 +732,7 @@ check test "$rc" -eq 2
 check test -e "$work/check_type_refused/NOT_BUILDABLE"
 check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
 check test "$(grep -c '  rb_check_type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
-check grep -q '  Check_Type  mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
+check grep -q '  Check_Type  stuck point (bignum decision): mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
 check grep -q '  rb_check_type  nil and false share' "$work/check_type_refused/REFUSALS.txt"
 check grep -q 'MRB_TT_OBJECT does not match' "$work/check_type_refused/REFUSALS.txt"
 check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
