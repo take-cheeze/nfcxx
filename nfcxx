@@ -638,14 +638,9 @@ pb_flags+=(${diag_opts[@]+"${diag_opts[@]}"})   # EDG diagnostic options (-Wno-n
 [ $backend != pathb ] || [ "$dialect" != clang ] || [ -z "${dialect_asked:-}" ] || pb_flags+=(--dialect=clang)   # scripts/pathb-dump.rb
 [ $backend != pathb ] || [ $freestanding != 0 ] || [ -z "${gnu_user:-}" ] || pb_flags+=("--gnu-version=$gnu_user")
 [ $backend != pathb ] || [ $freestanding = 0 ] || pb_flags+=(--freestanding --eh-runtime "--gnu-version=$gnu" "-I$root/lib")
-case $backend in
-  pathb) [ $freestanding = 0 ] || [ $pb_fs_host = 1 ] ||
-           { echo "nfcxx: Path B (--backend=pathb) compiles freestanding programs on x86-64 and aarch64 Linux and arm64 macOS only" >&2; exit 2; }
-       [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
-       export NFCXX_CC=$root/scripts/gcc-cc.rb ;;
-  gcc) export NFCXX_CC=$root/scripts/gcc-cc.rb ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
-  *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
-esac
+# The backend's compiler (NFCXX_CC) and its refusals: scripts/nfcxx-backend-env.rb plan (restructure step 3).
+backend_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend-env.rb" plan backend="$backend" freestanding="$freestanding" pb_fs_host="$pb_fs_host" root="$root") || exit $?
+eval "$backend_sh"
 
 # Hosted link (not -c, -shared or --freestanding): two additions to what eccp links.
 #  - the EH shim (lib/ehshim, docs/notes/eh-shim.md): exceptions thrown by libstdc++.so and std::exception_ptr on EDG's
