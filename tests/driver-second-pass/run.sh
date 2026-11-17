@@ -38,5 +38,17 @@ if ! (cd "$t" && g++ -c h.cpp -o h.o); then fail=$((fail + 1)); echo "FAIL host 
   ruby "$repo/scripts/nfcxx-second-pass.rb" host-symbols "$t/h.o" "$t/ruby.syms"
   if [ "$bash_syms" = "$(cat "$t/ruby.syms")" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL host symbols"; fi
 fi
+# the second pass's run: the driver with the host symbols and the cache left out, from a stub driver that prints its environment
+# and arguments and returns a status
+stub="$t/stubroot"; mkdir -p "$stub"
+cat > "$stub/nfcxx" <<'STUB'
+#!/bin/bash
+printf 'hs=%s cache=%s remote=%s args=' "$NFCXX_CUDA_HOST_SYMBOLS" "$NFCXX_CACHE" "$NFCXX_CACHE_REMOTE"; printf '[%s]' "$@"; echo
+exit 7
+STUB
+chmod +x "$stub/nfcxx"
+want=$(NFCXX_CUDA_HOST_SYMBOLS=/h/syms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$stub/nfcxx" -c m.cpp -o m.o; echo "rc=$?")
+got=$(ruby "$repo/scripts/nfcxx-second-pass.rb" rerun "$stub" /h/syms -c m.cpp -o m.o; echo "rc=$?")
+if [ "$want" = "$got" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL rerun: bash [$want] ruby [$got]"; fi
 echo "driver-second-pass: $pass passed, $fail failed"
 [ $fail = 0 ]

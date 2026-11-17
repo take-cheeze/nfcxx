@@ -893,7 +893,7 @@ if [ ${#cu_inputs[@]} = 1 ] && [ -z "${NFCXX_CUDA_HOST_SYMBOLS:-}" ] && [ $prepr
     t=$(trace_start)
     # (the second pass is not cached: the --cache option is left out, and NFCXX_CACHE emptied)
     args2=(); for a in "${args0[@]}"; do case $a in --cache=*) ;; *) args2+=("$a") ;; esac; done
-    NFCXX_CUDA_HOST_SYMBOLS=$hsyms NFCXX_CACHE= NFCXX_CACHE_REMOTE= "$root/nfcxx" ${args2[@]+"${args2[@]}"} || exit $?
+    "${RUBY:-ruby}" "$root/scripts/nfcxx-second-pass.rb" rerun "$root" "$hsyms" ${args2[@]+"${args2[@]}"} || exit $?   # the re-run (scripts/nfcxx-second-pass.rb)
     trace_end "$t" "second pass (kernel instances from the host compile)" eccp
   fi
 fi
