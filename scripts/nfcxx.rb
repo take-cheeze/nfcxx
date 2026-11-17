@@ -7,6 +7,7 @@
 #   NFCXX_RUBY_DRIVER=1 ./nfcxx ARGS...      (./nfcxx runs this script when the flag is set)
 
 require "tempfile"
+require "tmpdir"
 require "rbconfig"
 
 root = File.expand_path("..", __dir__)
@@ -20,8 +21,17 @@ program = Tempfile.new(["nfcxx-oracle", ".sh"])
 program.write(text)
 program.close
 
-# the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
-status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby }, "bash", program.path, *ARGV)
-program.unlink
-exit 0 if status
-exit($?.exitstatus || 1)
+# B6 (docs/notes/driver-body-restructure.md): the temporary directories of the driver are made under a root that this process
+# owns. TMPDIR points at it, so every mktemp -d the bash makes lands there; the bash removes its own directories in its EXIT
+# traps, and this removes whatever is left (a failing or interrupted driver) when the run ends, normally or not.
+status = nil
+Dir.mktmpdir("nfcxx-tmp.") do |tmproot|
+  begin
+    # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
+    status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot }, "bash", program.path, *ARGV)
+    status_code = status ? 0 : ($?.exitstatus || 1)
+  ensure
+    program.unlink
+  end
+  exit status_code
+end
