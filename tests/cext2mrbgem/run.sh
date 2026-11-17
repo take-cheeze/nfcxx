@@ -1603,6 +1603,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_truth_zero/NOT_BUILDABLE"
 check grep -qF 'mrb_test(' "$work/api_truth_zero/src/api_truth_zero.c"
 check grep -qF 'mrb_false_value()' "$work/api_truth_zero/src/api_truth_zero.c"
+# 2zzz147. a VALUE passed where a converted function takes an integer key (the word of the VALUE in CRuby) is a stuck point
+# (VALUE as integer): the fork's VALUE is a struct with no integer form, so the file is marked not buildable with that reason.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_int tools/cext2mrbgem/fixtures/api_value_int/ext/api_value_int "$work/api_value_int" > "$work/api_value_int.log" 2>&1 || rc=$?
+check test -e "$work/api_value_int/NOT_BUILDABLE"
+check grep -qF 'stuck point (VALUE as integer): obj is a VALUE' "$work/api_value_int/REFUSALS.txt"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

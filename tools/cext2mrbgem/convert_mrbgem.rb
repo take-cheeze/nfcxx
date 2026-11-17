@@ -3427,6 +3427,46 @@ use_problem = lambda do |name, use|
     out
   end
 
+  # a #define that generates a static function without the state parameter (DEFINE_DELEGATED_FUNCTION) names the global in
+  # its expansion: the generated function is a stored callback, run inside a method call
+  def global_macro_arrows(text, gname)
+    text.gsub(/^#define(?:[^\n]*\\\n)*[^\n]*/) do |blk|
+      next blk if blk.include?('mrb_state') || !blk.match?(/\bstatic\s+\w+\s+[\w#]+\s*\(/) || !blk.include?('{')
+      blk.gsub(/(?<![\w$.>])mrb->/, "#{gname}->").gsub(/(?<=[(,\s])mrb(?=\s*[,)])/, gname)
+    end
+  end
+
+  # A VALUE variable passed to a converted function whose parameter is not a VALUE, a pointer or a struct (an sid_t key, an
+  # ID, an integer): CRuby passes the VALUE's word, and the fork's VALUE is a struct with no integer form of it
+  def value_as_integer_arg_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      masked.to_enum(:scan, /(?<![#{WC}>.])([A-Za-z_]\w*)\s*\(/).each do
+        m = Regexp.last_match
+        name = m[1]
+        next if @entries[name] || @defs[name].nil? || @defs[name].empty?
+        next if define_at(rel, m.begin(1))
+        plists = @defs[name].map { |d| (d['params'] || '').split(',', -1).map { |p| py_strip(p) } }.uniq
+        next unless plists.size == 1
+        ptypes = plists[0]
+        open_pos = m.end(0) - 1
+        close_pos = match_close(masked, open_pos)
+        next if close_pos < 0
+        split_args(masked, open_pos, close_pos).each_with_index do |(s, e), i|
+          ptype = ptypes[i]
+          next if ptype.nil? || ptype.empty? || ptype == 'void'
+          next if ptype.match?(/VALUE|mrb_value|\*|\[|\.\.\./)
+          arg = masked[s...e].to_s.strip
+          next unless arg.match?(/\A[A-Za-z_]\w*\z/)
+          next unless (local_value_at?(rel, s, arg) || fs_values.include?(arg)) && !@class_vars.include?(arg)
+          next if @edits[rel].overlaps(s, s + 1)
+          refuse(rel, s, arg, "stuck point (VALUE as integer): #{arg} is a VALUE, a struct in the fork (include/mruby/boxing_no.h), passed as #{name}'s #{ptype} parameter, which takes the VALUE's word in CRuby; the fork has no integer form of it")
+        end
+      end
+    end
+  end
+
   # A relational comparison (<, >, <=, >=) of two VALUE expressions orders them by address (CRuby's class tables are searched
   # by VALUE). The fork's VALUE is a struct with no order: a stuck point, recorded with its reason.
   def value_order_stuck_pass
@@ -6212,8 +6252,11 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     # in its body names that global (the global-state functions are the ones that have no mrb parameter)
     if @global_wrap
       @files.each do |rel, f|
-        next unless f['kind'] == 'src'
-        outputs[rel] = global_mrb_arrows(outputs[rel], @global_name)
+        if f['kind'] == 'src'
+          outputs[rel] = global_mrb_arrows(outputs[rel], @global_name)
+        end
+        # a header's macro that generates a stateless function (DEFINE_DELEGATED_FUNCTION in safe.h) names the global too
+        outputs[rel] = global_macro_arrows(outputs[rel], @global_name)
       end
     end
     # a converted source that uses mruby names includes the mruby headers itself (gem_init.c has its own include)
@@ -6336,6 +6379,7 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     owned_class_assign_pass
     value_truth_call_pass
     value_order_stuck_pass
+    value_as_integer_arg_pass
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
