@@ -2618,6 +2618,15 @@
       "template": "nfcx_num_coerce_relop($m, $0, $1, $2)",
       "caveat": "CRuby's rb_num_coerce_relop: the coerced comparison; when it cannot be made, it raises ArgumentError (comparison failed), as CRuby's rb_cmperr"
     },
+    "rb_opts_exception_p": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": true,
+      "prelude": "static int nfcx_opts_exception_p(mrb_state *mrb, mrb_value opts, int default_value) {\n  mrb_value key, v;\n  if (!mrb_hash_p(opts)) return default_value;\n  key = mrb_symbol_value(mrb_intern_cstr(mrb, \"exception\"));\n  if (!mrb_hash_key_p(mrb, opts, key)) return default_value;\n  v = mrb_hash_get(mrb, opts, key);\n  if (mrb_true_p(v)) return 1;\n  if (mrb_false_p(v)) return 0;\n  mrb_raise(mrb, E_ARGUMENT_ERROR, \"expected true or false as exception\");\n  return 0;\n}",
+      "prelude_name": "nfcx_opts_exception_p",
+      "template": "nfcx_opts_exception_p($m, $0, $1)",
+      "caveat": "CRuby's rb_opts_exception_p: the :exception option of an options hash (nil or no key: the default); true/false; anything else raises ArgumentError (as CRuby)"
+    },
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,

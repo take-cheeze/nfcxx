@@ -1409,6 +1409,7 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_coerce/NOT_BUILDABLE"
 check grep -qF 'static mrb_value nfcx_num_coerce_bin(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {' "$work/api_coerce/src/api_coerce.c"
 check grep -qF 'nfcx_num_coerce_cmp(mrb, self, other, mrb_intern_cstr(mrb, "<=>"))' "$work/api_coerce/src/api_coerce.c"
+check grep -qF 'nfcx_opts_exception_p(mrb, opts, 1)' "$work/api_coerce/src/api_coerce.c"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?
