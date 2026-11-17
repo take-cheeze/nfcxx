@@ -4860,6 +4860,9 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         elsif (idl = /\Arb_intern\(\s*"([^"\\]*)"\s*\)\z/.match(texts[k].strip))
           # an ID argument written inline: the symbol of the literal (rb_intern("lit") -> mrb_intern_cstr)
           "mrb_intern_cstr(#{mrb_tok(rel, s)}, \"#{idl[1]}\")"
+        elsif (ce_t = @entries[texts[k].strip]).is_a?(Hash) && ce_t['kind'] == 'expr' && ce_t['mruby'].to_s.match?(CLASS_EXPR_RE) && !class_args.include?(k)
+          # a class constant copied into a template's VALUE argument (rb_apply(rb_cStruct, ...)) is its VALUE
+          "mrb_obj_value(#{ce_t['mruby']})"
         elsif (qe = { 'Qnil' => 'mrb_nil_value()', 'Qtrue' => 'mrb_true_value()', 'Qfalse' => 'mrb_false_value()', 'Qundef' => 'mrb_undef_value()' }[texts[k].strip])
           # a Q constant argument of a template is its value (the template copies the argument text)
           qe
