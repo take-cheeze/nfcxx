@@ -39,7 +39,8 @@ module NativeParamUnbox
         stmts << "mrb_int #{local} = mrb_as_int(M, #{argv[i]});"
         local
       when :float
-        stmts << "mrb_float #{local} = mrb_as_float(M, #{argv[i]});"
+        # A float parameter has no no-Float form; #error makes a call site that reaches it fail the build.
+        stmts << "#ifndef MRB_NO_FLOAT\nmrb_float #{local} = mrb_as_float(M, #{argv[i]});\n#else\n  static_assert(0, \"float parameter in a no-Float build\");\n#endif"
         local
       when :bool then "mrb_test(#{argv[i]})"
       else argv[i]

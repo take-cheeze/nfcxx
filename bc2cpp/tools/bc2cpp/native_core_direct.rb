@@ -1093,9 +1093,14 @@ module NativeCoreDirect
           mrb_int x = mrb_integer(a), y = mrb_integer(b);
           return mrb_fixnum_value(x > y ? 1 : x < y ? -1 : 0);
         }
+        #ifdef MRB_NO_FLOAT
+        /* The callers' arg guard admits fixnums only here (mrb_float_p is FALSE), so this is not reached. */
+        return mrb_nil_value();
+        #else
         mrb_float x = mrb_fixnum_p(a) ? (mrb_float)mrb_integer(a) : mrb_float(a);
         mrb_float y = mrb_fixnum_p(b) ? (mrb_float)mrb_integer(b) : mrb_float(b);
         return mrb_fixnum_value(x > y ? 1 : x < y ? -1 : 0);
+        #endif
       }
     CPP
     'bc2cpp_ary_compact' => <<~CPP,

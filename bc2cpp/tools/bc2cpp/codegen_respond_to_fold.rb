@@ -264,7 +264,11 @@ module RespondToFold
   def respond_to_fold_class_guard(klass, recv)
     return "mrb_nil_p(#{recv})" if klass == 'NilClass'
 
-    "bc2cpp_rtc == M->#{NativeOwnerMap::CORE_FIELD_OWNERS.key(klass)}"
+    field = NativeOwnerMap::CORE_FIELD_OWNERS.key(klass)
+    # bc2cpp_float_class (the prelude) is NULL without Float, so no M->float_class field is named there.
+    return "bc2cpp_rtc == bc2cpp_float_class(M)" if klass == 'Float'
+
+    "bc2cpp_rtc == M->#{field}"
   end
 
   # The call runs only for a receiver the asking guard accepts. A verify build makes it for every receiver and aborts

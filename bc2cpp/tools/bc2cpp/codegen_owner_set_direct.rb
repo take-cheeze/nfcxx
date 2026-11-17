@@ -176,12 +176,20 @@ module OwnerSetDirect
     note = "#{ind}// OWNER_SET_NATIVE_ARMS :#{m[:name]} -> #{entries.map(&:owner).join(', ')}: exact receiver, the " \
            "audited core body; the owner call for any other\n"
     branches = entries.map do |entry|
-      "if (#{entry.guard(m[:recv], argv)}) {\n#{ind}  #{m[:dest]} = #{entry.call(m[:recv], argv)};\n#{ind}} else "
+      arm = "if (#{entry.guard(m[:recv], argv)}) {\n#{ind}  #{m[:dest]} = #{entry.call(m[:recv], argv)};\n#{ind}} else "
+      # A Float arm names mrb_float, which a no-Float build does not have; it is dropped there, so the chain
+      # falls through to the owner call. The directives sit on their own lines to keep the chain whole.
+      float_arm?(entry) ? "\n#{ind}#ifndef MRB_NO_FLOAT\n#{ind}#{arm}\n#{ind}#endif\n#{ind}" : arm
     end
     "#{note}#{ind}#{branches.join}{\n#{ind}  #{m[:dest]} = #{m[:call]}\n#{ind}}"
   end
 
   ARM_ENTRY_SOURCES = %i[OWNER_ARM_ENTRIES NUMERIC_CONVERSION_ENTRIES].freeze
+
+  # An arm that produces or reads a Float; its text needs MRB_NO_FLOAT guarding (see owner_set_native_arms_code).
+  def float_arm?(entry)
+    entry.owner == 'Float' || [entry.expression, entry.recv_guard].compact.any? { |text| text.match?(/mrb_float|FIXABLE_FLOAT/) }
+  end
 
   def owner_set_arm_entries(name, argc)
     return [] if devirt_blocked_name?(name)

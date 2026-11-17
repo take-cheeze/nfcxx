@@ -1704,6 +1704,14 @@ BC2CPP_MAIN = lambda do
       }
     CPP
   end
+  # mrb_state has no float_class without Float; the Float class test is then false (an object's class is never NULL).
+  puts <<~'CPP'
+    #ifndef MRB_NO_FLOAT
+    static inline struct RClass* bc2cpp_float_class(mrb_state* M) { return M->float_class; }
+    #else
+    static inline struct RClass* bc2cpp_float_class(mrb_state* M) { (void)M; return NULL; }
+    #endif
+  CPP
   # The one method-table lookup in generated code: a closed-world table (class, symbol -> entry) replaces this body.
   puts <<~'CPP'
     #ifndef BC2CPP_FIND_METHOD
