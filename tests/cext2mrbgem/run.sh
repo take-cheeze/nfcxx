@@ -1608,6 +1608,11 @@ check grep -qF 'mrb_false_value()' "$work/api_truth_zero/src/api_truth_zero.c"
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_int tools/cext2mrbgem/fixtures/api_value_int/ext/api_value_int "$work/api_value_int" > "$work/api_value_int.log" 2>&1 || rc=$?
 check test -e "$work/api_value_int/NOT_BUILDABLE"
 check grep -qF 'stuck point (VALUE as integer): obj is a VALUE' "$work/api_value_int/REFUSALS.txt"
+# 2zzz148. if (v) on a VALUE is a stuck point (VALUE truth test): CRuby's nonzero word is true for nil as well, which the fork's
+# VALUE struct has no exact test of, so the file is marked not buildable with that reason.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_value_if tools/cext2mrbgem/fixtures/api_value_if/ext/api_value_if "$work/api_value_if" > "$work/api_value_if.log" 2>&1 || rc=$?
+check test -e "$work/api_value_if/NOT_BUILDABLE"
+check grep -qF 'stuck point (VALUE truth test): if tests v' "$work/api_value_if/REFUSALS.txt"
 # 2zzz110. the public headers of a subdirectory (api/) are inputs at their relative path: the sources' #include "api/x.h"
 # resolves in the output (include/api/x.h), and the subdirectory's header is not refused.
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_subdir_hdr tools/cext2mrbgem/fixtures/api_subdir_hdr/ext/api_subdir_hdr "$work/api_subdir_hdr" > "$work/api_subdir_hdr.log" 2>&1 || rc=$?

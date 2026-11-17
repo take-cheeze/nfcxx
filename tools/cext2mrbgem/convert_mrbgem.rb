@@ -3360,7 +3360,8 @@ use_problem = lambda do |name, use|
     text = @files[fn['file']]['text']
     body = psl(text, fn['brace'], fn['body_end'] + 1).to_s
     params = fn['params'].to_s
-    (body + ' ' + params).scan(/\b(?:VALUE|mrb_value)\s*\*\s*([A-Za-z_]\w*)/).flatten.to_set
+    # an array of VALUEs (VALUE args[3]) decays to a VALUE pointer
+    (body + ' ' + params).scan(/\b(?:VALUE|mrb_value)\s*\*\s*([A-Za-z_]\w*)|\b(?:VALUE|mrb_value)\s+([A-Za-z_]\w*)\s*\[/).map { |a, b| a || b }.to_set
   end
 
   # a call name whose result is a VALUE: a converted function returning VALUE, or a mapped API call whose mruby form or
@@ -3492,6 +3493,90 @@ use_problem = lambda do |name, use|
     text.gsub(/^#define(?:[^\n]*\\\n)*[^\n]*/) do |blk|
       next blk if blk.include?('mrb_state') || !blk.match?(/\bstatic\s+\w+\s+[\w#]+\s*\(/) || !blk.include?('{')
       blk.gsub(/(?<![\w$.>])mrb->/, "#{gname}->").gsub(/(?<=[(,\s])mrb(?=\s*[,)])/, gname)
+    end
+  end
+
+  # A VALUE array (VALUE *args, the data of rb_protect) whose elements carry struct pointers, (T *)args[i], or which is itself
+  # carried in a VALUE, (VALUE)args: the fork's VALUE is a struct, so neither has a form
+  def value_pointer_array_stuck_pass
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      mv.to_enum(:scan, /\(\s*(?!VALUE\b|mrb_value\b)(?:struct\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s*\*+\s*\)\s*([A-Za-z_]\w*)\s*\[/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        fn = enclosing_func(rel, m.begin(1))
+        next unless fn && value_pointer_names(fn).include?(nm)
+        next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+        refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE array (mrb_value *, the data of rb_protect), and an element cast to a struct pointer has no mruby form (the fork's VALUE is a struct, include/mruby/boxing_no.h)")
+      end
+      mv.to_enum(:scan, /\(\s*(?:VALUE|mrb_value)\s*\)\s*([A-Za-z_]\w*)(?![\w\[(])/).each do
+        m = Regexp.last_match
+        nm = m[1]
+        fn = enclosing_func(rel, m.begin(1))
+        next unless fn && value_pointer_names(fn).include?(nm)
+        next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+        refuse(rel, m.begin(1), nm, "stuck point (VALUE as pointer): #{nm} is a VALUE array (mrb_value *), and a pointer cast to VALUE is a struct in the fork (include/mruby/boxing_no.h), which cannot hold an address")
+      end
+    end
+  end
+
+  # rb_enc_get gives a VALUE (the encoding name, mruby-encoding), but a field or variable declared rb_encoding * takes the
+  # encoding pointer: an assignment of it to such a field is the Encoding stuck point (the fork has no rb_encoding)
+  def encoding_pointer_assign_pass
+    names = Set.new
+    @files.each_value do |f|
+      f['masked'].to_enum(:scan, /\brb_encoding\s*\*\s*([A-Za-z_]\w*)\s*[;,\[=)]/).each { names << Regexp.last_match(1) }
+    end
+    return if names.empty?
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      mv.to_enum(:scan, /(?<![#{WC}])([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)\s*=(?!=)\s*(rb_enc_get)\s*\(/).each do
+        m = Regexp.last_match
+        field = m[1].split(/\s*(?:->|\.)\s*/).last
+        next unless names.include?(field)
+        # refused at the assigned field: the rb_enc_get call itself is mapped (its template covers that text)
+        next if @edits[rel].overlaps(m.begin(1), m.end(1))
+        refuse(rel, m.begin(1), field, "stuck point (Encoding): rb_enc_get's result is assigned to #{field}, an rb_encoding * (the encoding pointer of CRuby); the fork has no Encoding (accepted stuck point)")
+      end
+    end
+  end
+
+  # if (v) on a VALUE tests its word: CRuby's Qnil is a nonzero word, so the test is true for nil, which the fork's struct has no
+  # exact test of (the same reason as the assert case); a VALUE struct cannot be a condition
+  def value_if_truth_stuck_pass
+    vfields = value_field_names
+    @files.each_key do |rel|
+      mv = @files[rel]['masked']
+      fs_values = file_scope_value_names(rel)
+      mv.to_enum(:scan, /(?<![#{WC}])if\s*\(\s*([A-Za-z_]\w*(?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)\s*\)/).each do
+        m = Regexp.last_match
+        path = m[1].split(/\s*(?:->|\.)\s*/)
+        base = path.first
+        field = path.length > 1 ? path.last : nil
+        is_value = field ? vfields.include?(field) : (local_value_at?(rel, m.begin(1), base) || fs_values.include?(base)) && !@class_vars.include?(base)
+        next unless is_value
+        next if in_dead_init(rel, m.begin(1))
+        next if @edits[rel].overlaps(m.begin(1), m.begin(1) + 1)
+        refuse(rel, m.begin(1), field ? "#{base}->#{field}" : base, "stuck point (VALUE truth test): if tests #{field ? "#{base}->#{field}" : base}, a VALUE (a struct in the fork, include/mruby/boxing_no.h); CRuby's nonzero word is true for nil too, which has no exact struct test")
+      end
+    end
+  end
+
+  # The Onigmo regexp engine of CRuby (its types, its match region and regex, its functions and constants): the fork has no
+  # regexp engine, so each use of its names is a stuck point, marked where it is used (the functions that hold them are not
+  # buildable without it)
+  ONIG_NAME_RE = /(?<![#{WC}.>])(OnigUChar|OnigRegion|OnigRegex|OnigPosition|OnigEncoding|OnigOptionType|OnigCaptureTreeNode|regex_t|re_registers|UChar|ONIG_[A-Z0-9_]+|onig_[a-z0-9_]+)(?![#{WC}])/
+  def onig_engine_stuck_pass
+    @files.each_key do |rel|
+      masked = @files[rel]['masked']
+      masked.to_enum(:scan, ONIG_NAME_RE).each do
+        m = Regexp.last_match
+        name = m[1]
+        next if @defs[name] || @entries[name]
+        s, e = m.begin(1), m.end(1)
+        next if @edits[rel].overlaps(s, e)
+        refuse(rel, s, name, "stuck point (regexp engine): #{name} is CRuby's Onigmo regexp engine (its match region, regex and functions); the fork has no regexp engine (no regexp mrbgem in mrbgems/), so it has no mruby form")
+      end
     end
   end
 
@@ -6504,6 +6589,10 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     value_order_stuck_pass
     value_as_integer_arg_pass
     value_struct_pointer_cast_pass
+    onig_engine_stuck_pass
+    value_if_truth_stuck_pass
+    value_pointer_array_stuck_pass
+    encoding_pointer_assign_pass
     header_prototype_types_pass
     value_zero_assign_pass
     integer_return_pass
