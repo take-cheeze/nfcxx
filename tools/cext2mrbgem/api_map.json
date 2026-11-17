@@ -2627,6 +2627,13 @@
       "template": "nfcx_opts_exception_p($m, $0, $1)",
       "caveat": "CRuby's rb_opts_exception_p: the :exception option of an options hash (nil or no key: the default); true/false; anything else raises ArgumentError (as CRuby)"
     },
+    "rb_typeddata_is_kind_of": {
+      "kind": "template",
+      "arity": 2,
+      "needs_mrb": false,
+      "template": "(mrb_type($0) == MRB_TT_DATA && DATA_TYPE($0) == &$1)",
+      "caveat": "CRuby's rb_typeddata_is_kind_of(obj, &type): obj is a typed data object whose type is type (or a subclass of it in CRuby). mruby's data objects carry one type descriptor and no parent chain, so this is an exact match; the second argument is the address of the type, as in the bigdecimal use"
+    },
     "rb_cstr_to_dbl": {
       "kind": "template",
       "arity": 2,
