@@ -569,16 +569,9 @@ hosted_libs=()
 # the copies the link did not choose (24 MB). --instantiate=auto: EDG's automatic instantiation, where the prelinker
 # assigns each instance a unit and recompiles that unit at link time, one unit per pass (libggml-sycl: 3087 instances in
 # 98 passes, a 33-minute link; 59 MB of code).
-inst_opts=()
-case $instantiate in
-  auto) ;;
-  used)
-    inst_opts=(--no_auto_instantiation -tused)
-    # Mach-O: ld64 coalesces the weak definitions itself (and takes no --gc-sections)
-    [ "$(uname -s)" = Darwin ] || inst_opts+=(--c_to_obj_option -ffunction-sections --c_to_obj_option -fdata-sections
-                                              --c_to_obj_option -Wl,--gc-sections) ;;
-  *) echo "nfcxx: --instantiate (NFCXX_INSTANTIATE) is auto or used (got $instantiate)" >&2; exit 2 ;;
-esac
+# --instantiate: scripts/nfcxx-instantiate.rb plan (its refusal is the bash's message, status 2).
+inst_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-instantiate.rb" plan instantiate="$instantiate" sys="$(uname -s)") || exit $?
+eval "$inst_sh"
 # --cosmo (docs/notes/cosmo.md): cosmocc is the C compiler (NFCXX_GCC: gcc-cc runs it, pathb-cc assembles with it), and
 # its libc++ headers and predefined macros are the C++ target. The backend is gcc, or Path B with --backend=pathb (NFCXX_PATH=b).
 if [ $cosmo = 1 ]; then
