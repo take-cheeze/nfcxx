@@ -11,7 +11,6 @@
     "_comment": "Check_Type and rb_check_type (handler check_type in convert_mrbgem.rb) map a T_ name only when its entry has type_check exact or caveat. These names are refused with the reason given here.",
     "T_OBJECT": "mruby's MRB_TT_OBJECT does not match CRuby's T_OBJECT: CRuby allocates exceptions as T_OBJECT (ruby4src error.c:3583 via object.c:118), mruby allocates them as MRB_TT_EXCEPTION (src/error.c:42), so the check would reject exceptions",
     "T_CLASS": "mruby's MRB_TT_CLASS does not match CRuby's T_CLASS: a CRuby singleton class is a class with RUBY_FL_SINGLETON (ruby4src class.c:42), mruby allocates singleton classes as MRB_TT_SCLASS (src/class.c:371), so the check would reject them",
-    "T_FIXNUM": "stuck point (bignum decision): mruby has one integer tag, MRB_TT_FIXNUM (include/mruby/value.h:109); CRuby's Fixnum/Bignum split is not mruby's integer range, so MRB_TT_FIXNUM matches every Integer (see the RB_TYPE_P caveat); a check that accepts every Integer is weaker than CRuby's, so converting it is a decision (accepted stuck point)",
     "T_BIGNUM": "stuck point: the fork has no Bignum. No MRB_TT_BIGINT tag exists (include/mruby/value.h:106-131) and no mrbgem defines a big-integer class, so no tag or class test can select CRuby's T_BIGNUM values",
     "T_NIL": "nil and false share mruby's tag MRB_TT_FALSE (include/mruby/value.h:106, MRB_TT_FALSE; mrb_nil_p tells them apart by value, value.h:184), so a type check cannot tell nil from false",
     "T_FALSE": "mruby's MRB_TT_FALSE (include/mruby/value.h:106) also matches nil, which CRuby reports as T_NIL",
@@ -1412,8 +1411,9 @@
     },
     "T_FIXNUM": {
       "kind": "expr",
+      "type_check": "caveat",
       "mruby": "MRB_TT_FIXNUM",
-      "caveat": "mruby has no bignum, so MRB_TT_FIXNUM matches every Integer, including values CRuby reports as T_BIGNUM; RB_TYPE_P(x, T_FIXNUM) stays refused for this reason"
+      "caveat": "mruby has one integer tag (MRB_TT_FIXNUM) and no bignum: the check accepts every Integer, which is weaker than CRuby's Fixnum check (accepted: the user chose the weaker check)"
     },
     "rb_eIndexError": {
       "kind": "expr",

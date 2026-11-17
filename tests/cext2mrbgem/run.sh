@@ -729,13 +729,13 @@ check grep -q 'CRuby T_DATA also covers TypedData' "$work/check_type/conversion_
 rc=0; "$rb" "$conv" --scanner "$scanner" --name check_type_refused tools/cext2mrbgem/fixtures/check_type_refused/ext/check_type_refused "$work/check_type_refused" > "$work/check_type_refused.log" 2>&1 || rc=$?
 check test "$rc" -eq 2
 check test -e "$work/check_type_refused/NOT_BUILDABLE"
-check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
+check test "$(grep -c '  Check_Type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 1
 check test "$(grep -c '  rb_check_type  ' "$work/check_type_refused/REFUSALS.txt")" -eq 2
-check grep -q '  Check_Type  stuck point (bignum decision): mruby has one integer tag' "$work/check_type_refused/REFUSALS.txt"
+check grep -qF 'mrb_check_type(mrb, v, MRB_TT_FIXNUM);' "$work/check_type_refused/src/check_type_refused.c"
 check grep -q '  rb_check_type  nil and false share' "$work/check_type_refused/REFUSALS.txt"
 check grep -q 'MRB_TT_OBJECT does not match' "$work/check_type_refused/REFUSALS.txt"
 check grep -q '  rb_check_type  type argument is not a literal T_ constant' "$work/check_type_refused/REFUSALS.txt"
-check sh -c "! grep -q 'MRB_TT_\|mrb_check_type(' '$work/check_type_refused/src/check_type_refused.c'"
+check sh -c "! grep -q 'MRB_TT_OBJECT\|MRB_TT_FALSE' '$work/check_type_refused/src/check_type_refused.c'"
 
 # 2zb. built-in class and exception references (api_map.json batch D1): rb_cHash is mrb->hash_class and rb_eKeyError is
 # E_KEY_ERROR; both are expressions, so the lookup stays inline at each use
