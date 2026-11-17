@@ -216,29 +216,10 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     state_put edg_launch "${NFCXX_CUDA_EDG_LAUNCH:-1}"
   } > "$inf"
   "${RUBY:-ruby}" "$root/scripts/nfcxx-cuda-device.rb" --cu-prepare < "$inf" > "$outf" || exit $?
-  while IFS= read -r -d '' rec; do
-    case $rec in
-      k*) group=${rec:1} ;;
-      v*)
-        case $group in
-          sdirs) cu_sdirs+=("${rec:1}") ;;
-          copies) cu_copies+=("${rec:1}") ;;
-          cuda) cu_cuda+=("${rec:1}") ;;
-          preinc) cu_pre+=("${rec:1}") ;;
-        esac ;;
-      x*) printf '%s\n' "${rec:1}" >&2; exit 2 ;;
-      z) done=1 ;;
-    esac
-  done < "$outf"
-  [ $done = 1 ] || { echo "nfcxx: scripts/nfcxx-cuda-device.rb stopped before its end (the .cu inputs are incomplete)" >&2; exit 1; }
-  for idx in "${!cu_inputs[@]}"; do
-    src=${cu_inputs[$idx]}; copy=${cu_copies[$idx]}
-    cflags+=("-I${cu_sdirs[$idx]}"); files+=("-I${cu_sdirs[$idx]}")
-    # if, not `[ ] && x`: a loop whose last test fails returns non-zero, and set -e would end the driver.
-    for i in "${!srcs[@]}"; do if [ "${srcs[$i]}" = "$src" ]; then srcs[$i]=$copy; fi; done
-    for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
-  done
-  cuda_opts=(${cu_cuda[@]+"${cu_cuda[@]}"}); preinc=(${cu_pre[@]+"${cu_pre[@]}"})
+  # the reply (scripts/nfcxx-cu-apply.rb plan, restructure step 2): the -I directories and the copies replace the inputs in srcs and
+  # files, and the cuda and preinc groups become cuda_opts and preinc. A refusal ends the driver with 2; a reply without its end with 1.
+  cu_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-cu-apply.rb" plan inputs="$(IFS=$'\x1f'; echo "${cu_inputs[*]-}")" srcs="$(IFS=$'\x1f'; echo "${srcs[*]-}")" files="$(IFS=$'\x1f'; echo "${files[*]-}")" cflags="$(IFS=$'\x1f'; echo "${cflags[*]-}")" < "$outf") || exit $?
+  eval "$cu_sh"
 }
 # A .cpp2 input (experimental, docs/notes/cpp2.md) is translated to C++1 by cppfront (scripts/setup-cppfront.sh) before the
 # front end, the way .cu inputs are rewritten: the copy has the source's basename, so default output names are unchanged, and
