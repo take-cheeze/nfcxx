@@ -521,6 +521,7 @@ class Converter
     @reg_names = Set.new
     @valid_reg_names = Set.new  # registered functions whose registration survived check_refs
     @block_arg_files = Set.new  # files that have the nfcx_block_arg definition (rb_yield in a helper)
+    @yield_cb_files = Set.new   # files that have the nfcx_yield_cb wrapper (rb_yield as the rb_protect callback)
     @decls = []   # dicts for function prototypes and definitions
     @defs = {}    # name -> [def dicts]
     @init_defs = []
@@ -3873,6 +3874,26 @@ end
       # a fixed expression over the call's arguments (api_map.json "template"): $0, $1, ... are the argument texts and
       # $m is the mruby state. Only plain identifiers and integer literals are substituted, and none is a class variable.
       unless called
+        # rb_yield as the function of rb_protect (rb_protect(rb_yield, Qnil, &state)): a file-scope wrapper yields with
+        # the data as the argument, and the callback slot takes it (the wrapper reads the block as a helper does)
+        open_p, callee_p = innermost_open(masked, s)
+        prev_p = prev_nonspace(masked, s - 1)
+        fnp = enclosing_func(rel, s)
+        if name == 'rb_yield' && open_p == '(' && callee_p == 'rb_protect' && prev_p >= 0 && masked[prev_p] == '(' && fnp && fnp['hstart']
+          unless @block_arg_files.include?(rel)
+            @block_arg_files << rel
+            ed.add(fnp['hstart'], fnp['hstart'],
+                   "static mrb_value nfcx_block_arg(mrb_state *mrb)\n{\n  mrb_value nfcx_b;\n  mrb_get_args(mrb, \"&\", &nfcx_b);\n  return nfcx_b;\n}\n\n")
+          end
+          unless @yield_cb_files.include?(rel)
+            @yield_cb_files << rel
+            ed.add(fnp['hstart'], fnp['hstart'],
+                   "static mrb_value nfcx_yield_cb(mrb_state *mrb, mrb_value data)\n{\n  return mrb_yield(mrb, nfcx_block_arg(mrb), data);\n}\n\n")
+          end
+          ed.add(s, e, 'nfcx_yield_cb')
+          rewrite(rel, s, name, 'nfcx_yield_cb', 'the callback of rb_protect: yields to the block of the calling method (a file-scope wrapper)')
+          return
+        end
         refuse(rel, s, name, 'used without a call; cannot map it')
         return
       end

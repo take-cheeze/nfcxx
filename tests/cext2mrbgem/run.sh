@@ -955,6 +955,7 @@ rc=0; "$rb" "$conv" --scanner "$scanner" --name api_yield_refused tools/cext2mrb
 check test "$rc" -eq 0
 check test ! -e "$work/api_yield_refused/NOT_BUILDABLE"
 check grep -qF 'mrb_yield(mrb, nfcx_block_arg(mrb), v)' "$work/api_yield_refused/src/api_yield_refused.c"
+check grep -qF 'mrb_protect(mrb, nfcx_yield_cb, mrb_nil_value(), &state)' "$work/api_yield_refused/src/api_yield_refused.c"
 
 # 2zzi. a helper's function-pointer parameter, RET (*NAME)(PARAMS), is called with the mruby state: the helper takes mrb, the
 # callback type takes mrb first, the callbacks passed for it are threaded, and the call through it passes mrb (fnptr_param_recs).
