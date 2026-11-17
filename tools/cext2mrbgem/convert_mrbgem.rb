@@ -4354,6 +4354,8 @@ end
         if pv_c >= 0 && masked[pv_c] == '&' && !(pv_c > 0 && masked[pv_c - 1] == '&')
           next
         end
+        # an unowned class variable is a VALUE already (no wrap); an owned one is a class pointer, wrapped as a VALUE
+        next unless owns_class_var?(rel, s, name)
         ed.add(s, e, "mrb_obj_value(#{name})")
         rewrite(rel, s, name, "mrb_obj_value(#{name})")
       end
@@ -5195,7 +5197,8 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       # a Q constant in a file-scope initializer (a table entry) is a constant compound literal with the same bits as the
       # fork's value (nil: value 0; true and false: value 1, the tag tells them apart): mrb_nil_value() is not a constant
       if %w[Qnil Qtrue Qfalse Qundef].include?(name) && !fs_init && enclosing_func(rel, s).nil? && define_at(rel, s).nil? &&
-         masked[[s - 60, 0].max...s].to_s.match?(/struct\s+RClass\s*\*\s*[A-Za-z_]\w*\s*=\s*\z/)
+         (masked[[s - 60, 0].max...s].to_s.match?(/struct\s+RClass\s*\*\s*([A-Za-z_]\w*)\s*=\s*\z/) ||
+          (masked[[s - 60, 0].max...s].to_s.match?(/\bVALUE\s+([A-Za-z_]\w*)\s*=\s*\z/) && @class_vars.include?($1) && owns_class_var?(rel, s, $1)))
         # an owned class variable (struct RClass *) starts as a null class pointer (the Q value is not a class)
         ed.add(s, e, '0')
         rewrite(rel, s, name, '0', 'an owned class variable (struct RClass *) initialized with a Q value: the null class pointer')
