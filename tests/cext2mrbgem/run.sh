@@ -963,6 +963,11 @@ check test "$rc" -eq 0
 check test ! -e "$work/api_fnptr_param/NOT_BUILDABLE"
 check grep -qF 'static mrb_value fp_each(mrb_state *mrb, mrb_value (*cb)(mrb_state *mrb, mrb_value, mrb_value), mrb_value v, mrb_value hash) {' "$work/api_fnptr_param/src/api_fnptr_param.c"
 check grep -qF 'return cb(mrb, v, hash);' "$work/api_fnptr_param/src/api_fnptr_param.c"
+# 2zzz107. --undefine NAME: the #ifdef NAME branches (a definition and its registration) are inactive, and the registration is
+# dead code (no refusal) in both scanner legs.
+rc=0; "$rb" "$conv" --scanner "$scanner" --name api_undef_build --undefine UB_TEST_ONLY_METHODS tools/cext2mrbgem/fixtures/api_undef_build/ext/api_undef_build "$work/api_undef_build" > "$work/api_undef_build.log" 2>&1 || rc=$?
+check test "$rc" -eq 0
+check test ! -e "$work/api_undef_build/NOT_BUILDABLE"
 check grep -qF 'return fp_each(mrb, fp_cb, v, mrb_nil_value());' "$work/api_fnptr_param/src/api_fnptr_param.c"
 
 # 2zzj. a struct function-pointer field filled by a positional initializer (struct TAG var = { h1, h2, ... }): the member index

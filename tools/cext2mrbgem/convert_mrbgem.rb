@@ -486,12 +486,13 @@ def kr_normalize(src)
 end
 
 class Converter
-  def initialize(cext_dir, out_dir, name = nil, scanner_mode = 'auto', defines = [])
+  def initialize(cext_dir, out_dir, name = nil, scanner_mode = 'auto', defines = [], undefines = [])
     @scanner_mode = scanner_mode  # auto, libclang or regex
     @scanner = 'regex'            # the scanner used: libclang or regex (choose_scanner)
     @scanner_reason = nil
     @scanner_fallback = []        # files the regex scan read although libclang was used
     @excluded_defs = Set.new      # names defined in text the libclang scan does not list (see libclang_declarations)
+    @undefines = undefines        # names this build leaves undefined (--undefine): their #ifdef branches are inactive
     @defines = defines            # -D options for the libclang front end (NAME or NAME=VALUE), as extconf would set
     @cext_dir = File.absolute_path(cext_dir)
     @out_dir = File.absolute_path(out_dir)
@@ -978,7 +979,7 @@ texts = static_rename(texts)
     build = Set.new((@defines || []).map { |d| d.split('=', 2)[0] })
     # The target is a non-Windows mruby build: these names are undefined in it, so their #ifdef branches are inactive
     # (oj's rb_w32_* calls sit under #ifdef _WIN32). A Windows target would need this set changed.
-    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__])
+    target_undefined = Set.new(%w[_WIN32 _MSC_VER __MINGW32__]) | Set.new(@undefines || [])
     gem_defined = Set.new
     @files.each_value { |g| g['masked'].scan(/^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)/) { gem_defined << $1 } }
     out = []
@@ -2314,6 +2315,12 @@ end
     @regs.each do |r|
       next unless r['error'].nil?
       next if @defs.key?(r['func'])
+      # a registration in inactive text (an #if 0 or an undefined #ifdef branch) is dead code: it is not refused, and the
+      # text stays as written
+      if text_inactive_spans(r['file']).any? { |a, z| a < r['call'] && r['call'] < z }
+        r['error'] = 'dead: the registration is in inactive text'
+        next
+      end
       why = if @excluded_defs.include?(r['func'])
               'registered function has no active definition: its only definition is in text the front end excludes'
             else
@@ -5022,6 +5029,7 @@ def main(argv)
   name = nil
   scanner = 'auto'
   defines = []
+  undefines = []
   while args.first&.start_with?('--')
     opt = args.shift
     if opt == '--name' && !args.empty?
@@ -5030,17 +5038,19 @@ def main(argv)
       scanner = args.shift
     elsif opt == '--define' && !args.empty?
       defines << args.shift
+    elsif opt == '--undefine' && !args.empty?
+      undefines << args.shift
     else
       args = nil
       break
     end
   end
   if args.nil? || args.size != 2
-    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... ' \
+    warn 'usage: convert_mrbgem.rb [--name GEM] [--scanner auto|libclang|regex] [--define NAME[=VALUE]]... [--undefine NAME]... ' \
          '<cext_dir> <out_dir>'
     return 1
   end
-  Converter.new(args[0], args[1], name, scanner, defines).run
+  Converter.new(args[0], args[1], name, scanner, defines, undefines).run
 end
 
 exit(main(ARGV)) if $PROGRAM_NAME == __FILE__
