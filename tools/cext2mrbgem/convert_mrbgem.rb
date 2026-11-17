@@ -4992,9 +4992,21 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
     end
   end
 
+  # the function of a macro body's expansions, when every expansion is a variadic method with the same argc and argv names
+  # (the macro's rb_scan_args then reads its arguments as each of them does): nil otherwise
+  def macro_expansion_fn(rel, s)
+    dm = define_at(rel, s)
+    return nil unless dm
+    fns = (@occ[dm[0]] || []).reject { |orel, os, _oe| define_at(orel, os) }.map { |orel, os, _oe| enclosing_func(orel, os) }
+    return nil if fns.empty? || fns.any?(&:nil?)
+    return nil unless fns.all? { |f| @variadic.key?(f['name']) }
+    return nil unless fns.map { |f| @variadic[f['name']] }.uniq.size == 1
+    fns.first
+  end
+
   def scan_args(rel, s, e, nxt, called)
     masked, text, ed = @files[rel]['masked'], @files[rel]['text'], @edits[rel]
-    fn = enclosing_func(rel, s)
+    fn = enclosing_func(rel, s) || (called ? macro_expansion_fn(rel, s) : nil)
     argv_helper = called && fn && !@variadic.key?(fn['name']) && argv_scan_helpers.key?(fn['name'])
     if !called || fn.nil? || (!@variadic.key?(fn['name']) && !argv_helper)
       refuse(rel, s, 'rb_scan_args', 'only supported directly in a variadic method (argc -1)')
