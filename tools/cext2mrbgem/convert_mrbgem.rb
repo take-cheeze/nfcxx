@@ -3839,8 +3839,14 @@ end
         next if nx >= 0 && masked[nx] == '=' && psl(masked, nx + 1, nx + 2) != '='
         callee, idx = call_context(masked, s)
         next if callee && (@special_pos[callee] || []).include?(idx)
-        # rb_raise's class is an RClass * for mrb_raisef: the class variable is not wrapped
-        next if callee == 'rb_raise' && idx == 0
+        # rb_raise's class is an RClass * for mrb_raisef: an owned class variable is one already; a class variable whose
+        # value is not a class definition (rb_const_get) is an mrb_value, and its class pointer is taken
+        if callee == 'rb_raise' && idx == 0
+          next if owns_class_var?(rel, s, name)
+          ed.add(s, e, "mrb_class_ptr(#{name})")
+          rewrite(rel, s, name, "mrb_class_ptr(#{name})")
+          next
+        end
         ed.add(s, e, "mrb_obj_value(#{name})")
         rewrite(rel, s, name, "mrb_obj_value(#{name})")
       end
