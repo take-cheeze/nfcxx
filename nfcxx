@@ -570,17 +570,10 @@ eval "$gnu_sh"
 # --target=linux_k1om: the k1om toolchain and runtime, the gcc backend (scripts/nfcxx-k1om-env.rb plan, restructure step 3).
 k1om_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-k1om-env.rb" plan target="$target" freestanding="$freestanding" backend_explicit="$backend_explicit" backend="$backend" root="$root") || exit $?
 [ -z "$k1om_sh" ] || eval "$k1om_sh"
-if [ -n "$target" ] && [ "$target" != linux_k1om ]; then
-  [ $freestanding = 1 ] || { echo "nfcxx: --target needs --freestanding (the host's library headers are the host target's)" >&2; exit 2; }
-  [ $emit_c = 1 ] || { echo "nfcxx: --target needs --emit-c (the generated C is for the target; compile it with a cross compiler)" >&2; exit 2; }
-  tbase=${EDG_BASE:-$root/build/edg-base}
-  [ -d "$tbase/lib_$target" ] || { echo "nfcxx: no EDG target '$target' in $tbase (lib_* tables: $(cd "$tbase" && ls -d lib_* | sed 's/^lib_//' | tr '\n' ' '))" >&2; exit 2; }
-  gnu_opts+=(--target "$target")
-  # Plain char is unsigned on these ABIs (clang -dM: __CHAR_UNSIGNED__ for each triple). EDG's table says signed for
-  # linux_aarch64 and linux_armv7 (src/defines.h, TARG_HAS_SIGNED_CHARS_*), so the driver sets it: the EDG base is not patched.
-  case $target in linux_aarch64|linux_armv7|linux_riscv32|linux_riscv64) gnu_opts+=(--unsigned_chars) ;; esac
-fi
-[ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
+# --target=NAME: the EDG table, the target's options and EDG_CPFE_DEFAULT_OPTIONS (scripts/nfcxx-target.rb plan, restructure step 3).
+# The gnu_opts array is passed joined by ASCII 31; the plan's words are appended to it by the eval.
+tgt_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-target.rb" plan target="$target" freestanding="$freestanding" emit_c="$emit_c" root="$root" gnu_opts="$(IFS=$'\x1f'; echo "${gnu_opts[*]-}")") || exit $?
+[ -z "$tgt_sh" ] || eval "$tgt_sh"
 
 if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
   echo "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)" >&2; exit 2
