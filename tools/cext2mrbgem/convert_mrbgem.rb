@@ -2463,7 +2463,7 @@ end
       if masked[[s - 80, 0].max...s].to_s =~ /(?:\.|->)[ \t\n]*(\w+)[ \t\n]*=[ \t\n]*\z/ && fields.include?($1)
         next nil
       end
-      if masked[(s + name.length)..(s + name.length + 80)].to_s =~ /\A[ \t\n]*(?:==|!=)[ \t\n]*[A-Za-z_][\w\t\n .>-]*?\.(\w+)/ && fields.include?($1)
+      if masked[(s + name.length)..(s + name.length + 80)].to_s =~ /\A[ \t\n]*(?:==|!=)[ \t\n]*[A-Za-z_][\w\t\n .>\[\]-]*?\.(\w+)/ && fields.include?($1)
         next nil
       end
       open, callee = innermost_open(masked, s)
