@@ -4011,6 +4011,11 @@ use_problem = lambda do |name, use|
 
   # a VALUE operand: a VALUE name, a VALUE member, an *_value(...) call, a Q constant, a converted function that returns VALUE, or a
   # parenthesized assignment to a VALUE name. A literal 0 is left to the equality pass (CRuby's Qfalse).
+  # a #define whose body is a funcall (rb_funcall or mrb_funcall...) in this file
+  def funcall_macro?(rel, name)
+    @files[rel]['text'].match?(/^[ \t]*#[ \t]*define[ \t]+#{Regexp.escape(name)}\s*\([^)]*\)\s*(?:mrb_funcall|rb_funcall)/)
+  end
+
   def value_operand?(t, value_names, vfields, rel, pos)
     t = t.strip
     return true if t.match?(/\AQ(?:nil|true|false|undef)\z/)
@@ -4026,6 +4031,10 @@ use_problem = lambda do |name, use|
     # a funcall of the fork returns a VALUE (mrb_funcall_argv(...) == mrb_fixnum_value(1))
     return true if t.match?(/\Amrb_funcall\w*\s*\(/)
     # a CRuby funcall (rb_funcall(...)) of the original is the same VALUE-returning call
+    # a macro whose body is a funcall (date's f_denominator: #define f_denominator(x) rb_funcall(x, ...)) is a VALUE call too
+    if (fm = t.match(/\A([A-Za-z_]\w*)\s*\(/)) && funcall_macro?(rel, fm[1])
+      return true
+    end
     return true if t.match?(/\Arb_funcall\w*\s*\(/)
     if (cm = t.match(/\A([A-Za-z_]\w*)\s*\(/))
       defs = (@defs[cm[1]] || []).reject { |x| x['proto'] }
