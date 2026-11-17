@@ -8,6 +8,7 @@
 
 require "tempfile"
 require "tmpdir"
+require "fileutils"
 require "rbconfig"
 
 root = File.expand_path("..", __dir__)
@@ -25,13 +26,17 @@ program.close
 # owns. TMPDIR points at it, so every mktemp -d the bash makes lands there; the bash removes its own directories in its EXIT
 # traps, and this removes whatever is left (a failing or interrupted driver) when the run ends, normally or not.
 status = nil
-Dir.mktmpdir("nfcxx-tmp.") do |tmproot|
-  begin
-    # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
-    status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot }, "bash", program.path, *ARGV)
-    status_code = status ? 0 : ($?.exitstatus || 1)
-  ensure
-    program.unlink
-  end
-  exit status_code
+# --keep-intermediates (NFCXX_KEEP_INTERMEDIATES=1): the bash keeps its eccp directory, which is made under this root; the root is then
+# kept too, so the directory the user asked for survives the run (the bash's eccp_cleanup removes it only when the flag is off)
+keep = ENV["NFCXX_KEEP_INTERMEDIATES"] == "1"
+tmproot = Dir.mktmpdir("nfcxx-tmp.")
+status_code = 1
+begin
+  # the stages not yet ported run in bash: the same arguments and environment, the standard streams inherited. Its status is ours.
+  status = system({ "RUBY" => ENV["RUBY"] || RbConfig.ruby, "TMPDIR" => tmproot }, "bash", program.path, *ARGV)
+  status_code = status ? 0 : ($?.exitstatus || 1)
+ensure
+  program.unlink
+  FileUtils.rm_rf(tmproot) unless keep
 end
+exit status_code

@@ -15,5 +15,9 @@ check() {   # check NAME STATUS WANT: the status, and no nfcxx-tmp directory lef
 (cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" "$repo/nfcxx" -c m.cpp -o >/dev/null 2>&1); check "value option last" $? 1
 # a SIGTERM during the run (the bash has no chance to remove its directories): the Ruby side still removes the root
 (cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" timeout -s TERM 0.2 "$repo/nfcxx" -c m.cpp -o z.o >/dev/null 2>&1); check "SIGTERM mid-run" 124 124
+# --keep-intermediates: a directory made under the root survives the run (the bash keeps its eccp directory this way)
+(cd "$t/src" && NFCXX_RUBY_DRIVER=1 NFCXX_KEEP_INTERMEDIATES=1 TMPDIR="$t/tmp" "$repo/nfcxx" -c m.cpp -o k.o >/dev/null 2>&1)
+kept=$(find "$t/tmp" -mindepth 1 -maxdepth 1 | wc -l)
+if [ "$kept" -ge 1 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL keep-intermediates: the root was removed"; fi
 echo "driver-body tmp-root: $pass passed, $fail failed"
 [ $fail = 0 ]
