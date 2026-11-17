@@ -3421,7 +3421,8 @@ use_problem = lambda do |name, use|
     end
     spans.reverse_each do |a, b|
       body = out[a..b]
-      out[a..b] = body.gsub(/(?<![\w$.>])mrb->/, "#{gname}->")
+      # mrb-> and the state passed as an argument (mrb_class_get(mrb, ...), a call's first argument) name the global
+      out[a..b] = body.gsub(/(?<![\w$.>])mrb->/, "#{gname}->").gsub(/(?<=[(,\s])mrb(?=\s*[,)])/, gname)
     end
     out
   end

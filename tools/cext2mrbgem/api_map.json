@@ -1668,8 +1668,9 @@
     },
     "rb_cInteger": {
       "kind": "expr",
-      "mruby": "mrb->integer_class",
-      "needs_mrb": true
+      "mruby": "mrb->fixnum_class",
+      "needs_mrb": true,
+      "caveat": "the fork has no Integer class field: mruby's Integer is fixnum_class (the fork has no separate Bignum class)"
     },
     "rb_cSymbol": {
       "kind": "expr",
