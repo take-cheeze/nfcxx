@@ -4150,6 +4150,25 @@ end
         refuse(rel, s, name, "expected #{entry['arity']} arguments, found #{texts.size}")
         return
       end
+      # a template that needs a file-scope helper (api_map "prelude": its definition text, "prelude_name": its name) gets it once
+      # per file, before the enclosing function (as nfcx_block_arg is)
+      if entry['prelude']
+        # a call in a function: the helper goes before that function; a call in a macro body: before the #define (file scope)
+        dpre = define_at(rel, s)
+        fnq = enclosing_func(rel, s)
+        at = if dpre then dpre[1]
+             elsif fnq && fnq['hstart'] then fnq['hstart']
+             end
+        unless at
+          refuse(rel, s, name, 'the helper this call needs has no place before it (not in a function or a macro)')
+          return
+        end
+        @prelude_done ||= Set.new
+        unless @prelude_done.include?([rel, entry['prelude_name']])
+          @prelude_done << [rel, entry['prelude_name']]
+          ed.add(at, at, entry['prelude'] + "\n")
+        end
+      end
       class_args = entry['class_args'] || []
       str_args = entry['str_args'] || []
       value_class_arg = lambda do |t, at|

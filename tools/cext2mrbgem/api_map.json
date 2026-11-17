@@ -54,9 +54,6 @@
     "rb_enc_mbclen": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_interned_str_cstr": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
     "rb_enc_raise": "stuck point (Encoding): the encoding API (rb_encoding, the default and the index of an encoding); the fork has no Encoding (accepted stuck point)",
-    "rb_num_coerce_cmp": "stuck point (coerce): the fork has no numeric coercion protocol: no coerce method in src/ or mrblib/ (grep finds only the step counter, src/numeric.c:173), so there is no coerced operand to compare",
-    "rb_num_coerce_relop": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
-    "rb_num_coerce_bin": "stuck point (coerce): the fork has no numeric coercion protocol (no coerce method in src/ or mrblib/, src/numeric.c:173 is the only match)",
     "rb_marshal_load": "stuck point: the fork has no Marshal (no marshal mrbgem in mrbgems/), so there is no loader to call",
     "rb_enc_sprintf": "stuck point (Encoding): rb_enc_sprintf takes an rb_encoding *; the fork has no Encoding (accepted stuck point)",
     "rb_usascii_encoding": "stuck point (Encoding): the US-ASCII rb_encoding object; the fork has no Encoding (accepted stuck point)",
@@ -2593,6 +2590,33 @@
       "needs_mrb": true,
       "template": "mrb_str_to_inum($m, $0, $1, $2)",
       "caveat": "parses the string in the base; badcheck as given (CRuby's rb_str_to_inum)"
+    },
+    "rb_num_coerce_cmp": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_cmp(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value pair, a, b;\n  if (!mrb_respond_to(mrb, y, mrb_intern_cstr(mrb, \"coerce\"))) return mrb_nil_value();\n  pair = mrb_funcall_argv(mrb, y, mrb_intern_cstr(mrb, \"coerce\"), 1, &x);\n  a = mrb_ary_ref(mrb, pair, 0); b = mrb_ary_ref(mrb, pair, 1);\n  return mrb_funcall_argv(mrb, a, op, 1, &b);\n}",
+      "prelude_name": "nfcx_num_coerce_cmp",
+      "template": "nfcx_num_coerce_cmp($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_cmp: y.coerce(x) gives [a, b], and a.op(b) is the result; nil when y does not coerce (no rescue: a coerce that raises propagates)"
+    },
+    "rb_num_coerce_bin": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_bin(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value pair, a, b;\n  pair = mrb_funcall_argv(mrb, y, mrb_intern_cstr(mrb, \"coerce\"), 1, &x);\n  a = mrb_ary_ref(mrb, pair, 0); b = mrb_ary_ref(mrb, pair, 1);\n  return mrb_funcall_argv(mrb, a, op, 1, &b);\n}",
+      "prelude_name": "nfcx_num_coerce_bin",
+      "template": "nfcx_num_coerce_bin($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_bin: y.coerce(x) gives [a, b], and a.op(b) is the result (a TypeError from coerce propagates)"
+    },
+    "rb_num_coerce_relop": {
+      "kind": "template",
+      "arity": 3,
+      "needs_mrb": true,
+      "prelude": "static mrb_value nfcx_num_coerce_relop(mrb_state *mrb, mrb_value x, mrb_value y, mrb_sym op) {\n  mrb_value r = nfcx_num_coerce_cmp(mrb, x, y, op);\n  if (mrb_nil_p(r)) mrb_raisef(mrb, E_ARGUMENT_ERROR, \"comparison of %S with %S failed\", mrb_str_new_cstr(mrb, mrb_obj_classname(mrb, x)), mrb_str_new_cstr(mrb, mrb_obj_classname(mrb, y)));\n  return r;\n}",
+      "prelude_name": "nfcx_num_coerce_relop",
+      "template": "nfcx_num_coerce_relop($m, $0, $1, $2)",
+      "caveat": "CRuby's rb_num_coerce_relop: the coerced comparison; when it cannot be made, it raises ArgumentError (comparison failed), as CRuby's rb_cmperr"
     },
     "rb_cstr_to_dbl": {
       "kind": "template",
