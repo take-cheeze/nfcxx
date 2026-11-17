@@ -1376,6 +1376,8 @@ check grep -qF 'if (nfcx_is_nil(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/s
 check grep -qF 'if (!nfcx_is_false(mrb_hash_get(mrb, h, k)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'static mrb_value sym_key;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 check grep -qF 'mrb_hash_get(mrb, h, sym_key)' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'static mrb_value saved_nil ;' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
+check grep -qF 'saved_nil = mrb_nil_value();' "$work/api_q_call_cmp/src/api_q_call_cmp.c"
 # 2zzz113. a name pasted by a local macro is not a refused CRuby name; RUBY_TYPED_DEFAULT_FREE is mrb_free; a data type's
 # mark callback is threaded (its initializer position is the identifier's, so the initializer use is not an escape).
 rc=0; "$rb" "$conv" --scanner "$scanner" --name api_dtype_mark tools/cext2mrbgem/fixtures/api_dtype_mark/ext/api_dtype_mark "$work/api_dtype_mark" > "$work/api_dtype_mark.log" 2>&1 || rc=$?

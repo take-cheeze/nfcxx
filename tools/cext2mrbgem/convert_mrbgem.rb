@@ -4424,6 +4424,21 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
       class_pos = callee_c && ((@special_pos[callee_c] || []).include?(idx_c) ||
                                ((@entries[callee_c] || {})['class_args'] || []).include?(idx_c))
       text = "mrb_obj_value(#{text})" if !class_pos && text.match?(/\A(?:mrb->(?:object_class|\w+_class)|mrb_class_get\()/)
+      # a file-scope initializer (static VALUE X = Qnil;) is not a constant expression in C (mrb_nil_value is a function): the
+      # initializer is removed, and the variable is set at the start of Init (the file's Init function)
+      fs_init = if %w[Qnil Qtrue Qfalse].include?(name) && enclosing_func(rel, s).nil?
+                  eq = prev_nonspace(masked, s - 1)
+                  var = eq >= 0 && masked[eq] == '=' ? masked[0...eq].match(/([A-Za-z_]\w*)\s*\z/) : nil
+                  init_d = @init_defs.find { |d| d['file'] == rel && d['brace'] }
+                  [eq, var && var[1], init_d] if var && init_d && (@init_rel == rel)
+                end
+      if fs_init
+        eq, var_name, init_d = fs_init
+        ed.add(eq, e, '')
+        ed.add(init_d['brace'] + 1, init_d['brace'] + 1, "\n  #{var_name} = #{entry['mruby']};")
+        rewrite(rel, s, name, "#{var_name} = #{entry['mruby']} (in Init)", 'a file-scope initializer is set at the start of Init (not a constant in C)')
+        return
+      end
       # nil, true and false compare by identity in CRuby (x == Qnil); mruby values are structs, so the comparison is a test
       # through a one-argument helper (the value is evaluated once) defined before the enclosing function
       if %w[Qnil Qtrue Qfalse].include?(name) && (cmp = q_comparison(rel, s, masked))

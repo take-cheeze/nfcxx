@@ -3,6 +3,9 @@
 /* an ID-typed variable that holds a symbol VALUE (assigned ID2SYM), used as a hash key */
 static ID sym_key;
 
+/* a file-scope VALUE initialized to nil: not a constant in C, so it is set at the start of Init */
+static VALUE saved_nil = Qnil;
+
 static VALUE
 m_key(VALUE self, VALUE h)
 {
@@ -24,5 +27,6 @@ Init_api_q_call_cmp(void)
     VALUE c = rb_define_class("QCallCmp", rb_cObject);
     rb_define_method(c, "missing", m_missing, 2);
     sym_key = ID2SYM(rb_intern("key"));
+    saved_nil = Qnil;
     rb_define_method(c, "key", m_key, 1);
 }
