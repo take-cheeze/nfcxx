@@ -4,8 +4,11 @@
 # names, one per input line, so the driver can name all its objects in one call. tests/driver-objname/run.sh checks the
 # port against the bash expressions verbatim.
 #
-#   ruby scripts/nfcxx-objname.rb < names                 ${basename%.*}.o for each name
-#   ruby scripts/nfcxx-objname.rb --suffix=.c < names     $(basename NAME .c).o for each name
+#   printf '%s' NAME | ruby scripts/nfcxx-objname.rb              ${basename%.*}.o for NAME
+#   printf '%s' NAME | ruby scripts/nfcxx-objname.rb --suffix=.c   $(basename NAME .c).o for NAME
+#
+# One name per run: standard input is the whole name (a name may contain a newline, so it is not split). The driver calls
+# it once per object and checks the status (the call is in $(...) || exit $?).
 #
 # basename follows GNU basename: trailing slashes are dropped, and "/" stays "/". The default stem is the text before the
 # last dot (so ".bashrc" gives ".o", "a.b.c" gives "a.b.o", "a." gives "a.o"). With --suffix, the suffix is removed only when
@@ -43,13 +46,10 @@ if $PROGRAM_NAME == __FILE__
     case arg
     when /\A--suffix=(.*)\z/m then suffix = Regexp.last_match(1)
     else
-      warn "usage: nfcxx-objname.rb [--suffix=SUF] < names"
+      warn "usage: nfcxx-objname.rb [--suffix=SUF] < name"
       exit 2
     end
   end
-  $stdin.binmode
-  $stdout.binmode
-  $stdin.each_line do |line|
-    $stdout.write(NfcxxObjname.object_name(line.delete_suffix("\n"), suffix: suffix), "\n")
-  end
+  name = $stdin.binmode.read
+  $stdout.binmode.write(NfcxxObjname.object_name(name, suffix: suffix), "\n")
 end
