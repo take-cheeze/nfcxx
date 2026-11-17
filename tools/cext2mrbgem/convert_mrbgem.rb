@@ -5325,6 +5325,14 @@ unless texts.each_with_index.all? { |t, i| ignored.include?(i) ? t.match?(/\A(?:
         end
         # the include of ruby/encoding.h is kept in the output (its api is the accepted Encoding stuck point); the fork has no
         # such header, and gcc stops at the fatal error, so the rest of the file is not checked
+        # an undeclared CRuby type tag that is a stuck decision (Rational, Complex: a gem; Bignum: no bignum): the tag's own
+        # stuck point is the reason, not a cascade
+        if (tm = m[2].strip.match(/\A'(T_RATIONAL|T_COMPLEX|T_BIGNUM|T_FIXNUM)' undeclared/))
+          why = tm[1] == 'T_BIGNUM' || tm[1] == 'T_FIXNUM' ? 'the bignum decision (no bignum in the fork)' : 'the gem decision (mruby-rational or mruby-complex in the build)'
+          @refusals << { 'file' => rel, 'line' => m[1].to_i, 'api' => 'compile check',
+                         'reason' => "stuck point (#{tm[1]}): the converted code uses #{tm[1]}, a tag the fork does not have; it is #{why} (accepted stuck point)" }
+          next
+        end
         # bcrypt's #else branch defines crypt_r for libcs without it; a glibc host declares crypt_r in crypt.h with another
         # signature, and the gem gates its own branch on _LIBC (defined only while glibc is built): a target conflict
         if m[2].strip.start_with?("conflicting types for 'crypt_r'")
