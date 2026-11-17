@@ -438,16 +438,9 @@ eval "$("${RUBY:-ruby}" "$root/scripts/nfcxx-backend.rb" default backend="$backe
 # -fsanitize=address: gcc's instrumentation on the gcc backend. Both link libasan. Path B calls
 # libasan's checks before each access (scripts/pathb-cc.rb --asan, passed below once the backend is final); the default backend gets it too (docs/notes/asan-plan.md; a program Path B does not build falls back to gcc).
 asan_c=()   # options for every C compile and link of the program
-if [ $asan = 1 ]; then
-  case $backend in
-    gcc) ;;
-    pathb) ;;
-    *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
-  esac
-  asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+${asanopts[@]+"${asanopts[@]}"}})
-else
-  asanopts=()
-fi
+# the ASan options and the backend check (scripts/nfcxx-asan-c.rb plan): a refused backend ends the driver with 2
+asan_sh=$("${RUBY:-ruby}" "$root/scripts/nfcxx-asan-c.rb" plan asan="$asan" backend="$backend" ${asanopts[@]+"${asanopts[@]/#/asanopts=}"}) || exit $?
+eval "$asan_sh"
 
 # C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
 # (gcc: gcc -O2 -fwrapv
