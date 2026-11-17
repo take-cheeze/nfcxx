@@ -13,5 +13,7 @@ check() {   # check NAME STATUS WANT: the status, and no nfcxx-tmp directory lef
 (cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" "$repo/nfcxx" -c m.cpp -o x.o >/dev/null 2>&1); check "compile" $? 0
 (cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" "$repo/nfcxx" --instantiate=bogus -c m.cpp -o y.o >/dev/null 2>&1); check "refusal" $? 2
 (cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" "$repo/nfcxx" -c m.cpp -o >/dev/null 2>&1); check "value option last" $? 1
+# a SIGTERM during the run (the bash has no chance to remove its directories): the Ruby side still removes the root
+(cd "$t/src" && NFCXX_RUBY_DRIVER=1 TMPDIR="$t/tmp" timeout -s TERM 0.2 "$repo/nfcxx" -c m.cpp -o z.o >/dev/null 2>&1); check "SIGTERM mid-run" 124 124
 echo "driver-body tmp-root: $pass passed, $fail failed"
 [ $fail = 0 ]
