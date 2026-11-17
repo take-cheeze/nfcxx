@@ -88,7 +88,7 @@ for a in "$@"; do
     [ $fso_has_E = 1 ] && exec "$0" "${fso_args[@]}"
     if [ $fso_has_o = 1 ]; then
       # An explicit -o is honoured by the real compile; the type check discards it.
-      fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+      fso_dir=$(mktemp -d); trap trace_finish EXIT
       fso_new=(); fso_skip=0
       for b in "${fso_args[@]}"; do
         if [ $fso_skip = 1 ]; then fso_skip=0; fso_new+=("$fso_dir/x.o"); continue; fi
@@ -96,7 +96,7 @@ for a in "$@"; do
       done
       "$0" -c "${fso_new[@]}"; exit $?
     fi
-    fso_dir=$(mktemp -d); trap 'rm -rf "$fso_dir"' EXIT
+    fso_dir=$(mktemp -d); trap trace_finish EXIT
     "$0" -c "${fso_args[@]}" -o "$fso_dir/x.o"; exit $?
   fi
 done
@@ -186,7 +186,7 @@ cu_inputs=()
 cu_keep=""   # with -c: the directory the device images are kept in (the link re-reads the copy, and the copy names them)
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
-  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"; trace_finish' EXIT
+  cudatmp=$(mktemp -d); trap trace_finish EXIT
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
@@ -250,7 +250,7 @@ cpp2_prepare() {  # cpp2_prepare: translates every .cpp2 input and puts its tran
   local cppfront_src=${CPPFRONT_SRC:-$root/build/cppfront-src}
   [ -x "$root/build/cppfront" ] || { echo "nfcxx: cppfront is not built; run scripts/setup-cppfront.sh (docs/notes/cpp2.md)" >&2; exit 2; }
   [ -f "$cppfront_src/include/cpp2util.h" ] || { echo "nfcxx: no cpp2util.h under $cppfront_src; run scripts/setup-cppfront.sh" >&2; exit 2; }
-  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
+  if [ -z "${cudatmp:-}" ]; then cudatmp=$(mktemp -d); trap trace_finish EXIT; fi
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
     # As for .cu inputs (cu_prepare): the translation outlives the compile, because the prelinker re-reads it at link time.
@@ -581,7 +581,7 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
+  tmp=$(mktemp -d); trap trace_finish EXIT
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+${sys_inc[@]+"${sys_inc[@]}"}} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
@@ -683,7 +683,7 @@ fi
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp" "$cudatmp"; trace_finish' EXIT
+  ctmp=$(mktemp -d); trap trace_finish EXIT
   n=0
   for c in ${cfiles[@]+"${cfiles[@]}"}; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -797,7 +797,7 @@ if [ $backend = pathb ] && [ $compile_only = 1 ] && [ $ncpp -gt 0 ]; then
   exit 0
 fi
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
+  ptmp=$(mktemp -d); trap trace_finish EXIT
   pobjs=(); plink=(); n=0
   for f in ${files[@]+"${files[@]}"}; do
     case $f in
