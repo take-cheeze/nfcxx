@@ -3553,6 +3553,30 @@ use_problem = lambda do |name, use|
         next if @edits[rel].overlaps(m.begin(1), m.end(1))
         refuse(rel, m.begin(1), field, "stuck point (Encoding): rb_enc_get's result is assigned to #{field}, an rb_encoding * (the encoding pointer of CRuby); the fork has no Encoding (accepted stuck point)")
       end
+      # rb_enc_get(...) as an argument of a function that takes an rb_encoding * (strscan's name_to_backref_number)
+      mv.to_enum(:scan, /(?<![#{WC}])rb_enc_get\s*\(/).each do
+        m = Regexp.last_match
+        s0 = m.begin(0)
+        callee = nil
+        cpos = nil
+        k = s0 - 1
+        while k >= [s0 - 400, 0].max && callee.nil?
+          if mv[k] == '(' && (c = match_close(mv, k)) > s0
+            pre = mv[0...k].match(/([A-Za-z_]\w*)\s*\z/)
+            if pre
+              callee = pre[1]
+              cpos = pre.begin(1)
+            end
+          end
+          k -= 1
+        end
+        next unless callee
+        defs = (@defs[callee] || [])
+        next unless defs.any? { |d| d['params'].to_s.include?('rb_encoding') }
+        # refused at the callee's name: the rb_enc_get call itself is covered by its template's edit
+        next if @edits[rel].overlaps(cpos, cpos + callee.length)
+        refuse(rel, cpos, callee, "stuck point (Encoding): rb_enc_get's result is passed to #{callee}, which takes an rb_encoding * (the encoding pointer of CRuby); the fork has no Encoding (accepted stuck point)")
+      end
     end
   end
 
@@ -4041,7 +4065,8 @@ use_problem = lambda do |name, use|
       return true if defs.any? && defs.all? { |x| x['ret'].to_s.strip == 'VALUE' }
       # a mapped CRuby API call whose result is a VALUE (its template wraps a data or class object in mrb_obj_value)
       ent = @entries[cm[1]]
-      return true if ent.is_a?(Hash) && (ent['template'].to_s.start_with?('mrb_obj_value(') || ent['mruby'].to_s.end_with?('_value'))
+      # (a template that is a funcall of the fork, rb_rational_den: mrb_funcall_argv(...), yields a VALUE too)
+      return true if ent.is_a?(Hash) && (ent['template'].to_s.start_with?('mrb_obj_value(', 'mrb_funcall') || ent['mruby'].to_s.end_with?('_value'))
     end
     if (am = t.match(/\A\(\s*([A-Za-z_]\w*)\s*=/))
       # the assigned call's result decides: a converted function that returns a non-VALUE (a Leaf pointer, an int) is not one
