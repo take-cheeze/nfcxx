@@ -97,6 +97,8 @@ C_STATEMENT_KEYWORDS = %w[if while for switch return sizeof else do].freeze
 DEF_RE = /^[ \t]*((?:(?:static|inline|extern)[ \t\n]+)*)((?:[A-Za-z_][#{WC}]*(?:[ \t\n]+|[ \t\n]*\*[ \t\n\*]*))+?)([A-Za-z_][#{WC}]*)[ \t\n]*\(((?:[^()]|\([^()]*\))*)\)#{SS}(\{|;)/
 INC_RE = /#[ \t]*include[ \t]*[<"](ruby(?:\/[#{WC}.\/-]*)?\.h)[>"]/
 REG_RE = /(?<![#{WC}$.>])(rb_define_method|rb_define_private_method|rb_define_singleton_method|rb_define_module_function|rb_define_global_function)#{SS}\(/
+# a right side that yields a class (a definition or a lookup of a class): not a non-class assignment to a class variable
+CLASS_RHS_RE = '(?:rb_define_(?:class|module)(?:_under)?|rb_const_get(?:_at)?|rb_path2class|rb_class_new|mrb_const_get|mrb_define_(?:class|module)(?:_under)?|mrb_class_get|rb_class_get)'
 CLASS_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
 # an ID variable's only write in the gem: NAME = rb_intern("lit"); (matched on the masked text, the literal read from the source)
 ID_LIT_ASSIGN_RE = /(?<![#{WC}$.>])([#{WC}]+)#{SS}=(?!=)#{SS}rb_intern(?:_const)?#{SS}\(#{SS}"[^"]*"#{SS}\)#{SS}[;,]/
@@ -1257,20 +1259,46 @@ texts = static_rename(texts)
   # (a class variable's own VALUE declaration is in @decl_name_pos, and it is not a shadow)
   # true when the class variable NAME is owned at pos: a file-scope variable, or a variable of a function that assigns it a
   # class (NAME = rb_define_class...). A VALUE local of another function with the same name is an ordinary value.
+  # A class variable is owned (struct RClass *) across the whole input when some function assigns it a class definition and
+  # no function assigns it a non-class value: a use in another file (or in a function without the definition) is the same
+  # object. The per-function test (below) decides the rest.
+  # an assignment (not a declaration with an initializer: VALUE x = Qnil declares x) of a non-class value
+  def nondef_assignment?(text, re)
+    text.to_enum(:scan, re).any? do
+      m = Regexp.last_match
+      pre = text[[m.begin(0) - 24, 0].max...m.begin(0)].to_s
+      !pre.match?(/\b(?:VALUE|mrb_value)\s*\*?\s*\z/)
+    end
+  end
+
+  def global_owned_cvar?(name)
+    @gcv_owned ||= {}
+    return @gcv_owned[name] if @gcv_owned.key?(name)
+    en = Regexp.escape(name)
+    define_re = /(?<![#{WC}$.>])#{en}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/
+    nondef_re = /(?<![#{WC}$.>])#{en}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/
+    defined = @files.values.any? { |f| f['masked'].match?(define_re) }
+    mixed = @files.values.any? { |f| nondef_assignment?(f['masked'], nondef_re) }
+    @gcv_owned[name] = defined && !mixed
+  end
+
   def owns_class_var?(rel, pos, name)
     fn = enclosing_func(rel, pos)
+    # a function that declares a local of this name shadows the class variable: its own (local) test decides
+    return true if global_owned_cvar?(name) && !(fn && value_names_of(fn).include?(name))
     if fn.nil?
       # a struct or union member is a field of that type, not a class variable (a field may share a class variable's name)
       open = enclosing_open_brace(@files[rel]['masked'], pos)
       return false if open && @files[rel]['masked'][[open - 60, 0].max...open].to_s.match?(/\b(?:struct|union)[ \t\n]*[A-Za-z_]?\w*[ \t\n]*\z/)
-      return true
+      # a file-scope class variable is owned unless some function assigns it a non-class value (then it is an mrb_value)
+      return global_owned_cvar?(name)
     end
     masked = @files[fn['file']]['masked']
     text = psl(masked, fn['brace'], fn['body_end'] + 1)
     return false unless text.match?(/(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=#{SS}rb_define_(?:class|module)(?:_under)?#{SS}\(/)
     # a function that also assigns the name a value that is not a class definition (Qundef, a lookup) holds an mrb_value:
     # an RClass * cannot take it
-    !text.match?(/(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=(?!=)(?>#{SS})(?!rb_define_(?:class|module)(?:_under)?#{SS}\()/)
+    !nondef_assignment?(text, /(?<![#{WC}$.>])#{Regexp.escape(name)}#{SS}=(?!=)(?>#{SS})(?!#{CLASS_RHS_RE}#{SS}\()/)
   end
 
   # for a Q constant at s that is the right operand of == or !=: [operator position, left operand start, negated?] when the
@@ -2983,7 +3011,8 @@ use_problem = lambda do |name, use|
           # a macro is a global macro only when its body calls the global state: a macro that calls only threaded helpers
           # expands with the mrb of its function (mrb_tok), so it is not on the global path
           threaded = @threaded_cands || Set.new
-          next unless body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) || accepted_names.include?(i) || (@macro_needs || Set.new).include?(i) }
+          # a --method-scope-fn macro (its expansions are stored callbacks that run in a method's call) is a candidate
+          next unless ($method_scope_fns || Set.new).include?(name) || body.scan(IDENT_RE).any? { |i| (@entries[i] || {})['needs_mrb'] || (@defs.key?(i) && @needs.include?(i) && !threaded.include?(i)) || accepted_names.include?(i) || (@macro_needs || Set.new).include?(i) }
           # a return in the body skips the state restore of a registered method or Init that expands it: refused there
           if body =~ /(?<![#{WC}])return(?![#{WC}])/
             wrapped_use = lambda do |orel, os|
@@ -3021,6 +3050,8 @@ use_problem = lambda do |name, use|
             # a macro is local to its file: a same-named macro of another file is another definition, not a use
             next true if orel != rel
             fn = enclosing_func(orel, os)
+            # a --method-scope-fn macro: its file-scope expansions are stored callbacks (run in a method's call)
+            next true if fn.nil? && ($method_scope_fns || Set.new).include?(name)
             if fn.nil?
               (accepted[orel] || []).any? { |a, z| a < os && os < z }
             else
@@ -3313,7 +3344,7 @@ use_problem = lambda do |name, use|
         next if @edits[rel].overlaps(op_s, op_e)
         fn = enclosing_func(rel, op_s)
         next unless fn
-        value_names = value_names_of(fn)
+        value_names = value_names_of(fn) | file_scope_value_names(rel)
         l_start, l_text = left_operand(masked, op_s)
         r_end, r_text = right_operand(masked, op_e)
         next if l_text.nil? || r_text.nil? || l_text.empty? || r_text.empty?
@@ -4139,6 +4170,11 @@ end
           next if owns_class_var?(rel, s, name)
           ed.add(s, e, "mrb_class_ptr(#{name})")
           rewrite(rel, s, name, "mrb_class_ptr(#{name})")
+          next
+        end
+        # the address of an unowned class variable (a VALUE) is the address of the VALUE itself (&mrb_obj_value(x) is not an lvalue)
+        pv_c = prev_nonspace(masked, s - 1)
+        if pv_c >= 0 && masked[pv_c] == '&' && !(pv_c > 0 && masked[pv_c - 1] == '&')
           next
         end
         ed.add(s, e, "mrb_obj_value(#{name})")
